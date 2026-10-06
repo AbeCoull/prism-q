@@ -6,7 +6,7 @@
 use super::QecNoise;
 use super::noise::{
     QecDeferredNoiseEvent, QecDeferredProgram, QecNoiseDraw, QecParityNoise, QecParityNoiseEvent,
-    append_qec_pauli_noise_effect, qec_pair_branch_flips, qec_single_noise_rates,
+    QecRecordEvent, append_qec_pauli_noise_effect, qec_pair_branch_flips, qec_single_noise_rates,
 };
 use super::runner::QecParityProjection;
 use crate::circuit::Instruction;
@@ -43,19 +43,171 @@ pub(super) fn compile_parity_noise(
     windows: Option<usize>,
 ) -> Result<Option<(Vec<u64>, QecParityNoise)>> {
     let plan = WalkPlan::new(deferred, projection, windows)?;
+    let walk = walk_outputs(&plan)?;
+    if !walk.fixed {
+        return Ok(None);
+    }
+    let events = walk
+        .events
+        .iter()
+        .map(|event| QecParityNoiseEvent {
+            draw: event.kept.draw,
+            first_branch: event.first_branch,
+        })
+        .collect();
+    Ok(Some((
+        walk.pattern,
+        QecParityNoise::from_parts(seed, events, walk.branch_offsets, walk.outputs),
+    )))
+}
+
+/// Compile every fault site of the deferred circuit onto `projection`'s outputs for the
+/// detector error model: the branches that fire and the outputs each flips, sites in
+/// program order. A random output is no obstacle here: the model describes flips of
+/// the noiseless outcome.
+pub(super) fn compile_fault_sites(
+    deferred: &QecDeferredProgram,
+    projection: &QecParityProjection,
+) -> Result<FaultSites> {
+    let plan = WalkPlan::new(deferred, projection, None)?;
+    let walk = walk_outputs(&plan)?;
+    let mut position_of_candidate = vec![0u32; plan.candidates as usize];
+    for (slot, &index) in plan.events_by_position.iter().enumerate() {
+        let event = &deferred.noise_events[index as usize];
+        let base = plan.candidate_base[slot] as usize;
+        position_of_candidate[base..base + candidate_count(event)].fill(event.position as u32);
+    }
+    let position_of = |at: usize| position_of_candidate[walk.events[at].kept.candidate as usize];
+    let mut order = Vec::with_capacity(walk.events.len());
+    let mut end = walk.events.len();
+    while end > 0 {
+        let mut start = end;
+        while start > 0 && position_of(start - 1) == position_of(end - 1) {
+            start -= 1;
+        }
+        order.extend((start..end).map(|at| at as u32));
+        end = start;
+    }
+    Ok(FaultSites { walk, order })
+}
+
+/// Compile the deferred circuit's kept events for the record sampler, in draw order,
+/// each with its anchor position and target aliases. The walk carries no output, only
+/// the record fingerprint, which is all the branch decisions need.
+pub(super) fn compile_record_events(deferred: &QecDeferredProgram) -> Result<Vec<QecRecordEvent>> {
+    let projection = QecParityProjection::new(deferred.measurement_qubits.len(), &[], &[]);
+    let plan = WalkPlan::new(deferred, &projection, None)?;
+    let walk = walk_outputs(&plan)?;
+    let mut site_of_candidate = vec![(0u32, 0u32); plan.candidates as usize];
+    for (slot, &index) in plan.events_by_position.iter().enumerate() {
+        let event = &deferred.noise_events[index as usize];
+        let base = plan.candidate_base[slot] as usize;
+        for (offset, site) in site_of_candidate[base..base + candidate_count(event)]
+            .iter_mut()
+            .enumerate()
+        {
+            *site = (index, offset as u32);
+        }
+    }
+    Ok(walk
+        .events
+        .iter()
+        .map(|kept| {
+            let (index, offset) = site_of_candidate[kept.kept.candidate as usize];
+            let event = &deferred.noise_events[index as usize];
+            let offset = offset as usize;
+            let targets = match event.channel {
+                QecNoise::Depolarize2(_) => [
+                    event.targets[2 * offset] as u32,
+                    event.targets[2 * offset + 1] as u32,
+                ],
+                _ => [event.targets[offset] as u32, u32::MAX],
+            };
+            QecRecordEvent {
+                draw: kept.kept.draw,
+                position: event.position as u32,
+                targets,
+            }
+        })
+        .collect())
+}
+
+/// Fault sites of one program in program order (positions ascending, program order
+/// within a position), the order the detector error model lists mechanisms in.
+pub(super) struct FaultSites {
+    walk: ParityWalk,
+    /// Indices into `walk.events` in program order.
+    order: Vec<u32>,
+}
+
+impl FaultSites {
+    /// Every site's firing branches, as `(probability, outputs ascending)`.
+    pub(super) fn sites(&self) -> impl Iterator<Item = impl Iterator<Item = (f64, &[u32])>> {
+        self.order
+            .iter()
+            .map(move |&at| self.walk.branches(&self.walk.events[at as usize]))
+    }
+}
+
+/// What a walk over the outputs produced: the noiseless pattern, whether every output
+/// is fixed, and the kept events in draw order (positions descending, program order
+/// within a position), branch `b` flipping `outputs[branch_offsets[b]..branch_offsets[b + 1]]`.
+struct ParityWalk {
+    pattern: Vec<u64>,
+    fixed: bool,
+    events: Vec<WalkEvent>,
+    branch_offsets: Vec<u32>,
+    outputs: Vec<u32>,
+}
+
+struct WalkEvent {
+    kept: KeptEvent,
+    first_branch: usize,
+}
+
+/// An event the walk keeps: its candidate id, its draw, and the branch rates behind the
+/// draw (X, Y, Z for a single-qubit event; the event rate and zeros for a pair).
+#[derive(Clone, Copy)]
+struct KeptEvent {
+    candidate: u32,
+    draw: QecNoiseDraw,
+    rates: [f64; 3],
+}
+
+impl ParityWalk {
+    /// `(probability, outputs ascending)` of each branch of `event` with a nonzero rate.
+    fn branches(&self, event: &WalkEvent) -> impl Iterator<Item = (f64, &[u32])> {
+        let (count, pair) = match event.kept.draw {
+            QecNoiseDraw::Single { .. } => (3, false),
+            QecNoiseDraw::Pair { .. } => (15, true),
+        };
+        let rates = event.kept.rates;
+        let first = event.first_branch;
+        (0..count).filter_map(move |branch| {
+            let probability = if pair { rates[0] / 15.0 } else { rates[branch] };
+            let range = self.branch_offsets[first + branch] as usize
+                ..self.branch_offsets[first + branch + 1] as usize;
+            (probability != 0.0).then(|| (probability, &self.outputs[range]))
+        })
+    }
+}
+
+/// Walk `plan` over every window and merge the windows' flips.
+fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
+    let projection = plan.projection;
     let window_count = plan.windows.len();
 
     let mut snapshots = Vec::new();
     let mut prepass_pattern = vec![0u64; projection.words];
     let mut fixed = true;
     if window_count > 1 {
-        let mut rows = WindowRows::new(&plan, u32::MAX, true);
+        let mut rows = WindowRows::new(plan, u32::MAX, true);
         let mut visitor = PrepassVisitor {
-            plan: &plan,
+            plan,
             snapshots: Vec::with_capacity(window_count - 1),
             next: window_count - 1,
         };
-        walk(&plan, &mut rows, plan.gate_count, &mut visitor)?;
+        walk(plan, &mut rows, plan.gate_count, &mut visitor)?;
         snapshots = visitor.snapshots;
         rows.fold_observable_signs();
         fixed &= rows.fixed;
@@ -63,13 +215,13 @@ pub(super) fn compile_parity_noise(
     }
 
     let run_window = |window: usize| -> Result<WindowResult> {
-        let mut rows = WindowRows::new(&plan, window as u32, window_count == 1);
+        let mut rows = WindowRows::new(plan, window as u32, window_count == 1);
         if window + 1 < window_count {
             rows.load_snapshot(&snapshots[window_count - 2 - window]);
         }
         let [lo, hi] = plan.windows[window];
         let mut visitor = WindowVisitor::new(lo, hi);
-        walk(&plan, &mut rows, hi, &mut visitor)?;
+        walk(plan, &mut rows, hi, &mut visitor)?;
         if window_count == 1 {
             rows.fold_observable_signs();
         }
@@ -105,9 +257,6 @@ pub(super) fn compile_parity_noise(
         owns.push(result.own);
         spills.push(result.spill);
     }
-    if !fixed {
-        return Ok(None);
-    }
 
     let pieces: Vec<NoisePiece> = if spills.iter().all(|spill| spill.keys.is_empty()) {
         owns.into_iter().map(|own| merge_window(own, &[])).collect()
@@ -140,22 +289,20 @@ pub(super) fn compile_parity_noise(
     for piece in pieces.iter().rev() {
         let first_branch = branch_offsets.len() - 1;
         let base = outputs.len() as u32;
-        events.extend(
-            piece
-                .events
-                .iter()
-                .map(|&(draw, branch)| QecParityNoiseEvent {
-                    draw,
-                    first_branch: first_branch + branch,
-                }),
-        );
+        events.extend(piece.events.iter().map(|&(kept, branch)| WalkEvent {
+            kept,
+            first_branch: first_branch + branch,
+        }));
         branch_offsets.extend(piece.branch_offsets[1..].iter().map(|&end| end + base));
         outputs.extend_from_slice(&piece.outputs);
     }
-    Ok(Some((
+    Ok(ParityWalk {
         pattern,
-        QecParityNoise::from_parts(seed, events, branch_offsets, outputs),
-    )))
+        fixed,
+        events,
+        branch_offsets,
+        outputs,
+    })
 }
 
 /// The deferred circuit laid out for the walk: events and alias creations in position
@@ -170,6 +317,8 @@ struct WalkPlan<'a> {
     /// sink is offered) are numbered in visit order, positions descending and program
     /// order within a position.
     candidate_base: Vec<u32>,
+    /// Candidates in total.
+    candidates: u32,
     /// Aliases ascending by creation position.
     aliases_by_creation: Vec<u32>,
     record_of_alias: Vec<u32>,
@@ -298,6 +447,7 @@ impl<'a> WalkPlan<'a> {
             gate_count,
             events_by_position,
             candidate_base,
+            candidates,
             aliases_by_creation,
             record_of_alias,
             windows: window_ranges,
@@ -739,10 +889,10 @@ struct WindowResult {
     fixed: bool,
 }
 
-/// Kept events of one window, as `(candidate, draw)`, with each branch's outputs in
+/// Kept events of one window, with each branch's outputs in
 /// `outputs[branch_offsets[b]..branch_offsets[b + 1]]`.
 struct OwnFlips {
-    events: Vec<(u32, QecNoiseDraw)>,
+    events: Vec<KeptEvent>,
     branch_offsets: Vec<u32>,
     outputs: Vec<u32>,
 }
@@ -831,9 +981,11 @@ impl WindowVisitor {
             let Some((px, py, pz)) = qec_single_noise_rates(x, z, px, py, pz) else {
                 return;
             };
-            self.own
-                .events
-                .push((candidate, QecNoiseDraw::single(px, py, pz)));
+            self.own.events.push(KeptEvent {
+                candidate,
+                draw: QecNoiseDraw::single(px, py, pz),
+                rates: [px, py, pz],
+            });
             self.push_branch(rows, z.iter().copied());
             self.push_branch(rows, x.iter().zip(z).map(|(x, z)| x ^ z));
             self.push_branch(rows, x.iter().copied());
@@ -850,7 +1002,11 @@ impl WindowVisitor {
         let mut branch_flips = std::mem::take(&mut self.branch_flips);
         if self.position >= self.lo {
             if qec_pair_branch_flips(x0, z0, x1, z1, p, &mut branch_flips) {
-                self.own.events.push((candidate, QecNoiseDraw::pair(p)));
+                self.own.events.push(KeptEvent {
+                    candidate,
+                    draw: QecNoiseDraw::pair(p),
+                    rates: [p, 0.0, 0.0],
+                });
                 for flips in branch_flips.chunks_exact(rows.words) {
                     self.push_branch(rows, flips.iter().copied());
                 }
@@ -943,8 +1099,8 @@ impl WalkVisitor for WindowVisitor {
 
 /// One window's kept events with every window's flips merged in, in walk order.
 struct NoisePiece {
-    /// Draw and branch index into `branch_offsets` per event.
-    events: Vec<(QecNoiseDraw, usize)>,
+    /// Event and its branch index into `branch_offsets`.
+    events: Vec<(KeptEvent, usize)>,
     branch_offsets: Vec<u32>,
     outputs: Vec<u32>,
 }
@@ -967,10 +1123,10 @@ fn merge_window(own: OwnFlips, later: &[SpillFlips]) -> NoisePiece {
         let events = own
             .events
             .iter()
-            .map(|&(_, draw)| {
+            .map(|&kept| {
                 let first = branch;
-                branch += branch_count(draw);
-                (draw, first)
+                branch += branch_count(kept.draw);
+                (kept, first)
             })
             .collect();
         return NoisePiece {
@@ -986,15 +1142,15 @@ fn merge_window(own: OwnFlips, later: &[SpillFlips]) -> NoisePiece {
     };
     let mut cursors = vec![0usize; sources.len()];
     let mut branch = 0usize;
-    for &(candidate, draw) in &own.events {
-        let branches = branch_count(draw);
-        piece.events.push((draw, piece.branch_offsets.len() - 1));
+    for &kept in &own.events {
+        let branches = branch_count(kept.draw);
+        piece.events.push((kept, piece.branch_offsets.len() - 1));
         for b in 0..branches {
             let start = piece.outputs.len();
             let own_range =
                 own.branch_offsets[branch] as usize..own.branch_offsets[branch + 1] as usize;
             piece.outputs.extend_from_slice(&own.outputs[own_range]);
-            let key = (candidate, b as u8);
+            let key = (kept.candidate, b as u8);
             let mut spilled = false;
             for (source, cursor) in sources.iter().zip(cursors.iter_mut()) {
                 while *cursor < source.keys.len() && source.keys[*cursor] < key {

@@ -818,7 +818,13 @@ fn pair_mut<T>(v: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
     }
 }
 
-fn pair_rows_mut(v: &mut [u64], a: usize, b: usize, words: usize) -> (&mut [u64], &mut [u64]) {
+/// Rows `a` and `b` of `v`, `words` words each, as two disjoint slices.
+pub(crate) fn pair_rows_mut(
+    v: &mut [u64],
+    a: usize,
+    b: usize,
+    words: usize,
+) -> (&mut [u64], &mut [u64]) {
     debug_assert_ne!(a, b);
     if a < b {
         let (lo, hi) = v.split_at_mut(b * words);

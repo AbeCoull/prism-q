@@ -1437,6 +1437,23 @@ pub(super) fn compute_reference_bits(
     ref_bits
 }
 
+/// Forward conjugation `G P G†` is the backward step by `G†`.
+pub(super) fn forward_as_backward_gate(gate: &Gate) -> Result<&Gate> {
+    match gate {
+        Gate::S => Ok(&Gate::Sdg),
+        Gate::Sdg => Ok(&Gate::S),
+        Gate::SX => Ok(&Gate::SXdg),
+        Gate::SXdg => Ok(&Gate::SX),
+        Gate::H | Gate::X | Gate::Y | Gate::Z | Gate::Id | Gate::Cx | Gate::Cz | Gate::Swap => {
+            Ok(gate)
+        }
+        _ => Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: format!("unsupported gate {:?} in column-major forward sim", gate),
+        }),
+    }
+}
+
 /// Column-major forward stabilizer simulation.
 ///
 /// Stores x_cols[qubit][row_word] and z_cols[qubit][row_word] so gate
@@ -1468,27 +1485,11 @@ pub(super) fn colmajor_forward_sim(
             _ => continue,
         };
 
-        // Forward conjugation G·P·G† is the backward step by G†.
-        let backward_gate = match gate {
-            Gate::S => &Gate::Sdg,
-            Gate::Sdg => &Gate::S,
-            Gate::SX => &Gate::SXdg,
-            Gate::SXdg => &Gate::SX,
-            Gate::H | Gate::X | Gate::Y | Gate::Z | Gate::Id | Gate::Cx | Gate::Cz | Gate::Swap => {
-                gate
-            }
-            _ => {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "CompiledSampler".to_string(),
-                    reason: format!("unsupported gate {:?} in column-major forward sim", gate),
-                });
-            }
-        };
         batch_propagate_backward(
             &mut x_cols,
             &mut z_cols,
             &mut phase,
-            backward_gate,
+            forward_as_backward_gate(gate)?,
             targets,
             row_words,
         );

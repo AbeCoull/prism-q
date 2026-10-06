@@ -2061,3 +2061,166 @@ fn wide_rank_counts_follow_the_measurement_map() {
         }
     }
 }
+
+// Rotated surface-code memory in measure-and-reset form: an ancilla per plaquette,
+// `rounds` syndrome rounds, then a Z readout of every data qubit.
+fn surface_memory_mr(distance: usize, rounds: usize) -> Circuit {
+    let mut plaquettes: Vec<(bool, Vec<usize>)> = Vec::new();
+    for i in 0..=distance {
+        for j in 0..=distance {
+            let cells: Vec<usize> = [(i, j), (i, j + 1), (i + 1, j), (i + 1, j + 1)]
+                .into_iter()
+                .filter(|&(r, c)| (1..=distance).contains(&r) && (1..=distance).contains(&c))
+                .map(|(r, c)| (r - 1) * distance + (c - 1))
+                .collect();
+            let z_type = (i + j) % 2 == 1;
+            let boundary_kept = if z_type {
+                i == 0 || i == distance
+            } else {
+                j == 0 || j == distance
+            };
+            if cells.len() == 4 || (cells.len() == 2 && boundary_kept) {
+                plaquettes.push((z_type, cells));
+            }
+        }
+    }
+    let data = distance * distance;
+    let n = data + plaquettes.len();
+    let mut c = Circuit::new(n, rounds * plaquettes.len() + data);
+    let mut bit = 0;
+    for _ in 0..rounds {
+        for (a, (z_type, cells)) in plaquettes.iter().enumerate() {
+            let anc = data + a;
+            if !z_type {
+                c.add_gate(Gate::H, &[anc]);
+            }
+            for &q in cells {
+                if *z_type {
+                    c.add_gate(Gate::Cx, &[q, anc]);
+                } else {
+                    c.add_gate(Gate::Cx, &[anc, q]);
+                }
+            }
+            if !z_type {
+                c.add_gate(Gate::H, &[anc]);
+            }
+            c.add_measure(anc, bit);
+            c.add_reset(anc);
+            bit += 1;
+        }
+    }
+    for q in 0..data {
+        c.add_measure(q, bit);
+        bit += 1;
+    }
+    c
+}
+
+fn repetition_memory_mr(distance: usize, rounds: usize) -> Circuit {
+    let n = 2 * distance - 1;
+    let mut c = Circuit::new(n, rounds * (distance - 1) + distance);
+    let mut bit = 0;
+    for _ in 0..rounds {
+        for a in 0..distance - 1 {
+            let anc = distance + a;
+            c.add_gate(Gate::Cx, &[a, anc]);
+            c.add_gate(Gate::Cx, &[a + 1, anc]);
+            c.add_measure(anc, bit);
+            c.add_reset(anc);
+            bit += 1;
+        }
+    }
+    for q in 0..distance {
+        c.add_measure(q, bit);
+        bit += 1;
+    }
+    c
+}
+
+fn assert_live_matches_dense(c: &Circuit, label: &str) {
+    let schedule = live_forward::LiveSchedule::plan(c);
+    let live = live_forward::compile_forward_live(c, 42, &schedule).unwrap();
+    let dense = compile_forward_dense(c, 42).unwrap();
+    assert_eq!(live.rank(), dense.rank(), "{label}: rank");
+    assert_eq!(
+        live.ref_bits_packed(),
+        dense.ref_bits_packed(),
+        "{label}: reference bits"
+    );
+    assert_eq!(live.flip_rows, dense.flip_rows, "{label}: flip rows");
+    let dispatched = compile_forward(c, 42).unwrap();
+    assert_eq!(dispatched.flip_rows, dense.flip_rows, "{label}: dispatch");
+}
+
+#[test]
+fn live_forward_matches_dense_on_deferred_memories() {
+    for (d, r) in [(3, 12), (5, 6), (7, 3)] {
+        let c = defer_measure_reset_circuit(&surface_memory_mr(d, r)).unwrap();
+        assert!(c.num_qubits >= 64);
+        assert_live_matches_dense(&c, &format!("surface d{d} r{r}"));
+    }
+    for (d, r) in [(15, 8), (9, 20)] {
+        let c = defer_measure_reset_circuit(&repetition_memory_mr(d, r)).unwrap();
+        assert!(c.num_qubits >= 64);
+        assert_live_matches_dense(&c, &format!("repetition d{d} r{r}"));
+    }
+}
+
+#[test]
+fn live_forward_matches_dense_when_every_qubit_stays_live() {
+    let n = 130;
+    let order: Vec<usize> = (0..n).map(|i| (i * 67) % n).collect();
+    let c = measure_in_order(circuits::clifford_heavy_circuit(n, 2, 7), &order);
+    assert_live_matches_dense(&c, "clifford 130 scrambled");
+
+    let n = 200;
+    let order: Vec<usize> = (0..n).map(|i| (i * 77) % n).collect();
+    let c = measure_in_order(circuits::ghz_circuit(n), &order);
+    assert_live_matches_dense(&c, "ghz 200 scrambled");
+
+    let n = 150;
+    let order: Vec<usize> = (0..n).rev().step_by(3).collect();
+    let c = measure_in_order(circuits::clifford_heavy_circuit(n, 3, 11), &order);
+    assert_live_matches_dense(&c, "clifford 150 partial register");
+}
+
+// Records on untouched qubits, a qubit read twice, a readout order that differs from
+// the order the qubits fall idle, and the S/SX family on the way to the readout.
+#[test]
+fn live_forward_matches_dense_on_irregular_schedules() {
+    let n = 96;
+    let mut c = circuits::clifford_heavy_circuit(70, 3, 5);
+    c.num_qubits = n;
+    for q in 0..20 {
+        c.add_gate(Gate::S, &[q]);
+        c.add_gate(Gate::SX, &[q + 20]);
+        c.add_gate(Gate::Sdg, &[q + 40]);
+        c.add_gate(Gate::SXdg, &[q + 1]);
+    }
+    let mut order: Vec<usize> = (0..n).rev().collect();
+    order.push(5);
+    order.push(80);
+    order.push(5);
+    let c = measure_in_order(c, &order);
+    assert_live_matches_dense(&c, "untouched tail and repeats");
+
+    let mut c = Circuit::new(80, 0);
+    for q in 0..40 {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::Cx, &[q, 40 + q]);
+    }
+    for q in 0..39 {
+        c.add_gate(Gate::Cz, &[40 + q, 41 + q]);
+    }
+    let order: Vec<usize> = (0..40).chain((40..80).rev()).collect();
+    let c = measure_in_order(c, &order);
+    assert_live_matches_dense(&c, "readout against idle order");
+}
+
+#[test]
+fn live_forward_agrees_with_tableau_runs() {
+    let c = defer_measure_reset_circuit(&surface_memory_mr(3, 12)).unwrap();
+    let schedule = live_forward::LiveSchedule::plan(&c);
+    assert!(schedule.peak_live * schedule.peak_live <= LIVE_FORWARD_DENSITY * c.num_qubits);
+    assert_forward_matches_tableau(&c, 60);
+}

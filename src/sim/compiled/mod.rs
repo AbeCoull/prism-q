@@ -4,6 +4,7 @@
 
 mod accumulator;
 mod bts;
+mod live_forward;
 pub(crate) mod parity;
 mod propagation;
 pub(crate) mod rng;
@@ -2580,7 +2581,21 @@ fn finish_sampler(
 /// ```
 pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     require_clifford(circuit)?;
+    let schedule = live_forward::LiveSchedule::plan(circuit);
+    if schedule.peak_live * schedule.peak_live <= LIVE_FORWARD_DENSITY * circuit.num_qubits {
+        return live_forward::compile_forward_live(circuit, seed, &schedule);
+    }
+    compile_forward_dense(circuit, seed)
+}
 
+/// Take the live-slot compile while the peak live count squared is at most this many
+/// times the register. Its cost per record grows with the square of the live count and
+/// the dense tableau's with the register; on random Clifford circuits that keep every
+/// qubit live the two meet near 200 times the register.
+const LIVE_FORWARD_DENSITY: usize = 64;
+
+/// [`compile_forward`] over the whole register at once, measured at the end.
+pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     let measurements: Vec<(usize, usize)> = circuit
         .instructions
         .iter()

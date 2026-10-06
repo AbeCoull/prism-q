@@ -865,26 +865,38 @@ pub(crate) fn pauli_rotation_gate(
     }
 }
 
+/// Destination of a gate lowering: a [`Circuit`], or a flat gate list that skips the
+/// [`Instruction`] encoding.
+pub(crate) trait GateSink {
+    fn gate(&mut self, gate: Gate, targets: &[usize]);
+}
+
+impl GateSink for Circuit {
+    fn gate(&mut self, gate: Gate, targets: &[usize]) {
+        self.add_gate(gate, targets);
+    }
+}
+
 /// Rotate `qubit` so that a Z-basis measurement reads the `axis` eigenvalue:
 /// X appends H, Y appends Sdg then H, Z appends nothing.
-pub(crate) fn append_axis_to_z_rotation(circuit: &mut Circuit, axis: PauliAxis, qubit: usize) {
+pub(crate) fn append_axis_to_z_rotation<S: GateSink>(sink: &mut S, axis: PauliAxis, qubit: usize) {
     match axis {
-        PauliAxis::X => circuit.add_gate(Gate::H, &[qubit]),
+        PauliAxis::X => sink.gate(Gate::H, &[qubit]),
         PauliAxis::Y => {
-            circuit.add_gate(Gate::Sdg, &[qubit]);
-            circuit.add_gate(Gate::H, &[qubit]);
+            sink.gate(Gate::Sdg, &[qubit]);
+            sink.gate(Gate::H, &[qubit]);
         }
         PauliAxis::Z => {}
     }
 }
 
 /// Inverse of [`append_axis_to_z_rotation`].
-pub(crate) fn append_z_to_axis_rotation(circuit: &mut Circuit, axis: PauliAxis, qubit: usize) {
+pub(crate) fn append_z_to_axis_rotation<S: GateSink>(sink: &mut S, axis: PauliAxis, qubit: usize) {
     match axis {
-        PauliAxis::X => circuit.add_gate(Gate::H, &[qubit]),
+        PauliAxis::X => sink.gate(Gate::H, &[qubit]),
         PauliAxis::Y => {
-            circuit.add_gate(Gate::H, &[qubit]);
-            circuit.add_gate(Gate::S, &[qubit]);
+            sink.gate(Gate::H, &[qubit]);
+            sink.gate(Gate::S, &[qubit]);
         }
         PauliAxis::Z => {}
     }
@@ -893,15 +905,19 @@ pub(crate) fn append_z_to_axis_rotation(circuit: &mut Circuit, axis: PauliAxis, 
 /// Lower a Pauli-product measurement onto a scratch qubit holding |0>: rotate
 /// each term into the Z basis, accumulate parity on the scratch via CX, then
 /// undo the rotations in reverse order. The caller measures the scratch.
-pub(crate) fn append_parity_rotations(circuit: &mut Circuit, terms: &[PauliTerm], scratch: usize) {
+pub(crate) fn append_parity_rotations<S: GateSink>(
+    sink: &mut S,
+    terms: &[PauliTerm],
+    scratch: usize,
+) {
     for term in terms {
-        append_axis_to_z_rotation(circuit, term.axis, term.qubit);
+        append_axis_to_z_rotation(sink, term.axis, term.qubit);
     }
     for term in terms {
-        circuit.add_gate(Gate::Cx, &[term.qubit, scratch]);
+        sink.gate(Gate::Cx, &[term.qubit, scratch]);
     }
     for term in terms.iter().rev() {
-        append_z_to_axis_rotation(circuit, term.axis, term.qubit);
+        append_z_to_axis_rotation(sink, term.axis, term.qubit);
     }
 }
 

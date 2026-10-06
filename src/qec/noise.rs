@@ -9,7 +9,7 @@ use super::{
     append_mpp_parity_rotations, append_z_to_basis_rotation, ensure_lowered_record_count,
     qec_lowered_num_qubits, qec_non_clifford_error,
 };
-use crate::circuit::{Circuit, Instruction, SmallVec};
+use crate::circuit::{Circuit, GateSink, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 #[cfg(feature = "parallel")]
@@ -55,8 +55,43 @@ pub(super) struct QecDeferredNoiseEvent {
     pub(super) position: usize,
 }
 
+/// One gate of the deferred circuit: `targets[1]` is `u32::MAX` for a one-qubit gate.
+/// 24 bytes against the 96 of an [`Instruction`], which the lowering and every walk
+/// over the gates pay for.
+#[derive(Clone)]
+pub(super) struct DeferredGate {
+    pub(super) gate: Gate,
+    targets: [u32; 2],
+}
+
+const _: () = assert!(size_of::<DeferredGate>() == 24);
+
+impl DeferredGate {
+    #[inline]
+    pub(super) fn targets(&self) -> &[u32] {
+        &self.targets[..1 + usize::from(self.targets[1] != u32::MAX)]
+    }
+}
+
+impl GateSink for Vec<DeferredGate> {
+    #[inline]
+    fn gate(&mut self, gate: Gate, targets: &[usize]) {
+        debug_assert!(matches!(targets.len(), 1 | 2));
+        self.push(DeferredGate {
+            gate,
+            targets: [
+                targets[0] as u32,
+                targets.get(1).map_or(u32::MAX, |&t| t as u32),
+            ],
+        });
+    }
+}
+
+/// A QEC program with its measurements deferred: `gates` in program order, then one
+/// terminal Z measurement per record on `measurement_qubits`, record order.
 pub(super) struct QecDeferredProgram {
-    pub(super) circuit: Circuit,
+    pub(super) gates: Vec<DeferredGate>,
+    pub(super) num_aliases: usize,
     pub(super) noise_events: Vec<QecDeferredNoiseEvent>,
     pub(super) measurement_qubits: Vec<usize>,
     /// Gate position at which each alias comes into use: 0 for the initial aliases, the
@@ -70,6 +105,28 @@ pub(super) struct QecDeferredProgram {
     /// program qubit to a fresh alias, so ops that reference program qubits
     /// at the end of the stream (`EXP_VAL`) must translate through this map.
     pub(super) final_qubit_aliases: Vec<usize>,
+}
+
+impl QecDeferredProgram {
+    /// The gates followed by the terminal measurements, record `j` on classical bit `j`.
+    pub(super) fn to_circuit(&self) -> Circuit {
+        let mut circuit = Circuit::new(self.num_aliases, self.measurement_qubits.len());
+        circuit
+            .instructions
+            .reserve_exact(self.gates.len() + self.measurement_qubits.len());
+        for gate in &self.gates {
+            let targets: SmallVec<[usize; 4]> =
+                gate.targets().iter().map(|&t| t as usize).collect();
+            circuit.instructions.push(Instruction::Gate {
+                gate: gate.gate.clone(),
+                targets,
+            });
+        }
+        for (record, &qubit) in self.measurement_qubits.iter().enumerate() {
+            circuit.add_measure(qubit, record);
+        }
+        circuit
+    }
 }
 
 pub(super) struct QecCompiledNoiseSampler {
@@ -354,12 +411,8 @@ impl QecRecordNoise {
         if events.is_empty() {
             return Ok(None);
         }
-        let instructions = &deferred.circuit.instructions;
-        let gate_count = instructions
-            .iter()
-            .position(|inst| !matches!(inst, Instruction::Gate { .. }))
-            .unwrap_or(instructions.len());
-        let num_aliases = deferred.circuit.num_qubits;
+        let gate_count = deferred.gates.len();
+        let num_aliases = deferred.num_aliases;
         let mut aliases_by_last_use: Vec<u32> = (0..num_aliases as u32)
             .filter(|&alias| deferred.last_use[alias as usize].is_some())
             .collect();
@@ -489,7 +542,7 @@ impl QecRecordNoise {
         drop(firings);
 
         let deferred = &self.deferred;
-        let mut frame = Frame::new(words, deferred.circuit.num_qubits);
+        let mut frame = Frame::new(words, deferred.num_aliases);
         let mut next_event = self.events.len();
         let mut next_alias = 0usize;
         let mut slots = [0usize; 2];
@@ -535,14 +588,12 @@ impl QecRecordNoise {
                 }
             }
             if position < self.gate_count {
-                let Instruction::Gate { gate, targets } = &deferred.circuit.instructions[position]
-                else {
-                    unreachable!("gates precede the deferred measurements")
-                };
-                for (slot, &alias) in slots.iter_mut().zip(targets.iter()) {
-                    *slot = frame.slot(alias);
+                let gate = &deferred.gates[position];
+                let targets = gate.targets();
+                for (slot, &alias) in slots.iter_mut().zip(targets) {
+                    *slot = frame.slot(alias as usize);
                 }
-                frame.gate(gate, &slots[..targets.len().min(2)]);
+                frame.gate(&gate.gate, &slots[..targets.len()]);
             }
         }
     }
@@ -879,7 +930,7 @@ impl QecSingleNoiseRates {
 
 pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompiledNoiseSampler> {
     let deferred = lower_qec_program_to_deferred_circuit(program)?;
-    let noiseless = compile_measurements(&deferred.circuit, program.options().seed)?;
+    let noiseless = compile_measurements(&deferred.to_circuit(), program.options().seed)?;
     let num_measurements = deferred.measurement_qubits.len();
     let noise = QecRecordNoise::compile(deferred, program.options().seed)?;
     Ok(QecCompiledNoiseSampler {
@@ -1002,11 +1053,8 @@ fn lower_qec_program_to_deferred_circuit_inner(
 ) -> Result<QecDeferredProgram> {
     let base_qubits = qec_lowered_num_qubits(program);
     let scratch_qubit = program.num_qubits();
-    let mut circuit = Circuit::new(base_qubits, program.num_measurements());
-    circuit
-        .instructions
-        .reserve_exact(qec_deferred_instruction_count(program));
-    touch_spare_capacity(&mut circuit.instructions);
+    let mut gates: Vec<DeferredGate> = Vec::with_capacity(qec_deferred_gate_count(program));
+    touch_spare_capacity(&mut gates);
     let mut aliases: Vec<usize> = (0..base_qubits).collect();
     let mut measured_aliases = vec![false; base_qubits];
     let mut alias_positions = vec![0; base_qubits];
@@ -1023,16 +1071,16 @@ fn lower_qec_program_to_deferred_circuit_inner(
                     return Err(qec_non_clifford_error(gate));
                 }
                 let mapped = map_qec_deferred_targets(targets, &aliases, &measured_aliases)?;
-                circuit.add_gate(gate.clone(), mapped.as_slice());
+                gates.gate(gate.clone(), mapped.as_slice());
                 for &alias in &mapped {
-                    last_use[alias] = Some(circuit.instructions.len());
+                    last_use[alias] = Some(gates.len());
                 }
             }
             QecOp::Measure { basis, qubit } => {
                 let alias = qec_deferred_target(*qubit, &aliases, &measured_aliases)?;
-                append_basis_to_z_rotation(&mut circuit, *basis, alias);
+                append_basis_to_z_rotation(&mut gates, *basis, alias);
                 if *basis != QecBasis::Z {
-                    last_use[alias] = Some(circuit.instructions.len());
+                    last_use[alias] = Some(gates.len());
                 }
                 deferred_measurements.push((alias, next_record));
                 measured_aliases[alias] = true;
@@ -1041,7 +1089,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
             QecOp::MeasurePauliProduct { terms } => {
                 let scratch_alias = if measured_aliases[aliases[scratch_qubit]] {
                     qec_assign_fresh_alias(
-                        &mut circuit,
+                        gates.len(),
                         &mut aliases,
                         &mut measured_aliases,
                         &mut alias_positions,
@@ -1058,9 +1106,9 @@ fn lower_qec_program_to_deferred_circuit_inner(
                     let alias = qec_deferred_target(term.qubit, &aliases, &measured_aliases)?;
                     mapped_terms.push(QecPauli::new(term.basis, alias));
                 }
-                append_mpp_parity_rotations(&mut circuit, &mapped_terms, scratch_alias);
+                append_mpp_parity_rotations(&mut gates, &mapped_terms, scratch_alias);
                 if !mapped_terms.is_empty() {
-                    let position = circuit.instructions.len();
+                    let position = gates.len();
                     for term in &mapped_terms {
                         last_use[term.qubit] = Some(position);
                     }
@@ -1073,7 +1121,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
             }
             QecOp::Reset { basis, qubit } => {
                 let alias = qec_assign_fresh_alias(
-                    &mut circuit,
+                    gates.len(),
                     &mut aliases,
                     &mut measured_aliases,
                     &mut alias_positions,
@@ -1081,9 +1129,9 @@ fn lower_qec_program_to_deferred_circuit_inner(
                     &mut next_qubit,
                     *qubit,
                 );
-                append_z_to_basis_rotation(&mut circuit, *basis, alias);
+                append_z_to_basis_rotation(&mut gates, *basis, alias);
                 if *basis != QecBasis::Z {
-                    last_use[alias] = Some(circuit.instructions.len());
+                    last_use[alias] = Some(gates.len());
                 }
             }
             QecOp::Noise { channel, targets } => {
@@ -1094,7 +1142,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
                         targets,
                         &aliases,
                         &measured_aliases,
-                        circuit.instructions.len(),
+                        gates.len(),
                         &mut noise_events,
                     )?;
                     for event in &noise_events[first..] {
@@ -1123,15 +1171,21 @@ fn lower_qec_program_to_deferred_circuit_inner(
 
     ensure_lowered_record_count(program, next_record, "deferred")?;
 
-    let mut measurement_qubits = Vec::with_capacity(deferred_measurements.len());
-    for (qubit, classical_bit) in deferred_measurements {
-        measurement_qubits.push(qubit);
-        circuit.add_measure(qubit, classical_bit);
-    }
+    let measurement_qubits: Vec<usize> = deferred_measurements
+        .iter()
+        .map(|&(qubit, _)| qubit)
+        .collect();
+    debug_assert!(
+        deferred_measurements
+            .iter()
+            .enumerate()
+            .all(|(record, &(_, bit))| record == bit)
+    );
 
     let final_qubit_aliases = aliases[..program.num_qubits()].to_vec();
     Ok(QecDeferredProgram {
-        circuit,
+        gates,
+        num_aliases: next_qubit,
         noise_events,
         measurement_qubits,
         alias_positions,
@@ -1159,10 +1213,10 @@ fn touch_spare_capacity<T: Send>(v: &mut Vec<T>) {
     }
 }
 
-/// Instructions the deferred lowering emits for `program`, so the circuit is built in
-/// one allocation: a 96-byte instruction per gate makes the doubling copies and page
-/// faults of a growing list cost more than the lowering itself.
-fn qec_deferred_instruction_count(program: &QecProgram) -> usize {
+/// Gates the deferred lowering emits for `program`, so the list is built in one
+/// allocation: the doubling copies and page faults of a growing list cost more than the
+/// lowering itself.
+fn qec_deferred_gate_count(program: &QecProgram) -> usize {
     let rotation = |basis: QecBasis| match basis {
         QecBasis::X => 1,
         QecBasis::Y => 2,
@@ -1180,11 +1234,11 @@ fn qec_deferred_instruction_count(program: &QecProgram) -> usize {
             _ => 0,
         })
         .sum();
-    gates + program.num_measurements()
+    gates
 }
 
 fn qec_assign_fresh_alias(
-    circuit: &mut Circuit,
+    position: usize,
     aliases: &mut [usize],
     measured_aliases: &mut Vec<bool>,
     alias_positions: &mut Vec<usize>,
@@ -1196,9 +1250,8 @@ fn qec_assign_fresh_alias(
     aliases[logical_qubit] = alias;
     *next_qubit += 1;
     measured_aliases.push(false);
-    alias_positions.push(circuit.instructions.len());
+    alias_positions.push(position);
     last_use.push(None);
-    circuit.num_qubits = *next_qubit;
     alias
 }
 

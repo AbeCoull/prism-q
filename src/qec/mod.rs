@@ -41,7 +41,7 @@ pub use t_sampler::{
 };
 
 use crate::circuit::{
-    Circuit, append_axis_to_z_rotation, append_parity_rotations, append_z_to_axis_rotation,
+    GateSink, append_axis_to_z_rotation, append_parity_rotations, append_z_to_axis_rotation,
 };
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -1039,22 +1039,22 @@ pub(crate) fn validate_qec_exp_val_placement(program: &QecProgram) -> Result<()>
     Ok(())
 }
 
-pub(super) fn append_basis_to_z_rotation(circuit: &mut Circuit, basis: QecBasis, qubit: usize) {
-    append_axis_to_z_rotation(circuit, basis.into(), qubit);
+pub(super) fn append_basis_to_z_rotation<S: GateSink>(sink: &mut S, basis: QecBasis, qubit: usize) {
+    append_axis_to_z_rotation(sink, basis.into(), qubit);
 }
 
-pub(super) fn append_z_to_basis_rotation(circuit: &mut Circuit, basis: QecBasis, qubit: usize) {
-    append_z_to_axis_rotation(circuit, basis.into(), qubit);
+pub(super) fn append_z_to_basis_rotation<S: GateSink>(sink: &mut S, basis: QecBasis, qubit: usize) {
+    append_z_to_axis_rotation(sink, basis.into(), qubit);
 }
 
 /// Lower a Pauli-product measurement onto a scratch qubit holding |0>; the
 /// caller measures the scratch afterward. See [`append_parity_rotations`].
-pub(super) fn append_mpp_parity_rotations(
-    circuit: &mut Circuit,
+pub(super) fn append_mpp_parity_rotations<S: GateSink>(
+    sink: &mut S,
     terms: &[QecPauli],
     scratch: usize,
 ) {
-    append_parity_rotations(circuit, &qec_terms_to_pauli(terms), scratch);
+    append_parity_rotations(sink, &qec_terms_to_pauli(terms), scratch);
 }
 
 /// Qubit count of a lowered program, including the `MPP` scratch qubit at index

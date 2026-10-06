@@ -41,6 +41,7 @@ struct Fixture {
 
 fn fixtures() -> Vec<Fixture> {
     let data: Vec<usize> = (0..9).collect();
+    let wide_data: Vec<usize> = (0..25).collect();
     let random_records = parse_qec_program(
         "H 0\nX_ERROR(0.1) 0 1\nCX 0 1\nDEPOLARIZE1(0.05) 1\nM 0 1\nDETECTOR rec[-1]\n\
          OBSERVABLE_INCLUDE(0) rec[-2]",
@@ -134,11 +135,33 @@ fn fixtures() -> Vec<Fixture> {
             keep_measurements: false,
             expected: EXPECTED[7],
         },
+        Fixture {
+            label: "surface d5 r20 depolarize1, kept",
+            program: qec_common::rotated_surface_memory(
+                5,
+                20,
+                QecNoise::Depolarize1(0.005),
+                &wide_data,
+                1,
+            ),
+            shots: 10_000,
+            chunk_size: None,
+            keep_measurements: true,
+            expected: EXPECTED[8],
+        },
+        Fixture {
+            label: "repetition d15 r40 depolarize1, kept",
+            program: qec_common::repetition_memory(15, 40, QecNoise::Depolarize1(0.005), 1),
+            shots: 10_000,
+            chunk_size: None,
+            keep_measurements: true,
+            expected: EXPECTED[9],
+        },
     ]
 }
 
 /// `(measurements, detectors, observables)` digests per fixture, in `fixtures` order.
-const EXPECTED: [[u64; 3]; 8] = [
+const EXPECTED: [[u64; 3]; 10] = [
     [0x94ebadd33fd4ab7b, 0x92755cac06099a6a, 0x257edc7a6737bbe9],
     [0x81e47d05fbcfe3e9, 0x2593f7e5054387f4, 0xddddbb9400a2aa87],
     [0x769f17e43f390d6a, 0x6677e1ae56997da3, 0x093d469cd1c2419a],
@@ -147,6 +170,8 @@ const EXPECTED: [[u64; 3]; 8] = [
     [0xcbf29ce484222325, 0x95e48ebc05109443, 0xd29150f644f7b417],
     [0xae18f78f34967bff, 0x95e48ebc05109443, 0xd29150f644f7b417],
     [0xcbf29ce484222325, 0x81ce69436c37a870, 0x81ce69436c37a870],
+    [0xd6d0f74308528fe0, 0xea060843a5d0a46d, 0x548ac3f6a691e9d5],
+    [0xfbc47415627c7118, 0xb06ce3ffe153d5e2, 0x14b766494ff5d670],
 ];
 
 #[test]

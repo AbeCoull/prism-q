@@ -515,6 +515,13 @@ pub fn parse_qasm(source: &str) -> PyPrismResult<PyCircuit> {
     Ok(PyCircuit(openqasm::parse(source)?))
 }
 
+/// Return a circuit template and its named input slots in declaration order.
+#[pyfunction]
+pub fn parse_qasm_parametric(source: &str) -> PyPrismResult<(PyCircuit, PyParameters)> {
+    let (circuit, parameters) = openqasm::parse_parametric(source)?;
+    Ok((PyCircuit(circuit), PyParameters(parameters)))
+}
+
 macro_rules! circuit_fn {
     ($name:ident, $call:path, ($($arg:ident : $ty:ty),*), ($($sig:tt)*)) => {
         #[pyfunction]

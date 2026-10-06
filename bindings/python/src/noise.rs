@@ -1,8 +1,8 @@
-//! Noise channels, noise models, and device calibration tables.
+//! Noise channels, model construction rules, and device calibration tables.
 
 use num_complex::Complex64;
 use prism_q::sim::calibration::presets;
-use prism_q::{DeviceCalibration, NoiseChannel, NoiseEvent, NoiseModel};
+use prism_q::{DeviceCalibration, GateFilter, NoiseBuilder, NoiseChannel, NoiseEvent, NoiseModel};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use smallvec::SmallVec;
@@ -81,6 +81,154 @@ impl PyNoiseChannel {
 
     fn __repr__(&self) -> String {
         format!("NoiseChannel({:?})", self.0)
+    }
+}
+
+/// Unset criteria match every gate; fluent methods update the same filter.
+#[pyclass(name = "GateFilter", module = "prism_q")]
+pub(crate) struct PyGateFilter(GateFilter);
+
+#[pymethods]
+impl PyGateFilter {
+    #[new]
+    fn new() -> Self {
+        Self(GateFilter::all())
+    }
+
+    #[staticmethod]
+    fn all() -> Self {
+        Self::new()
+    }
+
+    fn arity(mut slf: PyRefMut<'_, Self>, arity: usize) -> PyRefMut<'_, Self> {
+        slf.0 = std::mem::take(&mut slf.0).arity(arity);
+        slf
+    }
+
+    /// Match the unfused gate name, such as `"cx"`; unknown names match nothing.
+    fn named(mut slf: PyRefMut<'_, Self>, name: String) -> PyRefMut<'_, Self> {
+        slf.0 = std::mem::take(&mut slf.0).named(name);
+        slf
+    }
+
+    /// Select gate targets eligible for a rule, as an unordered set.
+    fn on_qubits(mut slf: PyRefMut<'_, Self>, qubits: Vec<usize>) -> PyRefMut<'_, Self> {
+        slf.0 = std::mem::take(&mut slf.0).on_qubits(qubits);
+        slf
+    }
+
+    /// Match the complete target list in order, so `[0, 1]` excludes `cx(1, 0)`.
+    fn on_targets(mut slf: PyRefMut<'_, Self>, targets: Vec<usize>) -> PyRefMut<'_, Self> {
+        slf.0 = std::mem::take(&mut slf.0).on_targets(targets);
+        slf
+    }
+}
+
+/// Rules are copied when added and emit events in registration order at `build`.
+#[pyclass(name = "NoiseBuilder", module = "prism_q")]
+pub(crate) struct PyNoiseBuilder(NoiseBuilder);
+
+#[pymethods]
+impl PyNoiseBuilder {
+    #[new]
+    fn new() -> Self {
+        Self(NoiseBuilder::new())
+    }
+
+    /// Emit a single-qubit channel on each matching target of a matching gate.
+    fn after_gates<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        filter: &PyGateFilter,
+        channel: &PyNoiseChannel,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).after_gates(filter.0.clone(), channel.0.clone());
+        slf
+    }
+
+    /// Emit a channel on the whole target list when its arity matches the gate.
+    fn after_gates_joint<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        filter: &PyGateFilter,
+        channel: &PyNoiseChannel,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).after_gates_joint(filter.0.clone(), channel.0.clone());
+        slf
+    }
+
+    /// Treat coupling edges as undirected; two-qubit channels order target before spectator.
+    fn crosstalk<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        filter: &PyGateFilter,
+        coupling: Vec<(usize, usize)>,
+        channel: &PyNoiseChannel,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).crosstalk(filter.0.clone(), coupling, channel.0.clone());
+        slf
+    }
+
+    /// Append a rotation of `relative * theta` after matching `rx`, `ry`, `rz`, or `p` gates.
+    fn over_rotation<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        filter: &PyGateFilter,
+        relative: f64,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).over_rotation(filter.0.clone(), relative);
+        slf
+    }
+
+    /// Charge every untouched qubit once per greedy circuit layer, at its last instruction.
+    fn on_idle_qubits<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        channel: &PyNoiseChannel,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).on_idle_qubits(channel.0.clone());
+        slf
+    }
+
+    /// Emit a single-qubit channel after each reset.
+    fn after_resets<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        channel: &PyNoiseChannel,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).after_resets(channel.0.clone());
+        slf
+    }
+
+    /// Damage the measured state; a measurement at instruction zero needs a preceding barrier.
+    fn before_measurements<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        channel: &PyNoiseChannel,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).before_measurements(channel.0.clone());
+        slf
+    }
+
+    /// Override the uniform readout rates on one classical bit, regardless of rule order.
+    fn readout_error(
+        mut slf: PyRefMut<'_, Self>,
+        bit: usize,
+        p01: f64,
+        p10: f64,
+    ) -> PyRefMut<'_, Self> {
+        slf.0 = std::mem::take(&mut slf.0).readout_error(bit, p01, p10);
+        slf
+    }
+
+    /// Set readout rates on every classical bit, including bits not measured.
+    fn uniform_readout_error(
+        mut slf: PyRefMut<'_, Self>,
+        p01: f64,
+        p10: f64,
+    ) -> PyRefMut<'_, Self> {
+        slf.0 = std::mem::take(&mut slf.0).uniform_readout_error(p01, p10);
+        slf
+    }
+
+    /// Validate and lower against the unfused circuit; the builder remains reusable.
+    fn build(&self, circuit: &PyCircuit) -> PyPrismResult<PyNoiseModel> {
+        Ok(PyNoiseModel {
+            inner: self.0.build(circuit.inner())?,
+        })
     }
 }
 

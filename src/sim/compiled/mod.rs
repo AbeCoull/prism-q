@@ -25,6 +25,7 @@ use rand_chacha::ChaCha8Rng;
 use bts::{BTS_BATCH_SHOTS, bts_batched, bts_single_pass, sample_bts_meas_major};
 use rng::{Xoshiro256PlusPlus, binomial_sample};
 
+use accumulator::transpose_64x64_dispatch;
 pub use accumulator::{
     CorrelatorAccumulator, HistogramAccumulator, MarginalsAccumulator, NullAccumulator,
     PauliExpectationAccumulator, ShotAccumulator, default_chunk_size, optimal_chunk_size,
@@ -35,8 +36,10 @@ pub(crate) use parity::{ParityBlock, ParityBlocks, SparseParity};
 use parity::{build_parity_blocks_if_useful, minimize_flip_row_weight};
 
 pub(crate) use crate::backend::word_ops::xor_words;
-pub(crate) use propagation::batch_propagate_backward;
 pub(crate) use propagation::propagate_backward;
+pub(crate) use propagation::{
+    batch_propagate_backward, batch_propagate_backward_flat, pair_rows_mut,
+};
 use propagation::{
     build_measurement_rows, colmajor_forward_sim, compute_reference_bits, rowmul_phase,
     rowmul_phase_into,
@@ -1937,6 +1940,33 @@ impl PackedShots {
         }
 
         shot_major
+    }
+
+    /// Measurement-major words: `num_measurements` rows of `s_words` each.
+    pub(crate) fn into_meas_major_data(self) -> Vec<u64> {
+        if self.layout == ShotLayout::MeasMajor {
+            return self.data;
+        }
+
+        let mut meas_major = vec![0u64; self.num_measurements * self.s_words];
+        let mut block = [0u64; 64];
+        for shot_word in 0..self.s_words {
+            let first_shot = shot_word * 64;
+            let shots = (self.num_shots - first_shot).min(64);
+            for meas_word in 0..self.m_words {
+                block.fill(0);
+                for (shot, word) in block[..shots].iter_mut().enumerate() {
+                    *word = self.data[(first_shot + shot) * self.m_words + meas_word];
+                }
+                transpose_64x64_dispatch(&mut block);
+                let first_measurement = meas_word * 64;
+                let measurements = (self.num_measurements - first_measurement).min(64);
+                for (measurement, &word) in block[..measurements].iter().enumerate() {
+                    meas_major[(first_measurement + measurement) * self.s_words + shot_word] = word;
+                }
+            }
+        }
+        meas_major
     }
 
     pub fn to_shots(&self) -> Vec<Vec<bool>> {

@@ -4,7 +4,12 @@
 
 #[cfg(feature = "bench-internal")]
 use super::noise::QecCompiledNoiseSampler;
-use super::noise::{QecParityNoise, compile_qec_noisy_sampler, compile_qec_parity_noise};
+use super::noise::{
+    QecParityNoise, compile_qec_noisy_sampler, lower_qec_program_to_deferred_circuit,
+};
+#[cfg(test)]
+use super::noise::{compile_qec_parity_noise, compile_qec_parity_noise_windows};
+use super::parity_walk::compile_parity_noise;
 use super::{
     QecBasis, QecNoise, QecObservableEstimate, QecOp, QecOptions, QecPauli, QecProgram,
     QecRecordRef, QecSampleResult, append_basis_to_z_rotation, append_mpp_parity_rotations,
@@ -21,6 +26,8 @@ use crate::sim::compiled::{PackedShots, ShotLayout, compile_detector_sampler};
 use crate::sim::unified_pauli::Welford;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Run a native QEC program through the scalable compiled Clifford path.
 ///
@@ -111,12 +118,20 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
     }
 
     if qec_records_unobserved(program) {
-        let projection = QecParityProjection::new(
-            program.num_measurements(),
-            &program.detector_rows()?,
-            &program.observable_rows()?,
+        let (projection, deferred) = qec_join(
+            || {
+                Ok(QecParityProjection::new(
+                    program.num_measurements(),
+                    &program.detector_rows()?,
+                    &program.observable_rows()?,
+                ))
+            },
+            || lower_qec_program_to_deferred_circuit(program),
         );
-        if let Some((pattern, noise)) = compile_qec_parity_noise(program, &projection)? {
+        let (projection, deferred) = (projection?, deferred?);
+        if let Some((pattern, noise)) =
+            compile_parity_noise(&deferred, &projection, program.options().seed, None)?
+        {
             return qec_result_from_parity_projection(
                 program,
                 &projection,
@@ -947,6 +962,10 @@ impl QecParityProjection {
         self.num_detectors + self.num_observables
     }
 
+    pub(super) fn num_detectors(&self) -> usize {
+        self.num_detectors
+    }
+
     /// Outputs that `record` feeds.
     pub(super) fn outputs(&self, record: usize) -> &[usize] {
         &self.record_outputs[self.record_offsets[record]..self.record_offsets[record + 1]]
@@ -989,6 +1008,12 @@ impl QecParityProjection {
     }
 }
 
+/// Output words from which the pattern fill runs on the pool. Every row is written,
+/// zero or not, so the fresh allocation's pages are first touched from all threads at
+/// once rather than one at a time as the noise lands on them.
+#[cfg(feature = "parallel")]
+const QEC_PARALLEL_FILL_WORDS: usize = 1 << 18;
+
 /// Sample measurement-major detector and observable bits without measurement records,
 /// from the projected noiseless `pattern` plus projected noise.
 fn qec_result_from_parity_projection(
@@ -1008,12 +1033,28 @@ fn qec_result_from_parity_projection(
 
     let mut rows = vec![0u64; (num_detectors + num_observables) * row_words];
     if row_words > 0 {
-        for (output, row) in rows.chunks_exact_mut(row_words).enumerate() {
+        let fill_row = |(output, row): (usize, &mut [u64])| {
             if (pattern[output / 64] >> (output % 64)) & 1 == 1 {
                 row.fill(u64::MAX);
                 row[row_words - 1] = tail_mask;
+            } else {
+                row.fill(0);
             }
+        };
+        #[cfg(feature = "parallel")]
+        if rows.len() >= QEC_PARALLEL_FILL_WORDS {
+            rows.par_chunks_exact_mut(row_words)
+                .enumerate()
+                .for_each(fill_row);
+        } else {
+            rows.chunks_exact_mut(row_words)
+                .enumerate()
+                .for_each(fill_row);
         }
+        #[cfg(not(feature = "parallel"))]
+        rows.chunks_exact_mut(row_words)
+            .enumerate()
+            .for_each(fill_row);
     }
     if let Some(noise) = noise {
         noise.apply(&mut rows, row_words, shots);
@@ -1033,6 +1074,20 @@ fn qec_result_from_parity_projection(
         0,
         logical_errors,
     )
+}
+
+/// Run two independent steps of the parity route side by side when a pool is available.
+#[cfg(feature = "parallel")]
+fn qec_join<A: Send, B: Send>(
+    a: impl FnOnce() -> A + Send,
+    b: impl FnOnce() -> B + Send,
+) -> (A, B) {
+    rayon::join(a, b)
+}
+
+#[cfg(not(feature = "parallel"))]
+fn qec_join<A, B>(a: impl FnOnce() -> A, b: impl FnOnce() -> B) -> (A, B) {
+    (a(), b())
 }
 
 fn qec_runner_chunk_size(options: QecOptions) -> Result<usize> {
@@ -1703,15 +1758,84 @@ DETECTOR rec[-1]",
             );
             let sampler = compile_qec_noisy_sampler(&program).unwrap();
             let expected = projection.constant_pattern(sampler.noiseless());
-            let pattern = compile_qec_parity_noise(&program, &projection)
-                .unwrap()
-                .map(|(pattern, _)| pattern);
+            let compiled = compile_qec_parity_noise(&program, &projection).unwrap();
+            let pattern = compiled.as_ref().map(|(pattern, _)| pattern.clone());
             assert_eq!(pattern, expected, "{text}");
+            for windows in [2, 5] {
+                let split =
+                    compile_qec_parity_noise_windows(&program, &projection, Some(windows)).unwrap();
+                assert_eq!(
+                    split, compiled,
+                    "{text}
+{windows} windows"
+                );
+            }
             if let Some(pattern) = pattern {
                 fixed += 1;
                 ones += usize::from(pattern[0] != 0);
             }
         }
         assert!(fixed > 300 && ones > 20, "fixed {fixed}, nonzero {ones}");
+    }
+
+    fn repetition_memory_text(n_data: usize, rounds: usize) -> String {
+        let checks = n_data - 1;
+        let data: Vec<String> = (0..n_data).map(|q| q.to_string()).collect();
+        let mut lines = Vec::new();
+        for round in 0..rounds {
+            lines.push(format!("DEPOLARIZE1(0.01) {}", data.join(" ")));
+            for c in 0..checks {
+                lines.push(format!("DEPOLARIZE2(0.01) {} {}", c, c + 1));
+                lines.push(format!("MPP Z{}*Z{}", c, c + 1));
+            }
+            for c in 0..checks {
+                if round == 0 {
+                    lines.push(format!("DETECTOR rec[-{}]", checks - c));
+                } else {
+                    lines.push(format!(
+                        "DETECTOR rec[-{}] rec[-{}]",
+                        checks - c,
+                        2 * checks - c
+                    ));
+                }
+            }
+        }
+        lines.push(format!("M {}", data.join(" ")));
+        for c in 0..checks {
+            lines.push(format!(
+                "DETECTOR rec[-{}] rec[-{}] rec[-{}]",
+                n_data - c,
+                n_data - c - 1,
+                n_data + checks - c
+            ));
+        }
+        lines.push(format!("OBSERVABLE_INCLUDE(0) rec[-{n_data}]"));
+        lines.join(
+            "
+",
+        )
+    }
+
+    // Windows own disjoint detector sets, hand flips on earlier windows' events back,
+    // and take the observable and fingerprint state from the sequential pass; every
+    // count must compile the same events, branches and pattern as the one-window walk.
+    #[test]
+    fn parity_compile_is_the_same_over_any_window_count() {
+        let program = parse_dropping_records(&repetition_memory_text(5, 40));
+        let projection = QecParityProjection::new(
+            program.num_measurements(),
+            &program.detector_rows().unwrap(),
+            &program.observable_rows().unwrap(),
+        );
+        let reference = compile_qec_parity_noise_windows(&program, &projection, Some(1))
+            .unwrap()
+            .expect("a repetition memory has a fixed pattern");
+        assert!(reference.1.event_count() > 300);
+        for windows in [2, 3, 5, 8, 40] {
+            let split = compile_qec_parity_noise_windows(&program, &projection, Some(windows))
+                .unwrap()
+                .unwrap();
+            assert_eq!(split, reference, "{windows} windows");
+        }
     }
 }

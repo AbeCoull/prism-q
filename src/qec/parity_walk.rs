@@ -9,7 +9,6 @@ use super::noise::{
     QecRecordEvent, append_qec_pauli_noise_effect, qec_pair_branch_flips, qec_single_noise_rates,
 };
 use super::runner::QecParityProjection;
-use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::compiled::batch_propagate_backward_flat;
@@ -340,21 +339,8 @@ impl<'a> WalkPlan<'a> {
         projection: &'a QecParityProjection,
         windows: Option<usize>,
     ) -> Result<Self> {
-        let instructions = &deferred.circuit.instructions;
-        let gate_count = instructions
-            .iter()
-            .position(|inst| !matches!(inst, Instruction::Gate { .. }))
-            .unwrap_or(instructions.len());
-        if instructions[gate_count..]
-            .iter()
-            .any(|inst| !matches!(inst, Instruction::Measure { .. }))
-        {
-            return Err(PrismError::InvalidParameter {
-                message: "QEC deferred circuit expected gate before terminal measurements"
-                    .to_string(),
-            });
-        }
-        let num_aliases = deferred.circuit.num_qubits;
+        let gate_count = deferred.gates.len();
+        let num_aliases = deferred.num_aliases;
 
         let mut events_by_position: Vec<u32> = (0..deferred.noise_events.len() as u32).collect();
         for event in &deferred.noise_events {
@@ -526,7 +512,7 @@ impl<'a> WindowRows<'a> {
             x: Vec::new(),
             z: Vec::new(),
             sign: vec![0; obs_words + 1],
-            slot_of_alias: vec![u32::MAX; plan.deferred.circuit.num_qubits],
+            slot_of_alias: vec![u32::MAX; plan.deferred.num_aliases],
             free_slots: Vec::new(),
             column_of_output: vec![u32::MAX; num_detectors],
             output_of_column,
@@ -811,7 +797,7 @@ fn walk<V: WalkVisitor>(
     let order = &plan.events_by_position;
     let alias_positions = &plan.deferred.alias_positions;
     let created = &plan.aliases_by_creation;
-    let instructions = &plan.deferred.circuit.instructions;
+    let gates = &plan.deferred.gates;
 
     let mut next_event = order.partition_point(|&e| events[e as usize].position <= hi);
     let mut next_alias = created.partition_point(|&a| alias_positions[a as usize] <= hi);
@@ -844,17 +830,12 @@ fn walk<V: WalkVisitor>(
         if position == 0 {
             break;
         }
-        let Instruction::Gate { gate, targets } = &instructions[position - 1] else {
-            return Err(PrismError::InvalidParameter {
-                message: "QEC deferred circuit expected gate before terminal measurements"
-                    .to_string(),
-            });
-        };
-        let arity = targets.len().min(2);
-        for (slot, &target) in gate_slots.iter_mut().zip(targets.iter()) {
-            *slot = rows.slot(target);
+        let gate = &gates[position - 1];
+        let targets = gate.targets();
+        for (slot, &target) in gate_slots.iter_mut().zip(targets) {
+            *slot = rows.slot(target as usize);
         }
-        rows.propagate(gate, &gate_slots[..arity]);
+        rows.propagate(&gate.gate, &gate_slots[..targets.len()]);
         position -= 1;
     }
     Ok(())

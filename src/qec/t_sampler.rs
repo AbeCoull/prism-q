@@ -230,14 +230,10 @@ fn lower_qec_program_for_pauli_observable(
 
     let deferred =
         super::noise::lower_qec_program_to_deferred_circuit_allowing_non_clifford(program)?;
-    let mut circuit = Circuit::new(
-        deferred.circuit.num_qubits,
-        deferred.circuit.num_classical_bits,
-    );
-    for inst in &deferred.circuit.instructions {
-        if matches!(inst, crate::circuit::Instruction::Gate { .. }) {
-            circuit.instructions.push(inst.clone());
-        }
+    let mut circuit = Circuit::new(deferred.num_aliases, deferred.measurement_qubits.len());
+    for gate in &deferred.gates {
+        let targets: SmallVec<[usize; 4]> = gate.targets().iter().map(|&t| t as usize).collect();
+        circuit.add_gate(gate.gate.clone(), &targets);
     }
     Ok((
         circuit,

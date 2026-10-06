@@ -9,6 +9,7 @@ on:
       - "docs/guides/python.md"
       - "src/**"
       - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/python.yml"
   workflow_dispatch:
 
@@ -76,6 +77,30 @@ jobs:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
 
+  wheel-compatibility:
+    name: Test wheel (Python ${{ matrix.python }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheels-linux-x86_64
+          path: dist
+      - name: Test the ABI3 wheel across Python versions
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pytest
+          python -m pip install --no-index --find-links dist prism-q
+          python -m pytest bindings/python/tests -q
+
   sdist:
     name: sdist
     runs-on: ubuntu-latest
@@ -91,10 +116,46 @@ jobs:
           name: sdist
           path: dist
 
+  sdist-validation:
+    name: Test source distribution
+    needs: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
+        with:
+          name: sdist
+          path: ${{ runner.temp }}/sdist
+      - name: Install and test outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "$RUNNER_TEMP"/sdist/*.tar.gz
+          python - <<'PY'
+          import numpy as np
+          import prism_q
+
+          circuit = prism_q.CircuitBuilder(2).h(0).cx(0, 1).build()
+          probabilities = prism_q.simulate(circuit).seed(42).run().probabilities
+          assert isinstance(probabilities, np.ndarray)
+          assert probabilities.dtype == np.float64
+          assert probabilities.shape == (4,)
+          np.testing.assert_allclose(probabilities, [0.5, 0.0, 0.0, 0.5], atol=1e-12)
+
+          state = prism_q.simulate(circuit).seed(42).state_vector()
+          assert isinstance(state, np.ndarray)
+          assert state.dtype == np.complex128
+          assert state.shape == (4,)
+          np.testing.assert_allclose(state, np.sqrt([0.5, 0.0, 0.0, 0.5]), atol=1e-12)
+          PY
+
   publish:
     name: Publish to PyPI
     if: startsWith(github.ref, 'refs/tags/py-v')
-    needs: [build, sdist]
+    needs: [build, wheel-compatibility, sdist-validation]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

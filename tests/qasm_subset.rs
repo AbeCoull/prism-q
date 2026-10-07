@@ -471,3 +471,68 @@ fn the_guide_array_example_folds_to_its_gate() {
         "rx(0.3) q[3];",
     );
 }
+
+// A loop body's writes to names declared outside it are the loop's whole
+// effect on them, so they have to outlive each pass.
+#[test]
+fn a_loop_keeps_writes_to_outer_names() {
+    assert_same_stream(
+        "int n = 0;\nfor int i in [0:2] { n += 1; }\nh q[n];",
+        "h q[3];",
+    );
+    assert_same_stream(
+        "int n = 0;\nfor int i in [0:1] { for int j in [0:0] { n += 1; } n += i; }\nh q[n];",
+        "h q[3];",
+    );
+    assert_same_stream(
+        "float t = 0;\nfor int i in [1:3] { t = t + i; }\nrx(t) q[0];",
+        "rx(6) q[0];",
+    );
+    assert_same_stream(
+        "duration d = 0ns;\nfor int i in [0:2] { d += 10ns; }\nrx(d / 10ns) q[0];",
+        "rx(3) q[0];",
+    );
+}
+
+#[test]
+fn a_loop_body_declaration_and_variable_stay_inside() {
+    assert_same_stream(
+        "int i = 2;\nfor int i in [0:1] { h q[i]; }\nx q[i];",
+        "h q[0];\nh q[1];\nx q[2];",
+    );
+    for body in [
+        "for int i in [0:1] { int j = i; }\nh q[j];",
+        "for int i in [0:1] { h q[i]; }\nh q[i];",
+        "for int i in [0:1] { duration d = 1ns; }\ndelay[d] q[0];",
+    ] {
+        assert!(
+            matches!(parse_err(body), PrismError::Parse { .. }),
+            "`{body}`"
+        );
+    }
+}
+
+// A def sees no non-constant global it does not take as an argument, so a
+// write to one inside the body cannot be inlined and is rejected rather than
+// dropped.
+#[test]
+fn a_def_cannot_write_an_outer_name() {
+    for body in [
+        "int n = 0;\ndef f(qubit a) { n += 1; h a; }\nf(q[0]);\nh q[n];",
+        "duration d = 0ns;\ndef f(qubit a) { d += 1ns; h a; }\nf(q[0]);",
+    ] {
+        match parse_err(body) {
+            PrismError::Parse { message, .. } => {
+                assert!(
+                    message.contains("not a declared classical variable"),
+                    "`{body}`: {message}"
+                );
+            }
+            other => panic!("`{body}` should be a parse error, got {other:?}"),
+        }
+    }
+    assert_same_stream(
+        "const int k = 2;\ndef f(qubit a) { int m = k; m += 1; rx(m) a; }\nf(q[0]);",
+        "rx(3) q[0];",
+    );
+}

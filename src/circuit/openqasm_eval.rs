@@ -1780,6 +1780,10 @@ impl<'a> Parser<'a> {
         };
 
         let mut sub = self.expansion_parser(bindings);
+        // The body runs in a parser of its own, so a write it made to an outer
+        // variable would be dropped on return; only the constants it may read
+        // stay declared, and a write to anything else is rejected.
+        sub.classical.retain(|_, decl| decl.constant);
         sub.durations = durations;
         // A def sees the global constants and nothing else it does not take as
         // an argument, so only a `const` array reaches its body.
@@ -1953,16 +1957,31 @@ impl<'a> Parser<'a> {
     /// fusion may merge across its boundary as freely as across a `delay`. The
     /// names its body declares go out of scope with it.
     fn exec_box(&mut self, body: &Block<'a>) -> Result<Vec<Instruction>> {
-        let before: Vec<&'a str> = self.classical.keys().copied().collect();
-        let arrays_before: Vec<&'a str> = self.arrays.keys().copied().collect();
+        let scope = self.open_scope();
         let was_nested = std::mem::replace(&mut self.nested, true);
         let result = self.execute(body);
         self.nested = was_nested;
+        self.close_scope(&scope);
+        result
+    }
+
+    /// The classical and array names in scope, for [`Parser::close_scope`].
+    fn open_scope(&self) -> (Vec<&'a str>, Vec<&'a str>) {
+        (
+            self.classical.keys().copied().collect(),
+            self.arrays.keys().copied().collect(),
+        )
+    }
+
+    /// Drop the names declared since `scope` was opened. Names declared before
+    /// it keep whatever the body wrote to them.
+    fn close_scope(&mut self, scope: &(Vec<&'a str>, Vec<&'a str>)) {
+        let (classical, arrays) = scope;
         let declared: Vec<&'a str> = self
             .classical
             .keys()
             .copied()
-            .filter(|name| !before.contains(name))
+            .filter(|name| !classical.contains(name))
             .collect();
         for name in declared {
             self.classical.remove(name);
@@ -1971,8 +1990,7 @@ impl<'a> Parser<'a> {
                 values.remove(name);
             }
         }
-        self.arrays.retain(|name, _| arrays_before.contains(name));
-        result
+        self.arrays.retain(|name, _| arrays.contains(name));
     }
 
     /// Run a block one nesting level down.
@@ -2014,27 +2032,39 @@ impl<'a> Parser<'a> {
             ));
         }
         let mut out = Vec::new();
-        let arrays_before: Vec<&'a str> = self.arrays.keys().copied().collect();
+        // The loop variable may shadow an outer name, whose value comes back
+        // once the loop ends.
+        let shadowed = self
+            .param_vars
+            .as_ref()
+            .and_then(|vars| vars.get(variable).copied());
+        let scope = self.open_scope();
+        let mut result = Ok(());
         for value in values {
-            // The body binds for one pass, so the whole classical scope is
-            // restored rather than the loop variable alone. An element write
-            // outlives the pass, as filling an array in a loop needs.
-            let saved_values = self.param_vars.clone();
-            let saved_decls = self.classical_copy();
-            let saved_durations = self.durations.clone();
+            // Each pass drops what the body declared, so a declaration binds
+            // for one pass, while a write to an outer name carries on.
             self.param_vars
                 .get_or_insert_with(HashMap::new)
                 .insert(variable, value as f64);
             let was_nested = std::mem::replace(&mut self.nested, true);
             let produced = self.execute(body);
             self.nested = was_nested;
-            self.param_vars = saved_values;
-            self.classical = saved_decls;
-            self.durations = saved_durations;
-            self.arrays.retain(|name, _| arrays_before.contains(name));
-            out.extend(produced?);
+            self.close_scope(&scope);
+            match produced {
+                Ok(produced) => out.extend(produced),
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
         }
-        Ok(out)
+        if let Some(vars) = self.param_vars.as_mut() {
+            match shadowed {
+                Some(value) => vars.insert(variable, value),
+                None => vars.remove(variable),
+            };
+        }
+        result.map(|()| out)
     }
 
     fn for_values(&self, range: &ForRange, line: usize) -> Result<Vec<i64>> {

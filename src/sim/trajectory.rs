@@ -2,7 +2,7 @@
 //! simulation per shot, sampling a noise branch after each instruction, or one
 //! per distinct error pattern when every shot's Pauli errors can be drawn first.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use num_complex::Complex64;
 use rand::SeedableRng;
@@ -666,6 +666,9 @@ pub(crate) struct PauliGroups {
     /// Instruction whose events hold each group's first insertion, `prefix` for
     /// the error-free group. Every instruction before it runs noiselessly.
     starts: Vec<usize>,
+    /// Instruction whose events hold each group's last insertion, `prefix` for
+    /// the error-free group. Every instruction after it runs noiselessly.
+    lasts: Vec<usize>,
     /// Shot indices ordered by group, ascending within each group.
     members: Vec<usize>,
     /// Group `g` owns `members[offsets[g]..offsets[g + 1]]`.
@@ -725,12 +728,14 @@ impl PauliGroups {
         let prefix = pauli_group_prefix(circuit, noise)?;
         let mut index: HashMap<Vec<Insertion>, usize> = HashMap::new();
         let mut starts = Vec::new();
+        let mut lasts = Vec::new();
         let mut shot_group = Vec::with_capacity(num_shots);
         let mut pattern = Vec::new();
         for shot in 0..num_shots {
             let mut rng = noise_rng(crate::sim::mix_seed(seed, shot));
             pattern.clear();
             let mut start = prefix;
+            let mut last = prefix;
             let mut event = 0usize;
             for (instruction, events) in noise.after_gate[..prefix].iter().enumerate() {
                 for noise_event in events {
@@ -738,6 +743,7 @@ impl PauliGroups {
                         if pattern.is_empty() {
                             start = instruction;
                         }
+                        last = instruction;
                         pattern.push(Insertion { event, letters });
                     }
                     event += 1;
@@ -752,6 +758,7 @@ impl PauliGroups {
                     }
                     index.insert(pattern.clone(), group);
                     starts.push(start);
+                    lasts.push(last);
                     group
                 }
             };
@@ -779,6 +786,7 @@ impl PauliGroups {
             prefix,
             patterns,
             starts,
+            lasts,
             members,
             offsets,
         })
@@ -865,7 +873,16 @@ fn run_built_group(
         evolve_error_free(backend.as_mut(), circuit, groups.prefix)?;
     } else {
         backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
-        evolve_pattern(backend.as_mut(), groups, group, circuit, noise, 0, 0)?;
+        evolve_pattern(
+            backend.as_mut(),
+            groups,
+            group,
+            circuit,
+            noise,
+            0,
+            groups.prefix,
+            0,
+        )?;
     }
     let probabilities = backend.probabilities()?;
     let records = group_records(
@@ -888,10 +905,12 @@ fn run_built_group(
 ///
 /// A noiseless checkpoint advances once through the raw prefix. Each group with
 /// errors copies it at its start and continues raw from there, which is the
-/// operation sequence it would apply from |0...0⟩, so it ends on the same bits.
-/// The weights pass reads the amplitudes, so no `2^n` table is built. At the
-/// statevector cap, where a second state would not fit, every group starts from
-/// |0...0⟩ instead.
+/// operation sequence it would apply from |0...0⟩, up to its last insertion.
+/// From the fusion width on, the noiseless rest runs as a fused stream shared by
+/// every group whose last insertion sits on the same instruction. The weights
+/// pass reads the amplitudes, so no `2^n` table is built. At the statevector
+/// cap, where a second state would not fit, every group starts from |0...0⟩ and
+/// runs raw instead.
 fn run_statevector_chunk(
     groups: &PauliGroups,
     chunk: &[usize],
@@ -906,6 +925,9 @@ fn run_statevector_chunk(
     if checkpointed {
         checkpoint.init(circuit.num_qubits, circuit.num_classical_bits)?;
     }
+    let fused_tails =
+        checkpointed && circuit.num_qubits >= crate::circuit::fusion::MIN_QUBITS_FOR_FUSION;
+    let mut tails: BTreeMap<usize, Circuit> = BTreeMap::new();
     let mut backend = StatevectorBackend::new(seed);
     let mut at = 0usize;
     let mut ordinal = 0usize;
@@ -915,7 +937,16 @@ fn run_statevector_chunk(
             evolve_error_free(&mut backend, circuit, groups.prefix)?;
         } else if !checkpointed {
             backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
-            evolve_pattern(&mut backend, groups, group, circuit, noise, 0, 0)?;
+            evolve_pattern(
+                &mut backend,
+                groups,
+                group,
+                circuit,
+                noise,
+                0,
+                groups.prefix,
+                0,
+            )?;
         } else {
             let start = groups.starts[group];
             for (instruction, events) in circuit.instructions[at..start]
@@ -927,7 +958,40 @@ fn run_statevector_chunk(
             }
             at = start;
             backend.copy_state_from(&checkpoint);
-            evolve_pattern(&mut backend, groups, group, circuit, noise, start, ordinal)?;
+            if fused_tails {
+                let tail = groups.lasts[group] + 1;
+                evolve_pattern(
+                    &mut backend,
+                    groups,
+                    group,
+                    circuit,
+                    noise,
+                    start,
+                    tail,
+                    ordinal,
+                )?;
+                while let Some(entry) = tails.first_entry() {
+                    if *entry.key() > start {
+                        break;
+                    }
+                    entry.remove();
+                }
+                let fused = tails
+                    .entry(tail)
+                    .or_insert_with(|| fused_noiseless(&backend, circuit, tail..groups.prefix));
+                backend.apply_instructions(&fused.instructions)?;
+            } else {
+                evolve_pattern(
+                    &mut backend,
+                    groups,
+                    group,
+                    circuit,
+                    noise,
+                    start,
+                    groups.prefix,
+                    ordinal,
+                )?;
+            }
         }
         let scale = backend.probability_scale();
         let weights = backend
@@ -944,15 +1008,26 @@ fn run_statevector_chunk(
 /// the fused plan a noiseless run takes, which no error insertion splits.
 fn evolve_error_free(backend: &mut dyn Backend, circuit: &Circuit, prefix: usize) -> Result<()> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
-    let noiseless = circuit.with_instructions(circuit.instructions[..prefix].to_vec());
-    let expanded = crate::sim::expand_for_backend(backend, &noiseless);
-    let fused = crate::sim::fuse_for_backend(backend, &expanded);
+    let fused = fused_noiseless(backend, circuit, 0..prefix);
     backend.apply_instructions(&fused.instructions)
 }
 
-/// Run the circuit prefix from instruction `from` with `group`'s Pauli errors
+/// Instructions `span` of `circuit` as the fused plan a noiseless run of them
+/// takes on `backend`.
+fn fused_noiseless(
+    backend: &dyn Backend,
+    circuit: &Circuit,
+    span: std::ops::Range<usize>,
+) -> Circuit {
+    let noiseless = circuit.with_instructions(circuit.instructions[span].to_vec());
+    let expanded = crate::sim::expand_for_backend(backend, &noiseless);
+    crate::sim::fuse_for_backend(backend, &expanded).into_owned()
+}
+
+/// Run instructions `from..to` of the circuit prefix with `group`'s Pauli errors
 /// inserted after the events that fired, on a `backend` holding the state
 /// before `from` and with `ordinal` events counted before it.
+#[allow(clippy::too_many_arguments)]
 fn evolve_pattern<B: Backend + ?Sized>(
     backend: &mut B,
     groups: &PauliGroups,
@@ -960,10 +1035,11 @@ fn evolve_pattern<B: Backend + ?Sized>(
     circuit: &Circuit,
     noise: &NoiseModel,
     from: usize,
+    to: usize,
     mut ordinal: usize,
 ) -> Result<()> {
     let mut insertions = groups.patterns[group].iter().peekable();
-    for (instruction, events) in circuit.instructions[from..groups.prefix]
+    for (instruction, events) in circuit.instructions[from..to]
         .iter()
         .zip(&noise.after_gate[from..])
     {
@@ -1858,7 +1934,17 @@ mod tests {
             evolve_error_free(&mut fused, &circuit, groups.prefix).unwrap();
             let mut raw = StatevectorBackend::new(seed);
             raw.init(n, n).unwrap();
-            evolve_pattern(&mut raw, &groups, error_free, &circuit, &noise, 0, 0).unwrap();
+            evolve_pattern(
+                &mut raw,
+                &groups,
+                error_free,
+                &circuit,
+                &noise,
+                0,
+                groups.prefix,
+                0,
+            )
+            .unwrap();
             let raw_probs = raw.probabilities().unwrap();
             let fused_probs = fused.probabilities().unwrap();
             for (index, (f, r)) in fused_probs.iter().zip(&raw_probs).enumerate() {
@@ -1916,7 +2002,17 @@ mod tests {
                 backend
                     .init(circuit.num_qubits, circuit.num_classical_bits)
                     .unwrap();
-                evolve_pattern(&mut backend, groups, group, circuit, noise, 0, 0).unwrap();
+                evolve_pattern(
+                    &mut backend,
+                    groups,
+                    group,
+                    circuit,
+                    noise,
+                    0,
+                    groups.prefix,
+                    0,
+                )
+                .unwrap();
             }
             let scale = backend.probability_scale();
             let weights = backend.state_vector().iter().map(|a| a.norm_sqr() * scale);

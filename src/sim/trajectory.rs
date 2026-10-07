@@ -126,6 +126,29 @@ fn apply_phase_damping(
     apply_diagonal_kraus_2op(backend, qubit, gamma, false, rng)
 }
 
+pub(crate) fn prepare_thermal_rates(noise: &NoiseModel) -> Vec<(f64, f64)> {
+    noise
+        .after_gate
+        .iter()
+        .flatten()
+        .filter_map(|event| {
+            let NoiseChannel::ThermalRelaxation {
+                t1, t2, gate_time, ..
+            } = &event.channel
+            else {
+                return None;
+            };
+            if *t1 <= 0.0 || *t2 <= 0.0 || *gate_time <= 0.0 {
+                None
+            } else {
+                Some(crate::sim::noise::thermal_relaxation_rates(
+                    *t1, *t2, *gate_time,
+                ))
+            }
+        })
+        .collect()
+}
+
 /// Unravel thermal relaxation as the amplitude-damping and phase-damping
 /// composition [`crate::sim::noise::kraus_1q`] lowers it to, so the trajectory
 /// average reproduces `exp(-t/t1)` populations and `exp(-t/t2)` coherences. A
@@ -142,16 +165,11 @@ fn apply_phase_damping(
 fn apply_thermal_relaxation(
     backend: &mut dyn Backend,
     qubit: usize,
-    t1: f64,
-    t2: f64,
-    gate_time: f64,
+    gad: f64,
+    gpd: f64,
     excited: f64,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    if t1 <= 0.0 || t2 <= 0.0 || gate_time <= 0.0 {
-        return Ok(());
-    }
-    let (gad, gpd) = crate::sim::noise::thermal_relaxation_rates(t1, t2, gate_time);
     let p1 = backend.qubit_probability(qubit)?;
     let p0 = 1.0 - p1;
     let cold = 1.0 - excited;
@@ -408,6 +426,7 @@ fn kraus_probability_2q(k: &[[Complex64; 4]; 4], rho: &[[Complex64; 4]; 4]) -> f
 fn apply_noise_event(
     backend: &mut dyn Backend,
     event: &NoiseEvent,
+    thermal_rates: &mut std::slice::Iter<'_, (f64, f64)>,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     match &event.channel {
@@ -429,15 +448,15 @@ fn apply_noise_event(
             t2,
             gate_time,
             excited_population,
-        } => apply_thermal_relaxation(
-            backend,
-            event.qubits[0],
-            *t1,
-            *t2,
-            *gate_time,
-            *excited_population,
-            rng,
-        ),
+        } => {
+            if *t1 <= 0.0 || *t2 <= 0.0 || *gate_time <= 0.0 {
+                return Ok(());
+            }
+            let &(gad, gpd) = thermal_rates
+                .next()
+                .expect("thermal event has prepared rates");
+            apply_thermal_relaxation(backend, event.qubits[0], gad, gpd, *excited_population, rng)
+        }
         NoiseChannel::TwoQubitDepolarizing { p } => {
             apply_two_qubit_depolarizing(backend, event.qubits[0], event.qubits[1], *p, rng)
         }
@@ -488,21 +507,23 @@ pub(crate) fn apply_readout_errors(
     }
 }
 
-/// `readout` is the output of [`written_readout`] for `circuit` and `noise`,
-/// computed once by the caller rather than per shot.
+/// `readout` and `thermal_rates` come from [`written_readout`] and
+/// [`prepare_thermal_rates`] for this `circuit` and `noise`.
 pub(crate) fn run_trajectory_shot(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &NoiseModel,
     readout: &[Option<ReadoutError>],
+    thermal_rates: &[(f64, f64)],
     rng: &mut ChaCha8Rng,
 ) -> Result<Vec<bool>> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+    let mut thermal_rates = thermal_rates.iter();
 
     for (idx, instr) in circuit.instructions.iter().enumerate() {
         backend.apply(instr)?;
         for event in &noise.after_gate[idx] {
-            apply_noise_event(backend, event, rng)?;
+            apply_noise_event(backend, event, &mut thermal_rates, rng)?;
         }
     }
 
@@ -528,6 +549,7 @@ pub(crate) fn run_trajectories(
     force_serial: bool,
     route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
+    let thermal_rates = prepare_thermal_rates(noise);
     #[cfg(not(feature = "parallel"))]
     let _ = force_serial;
     #[cfg(feature = "parallel")]
@@ -536,7 +558,15 @@ pub(crate) fn run_trajectories(
             && num_shots >= 4
             && crate::sim::state_splits_across_workers(route, circuit.num_qubits)
         {
-            return run_trajectories_par(&backend_factory, circuit, noise, num_shots, seed, route);
+            return run_trajectories_par(
+                &backend_factory,
+                circuit,
+                noise,
+                &thermal_rates,
+                num_shots,
+                seed,
+                route,
+            );
         }
     }
 
@@ -547,7 +577,14 @@ pub(crate) fn run_trajectories(
         let shot_seed = crate::sim::mix_seed(seed, i);
         let mut rng = noise_rng(shot_seed);
         let mut backend = backend_factory(shot_seed);
-        let result = run_trajectory_shot(backend.as_mut(), circuit, noise, &readout, &mut rng)?;
+        let result = run_trajectory_shot(
+            backend.as_mut(),
+            circuit,
+            noise,
+            &readout,
+            &thermal_rates,
+            &mut rng,
+        )?;
         let shot_metadata = crate::sim::backend_metadata(backend.as_ref());
         if i == 0 {
             metadata = shot_metadata;
@@ -565,6 +602,7 @@ fn run_trajectories_par(
     backend_factory: &(impl Fn(u64) -> Box<dyn Backend> + Sync),
     circuit: &Circuit,
     noise: &NoiseModel,
+    thermal_rates: &[(f64, f64)],
     num_shots: usize,
     seed: u64,
     route: crate::sim::ResolvedBackend,
@@ -576,7 +614,14 @@ fn run_trajectories_par(
             let shot_seed = crate::sim::mix_seed(seed, i);
             let mut rng = noise_rng(shot_seed);
             let mut backend = backend_factory(shot_seed);
-            let bits = run_trajectory_shot(backend.as_mut(), circuit, noise, &readout, &mut rng)?;
+            let bits = run_trajectory_shot(
+                backend.as_mut(),
+                circuit,
+                noise,
+                &readout,
+                thermal_rates,
+                &mut rng,
+            )?;
             Ok((bits, crate::sim::backend_metadata(backend.as_ref())))
         })
         .collect();
@@ -1071,6 +1116,133 @@ fn collect_groups(
 mod tests {
     use super::*;
     use crate::circuits;
+
+    #[test]
+    fn thermal_trajectories_keep_the_seeded_records() {
+        let mut circuit = Circuit::new(2, 2);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Ry(0.73), &[1]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::Rx(0.41), &[0]);
+        circuit.measure_all();
+        let factory = |seed| -> Box<dyn Backend> { Box::new(StatevectorBackend::new(seed)) };
+        let mut records = Vec::new();
+        for excited in [0.0, 0.3] {
+            let thermal = |qubit, gate_time| NoiseEvent {
+                channel: NoiseChannel::ThermalRelaxation {
+                    t1: 40.0,
+                    t2: 55.0,
+                    gate_time,
+                    excited_population: excited,
+                },
+                qubits: smallvec![qubit],
+            };
+            let mut noise = NoiseModel {
+                after_gate: vec![Vec::new(); circuit.instructions.len()],
+                readout: vec![
+                    Some(ReadoutError {
+                        p01: 0.04,
+                        p10: 0.07,
+                    }),
+                    None,
+                ],
+            };
+            noise.after_gate[0].push(thermal(0, 10.0));
+            noise.after_gate[1] = vec![
+                NoiseEvent {
+                    channel: NoiseChannel::Depolarizing { p: 0.17 },
+                    qubits: smallvec![1],
+                },
+                thermal(1, f64::MIN_POSITIVE),
+            ];
+            noise.after_gate[2] = vec![
+                thermal(0, 0.0),
+                NoiseEvent {
+                    channel: NoiseChannel::AmplitudeDamping { gamma: 0.11 },
+                    qubits: smallvec![1],
+                },
+                thermal(1, 4.0),
+            ];
+            let run = |force_serial| {
+                run_trajectories(
+                    factory,
+                    &circuit,
+                    &noise,
+                    128,
+                    42,
+                    force_serial,
+                    crate::sim::ResolvedBackend::Statevector,
+                )
+                .unwrap()
+            };
+            let serial = run(true);
+            assert_eq!(run(false).shots, serial.shots);
+            let mut words = [0u64; 4];
+            for (i, &bit) in serial.shots.iter().flatten().enumerate() {
+                words[i / 64] |= u64::from(bit) << (i % 64);
+            }
+            records.push(words);
+        }
+        assert_eq!(
+            records,
+            [
+                [
+                    9224519968870264836,
+                    13848632576476766240,
+                    3801337310814801361,
+                    13890320543975999040,
+                ],
+                [
+                    9224520175028698884,
+                    14064805371743890976,
+                    17637534460143341009,
+                    13891164969043494464,
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn thermal_identity_channels_keep_the_draw_count() {
+        for (t1, t2, gate_time, draws) in [
+            (0.0, 1.0, 1.0, 0),
+            (1.0, 0.0, 1.0, 0),
+            (1.0, 1.0, 0.0, 0),
+            (1.0, 1.0, f64::MIN_POSITIVE, 1),
+        ] {
+            let mut backend = StatevectorBackend::new(42);
+            backend.init(1, 0).unwrap();
+            let mut rng = noise_rng(42);
+            let noise = NoiseModel {
+                after_gate: vec![vec![NoiseEvent {
+                    channel: NoiseChannel::ThermalRelaxation {
+                        t1,
+                        t2,
+                        gate_time,
+                        excited_population: 0.0,
+                    },
+                    qubits: smallvec![0],
+                }]],
+                readout: Vec::new(),
+            };
+            let rates = prepare_thermal_rates(&noise);
+            apply_noise_event(
+                &mut backend,
+                &noise.after_gate[0][0],
+                &mut rates.iter(),
+                &mut rng,
+            )
+            .unwrap();
+            let mut expected = noise_rng(42);
+            for _ in 0..draws {
+                let _: f64 = rand::RngExt::random(&mut expected);
+            }
+            assert_eq!(
+                rand::RngExt::random::<u64>(&mut rng),
+                rand::RngExt::random::<u64>(&mut expected)
+            );
+        }
+    }
 
     // The replica cap is only a memory bound if it stays at or below the cap
     // governing a single state. Splitting statevector trajectories past the

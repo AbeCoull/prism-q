@@ -367,9 +367,15 @@ impl Circuit {
     /// transitively, or if a condition on one's measurement guards the other.
     /// Each group is sorted, and groups are ordered by their lowest qubit.
     pub fn independent_subsystems(&self) -> Vec<Vec<usize>> {
+        self.subsystems_and_clifford().0
+    }
+
+    /// [`Circuit::independent_subsystems`] and [`Circuit::is_clifford_only`] from
+    /// one pass over the stream.
+    pub(crate) fn subsystems_and_clifford(&self) -> (Vec<Vec<usize>>, bool) {
         let n = self.num_qubits;
         if n == 0 {
-            return Vec::new();
+            return (Vec::new(), self.is_clifford_only());
         }
         let mut parent: Vec<usize> = (0..n).collect();
         let mut rank = vec![0u8; n];
@@ -398,23 +404,31 @@ impl Circuit {
             }
         }
 
-        let mut cbit_to_qubit: Vec<Option<usize>> = vec![None; self.num_classical_bits.max(1)];
-        for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
-            cbit_to_qubit[classical_bit] = Some(qubit);
-        });
-
+        // A condition joins its targets to the last qubit measured into each bit
+        // it reads, anywhere in the circuit. Those unions wait for the loop to
+        // end, so a circuit without conditions never walks its measurements.
+        let mut clifford_only = true;
         let mut condition_bits: Vec<usize> = Vec::new();
+        let mut guarded: Vec<(usize, usize)> = Vec::new();
         for inst in &self.instructions {
             condition_bits.clear();
             let targets = match inst {
-                Instruction::Gate { targets, .. } => targets.as_slice(),
+                Instruction::Gate { gate, targets } => {
+                    clifford_only &= gate.is_clifford();
+                    targets.as_slice()
+                }
                 Instruction::Conditional {
-                    condition, targets, ..
+                    condition,
+                    gate,
+                    targets,
                 } => {
+                    clifford_only &= gate.is_clifford();
                     collect_condition_bits(condition, &mut condition_bits);
                     targets.as_slice()
                 }
                 Instruction::Region(region) => {
+                    clifford_only =
+                        clifford_only && !any_gate(region.body(), &mut |gate| !gate.is_clifford());
                     collect_condition_bits(region.condition(), &mut condition_bits);
                     collect_body_condition_bits(region.body(), &mut condition_bits);
                     region.qubits()
@@ -424,13 +438,21 @@ impl Circuit {
             let Some(&first) = targets.first() else {
                 continue;
             };
-            for &bit in &condition_bits {
+            guarded.extend(condition_bits.iter().map(|&bit| (first, bit)));
+            for &t in &targets[1..] {
+                union(&mut parent, &mut rank, first, t);
+            }
+        }
+
+        if !guarded.is_empty() {
+            let mut cbit_to_qubit: Vec<Option<usize>> = vec![None; self.num_classical_bits.max(1)];
+            for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
+                cbit_to_qubit[classical_bit] = Some(qubit);
+            });
+            for (first, bit) in guarded {
                 if let Some(mq) = cbit_to_qubit.get(bit).copied().flatten() {
                     union(&mut parent, &mut rank, first, mq);
                 }
-            }
-            for &t in &targets[1..] {
-                union(&mut parent, &mut rank, first, t);
             }
         }
 
@@ -442,7 +464,7 @@ impl Circuit {
         }
         let mut result: Vec<Vec<usize>> = components.into_values().collect();
         result.sort_by_key(|group| group[0]);
-        result
+        (result, clifford_only)
     }
 
     /// Split the circuit into one sub-circuit per component in two passes over the
@@ -1741,6 +1763,63 @@ mod tests {
         c.add_measure(2, 1);
         let subs = c.independent_subsystems();
         assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn test_subsystems_join_a_condition_to_the_last_writer_of_its_bit() {
+        let mut c = Circuit::new(5, 1);
+        c.instructions.push(Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(0),
+            gate: Gate::X,
+            targets: SmallVec::from_slice(&[4]),
+        });
+        c.add_measure(0, 0);
+        c.add_measure(2, 0);
+        assert_eq!(
+            c.independent_subsystems(),
+            vec![vec![0], vec![1], vec![2, 4], vec![3]]
+        );
+    }
+
+    #[test]
+    fn test_subsystems_and_clifford_reads_every_gate_form() {
+        let region = |gate: Gate| {
+            Instruction::Region(Box::new(GuardedRegion::new(
+                ClassicalCondition::BitIsOne(0),
+                vec![Instruction::Gate {
+                    gate,
+                    targets: SmallVec::from_slice(&[2]),
+                }],
+            )))
+        };
+        let conditional = |gate: Gate| Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(0),
+            gate,
+            targets: SmallVec::from_slice(&[3]),
+        };
+
+        for (tail, clifford) in [
+            (vec![], true),
+            (vec![conditional(Gate::S), region(Gate::H)], true),
+            (vec![conditional(Gate::T)], false),
+            (vec![region(Gate::T)], false),
+            (
+                vec![Instruction::Gate {
+                    gate: Gate::Rz(0.3),
+                    targets: SmallVec::from_slice(&[1]),
+                }],
+                false,
+            ),
+        ] {
+            let mut c = Circuit::new(4, 1);
+            c.add_gate(Gate::H, &[0]);
+            c.add_gate(Gate::Cx, &[0, 1]);
+            c.add_measure(0, 0);
+            c.instructions.extend(tail);
+            assert_eq!(c.is_clifford_only(), clifford);
+            assert_eq!(c.subsystems_and_clifford().1, clifford);
+        }
+        assert!(Circuit::new(0, 0).subsystems_and_clifford().1);
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! Timing constructs, `box`, and subroutines with classical arguments and returns.
+//! Timing constructs, `box`, subroutines with classical arguments and returns, and
+//! classical arrays.
 
 use prism_q::PrismError;
 use prism_q::circuit::{Circuit, openqasm};
@@ -365,5 +366,108 @@ fn the_guide_subroutine_example_inlines_to_its_expansion() {
     assert_eq!(
         format!("{:?}", openqasm::parse(guide).unwrap().instructions),
         format!("{:?}", openqasm::parse(expanded).unwrap().instructions)
+    );
+}
+
+#[test]
+fn an_array_element_reads_anywhere_a_value_does() {
+    assert_same_stream(
+        "array[int[32], 3] a = {1, 2, 3};\nh q[a[1]];\nrx(a[2] * pi / 4) q[0];\n\
+         for int k in [0:2] { x q[a[k]]; }\ndelay[a[0] * 1ns] q[0];",
+        "h q[2];\nrx(3 * pi / 4) q[0];\nx q[1];\nx q[2];\nx q[3];",
+    );
+    assert_same_stream(
+        "const array[float[64], 2, 2] m = {{0.1, 0.2}, {0.3, 0.4}};\n\
+         rx(m[1, 0]) q[0];\nry(m[0][1]) q[1];\nrz(m[1][1] * 2) q[2];",
+        "rx(0.3) q[0];\nry(0.2) q[1];\nrz(0.4 * 2) q[2];",
+    );
+    assert_same_stream(
+        "def r(float t, qubit a) { rx(t) a; }\narray[float, 2] th = {0.5, 0.7};\n\
+         r(th[1], q[0]);\nrx(th[0]) q[1];\nrx(th[0] + 1) q[2];",
+        "rx(0.7) q[0];\nrx(0.5) q[1];\nrx(1.5) q[2];",
+    );
+}
+
+// Filling an array in a loop is the common write, so an element write outlives
+// the pass that made it while a declaration does not.
+#[test]
+fn an_array_element_takes_assignments() {
+    assert_same_stream(
+        "array[int, 4] idx;\nfor int k in [0:3] { idx[k] = 3 - k; }\nidx[0] += 0;\n\
+         h q[idx[0]];\nh q[idx[3]];\n\
+         array[bool, 2, 2] f = {{true, false}, {false, true}};\nf[0, 1] = 1;\n\
+         if (c == f[0, 1]) x q[f[1][1]];",
+        "h q[3];\nh q[0];\nif (c == 1) x q[1];",
+    );
+    assert_same_stream(
+        "box { array[int, 1] t = {2}; h q[t[0]]; }\narray[int, 1] t = {1};\nh q[t[0]];\n\
+         for int k in [0:1] { array[int, 1] u = {k}; x q[u[0]]; }",
+        "h q[2];\nh q[1];\nx q[0];\nx q[1];",
+    );
+}
+
+#[test]
+fn a_def_reads_only_constant_arrays() {
+    assert_same_stream(
+        "const array[int, 2] k = {1, 2};\ndef g(qubit a) { rx(k[1]) a; }\ng(q[0]);",
+        "rx(2) q[0];",
+    );
+    match parse_err("array[int, 2] k = {1, 2};\ndef g(qubit a) { rx(2 * k[1]) a; }\ng(q[0]);") {
+        PrismError::Parse { message, .. } => {
+            assert!(message.contains("not a declared array"), "{message}")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_array_that_cannot_stand_is_rejected() {
+    let deep = format!("array[int, 1] a = {}1{};", "{".repeat(40), "}".repeat(40));
+    let malformed = [
+        ("array[int, 2] a = {1, 2, 3};", "lists 3 entries"),
+        ("array[int, 2, 2] a = {1, 2};", "does not match"),
+        ("array[int, 2] a;\nh q[a[2]];", "outside `a`"),
+        ("array[int, 2] a;\nh q[a[0, 1]];", "indexed with 2"),
+        ("const array[int, 2] a = {1, 2};\na[0] = 3;", "`const`"),
+        ("const array[int, 2] a;", "needs a value"),
+        ("array[int, 0] a;", "must be > 0"),
+        ("array[int, 2048, 2048] a;", "more than"),
+        ("array[int, 2] a;\nint a = 1;", "already an array"),
+        (
+            "int a = 1;\narray[int, 2] a;",
+            "already a classical variable",
+        ),
+        ("rx(b[0] + 1) q[0];", "not a declared array"),
+        ("c[0] = 1;", "not a name an assignment can write"),
+        ("array[int, 2] a;\na[0] /= 0;", "division by zero"),
+        (deep.as_str(), "nests deeper"),
+    ];
+    for (body, needle) in malformed {
+        match parse_err(body) {
+            PrismError::Parse { message, .. } => {
+                assert!(message.contains(needle), "`{body}`: {message}");
+            }
+            other => panic!("`{body}` should be a parse error, got {other:?}"),
+        }
+    }
+    for (body, needle) in [
+        ("array[bit, 2] a;", "`bit[n]` register"),
+        ("array[duration, 2] a;", "`array[duration, ...]`"),
+    ] {
+        match parse_err(body) {
+            PrismError::UnsupportedConstruct { construct, .. } => {
+                assert!(construct.contains(needle), "`{body}`: {construct}");
+            }
+            other => panic!("`{body}` should decline by name, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_guide_array_example_folds_to_its_gate() {
+    assert_same_stream(
+        "array[float[64], 2, 2] angles = {{0.1, 0.2}, {0.3, 0.4}};\narray[int, 4] order;\n\
+         for int k in [0:3] { order[k] = 3 - k; }\nrx(angles[1, 0]) q[order[0]];",
+        "rx(0.3) q[3];",
     );
 }

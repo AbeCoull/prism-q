@@ -103,6 +103,11 @@ pub(crate) enum StmtKind<'a> {
     },
     /// `return;`, `return measure q;` or `return r;`.
     Return(Option<ReturnValue<'a>>),
+    /// `array[int[32], 2, 3] a = {{1, 2, 3}, {4, 5, 6}};`. Boxed for the same
+    /// reason as `CallAssign`.
+    ArrayDecl(Box<ArrayDecl<'a>>),
+    /// `a[1] = 5;` and `a[0, 2] += 1;`.
+    ElementAssign(Box<ElementAssign<'a>>),
     /// `c[0] = f(q[0]);`, a call whose result is assigned. Boxed because the
     /// target and the arguments would otherwise set the width of every
     /// statement in the tree.
@@ -114,6 +119,31 @@ pub(crate) enum StmtKind<'a> {
     },
     /// A `#pragma` line, text included.
     Pragma(&'a str),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ArrayDecl<'a> {
+    pub constant: bool,
+    pub ty: &'a str,
+    pub dims: Vec<Expr<'a>>,
+    pub name: &'a str,
+    pub init: Option<ArrayInit<'a>>,
+}
+
+/// An array initializer: a value, or a braced list with one entry per index of
+/// the dimension it stands at.
+#[derive(Clone, Debug)]
+pub(crate) enum ArrayInit<'a> {
+    Value(Expr<'a>),
+    List(Vec<ArrayInit<'a>>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ElementAssign<'a> {
+    pub array: &'a str,
+    pub indices: Vec<Expr<'a>>,
+    pub op: Option<AssignOp>,
+    pub value: Expr<'a>,
 }
 
 #[derive(Clone, Debug)]

@@ -4,9 +4,9 @@
 //! find where a statement, a block or an argument ended.
 
 use super::ast::{
-    Argument, AssignOp, BitResult, Block, CallAssign, CmpOp, Condition, Conditional, DefParam,
-    ForRange, Index, Measure, Modifier, Operand, OperandName, Range, RegisterKind, ReturnValue,
-    Stmt, StmtKind, SwitchArm,
+    Argument, ArrayDecl, ArrayInit, AssignOp, BitResult, Block, CallAssign, CmpOp, Condition,
+    Conditional, DefParam, ElementAssign, ForRange, Index, Measure, Modifier, Operand, OperandName,
+    Range, RegisterKind, ReturnValue, Stmt, StmtKind, SwitchArm,
 };
 use super::expr::{self, Expr};
 use super::lexer::{Kind, Token};
@@ -22,7 +22,7 @@ const DECLARATION_TYPES: &[&str] = &[
 
 /// Keywords the language has and this parser declines, with the text each decline
 /// carries. Declining by name returns `UnsupportedConstruct` where the operands
-/// would otherwise give a bare syntax error (`array[int, 2] a` reads as a
+/// would otherwise give a bare syntax error (`while (c[0]) { }` reads as a
 /// malformed gate call).
 const UNSUPPORTED: &[(&str, &str)] = &[
     ("defcal", "defcal"),
@@ -32,8 +32,11 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("break", "break"),
     ("continue", "continue"),
     ("else", "else"),
-    ("array", "`array` declarations"),
 ];
+
+/// Deepest nesting an array initializer may have, which bounds the recursion
+/// that reads it.
+const MAX_INITIALIZER_DEPTH: usize = 32;
 
 pub(crate) fn parse_program<'a>(tokens: &[Token<'a>]) -> Result<Block<'a>> {
     let mut stream = Stream::new(tokens);
@@ -90,6 +93,7 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         "def" => def_def(stream),
         "return" => return_statement(stream),
         "box" => boxed(stream),
+        "array" => array_declaration(stream, false),
         "const" => declaration(stream),
         other if DECLARATION_TYPES.contains(&other) => declaration(stream),
         _ => call_or_assignment(stream),
@@ -169,6 +173,9 @@ fn typename<'a>(stream: &mut Stream<'_, 'a>) -> Result<(&'a str, Option<Expr<'a>
 
 fn declaration<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     let constant = stream.eat_keyword("const");
+    if stream.is_keyword("array") {
+        return array_declaration(stream, constant);
+    }
     let (ty, _width) = typename(stream)?;
     let name = stream.expect_ident()?;
     let value = if stream.eat(Kind::Assign) {
@@ -183,6 +190,54 @@ fn declaration<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         name,
         value,
     })
+}
+
+/// `array[int[32], 2, 3] a = {{1, 2, 3}, {4, 5, 6}};`, the element type first and
+/// one size per dimension after it.
+fn array_declaration<'a>(stream: &mut Stream<'_, 'a>, constant: bool) -> Result<StmtKind<'a>> {
+    stream.advance();
+    stream.expect(Kind::LBracket)?;
+    let (ty, _width) = typename(stream)?;
+    let mut dims = Vec::new();
+    while stream.eat(Kind::Comma) {
+        dims.push(expr::parse(stream)?);
+    }
+    if dims.is_empty() {
+        return Err(stream.expected("`,` and a size after the element type"));
+    }
+    stream.expect(Kind::RBracket)?;
+    let name = stream.expect_ident()?;
+    let init = if stream.eat(Kind::Assign) {
+        Some(array_init(stream, 0)?)
+    } else {
+        None
+    };
+    stream.expect(Kind::Semicolon)?;
+    Ok(StmtKind::ArrayDecl(Box::new(ArrayDecl {
+        constant,
+        ty,
+        dims,
+        name,
+        init,
+    })))
+}
+
+fn array_init<'a>(stream: &mut Stream<'_, 'a>, depth: usize) -> Result<ArrayInit<'a>> {
+    if !stream.eat(Kind::LBrace) {
+        return Ok(ArrayInit::Value(expr::parse(stream)?));
+    }
+    if depth >= MAX_INITIALIZER_DEPTH {
+        return Err(PrismError::Parse {
+            line: stream.line(),
+            message: format!("array initializer nests deeper than {MAX_INITIALIZER_DEPTH}"),
+        });
+    }
+    let mut entries = vec![array_init(stream, depth + 1)?];
+    while stream.eat(Kind::Comma) {
+        entries.push(array_init(stream, depth + 1)?);
+    }
+    stream.expect(Kind::RBrace)?;
+    Ok(ArrayInit::List(entries))
 }
 
 /// `let a = q[0:1] ++ q[3];`
@@ -682,19 +737,11 @@ fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>
     let mark = stream.mark();
     let Ok(target) = operand(stream) else {
         stream.rewind(mark);
-        return Ok(None);
+        return element_assignment(stream);
     };
-    let op = match stream.kind() {
-        Kind::Assign => None,
-        Kind::AddAssign => Some(AssignOp::Add),
-        Kind::SubAssign => Some(AssignOp::Sub),
-        Kind::MulAssign => Some(AssignOp::Mul),
-        Kind::DivAssign => Some(AssignOp::Div),
-        Kind::ModAssign => Some(AssignOp::Rem),
-        _ => {
-            stream.rewind(mark);
-            return Ok(None);
-        }
+    let Some(op) = assign_op(stream.kind()) else {
+        stream.rewind(mark);
+        return element_assignment(stream);
     };
     stream.advance();
 
@@ -727,6 +774,14 @@ fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>
 
     let value = expr::parse(stream)?;
     stream.expect(Kind::Semicolon)?;
+    if let (Some(array), Some(Index::Single(index))) = (target.register(), &target.index) {
+        return Ok(Some(StmtKind::ElementAssign(Box::new(ElementAssign {
+            array,
+            indices: vec![index.clone()],
+            op,
+            value,
+        }))));
+    }
     let Some(name) = target.register().filter(|_| target.index.is_none()) else {
         return Err(PrismError::Parse {
             line: target.line,
@@ -741,6 +796,43 @@ fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>
         op,
         value,
     }))
+}
+
+/// The assignment an operator token spells: `None` when it is no assignment,
+/// `Some(None)` for a plain `=`.
+fn assign_op(kind: Kind) -> Option<Option<AssignOp>> {
+    match kind {
+        Kind::Assign => Some(None),
+        Kind::AddAssign => Some(Some(AssignOp::Add)),
+        Kind::SubAssign => Some(Some(AssignOp::Sub)),
+        Kind::MulAssign => Some(Some(AssignOp::Mul)),
+        Kind::DivAssign => Some(Some(AssignOp::Div)),
+        Kind::ModAssign => Some(Some(AssignOp::Rem)),
+        _ => None,
+    }
+}
+
+/// `a[0, 2] = 1;` and `a[0][2] += 1;`, the element forms no operand spells.
+fn element_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>>> {
+    if stream.kind() != Kind::Ident || stream.peek_at(1).kind != Kind::LBracket {
+        return Ok(None);
+    }
+    let mark = stream.mark();
+    let array = stream.advance().text;
+    let indices = expr::index_groups(stream);
+    let (Ok(indices), Some(op)) = (indices, assign_op(stream.kind())) else {
+        stream.rewind(mark);
+        return Ok(None);
+    };
+    stream.advance();
+    let value = expr::parse(stream)?;
+    stream.expect(Kind::Semicolon)?;
+    Ok(Some(StmtKind::ElementAssign(Box::new(ElementAssign {
+        array,
+        indices,
+        op,
+        value,
+    }))))
 }
 
 /// `inv @`, `pow(k) @`, `ctrl @` and `negctrl @`, in any order and chainable.
@@ -795,14 +887,21 @@ fn modifier_chain<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Modifier<'a>>> 
     }
 }
 
-/// One entry inside a call's parentheses. A subscript settles it as a qubit;
-/// anything else parses as a value, and a bare name is read as whichever the
-/// declaration asks for.
+/// One entry inside a call's parentheses. A subscripted name standing alone is
+/// a qubit or bit reference, or an array element, which only the declaration
+/// tells apart; anything else parses as a value, and a bare name is read as
+/// whichever the declaration asks for.
 fn argument<'a>(stream: &mut Stream<'_, 'a>) -> Result<Argument<'a>> {
     if stream.kind() == Kind::Physical
         || (stream.kind() == Kind::Ident && stream.peek_at(1).kind == Kind::LBracket)
     {
-        return Ok(Argument::Operand(operand(stream)?));
+        let mark = stream.mark();
+        if let Ok(operand) = operand(stream) {
+            if matches!(stream.kind(), Kind::Comma | Kind::RParen) {
+                return Ok(Argument::Operand(operand));
+            }
+        }
+        stream.rewind(mark);
     }
     Ok(Argument::Value(expr::parse(stream)?))
 }

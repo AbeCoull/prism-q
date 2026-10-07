@@ -23,6 +23,7 @@
 //! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
 //! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand |
 //! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name |
+//! | Classical array | `array[int, 2, 2] a = {{1, 2}, {3, 4}};` `a[0, 1] = 5;` `h q[a[1][0]];` | `int`, `uint`, `float`, `angle` or `bool` elements, any number of dimensions, folded at parse time like a scalar; a `def` reads only `const` arrays |
 //! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number |
 //! | Delay | `delay[d] q[0];` `delay[s];` | The identity on its qubits, all of them when none is named; emits nothing |
 //! | Box | `box { ... }` `box[100ns] { ... }` | The body runs in place with no barrier at its edges; names it declares go out of scope with it |
@@ -81,8 +82,7 @@
 //!   `switch` whose arm measures into the switched register: both lowerings
 //!   re-read the bits after an earlier body ran
 //! - `switch` with a `default` and more case labels than the region depth bound
-//! - `array` declarations, by name rather than as a syntax error on their
-//!   operands
+//! - an `array` of `bit`, `duration` or any other non-numeric element type
 //! - `durationof`, a ratio over a `stretch`, and a ratio mixing `dt` with SI
 //!   units: nothing here sizes a stretch or knows a backend's sample period
 //! - `input` of any type but `float` and `angle`, and `output` of any type but
@@ -313,6 +313,20 @@ struct ClassicalDecl {
     constant: bool,
 }
 
+/// A classical array, its elements folded at parse time like any classical
+/// value and stored row-major.
+#[derive(Clone)]
+struct ClassicalArray {
+    ty: ClassicalType,
+    constant: bool,
+    dims: Vec<usize>,
+    values: Vec<f64>,
+}
+
+/// Most elements an array may hold, which bounds the allocation a declared
+/// size makes.
+const MAX_ARRAY_ELEMENTS: usize = 1 << 20;
+
 /// The error an out-of-range subscript raises, on the side of the register
 /// wall the reference sits on.
 fn invalid_index(kind: ast::RegisterKind, index: usize, register_size: usize) -> PrismError {
@@ -370,6 +384,7 @@ pub(crate) struct Parser<'a> {
     /// `duration` and `stretch` values, which no numeric expression reads
     /// directly.
     durations: HashMap<&'a str, Timed>,
+    arrays: HashMap<&'a str, ClassicalArray>,
     /// The `def` body being expanded; `None` outside one.
     def_result: Option<DefResult<'a>>,
 }
@@ -468,6 +483,7 @@ impl<'a> Parser<'a> {
             aliases: HashMap::new(),
             classical: HashMap::new(),
             durations: HashMap::new(),
+            arrays: HashMap::new(),
             def_result: None,
         }
     }
@@ -505,6 +521,8 @@ impl<'a> Parser<'a> {
     fn reject_redeclaration(&self, name: &str, line_num: usize) -> Result<()> {
         let clash = if self.classical.contains_key(name) {
             "a classical variable"
+        } else if self.arrays.contains_key(name) {
+            "an array"
         } else if self.aliases.contains_key(name) {
             "an alias"
         } else if self.qregs.contains_key(name) || self.cregs.contains_key(name) {

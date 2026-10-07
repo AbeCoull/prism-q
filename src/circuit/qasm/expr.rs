@@ -87,12 +87,20 @@ pub(crate) enum Expr<'a> {
     },
     /// Boxed so the one wide variant does not set the width of every node.
     Call(Box<Call<'a>>),
+    /// An array element, `a[i, j]` or `a[i][j]`.
+    Element(Box<Element<'a>>),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Call<'a> {
     pub name: &'a str,
     pub args: Vec<Expr<'a>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Element<'a> {
+    pub array: &'a str,
+    pub indices: Vec<Expr<'a>>,
 }
 
 impl<'a> Expr<'a> {
@@ -105,6 +113,18 @@ impl<'a> Expr<'a> {
             Expr::Negate(inner) => inner.mentions(name),
             Expr::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
             Expr::Call(call) => call.args.iter().any(|arg| arg.mentions(name)),
+            Expr::Element(element) => element.indices.iter().any(|index| index.mentions(name)),
+        }
+    }
+
+    /// True when the expression reads an array element.
+    pub(crate) fn reads_element(&self) -> bool {
+        match self {
+            Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) => false,
+            Expr::Negate(inner) => inner.reads_element(),
+            Expr::Binary { left, right, .. } => left.reads_element() || right.reads_element(),
+            Expr::Call(call) => call.args.iter().any(Expr::reads_element),
+            Expr::Element(_) => true,
         }
     }
 
@@ -151,6 +171,16 @@ impl fmt::Display for Expr<'_> {
                     write!(f, "{arg}")?;
                 }
                 f.write_str(")")
+            }
+            Expr::Element(element) => {
+                write!(f, "{}[", element.array)?;
+                for (at, index) in element.indices.iter().enumerate() {
+                    if at > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{index}")?;
+                }
+                f.write_str("]")
             }
         }
     }
@@ -240,6 +270,12 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
         }
         Kind::Ident => {
             let name = stream.advance().text;
+            if stream.kind() == Kind::LBracket {
+                return Ok(Expr::Element(Box::new(Element {
+                    array: name,
+                    indices: index_groups(stream)?,
+                })));
+            }
             if !stream.eat(Kind::LParen) {
                 return Ok(Expr::Ident(name));
             }
@@ -267,6 +303,19 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
         }),
         _ => Err(stream.expected("a value")),
     }
+}
+
+/// `[i, j]` or `[i][j]`, read as one flat index list.
+pub(crate) fn index_groups<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Expr<'a>>> {
+    let mut indices = Vec::new();
+    while stream.eat(Kind::LBracket) {
+        indices.push(parse_sum(stream)?);
+        while stream.eat(Kind::Comma) {
+            indices.push(parse_sum(stream)?);
+        }
+        stream.expect(Kind::RBracket)?;
+    }
+    Ok(indices)
 }
 
 fn binary<'a>(op: BinaryOp, left: Expr<'a>, right: Expr<'a>) -> Expr<'a> {
@@ -362,6 +411,10 @@ fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Resu
             message: format!("`{expr}` is a duration where a number belongs"),
         }),
         Expr::Ident(name) => resolve(name, line, vars),
+        Expr::Element(element) => Err(PrismError::Parse {
+            line,
+            message: format!("`{}` is not a declared array", element.array),
+        }),
         Expr::Negate(inner) => Ok(-evaluate(inner, line, vars)?),
         Expr::Binary { op, left, right } => {
             let left = evaluate(left, line, vars)?;
@@ -399,6 +452,7 @@ pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
         Expr::Negate(inner) => is_timed(inner, times),
         Expr::Binary { left, right, .. } => is_timed(left, times) || is_timed(right, times),
         Expr::Call(call) => call.args.iter().any(|arg| is_timed(arg, times)),
+        Expr::Element(element) => element.indices.iter().any(|index| is_timed(index, times)),
     }
 }
 
@@ -435,6 +489,10 @@ pub(crate) fn eval_timed(
         Expr::Call(call) => Err(PrismError::Parse {
             line,
             message: format!("`{}` takes numbers, not durations", call.name),
+        }),
+        Expr::Element(element) => Err(PrismError::Parse {
+            line,
+            message: format!("`{expr}` indexes `{}` with a duration", element.array),
         }),
         Expr::Number(value) => Ok(Timed::Number(*value)),
     }

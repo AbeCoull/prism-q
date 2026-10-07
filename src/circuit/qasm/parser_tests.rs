@@ -295,13 +295,22 @@ fn unimplemented_keywords_are_rejected_by_name() {
 }
 
 #[test]
-fn an_array_declaration_declines_by_name() {
-    match error("array[int[32], 2] a;") {
-        PrismError::UnsupportedConstruct { construct, .. } => {
-            assert!(construct.contains("array"), "{construct}");
+fn an_array_keeps_its_shape_and_initializer() {
+    match one("const array[int[32], 2, 3] a = {{1, 2, 3}, {4, 5, 6}};") {
+        StmtKind::ArrayDecl(decl) => {
+            assert!(decl.constant);
+            assert_eq!((decl.ty, decl.name, decl.dims.len()), ("int", "a", 2));
+            assert!(matches!(&decl.init, Some(ArrayInit::List(rows)) if rows.len() == 2));
         }
         other => panic!("{other:?}"),
     }
+    for source in ["a[1] = 2;", "a[0, 1] += 2;", "a[0][1] -= 2;"] {
+        assert!(
+            matches!(one(source), StmtKind::ElementAssign(_)),
+            "`{source}`"
+        );
+    }
+    assert!(matches!(error("array[int] a;"), PrismError::Parse { .. }));
 }
 
 #[test]

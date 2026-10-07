@@ -113,6 +113,22 @@ h q[cursor];
 A declaration inside a `for` body binds for that pass only: the scope the body
 opened is dropped at the end of each iteration.
 
+An `array` of any of those element types takes a size per dimension, fixed at parse
+time, and folds the same way. An element reads as `a[i, j]` or `a[i][j]` wherever a
+value would, and takes plain and compound assignment. A write made inside a loop
+outlives the pass, which is what filling an array needs.
+
+```qasm
+array[float[64], 2, 2] angles = {{0.1, 0.2}, {0.3, 0.4}};
+array[int, 4] order;
+for int k in [0:3] { order[k] = 3 - k; }
+rx(angles[1, 0]) q[order[0]];   // rx(0.3) q[3]
+```
+
+Elements of `bit` belong in a `bit[n]` register, so `array[bit, n]` declines. A `def`
+body sees the program's `const` arrays and no others, as it sees no other non-constant
+global.
+
 ### Timing
 
 A simulation has no clock, so timing parses and then has no effect. `delay` is the
@@ -389,7 +405,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `qubit`, `qreg`, `bit`, `creg` | Parses | |
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
 | `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type |
-| `array` declarations | Declines | `UnsupportedConstruct` |
+| `array` | Parses; folded at parse time | An element type other than `int`, `uint`, `float`, `angle` or `bool`: `UnsupportedConstruct`. An initializer of the wrong shape, an index out of range, or more than 2^20 elements: `Parse` |
 | `box`, `box[d]` | Runs its body in place | A length that is not a duration or is negative: `Parse` |
 | `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, and `durationof`: `UnsupportedConstruct` |
 | `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |

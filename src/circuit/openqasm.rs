@@ -22,7 +22,7 @@
 //! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` and `negctrl @` (chainable), `pow(k) @` for any real k. A control applies to whatever the gate expanded to, so it reaches a user `gate` and a lowered gate as well as a direct one; a fractional `pow` is the principal power of what the call expanded to |
 //! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
 //! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand |
-//! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name |
+//! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name; declined under a runtime `if` or `switch` for a name declared outside it |
 //! | Classical array | `array[int, 2, 2] a = {{1, 2}, {3, 4}};` `a[0, 1] = 5;` `h q[a[1][0]];` | `int`, `uint`, `float`, `angle` or `bool` elements, any number of dimensions, folded at parse time like a scalar; a `def` reads only `const` arrays |
 //! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number |
 //! | Delay | `delay[d] q[0];` `delay[s];` | The identity on its qubits, all of them when none is named; emits nothing |
@@ -39,7 +39,7 @@
 //! | Conditional inequality | `if (c != 0) x q[0];` | Register or bit `!=` |
 //! | Conditional bit literal | `if (c[0] == 1) x q[0];` | Bit equality vs `0` / `1` |
 //! | Conditional negation | `if (!c[0]) x q[0];` | Negated bit truthy test |
-//! | Guarded region | `if (c[0]) { x q[0]; measure q[1] -> c[1]; }` | Braced body, any statement, nestable |
+//! | Guarded region | `if (c[0]) { x q[0]; measure q[1] -> c[1]; }` | Braced body, any statement, nestable; names it declares go out of scope with it |
 //! | Conditional parity | `if (c[0] ^ c[2]) x q[0];` | Parity over bits, optionally `(...) == 0` |
 //! | Else arm | `if (c[0]) { ... } else { ... }` | Lowers to a second guard on the negated condition |
 //! | Else-if chain | `if (c[0]) { ... } else if (c[1]) { ... }` | Nests under the negated arm |
@@ -387,7 +387,13 @@ pub(crate) struct Parser<'a> {
     arrays: HashMap<&'a str, ClassicalArray>,
     /// The `def` body being expanded; `None` outside one.
     def_result: Option<DefResult<'a>>,
+    /// The classical and array names in scope where the innermost runtime
+    /// guard opened, none of which its body may write; `None` outside a guard.
+    guard: Option<Scope<'a>>,
 }
+
+/// Classical and array names in scope at some point, classical first.
+type Scope<'a> = (Vec<&'a str>, Vec<&'a str>);
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
 const MAX_FOR_ITERATIONS: i64 = 1_000_000;
@@ -485,6 +491,7 @@ impl<'a> Parser<'a> {
             durations: HashMap::new(),
             arrays: HashMap::new(),
             def_result: None,
+            guard: None,
         }
     }
 

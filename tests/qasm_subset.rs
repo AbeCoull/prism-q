@@ -536,3 +536,60 @@ fn a_def_cannot_write_an_outer_name() {
         "rx(3) q[0];",
     );
 }
+
+// A classical variable is folded at parse time, so a write under a guard that a
+// measurement decides would take effect whatever the measurement read.
+#[test]
+fn a_write_under_a_runtime_guard_is_declined() {
+    for body in [
+        "int n = 0;\nc[0] = measure q[0];\nif (c[0]) { n = 1; }\nh q[n];",
+        "int n = 0;\nif (c[0]) n += 1;\nh q[n];",
+        "int n = 0;\nif (c[0]) { x q[0]; } else { n = 2; }",
+        "int n = 0;\nif (c[0]) { x q[0]; } else if (c[1]) { n -= 1; }",
+        "int n = 0;\nswitch (c) { case 1 { n = 1; } default { x q[0]; } }",
+        "int n = 0;\nswitch (c) { case 1 { x q[0]; } default { n *= 2; } }",
+        "int n = 0;\nif (c[0]) { if (c[1]) { n += 1; } }",
+        "int n = 0;\nfor int i in [0:1] { if (c[0]) { n = i; } }",
+        "int n = 0;\nif (c[0]) { for int i in [0:1] { n += i; } }",
+        "if (c[0]) { int k = 0; if (c[1]) { k = 1; } h q[k]; }",
+        "float t = 0;\nif (c[0]) { t = sin(0.5); }",
+        "duration d = 0ns;\nif (c[0]) { d += 10ns; }",
+        "array[int, 2] a;\nif (c[0]) { a[1] = 3; }",
+        "def f(qubit a, bit b) { int k = 0; if (b) { k = 1; } rx(k) a; }\nf(q[0], c[0]);",
+    ] {
+        match parse_err(body) {
+            PrismError::UnsupportedConstruct { construct, .. } => {
+                assert!(
+                    construct.contains("runtime `if` or `switch`"),
+                    "`{body}`: {construct}"
+                );
+            }
+            other => panic!("`{body}` should decline by name, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_runtime_guard_keeps_what_does_not_write_outside_it() {
+    assert_same_stream(
+        "if (c[0]) { int k = 1; k += 1; h q[k]; }",
+        "if (c[0]) { h q[2]; }",
+    );
+    assert_same_stream(
+        "const int k = 2;\nint m = 3;\nif (c[0]) { x q[k]; rx(m) q[m]; }",
+        "if (c[0]) { x q[2]; rx(3) q[3]; }",
+    );
+    assert_same_stream(
+        "if (c[0]) { x q[1]; c[1] = measure q[1]; for int i in [0:1] { h q[i]; } }",
+        "if (c[0]) { x q[1]; c[1] = measure q[1]; h q[0]; h q[1]; }",
+    );
+    assert_same_stream(
+        "switch (c) { case 1 { array[int, 1] a = {2}; a[0] += 1; h q[a[0]]; } }",
+        "switch (c) { case 1 { h q[3]; } }",
+    );
+    // A name declared under the guard goes out of scope with it.
+    assert!(matches!(
+        parse_err("if (c[0]) { int k = 1; }\nh q[k];"),
+        PrismError::Parse { .. }
+    ));
+}

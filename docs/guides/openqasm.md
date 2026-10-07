@@ -111,7 +111,15 @@ h q[cursor];
 ```
 
 A declaration inside a `for` body binds for that pass only: the scope the body
-opened is dropped at the end of each iteration.
+opened is dropped at the end of each iteration, while a write to a name declared
+outside the loop carries on to the next pass and past the loop.
+
+An `if`, `else` or `switch` body opens a scope too, but whether it runs is decided by a
+measurement, and a classical variable is folded here at parse time. Such a body may
+declare and write its own variables, but a write to one declared outside it returns
+`UnsupportedConstruct`: the value would otherwise change whatever the measurement read.
+Holding a value that does depend on one needs a control-flow graph, which the IR does
+not build.
 
 An `array` of any of those element types takes a size per dimension, fixed at parse
 time, and folds the same way. An element reads as `a[i, j]` or `a[i][j]` wherever a
@@ -404,7 +412,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `include "..."` | Accepted and ignored | Nothing. The standard gates are built in, so an include adds no names; a gate it would have defined declines later by name |
 | `qubit`, `qreg`, `bit`, `creg` | Parses | |
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
-| `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type |
+| `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` |
 | `array` | Parses; folded at parse time | An element type other than `int`, `uint`, `float`, `angle` or `bool`: `UnsupportedConstruct`. An initializer of the wrong shape, an index out of range, or more than 2^20 elements: `Parse` |
 | `box`, `box[d]` | Runs its body in place | A length that is not a duration or is negative: `Parse` |
 | `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, and `durationof`: `UnsupportedConstruct` |

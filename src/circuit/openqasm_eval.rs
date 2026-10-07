@@ -655,6 +655,7 @@ impl<'a> Parser<'a> {
                 format!("`{target}` is `const` and cannot be assigned"),
             ));
         }
+        self.reject_guarded_write(target, line)?;
         if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
             return self.assign_duration(target, kind, op, value, line);
         }
@@ -787,6 +788,7 @@ impl<'a> Parser<'a> {
                 format!("`{}` is `const` and cannot be assigned", assign.array),
             ));
         }
+        self.reject_guarded_write(assign.array, line)?;
         let at = element_offset(array, assign.array, &assign.indices, line, |index| {
             self.value_of(index, line)
         })?;
@@ -1870,6 +1872,7 @@ impl<'a> Parser<'a> {
             durations: HashMap::new(),
             arrays: HashMap::new(),
             def_result: None,
+            guard: None,
         };
         for (name, register) in &self.qregs {
             sub.qregs.insert(
@@ -1966,7 +1969,7 @@ impl<'a> Parser<'a> {
     }
 
     /// The classical and array names in scope, for [`Parser::close_scope`].
-    fn open_scope(&self) -> (Vec<&'a str>, Vec<&'a str>) {
+    fn open_scope(&self) -> Scope<'a> {
         (
             self.classical.keys().copied().collect(),
             self.arrays.keys().copied().collect(),
@@ -1975,7 +1978,7 @@ impl<'a> Parser<'a> {
 
     /// Drop the names declared since `scope` was opened. Names declared before
     /// it keep whatever the body wrote to them.
-    fn close_scope(&mut self, scope: &(Vec<&'a str>, Vec<&'a str>)) {
+    fn close_scope(&mut self, scope: &Scope<'a>) {
         let (classical, arrays) = scope;
         let declared: Vec<&'a str> = self
             .classical
@@ -1993,14 +1996,38 @@ impl<'a> Parser<'a> {
         self.arrays.retain(|name, _| arrays.contains(name));
     }
 
-    /// Run a block one nesting level down.
+    /// Run a guarded block one nesting level down, in a scope of its own.
+    ///
+    /// Whether the block runs is decided by a measurement, while a classical
+    /// variable is folded here at parse time, so the block may not write any
+    /// variable declared outside it.
     fn region(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
         self.enter_region_depth(block)?;
+        let scope = self.open_scope();
+        let outer_guard = self.guard.replace(scope.clone());
         let was_nested = std::mem::replace(&mut self.nested, true);
         let body = self.execute(block);
         self.nested = was_nested;
+        self.guard = outer_guard;
+        self.close_scope(&scope);
         self.region_depth -= 1;
         body
+    }
+
+    fn reject_guarded_write(&self, name: &str, line: usize) -> Result<()> {
+        let Some((classical, arrays)) = &self.guard else {
+            return Ok(());
+        };
+        if classical.contains(&name) || arrays.contains(&name) {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "a write to `{name}` under a runtime `if` or `switch`; the variable is \
+                     folded at parse time and cannot depend on a measurement"
+                ),
+                line,
+            });
+        }
+        Ok(())
     }
 
     fn enter_region_depth(&mut self, block: &Block<'a>) -> Result<()> {

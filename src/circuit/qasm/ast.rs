@@ -98,8 +98,15 @@ pub(crate) enum StmtKind<'a> {
     DefDef {
         name: &'a str,
         args: Vec<DefParam<'a>>,
+        result: Option<BitResult<'a>>,
         body: Block<'a>,
     },
+    /// `return;`, `return measure q;` or `return r;`.
+    Return(Option<ReturnValue<'a>>),
+    /// `c[0] = f(q[0]);`, a call whose result is assigned. Boxed because the
+    /// target and the arguments would otherwise set the width of every
+    /// statement in the tree.
+    CallAssign(Box<CallAssign<'a>>),
     /// `box { ... }` or `box[100ns] { ... }`.
     Box {
         duration: Option<Expr<'a>>,
@@ -107,6 +114,25 @@ pub(crate) enum StmtKind<'a> {
     },
     /// A `#pragma` line, text included.
     Pragma(&'a str),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CallAssign<'a> {
+    pub target: Operand<'a>,
+    pub name: &'a str,
+    pub args: SmallVec<[Argument<'a>; 1]>,
+}
+
+/// A `def` declared `-> bit` or `-> bit[n]`, the only result type it may have.
+#[derive(Clone, Debug)]
+pub(crate) struct BitResult<'a> {
+    pub width: Option<Expr<'a>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ReturnValue<'a> {
+    Measure(Operand<'a>),
+    Value(Expr<'a>),
 }
 
 #[derive(Clone, Debug)]
@@ -304,4 +330,9 @@ pub(crate) enum DefParam<'a> {
     },
     /// A `duration` or `stretch` parameter.
     Duration(&'a str),
+    /// `bit` or `bit[n]`, passed by value.
+    Bit {
+        name: &'a str,
+        width: Option<Expr<'a>>,
+    },
 }

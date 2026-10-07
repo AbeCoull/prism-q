@@ -4,8 +4,9 @@
 //! find where a statement, a block or an argument ended.
 
 use super::ast::{
-    Argument, AssignOp, Block, CmpOp, Condition, Conditional, DefParam, ForRange, Index, Measure,
-    Modifier, Operand, OperandName, Range, RegisterKind, Stmt, StmtKind, SwitchArm,
+    Argument, AssignOp, BitResult, Block, CallAssign, CmpOp, Condition, Conditional, DefParam,
+    ForRange, Index, Measure, Modifier, Operand, OperandName, Range, RegisterKind, ReturnValue,
+    Stmt, StmtKind, SwitchArm,
 };
 use super::expr::{self, Expr};
 use super::lexer::{Kind, Token};
@@ -28,7 +29,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("extern", "extern"),
     ("opaque", "opaque"),
     ("while", "while"),
-    ("return", "return"),
     ("break", "break"),
     ("continue", "continue"),
     ("else", "else"),
@@ -88,6 +88,7 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         "switch" => switch(stream),
         "gate" => gate_def(stream),
         "def" => def_def(stream),
+        "return" => return_statement(stream),
         "box" => boxed(stream),
         "const" => declaration(stream),
         other if DECLARATION_TYPES.contains(&other) => declaration(stream),
@@ -559,7 +560,7 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     stream.expect(Kind::LParen)?;
     let mut args = Vec::new();
     while !stream.eat(Kind::RParen) {
-        let (ty, _width) = typename(stream)?;
+        let (ty, width) = typename(stream)?;
         let arg_name = stream.expect_ident()?;
         args.push(match ty {
             "qubit" => DefParam::Qubit(arg_name),
@@ -572,15 +573,10 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
                 integral: false,
             },
             "duration" | "stretch" => DefParam::Duration(arg_name),
-            "bit" | "creg" => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
-                        "classical bit parameters in def `{name}` (V1 supports unitary \
-                         subroutines only)"
-                    ),
-                    line,
-                });
-            }
+            "bit" => DefParam::Bit {
+                name: arg_name,
+                width,
+            },
             other => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!("def parameter type `{other}`"),
@@ -593,14 +589,41 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
             break;
         }
     }
-    if stream.kind() == Kind::Arrow {
-        return Err(PrismError::UnsupportedConstruct {
-            construct: "def with return type".to_string(),
-            line,
-        });
-    }
+    let result = if stream.eat(Kind::Arrow) {
+        let (ty, width) = typename(stream)?;
+        if ty != "bit" {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "def `{name}` returning `{ty}`; only a `bit` result has a home in the \
+                     instruction list"
+                ),
+                line,
+            });
+        }
+        Some(BitResult { width })
+    } else {
+        None
+    };
     let body = braced_block(stream)?;
-    Ok(StmtKind::DefDef { name, args, body })
+    Ok(StmtKind::DefDef {
+        name,
+        args,
+        result,
+        body,
+    })
+}
+
+fn return_statement<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    stream.advance();
+    let value = if stream.kind() == Kind::Semicolon {
+        None
+    } else if stream.eat_keyword("measure") {
+        Some(ReturnValue::Measure(operand(stream)?))
+    } else {
+        Some(ReturnValue::Value(expr::parse(stream)?))
+    };
+    stream.expect(Kind::Semicolon)?;
+    Ok(StmtKind::Return(value))
 }
 
 /// A gate application, a `def` call, or an assignment, which all open with a
@@ -619,16 +642,11 @@ fn call_or_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     }
     let modifiers = modifier_chain(stream)?;
     let name = stream.expect_ident()?;
-    let mut params = SmallVec::new();
-    if stream.eat(Kind::LParen) {
-        while !stream.eat(Kind::RParen) {
-            params.push(argument(stream)?);
-            if !stream.eat(Kind::Comma) {
-                stream.expect(Kind::RParen)?;
-                break;
-            }
-        }
-    }
+    let params = if stream.eat(Kind::LParen) {
+        call_arguments(stream)?
+    } else {
+        SmallVec::new()
+    };
     let mut operands = SmallVec::new();
     if stream.kind() != Kind::Semicolon {
         operands.push(operand(stream)?);
@@ -643,6 +661,19 @@ fn call_or_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         params,
         operands,
     })
+}
+
+/// The entries of a call's parentheses, the opening `(` already read.
+fn call_arguments<'a>(stream: &mut Stream<'_, 'a>) -> Result<SmallVec<[Argument<'a>; 1]>> {
+    let mut args = SmallVec::new();
+    while !stream.eat(Kind::RParen) {
+        args.push(argument(stream)?);
+        if !stream.eat(Kind::Comma) {
+            stream.expect(Kind::RParen)?;
+            break;
+        }
+    }
+    Ok(args)
 }
 
 /// `c = measure q;`, `n = n + 1;` and `n += 1;`, told from a gate call by the
@@ -674,6 +705,24 @@ fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>
             source,
             target,
         }))));
+    }
+
+    // A call standing alone on the right may hand over qubits and bits, which
+    // no expression can hold, so it keeps the call's own argument grammar.
+    if op.is_none() && stream.kind() == Kind::Ident && stream.peek_at(1).kind == Kind::LParen {
+        let value_mark = stream.mark();
+        let name = stream.advance().text;
+        stream.advance();
+        if let Ok(args) = call_arguments(stream) {
+            if stream.eat(Kind::Semicolon) {
+                return Ok(Some(StmtKind::CallAssign(Box::new(CallAssign {
+                    target,
+                    name,
+                    args,
+                }))));
+            }
+        }
+        stream.rewind(value_mark);
     }
 
     let value = expr::parse(stream)?;

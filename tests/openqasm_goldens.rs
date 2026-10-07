@@ -573,7 +573,7 @@ fn classical_control_constructs_parse_or_reject_by_name() {
         ("defcal", "defcal x $0 { }", "defcal"),
         ("opaque", "opaque foo q;", "opaque"),
         ("extern", "extern foo(int);", "extern"),
-        ("return", "return;", "return"),
+        ("return", "return;", "`return` outside a def"),
         ("stray else", "else { x q[0]; }", "else"),
     ];
     for (label, body, construct) in rejected {

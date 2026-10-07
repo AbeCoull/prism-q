@@ -47,6 +47,15 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
                 note(&measure.source);
                 note(&measure.target);
             }
+            StmtKind::CallAssign(assign) => {
+                note(&assign.target);
+                for arg in &assign.args {
+                    if let Argument::Operand(operand) = arg {
+                        note(operand);
+                    }
+                }
+            }
+            StmtKind::Return(Some(ast::ReturnValue::Measure(source))) => note(source),
             StmtKind::Reset { targets }
             | StmtKind::Barrier { targets }
             | StmtKind::Delay { targets, .. } => targets.iter().for_each(&mut *note),
@@ -100,6 +109,23 @@ fn number_of(
             format!("`{expr}` is a stretch where a number belongs"),
         )),
     }
+}
+
+fn is_bit_param(args: &[DefParam], name: &str) -> bool {
+    args.iter()
+        .any(|arg| matches!(arg, DefParam::Bit { name: param, .. } if *param == name))
+}
+
+/// Line of the first `return` in `block`, nested bodies included.
+fn return_line(block: &[Stmt]) -> Option<usize> {
+    block.iter().find_map(|stmt| match &stmt.kind {
+        StmtKind::Return(_) => Some(stmt.line),
+        StmtKind::If(conditional) => return_line(&conditional.then_body)
+            .or_else(|| conditional.else_body.as_deref().and_then(return_line)),
+        StmtKind::For { body, .. } | StmtKind::Box { body, .. } => return_line(body),
+        StmtKind::Switch { arms, .. } => arms.iter().find_map(|arm| return_line(&arm.body)),
+        _ => None,
+    })
 }
 
 impl<'a> Parser<'a> {
@@ -174,6 +200,26 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             StmtKind::RegisterDecl { kind, name, size } => {
+                if let Some(result) = self.def_result.as_ref().filter(|result| {
+                    *kind == ast::RegisterKind::Classical && result.local == Some(*name)
+                }) {
+                    // The returned bit is the caller's target, bound before the
+                    // body ran, so its declaration allocates nothing.
+                    let width = match size {
+                        Some(size) => self.integer_of(size, line)?,
+                        None => 1,
+                    };
+                    if width != result.bits.len() as i64 {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "`{name}` declares {width} bit(s) where the def returns {}",
+                                result.bits.len()
+                            ),
+                        ));
+                    }
+                    return Ok(());
+                }
                 self.declare_register(*kind, name, size.as_ref(), line)?;
                 Ok(())
             }
@@ -290,10 +336,29 @@ impl<'a> Parser<'a> {
                 );
                 Ok(())
             }
-            StmtKind::DefDef { name, args, body } => {
-                self.declare_def(name, args, body, line)?;
+            StmtKind::DefDef {
+                name,
+                args,
+                result,
+                body,
+            } => {
+                self.declare_def(name, args, result.as_ref(), body, line)?;
                 Ok(())
             }
+            StmtKind::Return(value) => {
+                let Some(result) = &self.def_result else {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: "`return` outside a def".to_string(),
+                        line,
+                    });
+                };
+                if let Some(ast::ReturnValue::Measure(source)) = value {
+                    let qubits = self.qubits_of(source)?;
+                    out.extend(Self::build_measurements(qubits, result.bits.clone(), line)?);
+                }
+                Ok(())
+            }
+            StmtKind::CallAssign(assign) => self.exec_call_assign(assign, line, out),
             StmtKind::Box { duration, body } => {
                 // A box and Braket's verbatim pragma both direct a scheduler or
                 // a device compiler, which a simulator has nothing to honour.
@@ -626,38 +691,171 @@ impl<'a> Parser<'a> {
         &mut self,
         name: &'a str,
         args: &[DefParam<'a>],
+        result: Option<&ast::BitResult<'a>>,
         body: &Block<'a>,
         line: usize,
     ) -> Result<()> {
-        if body.is_empty() {
+        let Some((last, rest)) = body.split_last() else {
             return Err(parse_error(line, format!("def `{name}` has an empty body")));
+        };
+        // A `return` anywhere but last decides at run time whether the rest of
+        // the body runs, which no guarded region can say.
+        let early = return_line(rest).or_else(|| match last.kind {
+            StmtKind::Return(_) => None,
+            _ => return_line(std::slice::from_ref(last)),
+        });
+        if let Some(at) = early {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "`return` before the end of def `{name}`, which needs control flow \
+                     beyond a guarded region"
+                ),
+                line: at,
+            });
         }
-        for stmt in body {
-            let rejected = match &stmt.kind {
-                StmtKind::Measure { .. } => Some("measure"),
-                StmtKind::Reset { .. } => Some("reset"),
-                StmtKind::RegisterDecl {
-                    kind: ast::RegisterKind::Classical,
-                    ..
-                } => Some("bit"),
-                _ => None,
-            };
-            if let Some(what) = rejected {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
-                        "`{what}` inside def `{name}` (V1 supports unitary subroutines only)"
-                    ),
-                    line: stmt.line,
-                });
-            }
-        }
+        let local = Self::def_result_local(name, args, result.is_some(), last, rest)?;
+        Self::check_def_writes(name, args, local, body, true)?;
         self.def_defs.insert(
             name,
             DefDefinition {
                 args: args.to_vec(),
+                result: result.cloned(),
+                local,
                 body: body.clone(),
             },
         );
+        Ok(())
+    }
+
+    /// The bit a `def` body declares and returns by name, after checking that
+    /// its final statement returns what the signature promises.
+    fn def_result_local(
+        name: &str,
+        args: &[DefParam<'a>],
+        has_result: bool,
+        last: &Stmt<'a>,
+        rest: &[Stmt<'a>],
+    ) -> Result<Option<&'a str>> {
+        let value = match &last.kind {
+            StmtKind::Return(value) => value.as_ref(),
+            _ if has_result => None,
+            _ => return Ok(None),
+        };
+        let Some(value) = value else {
+            if has_result {
+                return Err(parse_error(
+                    last.line,
+                    format!(
+                        "def `{name}` declares a `bit` result but does not end by returning one"
+                    ),
+                ));
+            }
+            return Ok(None);
+        };
+        if !has_result {
+            return Err(parse_error(
+                last.line,
+                format!("def `{name}` returns a value but declares no `-> bit` result"),
+            ));
+        }
+        let ast::ReturnValue::Value(expr) = value else {
+            return Ok(None);
+        };
+        let declared = |local: &str| {
+            rest.iter().any(|stmt| {
+                matches!(
+                    &stmt.kind,
+                    StmtKind::RegisterDecl {
+                        kind: ast::RegisterKind::Classical,
+                        name,
+                        ..
+                    } if *name == local
+                )
+            })
+        };
+        match expr.as_ident() {
+            Some(local) if is_bit_param(args, local) => Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "def `{name}` returning its bit parameter `{local}`, a copy the \
+                     instruction list has no classical move for"
+                ),
+                line: last.line,
+            }),
+            Some(local) if declared(local) => Ok(Some(local)),
+            _ => Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "return of `{expr}` from def `{name}`; a def returns a measurement or a \
+                     bit it declares"
+                ),
+                line: last.line,
+            }),
+        }
+    }
+
+    /// Check that a `def` body writes classical bits only through its result.
+    ///
+    /// A bit parameter is a copy, and any other bit would need a classical
+    /// register the program never declared, so neither can be written here.
+    fn check_def_writes(
+        name: &str,
+        args: &[DefParam<'a>],
+        local: Option<&str>,
+        block: &Block<'a>,
+        top: bool,
+    ) -> Result<()> {
+        for stmt in block {
+            match &stmt.kind {
+                StmtKind::RegisterDecl {
+                    kind: ast::RegisterKind::Classical,
+                    name: declared,
+                    ..
+                } if !(top && local == Some(*declared)) => {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "`bit {declared}` inside def `{name}`, which does not return it; \
+                             holding it would need a classical bit the program never declared"
+                        ),
+                        line: stmt.line,
+                    });
+                }
+                StmtKind::Measure(measure) => {
+                    let target = measure.target.register();
+                    if target.is_some() && target == local {
+                        continue;
+                    }
+                    let construct = match target {
+                        Some(param) if is_bit_param(args, param) => format!(
+                            "measure into bit parameter `{param}` of def `{name}`, which is \
+                             passed by value"
+                        ),
+                        _ => format!(
+                            "measure into `{}` inside def `{name}`, which writes classical \
+                             bits only through its result",
+                            measure.target.describe()
+                        ),
+                    };
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct,
+                        line: stmt.line,
+                    });
+                }
+                StmtKind::If(conditional) => {
+                    Self::check_def_writes(name, args, local, &conditional.then_body, false)?;
+                    if let Some(body) = &conditional.else_body {
+                        Self::check_def_writes(name, args, local, body, false)?;
+                    }
+                }
+                StmtKind::For { body, .. } | StmtKind::Box { body, .. } => {
+                    Self::check_def_writes(name, args, local, body, false)?;
+                }
+                StmtKind::Switch { arms, .. } => {
+                    for arm in arms {
+                        Self::check_def_writes(name, args, local, &arm.body, false)?;
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(())
     }
 
@@ -842,7 +1040,7 @@ impl<'a> Parser<'a> {
         let modifiers = self.fold_modifiers(modifiers, line)?;
 
         if self.def_defs.contains_key(name) {
-            let instrs = self.expand_def(name, params, line)?;
+            let instrs = self.expand_def(name, params, None, line)?;
             out.extend(Self::modify_expansion(instrs, &modifiers, name, line)?);
             return Ok(());
         }
@@ -1047,9 +1245,62 @@ impl<'a> Parser<'a> {
         Ok(Some(sub.execute(&def.body)?))
     }
 
+    /// `target = f(...);`: a `def` call whose `bit` result lands on `target`,
+    /// or a builtin on the right of a classical assignment.
+    fn exec_call_assign(
+        &mut self,
+        assign: &ast::CallAssign<'a>,
+        line: usize,
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
+        if self.def_defs.contains_key(assign.name) {
+            let bits = self.bits_of(&assign.target)?;
+            out.extend(self.expand_def(assign.name, &assign.args, Some(&bits), line)?);
+            return Ok(());
+        }
+        let Some(target) = assign
+            .target
+            .register()
+            .filter(|_| assign.target.index.is_none())
+        else {
+            return Err(parse_error(
+                line,
+                format!(
+                    "`{}` is not a name an assignment can write",
+                    assign.target.describe()
+                ),
+            ));
+        };
+        let args = assign
+            .args
+            .iter()
+            .map(|arg| match arg {
+                Argument::Value(expr) => Ok(expr.clone()),
+                Argument::Operand(operand) => Err(parse_error(
+                    line,
+                    format!(
+                        "`{}` is a qubit or bit where a value belongs",
+                        operand.describe()
+                    ),
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let value = Expr::Call(Box::new(syntax_expr::Call {
+            name: assign.name,
+            args,
+        }));
+        self.assign_classical(target, None, &value, line)
+    }
+
     /// Inline a `def` call, binding each argument by the kind its declaration
-    /// gave it.
-    fn expand_def(&self, name: &str, args: &[Argument], line: usize) -> Result<Vec<Instruction>> {
+    /// gave it and the result, when there is one, to `result`.
+    fn expand_def(
+        &self,
+        name: &str,
+        args: &[Argument],
+        result: Option<&[usize]>,
+        line: usize,
+    ) -> Result<Vec<Instruction>> {
         if self.gate_expansion_depth >= MAX_GATE_EXPANSION_DEPTH {
             return Err(parse_error(
                 line,
@@ -1071,6 +1322,7 @@ impl<'a> Parser<'a> {
         let mut bindings: HashMap<&'a str, f64> = self.param_vars.clone().unwrap_or_default();
         let mut durations = self.durations.clone();
         let mut qubit_bindings: Vec<(&'a str, usize)> = Vec::new();
+        let mut bit_bindings: Vec<(&'a str, SmallVec<[usize; 4]>)> = Vec::new();
         for (slot, argument) in def.args.iter().zip(args) {
             match slot {
                 DefParam::Qubit(param_name) => {
@@ -1161,8 +1413,104 @@ impl<'a> Parser<'a> {
                     }
                     durations.insert(param_name, value);
                 }
+                DefParam::Bit {
+                    name: param_name,
+                    width,
+                } => {
+                    let operand = match argument {
+                        Argument::Operand(operand) => operand.clone(),
+                        Argument::Value(expr) => match expr.as_ident() {
+                            Some(register) => Operand {
+                                name: OperandName::Register(register),
+                                index: None,
+                                line,
+                            },
+                            None => {
+                                return Err(parse_error(
+                                    line,
+                                    format!(
+                                        "def `{name}` bit parameter `{param_name}` needs a bit, \
+                                         not an expression"
+                                    ),
+                                ));
+                            }
+                        },
+                    };
+                    let bits = self.bits_of(&operand)?;
+                    let wanted = match width {
+                        Some(width) => self.integer_of(width, line)?,
+                        None => 1,
+                    };
+                    if bits.len() as i64 != wanted {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "def `{name}` bit parameter `{param_name}` takes {wanted} bit(s), \
+                                 got {}",
+                                bits.len()
+                            ),
+                        ));
+                    }
+                    bit_bindings.push((param_name, bits));
+                }
             }
         }
+
+        let frame = match (&def.result, result) {
+            (None, None) => DefResult {
+                bits: SmallVec::new(),
+                local: None,
+            },
+            (None, Some(_)) => {
+                return Err(parse_error(
+                    line,
+                    format!("def `{name}` declares no result to assign"),
+                ));
+            }
+            (Some(_), None) => {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!(
+                        "a call to def `{name}` that drops its `bit` result, which would need \
+                         a classical bit the program never declared"
+                    ),
+                    line,
+                });
+            }
+            (Some(declared), Some(bits)) => {
+                let wanted = match &declared.width {
+                    Some(width) => self.integer_of(width, line)?,
+                    None => 1,
+                };
+                if bits.len() as i64 != wanted {
+                    return Err(parse_error(
+                        line,
+                        format!(
+                            "def `{name}` returns {wanted} bit(s) where its target names {}",
+                            bits.len()
+                        ),
+                    ));
+                }
+                // The named result is written in place, so a parameter reading
+                // the same bit would see the new value rather than its copy.
+                let aliased = def.local.is_some()
+                    && bit_bindings
+                        .iter()
+                        .any(|(_, param)| param.iter().any(|bit| bits.contains(bit)));
+                if aliased {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "a call to def `{name}` passing a bit it also assigns, which the \
+                             body would read after writing its result"
+                        ),
+                        line,
+                    });
+                }
+                DefResult {
+                    bits: bits.iter().copied().collect(),
+                    local: def.local,
+                }
+            }
+        };
 
         let mut sub = self.expansion_parser(bindings);
         sub.durations = durations;
@@ -1175,7 +1523,42 @@ impl<'a> Parser<'a> {
                 },
             );
         }
+        for (param_name, bits) in bit_bindings {
+            sub.bind_bits(param_name, bits);
+        }
+        if let Some(local) = frame.local {
+            sub.bind_bits(local, frame.bits.clone());
+        }
+        sub.def_result = Some(frame);
         sub.execute(&def.body)
+    }
+
+    /// Name `bits` inside an expanded body: as a register when they run
+    /// contiguously, which a register comparison needs, and as an alias
+    /// otherwise.
+    fn bind_bits(&mut self, name: &'a str, bits: SmallVec<[usize; 4]>) {
+        let contiguous = bits.windows(2).all(|pair| pair[1] == pair[0] + 1);
+        match bits.first() {
+            Some(&offset) if contiguous => {
+                self.aliases.remove(name);
+                self.cregs.insert(
+                    name,
+                    Register {
+                        offset,
+                        size: bits.len(),
+                    },
+                );
+            }
+            _ => {
+                self.aliases.insert(
+                    name,
+                    Alias {
+                        kind: ast::RegisterKind::Classical,
+                        indices: bits.to_vec(),
+                    },
+                );
+            }
+        }
     }
 
     /// A parser for an expanded body: the enclosing registers and definitions,
@@ -1206,6 +1589,7 @@ impl<'a> Parser<'a> {
             aliases: HashMap::new(),
             classical: self.classical_copy(),
             durations: HashMap::new(),
+            def_result: None,
         };
         for (name, register) in &self.qregs {
             sub.qregs.insert(
@@ -1249,6 +1633,8 @@ impl<'a> Parser<'a> {
                 *name,
                 DefDefinition {
                     args: def.args.clone(),
+                    result: def.result.clone(),
+                    local: def.local,
                     body: def.body.clone(),
                 },
             );
@@ -1520,9 +1906,24 @@ impl<'a> Parser<'a> {
         Ok((register.offset, register.size))
     }
 
+    /// The bit an unsubscripted name stands for when it names exactly one,
+    /// as `bit b;` or a `def`'s `bit` parameter does.
+    fn single_bit(&self, operand: &Operand) -> Option<usize> {
+        if operand.index.is_some() {
+            return None;
+        }
+        match self.bits_of(operand).ok()?.as_slice() {
+            [bit] => Some(*bit),
+            _ => None,
+        }
+    }
+
     fn condition_of(&self, condition: &Condition, line: usize) -> Result<ClassicalCondition> {
         match condition {
             Condition::Truthy(operand) => {
+                if let Some(bit) = self.single_bit(operand) {
+                    return Ok(ClassicalCondition::BitIsOne(bit));
+                }
                 if operand.index.is_none() {
                     return Err(parse_error(
                         line,
@@ -1536,6 +1937,9 @@ impl<'a> Parser<'a> {
                 Ok(ClassicalCondition::BitIsOne(self.bit_of(operand)?))
             }
             Condition::Negated(operand) => {
+                if let Some(bit) = self.single_bit(operand) {
+                    return Ok(ClassicalCondition::BitIsZero(bit));
+                }
                 if operand.index.is_none() {
                     return Err(parse_error(
                         line,

@@ -337,6 +337,44 @@ The indices are absolute, so the register is as wide as the highest one named
 and nothing declares it. A `qubit` or `qreg` declaration in the same program is
 rejected: a physical index and a register offset would give `0` two meanings.
 
+## Subroutines
+
+A `def` is inlined at each call. Beside qubits and classical values it takes `bit`
+and `bit[n]` arguments, passed by value as the language specifies: the body reads the
+caller's bits and may branch on them, but cannot write them.
+
+A `-> bit` or `-> bit[n]` result lands on the bits the call is assigned to. The body
+ends with `return measure q;`, or with `return r;` for a bit it declared, which it may
+branch on before returning.
+
+```qasm
+OPENQASM 3.0;
+qubit[3] q;
+bit[3] c;
+def mx(qubit a) -> bit {
+  h a;
+  return measure a;
+}
+def herald(qubit a, qubit flag) -> bit {
+  bit r;
+  r = measure a;
+  if (r) x flag;
+  return r;
+}
+def fix(bit b, qubit a) {
+  if (b) z a;
+}
+c[0] = mx(q[0]);
+c[1] = herald(q[1], q[2]);
+fix(c[0], q[2]);
+```
+
+The call expands to exactly the instructions the inlined body would, so `c[1] =
+herald(q[1], q[2]);` is `c[1] = measure q[1]; if (c[1]) x q[2];`. A form that would
+need more than that declines by name: a result of a type other than `bit`, a call that
+discards its result, a `return` before the end of the body, a measurement into a
+bit parameter or a global register, and a `bit` the body declares without returning.
+
 ## The subset
 
 `UnsupportedConstruct` means the program is valid OpenQASM that this parser does not
@@ -360,8 +398,9 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
 | `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present: `UnsupportedConstruct` |
 | `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
-| `while` | Declines | `UnsupportedConstruct` |
-| `def` | Inlines a unitary body at the call site | A classical bit parameter or a return type: `UnsupportedConstruct` |
+| `while` | Declines | `UnsupportedConstruct`. A loop that exits on a measurement has no finite instruction list; it needs a control-flow graph the IR does not build |
+| `def` | Inlines its body at the call site, with `bit` parameters and a `bit` result | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width: `Parse` |
+| `return` | Parses as the last statement of a `def` | Anywhere else: `UnsupportedConstruct` |
 | `gate` blocks | Parses | |
 | `defcal`, `extern`, `opaque` | Declines | `UnsupportedConstruct`. Pulse-level calibration and calls out of the program have nothing to run against here |
 | `ctrl`, `negctrl`, `inv`, `pow(k)` | Parses, chainable in any order | See [Other supported constructs](#other-supported-constructs) for the reach of each, and below for the declines |

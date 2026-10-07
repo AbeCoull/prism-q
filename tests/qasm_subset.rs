@@ -199,3 +199,171 @@ fn timing_that_cannot_be_evaluated_is_rejected_by_name() {
         PrismError::InvalidQubit { .. }
     ));
 }
+
+#[test]
+fn a_def_returning_a_measurement_writes_its_target() {
+    assert_same_stream(
+        "def mx(qubit a) -> bit { h a; return measure a; }\nc[1] = mx(q[0]);",
+        "h q[0];\nc[1] = measure q[0];",
+    );
+    assert_same_stream(
+        "def mx(qubit a) -> bit { h a; return measure a; }\n\
+         c[0] = measure q[2];\nif (c[0]) { c[1] = mx(q[0]); }",
+        "c[0] = measure q[2];\nif (c[0]) { h q[0]; c[1] = measure q[0]; }",
+    );
+
+    let circuit = parse("def mz(qubit a) -> bit { return measure a; }\nx q[0];\nc[3] = mz(q[0]);");
+    let outcome = prism_q::simulate(&circuit).seed(42).run().expect("run");
+    assert_eq!(outcome.classical_bits, vec![false, false, false, true]);
+}
+
+// The bit a body declares and returns is the caller's target, so a branch on it
+// inside the body reads the measurement that is also the result.
+#[test]
+fn a_def_returning_a_declared_bit_writes_through_it() {
+    assert_same_stream(
+        "def flip(qubit a, qubit b) -> bit { bit r; r = measure a; if (r) x b; return r; }\n\
+         c[2] = flip(q[0], q[1]);",
+        "c[2] = measure q[0];\nif (c[2]) x q[1];",
+    );
+    assert_same_stream(
+        "def both(qubit a, qubit b) -> bit[2] {\n\
+           bit[2] r;\n  r[0] = measure a;\n  measure b -> r[1];\n  return r;\n}\n\
+         c[1:2] = both(q[0], q[3]);",
+        "c[1] = measure q[0];\nc[2] = measure q[3];",
+    );
+}
+
+#[test]
+fn a_def_reads_a_bit_argument() {
+    assert_same_stream(
+        "def fix(bit b, qubit a) { if (b) x a; if (!b) z a; }\n\
+         c[0] = measure q[0];\nfix(c[0], q[1]);",
+        "c[0] = measure q[0];\nif (c[0]) x q[1];\nif (!c[0]) z q[1];",
+    );
+    let circuit = parse("def pick(bit[2] s, qubit a) { if (s == 2) x a; }\npick(c[2:3], q[0]);");
+    assert!(
+        format!("{:?}", circuit.instructions)
+            .contains("RegisterEquals { offset: 2, size: 2, value: 2 }"),
+        "{:?}",
+        circuit.instructions
+    );
+}
+
+#[test]
+fn a_single_bit_register_reads_as_a_condition() {
+    let text = "OPENQASM 3.0;\nqubit[2] q;\nbit flag;\nflag = measure q[0];\nif (flag) x q[1];";
+    let reference =
+        "OPENQASM 3.0;\nqubit[2] q;\nbit flag;\nflag = measure q[0];\nif (flag[0]) x q[1];";
+    assert_eq!(
+        format!("{:?}", openqasm::parse(text).unwrap().instructions),
+        format!("{:?}", openqasm::parse(reference).unwrap().instructions)
+    );
+}
+
+#[test]
+fn a_builtin_call_still_assigns_a_classical_value() {
+    assert_same_stream(
+        "float t = 0.5;\nfloat y = 0;\ny = sin(t);\nrx(y) q[0];",
+        "rx(sin(0.5)) q[0];",
+    );
+}
+
+#[test]
+fn a_def_needing_more_than_a_guarded_region_declines_by_name() {
+    let unsupported = [
+        (
+            "def mx(qubit a) -> bit { return measure a; }\nmx(q[0]);",
+            "drops its `bit` result",
+        ),
+        ("def f(qubit a) { return; h a; }", "before the end"),
+        (
+            "def f(qubit a, bit b) { if (b) { return; } h a; }",
+            "before the end",
+        ),
+        (
+            "def f(qubit a, bit b) { b = measure a; }",
+            "passed by value",
+        ),
+        (
+            "def f(qubit a) { c[0] = measure a; }",
+            "only through its result",
+        ),
+        (
+            "def f(qubit a) { bit m; m = measure a; if (m) x a; }",
+            "does not return it",
+        ),
+        ("def f(bit b) -> bit { return b; }", "bit parameter"),
+        ("def f(qubit a) -> bit { return 1; }", "return of `1`"),
+        ("def f(qubit a) -> int { return 1; }", "returning `int`"),
+        (
+            "def f(bit b, qubit a) -> bit { bit r; r = measure a; if (b) x a; return r; }\n\
+             c[0] = f(c[0], q[0]);",
+            "passing a bit it also assigns",
+        ),
+        ("return;", "outside a def"),
+    ];
+    for (body, needle) in unsupported {
+        match parse_err(body) {
+            PrismError::UnsupportedConstruct { construct, .. } => {
+                assert!(construct.contains(needle), "`{body}`: {construct}");
+            }
+            other => panic!("`{body}` should decline by name, got {other:?}"),
+        }
+    }
+
+    let malformed = [
+        (
+            "def mx(qubit a) -> bit { return measure a; }\nc = mx(q[0]);",
+            "returns 1 bit(s)",
+        ),
+        (
+            "def f(qubit a) { h a; }\nc[0] = f(q[0]);",
+            "declares no result",
+        ),
+        (
+            "def f(qubit a) -> bit { h a; }",
+            "does not end by returning",
+        ),
+        (
+            "def f(qubit a) { return measure a; }",
+            "declares no `-> bit`",
+        ),
+        (
+            "def f(bit[2] b, qubit a) { if (b == 1) x a; }\nf(c[0], q[0]);",
+            "takes 2 bit(s)",
+        ),
+        ("def f(bit b, qubit a) { h a; }\nf(1, q[0]);", "needs a bit"),
+        (
+            "def f(qubit a) -> bit { bit[2] r; r[0] = measure a; return r; }\nc[0] = f(q[0]);",
+            "declares 2 bit(s)",
+        ),
+        ("float y = 0;\ny = sin(q[0]);", "where a value belongs"),
+    ];
+    for (body, needle) in malformed {
+        match parse_err(body) {
+            PrismError::Parse { message, .. } => {
+                assert!(message.contains(needle), "`{body}`: {message}");
+            }
+            other => panic!("`{body}` should be a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_guide_subroutine_example_inlines_to_its_expansion() {
+    let guide = "OPENQASM 3.0;\nqubit[3] q;\nbit[3] c;\n\
+                 def mx(qubit a) -> bit {\n  h a;\n  return measure a;\n}\n\
+                 def herald(qubit a, qubit flag) -> bit {\n  bit r;\n  r = measure a;\n  \
+                 if (r) x flag;\n  return r;\n}\n\
+                 def fix(bit b, qubit a) {\n  if (b) z a;\n}\n\
+                 c[0] = mx(q[0]);\nc[1] = herald(q[1], q[2]);\nfix(c[0], q[2]);";
+    let expanded = "OPENQASM 3.0;\nqubit[3] q;\nbit[3] c;\n\
+                    h q[0];\nc[0] = measure q[0];\n\
+                    c[1] = measure q[1];\nif (c[1]) x q[2];\n\
+                    if (c[0]) z q[2];";
+    assert_eq!(
+        format!("{:?}", openqasm::parse(guide).unwrap().instructions),
+        format!("{:?}", openqasm::parse(expanded).unwrap().instructions)
+    );
+}

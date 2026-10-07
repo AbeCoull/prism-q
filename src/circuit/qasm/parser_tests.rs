@@ -254,19 +254,36 @@ fn definitions_keep_their_signatures() {
         }
         other => panic!("{other:?}"),
     }
+    match one("def sub(bit[2] c, qubit a) -> bit { return measure a; }") {
+        StmtKind::DefDef {
+            args,
+            result: Some(result),
+            body,
+            ..
+        } => {
+            assert!(matches!(args[0], DefParam::Bit { width: Some(_), .. }));
+            assert!(result.width.is_none());
+            assert!(matches!(
+                body[0].kind,
+                StmtKind::Return(Some(ReturnValue::Measure(_)))
+            ));
+        }
+        other => panic!("{other:?}"),
+    }
     assert!(matches!(
-        error("def sub(qubit a) -> bit { h a; }"),
+        error("def sub(qubit a) -> int { return 1; }"),
         PrismError::UnsupportedConstruct { .. }
     ));
     assert!(matches!(
-        error("def sub(bit c) { }"),
-        PrismError::UnsupportedConstruct { .. }
+        one("c[0] = sub(c[1], q[0]);"),
+        StmtKind::CallAssign(_)
     ));
+    assert!(matches!(one("x = sin(t) + 1;"), StmtKind::Assign { .. }));
 }
 
 #[test]
 fn unimplemented_keywords_are_rejected_by_name() {
-    for keyword in ["defcal", "extern", "opaque", "while", "return", "break"] {
+    for keyword in ["defcal", "extern", "opaque", "while", "break"] {
         let source = format!("{keyword} x;");
         match error(&source) {
             PrismError::UnsupportedConstruct { construct, .. } => {

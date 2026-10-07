@@ -482,6 +482,46 @@ fn measure_split_rows_reach_the_factored_backend() {
     }
 }
 
+// `factored/sampling` prices the factored backend's own draw over its
+// sub-states. The decomposed route would sample per block on separate
+// backends and never call it, and a run that merged the pair into the chain
+// would leave one block and price the single-block case instead.
+#[test]
+fn factored_sampling_rows_draw_from_two_sub_states() {
+    for n in [16usize, 20, 24] {
+        let circuit = circuits::partially_independent_circuit(n, 5, SEED);
+        let mut measured = circuit.clone();
+        measured.measure_all();
+
+        let shots = sim::simulate(&measured)
+            .backend(BackendKind::Factored)
+            .seed(SEED)
+            .shots(1_000)
+            .unwrap();
+        assert_eq!(
+            shots.metadata.backend,
+            ResolvedBackend::Factored,
+            "factored/sampling/{n}q: the shots ran on {:?}",
+            shots.metadata.backend
+        );
+
+        let mut backend = prism_q::FactoredBackend::new(SEED);
+        sim::run_on(&mut backend, &circuit).unwrap();
+        let Some(prism_q::sim::Probabilities::Factored { blocks, .. }) =
+            backend.block_probabilities()
+        else {
+            panic!("factored/sampling/{n}q: the run collapsed to a single block");
+        };
+        let mut widths: Vec<u32> = blocks.iter().map(|b| b.mask.count_ones()).collect();
+        widths.sort_unstable();
+        assert_eq!(
+            widths,
+            vec![2, n as u32 - 2],
+            "factored/sampling/{n}q: the sampler must draw over the pair and the chain"
+        );
+    }
+}
+
 // `stabilizer/random_pairs` prices the batched cross-word kernel, whose buffer
 // takes only pairs split across two tableau words and runs the batched form
 // once four of them are held. That the fixture feeds it is what an external

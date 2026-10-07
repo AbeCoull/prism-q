@@ -3434,6 +3434,34 @@ fn bench_factored_partial_independence(c: &mut Criterion) {
     group.finish();
 }
 
+/// The factored backend's native shot sampler on the `partial_independence`
+/// fixture, so the run ends on two sub-states (the `n - 2` chain and the pair)
+/// and `sample_basis_states` draws one index per block per shot. The decomposed
+/// route never reaches this terminal. The 1k row is mostly the run and the CDF
+/// build over the wide block, which the 20k row shares, so the gap between the
+/// two is the draw loop.
+fn bench_factored_sampling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored/sampling");
+    configure_group(&mut group);
+
+    for &n in &[16, 20, 24] {
+        let circuit = measure_all(&circuits::partially_independent_circuit(n, 5, SEED));
+        for &shots in &[1_000, 20_000] {
+            group.bench_with_input(
+                BenchmarkId::new(format!("{n}q"), shots),
+                &circuit,
+                |b, circ| {
+                    b.iter(|| {
+                        black_box(run_shots_with(BackendKind::Factored, circ, shots, SEED).unwrap())
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 /// A mid-circuit collapse of half a merged chain, followed by layers on the
 /// surviving half. The collapsed qubits are product with the rest exactly, so
 /// the rows price whatever the factored state still carries for them.
@@ -5128,6 +5156,7 @@ criterion_group! {
     bench_factored_sim_only,
     bench_factored_dynamic,
     bench_factored_partial_independence,
+    bench_factored_sampling,
     bench_factored_measure_split,
     bench_factored_dense,
     bench_factored_noise_kraus,

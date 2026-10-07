@@ -146,7 +146,8 @@ All seeded with `0xDEAD_BEEF` for reproducibility.
 - **Sparse walk** (`circuits::sparse_walk_circuit`): H on the low k qubits,
   then layers of seeded diagonal phases and basis permutations over the whole
   register, holding the amplitude map at exactly 2^k entries. The
-  `sparse/walk_k12` and `sparse/sampling_k12` rows fix k = 12; the
+  `sparse/walk_k12`, `sparse/sampling_k12` and `sparse/noisy_walk_k12` rows fix
+  k = 12, the last under trajectory noise that can only shrink the map; the
   `sparse/densify` rows sweep k at 20 qubits against a dense arm on the same
   workload, tracing the load-factor crossover. The entry count and the routing
   (the register must not split to the decomposed path) are pinned in

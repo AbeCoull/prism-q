@@ -1729,6 +1729,37 @@ fn bench_sparse_sampling_populated(c: &mut Criterion) {
     group.finish();
 }
 
+/// Trajectory noise on the map, over the `sparse/sampling_k12` fixture. The
+/// damping jump is neither diagonal nor antidiagonal, so it takes the general
+/// branch of the single-qubit kernel, and the no-jump branch is a sub-unit
+/// diagonal that pays a prune pass; both send a basis state to at most one, so
+/// the map stays at or under 4096 entries. The depolarizing arm runs the same
+/// trajectory engine with X, Y and Z alone, none of which reach either path,
+/// so it is the group's control.
+fn bench_sparse_noisy_walk(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sparse/noisy_walk_k12");
+    configure_group(&mut group);
+
+    for &n in &[32, 64] {
+        let circuit = measure_all(&circuits::sparse_walk_circuit(n, 12, 2, SEED));
+        let damping = prism_q::NoiseModel::with_amplitude_damping(&circuit, 0.01);
+        let depolarizing = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        for (arm, noise) in [
+            ("amplitude_damping", &damping),
+            ("depolarizing", &depolarizing),
+        ] {
+            group.bench_with_input(BenchmarkId::new(arm, n), &circuit, |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        run_shots_with_noise(BackendKind::Sparse, circ, noise, 32, SEED).unwrap(),
+                    )
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 const NATIVE_COUNTS_SHOTS: usize = 100_000;
 
 /// `sample_counts` on the native samplers, over the `mps/sampling` and sparse
@@ -5085,6 +5116,7 @@ criterion_group! {
     bench_sparse_densify,
     bench_sparse_sampling,
     bench_sparse_sampling_populated,
+    bench_sparse_noisy_walk,
     bench_native_counts,
     // MPS
     bench_mps_scaling,

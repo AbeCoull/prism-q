@@ -282,6 +282,81 @@ fn sparse_densify_rows_pin_entry_ladder() {
     assert_resolves("densify/dense/8", BackendKind::Statevector, &circuit);
 }
 
+// `sparse/noisy_walk_k12` prices trajectory noise at a bounded map. Trajectories
+// apply the stream raw so noise events stay aligned to it, so the pin reads the
+// unfused stream. The damping row's bound is checked at its worst case: a jump
+// after every gate on every target the jump can reach, which only ever merges
+// or drops entries.
+#[test]
+fn sparse_noisy_walk_rows_stay_bounded_on_the_map() {
+    use num_complex::Complex64;
+
+    let zero = Complex64::new(0.0, 0.0);
+    for n in [32usize, 64] {
+        let circuit = circuits::sparse_walk_circuit(n, 12, 2, SEED);
+
+        let mut backend = prism_q::SparseBackend::new(SEED);
+        backend.init(n, 0).unwrap();
+        let mut peak = 0;
+        for instruction in &circuit.instructions {
+            backend.apply(instruction).unwrap();
+            peak = peak.max(backend.entry_count());
+        }
+        assert_eq!(
+            (peak, backend.entry_count()),
+            (1 << 12, 1 << 12),
+            "noisy_walk_k12/{n}: the raw stream no longer holds a pinned 4096 entries"
+        );
+
+        let mut backend = prism_q::SparseBackend::new(SEED);
+        backend.init(n, 0).unwrap();
+        let mut peak = 0;
+        for instruction in &circuit.instructions {
+            backend.apply(instruction).unwrap();
+            let prism_q::Instruction::Gate { targets, .. } = instruction else {
+                continue;
+            };
+            for &q in targets.iter() {
+                let p1 = backend.qubit_probability(q).unwrap();
+                if p1 > 1e-12 {
+                    let jump = [[zero, Complex64::new(p1.sqrt().recip(), 0.0)], [zero, zero]];
+                    backend.apply_1q_matrix(q, &jump).unwrap();
+                }
+                peak = peak.max(backend.entry_count());
+            }
+        }
+        assert!(
+            peak <= 1 << 12,
+            "noisy_walk_k12/{n}: the damping jump grew the map to {peak} entries"
+        );
+
+        let mut measured = circuit.clone();
+        measured.measure_all();
+        for (label, noise) in [
+            (
+                "amplitude_damping",
+                NoiseModel::with_amplitude_damping(&measured, 0.01),
+            ),
+            (
+                "depolarizing",
+                NoiseModel::uniform_depolarizing(&measured, 0.01),
+            ),
+        ] {
+            let shots = sim::simulate(&measured)
+                .backend(BackendKind::Sparse)
+                .noise(&noise)
+                .seed(SEED)
+                .shots(4)
+                .unwrap();
+            assert_eq!(
+                shots.metadata.backend,
+                ResolvedBackend::Sparse,
+                "noisy_walk_k12/{label}/{n}"
+            );
+        }
+    }
+}
+
 // `sparse/sampling` prices shot conversion on a near-empty map; the GHZ
 // chain keeps the register connected, unlike the split fixture it replaced.
 #[test]

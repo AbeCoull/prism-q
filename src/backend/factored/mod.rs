@@ -1040,8 +1040,7 @@ impl Backend for FactoredBackend {
             if group.is_empty() {
                 continue;
             }
-            let norm = crate::backend::state_norm_sqr(&sub.state);
-            let values = crate::sim::pauli_expectations_from_masks(&sub.state, &group, norm);
+            let (values, _) = crate::sim::pauli_expectations_from_masks(&sub.state, &group);
             for (&index, value) in rows.iter().zip(values) {
                 products[index] *= value;
             }

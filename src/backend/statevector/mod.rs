@@ -1060,12 +1060,7 @@ impl Backend for StatevectorBackend {
         if let Some(values) = self.pauli_expectations_on_device(&masks) {
             return values;
         }
-        let norm = crate::backend::state_norm_sqr(&self.state);
-        Ok(crate::sim::pauli_expectations_from_masks(
-            &self.state,
-            &masks,
-            norm,
-        ))
+        Ok(crate::sim::pauli_expectations_from_masks(&self.state, &masks).0)
     }
 
     fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {

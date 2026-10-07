@@ -1523,8 +1523,7 @@ fn statevector_expectations(
         .iter()
         .map(|o| crate::sim::pauli_masks(o, prefix.num_qubits).unwrap())
         .collect();
-    let norm: f64 = sv.state_vector().iter().map(|a| a.norm_sqr()).sum();
-    crate::sim::pauli_expectations_from_masks(sv.state_vector(), &masks, norm)
+    crate::sim::pauli_expectations_from_masks(sv.state_vector(), &masks).0
 }
 
 fn tableau_expectations(

@@ -1505,8 +1505,7 @@ fn expectation_values_from_initial_state(
     }
 
     let evolved = backend.export_statevector()?;
-    let norm = crate::backend::state_norm_sqr(&evolved);
-    let values = pauli_expectations_from_masks(&evolved, &masks, norm);
+    let (values, _) = pauli_expectations_from_masks(&evolved, &masks);
     Ok(analytic_expectations(values, metadata))
 }
 
@@ -3362,8 +3361,7 @@ fn grouped_expectation_on_state(
         Some(values) => (values?, None),
         None => {
             let state = backend.state_vector();
-            let norm = crate::backend::state_norm_sqr(state);
-            let values = pauli_expectations_from_masks(state, &combined, norm);
+            let (values, norm) = pauli_expectations_from_masks(state, &combined);
             (values, Some((state, norm)))
         }
     };
@@ -3802,11 +3800,7 @@ fn expectation_values_statevector(
 
     let values = match backend.pauli_expectations_on_device(&masks) {
         Some(values) => values?,
-        None => {
-            let state = backend.state_vector();
-            let norm = crate::backend::state_norm_sqr(state);
-            pauli_expectations_from_masks(state, &masks, norm)
-        }
+        None => pauli_expectations_from_masks(backend.state_vector(), &masks).0,
     };
     let metadata = backend_metadata(&backend);
     Ok(analytic_expectations(values, metadata))

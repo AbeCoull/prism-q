@@ -33,7 +33,7 @@ const QEC_NOISE_UNIT_SHOTS: usize = 8192;
 const QEC_PARALLEL_MIN_UNITS: usize = 2;
 
 /// Expected faults per run below which noise units run on the calling thread. Faults
-/// carry the work inside a unit; output rows are allocated and filled outside it.
+/// carry the work inside a unit, including the first touch of each page they land on.
 #[cfg(feature = "parallel")]
 const QEC_PARALLEL_MIN_FIRINGS: f64 = 1e4;
 
@@ -178,19 +178,19 @@ pub(super) struct QecParityNoiseEvent {
 }
 
 impl QecParityNoise {
-    /// Apply noise for all `shots` shots to `rows` of `row_words` words each, drawing
-    /// exactly as the record path does.
-    pub(super) fn apply(&self, rows: &mut [u64], row_words: usize, shots: usize) {
+    /// Zeroed rows of `row_words` words for `num_rows` outputs with the noise of all
+    /// `shots` shots XORed in, drawn exactly as the record path draws.
+    pub(super) fn sample_rows(&self, num_rows: usize, row_words: usize, shots: usize) -> Vec<u64> {
+        let mut rows = vec![0u64; num_rows * row_words];
         let units = shots.div_ceil(QEC_NOISE_UNIT_SHOTS);
         if units == 0 || row_words == 0 {
-            return;
+            return rows;
         }
-        let num_rows = rows.len() / row_words;
         #[cfg(feature = "parallel")]
         {
             let rows_len = rows.len();
             let rows = SendPtrU64(rows.as_mut_ptr());
-            let land = move |offset: usize, bit: u64| {
+            let flip = move |offset: usize, bit: u64| {
                 debug_assert!(offset < rows_len);
                 // SAFETY: `offset` is an output row's word for a shot of the unit being
                 // landed, so it lies in `rows`. Unit `unit` writes only words
@@ -199,34 +199,41 @@ impl QecParityNoise {
                 // same word, and within a unit each block of rows lands on one thread.
                 unsafe { rows.xor_word(offset, bit) }
             };
+            let clear = move |offset: usize| {
+                debug_assert!(offset < rows_len);
+                // SAFETY: `offset` is a word of the unit being landed, in `rows` and
+                // written by one thread only, for the reasons given in `flip`.
+                unsafe { rows.write_word(offset, 0) }
+            };
             if qec_noise_units_in_parallel(
                 units,
                 shots,
                 self.events.iter().map(|event| &event.draw),
             ) {
-                (0..units)
-                    .into_par_iter()
-                    .for_each(|unit| self.scatter_unit(unit, shots, row_words, num_rows, &land));
+                (0..units).into_par_iter().for_each(|unit| {
+                    self.scatter_unit(unit, shots, row_words, num_rows, &flip, &clear)
+                });
             } else {
                 for unit in 0..units {
-                    self.scatter_unit(unit, shots, row_words, num_rows, &land);
+                    self.scatter_unit(unit, shots, row_words, num_rows, &flip, &clear);
                 }
             }
         }
         #[cfg(not(feature = "parallel"))]
         {
-            let cells = std::cell::Cell::from_mut(rows).as_slice_of_cells();
-            let land = |offset: usize, bit: u64| cells[offset].set(cells[offset].get() ^ bit);
+            let cells = std::cell::Cell::from_mut(rows.as_mut_slice()).as_slice_of_cells();
+            let flip = |offset: usize, bit: u64| cells[offset].set(cells[offset].get() ^ bit);
+            let clear = |offset: usize| cells[offset].set(0);
             for unit in 0..units {
-                self.scatter_unit(unit, shots, row_words, num_rows, &land);
+                self.scatter_unit(unit, shots, row_words, num_rows, &flip, &clear);
             }
         }
+        rows
     }
 
     /// Draw unit `unit` into one bucket of flips per block of output rows, then land the
     /// buckets, so the words a bucket's flips touch stay in cache: the rows span far more
     /// memory than the cache and a fault's outputs are spread over all of it.
-    /// `flip(offset, bit)` XORs `bit` into `rows[offset]`.
     fn scatter_unit(
         &self,
         unit: usize,
@@ -234,25 +241,32 @@ impl QecParityNoise {
         row_words: usize,
         num_rows: usize,
         flip: &impl LandFlip,
+        clear: &impl LandClear,
     ) {
         let first_word = unit * QEC_NOISE_UNIT_SHOTS / 64;
-        let mut buckets: Vec<Vec<u64>> = (0..num_rows.div_ceil(QEC_SCATTER_BLOCK_ROWS))
-            .map(|_| Vec::new())
+        let span = UnitSpan {
+            first_word,
+            words: (row_words - first_word).min(QEC_NOISE_UNIT_SHOTS / 64),
+            row_words,
+            num_rows,
+        };
+        let mut buckets: Vec<LandBucket> = (0..num_rows.div_ceil(QEC_SCATTER_BLOCK_ROWS))
+            .map(|_| LandBucket::default())
             .collect();
         let mut buffered = 0usize;
         self.draw_unit(unit, shots, |output, word, bit| {
-            buckets[output / QEC_SCATTER_BLOCK_ROWS].push(
+            buckets[output / QEC_SCATTER_BLOCK_ROWS].flips.push(
                 ((output as u64) << 32)
                     | (((word - first_word) as u64) << 6)
                     | u64::from(bit.trailing_zeros()),
             );
             buffered += 1;
             if buffered == QEC_SCATTER_FLUSH {
-                land_buckets(&mut buckets, first_word, row_words, flip);
+                land_buckets(&mut buckets, span, flip, clear);
                 buffered = 0;
             }
         });
-        land_buckets(&mut buckets, first_word, row_words, flip);
+        land_buckets(&mut buckets, span, flip, clear);
     }
 
     /// Draw unit `unit` of a `shots`-shot run, calling `flip(output, word, bit)` for every
@@ -301,8 +315,8 @@ impl QecParityNoise {
     }
 }
 
-/// The flip sink of [`QecParityNoise::scatter_unit`]: shared across the pool's threads
-/// when there is one, so a unit's blocks land in parallel.
+/// `flip(offset, bit)` XORs `bit` into word `offset` of the rows, shared across the
+/// pool's threads when there is one, so a unit's blocks land in parallel.
 #[cfg(feature = "parallel")]
 trait LandFlip: Fn(usize, u64) + Sync {}
 #[cfg(feature = "parallel")]
@@ -312,35 +326,82 @@ trait LandFlip: Fn(usize, u64) {}
 #[cfg(not(feature = "parallel"))]
 impl<F: Fn(usize, u64)> LandFlip for F {}
 
-/// Land every bucket's flips, a bucket per thread when there is a pool and enough of
-/// them, then empty the buckets. An entry packs `output << 32 | unit_word << 6 | bit`.
-fn land_buckets(
-    buckets: &mut [Vec<u64>],
+/// `clear(offset)` writes zero to word `offset` of the rows without reading it.
+#[cfg(feature = "parallel")]
+trait LandClear: Fn(usize) + Sync {}
+#[cfg(feature = "parallel")]
+impl<F: Fn(usize) + Sync> LandClear for F {}
+#[cfg(not(feature = "parallel"))]
+trait LandClear: Fn(usize) {}
+#[cfg(not(feature = "parallel"))]
+impl<F: Fn(usize)> LandClear for F {}
+
+/// Words `first_word..first_word + words` of each of `num_rows` rows of `row_words`
+/// words: the part of the rows one noise unit writes.
+#[derive(Clone, Copy)]
+struct UnitSpan {
     first_word: usize,
+    words: usize,
     row_words: usize,
+    num_rows: usize,
+}
+
+/// Flips drawn for one block of rows, packed `output << 32 | unit_word << 6 | bit`, and
+/// whether the block's span has been cleared.
+#[derive(Default)]
+struct LandBucket {
+    flips: Vec<u64>,
+    cleared: bool,
+}
+
+/// Land every bucket's flips, a bucket per thread when there is a pool and enough of
+/// them, then empty the buckets. Before its first flip lands, a block's span is cleared
+/// in row order: the rows are freshly zeroed, so this only faults the pages in, and a
+/// page faulted in by a plain write costs less than one faulted in by a flip's read.
+fn land_buckets(
+    buckets: &mut [LandBucket],
+    span: UnitSpan,
     flip: &impl LandFlip,
+    clear: &impl LandClear,
 ) {
-    let land_bucket = |bucket: &[u64]| {
-        for &packed in bucket {
+    let land_bucket = |block: usize, bucket: &mut LandBucket| {
+        if bucket.flips.is_empty() {
+            return;
+        }
+        if !bucket.cleared {
+            bucket.cleared = true;
+            let first_row = block * QEC_SCATTER_BLOCK_ROWS;
+            for row in first_row..(first_row + QEC_SCATTER_BLOCK_ROWS).min(span.num_rows) {
+                let base = row * span.row_words + span.first_word;
+                clear(base);
+                clear(base + span.words - 1);
+            }
+        }
+        for &packed in &bucket.flips {
             let output = (packed >> 32) as usize;
             let word = ((packed >> 6) & 0x03FF_FFFF) as usize;
             flip(
-                output * row_words + first_word + word,
+                output * span.row_words + span.first_word + word,
                 1u64 << (packed & 63),
             );
         }
+        bucket.flips.clear();
     };
     #[cfg(feature = "parallel")]
-    if buckets.iter().map(Vec::len).sum::<usize>() >= QEC_PARALLEL_LAND_FLIPS {
-        buckets.par_iter_mut().for_each(|bucket| {
-            land_bucket(bucket);
-            bucket.clear();
-        });
+    if buckets
+        .iter()
+        .map(|bucket| bucket.flips.len())
+        .sum::<usize>()
+        >= QEC_PARALLEL_LAND_FLIPS
+    {
+        buckets
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(block, bucket)| land_bucket(block, bucket));
         return;
     }
-    for bucket in buckets {
-        land_bucket(bucket);
-        bucket.clear();
+    for (block, bucket) in buckets.iter_mut().enumerate() {
+        land_bucket(block, bucket);
     }
 }
 

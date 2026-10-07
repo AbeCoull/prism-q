@@ -1381,6 +1381,58 @@ fn qec_noise_ignores_chunk_size_and_record_path() {
     }
 }
 
+// Three qubits in four are flipped before readout, so 900 of 1,200 detectors and the
+// first observable read one without noise. At 20,000 shots those rows span more than
+// 2^18 words and every unit lands enough X errors to spread its flips over the pool.
+#[test]
+fn qec_dropped_records_match_kept_when_noiseless_parities_are_one() {
+    let qubits = 1_200;
+    let all: Vec<String> = (0..qubits).map(|q| q.to_string()).collect();
+    let flipped: Vec<String> = (0..qubits)
+        .filter(|q| q % 4 != 3)
+        .map(|q| q.to_string())
+        .collect();
+    for p in [0.0, 0.01] {
+        let mut text = format!(
+            "X {}\nX_ERROR({p}) {}\nM {}\n",
+            flipped.join(" "),
+            all.join(" "),
+            all.join(" ")
+        );
+        for q in 0..qubits {
+            text.push_str(&format!("DETECTOR rec[-{}]\n", qubits - q));
+        }
+        text.push_str(&format!(
+            "OBSERVABLE_INCLUDE(0) rec[-{qubits}]\nOBSERVABLE_INCLUDE(1) rec[-{}]\n",
+            qubits - 3
+        ));
+        let program = parse_qec_program(&text).unwrap();
+        for shots in [2_017, 20_000] {
+            let dropped = run_with(&program, shots, None, false);
+            let kept = run_with(&program, shots, None, true);
+            assert_same_parities(&dropped, &kept, &format!("p {p} shots {shots}"));
+            let past_last_shot = u64::MAX << (shots % 64);
+            for detector in 0..qubits {
+                let words = dropped.detectors.meas_words(detector);
+                assert_eq!(
+                    words[words.len() - 1] & past_last_shot,
+                    0,
+                    "detector {detector}"
+                );
+            }
+            if p == 0.0 {
+                for shot in dropped.detectors.to_shots() {
+                    assert!(shot.iter().enumerate().all(|(q, &bit)| bit == (q % 4 != 3)));
+                }
+                assert_eq!(dropped.logical_errors, vec![shots as u64, 0]);
+            } else {
+                assert!(dropped.logical_errors[0] < shots as u64);
+                assert!(dropped.logical_errors[1] > 0);
+            }
+        }
+    }
+}
+
 #[test]
 fn qec_noisy_records_ignore_chunk_size_when_noiseless_records_are_fixed() {
     let program = qec_common::repetition_memory(5, 5, QecNoise::Depolarize1(0.01), 1);

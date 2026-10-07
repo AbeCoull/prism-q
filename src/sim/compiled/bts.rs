@@ -2,6 +2,8 @@
 //! 64-shot batch and forms each measurement row as the XOR of its parity
 //! columns' words, emitting measurement-major packed shots.
 
+use std::marker::PhantomData;
+
 #[cfg(feature = "parallel")]
 use super::SendPtrU64;
 use super::parity::SparseParity;
@@ -13,6 +15,90 @@ use super::rng::{Xoshiro256PlusPlus, Xoshiro256PlusPlusLanes};
 use super::shot_tail_mask;
 
 pub(super) const BTS_BATCH_SHOTS: usize = 65536;
+
+struct BtsOutput<'a> {
+    ptr: *mut u64,
+    rows: usize,
+    stride: usize,
+    offset: usize,
+    words: usize,
+    borrow: PhantomData<&'a mut [u64]>,
+}
+
+impl<'a> BtsOutput<'a> {
+    fn contiguous(output: &'a mut [u64], rows: usize, words: usize) -> Self {
+        assert_eq!(Some(output.len()), rows.checked_mul(words));
+        Self {
+            ptr: output.as_mut_ptr(),
+            rows,
+            stride: words,
+            offset: 0,
+            words,
+            borrow: PhantomData,
+        }
+    }
+
+    /// Zero the exclusive word range in each measurement row.
+    ///
+    /// # Safety
+    /// Every range `ptr + row * stride + offset .. + words` must be valid for writes and
+    /// exclusively borrowed for `'a`; the ranges must not overlap.
+    unsafe fn new(ptr: *mut u64, rows: usize, stride: usize, offset: usize, words: usize) -> Self {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            if stride == words && offset == 0 {
+                ptr.write_bytes(0, rows * words);
+            } else {
+                for row in 0..rows {
+                    ptr.add(row * stride + offset).write_bytes(0, words);
+                }
+            }
+        }
+        Self {
+            ptr,
+            rows,
+            stride,
+            offset,
+            words,
+            borrow: PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    fn row_mut(&mut self, row: usize) -> &mut [u64] {
+        assert!(row < self.rows);
+        // SAFETY: Both constructors retain an initialized, exclusive range for every row.
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.ptr.add(row * self.stride + self.offset),
+                self.words,
+            )
+        }
+    }
+
+    fn apply_ref_bits(&mut self, ref_bits: &[u64], num_shots: usize) {
+        if self.stride == self.words && self.offset == 0 {
+            // SAFETY: The initialized exclusive rows are contiguous at this stride.
+            let output =
+                unsafe { std::slice::from_raw_parts_mut(self.ptr, self.rows * self.words) };
+            apply_ref_bits_meas_major(output, ref_bits, self.rows, self.words, num_shots);
+        } else {
+            let words = self.words;
+            for row in 0..self.rows {
+                let bit = (ref_bits[row / 64] >> (row % 64)) & 1;
+                apply_ref_bits_meas_major(self.row_mut(row), &[bit], 1, words, num_shots);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl SendPtrU64 {
+    #[inline(always)]
+    fn as_mut_ptr(self) -> *mut u64 {
+        self.0
+    }
+}
 
 #[inline(always)]
 fn xor_reduce_scalar(cols: &[u32], random_bits: &[u64]) -> u64 {
@@ -63,6 +149,10 @@ pub(super) fn bts_batched(
     rank: usize,
 ) -> Vec<u64> {
     let num_meas = sparse.num_rows;
+    let total_len = num_meas
+        .checked_mul(total_s_words)
+        .expect("BTS output size overflows usize");
+    let mut output: Vec<u64> = Vec::with_capacity(total_len);
 
     #[cfg(feature = "parallel")]
     {
@@ -94,17 +184,6 @@ pub(super) fn bts_batched(
                     .filter(|(s, e)| s < e)
                     .collect();
 
-                let total_len = num_meas * total_s_words;
-                #[allow(clippy::uninit_vec)]
-                let mut output = {
-                    let mut v = Vec::with_capacity(total_len);
-                    // SAFETY: All elements are written before read. The parallel chunks
-                    // cover [0, num_shots) with 64-aligned boundaries, mapping to all
-                    // total_s_words words per measurement. Each thread writes disjoint regions.
-                    unsafe { v.set_len(total_len) };
-                    v
-                };
-
                 {
                     use rayon::prelude::*;
                     let ptr = SendPtrU64(output.as_mut_ptr());
@@ -124,48 +203,39 @@ pub(super) fn bts_batched(
                                 let batch_shots = (chunk_shots - chunk_done).min(BTS_BATCH_SHOTS);
                                 let batch_s_words = batch_shots.div_ceil(64);
                                 let batch_offset = word_offset + chunk_done / 64;
-                                let batch_data = bts_single_pass(
+                                // SAFETY: Shot chunks have disjoint, 64-aligned word ranges
+                                // in every row. Each batch stays in its worker's range and
+                                // the allocation remains live until all workers finish.
+                                let mut batch_output = unsafe {
+                                    BtsOutput::new(
+                                        ptr.as_mut_ptr(),
+                                        nm,
+                                        total_sw,
+                                        batch_offset,
+                                        batch_s_words,
+                                    )
+                                };
+                                sample_bts_into(
                                     sparse,
                                     batch_shots,
                                     ref_bits,
                                     &mut thread_rng,
                                     rank,
+                                    &mut batch_output,
                                 );
-
-                                // SAFETY: Each thread writes to non-overlapping regions.
-                                // shots_per_thread is 64-aligned, so word_offset ranges are disjoint.
-                                // For measurement m, region [m*total_sw + batch_offset .. + batch_s_words]
-                                // does not overlap with any other thread's region.
-                                unsafe {
-                                    for m in 0..nm {
-                                        let src = batch_data
-                                            [m * batch_s_words..(m + 1) * batch_s_words]
-                                            .as_ptr();
-                                        let dst_start = m * total_sw + batch_offset;
-                                        ptr.write_slice(dst_start, src, batch_s_words);
-                                    }
-                                }
 
                                 chunk_done += batch_shots;
                             }
                         });
                 }
 
+                // SAFETY: The completed batches initialized every word of every row.
+                unsafe { output.set_len(total_len) };
                 return output;
             }
         }
     }
 
-    let total_len = num_meas * total_s_words;
-    #[allow(clippy::uninit_vec)]
-    let mut output = {
-        let mut v = Vec::with_capacity(total_len);
-        // SAFETY: All elements are written before read. The sequential batches cover
-        // [0, num_shots) in BTS_BATCH_SHOTS increments, writing all total_s_words
-        // words per measurement via copy_from_slice.
-        unsafe { v.set_len(total_len) };
-        v
-    };
     let mut shots_done = 0usize;
 
     while shots_done < num_shots {
@@ -173,17 +243,24 @@ pub(super) fn bts_batched(
         let batch_s_words = batch_shots.div_ceil(64);
         let word_offset = shots_done / 64;
 
-        let batch_data = bts_single_pass(sparse, batch_shots, ref_bits, rng, rank);
-
-        for m in 0..num_meas {
-            let src = &batch_data[m * batch_s_words..(m + 1) * batch_s_words];
-            let dst_start = m * total_s_words + word_offset;
-            output[dst_start..dst_start + batch_s_words].copy_from_slice(src);
-        }
+        // SAFETY: Every batch owns a disjoint word range in each allocated row,
+        // and no reference into output survives the batch.
+        let mut batch_output = unsafe {
+            BtsOutput::new(
+                output.as_mut_ptr(),
+                num_meas,
+                total_s_words,
+                word_offset,
+                batch_s_words,
+            )
+        };
+        sample_bts_into(sparse, batch_shots, ref_bits, rng, rank, &mut batch_output);
 
         shots_done += batch_shots;
     }
 
+    // SAFETY: The completed batches initialized every word of every row.
+    unsafe { output.set_len(total_len) };
     output
 }
 
@@ -194,11 +271,32 @@ pub(super) fn sample_bts_meas_major(
     rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
+    let words = num_shots.div_ceil(64);
+    let len = sparse
+        .num_rows
+        .checked_mul(words)
+        .expect("BTS output size overflows usize");
+    let mut output = vec![0; len];
+    let mut dest = BtsOutput::contiguous(&mut output, sparse.num_rows, words);
+    sample_bts_into(sparse, num_shots, ref_bits, rng, rank, &mut dest);
+    output
+}
+
+fn sample_bts_into(
+    sparse: &SparseParity,
+    num_shots: usize,
+    ref_bits: &[u64],
+    rng: &mut Xoshiro256PlusPlus,
+    rank: usize,
+    output: &mut BtsOutput<'_>,
+) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") && num_shots >= 256 {
             // SAFETY: AVX2 detected, all pointer arithmetic bounded by allocation sizes
-            return unsafe { sample_bts_meas_major_avx2(sparse, num_shots, ref_bits, rng, rank) };
+            return unsafe {
+                sample_bts_meas_major_avx2(sparse, num_shots, ref_bits, rng, rank, output)
+            };
         }
     }
 
@@ -206,11 +304,13 @@ pub(super) fn sample_bts_meas_major(
     {
         if num_shots >= 128 {
             // SAFETY: NEON is baseline on aarch64, pointers are valid
-            return unsafe { sample_bts_meas_major_neon(sparse, num_shots, ref_bits, rng, rank) };
+            return unsafe {
+                sample_bts_meas_major_neon(sparse, num_shots, ref_bits, rng, rank, output)
+            };
         }
     }
 
-    sample_bts_meas_major_scalar(sparse, num_shots, ref_bits, rng, rank)
+    sample_bts_meas_major_scalar(sparse, num_shots, ref_bits, rng, rank, output)
 }
 
 /// The portable path, drawing shot word `w` from lane `w % 4` of the four-lane stream
@@ -221,11 +321,10 @@ fn sample_bts_meas_major_scalar(
     ref_bits: &[u64],
     rng: &mut Xoshiro256PlusPlus,
     rank: usize,
-) -> Vec<u64> {
-    let num_meas = sparse.num_rows;
+    output: &mut BtsOutput<'_>,
+) {
     let s_words = num_shots.div_ceil(64);
     let mut lanes = Xoshiro256PlusPlusLanes::from_scalar(rng);
-    let mut meas_major = vec![0u64; num_meas * s_words];
     let mut random_bits = vec![0u64; rank];
 
     for batch in 0..s_words {
@@ -246,12 +345,11 @@ fn sample_bts_meas_major_scalar(
             let m = m as usize;
             let cols = sparse.row_cols(m);
             let acc = xor_reduce_scalar(cols, &random_bits);
-            meas_major[m * s_words + batch] = acc;
+            output.row_mut(m)[batch] = acc;
         }
     }
 
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
-    meas_major
+    output.apply_ref_bits(ref_bits, num_shots);
 }
 
 pub(super) fn apply_ref_bits_meas_major(
@@ -284,16 +382,15 @@ unsafe fn sample_bts_meas_major_avx2(
     ref_bits: &[u64],
     rng: &mut Xoshiro256PlusPlus,
     rank: usize,
-) -> Vec<u64> {
+    output: &mut BtsOutput<'_>,
+) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         use std::arch::x86_64::*;
 
-        let num_meas = sparse.num_rows;
         let s_words = num_shots.div_ceil(64);
         let s_quads = num_shots.div_ceil(256);
 
-        let mut meas_major = vec![0u64; num_meas * s_words];
         let mut vrng = Xoshiro256PlusPlusX4::from_scalar(rng);
 
         let tile = if rank == 0 {
@@ -319,7 +416,8 @@ unsafe fn sample_bts_meas_major_avx2(
                 for &m in &sparse.non_det_rows {
                     let m = m as usize;
                     let cols = sparse.row_cols(m);
-                    let out_base = m * s_words + quad_start * 4;
+                    let row = output.row_mut(m);
+                    let out_base = quad_start * 4;
 
                     match cols.len() {
                         0 => unreachable!(),
@@ -327,7 +425,7 @@ unsafe fn sample_bts_meas_major_avx2(
                             let c0 = cols[0] as usize * tile;
                             for t in 0..tile {
                                 _mm256_storeu_si256(
-                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    row[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
                                     random_tile[c0 + t],
                                 );
                             }
@@ -337,7 +435,7 @@ unsafe fn sample_bts_meas_major_avx2(
                             let c1 = cols[1] as usize * tile;
                             for t in 0..tile {
                                 _mm256_storeu_si256(
-                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    row[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
                                     _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
                                 );
                             }
@@ -348,7 +446,7 @@ unsafe fn sample_bts_meas_major_avx2(
                             let c2 = cols[2] as usize * tile;
                             for t in 0..tile {
                                 _mm256_storeu_si256(
-                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    row[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
                                     _mm256_xor_si256(
                                         _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
                                         random_tile[c2 + t],
@@ -363,7 +461,7 @@ unsafe fn sample_bts_meas_major_avx2(
                             let c3 = cols[3] as usize * tile;
                             for t in 0..tile {
                                 _mm256_storeu_si256(
-                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    row[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
                                     _mm256_xor_si256(
                                         _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
                                         _mm256_xor_si256(random_tile[c2 + t], random_tile[c3 + t]),
@@ -375,7 +473,7 @@ unsafe fn sample_bts_meas_major_avx2(
                             for t in 0..tile {
                                 let a = xor_reduce_avx2_tiled(cols, &random_tile, tile, t);
                                 _mm256_storeu_si256(
-                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    row[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
                                     a,
                                 );
                             }
@@ -388,7 +486,7 @@ unsafe fn sample_bts_meas_major_avx2(
 
             bts_avx2_remainder(
                 sparse,
-                &mut meas_major,
+                output,
                 &mut vrng,
                 &mut random_tile,
                 rank,
@@ -402,7 +500,7 @@ unsafe fn sample_bts_meas_major_avx2(
             let mut random_avx: Vec<__m256i> = vec![_mm256_setzero_si256(); rank];
             bts_avx2_per_quad(
                 sparse,
-                &mut meas_major,
+                output,
                 &mut vrng,
                 &mut random_avx,
                 rank,
@@ -413,8 +511,7 @@ unsafe fn sample_bts_meas_major_avx2(
             );
         }
 
-        apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
-        meas_major
+        output.apply_ref_bits(ref_bits, num_shots);
     }
 }
 
@@ -423,7 +520,7 @@ unsafe fn sample_bts_meas_major_avx2(
 #[allow(clippy::too_many_arguments)]
 unsafe fn bts_avx2_remainder(
     sparse: &SparseParity,
-    meas_major: &mut [u64],
+    output: &mut BtsOutput<'_>,
     vrng: &mut Xoshiro256PlusPlusX4,
     random_tile: &mut [std::arch::x86_64::__m256i],
     rank: usize,
@@ -484,7 +581,7 @@ unsafe fn bts_avx2_remainder(
                     _ => xor_reduce_avx2_tiled(cols, random_tile, tile, 0),
                 };
 
-                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+                let out_ptr = output.row_mut(m)[base_sw..].as_mut_ptr();
                 if words_this_quad == 4 {
                     _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
                 } else {
@@ -504,7 +601,7 @@ unsafe fn bts_avx2_remainder(
 #[allow(clippy::too_many_arguments)]
 unsafe fn bts_avx2_per_quad(
     sparse: &SparseParity,
-    meas_major: &mut [u64],
+    output: &mut BtsOutput<'_>,
     vrng: &mut Xoshiro256PlusPlusX4,
     random_avx: &mut [std::arch::x86_64::__m256i],
     rank: usize,
@@ -573,7 +670,7 @@ unsafe fn bts_avx2_per_quad(
                     _ => xor_reduce_avx2(cols, random_avx),
                 };
 
-                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+                let out_ptr = output.row_mut(m)[base_sw..].as_mut_ptr();
                 if words_this_quad == 4 {
                     _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
                 } else {
@@ -661,16 +758,15 @@ unsafe fn sample_bts_meas_major_neon(
     ref_bits: &[u64],
     rng: &mut Xoshiro256PlusPlus,
     rank: usize,
-) -> Vec<u64> {
+    output: &mut BtsOutput<'_>,
+) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         use std::arch::aarch64::*;
 
-        let num_meas = sparse.num_rows;
         let s_words = num_shots.div_ceil(64);
         let s_pairs = num_shots.div_ceil(128);
 
-        let mut meas_major = vec![0u64; num_meas * s_words];
         // Pair p carries lanes 2(p % 2) and 2(p % 2) + 1 of the four-lane stream.
         let mut vrng = [
             Xoshiro256PlusPlusX2::from_scalar(rng),
@@ -701,7 +797,8 @@ unsafe fn sample_bts_meas_major_neon(
                 for &m in &sparse.non_det_rows {
                     let m = m as usize;
                     let cols = sparse.row_cols(m);
-                    let out_base = m * s_words + pair_start * 2;
+                    let row = output.row_mut(m);
+                    let out_base = pair_start * 2;
 
                     match cols.len() {
                         0 => unreachable!(),
@@ -709,7 +806,7 @@ unsafe fn sample_bts_meas_major_neon(
                             let c0 = cols[0] as usize * tile;
                             for t in 0..tile {
                                 vst1q_u64(
-                                    meas_major[out_base + t * 2..].as_mut_ptr(),
+                                    row[out_base + t * 2..].as_mut_ptr(),
                                     random_tile[c0 + t],
                                 );
                             }
@@ -719,7 +816,7 @@ unsafe fn sample_bts_meas_major_neon(
                             let c1 = cols[1] as usize * tile;
                             for t in 0..tile {
                                 vst1q_u64(
-                                    meas_major[out_base + t * 2..].as_mut_ptr(),
+                                    row[out_base + t * 2..].as_mut_ptr(),
                                     veorq_u64(random_tile[c0 + t], random_tile[c1 + t]),
                                 );
                             }
@@ -730,7 +827,7 @@ unsafe fn sample_bts_meas_major_neon(
                             let c2 = cols[2] as usize * tile;
                             for t in 0..tile {
                                 vst1q_u64(
-                                    meas_major[out_base + t * 2..].as_mut_ptr(),
+                                    row[out_base + t * 2..].as_mut_ptr(),
                                     veorq_u64(
                                         veorq_u64(random_tile[c0 + t], random_tile[c1 + t]),
                                         random_tile[c2 + t],
@@ -745,7 +842,7 @@ unsafe fn sample_bts_meas_major_neon(
                             let c3 = cols[3] as usize * tile;
                             for t in 0..tile {
                                 vst1q_u64(
-                                    meas_major[out_base + t * 2..].as_mut_ptr(),
+                                    row[out_base + t * 2..].as_mut_ptr(),
                                     veorq_u64(
                                         veorq_u64(random_tile[c0 + t], random_tile[c1 + t]),
                                         veorq_u64(random_tile[c2 + t], random_tile[c3 + t]),
@@ -756,7 +853,7 @@ unsafe fn sample_bts_meas_major_neon(
                         _ => {
                             for t in 0..tile {
                                 let a = xor_reduce_neon_tiled(cols, &random_tile, tile, t);
-                                vst1q_u64(meas_major[out_base + t * 2..].as_mut_ptr(), a);
+                                vst1q_u64(row[out_base + t * 2..].as_mut_ptr(), a);
                             }
                         }
                     }
@@ -766,30 +863,13 @@ unsafe fn sample_bts_meas_major_neon(
             }
 
             bts_neon_per_pair(
-                sparse,
-                &mut meas_major,
-                &mut vrng,
-                rank,
-                s_words,
-                s_pairs,
-                pair_start,
-                rem,
+                sparse, output, &mut vrng, rank, s_words, s_pairs, pair_start, rem,
             );
         } else {
-            bts_neon_per_pair(
-                sparse,
-                &mut meas_major,
-                &mut vrng,
-                rank,
-                s_words,
-                s_pairs,
-                0,
-                rem,
-            );
+            bts_neon_per_pair(sparse, output, &mut vrng, rank, s_words, s_pairs, 0, rem);
         }
 
-        apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
-        meas_major
+        output.apply_ref_bits(ref_bits, num_shots);
     }
 }
 
@@ -797,7 +877,7 @@ unsafe fn sample_bts_meas_major_neon(
 #[allow(clippy::too_many_arguments)]
 unsafe fn bts_neon_per_pair(
     sparse: &SparseParity,
-    meas_major: &mut [u64],
+    output: &mut BtsOutput<'_>,
     vrng: &mut [Xoshiro256PlusPlusX2; 2],
     rank: usize,
     s_words: usize,
@@ -857,7 +937,7 @@ unsafe fn bts_neon_per_pair(
                     _ => xor_reduce_neon(cols, &random_neon),
                 };
 
-                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+                let out_ptr = output.row_mut(m)[base_sw..].as_mut_ptr();
                 if words_this_pair == 2 {
                     vst1q_u64(out_ptr, acc);
                 } else {
@@ -941,6 +1021,20 @@ mod tests {
         Xoshiro256PlusPlus::from_chacha(&mut c)
     }
 
+    fn scalar_samples(
+        sparse: &SparseParity,
+        num_shots: usize,
+        ref_bits: &[u64],
+        rng: &mut Xoshiro256PlusPlus,
+        rank: usize,
+    ) -> Vec<u64> {
+        let words = num_shots.div_ceil(64);
+        let mut data = vec![0; sparse.num_rows * words];
+        let mut output = BtsOutput::contiguous(&mut data, sparse.num_rows, words);
+        sample_bts_meas_major_scalar(sparse, num_shots, ref_bits, rng, rank, &mut output);
+        data
+    }
+
     #[test]
     fn xor_reduce_scalar_arities() {
         let bits = vec![0x01u64, 0x02, 0x04, 0x08, 0x10, 0x20];
@@ -981,6 +1075,33 @@ mod tests {
         assert_eq!(out.len(), num_meas * num_shots.div_ceil(64));
     }
 
+    #[test]
+    #[should_panic(expected = "BTS output size overflows usize")]
+    fn batched_output_rejects_size_overflow() {
+        let sparse = SparseParity::from_flip_rows(&[vec![1]], 64);
+        bts_batched(
+            &sparse,
+            usize::MAX,
+            usize::MAX.div_ceil(64),
+            &[0],
+            &mut rng(42),
+            1,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "BTS output size overflows usize")]
+    fn single_pass_output_rejects_size_overflow() {
+        let sparse = SparseParity::from_flip_rows(&[vec![1]], 64);
+        sample_bts_meas_major(&sparse, usize::MAX, &[0], &mut rng(42), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn contiguous_output_rejects_size_overflow() {
+        BtsOutput::contiguous(&mut [], 64, usize::MAX.div_ceil(64));
+    }
+
     // Every path lays the same four xoshiro lanes over the shot words, so the vector
     // kernel and the portable loop agree bitwise at any shot count and rank, and
     // both leave the scalar generator at the same point.
@@ -1007,26 +1128,48 @@ mod tests {
             let ref_bits = vec![setup.next_u64() & mask];
             let mut scalar_rng = rng(99);
             let mut vector_rng = rng(99);
-            let scalar =
-                sample_bts_meas_major_scalar(&sparse, num_shots, &ref_bits, &mut scalar_rng, rank);
+            let scalar = scalar_samples(&sparse, num_shots, &ref_bits, &mut scalar_rng, rank);
+            let words = num_shots.div_ceil(64);
+            let mut vector = vec![0; num_meas * words];
+            let mut output = BtsOutput::contiguous(&mut vector, num_meas, words);
             #[cfg(target_arch = "x86_64")]
-            let vector = {
+            {
                 if !is_x86_feature_detected!("avx2") {
                     return;
                 }
                 // SAFETY: AVX2 detected
                 unsafe {
-                    sample_bts_meas_major_avx2(&sparse, num_shots, &ref_bits, &mut vector_rng, rank)
+                    sample_bts_meas_major_avx2(
+                        &sparse,
+                        num_shots,
+                        &ref_bits,
+                        &mut vector_rng,
+                        rank,
+                        &mut output,
+                    );
                 }
-            };
+            }
             #[cfg(target_arch = "aarch64")]
             // SAFETY: NEON is baseline on aarch64
-            let vector = unsafe {
-                sample_bts_meas_major_neon(&sparse, num_shots, &ref_bits, &mut vector_rng, rank)
-            };
+            unsafe {
+                sample_bts_meas_major_neon(
+                    &sparse,
+                    num_shots,
+                    &ref_bits,
+                    &mut vector_rng,
+                    rank,
+                    &mut output,
+                );
+            }
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-            let vector =
-                sample_bts_meas_major_scalar(&sparse, num_shots, &ref_bits, &mut vector_rng, rank);
+            sample_bts_meas_major_scalar(
+                &sparse,
+                num_shots,
+                &ref_bits,
+                &mut vector_rng,
+                rank,
+                &mut output,
+            );
             assert_eq!(scalar, vector, "{num_shots} shots, rank {rank}");
             assert_eq!(
                 scalar_rng.next_u64(),
@@ -1037,16 +1180,137 @@ mod tests {
     }
 
     #[test]
-    fn bts_batched_matches_single_pass_layout() {
-        let rank = 2;
-        let num_meas = 3;
-        let flip_rows = vec![vec![0b101u64], vec![0b011u64]];
-        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
-        let ref_bits = vec![0u64];
-        let num_shots: usize = 128;
-        let total_s_words = num_shots.div_ceil(64);
-        let mut r = rng(13);
-        let out = bts_batched(&sparse, num_shots, total_s_words, &ref_bits, &mut r, rank);
-        assert_eq!(out.len(), num_meas * total_s_words);
+    fn strided_output_preserves_stream_and_neighbouring_words() {
+        const SENTINEL: u64 = 0x1234_5678_9abc_def0;
+        let num_meas = 73;
+        let ref_bits = [0x0123_4567_89ab_cdef, 0b1_0101_0011];
+        for rank in [0, 7, 70] {
+            let mut setup = rng(42);
+            let flip_rows: Vec<Vec<u64>> = (0..rank)
+                .map(|_| vec![setup.next_u64(), setup.next_u64() & 0x7f])
+                .collect();
+            let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
+            for num_shots in [
+                0usize, 1, 63, 64, 65, 127, 128, 129, 255, 256, 257, 65535, 65536, 65537,
+            ] {
+                let words = num_shots.div_ceil(64);
+                let stride = words + 5;
+                let mut scalar_rng = rng(42);
+                let expected = scalar_samples(&sparse, num_shots, &ref_bits, &mut scalar_rng, rank);
+                let mut data = vec![SENTINEL; num_meas * stride];
+                let mut actual_rng = rng(42);
+                // SAFETY: Each row owns its middle words exclusively; prefix and suffix
+                // sentinels are outside the destination and remain initialized.
+                let mut output =
+                    unsafe { BtsOutput::new(data.as_mut_ptr(), num_meas, stride, 3, words) };
+                sample_bts_into(
+                    &sparse,
+                    num_shots,
+                    &ref_bits,
+                    &mut actual_rng,
+                    rank,
+                    &mut output,
+                );
+                for row in 0..num_meas {
+                    let actual = &data[row * stride..(row + 1) * stride];
+                    assert_eq!(&actual[..3], &[SENTINEL; 3]);
+                    assert_eq!(
+                        &actual[3..3 + words],
+                        &expected[row * words..(row + 1) * words],
+                        "{num_shots} shots, rank {rank}, row {row}"
+                    );
+                    assert_eq!(&actual[3 + words..], &[SENTINEL; 2]);
+                }
+                assert_eq!(actual_rng.next_u64(), scalar_rng.next_u64());
+            }
+        }
+    }
+
+    fn check_batched_stream(num_threads: usize) {
+        for rank in [0, 7] {
+            let num_meas = 9;
+            let ref_bits = [0b1_0101_0011];
+            let mut setup = rng(42);
+            let flip_rows: Vec<Vec<u64>> =
+                (0..rank).map(|_| vec![setup.next_u64() & 0x7f]).collect();
+            let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
+            for num_shots in [
+                0usize,
+                63,
+                65,
+                127,
+                129,
+                255,
+                257,
+                65535,
+                65536,
+                65537,
+                num_threads * BTS_BATCH_SHOTS + 65,
+            ] {
+                let words = num_shots.div_ceil(64);
+                let mut expected = vec![0; num_meas * words];
+                let mut expected_rng = rng(42);
+                let mut copy_batches =
+                    |start: usize, shots: usize, rng: &mut Xoshiro256PlusPlus| {
+                        for done in (0..shots).step_by(BTS_BATCH_SHOTS) {
+                            let batch_shots = (shots - done).min(BTS_BATCH_SHOTS);
+                            let batch_words = batch_shots.div_ceil(64);
+                            let batch = scalar_samples(&sparse, batch_shots, &ref_bits, rng, rank);
+                            for row in 0..num_meas {
+                                let offset = row * words + (start + done) / 64;
+                                expected[offset..offset + batch_words].copy_from_slice(
+                                    &batch[row * batch_words..(row + 1) * batch_words],
+                                );
+                            }
+                        }
+                    };
+                #[cfg(feature = "parallel")]
+                {
+                    let shots_per_thread = (num_shots.div_ceil(num_threads) / 64) * 64;
+                    if num_threads > 1 && shots_per_thread >= 64 {
+                        for thread in 0..num_threads {
+                            let seed = std::array::from_fn(|_| expected_rng.next_u64());
+                            let mut thread_rng = Xoshiro256PlusPlus::from_seeds(seed);
+                            let start = thread * shots_per_thread;
+                            let end = if thread + 1 == num_threads {
+                                num_shots
+                            } else {
+                                ((thread + 1) * shots_per_thread).min(num_shots)
+                            };
+                            if start < end {
+                                copy_batches(start, end - start, &mut thread_rng);
+                            }
+                        }
+                    } else {
+                        copy_batches(0, num_shots, &mut expected_rng);
+                    }
+                }
+                #[cfg(not(feature = "parallel"))]
+                copy_batches(0, num_shots, &mut expected_rng);
+
+                let mut actual_rng = rng(42);
+                let actual =
+                    bts_batched(&sparse, num_shots, words, &ref_bits, &mut actual_rng, rank);
+                assert_eq!(
+                    actual, expected,
+                    "{num_shots} shots, rank {rank}, {num_threads} threads"
+                );
+                assert_eq!(actual_rng.next_u64(), expected_rng.next_u64());
+            }
+        }
+    }
+
+    #[test]
+    fn bts_batched_preserves_batch_and_worker_streams() {
+        #[cfg(feature = "parallel")]
+        for num_threads in [1, 2, 3, 8] {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .unwrap()
+                .install(|| check_batched_stream(num_threads));
+        }
+        #[cfg(not(feature = "parallel"))]
+        check_batched_stream(1);
     }
 }

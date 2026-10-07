@@ -1263,6 +1263,21 @@ fn gray_code_matches_sampling() {
 }
 
 #[test]
+fn compiled_sampler_scale_fixture_reaches_batched_bts() {
+    let mut circuit = circuits::clifford_heavy_circuit(100, 10, 0xDEAD_BEEF);
+    circuit.num_classical_bits = 100;
+    for qubit in 0..100 {
+        circuit.add_measure(qubit, qubit);
+    }
+    let sampler = compile_forward(&circuit, 0xDEAD_BEEF).unwrap();
+    assert!(sampler.parity_blocks.is_none());
+    for shots in [100_000, 1_000_000, 10_000_000] {
+        assert!(shots > BTS_BATCH_SHOTS);
+        assert!(sampler.should_use_bts(shots));
+    }
+}
+
+#[test]
 fn bts_batched_correctness() {
     let mut c = Circuit::new(4, 4);
     c.add_gate(Gate::H, &[0]);

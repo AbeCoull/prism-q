@@ -1224,6 +1224,57 @@ fn test_shots_cached_fusion_matches_uncached() {
     }
 }
 
+// Shots restore one evolution of the gates before the first measurement. At 12
+// qubits the loop splits across workers and at 16 it runs serially; both widths
+// fuse the prefix, and the suffix carries a condition and a reset.
+#[test]
+fn prefix_restored_shots_match_fresh_runs() {
+    for n in [12usize, 16] {
+        let mut circuit = Circuit::new(n, n + 1);
+        for layer in 0..2 {
+            for q in 0..n {
+                circuit.add_gate(Gate::Ry(0.31 + 0.07 * (q + layer) as f64), &[q]);
+                circuit.add_gate(Gate::Rz(0.53 + 0.05 * q as f64), &[q]);
+            }
+            for q in (layer % 2..n - 1).step_by(2) {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+        circuit.add_measure(0, n);
+        circuit.instructions.push(Instruction::Conditional {
+            condition: crate::circuit::ClassicalCondition::BitIsOne(n),
+            gate: Gate::X,
+            targets: smallvec![1],
+        });
+        circuit.add_reset(2);
+        for q in 0..n {
+            circuit.add_gate(Gate::Rx(0.29 + 0.13 * q as f64), &[q]);
+        }
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+
+        let shots = 12;
+        for kind in [BackendKind::Auto, BackendKind::Statevector] {
+            let result = run_shots_with(kind.clone(), &circuit, shots, 42).unwrap();
+            assert_eq!(result.metadata.backend, ResolvedBackend::Statevector);
+            for i in 0..shots {
+                let single = run_with_internal(
+                    kind.clone(),
+                    &circuit,
+                    mix_seed(42, i),
+                    SimOptions::classical_only(),
+                )
+                .unwrap();
+                assert_eq!(
+                    result.shots[i], single.classical_bits,
+                    "{n}q {kind:?} shot {i}"
+                );
+            }
+        }
+    }
+}
+
 // With shot `i` on `seed + i`, shot `i + 1` of a run seeded 42 was shot `i` of a
 // run seeded 43, so averaging over consecutive seeds pooled near-copies.
 #[test]

@@ -5016,6 +5016,27 @@ fn bench_density_matrix_neutrality(c: &mut Criterion) {
     group.finish();
 }
 
+/// Independent blocks opening on a Clifford prefix, with a mid-circuit
+/// measurement in each: Auto replays every shot on the decomposed route, each
+/// block through its own Clifford prefix.
+fn bench_dynamic_temporal_prefix_blocks(c: &mut Criterion) {
+    let shots = 1_000usize;
+
+    let mut group = c.benchmark_group("dynamic/temporal_prefix_blocks");
+    configure_group(&mut group);
+    for &block_size in &[6usize, 8] {
+        let circuit = circuits::clifford_prefix_measured_blocks(2, block_size, 4, SEED);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{}q", circuit.num_qubits), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| run_shots_with(BackendKind::Auto, circ, shots, SEED).unwrap());
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -5168,6 +5189,7 @@ criterion_group! {
     bench_dynamic_dead_region,
     bench_dynamic_shots,
     bench_dynamic_mid_circuit_shots,
-    bench_dynamic_clifford_shots
+    bench_dynamic_clifford_shots,
+    bench_dynamic_temporal_prefix_blocks
 }
 criterion_main!(benches);

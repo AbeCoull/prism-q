@@ -602,3 +602,54 @@ fn noisy_sampling_rows_take_the_compiled_sampler() {
         );
     }
 }
+
+// `dynamic/temporal_prefix_blocks` prices the per-shot loop for a circuit that
+// splits into blocks and also opens on a Clifford prefix, which runs each shot
+// through the decomposed route block by block rather than the decomposed shot
+// loop. Three properties put it there and none shows in a timing: the shots
+// run decomposed, the leading Clifford run reaches the temporal-prefix floor of
+// `max(2n, 16)` gates for the whole register, and it reaches 16 on every block,
+// so each block runs its own Clifford prefix too.
+#[test]
+fn temporal_prefix_block_rows_split_and_open_on_a_clifford_prefix() {
+    use prism_q::Instruction;
+
+    for block_size in [6usize, 8] {
+        let circuit = circuits::clifford_prefix_measured_blocks(2, block_size, 4, SEED);
+        let n = circuit.num_qubits;
+        assert!(!circuit.is_clifford_only());
+
+        let leading: Vec<&[usize]> = circuit
+            .instructions
+            .iter()
+            .map_while(|inst| match inst {
+                Instruction::Gate { gate, targets } if gate.is_clifford() => Some(&targets[..]),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            leading.len() >= (2 * n).max(16),
+            "{n}q: {} leading Clifford gates, under the temporal-prefix floor",
+            leading.len()
+        );
+        assert!(leading.len() < circuit.instructions.len());
+        for block in 0..2 {
+            let span = block * block_size..(block + 1) * block_size;
+            let on_block = leading
+                .iter()
+                .filter(|targets| targets.iter().all(|q| span.contains(q)))
+                .count();
+            assert!(
+                on_block >= 16,
+                "{n}q block {block}: {on_block} leading Clifford gates"
+            );
+        }
+
+        let result = sim::simulate(&circuit).seed(SEED).shots(64).unwrap();
+        assert_eq!(
+            result.metadata.backend,
+            ResolvedBackend::Decomposed,
+            "temporal_prefix_blocks/{n}q: the shots must run decomposed"
+        );
+    }
+}

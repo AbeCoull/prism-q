@@ -1224,6 +1224,47 @@ fn test_shots_cached_fusion_matches_uncached() {
     }
 }
 
+// The fixture takes the temporal-prefix shot branch with a decomposition, and
+// each of its blocks routes through its own Clifford prefix. Every shot carries
+// the bits and metadata of a separate run on its seed.
+#[test]
+fn temporal_prefix_block_shots_match_seeded_runs() {
+    let kind = BackendKind::Auto;
+    for block_size in [6usize, 8] {
+        let circuit = crate::circuits::clifford_prefix_measured_blocks(2, block_size, 4, 7);
+        assert!(has_temporal_clifford_opportunity(&kind, &circuit));
+        let (Some(components), _) = analyze_independence(&circuit) else {
+            panic!("{block_size}: the blocks must decompose");
+        };
+        for (sub, _, _) in circuit.partition_subcircuits(&components) {
+            assert!(matches!(
+                plan_probability_route(&kind, &sub),
+                ProbabilityRoute::TemporalClifford { .. }
+            ));
+        }
+
+        let shots = 40;
+        let result = run_shots_with(kind.clone(), &circuit, shots, 42).unwrap();
+        let mut metadata = None;
+        for i in 0..shots {
+            let single = run_with_internal(
+                kind.clone(),
+                &circuit,
+                mix_seed(42, i),
+                SimOptions::classical_only(),
+            )
+            .unwrap();
+            assert_eq!(result.shots[i], single.classical_bits, "shot {i}");
+            metadata
+                .get_or_insert_with(|| single.metadata.clone())
+                .weaken_with(&single.metadata);
+        }
+        let mut expected = metadata.unwrap();
+        expected.shots = Some(shots);
+        assert_eq!(format!("{:?}", result.metadata), format!("{expected:?}"));
+    }
+}
+
 // Shots restore one evolution of the gates before the first measurement. At 12
 // qubits the loop splits across workers and at 16 it runs serially; both widths
 // fuse the prefix, and the suffix carries a condition and a reset.

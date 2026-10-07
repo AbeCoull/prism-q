@@ -22,7 +22,7 @@ use circuit::{PyCircuit, PyCircuitBuilder, PySaveSpec};
 use error::PrismError;
 use gate::PyGate;
 use gpu::PyGpuContext;
-use noise::{PyDeviceCalibration, PyNoiseChannel, PyNoiseModel};
+use noise::{PyDeviceCalibration, PyGateFilter, PyNoiseBuilder, PyNoiseChannel, PyNoiseModel};
 use parameter::{PyParameters, PyPreparedCircuit};
 use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
@@ -49,6 +49,8 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGpuContext>()?;
     m.add_class::<crate::distributed::PyDistributedContext>()?;
     m.add_class::<PyNoiseChannel>()?;
+    m.add_class::<PyGateFilter>()?;
+    m.add_class::<PyNoiseBuilder>()?;
     m.add_class::<PyNoiseModel>()?;
     m.add_class::<PyDeviceCalibration>()?;
     m.add_class::<PySimulation>()?;
@@ -74,6 +76,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBraketProgram>()?;
 
     m.add_function(wrap_pyfunction!(circuit::parse_qasm, m)?)?;
+    m.add_function(wrap_pyfunction!(circuit::parse_qasm_parametric, m)?)?;
     m.add_function(wrap_pyfunction!(braket::parse_braket, m)?)?;
     m.add_function(wrap_pyfunction!(sim::simulate, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_qasm, m)?)?;

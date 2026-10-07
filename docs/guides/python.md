@@ -533,7 +533,49 @@ counts = simulate(circuit).seed(42).noise(model).sample_counts(4000).counts()
 
 `NoiseModel.uniform_depolarizing(circuit, p)` and
 `NoiseModel.with_amplitude_damping(circuit, gamma)` cover the common cases.
-For per-instruction control, start from `NoiseModel.empty(circuit)` and attach
+`NoiseBuilder` attaches channels by rule and validates the resulting model at
+`build(circuit)`, before simulation:
+
+```python
+from prism_q import GateFilter, NoiseBuilder
+
+noise_rules = (
+    NoiseBuilder()
+    .after_gates(GateFilter.all().arity(1), NoiseChannel.depolarizing(0.001))
+    .after_gates_joint(
+        GateFilter.all().named("cx"), NoiseChannel.two_qubit_depolarizing(0.01)
+    )
+    .uniform_readout_error(0.01, 0.02)
+)
+rule_model = noise_rules.build(circuit)
+```
+
+Fluent methods update the same builder or filter. Adding a rule copies its filter
+and channel, so later filter edits leave the rule unchanged; `build` keeps the
+builder reusable. `GateFilter()` and `GateFilter.all()` start unrestricted.
+`named`, `arity`, `on_qubits` and `on_targets` combine restrictions: `on_qubits`
+selects an unordered set of targets for noise, while `on_targets([0, 1])` matches
+the complete ordered target list, excluding `cx(1, 0)`. Build against the original
+circuit because fusion changes gate names. Gate rules skip conditional instructions.
+
+| Rule | Effect |
+|------|--------|
+| `after_gates(filter, channel)` | One single-qubit event per matching target |
+| `after_gates_joint(filter, channel)` | One event on the complete target list when its arity matches the channel |
+| `crosstalk(filter, coupling, channel)` | Spectator noise along undirected coupling edges; two-qubit channels put the gate target first |
+| `over_rotation(filter, relative)` | An extra `relative * theta` rotation after `rx`, `ry`, `rz` or `p` |
+| `on_idle_qubits(channel)` | One single-qubit event per idle qubit per greedy circuit layer |
+| `after_resets(channel)` | One single-qubit event on each reset qubit |
+| `before_measurements(channel)` | Damage the measured state, including outcomes used by feed-forward |
+| `readout_error(bit, p01, p10)` | Override the uniform readout rates on one classical bit |
+
+Rules emit events in registration order within each instruction slot. Idle events
+attach to the highest-indexed instruction in their layer. Pre-measurement events
+attach to the preceding instruction, so a measurement at instruction zero needs a
+barrier prepended. Readout error changes reported bits after sampling and leaves
+the quantum state intact.
+
+For explicit instruction slots, start from `NoiseModel.empty(circuit)` and attach
 events:
 
 ```python
@@ -715,6 +757,30 @@ by `param(slot)`; `Parameters.all_rotations(circuit)` gives every bindable gate
 its own slot in circuit order; `Parameters(n)` plus `link(instruction, slot)`
 declares the slots up front. Several gates may share a slot, in which case
 binding writes one angle to each.
+
+`parse_qasm_parametric` returns a template and the named slots declared by OpenQASM
+`input` statements, in declaration order:
+
+```python
+from prism_q import BackendKind, PreparedCircuit, parse_qasm_parametric
+
+template, parameters = parse_qasm_parametric("""
+OPENQASM 3.0;
+input float[64] theta;
+qubit[2] q;
+ry(theta) q[0];
+cx q[0], q[1];
+ry(theta) q[1];
+""")
+assert parameters.slot_of("theta") == 0
+qasm_sweep = PreparedCircuit(template, parameters, BackendKind.statevector())
+outcomes = qasm_sweep.run_many([[0.2], [0.7]], seed=42)
+```
+
+Input angles start at zero, so bind the template before simulation and choose an
+explicit backend when preparing it. Each input must occupy a whole angle argument
+of a supported gate at the top level; expressions such as `2 * theta` and inputs in
+control-flow bodies raise `PrismError`. `parse_qasm` continues to reject unbound inputs.
 
 | Method | Returns |
 |--------|---------|

@@ -100,8 +100,11 @@ pub(crate) enum StmtKind<'a> {
         args: Vec<DefParam<'a>>,
         body: Block<'a>,
     },
-    /// `box { ... }`, which Braket opens with a verbatim pragma.
-    Box(Block<'a>),
+    /// `box { ... }` or `box[100ns] { ... }`.
+    Box {
+        duration: Option<Expr<'a>>,
+        body: Block<'a>,
+    },
     /// A `#pragma` line, text included.
     Pragma(&'a str),
 }

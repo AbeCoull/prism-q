@@ -25,6 +25,7 @@
 //! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name |
 //! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number |
 //! | Delay | `delay[d] q[0];` `delay[s];` | The identity on its qubits, all of them when none is named; emits nothing |
+//! | Box | `box { ... }` `box[100ns] { ... }` | The body runs in place with no barrier at its edges; names it declares go out of scope with it |
 //! | Register slice | `h q[0:2];` `h q[0:2:6];` `h q[{0, 3}];` | Inclusive range with an optional step in the middle, or an explicit index set. Broadcasts like a whole register |
 //! | Register alias | `let a = q[0:1];` `let a = q[2] ++ q[0];` | Names qubits or bits in the order written; an alias is itself sliceable |
 //! | Physical qubits | `h $0;` `cx $0, $1;` | Absolute indices with no declaration; the register is as wide as the highest one named, and a declared register alongside is rejected |
@@ -55,12 +56,11 @@
 //! | Result pragma | `#pragma braket result expectation z(q[0])` | [`Dialect::Braket`] only; reaches the caller through [`parse_braket`] |
 //! | Noise pragma | `#pragma braket noise bit_flip(0.1) q[0]` | Builds a [`NoiseModel`] event after the preceding instruction |
 //! | Inline unitary | `#pragma braket unitary([[0, 1], [1, 0]]) q[0]` | Up to four targets |
-//! | Verbatim box | `#pragma braket verbatim` then `box { ... }` | The body runs as written; a `box` without the pragma is rejected |
+//! | Verbatim box | `#pragma braket verbatim` then `box { ... }` | The body runs as written, as any `box` does |
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
 //!
-//! - `defcal`, `extern`, `opaque`, `while`, `return`, `break`, and a `box`
-//!   that no `#pragma braket verbatim` precedes
+//! - `defcal`, `extern`, `opaque`, `while`, `return`, `break`
 //! - `def` bodies that contain `measure`, `reset`, `bit`, `creg`, `return`,
 //!   or the `=measure` assignment shape (V1 supports unitary subroutines only)
 //! - `def` declarations with a return type

@@ -88,10 +88,7 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         "switch" => switch(stream),
         "gate" => gate_def(stream),
         "def" => def_def(stream),
-        "box" => {
-            stream.advance();
-            Ok(StmtKind::Box(braced_block(stream)?))
-        }
+        "box" => boxed(stream),
         "const" => declaration(stream),
         other if DECLARATION_TYPES.contains(&other) => declaration(stream),
         _ => call_or_assignment(stream),
@@ -244,6 +241,22 @@ fn delay<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     };
     stream.expect(Kind::Semicolon)?;
     Ok(StmtKind::Delay { duration, targets })
+}
+
+/// `box { ... }`, with an optional duration designator before the body.
+fn boxed<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    stream.advance();
+    let duration = if stream.eat(Kind::LBracket) {
+        let duration = expr::parse(stream)?;
+        stream.expect(Kind::RBracket)?;
+        Some(duration)
+    } else {
+        None
+    };
+    Ok(StmtKind::Box {
+        duration,
+        body: braced_block(stream)?,
+    })
 }
 
 fn operand_list<'a>(stream: &mut Stream<'_, 'a>, what: &str) -> Result<Vec<Operand<'a>>> {

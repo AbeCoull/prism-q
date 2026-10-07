@@ -113,11 +113,13 @@ h q[cursor];
 A declaration inside a `for` body binds for that pass only: the scope the body
 opened is dropped at the end of each iteration.
 
-### Durations and delays
+### Timing
 
 A simulation has no clock, so timing parses and then has no effect. `delay` is the
 identity on the qubits it names, or on every qubit when it names none, and emits no
-instruction, so fusion merges across it as if it were absent.
+instruction, so fusion merges across it as if it were absent. A `box`, with or without
+a duration, runs its body in place: its edges carry no barrier, since a box only fixes
+when its contents run, and the names its body declares go out of scope with it.
 
 ```qasm
 OPENQASM 3.0;
@@ -129,6 +131,9 @@ h q[0];
 delay[settle] q[0];
 delay[slack] q;
 rz(settle / pulse) q[1];   // a ratio of durations is a number: 27
+box[settle] {
+  cx q[0], q[1];
+}
 ```
 
 Literals take `dt`, `ns`, `us` (or `µs`), `ms` and `s`. Durations add, subtract,
@@ -243,8 +248,8 @@ cnot q[0], q[1];
   targets. A wider matrix has no gate variant to carry it and says so.
 - **Verbatim boxes**: `#pragma braket verbatim` followed by `box { ... }`. The
   body runs as written, verbatim being a directive to a device compiler that a
-  simulator has nothing to honour. A `box` without the pragma is rejected, and
-  so is the pragma without a box.
+  simulator has nothing to honour. A `box` without the pragma runs the same way;
+  the pragma without a box is rejected.
 
 Matrix entries take Braket's complex notation: a real (`0`, `-1.5`), an
 imaginary (`1im`, `-1im`), or their sum (`0.7 + 0.7im`).
@@ -347,6 +352,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
 | `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type |
 | `array` declarations | Declines | `UnsupportedConstruct` |
+| `box`, `box[d]` | Runs its body in place | A length that is not a duration or is negative: `Parse` |
 | `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, and `durationof`: `UnsupportedConstruct` |
 | `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
@@ -357,7 +363,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `while` | Declines | `UnsupportedConstruct` |
 | `def` | Inlines a unitary body at the call site | A classical bit parameter or a return type: `UnsupportedConstruct` |
 | `gate` blocks | Parses | |
-| `defcal`, `extern`, `opaque`, `box` | Declines | `UnsupportedConstruct` |
+| `defcal`, `extern`, `opaque` | Declines | `UnsupportedConstruct`. Pulse-level calibration and calls out of the program have nothing to run against here |
 | `ctrl`, `negctrl`, `inv`, `pow(k)` | Parses, chainable in any order | See [Other supported constructs](#other-supported-constructs) for the reach of each, and below for the declines |
 | `gphase(theta)` | Parses and is carried | |
 | `#pragma braket ...` | Parses under `Dialect::Braket` | Any other dialect, or any other pragma: `UnsupportedConstruct` naming the pragma |

@@ -556,6 +556,8 @@ fn classical_control_constructs_parse_or_reject_by_name() {
             "switch (c) { case 0 { x q[0]; } default { h q[0]; } }",
         ),
         ("bounded for", "for int i in [0:2] { x q[i]; }"),
+        ("box", "box { x q[0]; }"),
+        ("box with a duration", "box[100ns] { x q[0]; }"),
     ];
     for (label, body) in accepted {
         let qasm = format!("{PROLOGUE}{body}");
@@ -568,7 +570,6 @@ fn classical_control_constructs_parse_or_reject_by_name() {
     let rejected = [
         ("while", "while (c[0]) { x q[0]; }", "while"),
         ("break", "break;", "break"),
-        ("box", "box { x q[0]; }", "box"),
         ("defcal", "defcal x $0 { }", "defcal"),
         ("opaque", "opaque foo q;", "opaque"),
         ("extern", "extern foo(int);", "extern"),

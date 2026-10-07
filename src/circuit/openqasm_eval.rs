@@ -62,7 +62,7 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
                 }
             }
             StmtKind::For { body, .. }
-            | StmtKind::Box(body)
+            | StmtKind::Box { body, .. }
             | StmtKind::DefDef { body, .. }
             | StmtKind::GateDef { body, .. } => walk_operands(body, note),
             StmtKind::Switch { operand, arms } => {
@@ -294,20 +294,14 @@ impl<'a> Parser<'a> {
                 self.declare_def(name, args, body, line)?;
                 Ok(())
             }
-            StmtKind::Box(body) => {
-                if !self.verbatim_pending {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: "box".to_string(),
-                        line,
-                    });
-                }
-                // Verbatim marks a region the device compiler must not rewrite,
-                // which a simulator has nothing to honour.
+            StmtKind::Box { duration, body } => {
+                // A box and Braket's verbatim pragma both direct a scheduler or
+                // a device compiler, which a simulator has nothing to honour.
                 self.verbatim_pending = false;
-                let was_nested = std::mem::replace(&mut self.nested, true);
-                let result = self.execute(body);
-                self.nested = was_nested;
-                out.extend(result?);
+                if let Some(duration) = duration {
+                    self.span_of(duration, "box", line)?;
+                }
+                out.extend(self.exec_box(body)?);
                 Ok(())
             }
             StmtKind::Pragma(text) => {
@@ -1289,6 +1283,32 @@ impl<'a> Parser<'a> {
         out.extend(guarded(condition.clone(), then_instrs));
         out.extend(guarded(condition.negate(), else_instrs));
         Ok(out)
+    }
+
+    /// Run a `box` body in place, with no guard and no barrier at either edge.
+    ///
+    /// A box only fixes timing, which an ideal simulation does not model, so
+    /// fusion may merge across its boundary as freely as across a `delay`. The
+    /// names its body declares go out of scope with it.
+    fn exec_box(&mut self, body: &Block<'a>) -> Result<Vec<Instruction>> {
+        let before: Vec<&'a str> = self.classical.keys().copied().collect();
+        let was_nested = std::mem::replace(&mut self.nested, true);
+        let result = self.execute(body);
+        self.nested = was_nested;
+        let declared: Vec<&'a str> = self
+            .classical
+            .keys()
+            .copied()
+            .filter(|name| !before.contains(name))
+            .collect();
+        for name in declared {
+            self.classical.remove(name);
+            self.durations.remove(name);
+            if let Some(values) = self.param_vars.as_mut() {
+                values.remove(name);
+            }
+        }
+        result
     }
 
     /// Run a block one nesting level down.

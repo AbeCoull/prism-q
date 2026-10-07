@@ -62,10 +62,13 @@ fn the_guide_timing_example_folds_its_ratio() {
     let circuit = openqasm::parse(
         "OPENQASM 3.0;\nqubit[2] q;\nconst duration pulse = 40ns;\n\
          duration settle = 2 * pulse + 1us;\nstretch slack;\nh q[0];\n\
-         delay[settle] q[0];\ndelay[slack] q;\nrz(settle / pulse) q[1];",
+         delay[settle] q[0];\ndelay[slack] q;\nrz(settle / pulse) q[1];\n\
+         box[settle] {\n  cx q[0], q[1];\n}",
     )
     .expect("parse");
-    let reference = openqasm::parse("OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nrz(27) q[1];").unwrap();
+    let reference =
+        openqasm::parse("OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nrz(27) q[1];\ncx q[0], q[1];")
+            .unwrap();
     assert_eq!(
         format!("{:?}", circuit.instructions),
         format!("{:?}", reference.instructions)
@@ -86,6 +89,56 @@ fn a_def_takes_a_duration_argument() {
         "def wait(duration d, qubit a) { delay[d] a; x a; }\nwait(20ns, q[0]);\nwait(2 * 3dt, q[1]);",
         "x q[0];\nx q[1];",
     );
+}
+
+// The body joins the stream exactly as if the box were absent, so fusion sees no
+// boundary to stop at.
+#[test]
+fn a_box_runs_its_body_in_place() {
+    assert_same_stream(
+        "h q[0];\nbox { cx q[0], q[1]; rz(0.3) q[1]; }\nbox[1us] { x q[2]; }\n\
+         duration d = 20ns;\nbox[2 * d] { box { h q[3]; } }",
+        "h q[0];\ncx q[0], q[1];\nrz(0.3) q[1];\nx q[2];\nh q[3];",
+    );
+    assert_same_stream(
+        "c[0] = measure q[0];\nif (c[0]) { box { x q[1]; } }",
+        "c[0] = measure q[0];\nif (c[0]) { x q[1]; }",
+    );
+    assert_same_stream(
+        "def layer(qubit a) { box[40ns] { h a; } }\nlayer(q[2]);",
+        "h q[2];",
+    );
+}
+
+#[test]
+fn a_box_scopes_what_it_declares() {
+    // An assignment to an outer name survives the box; a declaration inside it
+    // does not, so the same name can be declared again after it.
+    assert_same_stream(
+        "int k = 0;\nbox { int j = 2; k = j + 1; }\nh q[k];\nint j = 1;\nx q[j];",
+        "h q[3];\nx q[1];",
+    );
+    assert!(matches!(
+        parse_err("box { int j = 2; }\nh q[j];"),
+        PrismError::Parse { .. }
+    ));
+}
+
+#[test]
+fn a_box_with_an_unusable_length_is_rejected() {
+    for (body, needle) in [
+        ("box[10] { x q[0]; }", "where a duration belongs"),
+        ("box[-1ns] { x q[0]; }", "non-negative"),
+        ("box[10ns] x q[0];", "expected `{`"),
+        ("box { x q[0];", "`}`"),
+    ] {
+        match parse_err(body) {
+            PrismError::Parse { message, .. } => {
+                assert!(message.contains(needle), "`{body}`: {message}");
+            }
+            other => panic!("`{body}` should be a parse error, got {other:?}"),
+        }
+    }
 }
 
 #[test]

@@ -24,7 +24,8 @@ flowchart TD
     P2qb --> P2["fuse_multi_1q_gates (>=14q) to MultiFused"]
     P2 --> P2qr["reorder_fused2q_into_tiles (>=12q)"]
     P2qr --> Pm2q["fuse_multi_2q_gates (>=12q) to Multi2q"]
-    Pm2q --> Pcp["fuse_controlled_phases (>=16q) to BatchPhase"]
+    Pm2q --> Ppr["fuse_pauli_rot_batches (>=16q) to MultiPauliRot"]
+    Ppr --> Pcp["fuse_controlled_phases (>=16q) to BatchPhase"]
     Pcp --> Pdb["fuse_diagonal_batch (>=16q) to DiagonalBatch"]
     Pdb --> Ppp["batch_post_phase_1q (>=18q)"]
     Ppp --> OUT
@@ -40,6 +41,7 @@ flowchart TD
 | `MIN_QUBITS_FOR_POST_PHASE_BATCH` | 18 | Post-phase 1q re-batching |
 | `MIN_QUBITS_FOR_2Q_FUSION` | 12 | Benchmarked QV and random sweeps show memory-pass reduction wins from 12q |
 | `MIN_QUBITS_FOR_MULTI_2Q_FUSION` | 12 | Same as 2q fusion |
+| `MIN_QUBITS_FOR_PAULI_ROT_BATCH` | 16 | At 15q a parallel subcube pass has tiles for half of an eight-thread pool |
 
 ## Payload capacities
 

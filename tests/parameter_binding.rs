@@ -144,6 +144,26 @@ fn assert_payloads_match(a: &Gate, b: &Gate, what: &str) {
                 );
             }
         }
+        (Gate::MultiPauliRot(x), Gate::MultiPauliRot(y)) => {
+            assert_eq!(
+                x.rotations().len(),
+                y.rotations().len(),
+                "{what}: multi_pauli_rot arity"
+            );
+            for (k, (rx, ry)) in x.rotations().iter().zip(y.rotations()).enumerate() {
+                assert_eq!(
+                    (rx.0, rx.1),
+                    (ry.0, ry.1),
+                    "{what}: multi_pauli_rot entry {k} masks"
+                );
+                assert!(
+                    (rx.2 - ry.2).abs() < 1e-12,
+                    "{what}: multi_pauli_rot entry {k} angle, {} vs {}",
+                    rx.2,
+                    ry.2
+                );
+            }
+        }
         (
             Gate::Rx(x) | Gate::Ry(x) | Gate::Rz(x) | Gate::Rzz(x) | Gate::P(x),
             Gate::Rx(y) | Gate::Ry(y) | Gate::Rz(y) | Gate::Rzz(y) | Gate::P(y),
@@ -309,6 +329,44 @@ fn an_absorbed_pauli_rotation_rebinds_through_the_plan() {
             &expected,
             &format!("absorbed pauli_rot point {point}"),
         );
+    }
+}
+
+// Batched rotation angles rebind through one angle recipe per batch entry.
+#[test]
+fn batched_pauli_rotation_angles_rebind_through_the_plan() {
+    for n in [16, 18] {
+        let mut template = Circuit::new(n, 0);
+        for (coefficient, factors) in circuits::jordan_wigner_hamiltonian(n, 120, SEED) {
+            if factors.len() >= 3 {
+                template.add_pauli_rotation(0.1 * coefficient, &factors);
+            }
+        }
+        let params = Parameters::all_rotations(&template);
+        let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+        assert!(
+            prepared.reuses_fusion_plan(),
+            "{n}q: no fusion plan captured"
+        );
+        for point in 0..4 {
+            let values = angles(params.num_slots(), 6000 + point);
+            let independent = params.bind(&template, &values).unwrap();
+            let expected = fuse_circuit(&independent, true).into_owned();
+            let bound = prepared.bind_fused(&values).unwrap();
+            assert!(
+                bound.instructions.iter().any(|i| matches!(
+                    i,
+                    Instruction::Gate {
+                        gate: Gate::MultiPauliRot(_),
+                        ..
+                    }
+                )),
+                "{n}q point {point}: no MultiPauliRot in the bound stream"
+            );
+            let what = format!("batched pauli_rot {n}q point {point}");
+            assert_streams_match(bound, &expected, &what);
+            assert_states_match(&statevector(bound), &statevector(&independent), &what);
+        }
     }
 }
 

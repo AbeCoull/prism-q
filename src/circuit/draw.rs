@@ -84,6 +84,7 @@ fn classify_op(gate: &Gate, targets: &[usize]) -> (String, OpKind) {
         | Gate::DiagonalBatch(_)
         | Gate::Multi2q(_)
         | Gate::PauliRot(_)
+        | Gate::MultiPauliRot(_)
         | Gate::Unitary(_) => OpKind::TwoQubit,
         Gate::BatchPhase(_) => OpKind::Controlled {
             controls: vec![targets[0]],

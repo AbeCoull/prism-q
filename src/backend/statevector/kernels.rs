@@ -100,33 +100,32 @@ impl SubcubePlan {
     }
 }
 
-/// The subcube tile for `gates`, or `None` when the batch is served better by
-/// the in-place tiles (every qubit below the tile bits, or the state is one
-/// tile) or cannot be tiled at all (more than [`multi_2q_high_budget`]
-/// distinct qubits at or above [`multi_2q_low_bits`]).
+/// The subcube tile holding `qubits`, the ones a batch's gates need inside the
+/// tile, or `None` when the batch is served better by the in-place tiles (every
+/// qubit below the tile bits, or the state is one tile) or cannot be tiled at all
+/// (more than [`multi_2q_high_budget`] distinct qubits at or above
+/// [`multi_2q_low_bits`]).
 fn subcube_plan(
-    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+    qubits: impl Iterator<Item = usize> + Clone,
     num_qubits: usize,
 ) -> Option<SubcubePlan> {
     let tile_bits = multi_2q_tile_bits_for(num_qubits);
     if num_qubits <= tile_bits {
         return None;
     }
-    let max_q = gates.iter().map(|&(q0, q1, _)| q0.max(q1)).max()?;
+    let max_q = qubits.clone().max()?;
     if max_q < tile_bits {
         return None;
     }
     let budget = multi_2q_high_budget_for(num_qubits);
     let low_bits = multi_2q_low_bits();
     let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
-    for &(q0, q1, _) in gates {
-        for q in [q0, q1] {
-            if q >= low_bits && !high.contains(&q) {
-                if high.len() == budget {
-                    return None;
-                }
-                high.push(q);
+    for q in qubits {
+        if q >= low_bits && !high.contains(&q) {
+            if high.len() == budget {
+                return None;
             }
+            high.push(q);
         }
     }
     // A high qubit that lands inside the contiguous run rides there instead,
@@ -202,8 +201,8 @@ fn with_subcube_tile<R>(tile_bits: usize, f: impl FnOnce(&mut [Complex64]) -> R)
     })
 }
 
-/// Gather the subcube `outer` selects into this thread's tile, apply `gates`
-/// there in order through the contiguous tiled kernel, and scatter it back.
+/// Gather the subcube `outer` selects into this thread's tile, run `apply` on it
+/// with the global index of the subcube's first amplitude, and scatter it back.
 /// Applying in place across the runs instead was measured slower at every
 /// width: the strided group walk gives up the paired AVX2 kernel.
 ///
@@ -215,7 +214,7 @@ unsafe fn apply_subcube(
     plan: &SubcubePlan,
     rest: &[usize],
     outer: usize,
-    gates: &[(usize, usize, simd::PreparedGate2q)],
+    apply: impl Fn(&mut [Complex64], usize),
 ) {
     let run = 1usize << plan.low;
     let mut base = 0usize;
@@ -251,9 +250,7 @@ unsafe fn apply_subcube(
         {
             return;
         }
-        for &(q0, q1, ref prepared) in gates {
-            prepared.apply_tiled(tile, plan.tile_bits, plan.map[q0], plan.map[q1]);
-        }
+        apply(tile, base);
         for c in 0..runs {
             // SAFETY: same contract as the enclosing unsafe fn.
             unsafe {
@@ -2113,6 +2110,114 @@ fn pauli_rot_pair_halves(
     }
 }
 
+/// `cos(θ/2)` and the `(m_lo, m_hi)` cross coefficients [`pauli_rot_pair_halves`]
+/// takes for `exp(-i θ P / 2)` with `num_y` Y letters in `P`.
+///
+/// `m_hi` points toward the pivot-set side of a pair; the opposite direction
+/// differs by the parity of `xmask & zmask`, which is the Y count.
+#[inline(always)]
+fn pauli_rot_coefficients(theta: f64, num_y: u32) -> (f64, Complex64, Complex64) {
+    let (s, c) = (theta / 2.0).sin_cos();
+    let m_hi = match num_y % 4 {
+        0 => Complex64::new(0.0, -s),
+        1 => Complex64::new(s, 0.0),
+        2 => Complex64::new(0.0, s),
+        _ => Complex64::new(-s, 0.0),
+    };
+    let m_lo = if num_y % 2 == 1 { -m_hi } else { m_hi };
+    (c, m_lo, m_hi)
+}
+
+/// One rotation of a `MultiPauliRot` batch in tile coordinates.
+///
+/// `xmask` and `zmask` cover tile bits. `zrest` keeps the Z letters on qubits
+/// outside the tile: their parity is fixed across a tile and, when odd, negates
+/// both cross terms. A diagonal string (`xmask == 0`) holds its even and odd
+/// parity phases in `m_lo` and `m_hi` instead.
+#[derive(Clone, Copy)]
+struct TiledPauliRot {
+    xmask: usize,
+    zmask: usize,
+    zrest: usize,
+    c: f64,
+    m_lo: Complex64,
+    m_hi: Complex64,
+}
+
+impl TiledPauliRot {
+    /// Move a rotation's global masks into the tile `tile_bit` describes: the tile
+    /// bit a qubit lands on, or `None` for a qubit outside the tile, which must
+    /// carry no X or Y letter.
+    fn new(
+        xmask: usize,
+        zmask: usize,
+        theta: f64,
+        tile_bit: impl Fn(usize) -> Option<usize>,
+    ) -> Self {
+        let (mut tile_x, mut tile_z, mut zrest) = (0usize, 0usize, 0usize);
+        let mut letters = xmask | zmask;
+        while letters != 0 {
+            let q = letters.trailing_zeros() as usize;
+            letters &= letters - 1;
+            match tile_bit(q) {
+                Some(bit) => {
+                    tile_x |= (xmask >> q & 1) << bit;
+                    tile_z |= (zmask >> q & 1) << bit;
+                }
+                None => {
+                    debug_assert_eq!(xmask >> q & 1, 0, "X or Y letter outside the tile");
+                    zrest |= 1 << q;
+                }
+            }
+        }
+        let (c, m_lo, m_hi) = if xmask == 0 {
+            let (s, c) = (theta / 2.0).sin_cos();
+            (c, Complex64::new(c, -s), Complex64::new(c, s))
+        } else {
+            pauli_rot_coefficients(theta, (xmask & zmask).count_ones())
+        };
+        Self {
+            xmask: tile_x,
+            zmask: tile_z,
+            zrest,
+            c,
+            m_lo,
+            m_hi,
+        }
+    }
+
+    /// Apply to `tile`, whose first amplitude has global index `base` once the
+    /// tile bits are cleared.
+    #[inline(always)]
+    fn apply(&self, tile: &mut [Complex64], base: usize) {
+        let odd = (base & self.zrest).count_ones() & 1 == 1;
+        if self.xmask == 0 {
+            let phases = if odd {
+                [self.m_hi, self.m_lo]
+            } else {
+                [self.m_lo, self.m_hi]
+            };
+            for (i, amp) in tile.iter_mut().enumerate() {
+                *amp *= phases[((i & self.zmask).count_ones() & 1) as usize];
+            }
+            return;
+        }
+        let (m_lo, m_hi) = if odd {
+            (-self.m_lo, -self.m_hi)
+        } else {
+            (self.m_lo, self.m_hi)
+        };
+        let pivot = usize::BITS as usize - 1 - self.xmask.leading_zeros() as usize;
+        let half = 1usize << pivot;
+        let block = half << 1;
+        let xlow = self.xmask ^ half;
+        for (k, chunk) in tile.chunks_mut(block).enumerate() {
+            let (lo, hi) = chunk.split_at_mut(half);
+            pauli_rot_pair_halves(lo, hi, k * block, xlow, self.zmask, self.c, m_lo, m_hi);
+        }
+    }
+}
+
 /// Apply one gate over the whole state, tiling or splitting by block size.
 #[cfg(feature = "parallel")]
 #[inline(always)]
@@ -2741,23 +2846,18 @@ impl StatevectorBackend {
     #[inline(always)]
     pub(super) fn apply_pauli_rot(&mut self, targets: &[usize], theta: f64, axes: &[PauliAxis]) {
         let (xmask, zmask, num_y) = pauli_rot_masks(targets, axes);
-        let c = (theta / 2.0).cos();
-        let s = (theta / 2.0).sin();
+        self.apply_pauli_rot_masks(xmask, zmask, num_y, theta);
+    }
+
+    #[inline(always)]
+    fn apply_pauli_rot_masks(&mut self, xmask: usize, zmask: usize, num_y: u32, theta: f64) {
         if xmask == 0 {
+            let (s, c) = (theta / 2.0).sin_cos();
             self.apply_parity_phase(zmask, Complex64::new(c, -s), Complex64::new(c, s));
             return;
         }
 
-        // Cross-term coefficient toward the pivot-set side of a pair; the
-        // opposite direction differs by the parity of `xmask & zmask`, which
-        // is the Y count, hoisted into `m_lo`.
-        let m_hi = match num_y % 4 {
-            0 => Complex64::new(0.0, -s),
-            1 => Complex64::new(s, 0.0),
-            2 => Complex64::new(0.0, s),
-            _ => Complex64::new(-s, 0.0),
-        };
-        let m_lo = if num_y % 2 == 1 { -m_hi } else { m_hi };
+        let (c, m_lo, m_hi) = pauli_rot_coefficients(theta, num_y);
         let pivot = usize::BITS as usize - 1 - xmask.leading_zeros() as usize;
         let half = 1usize << pivot;
         let block = half << 1;
@@ -2854,6 +2954,66 @@ impl StatevectorBackend {
                     *amp *= phases[(((base + j) & zmask).count_ones() & 1) as usize];
                 }
             });
+    }
+
+    /// Apply `(xmask, zmask, theta)` Pauli rotations in order in one cache-tiled pass.
+    ///
+    /// Strings whose X and Y letters all sit below the tile bits run on the state in
+    /// place; others gather the subcube holding their X and Y qubits, as
+    /// [`apply_multi_2q`](Self::apply_multi_2q) does. Z letters never need the tile.
+    /// A batch no tile holds takes one pass per rotation.
+    pub(super) fn apply_multi_pauli_rot(&mut self, rotations: &[(usize, usize, f64)]) {
+        let xall = rotations.iter().fold(0usize, |acc, &(x, _, _)| acc | x);
+        let xqubits = (0..self.num_qubits).filter(|&q| xall >> q & 1 == 1);
+        if let Some(plan) = subcube_plan(xqubits, self.num_qubits) {
+            let tiled: Vec<TiledPauliRot> = rotations
+                .iter()
+                .map(|&(x, z, theta)| {
+                    TiledPauliRot::new(x, z, theta, |q| {
+                        Some(plan.map[q]).filter(|&bit| bit != usize::MAX)
+                    })
+                })
+                .collect();
+            self.apply_subcubes(&plan, |tile, base| {
+                for rotation in &tiled {
+                    rotation.apply(tile, base);
+                }
+            });
+            return;
+        }
+
+        let tile_bits = multi_2q_tile_bits_for(self.num_qubits).min(self.num_qubits);
+        if xall >> tile_bits != 0 {
+            for &(x, z, theta) in rotations {
+                self.apply_pauli_rot_masks(x, z, (x & z).count_ones(), theta);
+            }
+            return;
+        }
+        let tiled: Vec<TiledPauliRot> = rotations
+            .iter()
+            .map(|&(x, z, theta)| TiledPauliRot::new(x, z, theta, |q| (q < tile_bits).then_some(q)))
+            .collect();
+        let tile_len = 1usize << tile_bits;
+
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            self.state
+                .par_chunks_mut(tile_len)
+                .with_min_len(chunk_min_len(tile_len))
+                .enumerate()
+                .for_each(|(k, tile)| {
+                    for rotation in &tiled {
+                        rotation.apply(tile, k * tile_len);
+                    }
+                });
+            return;
+        }
+
+        for (k, tile) in self.state.chunks_mut(tile_len).enumerate() {
+            for rotation in &tiled {
+                rotation.apply(tile, k * tile_len);
+            }
+        }
     }
 
     #[inline(always)]
@@ -4049,38 +4209,32 @@ impl StatevectorBackend {
         }
     }
 
-    fn apply_multi_2q_subcube(
+    /// Run `apply` on every subcube of `plan` through [`apply_subcube`], across the
+    /// pool above the parallel threshold.
+    fn apply_subcubes(
         &mut self,
-        gates: &[(usize, usize, [[Complex64; 4]; 4])],
         plan: &SubcubePlan,
+        apply: impl Fn(&mut [Complex64], usize) + Sync,
     ) {
-        let prepared = prepare_2q(gates);
         let rest = plan.rest(self.num_qubits);
-        let state = self.state.as_mut_ptr();
-        for outer in 0..1usize << (self.num_qubits - plan.tile_bits) {
-            // SAFETY: `state` holds 2^num_qubits amplitudes and each `outer`
-            // addresses its own subcube, applied one at a time here.
-            unsafe { apply_subcube(state, plan, &rest, outer, &prepared) };
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    fn apply_multi_2q_subcube_par(
-        &mut self,
-        gates: &[(usize, usize, [[Complex64; 4]; 4])],
-        plan: &SubcubePlan,
-    ) {
-        let prepared = prepare_2q(gates);
-        let rest = plan.rest(self.num_qubits);
-        let ptr = SendPtr(self.state.as_mut_ptr());
-        (0..1usize << (self.num_qubits - plan.tile_bits))
-            .into_par_iter()
-            .for_each(|outer| {
+        let subcubes = 1usize << (self.num_qubits - plan.tile_bits);
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            let ptr = SendPtr(self.state.as_mut_ptr());
+            (0..subcubes).into_par_iter().for_each(|outer| {
                 // SAFETY: `ptr` holds 2^num_qubits amplitudes and distinct
                 // `outer` values address disjoint subcubes, so no two tasks
                 // touch the same amplitude.
-                unsafe { apply_subcube(ptr.as_complex_ptr(), plan, &rest, outer, &prepared) };
+                unsafe { apply_subcube(ptr.as_complex_ptr(), plan, &rest, outer, &apply) };
             });
+            return;
+        }
+        let state = self.state.as_mut_ptr();
+        for outer in 0..subcubes {
+            // SAFETY: `state` holds 2^num_qubits amplitudes and each `outer`
+            // addresses its own subcube, applied one at a time here.
+            unsafe { apply_subcube(state, plan, &rest, outer, &apply) };
+        }
     }
 
     /// Apply multiple two-qubit gates in a cache-tiled pass.
@@ -4104,13 +4258,14 @@ impl StatevectorBackend {
             self.apply_fused_2q(gates[0].0, gates[0].1, &gates[0].2);
             return;
         }
-        if let Some(plan) = subcube_plan(gates, self.num_qubits) {
-            #[cfg(feature = "parallel")]
-            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
-                self.apply_multi_2q_subcube_par(gates, &plan);
-                return;
-            }
-            self.apply_multi_2q_subcube(gates, &plan);
+        let qubits = gates.iter().flat_map(|&(q0, q1, _)| [q0, q1]);
+        if let Some(plan) = subcube_plan(qubits, self.num_qubits) {
+            let prepared = prepare_2q(gates);
+            self.apply_subcubes(&plan, |tile, _| {
+                for &(q0, q1, ref gate) in &prepared {
+                    gate.apply_tiled(tile, plan.tile_bits, plan.map[q0], plan.map[q1]);
+                }
+            });
             return;
         }
 

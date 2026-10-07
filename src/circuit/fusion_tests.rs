@@ -1448,3 +1448,107 @@ fn test_recognition_extends_clifford_prefix() {
     assert_eq!(pre_f.instructions.len(), 2); // S + CX
     assert_eq!(tail_f.instructions.len(), 1); // Rx(0.7)
 }
+
+fn fused_rotation_counts(circuit: &Circuit) -> Vec<(&'static str, usize)> {
+    fuse_circuit(circuit, true)
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Gate {
+                gate: Gate::MultiPauliRot(data),
+                ..
+            } => Some(("multi_pauli_rot", data.rotations.len())),
+            Instruction::Gate {
+                gate: Gate::PauliRot(_),
+                ..
+            } => Some(("pauli_rot", 1)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn pauli_rotations_batch_while_their_xy_qubits_fit_a_tile() {
+    use crate::gates::{multi_2q_high_budget_for, multi_2q_low_bits};
+    use crate::sim::unified_pauli::PauliTerm;
+    let n = 20;
+    let budget = multi_2q_high_budget_for(n);
+    let low = multi_2q_low_bits();
+    let mut c = Circuit::new(n, 0);
+    c.add_pauli_rotation(0.3, &[PauliTerm::x(0), PauliTerm::x(1), PauliTerm::z(19)]);
+    // Each string brings one new high X qubit; the one past the budget opens a run.
+    for k in 0..=budget {
+        c.add_pauli_rotation(
+            0.1 + 0.01 * k as f64,
+            &[PauliTerm::y(0), PauliTerm::x(low + k), PauliTerm::z(19)],
+        );
+    }
+    assert_eq!(
+        fused_rotation_counts(&c),
+        vec![("multi_pauli_rot", budget + 1), ("pauli_rot", 1)]
+    );
+}
+
+#[test]
+fn z_letters_never_count_against_the_tile_budget() {
+    use crate::sim::unified_pauli::PauliTerm;
+    let n = 20;
+    let mut c = Circuit::new(n, 0);
+    for k in 6..17 {
+        c.add_pauli_rotation(
+            0.2,
+            &[
+                PauliTerm::x(0),
+                PauliTerm::y(1),
+                PauliTerm::z(k),
+                PauliTerm::z(k + 1),
+                PauliTerm::z(k + 3),
+            ],
+        );
+    }
+    assert_eq!(fused_rotation_counts(&c), vec![("multi_pauli_rot", 11)]);
+}
+
+#[test]
+fn a_string_wider_than_the_tile_stays_native_and_splits_the_run() {
+    use crate::gates::{multi_2q_high_budget_for, multi_2q_low_bits};
+    use crate::sim::unified_pauli::PauliTerm;
+    let n = 20;
+    let low = multi_2q_low_bits();
+    let wide: Vec<PauliTerm> = (low..=low + multi_2q_high_budget_for(n))
+        .map(PauliTerm::x)
+        .collect();
+    let narrow = [PauliTerm::x(0), PauliTerm::y(2), PauliTerm::z(18)];
+    let mut c = Circuit::new(n, 0);
+    c.add_pauli_rotation(0.1, &narrow);
+    c.add_pauli_rotation(0.2, &narrow);
+    c.add_pauli_rotation(0.3, &wide);
+    c.add_pauli_rotation(0.4, &narrow);
+    c.add_pauli_rotation(0.5, &narrow);
+    assert_eq!(
+        fused_rotation_counts(&c),
+        vec![
+            ("multi_pauli_rot", 2),
+            ("pauli_rot", 1),
+            ("multi_pauli_rot", 2)
+        ]
+    );
+}
+
+#[test]
+fn pauli_rotations_stay_native_below_the_batch_floor() {
+    use crate::sim::unified_pauli::PauliTerm;
+    let n = MIN_QUBITS_FOR_PAULI_ROT_BATCH - 1;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n - 2 {
+        c.add_pauli_rotation(
+            0.2,
+            &[PauliTerm::x(q), PauliTerm::y(q + 1), PauliTerm::z(q + 2)],
+        );
+    }
+    assert!(
+        fused_rotation_counts(&c)
+            .iter()
+            .all(|&(name, _)| name == "pauli_rot")
+    );
+}

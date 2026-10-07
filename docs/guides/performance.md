@@ -21,7 +21,10 @@ the architecture reference under [Fusion Pipeline](../architecture/fusion.md) an
    A `Multi2q` tile is a contiguous run of the low index bits plus gathered high
    qubits, 64 amplitudes per run and up to eight high qubits in a 2^14 tile, so a
    batch of gates on any qubits costs one pass over the state as long as it spans at
-   most eight qubits above bit 6. `PRISM_TILE_KB` overrides the budget for every tile,
+   most eight qubits above bit 6. A `MultiPauliRot` batch of Pauli rotations uses the
+   same tile, counting only the qubits that carry an X or Y letter, since a Z letter
+   outside the tile fixes one sign per tile.
+   `PRISM_TILE_KB` overrides the budget for every tile,
    and `PRISM_MULTI_2Q_TILE_BITS` and `PRISM_MULTI_2Q_LOW_BITS` set the `Multi2q`
    shape by hand. Budgets past 256 KB are derived, not measured, so a core with a
    larger cache is worth a sweep of `PRISM_TILE_KB`.

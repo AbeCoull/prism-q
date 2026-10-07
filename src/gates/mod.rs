@@ -111,6 +111,10 @@ pub enum Gate {
     /// the CNOT-ladder lowering from `circuit::expand_pauli_rotations`.
     PauliRot(Box<PauliRotData>),
 
+    /// Pauli rotations applied in order in one cache-tiled pass. Targets list every
+    /// qubit the strings touch, ascending.
+    MultiPauliRot(Box<MultiPauliRotData>),
+
     /// Dense unitary on three or more qubits, a row-major `2^k x 2^k` matrix
     /// with `targets[0]` the most significant bit of both indices, the packing
     /// [`Gate::matrix_4x4`] uses.
@@ -404,6 +408,48 @@ pub(crate) fn pauli_rot_masks(targets: &[usize], axes: &[PauliAxis]) -> (usize, 
         }
     }
     (xmask, zmask, num_y)
+}
+
+/// Data for a `MultiPauliRot` batch: `(xmask, zmask, theta)` per rotation in circuit
+/// order. Bit `q` of `xmask` marks an X or Y letter on qubit `q` and bit `q` of `zmask`
+/// a Z or Y, so the Y count is `(xmask & zmask).count_ones()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiPauliRotData {
+    pub(crate) rotations: Vec<(usize, usize, f64)>,
+}
+
+impl MultiPauliRotData {
+    pub fn rotations(&self) -> &[(usize, usize, f64)] {
+        &self.rotations
+    }
+
+    /// Every qubit any rotation touches, as a bit mask.
+    pub(crate) fn support(&self) -> usize {
+        self.rotations.iter().fold(0, |acc, &(x, z, _)| acc | x | z)
+    }
+
+    /// Call `f` with each rotation as an angle, ascending targets, and their letters.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn for_each_rotation(&self, mut f: impl FnMut(f64, &[usize], &[PauliAxis])) {
+        let mut targets: SmallVec<[usize; 8]> = SmallVec::new();
+        let mut axes: SmallVec<[PauliAxis; 8]> = SmallVec::new();
+        for &(xmask, zmask, theta) in &self.rotations {
+            targets.clear();
+            axes.clear();
+            let mut rest = xmask | zmask;
+            while rest != 0 {
+                let q = rest.trailing_zeros() as usize;
+                rest &= rest - 1;
+                targets.push(q);
+                axes.push(match (xmask >> q & 1, zmask >> q & 1) {
+                    (1, 1) => PauliAxis::Y,
+                    (1, _) => PauliAxis::X,
+                    _ => PauliAxis::Z,
+                });
+            }
+            f(theta, &targets, &axes);
+        }
+    }
 }
 
 /// Data for a multi-controlled unitary gate.
@@ -706,11 +752,20 @@ pub(crate) fn multi_2q_join(
     q1: usize,
     num_qubits: usize,
 ) -> Option<smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>> {
+    subcube_join(high, [q0, q1], num_qubits)
+}
+
+/// [`multi_2q_join`] for any set of qubits a gate needs inside the tile.
+pub(crate) fn subcube_join(
+    high: &[usize],
+    qubits: impl IntoIterator<Item = usize>,
+    num_qubits: usize,
+) -> Option<smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>> {
     let budget = multi_2q_high_budget_for(num_qubits);
     let low_bits = multi_2q_low_bits();
     let mut joined: smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> =
         high.iter().copied().collect();
-    for q in [q0, q1] {
+    for q in qubits {
         if q >= low_bits && !joined.contains(&q) {
             if joined.len() == budget {
                 return None;
@@ -903,6 +958,7 @@ impl Gate {
             }
             Gate::DiagonalBatch(data) => count_unique_diag_qubits(&data.entries),
             Gate::PauliRot(data) => data.axes.len(),
+            Gate::MultiPauliRot(data) => data.support().count_ones() as usize,
             Gate::Unitary(data) => data.num_qubits(),
             Gate::MultiFused(data) => data.gates.len(),
             Gate::Multi2q(data) => {
@@ -993,6 +1049,7 @@ impl Gate {
             | Gate::BatchRzz(_)
             | Gate::DiagonalBatch(_)
             | Gate::PauliRot(_)
+            | Gate::MultiPauliRot(_)
             | Gate::Unitary(_)
             | Gate::MultiFused(_)
             | Gate::Fused2q(_)
@@ -1152,6 +1209,7 @@ impl Gate {
             Gate::BatchPhase(_) => "batch_phase",
             Gate::QftBlock { .. } => "qft_block",
             Gate::PauliRot(_) => "pauli_rot",
+            Gate::MultiPauliRot(_) => "multi_pauli_rot",
             Gate::Unitary(_) => "unitary",
             Gate::BatchRzz(_) => "batch_rzz",
             Gate::DiagonalBatch(_) => "diagonal_batch",
@@ -1193,6 +1251,14 @@ impl Gate {
             Gate::PauliRot(data) => Gate::PauliRot(Box::new(PauliRotData {
                 theta: -data.theta,
                 axes: data.axes.clone(),
+            })),
+            Gate::MultiPauliRot(data) => Gate::MultiPauliRot(Box::new(MultiPauliRotData {
+                rotations: data
+                    .rotations
+                    .iter()
+                    .rev()
+                    .map(|&(xmask, zmask, theta)| (xmask, zmask, -theta))
+                    .collect(),
             })),
             Gate::Unitary(data) => Gate::Unitary(Box::new(data.adjoint())),
             Gate::BatchRzz(data) => Gate::BatchRzz(Box::new(BatchRzzData {
@@ -1783,6 +1849,7 @@ impl fmt::Display for Gate {
                 }
                 write!(f, "]({})", format_angle(data.theta))
             }
+            Gate::MultiPauliRot(data) => write!(f, "MR[{}]", data.rotations.len()),
             Gate::BatchRzz(data) => write!(f, "BZZ[{}]", data.edges.len()),
             Gate::DiagonalBatch(data) => write!(f, "BD[{}]", data.entries.len()),
             Gate::Multi2q(data) => write!(f, "M2[{}]", data.gates.len()),

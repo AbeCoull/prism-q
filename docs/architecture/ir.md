@@ -125,6 +125,7 @@ regressions. Check `size_of::<Gate>()` after adding a variant, and `Box` large p
 | `BatchRzz(Box<BatchRzzData>)` | Batched ZZ rotations | 16B |
 | `DiagonalBatch(Box<DiagonalBatchData>)` | Mixed diagonal 1q/2q batch | 16B |
 | `PauliRot(Box<PauliRotData>)` | Multi-qubit Pauli rotation, boxed angle plus letters | 16B |
+| `MultiPauliRot(Box<MultiPauliRotData>)` | Batched Pauli rotations as masks and angles for tiled pass | 16B |
 | `Unitary(Box<UnitaryData>)` | Caller-supplied dense `2^k x 2^k` matrix, boxed with its width | 16B |
 
 `Unitary` is the one variant built from a matrix a caller hands in, through

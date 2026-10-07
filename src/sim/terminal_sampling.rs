@@ -258,26 +258,90 @@ fn sample_counts_from_outcome_distribution(
     seed: u64,
 ) -> HashMap<Vec<u64>, u64> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let cdf = build_cdf(probs);
     let m_words = num_classical_bits.div_ceil(64).max(1);
+
+    if probs.len() > SEARCHED_CDF_MAX_LEN || probs.len() >= num_shots {
+        let mut uniforms: Vec<f64> = (0..num_shots).map(|_| rng.random()).collect();
+        uniforms.sort_unstable_by(f64::total_cmp);
+        let Some(hits) = merged_cdf_hits(probs, &uniforms) else {
+            return searched_cdf_counts(probs, uniforms.into_iter(), map, m_words);
+        };
+        return hits
+            .into_iter()
+            .map(|(key, count)| (map.packed_key_from_compact(key, m_words), count))
+            .collect();
+    }
+    searched_cdf_counts(probs, (0..num_shots).map(|_| rng.random()), map, m_words)
+}
+
+/// Outcome tables up to this length keep a searched CDF when the shots outnumber
+/// them: a 256 KiB table stays cache resident, where sorting the uniforms for
+/// [`merged_cdf_hits`] can cost more than the searches it replaces.
+const SEARCHED_CDF_MAX_LEN: usize = 1 << 15;
+
+fn searched_cdf_counts(
+    probs: &[f64],
+    uniforms: impl Iterator<Item = f64>,
+    map: &CompactMeasurementMap,
+    m_words: usize,
+) -> HashMap<Vec<u64>, u64> {
+    let cdf = build_cdf(probs);
 
     if probs.len() <= MAX_DENSE_COUNT_BINS {
         let mut compact_counts = vec![0u64; probs.len()];
-        for _ in 0..num_shots {
-            let r: f64 = rng.random();
-            let key = sample_from_cdf(&cdf, r);
-            compact_counts[key] += 1;
+        for r in uniforms {
+            compact_counts[sample_from_cdf(&cdf, r)] += 1;
         }
         return packed_counts_from_dense(compact_counts, map, m_words);
     }
 
-    let mut compact_counts = HashMap::with_capacity(num_shots.min(probs.len()));
-    for _ in 0..num_shots {
-        let r: f64 = rng.random();
-        let key = sample_from_cdf(&cdf, r);
-        *compact_counts.entry(key).or_insert(0) += 1;
+    let mut compact_counts = HashMap::with_capacity(uniforms.size_hint().0.min(probs.len()));
+    for r in uniforms {
+        *compact_counts.entry(sample_from_cdf(&cdf, r)).or_insert(0) += 1;
     }
     packed_counts_from_sparse(compact_counts, map, m_words)
+}
+
+/// Each nonzero outcome index of `probs` with its hit count when the ascending
+/// `sorted` uniforms walk one cumulative pass, `None` on a negative or NaN weight.
+///
+/// Every uniform lands where [`sample_from_cdf`] on [`build_cdf`] puts it: the
+/// first index whose cumulative weight exceeds it, or, when it equals a run of
+/// cumulative weights, the last index of that run. A negative weight breaks the
+/// monotone order the equivalence rests on.
+fn merged_cdf_hits(probs: &[f64], sorted: &[f64]) -> Option<Vec<(usize, u64)>> {
+    let last = probs.len().checked_sub(1)?;
+    let mut hits = Vec::new();
+    let mut held = 0u64;
+    let mut prev = f64::NEG_INFINITY;
+    let mut acc = 0.0f64;
+    let mut next = 0usize;
+    for (i, &p) in probs.iter().enumerate() {
+        if p.is_nan() || p < 0.0 {
+            return None;
+        }
+        acc += p;
+        let cumulative = if i == last { 1.0 } else { acc };
+        let start = next;
+        while next < sorted.len() && sorted[next] < cumulative {
+            next += 1;
+        }
+        let tied = sorted[start..next]
+            .iter()
+            .take_while(|&&r| r == prev)
+            .count();
+        held += tied as u64;
+        if held != 0 {
+            hits.push((i - 1, held));
+        }
+        held = (next - start - tied) as u64;
+        prev = cumulative;
+    }
+    held += (sorted.len() - next) as u64;
+    if held != 0 {
+        hits.push((last, held));
+    }
+    Some(hits)
 }
 
 fn sorted_thresholds(num_shots: usize, seed: u64) -> Vec<(f64, usize)> {
@@ -538,5 +602,80 @@ mod tests {
         let below_cap = sample_counts_from_probs_capped(&probs, &meas_map, bits, 300, 42, bits);
         let total: u64 = below_cap.values().sum();
         assert_eq!(total, 300);
+    }
+
+    fn merged_counts(
+        probs: &[f64],
+        sorted: &[f64],
+        map: &CompactMeasurementMap,
+    ) -> HashMap<Vec<u64>, u64> {
+        merged_cdf_hits(probs, sorted)
+            .expect("nonnegative weights")
+            .into_iter()
+            .map(|(key, count)| (map.packed_key_from_compact(key, 1), count))
+            .collect()
+    }
+
+    // The merge must land every uniform where the binary search does, including a
+    // uniform equal to a cumulative weight that zero-probability bins repeat, a
+    // weight sum that rounds past 1 before the last bin is pinned, and draws past
+    // every nonzero bin.
+    #[test]
+    fn merged_cdf_counts_match_searched_cdf() {
+        let bits = 3;
+        let meas_map: Vec<(usize, usize)> = (0..bits).map(|q| (q, q)).collect();
+        let map = CompactMeasurementMap::new(&meas_map, bits);
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let random: Vec<f64> = (0..64).map(|_| rng.random()).collect();
+        let weights: Vec<f64> = (0..8).map(|_| rng.random()).collect();
+        let total: f64 = weights.iter().sum();
+        let distributions: Vec<Vec<f64>> = vec![
+            weights.iter().map(|w| w / total).collect(),
+            vec![0.25, 0.0, 0.25, 0.0, 0.5, 0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0],
+            vec![0.1, 0.2, 0.3, 0.4 + 1e-15, 0.0, 0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            vec![0.125; 8],
+        ];
+        for probs in &distributions {
+            let cdf = build_cdf(probs);
+            let mut uniforms = random.clone();
+            uniforms.extend(cdf.iter().copied().filter(|&c| c < 1.0));
+            uniforms.extend([
+                0.0,
+                0.25 - f64::EPSILON / 8.0,
+                0.5,
+                1.0 - f64::EPSILON / 2.0,
+            ]);
+            uniforms.sort_unstable_by(f64::total_cmp);
+            assert_eq!(
+                merged_counts(probs, &uniforms, &map),
+                searched_cdf_counts(probs, uniforms.iter().copied(), &map, 1),
+                "{probs:?}"
+            );
+        }
+        assert!(merged_cdf_hits(&[0.5, -1e-18, 0.5], &[0.5]).is_none());
+    }
+
+    #[test]
+    fn merged_counts_match_searched_counts_end_to_end() {
+        let bits = 16;
+        let len = 1usize << bits;
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut probs: Vec<f64> = (0..len)
+            .map(|i| if i % 5 == 0 { 0.0 } else { rng.random::<f64>() })
+            .collect();
+        probs[len - 64..].fill(0.0);
+        let total: f64 = probs.iter().sum();
+        probs.iter_mut().for_each(|p| *p /= total);
+        let meas_map: Vec<(usize, usize)> = (0..bits).map(|q| (q, q)).collect();
+        let map = CompactMeasurementMap::new(&meas_map, bits);
+
+        for shots in [1_000, 100_000] {
+            let counts = sample_counts_from_outcome_distribution(&probs, &map, bits, shots, 42);
+            let mut draws = ChaCha8Rng::seed_from_u64(42);
+            let searched = searched_cdf_counts(&probs, (0..shots).map(|_| draws.random()), &map, 1);
+            assert_eq!(counts, searched, "{shots} shots");
+        }
     }
 }

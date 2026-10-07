@@ -21,112 +21,77 @@ use prism_q::gates::Gate;
 use prism_q::sim::{self, BackendKind as Kind};
 use prism_q::simulate;
 
-backend_matrix_sv_tests! {
-    backend: BackendKind::Sparse,
-    constructor: || SparseBackend::new(SEED),
-    eps: SPARSE_EPS,
-    cases: exact_small_cases(),
-    tests: {
-        matrix_sparse_bell_matches_statevector => "bell",
-        matrix_sparse_ghz_3_matches_statevector => "ghz_3",
-        matrix_sparse_ghz_5_matches_statevector => "ghz_5",
-        matrix_sparse_qft_4_matches_statevector => "qft_4",
-        matrix_sparse_qft_8_matches_statevector => "qft_8",
-        matrix_sparse_random_4_matches_statevector => "random_4",
-        matrix_sparse_random_8_matches_statevector => "random_8",
-        matrix_sparse_hea_4_matches_statevector => "hea_4",
-        matrix_sparse_ghz_4_matches_statevector => "ghz_4",
-        matrix_sparse_qaoa_4_l3_matches_statevector => "qaoa_4_l3",
-        matrix_sparse_qpe_4_matches_statevector => "qpe_4",
-        matrix_sparse_qpe_8_matches_statevector => "qpe_8",
-        matrix_sparse_cz_chain_8_matches_statevector => "cz_chain_8",
-        matrix_sparse_single_qubit_rotations_matches_statevector => "single_qubit_rotations",
-        matrix_sparse_clifford_random_small_matches_statevector => "clifford_random_small",
-        matrix_sparse_basis_permutation_matches_statevector => "sparse_basis_permutation",
-    }
+macro_rules! exact_backend_tests {
+    ($suite:ident, $backend:expr, $constructor:expr, $eps:expr) => {
+        $suite! {
+            backend: $backend,
+            constructor: $constructor,
+            eps: $eps,
+            cases: exact_small_cases(),
+            coverage: corpus_is_complete,
+            tests: {
+                bell => "bell",
+                ghz_3 => "ghz_3",
+                ghz_4 => "ghz_4",
+                ghz_5 => "ghz_5",
+                qft_4 => "qft_4",
+                qft_8 => "qft_8",
+                random_4 => "random_4",
+                random_8 => "random_8",
+                hea_4 => "hea_4",
+                qaoa_4 => "qaoa_4",
+                qaoa_4_l3 => "qaoa_4_l3",
+                qpe_4 => "qpe_4",
+                qpe_8 => "qpe_8",
+                cz_chain_8 => "cz_chain_8",
+                w_state_4 => "w_state_4",
+                single_qubit_rotations => "single_qubit_rotations",
+                clifford_random_small => "clifford_random_small",
+                sparse_basis_permutation => "sparse_basis_permutation",
+            }
+        }
+    };
 }
 
-backend_matrix_fused_tests! {
-    backend: BackendKind::Sparse,
-    constructor: || SparseBackend::new(SEED),
-    eps: SPARSE_EPS,
-    cases: exact_small_cases(),
-    tests: {
-        matrix_sparse_bell_fused_matches_unfused => "bell",
-        matrix_sparse_ghz_3_fused_matches_unfused => "ghz_3",
-        matrix_sparse_ghz_5_fused_matches_unfused => "ghz_5",
-        matrix_sparse_qft_4_fused_matches_unfused => "qft_4",
-        matrix_sparse_single_qubit_rotations_fused_matches_unfused => "single_qubit_rotations",
-        matrix_sparse_clifford_random_small_fused_matches_unfused => "clifford_random_small",
-        matrix_sparse_basis_permutation_fused_matches_unfused => "sparse_basis_permutation",
-    }
+macro_rules! exact_backend {
+    ($module:ident, $backend:expr, $constructor:expr, $eps:expr) => {
+        mod $module {
+            use super::*;
+
+            exact_backend_tests!(backend_matrix_sv_tests, $backend, $constructor, $eps);
+        }
+    };
 }
 
-backend_matrix_sv_tests! {
-    backend: BackendKind::Mps,
-    constructor: || MpsBackend::new(SEED, 64),
-    eps: MPS_EPS,
-    cases: exact_small_cases(),
-    tests: {
-        matrix_mps_bell_matches_statevector => "bell",
-        matrix_mps_ghz_3_matches_statevector => "ghz_3",
-        matrix_mps_ghz_5_matches_statevector => "ghz_5",
-        matrix_mps_qft_4_matches_statevector => "qft_4",
-        matrix_mps_qft_8_matches_statevector => "qft_8",
-        matrix_mps_random_4_matches_statevector => "random_4",
-        matrix_mps_random_8_matches_statevector => "random_8",
-        matrix_mps_hea_4_matches_statevector => "hea_4",
-        matrix_mps_ghz_4_matches_statevector => "ghz_4",
-        matrix_mps_qaoa_4_matches_statevector => "qaoa_4",
-        matrix_mps_qpe_4_matches_statevector => "qpe_4",
-        matrix_mps_qpe_8_matches_statevector => "qpe_8",
-        matrix_mps_w_state_4_matches_statevector => "w_state_4",
-        matrix_mps_single_qubit_rotations_matches_statevector => "single_qubit_rotations",
-        matrix_mps_clifford_random_small_matches_statevector => "clifford_random_small",
-        matrix_mps_basis_permutation_matches_statevector => "sparse_basis_permutation",
-    }
-}
+exact_backend!(
+    sparse,
+    BackendKind::Sparse,
+    || SparseBackend::new(SEED),
+    SPARSE_EPS
+);
+exact_backend!(mps, BackendKind::Mps, || MpsBackend::new(SEED, 64), MPS_EPS);
+exact_backend!(
+    tensor_network,
+    BackendKind::TensorNetwork,
+    || TensorNetworkBackend::new(SEED),
+    TN_EPS
+);
+exact_backend!(
+    factored,
+    BackendKind::Factored,
+    || FactoredBackend::new(SEED),
+    FACTORED_EPS
+);
 
-backend_matrix_sv_tests! {
-    backend: BackendKind::TensorNetwork,
-    constructor: || TensorNetworkBackend::new(SEED),
-    eps: TN_EPS,
-    cases: exact_small_cases(),
-    tests: {
-        matrix_tensor_network_bell_matches_statevector => "bell",
-        matrix_tensor_network_ghz_3_matches_statevector => "ghz_3",
-        matrix_tensor_network_ghz_5_matches_statevector => "ghz_5",
-        matrix_tensor_network_qft_4_matches_statevector => "qft_4",
-        matrix_tensor_network_qft_8_matches_statevector => "qft_8",
-        matrix_tensor_network_random_4_matches_statevector => "random_4",
-        matrix_tensor_network_random_8_matches_statevector => "random_8",
-        matrix_tensor_network_hea_4_matches_statevector => "hea_4",
-        matrix_tensor_network_ghz_4_matches_statevector => "ghz_4",
-        matrix_tensor_network_qaoa_4_matches_statevector => "qaoa_4",
-        matrix_tensor_network_qpe_4_matches_statevector => "qpe_4",
-        matrix_tensor_network_qpe_8_matches_statevector => "qpe_8",
-        matrix_tensor_network_cz_chain_8_matches_statevector => "cz_chain_8",
-        matrix_tensor_network_w_state_4_matches_statevector => "w_state_4",
-        matrix_tensor_network_single_qubit_rotations_matches_statevector => "single_qubit_rotations",
-        matrix_tensor_network_clifford_random_small_matches_statevector => "clifford_random_small",
-        matrix_tensor_network_basis_permutation_matches_statevector => "sparse_basis_permutation",
-    }
-}
+mod sparse_fused {
+    use super::*;
 
-backend_matrix_sv_tests! {
-    backend: BackendKind::Factored,
-    constructor: || FactoredBackend::new(SEED),
-    eps: FACTORED_EPS,
-    cases: exact_small_cases(),
-    tests: {
-        matrix_factored_bell_matches_statevector => "bell",
-        matrix_factored_ghz_3_matches_statevector => "ghz_3",
-        matrix_factored_ghz_5_matches_statevector => "ghz_5",
-        matrix_factored_qft_4_matches_statevector => "qft_4",
-        matrix_factored_single_qubit_rotations_matches_statevector => "single_qubit_rotations",
-        matrix_factored_clifford_random_small_matches_statevector => "clifford_random_small",
-        matrix_factored_basis_permutation_matches_statevector => "sparse_basis_permutation",
-    }
+    exact_backend_tests!(
+        backend_matrix_fused_tests,
+        BackendKind::Sparse,
+        || SparseBackend::new(SEED),
+        SPARSE_EPS
+    );
 }
 
 backend_matrix_sv_tests! {
@@ -134,6 +99,7 @@ backend_matrix_sv_tests! {
     constructor: || StabilizerBackend::new(SEED),
     eps: STAB_EPS,
     cases: exact_small_cases(),
+    coverage: matrix_stabilizer_corpus_is_complete,
     tests: {
         matrix_stabilizer_bell_matches_statevector => "bell",
         matrix_stabilizer_ghz_3_matches_statevector => "ghz_3",
@@ -149,6 +115,7 @@ backend_matrix_sv_tests! {
     constructor: || ProductStateBackend::new(SEED),
     eps: PRODUCT_EPS,
     cases: product_separable_cases(),
+    coverage: matrix_product_corpus_is_complete,
     tests: {
         matrix_product_single_qubit_rotations_4q_matches_statevector => "single_qubit_rotations_4q",
         matrix_product_single_qubit_rotations_8q_matches_statevector => "single_qubit_rotations_8q",
@@ -162,6 +129,7 @@ backend_matrix_fused_tests! {
     constructor: || ProductStateBackend::new(SEED),
     eps: PRODUCT_EPS,
     cases: product_separable_cases(),
+    coverage: matrix_product_fused_corpus_is_complete,
     tests: {
         matrix_product_single_qubit_rotations_4q_fused_matches_unfused => "single_qubit_rotations_4q",
         matrix_product_single_qubit_rotations_8q_fused_matches_unfused => "single_qubit_rotations_8q",
@@ -170,15 +138,12 @@ backend_matrix_fused_tests! {
     }
 }
 
-// ---- State diagnostics ----
-
 fn run_on_new<B: Backend>(mut backend: B, circuit: &Circuit) -> B {
     sim::run_on(&mut backend, circuit).unwrap();
     backend
 }
 
-/// Every contiguous cut of an `n`-qubit register plus one scattered
-/// subsystem, so a backend that only handles a prefix is caught.
+/// Include contiguous cuts and a scattered subsystem.
 fn entropy_cuts(n: usize) -> Vec<Vec<usize>> {
     let mut cuts: Vec<Vec<usize>> = (1..n).map(|cut| (0..cut).collect()).collect();
     if n >= 4 {
@@ -230,9 +195,7 @@ fn assert_diagnostics_match_statevector<B: Backend>(backend: &mut B, case: Circu
     }
 }
 
-// The entropy comes off a rank and the marginal off a projector, neither of
-// which touches an amplitude, so both are checked against the dense partial
-// trace on every Clifford case of the corpus.
+// Tableau diagnostics provide an independent check against dense partial traces.
 #[test]
 fn matrix_stabilizer_diagnostics_match_the_statevector() {
     for case in exact_small_cases() {
@@ -244,8 +207,7 @@ fn matrix_stabilizer_diagnostics_match_the_statevector() {
     }
 }
 
-// Clusters are unentangled, so the entropy sums over them and the marginal is
-// their Kronecker product; a cut that crosses several clusters exercises both.
+// Cuts across clusters exercise entropy addition and marginal tensor products.
 #[test]
 fn matrix_factored_stabilizer_diagnostics_match_the_statevector() {
     for case in exact_small_cases() {
@@ -293,10 +255,7 @@ fn overlap_through(
         .fidelity
 }
 
-// Each backend against itself on a pair of circuits, which takes its native
-// route, and against the statevector on one circuit, which takes the dense
-// export. The second circuit differs by a trailing Z, so the value is neither
-// 1 nor 0 on most cases and a dropped phase would show.
+// A trailing Z makes overlap sensitive to phase errors on both query routes.
 #[test]
 fn matrix_overlap_agrees_with_the_statevector() {
     for case in exact_small_cases() {
@@ -333,9 +292,7 @@ fn matrix_overlap_agrees_with_the_statevector() {
     }
 }
 
-// A chain at bond 2 discards weight on `random_8`, so the state it holds is
-// unnormalized. The overlap divides by both norms, which is what leaves a
-// truncated chain reading 1 against itself.
+// Truncation discards norm; normalized self-overlap must remain one.
 #[test]
 fn matrix_truncated_mps_overlap_normalizes() {
     let circuit = find_case(exact_small_cases(), "random_8").circuit();

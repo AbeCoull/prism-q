@@ -1,6 +1,4 @@
-//! Shared helpers for the cross-backend correctness tests. Tolerance
-//! constants are split per backend so the same helper runs at each backend's
-//! precision.
+//! Cross-backend correctness helpers and backend-specific tolerances.
 
 #![allow(dead_code)]
 
@@ -42,11 +40,8 @@ pub fn mix_seed(seed: u64, index: usize) -> u64 {
     splitmix64(splitmix64(seed) ^ index as u64)
 }
 
-/// The 16 two-qubit Pauli Kraus operators of symmetric depolarizing with
-/// parameter `p`, weighted `sqrt(1-p)` on `I(x)I` and `sqrt(p/15)` elsewhere,
-/// indexed `2*bit(q0) + bit(q1)`. The closed-form
-/// `DensityMatrixBackend::apply_2q_depolarizing` replaces this set, so the
-/// two are independent implementations of the same channel.
+/// Depolarizing Kraus operators: weights sqrt(1-p) for II, sqrt(p/15) otherwise.
+/// Index each operator by 2*bit(q0) + bit(q1), independently of the channel kernel.
 pub fn depolarizing_2q_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
     let c = Complex64::new;
     let paulis: [[[Complex64; 2]; 2]; 4] = [
@@ -87,16 +82,7 @@ pub fn all_pauli_masks(n: usize) -> Vec<(usize, usize, u32)> {
     masks
 }
 
-/// Statevector probabilities used as the reference for the backend matrices.
-///
-/// The statevector is a participant, not an independent authority: a helper
-/// built on it can only report that two implementations disagree, and it will
-/// name the other backend as the failure. Anything this reference is expected
-/// to get right therefore needs a closed-form anchor in
-/// `tests/golden_small_circuits.rs` that names the statevector directly. The
-/// `reset` contract went unanchored there for a long time, and a
-/// projection-onto-|0> implementation survived a green matrix as a result:
-/// four correct backends were the ones reported as failing.
+/// Compare backend agreement; anchor correctness separately in `golden_small_circuits`.
 pub fn sv_reference_probs(circuit: &Circuit) -> Vec<f64> {
     let mut backend = StatevectorBackend::new(SEED);
     sim::run_on(&mut backend, circuit).unwrap();
@@ -210,25 +196,14 @@ pub fn run_and_state(circuit: &Circuit) -> Vec<Complex64> {
     backend.state_vector().to_vec()
 }
 
-/// Reverse the low `num_qubits` bits of a basis-state index.
-///
-/// PRISM-Q carries two basis orderings and both are load-bearing. A
-/// statevector index puts qubit 0 in the least significant bit; a gate matrix
-/// (`Fused2q`, `matrix_4x4`, 2q Kraus operators) puts `targets[0]` in the most
-/// significant. The two are bit reversals of each other, so this converts in
-/// either direction.
+/// Convert between statevector order (q0 low) and gate-matrix order (first target high).
 pub fn reverse_qubit_bits(index: usize, num_qubits: usize) -> usize {
     (0..num_qubits)
         .filter(|bit| (index >> (num_qubits - 1 - bit)) & 1 == 1)
         .fold(0, |acc, bit| acc | (1 << bit))
 }
 
-/// The unitary a circuit implements, indexed in gate-matrix order.
-///
-/// Column `c` is the circuit applied to the basis state `c` names, so a
-/// circuit holding one gate on `0..n` in order reproduces that gate's matrix
-/// exactly. Panics on a circuit that is not unitary, since `run_on_state`
-/// rejects one.
+/// Return the circuit unitary in gate-matrix order; panic for non-unitary circuits.
 pub fn circuit_unitary(circuit: &Circuit) -> Vec<Vec<Complex64>> {
     let n = circuit.num_qubits;
     let dim = 1usize << n;

@@ -44,6 +44,9 @@ jobs:
       - name: Formatting
         run: cargo fmt --all -- --check
 
+      - name: Correctness tooling tests
+        run: python3 -m unittest discover -s scripts -p 'test_correctness_tools.py'
+
       - name: Clippy
         run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
@@ -531,6 +534,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -538,8 +546,25 @@ jobs:
         with:
           cache-bin: false
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@cargo-nextest
       - name: Generate coverage
-        run: cargo llvm-cov --features "$CI_FEATURES" --lcov --output-path lcov.info
+        run: cargo llvm-cov nextest --features "$CI_FEATURES" --lcov --output-path lcov.info
+      - name: Summarize source gaps
+        env:
+          COVERAGE_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          args=()
+          if [[ -n "$COVERAGE_BASE" ]]; then args+=(--base "$COVERAGE_BASE"); fi
+          python scripts/coverage_report.py lcov.info "${args[@]}" > coverage-summary.md
+          cat coverage-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: |
+            lcov.info
+            coverage-summary.md
+          if-no-files-found: error
       - name: Extract coverage percentage
         id: cov
         run: |

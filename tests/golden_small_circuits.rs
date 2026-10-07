@@ -1,9 +1,4 @@
-//! Closed-form goldens: circuits whose output was computed by hand. The
-//! expected value is a literal from the algebra in the comment above it, or a
-//! textbook decomposition of the same gate on the same backend, never a
-//! second simulator: a comparison can only report that two implementations
-//! disagree, not which one is right. Behavior needing an authority goes here;
-//! agreement between implementations goes in `tests/backend_equivalence.rs`.
+//! Closed-form and textbook-decomposition oracles, independent of backend consensus.
 
 mod common;
 
@@ -37,6 +32,16 @@ fn assert_amplitude(actual: Complex64, expected: Complex64, label: &str) {
         (actual - expected).norm() < EPS,
         "{label}: expected {expected}, got {actual}"
     );
+}
+
+#[test]
+fn parity_sibling_regions_preserve_the_taken_branch() {
+    let circuit = common::circuits::parity_sibling_regions();
+    let result = sim::run_on(&mut StatevectorBackend::new(common::SEED), &circuit).unwrap();
+    assert_eq!(result.classical_bits, [true, false, true, false]);
+    let mut expected = [0.0; 16];
+    expected[5] = 1.0;
+    assert_probs(&result.probabilities.unwrap().to_vec(), &expected);
 }
 
 // ---- Identity ----

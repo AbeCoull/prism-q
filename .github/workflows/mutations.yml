@@ -1,0 +1,42 @@
+name: Mutation checks
+
+on:
+  schedule:
+    - cron: '30 4 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutations-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  seeded-faults:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: mutation-checks
+      - uses: taiki-e/install-action@cargo-nextest
+      - name: Correctness tooling tests
+        run: python -m unittest discover -s scripts -p 'test_correctness_tools.py'
+      - name: Check phase signs, target order, and parameter replay
+        run: python scripts/check_mutations.py
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-results
+          path: |
+            target/mutation-check/report.json
+            target/mutation-check/*.log
+          if-no-files-found: error

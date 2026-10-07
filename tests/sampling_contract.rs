@@ -17,6 +17,72 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 const SHOTS: usize = 4000;
+
+fn check_single_shot_independence(rank: usize) {
+    let mut circuit = Circuit::new(rank + 1, rank + 1);
+    for q in 0..rank {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.add_gate(Gate::X, &[rank]);
+    for q in 0..=rank {
+        circuit.add_measure(q, q);
+    }
+    let mut sampler = compile_measurements(&circuit, SEED).unwrap();
+    assert_eq!(sampler.rank(), rank);
+    let mut ones = vec![0; rank];
+    let mut joint = vec![[0usize; 4]; rank.saturating_sub(1)];
+    for _ in 0..SHOTS {
+        let sample = sampler.sample();
+        assert_eq!(sample.len(), rank + 1);
+        assert!(sample[rank]);
+        for (q, count) in ones.iter_mut().enumerate() {
+            *count += usize::from(sample[q]);
+        }
+        for (q, counts) in joint.iter_mut().enumerate() {
+            counts[usize::from(sample[q]) + 2 * usize::from(sample[rank - 1])] += 1;
+        }
+    }
+    for (q, count) in ones.into_iter().enumerate() {
+        assert!(
+            count.abs_diff(SHOTS / 2) < SHOTS / 16,
+            "rank {rank}, qubit {q}: {count}"
+        );
+    }
+    for (q, counts) in joint.into_iter().enumerate() {
+        for count in counts {
+            assert!(
+                count.abs_diff(SHOTS / 4) < SHOTS / 16,
+                "rank {rank}, qubits {q} and {}: {counts:?}",
+                rank - 1,
+            );
+        }
+    }
+}
+
+macro_rules! single_shot_cases {
+    ($($name:ident => $rank:literal),+ $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                check_single_shot_independence($rank);
+            }
+        )+
+    };
+}
+
+single_shot_cases! {
+    single_shot_rank_0 => 0,
+    single_shot_rank_7 => 7,
+    single_shot_rank_8 => 8,
+    single_shot_rank_9 => 9,
+    single_shot_rank_15 => 15,
+    single_shot_rank_16 => 16,
+    single_shot_rank_17 => 17,
+    single_shot_rank_63 => 63,
+    single_shot_rank_64 => 64,
+    single_shot_rank_65 => 65,
+}
+
 /// Shots for the stabilizer-rank sampler on a dynamic circuit, which walks its
 /// branch set once per shot.
 const BRANCH_SHOTS: usize = 400;

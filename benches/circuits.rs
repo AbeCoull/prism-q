@@ -3878,6 +3878,21 @@ fn bench_compiled_sampler(c: &mut Criterion) {
     let mut group = c.benchmark_group("compiled_sampler");
     configure_group(&mut group);
 
+    for rank in [9, 63, 64, 65] {
+        let mut circuit = Circuit::new(rank, rank);
+        for q in 0..rank {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for q in 0..rank {
+            circuit.add_measure(q, q);
+        }
+        let mut sampler = prism_q::compile_measurements(&circuit, SEED).unwrap();
+        assert_eq!(sampler.rank(), rank);
+        group.bench_function(BenchmarkId::new("single_shot", rank), |b| {
+            b.iter(|| black_box(sampler.sample()));
+        });
+    }
+
     for &n in &[100, 500, 1000] {
         let mut circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
         circuit.num_classical_bits = n;

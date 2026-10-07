@@ -799,7 +799,8 @@ impl CompiledSampler {
                     rand_buf = self.rng.next_u64();
                     rand_pos = 0;
                 }
-                let byte = ((rand_buf >> (rand_pos * 8)) & 0xFF) as usize;
+                let byte = (rand_buf & 0xFF) as usize;
+                rand_buf >>= 8;
                 rand_pos += 1;
                 let entry = lut.lookup(g, byte);
                 xor_words(accum, entry);

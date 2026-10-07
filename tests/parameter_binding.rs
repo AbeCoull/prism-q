@@ -21,8 +21,7 @@ fn angles(count: usize, seed: u64) -> Vec<f64> {
         .collect()
 }
 
-// Apply `circuit` verbatim, without a further fusion pass, so an already fused
-// stream is measured as the backend would execute it.
+// Apply the fused stream verbatim so a second fusion pass cannot repair it.
 fn statevector(circuit: &Circuit) -> Vec<Complex64> {
     let mut backend = StatevectorBackend::new(SEED);
     backend
@@ -44,9 +43,7 @@ fn assert_states_match(a: &[Complex64], b: &[Complex64], what: &str) {
     }
 }
 
-// The instruction streams must agree gate for gate, not merely up to the state
-// they produce: a replayed plan with a different block structure would still
-// simulate correctly while losing the performance the plan exists for.
+// Preserve block structure as well as the resulting state.
 fn assert_streams_match(a: &Circuit, b: &Circuit, what: &str) {
     assert_eq!(
         a.instructions.len(),
@@ -104,8 +101,6 @@ fn assert_mat4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4], what: &str) {
     }
 }
 
-// Gate kind and targets alone would let a replayed plan pass while carrying the
-// wrong matrices, which is exactly what a mis-recorded recipe produces.
 fn assert_payloads_match(a: &Gate, b: &Gate, what: &str) {
     match (a, b) {
         (Gate::Fused(x), Gate::Fused(y)) => assert_mat2(x, y, what),
@@ -157,9 +152,7 @@ fn assert_payloads_match(a: &Gate, b: &Gate, what: &str) {
     }
 }
 
-// A Trotter layer over the native Pauli rotation: the strings the constructor
-// does not recognize stay as `PauliRot`, whose angle a binding has to reach
-// through the plan like any other rotation.
+// Keep native PauliRot gates whose angles must survive plan replay.
 fn trotter_layer(n: usize) -> Circuit {
     let mut c = Circuit::new(n, 0);
     for q in 0..n {
@@ -226,10 +219,7 @@ fn n_bindings_match_n_independent_circuits_on_statevector() {
     }
 }
 
-// A weight-2 `PauliRot` anchors a `Fused2q`, so its angle now reaches the state
-// through the `Mat4` recipe rather than as a gate the plan carries unfused. The
-// recipe reads the bound gate through `matrix_4x4`, and a missing arm there
-// would replay the template's angle instead of the new one, silently.
+// Absorbed PauliRot angles must rebind through the Mat4 recipe.
 #[test]
 fn rxx_angles_rebind_through_a_fused_template() {
     let n = 16;
@@ -271,10 +261,7 @@ fn rxx_angles_rebind_through_a_fused_template() {
     }
 }
 
-// Fusion folds a weight-2 `PauliRot` with pending 1q neighbours into a dense
-// 4x4, so the plan has to rebuild that block from the bound angle. The
-// neighbours are generic rotations rather than named gates, which would bail
-// capture and hide the replay path behind the fallback.
+// Generic neighbours allow plan capture; named gates would force the fallback.
 #[test]
 fn an_absorbed_pauli_rotation_rebinds_through_the_plan() {
     let n = 12;
@@ -337,9 +324,7 @@ fn plan_is_captured_for_the_ansatz_bench_shapes() {
     }
 }
 
-// Zero angles drive several fused blocks to the identity, which fusion elides.
-// The plan cannot express that, so the guard has to send the binding back
-// through the pass pipeline rather than emit a stale block.
+// Identity elimination changes block structure and must invalidate plan replay.
 #[test]
 fn degenerate_angles_fall_back_and_stay_correct() {
     let template = circuits::hardware_efficient_ansatz(12, 3, SEED);
@@ -494,9 +479,7 @@ fn slot_that_no_gate_reads_binds_and_is_reported() {
     );
 }
 
-// A replayed plan patches payloads in place, so a rotation it records no site
-// for keeps the template's angle while the states still look plausible. Read
-// the angle back off the fused stream rather than trusting agreement.
+// Read angles directly to detect missing replay sites.
 #[test]
 fn a_bound_pauli_rotation_reaches_the_fused_stream() {
     let template = trotter_layer(12);
@@ -536,8 +519,6 @@ fn a_bound_pauli_rotation_reaches_the_fused_stream() {
     assert_eq!(bound, expected);
 }
 
-// A circuit with no parameters must still bind and fuse exactly as the
-// ordinary path does.
 #[test]
 fn unparameterized_template_is_unchanged() {
     let template = circuits::qft_circuit(12);
@@ -553,10 +534,7 @@ fn unparameterized_template_is_unchanged() {
     );
 }
 
-// A 1q run that is diagonal at capture time commutes backwards past a CX
-// control, and can then be absorbed into a Fused2q that carries no 2x2 payload
-// of its own. Binding an angle that makes the run non-diagonal stops the
-// reorder, so the guard on the run has to catch it even though no site does.
+// Losing diagonality must invalidate reordering even after absorption into Fused2q.
 #[test]
 fn binding_that_flips_1q_diagonality_falls_back() {
     let mut template = Circuit::new(12, 0);
@@ -613,8 +591,7 @@ fn run_matches_simulate_on_every_binding() {
     }
 }
 
-// A held backend would carry its RNG from one call into the next, so repeated
-// calls with one seed must each measure what a fresh `simulate` run measures.
+// Repeated calls must restart the backend RNG.
 #[test]
 fn run_with_mid_circuit_measurement_is_independent_of_call_history() {
     let mut template = Circuit::new(3, 3);
@@ -659,8 +636,7 @@ fn run_with_mid_circuit_measurement_is_independent_of_call_history() {
     }
 }
 
-// The density matrix backend does not accept fused gates, so `run` has to hand
-// it the bound template rather than the replayed skeleton.
+// Density matrix execution requires the bound template without fused gates.
 #[test]
 fn run_on_a_backend_without_fused_gates_binds_unfused() {
     let template = circuits::hardware_efficient_ansatz(6, 2, SEED);
@@ -713,9 +689,7 @@ fn a_clone_carries_the_plan_and_agrees() {
     assert_states_match(&a, &b, "clone");
 }
 
-// Links are instruction indices, so inserting a gate shifts every later link.
-// A set built by `all_rotations` pins the gate kinds it saw, so the edited
-// circuit is rejected instead of binding the wrong gates.
+// Inserting a gate invalidates the instruction indices stored in parameter links.
 #[test]
 fn editing_the_circuit_after_recording_links_is_rejected() {
     let mut template = Circuit::new(3, 0);
@@ -793,9 +767,7 @@ fn a_builder_pauli_rotation_takes_a_parameter_slot() {
     assert_eq!(params.values(&bound).expect("values"), vec![1.25]);
 }
 
-// A prepared circuit crosses a thread boundary in the Python bindings, which
-// release the GIL around `run`. The backend the route holds is what makes this
-// non-obvious, so pin it here rather than discovering it downstream.
+// Python releases the GIL while the prepared backend runs.
 #[test]
 fn a_prepared_circuit_is_send() {
     fn assert_send<T: Send>() {}
@@ -809,9 +781,7 @@ fn pauli_strings(n: usize) -> Vec<Vec<PauliTerm>> {
     strings
 }
 
-// A `ZZ` chain and an `X` field each form one group past the pair budget, so
-// both the Z-only and the basis-rotated moments passes run, and the `Y` term
-// lands in a small group that takes the pair expansion.
+// Exercise grouped Z and X moments, plus the Y pair expansion.
 fn energy(n: usize) -> PauliObservable {
     let chain = (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]));
     let field = (0..n).map(|q| (0.5, vec![PauliTerm::x(q)]));
@@ -822,8 +792,7 @@ fn energy(n: usize) -> PauliObservable {
     PauliObservable::from_terms(chain.chain(field).chain(extra).collect::<Vec<_>>()).unwrap()
 }
 
-// Random bindings, then the three degenerate ones that send `bind_fused` back
-// through the pass pipeline.
+// Include degenerate bindings that invalidate plan replay.
 fn bindings_with_fallback(slots: usize, seed: u64) -> Vec<Vec<f64>> {
     let mut points: Vec<Vec<f64>> = (0..3).map(|k| angles(slots, seed + k)).collect();
     points.push(vec![0.0; slots]);
@@ -913,8 +882,7 @@ fn observable_expectation_matches_simulate_on_every_binding() {
     }
 }
 
-// Two halves that never interact, which `Auto` decomposes, so no held route
-// exists and every terminal asks `simulate`.
+// Independent halves force decomposition without a held route.
 fn independent_halves() -> Circuit {
     let mut c = Circuit::new(6, 0);
     for half in [0, 3] {
@@ -931,8 +899,7 @@ fn independent_halves() -> Circuit {
     c
 }
 
-// Explicit kinds that take the grouped and the per-term routes, one of which
-// holds no fused gates, and an `Auto` template with no held route at all.
+// Cover grouped, per-term, unfused, and decomposed terminal routes.
 #[test]
 fn expectation_terminals_match_simulate_across_routes() {
     let ansatz = circuits::hardware_efficient_ansatz(6, 2, SEED);
@@ -1066,8 +1033,6 @@ fn many_terminals_report_the_first_failing_binding() {
     assert!(prepared.run_many::<Vec<f64>>(&[], SEED).unwrap().is_empty());
 }
 
-// Each binding in a sweep has to measure what a solo run with the same seed
-// measures, whichever worker it lands on.
 #[test]
 fn run_many_with_mid_circuit_measurement_matches_simulate() {
     let mut template = Circuit::new(3, 3);

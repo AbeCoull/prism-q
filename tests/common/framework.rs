@@ -25,10 +25,20 @@ macro_rules! backend_matrix_sv_tests {
         constructor: $new_backend:expr,
         eps: $eps:expr,
         cases: $cases:expr,
+        coverage: $coverage:ident,
         tests: {
             $($test_name:ident => $case_name:literal),+ $(,)?
         }
     ) => {
+        #[test]
+        fn $coverage() {
+            $crate::common::matrix::assert_case_coverage(
+                $backend_kind,
+                $cases,
+                &[$($case_name),+],
+            );
+        }
+
         $(
             #[test]
             fn $test_name() {
@@ -51,10 +61,20 @@ macro_rules! backend_matrix_fused_tests {
         constructor: $new_backend:expr,
         eps: $eps:expr,
         cases: $cases:expr,
+        coverage: $coverage:ident,
         tests: {
             $($test_name:ident => $case_name:literal),+ $(,)?
         }
     ) => {
+        #[test]
+        fn $coverage() {
+            $crate::common::matrix::assert_case_coverage(
+                $backend_kind,
+                $cases,
+                &[$($case_name),+],
+            );
+        }
+
         $(
             #[test]
             fn $test_name() {
@@ -77,10 +97,20 @@ macro_rules! backend_matrix_outcome_tests {
         constructor: $new_backend:expr,
         eps: $eps:expr,
         cases: $cases:expr,
+        coverage: $coverage:ident,
         tests: {
             $($test_name:ident => $case_name:literal),+ $(,)?
         }
     ) => {
+        #[test]
+        fn $coverage() {
+            $crate::common::matrix::assert_case_coverage(
+                $backend_kind,
+                $cases,
+                &[$($case_name),+],
+            );
+        }
+
         $(
             #[test]
             fn $test_name() {
@@ -103,10 +133,20 @@ macro_rules! backend_matrix_repeatability_tests {
         constructor: $new_backend:expr,
         eps: $eps:expr,
         cases: $cases:expr,
+        coverage: $coverage:ident,
         tests: {
             $($test_name:ident => $case_name:literal),+ $(,)?
         }
     ) => {
+        #[test]
+        fn $coverage() {
+            $crate::common::matrix::assert_case_coverage(
+                $backend_kind,
+                $cases,
+                &[$($case_name),+],
+            );
+        }
+
         $(
             #[test]
             fn $test_name() {

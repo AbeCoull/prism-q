@@ -8,8 +8,23 @@ use super::{
     assert_fused_matches_unfused,
 };
 
-/// A backend the corpus marks as rejected for this case must not reach a
-/// comparison: the skip belongs in the case list, not in a silent pass here.
+pub(crate) fn assert_case_coverage(
+    backend: BackendKind,
+    cases: impl IntoIterator<Item = CircuitCase>,
+    names: &[&str],
+) {
+    let mut expected: Vec<_> = cases
+        .into_iter()
+        .filter(|case| case.support(backend).is_supported())
+        .map(|case| case.name)
+        .collect();
+    let mut actual = names.to_vec();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    assert_eq!(actual, expected, "{}: corpus coverage", backend.name());
+}
+
+/// Reject unsupported registrations instead of silently skipping them.
 fn assert_supported(backend_kind: BackendKind, case: CircuitCase) {
     assert!(
         case.support(backend_kind).is_supported(),

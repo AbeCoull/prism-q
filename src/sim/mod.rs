@@ -22,7 +22,8 @@ pub mod unified_pauli;
 pub use braket::ResultValue;
 pub(crate) use decomposed::merge_probabilities;
 use decomposed::{
-    MIN_DECOMPOSITION_QUBITS, run_decomposed, run_decomposed_prefused, should_decompose,
+    MIN_DECOMPOSITION_QUBITS, PreparedBlocks, run_decomposed, run_decomposed_prefused,
+    should_decompose,
 };
 pub use dispatch::BackendKind;
 use dispatch::{
@@ -3992,10 +3993,16 @@ fn run_shots_per_shot(
         }
         // Decomposable circuits with a temporal prefix keep the per-shot
         // full-pipeline route; the prefix spans blocks that decomposition
-        // would otherwise split.
+        // would otherwise split. Its blocks are partitioned and planned once.
         let opts = SimOptions::classical_only();
         let route = resolve_backend(&kind, circuit, has_partial_independence).resolved();
         let plan = plan_probability_route(&kind, circuit);
+        let blocks = match &plan {
+            ProbabilityRoute::Decomposed(components) => {
+                Some(PreparedBlocks::new(&kind, components.clone(), circuit))
+            }
+            _ => None,
+        };
         let states = [(route, circuit.num_qubits)];
         return collect_shots(
             circuit,
@@ -4005,7 +4012,10 @@ fn run_shots_per_shot(
             &kind,
             &states,
             |shot_seed| {
-                let outcome = run_route(&kind, circuit, shot_seed, opts, &plan)?;
+                let outcome = match &blocks {
+                    Some(blocks) => blocks.run(&kind, circuit, shot_seed, &opts)?,
+                    None => run_route(&kind, circuit, shot_seed, opts, &plan)?,
+                };
                 Ok((outcome.classical_bits, outcome.metadata))
             },
         );

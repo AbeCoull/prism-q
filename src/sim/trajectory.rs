@@ -518,12 +518,36 @@ pub(crate) fn run_trajectory_shot(
     rng: &mut ChaCha8Rng,
 ) -> Result<Vec<bool>> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
-    let mut thermal_rates = thermal_rates.iter();
+    finish_trajectory(
+        backend,
+        circuit,
+        noise,
+        0,
+        readout,
+        &mut thermal_rates.iter(),
+        rng,
+    )
+}
 
-    for (idx, instr) in circuit.instructions.iter().enumerate() {
+/// Run a trajectory from instruction `from` on a `backend` holding its state
+/// before `from`, with `rng` and `thermal_rates` advanced past the events before
+/// it, and return its record.
+fn finish_trajectory(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    from: usize,
+    readout: &[Option<ReadoutError>],
+    thermal_rates: &mut std::slice::Iter<'_, (f64, f64)>,
+    rng: &mut ChaCha8Rng,
+) -> Result<Vec<bool>> {
+    for (instr, events) in circuit.instructions[from..]
+        .iter()
+        .zip(&noise.after_gate[from..])
+    {
         backend.apply(instr)?;
-        for event in &noise.after_gate[idx] {
-            apply_noise_event(backend, event, &mut thermal_rates, rng)?;
+        for event in events {
+            apply_noise_event(backend, event, thermal_rates, rng)?;
         }
     }
 
@@ -725,7 +749,35 @@ impl PauliGroups {
         num_shots: usize,
         seed: u64,
     ) -> Option<Self> {
-        let prefix = pauli_group_prefix(circuit, noise)?;
+        Self::group(pauli_group_prefix(circuit, noise)?, noise, num_shots, seed)
+    }
+
+    /// [`sample`](Self::sample) for a circuit it declines, grouping the gates
+    /// before the first instruction that is not a gate or barrier, `None` when
+    /// there is no such gate or `sample` would accept the circuit.
+    ///
+    /// Every channel must be a Pauli-frame channel, so a shot's draws before
+    /// that point are the ones [`sample`](Self::sample) makes.
+    pub(crate) fn sample_replayed(
+        circuit: &Circuit,
+        noise: &NoiseModel,
+        num_shots: usize,
+        seed: u64,
+    ) -> Option<Self> {
+        if !noise.has_only_pauli_channels() || pauli_group_prefix(circuit, noise).is_some() {
+            return None;
+        }
+        let prefix = circuit
+            .instructions
+            .iter()
+            .position(|inst| {
+                !matches!(inst, Instruction::Gate { .. } | Instruction::Barrier { .. })
+            })
+            .filter(|&prefix| prefix > 0)?;
+        Self::group(prefix, noise, num_shots, seed)
+    }
+
+    fn group(prefix: usize, noise: &NoiseModel, num_shots: usize, seed: u64) -> Option<Self> {
         let mut index: HashMap<Vec<Insertion>, usize> = HashMap::new();
         let mut starts = Vec::new();
         let mut lasts = Vec::new();
@@ -1165,6 +1217,169 @@ pub(crate) fn run_pauli_groups(
     }
     let runs: Result<Vec<GroupRun>> = (0..groups.num_groups()).map(run).collect();
     collect_groups(groups, circuit, route, runs?)
+}
+
+/// A run of one group's members, `members(group)[range]`.
+type Segment = (usize, std::ops::Range<usize>);
+
+/// One shot's index, record, and backend metadata.
+type ShotRun = (usize, Vec<bool>, crate::sim::RunMetadata);
+
+/// Run every shot of `groups`, sampled by [`PauliGroups::sample_replayed`], on
+/// the host statevector, and return the shots in index order.
+///
+/// Each distinct error pattern evolves raw off a noiseless checkpoint to the end
+/// of the prefix, the operation sequence a trajectory applies from |0...0⟩. Each
+/// member shot then copies that state, reseeds the backend with its shot seed,
+/// redraws its prefix errors to advance its noise stream, and finishes as its
+/// per-shot trajectory would, so it keeps its per-shot bits. Shots split across
+/// Rayon workers under the per-shot rule for `route`, as contiguous runs of the
+/// start order balanced by work; a group whose members span two runs evolves
+/// once in each.
+pub(crate) fn run_replayed_groups(
+    groups: &PauliGroups,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    seed: u64,
+    route: crate::sim::ResolvedBackend,
+) -> Result<ShotsResult> {
+    let readout = written_readout(circuit, &noise.readout);
+    let mut order: Vec<usize> = (0..groups.num_groups()).collect();
+    order.sort_by_key(|&group| groups.starts[group]);
+    let run = |segments: Vec<Segment>| {
+        run_replayed_chunk(groups, &segments, circuit, noise, &readout, seed)
+    };
+    let num_shots = groups.members.len();
+    #[cfg(feature = "parallel")]
+    if num_shots >= 4 && crate::sim::state_splits_across_workers(route, circuit.num_qubits) {
+        let suffix = circuit.instructions.len() - groups.prefix;
+        let chunks = replay_chunks(groups, &order, rayon::current_num_threads(), suffix);
+        let runs: Result<Vec<Vec<ShotRun>>> = chunks.into_par_iter().map(run).collect();
+        return fold_replayed(circuit, route, num_shots, runs?.into_iter().flatten());
+    }
+    let whole = order
+        .iter()
+        .map(|&group| (group, 0..groups.members(group).len()))
+        .collect();
+    fold_replayed(circuit, route, num_shots, run(whole)?)
+}
+
+/// Split the member shots of `order` into at most `parts` contiguous runs of
+/// about equal work: a group's evolution past its start, then `suffix`
+/// instructions per member.
+#[cfg(feature = "parallel")]
+fn replay_chunks(
+    groups: &PauliGroups,
+    order: &[usize],
+    parts: usize,
+    suffix: usize,
+) -> Vec<Vec<Segment>> {
+    let total: usize = order
+        .iter()
+        .map(|&group| groups.prefix - groups.starts[group] + groups.members(group).len() * suffix)
+        .sum();
+    let mut chunks = Vec::with_capacity(parts);
+    let mut current = Vec::new();
+    let mut done = 0usize;
+    for &group in order {
+        done += groups.prefix - groups.starts[group];
+        let count = groups.members(group).len();
+        let mut first = 0usize;
+        for member in 0..count {
+            done += suffix;
+            if done * parts >= total * (chunks.len() + 1) {
+                current.push((group, first..member + 1));
+                chunks.push(std::mem::take(&mut current));
+                first = member + 1;
+            }
+        }
+        if first < count {
+            current.push((group, first..count));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+/// Run `segments`, in ascending start order, off one noiseless checkpoint.
+fn run_replayed_chunk(
+    groups: &PauliGroups,
+    segments: &[Segment],
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    readout: &[Option<ReadoutError>],
+    seed: u64,
+) -> Result<Vec<ShotRun>> {
+    let mut checkpoint = StatevectorBackend::new(seed);
+    checkpoint.init(circuit.num_qubits, circuit.num_classical_bits)?;
+    let mut state = StatevectorBackend::new(seed);
+    let mut backend = StatevectorBackend::new(seed);
+    let mut at = 0usize;
+    let mut ordinal = 0usize;
+    let mut runs = Vec::new();
+    for (group, range) in segments {
+        let start = groups.starts[*group];
+        for (instruction, events) in circuit.instructions[at..start]
+            .iter()
+            .zip(&noise.after_gate[at..start])
+        {
+            checkpoint.apply(instruction)?;
+            ordinal += events.len();
+        }
+        at = start;
+        state.copy_state_from(&checkpoint);
+        evolve_pattern(
+            &mut state,
+            groups,
+            *group,
+            circuit,
+            noise,
+            start,
+            groups.prefix,
+            ordinal,
+        )?;
+        for &shot in &groups.members(*group)[range.clone()] {
+            let shot_seed = crate::sim::mix_seed(seed, shot);
+            backend.copy_state_from(&state);
+            backend.rng = ChaCha8Rng::seed_from_u64(shot_seed);
+            let mut rng = noise_rng(shot_seed);
+            for event in noise.after_gate[..groups.prefix].iter().flatten() {
+                draw_frame_branch(event, &mut rng);
+            }
+            let bits = finish_trajectory(
+                &mut backend,
+                circuit,
+                noise,
+                groups.prefix,
+                readout,
+                &mut [].iter(),
+                &mut rng,
+            )?;
+            runs.push((shot, bits, crate::sim::backend_metadata(&backend)));
+        }
+    }
+    Ok(runs)
+}
+
+fn fold_replayed(
+    circuit: &Circuit,
+    route: crate::sim::ResolvedBackend,
+    num_shots: usize,
+    runs: impl IntoIterator<Item = ShotRun>,
+) -> Result<ShotsResult> {
+    let mut slots = vec![None; num_shots];
+    for (shot, bits, metadata) in runs {
+        slots[shot] = Some((bits, metadata));
+    }
+    crate::sim::fold_shots(
+        circuit,
+        route,
+        slots
+            .into_iter()
+            .map(|slot| Ok(slot.expect("every shot runs in one segment"))),
+    )
 }
 
 fn collect_groups(
@@ -2125,5 +2340,94 @@ mod tests {
         let reference = per_shot(&circuit, &noise, shots, 7);
         assert_eq!(grouped.shots, reference.shots);
         assert!(grouped.shots.iter().any(|s| s.iter().any(|&b| b)));
+    }
+
+    // Layers, a measurement of qubit 0 that conditions an X on qubit 1, a reset,
+    // more layers with live noise, then every qubit measured with readout error.
+    // Each shot finishes its own trajectory from its group's state, so the
+    // records match the per-shot trajectories bit for bit, whole and split.
+    #[test]
+    fn replayed_groups_keep_the_per_shot_trajectories() {
+        let seed = 42;
+        let shots = 300;
+        for n in [6usize, 10] {
+            let mut circuit = Circuit::new(n, n + 1);
+            let layer = |circuit: &mut Circuit, offset: usize| {
+                for q in 0..n {
+                    circuit.add_gate(Gate::H, &[q]);
+                    circuit.add_gate(Gate::T, &[q]);
+                    circuit.add_gate(Gate::Rz(0.03 * (offset + q + 1) as f64), &[q]);
+                }
+                for q in 0..n - 1 {
+                    circuit.add_gate(Gate::Cx, &[q, q + 1]);
+                }
+            };
+            layer(&mut circuit, 0);
+            layer(&mut circuit, 1);
+            circuit.add_measure(0, n);
+            circuit.instructions.push(Instruction::Conditional {
+                condition: crate::circuit::ClassicalCondition::BitIsOne(n),
+                gate: Gate::X,
+                targets: smallvec![1],
+            });
+            circuit.add_reset(0);
+            layer(&mut circuit, 2);
+            circuit.measure_all();
+            for p in [1e-3, 1e-2] {
+                let mut noise = NoiseModel::uniform_depolarizing(&circuit, p);
+                noise.after_gate[n].push(NoiseEvent {
+                    channel: NoiseChannel::TwoQubitDepolarizing { p: 0.05 },
+                    qubits: smallvec![0, 1],
+                });
+                noise.with_readout_error(0.02, 0.03);
+                let groups = PauliGroups::sample_replayed(&circuit, &noise, shots, seed).unwrap();
+                assert!(groups.num_groups() > 1, "{n} qubits, p {p}: one group");
+                assert!(groups.num_groups() < shots, "{n} qubits, p {p}: no sharing");
+                let reference = per_shot(&circuit, &noise, shots, seed);
+                let routed = statevector_route(&circuit, &noise, shots, seed);
+                assert_eq!(routed.shots, reference.shots, "{n} qubits, p {p}");
+
+                let mut order: Vec<usize> = (0..groups.num_groups()).collect();
+                order.sort_by_key(|&group| groups.starts[group]);
+                let readout = written_readout(&circuit, &noise.readout);
+                let run = |segments: Vec<Segment>| {
+                    run_replayed_chunk(&groups, &segments, &circuit, &noise, &readout, seed)
+                        .unwrap()
+                };
+                #[cfg(feature = "parallel")]
+                for parts in [2, 3, 7] {
+                    let chunks = replay_chunks(&groups, &order, parts, 5);
+                    assert!(chunks.len() <= parts);
+                    let split = fold_replayed(
+                        &circuit,
+                        crate::sim::ResolvedBackend::Statevector,
+                        shots,
+                        chunks.into_iter().flat_map(run),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        split.shots, reference.shots,
+                        "{n} qubits, p {p}, {parts} chunks"
+                    );
+                }
+                let whole = order
+                    .iter()
+                    .map(|&group| (group, 0..groups.members(group).len()))
+                    .collect();
+                let serial = fold_replayed(
+                    &circuit,
+                    crate::sim::ResolvedBackend::Statevector,
+                    shots,
+                    run(whole),
+                )
+                .unwrap();
+                assert_eq!(serial.shots, reference.shots, "{n} qubits, p {p}, serial");
+            }
+        }
+        let terminal = grouped_circuit(4);
+        let noise = NoiseModel::uniform_depolarizing(&terminal, 1e-3);
+        assert!(PauliGroups::sample_replayed(&terminal, &noise, shots, seed).is_none());
+        let damping = NoiseModel::with_amplitude_damping(&terminal, 0.01);
+        assert!(PauliGroups::sample_replayed(&terminal, &damping, shots, seed).is_none());
     }
 }

@@ -4246,7 +4246,9 @@ fn general_noise_plan(
 /// or classical conditionals. Pauli noise on the host statevector, or on a
 /// tensor network whose probabilities fit the dense cap, under the same limits
 /// draws every shot's errors first and simulates each distinct pattern once;
-/// see [`trajectory::PauliGroups`].
+/// see [`trajectory::PauliGroups`]. On the host statevector, a circuit with a
+/// mid-circuit measurement, reset or condition shares the gates before the first
+/// of them the same way, and each shot finishes its own trajectory from there.
 pub(crate) fn run_shots_with_noise(
     kind: BackendKind,
     circuit: &Circuit,
@@ -4411,6 +4413,20 @@ pub(crate) fn run_shots_with_noise(
                 noise_model,
                 seed,
                 dense_tensor_network.then_some(&build as trajectory::GroupBackendFactory<'_>),
+                plan.resolved(),
+            );
+        }
+    }
+    // A checkpoint, a group state and a shot state at once.
+    if host_statevector && circuit.num_qubits + 1 < max_statevector_qubits() {
+        if let Some(groups) =
+            trajectory::PauliGroups::sample_replayed(circuit, noise_model, num_shots, seed)
+        {
+            return trajectory::run_replayed_groups(
+                &groups,
+                circuit,
+                noise_model,
+                seed,
                 plan.resolved(),
             );
         }

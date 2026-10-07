@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 
-use super::lexer::Kind;
+use super::lexer::{Kind, TIME_UNITS};
 use super::stream::Stream;
 use crate::error::{PrismError, Result};
 
@@ -34,9 +34,50 @@ impl BinaryOp {
     }
 }
 
+/// A length of time, held as nanoseconds beside backend sample periods (`dt`),
+/// which only a backend relates to each other.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub(crate) struct Duration {
+    pub ns: f64,
+    pub dt: f64,
+}
+
+impl Duration {
+    fn scaled(self, factor: f64) -> Duration {
+        Duration {
+            ns: self.ns * factor,
+            dt: self.dt * factor,
+        }
+    }
+
+    pub(crate) fn is_negative(self) -> bool {
+        self.ns < 0.0 || self.dt < 0.0
+    }
+}
+
+/// What a timing expression folds to. A stretch has no length until a scheduler
+/// sizes it, so anything built from one stays unresolved.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Timed {
+    Number(f64),
+    Duration(Duration),
+    Stretch,
+}
+
+impl Timed {
+    fn describe(self) -> &'static str {
+        match self {
+            Timed::Number(_) => "a number",
+            Timed::Duration(_) => "a duration",
+            Timed::Stretch => "a stretch",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Expr<'a> {
     Number(f64),
+    Duration(Duration),
     Ident(&'a str),
     Negate(Box<Expr<'a>>),
     Binary {
@@ -59,7 +100,7 @@ impl<'a> Expr<'a> {
     /// on an `input` slot.
     pub(crate) fn mentions(&self, name: &str) -> bool {
         match self {
-            Expr::Number(_) => false,
+            Expr::Number(_) | Expr::Duration(_) => false,
             Expr::Ident(ident) => *ident == name,
             Expr::Negate(inner) => inner.mentions(name),
             Expr::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
@@ -89,6 +130,8 @@ impl fmt::Display for Expr<'_> {
                     write!(f, "{value}")
                 }
             }
+            Expr::Duration(duration) if duration.dt == 0.0 => write!(f, "{}ns", duration.ns),
+            Expr::Duration(duration) => write!(f, "{}dt", duration.dt),
             Expr::Ident(name) => f.write_str(name),
             Expr::Negate(inner) => {
                 f.write_str("-")?;
@@ -191,10 +234,20 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
             let token = stream.advance();
             Ok(Expr::Number(number(token.text, token.line as usize)?))
         }
+        Kind::Duration => {
+            let token = stream.advance();
+            Ok(Expr::Duration(duration(token.text, token.line as usize)?))
+        }
         Kind::Ident => {
             let name = stream.advance().text;
             if !stream.eat(Kind::LParen) {
                 return Ok(Expr::Ident(name));
+            }
+            if name == "durationof" {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: "`durationof`, which needs a scheduler to size the block".into(),
+                    line: stream.line(),
+                });
             }
             let mut args = vec![parse_sum(stream)?];
             while stream.eat(Kind::Comma) {
@@ -262,6 +315,28 @@ fn number(text: &str, line: usize) -> Result<f64> {
     Ok(value)
 }
 
+/// Read a duration literal, its unit attached.
+fn duration(text: &str, line: usize) -> Result<Duration> {
+    let Some(unit) = TIME_UNITS.iter().find(|unit| text.ends_with(*unit)) else {
+        return Err(PrismError::Parse {
+            line,
+            message: format!("invalid duration: `{text}`"),
+        });
+    };
+    let value = number(&text[..text.len() - unit.len()], line)?;
+    let nanoseconds = match *unit {
+        "dt" => return Ok(Duration { ns: 0.0, dt: value }),
+        "ns" => 1.0,
+        "ms" => 1e6,
+        "s" => 1e9,
+        _ => 1e3,
+    };
+    Ok(Duration {
+        ns: value * nanoseconds,
+        dt: 0.0,
+    })
+}
+
 /// Fold an expression to its value, resolving names against `vars`.
 ///
 /// The finiteness check sits here rather than on each operator so that an
@@ -282,19 +357,16 @@ pub(crate) fn eval(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) 
 fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
     match expr {
         Expr::Number(value) => Ok(*value),
+        Expr::Duration(_) => Err(PrismError::Parse {
+            line,
+            message: format!("`{expr}` is a duration where a number belongs"),
+        }),
         Expr::Ident(name) => resolve(name, line, vars),
         Expr::Negate(inner) => Ok(-evaluate(inner, line, vars)?),
         Expr::Binary { op, left, right } => {
             let left = evaluate(left, line, vars)?;
             let right = evaluate(right, line, vars)?;
-            match op {
-                BinaryOp::Add => Ok(left + right),
-                BinaryOp::Sub => Ok(left - right),
-                BinaryOp::Mul => Ok(left * right),
-                BinaryOp::Div => divide("division", left, right, line),
-                BinaryOp::Rem => divide("modulo", left, right, line),
-                BinaryOp::Pow => finite(line, op.spelling(), left.powf(right)),
-            }
+            arithmetic(*op, left, right, line)
         }
         Expr::Call(call) => {
             let values = call
@@ -305,6 +377,141 @@ fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Resu
             apply(call.name, &values, line)
         }
     }
+}
+
+fn arithmetic(op: BinaryOp, left: f64, right: f64, line: usize) -> Result<f64> {
+    match op {
+        BinaryOp::Add => Ok(left + right),
+        BinaryOp::Sub => Ok(left - right),
+        BinaryOp::Mul => Ok(left * right),
+        BinaryOp::Div => divide("division", left, right, line),
+        BinaryOp::Rem => divide("modulo", left, right, line),
+        BinaryOp::Pow => finite(line, op.spelling(), left.powf(right)),
+    }
+}
+
+/// True when the expression reads a duration: a literal, or a name `times` holds.
+pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
+    match expr {
+        Expr::Number(_) => false,
+        Expr::Duration(_) => true,
+        Expr::Ident(name) => times.contains_key(name),
+        Expr::Negate(inner) => is_timed(inner, times),
+        Expr::Binary { left, right, .. } => is_timed(left, times) || is_timed(right, times),
+        Expr::Call(call) => call.args.iter().any(|arg| is_timed(arg, times)),
+    }
+}
+
+/// Fold an expression that may read durations, resolving the duration and
+/// stretch names against `times` and every other name against `vars`.
+///
+/// Durations add and subtract, scale by a number, and divide into a number when
+/// both sides are in SI units or both in `dt`. Any other mix is an error.
+pub(crate) fn eval_timed(
+    expr: &Expr,
+    line: usize,
+    vars: Option<&HashMap<&str, f64>>,
+    times: &HashMap<&str, Timed>,
+) -> Result<Timed> {
+    if !is_timed(expr, times) {
+        return Ok(Timed::Number(eval(expr, line, vars)?));
+    }
+    match expr {
+        Expr::Duration(duration) => Ok(Timed::Duration(*duration)),
+        Expr::Ident(name) => match times.get(name) {
+            Some(value) => Ok(*value),
+            None => Ok(Timed::Number(resolve(name, line, vars)?)),
+        },
+        Expr::Negate(inner) => Ok(match eval_timed(inner, line, vars, times)? {
+            Timed::Number(value) => Timed::Number(-value),
+            Timed::Duration(duration) => Timed::Duration(duration.scaled(-1.0)),
+            Timed::Stretch => Timed::Stretch,
+        }),
+        Expr::Binary { op, left, right } => {
+            let left = eval_timed(left, line, vars, times)?;
+            let right = eval_timed(right, line, vars, times)?;
+            combine_timed(*op, left, right, line)
+        }
+        Expr::Call(call) => Err(PrismError::Parse {
+            line,
+            message: format!("`{}` takes numbers, not durations", call.name),
+        }),
+        Expr::Number(value) => Ok(Timed::Number(*value)),
+    }
+}
+
+/// Apply `op` to two folded timing values.
+pub(crate) fn combine_timed(op: BinaryOp, left: Timed, right: Timed, line: usize) -> Result<Timed> {
+    use BinaryOp::{Add, Div, Mul, Sub};
+    let zero_divisor = || PrismError::Parse {
+        line,
+        message: "division by zero in a duration expression".into(),
+    };
+    Ok(match (op, left, right) {
+        (_, Timed::Number(a), Timed::Number(b)) => Timed::Number(arithmetic(op, a, b, line)?),
+        (Add, Timed::Duration(a), Timed::Duration(b)) => Timed::Duration(Duration {
+            ns: a.ns + b.ns,
+            dt: a.dt + b.dt,
+        }),
+        (Sub, Timed::Duration(a), Timed::Duration(b)) => Timed::Duration(Duration {
+            ns: a.ns - b.ns,
+            dt: a.dt - b.dt,
+        }),
+        (Add | Sub, Timed::Stretch, Timed::Duration(_) | Timed::Stretch)
+        | (Add | Sub, Timed::Duration(_), Timed::Stretch)
+        | (Mul, Timed::Stretch, Timed::Number(_))
+        | (Mul, Timed::Number(_), Timed::Stretch) => Timed::Stretch,
+        (Mul, Timed::Duration(a), Timed::Number(k))
+        | (Mul, Timed::Number(k), Timed::Duration(a)) => Timed::Duration(a.scaled(k)),
+        (Div, Timed::Duration(a), Timed::Number(k)) => {
+            if k == 0.0 {
+                return Err(zero_divisor());
+            }
+            Timed::Duration(a.scaled(1.0 / k))
+        }
+        (Div, Timed::Stretch, Timed::Number(k)) => {
+            if k == 0.0 {
+                return Err(zero_divisor());
+            }
+            Timed::Stretch
+        }
+        (Div, Timed::Duration(a), Timed::Duration(b)) => {
+            let (num, den) = if a.dt == 0.0 && b.dt == 0.0 {
+                (a.ns, b.ns)
+            } else if a.ns == 0.0 && b.ns == 0.0 {
+                (a.dt, b.dt)
+            } else {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: "a duration ratio mixing `dt` with SI units, which only a \
+                                backend's sample period relates"
+                        .into(),
+                    line,
+                });
+            };
+            if den == 0.0 {
+                return Err(zero_divisor());
+            }
+            Timed::Number(finite(line, op.spelling(), num / den)?)
+        }
+        (Div, Timed::Stretch, Timed::Duration(_) | Timed::Stretch)
+        | (Div, Timed::Duration(_), Timed::Stretch) => {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "a ratio over a stretch, whose length only a scheduler fixes".into(),
+                line,
+            });
+        }
+        _ => {
+            return Err(PrismError::Parse {
+                line,
+                message: format!(
+                    "`{}` between {} and {}",
+                    op.spelling(),
+                    left.describe(),
+                    right.describe()
+                ),
+            });
+        }
+    })
 }
 
 fn divide(operation: &str, left: f64, right: f64, line: usize) -> Result<f64> {

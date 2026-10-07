@@ -23,6 +23,8 @@
 //! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
 //! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand |
 //! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name |
+//! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number |
+//! | Delay | `delay[d] q[0];` `delay[s];` | The identity on its qubits, all of them when none is named; emits nothing |
 //! | Register slice | `h q[0:2];` `h q[0:2:6];` `h q[{0, 3}];` | Inclusive range with an optional step in the middle, or an explicit index set. Broadcasts like a whole register |
 //! | Register alias | `let a = q[0:1];` `let a = q[2] ++ q[0];` | Names qubits or bits in the order written; an alias is itself sliceable |
 //! | Physical qubits | `h $0;` `cx $0, $1;` | Absolute indices with no declaration; the register is as wide as the highest one named, and a declared register alongside is rejected |
@@ -75,9 +77,10 @@
 //!   `switch` whose arm measures into the switched register: both lowerings
 //!   re-read the bits after an earlier body ran
 //! - `switch` with a `default` and more case labels than the region depth bound
-//! - `duration`, `stretch` and `delay` outside `def` parameter lists, and `array`
-//!   declarations. Each declines by name rather than as a syntax error on its
-//!   operands, which is what `delay[10ns] q[0]` would otherwise produce
+//! - `array` declarations, by name rather than as a syntax error on their
+//!   operands
+//! - `durationof`, a ratio over a `stretch`, and a ratio mixing `dt` with SI
+//!   units: nothing here sizes a stretch or knows a backend's sample period
 //! - `input` of any type but `float` and `angle`, and `output` of any type but
 //!   `bit`
 //! - an `input` anywhere but as the whole angle argument of a top-level
@@ -96,6 +99,7 @@ use num_complex::Complex64;
 
 use super::braket::{self, NoiseSpec, ResultSpec};
 use crate::circuit::qasm::ast::{self, DefParam};
+use crate::circuit::qasm::expr::Timed;
 use crate::circuit::synthesis;
 use crate::circuit::{
     Circuit, ClassicalCondition, Instruction, MAX_REGION_DEPTH, ParamLink, Parameters, SmallVec,
@@ -286,6 +290,8 @@ enum ClassicalType {
     Int,
     Bool,
     Float,
+    Duration,
+    Stretch,
 }
 
 struct ClassicalDecl {
@@ -345,8 +351,11 @@ pub(crate) struct Parser<'a> {
     /// `let` aliases by name; the values live beside the registers they index.
     aliases: HashMap<&'a str, Alias>,
     /// Declared classical variables. The values sit in `param_vars`, which is
-    /// where every expression already reads them.
+    /// where every expression already reads them, or in `durations`.
     classical: HashMap<&'a str, ClassicalDecl>,
+    /// `duration` and `stretch` values, which no numeric expression reads
+    /// directly.
+    durations: HashMap<&'a str, Timed>,
 }
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
@@ -442,6 +451,7 @@ impl<'a> Parser<'a> {
             physical: false,
             aliases: HashMap::new(),
             classical: HashMap::new(),
+            durations: HashMap::new(),
         }
     }
 

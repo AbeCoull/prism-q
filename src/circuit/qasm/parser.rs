@@ -13,16 +13,15 @@ use super::stream::Stream;
 use crate::error::{PrismError, Result};
 use smallvec::SmallVec;
 
-/// Keywords that open a classical declaration. `complex` and `stretch` parse and
-/// are declined by the evaluator; `duration` never gets here, as `UNSUPPORTED`
-/// declines it first.
+/// Keywords that open a classical declaration. `complex` parses and is declined
+/// by the evaluator.
 const DECLARATION_TYPES: &[&str] = &[
     "int", "uint", "float", "angle", "bool", "complex", "duration", "stretch",
 ];
 
 /// Keywords the language has and this parser declines, with the text each decline
 /// carries. Declining by name returns `UnsupportedConstruct` where the operands
-/// would otherwise give a bare syntax error (`delay[10ns] q[0]` reads as a
+/// would otherwise give a bare syntax error (`array[int, 2] a` reads as a
 /// malformed gate call).
 const UNSUPPORTED: &[(&str, &str)] = &[
     ("defcal", "defcal"),
@@ -33,11 +32,6 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("break", "break"),
     ("continue", "continue"),
     ("else", "else"),
-    (
-        "delay",
-        "`delay`, a timing instruction with no schedule to delay against",
-    ),
-    ("duration", "`duration` declarations"),
     ("array", "`array` declarations"),
 ];
 
@@ -88,6 +82,7 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         "measure" => measure_arrow(stream),
         "reset" => reset(stream),
         "barrier" => barrier(stream),
+        "delay" => delay(stream),
         "if" => conditional(stream),
         "for" => for_loop(stream),
         "switch" => switch(stream),
@@ -234,6 +229,21 @@ fn barrier<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     };
     stream.expect(Kind::Semicolon)?;
     Ok(StmtKind::Barrier { targets })
+}
+
+/// `delay[100ns] q[0], q[1];`, where no operand means every qubit.
+fn delay<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    stream.advance();
+    stream.expect(Kind::LBracket)?;
+    let duration = expr::parse(stream)?;
+    stream.expect(Kind::RBracket)?;
+    let targets = if stream.kind() == Kind::Semicolon {
+        Vec::new()
+    } else {
+        operand_list(stream, "delay")?
+    };
+    stream.expect(Kind::Semicolon)?;
+    Ok(StmtKind::Delay { duration, targets })
 }
 
 fn operand_list<'a>(stream: &mut Stream<'_, 'a>, what: &str) -> Result<Vec<Operand<'a>>> {
@@ -544,10 +554,11 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
                 name: arg_name,
                 integral: true,
             },
-            "float" | "angle" | "complex" | "duration" | "stretch" => DefParam::Value {
+            "float" | "angle" | "complex" => DefParam::Value {
                 name: arg_name,
                 integral: false,
             },
+            "duration" | "stretch" => DefParam::Duration(arg_name),
             "bit" | "creg" => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!(

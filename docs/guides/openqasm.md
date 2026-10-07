@@ -113,6 +113,30 @@ h q[cursor];
 A declaration inside a `for` body binds for that pass only: the scope the body
 opened is dropped at the end of each iteration.
 
+### Durations and delays
+
+A simulation has no clock, so timing parses and then has no effect. `delay` is the
+identity on the qubits it names, or on every qubit when it names none, and emits no
+instruction, so fusion merges across it as if it were absent.
+
+```qasm
+OPENQASM 3.0;
+qubit[2] q;
+const duration pulse = 40ns;
+duration settle = 2 * pulse + 1us;
+stretch slack;
+h q[0];
+delay[settle] q[0];
+delay[slack] q;
+rz(settle / pulse) q[1];   // a ratio of durations is a number: 27
+```
+
+Literals take `dt`, `ns`, `us` (or `µs`), `ms` and `s`. Durations add, subtract,
+scale by a number and divide into a number, all folded at parse time. A ratio needs
+both sides in SI units or both in `dt`, since only a backend's sample period relates
+the two. A `stretch` is sized by a scheduler, so it may stand wherever a delay takes a
+length but is rejected where its value would be read.
+
 ## Input parameters
 
 An `input` declaration names a parameter slot. `openqasm::parse_parametric`
@@ -323,7 +347,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
 | `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type |
 | `array` declarations | Declines | `UnsupportedConstruct` |
-| `duration`, `stretch`, `delay` | Declines | `UnsupportedConstruct`. Timing has no meaning here: nothing schedules |
+| `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, and `durationof`: `UnsupportedConstruct` |
 | `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |

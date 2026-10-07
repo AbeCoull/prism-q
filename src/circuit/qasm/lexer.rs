@@ -8,6 +8,9 @@ pub(crate) enum Kind {
     Ident,
     Int,
     Float,
+    /// A number with its time unit attached, `10ns` or `4dt`. The token text
+    /// keeps the unit.
+    Duration,
     /// A double-quoted literal. The token text is the content without quotes.
     Str,
     /// `$0`, a hardware qubit. The token text is the digits.
@@ -56,6 +59,7 @@ impl Kind {
         match self {
             Kind::Ident => "a name",
             Kind::Int | Kind::Float => "a number",
+            Kind::Duration => "a duration",
             Kind::Str => "a string",
             Kind::Physical => "a physical qubit",
             Kind::Pragma => "a pragma",
@@ -109,7 +113,7 @@ impl<'a> Token<'a> {
     /// that is informative, its kind where it is not.
     pub(crate) fn describe(&self) -> String {
         match self.kind {
-            Kind::Ident | Kind::Int | Kind::Float => format!("`{}`", self.text),
+            Kind::Ident | Kind::Int | Kind::Float | Kind::Duration => format!("`{}`", self.text),
             Kind::Physical => format!("`${}`", self.text),
             other => other.describe().to_string(),
         }
@@ -119,6 +123,11 @@ impl<'a> Token<'a> {
 /// The two Unicode constants the expression language accepts beside their
 /// ASCII names.
 const UNICODE_IDENTS: [&str; 2] = ["\u{3c0}", "\u{3c4}"];
+
+/// Time units a number may carry, written straight after its digits. `s` comes
+/// last so it never shadows a longer unit, and the micro sign has both of its
+/// Unicode spellings beside `us`.
+pub(crate) const TIME_UNITS: [&str; 7] = ["dt", "ns", "us", "\u{b5}s", "\u{3bc}s", "ms", "s"];
 
 struct Lexer<'a> {
     source: &'a str,
@@ -374,8 +383,36 @@ impl<'a> Lexer<'a> {
                 _ => break,
             }
         }
+        if let Some(width) = self.time_unit_width() {
+            self.at += width;
+            return Ok(self.token(Kind::Duration, start, self.at));
+        }
         let kind = if float { Kind::Float } else { Kind::Int };
         Ok(self.token(kind, start, self.at))
+    }
+
+    /// Byte width of a time unit glued to the number just read, or `None`.
+    ///
+    /// A unit followed by more name characters is no unit, so `2sx` stays a
+    /// number beside a name, as it lexed before durations existed.
+    fn time_unit_width(&self) -> Option<usize> {
+        let rest = &self.bytes[self.at..];
+        if !rest
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || !byte.is_ascii())
+        {
+            return None;
+        }
+        let unit = TIME_UNITS
+            .iter()
+            .find(|unit| rest.starts_with(unit.as_bytes()))?;
+        if rest
+            .get(unit.len())
+            .is_some_and(|byte| is_ident_byte(*byte))
+        {
+            return None;
+        }
+        Some(unit.len())
     }
 
     /// True when `e` here opens an exponent rather than an identifier, which

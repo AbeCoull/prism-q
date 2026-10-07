@@ -11,7 +11,7 @@ use crate::circuit::qasm::ast::{
     self, Argument, AssignOp, Block, CmpOp, Condition, DefParam, ForRange, Index, Operand,
     OperandName, Stmt, StmtKind,
 };
-use crate::circuit::qasm::expr::{self as syntax_expr, Expr};
+use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Duration, Expr, Timed};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
 /// Highest `$k` the program names, `None` when it names none.
@@ -47,9 +47,9 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
                 note(&measure.source);
                 note(&measure.target);
             }
-            StmtKind::Reset { targets } | StmtKind::Barrier { targets } => {
-                targets.iter().for_each(&mut *note)
-            }
+            StmtKind::Reset { targets }
+            | StmtKind::Barrier { targets }
+            | StmtKind::Delay { targets, .. } => targets.iter().for_each(&mut *note),
             StmtKind::If(conditional) => {
                 match &conditional.condition {
                     Condition::Truthy(operand) | Condition::Negated(operand) => note(operand),
@@ -73,6 +73,32 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
             }
             _ => {}
         }
+    }
+}
+
+/// Fold an expression to a number, where a ratio of two durations counts as
+/// one. The duration path runs only once the plain fold has failed, so a
+/// program that names no duration never pays for it.
+fn number_of(
+    expr: &Expr,
+    line: usize,
+    vars: Option<&HashMap<&str, f64>>,
+    durations: &HashMap<&str, Timed>,
+) -> Result<f64> {
+    let value = syntax_expr::eval(expr, line, vars);
+    if value.is_ok() || !syntax_expr::is_timed(expr, durations) {
+        return value;
+    }
+    match syntax_expr::eval_timed(expr, line, vars, durations)? {
+        Timed::Number(value) => Ok(value),
+        Timed::Duration(_) => Err(parse_error(
+            line,
+            format!("`{expr}` is a duration where a number belongs"),
+        )),
+        Timed::Stretch => Err(parse_error(
+            line,
+            format!("`{expr}` is a stretch where a number belongs"),
+        )),
     }
 }
 
@@ -214,6 +240,16 @@ impl<'a> Parser<'a> {
                     }
                 }
                 out.push(Instruction::Barrier { qubits });
+                Ok(())
+            }
+            // An ideal simulation has no clock, so a delay is the identity on
+            // its qubits. It emits nothing, which also leaves fusion free to
+            // merge across it.
+            StmtKind::Delay { duration, targets } => {
+                self.span_of(duration, "delay", line)?;
+                for target in targets {
+                    self.qubits_of(target)?;
+                }
                 Ok(())
             }
             StmtKind::If(conditional) => {
@@ -359,6 +395,8 @@ impl<'a> Parser<'a> {
             "int" | "uint" => ClassicalType::Int,
             "bool" => ClassicalType::Bool,
             "float" | "angle" => ClassicalType::Float,
+            "duration" => ClassicalType::Duration,
+            "stretch" => ClassicalType::Stretch,
             other => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!("`{other}` declarations"),
@@ -374,11 +412,57 @@ impl<'a> Parser<'a> {
                     format!("`const {ty} {name}` needs a value"),
                 ));
             }
-            self.bind_classical(name, kind, 0.0, constant);
+            if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
+                let zero = Timed::Duration(Duration::default());
+                self.bind_duration(name, kind, zero, constant);
+            } else {
+                self.bind_classical(name, kind, 0.0, constant);
+            }
             return Ok(());
         };
+        if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
+            let folded = self.duration_of(value, line)?;
+            self.bind_duration(name, kind, folded, constant);
+            return Ok(());
+        }
         let folded = self.fold_typed(kind, value, line)?;
         self.bind_classical(name, kind, folded, constant);
+        Ok(())
+    }
+
+    /// Bind a `duration` or `stretch`. A stretch keeps no value: a scheduler
+    /// sizes it, so whatever it was initialised with is only a lower bound.
+    fn bind_duration(&mut self, name: &'a str, ty: ClassicalType, value: Timed, constant: bool) {
+        let value = if ty == ClassicalType::Stretch {
+            Timed::Stretch
+        } else {
+            value
+        };
+        self.classical.insert(name, ClassicalDecl { ty, constant });
+        self.durations.insert(name, value);
+    }
+
+    /// Fold an expression that has to be a duration or a stretch.
+    fn duration_of(&self, expr: &Expr, line: usize) -> Result<Timed> {
+        match syntax_expr::eval_timed(expr, line, self.param_vars.as_ref(), &self.durations)? {
+            Timed::Number(value) => Err(parse_error(
+                line,
+                format!("`{expr}` is the number {value} where a duration belongs; give it a unit"),
+            )),
+            timed => Ok(timed),
+        }
+    }
+
+    /// Check the length a `delay` or `box` names, which has no further effect.
+    fn span_of(&self, expr: &Expr, what: &str, line: usize) -> Result<()> {
+        if let Timed::Duration(duration) = self.duration_of(expr, line)? {
+            if duration.is_negative() {
+                return Err(parse_error(
+                    line,
+                    format!("`{what}` needs a non-negative duration, got `{expr}`"),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -401,6 +485,9 @@ impl<'a> Parser<'a> {
                 line,
                 format!("`{target}` is `const` and cannot be assigned"),
             ));
+        }
+        if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
+            return self.assign_duration(target, kind, op, value, line);
         }
         let folded = self.fold_typed(kind, value, line)?;
         let updated = match op {
@@ -429,6 +516,52 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn assign_duration(
+        &mut self,
+        target: &'a str,
+        kind: ClassicalType,
+        op: Option<AssignOp>,
+        value: &Expr<'a>,
+        line: usize,
+    ) -> Result<()> {
+        if kind == ClassicalType::Stretch {
+            return Err(parse_error(
+                line,
+                format!(
+                    "`{target}` is a stretch, which a scheduler sizes and a program cannot assign"
+                ),
+            ));
+        }
+        let value =
+            syntax_expr::eval_timed(value, line, self.param_vars.as_ref(), &self.durations)?;
+        let updated = match op {
+            None => value,
+            Some(op) => {
+                let op = match op {
+                    AssignOp::Add => BinaryOp::Add,
+                    AssignOp::Sub => BinaryOp::Sub,
+                    AssignOp::Mul => BinaryOp::Mul,
+                    AssignOp::Div => BinaryOp::Div,
+                    AssignOp::Rem => BinaryOp::Rem,
+                };
+                let current = self
+                    .durations
+                    .get(target)
+                    .copied()
+                    .unwrap_or(Timed::Stretch);
+                syntax_expr::combine_timed(op, current, value, line)?
+            }
+        };
+        if let Timed::Number(number) = updated {
+            return Err(parse_error(
+                line,
+                format!("assignment leaves duration `{target}` holding the number {number}"),
+            ));
+        }
+        self.bind_duration(target, kind, updated, false);
+        Ok(())
+    }
+
     /// Fold an initializer to the value its declared type holds, naming an
     /// `input` rather than leaving it to read as an unknown identifier.
     fn fold_typed(&self, kind: ClassicalType, value: &Expr, line: usize) -> Result<f64> {
@@ -441,7 +574,9 @@ impl<'a> Parser<'a> {
             });
         }
         match kind {
-            ClassicalType::Float => self.value_of(value, line),
+            ClassicalType::Float | ClassicalType::Duration | ClassicalType::Stretch => {
+                self.value_of(value, line)
+            }
             ClassicalType::Int => Ok(self.integer_of(value, line)? as f64),
             ClassicalType::Bool => Ok(f64::from(self.integer_of(value, line)? != 0)),
         }
@@ -682,7 +817,7 @@ impl<'a> Parser<'a> {
     // ------------------------------------------------------------ expressions
 
     pub(super) fn value_of(&self, expr: &Expr, line: usize) -> Result<f64> {
-        syntax_expr::eval(expr, line, self.param_vars.as_ref())
+        number_of(expr, line, self.param_vars.as_ref(), &self.durations)
     }
 
     pub(super) fn integer_of(&self, expr: &Expr, line: usize) -> Result<i64> {
@@ -940,6 +1075,7 @@ impl<'a> Parser<'a> {
         }
 
         let mut bindings: HashMap<&'a str, f64> = self.param_vars.clone().unwrap_or_default();
+        let mut durations = self.durations.clone();
         let mut qubit_bindings: Vec<(&'a str, usize)> = Vec::new();
         for (slot, argument) in def.args.iter().zip(args) {
             match slot {
@@ -998,7 +1134,7 @@ impl<'a> Parser<'a> {
                             line,
                         });
                     }
-                    let value = syntax_expr::eval(expr, line, Some(&bindings))?;
+                    let value = number_of(expr, line, Some(&bindings), &durations)?;
                     let value = if *integral {
                         let rounded = value.round();
                         if (value - rounded).abs() > 0.0 {
@@ -1013,10 +1149,29 @@ impl<'a> Parser<'a> {
                     };
                     bindings.insert(param_name, value);
                 }
+                DefParam::Duration(param_name) => {
+                    let Argument::Value(expr) = argument else {
+                        return Err(parse_error(
+                            line,
+                            format!("def `{name}` parameter `{param_name}` takes a duration"),
+                        ));
+                    };
+                    let value = syntax_expr::eval_timed(expr, line, Some(&bindings), &durations)?;
+                    if let Timed::Number(number) = value {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "def `{name}` parameter `{param_name}` takes a duration, got {number}"
+                            ),
+                        ));
+                    }
+                    durations.insert(param_name, value);
+                }
             }
         }
 
         let mut sub = self.expansion_parser(bindings);
+        sub.durations = durations;
         for (param_name, qubit) in qubit_bindings {
             sub.aliases.insert(
                 param_name,
@@ -1056,6 +1211,7 @@ impl<'a> Parser<'a> {
             physical: self.physical,
             aliases: HashMap::new(),
             classical: self.classical_copy(),
+            durations: HashMap::new(),
         };
         for (name, register) in &self.qregs {
             sub.qregs.insert(
@@ -1179,6 +1335,7 @@ impl<'a> Parser<'a> {
             // restored rather than the loop variable alone.
             let saved_values = self.param_vars.clone();
             let saved_decls = self.classical_copy();
+            let saved_durations = self.durations.clone();
             self.param_vars
                 .get_or_insert_with(HashMap::new)
                 .insert(variable, value as f64);
@@ -1187,6 +1344,7 @@ impl<'a> Parser<'a> {
             self.nested = was_nested;
             self.param_vars = saved_values;
             self.classical = saved_decls;
+            self.durations = saved_durations;
             out.extend(produced?);
         }
         Ok(out)

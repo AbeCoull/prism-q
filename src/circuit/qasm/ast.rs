@@ -74,6 +74,11 @@ pub(crate) enum StmtKind<'a> {
         /// Empty for a bare `barrier;`, which spans every qubit declared so far.
         targets: Vec<Operand<'a>>,
     },
+    /// `delay[d] q;`. Empty targets mean every qubit.
+    Delay {
+        duration: Expr<'a>,
+        targets: Vec<Operand<'a>>,
+    },
     If(Box<Conditional<'a>>),
     For {
         variable: &'a str,
@@ -290,5 +295,10 @@ pub(crate) struct SwitchArm<'a> {
 #[derive(Clone, Debug)]
 pub(crate) enum DefParam<'a> {
     Qubit(&'a str),
-    Value { name: &'a str, integral: bool },
+    Value {
+        name: &'a str,
+        integral: bool,
+    },
+    /// A `duration` or `stretch` parameter.
+    Duration(&'a str),
 }

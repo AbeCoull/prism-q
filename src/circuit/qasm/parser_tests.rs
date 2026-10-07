@@ -278,25 +278,37 @@ fn unimplemented_keywords_are_rejected_by_name() {
 }
 
 #[test]
-fn timing_and_array_declines_name_the_construct() {
-    for source in [
-        "delay[10ns] q[0];",
-        "delay q[0];",
-        "duration d = 10ns;",
-        "array[int[32], 2] a;",
-    ] {
-        match error(source) {
-            PrismError::UnsupportedConstruct { construct, .. } => {
-                assert!(
-                    construct.contains("delay")
-                        || construct.contains("duration")
-                        || construct.contains("array"),
-                    "`{source}` gave `{construct}`"
-                );
-            }
-            other => panic!("`{source}` gave {other:?}"),
+fn an_array_declaration_declines_by_name() {
+    match error("array[int[32], 2] a;") {
+        PrismError::UnsupportedConstruct { construct, .. } => {
+            assert!(construct.contains("array"), "{construct}");
         }
+        other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_delay_keeps_its_length_and_targets() {
+    match one("delay[2 * 10ns] q[0], q[1];") {
+        StmtKind::Delay { duration, targets } => {
+            assert_eq!(format!("{duration}"), "2 * 10ns");
+            assert_eq!(targets.len(), 2);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        one("delay[4dt];"),
+        StmtKind::Delay { targets, .. } if targets.is_empty()
+    ));
+    assert!(matches!(
+        one("duration d = 10ns;"),
+        StmtKind::ClassicalDecl { ty: "duration", .. }
+    ));
+    assert!(matches!(
+        one("stretch s;"),
+        StmtKind::ClassicalDecl { ty: "stretch", .. }
+    ));
+    assert!(matches!(error("delay q[0];"), PrismError::Parse { .. }));
 }
 
 #[test]

@@ -597,6 +597,87 @@ fn factored_sampling_rows_draw_from_two_sub_states() {
     }
 }
 
+// The `fstab_*` rows of `auto/crossover` bracket the factored-stabilizer floor,
+// so they owe a route on each side of it: per-block tableaux under 24 qubits,
+// one factored-stabilizer backend from 24 up. Above the floor the `auto` arm
+// must also return what the `factored` arm's `run_on` returns, or the pair
+// prices two different answers rather than the routing work between them.
+#[test]
+fn fstab_crossover_rows_straddle_the_floor() {
+    let grid = [
+        (2usize, 16usize),
+        (3, 16),
+        (4, 16),
+        (6, 16),
+        (8, 16),
+        (10, 16),
+        (2, 8),
+        (3, 8),
+        (4, 8),
+        (8, 8),
+        (12, 8),
+        (20, 8),
+        (3, 6),
+        (4, 6),
+        (8, 6),
+        (4, 4),
+        (5, 4),
+        (6, 4),
+        (8, 4),
+        (16, 4),
+        (24, 4),
+        (40, 4),
+        (6, 3),
+        (8, 3),
+        (16, 3),
+        (8, 2),
+        (10, 2),
+        (12, 2),
+        (16, 2),
+        (32, 2),
+        (48, 2),
+        (80, 2),
+    ];
+    let mut below = 0;
+    for (blocks, block_size) in grid {
+        let n = blocks * block_size;
+        let label = format!("fstab_{n}q_b{block_size}");
+        let circuit = circuits::local_clifford_blocks(blocks, block_size, 200, SEED);
+        let auto = sim::simulate(&circuit).seed(42).run().unwrap();
+
+        if n < 24 {
+            below += 1;
+            assert_eq!(
+                auto.metadata.backend,
+                ResolvedBackend::Decomposed,
+                "{label}: under the floor Auto must run per block"
+            );
+            continue;
+        }
+        assert_eq!(
+            auto.metadata.backend,
+            ResolvedBackend::FactoredStabilizer,
+            "{label}: from the floor up Auto must run one factored-stabilizer backend"
+        );
+        let mut backend = prism_q::FactoredStabilizerBackend::new(42);
+        let direct = sim::run_on(&mut backend, &circuit).unwrap();
+        assert_eq!(
+            format!("{:?}", auto.metadata),
+            format!("{:?}", direct.metadata),
+            "{label}"
+        );
+        assert_eq!(auto.classical_bits, direct.classical_bits, "{label}");
+        if n <= 64 {
+            assert_eq!(
+                auto.probabilities.map(|p| p.marginals()),
+                direct.probabilities.map(|p| p.marginals()),
+                "{label}"
+            );
+        }
+    }
+    assert!(below >= 6, "the grid lost its rows under the floor");
+}
+
 // `stabilizer/random_pairs` prices the batched cross-word kernel, whose buffer
 // takes only pairs split across two tableau words and runs the batched form
 // once four of them are held. That the fixture feeds it is what an external

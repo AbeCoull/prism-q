@@ -1209,6 +1209,7 @@ pub fn prism_q::circuit::qft_textbook_steps(usize, usize) -> impl core::iter::tr
 pub mod prism_q::circuits
 pub fn prism_q::circuits::brickwork_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::clifford_heavy_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
+pub fn prism_q::circuits::clifford_prefix_measured_blocks(usize, usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::clifford_random_pairs(usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::clifford_t_circuit(usize, usize, f64, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::cz_chain_circuit(usize, usize, u64) -> prism_q::circuit::Circuit

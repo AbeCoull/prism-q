@@ -66,7 +66,8 @@ qubit. This is reversed relative to Qiskit. For example, the state where only
   adjoint gradients.
 - Noise models (`NoiseModel`, `NoiseChannel`, two-qubit Kraus channels included) for
   shot sampling.
-- Native QEC programs (`QecProgram`) with detector and observable sampling.
+- Native QEC programs (`QecProgram`) with detector and observable sampling and
+  feed-forward corrections.
 - NumPy output for probabilities, statevectors, and QEC bit matrices.
 
 ## License

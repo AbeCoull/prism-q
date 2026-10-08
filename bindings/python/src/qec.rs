@@ -4,6 +4,7 @@ use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
     DetectorErrorModel, PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram,
     QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
+    run_qec_program_reference,
 };
 use pyo3::prelude::*;
 
@@ -214,6 +215,21 @@ impl PyQecProgram {
         Ok(())
     }
 
+    /// Apply the operations of `body` only in shots where the parity over
+    /// `records` equals `expected`. `body` admits gates and resets only, so the
+    /// measurement record keeps one layout across shots.
+    fn feedforward(
+        &mut self,
+        records: Vec<PyRecordRef>,
+        expected: bool,
+        body: &PyQecProgram,
+    ) -> PyPrismResult<()> {
+        let refs: Vec<QecRecordRef> = records.iter().map(|r| r.0).collect();
+        self.inner
+            .feedforward(&refs, expected, body.inner.ops().to_vec())?;
+        Ok(())
+    }
+
     /// Append a Pauli-noise annotation on `targets`.
     fn noise(&mut self, channel: &PyQecNoise, targets: Vec<usize>) -> PyPrismResult<()> {
         self.inner.noise(channel.0, &targets)?;
@@ -224,6 +240,15 @@ impl PyQecProgram {
     fn run(&self, py: Python<'_>) -> PyPrismResult<PyQecResult> {
         let program = &self.inner;
         let result = py.detach(|| run_qec_program(program))?;
+        Ok(PyQecResult { inner: result })
+    }
+
+    /// Sample through the per-shot statevector reference path, the route that
+    /// executes `feedforward`. Costs `O(shots * 2^n)`, so it suits small
+    /// programs rather than bulk sampling.
+    fn run_reference(&self, py: Python<'_>) -> PyPrismResult<PyQecResult> {
+        let program = &self.inner;
+        let result = py.detach(|| run_qec_program_reference(program))?;
         Ok(PyQecResult { inner: result })
     }
 

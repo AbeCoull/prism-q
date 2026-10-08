@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import prism_q
 from prism_q import QecBasis, QecNoise, QecProgram, RecordRef
@@ -182,3 +183,47 @@ def test_decoder_rejects_bad_inputs():
         hyper.detector([RecordRef.absolute(record)])
     with pytest.raises(prism_q.PrismError, match="decompose_graphlike"):
         prism_q.Decoder(hyper.detector_error_model())
+
+
+def _corrected_bell_pair(shots=256):
+    qp = QecProgram(2)
+    qp.set_options(shots=shots, seed=11)
+    qp.push_gate(prism_q.Gate.h(), [0])
+    qp.push_gate(prism_q.Gate.cx(), [0, 1])
+    record = qp.measure_z(0)
+    body = QecProgram(2)
+    body.push_gate(prism_q.Gate.x(), [1])
+    qp.feedforward([RecordRef.absolute(record)], True, body)
+    qp.measure_z(1)
+    return qp
+
+
+def test_feedforward_corrects_on_the_reference_path():
+    res = _corrected_bell_pair().run_reference()
+    measurements = res.measurements
+    assert measurements.shape == (256, 2)
+    assert 0 < measurements[:, 0].sum() < 256
+    assert not measurements[:, 1].any()
+
+
+def test_feedforward_needs_the_reference_path():
+    with pytest.raises(prism_q.PrismError, match="run_qec_program_reference"):
+        _corrected_bell_pair().run()
+
+
+def test_feedforward_body_takes_gates_and_resets_only():
+    qp = QecProgram(2)
+    r = qp.measure_z(0)
+    measuring = QecProgram(2)
+    measuring.measure_z(1)
+    with pytest.raises(prism_q.PrismError):
+        qp.feedforward([RecordRef.absolute(r)], True, measuring)
+    with pytest.raises(prism_q.PrismError):
+        qp.feedforward([RecordRef.absolute(r)], True, QecProgram(2))
+    wide = QecProgram(3)
+    wide.push_gate(prism_q.Gate.x(), [2])
+    with pytest.raises(prism_q.PrismError):
+        qp.feedforward([RecordRef.absolute(r)], True, wide)
+    resetting = QecProgram(2)
+    resetting.reset(QecBasis.Z, 1)
+    qp.feedforward([RecordRef.lookback(1)], False, resetting)

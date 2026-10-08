@@ -1014,6 +1014,28 @@ predicted = decoder.decode(res.detectors)
 failures = (predicted[:, 0] != res.observables[:, 0]).sum()
 ```
 
+`feedforward(records, expected, body)` applies the gates and resets of `body`, a
+second `QecProgram` holding the correction, only in shots where the parity over
+`records` equals `expected`: an adaptive correction keyed on a syndrome. The compiled
+sampler behind `run()` evaluates one affine map for every shot, which a feed-forward
+breaks, so a program carrying one runs through `run_reference()`, the per-shot
+statevector path. It costs `O(shots * 2^n)` and suits small programs.
+
+```python
+from prism_q import Gate, QecProgram, RecordRef
+
+prog = QecProgram(2)
+prog.set_options(shots=1000, seed=1)
+prog.push_gate(Gate.h(), [0])
+prog.push_gate(Gate.cx(), [0, 1])
+flag = prog.measure_z(0)
+fix = QecProgram(2)
+fix.push_gate(Gate.x(), [1])
+prog.feedforward([RecordRef.absolute(flag)], True, fix)
+prog.measure_z(1)
+assert not prog.run_reference().measurements[:, 1].any()
+```
+
 `packed_detectors()`, `packed_observables()`, and `packed_measurements()` return
 the same records eight to a byte, as `(shots, ceil(n / 8))` `uint8` arrays: record
 `j` of a shot is bit `j % 8` of byte `j // 8`, and the unused high bits of the

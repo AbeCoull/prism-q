@@ -151,8 +151,12 @@ per-shot pure state. Every row marked "density matrix only" reads the exact mixe
 instead, so it needs `.backend(BackendKind.density_matrix())`; auto dispatch never
 selects it. There the mixture is evolved once and every terminal reads that one
 evolution, so the probabilities are seed independent and the observables carry no
-sampling error. Circuits with mid-circuit measurement or classical conditioning are
-rejected on that route, since the mixture holds every measurement branch at once.
+sampling error. With `.noise()` attached, circuits with mid-circuit measurement or
+classical conditioning are rejected on that route, since the mixture holds every
+measurement branch at once; `density_matrix_expectation_values()` rejects them too.
+Without a noise model the density-matrix backend runs them the way the statevector
+does: each measurement samples an outcome and collapses onto it, so `run()` returns
+the probabilities of one branch and `sample_counts()` draws a fresh branch per shot.
 
 Terminals that cannot honor a model raise `PrismError` naming the reason.
 `state_vector()` honors `.backend(...)` and declines

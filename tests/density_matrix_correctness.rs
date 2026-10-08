@@ -441,6 +441,47 @@ fn dm_noisy_terminals_reject_branching_circuits_naming_the_mixture() {
     }
 }
 
+// Without a noise model there is no mixture to read, so the backend runs a
+// branching circuit the way the statevector does: one sampled branch per run.
+#[test]
+fn dm_noiseless_terminals_follow_one_branch_of_a_conditioned_circuit() {
+    use prism_q::BackendKind;
+    use prism_q::circuit::{ClassicalCondition, Instruction, SmallVec};
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    let targets: SmallVec<[usize; 4]> = [1usize].into_iter().collect();
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets,
+    });
+    circuit.add_measure(1, 1);
+
+    for seed in 0..8 {
+        let outcome = sim::simulate(&circuit)
+            .backend(BackendKind::DensityMatrix)
+            .seed(seed)
+            .run()
+            .unwrap();
+        let branch = if outcome.classical_bits[0] { 3 } else { 0 };
+        let probs = outcome.probabilities.unwrap().to_vec();
+        assert!(
+            (probs[branch] - 1.0).abs() < DM_EPS,
+            "seed {seed}: {probs:?}"
+        );
+    }
+
+    let counts = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(SEED)
+        .sample_counts(64)
+        .unwrap()
+        .counts;
+    assert_eq!(counts.len(), 2, "{counts:?}");
+    assert_eq!(counts.values().sum::<u64>(), 64);
+}
+
 // Idle damping lands on qubit 0 once before its measurement and once after it,
 // in the slot of the measurement of qubit 1. A shot has recorded qubit 0 by
 // then, so only the first event reaches the distribution: P(q0 = 1) = 1/2.

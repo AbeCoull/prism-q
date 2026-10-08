@@ -71,6 +71,35 @@ fn numbers_split_from_what_follows_them() {
     }
 }
 
+// A unit belongs to the number only when nothing name-like follows it, so `2sx`
+// stays the number and the name it lexed as before durations existed.
+#[test]
+fn a_time_unit_glues_to_its_number() {
+    for source in [
+        "10ns",
+        "2.5us",
+        "4dt",
+        "3ms",
+        "1s",
+        "1e3ns",
+        "1_000ns",
+        "3\u{b5}s",
+        "3\u{3bc}s",
+    ] {
+        assert_eq!(kinds(source), vec![Kind::Duration], "`{source}`");
+        assert_eq!(texts(source), vec![source.to_string()], "`{source}`");
+    }
+    for (source, expected) in [
+        ("2sx", vec![Kind::Int, Kind::Ident]),
+        ("2 ns", vec![Kind::Int, Kind::Ident]),
+        ("2nsec", vec![Kind::Int, Kind::Ident]),
+        ("2e", vec![Kind::Int, Kind::Ident]),
+        ("0x1f", vec![Kind::Int]),
+    ] {
+        assert_eq!(kinds(source), expected, "`{source}`");
+    }
+}
+
 // A `/*` inside a line comment or a string opens nothing, and a `//` inside a
 // string ends nothing.
 #[test]

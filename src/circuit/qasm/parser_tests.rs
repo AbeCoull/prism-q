@@ -254,19 +254,36 @@ fn definitions_keep_their_signatures() {
         }
         other => panic!("{other:?}"),
     }
+    match one("def sub(bit[2] c, qubit a) -> bit { return measure a; }") {
+        StmtKind::DefDef {
+            args,
+            result: Some(result),
+            body,
+            ..
+        } => {
+            assert!(matches!(args[0], DefParam::Bit { width: Some(_), .. }));
+            assert!(result.width.is_none());
+            assert!(matches!(
+                body[0].kind,
+                StmtKind::Return(Some(ReturnValue::Measure(_)))
+            ));
+        }
+        other => panic!("{other:?}"),
+    }
     assert!(matches!(
-        error("def sub(qubit a) -> bit { h a; }"),
+        error("def sub(qubit a) -> int { return 1; }"),
         PrismError::UnsupportedConstruct { .. }
     ));
     assert!(matches!(
-        error("def sub(bit c) { }"),
-        PrismError::UnsupportedConstruct { .. }
+        one("c[0] = sub(c[1], q[0]);"),
+        StmtKind::CallAssign(_)
     ));
+    assert!(matches!(one("x = sin(t) + 1;"), StmtKind::Assign { .. }));
 }
 
 #[test]
 fn unimplemented_keywords_are_rejected_by_name() {
-    for keyword in ["defcal", "extern", "opaque", "while", "return", "break"] {
+    for keyword in ["defcal", "extern", "opaque", "while", "break"] {
         let source = format!("{keyword} x;");
         match error(&source) {
             PrismError::UnsupportedConstruct { construct, .. } => {
@@ -278,25 +295,46 @@ fn unimplemented_keywords_are_rejected_by_name() {
 }
 
 #[test]
-fn timing_and_array_declines_name_the_construct() {
-    for source in [
-        "delay[10ns] q[0];",
-        "delay q[0];",
-        "duration d = 10ns;",
-        "array[int[32], 2] a;",
-    ] {
-        match error(source) {
-            PrismError::UnsupportedConstruct { construct, .. } => {
-                assert!(
-                    construct.contains("delay")
-                        || construct.contains("duration")
-                        || construct.contains("array"),
-                    "`{source}` gave `{construct}`"
-                );
-            }
-            other => panic!("`{source}` gave {other:?}"),
+fn an_array_keeps_its_shape_and_initializer() {
+    match one("const array[int[32], 2, 3] a = {{1, 2, 3}, {4, 5, 6}};") {
+        StmtKind::ArrayDecl(decl) => {
+            assert!(decl.constant);
+            assert_eq!((decl.ty, decl.name, decl.dims.len()), ("int", "a", 2));
+            assert!(matches!(&decl.init, Some(ArrayInit::List(rows)) if rows.len() == 2));
         }
+        other => panic!("{other:?}"),
     }
+    for source in ["a[1] = 2;", "a[0, 1] += 2;", "a[0][1] -= 2;"] {
+        assert!(
+            matches!(one(source), StmtKind::ElementAssign(_)),
+            "`{source}`"
+        );
+    }
+    assert!(matches!(error("array[int] a;"), PrismError::Parse { .. }));
+}
+
+#[test]
+fn a_delay_keeps_its_length_and_targets() {
+    match one("delay[2 * 10ns] q[0], q[1];") {
+        StmtKind::Delay { duration, targets } => {
+            assert_eq!(format!("{duration}"), "2 * 10ns");
+            assert_eq!(targets.len(), 2);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        one("delay[4dt];"),
+        StmtKind::Delay { targets, .. } if targets.is_empty()
+    ));
+    assert!(matches!(
+        one("duration d = 10ns;"),
+        StmtKind::ClassicalDecl { ty: "duration", .. }
+    ));
+    assert!(matches!(
+        one("stretch s;"),
+        StmtKind::ClassicalDecl { ty: "stretch", .. }
+    ));
+    assert!(matches!(error("delay q[0];"), PrismError::Parse { .. }));
 }
 
 #[test]

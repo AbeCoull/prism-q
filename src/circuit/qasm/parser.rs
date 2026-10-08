@@ -4,8 +4,9 @@
 //! find where a statement, a block or an argument ended.
 
 use super::ast::{
-    Argument, AssignOp, Block, CmpOp, Condition, Conditional, DefParam, ForRange, Index, Measure,
-    Modifier, Operand, OperandName, Range, RegisterKind, Stmt, StmtKind, SwitchArm,
+    Argument, ArrayDecl, ArrayInit, AssignOp, BitResult, Block, CallAssign, CmpOp, Condition,
+    Conditional, DefParam, ElementAssign, ForRange, Index, Measure, Modifier, Operand, OperandName,
+    Range, RegisterKind, ReturnValue, Stmt, StmtKind, SwitchArm,
 };
 use super::expr::{self, Expr};
 use super::lexer::{Kind, Token};
@@ -13,33 +14,29 @@ use super::stream::Stream;
 use crate::error::{PrismError, Result};
 use smallvec::SmallVec;
 
-/// Keywords that open a classical declaration. `complex` and `stretch` parse and
-/// are declined by the evaluator; `duration` never gets here, as `UNSUPPORTED`
-/// declines it first.
+/// Keywords that open a classical declaration. `complex` parses and is declined
+/// by the evaluator.
 const DECLARATION_TYPES: &[&str] = &[
     "int", "uint", "float", "angle", "bool", "complex", "duration", "stretch",
 ];
 
 /// Keywords the language has and this parser declines, with the text each decline
 /// carries. Declining by name returns `UnsupportedConstruct` where the operands
-/// would otherwise give a bare syntax error (`delay[10ns] q[0]` reads as a
+/// would otherwise give a bare syntax error (`while (c[0]) { }` reads as a
 /// malformed gate call).
 const UNSUPPORTED: &[(&str, &str)] = &[
     ("defcal", "defcal"),
     ("extern", "extern"),
     ("opaque", "opaque"),
     ("while", "while"),
-    ("return", "return"),
     ("break", "break"),
     ("continue", "continue"),
     ("else", "else"),
-    (
-        "delay",
-        "`delay`, a timing instruction with no schedule to delay against",
-    ),
-    ("duration", "`duration` declarations"),
-    ("array", "`array` declarations"),
 ];
+
+/// Deepest nesting an array initializer may have, which bounds the recursion
+/// that reads it.
+const MAX_INITIALIZER_DEPTH: usize = 32;
 
 pub(crate) fn parse_program<'a>(tokens: &[Token<'a>]) -> Result<Block<'a>> {
     let mut stream = Stream::new(tokens);
@@ -88,15 +85,15 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         "measure" => measure_arrow(stream),
         "reset" => reset(stream),
         "barrier" => barrier(stream),
+        "delay" => delay(stream),
         "if" => conditional(stream),
         "for" => for_loop(stream),
         "switch" => switch(stream),
         "gate" => gate_def(stream),
         "def" => def_def(stream),
-        "box" => {
-            stream.advance();
-            Ok(StmtKind::Box(braced_block(stream)?))
-        }
+        "return" => return_statement(stream),
+        "box" => boxed(stream),
+        "array" => array_declaration(stream, false),
         "const" => declaration(stream),
         other if DECLARATION_TYPES.contains(&other) => declaration(stream),
         _ => call_or_assignment(stream),
@@ -176,6 +173,9 @@ fn typename<'a>(stream: &mut Stream<'_, 'a>) -> Result<(&'a str, Option<Expr<'a>
 
 fn declaration<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     let constant = stream.eat_keyword("const");
+    if stream.is_keyword("array") {
+        return array_declaration(stream, constant);
+    }
     let (ty, _width) = typename(stream)?;
     let name = stream.expect_ident()?;
     let value = if stream.eat(Kind::Assign) {
@@ -190,6 +190,54 @@ fn declaration<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         name,
         value,
     })
+}
+
+/// `array[int[32], 2, 3] a = {{1, 2, 3}, {4, 5, 6}};`, the element type first and
+/// one size per dimension after it.
+fn array_declaration<'a>(stream: &mut Stream<'_, 'a>, constant: bool) -> Result<StmtKind<'a>> {
+    stream.advance();
+    stream.expect(Kind::LBracket)?;
+    let (ty, _width) = typename(stream)?;
+    let mut dims = Vec::new();
+    while stream.eat(Kind::Comma) {
+        dims.push(expr::parse(stream)?);
+    }
+    if dims.is_empty() {
+        return Err(stream.expected("`,` and a size after the element type"));
+    }
+    stream.expect(Kind::RBracket)?;
+    let name = stream.expect_ident()?;
+    let init = if stream.eat(Kind::Assign) {
+        Some(array_init(stream, 0)?)
+    } else {
+        None
+    };
+    stream.expect(Kind::Semicolon)?;
+    Ok(StmtKind::ArrayDecl(Box::new(ArrayDecl {
+        constant,
+        ty,
+        dims,
+        name,
+        init,
+    })))
+}
+
+fn array_init<'a>(stream: &mut Stream<'_, 'a>, depth: usize) -> Result<ArrayInit<'a>> {
+    if !stream.eat(Kind::LBrace) {
+        return Ok(ArrayInit::Value(expr::parse(stream)?));
+    }
+    if depth >= MAX_INITIALIZER_DEPTH {
+        return Err(PrismError::Parse {
+            line: stream.line(),
+            message: format!("array initializer nests deeper than {MAX_INITIALIZER_DEPTH}"),
+        });
+    }
+    let mut entries = vec![array_init(stream, depth + 1)?];
+    while stream.eat(Kind::Comma) {
+        entries.push(array_init(stream, depth + 1)?);
+    }
+    stream.expect(Kind::RBrace)?;
+    Ok(ArrayInit::List(entries))
 }
 
 /// `let a = q[0:1] ++ q[3];`
@@ -234,6 +282,37 @@ fn barrier<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     };
     stream.expect(Kind::Semicolon)?;
     Ok(StmtKind::Barrier { targets })
+}
+
+/// `delay[100ns] q[0], q[1];`, where no operand means every qubit.
+fn delay<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    stream.advance();
+    stream.expect(Kind::LBracket)?;
+    let duration = expr::parse(stream)?;
+    stream.expect(Kind::RBracket)?;
+    let targets = if stream.kind() == Kind::Semicolon {
+        Vec::new()
+    } else {
+        operand_list(stream, "delay")?
+    };
+    stream.expect(Kind::Semicolon)?;
+    Ok(StmtKind::Delay { duration, targets })
+}
+
+/// `box { ... }`, with an optional duration designator before the body.
+fn boxed<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    stream.advance();
+    let duration = if stream.eat(Kind::LBracket) {
+        let duration = expr::parse(stream)?;
+        stream.expect(Kind::RBracket)?;
+        Some(duration)
+    } else {
+        None
+    };
+    Ok(StmtKind::Box {
+        duration,
+        body: braced_block(stream)?,
+    })
 }
 
 fn operand_list<'a>(stream: &mut Stream<'_, 'a>, what: &str) -> Result<Vec<Operand<'a>>> {
@@ -536,7 +615,7 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     stream.expect(Kind::LParen)?;
     let mut args = Vec::new();
     while !stream.eat(Kind::RParen) {
-        let (ty, _width) = typename(stream)?;
+        let (ty, width) = typename(stream)?;
         let arg_name = stream.expect_ident()?;
         args.push(match ty {
             "qubit" => DefParam::Qubit(arg_name),
@@ -544,19 +623,15 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
                 name: arg_name,
                 integral: true,
             },
-            "float" | "angle" | "complex" | "duration" | "stretch" => DefParam::Value {
+            "float" | "angle" | "complex" => DefParam::Value {
                 name: arg_name,
                 integral: false,
             },
-            "bit" | "creg" => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
-                        "classical bit parameters in def `{name}` (V1 supports unitary \
-                         subroutines only)"
-                    ),
-                    line,
-                });
-            }
+            "duration" | "stretch" => DefParam::Duration(arg_name),
+            "bit" => DefParam::Bit {
+                name: arg_name,
+                width,
+            },
             other => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!("def parameter type `{other}`"),
@@ -569,14 +644,41 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
             break;
         }
     }
-    if stream.kind() == Kind::Arrow {
-        return Err(PrismError::UnsupportedConstruct {
-            construct: "def with return type".to_string(),
-            line,
-        });
-    }
+    let result = if stream.eat(Kind::Arrow) {
+        let (ty, width) = typename(stream)?;
+        if ty != "bit" {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "def `{name}` returning `{ty}`; only a `bit` result has a home in the \
+                     instruction list"
+                ),
+                line,
+            });
+        }
+        Some(BitResult { width })
+    } else {
+        None
+    };
     let body = braced_block(stream)?;
-    Ok(StmtKind::DefDef { name, args, body })
+    Ok(StmtKind::DefDef {
+        name,
+        args,
+        result,
+        body,
+    })
+}
+
+fn return_statement<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    stream.advance();
+    let value = if stream.kind() == Kind::Semicolon {
+        None
+    } else if stream.eat_keyword("measure") {
+        Some(ReturnValue::Measure(operand(stream)?))
+    } else {
+        Some(ReturnValue::Value(expr::parse(stream)?))
+    };
+    stream.expect(Kind::Semicolon)?;
+    Ok(StmtKind::Return(value))
 }
 
 /// A gate application, a `def` call, or an assignment, which all open with a
@@ -595,16 +697,11 @@ fn call_or_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     }
     let modifiers = modifier_chain(stream)?;
     let name = stream.expect_ident()?;
-    let mut params = SmallVec::new();
-    if stream.eat(Kind::LParen) {
-        while !stream.eat(Kind::RParen) {
-            params.push(argument(stream)?);
-            if !stream.eat(Kind::Comma) {
-                stream.expect(Kind::RParen)?;
-                break;
-            }
-        }
-    }
+    let params = if stream.eat(Kind::LParen) {
+        call_arguments(stream)?
+    } else {
+        SmallVec::new()
+    };
     let mut operands = SmallVec::new();
     if stream.kind() != Kind::Semicolon {
         operands.push(operand(stream)?);
@@ -621,25 +718,30 @@ fn call_or_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     })
 }
 
+/// The entries of a call's parentheses, the opening `(` already read.
+fn call_arguments<'a>(stream: &mut Stream<'_, 'a>) -> Result<SmallVec<[Argument<'a>; 1]>> {
+    let mut args = SmallVec::new();
+    while !stream.eat(Kind::RParen) {
+        args.push(argument(stream)?);
+        if !stream.eat(Kind::Comma) {
+            stream.expect(Kind::RParen)?;
+            break;
+        }
+    }
+    Ok(args)
+}
+
 /// `c = measure q;`, `n = n + 1;` and `n += 1;`, told from a gate call by the
 /// assignment that follows the target.
 fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>>> {
     let mark = stream.mark();
     let Ok(target) = operand(stream) else {
         stream.rewind(mark);
-        return Ok(None);
+        return element_assignment(stream);
     };
-    let op = match stream.kind() {
-        Kind::Assign => None,
-        Kind::AddAssign => Some(AssignOp::Add),
-        Kind::SubAssign => Some(AssignOp::Sub),
-        Kind::MulAssign => Some(AssignOp::Mul),
-        Kind::DivAssign => Some(AssignOp::Div),
-        Kind::ModAssign => Some(AssignOp::Rem),
-        _ => {
-            stream.rewind(mark);
-            return Ok(None);
-        }
+    let Some(op) = assign_op(stream.kind()) else {
+        stream.rewind(mark);
+        return element_assignment(stream);
     };
     stream.advance();
 
@@ -652,8 +754,34 @@ fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>
         }))));
     }
 
+    // A call standing alone on the right may hand over qubits and bits, which
+    // no expression can hold, so it keeps the call's own argument grammar.
+    if op.is_none() && stream.kind() == Kind::Ident && stream.peek_at(1).kind == Kind::LParen {
+        let value_mark = stream.mark();
+        let name = stream.advance().text;
+        stream.advance();
+        if let Ok(args) = call_arguments(stream) {
+            if stream.eat(Kind::Semicolon) {
+                return Ok(Some(StmtKind::CallAssign(Box::new(CallAssign {
+                    target,
+                    name,
+                    args,
+                }))));
+            }
+        }
+        stream.rewind(value_mark);
+    }
+
     let value = expr::parse(stream)?;
     stream.expect(Kind::Semicolon)?;
+    if let (Some(array), Some(Index::Single(index))) = (target.register(), &target.index) {
+        return Ok(Some(StmtKind::ElementAssign(Box::new(ElementAssign {
+            array,
+            indices: vec![index.clone()],
+            op,
+            value,
+        }))));
+    }
     let Some(name) = target.register().filter(|_| target.index.is_none()) else {
         return Err(PrismError::Parse {
             line: target.line,
@@ -668,6 +796,43 @@ fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>
         op,
         value,
     }))
+}
+
+/// The assignment an operator token spells: `None` when it is no assignment,
+/// `Some(None)` for a plain `=`.
+fn assign_op(kind: Kind) -> Option<Option<AssignOp>> {
+    match kind {
+        Kind::Assign => Some(None),
+        Kind::AddAssign => Some(Some(AssignOp::Add)),
+        Kind::SubAssign => Some(Some(AssignOp::Sub)),
+        Kind::MulAssign => Some(Some(AssignOp::Mul)),
+        Kind::DivAssign => Some(Some(AssignOp::Div)),
+        Kind::ModAssign => Some(Some(AssignOp::Rem)),
+        _ => None,
+    }
+}
+
+/// `a[0, 2] = 1;` and `a[0][2] += 1;`, the element forms no operand spells.
+fn element_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>>> {
+    if stream.kind() != Kind::Ident || stream.peek_at(1).kind != Kind::LBracket {
+        return Ok(None);
+    }
+    let mark = stream.mark();
+    let array = stream.advance().text;
+    let indices = expr::index_groups(stream);
+    let (Ok(indices), Some(op)) = (indices, assign_op(stream.kind())) else {
+        stream.rewind(mark);
+        return Ok(None);
+    };
+    stream.advance();
+    let value = expr::parse(stream)?;
+    stream.expect(Kind::Semicolon)?;
+    Ok(Some(StmtKind::ElementAssign(Box::new(ElementAssign {
+        array,
+        indices,
+        op,
+        value,
+    }))))
 }
 
 /// `inv @`, `pow(k) @`, `ctrl @` and `negctrl @`, in any order and chainable.
@@ -722,14 +887,21 @@ fn modifier_chain<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Modifier<'a>>> 
     }
 }
 
-/// One entry inside a call's parentheses. A subscript settles it as a qubit;
-/// anything else parses as a value, and a bare name is read as whichever the
-/// declaration asks for.
+/// One entry inside a call's parentheses. A subscripted name standing alone is
+/// a qubit or bit reference, or an array element, which only the declaration
+/// tells apart; anything else parses as a value, and a bare name is read as
+/// whichever the declaration asks for.
 fn argument<'a>(stream: &mut Stream<'_, 'a>) -> Result<Argument<'a>> {
     if stream.kind() == Kind::Physical
         || (stream.kind() == Kind::Ident && stream.peek_at(1).kind == Kind::LBracket)
     {
-        return Ok(Argument::Operand(operand(stream)?));
+        let mark = stream.mark();
+        if let Ok(operand) = operand(stream) {
+            if matches!(stream.kind(), Kind::Comma | Kind::RParen) {
+                return Ok(Argument::Operand(operand));
+            }
+        }
+        stream.rewind(mark);
     }
     Ok(Argument::Value(expr::parse(stream)?))
 }

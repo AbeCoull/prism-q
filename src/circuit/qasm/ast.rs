@@ -74,6 +74,11 @@ pub(crate) enum StmtKind<'a> {
         /// Empty for a bare `barrier;`, which spans every qubit declared so far.
         targets: Vec<Operand<'a>>,
     },
+    /// `delay[d] q;`. Empty targets mean every qubit.
+    Delay {
+        duration: Expr<'a>,
+        targets: Vec<Operand<'a>>,
+    },
     If(Box<Conditional<'a>>),
     For {
         variable: &'a str,
@@ -93,12 +98,71 @@ pub(crate) enum StmtKind<'a> {
     DefDef {
         name: &'a str,
         args: Vec<DefParam<'a>>,
+        result: Option<BitResult<'a>>,
         body: Block<'a>,
     },
-    /// `box { ... }`, which Braket opens with a verbatim pragma.
-    Box(Block<'a>),
+    /// `return;`, `return measure q;` or `return r;`.
+    Return(Option<ReturnValue<'a>>),
+    /// `array[int[32], 2, 3] a = {{1, 2, 3}, {4, 5, 6}};`. Boxed for the same
+    /// reason as `CallAssign`.
+    ArrayDecl(Box<ArrayDecl<'a>>),
+    /// `a[1] = 5;` and `a[0, 2] += 1;`.
+    ElementAssign(Box<ElementAssign<'a>>),
+    /// `c[0] = f(q[0]);`, a call whose result is assigned. Boxed because the
+    /// target and the arguments would otherwise set the width of every
+    /// statement in the tree.
+    CallAssign(Box<CallAssign<'a>>),
+    /// `box { ... }` or `box[100ns] { ... }`.
+    Box {
+        duration: Option<Expr<'a>>,
+        body: Block<'a>,
+    },
     /// A `#pragma` line, text included.
     Pragma(&'a str),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ArrayDecl<'a> {
+    pub constant: bool,
+    pub ty: &'a str,
+    pub dims: Vec<Expr<'a>>,
+    pub name: &'a str,
+    pub init: Option<ArrayInit<'a>>,
+}
+
+/// An array initializer: a value, or a braced list with one entry per index of
+/// the dimension it stands at.
+#[derive(Clone, Debug)]
+pub(crate) enum ArrayInit<'a> {
+    Value(Expr<'a>),
+    List(Vec<ArrayInit<'a>>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ElementAssign<'a> {
+    pub array: &'a str,
+    pub indices: Vec<Expr<'a>>,
+    pub op: Option<AssignOp>,
+    pub value: Expr<'a>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CallAssign<'a> {
+    pub target: Operand<'a>,
+    pub name: &'a str,
+    pub args: SmallVec<[Argument<'a>; 1]>,
+}
+
+/// A `def` declared `-> bit` or `-> bit[n]`, the only result type it may have.
+#[derive(Clone, Debug)]
+pub(crate) struct BitResult<'a> {
+    pub width: Option<Expr<'a>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ReturnValue<'a> {
+    Measure(Operand<'a>),
+    Value(Expr<'a>),
 }
 
 #[derive(Clone, Debug)]
@@ -290,5 +354,15 @@ pub(crate) struct SwitchArm<'a> {
 #[derive(Clone, Debug)]
 pub(crate) enum DefParam<'a> {
     Qubit(&'a str),
-    Value { name: &'a str, integral: bool },
+    Value {
+        name: &'a str,
+        integral: bool,
+    },
+    /// A `duration` or `stretch` parameter.
+    Duration(&'a str),
+    /// `bit` or `bit[n]`, passed by value.
+    Bit {
+        name: &'a str,
+        width: Option<Expr<'a>>,
+    },
 }

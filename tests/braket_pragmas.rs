@@ -245,11 +245,9 @@ fn a_verbatim_box_runs_its_body() {
 }
 
 #[test]
-fn a_box_without_a_verbatim_pragma_is_rejected() {
-    assert!(matches!(
-        parse_err("box {\n  h q[0];\n}"),
-        PrismError::UnsupportedConstruct { .. }
-    ));
+fn a_box_without_a_verbatim_pragma_runs_its_body() {
+    let parsed = parse("box {\n  h q[0];\n}");
+    assert_eq!(parsed.circuit.gate_count(), 1);
 }
 
 #[test]

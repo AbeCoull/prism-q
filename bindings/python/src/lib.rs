@@ -27,8 +27,8 @@ use error::PrismError;
 use gate::PyGate;
 use gpu::{PyGpuContext, PyGpuInfo};
 use noise::{
-    PyDeviceCalibration, PyErrorChainComplex, PyGateFilter, PyNoiseBuilder, PyNoiseChannel,
-    PyNoiseModel,
+    PyDeviceCalibration, PyDriftDistribution, PyErrorChainComplex, PyGateFilter, PyGateTimes,
+    PyNoiseBuilder, PyNoiseChannel, PyNoiseModel,
 };
 use parameter::{PyParameters, PyPreparedCircuit};
 use program::{PyDynamicProgram, PyDynamicProgramBuilder, PyProgramSimulation};
@@ -66,6 +66,8 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNoiseModel>()?;
     m.add_class::<PyDeviceCalibration>()?;
     m.add_class::<PyErrorChainComplex>()?;
+    m.add_class::<PyGateTimes>()?;
+    m.add_class::<PyDriftDistribution>()?;
     m.add_class::<PySimulation>()?;
     m.add_class::<PyRunOutcome>()?;
     m.add_class::<PyShotsResult>()?;

@@ -84,7 +84,7 @@ impl PyRecordRef {
     }
 }
 
-/// Pauli-noise annotation for a QEC program.
+/// Noise annotation for a QEC program: Pauli channels and leakage.
 #[pyclass(name = "QecNoise", module = "prism_q", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyQecNoise(QecNoise);
@@ -135,6 +135,24 @@ impl PyQecNoise {
         let mut w = Writer::new(Kind::QecNoise);
         codec::write_qec_noise(&mut w, &slf.get().0)?;
         reduce(slf.as_any(), w.finish())
+    }
+
+    /// Per target, an unleaked qubit leaks with probability `p`; each target adds a
+    /// herald column.
+    #[staticmethod]
+    fn leak(p: f64) -> Self {
+        Self(QecNoise::Leak(p))
+    }
+    /// Per target, a leaked qubit returns in a random basis state with probability `p`.
+    #[staticmethod]
+    fn seep(p: f64) -> Self {
+        Self(QecNoise::Seep(p))
+    }
+    /// Per target pair, leakage spreads from a leaked qubit to its partner with
+    /// probability `p`.
+    #[staticmethod]
+    fn leak_transport(p: f64) -> Self {
+        Self(QecNoise::LeakTransport(p))
     }
 
     fn __repr__(&self) -> String {
@@ -978,6 +996,17 @@ impl PyQecResult {
     /// Measurement records in the `packed_detectors` layout.
     fn packed_measurements<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {
         packed_to_bytes(py, &self.inner.measurements)
+    }
+
+    /// Erasure heralds as a `(shots, num_leak_targets)` bool array, one column per
+    /// `LEAK` target in program order; `None` for a program without leakage.
+    #[getter]
+    fn heralds<'py>(&self, py: Python<'py>) -> PyPrismResult<Option<Bound<'py, PyArray2<bool>>>> {
+        self.inner
+            .heralds
+            .as_ref()
+            .map(|heralds| packed_to_2d(py, heralds))
+            .transpose()
     }
 
     fn __repr__(&self) -> String {

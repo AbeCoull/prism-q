@@ -269,6 +269,26 @@ impl GridCell {
     }
 }
 
+/// Give each moment's barriers a column ahead of its gates, or drop them when hidden.
+///
+/// Placement synchronizes a barrier's qubits without advancing them, so the next gate
+/// on those qubits shares the barrier's moment and would overwrite its cells.
+fn barrier_columns(moments: Vec<Vec<PlacedOp>>, show_barriers: bool) -> Vec<Vec<PlacedOp>> {
+    let mut columns = Vec::with_capacity(moments.len());
+    for moment in moments {
+        let (barriers, ops): (Vec<_>, Vec<_>) = moment
+            .into_iter()
+            .partition(|op| matches!(op.kind, OpKind::Barrier));
+        if show_barriers && !barriers.is_empty() {
+            columns.push(barriers);
+        }
+        if !ops.is_empty() {
+            columns.push(ops);
+        }
+    }
+    columns
+}
+
 #[allow(clippy::needless_range_loop)]
 fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptions) -> Vec<String> {
     if moments.is_empty() || num_qubits == 0 {
@@ -989,6 +1009,7 @@ impl Circuit {
             return render_summary(self).join("\n");
         }
 
+        let moments = barrier_columns(moments, opts.show_barriers);
         let lines = render_moments(&moments, self.num_qubits, opts);
         if lines.is_empty() {
             return "(empty circuit)".to_string();
@@ -1299,6 +1320,36 @@ mod tests {
                 "q[2]: ─Rx(π/4)─",
             ]
             .join("\n"),
+        );
+    }
+
+    #[test]
+    fn barrier_gets_its_own_column() {
+        let mut builder = CircuitBuilder::new(2);
+        builder.h(0).h(1).barrier(&[0, 1]).x(0).x(1);
+        let circuit = builder.build();
+        assert_eq!(
+            circuit.draw(&TextOptions::default()),
+            ["q[0]: ─H─┊┊┊─X─", "q[1]: ─H─┊┊┊─X─"].join("\n"),
+        );
+
+        let hidden = TextOptions {
+            show_barriers: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            circuit.draw(&hidden),
+            ["q[0]: ─H──X─", "q[1]: ─H──X─"].join("\n"),
+        );
+    }
+
+    #[test]
+    fn partial_barrier_precedes_later_gates() {
+        let mut builder = CircuitBuilder::new(3);
+        builder.h(0).h(2).barrier(&[0, 1]).h(1);
+        assert_eq!(
+            builder.build().draw(&TextOptions::default()),
+            ["q[0]: ─H─┊┊┊───", "q[1]: ───┊┊┊─H─", "q[2]: ─H───────"].join("\n"),
         );
     }
 }

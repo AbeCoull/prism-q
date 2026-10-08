@@ -753,6 +753,9 @@ class QecProgram:
 
 @final
 class DetectorErrorModel:
+    @staticmethod
+    def from_text(text: str) -> "DetectorErrorModel": ...
+    def suggested_decompositions(self) -> list[list[tuple[list[int], list[int]]]]: ...
     @property
     def num_detectors(self) -> int: ...
     @property

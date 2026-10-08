@@ -301,6 +301,7 @@ read. The emitted subset:
 
 ```text
 error(<p>) D<i> ... L<j> ...
+error(<p>) D<i> D<k> ^ D<m> L<j> ...
 detector D<i>
 detector(<c0>, <c1>, ...) D<i>
 logical_observable L<j>
@@ -308,12 +309,41 @@ logical_observable L<j>
 
 One `error` line per mechanism in mechanism order, carrying its probability
 and the `D`-prefixed detector indices and `L`-prefixed observable indices it
-flips, both ascending. One `detector` line per detector in index order, with
-the coordinates of the program's detector op when present. One
+flips, both ascending. A mechanism on more than two detectors is written as
+`^`-separated components, the decomposition suggestion a matching decoder
+reads: the suggestion the mechanism carries when it was imported with one,
+otherwise the cover `decompose_graphlike` would pick, otherwise flat when no
+cover exists. One `detector` line per detector in index order, with the
+coordinates of the program's detector op when present. One
 `logical_observable` line per observable slot. Indices are zero-based and
-dense; probabilities print with enough digits to round-trip exactly. Flat
-models only: no repeat blocks, no coordinate shifts, no decomposition
-suggestions.
+dense; probabilities print with enough digits to round-trip exactly.
+
+The output is otherwise flat: no `repeat` blocks and no `shift_detectors`.
+Derivation merges mechanisms across the whole program by symptom, so the
+per-round structure a `repeat` block would compress is not kept in the model,
+and recovering it means searching the flat list for a period. A distance-13
+surface memory over 1000 rounds at uniform circuit noise writes 3.4 million
+mechanisms, about 200 MB of text, which reads back in less time than the
+derivation that produced it. Compression stays out until a workload shows the
+text size matters.
+
+`DetectorErrorModel::from_text` reads the format back: `error(p)` with `D`,
+`L`, and `^` targets, `detector` with optional coordinates,
+`logical_observable`, `shift_detectors(<coordinate shift>) <detector shift>`,
+and nested `repeat N { ... }` blocks, which expand as they are read. Detector
+targets add the accumulated detector shift and detector coordinates the
+accumulated coordinate shift, both in program order through the expansion.
+Instruction names are case-insensitive, `error[tag](p)` tags are ignored, and
+`#` starts a comment. Each `error` line becomes one mechanism in line order,
+not merged with others of the same symptom; a target named twice in one
+component cancels. Its `^` components are kept as
+`ErrorMechanism::suggested_decomposition`, and `decompose_graphlike` splits a
+hypergraph mechanism along them when every component flips one or two
+detectors, adding any component no existing mechanism matches. The detector and
+observable counts are one past the highest index named anywhere. A `repeat`
+whose expansion would exceed 2^25 instructions is rejected before it runs.
+Export then import reproduces every mechanism's probability, detectors, and
+observables, the detector coordinates, and the text itself.
 
 Example, one syndrome round of the three-qubit repetition memory under
 `X_ERROR(0.05)` on the data qubits:
@@ -328,8 +358,9 @@ detector D1
 
 In Python, `QecProgram.detector_error_model()` returns the model with
 `probabilities()` (float64), `detector_matrix()` and `observable_matrix()`
-(bool, detectors or observables by mechanisms), `detector_coords()`, and
-`to_text()`. The matrix triple feeds check-matrix decoder constructors
+(bool, detectors or observables by mechanisms), `detector_coords()`,
+`suggested_decompositions()`, and `to_text()`; `DetectorErrorModel.from_text`
+reads a model from text. The matrix triple feeds check-matrix decoder constructors
 directly, with no file in between.
 
 ### Decoding

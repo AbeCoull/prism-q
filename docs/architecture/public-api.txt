@@ -1735,6 +1735,7 @@ pub struct prism_q::qec::DetectorErrorModel
 impl prism_q::DetectorErrorModel
 pub fn prism_q::DetectorErrorModel::decompose_graphlike(&self) -> prism_q::error::Result<prism_q::DetectorErrorModel>
 pub fn prism_q::DetectorErrorModel::detector_coords(&self) -> &[alloc::vec::Vec<f64>]
+pub fn prism_q::DetectorErrorModel::from_text(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::DetectorErrorModel::mechanisms(&self) -> &[prism_q::ErrorMechanism]
 pub fn prism_q::DetectorErrorModel::num_detectors(&self) -> usize
 pub fn prism_q::DetectorErrorModel::num_mechanisms(&self) -> usize
@@ -1745,6 +1746,7 @@ impl prism_q::ErrorMechanism
 pub fn prism_q::ErrorMechanism::detectors(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::observables(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::probability(&self) -> f64
+pub fn prism_q::ErrorMechanism::suggested_decomposition(&self) -> &[(alloc::vec::Vec<usize>, alloc::vec::Vec<usize>)]
 pub struct prism_q::qec::QecCompiledRows
 impl prism_q::qec::QecCompiledRows
 pub fn prism_q::qec::QecCompiledRows::detector_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
@@ -3002,6 +3004,7 @@ pub struct prism_q::DetectorErrorModel
 impl prism_q::DetectorErrorModel
 pub fn prism_q::DetectorErrorModel::decompose_graphlike(&self) -> prism_q::error::Result<prism_q::DetectorErrorModel>
 pub fn prism_q::DetectorErrorModel::detector_coords(&self) -> &[alloc::vec::Vec<f64>]
+pub fn prism_q::DetectorErrorModel::from_text(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::DetectorErrorModel::mechanisms(&self) -> &[prism_q::ErrorMechanism]
 pub fn prism_q::DetectorErrorModel::num_detectors(&self) -> usize
 pub fn prism_q::DetectorErrorModel::num_mechanisms(&self) -> usize
@@ -3133,6 +3136,7 @@ impl prism_q::ErrorMechanism
 pub fn prism_q::ErrorMechanism::detectors(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::observables(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::probability(&self) -> f64
+pub fn prism_q::ErrorMechanism::suggested_decomposition(&self) -> &[(alloc::vec::Vec<usize>, alloc::vec::Vec<usize>)]
 pub struct prism_q::ExpectationGradient
 pub prism_q::ExpectationGradient::gradient: alloc::vec::Vec<f64>
 pub prism_q::ExpectationGradient::value: f64

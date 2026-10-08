@@ -354,6 +354,24 @@ pub struct PyDetectorErrorModel {
 
 #[pymethods]
 impl PyDetectorErrorModel {
+    /// Parse the common detector error model text format, expanding `repeat` blocks.
+    #[staticmethod]
+    fn from_text(text: &str) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: DetectorErrorModel::from_text(text)?,
+        })
+    }
+
+    /// Suggested `^` decomposition of each mechanism as lists of `(detectors,
+    /// observables)` components, empty for mechanisms without one.
+    fn suggested_decompositions(&self) -> Vec<Vec<(Vec<usize>, Vec<usize>)>> {
+        self.inner
+            .mechanisms()
+            .iter()
+            .map(|m| m.suggested_decomposition().to_vec())
+            .collect()
+    }
+
     #[getter]
     fn num_detectors(&self) -> usize {
         self.inner.num_detectors()

@@ -21,6 +21,7 @@ pub(crate) mod camps_prefix;
 pub mod cut_selection;
 mod decoder;
 mod dem;
+mod dem_text;
 mod noise;
 pub mod observable_reroute;
 mod parity_walk;

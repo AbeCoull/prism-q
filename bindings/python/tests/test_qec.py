@@ -290,3 +290,24 @@ def test_program_text_round_trips():
     assert qp.to_text() == text
     again = QecProgram.from_text(qp.to_text())
     assert again.num_detectors == qp.num_detectors == 1
+
+
+def test_detector_error_model_text_round_trips():
+    dem = prism_q.DetectorErrorModel.from_text(
+        "error(0.1) D0 D1 ^ D2 L0\nrepeat 2 {\n error(0.01) D0\n shift_detectors(0, 1) 1\n}\n"
+        "detector(1, 2) D0\n"
+    )
+    assert dem.num_mechanisms == 3
+    assert dem.num_detectors == 3
+    assert dem.num_observables == 1
+    assert dem.detector_coords()[2] == [1.0, 4.0]
+    assert dem.suggested_decompositions()[0] == [([0, 1], []), ([2], [0])]
+    assert dem.suggested_decompositions()[1] == []
+    again = prism_q.DetectorErrorModel.from_text(dem.to_text())
+    assert again.to_text() == dem.to_text()
+    assert (again.detector_matrix() == dem.detector_matrix()).all()
+
+    import pytest
+
+    with pytest.raises(prism_q.PrismError):
+        prism_q.DetectorErrorModel.from_text("error(2) D0")

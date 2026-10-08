@@ -156,8 +156,30 @@ model also exposes `probabilities()`, `detector_matrix()`, and
 libraries accept directly. Matching decoders need at most two detectors per
 mechanism: `decompose_graphlike` returns that form, splitting each hypergraph
 mechanism across existing graphlike ones and erroring loudly when no split
-exists. See [QEC program execution](../architecture/qec-programs.md) for the
-derivation semantics and the emitted grammar.
+exists. `to_text` writes those splits as `^`-separated components.
+
+`DetectorErrorModel::from_text` reads the same format, `repeat` blocks and
+`shift_detectors` included, so a model written by another tool can drive the
+in-crate decoder:
+
+```rust
+use prism_q::{DetectorErrorModel, UnionFindDecoder};
+
+let model = DetectorErrorModel::from_text(
+    "error(0.1) D0
+     repeat 2 {
+         error(0.1) D0 D1
+         shift_detectors 1
+     }
+     error(0.1) D0 L0",
+)?;
+assert_eq!(model.num_detectors(), 3);
+let decoder = UnionFindDecoder::from_model(&model)?;
+# Ok::<(), prism_q::PrismError>(())
+```
+
+See [QEC program execution](../architecture/qec-programs.md) for the
+derivation semantics and the grammar both directions cover.
 
 ## Decoding
 

@@ -97,6 +97,51 @@ class Circuit:
     def add_save(self, spec: SaveSpec, label: str) -> None: ...
     @property
     def save_count(self) -> int: ...
+    def to_qasm(self, *, expand_pauli_rotations: bool = False) -> str: ...
+    def draw(
+        self,
+        *,
+        fold_width: int = ...,
+        show_idle_wires: bool = True,
+        show_barriers: bool = True,
+        max_qubits: Optional[int] = None,
+        max_moments: Optional[int] = None,
+    ) -> str: ...
+    def heatmap(
+        self,
+        *,
+        fold_width: int = ...,
+        show_idle_wires: bool = True,
+        show_barriers: bool = True,
+        max_qubits: Optional[int] = None,
+        max_moments: Optional[int] = None,
+    ) -> str: ...
+    def summary(self) -> str: ...
+    def to_svg(
+        self,
+        *,
+        dark_mode: bool = False,
+        auto_theme: bool = False,
+        animate: bool = True,
+        compact: bool = False,
+        show_legend: bool = False,
+        show_stats_header: bool = False,
+        show_topology: bool = False,
+        show_idle_wires: bool = True,
+        show_barriers: bool = True,
+        max_qubits: Optional[int] = None,
+        max_moments: Optional[int] = None,
+        ellipsis: Optional[tuple[int, int]] = None,
+        wire_spacing: float = ...,
+        moment_width: float = ...,
+        gate_height: float = ...,
+        gate_min_width: float = ...,
+        font_size: float = ...,
+        control_radius: float = ...,
+        padding: tuple[float, float, float, float] = ...,
+    ) -> str: ...
+    def to_svg_heatmap(self, *, dark_mode: bool = False, auto_theme: bool = False) -> str: ...
+    def _repr_svg_(self) -> str: ...
 
 @final
 class SaveSpec:

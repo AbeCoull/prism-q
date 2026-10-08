@@ -183,6 +183,55 @@ and `measure_all` inside one. Regions nest. A noise model carrying quantum event
 rejects a circuit that holds a region, because its event slots index top-level
 instructions; readout error alone is accepted.
 
+## Exporting and drawing circuits
+
+`to_qasm()` writes OpenQASM 3.0 that `parse_qasm` reads back to the same instruction
+stream, with inline angles exact:
+
+```python
+from prism_q import CircuitBuilder, parse_qasm
+
+circuit = (
+    CircuitBuilder(3, 3)
+    .h(0)
+    .cx(0, 1)
+    .pauli_rotation(0.3, [(0, "X"), (1, "Y"), (2, "Z")])
+    .measure_all()
+    .build()
+)
+text = circuit.to_qasm()
+assert parse_qasm(text).to_qasm() == text
+portable = circuit.to_qasm(expand_pauli_rotations=True)
+```
+
+A multi-letter Pauli rotation keeps its `rxyz(0.3)` spelling, which only PRISM-Q
+parses. `expand_pauli_rotations=True` lowers it to basis changes around a CNOT ladder so
+other toolchains read the file. Guarded regions export as `if` blocks. Save points and
+dense unitaries on three or more qubits have no OpenQASM spelling and raise `PrismError`
+with `kind == "export_unsupported"`.
+
+`print(circuit)` draws the text wire diagram. `draw()` takes the layout options
+`fold_width`, `show_idle_wires`, `show_barriers`, `max_qubits`, and `max_moments`, and
+past 64 qubits or 500 moments returns `summary()` instead: gate counts, connectivity,
+and the depth profile. `heatmap()` draws gate density by qubit and moment.
+
+```python
+print(circuit)
+print(circuit.draw(fold_width=80, show_idle_wires=False))
+with open("circuit.svg", "w", encoding="utf-8") as f:
+    f.write(circuit.to_svg(dark_mode=True, show_legend=True))
+```
+
+`to_svg()` writes a self-contained SVG. Its keyword options cover the theme
+(`dark_mode`, or `auto_theme` to embed both and follow the viewer's color scheme),
+`animate`, `compact`, the `show_legend`, `show_stats_header`, and `show_topology`
+layers, truncation (`max_qubits`, `max_moments`, and `ellipsis=(first, last)` to keep
+only the leading and trailing moments), and geometry in SVG units (`wire_spacing`,
+`moment_width`, `gate_height`, `gate_min_width`, `font_size`, `control_radius`, and
+`padding` as `(left, top, right, bottom)`). `to_svg_heatmap()` renders the density
+heatmap. In Jupyter a circuit displays as its diagram, static and following the page
+theme, cut to 64 wires and 200 moments.
+
 ## Running a simulation
 
 `simulate(circuit)` returns a `Simulation` you configure with `.seed()`,

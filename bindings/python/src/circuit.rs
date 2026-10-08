@@ -1,8 +1,9 @@
 //! Circuit construction, OpenQASM parsing, and reusable circuit builders.
 
-use prism_q::circuit::openqasm;
+use prism_q::circuit::{openqasm, qasm_export};
 use prism_q::{
-    Circuit, CircuitBuilder, ClassicalCondition, Gate, Instruction, PauliTerm, SaveSpec, circuits,
+    Circuit, CircuitBuilder, ClassicalCondition, Gate, Instruction, PauliTerm, SaveSpec,
+    SvgOptions, TextOptions, circuits,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -96,6 +97,9 @@ fn check_mcu_targets(num_qubits: usize, controls: &[usize], target: usize) -> Py
     check_qubit(num_qubits, target, "target")?;
     Ok(())
 }
+
+const REPR_MAX_QUBITS: usize = 64;
+const REPR_MAX_MOMENTS: usize = 200;
 
 /// A runtime test on measured classical bits that guards a gate or region.
 #[pyclass(
@@ -413,6 +417,187 @@ impl PyCircuit {
         }
         self.0.add_barrier(&qubits);
         Ok(())
+    }
+
+    /// Render as an OpenQASM 3.0 program that `parse_qasm` reads back.
+    ///
+    /// A multi-letter Pauli rotation keeps its `r<letters>` spelling, an
+    /// extension only PRISM-Q parses; `expand_pauli_rotations=True` lowers it
+    /// to basis changes around a CNOT ladder for other toolchains. Save points
+    /// and dense gates on three or more qubits have no spelling and raise.
+    #[pyo3(signature = (*, expand_pauli_rotations = false))]
+    fn to_qasm(&self, expand_pauli_rotations: bool) -> PyPrismResult<String> {
+        if expand_pauli_rotations {
+            let expanded = prism_q::circuit::expand_pauli_rotations(&self.0);
+            Ok(qasm_export::to_qasm3(&expanded)?)
+        } else {
+            Ok(qasm_export::to_qasm3(&self.0)?)
+        }
+    }
+
+    /// Text wire diagram, folded at `fold_width` columns. Past 64 qubits or
+    /// 500 moments it returns `summary()` instead.
+    #[pyo3(signature = (
+        *,
+        fold_width = TextOptions::default().fold_width,
+        show_idle_wires = true,
+        show_barriers = true,
+        max_qubits = None,
+        max_moments = None,
+    ))]
+    fn draw(
+        &self,
+        fold_width: usize,
+        show_idle_wires: bool,
+        show_barriers: bool,
+        max_qubits: Option<usize>,
+        max_moments: Option<usize>,
+    ) -> String {
+        self.0.draw(&TextOptions {
+            fold_width,
+            show_idle_wires,
+            show_barriers,
+            max_qubits,
+            max_moments,
+        })
+    }
+
+    /// Gate-density heatmap of qubits by moments as text, bucketed to fit
+    /// `fold_width` columns.
+    #[pyo3(signature = (
+        *,
+        fold_width = TextOptions::default().fold_width,
+        show_idle_wires = true,
+        show_barriers = true,
+        max_qubits = None,
+        max_moments = None,
+    ))]
+    fn heatmap(
+        &self,
+        fold_width: usize,
+        show_idle_wires: bool,
+        show_barriers: bool,
+        max_qubits: Option<usize>,
+        max_moments: Option<usize>,
+    ) -> String {
+        self.0.heatmap(&TextOptions {
+            fold_width,
+            show_idle_wires,
+            show_barriers,
+            max_qubits,
+            max_moments,
+        })
+    }
+
+    /// Gate counts, connectivity, and depth profile as text.
+    fn summary(&self) -> String {
+        self.0.summary()
+    }
+
+    /// Self-contained SVG wire diagram. Lengths are SVG user units and
+    /// `font_size` is in pixels. `ellipsis` as `(first, last)` draws only those
+    /// leading and trailing moments when the circuit does not fit.
+    #[pyo3(signature = (
+        *,
+        dark_mode = false,
+        auto_theme = false,
+        animate = true,
+        compact = false,
+        show_legend = false,
+        show_stats_header = false,
+        show_topology = false,
+        show_idle_wires = true,
+        show_barriers = true,
+        max_qubits = None,
+        max_moments = None,
+        ellipsis = None,
+        wire_spacing = SvgOptions::default().wire_spacing,
+        moment_width = SvgOptions::default().moment_width,
+        gate_height = SvgOptions::default().gate_height,
+        gate_min_width = SvgOptions::default().gate_min_width,
+        font_size = SvgOptions::default().font_size,
+        control_radius = SvgOptions::default().control_radius,
+        padding = (
+            SvgOptions::default().padding_left,
+            SvgOptions::default().padding_top,
+            SvgOptions::default().padding_right,
+            SvgOptions::default().padding_bottom,
+        ),
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn to_svg(
+        &self,
+        dark_mode: bool,
+        auto_theme: bool,
+        animate: bool,
+        compact: bool,
+        show_legend: bool,
+        show_stats_header: bool,
+        show_topology: bool,
+        show_idle_wires: bool,
+        show_barriers: bool,
+        max_qubits: Option<usize>,
+        max_moments: Option<usize>,
+        ellipsis: Option<(usize, usize)>,
+        wire_spacing: f64,
+        moment_width: f64,
+        gate_height: f64,
+        gate_min_width: f64,
+        font_size: f64,
+        control_radius: f64,
+        padding: (f64, f64, f64, f64),
+    ) -> String {
+        self.0.to_svg(&SvgOptions {
+            dark_mode,
+            auto_theme,
+            animate,
+            compact,
+            show_legend,
+            show_stats_header,
+            show_topology,
+            show_idle_wires,
+            show_barriers,
+            max_qubits,
+            max_moments,
+            ellipsis_mode: ellipsis,
+            wire_spacing,
+            moment_width,
+            gate_height,
+            gate_min_width,
+            font_size,
+            control_radius,
+            padding_left: padding.0,
+            padding_top: padding.1,
+            padding_right: padding.2,
+            padding_bottom: padding.3,
+        })
+    }
+
+    /// Gate-density heatmap as self-contained SVG, with marginal activity bars
+    /// and a color legend.
+    #[pyo3(signature = (*, dark_mode = false, auto_theme = false))]
+    fn to_svg_heatmap(&self, dark_mode: bool, auto_theme: bool) -> String {
+        self.0.to_svg_heatmap(&SvgOptions {
+            dark_mode,
+            auto_theme,
+            ..SvgOptions::default()
+        })
+    }
+
+    /// Jupyter rich display: a static diagram following the page theme, cut to
+    /// 64 wires and 200 moments.
+    fn _repr_svg_(&self) -> String {
+        self.0.to_svg(&SvgOptions {
+            auto_theme: true,
+            animate: false,
+            max_qubits: Some(REPR_MAX_QUBITS),
+            max_moments: Some(REPR_MAX_MOMENTS),
+            ..SvgOptions::default()
+        })
+    }
+
+    fn __str__(&self) -> String {
+        self.0.to_string()
     }
 
     fn __repr__(&self) -> String {

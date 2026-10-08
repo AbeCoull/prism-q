@@ -79,6 +79,7 @@ pub use backend::stabilizer::StabilizerBackend;
 pub use backend::statevector::StatevectorBackend;
 pub use backend::tensornetwork::TensorNetworkBackend;
 pub use circuit::builder::CircuitBuilder;
+pub use circuit::dynamic::{DynamicProgram, DynamicProgramBuilder};
 pub use circuit::{
     Circuit, ClassicalCondition, Instruction, ParamLink, Parameters, PreparedCircuit, SaveRecord,
     SaveSpec, SavedValue, SvgOptions, TextOptions,
@@ -128,8 +129,9 @@ pub use sim::{
     BackendKind, BondReport, CountsResult, Engine, EntropyResult, Exactness, ExpectationResult,
     FactoredBlock, MarginalsResult, ObservableExpectation, ObservableVariance, OverlapResult,
     PauliObservable, Placement, Probabilities, ReducedDensityMatrix, ResolvedBackend, RunMetadata,
-    RunOutcome, Seeded, ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values,
-    run_observable_expectation, run_on, run_on_state, run_qasm, simulate,
+    RunOutcome, Seeded, ShotsResult, Simulate, SimulateProgram, Unseeded, bitstring,
+    run_expectation_values, run_observable_expectation, run_on, run_on_state, run_qasm, simulate,
+    simulate_program,
 };
 #[cfg(feature = "parallel")]
 pub use threading::ThreadPool;

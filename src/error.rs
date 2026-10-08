@@ -13,8 +13,9 @@ pub enum PrismError {
     #[error("parse error at line {line}: {message}")]
     Parse { line: usize, message: String },
 
-    /// Valid OpenQASM that PRISM-Q does not support.
-    #[error("unsupported construct at line {line}: `{construct}`")]
+    /// Valid OpenQASM that PRISM-Q does not support. A loop keyword names the
+    /// entry point that reads it.
+    #[error("unsupported construct at line {line}: `{construct}`{}", loop_hint(.construct))]
     UnsupportedConstruct { construct: String, line: usize },
 
     /// Qubit index exceeds register size.
@@ -52,6 +53,13 @@ pub enum PrismError {
     /// Incompatible backend for the given circuit.
     #[error("backend `{backend}` is incompatible: {reason}")]
     IncompatibleBackend { backend: String, reason: String },
+
+    /// A shot of a dynamic program ran more blocks than its step bound allows.
+    /// `region` names the loop it was in.
+    #[error(
+        "dynamic program stopped after {max_steps} steps in {region}; raise the bound with          `max_steps` if the loop is meant to run that long"
+    )]
+    StepLimit { region: String, max_steps: u64 },
 
     /// An allocation the run needs is over a memory cap; the numbers are on
     /// [`ResourceLimit`], boxed so the error stays small on every `Result`.
@@ -101,6 +109,16 @@ impl std::fmt::Display for ResourceKind {
             ResourceKind::Elements => "elements",
             ResourceKind::DeviceBytes => "bytes of device memory",
         })
+    }
+}
+
+/// Where a program declined for a loop keyword can go instead.
+fn loop_hint(construct: &str) -> &'static str {
+    match construct {
+        "while" | "break" | "continue" => {
+            "; `openqasm::parse_dynamic` reads it into a control-flow graph"
+        }
+        _ => "",
     }
 }
 

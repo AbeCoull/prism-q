@@ -7,6 +7,7 @@ mod clifford_register;
 pub mod compiled;
 mod decomposed;
 mod dispatch;
+mod dynamic;
 pub mod gradient;
 pub mod homological;
 mod metadata;
@@ -34,6 +35,7 @@ use dispatch::{
     mps_apply_cost, plan_for_family, plan_temporal_clifford, resolve, resolve_backend,
     run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
 };
+pub use dynamic::{SimulateProgram, simulate_program};
 pub use metadata::{
     BondReport, Engine, Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata,
 };

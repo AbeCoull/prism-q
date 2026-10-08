@@ -23,7 +23,7 @@ const DECLARATION_TYPES: &[&str] = &[
 /// Keywords the language has and this parser declines, with the text each decline
 /// carries. Declining by name returns `UnsupportedConstruct` where the operands
 /// would otherwise give a bare syntax error (`while (c[0]) { }` reads as a
-/// malformed gate call).
+/// malformed gate call). A dynamic parse reads the [`LOOP_KEYWORDS`] instead.
 const UNSUPPORTED: &[(&str, &str)] = &[
     ("defcal", "defcal"),
     ("extern", "extern"),
@@ -34,14 +34,26 @@ const UNSUPPORTED: &[(&str, &str)] = &[
     ("else", "else"),
 ];
 
+/// The keywords only a dynamic parse reads.
+const LOOP_KEYWORDS: &[&str] = &["while", "break", "continue"];
+
 /// Deepest nesting an array initializer may have, which bounds the recursion
 /// that reads it.
 const MAX_INITIALIZER_DEPTH: usize = 32;
 
 pub(crate) fn parse_program<'a>(tokens: &[Token<'a>]) -> Result<Block<'a>> {
-    let mut stream = Stream::new(tokens);
+    program(Stream::new(tokens), tokens.len())
+}
+
+/// [`parse_program`] with `while`, `break` and `continue`, and conditions and
+/// values over the full classical operator set.
+pub(crate) fn parse_dynamic_program<'a>(tokens: &[Token<'a>]) -> Result<Block<'a>> {
+    program(Stream::dynamic(tokens), tokens.len())
+}
+
+fn program<'a>(mut stream: Stream<'_, 'a>, num_tokens: usize) -> Result<Block<'a>> {
     // A gate statement runs six to twelve tokens.
-    let mut out = Block::with_capacity(tokens.len() / 6);
+    let mut out = Block::with_capacity(num_tokens / 6);
     while !stream.at_end() {
         out.push(statement(&mut stream)?);
     }
@@ -66,7 +78,11 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     }
 
     let word = stream.peek().text;
-    if let Some((_, construct)) = UNSUPPORTED.iter().find(|(keyword, _)| *keyword == word) {
+    let reads_loops = stream.is_dynamic() && LOOP_KEYWORDS.contains(&word);
+    if let Some((_, construct)) = UNSUPPORTED
+        .iter()
+        .find(|(keyword, _)| *keyword == word && !reads_loops)
+    {
         return Err(PrismError::UnsupportedConstruct {
             construct: (*construct).to_string(),
             line: stream.line(),
@@ -88,6 +104,16 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         "delay" => delay(stream),
         "if" => conditional(stream),
         "for" => for_loop(stream),
+        "while" => while_loop(stream),
+        "break" | "continue" => {
+            stream.advance();
+            stream.expect(Kind::Semicolon)?;
+            Ok(if word == "break" {
+                StmtKind::Break
+            } else {
+                StmtKind::Continue
+            })
+        }
         "switch" => switch(stream),
         "gate" => gate_def(stream),
         "def" => def_def(stream),
@@ -176,7 +202,7 @@ fn declaration<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     if stream.is_keyword("array") {
         return array_declaration(stream, constant);
     }
-    let (ty, _width) = typename(stream)?;
+    let (ty, width) = typename(stream)?;
     let name = stream.expect_ident()?;
     let value = if stream.eat(Kind::Assign) {
         Some(expr::parse(stream)?)
@@ -187,6 +213,7 @@ fn declaration<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     Ok(StmtKind::ClassicalDecl {
         constant,
         ty,
+        width,
         name,
         value,
     })
@@ -398,9 +425,7 @@ fn optional_bound<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<Expr<'a>>> {
 
 fn conditional<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     stream.advance();
-    stream.expect(Kind::LParen)?;
-    let condition = parse_condition(stream)?;
-    stream.expect(Kind::RParen)?;
+    let condition = parenthesized_condition(stream)?;
     let then_body = body(stream)?;
     let else_body = if stream.eat_keyword("else") {
         Some(body(stream)?)
@@ -412,6 +437,34 @@ fn conditional<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         then_body,
         else_body,
     })))
+}
+
+/// `(condition)`. A dynamic parse reads the condition forms a static one does
+/// first, and any other expression when none of them spans the parentheses.
+fn parenthesized_condition<'a>(stream: &mut Stream<'_, 'a>) -> Result<Condition<'a>> {
+    stream.expect(Kind::LParen)?;
+    if !stream.is_dynamic() {
+        let condition = parse_condition(stream)?;
+        stream.expect(Kind::RParen)?;
+        return Ok(condition);
+    }
+    let mark = stream.mark();
+    if let Ok(condition) = parse_condition(stream) {
+        if stream.eat(Kind::RParen) {
+            return Ok(condition);
+        }
+    }
+    stream.rewind(mark);
+    let condition = Condition::Expr(expr::parse(stream)?);
+    stream.expect(Kind::RParen)?;
+    Ok(condition)
+}
+
+fn while_loop<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    stream.advance();
+    let condition = parenthesized_condition(stream)?;
+    let body = body(stream)?;
+    Ok(StmtKind::While { condition, body })
 }
 
 /// A braced block, or the single statement that stands in for one.
@@ -486,7 +539,7 @@ fn comparison<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<(CmpOp, Expr<'a>
         _ => return Ok(None),
     };
     stream.advance();
-    Ok(Some((op, expr::parse(stream)?)))
+    Ok(Some((op, expr::parse_arithmetic(stream)?)))
 }
 
 fn for_loop<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {

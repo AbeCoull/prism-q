@@ -974,6 +974,144 @@ pub fn prism_q::circuit::builder::CircuitBuilder::tdg(&mut self, usize) -> &mut 
 pub fn prism_q::circuit::builder::CircuitBuilder::x(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::y(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::z(&mut self, usize) -> &mut Self
+pub mod prism_q::circuit::dynamic
+#[non_exhaustive] pub enum prism_q::circuit::dynamic::Action
+pub prism_q::circuit::dynamic::Action::Assign
+pub prism_q::circuit::dynamic::Action::Assign::value: prism_q::circuit::dynamic::ClassicalExpr
+pub prism_q::circuit::dynamic::Action::Assign::var: prism_q::circuit::dynamic::VarId
+pub prism_q::circuit::dynamic::Action::Rotation
+pub prism_q::circuit::dynamic::Action::Rotation::angle: prism_q::circuit::dynamic::ClassicalExpr
+pub prism_q::circuit::dynamic::Action::Rotation::kind: prism_q::circuit::dynamic::RotationKind
+pub prism_q::circuit::dynamic::Action::Rotation::targets: smallvec::SmallVec<[usize; 4]>
+#[non_exhaustive] pub enum prism_q::circuit::dynamic::BinaryOp
+pub prism_q::circuit::dynamic::BinaryOp::Add
+pub prism_q::circuit::dynamic::BinaryOp::And
+pub prism_q::circuit::dynamic::BinaryOp::BitAnd
+pub prism_q::circuit::dynamic::BinaryOp::BitOr
+pub prism_q::circuit::dynamic::BinaryOp::BitXor
+pub prism_q::circuit::dynamic::BinaryOp::Div
+pub prism_q::circuit::dynamic::BinaryOp::Eq
+pub prism_q::circuit::dynamic::BinaryOp::Ge
+pub prism_q::circuit::dynamic::BinaryOp::Gt
+pub prism_q::circuit::dynamic::BinaryOp::Le
+pub prism_q::circuit::dynamic::BinaryOp::Lt
+pub prism_q::circuit::dynamic::BinaryOp::Mul
+pub prism_q::circuit::dynamic::BinaryOp::Ne
+pub prism_q::circuit::dynamic::BinaryOp::Or
+pub prism_q::circuit::dynamic::BinaryOp::Pow
+pub prism_q::circuit::dynamic::BinaryOp::Rem
+pub prism_q::circuit::dynamic::BinaryOp::Shl
+pub prism_q::circuit::dynamic::BinaryOp::Shr
+pub prism_q::circuit::dynamic::BinaryOp::Sub
+#[non_exhaustive] pub enum prism_q::circuit::dynamic::ClassicalExpr
+pub prism_q::circuit::dynamic::ClassicalExpr::Binary
+pub prism_q::circuit::dynamic::ClassicalExpr::Binary::lhs: alloc::boxed::Box<prism_q::circuit::dynamic::ClassicalExpr>
+pub prism_q::circuit::dynamic::ClassicalExpr::Binary::op: prism_q::circuit::dynamic::BinaryOp
+pub prism_q::circuit::dynamic::ClassicalExpr::Binary::rhs: alloc::boxed::Box<prism_q::circuit::dynamic::ClassicalExpr>
+pub prism_q::circuit::dynamic::ClassicalExpr::Bit(usize)
+pub prism_q::circuit::dynamic::ClassicalExpr::Const(prism_q::circuit::dynamic::ClassicalValue)
+pub prism_q::circuit::dynamic::ClassicalExpr::Register
+pub prism_q::circuit::dynamic::ClassicalExpr::Register::offset: usize
+pub prism_q::circuit::dynamic::ClassicalExpr::Register::size: usize
+pub prism_q::circuit::dynamic::ClassicalExpr::Unary
+pub prism_q::circuit::dynamic::ClassicalExpr::Unary::op: prism_q::circuit::dynamic::UnaryOp
+pub prism_q::circuit::dynamic::ClassicalExpr::Unary::operand: alloc::boxed::Box<prism_q::circuit::dynamic::ClassicalExpr>
+pub prism_q::circuit::dynamic::ClassicalExpr::Var(prism_q::circuit::dynamic::VarId)
+impl prism_q::circuit::dynamic::ClassicalExpr
+pub fn prism_q::circuit::dynamic::ClassicalExpr::binary(prism_q::circuit::dynamic::BinaryOp, prism_q::circuit::dynamic::ClassicalExpr, prism_q::circuit::dynamic::ClassicalExpr) -> Self
+pub fn prism_q::circuit::dynamic::ClassicalExpr::unary(prism_q::circuit::dynamic::UnaryOp, prism_q::circuit::dynamic::ClassicalExpr) -> Self
+impl core::convert::From<bool> for prism_q::circuit::dynamic::ClassicalExpr
+pub fn prism_q::circuit::dynamic::ClassicalExpr::from(bool) -> Self
+impl core::convert::From<f64> for prism_q::circuit::dynamic::ClassicalExpr
+pub fn prism_q::circuit::dynamic::ClassicalExpr::from(f64) -> Self
+impl core::convert::From<i64> for prism_q::circuit::dynamic::ClassicalExpr
+pub fn prism_q::circuit::dynamic::ClassicalExpr::from(i64) -> Self
+impl core::convert::From<prism_q::circuit::dynamic::VarId> for prism_q::circuit::dynamic::ClassicalExpr
+pub fn prism_q::circuit::dynamic::ClassicalExpr::from(prism_q::circuit::dynamic::VarId) -> Self
+#[non_exhaustive] pub enum prism_q::circuit::dynamic::ClassicalType
+pub prism_q::circuit::dynamic::ClassicalType::Angle
+pub prism_q::circuit::dynamic::ClassicalType::Bool
+pub prism_q::circuit::dynamic::ClassicalType::Float
+pub prism_q::circuit::dynamic::ClassicalType::Int
+pub prism_q::circuit::dynamic::ClassicalType::Int::width: u32
+pub prism_q::circuit::dynamic::ClassicalType::Uint
+pub prism_q::circuit::dynamic::ClassicalType::Uint::width: u32
+pub enum prism_q::circuit::dynamic::ClassicalValue
+pub prism_q::circuit::dynamic::ClassicalValue::Bool(bool)
+pub prism_q::circuit::dynamic::ClassicalValue::Float(f64)
+pub prism_q::circuit::dynamic::ClassicalValue::Int(i128)
+impl core::convert::From<bool> for prism_q::circuit::dynamic::ClassicalValue
+pub fn prism_q::circuit::dynamic::ClassicalValue::from(bool) -> Self
+impl core::convert::From<f64> for prism_q::circuit::dynamic::ClassicalValue
+pub fn prism_q::circuit::dynamic::ClassicalValue::from(f64) -> Self
+impl core::convert::From<i64> for prism_q::circuit::dynamic::ClassicalValue
+pub fn prism_q::circuit::dynamic::ClassicalValue::from(i64) -> Self
+#[non_exhaustive] pub enum prism_q::circuit::dynamic::RotationKind
+pub prism_q::circuit::dynamic::RotationKind::Phase
+pub prism_q::circuit::dynamic::RotationKind::Rx
+pub prism_q::circuit::dynamic::RotationKind::Ry
+pub prism_q::circuit::dynamic::RotationKind::Rz
+pub prism_q::circuit::dynamic::RotationKind::Rzz
+#[non_exhaustive] pub enum prism_q::circuit::dynamic::Terminator
+pub prism_q::circuit::dynamic::Terminator::Branch
+pub prism_q::circuit::dynamic::Terminator::Branch::condition: prism_q::circuit::dynamic::ClassicalExpr
+pub prism_q::circuit::dynamic::Terminator::Branch::otherwise: prism_q::circuit::dynamic::BlockId
+pub prism_q::circuit::dynamic::Terminator::Branch::then: prism_q::circuit::dynamic::BlockId
+pub prism_q::circuit::dynamic::Terminator::End
+pub prism_q::circuit::dynamic::Terminator::Jump(prism_q::circuit::dynamic::BlockId)
+#[non_exhaustive] pub enum prism_q::circuit::dynamic::UnaryOp
+pub prism_q::circuit::dynamic::UnaryOp::BitNot
+pub prism_q::circuit::dynamic::UnaryOp::Neg
+pub prism_q::circuit::dynamic::UnaryOp::Not
+pub struct prism_q::circuit::dynamic::BasicBlock
+pub prism_q::circuit::dynamic::BasicBlock::actions: alloc::vec::Vec<prism_q::circuit::dynamic::Action>
+pub prism_q::circuit::dynamic::BasicBlock::circuit: prism_q::circuit::Circuit
+pub prism_q::circuit::dynamic::BasicBlock::loop_name: core::option::Option<alloc::string::String>
+pub prism_q::circuit::dynamic::BasicBlock::terminator: prism_q::circuit::dynamic::Terminator
+pub struct prism_q::circuit::dynamic::BlockId(_)
+impl prism_q::circuit::dynamic::BlockId
+pub fn prism_q::circuit::dynamic::BlockId::index(self) -> usize
+pub fn prism_q::circuit::dynamic::BlockId::new(usize) -> Self
+pub struct prism_q::circuit::dynamic::DynamicProgram
+impl prism_q::circuit::dynamic::DynamicProgram
+pub fn prism_q::circuit::dynamic::DynamicProgram::blocks(&self) -> &[prism_q::circuit::dynamic::BasicBlock]
+pub fn prism_q::circuit::dynamic::DynamicProgram::new(usize, usize, alloc::vec::Vec<prism_q::circuit::dynamic::Variable>, alloc::vec::Vec<prism_q::circuit::dynamic::BasicBlock>) -> prism_q::error::Result<Self>
+pub fn prism_q::circuit::dynamic::DynamicProgram::num_classical_bits(&self) -> usize
+pub fn prism_q::circuit::dynamic::DynamicProgram::num_qubits(&self) -> usize
+pub fn prism_q::circuit::dynamic::DynamicProgram::static_circuit(&self) -> core::option::Option<&prism_q::circuit::Circuit>
+pub fn prism_q::circuit::dynamic::DynamicProgram::variables(&self) -> &[prism_q::circuit::dynamic::Variable]
+pub struct prism_q::circuit::dynamic::DynamicProgramBuilder
+impl prism_q::DynamicProgramBuilder
+pub fn prism_q::DynamicProgramBuilder::add_gate(&mut self, prism_q::gates::Gate, &[usize]) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::add_instruction(&mut self, prism_q::circuit::Instruction) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::add_measure(&mut self, usize, usize) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::add_reset(&mut self, usize) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::add_rotation(&mut self, prism_q::circuit::dynamic::RotationKind, &[usize], prism_q::circuit::dynamic::ClassicalExpr) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::append(&mut self, &prism_q::circuit::Circuit) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::assign(&mut self, prism_q::circuit::dynamic::VarId, prism_q::circuit::dynamic::ClassicalExpr) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::begin_else(&mut self) -> prism_q::error::Result<()>
+pub fn prism_q::DynamicProgramBuilder::begin_if(&mut self, prism_q::circuit::dynamic::ClassicalExpr)
+pub fn prism_q::DynamicProgramBuilder::begin_while(&mut self, impl core::convert::Into<alloc::string::String>, prism_q::circuit::dynamic::ClassicalExpr)
+pub fn prism_q::DynamicProgramBuilder::break_loop(&mut self) -> prism_q::error::Result<()>
+pub fn prism_q::DynamicProgramBuilder::build(self) -> prism_q::error::Result<prism_q::circuit::dynamic::DynamicProgram>
+pub fn prism_q::DynamicProgramBuilder::continue_loop(&mut self) -> prism_q::error::Result<()>
+pub fn prism_q::DynamicProgramBuilder::declare(&mut self, impl core::convert::Into<alloc::string::String>, prism_q::circuit::dynamic::ClassicalType, prism_q::circuit::dynamic::ClassicalValue) -> prism_q::circuit::dynamic::VarId
+pub fn prism_q::DynamicProgramBuilder::end(&mut self) -> prism_q::error::Result<()>
+pub fn prism_q::DynamicProgramBuilder::expr(&self, &str) -> prism_q::error::Result<prism_q::circuit::dynamic::ClassicalExpr>
+pub fn prism_q::DynamicProgramBuilder::new(usize, usize) -> Self
+pub fn prism_q::DynamicProgramBuilder::num_classical_bits(&self) -> usize
+pub fn prism_q::DynamicProgramBuilder::num_qubits(&self) -> usize
+pub fn prism_q::DynamicProgramBuilder::variable(&self, &str) -> core::option::Option<prism_q::circuit::dynamic::VarId>
+pub struct prism_q::circuit::dynamic::VarId(_)
+impl prism_q::circuit::dynamic::VarId
+pub fn prism_q::circuit::dynamic::VarId::index(self) -> usize
+pub fn prism_q::circuit::dynamic::VarId::new(usize) -> Self
+impl core::convert::From<prism_q::circuit::dynamic::VarId> for prism_q::circuit::dynamic::ClassicalExpr
+pub fn prism_q::circuit::dynamic::ClassicalExpr::from(prism_q::circuit::dynamic::VarId) -> Self
+pub struct prism_q::circuit::dynamic::Variable
+pub prism_q::circuit::dynamic::Variable::initial: prism_q::circuit::dynamic::ClassicalValue
+pub prism_q::circuit::dynamic::Variable::name: alloc::string::String
+pub prism_q::circuit::dynamic::Variable::ty: prism_q::circuit::dynamic::ClassicalType
 pub mod prism_q::circuit::openqasm
 #[non_exhaustive] pub enum prism_q::circuit::openqasm::Dialect
 pub prism_q::circuit::openqasm::Dialect::Braket
@@ -985,6 +1123,7 @@ pub prism_q::circuit::openqasm::BraketProgram::parameters: prism_q::circuit::par
 pub prism_q::circuit::openqasm::BraketProgram::results: alloc::vec::Vec<prism_q::circuit::braket::ResultSpec>
 pub fn prism_q::circuit::openqasm::parse(&str) -> prism_q::error::Result<prism_q::circuit::Circuit>
 pub fn prism_q::circuit::openqasm::parse_braket(&str) -> prism_q::error::Result<prism_q::circuit::openqasm::BraketProgram>
+pub fn prism_q::circuit::openqasm::parse_dynamic(&str) -> prism_q::error::Result<prism_q::circuit::dynamic::DynamicProgram>
 pub fn prism_q::circuit::openqasm::parse_parametric(&str) -> prism_q::error::Result<(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)>
 pub fn prism_q::circuit::openqasm::parse_parametric_with(&str, prism_q::circuit::openqasm::Dialect) -> prism_q::error::Result<(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)>
 pub fn prism_q::circuit::openqasm::parse_with(&str, prism_q::circuit::openqasm::Dialect) -> prism_q::error::Result<prism_q::circuit::Circuit>
@@ -1336,6 +1475,9 @@ pub prism_q::error::PrismError::Parse
 pub prism_q::error::PrismError::Parse::line: usize
 pub prism_q::error::PrismError::Parse::message: alloc::string::String
 pub prism_q::error::PrismError::ResourceLimit(alloc::boxed::Box<prism_q::error::ResourceLimit>)
+pub prism_q::error::PrismError::StepLimit
+pub prism_q::error::PrismError::StepLimit::max_steps: u64
+pub prism_q::error::PrismError::StepLimit::region: alloc::string::String
 pub prism_q::error::PrismError::UndefinedRegister
 pub prism_q::error::PrismError::UndefinedRegister::line: usize
 pub prism_q::error::PrismError::UndefinedRegister::name: alloc::string::String
@@ -2305,6 +2447,15 @@ pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::shots(self, usize) -> p
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
 impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
+pub struct prism_q::sim::SimulateProgram<'p, SeedState>
+impl prism_q::SimulateProgram<'_, prism_q::sim::Seeded>
+pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+impl<'p, SeedState> prism_q::SimulateProgram<'p, SeedState>
+pub fn prism_q::SimulateProgram<'p, SeedState>::backend(self, prism_q::BackendKind) -> Self
+pub fn prism_q::SimulateProgram<'p, SeedState>::max_steps(self, u64) -> Self
+impl<'p> prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>
+pub fn prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::sim::Seeded>
 pub struct prism_q::sim::Unseeded
 pub fn prism_q::sim::bitstring(&[u64], usize) -> alloc::string::String
 pub fn prism_q::sim::run_batch(&[prism_q::circuit::Circuit], prism_q::BackendKind, u64) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::RunOutcome>>
@@ -2314,6 +2465,7 @@ pub fn prism_q::sim::run_on(&mut dyn prism_q::backend::Backend, &prism_q::circui
 pub fn prism_q::sim::run_on_state(&mut dyn prism_q::backend::Backend, &prism_q::circuit::Circuit, &[num_complex::Complex64]) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::sim::run_qasm(&str, u64) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::sim::simulate(&prism_q::circuit::Circuit) -> prism_q::sim::Simulate<'_, prism_q::sim::Unseeded>
+pub fn prism_q::sim::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::sim::Unseeded>
 pub mod prism_q::threading
 pub struct prism_q::threading::ThreadPool
 impl prism_q::threading::ThreadPool
@@ -2525,6 +2677,9 @@ pub prism_q::PrismError::Parse
 pub prism_q::PrismError::Parse::line: usize
 pub prism_q::PrismError::Parse::message: alloc::string::String
 pub prism_q::PrismError::ResourceLimit(alloc::boxed::Box<prism_q::error::ResourceLimit>)
+pub prism_q::PrismError::StepLimit
+pub prism_q::PrismError::StepLimit::max_steps: u64
+pub prism_q::PrismError::StepLimit::region: alloc::string::String
 pub prism_q::PrismError::UndefinedRegister
 pub prism_q::PrismError::UndefinedRegister::line: usize
 pub prism_q::PrismError::UndefinedRegister::name: alloc::string::String
@@ -2924,6 +3079,36 @@ pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend:
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_pauli_rotation(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_qft_block(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_two_qubit_kraus(&self) -> bool
+pub struct prism_q::DynamicProgram
+impl prism_q::circuit::dynamic::DynamicProgram
+pub fn prism_q::circuit::dynamic::DynamicProgram::blocks(&self) -> &[prism_q::circuit::dynamic::BasicBlock]
+pub fn prism_q::circuit::dynamic::DynamicProgram::new(usize, usize, alloc::vec::Vec<prism_q::circuit::dynamic::Variable>, alloc::vec::Vec<prism_q::circuit::dynamic::BasicBlock>) -> prism_q::error::Result<Self>
+pub fn prism_q::circuit::dynamic::DynamicProgram::num_classical_bits(&self) -> usize
+pub fn prism_q::circuit::dynamic::DynamicProgram::num_qubits(&self) -> usize
+pub fn prism_q::circuit::dynamic::DynamicProgram::static_circuit(&self) -> core::option::Option<&prism_q::circuit::Circuit>
+pub fn prism_q::circuit::dynamic::DynamicProgram::variables(&self) -> &[prism_q::circuit::dynamic::Variable]
+pub struct prism_q::DynamicProgramBuilder
+impl prism_q::DynamicProgramBuilder
+pub fn prism_q::DynamicProgramBuilder::add_gate(&mut self, prism_q::gates::Gate, &[usize]) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::add_instruction(&mut self, prism_q::circuit::Instruction) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::add_measure(&mut self, usize, usize) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::add_reset(&mut self, usize) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::add_rotation(&mut self, prism_q::circuit::dynamic::RotationKind, &[usize], prism_q::circuit::dynamic::ClassicalExpr) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::append(&mut self, &prism_q::circuit::Circuit) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::assign(&mut self, prism_q::circuit::dynamic::VarId, prism_q::circuit::dynamic::ClassicalExpr) -> &mut Self
+pub fn prism_q::DynamicProgramBuilder::begin_else(&mut self) -> prism_q::error::Result<()>
+pub fn prism_q::DynamicProgramBuilder::begin_if(&mut self, prism_q::circuit::dynamic::ClassicalExpr)
+pub fn prism_q::DynamicProgramBuilder::begin_while(&mut self, impl core::convert::Into<alloc::string::String>, prism_q::circuit::dynamic::ClassicalExpr)
+pub fn prism_q::DynamicProgramBuilder::break_loop(&mut self) -> prism_q::error::Result<()>
+pub fn prism_q::DynamicProgramBuilder::build(self) -> prism_q::error::Result<prism_q::circuit::dynamic::DynamicProgram>
+pub fn prism_q::DynamicProgramBuilder::continue_loop(&mut self) -> prism_q::error::Result<()>
+pub fn prism_q::DynamicProgramBuilder::declare(&mut self, impl core::convert::Into<alloc::string::String>, prism_q::circuit::dynamic::ClassicalType, prism_q::circuit::dynamic::ClassicalValue) -> prism_q::circuit::dynamic::VarId
+pub fn prism_q::DynamicProgramBuilder::end(&mut self) -> prism_q::error::Result<()>
+pub fn prism_q::DynamicProgramBuilder::expr(&self, &str) -> prism_q::error::Result<prism_q::circuit::dynamic::ClassicalExpr>
+pub fn prism_q::DynamicProgramBuilder::new(usize, usize) -> Self
+pub fn prism_q::DynamicProgramBuilder::num_classical_bits(&self) -> usize
+pub fn prism_q::DynamicProgramBuilder::num_qubits(&self) -> usize
+pub fn prism_q::DynamicProgramBuilder::variable(&self, &str) -> core::option::Option<prism_q::circuit::dynamic::VarId>
 pub struct prism_q::EntropyResult
 pub prism_q::EntropyResult::entropy: f64
 pub prism_q::EntropyResult::metadata: prism_q::RunMetadata
@@ -3536,6 +3721,15 @@ pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::shots(self, usize) -> p
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
 impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
+pub struct prism_q::SimulateProgram<'p, SeedState>
+impl prism_q::SimulateProgram<'_, prism_q::sim::Seeded>
+pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+impl<'p, SeedState> prism_q::SimulateProgram<'p, SeedState>
+pub fn prism_q::SimulateProgram<'p, SeedState>::backend(self, prism_q::BackendKind) -> Self
+pub fn prism_q::SimulateProgram<'p, SeedState>::max_steps(self, u64) -> Self
+impl<'p> prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>
+pub fn prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::sim::Seeded>
 pub struct prism_q::SparseBackend
 impl prism_q::backend::sparse::SparseBackend
 pub fn prism_q::backend::sparse::SparseBackend::entry_count(&self) -> usize
@@ -3864,6 +4058,7 @@ pub fn prism_q::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::u
 pub fn prism_q::run_stabilizer_rank(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
 pub fn prism_q::run_stabilizer_rank_approx(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
 pub fn prism_q::simulate(&prism_q::circuit::Circuit) -> prism_q::sim::Simulate<'_, prism_q::sim::Unseeded>
+pub fn prism_q::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::sim::Unseeded>
 pub fn prism_q::stabilizer_inner_product(&prism_q::backend::stabilizer::StabilizerBackend, &prism_q::backend::stabilizer::StabilizerBackend, usize) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::stabilizer_overlap_sq(&prism_q::backend::stabilizer::StabilizerBackend, &prism_q::backend::stabilizer::StabilizerBackend, usize) -> f64
 pub type prism_q::Result<T> = core::result::Result<T, prism_q::error::PrismError>

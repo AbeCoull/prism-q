@@ -50,6 +50,13 @@ pub(crate) enum Kind {
     Caret,
     Bang,
     Pow,
+    Amp,
+    AndAnd,
+    Pipe,
+    OrOr,
+    Tilde,
+    Shl,
+    Shr,
     Eof,
 }
 
@@ -95,6 +102,13 @@ impl Kind {
             Kind::Caret => "`^`",
             Kind::Bang => "`!`",
             Kind::Pow => "`**`",
+            Kind::Amp => "`&`",
+            Kind::AndAnd => "`&&`",
+            Kind::Pipe => "`|`",
+            Kind::OrOr => "`||`",
+            Kind::Tilde => "`~`",
+            Kind::Shl => "`<<`",
+            Kind::Shr => "`>>`",
             Kind::Eof => "the end of the program",
         }
     }
@@ -307,9 +321,16 @@ impl<'a> Lexer<'a> {
             b'!' if next == Some(b'=') => (Kind::NotEq, 2),
             b'!' => (Kind::Bang, 1),
             b'<' if next == Some(b'=') => (Kind::Le, 2),
+            b'<' if next == Some(b'<') => (Kind::Shl, 2),
             b'<' => (Kind::Lt, 1),
             b'>' if next == Some(b'=') => (Kind::Ge, 2),
+            b'>' if next == Some(b'>') => (Kind::Shr, 2),
             b'>' => (Kind::Gt, 1),
+            b'&' if next == Some(b'&') => (Kind::AndAnd, 2),
+            b'&' => (Kind::Amp, 1),
+            b'|' if next == Some(b'|') => (Kind::OrOr, 2),
+            b'|' => (Kind::Pipe, 1),
+            b'~' => (Kind::Tilde, 1),
             _ => return self.unicode_ident(start),
         };
         self.at += width;

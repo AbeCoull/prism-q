@@ -1548,6 +1548,12 @@ pub struct PyShotsResult {
     inner: ShotsResult,
 }
 
+impl PyShotsResult {
+    pub(crate) fn from_result(inner: ShotsResult) -> Self {
+        Self { inner }
+    }
+}
+
 #[pymethods]
 impl PyShotsResult {
     /// Shot records as a `(num_shots, num_classical_bits)` bool array.
@@ -1600,6 +1606,16 @@ pub struct PyCountsResult {
     counts: HashMap<Vec<u64>, u64>,
     num_classical_bits: usize,
     metadata: PyRunMetadata,
+}
+
+impl PyCountsResult {
+    pub(crate) fn from_result(result: CountsResult) -> Self {
+        Self {
+            counts: result.counts,
+            num_classical_bits: result.num_classical_bits,
+            metadata: PyRunMetadata::new(result.metadata),
+        }
+    }
 }
 
 #[pymethods]

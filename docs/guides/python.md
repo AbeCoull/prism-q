@@ -1129,6 +1129,75 @@ A payload from a newer format version raises `PrismError` naming the version rat
 than decoding wrongly. Builders, results, samplers, backends, and contexts do not
 pickle: return a result's arrays or counts from a worker instead.
 
+## Dynamic programs
+
+A `Circuit` is a finite instruction list, so it cannot hold a loop that repeats
+until a measurement comes up, or a counter a measurement increments.
+`parse_qasm_dynamic` reads OpenQASM with `while`, `break`, `continue`, and
+classical values decided at runtime, and returns a `DynamicProgram`: circuits
+joined by branches on classical expressions, run once per shot.
+`simulate_program` runs one and returns the same `ShotsResult` and
+`CountsResult` a circuit run returns.
+
+```python
+from prism_q import parse_qasm_dynamic, simulate_program
+
+program = parse_qasm_dynamic("""
+    OPENQASM 3.0;
+    qubit[1] q;
+    bit[1] c;
+    h q[0];
+    c[0] = measure q[0];
+    while (c[0]) {
+        reset q[0];
+        h q[0];
+        c[0] = measure q[0];
+    }
+""")
+counts = simulate_program(program).seed(42).sample_counts(1000).counts()
+assert counts == {"0": 1000}
+```
+
+`DynamicProgramBuilder` builds the same structure directly. Conditions,
+assigned values, and rotation angles are OpenQASM expression strings over the
+declared variables and the classical bits, `c[i]` for one bit and `c` for the
+whole register read as an unsigned integer, or plain `bool`, `int`, and `float`
+constants. `begin_while` and `begin_if` open a block that `end()` closes, and
+`begin_else`, `break_loop`, and `continue_loop` work as their OpenQASM keywords
+do. Variable types are `"bool"`, `"int[n]"`, `"uint[n]"`, `"float"`, and
+`"angle"`; integers wrap at their declared width.
+
+```python
+from prism_q import DynamicProgramBuilder, Gate, simulate_program
+
+b = DynamicProgramBuilder(2, 2)
+b.declare("theta", "float", 0.0)
+b.add_gate(Gate.h(), [0]).add_measure(0, 0)
+b.begin_while("retry", "c[0] && theta < 1.0")
+b.assign("theta", "theta + 0.25")
+b.add_reset(0).add_gate(Gate.h(), [0]).add_measure(0, 0)
+b.end()
+b.add_rotation("ry", [1], "theta").add_measure(1, 1)
+program = b.build()
+shots = simulate_program(program).seed(7).shots(500)
+```
+
+A shot that runs more blocks than its bound, one million by default, raises
+`PrismError` with `kind == "step_limit"` and the loop's name, rather than
+hanging. `.max_steps(n)` sets another bound:
+
+```python
+b = DynamicProgramBuilder(1, 0)
+b.begin_while("forever", True).add_gate(Gate.x(), [0]).end()
+simulate_program(b.build()).max_steps(100).shots(1)  # raises
+```
+
+A program with no runtime control flow runs as its circuit, with the same seeded
+shots. Statevector, stabilizer, sparse, MPS, product-state, factored, tensor
+network, and density-matrix backends run dynamic programs; the stabilizer-rank
+and Pauli propagation engines keep no per-shot state and raise
+`incompatible_backend`.
+
 ## Errors and typing
 
 Every failure surfaces as `prism_q.PrismError`, carrying the message from the

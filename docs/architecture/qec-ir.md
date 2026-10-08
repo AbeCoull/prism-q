@@ -44,7 +44,9 @@ spell it.
 `parse_qec_program` and `QecProgram::from_text` parse the native QEC text
 subset: `H`, `S`, `S_DAG`, `T`, `T_DAG`,
 `CX`, `CZ`, `R`/`RX`/`RY`, `M`/`MX`/`MY`, `MR` variants, `MPP`, `DETECTOR`,
-`OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, Pauli-noise instructions, `TICK`,
+`OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, the Pauli-noise instructions
+(`X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1`, `DEPOLARIZE2`, `PAULI_CHANNEL_1`,
+`PAULI_CHANNEL_2`), `TICK`,
 `QUBIT_COORDS`, `SHIFT_COORDS`, and flattened `REPEAT` blocks. The parser
 resolves `rec[-k]` references while building the program. Numeric arguments on
 basis measurements, such as `M(0.001)`, lower to pre-measurement Pauli flips

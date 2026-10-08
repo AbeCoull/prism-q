@@ -227,3 +227,58 @@ def test_feedforward_body_takes_gates_and_resets_only():
     resetting = QecProgram(2)
     resetting.reset(QecBasis.Z, 1)
     qp.feedforward([RecordRef.lookback(1)], False, resetting)
+
+
+def _bell_channel_program(channel, shots=4096):
+    qp = QecProgram(2)
+    qp.set_options(shots=shots, seed=42)
+    qp.push_gate(prism_q.Gate.h(), [0])
+    qp.push_gate(prism_q.Gate.cx(), [0, 1])
+    qp.noise(channel, [0])
+    zz = qp.measure_pauli_product([(QecBasis.Z, 0), (QecBasis.Z, 1)])
+    xx = qp.measure_pauli_product([(QecBasis.X, 0), (QecBasis.X, 1)])
+    qp.detector([RecordRef.absolute(zz)])
+    qp.detector([RecordRef.absolute(xx)])
+    return qp
+
+
+def test_pauli_channels_flip_their_detectors():
+    det = _bell_channel_program(QecNoise.y_error(1.0)).run().detectors
+    assert det.all()
+
+    det = _bell_channel_program(QecNoise.pauli_channel_1(0.0, 0.0, 1.0)).run().detectors
+    assert not det[:, 0].any() and det[:, 1].all()
+
+    dem = _bell_channel_program(QecNoise.pauli_channel_1(0.1, 0.2, 0.3)).detector_error_model()
+    assert sorted(dem.probabilities().tolist()) == [0.1, 0.2, 0.3]
+
+
+def test_pauli_channel_2_branches_reach_the_model():
+    rates = [0.005 * (k + 1) for k in range(15)]
+    qp = QecProgram(2)
+    qp.noise(QecNoise.pauli_channel_2(rates), [0, 1])
+    qp.detector([RecordRef.absolute(qp.measure_z(0))])
+    qp.detector([RecordRef.absolute(qp.measure_z(1))])
+    dem = qp.detector_error_model()
+    # Z readout flips on X or Y: first letter on qubit 0, second on qubit 1.
+    x_or_y = {1, 2}
+    expected = {}
+    for k, p in enumerate(rates):
+        first, second = (k + 1) // 4, (k + 1) % 4
+        key = (first in x_or_y, second in x_or_y)
+        if any(key):
+            expected[key] = expected.get(key, 0.0) + p
+    matrix = dem.detector_matrix()
+    got = {
+        (bool(matrix[0, m]), bool(matrix[1, m])): p for m, p in enumerate(dem.probabilities())
+    }
+    assert got.keys() == expected.keys()
+    for key, p in expected.items():
+        assert abs(got[key] - p) < 1e-12
+
+
+def test_pauli_channel_2_requires_fifteen_rates():
+    import pytest
+
+    with pytest.raises((TypeError, ValueError)):
+        QecNoise.pauli_channel_2([0.1] * 14)

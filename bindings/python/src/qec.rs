@@ -85,7 +85,7 @@ impl PyRecordRef {
 
 /// Pauli-noise annotation for a QEC program.
 #[pyclass(name = "QecNoise", module = "prism_q", frozen, from_py_object)]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PyQecNoise(QecNoise);
 
 #[pymethods]
@@ -106,6 +106,21 @@ impl PyQecNoise {
     fn depolarize2(p: f64) -> Self {
         Self(QecNoise::Depolarize2(p))
     }
+    #[staticmethod]
+    fn y_error(p: f64) -> Self {
+        Self(QecNoise::YError(p))
+    }
+    /// X, Y, Z with probabilities `px`, `py`, `pz` per target.
+    #[staticmethod]
+    fn pauli_channel_1(px: f64, py: f64, pz: f64) -> Self {
+        Self(QecNoise::PauliChannel1([px, py, pz]))
+    }
+    /// Fifteen two-qubit Pauli probabilities per target pair, in the order `IX, IY, IZ,
+    /// XI, ..., ZZ` with the first letter on the first target.
+    #[staticmethod]
+    fn pauli_channel_2(probabilities: [f64; 15]) -> Self {
+        Self(QecNoise::PauliChannel2(Box::new(probabilities)))
+    }
 
     #[staticmethod]
     fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
@@ -117,7 +132,7 @@ impl PyQecNoise {
 
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
         let mut w = Writer::new(Kind::QecNoise);
-        codec::write_qec_noise(&mut w, slf.get().0)?;
+        codec::write_qec_noise(&mut w, &slf.get().0)?;
         reduce(slf.as_any(), w.finish())
     }
 
@@ -274,7 +289,7 @@ impl PyQecProgram {
 
     /// Append a Pauli-noise annotation on `targets`.
     fn noise(&mut self, channel: &PyQecNoise, targets: Vec<usize>) -> PyPrismResult<()> {
-        self.inner.noise(channel.0, &targets)?;
+        self.inner.noise(channel.0.clone(), &targets)?;
         Ok(())
     }
 

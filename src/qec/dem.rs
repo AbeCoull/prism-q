@@ -163,12 +163,12 @@ impl QecProgram {
     /// Derive the detector error model implied by the program's Pauli-noise
     /// annotations, detectors, and observables.
     ///
-    /// Each annotation expands into Pauli fault branches per fault site (one per
-    /// target for `X_ERROR` / `Z_ERROR`, three per target for `DEPOLARIZE1`,
-    /// fifteen per target pair for `DEPOLARIZE2`), each propagated to the
-    /// detectors and observables it flips. Exclusive branches at one site with the
-    /// same symptom sum; independent sites (distinct targets of one annotation
-    /// included) with the same symptom compose as `p = p1(1-p2) + p2(1-p1)`.
+    /// Each annotation expands into Pauli fault branches per fault site (the nonzero
+    /// ones of three per target for a one-qubit channel, of fifteen per target pair
+    /// for a two-qubit channel), each propagated to the detectors and observables
+    /// it flips. Exclusive branches at one site with the same symptom sum;
+    /// independent sites (distinct targets of one annotation included) with the same
+    /// symptom compose as `p = p1(1-p2) + p2(1-p1)`.
     /// Faults that flip nothing are omitted. Mechanisms are independent in the
     /// model, so its joint statistics agree with the sampler to second order in
     /// the branch probabilities.

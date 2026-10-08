@@ -171,6 +171,9 @@ def test_small_values_round_trip():
         RecordRef.lookback(3),
         RecordRef.absolute(4),
         QecNoise.depolarize2(0.01),
+        QecNoise.y_error(0.02),
+        QecNoise.pauli_channel_1(0.1, 0.2, 0.3),
+        QecNoise.pauli_channel_2([0.001 * (k + 1) for k in range(15)]),
         PauliObservable([(0.5, [(0, "X"), (2, "Z")]), (-1.0, [])]),
     ):
         assert repr(_round_trip(value)) == repr(value)

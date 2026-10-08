@@ -3,10 +3,10 @@
 //! into position windows that walk in parallel behind a sequential pass that carries
 //! only the observable columns and the record fingerprint.
 
-use super::QecNoise;
 use super::noise::{
-    QecDeferredNoiseEvent, QecDeferredProgram, QecNoiseDraw, QecParityNoise, QecParityNoiseEvent,
-    QecRecordEvent, append_qec_pauli_noise_effect, qec_pair_branch_flips, qec_single_noise_rates,
+    QecDeferredChannel, QecDeferredNoiseEvent, QecDeferredProgram, QecNoiseDraw, QecParityNoise,
+    QecParityNoiseEvent, QecRecordEvent, append_qec_pauli_noise_effect, qec_pair_branch_flips,
+    qec_single_noise_rates,
 };
 use super::runner::QecParityProjection;
 use crate::error::{PrismError, Result};
@@ -56,7 +56,13 @@ pub(super) fn compile_parity_noise(
         .collect();
     Ok(Some((
         walk.pattern,
-        QecParityNoise::from_parts(seed, events, walk.branch_offsets, walk.outputs),
+        QecParityNoise::from_parts(
+            seed,
+            events,
+            walk.branch_offsets,
+            walk.outputs,
+            deferred.pair_tables.clone(),
+        ),
     )))
 }
 
@@ -87,7 +93,11 @@ pub(super) fn compile_fault_sites(
         order.extend((start..end).map(|at| at as u32));
         end = start;
     }
-    Ok(FaultSites { walk, order })
+    Ok(FaultSites {
+        walk,
+        order,
+        pair_tables: deferred.pair_tables.clone(),
+    })
 }
 
 /// Compile the deferred circuit's kept events for the record sampler, in draw order,
@@ -115,12 +125,13 @@ pub(super) fn compile_record_events(deferred: &QecDeferredProgram) -> Result<Vec
             let (index, offset) = site_of_candidate[kept.kept.candidate as usize];
             let event = &deferred.noise_events[index as usize];
             let offset = offset as usize;
-            let targets = match event.channel {
-                QecNoise::Depolarize2(_) => [
+            let targets = if event.channel.is_pair() {
+                [
                     event.targets[2 * offset] as u32,
                     event.targets[2 * offset + 1] as u32,
-                ],
-                _ => [event.targets[offset] as u32, u32::MAX],
+                ]
+            } else {
+                [event.targets[offset] as u32, u32::MAX]
             };
             QecRecordEvent {
                 draw: kept.kept.draw,
@@ -137,14 +148,16 @@ pub(super) struct FaultSites {
     walk: ParityWalk,
     /// Indices into `walk.events` in program order.
     order: Vec<u32>,
+    pair_tables: Vec<[f64; 15]>,
 }
 
 impl FaultSites {
     /// Every site's firing branches, as `(probability, outputs ascending)`.
     pub(super) fn sites(&self) -> impl Iterator<Item = impl Iterator<Item = (f64, &[u32])>> {
-        self.order
-            .iter()
-            .map(move |&at| self.walk.branches(&self.walk.events[at as usize]))
+        self.order.iter().map(move |&at| {
+            self.walk
+                .branches(&self.walk.events[at as usize], &self.pair_tables)
+        })
     }
 }
 
@@ -175,15 +188,21 @@ struct KeptEvent {
 
 impl ParityWalk {
     /// `(probability, outputs ascending)` of each branch of `event` with a nonzero rate.
-    fn branches(&self, event: &WalkEvent) -> impl Iterator<Item = (f64, &[u32])> {
-        let (count, pair) = match event.kept.draw {
-            QecNoiseDraw::Single { .. } => (3, false),
-            QecNoiseDraw::Pair { .. } => (15, true),
-        };
+    fn branches<'a>(
+        &'a self,
+        event: &WalkEvent,
+        pair_tables: &'a [[f64; 15]],
+    ) -> impl Iterator<Item = (f64, &'a [u32])> {
+        let draw = event.kept.draw;
+        let count = branch_count(draw);
         let rates = event.kept.rates;
         let first = event.first_branch;
         (0..count).filter_map(move |branch| {
-            let probability = if pair { rates[0] / 15.0 } else { rates[branch] };
+            let probability = match draw {
+                QecNoiseDraw::Single { .. } => rates[branch],
+                QecNoiseDraw::Pair { .. } => rates[0] / 15.0,
+                QecNoiseDraw::PairTable { table, .. } => pair_tables[table as usize][branch],
+            };
             let range = self.branch_offsets[first + branch] as usize
                 ..self.branch_offsets[first + branch + 1] as usize;
             (probability != 0.0).then(|| (probability, &self.outputs[range]))
@@ -457,9 +476,10 @@ fn default_window_count(gate_count: usize) -> usize {
 
 /// Events the sink is offered for one deferred event: one per target, or per pair.
 fn candidate_count(event: &QecDeferredNoiseEvent) -> usize {
-    match event.channel {
-        QecNoise::Depolarize2(_) => event.targets.len() / 2,
-        _ => event.targets.len(),
+    if event.channel.is_pair() {
+        event.targets.len() / 2
+    } else {
+        event.targets.len()
     }
 }
 
@@ -977,15 +997,22 @@ impl WindowVisitor {
         }
     }
 
-    fn pair(&mut self, rows: &WindowRows<'_>, slots: [usize; 2], candidate: u32, p: f64) {
+    fn pair(
+        &mut self,
+        rows: &WindowRows<'_>,
+        slots: [usize; 2],
+        candidate: u32,
+        draw: QecNoiseDraw,
+    ) {
         let (x0, z0) = rows.row(slots[0]);
         let (x1, z1) = rows.row(slots[1]);
+        let p = draw.pair_rate();
         let mut branch_flips = std::mem::take(&mut self.branch_flips);
         if self.position >= self.lo {
             if qec_pair_branch_flips(x0, z0, x1, z1, p, &mut branch_flips) {
                 self.own.events.push(KeptEvent {
                     candidate,
-                    draw: QecNoiseDraw::pair(p),
+                    draw,
                     rates: [p, 0.0, 0.0],
                 });
                 for flips in branch_flips.chunks_exact(rows.words) {
@@ -1045,35 +1072,23 @@ impl WalkVisitor for WindowVisitor {
         candidate: u32,
     ) {
         debug_assert!(self.position <= self.hi);
-        match event.channel {
-            QecNoise::XError(p) => {
+        let pair_draw = match event.channel {
+            QecDeferredChannel::Depolarize2(p) => QecNoiseDraw::pair(p),
+            QecDeferredChannel::PairTable { p, table } => QecNoiseDraw::pair_table(p, table),
+            QecDeferredChannel::Single([px, py, pz]) => {
                 for (offset, &slot) in slots.iter().enumerate() {
-                    self.single(rows, slot, candidate + offset as u32, p, 0.0, 0.0);
+                    self.single(rows, slot, candidate + offset as u32, px, py, pz);
                 }
+                return;
             }
-            QecNoise::ZError(p) => {
-                for (offset, &slot) in slots.iter().enumerate() {
-                    self.single(rows, slot, candidate + offset as u32, 0.0, 0.0, p);
-                }
-            }
-            QecNoise::Depolarize1(p) => {
-                let branch_p = p / 3.0;
-                for (offset, &slot) in slots.iter().enumerate() {
-                    self.single(
-                        rows,
-                        slot,
-                        candidate + offset as u32,
-                        branch_p,
-                        branch_p,
-                        branch_p,
-                    );
-                }
-            }
-            QecNoise::Depolarize2(p) => {
-                for (offset, pair) in slots.chunks_exact(2).enumerate() {
-                    self.pair(rows, [pair[0], pair[1]], candidate + offset as u32, p);
-                }
-            }
+        };
+        for (offset, pair) in slots.chunks_exact(2).enumerate() {
+            self.pair(
+                rows,
+                [pair[0], pair[1]],
+                candidate + offset as u32,
+                pair_draw,
+            );
         }
     }
 }
@@ -1089,7 +1104,7 @@ struct NoisePiece {
 fn branch_count(draw: QecNoiseDraw) -> usize {
     match draw {
         QecNoiseDraw::Single { .. } => 3,
-        QecNoiseDraw::Pair { .. } => 15,
+        QecNoiseDraw::Pair { .. } | QecNoiseDraw::PairTable { .. } => 15,
     }
 }
 

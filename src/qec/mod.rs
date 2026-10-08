@@ -48,6 +48,10 @@ use crate::gates::Gate;
 use crate::sim::compiled::{PackedShots, PauliVec, get_bit, set_bit};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
+/// Rounding slack on the branch sum of a multi-probability channel, so `0.1, 0.2, 0.7`
+/// is accepted.
+pub(super) const QEC_PROBABILITY_SUM_TOLERANCE: f64 = 1e-9;
+
 /// Pauli basis used by QEC measurements and Pauli products.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QecBasis {
@@ -140,7 +144,7 @@ impl QecRecordRef {
 ///
 /// Probabilities are validated on append to a [`QecProgram`]; probability zero makes
 /// the annotation inactive.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum QecNoise {
     /// With probability `p`, apply X to each target.
@@ -152,22 +156,70 @@ pub enum QecNoise {
     /// Per target pair, apply each of the 15 non-identity two-qubit Paulis with
     /// probability `p / 15`. The target list must have even length.
     Depolarize2(f64),
+    /// With probability `p`, apply Y to each target.
+    YError(f64),
+    /// Per target, apply X, Y, or Z with the listed probability, in that order.
+    PauliChannel1([f64; 3]),
+    /// Per target pair, apply `P0 P1` with its listed probability, in the order `IX, IY,
+    /// IZ, XI, XX, XY, XZ, YI, YX, YY, YZ, ZI, ZX, ZY, ZZ` (`P0` on the first target of the
+    /// pair). The target list must have even length. Boxed so [`QecOp`] stays 64 bytes.
+    PauliChannel2(Box<[f64; 15]>),
 }
 
 impl QecNoise {
-    pub fn probability(self) -> f64 {
+    /// Probability that the channel applies any non-identity Pauli to one target or pair.
+    pub fn probability(&self) -> f64 {
         match self {
-            Self::XError(p) | Self::ZError(p) | Self::Depolarize1(p) | Self::Depolarize2(p) => p,
+            Self::XError(p)
+            | Self::ZError(p)
+            | Self::Depolarize1(p)
+            | Self::Depolarize2(p)
+            | Self::YError(p) => *p,
+            Self::PauliChannel1(probabilities) => probabilities.iter().sum(),
+            Self::PauliChannel2(probabilities) => probabilities.iter().sum(),
         }
     }
 
     /// Native text instruction name for this channel.
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::XError(_) => "X_ERROR",
             Self::ZError(_) => "Z_ERROR",
             Self::Depolarize1(_) => "DEPOLARIZE1",
             Self::Depolarize2(_) => "DEPOLARIZE2",
+            Self::YError(_) => "Y_ERROR",
+            Self::PauliChannel1(_) => "PAULI_CHANNEL_1",
+            Self::PauliChannel2(_) => "PAULI_CHANNEL_2",
+        }
+    }
+
+    /// Numeric arguments in text order.
+    pub(crate) fn args(&self) -> Vec<f64> {
+        match self {
+            Self::XError(p)
+            | Self::ZError(p)
+            | Self::Depolarize1(p)
+            | Self::Depolarize2(p)
+            | Self::YError(p) => vec![*p],
+            Self::PauliChannel1(probabilities) => probabilities.to_vec(),
+            Self::PauliChannel2(probabilities) => probabilities.to_vec(),
+        }
+    }
+
+    /// Whether targets are consumed in pairs.
+    pub(crate) fn is_pair(&self) -> bool {
+        matches!(self, Self::Depolarize2(_) | Self::PauliChannel2(_))
+    }
+
+    /// Single-qubit branch probabilities `(px, py, pz)`, `None` for a pair channel.
+    pub(crate) fn single_rates(&self) -> Option<(f64, f64, f64)> {
+        match *self {
+            Self::XError(p) => Some((p, 0.0, 0.0)),
+            Self::YError(p) => Some((0.0, p, 0.0)),
+            Self::ZError(p) => Some((0.0, 0.0, p)),
+            Self::Depolarize1(p) => Some((p / 3.0, p / 3.0, p / 3.0)),
+            Self::PauliChannel1(ref p) => Some((p[0], p[1], p[2])),
+            Self::Depolarize2(_) | Self::PauliChannel2(_) => None,
         }
     }
 }
@@ -807,7 +859,7 @@ impl QecProgram {
                 }
             }
             QecOp::Noise { channel, targets } => {
-                validate_noise(*channel, targets, self.num_qubits)?;
+                validate_noise(channel, targets, self.num_qubits)?;
             }
             QecOp::Tick => {}
         }
@@ -1143,34 +1195,40 @@ fn validate_finite_values(values: &[f64], label: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_noise(channel: QecNoise, targets: &[usize], num_qubits: usize) -> Result<()> {
-    let p = channel.probability();
-    if !(0.0..=1.0).contains(&p) || !p.is_finite() {
+fn validate_noise(channel: &QecNoise, targets: &[usize], num_qubits: usize) -> Result<()> {
+    let name = channel.name();
+    let args = channel.args();
+    let total = channel.probability();
+    if args
+        .iter()
+        .any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
+        || !(0.0..=1.0 + QEC_PROBABILITY_SUM_TOLERANCE).contains(&total)
+    {
         return Err(PrismError::InvalidParameter {
-            message: format!(
-                "{} probability must be finite and in [0, 1]",
-                channel.name()
-            ),
+            message: if args.len() == 1 {
+                format!("{name} probability must be finite and in [0, 1]")
+            } else {
+                format!("{name} probabilities must be finite, in [0, 1], and sum to at most 1")
+            },
         });
     }
 
     if targets.is_empty() {
         return Err(PrismError::InvalidParameter {
-            message: format!("{} requires at least one target", channel.name()),
+            message: format!("{name} requires at least one target"),
         });
     }
 
-    if matches!(channel, QecNoise::Depolarize2(_)) && !targets.len().is_multiple_of(2) {
-        return Err(PrismError::InvalidParameter {
-            message: "DEPOLARIZE2 requires an even number of targets".to_string(),
-        });
-    }
-
-    if matches!(channel, QecNoise::Depolarize2(_)) {
+    if channel.is_pair() {
+        if !targets.len().is_multiple_of(2) {
+            return Err(PrismError::InvalidParameter {
+                message: format!("{name} requires an even number of targets"),
+            });
+        }
         for pair in targets.chunks_exact(2) {
             if pair[0] == pair[1] {
                 return Err(PrismError::InvalidParameter {
-                    message: "DEPOLARIZE2 target pairs must use distinct qubits".to_string(),
+                    message: format!("{name} target pairs must use distinct qubits"),
                 });
             }
         }

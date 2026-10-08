@@ -16,7 +16,8 @@ value. The typed builders (`push_gate`, `measure`, `measure_pauli_product`,
 `measure_pauli_product` return the new measurement-record index, and
 `detector` returns the detector index. Validation covers gate arity, qubit
 bounds, finite coordinates, coefficients, and probabilities, record-reference
-scope, duplicate qubits in a Pauli product, and `DEPOLARIZE2` target pairing.
+scope, duplicate qubits in a Pauli product, branch probabilities that sum to at
+most 1, and target pairing for `DEPOLARIZE2` and `PAULI_CHANNEL_2`.
 
 | `QecOp` variant | Payload | Semantics |
 | --- | --- | --- |
@@ -200,7 +201,9 @@ buffer. Small-probability events skip between firing shots with geometric
 sampling; dense events (probability at or above `0.5`, or a unit of fewer
 than 32 shots) iterate every shot. `DEPOLARIZE2` precomputes the flip masks of
 all 15 non-identity two-qubit Pauli branches and picks one uniformly per
-firing.
+firing; `PAULI_CHANNEL_2` precomputes the same masks and picks a branch from a
+second uniform draw against its cumulative branch rates, which the sampler keeps
+in one table per op rather than in every event.
 
 Noise draws in fixed units of 8192 shots. Unit `k` covers shots
 `[8192 k, 8192 (k + 1))` and draws every event in program order from ChaCha
@@ -216,15 +219,21 @@ output: changing it changes noisy results at a given seed. Noiseless records
 that are random in the circuit still draw from the compiled sampler per
 chunk.
 
-Supported channels are `X_ERROR`, `Z_ERROR`, `DEPOLARIZE1`, and
-`DEPOLARIZE2`. Noise on an already-measured target is dropped (it can no
-longer affect any record), and a `DEPOLARIZE2` pair with one measured target
-degrades to `DEPOLARIZE1` at `p * 0.8` on the survivor, preserving the
-marginal error rate. The reference runner instead applies the same channels
-stochastically to the per-shot state, and the density-matrix estimator
-applies them exactly: `X_ERROR` and `Z_ERROR` become one-axis Pauli channels,
-`DEPOLARIZE1` a symmetric one-qubit depolarizing channel, and `DEPOLARIZE2` a
-two-qubit depolarizing channel on each target pair. How the QEC noise path
+Supported channels are `X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1`,
+`PAULI_CHANNEL_1(px, py, pz)`, `DEPOLARIZE2`, and `PAULI_CHANNEL_2` with its 15
+probabilities in the order `IX, IY, IZ, XI, XX, XY, XZ, YI, YX, YY, YZ, ZI, ZX,
+ZY, ZZ`, the first letter on the first target of each pair. Every one-qubit
+channel shares one draw with three branch rates, so `Y_ERROR(p)` is the draw
+`(0, p, 0)`. Noise on an already-measured target is dropped (it can no longer
+affect any record), and a two-qubit channel with one measured target degrades
+to its marginal on the survivor: `DEPOLARIZE1` at `p * 0.8` for `DEPOLARIZE2`,
+and the `PAULI_CHANNEL_1` that sums the branch rates by the survivor's letter
+for `PAULI_CHANNEL_2`. The reference runner instead applies the same channels
+stochastically to the per-shot state, and the density-matrix estimator applies
+them exactly: the one-qubit channels become Pauli channels, `DEPOLARIZE1` a
+symmetric one-qubit depolarizing channel, `DEPOLARIZE2` a two-qubit
+depolarizing channel on each target pair, and `PAULI_CHANNEL_2` a two-qubit
+Kraus channel of `sqrt(p) P` terms. How the QEC noise path
 relates to the circuit-level noisy engines is covered by the noisy engine
 routing section of the [compiled samplers](./samplers.md) page.
 
@@ -239,14 +248,15 @@ The derivation reuses the noisy data flow above. The deferred lowering
 produces the noiseless circuit and the positioned noise events, and the same
 backward Pauli propagation supplies, at every event position, the set of
 measurement records each single-Pauli fault flips. Every annotation then
-expands into its fault branches (one per target for `X_ERROR` and `Z_ERROR`,
-three per target for `DEPOLARIZE1`, fifteen per pair for `DEPOLARIZE2`), and
+expands into its fault branches (three per target for the one-qubit channels,
+fifteen per pair for the two-qubit ones; branches with probability zero do not
+fire), and
 each branch's record mask is projected through the detector and observable
 rows to its symptom: the detectors and observables it flips.
 
 Branches merge into mechanisms under two rules, at fault-site granularity
-(one target of a single-qubit annotation, or one target pair of
-`DEPOLARIZE2`):
+(one target of a single-qubit annotation, or one target pair of a two-qubit
+one):
 
 - Branches at one fault site are mutually exclusive, so branches with the
   same symptom sum. A `DEPOLARIZE1` site whose X and Y branches flip the same
@@ -265,9 +275,8 @@ exactly.
 Consequences of the sampler semantics carry over unchanged: a measurement
 error argument (`M(p)`) is already a pre-measurement Pauli fault, so it
 appears as an ordinary mechanism on that record's detectors; noise on an
-already-measured qubit contributes nothing; and a `DEPOLARIZE2` pair with one
-measured target enters as the exact `DEPOLARIZE1(0.8p)` marginal on the
-survivor. Non-Clifford gates and reuse of a measured qubit without reset are
+already-measured qubit contributes nothing; and a two-qubit channel with one
+measured target enters as its exact one-qubit marginal on the survivor. Non-Clifford gates and reuse of a measured qubit without reset are
 rejected, as on the compiled sampling path.
 
 Hypergraph mechanisms (more than two detectors, as `DEPOLARIZE2` produces)

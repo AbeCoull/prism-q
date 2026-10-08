@@ -19,6 +19,7 @@ use crate::sim::compiled::{
     xor_words,
 };
 use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, geometric_sample_xoshiro};
+use num_complex::Complex64;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 #[cfg(feature = "parallel")]
@@ -50,9 +51,29 @@ const QEC_PARALLEL_LAND_FLIPS: usize = 1 << 15;
 
 #[derive(Clone)]
 pub(super) struct QecDeferredNoiseEvent {
-    pub(super) channel: QecNoise,
+    pub(super) channel: QecDeferredChannel,
     pub(super) targets: Vec<usize>,
     pub(super) position: usize,
+}
+
+/// Noise channel of a deferred event, with `PAULI_CHANNEL_2` rates held in
+/// [`QecDeferredProgram::pair_tables`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum QecDeferredChannel {
+    /// One-qubit channel with its X, Y, Z branch rates.
+    Single([f64; 3]),
+    Depolarize2(f64),
+    /// Two-qubit Pauli channel of total rate `p` whose branches are `pair_tables[table]`.
+    PairTable {
+        p: f64,
+        table: u32,
+    },
+}
+
+impl QecDeferredChannel {
+    pub(super) fn is_pair(self) -> bool {
+        !matches!(self, Self::Single(_))
+    }
 }
 
 /// One gate of the deferred circuit: `targets[1]` is `u32::MAX` for a one-qubit gate.
@@ -105,6 +126,8 @@ pub(super) struct QecDeferredProgram {
     /// program qubit to a fresh alias, so ops that reference program qubits
     /// at the end of the stream (`EXP_VAL`) must translate through this map.
     pub(super) final_qubit_aliases: Vec<usize>,
+    /// Branch rates of each `PAULI_CHANNEL_2` op, in [`qec_pair_branch_flips`] order.
+    pub(super) pair_tables: Vec<[f64; 15]>,
 }
 
 impl QecDeferredProgram {
@@ -166,6 +189,7 @@ pub(super) struct QecParityNoise {
     events: Vec<QecParityNoiseEvent>,
     branch_offsets: Vec<u32>,
     outputs: Vec<u32>,
+    pair_tables: Vec<[f64; 15]>,
     seed: u64,
 }
 
@@ -279,6 +303,7 @@ impl QecParityNoise {
         draw_qec_unit(
             &self.events,
             |event| &event.draw,
+            &self.pair_tables,
             &mut rng,
             unit_shots,
             |_, event, shot, branch| {
@@ -305,11 +330,13 @@ impl QecParityNoise {
         events: Vec<QecParityNoiseEvent>,
         branch_offsets: Vec<u32>,
         outputs: Vec<u32>,
+        pair_tables: Vec<[f64; 15]>,
     ) -> Self {
         Self {
             events,
             branch_offsets,
             outputs,
+            pair_tables,
             seed,
         }
     }
@@ -580,6 +607,7 @@ impl QecRecordNoise {
         draw_qec_unit(
             &self.events,
             |event| &event.draw,
+            &self.deferred.pair_tables,
             &mut rng,
             unit_shots,
             |index, _, shot, branch| {
@@ -622,7 +650,7 @@ impl QecRecordNoise {
                             frame.flip(slot, (firing >> 8) as usize, (firing & 0xFF) as usize + 1);
                         }
                     }
-                    QecNoiseDraw::Pair { .. } => {
+                    QecNoiseDraw::Pair { .. } | QecNoiseDraw::PairTable { .. } => {
                         let slot0 = frame.slot(event.targets[0] as usize);
                         let slot1 = frame.slot(event.targets[1] as usize);
                         for &firing in fired {
@@ -883,6 +911,12 @@ pub(super) enum QecNoiseDraw {
         p: f64,
         ln_1mp: f64,
     },
+    /// A pair event drawing its branch from `pair_tables[table]`, which sums to `p`.
+    PairTable {
+        p: f64,
+        ln_1mp: f64,
+        table: u32,
+    },
 }
 
 impl QecNoiseDraw {
@@ -908,11 +942,27 @@ impl QecNoiseDraw {
         }
     }
 
+    pub(super) fn pair_table(p: f64, table: u32) -> Self {
+        Self::PairTable {
+            p,
+            ln_1mp: (1.0 - p).ln(),
+            table,
+        }
+    }
+
+    /// Event rate of a pair draw.
+    pub(super) fn pair_rate(&self) -> f64 {
+        match *self {
+            Self::Pair { p, .. } | Self::PairTable { p, .. } => p,
+            Self::Single { .. } => unreachable!("pair draws only"),
+        }
+    }
+
     #[cfg(feature = "parallel")]
     fn rate(&self) -> f64 {
         match *self {
             Self::Single { rates, .. } => rates.p_event,
-            Self::Pair { p, .. } => p,
+            Self::Pair { p, .. } | Self::PairTable { p, .. } => p,
         }
     }
 }
@@ -943,6 +993,7 @@ fn qec_noise_unit_rng(seed: u64, unit: usize) -> Xoshiro256PlusPlus {
 fn draw_qec_unit<E>(
     events: &[E],
     draw: impl Fn(&E) -> &QecNoiseDraw,
+    pair_tables: &[[f64; 15]],
     rng: &mut Xoshiro256PlusPlus,
     unit_shots: usize,
     mut flip: impl FnMut(usize, &E, usize, usize),
@@ -961,6 +1012,14 @@ fn draw_qec_unit<E>(
                     flip(index, event, shot, b)
                 })
             }
+            QecNoiseDraw::PairTable { p, ln_1mp, table } => draw_qec_pair_table_noise(
+                unit_shots,
+                p,
+                ln_1mp,
+                &pair_tables[table as usize],
+                rng,
+                |shot, b| flip(index, event, shot, b),
+            ),
         }
     }
 }
@@ -1031,7 +1090,7 @@ pub(super) fn lower_qec_program_to_density_matrix(
                 }
                 let anchor = circuit.instructions.len() - 1;
                 after_gate.resize_with(circuit.instructions.len(), Vec::new);
-                push_density_matrix_noise_events(&mut after_gate[anchor], *channel, targets);
+                push_density_matrix_noise_events(&mut after_gate[anchor], channel, targets);
             }
             QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => {
                 return Err(PrismError::IncompatibleBackend {
@@ -1068,16 +1127,10 @@ pub(super) fn lower_qec_program_to_density_matrix(
 
 fn push_density_matrix_noise_events(
     events: &mut Vec<NoiseEvent>,
-    channel: QecNoise,
+    channel: &QecNoise,
     targets: &[usize],
 ) {
-    match channel {
-        QecNoise::XError(p) => {
-            events.extend(targets.iter().map(|&q| NoiseEvent::pauli(q, p, 0.0, 0.0)));
-        }
-        QecNoise::ZError(p) => {
-            events.extend(targets.iter().map(|&q| NoiseEvent::pauli(q, 0.0, 0.0, p)));
-        }
+    match *channel {
         QecNoise::Depolarize1(p) => {
             events.extend(targets.iter().map(|&q| NoiseEvent {
                 channel: NoiseChannel::Depolarizing { p },
@@ -1090,7 +1143,52 @@ fn push_density_matrix_noise_events(
                 qubits: SmallVec::from_slice(pair),
             }));
         }
+        QecNoise::PauliChannel2(ref rates) => {
+            let kraus = pauli_channel_2_kraus(rates);
+            events.extend(targets.chunks_exact(2).map(|pair| NoiseEvent {
+                channel: NoiseChannel::Kraus2q {
+                    kraus: kraus.clone(),
+                },
+                qubits: SmallVec::from_slice(pair),
+            }));
+        }
+        _ => {
+            let (px, py, pz) = channel
+                .single_rates()
+                .expect("every one-qubit channel has branch rates");
+            events.extend(targets.iter().map(|&q| NoiseEvent::pauli(q, px, py, pz)));
+        }
     }
+}
+
+/// Kraus operators `sqrt(p_k) P_k` of a two-qubit Pauli channel, identity first, in the
+/// `Kraus2q` packing (first target the high bit).
+fn pauli_channel_2_kraus(rates: &[f64; 15]) -> Vec<[[Complex64; 4]; 4]> {
+    let zero = Complex64::new(0.0, 0.0);
+    let one = Complex64::new(1.0, 0.0);
+    let i = Complex64::new(0.0, 1.0);
+    let paulis = [
+        [[one, zero], [zero, one]],
+        [[zero, one], [one, zero]],
+        [[zero, -i], [i, zero]],
+        [[one, zero], [zero, -one]],
+    ];
+    let identity_rate = (1.0 - rates.iter().sum::<f64>()).max(0.0);
+    std::iter::once((0usize, identity_rate))
+        .chain(rates.iter().enumerate().map(|(b, &rate)| (b + 1, rate)))
+        .filter(|&(_, rate)| rate > 0.0)
+        .map(|(sample, rate)| {
+            let (a, b) = (&paulis[sample / 4], &paulis[sample % 4]);
+            let scale = rate.sqrt();
+            let mut op = [[zero; 4]; 4];
+            for (row, op_row) in op.iter_mut().enumerate() {
+                for (col, entry) in op_row.iter_mut().enumerate() {
+                    *entry = a[row / 2][col / 2] * b[row % 2][col % 2] * scale;
+                }
+            }
+            op
+        })
+        .collect()
 }
 
 pub(super) fn lower_qec_program_to_deferred_circuit(
@@ -1124,6 +1222,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
     let mut next_record = 0usize;
     let mut deferred_measurements = Vec::with_capacity(program.num_measurements());
     let mut noise_events = Vec::new();
+    let mut pair_tables = Vec::new();
 
     for op in program.ops() {
         match op {
@@ -1199,12 +1298,13 @@ fn lower_qec_program_to_deferred_circuit_inner(
                 if channel.probability() > 0.0 {
                     let first = noise_events.len();
                     push_qec_deferred_noise_events(
-                        *channel,
+                        channel,
                         targets,
                         &aliases,
                         &measured_aliases,
                         gates.len(),
                         &mut noise_events,
+                        &mut pair_tables,
                     )?;
                     for event in &noise_events[first..] {
                         for &alias in &event.targets {
@@ -1252,6 +1352,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
         alias_positions,
         last_use,
         final_qubit_aliases,
+        pair_tables,
     })
 }
 
@@ -1351,52 +1452,82 @@ fn qec_deferred_target(
 }
 
 fn push_qec_deferred_noise_events(
-    channel: QecNoise,
+    channel: &QecNoise,
     targets: &[usize],
     aliases: &[usize],
     measured_aliases: &[bool],
     position: usize,
     noise_events: &mut Vec<QecDeferredNoiseEvent>,
+    pair_tables: &mut Vec<[f64; 15]>,
 ) -> Result<()> {
-    match channel {
-        QecNoise::XError(_) | QecNoise::ZError(_) | QecNoise::Depolarize1(_) => {
-            let mut live_targets = Vec::with_capacity(targets.len());
-            for &target in targets {
-                if let Some(alias) = qec_deferred_noise_target(target, aliases, measured_aliases)? {
-                    live_targets.push(alias);
-                }
+    if let Some((px, py, pz)) = channel.single_rates() {
+        let mut live_targets = Vec::with_capacity(targets.len());
+        for &target in targets {
+            if let Some(alias) = qec_deferred_noise_target(target, aliases, measured_aliases)? {
+                live_targets.push(alias);
             }
-            if !live_targets.is_empty() {
+        }
+        if !live_targets.is_empty() {
+            noise_events.push(QecDeferredNoiseEvent {
+                channel: QecDeferredChannel::Single([px, py, pz]),
+                targets: live_targets,
+                position,
+            });
+        }
+        return Ok(());
+    }
+
+    let pair_channel = match channel {
+        QecNoise::Depolarize2(p) => QecDeferredChannel::Depolarize2(*p),
+        QecNoise::PauliChannel2(rates) => {
+            pair_tables.push(**rates);
+            QecDeferredChannel::PairTable {
+                p: channel.probability(),
+                table: (pair_tables.len() - 1) as u32,
+            }
+        }
+        _ => unreachable!("one-qubit channels return above"),
+    };
+    for pair in targets.chunks_exact(2) {
+        let first = qec_deferred_noise_target(pair[0], aliases, measured_aliases)?;
+        let second = qec_deferred_noise_target(pair[1], aliases, measured_aliases)?;
+        let (alias, side) = match (first, second) {
+            (Some(q0), Some(q1)) => {
                 noise_events.push(QecDeferredNoiseEvent {
-                    channel,
-                    targets: live_targets,
+                    channel: pair_channel,
+                    targets: vec![q0, q1],
                     position,
                 });
+                continue;
             }
-        }
-        QecNoise::Depolarize2(p) => {
-            for pair in targets.chunks_exact(2) {
-                let first = qec_deferred_noise_target(pair[0], aliases, measured_aliases)?;
-                let second = qec_deferred_noise_target(pair[1], aliases, measured_aliases)?;
-                match (first, second) {
-                    (Some(q0), Some(q1)) => noise_events.push(QecDeferredNoiseEvent {
-                        channel,
-                        targets: vec![q0, q1],
-                        position,
-                    }),
-                    (Some(q), None) | (None, Some(q)) => {
-                        noise_events.push(QecDeferredNoiseEvent {
-                            channel: QecNoise::Depolarize1(p * 0.8),
-                            targets: vec![q],
-                            position,
-                        });
-                    }
-                    (None, None) => {}
-                }
-            }
-        }
+            (Some(q), None) => (q, 0),
+            (None, Some(q)) => (q, 1),
+            (None, None) => continue,
+        };
+        noise_events.push(QecDeferredNoiseEvent {
+            channel: QecDeferredChannel::Single(pair_marginal(channel, side)),
+            targets: vec![alias],
+            position,
+        });
     }
     Ok(())
+}
+
+/// X, Y, Z rates of the one-qubit channel a pair channel leaves on target `side` (0 or 1)
+/// once the other target is measured. `DEPOLARIZE2` leaves `DEPOLARIZE1(0.8 p)`.
+fn pair_marginal(channel: &QecNoise, side: usize) -> [f64; 3] {
+    match channel {
+        QecNoise::Depolarize2(p) => [p * 0.8 / 3.0; 3],
+        QecNoise::PauliChannel2(rates) => {
+            let mut letters = [0.0; 4];
+            for (branch, &rate) in rates.iter().enumerate() {
+                let sample = branch + 1;
+                letters[if side == 0 { sample / 4 } else { sample % 4 }] += rate;
+            }
+            [letters[1], letters[2], letters[3]]
+        }
+        _ => unreachable!("pair channels only"),
+    }
 }
 
 fn qec_deferred_noise_target(
@@ -1508,6 +1639,55 @@ fn draw_qec_pair_noise(
         flip(shot, qec_uniform_15(rng));
         shot += 1 + geometric_sample_xoshiro(rng, ln_1mp);
     }
+}
+
+/// Draw one `PAULI_CHANNEL_2` event over `num_shots` shots, calling `flip(shot, branch)`
+/// per fault with a branch in `0..15` drawn from `rates`, which sum to `p`.
+#[inline(always)]
+fn draw_qec_pair_table_noise(
+    num_shots: usize,
+    p: f64,
+    ln_1mp: f64,
+    rates: &[f64; 15],
+    rng: &mut Xoshiro256PlusPlus,
+    mut flip: impl FnMut(usize, usize),
+) {
+    if p == 0.0 {
+        return;
+    }
+
+    if p >= 0.5 || num_shots < 32 {
+        for shot in 0..num_shots {
+            let r = rng.next_f64();
+            if r < p {
+                flip(shot, qec_pair_table_branch(rates, r));
+            }
+        }
+        return;
+    }
+
+    let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
+    while shot < num_shots {
+        flip(shot, qec_pair_table_branch(rates, rng.next_f64() * p));
+        shot += 1 + geometric_sample_xoshiro(rng, ln_1mp);
+    }
+}
+
+/// Branch whose cumulative rate interval holds `r`, for `r` in `[0, p)`.
+#[inline(always)]
+fn qec_pair_table_branch(rates: &[f64; 15], r: f64) -> usize {
+    let mut cumulative = 0.0;
+    let mut last = 0;
+    for (branch, &rate) in rates.iter().enumerate() {
+        if rate > 0.0 {
+            cumulative += rate;
+            last = branch;
+            if r < cumulative {
+                return branch;
+            }
+        }
+    }
+    last
 }
 
 pub(super) fn append_qec_pauli_noise_effect(

@@ -112,8 +112,9 @@ programs.
 
 ```admonish info title="What QEC programs support"
 Clifford gates, basis resets and measurements, `MPP` Pauli-product measurements,
-detectors, observables, postselection, `X_ERROR` / `Z_ERROR` / `DEPOLARIZE1` /
-`DEPOLARIZE2` noise, and terminal `EXP_VAL` final-state expectation estimates.
+detectors, observables, postselection, `X_ERROR` / `Y_ERROR` / `Z_ERROR` /
+`DEPOLARIZE1` / `DEPOLARIZE2` / `PAULI_CHANNEL_1` / `PAULI_CHANNEL_2` noise, and
+terminal `EXP_VAL` final-state expectation estimates.
 A noiseless `EXP_VAL` uses the analytical T strategies, with any detector records
 still sampled by the packed runner. A noisy one is estimated exactly on the density
 matrix when it fits, and falls to the per-shot reference runner when the program

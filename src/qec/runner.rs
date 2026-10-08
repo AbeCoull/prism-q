@@ -528,7 +528,7 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
                     reset_reference_basis(&mut backend, *basis, *qubit)?;
                 }
                 QecOp::Noise { channel, targets } => {
-                    apply_reference_noise(&mut backend, &mut noise_rng, *channel, targets)?;
+                    apply_reference_noise(&mut backend, &mut noise_rng, channel, targets)?;
                 }
                 QecOp::Feedforward { .. } => {
                     backend.apply(&feedforward_regions[next_feedforward])?;
@@ -1485,14 +1485,14 @@ fn rotate_reference_z_to_basis(
 fn apply_reference_noise(
     backend: &mut StatevectorBackend,
     rng: &mut ChaCha8Rng,
-    channel: QecNoise,
+    channel: &QecNoise,
     targets: &[usize],
 ) -> Result<()> {
     if channel.probability() == 0.0 {
         return Ok(());
     }
 
-    match channel {
+    match *channel {
         QecNoise::XError(p) => {
             for &target in targets {
                 if rng.random::<f64>() < p {
@@ -1528,6 +1528,38 @@ fn apply_reference_noise(
                     apply_reference_pauli_index(backend, first, pair[0])?;
                     apply_reference_pauli_index(backend, second, pair[1])?;
                 }
+            }
+        }
+        QecNoise::PauliChannel2(ref rates) => {
+            for pair in targets.chunks_exact(2) {
+                let mut r = rng.random::<f64>();
+                for (branch, &rate) in rates.iter().enumerate() {
+                    if r < rate {
+                        let sample = branch + 1;
+                        apply_reference_pauli_index(backend, sample / 4, pair[0])?;
+                        apply_reference_pauli_index(backend, sample % 4, pair[1])?;
+                        break;
+                    }
+                    r -= rate;
+                }
+            }
+        }
+        _ => {
+            let (px, py, pz) = channel
+                .single_rates()
+                .expect("every one-qubit channel has branch rates");
+            for &target in targets {
+                let r = rng.random::<f64>();
+                let pauli = if r < px {
+                    1
+                } else if r < px + py {
+                    2
+                } else if r < px + py + pz {
+                    3
+                } else {
+                    0
+                };
+                apply_reference_pauli_index(backend, pauli, target)?;
             }
         }
     }

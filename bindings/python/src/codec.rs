@@ -1032,30 +1032,45 @@ fn read_paulis(r: &mut Reader<'_>) -> PyPrismResult<Vec<QecPauli>> {
         .collect()
 }
 
-pub(crate) fn write_qec_noise(w: &mut Writer, channel: QecNoise) -> PyPrismResult<()> {
-    w.u8(match channel {
-        QecNoise::XError(_) => 0,
-        QecNoise::ZError(_) => 1,
-        QecNoise::Depolarize1(_) => 2,
-        QecNoise::Depolarize2(_) => 3,
+pub(crate) fn write_qec_noise(w: &mut Writer, channel: &QecNoise) -> PyPrismResult<()> {
+    let (tag, rates): (u8, &[f64]) = match channel {
+        QecNoise::XError(p) => (0, std::slice::from_ref(p)),
+        QecNoise::ZError(p) => (1, std::slice::from_ref(p)),
+        QecNoise::Depolarize1(p) => (2, std::slice::from_ref(p)),
+        QecNoise::Depolarize2(p) => (3, std::slice::from_ref(p)),
+        QecNoise::YError(p) => (4, std::slice::from_ref(p)),
+        QecNoise::PauliChannel1(rates) => (5, rates),
+        QecNoise::PauliChannel2(rates) => (6, rates.as_slice()),
         other => {
             return Err(invalid(format!(
                 "QEC noise {other:?} has no pickle encoding"
             )));
         }
-    });
-    w.f64(channel.probability());
+    };
+    w.u8(tag);
+    for &rate in rates {
+        w.f64(rate);
+    }
     Ok(())
 }
 
+fn read_rates<const N: usize>(r: &mut Reader<'_>) -> PyPrismResult<[f64; N]> {
+    let mut rates = [0.0; N];
+    for rate in &mut rates {
+        *rate = r.f64()?;
+    }
+    Ok(rates)
+}
+
 pub(crate) fn read_qec_noise(r: &mut Reader<'_>) -> PyPrismResult<QecNoise> {
-    let tag = r.u8()?;
-    let p = r.f64()?;
-    Ok(match tag {
-        0 => QecNoise::XError(p),
-        1 => QecNoise::ZError(p),
-        2 => QecNoise::Depolarize1(p),
-        3 => QecNoise::Depolarize2(p),
+    Ok(match r.u8()? {
+        0 => QecNoise::XError(r.f64()?),
+        1 => QecNoise::ZError(r.f64()?),
+        2 => QecNoise::Depolarize1(r.f64()?),
+        3 => QecNoise::Depolarize2(r.f64()?),
+        4 => QecNoise::YError(r.f64()?),
+        5 => QecNoise::PauliChannel1(read_rates(r)?),
+        6 => QecNoise::PauliChannel2(Box::new(read_rates(r)?)),
         other => return Err(bad_tag("QEC noise", other)),
     })
 }
@@ -1118,7 +1133,7 @@ fn write_ops(w: &mut Writer, ops: &[QecOp]) -> PyPrismResult<()> {
             }
             QecOp::Noise { channel, targets } => {
                 w.u8(9);
-                write_qec_noise(w, *channel)?;
+                write_qec_noise(w, channel)?;
                 w.usizes(targets);
             }
             QecOp::Tick => w.u8(10),

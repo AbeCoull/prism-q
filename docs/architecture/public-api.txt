@@ -1678,11 +1678,14 @@ pub fn prism_q::sim::unified_pauli::PauliAxis::from(prism_q::qec::QecBasis) -> S
 #[non_exhaustive] pub enum prism_q::qec::QecNoise
 pub prism_q::qec::QecNoise::Depolarize1(f64)
 pub prism_q::qec::QecNoise::Depolarize2(f64)
+pub prism_q::qec::QecNoise::PauliChannel1([f64; 3])
+pub prism_q::qec::QecNoise::PauliChannel2(alloc::boxed::Box<[f64; 15]>)
 pub prism_q::qec::QecNoise::XError(f64)
+pub prism_q::qec::QecNoise::YError(f64)
 pub prism_q::qec::QecNoise::ZError(f64)
 impl prism_q::qec::QecNoise
-pub fn prism_q::qec::QecNoise::name(self) -> &'static str
-pub fn prism_q::qec::QecNoise::probability(self) -> f64
+pub fn prism_q::qec::QecNoise::name(&self) -> &'static str
+pub fn prism_q::qec::QecNoise::probability(&self) -> f64
 #[non_exhaustive] pub enum prism_q::qec::QecOp
 pub prism_q::qec::QecOp::Detector
 pub prism_q::qec::QecOp::Detector::coords: alloc::vec::Vec<f64>
@@ -2708,11 +2711,14 @@ pub fn prism_q::sim::unified_pauli::PauliAxis::from(prism_q::qec::QecBasis) -> S
 #[non_exhaustive] pub enum prism_q::QecNoise
 pub prism_q::QecNoise::Depolarize1(f64)
 pub prism_q::QecNoise::Depolarize2(f64)
+pub prism_q::QecNoise::PauliChannel1([f64; 3])
+pub prism_q::QecNoise::PauliChannel2(alloc::boxed::Box<[f64; 15]>)
 pub prism_q::QecNoise::XError(f64)
+pub prism_q::QecNoise::YError(f64)
 pub prism_q::QecNoise::ZError(f64)
 impl prism_q::qec::QecNoise
-pub fn prism_q::qec::QecNoise::name(self) -> &'static str
-pub fn prism_q::qec::QecNoise::probability(self) -> f64
+pub fn prism_q::qec::QecNoise::name(&self) -> &'static str
+pub fn prism_q::qec::QecNoise::probability(&self) -> f64
 #[non_exhaustive] pub enum prism_q::QecOp
 pub prism_q::QecOp::Detector
 pub prism_q::QecOp::Detector::coords: alloc::vec::Vec<f64>

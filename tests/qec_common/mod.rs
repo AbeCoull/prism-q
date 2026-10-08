@@ -35,7 +35,7 @@ pub fn repetition_memory(
     let mut program = QecProgram::with_options(distance, qec_options(shots, 4096, false));
     let mut prev: Option<Vec<usize>> = None;
     for _ in 0..rounds {
-        program.noise(noise, &data).unwrap();
+        program.noise(noise.clone(), &data).unwrap();
         let records: Vec<usize> = (0..distance - 1)
             .map(|check| {
                 program
@@ -99,7 +99,7 @@ pub fn surface_memory_d3(
     let mut program = QecProgram::with_options(9, qec_options(shots, 4096, false));
     let mut prev: Option<Vec<usize>> = None;
     for _ in 0..rounds {
-        program.noise(noise, noise_targets).unwrap();
+        program.noise(noise.clone(), noise_targets).unwrap();
         let mut records = Vec::with_capacity(8);
         for stab in SURFACE_D3_Z_STABILIZERS {
             let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::z(q)).collect();
@@ -184,7 +184,7 @@ pub fn rotated_surface_memory(
     let mut program = QecProgram::with_options(num_qubits, qec_options(shots, 4096, false));
     let mut previous: Vec<usize> = Vec::new();
     for _ in 0..rounds {
-        program.noise(noise, noise_targets).unwrap();
+        program.noise(noise.clone(), noise_targets).unwrap();
         let mut records = Vec::with_capacity(z_stabs.len() + x_stabs.len());
         for stab in &z_stabs {
             let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::z(q)).collect();

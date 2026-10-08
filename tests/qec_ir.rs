@@ -1100,7 +1100,8 @@ fn qec_dropped_records_match_kept_projection_on_repetition_memory() {
             QecNoise::Depolarize1(0.01),
             QecNoise::Depolarize2(0.02),
         ] {
-            let program = qec_common::repetition_memory(distance, distance, noise, PARITY_SHOTS);
+            let program =
+                qec_common::repetition_memory(distance, distance, noise.clone(), PARITY_SHOTS);
             if noise.probability() > 0.0 {
                 assert!(any_detector_fires(&program), "d{distance} {noise:?}");
             }
@@ -1120,7 +1121,7 @@ fn qec_dropped_records_match_kept_projection_on_repetition_memory() {
 fn qec_dropped_records_match_kept_projection_on_surface_memory() {
     let data: Vec<usize> = (0..9).collect();
     for noise in [QecNoise::Depolarize1(0.0), QecNoise::Depolarize1(0.01)] {
-        let program = qec_common::surface_memory_d3(3, noise, &data, PARITY_SHOTS);
+        let program = qec_common::surface_memory_d3(3, noise.clone(), &data, PARITY_SHOTS);
         assert_parities_meas_major(&program, &format!("surface d3 {noise:?}"));
         for chunk_size in [None, Some(500)] {
             assert_dropped_records_match_kept(
@@ -1197,7 +1198,7 @@ fn qec_dropped_records_match_kept_projection_on_rotated_surface_memory() {
             let program = qec_common::rotated_surface_memory(
                 distance,
                 distance,
-                noise,
+                noise.clone(),
                 targets,
                 PARITY_SHOTS,
             );

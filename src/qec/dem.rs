@@ -352,6 +352,9 @@ impl QecProgram {
 pub(super) type Symptom = (Vec<usize>, Vec<usize>);
 
 fn derive_detector_error_model(program: &QecProgram) -> Result<DetectorErrorModel> {
+    if program.has_leakage() {
+        return Err(super::leakage::leakage_rejection("detector error model"));
+    }
     let detector_rows = program.detector_rows()?;
     let observable_rows = program.observable_rows()?;
     let num_detectors = detector_rows.len();

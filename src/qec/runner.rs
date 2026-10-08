@@ -108,6 +108,9 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
     }
     let has_noise = validate_qec_compiled_program(program)?;
     let chunk_size = qec_runner_chunk_size(program.options())?;
+    if program.has_leakage() {
+        return run_qec_program_leaky(program, chunk_size);
+    }
     if program.num_measurements() == 0 {
         let measurements = PackedShots::from_shot_major(
             Vec::new(),
@@ -166,6 +169,41 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
     qec_result_from_measurement_chunks(program, |_, chunk| {
         sampler.sample_measurements_packed(chunk)
     })
+}
+
+/// The packed path for a program carrying leakage annotations, which a linear map of
+/// record flips cannot express: [`QecLeakageSampler`](super::leakage::QecLeakageSampler)
+/// carries the flags, and its herald columns land in [`QecSampleResult::heralds`].
+fn run_qec_program_leaky(program: &QecProgram, chunk_size: usize) -> Result<QecSampleResult> {
+    let mut sampler = super::leakage::QecLeakageSampler::compile(program)?;
+    let shots = program.options().shots;
+    if chunk_size >= shots {
+        let (measurements, heralds) = sampler.sample(0, shots, shots)?;
+        return Ok(qec_result_from_measurements(program, measurements)?.with_heralds(heralds));
+    }
+    let num_heralds = sampler.num_heralds();
+    let mut herald_chunks: Vec<(usize, PackedShots)> = Vec::new();
+    let result = qec_result_from_measurement_chunks(program, |first_shot, chunk| {
+        let (measurements, heralds) = sampler.sample(first_shot, chunk, shots)?;
+        herald_chunks.push((first_shot, heralds));
+        Ok(measurements)
+    })?;
+    let s_words = shots.div_ceil(64);
+    let mut heralds = vec![0u64; num_heralds * s_words];
+    for (first_shot, chunk) in herald_chunks {
+        let chunk_words = chunk.num_shots().div_ceil(64);
+        for herald in 0..num_heralds {
+            super::leakage::land_bits(
+                &mut heralds[herald * s_words..(herald + 1) * s_words],
+                first_shot,
+                &chunk.raw_data()[herald * chunk_words..(herald + 1) * chunk_words],
+                0,
+                chunk.num_shots(),
+                |a, b| a | b,
+            );
+        }
+    }
+    Ok(result.with_heralds(PackedShots::from_meas_major(heralds, shots, num_heralds)))
 }
 
 /// Execution for `EXP_VAL` programs carrying active noise.
@@ -1488,6 +1526,9 @@ fn apply_reference_noise(
     channel: &QecNoise,
     targets: &[usize],
 ) -> Result<()> {
+    if channel.is_leakage() {
+        return Err(super::leakage::leakage_rejection("QEC reference runner"));
+    }
     if channel.probability() == 0.0 {
         return Ok(());
     }

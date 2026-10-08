@@ -2244,6 +2244,15 @@ mod multi_pauli_rot {
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             assert!((g - w).norm() < 1e-12, "{n}q amplitude {i}: {g} vs {w}");
         }
+        // The CNOT ladder shares no arithmetic with the pair kernel, so it pins
+        // the scalar and SIMD runs both paths above lean on.
+        let ladder = run(&crate::circuit::expand_pauli_rotations(&one_by_one));
+        for (i, (w, l)) in want.iter().zip(&ladder).enumerate() {
+            assert!(
+                (w - l).norm() < 1e-11,
+                "{n}q ladder amplitude {i}: {w} vs {l}"
+            );
+        }
     }
 
     #[test]

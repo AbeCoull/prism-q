@@ -2078,13 +2078,56 @@ fn fft_stage_pair_par(
     );
 }
 
+/// Shortest run of contiguous pairs handed to the SIMD pair kernel. Below it the
+/// AVX2 loop runs at most one 256-bit iteration per call, so the per-run dispatch
+/// outweighs it and the scalar loop takes the block.
+const MIN_PAULI_ROT_SIMD_RUN: usize = 4;
+
+/// The pair arithmetic of `exp(-i θ P / 2)` for [`pauli_rot_pair_halves`].
+///
+/// `m_lo` and `m_hi` are the parity-even cross coefficients toward the pivot-clear
+/// and pivot-set side; `even` and `odd` hold the pair matrix
+/// `[[c, ±m_lo], [±m_hi, c]]` for each parity with its SIMD tier chosen once.
+struct PauliRotPair {
+    c: f64,
+    m_lo: Complex64,
+    m_hi: Complex64,
+    even: simd::PreparedGate1q,
+    odd: simd::PreparedGate1q,
+}
+
+impl PauliRotPair {
+    /// The pair arithmetic for a rotation by `theta` whose string has `num_y` Y letters.
+    ///
+    /// `m_hi` points toward the pivot-set side of a pair; the opposite direction
+    /// differs by the parity of `xmask & zmask`, which is the Y count.
+    fn new(theta: f64, num_y: u32) -> Self {
+        let (s, c) = (theta / 2.0).sin_cos();
+        let m_hi = match num_y % 4 {
+            0 => Complex64::new(0.0, -s),
+            1 => Complex64::new(s, 0.0),
+            2 => Complex64::new(0.0, s),
+            _ => Complex64::new(-s, 0.0),
+        };
+        let m_lo = if num_y % 2 == 1 { -m_hi } else { m_hi };
+        let diag = Complex64::new(c, 0.0);
+        Self {
+            c,
+            m_lo,
+            m_hi,
+            even: simd::PreparedGate1q::new(&[[diag, m_lo], [m_hi, diag]]),
+            odd: simd::PreparedGate1q::new(&[[diag, -m_lo], [-m_hi, diag]]),
+        }
+    }
+}
+
 /// Mix the pairs `(lo[i], hi[i ^ xlow])` of one Pauli-rotation pivot block.
 ///
 /// `base` is the global index of `lo[0]` and must be a multiple of `lo.len()`,
-/// so `(base + i) & zmask` reads the pair's parity sign directly. `m_lo` and
-/// `m_hi` are the parity-even cross coefficients toward the pivot-clear and
-/// pivot-set side respectively.
-#[allow(clippy::too_many_arguments)]
+/// so `(base + i) & zmask` reads the pair's parity sign directly; `flip` (0 or 1)
+/// is added to that parity. Pairs whose index bits below the lowest X or Z letter
+/// vary form contiguous runs on both sides with one parity, and runs of at least
+/// [`MIN_PAULI_ROT_SIMD_RUN`] go through the SIMD pair kernel.
 #[inline(always)]
 fn pauli_rot_pair_halves(
     lo: &mut [Complex64],
@@ -2092,15 +2135,29 @@ fn pauli_rot_pair_halves(
     base: usize,
     xlow: usize,
     zmask: usize,
-    c: f64,
-    m_lo: Complex64,
-    m_hi: Complex64,
+    pair: &PauliRotPair,
+    flip: u32,
 ) {
+    let run = 1usize << (((xlow | zmask) & (lo.len() - 1)) | lo.len()).trailing_zeros();
+    if run >= MIN_PAULI_ROT_SIMD_RUN {
+        for start in (0..lo.len()).step_by(run) {
+            let k = start ^ xlow;
+            let prepared = if ((base + start) & zmask).count_ones() & 1 == flip {
+                &pair.even
+            } else {
+                &pair.odd
+            };
+            prepared.apply(&mut lo[start..start + run], &mut hi[k..k + run]);
+        }
+        return;
+    }
+
+    let (c, m_lo, m_hi) = (pair.c, pair.m_lo, pair.m_hi);
     for (i, amp_lo) in lo.iter_mut().enumerate() {
         let k = i ^ xlow;
         let a = *amp_lo;
         let b = hi[k];
-        if ((base + i) & zmask).count_ones() & 1 == 0 {
+        if ((base + i) & zmask).count_ones() & 1 == flip {
             *amp_lo = a * c + b * m_lo;
             hi[k] = b * c + a * m_hi;
         } else {
@@ -2110,38 +2167,24 @@ fn pauli_rot_pair_halves(
     }
 }
 
-/// `cos(θ/2)` and the `(m_lo, m_hi)` cross coefficients [`pauli_rot_pair_halves`]
-/// takes for `exp(-i θ P / 2)` with `num_y` Y letters in `P`.
-///
-/// `m_hi` points toward the pivot-set side of a pair; the opposite direction
-/// differs by the parity of `xmask & zmask`, which is the Y count.
-#[inline(always)]
-fn pauli_rot_coefficients(theta: f64, num_y: u32) -> (f64, Complex64, Complex64) {
-    let (s, c) = (theta / 2.0).sin_cos();
-    let m_hi = match num_y % 4 {
-        0 => Complex64::new(0.0, -s),
-        1 => Complex64::new(s, 0.0),
-        2 => Complex64::new(0.0, s),
-        _ => Complex64::new(-s, 0.0),
-    };
-    let m_lo = if num_y % 2 == 1 { -m_hi } else { m_hi };
-    (c, m_lo, m_hi)
+/// How one `MultiPauliRot` rotation acts inside a tile.
+#[allow(clippy::large_enum_variant)]
+enum TiledAction {
+    /// A diagonal string: the phase for an even and for an odd Z parity.
+    Parity([Complex64; 2]),
+    Pairs(PauliRotPair),
 }
 
 /// One rotation of a `MultiPauliRot` batch in tile coordinates.
 ///
 /// `xmask` and `zmask` cover tile bits. `zrest` keeps the Z letters on qubits
 /// outside the tile: their parity is fixed across a tile and, when odd, negates
-/// both cross terms. A diagonal string (`xmask == 0`) holds its even and odd
-/// parity phases in `m_lo` and `m_hi` instead.
-#[derive(Clone, Copy)]
+/// both cross terms or swaps the two phases.
 struct TiledPauliRot {
     xmask: usize,
     zmask: usize,
     zrest: usize,
-    c: f64,
-    m_lo: Complex64,
-    m_hi: Complex64,
+    action: TiledAction,
 }
 
 impl TiledPauliRot {
@@ -2170,19 +2213,17 @@ impl TiledPauliRot {
                 }
             }
         }
-        let (c, m_lo, m_hi) = if xmask == 0 {
+        let action = if xmask == 0 {
             let (s, c) = (theta / 2.0).sin_cos();
-            (c, Complex64::new(c, -s), Complex64::new(c, s))
+            TiledAction::Parity([Complex64::new(c, -s), Complex64::new(c, s)])
         } else {
-            pauli_rot_coefficients(theta, (xmask & zmask).count_ones())
+            TiledAction::Pairs(PauliRotPair::new(theta, (xmask & zmask).count_ones()))
         };
         Self {
             xmask: tile_x,
             zmask: tile_z,
             zrest,
-            c,
-            m_lo,
-            m_hi,
+            action,
         }
     }
 
@@ -2190,30 +2231,28 @@ impl TiledPauliRot {
     /// tile bits are cleared.
     #[inline(always)]
     fn apply(&self, tile: &mut [Complex64], base: usize) {
-        let odd = (base & self.zrest).count_ones() & 1 == 1;
-        if self.xmask == 0 {
-            let phases = if odd {
-                [self.m_hi, self.m_lo]
-            } else {
-                [self.m_lo, self.m_hi]
-            };
-            for (i, amp) in tile.iter_mut().enumerate() {
-                *amp *= phases[((i & self.zmask).count_ones() & 1) as usize];
+        let flip = (base & self.zrest).count_ones() & 1;
+        match &self.action {
+            TiledAction::Parity([even, odd]) => {
+                let phases = if flip == 1 {
+                    [*odd, *even]
+                } else {
+                    [*even, *odd]
+                };
+                for (i, amp) in tile.iter_mut().enumerate() {
+                    *amp *= phases[((i & self.zmask).count_ones() & 1) as usize];
+                }
             }
-            return;
-        }
-        let (m_lo, m_hi) = if odd {
-            (-self.m_lo, -self.m_hi)
-        } else {
-            (self.m_lo, self.m_hi)
-        };
-        let pivot = usize::BITS as usize - 1 - self.xmask.leading_zeros() as usize;
-        let half = 1usize << pivot;
-        let block = half << 1;
-        let xlow = self.xmask ^ half;
-        for (k, chunk) in tile.chunks_mut(block).enumerate() {
-            let (lo, hi) = chunk.split_at_mut(half);
-            pauli_rot_pair_halves(lo, hi, k * block, xlow, self.zmask, self.c, m_lo, m_hi);
+            TiledAction::Pairs(pair) => {
+                let pivot = usize::BITS as usize - 1 - self.xmask.leading_zeros() as usize;
+                let half = 1usize << pivot;
+                let block = half << 1;
+                let xlow = self.xmask ^ half;
+                for (k, chunk) in tile.chunks_mut(block).enumerate() {
+                    let (lo, hi) = chunk.split_at_mut(half);
+                    pauli_rot_pair_halves(lo, hi, k * block, xlow, self.zmask, pair, flip);
+                }
+            }
         }
     }
 }
@@ -2857,7 +2896,7 @@ impl StatevectorBackend {
             return;
         }
 
-        let (c, m_lo, m_hi) = pauli_rot_coefficients(theta, num_y);
+        let pair = PauliRotPair::new(theta, num_y);
         let pivot = usize::BITS as usize - 1 - xmask.leading_zeros() as usize;
         let half = 1usize << pivot;
         let block = half << 1;
@@ -2865,13 +2904,13 @@ impl StatevectorBackend {
 
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
-            self.apply_pauli_rot_pairs_par(pivot, xlow, zmask, c, m_lo, m_hi);
+            self.apply_pauli_rot_pairs_par(pivot, xlow, zmask, &pair);
             return;
         }
 
         for (chunk_idx, chunk) in self.state.chunks_mut(block).enumerate() {
             let (lo, hi) = chunk.split_at_mut(half);
-            pauli_rot_pair_halves(lo, hi, chunk_idx * block, xlow, zmask, c, m_lo, m_hi);
+            pauli_rot_pair_halves(lo, hi, chunk_idx * block, xlow, zmask, &pair, 0);
         }
     }
 
@@ -2882,9 +2921,7 @@ impl StatevectorBackend {
         pivot: usize,
         xlow: usize,
         zmask: usize,
-        c: f64,
-        m_lo: Complex64,
-        m_hi: Complex64,
+        pair: &PauliRotPair,
     ) {
         let half = 1usize << pivot;
         let block = half << 1;
@@ -2897,7 +2934,7 @@ impl StatevectorBackend {
                 .enumerate()
                 .for_each(|(chunk_idx, chunk)| {
                     let (lo, hi) = chunk.split_at_mut(half);
-                    pauli_rot_pair_halves(lo, hi, chunk_idx * block, xlow, zmask, c, m_lo, m_hi);
+                    pauli_rot_pair_halves(lo, hi, chunk_idx * block, xlow, zmask, pair, 0);
                 });
         } else {
             // Tiles are a power of two above `xlow`, so `i ^ xlow` stays
@@ -2916,9 +2953,8 @@ impl StatevectorBackend {
                             chunk_base + t * tile,
                             xlow,
                             zmask,
-                            c,
-                            m_lo,
-                            m_hi,
+                            pair,
+                            0,
                         );
                     });
             }

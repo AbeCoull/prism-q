@@ -152,7 +152,7 @@ unsafe fn complex_mul_sse2(
     }
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn apply_slices_sse2(lo: &mut [Complex64], hi: &mut [Complex64], mat: &MatBroadcast) {
     // SAFETY: same contract as the enclosing unsafe fn.
@@ -193,7 +193,7 @@ pub(crate) unsafe fn complex_mul_fma(c_rr: __m128d, c_ii: __m128d, z: __m128d) -
     _mm_fmaddsub_pd(c_rr, z, t)
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "fma")]
 unsafe fn apply_slices_fma(lo: &mut [Complex64], hi: &mut [Complex64], mat: &MatBroadcast) {
     // SAFETY: same contract as the enclosing unsafe fn.
@@ -224,7 +224,7 @@ unsafe fn apply_slices_fma(lo: &mut [Complex64], hi: &mut [Complex64], mat: &Mat
     }
 }
 
-#[cfg(all(target_arch = "aarch64", any(feature = "parallel", test)))]
+#[cfg(target_arch = "aarch64")]
 unsafe fn apply_slices_neon(lo: &mut [Complex64], hi: &mut [Complex64], mat: &MatBroadcast) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
@@ -264,7 +264,7 @@ pub(crate) unsafe fn complex_mul_avx2fma(c_rr: __m256d, c_ii: __m256d, z: __m256
     _mm256_fmaddsub_pd(c_rr, z, t)
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn apply_slices_avx2fma(
@@ -609,7 +609,6 @@ impl PreparedGate1q {
         }
     }
 
-    #[cfg(any(feature = "parallel", test))]
     #[inline(always)]
     pub(crate) fn apply(&self, lo: &mut [Complex64], hi: &mut [Complex64]) {
         debug_assert_eq!(lo.len(), hi.len());

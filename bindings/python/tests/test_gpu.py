@@ -24,6 +24,7 @@ from prism_q import (
     NoiseModel,
     PrismError,
     circuits,
+    gpu_info,
     simulate,
 )
 
@@ -63,6 +64,21 @@ def test_context_without_feature_raises_named_error():
 def test_context_without_device_raises_rather_than_falling_back():
     with pytest.raises(PrismError):
         GpuContext()
+
+
+def test_gpu_info_reports_a_device_or_a_reason():
+    info = gpu_info()
+    if info.available:
+        assert info.device and info.reason is None
+    else:
+        assert info.device is None and info.reason
+    if not SUPPORTED:
+        assert "built without GPU support" in info.reason
+
+
+@requires_device
+def test_gpu_info_names_the_context_device():
+    assert gpu_info(0).device == GpuContext(0).device_name
 
 
 @requires_device

@@ -16,9 +16,10 @@ release = false
 name = "_prism_q"
 crate-type = ["cdylib"]
 
-# Off by default: published wheels are built on runners without a CUDA toolkit,
-# and macOS has none at all. `GpuContext` raises rather than vanishing when this
-# is absent, so the Python API surface is the same either way.
+# Off by default so a source build stays CUDA-free. The Linux and Windows wheel
+# jobs turn it on; it needs no toolkit to build, since the driver and NVRTC load
+# at run time. macOS has no CUDA. `GpuContext` raises rather than vanishing when
+# this is absent, so the Python API surface is the same either way.
 [features]
 gpu = ["prism-q/gpu"]
 

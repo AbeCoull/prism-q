@@ -9,6 +9,15 @@ performance-first quantum circuit simulator written in Rust.
 pip install prism-q
 ```
 
+The Linux and Windows wheels include the CUDA backends. They need an NVIDIA driver
+and NVRTC, which the `cuda12` extra installs:
+
+```bash
+pip install "prism-q[cuda12]"
+```
+
+`prism_q.gpu_info()` reports the device, or why it cannot be used.
+
 ## Quick start
 
 ```python

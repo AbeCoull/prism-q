@@ -51,10 +51,21 @@ impl PyGpuContext {
     fn new(py: Python<'_>, device_id: usize) -> PyResult<Self> {
         #[cfg(feature = "gpu")]
         {
-            py.import("prism_q._cuda")?.call_method0("preload_nvrtc")?;
-            let inner = py
-                .detach(|| prism_q::gpu::GpuContext::new(device_id))
-                .map_err(with_nvrtc_hint)?;
+            let open = || py.detach(|| prism_q::gpu::GpuContext::new(device_id));
+            let inner = match open() {
+                Ok(inner) => inner,
+                Err(err) => {
+                    if prism_q::gpu::nvrtc_available()
+                        || py
+                            .import("prism_q._cuda")?
+                            .call_method0("preload_nvrtc")?
+                            .is_none()
+                    {
+                        return Err(with_nvrtc_hint(err));
+                    }
+                    open().map_err(with_nvrtc_hint)?
+                }
+            };
             Ok(Self { device_id, inner })
         }
         #[cfg(not(feature = "gpu"))]

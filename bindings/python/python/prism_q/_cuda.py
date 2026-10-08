@@ -1,10 +1,11 @@
 """Load NVRTC from the ``nvidia-cuda-nvrtc-cu12`` package the ``cuda12`` extra installs.
 
-The extension opens NVRTC by file name when it first compiles kernels, through the
-platform loader's default search, which never looks inside site-packages. Loading the
-packaged copy by full path beforehand makes that lookup resolve to it, since both
-loaders return an already loaded library whose name matches. Without the package, the
-default search finds a system CUDA 12 toolkit instead.
+The extension opens NVRTC by file name when it compiles kernels, through the platform
+loader's default search, which never looks inside site-packages. Loading the packaged
+copy by full path makes that lookup resolve to it, since both loaders return an already
+loaded library whose name matches. ``GpuContext`` calls this only after opening a device
+failed for want of NVRTC, so a cached kernel image or a toolkit NVRTC on the loader path
+comes first and the packaged copy stays unloaded otherwise.
 """
 
 import ctypes

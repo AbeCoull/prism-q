@@ -13,6 +13,8 @@ coverage is `tests/golden_gpu.rs` on the Rust side.
 
 import math
 import os
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -150,6 +152,39 @@ def test_gpu_shots_stay_on_the_ghz_support():
     counts = simulate(circuit).backend(BackendKind.auto_gpu(context)).seed(42).shots(512).counts()
     assert set(counts) <= {"0000", "1111"}
     assert sum(counts.values()) == 512
+
+
+_OPEN_AND_REPORT_NVRTC = """
+import ctypes, sys
+from prism_q import GpuContext
+GpuContext(0)
+if sys.platform == "win32":
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+    print(bool(kernel32.GetModuleHandleW("nvrtc64_120_0.dll")))
+else:
+    with open("/proc/self/maps") as maps:
+        print(any("libnvrtc" in line for line in maps))
+"""
+
+
+@requires_device
+def test_warm_cubin_cache_opens_without_loading_nvrtc(tmp_path):
+    env = dict(os.environ, XDG_CACHE_HOME=str(tmp_path))
+
+    def open_context():
+        return subprocess.run(
+            [sys.executable, "-c", _OPEN_AND_REPORT_NVRTC],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    open_context()
+    if not any(tmp_path.glob("prism-q-ptx/*.cubin")):
+        pytest.skip("NVRTC cannot emit SASS for this device")
+    assert open_context() == "False"
 
 
 @requires_device

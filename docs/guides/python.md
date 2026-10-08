@@ -434,13 +434,13 @@ default source build are not. Without it the constructors still exist and
 `GpuContext(...)` raises `PrismError` naming the missing build feature, so code
 written against the GPU API fails with a message rather than an `AttributeError`.
 
-A CUDA build loads the NVIDIA driver and NVRTC when the first `GpuContext` opens,
-not at import. The driver must support CUDA 12.0 or newer. NVRTC comes from the
-`nvidia-cuda-nvrtc-cu12` package that the `cuda12` extra installs, and otherwise
-from a CUDA 12 toolkit on the loader path (`PATH` on Windows, the `ld.so` search
-path on Linux). When either is missing, `GpuContext(...)` raises `PrismError`
-naming it. NVRTC runs only when no cached kernel image matches the device, so a
-host with a warm cache keeps working without it.
+A CUDA build loads the NVIDIA driver when the first `GpuContext` opens, not at
+import, and NVRTC only when no cached kernel image matches the device, so a host
+with a warm cache never opens NVRTC. The driver must support CUDA 12.0 or newer.
+NVRTC comes from a CUDA 12 toolkit on the loader path (`PATH` on Windows, the
+`ld.so` search path on Linux), and otherwise from the `nvidia-cuda-nvrtc-cu12`
+package that the `cuda12` extra installs. When either is missing, `GpuContext(...)`
+raises `PrismError` naming it.
 
 The kernels compile to SASS for the device's own architecture, which any CUDA 12
 driver loads, so the newest NVRTC the extra installs also runs on older 12.x

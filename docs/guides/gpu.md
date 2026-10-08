@@ -2,7 +2,8 @@
 
 ```admonish info
 The GPU backend is optional and gated behind the `gpu` feature. Building it needs no
-CUDA toolkit: the NVIDIA driver and NVRTC load when the first `GpuContext` opens.
+CUDA toolkit: the NVIDIA driver loads when the first `GpuContext` opens, and NVRTC
+when kernels need compiling.
 Running it needs a CUDA-capable device, a driver for CUDA 12.0 or newer, and NVRTC
 from a CUDA 12 toolkit on the loader path (`PATH` on Windows, the `ld.so` search path
 on Linux). A missing driver or NVRTC is a `PrismError` from `GpuContext::new`, not a
@@ -23,8 +24,9 @@ NVRTC, and `GpuContext::new` names both versions when it is not. The image is sh
 every context in the process and cached on disk in
 `prism-q-ptx` under the user cache directory (`XDG_CACHE_HOME`, else `LOCALAPPDATA`,
 else `HOME/.cache`, else the OS temp directory), keyed by device arch, crate version,
-NVRTC version, and a hash of the kernel source, so later processes skip the compile.
-Without NVRTC, any cached image for the device and source is used. A missing,
+and a hash of the kernel source, so later processes skip the compile. File names also
+record the NVRTC version. A cached cubin is used whichever NVRTC made it, without
+opening NVRTC; cached PTX is used only after it, since the driver may refuse it. A missing,
 unreadable, or corrupt cache file only costs a recompile; delete the directory to force
 one.
 

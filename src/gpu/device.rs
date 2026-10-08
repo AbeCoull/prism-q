@@ -240,11 +240,12 @@ fn load_kernel_module(
 }
 
 /// Load the module from an image cached in `cache_dir`, or compile through NVRTC when
-/// none loads. The file name binds crate version, device architecture, a hash of the
-/// source text, and the NVRTC version, so a changed kernel or NVRTC never resolves to a
-/// stale image. Without NVRTC, any cached image for this source and architecture is
-/// tried. A fresh compile is written back atomically; a write failure is ignored, the
-/// module is already loaded.
+/// none loads. File names bind crate version, device architecture, a hash of the source
+/// text, and the NVRTC version that compiled them. A cached cubin matches whichever
+/// CUDA 12 NVRTC made it, so it is tried first without opening NVRTC. Cached PTX is
+/// tried next, from this NVRTC only when one loads, since a driver older than the NVRTC
+/// refuses it. A fresh compile is written back atomically; a write failure is ignored,
+/// the module is already loaded.
 fn load_or_compile(
     context: &Arc<CudaContext>,
     capability: (i32, i32),
@@ -252,47 +253,46 @@ fn load_or_compile(
 ) -> Result<(Arc<KernelImage>, Arc<CudaModule>)> {
     let source = kernel_source();
     let stem = cache_stem(capability, &source);
-    let nvrtc_version = if nvrtc_present() {
-        Some(
-            nvrtc_version()
-                .ok_or_else(|| gpu_unusable("NVRTC did not report its version".to_string()))?,
-        )
-    } else {
-        None
+    let cached = |extension: &str| -> Vec<PathBuf> {
+        let prefix = format!("{stem}-nvrtc");
+        let suffix = format!(".{extension}");
+        std::fs::read_dir(cache_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(&suffix))
+            })
+            .collect()
     };
-    let candidates: Vec<PathBuf> = match nvrtc_version {
-        Some(version) => ["cubin", "ptx"]
+    let try_load = |paths: &[PathBuf]| {
+        paths
             .iter()
-            .map(|ext| cache_dir.join(cache_file_name(&stem, version, ext)))
-            .collect(),
-        None => {
-            let prefix = format!("{stem}-nvrtc");
-            std::fs::read_dir(cache_dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with(&prefix))
-                })
-                .collect()
-        }
+            .filter_map(|path| KernelImage::read(path))
+            .find_map(|image| Some((image.load(context).ok()?, image)))
+            .map(|(module, image)| (Arc::new(image), module))
     };
-    for image in candidates.iter().filter_map(|path| KernelImage::read(path)) {
-        if let Ok(module) = image.load(context) {
-            return Ok((Arc::new(image), module));
-        }
+    if let Some(hit) = try_load(&cached("cubin")) {
+        return Ok(hit);
     }
-    let Some(version) = nvrtc_version else {
-        return Err(gpu_unusable(
-            "NVRTC, the CUDA runtime compiler, did not load (looked for libnvrtc.so.12 or \
-             nvrtc64_120_0.dll); install a CUDA 12 toolkit or put its NVRTC library on the \
-             loader path"
-                .to_string(),
-        ));
-    };
+    if !nvrtc_present() {
+        return try_load(&cached("ptx")).ok_or_else(|| {
+            gpu_unusable(
+                "NVRTC, the CUDA runtime compiler, did not load (looked for libnvrtc.so.12 or \
+                 nvrtc64_120_0.dll); install a CUDA 12 toolkit or put its NVRTC library on the \
+                 loader path"
+                    .to_string(),
+            )
+        });
+    }
+    let version =
+        nvrtc_version().ok_or_else(|| gpu_unusable("NVRTC did not report its version".into()))?;
+    if let Some(hit) = try_load(&[cache_dir.join(cache_file_name(&stem, version, "ptx"))]) {
+        return Ok(hit);
+    }
     let image = compile_kernels(&source, capability)?;
     let module = image.load(context).map_err(fresh_module_err)?;
     write_image_cache(
@@ -620,6 +620,33 @@ mod tests {
         let image = compile_kernels(&kernel_source(), capability).unwrap();
         assert!(matches!(image, KernelImage::Cubin(_)));
         image.load(&context).unwrap();
+    }
+
+    // A cached cubin matches whatever NVRTC version its name records, so a cubin
+    // labelled with a foreign version loads and nothing is recompiled or written.
+    #[test]
+    fn cached_cubin_from_another_nvrtc_version_loads_without_a_recompile() {
+        if !GpuDevice::is_available() || !nvrtc_present() {
+            eprintln!("SKIP: no usable GPU or NVRTC");
+            return;
+        }
+        let context = CudaContext::new(0).unwrap();
+        let capability = detect_capability(&context).unwrap();
+        let image = compile_kernels(&kernel_source(), capability).unwrap();
+        if !matches!(image, KernelImage::Cubin(_)) {
+            eprintln!("SKIP: NVRTC cannot target this device");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prism-q-cubin-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stem = cache_stem(capability, &kernel_source());
+        let path = dir.join(cache_file_name(&stem, (12, 0), "cubin"));
+        std::fs::write(&path, image.bytes()).unwrap();
+
+        let (loaded, _module) = load_or_compile(&context, capability, &dir).unwrap();
+        assert_eq!(loaded.bytes(), image.bytes());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // A corrupt cache file is overwritten by a recompile; the valid file is then

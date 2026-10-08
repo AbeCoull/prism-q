@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use super::Circuit;
-use super::draw::{OpKind, PlacedOp, assign_moments};
+use super::draw::{OpKind, PlacedOp, assign_moments, barrier_columns};
 use crate::gates::Gate;
 
 const GATE_CORNER_RADIUS: f64 = 1.0;
@@ -668,6 +668,10 @@ fn render_svg(
             .flat_map(|m| m.iter())
             .filter(|op| !matches!(op.kind, OpKind::Barrier | OpKind::Measure { .. }))
             .count();
+        let depth = moments
+            .iter()
+            .filter(|m| m.iter().any(|op| !matches!(op.kind, OpKind::Barrier)))
+            .count();
         let _ = writeln!(
             svg,
             "<text x=\"{:.1}\" y=\"{:.1}\" class=\"qlabel\" \
@@ -678,7 +682,7 @@ fn render_svg(
             if num_qubits == 1 { "" } else { "s" },
             gate_count,
             if gate_count == 1 { "" } else { "s" },
-            moments.len(),
+            depth,
         );
     }
 
@@ -1692,7 +1696,7 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
 impl Circuit {
     /// Render the circuit as a self-contained SVG wire diagram.
     pub fn to_svg(&self, opts: &SvgOptions) -> String {
-        let moments = assign_moments(self);
+        let moments = barrier_columns(assign_moments(self), opts.show_barriers);
         render_svg(&moments, self.num_qubits, self.num_classical_bits, opts)
     }
 

@@ -283,8 +283,11 @@ fn cell_label(op: &PlacedOp) -> Cow<'_, str> {
 /// Give each moment's barriers a column ahead of its gates, or drop them when hidden.
 ///
 /// Placement synchronizes a barrier's qubits without advancing them, so the next gate
-/// on those qubits shares the barrier's moment and would overwrite its cells.
-fn barrier_columns(moments: Vec<Vec<PlacedOp>>, show_barriers: bool) -> Vec<Vec<PlacedOp>> {
+/// on those qubits shares the barrier's moment and would be drawn over it.
+pub(super) fn barrier_columns(
+    moments: Vec<Vec<PlacedOp>>,
+    show_barriers: bool,
+) -> Vec<Vec<PlacedOp>> {
     let mut columns = Vec::with_capacity(moments.len());
     for moment in moments {
         let (barriers, ops): (Vec<_>, Vec<_>) = moment

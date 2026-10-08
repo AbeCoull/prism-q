@@ -8,9 +8,11 @@ use prism_q::{
 };
 use pyo3::prelude::*;
 
+use crate::codec::{self, Kind, Reader, Writer};
 use crate::error::PyPrismResult;
 use crate::gate::PyGate;
 use crate::numpy_util::{bool_matrix, f64_array, u8_matrix};
+use crate::pickle::{Reduced, ReducedMember, reduce, reduce_member};
 
 /// Pauli basis for QEC measurements and resets.
 #[pyclass(name = "QecBasis", module = "prism_q", eq, eq_int, from_py_object)]
@@ -19,6 +21,18 @@ pub enum PyQecBasis {
     X,
     Y,
     Z,
+}
+
+#[pymethods]
+impl PyQecBasis {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<ReducedMember<'py>> {
+        let name = match *slf.borrow() {
+            PyQecBasis::X => "X",
+            PyQecBasis::Y => "Y",
+            PyQecBasis::Z => "Z",
+        };
+        reduce_member(slf.as_any(), name)
+    }
 }
 
 impl PyQecBasis {
@@ -50,6 +64,20 @@ impl PyRecordRef {
         Ok(Self(QecRecordRef::lookback(distance)?))
     }
 
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let mut r = Reader::new(data, Kind::RecordRef)?;
+        let record = codec::read_record(&mut r)?;
+        r.finish()?;
+        Ok(Self(record))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let mut w = Writer::new(Kind::RecordRef);
+        codec::write_record(&mut w, &slf.get().0)?;
+        reduce(slf.as_any(), w.finish())
+    }
+
     fn __repr__(&self) -> String {
         format!("RecordRef({:?})", self.0)
     }
@@ -77,6 +105,20 @@ impl PyQecNoise {
     #[staticmethod]
     fn depolarize2(p: f64) -> Self {
         Self(QecNoise::Depolarize2(p))
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let mut r = Reader::new(data, Kind::QecNoise)?;
+        let channel = codec::read_qec_noise(&mut r)?;
+        r.finish()?;
+        Ok(Self(channel))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let mut w = Writer::new(Kind::QecNoise);
+        codec::write_qec_noise(&mut w, slf.get().0)?;
+        reduce(slf.as_any(), w.finish())
     }
 
     fn __repr__(&self) -> String {
@@ -258,6 +300,18 @@ impl PyQecProgram {
         Ok(PyDetectorErrorModel {
             inner: self.inner.detector_error_model()?,
         })
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: codec::decode_qec_program(data)?,
+        })
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let data = codec::encode_qec_program(&slf.borrow().inner)?;
+        reduce(slf.as_any(), data)
     }
 
     fn __repr__(&self) -> String {

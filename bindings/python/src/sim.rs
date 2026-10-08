@@ -19,9 +19,11 @@ use pyo3::types::{PyDict, PyList, PyString};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
+use crate::codec;
 use crate::error::{PyPrismResult, invalid};
 use crate::noise::PyNoiseModel;
 use crate::numpy_util::{bool_matrix, complex_array, complex_matrix, f64_array};
+use crate::pickle::{Reduced, reduce};
 
 pub(crate) const DEFAULT_SEED: u64 = 42;
 
@@ -916,6 +918,15 @@ impl PyPauliObservable {
     #[getter]
     fn num_groups(&self) -> usize {
         self.0.num_groups()
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        Ok(Self(codec::decode_observable(data)?))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        reduce(slf.as_any(), codec::encode_observable(&slf.get().0))
     }
 
     fn __repr__(&self) -> String {

@@ -1103,6 +1103,32 @@ detectors = np.unpackbits(packed, axis=1, count=qp.num_detectors, bitorder="litt
 assert (detectors.astype(bool) == res.detectors).all()
 ```
 
+## Pickling and multiprocessing
+
+`Circuit`, `Gate`, `Parameters`, `NoiseChannel`, `NoiseModel`, `QecProgram`,
+`PauliObservable`, `ClassicalCondition`, `RecordRef`, `QecNoise`, `SaveSpec`, and
+`QecBasis` pickle, so they cross `multiprocessing`, `concurrent.futures`, Ray, and Dask
+boundaries. The payload is a versioned binary encoding that carries every float as its
+IEEE bits, so an unpickled value is identical to the original rather than close to it,
+and a `Parameters` set keeps the edit guard it was pinned with.
+
+```python
+import pickle
+
+from prism_q import CircuitBuilder, simulate
+
+circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
+restored = pickle.loads(pickle.dumps(circuit))
+assert pickle.dumps(restored) == pickle.dumps(circuit)
+assert simulate(restored).seed(1).shots(100).counts() == simulate(circuit).seed(1).shots(
+    100
+).counts()
+```
+
+A payload from a newer format version raises `PrismError` naming the version rather
+than decoding wrongly. Builders, results, samplers, backends, and contexts do not
+pickle: return a result's arrays or counts from a worker instead.
+
 ## Errors and typing
 
 Every failure surfaces as `prism_q.PrismError`, carrying the message from the

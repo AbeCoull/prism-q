@@ -71,6 +71,8 @@ qubit. This is reversed relative to Qiskit. For example, the state where only
 - Native QEC programs (`QecProgram`) with detector and observable sampling and
   feed-forward corrections.
 - NumPy output for probabilities, statevectors, and QEC bit matrices.
+- Pickling for circuits, parameters, noise models, and QEC programs, so they cross
+  `multiprocessing`, Ray, and Dask boundaries.
 
 ## License
 

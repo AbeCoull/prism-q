@@ -8,9 +8,11 @@ use prism_q::{
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
+use crate::codec::{self, Kind, Reader, Writer};
 use crate::error::{PyPrismResult, invalid};
 use crate::gate::PyGate;
 use crate::parameter::PyParameters;
+use crate::pickle::{Reduced, ReducedMember, reduce, reduce_member};
 use crate::sim::{parse_axis, parse_pauli_string};
 
 /// A quantum circuit. Construct via [`CircuitBuilder`], [`parse_qasm`], or one
@@ -221,6 +223,20 @@ impl PyClassicalCondition {
         Ok(self.0.evaluate(&classical_bits))
     }
 
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let mut r = Reader::new(data, Kind::Condition)?;
+        let condition = codec::read_condition(&mut r)?;
+        r.finish()?;
+        Ok(Self(condition))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let mut w = Writer::new(Kind::Condition);
+        codec::write_condition(&mut w, &slf.get().0)?;
+        reduce(slf.as_any(), w.finish())
+    }
+
     fn __repr__(&self) -> String {
         format!("ClassicalCondition({:?})", self.0)
     }
@@ -310,6 +326,18 @@ pub enum PySaveSpec {
     StateVector,
     Probabilities,
     DensityMatrix,
+}
+
+#[pymethods]
+impl PySaveSpec {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<ReducedMember<'py>> {
+        let name = match *slf.borrow() {
+            PySaveSpec::StateVector => "StateVector",
+            PySaveSpec::Probabilities => "Probabilities",
+            PySaveSpec::DensityMatrix => "DensityMatrix",
+        };
+        reduce_member(slf.as_any(), name)
+    }
 }
 
 impl PySaveSpec {
@@ -600,6 +628,16 @@ impl PyCircuit {
         self.0.to_string()
     }
 
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        Ok(Self(codec::decode_circuit(data)?))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let data = codec::encode_circuit(&slf.borrow().0)?;
+        reduce(slf.as_any(), data)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Circuit(num_qubits={}, num_classical_bits={}, gates={})",
@@ -774,12 +812,8 @@ impl PyCircuitBuilder {
     /// `Parameters.bind`. Pinned to the circuit as it stands, so binding after
     /// further edits fails rather than writing the wrong gates.
     fn parameters(&self) -> PyParameters {
-        PyParameters(
-            self.inner
-                .parameters()
-                .clone()
-                .pinned_to(self.inner.circuit()),
-        )
+        let circuit = self.inner.circuit();
+        PyParameters::against(self.inner.parameters().clone().pinned_to(circuit), circuit)
     }
 
     fn cx(
@@ -1013,7 +1047,8 @@ pub fn parse_qasm(source: &str) -> PyPrismResult<PyCircuit> {
 #[pyfunction]
 pub fn parse_qasm_parametric(source: &str) -> PyPrismResult<(PyCircuit, PyParameters)> {
     let (circuit, parameters) = openqasm::parse_parametric(source)?;
-    Ok((PyCircuit(circuit), PyParameters(parameters)))
+    let parameters = PyParameters::against(parameters, &circuit);
+    Ok((PyCircuit(circuit), parameters))
 }
 
 macro_rules! circuit_fn {

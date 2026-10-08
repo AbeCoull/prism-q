@@ -12,9 +12,11 @@ use pyo3::types::PyAny;
 use smallvec::SmallVec;
 
 use crate::circuit::PyCircuit;
+use crate::codec::{self, Kind, Reader, Writer};
 use crate::error::{PyPrismResult, invalid};
 use crate::gate::{extract_2x2, extract_4x4};
 use crate::numpy_util::f64_array;
+use crate::pickle::{Reduced, reduce};
 
 /// A one- or two-qubit noise channel, built by the static methods.
 #[pyclass(name = "NoiseChannel", module = "prism_q", frozen, from_py_object)]
@@ -104,6 +106,20 @@ impl PyNoiseChannel {
     #[getter]
     fn num_qubits(&self) -> usize {
         self.0.num_qubits()
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let mut r = Reader::new(data, Kind::NoiseChannel)?;
+        let channel = codec::read_channel(&mut r)?;
+        r.finish()?;
+        Ok(Self(channel))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let mut w = Writer::new(Kind::NoiseChannel);
+        codec::write_channel(&mut w, &slf.get().0)?;
+        reduce(slf.as_any(), w.finish())
     }
 
     fn __repr__(&self) -> String {
@@ -340,6 +356,18 @@ impl PyNoiseModel {
     /// entry answers False and still runs on the stabilizer samplers.
     fn is_pauli_only(&self) -> bool {
         self.inner.is_pauli_only()
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: codec::decode_noise_model(data)?,
+        })
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let data = codec::encode_noise_model(&slf.borrow().inner)?;
+        reduce(slf.as_any(), data)
     }
 }
 

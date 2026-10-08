@@ -364,3 +364,80 @@ def test_memory_generators_reject_bad_parameters():
         QecProgram.surface_memory(3, 2, basis=QecBasis.Y)
     with pytest.raises(prism_q.PrismError):
         QecProgram.repetition_memory(3, 0)
+
+
+def _hypergraph_program():
+    hyper = QecProgram(1)
+    hyper.set_options(shots=256, seed=42)
+    hyper.noise(QecNoise.x_error(0.1), [0])
+    for _ in range(3):
+        record = hyper.measure_pauli_product([(QecBasis.Z, 0)])
+        hyper.detector([RecordRef.absolute(record)])
+    return hyper
+
+
+def test_matching_decoder_never_worse_than_union_find():
+    p = 0.02
+    qp = _repetition_memory(3, p, 20_000)
+    dem = qp.detector_error_model()
+    res = qp.run()
+    union_find = prism_q.Decoder(dem)
+    matching = prism_q.MatchingDecoder(dem)
+    assert matching.num_detectors == 8
+    assert matching.num_observables == 1
+
+    predicted = matching.decode(res.detectors)
+    assert predicted.dtype == np.bool_
+    assert predicted.shape == (res.total_shots, 1)
+    failures = int((predicted[:, 0] != res.observables[:, 0]).sum())
+    rate = matching.logical_error_rate(res.detectors, res.observables)
+    assert rate == failures / res.total_shots
+    assert rate <= union_find.logical_error_rate(res.detectors, res.observables)
+    assert rate < p
+
+
+def test_matching_decoder_rejects_hypergraph_models():
+    import pytest
+
+    with pytest.raises(prism_q.PrismError, match="decompose_graphlike"):
+        prism_q.MatchingDecoder(_hypergraph_program().detector_error_model())
+
+
+def test_bposd_decoder_accepts_hypergraph_models():
+    hyper = _hypergraph_program()
+    dem = hyper.detector_error_model()
+    decoder = prism_q.BpOsdDecoder(dem, osd_method="exhaustive", osd_order=4)
+    assert decoder.num_detectors == 3
+    res = hyper.run()
+    predicted = decoder.decode(res.detectors)
+    assert predicted.shape == (res.total_shots, 0)
+    assert decoder.logical_error_rate(res.detectors, res.observables) == 0.0
+
+
+def test_bposd_decoder_matches_union_find_on_repetition_memory():
+    p = 0.02
+    qp = _repetition_memory(3, p, 20_000)
+    dem = qp.detector_error_model()
+    res = qp.run()
+    union_find = prism_q.Decoder(dem).logical_error_rate(res.detectors, res.observables)
+    for bp_method in ("min_sum", "product_sum"):
+        decoder = prism_q.BpOsdDecoder(dem, bp_method=bp_method, max_iterations=20)
+        rate = decoder.logical_error_rate(res.detectors, res.observables)
+        assert rate <= union_find
+
+
+def test_bposd_decoder_rejects_bad_options():
+    import pytest
+
+    dem = _repetition_memory(1, 0.05, 16).detector_error_model()
+    with pytest.raises(prism_q.PrismError, match="bp_method"):
+        prism_q.BpOsdDecoder(dem, bp_method="sum_product")
+    with pytest.raises(prism_q.PrismError, match="osd_method"):
+        prism_q.BpOsdDecoder(dem, osd_method="osd1")
+    with pytest.raises(prism_q.PrismError, match="scaling"):
+        prism_q.BpOsdDecoder(dem, min_sum_scaling=0.0)
+    with pytest.raises(prism_q.PrismError, match="exhaustive"):
+        prism_q.BpOsdDecoder(dem, osd_method="exhaustive", osd_order=40)
+    decoder = prism_q.BpOsdDecoder(dem)
+    with pytest.raises(prism_q.PrismError):
+        decoder.decode(np.zeros((4, 2), dtype=np.bool_))

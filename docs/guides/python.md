@@ -1067,6 +1067,20 @@ predicted = decoder.decode(res.detectors)
 failures = (predicted[:, 0] != res.observables[:, 0]).sum()
 ```
 
+`MatchingDecoder` (exact minimum-weight perfect matching, graphlike models) and
+`BpOsdDecoder` (belief propagation with ordered statistics, any model) share that
+surface. Every decoder also offers `logical_error_rate(detectors, observables)`,
+the fraction of shots with any observable mispredicted. `BpOsdDecoder` takes
+keyword options `max_iterations`, `bp_method` (`"min_sum"` or `"product_sum"`),
+`min_sum_scaling`, `osd_method` (`"osd0"`, `"cs"`, or `"exhaustive"`), and
+`osd_order`:
+
+```python
+matching = prism_q.MatchingDecoder(dem.decompose_graphlike())
+bposd = prism_q.BpOsdDecoder(dem, osd_method="cs", osd_order=10)
+rates = [d.logical_error_rate(res.detectors, res.observables) for d in (matching, bposd)]
+```
+
 `feedforward(records, expected, body)` applies the gates and resets of `body`, a
 second `QecProgram` holding the correction, only in shots where the parity over
 `records` equals `expected`: an adaptive correction keyed on a syndrome. The compiled

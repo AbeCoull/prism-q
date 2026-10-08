@@ -33,8 +33,8 @@ use noise::{
 use parameter::{PyParameters, PyPreparedCircuit};
 use program::{PyDynamicProgram, PyDynamicProgramBuilder, PyProgramSimulation};
 use qec::{
-    PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecCircuitNoise, PyQecNoise, PyQecProgram,
-    PyQecResult, PyRecordRef,
+    PyBpOsdDecoder, PyDecoder, PyDetectorErrorModel, PyMatchingDecoder, PyQecBasis,
+    PyQecCircuitNoise, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
 };
 use sampler::PyCompiledSampler;
 use sim::{
@@ -88,6 +88,8 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDetectorErrorModel>()?;
     m.add_class::<PyDecoder>()?;
     m.add_class::<PyQecCircuitNoise>()?;
+    m.add_class::<PyMatchingDecoder>()?;
+    m.add_class::<PyBpOsdDecoder>()?;
     m.add_class::<PyBraketProgram>()?;
     m.add_class::<PyDynamicProgram>()?;
     m.add_class::<PyDynamicProgramBuilder>()?;

@@ -2,8 +2,9 @@
 
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
-    DetectorErrorModel, PackedShots, QecBasis, QecCircuitNoise, QecNoise, QecOptions, QecPauli,
-    QecProgram, QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
+    BpMethod, BpOsdDecoder, BpOsdOptions, DetectorErrorModel, MatchingDecoder, OsdMethod,
+    PackedShots, PrismError, QecBasis, QecCircuitNoise, QecNoise, QecOptions, QecPauli, QecProgram,
+    QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
     run_qec_program_reference,
 };
 use pyo3::prelude::*;
@@ -595,22 +596,22 @@ impl PyDecoder {
         py: Python<'py>,
         detectors: PyReadonlyArray2<'py, bool>,
     ) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
-        let array = detectors.as_array();
-        let shots = array.nrows();
-        let columns = array.ncols();
-        let m_words = columns.div_ceil(64);
-        let mut data = vec![0u64; shots * m_words];
-        for (shot, row) in array.outer_iter().enumerate() {
-            let base = shot * m_words;
-            for (column, &bit) in row.iter().enumerate() {
-                if bit {
-                    data[base + column / 64] |= 1u64 << (column % 64);
-                }
-            }
-        }
-        let packed = PackedShots::try_from_shot_major(data, shots, columns)?;
+        let packed = pack_bool_rows(&detectors)?;
         let decoded = py.detach(|| self.inner.decode_packed(&packed))?;
         packed_to_2d(py, &decoded)
+    }
+
+    /// Fraction of shots whose predicted flips differ from `observables`
+    /// (`(shots, num_observables)` bool) in any observable.
+    fn logical_error_rate<'py>(
+        &self,
+        py: Python<'py>,
+        detectors: PyReadonlyArray2<'py, bool>,
+        observables: PyReadonlyArray2<'py, bool>,
+    ) -> PyPrismResult<f64> {
+        let detectors = pack_bool_rows(&detectors)?;
+        let observables = pack_bool_rows(&observables)?;
+        Ok(py.detach(|| self.inner.logical_error_rate(&detectors, &observables))?)
     }
 
     fn __repr__(&self) -> String {
@@ -620,6 +621,196 @@ impl PyDecoder {
             self.inner.num_observables()
         )
     }
+}
+
+/// Exact minimum-weight perfect matching decoder over a graphlike detector
+/// error model: predicts observable flips from detector samples.
+#[pyclass(name = "MatchingDecoder", module = "prism_q", frozen)]
+pub struct PyMatchingDecoder {
+    inner: MatchingDecoder,
+}
+
+#[pymethods]
+impl PyMatchingDecoder {
+    /// Compile a decoder from a graphlike model (at most two detectors per
+    /// mechanism; apply `decompose_graphlike` first when needed).
+    #[new]
+    fn new(model: &PyDetectorErrorModel) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: MatchingDecoder::from_model(&model.inner)?,
+        })
+    }
+
+    #[getter]
+    fn num_detectors(&self) -> usize {
+        self.inner.num_detectors()
+    }
+    #[getter]
+    fn num_observables(&self) -> usize {
+        self.inner.num_observables()
+    }
+
+    /// Decode a `(shots, num_detectors)` bool array of detector samples into
+    /// a `(shots, num_observables)` bool array of predicted observable flips.
+    fn decode<'py>(
+        &self,
+        py: Python<'py>,
+        detectors: PyReadonlyArray2<'py, bool>,
+    ) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
+        let packed = pack_bool_rows(&detectors)?;
+        let decoded = py.detach(|| self.inner.decode_packed(&packed))?;
+        packed_to_2d(py, &decoded)
+    }
+
+    /// Fraction of shots whose predicted flips differ from `observables`
+    /// (`(shots, num_observables)` bool) in any observable.
+    fn logical_error_rate<'py>(
+        &self,
+        py: Python<'py>,
+        detectors: PyReadonlyArray2<'py, bool>,
+        observables: PyReadonlyArray2<'py, bool>,
+    ) -> PyPrismResult<f64> {
+        let detectors = pack_bool_rows(&detectors)?;
+        let observables = pack_bool_rows(&observables)?;
+        Ok(py.detach(|| self.inner.logical_error_rate(&detectors, &observables))?)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "MatchingDecoder(detectors={}, observables={})",
+            self.inner.num_detectors(),
+            self.inner.num_observables()
+        )
+    }
+}
+
+/// Belief propagation with ordered-statistics post-processing over any
+/// detector error model, hypergraph mechanisms included.
+#[pyclass(name = "BpOsdDecoder", module = "prism_q", frozen)]
+pub struct PyBpOsdDecoder {
+    inner: BpOsdDecoder,
+}
+
+#[pymethods]
+impl PyBpOsdDecoder {
+    /// Compile a decoder. `bp_method` is `"min_sum"` (messages scaled by
+    /// `min_sum_scaling`) or `"product_sum"`; `osd_method` is `"osd0"`,
+    /// `"cs"` (combination sweep), or `"exhaustive"`, searching `osd_order`
+    /// free columns.
+    #[new]
+    #[pyo3(signature = (
+        model,
+        *,
+        max_iterations = 30,
+        bp_method = "min_sum",
+        min_sum_scaling = 0.625,
+        osd_method = "cs",
+        osd_order = 7,
+    ))]
+    fn new(
+        model: &PyDetectorErrorModel,
+        max_iterations: usize,
+        bp_method: &str,
+        min_sum_scaling: f64,
+        osd_method: &str,
+        osd_order: usize,
+    ) -> PyPrismResult<Self> {
+        let bp_method = match bp_method {
+            "min_sum" => BpMethod::MinSum {
+                scaling: min_sum_scaling,
+            },
+            "product_sum" => BpMethod::ProductSum,
+            other => {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "unknown bp_method `{other}`; expected `min_sum` or `product_sum`"
+                    ),
+                }
+                .into());
+            }
+        };
+        let osd_method = match osd_method {
+            "osd0" => OsdMethod::Zero,
+            "cs" => OsdMethod::CombinationSweep { order: osd_order },
+            "exhaustive" => OsdMethod::Exhaustive { order: osd_order },
+            other => {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "unknown osd_method `{other}`; expected `osd0`, `cs`, or `exhaustive`"
+                    ),
+                }
+                .into());
+            }
+        };
+        let options = BpOsdOptions {
+            max_iterations,
+            bp_method,
+            osd_method,
+        };
+        Ok(Self {
+            inner: BpOsdDecoder::with_options(&model.inner, options)?,
+        })
+    }
+
+    #[getter]
+    fn num_detectors(&self) -> usize {
+        self.inner.num_detectors()
+    }
+    #[getter]
+    fn num_observables(&self) -> usize {
+        self.inner.num_observables()
+    }
+
+    /// Decode a `(shots, num_detectors)` bool array of detector samples into
+    /// a `(shots, num_observables)` bool array of predicted observable flips.
+    fn decode<'py>(
+        &self,
+        py: Python<'py>,
+        detectors: PyReadonlyArray2<'py, bool>,
+    ) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
+        let packed = pack_bool_rows(&detectors)?;
+        let decoded = py.detach(|| self.inner.decode_packed(&packed))?;
+        packed_to_2d(py, &decoded)
+    }
+
+    /// Fraction of shots whose predicted flips differ from `observables`
+    /// (`(shots, num_observables)` bool) in any observable.
+    fn logical_error_rate<'py>(
+        &self,
+        py: Python<'py>,
+        detectors: PyReadonlyArray2<'py, bool>,
+        observables: PyReadonlyArray2<'py, bool>,
+    ) -> PyPrismResult<f64> {
+        let detectors = pack_bool_rows(&detectors)?;
+        let observables = pack_bool_rows(&observables)?;
+        Ok(py.detach(|| self.inner.logical_error_rate(&detectors, &observables))?)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BpOsdDecoder(detectors={}, observables={})",
+            self.inner.num_detectors(),
+            self.inner.num_observables()
+        )
+    }
+}
+
+/// Pack a `(shots, columns)` bool array into shot-major words.
+fn pack_bool_rows(array: &PyReadonlyArray2<'_, bool>) -> PyPrismResult<PackedShots> {
+    let array = array.as_array();
+    let shots = array.nrows();
+    let columns = array.ncols();
+    let m_words = columns.div_ceil(64);
+    let mut data = vec![0u64; shots * m_words];
+    for (shot, row) in array.outer_iter().enumerate() {
+        let base = shot * m_words;
+        for (column, &bit) in row.iter().enumerate() {
+            if bit {
+                data[base + column / 64] |= 1u64 << (column % 64);
+            }
+        }
+    }
+    Ok(PackedShots::try_from_shot_major(data, shots, columns)?)
 }
 
 /// Result of sampling a QEC program.

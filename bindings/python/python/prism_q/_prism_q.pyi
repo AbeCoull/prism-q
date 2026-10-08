@@ -1,7 +1,7 @@
 """Type stubs for the compiled ``prism_q._prism_q`` extension module."""
 
 from collections.abc import Callable, Sequence
-from typing import Any, ClassVar, Optional, Self, TypeAlias, final
+from typing import Any, ClassVar, Literal, Optional, Self, TypeAlias, final
 
 import numpy as np
 import numpy.typing as npt
@@ -815,6 +815,42 @@ class Decoder:
     @property
     def num_observables(self) -> int: ...
     def decode(self, detectors: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]: ...
+    def logical_error_rate(
+        self, detectors: npt.NDArray[np.bool_], observables: npt.NDArray[np.bool_]
+    ) -> float: ...
+
+@final
+class MatchingDecoder:
+    def __new__(cls, model: DetectorErrorModel) -> Self: ...
+    @property
+    def num_detectors(self) -> int: ...
+    @property
+    def num_observables(self) -> int: ...
+    def decode(self, detectors: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]: ...
+    def logical_error_rate(
+        self, detectors: npt.NDArray[np.bool_], observables: npt.NDArray[np.bool_]
+    ) -> float: ...
+
+@final
+class BpOsdDecoder:
+    def __new__(
+        cls,
+        model: DetectorErrorModel,
+        *,
+        max_iterations: int = 30,
+        bp_method: Literal["min_sum", "product_sum"] = "min_sum",
+        min_sum_scaling: float = 0.625,
+        osd_method: Literal["osd0", "cs", "exhaustive"] = "cs",
+        osd_order: int = 7,
+    ) -> Self: ...
+    @property
+    def num_detectors(self) -> int: ...
+    @property
+    def num_observables(self) -> int: ...
+    def decode(self, detectors: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]: ...
+    def logical_error_rate(
+        self, detectors: npt.NDArray[np.bool_], observables: npt.NDArray[np.bool_]
+    ) -> float: ...
 
 @final
 class QecResult:

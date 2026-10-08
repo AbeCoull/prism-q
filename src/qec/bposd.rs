@@ -115,22 +115,22 @@ impl BpOsdDecoder {
     /// mechanism is skipped. A min-sum scaling outside `(0, 1]` or an
     /// exhaustive order above 24 is rejected.
     pub fn with_options(model: &DetectorErrorModel, options: BpOsdOptions) -> Result<Self> {
-        if let BpMethod::MinSum { scaling } = options.bp_method
-            && !(scaling > 0.0 && scaling <= 1.0)
-        {
-            return Err(PrismError::InvalidParameter {
-                message: format!("min-sum scaling {scaling} lies outside (0, 1]"),
-            });
+        if let BpMethod::MinSum { scaling } = options.bp_method {
+            if !(scaling > 0.0 && scaling <= 1.0) {
+                return Err(PrismError::InvalidParameter {
+                    message: format!("min-sum scaling {scaling} lies outside (0, 1]"),
+                });
+            }
         }
-        if let OsdMethod::Exhaustive { order } = options.osd_method
-            && order > MAX_EXHAUSTIVE_ORDER
-        {
-            return Err(PrismError::InvalidParameter {
-                message: format!(
-                    "exhaustive OSD order {order} exceeds {MAX_EXHAUSTIVE_ORDER}; use the \
-                     combination sweep for larger searches"
-                ),
-            });
+        if let OsdMethod::Exhaustive { order } = options.osd_method {
+            if order > MAX_EXHAUSTIVE_ORDER {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "exhaustive OSD order {order} exceeds {MAX_EXHAUSTIVE_ORDER}; use the \
+                         combination sweep for larger searches"
+                    ),
+                });
+            }
         }
 
         let mut columns: Vec<(&[usize], f64, &[usize])> = Vec::new();

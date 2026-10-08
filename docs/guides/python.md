@@ -83,7 +83,8 @@ circuit = (
 | Two qubit | `cx(control, target)`, `cz(q0, q1)`, `swap(q0, q1)`, `rzz(theta, q0, q1)`, `cphase(theta, control, target)` |
 | Multi-qubit rotation | `pauli_rotation(theta, factors)` |
 | Arbitrary unitary | `cu(matrix, control, target)`, `mcu(matrix, controls, target)`, `gate(gate, targets)` |
-| Non-unitary | `measure(qubit, bit)`, `measure_all()`, `barrier(qubits)` |
+| Non-unitary | `measure(qubit, bit)`, `measure_all()`, `measure_in_basis(qubit, axis, bit)`, `measure_pauli_product(factors, bit)`, `reset(qubit)`, `barrier(qubits)` |
+| Classical control | `conditional(condition, gate, targets)`, `guarded(condition, body, else_body=None)` |
 | Parameters | `param(slot)`, `parameters()`, `parameter_links()` |
 
 `pauli_rotation(theta, factors)` appends `exp(-i * theta * P / 2)` for the Pauli
@@ -116,6 +117,71 @@ The `circuits` submodule mirrors the Rust builders documented in
 `single_qubit_rotation`, `clifford_t`, `quantum_volume`, `cz_chain`,
 `phase_estimation`, `independent_bell_pairs`, `independent_random_blocks`, and
 `local_clifford_blocks`. Seeded builders default to seed 42.
+
+### Measuring in other bases
+
+`measure_in_basis(qubit, axis, bit)` rotates `axis` onto Z and measures, recording
+the `+1` eigenvalue as `0`. The qubit is left in the Z eigenstate, not the `axis` one.
+`measure_pauli_product(factors, bit)` measures a multi-qubit Pauli product such as
+`X0 X1` without measuring its factors one by one. The parity collects on one extra
+qubit appended past the register on the first call, so the built circuit is one qubit
+wider; a second call resets that qubit, which takes the circuit off the compiled
+sampling route.
+
+```python
+from prism_q import CircuitBuilder, simulate
+
+bell = CircuitBuilder(2, 2).h(0).cx(0, 1)
+bell.measure_pauli_product([(0, "X"), (1, "X")], 0)
+bell.measure_pauli_product([(0, "Z"), (1, "Z")], 1)
+checked = bell.build()
+print(checked.num_qubits)                              # 3
+print(simulate(checked).seed(1).shots(100).counts())   # {'00': 100}
+```
+
+### Classical control
+
+A `ClassicalCondition` tests measured bits at runtime. `ClassicalCondition.bit(b,
+value=True)` reads one bit, `parity(bits, expected=True)` the XOR of several, and
+`register_equals(offset, size, value)` and `register_not_equals` read `size` bits as an
+integer with bit `offset` least significant. `~condition` is the negation.
+
+`conditional(condition, gate, targets)` applies one gate when the condition holds:
+
+```python
+from prism_q import ClassicalCondition, Gate
+
+teleport = CircuitBuilder(3, 3).ry(0.8, 0).h(1).cx(1, 2).cx(0, 1).h(0)
+teleport.measure(0, 0).measure(1, 1)
+teleport.conditional(ClassicalCondition.bit(1), Gate.x(), [2])
+teleport.conditional(ClassicalCondition.bit(0), Gate.z(), [2])
+teleport.ry(-0.8, 2).measure(2, 2)
+received = simulate(teleport.build()).seed(5).shots(500)
+assert not received.shots[:, 2].any()
+```
+
+`guarded(condition, body, else_body=None)` calls `body` with a fresh `CircuitBuilder` of
+the same width and turns whatever it appends, measurements and resets included, into a
+region that runs only when the condition holds. `else_body` builds a second region for
+the shots where it does not:
+
+```python
+coin = CircuitBuilder(2, 2).h(0).measure(0, 0)
+coin.guarded(
+    ClassicalCondition.bit(0),
+    lambda then: then.x(1),
+    lambda otherwise: otherwise.z(1),
+)
+coin.measure(1, 1)
+print(simulate(coin.build()).seed(3).shots(1000).counts())   # {'00': 507, '11': 493}
+```
+
+The else region reads the condition again after the first has run, so a `body` that
+measures into a bit the condition reads cannot take an `else_body` and raises
+`PrismError`. A body cannot widen the circuit, which rules out `measure_pauli_product`
+and `measure_all` inside one. Regions nest. A noise model carrying quantum events
+rejects a circuit that holds a region, because its event slots index top-level
+instructions; readout error alone is accepted.
 
 ## Running a simulation
 

@@ -55,6 +55,8 @@ qubit. This is reversed relative to Qiskit. For example, the state where only
 ## Features
 
 - Fluent `CircuitBuilder` and OpenQASM 3.0 parsing.
+- Classical control on measured bits (`ClassicalCondition`, `guarded` with an else
+  branch) and measurement in a Pauli basis or of a Pauli product.
 - Reusable circuit generators (`prism_q.circuits`): QFT, GHZ, QAOA,
   hardware-efficient ansatz, quantum volume, and more.
 - Backend selection via `BackendKind` (statevector, stabilizer, sparse, MPS,

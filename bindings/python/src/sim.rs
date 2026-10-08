@@ -923,7 +923,7 @@ impl PyPauliObservable {
     }
 }
 
-fn parse_axis(axis: &str) -> PyPrismResult<PauliAxis> {
+pub(crate) fn parse_axis(axis: &str) -> PyPrismResult<PauliAxis> {
     match axis.to_ascii_uppercase().as_str() {
         "X" => Ok(PauliAxis::X),
         "Y" => Ok(PauliAxis::Y),

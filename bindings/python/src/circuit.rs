@@ -1,14 +1,16 @@
 //! Circuit construction, OpenQASM parsing, and reusable circuit builders.
 
 use prism_q::circuit::openqasm;
-use prism_q::{Circuit, CircuitBuilder, Gate, Instruction, PauliTerm, SaveSpec, circuits};
+use prism_q::{
+    Circuit, CircuitBuilder, ClassicalCondition, Gate, Instruction, PauliTerm, SaveSpec, circuits,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 use crate::error::{PyPrismResult, invalid};
 use crate::gate::PyGate;
 use crate::parameter::PyParameters;
-use crate::sim::parse_pauli_string;
+use crate::sim::{parse_axis, parse_pauli_string};
 
 /// A quantum circuit. Construct via [`CircuitBuilder`], [`parse_qasm`], or one
 /// of the reusable circuit generators under `prism_q.circuits`.
@@ -93,6 +95,208 @@ fn check_mcu_targets(num_qubits: usize, controls: &[usize], target: usize) -> Py
     }
     check_qubit(num_qubits, target, "target")?;
     Ok(())
+}
+
+/// A runtime test on measured classical bits that guards a gate or region.
+#[pyclass(
+    name = "ClassicalCondition",
+    module = "prism_q",
+    frozen,
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct PyClassicalCondition(pub ClassicalCondition);
+
+/// Classical bits `condition` reads.
+pub(crate) fn condition_bits(condition: &ClassicalCondition) -> PyPrismResult<Vec<usize>> {
+    Ok(match condition {
+        ClassicalCondition::BitIsOne(bit) | ClassicalCondition::BitIsZero(bit) => vec![*bit],
+        ClassicalCondition::Parity { bits, .. } => bits.to_vec(),
+        ClassicalCondition::RegisterEquals { offset, size, .. }
+        | ClassicalCondition::RegisterNotEquals { offset, size, .. } => {
+            (*offset..offset + size).collect()
+        }
+        other => {
+            return Err(invalid(format!(
+                "condition {other:?} is newer than this binding"
+            )));
+        }
+    })
+}
+
+fn check_condition(num_bits: usize, condition: &ClassicalCondition) -> PyPrismResult<()> {
+    for bit in condition_bits(condition)? {
+        check_classical_bit(num_bits, bit)?;
+    }
+    Ok(())
+}
+
+fn check_register(size: usize, value: u64) -> PyPrismResult<()> {
+    if size == 0 || size > 64 {
+        return Err(invalid(format!(
+            "register conditions span 1 to 64 bits, got {size}"
+        )));
+    }
+    if size < 64 && value >> size != 0 {
+        return Err(invalid(format!(
+            "value {value} does not fit in a {size}-bit register"
+        )));
+    }
+    Ok(())
+}
+
+#[pymethods]
+impl PyClassicalCondition {
+    /// Holds when classical bit `bit` reads `value`.
+    #[staticmethod]
+    #[pyo3(signature = (bit, value = true))]
+    fn bit(bit: usize, value: bool) -> Self {
+        Self(if value {
+            ClassicalCondition::BitIsOne(bit)
+        } else {
+            ClassicalCondition::BitIsZero(bit)
+        })
+    }
+
+    /// Holds when the XOR of `bits` equals `expected`.
+    #[staticmethod]
+    #[pyo3(signature = (bits, expected = true))]
+    fn parity(bits: Vec<usize>, expected: bool) -> PyPrismResult<Self> {
+        if bits.is_empty() {
+            return Err(invalid("parity condition needs at least one bit"));
+        }
+        Ok(Self(ClassicalCondition::Parity {
+            bits: bits.into_boxed_slice(),
+            expected,
+        }))
+    }
+
+    /// Holds when bits `offset .. offset + size`, read with `offset` as the
+    /// least significant bit, equal `value`.
+    #[staticmethod]
+    fn register_equals(offset: usize, size: usize, value: u64) -> PyPrismResult<Self> {
+        check_register(size, value)?;
+        Ok(Self(ClassicalCondition::RegisterEquals {
+            offset,
+            size,
+            value,
+        }))
+    }
+
+    /// The negation of `register_equals` over the same bits.
+    #[staticmethod]
+    fn register_not_equals(offset: usize, size: usize, value: u64) -> PyPrismResult<Self> {
+        check_register(size, value)?;
+        Ok(Self(ClassicalCondition::RegisterNotEquals {
+            offset,
+            size,
+            value,
+        }))
+    }
+
+    /// The condition that holds exactly when this one does not.
+    fn negate(&self) -> Self {
+        Self(self.0.negate())
+    }
+
+    fn __invert__(&self) -> Self {
+        self.negate()
+    }
+
+    /// Classical bits the condition reads.
+    #[getter]
+    fn bits(&self) -> PyPrismResult<Vec<usize>> {
+        condition_bits(&self.0)
+    }
+
+    /// Evaluate against a classical record, bit `i` at index `i`.
+    fn evaluate(&self, classical_bits: Vec<bool>) -> PyPrismResult<bool> {
+        for bit in condition_bits(&self.0)? {
+            check_classical_bit(classical_bits.len(), bit)?;
+        }
+        Ok(self.0.evaluate(&classical_bits))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ClassicalCondition({:?})", self.0)
+    }
+}
+
+/// Replay `instructions` onto `builder`, which has no generic append.
+fn replay(builder: &mut CircuitBuilder, instructions: Vec<Instruction>) -> PyPrismResult<()> {
+    for inst in instructions {
+        match inst {
+            Instruction::Gate { gate, targets } => {
+                builder.gate(gate, &targets);
+            }
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => {
+                builder.measure(qubit, classical_bit);
+            }
+            Instruction::Reset { qubit } => {
+                builder.reset(qubit);
+            }
+            Instruction::Barrier { qubits } => {
+                builder.barrier(&qubits);
+            }
+            Instruction::Conditional {
+                condition,
+                gate,
+                targets,
+            } => {
+                builder.conditional(condition, gate, &targets);
+            }
+            Instruction::Region(region) => {
+                let body = region.body().to_vec();
+                let mut nested = Ok(());
+                builder.guarded(region.condition().clone(), |inner| {
+                    nested = replay(inner, body);
+                });
+                nested?;
+            }
+            Instruction::Save { label, .. } => {
+                return Err(invalid(format!(
+                    "save point `{label}` cannot sit inside a guarded region"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Call `body` on a fresh builder of the given width and take what it appended.
+fn region_body(
+    body: &Bound<'_, PyAny>,
+    num_qubits: usize,
+    num_bits: usize,
+) -> PyResult<Vec<Instruction>> {
+    let builder = Bound::new(
+        body.py(),
+        PyCircuitBuilder {
+            inner: CircuitBuilder::new_with_classical(num_qubits, num_bits),
+        },
+    )?;
+    body.call1((builder.clone(),))?;
+    let builder = builder.borrow();
+    let circuit = builder.inner.circuit();
+    if circuit.num_qubits != num_qubits || circuit.num_classical_bits != num_bits {
+        return Err(invalid(
+            "a guarded body cannot widen the circuit (measure_pauli_product or measure_all)",
+        )
+        .into());
+    }
+    Ok(circuit.instructions.clone())
+}
+
+/// True when a measurement in `instructions` writes one of `bits`.
+fn writes_any(instructions: &[Instruction], bits: &[usize]) -> bool {
+    instructions.iter().any(|inst| match inst {
+        Instruction::Measure { classical_bit, .. } => bits.contains(classical_bit),
+        Instruction::Region(region) => writes_any(region.body(), bits),
+        _ => false,
+    })
 }
 
 /// What a save point records.
@@ -479,6 +683,111 @@ impl PyCircuitBuilder {
     fn measure_all(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf.inner.measure_all();
         slf
+    }
+
+    /// Measure `qubit` along `axis` (`"X"`, `"Y"` or `"Z"`) into
+    /// `classical_bit`, `+1` reading False. The qubit is left in the Z
+    /// eigenstate, not the `axis` one.
+    fn measure_in_basis<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        qubit: usize,
+        axis: &str,
+        classical_bit: usize,
+    ) -> PyPrismResult<PyRefMut<'py, Self>> {
+        let circuit = slf.inner.circuit();
+        check_qubit(circuit.num_qubits, qubit, "qubit")?;
+        check_classical_bit(circuit.num_classical_bits, classical_bit)?;
+        let axis = parse_axis(axis)?;
+        slf.inner.measure_in_basis(qubit, axis, classical_bit);
+        Ok(slf)
+    }
+
+    /// Measure the Pauli product over `(qubit, axis)` factors into
+    /// `classical_bit`, `+1` reading False, leaving the named qubits in the
+    /// post-measurement eigenstate.
+    ///
+    /// The parity collects on one extra qubit appended past the register on the
+    /// first call, so the built circuit is one qubit wider. Later calls reset
+    /// that qubit, which takes the circuit off the compiled sampling route.
+    fn measure_pauli_product(
+        mut slf: PyRefMut<'_, Self>,
+        factors: Vec<(usize, String)>,
+        classical_bit: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let circuit = slf.inner.circuit();
+        let terms = check_pauli_factors(circuit.num_qubits, factors)?;
+        check_classical_bit(circuit.num_classical_bits, classical_bit)?;
+        slf.inner.measure_pauli_product(&terms, classical_bit);
+        Ok(slf)
+    }
+
+    fn reset(mut slf: PyRefMut<'_, Self>, qubit: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
+        check_qubit(slf.inner.circuit().num_qubits, qubit, "qubit")?;
+        slf.inner.reset(qubit);
+        Ok(slf)
+    }
+
+    /// Append `gate` on `targets`, applied only when `condition` holds.
+    fn conditional<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        condition: PyClassicalCondition,
+        gate: &PyGate,
+        targets: Vec<usize>,
+    ) -> PyPrismResult<PyRefMut<'py, Self>> {
+        let circuit = slf.inner.circuit();
+        check_targets(circuit.num_qubits, gate.inner(), &targets)?;
+        check_condition(circuit.num_classical_bits, &condition.0)?;
+        slf.inner
+            .conditional(condition.0, gate.inner().clone(), &targets);
+        Ok(slf)
+    }
+
+    /// Append a region that runs only when `condition` holds, and with
+    /// `else_body` one that runs only when it does not.
+    ///
+    /// Each body is called with a fresh `CircuitBuilder` of the same width,
+    /// whose indices are this circuit's; whatever it appends, measurement and
+    /// reset included, becomes the region. An `else_body` needs a `body` that
+    /// does not measure into a bit the condition reads.
+    #[pyo3(signature = (condition, body, else_body = None))]
+    fn guarded<'py>(
+        slf: Bound<'py, Self>,
+        condition: PyClassicalCondition,
+        body: Bound<'py, PyAny>,
+        else_body: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let (num_qubits, num_bits) = {
+            let builder = slf.borrow();
+            let circuit = builder.inner.circuit();
+            (circuit.num_qubits, circuit.num_classical_bits)
+        };
+        check_condition(num_bits, &condition.0)?;
+        let then_body = region_body(&body, num_qubits, num_bits)?;
+        let else_body = else_body
+            .map(|body| region_body(&body, num_qubits, num_bits))
+            .transpose()?;
+        if else_body.is_some() && writes_any(&then_body, &condition_bits(&condition.0)?) {
+            return Err(invalid(
+                "an else branch needs a body that does not measure into a bit the condition reads",
+            )
+            .into());
+        }
+        {
+            let mut builder = slf.borrow_mut();
+            let mut replayed = Ok(());
+            builder.inner.guarded(condition.0.clone(), |inner| {
+                replayed = replay(inner, then_body);
+            });
+            replayed?;
+            if let Some(else_body) = else_body {
+                let mut replayed = Ok(());
+                builder.inner.guarded(condition.0.negate(), |inner| {
+                    replayed = replay(inner, else_body);
+                });
+                replayed?;
+            }
+        }
+        Ok(slf)
     }
 
     fn barrier(

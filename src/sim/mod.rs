@@ -471,6 +471,13 @@ impl<'c> Simulate<'c, Seeded> {
         })
     }
 
+    /// [`reject_approximate_route`] for the shot terminals, which without a noise
+    /// model or a start state can sample through the stabilizer-rank expansion.
+    fn reject_approximate_shot_route(&self) -> Result<()> {
+        let sampling = self.noise_model.is_none() && self.initial_state.is_none();
+        reject_predicted_route(approximate_route_name(&self.kind, self.circuit, sampling))
+    }
+
     /// Execute `num_shots` times, collecting per-shot classical bits. Accepts
     /// an attached noise model.
     #[inline]
@@ -479,7 +486,7 @@ impl<'c> Simulate<'c, Seeded> {
         let seed = self.seed_value();
         let require_exact = self.require_exact;
         if require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            self.reject_approximate_shot_route()?;
         }
         let result = if let Some(noise_model) = self.noise_model {
             self.require_no_initial_state_under_noise("shot sampling")?;
@@ -504,7 +511,7 @@ impl<'c> Simulate<'c, Seeded> {
         self.reject_saves("sample_counts")?;
         let seed = self.seed_value();
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            self.reject_approximate_shot_route()?;
         }
         let (counts, metadata) = if let Some(noise_model) = self.noise_model {
             self.require_no_initial_state_under_noise("count sampling")?;
@@ -1527,11 +1534,15 @@ fn ensure_exact_result(require_exact: bool, metadata: &RunMetadata) -> Result<()
     Ok(())
 }
 
-/// Reject an approximate route for a caller that opted out of one. The engine
-/// is named in the error, since a caller who asked for exactness wants to know
-/// which one would have answered.
+/// Reject an approximate route for a caller that opted out of one.
 fn reject_approximate_route(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
-    match approximate_route_name(kind, circuit) {
+    reject_predicted_route(approximate_route_name(kind, circuit, false))
+}
+
+/// The engine is named in the error, since a caller who asked for exactness
+/// wants to know which one would have answered.
+fn reject_predicted_route(engine: Option<&'static str>) -> Result<()> {
+    match engine {
         Some(engine) => Err(PrismError::IncompatibleBackend {
             backend: engine.into(),
             reason: "require_exact rejects a route that can discard state weight; drop the \
@@ -2696,6 +2707,27 @@ fn auto_prefers_clifford_register(circuit: &Circuit) -> bool {
         })
 }
 
+/// Whether terminal shots of a circuit wider than [`MAX_STABILIZER_RANK_QUBITS`]
+/// go to the stabilizer-rank expansion once the statevector has declined them.
+fn auto_samples_wide_by_stabilizer_rank(circuit: &Circuit) -> bool {
+    circuit.has_terminal_measurements_only()
+        && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
+        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
+}
+
+/// Whether `Auto` shots of `circuit`, without noise or a start state, run on the
+/// exact stabilizer-rank expansion: the register and wide-circuit tests in
+/// [`prepare_shot_source`], or the per-shot test in [`run_shots_per_shot`].
+fn auto_samples_by_stabilizer_rank(circuit: &Circuit) -> bool {
+    let folded = circuit.fold_static_guards();
+    let circuit = folded.as_ref();
+    if circuit.has_terminal_measurements_only() {
+        auto_prefers_clifford_register(circuit) || auto_samples_wide_by_stabilizer_rank(circuit)
+    } else {
+        auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
+    }
+}
+
 /// Select and prepare the sampling source for `circuit`.
 ///
 /// Preparation is real work: compiling a sampler, building and running a
@@ -2739,11 +2771,7 @@ fn prepare_shot_source(
     if matches!(kind, BackendKind::StabilizerRank) && circuit.has_t_gates() {
         return Ok(ShotSource::StabilizerRank);
     }
-    if kind.is_auto()
-        && circuit.has_terminal_measurements_only()
-        && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
-        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
-    {
+    if kind.is_auto() && auto_samples_wide_by_stabilizer_rank(circuit) {
         return Ok(ShotSource::StabilizerRank);
     }
 

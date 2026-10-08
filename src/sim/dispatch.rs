@@ -918,12 +918,15 @@ pub(super) enum ExecutionPlan {
 ///
 /// Resolved from the circuit rather than read off a finished run, so
 /// [`Simulate::require_exact`] rejects before paying for the state it would
-/// throw away.
+/// throw away. `sampling` marks a shot terminal with no noise model or start
+/// state, where `Auto` takes the exact stabilizer-rank expansion for a
+/// Clifford+T circuit before consulting the family tree.
 ///
 /// [`Simulate::require_exact`]: crate::sim::Simulate::require_exact
 pub(super) fn approximate_route_name(
     kind: &BackendKind,
     circuit: &Circuit,
+    sampling: bool,
 ) -> Option<&'static str> {
     // Diagonal and permutation gates keep the all-zero start on a single basis
     // state, so an MPS holds it at bond 1 and has nothing to truncate. A start
@@ -952,6 +955,9 @@ pub(super) fn approximate_route_name(
         _ => {}
     }
     if !kind.is_auto() {
+        return None;
+    }
+    if sampling && crate::sim::auto_samples_by_stabilizer_rank(circuit) {
         return None;
     }
     let (_, has_partial_independence) = crate::sim::analyze_independence(circuit);

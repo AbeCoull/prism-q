@@ -510,3 +510,94 @@ fn require_exact_accepts_a_zero_threshold_pauli_route() {
         .unwrap();
     assert!(gated.metadata.is_exact());
 }
+
+/// Every qubit superposed before a CX ladder, so no sparse map holds it and the
+/// family tree puts it on an MPS; `t_count` T gates follow, then `measure_all`.
+fn wide_clifford_t_chain(num_qubits: usize, t_count: usize) -> Circuit {
+    let mut circuit = Circuit::new(num_qubits, 0);
+    for q in 0..num_qubits {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 1..num_qubits {
+        circuit.add_gate(Gate::Cx, &[q - 1, q]);
+    }
+    for q in 0..t_count {
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    circuit.measure_all();
+    circuit
+}
+
+// The shot terminals sample a Clifford+T circuit with few T gates through the
+// stabilizer-rank expansion before the family tree, so `require_exact` has to
+// predict that route rather than the MPS a probability query takes.
+#[test]
+fn require_exact_predicts_the_stabilizer_rank_shot_route() {
+    let circuit = wide_clifford_t_chain(60, 8);
+    let unrestricted = simulate(&circuit).seed(SEED).shots(32).unwrap();
+    assert_eq!(
+        unrestricted.metadata.backend,
+        ResolvedBackend::StabilizerRank
+    );
+    assert!(unrestricted.metadata.is_exact());
+
+    let shots = simulate(&circuit)
+        .seed(SEED)
+        .require_exact()
+        .shots(32)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::StabilizerRank);
+    let counts = simulate(&circuit)
+        .seed(SEED)
+        .require_exact()
+        .sample_counts(32)
+        .unwrap();
+    assert_eq!(counts.metadata.backend, ResolvedBackend::StabilizerRank);
+
+    let mut mid_circuit = Circuit::new(60, 61);
+    mid_circuit.add_gate(Gate::H, &[0]);
+    mid_circuit.add_measure(0, 60);
+    mid_circuit
+        .instructions
+        .extend(wide_clifford_t_chain(60, 1).instructions);
+    let shots = simulate(&mid_circuit)
+        .seed(SEED)
+        .require_exact()
+        .shots(2)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::StabilizerRank);
+
+    let err = simulate(&circuit)
+        .seed(SEED)
+        .require_exact()
+        .marginals()
+        .unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps"),
+        "{err:?}"
+    );
+}
+
+// Past the shot T ceiling the sampler falls through to the family tree, and a noise
+// model sends trajectories there too, so both stay rejected.
+#[test]
+fn require_exact_rejects_shots_the_family_tree_takes() {
+    let is_mps = |err: &PrismError| matches!(err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps");
+    let deep = wide_clifford_t_chain(60, 45);
+    let err = simulate(&deep)
+        .seed(SEED)
+        .require_exact()
+        .shots(8)
+        .unwrap_err();
+    assert!(is_mps(&err), "{err:?}");
+
+    let circuit = wide_clifford_t_chain(60, 8);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let err = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .require_exact()
+        .sample_counts(8)
+        .unwrap_err();
+    assert!(is_mps(&err), "{err:?}");
+}

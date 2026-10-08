@@ -23,7 +23,10 @@ use circuit::{PyCircuit, PyCircuitBuilder, PyClassicalCondition, PySaveSpec};
 use error::PrismError;
 use gate::PyGate;
 use gpu::{PyGpuContext, PyGpuInfo};
-use noise::{PyDeviceCalibration, PyGateFilter, PyNoiseBuilder, PyNoiseChannel, PyNoiseModel};
+use noise::{
+    PyDeviceCalibration, PyErrorChainComplex, PyGateFilter, PyNoiseBuilder, PyNoiseChannel,
+    PyNoiseModel,
+};
 use parameter::{PyParameters, PyPreparedCircuit};
 use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
@@ -57,6 +60,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNoiseBuilder>()?;
     m.add_class::<PyNoiseModel>()?;
     m.add_class::<PyDeviceCalibration>()?;
+    m.add_class::<PyErrorChainComplex>()?;
     m.add_class::<PySimulation>()?;
     m.add_class::<PyRunOutcome>()?;
     m.add_class::<PyShotsResult>()?;
@@ -87,6 +91,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sim::run_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_batch, m)?)?;
     m.add_function(wrap_pyfunction!(gpu::gpu_info, m)?)?;
+    m.add_function(wrap_pyfunction!(noise::noisy_marginals_analytical, m)?)?;
 
     circuit::register_circuits(m)?;
 

@@ -1,8 +1,12 @@
 //! Noise channels, model construction rules, and device calibration tables.
 
 use num_complex::Complex64;
+use numpy::PyArray1;
 use prism_q::sim::calibration::presets;
-use prism_q::{DeviceCalibration, GateFilter, NoiseBuilder, NoiseChannel, NoiseEvent, NoiseModel};
+use prism_q::{
+    DeviceCalibration, ErrorChainComplex, GateFilter, NoiseBuilder, NoiseChannel, NoiseEvent,
+    NoiseModel,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use smallvec::SmallVec;
@@ -10,6 +14,7 @@ use smallvec::SmallVec;
 use crate::circuit::PyCircuit;
 use crate::error::{PyPrismResult, invalid};
 use crate::gate::{extract_2x2, extract_4x4};
+use crate::numpy_util::f64_array;
 
 /// A one- or two-qubit noise channel, built by the static methods.
 #[pyclass(name = "NoiseChannel", module = "prism_q", frozen, from_py_object)]
@@ -387,6 +392,81 @@ impl PyDeviceCalibration {
     fn __repr__(&self) -> String {
         format!("DeviceCalibration(num_qubits={})", self.0.num_qubits())
     }
+}
+
+/// The GF(2) chain complex of a noisy Clifford circuit: which noise locations
+/// flip which measurement records, and which error classes no measurement
+/// detects.
+#[pyclass(name = "ErrorChainComplex", module = "prism_q", frozen)]
+pub struct PyErrorChainComplex {
+    inner: ErrorChainComplex,
+    num_measurements: usize,
+}
+
+#[pymethods]
+impl PyErrorChainComplex {
+    #[new]
+    fn new(circuit: &PyCircuit, noise: &PyNoiseModel) -> PyPrismResult<Self> {
+        let circuit = circuit.inner();
+        noise.inner.validate_for(circuit)?;
+        Ok(Self {
+            inner: ErrorChainComplex::build(circuit, &noise.inner, 0)?,
+            num_measurements: circuit.measurement_map().len(),
+        })
+    }
+
+    /// Stabilizer generators no measurement detects.
+    #[getter]
+    fn boundary_dim(&self) -> usize {
+        self.inner.boundary_dim()
+    }
+
+    /// Independent logical error classes.
+    #[getter]
+    fn homology_dim(&self) -> usize {
+        self.inner.homology_dim()
+    }
+
+    /// Exact noisy probability that each measurement record reads 1, from the
+    /// noiseless ones, with no sampling.
+    fn noisy_marginals<'py>(
+        &self,
+        py: Python<'py>,
+        noiseless: Vec<f64>,
+    ) -> PyPrismResult<Bound<'py, PyArray1<f64>>> {
+        if noiseless.len() != self.num_measurements {
+            return Err(invalid(format!(
+                "expected {} noiseless marginals, one per measurement record, got {}",
+                self.num_measurements,
+                noiseless.len()
+            )));
+        }
+        Ok(f64_array(py, self.inner.noisy_marginals(&noiseless)))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ErrorChainComplex(boundary_dim={}, homology_dim={})",
+            self.inner.boundary_dim(),
+            self.inner.homology_dim()
+        )
+    }
+}
+
+/// Exact per-classical-bit probability of reading 1 under `noise`, readout
+/// error included, computed from the chain complex with no sampling. The
+/// circuit must be Clifford with terminal measurements and `noise` a Pauli
+/// model; bits no measurement writes read 0.5.
+#[pyfunction]
+pub fn noisy_marginals_analytical<'py>(
+    py: Python<'py>,
+    circuit: &PyCircuit,
+    noise: &PyNoiseModel,
+) -> PyPrismResult<Bound<'py, PyArray1<f64>>> {
+    let circuit = circuit.inner();
+    noise.inner.validate_for(circuit)?;
+    let marginals = py.detach(|| prism_q::noisy_marginals_analytical(circuit, &noise.inner, 0))?;
+    Ok(f64_array(py, marginals))
 }
 
 impl PyNoiseModel {

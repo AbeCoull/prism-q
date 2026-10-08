@@ -882,6 +882,23 @@ indices, the expectation of the Z-type Pauli product those records measure, and
 measurements and no reset or classical condition, and other input raises `PrismError`
 naming the reason.
 
+```python
+from prism_q import ErrorChainComplex, NoiseModel, noisy_marginals_analytical
+
+model = NoiseModel.uniform_depolarizing(ghz, 0.01)
+noisy = CompiledSampler(ghz, seed=7, noise=model)
+estimate = noisy.marginals(10**6)
+exact = noisy_marginals_analytical(ghz, model)
+logical_classes = ErrorChainComplex(ghz, model).homology_dim
+```
+
+`noisy_marginals_analytical(circuit, model)` returns the exact probability that each
+classical bit reads 1 under Pauli noise, with no sampling and no rank limit.
+`ErrorChainComplex(circuit, model)` exposes the GF(2) chain complex behind it:
+`homology_dim` counts the independent logical error classes, `boundary_dim` the
+stabilizer generators no measurement detects, and `noisy_marginals(noiseless)` maps
+noiseless record marginals to noisy ones.
+
 ## Parameter sweeps
 
 A variational loop rebinds angles while the gate sequence stays fixed.

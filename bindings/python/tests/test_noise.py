@@ -157,3 +157,27 @@ def test_two_qubit_kraus_channel_shape_and_completeness():
     model.add_event(0, NoiseChannel.custom_2q([0.5 * np.eye(4)]), [0, 1])
     with pytest.raises(prism_q.PrismError):
         model.validate()
+
+
+def test_chain_complex_and_analytic_marginals_match_sampling():
+    circuit = CircuitBuilder(2, 2).x(0).cx(0, 1).measure_all().build()
+    model = NoiseModel.uniform_depolarizing(circuit, 0.03)
+    analytic = prism_q.noisy_marginals_analytical(circuit, model)
+    sampled = prism_q.CompiledSampler(circuit, seed=5, noise=model).marginals(200_000)
+    np.testing.assert_allclose(analytic, sampled, atol=5e-3)
+
+    complex_ = prism_q.ErrorChainComplex(circuit, model)
+    np.testing.assert_allclose(complex_.noisy_marginals([1.0, 1.0]), analytic, atol=1e-12)
+    assert complex_.boundary_dim >= 0 and complex_.homology_dim >= 0
+    with pytest.raises(prism_q.PrismError):
+        complex_.noisy_marginals([1.0])
+
+
+def test_chain_complex_rejects_a_model_for_another_circuit():
+    circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
+    other = CircuitBuilder(1, 1).h(0).build()
+    model = NoiseModel.uniform_depolarizing(other, 0.01)
+    with pytest.raises(prism_q.PrismError):
+        prism_q.ErrorChainComplex(circuit, model)
+    with pytest.raises(prism_q.PrismError):
+        prism_q.noisy_marginals_analytical(circuit, model)

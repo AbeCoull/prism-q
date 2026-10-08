@@ -365,12 +365,28 @@ directly, with no file in between.
 
 ### Decoding
 
-`UnionFindDecoder` keeps decoding in the crate, so sampling, model derivation,
-decomposition, decoding, and the logical error rate need no external tool. The decoder
-is union-find with peeling (Delfosse and Nickerson, arXiv:1709.06218), chosen for its
-almost-linear decode cost. A minimum-weight perfect matching decoder could sit behind
-the same model input as a second family if accuracy on hard workloads justifies its
-cost.
+Three decoders keep decoding in the crate, so sampling, model derivation,
+decomposition, decoding, and the logical error rate need no external tool:
+
+| Decoder | Model | Correction |
+| --- | --- | --- |
+| `UnionFindDecoder` | graphlike | union-find with peeling, almost-linear cost |
+| `MatchingDecoder` | graphlike | exact minimum-weight perfect matching |
+| `BpOsdDecoder` | any, hypergraph included | belief propagation, then ordered statistics |
+
+All three compile from a `DetectorErrorModel` and share one batch driver:
+`decode_packed` takes a `PackedShots` of detector samples in either layout and
+returns shot-major predicted observable flips, and `logical_error_rate` decodes and
+counts the shots whose prediction differs from the sampled observables in any
+observable. The driver transposes measurement-major input once, decodes each shot
+into a zeroed output row with scratch reused across shots, and under the `parallel`
+feature splits large batches into Rayon chunks with one scratch per chunk. A shot the
+model cannot explain rejects the batch with an error naming the first such shot.
+
+#### Union-find
+
+The union-find decoder is weighted cluster growth with peeling (Delfosse and Nickerson,
+arXiv:1709.06218).
 
 `UnionFindDecoder::from_model` compiles a graphlike model: detectors become
 vertices, a two-detector mechanism an internal edge, a one-detector mechanism
@@ -406,8 +422,134 @@ union-find failure rate alongside the exact ML rate and assert
 pin the analytic rate at 1e-12, and hold fixed-seed golden decode counts. On
 repetition memory at p=0.02 (20k shots, seed 42, 3 rounds) the decoded rate
 falls from distance 3 to distance 5 and both sit below the physical rate.
-Python exposes the same surface as `Decoder(model)` with
-`decode(detectors) -> (shots, num_observables)` over numpy bool arrays.
+
+#### Minimum-weight perfect matching
+
+`MatchingDecoder::from_model` builds the union-find decoding graph (same edge
+dedup, same `ln((1-p)/p)` weights clamped at zero) and quantizes every weight to an
+even integer, `2 * round(w / w_max * 2^23)`. The matching is exact for the quantized
+weights: each shot's correction is a minimum-weight edge set whose boundary is the
+shot's defects, where the open boundary absorbs any number of chain ends. That is a
+minimum-weight perfect matching on the defects in which any defect may match the
+boundary instead. Construction also runs one multi-source Dijkstra from every
+boundary edge, which gives each detector its exact boundary distance `b(v)` and the
+observable mask of one shortest path to the boundary.
+
+Per shot the decoder runs Edmonds' primal-dual blossom algorithm in the cut
+formulation, organized like sparse blossom (Higgott and Gidney, arXiv:2303.15933):
+every unmatched defect roots an alternating tree, and one global clock drives every
+dual at once. S nodes grow at rate 1, T nodes shrink at rate 1, and nodes outside a
+tree hold. A defect's radius is the sum of the duals of every node containing it.
+Four event kinds advance the search:
+
+- A pair between two S nodes becomes tight: a blossom forms when both sit in one
+  tree, and an augmentation joins the two trees otherwise.
+- A pair between an S node and an out-of-tree node becomes tight: the tree grows
+  through that node and its mate, or augments when its mate is the boundary.
+- An S defect's radius reaches `b(v)`: the tree augments to the boundary.
+- A T blossom's dual reaches zero: the blossom expands, the even arc of its cycle
+  staying in the tree and the rest leaving as matched pairs.
+
+Sparse blossom discovers pairs through regions that own detector vertices. Here each
+defect instead grows its own Dijkstra ball, settled out to its current radius:
+whenever a radius reaches the next tentative distance in its heap, a frontier event
+settles every vertex at or below it before any other event at that time. Balls may
+overlap, so a shrinking T node needs no undo on the graph. When a ball settles a
+vertex it records a candidate length for every other ball met at that vertex or
+across one edge from it, keeping the shortest. If `d(i, j)` is at most the sum of
+the two settled radii, the candidate equals `d(i, j)`: the last vertex of a shortest
+path inside ball `i` and the next one, which lies strictly inside ball `j`, are
+joined by a path edge that the later settle examined. A pair turns tight only when
+the radii reach its length, and radii never exceed settled radii, so every tight
+pair carries its exact distance, and a pair not yet discovered still has positive
+slack.
+
+The result is optimal by LP duality. At termination every defect is matched to a
+defect or to the boundary along tight edges, and a blossom dual is positive only on
+a blossom with exactly one matched edge leaving it, so the matching's cost equals
+the dual objective. Every boundary-aware matching satisfies the odd-set constraints
+(an odd set of defects has a member matched outside it), so the dual bounds every
+matching from below.
+
+Arithmetic is exact `i64`. With even weights, every defect in a tree has a radius of
+the same parity as the clock at every event, so a pair between two growing nodes
+has even slack and every event falls on an integer time. Tree and match edges are
+stored as pair ids and resolved to top-level nodes on use, so forming or expanding a
+blossom rewires nothing outside it, and the matching inside blossoms is resolved
+once at the end by descending from each external match edge. A matched pair's
+observable mask is the XOR of the edge masks along both ball predecessor chains and
+the meeting edge.
+
+Per shot with `k` defects, Dijkstra work is `O(B log B)` over the `B` vertex
+entries the balls settle, and the matcher performs at most `k` augmentations, each
+rescheduling the discovered pairs of the nodes it touches: `O(k^2 P log P)` worst
+case over `P` discovered pairs. At low defect density balls stop at the first
+collision or at the boundary, so the work stays close to linear in `k`. Vertex
+slots are stamped rather than cleared and every pool keeps its capacity, so
+decoding allocates nothing per shot after warm-up.
+
+Validation compares the matched weight with brute force: on 400 random graphs of up
+to 8 detectors and 14 edges, every syndrome decodes to the minimum over all edge
+subsets and to an observable mask some minimum subset reaches; on 60 random graphs
+of 20 to 48 detectors, syndromes of up to 12 defects decode to the metric-closure
+optimum. On the enumerable distance-3 models the exact rates satisfy
+`rate_ML <= rate_MWPM <= rate_UF`. On shared fixed-seed samples matching never
+fails more often than union-find (repetition memory at distances 3, 5, 7 and
+rotated surface memory at distances 3 and 5), and the repetition rate at p = 0.05
+falls from distance 3 through 7.
+
+#### BP+OSD
+
+`BpOsdDecoder` takes any model. Each mechanism flipping at least one detector is a
+column of the check matrix (detectors are rows) with prior log-likelihood ratio
+`ln((1-p)/p)`; mechanisms sharing one detector set collapse to the most probable,
+as in the graph decoders. Belief propagation runs a flooding schedule on the Tanner
+graph with the product-sum rule (leave-one-out `tanh` products built forward and
+backward) or scaled min-sum (default scaling 0.625), for at most 30 iterations by
+default, and stops as soon as its hard decision reproduces the syndrome. A
+converged decision can still carry a zero-syndrome cycle on top of a lighter
+solution: on the color code below, the first min-sum iteration already satisfies
+the syndrome of a single center-qubit fault with that fault plus a weight-3
+logical. The decoder therefore reruns the OSD search restricted to the decision's
+support and the checks it touches, and keeps the lighter of the two. That pass
+costs `O(k * r)` for a decision of `k` columns touching `r` checks.
+
+When it does not, ordered-statistics decoding (Panteleev and Kalachev,
+arXiv:1904.02703; Roffe et al., arXiv:2005.07016) sorts the columns by posterior
+log-likelihood, most likely error first, and reduces the check matrix in that order
+to reduced row-echelon form over GF(2), with the syndrome as right-hand side and
+the matrix rank precomputed so elimination stops once it is reached. A nonzero
+right-hand side below the rank rejects the batch. Every candidate fixes the free
+(non-pivot) bits and reads the pivot bits from the reduced rows; the candidate of
+least prior weight wins. `OsdMethod::Zero` keeps the all-zero free pattern,
+`CombinationSweep { order }` adds every single free bit and every pair among the
+first `order` free bits (default order 7), and `Exhaustive { order }` walks all
+`2^order` patterns over the first `order` free bits in Gray-code order, which is
+exact maximum-likelihood error decoding once `order` covers every free column.
+
+Belief propagation costs `O(iterations * nnz)` per shot. Elimination costs
+`O(rank * rows * columns / 64)` word operations, and each candidate one packed XOR
+over the pivot rows plus a weighted walk of its set bits. Buffers are sized once per
+scratch, and batches of 64 shots or more decode in parallel over 16-shot chunks.
+
+Validation on the cyclic [15, 7, 5] BCH code recovers every error of weight at most
+two under both BP rules and every OSD method (OSD-0 relies on belief propagation for
+its order), and exhaustive OSD at order `n - rank` equals the brute-force
+maximum-likelihood error weight on every syndrome. On the graphlike distance-3
+models the exact BP+OSD rate is at most the union-find rate, and on shared samples
+under single-qubit noise it never fails more often than union-find. On the
+distance-3 color code, whose X errors on the center qubit flip three plaquettes,
+every single fault decodes to its own class and the exact rate stays within 1.5
+times the ML rate. Under two-qubit depolarizing noise `decompose_graphlike` drops
+the correlations of the hyperedges it splits; on the distance-3 surface memory at
+p = 0.02 (20k shots, seed 42) union-find fails 603 times and exact matching 654
+times over the decomposed model, while BP+OSD over the full model fails 436
+times.
+
+Python exposes the same surface as `Decoder(model)`, `MatchingDecoder(model)`, and
+`BpOsdDecoder(model, ...)`, each with `decode(detectors) -> (shots,
+num_observables)` and `logical_error_rate(detectors, observables)` over numpy bool
+arrays.
 
 ## Expectation values
 

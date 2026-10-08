@@ -88,7 +88,8 @@ and splits it across cores where `run_batch` would.
 `run_qec_program_spd_rerouted`, `QecProgram`, `QecOp`, `QecOptions`, `QecSampleResult`,
 `QecBasis`, `QecPauli`, `QecRecordRef`, `QecNoise`, `QecMeasurementRow`,
 `QecCompiledRows`, `QecObservableEstimate`, `QecObservableReroute`, `QecTStrategy`,
-`DetectorErrorModel`, `ErrorMechanism`, `UnionFindDecoder`
+`DetectorErrorModel`, `ErrorMechanism`, `UnionFindDecoder`, `MatchingDecoder`,
+`BpOsdDecoder`, `BpOsdOptions`, `BpMethod`, `OsdMethod`
 
 **Clifford+T:**
 `run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`,

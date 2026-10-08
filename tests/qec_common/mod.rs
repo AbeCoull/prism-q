@@ -228,6 +228,63 @@ pub fn rotated_surface_memory(
     program
 }
 
+/// Plaquettes of the distance-3 triangular color code (the Steane code), each
+/// carrying both an X and a Z check.
+pub const COLOR_D3_PLAQUETTES: [&[usize]; 3] = [&[0, 2, 4, 6], &[1, 2, 5, 6], &[3, 4, 5, 6]];
+
+/// Distance-3 color-code Z memory with the round structure of
+/// [`surface_memory_d3`]: Z then X plaquette MPPs per round, observable on the
+/// weight-3 logical Z over qubits 0, 1, 2. A single X error on qubit 6 flips
+/// three Z plaquettes, so the model is a hypergraph.
+pub fn color_code_memory_d3(rounds: usize, noise: QecNoise, shots: usize) -> QecProgram {
+    let plaquettes = COLOR_D3_PLAQUETTES.len();
+    let mut program = QecProgram::with_options(7, qec_options(shots, 4096, false));
+    let data: Vec<usize> = (0..7).collect();
+    let mut previous: Vec<usize> = Vec::new();
+    for _ in 0..rounds {
+        program.noise(noise.clone(), &data).unwrap();
+        let mut records = Vec::with_capacity(2 * plaquettes);
+        for stab in COLOR_D3_PLAQUETTES {
+            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::z(q)).collect();
+            records.push(program.measure_pauli_product(&terms).unwrap());
+        }
+        for stab in COLOR_D3_PLAQUETTES {
+            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::x(q)).collect();
+            records.push(program.measure_pauli_product(&terms).unwrap());
+        }
+        if previous.is_empty() {
+            for &record in &records[..plaquettes] {
+                program.detector(&[QecRecordRef::absolute(record)]).unwrap();
+            }
+        } else {
+            for (&record, &prior) in records.iter().zip(&previous) {
+                program
+                    .detector(&[
+                        QecRecordRef::absolute(record),
+                        QecRecordRef::absolute(prior),
+                    ])
+                    .unwrap();
+            }
+        }
+        previous = records;
+    }
+    let readout: Vec<usize> = (0..7).map(|q| program.measure_z(q).unwrap()).collect();
+    for (stab, &prior) in COLOR_D3_PLAQUETTES.iter().zip(&previous) {
+        let mut refs: Vec<QecRecordRef> = stab
+            .iter()
+            .map(|&q| QecRecordRef::absolute(readout[q]))
+            .collect();
+        refs.push(QecRecordRef::absolute(prior));
+        program.detector(&refs).unwrap();
+    }
+    let logical: Vec<QecRecordRef> = [0usize, 1, 2]
+        .iter()
+        .map(|&q| QecRecordRef::absolute(readout[q]))
+        .collect();
+    program.observable_include(0, &logical).unwrap();
+    program
+}
+
 /// The `EXP_VAL` estimates of a result, which every estimator path attaches.
 pub fn estimates(result: &QecSampleResult) -> &[QecObservableEstimate] {
     result

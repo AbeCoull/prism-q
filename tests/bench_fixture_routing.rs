@@ -282,6 +282,81 @@ fn sparse_densify_rows_pin_entry_ladder() {
     assert_resolves("densify/dense/8", BackendKind::Statevector, &circuit);
 }
 
+// `sparse/noisy_walk_k12` prices trajectory noise at a bounded map. Trajectories
+// apply the stream raw so noise events stay aligned to it, so the pin reads the
+// unfused stream. The damping row's bound is checked at its worst case: a jump
+// after every gate on every target the jump can reach, which only ever merges
+// or drops entries.
+#[test]
+fn sparse_noisy_walk_rows_stay_bounded_on_the_map() {
+    use num_complex::Complex64;
+
+    let zero = Complex64::new(0.0, 0.0);
+    for n in [32usize, 64] {
+        let circuit = circuits::sparse_walk_circuit(n, 12, 2, SEED);
+
+        let mut backend = prism_q::SparseBackend::new(SEED);
+        backend.init(n, 0).unwrap();
+        let mut peak = 0;
+        for instruction in &circuit.instructions {
+            backend.apply(instruction).unwrap();
+            peak = peak.max(backend.entry_count());
+        }
+        assert_eq!(
+            (peak, backend.entry_count()),
+            (1 << 12, 1 << 12),
+            "noisy_walk_k12/{n}: the raw stream no longer holds a pinned 4096 entries"
+        );
+
+        let mut backend = prism_q::SparseBackend::new(SEED);
+        backend.init(n, 0).unwrap();
+        let mut peak = 0;
+        for instruction in &circuit.instructions {
+            backend.apply(instruction).unwrap();
+            let prism_q::Instruction::Gate { targets, .. } = instruction else {
+                continue;
+            };
+            for &q in targets.iter() {
+                let p1 = backend.qubit_probability(q).unwrap();
+                if p1 > 1e-12 {
+                    let jump = [[zero, Complex64::new(p1.sqrt().recip(), 0.0)], [zero, zero]];
+                    backend.apply_1q_matrix(q, &jump).unwrap();
+                }
+                peak = peak.max(backend.entry_count());
+            }
+        }
+        assert!(
+            peak <= 1 << 12,
+            "noisy_walk_k12/{n}: the damping jump grew the map to {peak} entries"
+        );
+
+        let mut measured = circuit.clone();
+        measured.measure_all();
+        for (label, noise) in [
+            (
+                "amplitude_damping",
+                NoiseModel::with_amplitude_damping(&measured, 0.01),
+            ),
+            (
+                "depolarizing",
+                NoiseModel::uniform_depolarizing(&measured, 0.01),
+            ),
+        ] {
+            let shots = sim::simulate(&measured)
+                .backend(BackendKind::Sparse)
+                .noise(&noise)
+                .seed(SEED)
+                .shots(4)
+                .unwrap();
+            assert_eq!(
+                shots.metadata.backend,
+                ResolvedBackend::Sparse,
+                "noisy_walk_k12/{label}/{n}"
+            );
+        }
+    }
+}
+
 // `sparse/sampling` prices shot conversion on a near-empty map; the GHZ
 // chain keeps the register connected, unlike the split fixture it replaced.
 #[test]
@@ -480,6 +555,127 @@ fn measure_split_rows_reach_the_factored_backend() {
             );
         }
     }
+}
+
+// `factored/sampling` prices the factored backend's own draw over its
+// sub-states. The decomposed route would sample per block on separate
+// backends and never call it, and a run that merged the pair into the chain
+// would leave one block and price the single-block case instead.
+#[test]
+fn factored_sampling_rows_draw_from_two_sub_states() {
+    for n in [16usize, 20, 24] {
+        let circuit = circuits::partially_independent_circuit(n, 5, SEED);
+        let mut measured = circuit.clone();
+        measured.measure_all();
+
+        let shots = sim::simulate(&measured)
+            .backend(BackendKind::Factored)
+            .seed(SEED)
+            .shots(1_000)
+            .unwrap();
+        assert_eq!(
+            shots.metadata.backend,
+            ResolvedBackend::Factored,
+            "factored/sampling/{n}q: the shots ran on {:?}",
+            shots.metadata.backend
+        );
+
+        let mut backend = prism_q::FactoredBackend::new(SEED);
+        sim::run_on(&mut backend, &circuit).unwrap();
+        let Some(prism_q::sim::Probabilities::Factored { blocks, .. }) =
+            backend.block_probabilities()
+        else {
+            panic!("factored/sampling/{n}q: the run collapsed to a single block");
+        };
+        let mut widths: Vec<u32> = blocks.iter().map(|b| b.mask.count_ones()).collect();
+        widths.sort_unstable();
+        assert_eq!(
+            widths,
+            vec![2, n as u32 - 2],
+            "factored/sampling/{n}q: the sampler must draw over the pair and the chain"
+        );
+    }
+}
+
+// The `fstab_*` rows of `auto/crossover` bracket the factored-stabilizer floor,
+// so they owe a route on each side of it: per-block tableaux under 24 qubits,
+// one factored-stabilizer backend from 24 up. Above the floor the `auto` arm
+// must also return what the `factored` arm's `run_on` returns, or the pair
+// prices two different answers rather than the routing work between them.
+#[test]
+fn fstab_crossover_rows_straddle_the_floor() {
+    let grid = [
+        (2usize, 16usize),
+        (3, 16),
+        (4, 16),
+        (6, 16),
+        (8, 16),
+        (10, 16),
+        (2, 8),
+        (3, 8),
+        (4, 8),
+        (8, 8),
+        (12, 8),
+        (20, 8),
+        (3, 6),
+        (4, 6),
+        (8, 6),
+        (4, 4),
+        (5, 4),
+        (6, 4),
+        (8, 4),
+        (16, 4),
+        (24, 4),
+        (40, 4),
+        (6, 3),
+        (8, 3),
+        (16, 3),
+        (8, 2),
+        (10, 2),
+        (12, 2),
+        (16, 2),
+        (32, 2),
+        (48, 2),
+        (80, 2),
+    ];
+    let mut below = 0;
+    for (blocks, block_size) in grid {
+        let n = blocks * block_size;
+        let label = format!("fstab_{n}q_b{block_size}");
+        let circuit = circuits::local_clifford_blocks(blocks, block_size, 200, SEED);
+        let auto = sim::simulate(&circuit).seed(42).run().unwrap();
+
+        if n < 24 {
+            below += 1;
+            assert_eq!(
+                auto.metadata.backend,
+                ResolvedBackend::Decomposed,
+                "{label}: under the floor Auto must run per block"
+            );
+            continue;
+        }
+        assert_eq!(
+            auto.metadata.backend,
+            ResolvedBackend::FactoredStabilizer,
+            "{label}: from the floor up Auto must run one factored-stabilizer backend"
+        );
+        let mut backend = prism_q::FactoredStabilizerBackend::new(42);
+        let direct = sim::run_on(&mut backend, &circuit).unwrap();
+        assert_eq!(
+            format!("{:?}", auto.metadata),
+            format!("{:?}", direct.metadata),
+            "{label}"
+        );
+        assert_eq!(auto.classical_bits, direct.classical_bits, "{label}");
+        if n <= 64 {
+            assert_eq!(
+                auto.probabilities.map(|p| p.marginals()),
+                direct.probabilities.map(|p| p.marginals()),
+                "{label}"
+            );
+        }
+    }
+    assert!(below >= 6, "the grid lost its rows under the floor");
 }
 
 // `stabilizer/random_pairs` prices the batched cross-word kernel, whose buffer

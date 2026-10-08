@@ -2412,16 +2412,19 @@ fn compile_measurements_for_kind(
     Ok(sampler)
 }
 
+/// Components to decompose with, and whether every gate is Clifford.
+type Decomposition = (Vec<Vec<usize>>, bool);
+
 /// Independence analysis shared by the routing prelude in
 /// `run_with_internal`, the shots slow path, and the terminal fast-path
-/// candidacy. Returns the components to decompose with when full
-/// decomposition should fire, plus the partial-independence flag otherwise.
-fn analyze_independence(circuit: &Circuit) -> (Option<Vec<Vec<usize>>>, bool) {
+/// candidacy. Returns the decomposition when full decomposition should fire,
+/// plus the partial-independence flag otherwise.
+fn analyze_independence(circuit: &Circuit) -> (Option<Decomposition>, bool) {
     if circuit.num_qubits >= MIN_DECOMPOSITION_QUBITS {
-        let components = circuit.independent_subsystems();
+        let (components, clifford_only) = circuit.subsystems_and_clifford();
         if components.len() > 1 {
             if should_decompose(&components, circuit.num_qubits) {
-                return (Some(components), false);
+                return (Some((components, clifford_only)), false);
             }
             return (None, true);
         }
@@ -2468,10 +2471,10 @@ enum ProbabilityRoute {
 
 fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityRoute {
     let (decompose, has_partial_independence) = analyze_independence(circuit);
-    if let Some(components) = decompose {
+    if let Some((components, clifford_only)) = decompose {
         let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
         if kind.is_auto()
-            && circuit.is_clifford_only()
+            && clifford_only
             && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
             && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
         {
@@ -4013,7 +4016,7 @@ fn run_shots_per_shot(
 
     let opts = SimOptions::classical_only();
 
-    if let Some(ref comps) = decompose {
+    if let Some((ref comps, _)) = decompose {
         let partitions = circuit.partition_subcircuits(comps);
         let block_plans: Vec<BackendPlan> = partitions
             .iter()

@@ -1729,6 +1729,37 @@ fn bench_sparse_sampling_populated(c: &mut Criterion) {
     group.finish();
 }
 
+/// Trajectory noise on the map, over the `sparse/sampling_k12` fixture. The
+/// damping jump is neither diagonal nor antidiagonal, so it takes the general
+/// branch of the single-qubit kernel, and the no-jump branch is a sub-unit
+/// diagonal that pays a prune pass; both send a basis state to at most one, so
+/// the map stays at or under 4096 entries. The depolarizing arm runs the same
+/// trajectory engine with X, Y and Z alone, none of which reach either path,
+/// so it is the group's control.
+fn bench_sparse_noisy_walk(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sparse/noisy_walk_k12");
+    configure_group(&mut group);
+
+    for &n in &[32, 64] {
+        let circuit = measure_all(&circuits::sparse_walk_circuit(n, 12, 2, SEED));
+        let damping = prism_q::NoiseModel::with_amplitude_damping(&circuit, 0.01);
+        let depolarizing = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        for (arm, noise) in [
+            ("amplitude_damping", &damping),
+            ("depolarizing", &depolarizing),
+        ] {
+            group.bench_with_input(BenchmarkId::new(arm, n), &circuit, |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        run_shots_with_noise(BackendKind::Sparse, circ, noise, 32, SEED).unwrap(),
+                    )
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 const NATIVE_COUNTS_SHOTS: usize = 100_000;
 
 /// `sample_counts` on the native samplers, over the `mps/sampling` and sparse
@@ -2355,10 +2386,12 @@ fn bench_auto_crossover(c: &mut Criterion) {
     // size through `run_on`, which brackets the floor from below and, above
     // it, runs what `auto` runs. Depth 200 rather than 10 because at depth 10
     // these rows sit near 500 us, where two arms running the same route read
-    // 14% to 48% apart on the reference host. The grid runs 24 to 160 qubits
+    // 14% to 48% apart on the reference host. The grid runs 16 to 160 qubits
     // at blocks of 2 to 16, so each constant's crossover reads along one axis
-    // with the other held. At 64 qubits and below every arm also builds the
-    // per-block probabilities, as a run returns them there.
+    // with the other held. Blocks of 2, 4 and 8 reach under the 24-qubit floor,
+    // where `auto` takes the decomposed route, and blocks of 3 and 6 straddle
+    // it. At 64 qubits and below every arm also builds the per-block
+    // probabilities, as a run returns them there.
     for &(blocks, block_size) in &[
         (2usize, 16usize),
         (3, 16),
@@ -2366,16 +2399,27 @@ fn bench_auto_crossover(c: &mut Criterion) {
         (6, 16),
         (8, 16),
         (10, 16),
+        (2, 8),
         (3, 8),
         (4, 8),
         (8, 8),
         (12, 8),
         (20, 8),
+        (3, 6),
+        (4, 6),
+        (8, 6),
+        (4, 4),
+        (5, 4),
         (6, 4),
         (8, 4),
         (16, 4),
         (24, 4),
         (40, 4),
+        (6, 3),
+        (8, 3),
+        (16, 3),
+        (8, 2),
+        (10, 2),
         (12, 2),
         (16, 2),
         (32, 2),
@@ -3429,6 +3473,34 @@ fn bench_factored_partial_independence(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("factored", n), &circuit, |b, circ| {
             b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
         });
+    }
+
+    group.finish();
+}
+
+/// The factored backend's native shot sampler on the `partial_independence`
+/// fixture, so the run ends on two sub-states (the `n - 2` chain and the pair)
+/// and `sample_basis_states` draws one index per block per shot. The decomposed
+/// route never reaches this terminal. The 1k row is mostly the run and the CDF
+/// build over the wide block, which the 20k row shares, so the gap between the
+/// two is the draw loop.
+fn bench_factored_sampling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored/sampling");
+    configure_group(&mut group);
+
+    for &n in &[16, 20, 24] {
+        let circuit = measure_all(&circuits::partially_independent_circuit(n, 5, SEED));
+        for &shots in &[1_000, 20_000] {
+            group.bench_with_input(
+                BenchmarkId::new(format!("{n}q"), shots),
+                &circuit,
+                |b, circ| {
+                    b.iter(|| {
+                        black_box(run_shots_with(BackendKind::Factored, circ, shots, SEED).unwrap())
+                    });
+                },
+            );
+        }
     }
 
     group.finish();
@@ -5057,6 +5129,7 @@ criterion_group! {
     bench_sparse_densify,
     bench_sparse_sampling,
     bench_sparse_sampling_populated,
+    bench_sparse_noisy_walk,
     bench_native_counts,
     // MPS
     bench_mps_scaling,
@@ -5128,6 +5201,7 @@ criterion_group! {
     bench_factored_sim_only,
     bench_factored_dynamic,
     bench_factored_partial_independence,
+    bench_factored_sampling,
     bench_factored_measure_split,
     bench_factored_dense,
     bench_factored_noise_kraus,

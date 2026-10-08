@@ -9,8 +9,8 @@ use num_complex::Complex64;
 use super::{Circuit, GuardedRegion, Instruction, SmallVec, smallvec};
 use crate::gates::{
     DiagEntry, DiagonalBatchData, Gate, IDENTITY_EPS, MULTI_2Q_HIGH_BUDGET, Multi2qData,
-    MultiFusedData, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4,
-    multi_2q_join,
+    MultiFusedData, MultiPauliRotData, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2,
+    mat_mul_4x4, multi_2q_join, pauli_rot_join, pauli_rot_masks,
 };
 
 use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases};
@@ -69,6 +69,15 @@ fn reorder_2q_enabled() -> bool {
 const MIN_QUBITS_FOR_MULTI_2Q_FUSION: usize = MIN_QUBITS_FOR_2Q_FUSION;
 
 const MIN_MULTI_2Q_BATCH: usize = 2;
+
+/// Floor for batching Pauli rotations into `MultiPauliRot`. A parallel subcube pass
+/// splits the state into `2^(n - 13)` tiles at the widths just past the parallel
+/// threshold, so at 15 qubits it would feed half of an eight-thread pool where the
+/// per-rotation pass feeds all of it.
+#[cfg(not(miri))]
+const MIN_QUBITS_FOR_PAULI_ROT_BATCH: usize = 16;
+#[cfg(miri)]
+const MIN_QUBITS_FOR_PAULI_ROT_BATCH: usize = 8;
 
 #[inline]
 pub(super) fn push_unique(qubits: &mut SmallVec<[usize; 4]>, q: usize) {
@@ -1186,6 +1195,130 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
     }
 }
 
+/// A run of Pauli rotations whose X and Y qubits fit one subcube tile.
+#[derive(Default)]
+struct PauliRotRun {
+    rotations: Vec<(usize, usize, f64)>,
+    srcs: Vec<usize>,
+    high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>,
+}
+
+impl PauliRotRun {
+    /// Emit the run as one `MultiPauliRot`, or as its source instruction when it
+    /// holds one rotation, and start a new run. Returns whether a batch was emitted.
+    fn flush(
+        &mut self,
+        source: &[Instruction],
+        output: &mut Vec<Instruction>,
+        tracer: &mut Tracer,
+    ) -> bool {
+        self.high.clear();
+        if self.rotations.len() < 2 {
+            self.rotations.clear();
+            for src in self.srcs.drain(..) {
+                output.push(source[src].clone());
+                tracer.keep(src);
+            }
+            return false;
+        }
+        let data = MultiPauliRotData {
+            rotations: std::mem::take(&mut self.rotations),
+        };
+        let mut support = data.support();
+        let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
+        while support != 0 {
+            targets.push(support.trailing_zeros() as usize);
+            support &= support - 1;
+        }
+        output.push(Instruction::Gate {
+            gate: Gate::MultiPauliRot(Box::new(data)),
+            targets,
+        });
+        if tracer.on {
+            let entries: Vec<Vec<(usize, Place)>> = self
+                .srcs
+                .iter()
+                .map(|&src| vec![(src, Place::Plain)])
+                .collect();
+            tracer.batch(&entries);
+        }
+        self.srcs.clear();
+        true
+    }
+}
+
+/// Batch consecutive `PauliRot` gates into `MultiPauliRot` for cache-tiled execution.
+///
+/// A run grows while the X and Y qubits of its strings fit one subcube tile, under
+/// the budget a `Multi2q` run takes. Z letters never count against it: a Z outside
+/// the tile fixes one sign per tile. Returns the input unchanged when no batch forms.
+fn fuse_pauli_rot_batches<'a>(circuit: Cow<'a, Circuit>, tracer: &mut Tracer) -> Cow<'a, Circuit> {
+    let n = circuit.num_qubits;
+    let rotations = circuit
+        .instructions
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::PauliRot(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    if rotations < 2 || n > usize::BITS as usize {
+        return circuit;
+    }
+
+    let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
+    let mut run = PauliRotRun::default();
+    let mut changed = false;
+    let source = &circuit.instructions;
+
+    tracer.begin();
+    for (i, inst) in source.iter().enumerate() {
+        match inst {
+            Instruction::Gate {
+                gate: Gate::PauliRot(data),
+                targets,
+            } => {
+                let (xmask, zmask, _) = pauli_rot_masks(targets, &data.axes);
+                let xqubits = || targets.iter().copied().filter(|&q| xmask >> q & 1 == 1);
+                let joined = pauli_rot_join(&run.high, xqubits(), n).or_else(|| {
+                    changed |= run.flush(source, &mut output, tracer);
+                    pauli_rot_join(&[], xqubits(), n)
+                });
+                match joined {
+                    Some(joined) => {
+                        run.high = joined;
+                        run.rotations.push((xmask, zmask, data.theta));
+                        run.srcs.push(i);
+                    }
+                    None => {
+                        output.push(inst.clone());
+                        tracer.keep(i);
+                    }
+                }
+            }
+            _ => {
+                changed |= run.flush(source, &mut output, tracer);
+                output.push(inst.clone());
+                tracer.keep(i);
+            }
+        }
+    }
+    changed |= run.flush(source, &mut output, tracer);
+
+    if changed {
+        tracer.commit();
+        Cow::Owned(circuit.with_instructions(output))
+    } else {
+        tracer.discard();
+        circuit
+    }
+}
+
 /// Batch contiguous runs of diagonal gates into `DiagonalBatch` instructions.
 ///
 /// Diagonal gates (Z, S, T, Rz, P, CZ, Rzz, CPhase) commute, so a run collapses into one
@@ -1434,7 +1567,10 @@ fn fuse_at_width<'a>(circuit: &'a Circuit, n: usize, t: &mut Tracer) -> Cow<'a, 
     let pass_m2q = gated(pass_2qr, n, MIN_QUBITS_FOR_MULTI_2Q_FUSION, |c| {
         fuse_multi_2q_gates(c, t)
     });
-    let pass_cp = gated(pass_m2q, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
+    let pass_pr = gated(pass_m2q, n, MIN_QUBITS_FOR_PAULI_ROT_BATCH, |c| {
+        fuse_pauli_rot_batches(c, t)
+    });
+    let pass_cp = gated(pass_pr, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
         fuse_controlled_phases(c, t)
     });
     let pass_db = gated(pass_cp, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {

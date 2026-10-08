@@ -1945,6 +1945,9 @@ impl DistributedStatevectorBackend {
             self.inner.dispatch_gate(gate, targets);
             return Ok(());
         }
+        if matches!(gate, Gate::MultiPauliRot(_)) {
+            return Err(self.unsupported("Pauli rotation batch over a sharded state"));
+        }
         if self.relabel {
             self.touch_instruction(gate, targets);
             if matches!(gate, Gate::Swap) {

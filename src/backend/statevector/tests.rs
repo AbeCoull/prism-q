@@ -2153,3 +2153,131 @@ mod multi_2q_subcube {
         batch_matches_per_gate(18, &[(10, 11), (12, 13), (14, 15), (16, 17)], 3);
     }
 }
+
+mod multi_pauli_rot {
+    use crate::backend::Backend;
+    use crate::backend::statevector::StatevectorBackend;
+    use crate::circuit::Circuit;
+    use crate::gates::{Gate, MultiPauliRotData, PauliRotData, pauli_rot_masks};
+    use crate::sim::unified_pauli::PauliAxis;
+    use num_complex::Complex64;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    // Up to three X or Y letters drawn from `xy_pool`, then Z letters anywhere,
+    // so a Z outside the tile has to resolve to a per-tile sign.
+    fn random_string(
+        n: usize,
+        xy_pool: &[usize],
+        rng: &mut ChaCha8Rng,
+    ) -> (Vec<usize>, PauliRotData) {
+        let mut targets: Vec<usize> = Vec::new();
+        let mut axes = Vec::new();
+        let xy = rng.random_range(0..=3usize.min(xy_pool.len()));
+        while targets.len() < xy {
+            let q = xy_pool[rng.random_range(0..xy_pool.len())];
+            if !targets.contains(&q) {
+                targets.push(q);
+                axes.push(if rng.random::<bool>() {
+                    PauliAxis::X
+                } else {
+                    PauliAxis::Y
+                });
+            }
+        }
+        let z = rng.random_range(if xy == 0 { 2..=4 } else { 0..=3 });
+        while targets.len() < xy + z {
+            let q = rng.random_range(0..n);
+            if !targets.contains(&q) {
+                targets.push(q);
+                axes.push(PauliAxis::Z);
+            }
+        }
+        let theta = rng.random::<f64>() * std::f64::consts::TAU - std::f64::consts::PI;
+        (targets, PauliRotData { theta, axes })
+    }
+
+    fn random_state(n: usize, rng: &mut ChaCha8Rng) -> Vec<Complex64> {
+        let raw: Vec<Complex64> = (0..1usize << n)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect();
+        let norm = raw.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+        raw.into_iter().map(|a| a / norm).collect()
+    }
+
+    // The batch as one MultiPauliRot against the same strings as native
+    // PauliRot gates one at a time, from one random start state, so a wrong
+    // gather, a wrong tile mask, a wrong outside-Z sign, or a wrong order shows.
+    fn batch_matches_per_gate(n: usize, xy_pool: &[usize], count: usize, seed: u64) {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let strings: Vec<(Vec<usize>, PauliRotData)> = (0..count)
+            .map(|_| random_string(n, xy_pool, &mut rng))
+            .collect();
+        let start = random_state(n, &mut rng);
+
+        let data = MultiPauliRotData {
+            rotations: strings
+                .iter()
+                .map(|(targets, data)| {
+                    let (xmask, zmask, _) = pauli_rot_masks(targets, &data.axes);
+                    (xmask, zmask, data.theta)
+                })
+                .collect(),
+        };
+        let support = data.support();
+        let targets: Vec<usize> = (0..n).filter(|&q| support >> q & 1 == 1).collect();
+        let mut batched = Circuit::new(n, 0);
+        batched.add_gate(Gate::MultiPauliRot(Box::new(data)), &targets);
+        let mut one_by_one = Circuit::new(n, 0);
+        for (targets, data) in &strings {
+            one_by_one.add_gate(Gate::PauliRot(Box::new(data.clone())), targets);
+        }
+
+        let run = |circuit: &Circuit| {
+            let mut b = StatevectorBackend::new(1);
+            b.init_from_amplitudes(start.clone(), 0).unwrap();
+            b.apply_instructions(&circuit.instructions).unwrap();
+            b.state_vector().to_vec()
+        };
+        let got = run(&batched);
+        let want = run(&one_by_one);
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!((g - w).norm() < 1e-12, "{n}q amplitude {i}: {g} vs {w}");
+        }
+        // The CNOT ladder shares no arithmetic with the pair kernel, so it pins
+        // the scalar and SIMD runs both paths above lean on.
+        let ladder = run(&crate::circuit::expand_pauli_rotations(&one_by_one));
+        for (i, (w, l)) in want.iter().zip(&ladder).enumerate() {
+            assert!(
+                (w - l).norm() < 1e-11,
+                "{n}q ladder amplitude {i}: {w} vs {l}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_tile_states_below_the_parallel_threshold() {
+        batch_matches_per_gate(10, &(0..10).collect::<Vec<_>>(), 24, 3);
+        batch_matches_per_gate(14, &(0..14).collect::<Vec<_>>(), 24, 5);
+    }
+
+    #[test]
+    fn low_strings_run_in_place_with_outside_z_signs() {
+        let low: Vec<usize> = (0..13).collect();
+        batch_matches_per_gate(16, &low, 32, 7);
+        batch_matches_per_gate(18, &low, 32, 11);
+    }
+
+    #[test]
+    fn high_strings_gather_a_subcube() {
+        batch_matches_per_gate(16, &[0, 3, 9, 14, 15], 32, 13);
+        batch_matches_per_gate(18, &[1, 7, 12, 16, 17], 32, 17);
+        batch_matches_per_gate(20, &[2, 11, 18, 19], 32, 19);
+    }
+
+    #[test]
+    fn a_batch_over_the_budget_still_matches() {
+        // Fourteen distinct qubits from 6 up: more than any tile's high budget.
+        batch_matches_per_gate(20, &(6..20).collect::<Vec<_>>(), 40, 23);
+    }
+}

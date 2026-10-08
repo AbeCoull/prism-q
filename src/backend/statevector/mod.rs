@@ -130,6 +130,37 @@ pub(super) fn rdm_sum_add(
 /// free memory (stub device) falls through to the allocation attempt, whose
 /// own error stays authoritative; so does a lost race against another process
 /// allocating between this check and the allocation.
+/// Apply `exp(-i θ P / 2)` on the device through its CNOT-ladder lowering.
+#[cfg(feature = "gpu")]
+fn launch_pauli_rotation_gpu(
+    ctx: &GpuContext,
+    gpu: &mut GpuState,
+    theta: f64,
+    targets: &[usize],
+    axes: &[crate::sim::unified_pauli::PauliAxis],
+) -> Result<()> {
+    use crate::gpu::kernels::dense as k;
+
+    let mut result = Ok(());
+    crate::circuit::pauli_rotation_lowering(theta, targets, axes, |step, tgts| {
+        if result.is_err() {
+            return;
+        }
+        result = match &step {
+            Gate::Cx => k::launch_apply_cx(ctx, gpu, tgts[0], tgts[1]),
+            _ => {
+                let mat = step.matrix_2x2();
+                if step.is_diagonal_1q() {
+                    k::launch_apply_diagonal_1q(ctx, gpu, tgts[0], mat[0][0], mat[1][1])
+                } else {
+                    k::launch_apply_gate_1q(ctx, gpu, tgts[0], mat)
+                }
+            }
+        };
+    });
+    result
+}
+
 #[cfg(feature = "gpu")]
 fn check_device_budget(context: &GpuContext, num_qubits: usize) -> crate::error::Result<()> {
     if num_qubits >= usize::BITS as usize - 4 {
@@ -371,26 +402,13 @@ impl StatevectorBackend {
                 Ok(())
             }
             Gate::PauliRot(data) => {
+                launch_pauli_rotation_gpu(&ctx, gpu, data.theta, targets, &data.axes)
+            }
+            Gate::MultiPauliRot(data) => {
                 let mut result = Ok(());
-                crate::circuit::pauli_rotation_lowering(data.theta, targets, &data.axes, {
-                    let (result, gpu) = (&mut result, &mut *gpu);
-                    move |step, tgts| {
-                        if result.is_err() {
-                            return;
-                        }
-                        *result = match &step {
-                            Gate::Cx => k::launch_apply_cx(&ctx, gpu, tgts[0], tgts[1]),
-                            _ => {
-                                let mat = step.matrix_2x2();
-                                if step.is_diagonal_1q() {
-                                    k::launch_apply_diagonal_1q(
-                                        &ctx, gpu, tgts[0], mat[0][0], mat[1][1],
-                                    )
-                                } else {
-                                    k::launch_apply_gate_1q(&ctx, gpu, tgts[0], mat)
-                                }
-                            }
-                        };
+                data.for_each_rotation(|theta, targets, axes| {
+                    if result.is_ok() {
+                        result = launch_pauli_rotation_gpu(&ctx, gpu, theta, targets, axes);
                     }
                 });
                 result
@@ -758,6 +776,9 @@ impl StatevectorBackend {
             }
             Gate::PauliRot(data) => {
                 self.apply_pauli_rot(targets, data.theta, &data.axes);
+            }
+            Gate::MultiPauliRot(data) => {
+                self.apply_multi_pauli_rot(&data.rotations);
             }
             Gate::Unitary(data) => {
                 self.apply_unitary(targets, data.matrix());

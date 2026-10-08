@@ -43,28 +43,80 @@ fn state_of(backend: &mut StatevectorBackend, circuit: &Circuit) -> Vec<Complex6
 // only when the rotation has a neighbouring 1q gate to absorb. Both weight-3
 // terms survive on width alone. So does `x(1) x(3)`, whose qubits the two
 // weight-3 terms ahead of it already flushed, leaving it nothing to absorb; the
-// two rotations reaching an untouched qubit are the ones that anchor.
+// two rotations reaching an untouched qubit are the ones that anchor. At 16
+// qubits the three survivors run back to back, so they reach the kernel as one
+// `MultiPauliRot` batch.
 #[test]
 fn fusion_keeps_the_native_gate() {
     let circuit = trotter_like_circuit(16);
     let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
-    let native_widths: Vec<usize> = fused
-        .instructions
-        .iter()
-        .filter_map(|inst| match inst {
+    let mut native_widths: Vec<usize> = Vec::new();
+    let mut batches = 0;
+    for inst in &fused.instructions {
+        match inst {
             Instruction::Gate {
                 gate: Gate::PauliRot(data),
                 ..
-            } => Some(data.axes().len()),
-            _ => None,
-        })
-        .collect();
+            } => native_widths.push(data.axes().len()),
+            Instruction::Gate {
+                gate: Gate::MultiPauliRot(data),
+                ..
+            } => {
+                batches += 1;
+                native_widths.extend(
+                    data.rotations()
+                        .iter()
+                        .map(|&(x, z, _)| (x | z).count_ones() as usize),
+                );
+            }
+            _ => {}
+        }
+    }
     assert_eq!(
         native_widths,
         vec![3, 3, 2],
         "fusion took a rotation it has no anchor for, or left one unabsorbed"
     );
+    assert_eq!(batches, 1, "the surviving rotations did not batch");
     assert!(StatevectorBackend::new(SEED).supports_pauli_rotation());
+}
+
+fn jordan_wigner_step(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for (coefficient, factors) in prism_q::circuits::jordan_wigner_hamiltonian(n, 200, SEED) {
+        if !factors.is_empty() {
+            c.add_pauli_rotation(0.1 * coefficient, &factors);
+        }
+    }
+    c
+}
+
+// The batched stream against the same circuit applied gate by gate without
+// fusion, at a width that gathers subcubes and one that runs mostly in place.
+#[test]
+fn batched_trotter_step_matches_per_gate_application() {
+    for n in [16, 20] {
+        let circuit = jordan_wigner_step(n);
+        let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+        assert!(
+            fused.instructions.iter().any(|inst| matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::MultiPauliRot(_),
+                    ..
+                }
+            )),
+            "{n}q: no MultiPauliRot in the fused stream"
+        );
+        let batched = state_of(&mut StatevectorBackend::new(SEED), &circuit);
+        let mut per_gate = StatevectorBackend::new(SEED);
+        per_gate.init(n, 0).unwrap();
+        per_gate.apply_instructions(&circuit.instructions).unwrap();
+        for (i, (a, e)) in batched.iter().zip(per_gate.state_vector()).enumerate() {
+            let diff = (a - e).norm();
+            assert!(diff < 1e-12, "{n}q amplitude {i}: |diff| = {diff:e}");
+        }
+    }
 }
 
 // Native kernel against the ladder lowering across the parallel threshold,

@@ -137,9 +137,9 @@ pub use threading::ThreadPool;
 #[cfg(feature = "gpu")]
 pub use sim::compiled::{DevicePackedShots, run_shots_compiled_with_gpu};
 
-// Runs the Rust code blocks of the user guides under `cargo test --doc`. The Python guide
-// is executed by the bindings' test suite instead. mdbook-admonish blocks carry
-// `title="..."`, which rustdoc reads as a malformed attribute on a block it never runs.
+// Runs the Rust code blocks of the user guides and tutorials under `cargo test --doc`. Their
+// Python blocks are executed by the bindings' test suite instead. mdbook-admonish blocks
+// carry `title="..."`, which rustdoc reads as a malformed attribute on a block it never runs.
 #[cfg(doctest)]
 #[allow(rustdoc::invalid_codeblock_attributes)]
 mod guide_examples {
@@ -149,6 +149,8 @@ mod guide_examples {
     struct Capabilities;
     #[doc = include_str!("../docs/guides/clifford-t.md")]
     struct CliffordT;
+    #[doc = include_str!("../docs/guides/drawing.md")]
+    struct Drawing;
     #[doc = include_str!("../docs/guides/gpu.md")]
     struct Gpu;
     #[doc = include_str!("../docs/guides/openqasm.md")]
@@ -157,4 +159,16 @@ mod guide_examples {
     struct Performance;
     #[doc = include_str!("../docs/guides/qec.md")]
     struct Qec;
+    #[doc = include_str!("../docs/tutorials/dynamic-circuits.md")]
+    struct TutorialDynamicCircuits;
+    #[doc = include_str!("../docs/tutorials/large-circuits.md")]
+    struct TutorialLargeCircuits;
+    #[doc = include_str!("../docs/tutorials/noisy-simulation.md")]
+    struct TutorialNoisySimulation;
+    #[doc = include_str!("../docs/tutorials/qec-memory.md")]
+    struct TutorialQecMemory;
+    #[doc = include_str!("../docs/tutorials/simulate-and-sample.md")]
+    struct TutorialSimulateAndSample;
+    #[doc = include_str!("../docs/tutorials/variational.md")]
+    struct TutorialVariational;
 }

@@ -38,6 +38,16 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 - [Shots and sampling](https://abecoull.github.io/prism-q/getting-started/shots.html): measurement records, shot counts, and seeding.
 - [Choosing a backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html): the automatic dispatch tree and when to override it.
 
+## Tutorials
+
+- [Tutorials](https://abecoull.github.io/prism-q/tutorials/index.html): task-shaped walkthroughs in Python with Rust equivalents, each tested in CI.
+- [Simulate and sample](https://abecoull.github.io/prism-q/tutorials/simulate-and-sample.html): exact probabilities, shot counts, and choosing a backend.
+- [Variational circuits and gradients](https://abecoull.github.io/prism-q/tutorials/variational.html): adjoint and parameter-shift gradients, `Parameters`, `PreparedCircuit`, and batched sweeps.
+- [Noisy simulation](https://abecoull.github.io/prism-q/tutorials/noisy-simulation.html): `NoiseBuilder` rules, device calibrations, and exact density-matrix answers.
+- [A QEC memory experiment](https://abecoull.github.io/prism-q/tutorials/qec-memory.html): a repetition code built with `QecProgram`, its detector error model, and union-find decoding.
+- [Dynamic circuits](https://abecoull.github.io/prism-q/tutorials/dynamic-circuits.html): mid-circuit measurement, reset, and `if`/`else` from OpenQASM 3.
+- [Large and structured circuits](https://abecoull.github.io/prism-q/tutorials/large-circuits.html): stabilizer, stabilizer rank, Pauli propagation, and MPS runs past the statevector limit, with `require_exact()` and result metadata.
+
 ## Guides
 
 - [Python bindings](https://abecoull.github.io/prism-q/guides/python.html): the wheel surface, which Rust terminals it exposes, and numpy interop.
@@ -46,6 +56,7 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 - [Performance and SIMD](https://abecoull.github.io/prism-q/guides/performance.html): parallel thresholds, kernel dispatch, and the tuning knobs.
 - [Benchmark methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html): what the published timings include, the warmup and timing rules, the Criterion targets, and the controls for a fair comparison against another simulator.
 - [OpenQASM support](https://abecoull.github.io/prism-q/guides/openqasm.html): the accepted subset, the Braket dialect, gate modifiers, and export.
+- [Drawing circuits](https://abecoull.github.io/prism-q/guides/drawing.html): text diagrams, gate-density heatmaps, and SVG output from Rust.
 - [Clifford+T simulation](https://abecoull.github.io/prism-q/guides/clifford-t.html): stabilizer rank, sparse Pauli propagation, and their exactness contracts.
 - [Noise and QEC](https://abecoull.github.io/prism-q/guides/qec.html): noise channels, trajectory and exact mixture routes, detectors, and decoding.
 - [GPU backend](https://abecoull.github.io/prism-q/guides/gpu.html): the CUDA path, what it accelerates, and how to enable it.

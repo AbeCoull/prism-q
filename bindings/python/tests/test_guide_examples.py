@@ -1,9 +1,10 @@
-"""Execute the Python examples in docs/guides/python.md.
+"""Execute the Python examples in docs/guides/python.md and docs/tutorials.
 
 Blocks fenced as ``python`` run in order in one namespace, so an example may use
 what an earlier one defined. ``python,ignore`` marks a block that needs hardware
 or a launcher CI does not have. A block whose last line ends in ``# raises`` must
-raise ``PrismError``.
+raise ``PrismError``. A tutorial page starts from an empty namespace, so its
+blocks import what they use, as a reader copying them would.
 """
 
 import re
@@ -15,6 +16,7 @@ import pytest
 import prism_q
 
 GUIDE = Path(__file__).resolve().parents[3] / "docs" / "guides" / "python.md"
+TUTORIALS = GUIDE.parents[1] / "tutorials"
 
 # Inputs the guide names without building, keyed by a fragment of the block that
 # first reads them and supplied just before it runs.
@@ -119,3 +121,28 @@ def test_python_guide_examples_run(tmp_path, monkeypatch):
         ran += 1
     assert unused == set(), f"setup keys matched no block: {sorted(unused)}"
     assert ran > 0
+
+
+def tutorial_pages():
+    if not TUTORIALS.exists():
+        return []
+    return [
+        page
+        for page in sorted(TUTORIALS.glob("*.md"))
+        if "```python\n" in page.read_text(encoding="utf-8")
+    ]
+
+
+@pytest.mark.parametrize("page", tutorial_pages(), ids=lambda page: page.stem)
+def test_tutorial_examples_run(page, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    namespace = {"__name__": "__main__"}
+    for line, info, code in fenced_blocks(page.read_text(encoding="utf-8")):
+        if info != "python":
+            continue
+        source = compile(code, f"{page.name}:{line}", "exec")
+        if code.rstrip().endswith("# raises"):
+            with pytest.raises(prism_q.PrismError):
+                exec(source, namespace)
+        else:
+            exec(source, namespace)

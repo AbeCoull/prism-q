@@ -7,7 +7,7 @@ use common::SEED;
 use prism_q::circuits::brickwork_circuit;
 use prism_q::{
     BackendKind, Circuit, CircuitBuilder, Engine, Exactness, Gate, NoiseModel, PauliTerm,
-    Placement, ResolvedBackend, SpdTruncation, run_shots_compiled, simulate,
+    Placement, PrismError, ResolvedBackend, SpdTruncation, run_shots_compiled, simulate,
 };
 
 fn bell() -> Circuit {
@@ -456,4 +456,57 @@ fn spd_exactness_marks_the_route_not_the_run() {
         (approx_route.values[0] - exact_route.values[0]).abs() < 1e-12,
         "nothing was discarded, so the values must agree"
     );
+}
+
+// A zero threshold drops nothing whatever the term budget, so the route is exact
+// and `require_exact` has to accept what the metadata reports.
+#[test]
+fn require_exact_accepts_a_zero_threshold_pauli_route() {
+    let circuit = entangling_brickwork(3, 1);
+    let observables = vec![vec![PauliTerm::z(0)]];
+    let threshold = |epsilon| BackendKind::DeterministicPauli {
+        truncation: SpdTruncation::Threshold {
+            epsilon,
+            max_terms: 1 << 16,
+        },
+    };
+
+    let unrestricted = simulate(&circuit)
+        .backend(threshold(0.0))
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert!(unrestricted.metadata.is_exact());
+    let gated = simulate(&circuit)
+        .backend(threshold(0.0))
+        .seed(SEED)
+        .require_exact()
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert_eq!(gated.values, unrestricted.values);
+
+    let err = simulate(&circuit)
+        .backend(threshold(1e-12))
+        .seed(SEED)
+        .require_exact()
+        .expectation_values_reported(&observables)
+        .unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { backend, .. } if backend == "DeterministicPauli"),
+        "{err:?}"
+    );
+
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let path = BackendKind::PauliPath {
+        epsilon: 0.0,
+        max_terms: 1 << 16,
+    };
+    let gated = simulate(&circuit)
+        .backend(path)
+        .noise(&noise)
+        .seed(SEED)
+        .require_exact()
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert!(gated.metadata.is_exact());
 }

@@ -939,20 +939,15 @@ pub(super) fn approximate_route_name(
         }
         BackendKind::TensorNetworkBounded { .. } => return Some("TensorNetworkBounded"),
         BackendKind::StochasticPauli { .. } => return Some("StochasticPauli"),
-        BackendKind::DeterministicPauli { truncation } => match *truncation {
-            SpdTruncation::Threshold { epsilon, max_terms } => {
-                if epsilon > 0.0 || max_terms > 0 {
-                    return Some("DeterministicPauli");
-                }
-                return None;
-            }
-            _ => return Some("DeterministicPauli"),
-        },
+        BackendKind::DeterministicPauli { truncation } => {
+            return truncation.can_discard().then_some("DeterministicPauli");
+        }
         BackendKind::PauliPath { epsilon, max_terms } => {
-            if *epsilon > 0.0 || *max_terms > 0 {
-                return Some("PauliPath");
-            }
-            return None;
+            let truncation = SpdTruncation::Threshold {
+                epsilon: *epsilon,
+                max_terms: *max_terms,
+            };
+            return truncation.can_discard().then_some("PauliPath");
         }
         _ => {}
     }

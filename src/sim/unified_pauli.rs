@@ -923,6 +923,15 @@ pub enum SpdTruncation {
 }
 
 impl SpdTruncation {
+    /// Whether the policy can drop a term. A threshold at or below zero cannot,
+    /// since no coefficient magnitude falls under it.
+    pub(crate) fn can_discard(&self) -> bool {
+        match *self {
+            SpdTruncation::Threshold { epsilon, .. } => epsilon > 0.0,
+            SpdTruncation::Budget { .. } => true,
+        }
+    }
+
     /// Reject a budget that would drop every term or outrun the internal
     /// ceiling. Called by every entry point, so a policy built by hand cannot
     /// reach the propagation loop unchecked.

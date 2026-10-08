@@ -2895,11 +2895,10 @@ fn marginals_from_pauli_expectations(
 /// so it stays `total_discarded` on the engine result and never a fidelity
 /// bound.
 fn spd_metadata(truncation: &SpdTruncation) -> RunMetadata {
-    let exact = matches!(*truncation, SpdTruncation::Threshold { epsilon, .. } if epsilon <= 0.0);
-    if exact {
-        RunMetadata::exact(ResolvedBackend::DeterministicPauli)
-    } else {
+    if truncation.can_discard() {
         RunMetadata::approximate(ResolvedBackend::DeterministicPauli)
+    } else {
+        RunMetadata::exact(ResolvedBackend::DeterministicPauli)
     }
 }
 

@@ -24,6 +24,11 @@ pub struct ShotsResult {
     pub(crate) num_classical_bits: usize,
     /// Which engine ran, whether the answer is exact, and where the state lived.
     pub metadata: RunMetadata,
+    /// `leaked[i][q]` is `true` when qubit `q` leaked at any point of shot `i`,
+    /// the erasure herald of a model carrying
+    /// [`NoiseChannel::Leakage`](crate::NoiseChannel::Leakage); `None` for every
+    /// other run.
+    pub leaked: Option<Vec<Vec<bool>>>,
 }
 
 impl ShotsResult {
@@ -35,7 +40,13 @@ impl ShotsResult {
             shots,
             num_classical_bits,
             metadata: RunMetadata::exact(ResolvedBackend::Other(UNSTAMPED)),
+            leaked: None,
         }
+    }
+
+    pub(crate) fn with_leaked(mut self, leaked: Vec<Vec<bool>>) -> Self {
+        self.leaked = Some(leaked);
+        self
     }
 
     pub(crate) fn with_metadata(mut self, metadata: RunMetadata) -> Self {

@@ -102,7 +102,7 @@ pub use qec::{
 };
 #[cfg(feature = "bench-internal")]
 pub use qec::{QecProfiledCounts, QecProfiledSampler, compile_qec_profiled_sampler};
-pub use sim::calibration::{DeviceCalibration, GateCalibration, QubitCalibration};
+pub use sim::calibration::{DeviceCalibration, GateCalibration, GateTimes, QubitCalibration};
 pub use sim::compiled::{
     CompiledDetectorSampler, CompiledSampler, CorrelatorAccumulator, DetectorSampleBatch,
     HistogramAccumulator, MarginalsAccumulator, NullAccumulator, PackedShots, ParityStats,
@@ -114,8 +114,9 @@ pub use sim::gradient::{
 };
 pub use sim::homological::{ErrorChainComplex, noisy_marginals_analytical};
 pub use sim::noise::{
-    GateFilter, NoiseBuilder, NoiseChannel, NoiseEvent, NoiseModel, NoisyCompiledSampler,
-    ReadoutError, compile_noisy, density_matrix_expectation_values, run_shots_noisy,
+    DriftDistribution, GateFilter, NoiseBuilder, NoiseChannel, NoiseEvent, NoiseModel,
+    NoisyCompiledSampler, ReadoutError, compile_noisy, density_matrix_expectation_values,
+    run_shots_noisy,
 };
 pub use sim::stabilizer_rank::{
     StabRankResult, run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_inner_product,

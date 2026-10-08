@@ -18,6 +18,7 @@ use crate::gates::Gate;
 use crate::sim::compiled::{
     PackedShots, batch_propagate_backward, compile_measurements, xor_words,
 };
+use crate::sim::unified_pauli::PauliAxis;
 use crate::sim::{BackendKind, ShotsResult};
 
 /// A noise channel on one qubit, or on two for `TwoQubitDepolarizing` and
@@ -100,13 +101,50 @@ pub enum NoiseChannel {
     /// # Ok::<(), prism_q::PrismError>(())
     /// ```
     Kraus2q { kraus: Vec<[[Complex64; 4]; 4]> },
+    /// With probability `p`, an unleaked qubit leaves the computational subspace.
+    ///
+    /// A leaked qubit is a classical flag in the trajectory: gates on it do not
+    /// act, a gate pairing it with unleaked qubits applies a uniformly random
+    /// Pauli (`I`, `X`, `Y`, `Z` at a quarter each) to each of them instead,
+    /// measuring it reports 1, and a reset or a [`NoiseChannel::Seepage`] clears
+    /// the flag. Every other channel skips an event naming a leaked qubit.
+    /// [`ShotsResult::leaked`](crate::ShotsResult::leaked) records which qubits
+    /// leaked in each shot. Runs on the per-shot trajectory engines only.
+    Leakage { p: f64 },
+    /// With probability `p`, a leaked qubit returns to the computational
+    /// subspace in a uniformly random basis state, `|0>` or `|1>` at one half
+    /// each and uncorrelated with the rest of the register.
+    Seepage { p: f64 },
+    /// With probability `p`, leakage spreads across a pair: when exactly one of
+    /// the two qubits is leaked as the event fires, the other leaks too.
+    ///
+    /// The flags are read when the event fires, so declare it ahead of a
+    /// [`NoiseChannel::Leakage`] event in the same slot to spread only the
+    /// leakage the gate itself saw.
+    LeakageTransport { p: f64 },
+    /// Coherent rotation `exp(-i angle P / 2)` about `axis`, with an angle
+    /// drawn once per shot as `sum_k weight_k * z[source_k]` over the pairs in
+    /// `weights`.
+    ///
+    /// `z` holds independent standard normal draws, one per source index, made
+    /// at the start of each shot from its noise stream and shared by every event
+    /// of the shot, so two events naming one source rotate by correlated angles.
+    /// That makes each shot a different unitary, which only the per-shot
+    /// trajectory engines can sample; [`NoiseBuilder`] lowers detuning and
+    /// amplitude drift onto it.
+    QuasiStatic {
+        axis: PauliAxis,
+        weights: Vec<(usize, f64)>,
+    },
 }
 
 impl NoiseChannel {
     /// Number of qubits an event carrying this channel must name.
     pub fn num_qubits(&self) -> usize {
         match self {
-            NoiseChannel::TwoQubitDepolarizing { .. } | NoiseChannel::Kraus2q { .. } => 2,
+            NoiseChannel::TwoQubitDepolarizing { .. }
+            | NoiseChannel::Kraus2q { .. }
+            | NoiseChannel::LeakageTransport { .. } => 2,
             _ => 1,
         }
     }
@@ -219,6 +257,16 @@ impl NoiseChannel {
             }
             NoiseChannel::Custom { kraus } => validate_kraus_set("Custom", kraus)?,
             NoiseChannel::Kraus2q { kraus } => validate_kraus_set("Kraus2q", kraus)?,
+            NoiseChannel::Leakage { p }
+            | NoiseChannel::Seepage { p }
+            | NoiseChannel::LeakageTransport { p } => validate_probability("p", *p)?,
+            NoiseChannel::QuasiStatic { weights, .. } => {
+                if weights.iter().any(|(_, weight)| !weight.is_finite()) {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: "quasi-static weights must be finite".into(),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -501,6 +549,51 @@ impl NoiseModel {
             .iter()
             .flat_map(|events| events.iter())
             .any(|event| matches!(event.channel, NoiseChannel::Kraus2q { .. }))
+    }
+
+    /// True when any event carries a leakage channel, which gives each
+    /// trajectory a leak flag per qubit and each shot a leaked-qubit record.
+    pub(crate) fn has_leakage(&self) -> bool {
+        self.after_gate.iter().flatten().any(|event| {
+            matches!(
+                event.channel,
+                NoiseChannel::Leakage { .. }
+                    | NoiseChannel::Seepage { .. }
+                    | NoiseChannel::LeakageTransport { .. }
+            )
+        })
+    }
+
+    /// Standard normal draws each shot makes for its
+    /// [`NoiseChannel::QuasiStatic`] events: one past the highest source index.
+    pub(crate) fn quasi_static_sources(&self) -> usize {
+        self.after_gate
+            .iter()
+            .flatten()
+            .filter_map(|event| match &event.channel {
+                NoiseChannel::QuasiStatic { weights, .. } => {
+                    weights.iter().map(|&(source, _)| source + 1).max()
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Return an error naming `engine` if any channel needs per-shot memory:
+    /// a leak flag or a quasi-static draw. A mixture averages each event on its
+    /// own, which neither survives.
+    pub(crate) fn ensure_memoryless(&self, engine: &str) -> Result<()> {
+        if self.has_leakage() || self.quasi_static_sources() > 0 {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: engine.into(),
+                reason: "leakage and quasi-static channels carry state from one event to the \
+                         next within a shot, which a mixture evolved event by event does not \
+                         hold; sample them through per-shot trajectories"
+                    .into(),
+            });
+        }
+        Ok(())
     }
 
     pub fn has_noise(&self) -> bool {
@@ -3170,8 +3263,15 @@ pub(crate) fn kraus_1q(channel: &NoiseChannel) -> Vec<[[Complex64; 2]; 2]> {
             out
         }
         NoiseChannel::Custom { kraus } => kraus.clone(),
-        NoiseChannel::TwoQubitDepolarizing { .. } | NoiseChannel::Kraus2q { .. } => {
+        NoiseChannel::TwoQubitDepolarizing { .. }
+        | NoiseChannel::Kraus2q { .. }
+        | NoiseChannel::LeakageTransport { .. } => {
             unreachable!("two-qubit channels have no single-qubit Kraus lowering")
+        }
+        NoiseChannel::Leakage { .. }
+        | NoiseChannel::Seepage { .. }
+        | NoiseChannel::QuasiStatic { .. } => {
+            unreachable!("evolve_density_matrix rejects channels with per-shot memory")
         }
     }
 }
@@ -3231,6 +3331,7 @@ pub(crate) fn evolve_density_matrix(
     }
     if let Some(noise) = noise {
         noise.validate_for(circuit)?;
+        noise.ensure_memoryless("density_matrix")?;
     }
 
     let mut dm = build_density_matrix(&accel, seed);
@@ -3468,7 +3569,7 @@ pub(crate) fn dm_expectation_values(
 #[path = "noise_builder.rs"]
 pub mod builder;
 
-pub use builder::{GateFilter, NoiseBuilder};
+pub use builder::{DriftDistribution, GateFilter, NoiseBuilder};
 
 #[cfg(test)]
 #[path = "noise_tests.rs"]

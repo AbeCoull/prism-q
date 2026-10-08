@@ -1363,3 +1363,73 @@ fn deferred_density_matrix_walk_matches_one_sweep_per_map() {
         }
     }
 }
+
+/// Each qubit's detuning over one unit-length layer, per shot, as the
+/// trajectory engine draws it.
+fn drawn_detunings(drift: DriftDistribution, num_qubits: usize, shots: usize) -> Vec<Vec<f64>> {
+    let mut circuit = Circuit::new(num_qubits, 0);
+    for q in 0..num_qubits {
+        circuit.add_gate(Gate::Id, &[q]);
+    }
+    let noise = NoiseBuilder::new()
+        .schedule(crate::sim::calibration::GateTimes::new(1.0, 1.0))
+        .quasi_static_detuning(drift)
+        .build(&circuit)
+        .unwrap();
+    let mut weights = vec![Vec::new(); num_qubits];
+    for event in noise.after_gate.iter().flatten() {
+        if let NoiseChannel::QuasiStatic { axis, weights: w } = &event.channel {
+            assert_eq!(*axis, PauliAxis::Z);
+            weights[event.qubits[0]] = w.clone();
+        }
+    }
+    let mut z = vec![0.0; noise.quasi_static_sources()];
+    (0..shots)
+        .map(|shot| {
+            let mut rng = crate::sim::trajectory::noise_rng(crate::sim::mix_seed(42, shot));
+            crate::sim::trajectory::standard_normals(&mut rng, &mut z);
+            weights
+                .iter()
+                .map(|w| w.iter().map(|&(source, weight)| weight * z[source]).sum())
+                .collect()
+        })
+        .collect()
+}
+
+fn assert_covariance(samples: &[Vec<f64>], expected: &[f64]) {
+    let n = samples[0].len();
+    let count = samples.len() as f64;
+    for a in 0..n {
+        for b in 0..n {
+            let observed = samples.iter().map(|s| s[a] * s[b]).sum::<f64>() / count;
+            let want = expected[a * n + b];
+            let spread = ((expected[a * n + a] * expected[b * n + b] + want * want) / count).sqrt();
+            assert!(
+                (observed - want).abs() <= 5.0 * spread + 1e-12,
+                "covariance ({a}, {b}): drew {observed}, asked {want} +- {spread}"
+            );
+        }
+    }
+}
+
+#[test]
+fn correlated_detuning_draws_reproduce_the_requested_covariance() {
+    let neighbours = DriftDistribution::independent([1.0, 2.0, 0.5, 1.5])
+        .with_neighbour_correlation([(0, 1), (1, 2), (2, 3)], 0.45);
+    let expected = neighbours.covariance().to_vec();
+    assert_covariance(&drawn_detunings(neighbours, 4, 40_000), &expected);
+
+    let full = DriftDistribution::from_covariance(vec![
+        vec![2.0, 0.6, -0.4],
+        vec![0.6, 1.0, 0.3],
+        vec![-0.4, 0.3, 0.5],
+    ]);
+    let expected = full.covariance().to_vec();
+    assert_covariance(&drawn_detunings(full, 3, 40_000), &expected);
+
+    let locked =
+        DriftDistribution::independent([1.0, 1.0]).with_neighbour_correlation([(0, 1)], 1.0);
+    for shot in drawn_detunings(locked, 2, 64) {
+        assert!((shot[0] - shot[1]).abs() < 1e-12, "{shot:?}");
+    }
+}

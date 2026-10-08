@@ -15,8 +15,8 @@ use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::sim::noise::NoiseModel;
 use prism_q::{
-    DetectorErrorModel, QecBasis, QecCircuitNoise, QecNoise, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, run_qec_program,
+    DetectorErrorModel, QecBasis, QecCircuitNoise, QecNoise, QecOp, QecOptions, QecPauli,
+    QecProgram, QecRecordRef, run_qec_program,
 };
 #[cfg(feature = "bench-internal")]
 use prism_q::{compile_qec_profiled_sampler, parse_qec_program};
@@ -1105,6 +1105,47 @@ fn bench_qec_workflow(c: &mut Criterion) {
     group.finish();
 }
 
+/// [`qec_surface_program`] with `LEAK(1e-3)` and `SEEP(0.1)` on every data qubit after
+/// each round's depolarizing annotation: the erasure sampler against the
+/// `qec_detector_sampling/surf_d5` record path on the same program without them.
+fn bench_qec_erasure_runner(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_erasure_runner");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    let shots = 100_000;
+    for &distance in &[3usize, 5] {
+        let base = qec_surface_program(distance, distance, shots, Some(0.001));
+        let data: Vec<usize> = (0..base.num_qubits()).collect();
+        let mut ops = Vec::with_capacity(base.ops().len() + 2 * distance);
+        for op in base.ops() {
+            let round_noise = matches!(op, QecOp::Noise { .. });
+            ops.push(op.clone());
+            if round_noise {
+                ops.push(QecOp::Noise {
+                    channel: QecNoise::Leak(0.001),
+                    targets: data.clone(),
+                });
+                ops.push(QecOp::Noise {
+                    channel: QecNoise::Seep(0.1),
+                    targets: data.clone(),
+                });
+            }
+        }
+        let program = QecProgram::from_ops(base.num_qubits(), base.options(), ops).unwrap();
+        group.bench_with_input(
+            BenchmarkId::new(format!("surf_d{distance}"), shots),
+            &program,
+            |b, program| {
+                b.iter(|| run_qec_program(program).unwrap());
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -1124,6 +1165,7 @@ criterion_group! {
     bench_qec_noisy_runner_split,
     bench_analytical_marginals,
     bench_chunked_high_shots,
-    bench_qec_workflow
+    bench_qec_workflow,
+    bench_qec_erasure_runner
 }
 criterion_main!(benches);

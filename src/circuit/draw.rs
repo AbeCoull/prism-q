@@ -1,6 +1,7 @@
 //! Unicode text rendering for circuits: [`Circuit::draw`], [`Circuit::summary`],
 //! and [`Circuit::heatmap`], configured through [`TextOptions`].
 
+use std::borrow::Cow;
 use std::fmt;
 
 use crate::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
@@ -269,6 +270,16 @@ impl GridCell {
     }
 }
 
+/// Text a measurement or conditional cell shows, which its column must fit. Other
+/// kinds draw `op.label` or a glyph no wider than it.
+fn cell_label(op: &PlacedOp) -> Cow<'_, str> {
+    match &op.kind {
+        OpKind::Measure { cbit } => Cow::Owned(format!("M{cbit}")),
+        OpKind::Conditional { cbit_label } => Cow::Owned(format!("{cbit_label}?{}", op.label)),
+        _ => Cow::Borrowed(&op.label),
+    }
+}
+
 /// Give each moment's barriers a column ahead of its gates, or drop them when hidden.
 ///
 /// Placement synchronizes a barrier's qubits without advancing them, so the next gate
@@ -308,7 +319,7 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
             if matches!(op.kind, OpKind::Barrier) {
                 continue;
             }
-            max_label = max_label.max(op.label.chars().count());
+            max_label = max_label.max(cell_label(op).chars().count());
         }
         col_widths.push(max_label + 2);
     }
@@ -471,14 +482,13 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
                         }
                     }
                 }
-                OpKind::Measure { cbit } => {
+                OpKind::Measure { .. } => {
                     if let Some(row) = op
                         .qubits
                         .first()
                         .and_then(|&q| qubit_to_row.get(q).copied().flatten())
                     {
-                        let label = format!("M{}", cbit);
-                        grid[row * 2][m_idx] = GridCell::gate(&label, w);
+                        grid[row * 2][m_idx] = GridCell::gate(&cell_label(op), w);
                     }
                 }
                 OpKind::Reset => {
@@ -490,10 +500,10 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
                         grid[row * 2][m_idx] = GridCell::gate("|0⟩", w);
                     }
                 }
-                OpKind::Conditional { cbit_label } => {
+                OpKind::Conditional { .. } => {
+                    let label = cell_label(op);
                     for &q in &op.qubits {
                         if let Some(row) = qubit_to_row.get(q).copied().flatten() {
-                            let label = format!("{}?{}", cbit_label, op.label);
                             grid[row * 2][m_idx] = GridCell::gate(&label, w);
                         }
                     }
@@ -1350,6 +1360,31 @@ mod tests {
         assert_eq!(
             builder.build().draw(&TextOptions::default()),
             ["q[0]: ─H─┊┊┊───", "q[1]: ───┊┊┊─H─", "q[2]: ─H───────"].join("\n"),
+        );
+    }
+
+    #[test]
+    fn measurement_column_fits_its_classical_bit() {
+        let circuit = CircuitBuilder::new_with_classical(1, 101)
+            .h(0)
+            .measure(0, 100)
+            .x(0)
+            .build();
+        assert_eq!(circuit.draw(&TextOptions::default()), "q[0]: ─H──M100──X─");
+    }
+
+    #[test]
+    fn conditional_column_fits_its_condition() {
+        let circuit = CircuitBuilder::new_with_classical(2, 1)
+            .h(0)
+            .measure(0, 0)
+            .x(1)
+            .x(1)
+            .conditional(ClassicalCondition::BitIsOne(0), Gate::X, &[1])
+            .build();
+        assert_eq!(
+            circuit.draw(&TextOptions::default()),
+            ["q[0]: ─H──M0─────────", "q[1]: ─X──X───c[0]?X─"].join("\n"),
         );
     }
 }

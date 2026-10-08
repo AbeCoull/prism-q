@@ -13,6 +13,8 @@
 //! - [`QecProgram::detector_error_model`] derives the [`DetectorErrorModel`] for export
 //!   to matching and belief-propagation decoders.
 //! - [`UnionFindDecoder`] decodes packed detector samples against a graphlike model.
+//! - [`QecProgram::surface_memory`] and its repetition and color code siblings generate
+//!   memory experiments with circuit-level noise.
 
 pub(crate) mod camps_prefix;
 /// Treewidth-aware cut-selection heuristics, benchmark-only: the dispatcher follows a
@@ -22,6 +24,7 @@ pub mod cut_selection;
 mod decoder;
 mod dem;
 mod dem_text;
+mod generators;
 mod noise;
 pub mod observable_reroute;
 mod parity_walk;
@@ -33,6 +36,7 @@ mod text;
 
 pub use decoder::UnionFindDecoder;
 pub use dem::{DetectorErrorModel, ErrorMechanism};
+pub use generators::QecCircuitNoise;
 pub use parse::parse_qec_program;
 pub use result::{QecObservableEstimate, QecSampleResult};
 #[cfg(feature = "bench-internal")]

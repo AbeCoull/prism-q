@@ -710,11 +710,49 @@ class QecNoise:
     def __reduce__(self) -> tuple[Any, tuple[bytes]]: ...
 
 @final
+class QecCircuitNoise:
+    def __new__(
+        cls,
+        after_clifford_depolarization: float = 0.0,
+        before_measure_flip_probability: float = 0.0,
+        after_reset_flip_probability: float = 0.0,
+        before_round_data_depolarization: float = 0.0,
+    ) -> Self: ...
+    @staticmethod
+    def uniform(p: float) -> "QecCircuitNoise": ...
+    @property
+    def after_clifford_depolarization(self) -> float: ...
+    @property
+    def before_measure_flip_probability(self) -> float: ...
+    @property
+    def after_reset_flip_probability(self) -> float: ...
+    @property
+    def before_round_data_depolarization(self) -> float: ...
+
+@final
 class QecProgram:
     def __new__(cls, num_qubits: int) -> Self: ...
     @staticmethod
     def from_text(text: str) -> "QecProgram": ...
     def to_text(self) -> str: ...
+    @staticmethod
+    def repetition_memory(
+        distance: int, rounds: int, noise: Optional[QecCircuitNoise] = None
+    ) -> "QecProgram": ...
+    @staticmethod
+    def surface_memory(
+        distance: int,
+        rounds: int,
+        basis: QecBasis = ...,
+        noise: Optional[QecCircuitNoise] = None,
+    ) -> "QecProgram": ...
+    @staticmethod
+    def color_memory(
+        distance: int,
+        rounds: int,
+        basis: QecBasis = ...,
+        noise: Optional[QecCircuitNoise] = None,
+    ) -> "QecProgram": ...
     def set_options(
         self,
         shots: int,

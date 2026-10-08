@@ -14,7 +14,10 @@ use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::sim::noise::NoiseModel;
-use prism_q::{QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef, run_qec_program};
+use prism_q::{
+    DetectorErrorModel, QecBasis, QecCircuitNoise, QecNoise, QecOptions, QecPauli, QecProgram,
+    QecRecordRef, run_qec_program,
+};
 #[cfg(feature = "bench-internal")]
 use prism_q::{compile_qec_profiled_sampler, parse_qec_program};
 use std::collections::HashMap;
@@ -1077,6 +1080,31 @@ fn bench_chunked_high_shots(c: &mut Criterion) {
     group.finish();
 }
 
+// Building a distance-13 surface memory of 1000 rounds, and reading back the exported
+// detector error model of its 100-round sibling, 340k mechanisms in 18 MB of text.
+fn bench_qec_workflow(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_workflow");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(5));
+
+    let noise = QecCircuitNoise::uniform(0.001);
+    group.bench_function("surface_memory/d13_r1000", |b| {
+        b.iter(|| QecProgram::surface_memory(13, 1000, QecBasis::Z, &noise).unwrap());
+    });
+
+    let text = QecProgram::surface_memory(13, 100, QecBasis::Z, &noise)
+        .unwrap()
+        .detector_error_model()
+        .unwrap()
+        .to_text();
+    group.bench_function("dem_from_text/surface_d13_r100", |b| {
+        b.iter(|| DetectorErrorModel::from_text(&text).unwrap());
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -1095,6 +1123,7 @@ criterion_group! {
     bench_qec_deep_memory,
     bench_qec_noisy_runner_split,
     bench_analytical_marginals,
-    bench_chunked_high_shots
+    bench_chunked_high_shots,
+    bench_qec_workflow
 }
 criterion_main!(benches);

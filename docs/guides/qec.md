@@ -126,6 +126,37 @@ grammar, and [QEC program execution](../architecture/qec-programs.md) for the
 runner routing, the V1 reset requirement, and the `EXP_VAL` placement rules.
 ```
 
+## Memory experiments
+
+`QecProgram::repetition_memory`, `surface_memory`, and `color_memory` build
+the standard memory experiments with circuit-level noise from a
+`QecCircuitNoise`: depolarization after every Clifford gate, a flip before
+every measurement and after every reset, and depolarization of the data at
+the start of each round. Each program carries detectors with coordinates and
+logical observable 0, ready for sampling, model derivation, and decoding:
+
+```rust
+use prism_q::{QecBasis, QecCircuitNoise, QecProgram, UnionFindDecoder, run_qec_program};
+
+let noise = QecCircuitNoise::uniform(0.002);
+let program = QecProgram::surface_memory(3, 3, QecBasis::Z, &noise)?;
+let model = program.detector_error_model()?.decompose_graphlike()?;
+let decoder = UnionFindDecoder::from_model(&model)?;
+let result = run_qec_program(&program)?;
+let predicted = decoder.decode_packed(&result.detectors)?;
+let failures = (0..result.total_shots)
+    .filter(|&shot| predicted.get_bit(shot, 0) != result.observables.get_bit(shot, 0))
+    .count();
+# Ok::<(), prism_q::PrismError>(())
+```
+
+The repetition code protects a Z memory; the rotated surface and triangular
+6.6.6 color codes take an X or Z memory basis. A zero rate adds no annotation,
+so `QecCircuitNoise::default()` gives the noiseless program, whose detectors
+and observable never fire. In Python the same generators are static methods
+of `QecProgram`, with an optional `QecCircuitNoise`. See the
+[QEC IR reference](../architecture/qec-ir.md) for the layouts and schedules.
+
 ## Detector error model export
 
 Matching and belief-propagation decoders consume an error model, not raw

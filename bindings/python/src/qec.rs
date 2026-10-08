@@ -2,8 +2,8 @@
 
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
-    DetectorErrorModel, PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
+    DetectorErrorModel, PackedShots, QecBasis, QecCircuitNoise, QecNoise, QecOptions, QecPauli,
+    QecProgram, QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
     run_qec_program_reference,
 };
 use pyo3::prelude::*;
@@ -141,6 +141,66 @@ impl PyQecNoise {
     }
 }
 
+/// Circuit-level noise for the memory-experiment generators; a zero rate adds nothing.
+#[pyclass(name = "QecCircuitNoise", module = "prism_q", frozen, from_py_object)]
+#[derive(Clone, Copy)]
+pub struct PyQecCircuitNoise(QecCircuitNoise);
+
+#[pymethods]
+impl PyQecCircuitNoise {
+    #[new]
+    #[pyo3(signature = (
+        after_clifford_depolarization = 0.0,
+        before_measure_flip_probability = 0.0,
+        after_reset_flip_probability = 0.0,
+        before_round_data_depolarization = 0.0,
+    ))]
+    fn new(
+        after_clifford_depolarization: f64,
+        before_measure_flip_probability: f64,
+        after_reset_flip_probability: f64,
+        before_round_data_depolarization: f64,
+    ) -> Self {
+        Self(QecCircuitNoise {
+            after_clifford_depolarization,
+            before_measure_flip_probability,
+            after_reset_flip_probability,
+            before_round_data_depolarization,
+        })
+    }
+
+    /// Every term at rate `p`.
+    #[staticmethod]
+    fn uniform(p: f64) -> Self {
+        Self(QecCircuitNoise::uniform(p))
+    }
+
+    #[getter]
+    fn after_clifford_depolarization(&self) -> f64 {
+        self.0.after_clifford_depolarization
+    }
+    #[getter]
+    fn before_measure_flip_probability(&self) -> f64 {
+        self.0.before_measure_flip_probability
+    }
+    #[getter]
+    fn after_reset_flip_probability(&self) -> f64 {
+        self.0.after_reset_flip_probability
+    }
+    #[getter]
+    fn before_round_data_depolarization(&self) -> f64 {
+        self.0.before_round_data_depolarization
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.0)
+    }
+}
+
+fn generator_noise(noise: Option<PyQecCircuitNoise>) -> QecCircuitNoise {
+    noise.map_or_else(QecCircuitNoise::default, |noise| noise.0)
+}
+
 /// A native measurement-record QEC program.
 #[pyclass(name = "QecProgram", module = "prism_q")]
 pub struct PyQecProgram {
@@ -167,6 +227,57 @@ impl PyQecProgram {
     /// Render the program in the native QEC text format that `from_text` reads.
     fn to_text(&self) -> PyPrismResult<String> {
         Ok(self.inner.to_text()?)
+    }
+
+    /// Repetition-code Z memory with `distance` data qubits and `rounds` rounds.
+    #[staticmethod]
+    #[pyo3(signature = (distance, rounds, noise = None))]
+    fn repetition_memory(
+        distance: usize,
+        rounds: usize,
+        noise: Option<PyQecCircuitNoise>,
+    ) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: QecProgram::repetition_memory(distance, rounds, &generator_noise(noise))?,
+        })
+    }
+
+    /// Rotated surface-code memory in the X or Z logical basis.
+    #[staticmethod]
+    #[pyo3(signature = (distance, rounds, basis = PyQecBasis::Z, noise = None))]
+    fn surface_memory(
+        distance: usize,
+        rounds: usize,
+        basis: PyQecBasis,
+        noise: Option<PyQecCircuitNoise>,
+    ) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: QecProgram::surface_memory(
+                distance,
+                rounds,
+                basis.to_core(),
+                &generator_noise(noise),
+            )?,
+        })
+    }
+
+    /// Triangular 6.6.6 color-code memory in the X or Z logical basis, odd distance.
+    #[staticmethod]
+    #[pyo3(signature = (distance, rounds, basis = PyQecBasis::Z, noise = None))]
+    fn color_memory(
+        distance: usize,
+        rounds: usize,
+        basis: PyQecBasis,
+        noise: Option<PyQecCircuitNoise>,
+    ) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: QecProgram::color_memory(
+                distance,
+                rounds,
+                basis.to_core(),
+                &generator_noise(noise),
+            )?,
+        })
     }
 
     #[pyo3(signature = (shots, seed = 42, chunk_size = None, keep_measurements = true))]

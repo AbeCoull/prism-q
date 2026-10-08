@@ -228,7 +228,7 @@ impl GridCell {
     }
 
     fn gate(label: &str, width: usize) -> Self {
-        let pad_total = width.saturating_sub(label.len());
+        let pad_total = width.saturating_sub(label.chars().count());
         let pad_left = pad_total / 2;
         let pad_right = pad_total - pad_left;
         let content = format!(
@@ -288,7 +288,7 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
             if matches!(op.kind, OpKind::Barrier) {
                 continue;
             }
-            max_label = max_label.max(op.label.len());
+            max_label = max_label.max(op.label.chars().count());
         }
         col_widths.push(max_label + 2);
     }
@@ -1250,5 +1250,55 @@ mod tests {
         let circuit = crate::circuits::ghz_circuit(8);
         let summary = circuit.summary();
         assert!(summary.contains("nearest-neighbor"));
+    }
+
+    #[test]
+    fn multibyte_labels_pad_by_char_count() {
+        let rotation = CircuitBuilder::new(2)
+            .ry(std::f64::consts::FRAC_PI_2, 0)
+            .h(1)
+            .build();
+        assert_eq!(
+            rotation.draw(&TextOptions::default()),
+            ["q[0]: ─Ry(π/2)─", "q[1]: ────H────"].join("\n"),
+        );
+
+        let mut builder = CircuitBuilder::new(2);
+        builder.h(0).h(1).reset(0).x(1);
+        assert_eq!(
+            builder.build().draw(&TextOptions::default()),
+            ["q[0]: ─H──|0⟩─", "q[1]: ─H───X──"].join("\n"),
+        );
+    }
+
+    #[test]
+    fn swap_connector_aligns_with_markers() {
+        let circuit = CircuitBuilder::new(3).swap(0, 2).h(0).h(2).build();
+        assert_eq!(
+            circuit.draw(&TextOptions::default()),
+            [
+                "q[0]: ──×────H─",
+                "        │",
+                "q[1]: ──│──────",
+                "        │",
+                "q[2]: ──×────H─",
+            ]
+            .join("\n"),
+        );
+
+        let odd_width = CircuitBuilder::new(3)
+            .swap(0, 1)
+            .rx(std::f64::consts::FRAC_PI_4, 2)
+            .build();
+        assert_eq!(
+            odd_width.draw(&TextOptions::default()),
+            [
+                "q[0]: ────×────",
+                "          │",
+                "q[1]: ────×────",
+                "q[2]: ─Rx(π/4)─",
+            ]
+            .join("\n"),
+        );
     }
 }

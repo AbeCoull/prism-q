@@ -1008,14 +1008,14 @@ impl QecParityProjection {
     }
 }
 
-/// Output words from which the pattern fill runs on the pool. Every row is written,
-/// zero or not, so the fresh allocation's pages are first touched from all threads at
-/// once rather than one at a time as the noise lands on them.
+/// Words of rows with a set pattern bit from which their inversion runs on the pool.
 #[cfg(feature = "parallel")]
-const QEC_PARALLEL_FILL_WORDS: usize = 1 << 18;
+const QEC_PARALLEL_INVERT_WORDS: usize = 1 << 18;
 
 /// Sample measurement-major detector and observable bits without measurement records,
-/// from the projected noiseless `pattern` plus projected noise.
+/// from the projected noiseless `pattern` plus projected noise. Noise lands on zeroed
+/// rows and the rows whose noiseless parity is one are inverted after, so rows that
+/// neither a fault nor a set parity reaches are never written.
 fn qec_result_from_parity_projection(
     program: &QecProgram,
     projection: &QecParityProjection,
@@ -1031,38 +1031,46 @@ fn qec_result_from_parity_projection(
         bits => (1u64 << bits) - 1,
     };
 
-    let mut rows = vec![0u64; (num_detectors + num_observables) * row_words];
+    let num_rows = num_detectors + num_observables;
+    let mut rows = match noise {
+        Some(noise) => noise.sample_rows(num_rows, row_words, shots),
+        None => vec![0u64; num_rows * row_words],
+    };
     if row_words > 0 {
-        let fill_row = |(output, row): (usize, &mut [u64])| {
+        let invert_row = |(output, row): (usize, &mut [u64])| {
             if (pattern[output / 64] >> (output % 64)) & 1 == 1 {
-                row.fill(u64::MAX);
-                row[row_words - 1] = tail_mask;
-            } else {
-                row.fill(0);
+                for word in row.iter_mut() {
+                    *word = !*word;
+                }
+                row[row_words - 1] &= tail_mask;
             }
         };
         #[cfg(feature = "parallel")]
-        if rows.len() >= QEC_PARALLEL_FILL_WORDS {
+        if pattern
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum::<usize>()
+            * row_words
+            >= QEC_PARALLEL_INVERT_WORDS
+        {
             rows.par_chunks_exact_mut(row_words)
                 .enumerate()
-                .for_each(fill_row);
+                .for_each(invert_row);
         } else {
             rows.chunks_exact_mut(row_words)
                 .enumerate()
-                .for_each(fill_row);
+                .for_each(invert_row);
         }
         #[cfg(not(feature = "parallel"))]
         rows.chunks_exact_mut(row_words)
             .enumerate()
-            .for_each(fill_row);
-    }
-    if let Some(noise) = noise {
-        noise.apply(&mut rows, row_words, shots);
+            .for_each(invert_row);
     }
 
     let observable_data = rows.split_off(num_detectors * row_words);
-    let detectors = PackedShots::from_meas_major(rows, shots, num_detectors);
-    let observables = PackedShots::from_meas_major(observable_data, shots, num_observables);
+    let detectors = PackedShots::from_meas_major_clear_padding(rows, shots, num_detectors);
+    let observables =
+        PackedShots::from_meas_major_clear_padding(observable_data, shots, num_observables);
     let mut logical_errors = vec![0u64; num_observables];
     add_qec_logical_error_counts(&observables, &mut logical_errors);
     QecSampleResult::new_with_total_shots(

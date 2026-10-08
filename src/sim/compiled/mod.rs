@@ -290,6 +290,19 @@ impl SendPtrU64 {
             *self.0.add(offset) ^= bits;
         }
     }
+
+    /// Write `value` to the word at `offset` without reading it.
+    ///
+    /// # Safety
+    ///
+    /// `offset` must be in bounds, and no other thread may access that word concurrently.
+    #[inline(always)]
+    pub(crate) unsafe fn write_word(self, offset: usize, value: u64) {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            self.0.add(offset).write(value);
+        }
+    }
 }
 
 #[inline(always)]
@@ -1882,6 +1895,30 @@ impl PackedShots {
             s_words,
             layout: ShotLayout::MeasMajor,
         })
+    }
+
+    /// [`Self::from_meas_major`] for rows built with clear padding, without the scan of
+    /// every row's last word, which faults in each page of rows nothing has touched.
+    pub(crate) fn from_meas_major_clear_padding(
+        data: Vec<u64>,
+        num_shots: usize,
+        num_measurements: usize,
+    ) -> Self {
+        let s_words = num_shots.div_ceil(64);
+        debug_assert!(
+            validate_packed_len("measurement-major", data.len(), num_measurements, s_words).is_ok()
+        );
+        debug_assert!(
+            validate_meas_major_padding(&data, num_shots, num_measurements, s_words).is_ok()
+        );
+        Self {
+            data,
+            num_shots,
+            num_measurements,
+            m_words: num_measurements.div_ceil(64),
+            s_words,
+            layout: ShotLayout::MeasMajor,
+        }
     }
 
     /// Like [`Self::try_from_meas_major`] but panics on invalid data.

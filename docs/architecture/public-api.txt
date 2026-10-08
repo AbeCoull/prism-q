@@ -1475,6 +1475,7 @@ pub const prism_q::gates::MAX_UNITARY_QUBITS: usize
 pub mod prism_q::gpu
 pub struct prism_q::gpu::GpuContext
 impl prism_q::gpu::GpuContext
+pub fn prism_q::gpu::GpuContext::device_name(&self) -> prism_q::error::Result<alloc::string::String>
 pub fn prism_q::gpu::GpuContext::fits_statevector(&self, usize) -> prism_q::error::Result<bool>
 pub fn prism_q::gpu::GpuContext::fits_statevector_with_scratch(&self, usize) -> prism_q::error::Result<bool>
 pub fn prism_q::gpu::GpuContext::fits_tableau(&self, usize) -> prism_q::error::Result<bool>
@@ -1508,6 +1509,7 @@ pub const prism_q::gpu::MIN_QUBITS_DEFAULT: usize
 pub const prism_q::gpu::STABILIZER_MIN_QUBITS_DEFAULT: usize
 pub fn prism_q::gpu::is_available() -> bool
 pub fn prism_q::gpu::min_qubits() -> usize
+pub fn prism_q::gpu::nvrtc_available() -> bool
 pub fn prism_q::gpu::stabilizer_min_qubits() -> usize
 pub mod prism_q::qec
 pub mod prism_q::qec::observable_reroute

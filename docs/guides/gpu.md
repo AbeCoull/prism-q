@@ -1,8 +1,12 @@
 # GPU Backend
 
 ```admonish info
-The GPU backend is optional and gated behind the `gpu` feature. It requires the CUDA
-toolkit (12.x or newer) and a CUDA-capable device.
+The GPU backend is optional and gated behind the `gpu` feature. Building it needs no
+CUDA toolkit: the NVIDIA driver and NVRTC load when the first `GpuContext` opens.
+Running it needs a CUDA-capable device, a driver for CUDA 12.0 or newer, and NVRTC
+from a CUDA 12 toolkit on the loader path (`PATH` on Windows, the `ld.so` search path
+on Linux). A missing driver or NVRTC is a `PrismError` from `GpuContext::new`, not a
+load failure.
 ```
 
 ```bash
@@ -75,8 +79,9 @@ currently free VRAM is rejected at `init` with an error naming the requested and
 device memory; `GpuContext::max_qubits_for_statevector` reports the advisory cap from
 free memory.
 
-The four `BackendKind` entry points are also reachable from Python, from a build
-carrying the `gpu` feature. See [Python Bindings](python.md#gpu-backends).
+The four `BackendKind` entry points are also reachable from Python. The Linux and
+Windows wheels carry the `gpu` feature, and `pip install "prism-q[cuda12]"` adds
+NVRTC from PyPI. See [Python Bindings](python.md#gpu-backends).
 
 ## Module layout (`src/gpu/`)
 

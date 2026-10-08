@@ -52,9 +52,12 @@ back to OpenQASM 3.0.
 cargo add prism-q                          # Rayon parallelism and faer SVD (default)
 cargo add prism-q --no-default-features    # single-threaded, minimal dependencies
 pip install prism-q                        # Python
+pip install "prism-q[cuda12]"              # Python, plus NVRTC for the CUDA backends
 ```
 
-The `gpu` feature needs CUDA Toolkit 12.x or newer and a CUDA device. Build with
+The `gpu` feature builds without a CUDA toolkit and loads the NVIDIA driver and NVRTC at
+run time; running it needs a CUDA device, a CUDA 12 driver, and NVRTC from a CUDA 12
+toolkit or the `cuda12` Python extra. Build with
 `cargo build --release --features "parallel gpu"`. Building from source and pinning a
 git revision are covered in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

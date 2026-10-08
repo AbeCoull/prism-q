@@ -9,8 +9,9 @@ cargo build --features "parallel gpu" # add the optional CUDA statevector backen
 cargo build --all-features            # everything
 ```
 
-The `gpu` feature requires the CUDA toolkit (12.x or newer) and a CUDA capable device.
-PTX is compiled at runtime via NVRTC against the device's compute capability.
+The `gpu` feature builds without a CUDA toolkit. Running it needs a CUDA capable device,
+an NVIDIA driver for CUDA 12.0 or newer, and NVRTC from a CUDA 12 toolkit, all loaded at
+run time. PTX is compiled at runtime via NVRTC against the device's compute capability.
 
 ### From source
 
@@ -39,7 +40,7 @@ cargo doc --no-deps --features "parallel gpu distributed"
 `--all-features` includes `distributed-mpi`, which needs a system MPI installation and
 libclang for its bindgen step; without them, name the features instead, for example
 `--features "parallel gpu distributed"`. The doc build covers the `gpu` and
-`distributed` surfaces without a CUDA toolkit, because rustdoc compiles but never links.
+`distributed` surfaces without a CUDA toolkit.
 
 Use `cargo test --all-features` when `cargo-nextest` is not installed. Keep doctests on
 `cargo test --doc` until nextest doctest support is no longer experimental.
@@ -190,8 +191,8 @@ pin are stated once in [Compatibility](docs/guides/capabilities.md#compatibility
 
 PRs run formatting, clippy, nextest, doctests, doc build, coverage, the release
 bump-level check, aarch64 cross-compile, macOS ARM64 tests, and `cargo-deny`
-(security advisories plus license audit). The GPU job compiles the `gpu` feature against
-the CUDA toolkit and runs the device-free kernel name registry test; nothing in CI opens
+(security advisories plus license audit). The GPU job compiles the `gpu` feature without a
+CUDA toolkit and runs the device-free kernel name registry test; nothing in CI opens
 a device, so `scripts/test-gpu.ps1` covers the device suites on a host with a card.
 
 ## Hot-path rules

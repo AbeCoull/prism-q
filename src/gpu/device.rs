@@ -44,6 +44,13 @@ impl GpuDevice {
     /// disk in `prism-q-ptx` under the user cache dir (`XDG_CACHE_HOME`, `LOCALAPPDATA`,
     /// or `HOME/.cache`), so NVRTC runs once per source change per user and host.
     pub fn new(device_id: usize) -> Result<Self> {
+        let version = driver_version()?;
+        if version < MIN_DRIVER_VERSION {
+            return Err(gpu_unusable(format!(
+                "the NVIDIA driver supports CUDA {}, and CUDA 12.0 or newer is required",
+                cuda_version(version)
+            )));
+        }
         let context = CudaContext::new(device_id).map_err(|e| driver_err("init", e))?;
         let stream = context.default_stream();
         let arch = detect_arch(&context)?;
@@ -69,7 +76,15 @@ impl GpuDevice {
 
     /// Whether device 0 opens; any detection failure reads as `false`.
     pub fn is_available() -> bool {
-        CudaContext::new(0).is_ok()
+        driver_version().is_ok_and(|v| v >= MIN_DRIVER_VERSION) && CudaContext::new(0).is_ok()
+    }
+
+    /// Product name of the selected device, as the driver reports it.
+    pub fn name(&self) -> Result<String> {
+        match &self.inner {
+            DeviceInner::Real { context, .. } => context.name().map_err(|e| driver_err("name", e)),
+            DeviceInner::Stub => Err(Self::stub_unsupported("name")),
+        }
     }
 
     /// Total VRAM on the selected device in bytes.
@@ -190,11 +205,17 @@ fn load_or_compile(
             return Ok((Arc::new(ptx), module));
         }
     }
+    if !nvrtc_present() {
+        return Err(gpu_unusable(
+            "NVRTC, the CUDA runtime compiler, did not load (looked for libnvrtc.so.12 or \
+             nvrtc64_120_0.dll); install a CUDA 12 toolkit or put its NVRTC library on the \
+             loader path"
+                .to_string(),
+        ));
+    }
     let ptx = compile_ptx_with_opts(&source, opts)
         .map_err(|e| driver_err(&format!("PTX compilation (arch={arch})"), e))?;
-    let module = context
-        .load_module(ptx.clone())
-        .map_err(|e| driver_err("load_module", e))?;
+    let module = context.load_module(ptx.clone()).map_err(fresh_module_err)?;
     write_ptx_cache(&path, &ptx.to_src());
     Ok((Arc::new(ptx), module))
 }
@@ -230,6 +251,73 @@ fn write_ptx_cache(path: &Path, ptx_src: &str) {
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     if std::fs::write(&tmp, ptx_src).is_ok() && std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Oldest driver, as `cuDriverGetVersion` encodes it, that the pinned `cudarc` bindings
+/// and the NVRTC 12 PTX run on.
+const MIN_DRIVER_VERSION: i32 = 12_000;
+
+/// CUDA version the installed driver supports, or an error naming the missing library.
+///
+/// `cudarc` loads the driver on first use and panics when it is absent, so every path
+/// that opens a device checks here first.
+fn driver_version() -> Result<i32> {
+    // SAFETY: probing loads the driver library by name, which runs only its own
+    // initialisers and asks nothing of this process.
+    if !unsafe { cudarc::driver::sys::is_culib_present() } {
+        return Err(gpu_unusable(
+            "the NVIDIA driver library (libcuda.so.1 or nvcuda.dll) did not load; install an \
+             NVIDIA driver"
+                .to_string(),
+        ));
+    }
+    let mut version = 0;
+    // SAFETY: the driver library loads (checked above), and cuDriverGetVersion only writes
+    // its out-parameter; it is valid before cuInit.
+    unsafe { cudarc::driver::sys::cuDriverGetVersion(&mut version) }
+        .result()
+        .map_err(|e| driver_err("driver version", e))?;
+    Ok(version)
+}
+
+/// Whether the NVRTC library loads under any name `cudarc` searches for.
+pub(crate) fn nvrtc_present() -> bool {
+    // SAFETY: probing loads the NVRTC library by name, which runs only its own
+    // initialisers and asks nothing of this process.
+    unsafe { cudarc::nvrtc::sys::is_culib_present() }
+}
+
+fn nvrtc_version() -> Option<(i32, i32)> {
+    let (mut major, mut minor) = (0, 0);
+    // SAFETY: called after a compile, so NVRTC is loaded; nvrtcVersion only writes its
+    // out-parameters.
+    let status = unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor) };
+    (status == cudarc::nvrtc::sys::nvrtcResult::NVRTC_SUCCESS).then_some((major, minor))
+}
+
+fn cuda_version(encoded: i32) -> String {
+    format!("{}.{}", encoded / 1000, encoded % 1000 / 10)
+}
+
+/// Map a failure to load freshly compiled PTX, naming the version mismatch when the
+/// driver predates the NVRTC that emitted the PTX.
+fn fresh_module_err(err: cudarc::driver::DriverError) -> PrismError {
+    if err.0 != cudarc::driver::sys::CUresult::CUDA_ERROR_UNSUPPORTED_PTX_VERSION {
+        return driver_err("load_module", err);
+    }
+    let driver = driver_version().map_or_else(|_| "unknown".to_string(), cuda_version);
+    let nvrtc = nvrtc_version().map_or_else(|| "unknown".to_string(), |(a, b)| format!("{a}.{b}"));
+    gpu_unusable(format!(
+        "the NVIDIA driver (CUDA {driver}) is older than the NVRTC that compiled the kernels \
+         (CUDA {nvrtc}); update the driver, or use an NVRTC no newer than the driver"
+    ))
+}
+
+fn gpu_unusable(reason: String) -> PrismError {
+    PrismError::IncompatibleBackend {
+        backend: "gpu".to_string(),
+        reason,
     }
 }
 
@@ -324,10 +412,11 @@ mod tests {
     // Skips without a usable GPU, matching the golden suites.
     #[test]
     fn second_device_reuses_the_process_cached_ptx() {
-        let Ok(context) = CudaContext::new(0) else {
+        if !GpuDevice::is_available() {
             eprintln!("SKIP: no usable GPU");
             return;
-        };
+        }
+        let context = CudaContext::new(0).unwrap();
         let arch = detect_arch(&context).unwrap();
         let _first = GpuDevice::new(0).unwrap();
         let before = Arc::clone(&PTX_BY_ARCH.lock().unwrap()[arch]);
@@ -341,10 +430,11 @@ mod tests {
     // is the hit).
     #[test]
     fn corrupt_disk_cache_falls_back_to_a_recompile() {
-        let Ok(context) = CudaContext::new(0) else {
+        if !GpuDevice::is_available() {
             eprintln!("SKIP: no usable GPU");
             return;
-        };
+        }
+        let context = CudaContext::new(0).unwrap();
         let arch = detect_arch(&context).unwrap();
         let dir = std::env::temp_dir().join(format!("prism-q-ptx-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

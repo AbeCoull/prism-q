@@ -452,7 +452,7 @@ fn unpack_word(word: u64, out: &mut [bool]) {
     }
 }
 
-fn packed_to_2d<'py>(
+pub(crate) fn packed_to_2d<'py>(
     py: Python<'py>,
     packed: &PackedShots,
 ) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
@@ -486,7 +486,7 @@ fn packed_to_2d<'py>(
 
 /// Repack shot-major as `(shots, ceil(n / 8))` bytes: record `j` is bit `j % 8` of
 /// byte `j / 8`, and the padding bits of the last byte are clear.
-fn packed_to_bytes<'py>(
+pub(crate) fn packed_to_bytes<'py>(
     py: Python<'py>,
     packed: &PackedShots,
 ) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {

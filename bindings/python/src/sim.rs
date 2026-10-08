@@ -989,7 +989,7 @@ pub fn run_qasm(source: &str, seed: u64) -> PyPrismResult<PyRunOutcome> {
     Ok(PyRunOutcome::from_outcome(outcome))
 }
 
-fn counts_to_dict<'py>(
+pub(crate) fn counts_to_dict<'py>(
     py: Python<'py>,
     counts: &HashMap<Vec<u64>, u64>,
     num_bits: usize,

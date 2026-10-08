@@ -14,6 +14,7 @@ mod noise;
 mod numpy_util;
 mod parameter;
 mod qec;
+mod sampler;
 mod sim;
 
 use backend::{PyBackendKind, PyStabilizerBackend};
@@ -27,6 +28,7 @@ use parameter::{PyParameters, PyPreparedCircuit};
 use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
 };
+use sampler::PyCompiledSampler;
 use sim::{
     PyBondReport, PyCountsResult, PyEntropyResult, PyExpectationResult, PyObservableExpectation,
     PyObservableVariance, PyOverlapResult, PyPauliObservable, PyReducedDensityMatrix,
@@ -59,6 +61,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRunOutcome>()?;
     m.add_class::<PyShotsResult>()?;
     m.add_class::<PyCountsResult>()?;
+    m.add_class::<PyCompiledSampler>()?;
     m.add_class::<PyRunMetadata>()?;
     m.add_class::<PyBondReport>()?;
     m.add_class::<PyPauliObservable>()?;

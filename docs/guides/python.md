@@ -846,6 +846,42 @@ than the batch run one circuit at a time at 14 and 16 qubits. From 17 qubits up 
 circuit uses every core itself, and the batch saves only the crossing into Rust, about
 2.4 microseconds a call.
 
+## Compiled sampling
+
+`simulate(circuit).shots(n)` compiles a Clifford circuit's measurements into a parity
+sampler on every call. `CompiledSampler` keeps the compiled form, so repeated draws
+skip the compile, and adds reductions that stream shots through in bounded chunks
+rather than holding them:
+
+```python
+from prism_q import CircuitBuilder, CompiledSampler
+
+ghz = CircuitBuilder(3, 3).h(0).cx(0, 1).cx(1, 2).measure_all().build()
+sampler = CompiledSampler(ghz, seed=7)
+shots = sampler.sample(1000)                    # (1000, 3) bool
+counts = sampler.sample_counts(10**9)           # closed form at small rank
+marginals = sampler.marginals(10**6)            # P(record reads 1)
+parities = sampler.parity_expectations([[0, 1], [0, 1, 2]], 10**6)
+correlators = sampler.correlators([(0, 2)], 10**6)
+```
+
+Columns, count keys, and indices are measurement records in circuit order: record `j`
+is the `j`-th measurement, and `circuit.measurement_map()[j]` names its qubit and
+classical bit. `shots()` reports classical bits instead. Each call continues one seeded
+stream, so successive calls draw fresh shots and a sampler built again with the same
+seed replays them. `rank` counts the independent random bits behind the record, and
+`exact_counts()` enumerates all `2 ** rank` outcomes up to rank 25. `sample_packed(n)`
+returns records eight to a byte in the `QecResult.packed_measurements()` layout.
+
+`parity_expectations(rows, n)` estimates `<(-1)^parity>` over each row of record
+indices, the expectation of the Z-type Pauli product those records measure, and
+`correlators(pairs, n)` is its two-record case.
+
+`noise=model` compiles a Pauli noise model, readout error included, into the sampler;
+`rank` and `exact_counts()` are then `None`. The circuit must be Clifford with terminal
+measurements and no reset or classical condition, and other input raises `PrismError`
+naming the reason.
+
 ## Parameter sweeps
 
 A variational loop rebinds angles while the gate sequence stays fixed.

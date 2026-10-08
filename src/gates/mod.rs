@@ -752,11 +752,24 @@ pub(crate) fn multi_2q_join(
     q1: usize,
     num_qubits: usize,
 ) -> Option<smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>> {
-    subcube_join(high, [q0, q1], num_qubits)
+    let budget = multi_2q_high_budget_for(num_qubits);
+    let low_bits = multi_2q_low_bits();
+    let mut joined: smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> =
+        high.iter().copied().collect();
+    for q in [q0, q1] {
+        if q >= low_bits && !joined.contains(&q) {
+            if joined.len() == budget {
+                return None;
+            }
+            joined.push(q);
+        }
+    }
+    Some(joined)
 }
 
-/// [`multi_2q_join`] for any set of qubits a gate needs inside the tile.
-pub(crate) fn subcube_join(
+/// [`multi_2q_join`] for the X and Y qubits of a Pauli string, which a
+/// `MultiPauliRot` batch needs inside its tile.
+pub(crate) fn pauli_rot_join(
     high: &[usize],
     qubits: impl IntoIterator<Item = usize>,
     num_qubits: usize,

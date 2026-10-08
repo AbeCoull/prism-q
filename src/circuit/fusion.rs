@@ -10,7 +10,7 @@ use super::{Circuit, GuardedRegion, Instruction, SmallVec, smallvec};
 use crate::gates::{
     DiagEntry, DiagonalBatchData, Gate, IDENTITY_EPS, MULTI_2Q_HIGH_BUDGET, Multi2qData,
     MultiFusedData, MultiPauliRotData, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2,
-    mat_mul_4x4, multi_2q_join, pauli_rot_masks, subcube_join,
+    mat_mul_4x4, multi_2q_join, pauli_rot_join, pauli_rot_masks,
 };
 
 use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases};
@@ -1285,9 +1285,9 @@ fn fuse_pauli_rot_batches<'a>(circuit: Cow<'a, Circuit>, tracer: &mut Tracer) ->
             } => {
                 let (xmask, zmask, _) = pauli_rot_masks(targets, &data.axes);
                 let xqubits = || targets.iter().copied().filter(|&q| xmask >> q & 1 == 1);
-                let joined = subcube_join(&run.high, xqubits(), n).or_else(|| {
+                let joined = pauli_rot_join(&run.high, xqubits(), n).or_else(|| {
                     changed |= run.flush(source, &mut output, tracer);
-                    subcube_join(&[], xqubits(), n)
+                    pauli_rot_join(&[], xqubits(), n)
                 });
                 match joined {
                     Some(joined) => {

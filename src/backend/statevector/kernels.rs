@@ -100,12 +100,65 @@ impl SubcubePlan {
     }
 }
 
-/// The subcube tile holding `qubits`, the ones a batch's gates need inside the
-/// tile, or `None` when the batch is served better by the in-place tiles (every
-/// qubit below the tile bits, or the state is one tile) or cannot be tiled at all
-/// (more than [`multi_2q_high_budget`] distinct qubits at or above
-/// [`multi_2q_low_bits`]).
+/// The subcube tile for `gates`, or `None` when the batch is served better by
+/// the in-place tiles (every qubit below the tile bits, or the state is one
+/// tile) or cannot be tiled at all (more than [`multi_2q_high_budget`]
+/// distinct qubits at or above [`multi_2q_low_bits`]).
 fn subcube_plan(
+    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+    num_qubits: usize,
+) -> Option<SubcubePlan> {
+    let tile_bits = multi_2q_tile_bits_for(num_qubits);
+    if num_qubits <= tile_bits {
+        return None;
+    }
+    let max_q = gates.iter().map(|&(q0, q1, _)| q0.max(q1)).max()?;
+    if max_q < tile_bits {
+        return None;
+    }
+    let budget = multi_2q_high_budget_for(num_qubits);
+    let low_bits = multi_2q_low_bits();
+    let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
+    for &(q0, q1, _) in gates {
+        for q in [q0, q1] {
+            if q >= low_bits && !high.contains(&q) {
+                if high.len() == budget {
+                    return None;
+                }
+                high.push(q);
+            }
+        }
+    }
+    // A high qubit that lands inside the contiguous run rides there instead,
+    // which lengthens the run and can free another; iterate to a fixed point.
+    let mut low = tile_bits - high.len();
+    loop {
+        let before = high.len();
+        high.retain(|&mut q| q >= low);
+        if high.len() == before {
+            break;
+        }
+        low = tile_bits - high.len();
+    }
+    high.sort_unstable();
+    let mut map = vec![usize::MAX; num_qubits];
+    for (q, slot) in map.iter_mut().enumerate().take(low) {
+        *slot = q;
+    }
+    for (j, &h) in high.iter().enumerate() {
+        map[h] = low + j;
+    }
+    Some(SubcubePlan {
+        tile_bits,
+        low,
+        high,
+        map,
+    })
+}
+
+/// [`subcube_plan`] over `qubits`, the X and Y qubits a `MultiPauliRot` batch needs
+/// inside the tile, with the same `None` cases.
+fn pauli_rot_subcube_plan(
     qubits: impl Iterator<Item = usize> + Clone,
     num_qubits: usize,
 ) -> Option<SubcubePlan> {
@@ -201,8 +254,8 @@ fn with_subcube_tile<R>(tile_bits: usize, f: impl FnOnce(&mut [Complex64]) -> R)
     })
 }
 
-/// Gather the subcube `outer` selects into this thread's tile, run `apply` on it
-/// with the global index of the subcube's first amplitude, and scatter it back.
+/// Gather the subcube `outer` selects into this thread's tile, apply `gates`
+/// there in order through the contiguous tiled kernel, and scatter it back.
 /// Applying in place across the runs instead was measured slower at every
 /// width: the strided group walk gives up the paired AVX2 kernel.
 ///
@@ -214,7 +267,7 @@ unsafe fn apply_subcube(
     plan: &SubcubePlan,
     rest: &[usize],
     outer: usize,
-    apply: impl Fn(&mut [Complex64], usize),
+    gates: &[(usize, usize, simd::PreparedGate2q)],
 ) {
     let run = 1usize << plan.low;
     let mut base = 0usize;
@@ -250,7 +303,73 @@ unsafe fn apply_subcube(
         {
             return;
         }
-        apply(tile, base);
+        for &(q0, q1, ref prepared) in gates {
+            prepared.apply_tiled(tile, plan.tile_bits, plan.map[q0], plan.map[q1]);
+        }
+        for c in 0..runs {
+            // SAFETY: same contract as the enclosing unsafe fn.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    tile.as_ptr().add(c << plan.low),
+                    state.add(run_offset(c)),
+                    run,
+                );
+            }
+        }
+    });
+}
+
+/// [`apply_subcube`] for a `MultiPauliRot` batch: gather the subcube, apply
+/// `rotations` there in order, and scatter it back. Kept apart from the `Multi2q`
+/// gather: one generic body for both read 5% slower on `statevector/qv/16`.
+///
+/// # Safety
+/// `state` must point at `2^num_qubits` amplitudes laid out for `plan` and
+/// `rest`, and no other access to this subcube may overlap the call.
+unsafe fn apply_pauli_rot_subcube(
+    state: *mut Complex64,
+    plan: &SubcubePlan,
+    rest: &[usize],
+    outer: usize,
+    rotations: &[TiledPauliRot],
+) {
+    let run = 1usize << plan.low;
+    let mut base = 0usize;
+    for (j, &p) in rest.iter().enumerate() {
+        base |= ((outer >> j) & 1) << p;
+    }
+    let run_offset = |c: usize| {
+        let mut off = base;
+        for (j, &h) in plan.high.iter().enumerate() {
+            off |= ((c >> j) & 1) << h;
+        }
+        off
+    };
+    let runs = 1usize << plan.high.len();
+    with_subcube_tile(plan.tile_bits, |tile| {
+        for c in 0..runs {
+            // SAFETY: same contract as the enclosing unsafe fn; the run is
+            // inside the subcube and the tile holds `runs << low` elements.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    state.add(run_offset(c)),
+                    tile.as_mut_ptr().add(c << plan.low),
+                    run,
+                );
+            }
+        }
+        // A zero subcube stays zero under any unitary, so it needs no gates and no
+        // write back. Early in a circuit most subcubes are zero; a dense one exits
+        // this scan at its first amplitude.
+        if tile[..runs << plan.low]
+            .iter()
+            .all(|a| a.re == 0.0 && a.im == 0.0)
+        {
+            return;
+        }
+        for rotation in rotations {
+            rotation.apply(tile, base);
+        }
         for c in 0..runs {
             // SAFETY: same contract as the enclosing unsafe fn.
             unsafe {
@@ -3001,7 +3120,7 @@ impl StatevectorBackend {
     pub(super) fn apply_multi_pauli_rot(&mut self, rotations: &[(usize, usize, f64)]) {
         let xall = rotations.iter().fold(0usize, |acc, &(x, _, _)| acc | x);
         let xqubits = (0..self.num_qubits).filter(|&q| xall >> q & 1 == 1);
-        if let Some(plan) = subcube_plan(xqubits, self.num_qubits) {
+        if let Some(plan) = pauli_rot_subcube_plan(xqubits, self.num_qubits) {
             let tiled: Vec<TiledPauliRot> = rotations
                 .iter()
                 .map(|&(x, z, theta)| {
@@ -3010,11 +3129,27 @@ impl StatevectorBackend {
                     })
                 })
                 .collect();
-            self.apply_subcubes(&plan, |tile, base| {
-                for rotation in &tiled {
-                    rotation.apply(tile, base);
-                }
-            });
+            let rest = plan.rest(self.num_qubits);
+            let subcubes = 1usize << (self.num_qubits - plan.tile_bits);
+            #[cfg(feature = "parallel")]
+            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+                let ptr = SendPtr(self.state.as_mut_ptr());
+                (0..subcubes).into_par_iter().for_each(|outer| {
+                    // SAFETY: `ptr` holds 2^num_qubits amplitudes and distinct
+                    // `outer` values address disjoint subcubes, so no two tasks
+                    // touch the same amplitude.
+                    unsafe {
+                        apply_pauli_rot_subcube(ptr.as_complex_ptr(), &plan, &rest, outer, &tiled)
+                    };
+                });
+                return;
+            }
+            let state = self.state.as_mut_ptr();
+            for outer in 0..subcubes {
+                // SAFETY: `state` holds 2^num_qubits amplitudes and each `outer`
+                // addresses its own subcube, applied one at a time here.
+                unsafe { apply_pauli_rot_subcube(state, &plan, &rest, outer, &tiled) };
+            }
             return;
         }
 
@@ -4245,32 +4380,38 @@ impl StatevectorBackend {
         }
     }
 
-    /// Run `apply` on every subcube of `plan` through [`apply_subcube`], across the
-    /// pool above the parallel threshold.
-    fn apply_subcubes(
+    fn apply_multi_2q_subcube(
         &mut self,
+        gates: &[(usize, usize, [[Complex64; 4]; 4])],
         plan: &SubcubePlan,
-        apply: impl Fn(&mut [Complex64], usize) + Sync,
     ) {
+        let prepared = prepare_2q(gates);
         let rest = plan.rest(self.num_qubits);
-        let subcubes = 1usize << (self.num_qubits - plan.tile_bits);
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
-            let ptr = SendPtr(self.state.as_mut_ptr());
-            (0..subcubes).into_par_iter().for_each(|outer| {
+        let state = self.state.as_mut_ptr();
+        for outer in 0..1usize << (self.num_qubits - plan.tile_bits) {
+            // SAFETY: `state` holds 2^num_qubits amplitudes and each `outer`
+            // addresses its own subcube, applied one at a time here.
+            unsafe { apply_subcube(state, plan, &rest, outer, &prepared) };
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    fn apply_multi_2q_subcube_par(
+        &mut self,
+        gates: &[(usize, usize, [[Complex64; 4]; 4])],
+        plan: &SubcubePlan,
+    ) {
+        let prepared = prepare_2q(gates);
+        let rest = plan.rest(self.num_qubits);
+        let ptr = SendPtr(self.state.as_mut_ptr());
+        (0..1usize << (self.num_qubits - plan.tile_bits))
+            .into_par_iter()
+            .for_each(|outer| {
                 // SAFETY: `ptr` holds 2^num_qubits amplitudes and distinct
                 // `outer` values address disjoint subcubes, so no two tasks
                 // touch the same amplitude.
-                unsafe { apply_subcube(ptr.as_complex_ptr(), plan, &rest, outer, &apply) };
+                unsafe { apply_subcube(ptr.as_complex_ptr(), plan, &rest, outer, &prepared) };
             });
-            return;
-        }
-        let state = self.state.as_mut_ptr();
-        for outer in 0..subcubes {
-            // SAFETY: `state` holds 2^num_qubits amplitudes and each `outer`
-            // addresses its own subcube, applied one at a time here.
-            unsafe { apply_subcube(state, plan, &rest, outer, &apply) };
-        }
     }
 
     /// Apply multiple two-qubit gates in a cache-tiled pass.
@@ -4294,14 +4435,13 @@ impl StatevectorBackend {
             self.apply_fused_2q(gates[0].0, gates[0].1, &gates[0].2);
             return;
         }
-        let qubits = gates.iter().flat_map(|&(q0, q1, _)| [q0, q1]);
-        if let Some(plan) = subcube_plan(qubits, self.num_qubits) {
-            let prepared = prepare_2q(gates);
-            self.apply_subcubes(&plan, |tile, _| {
-                for &(q0, q1, ref gate) in &prepared {
-                    gate.apply_tiled(tile, plan.tile_bits, plan.map[q0], plan.map[q1]);
-                }
-            });
+        if let Some(plan) = subcube_plan(gates, self.num_qubits) {
+            #[cfg(feature = "parallel")]
+            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+                self.apply_multi_2q_subcube_par(gates, &plan);
+                return;
+            }
+            self.apply_multi_2q_subcube(gates, &plan);
             return;
         }
 

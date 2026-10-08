@@ -11,7 +11,7 @@ use crate::circuit::qasm::ast::{
     self, Argument, AssignOp, Block, CmpOp, Condition, DefParam, ForRange, Index, Operand,
     OperandName, Stmt, StmtKind,
 };
-use crate::circuit::qasm::expr::{self as syntax_expr, Expr};
+use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Duration, Expr, Timed};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
 /// Highest `$k` the program names, `None` when it names none.
@@ -47,9 +47,18 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
                 note(&measure.source);
                 note(&measure.target);
             }
-            StmtKind::Reset { targets } | StmtKind::Barrier { targets } => {
-                targets.iter().for_each(&mut *note)
+            StmtKind::CallAssign(assign) => {
+                note(&assign.target);
+                for arg in &assign.args {
+                    if let Argument::Operand(operand) = arg {
+                        note(operand);
+                    }
+                }
             }
+            StmtKind::Return(Some(ast::ReturnValue::Measure(source))) => note(source),
+            StmtKind::Reset { targets }
+            | StmtKind::Barrier { targets }
+            | StmtKind::Delay { targets, .. } => targets.iter().for_each(&mut *note),
             StmtKind::If(conditional) => {
                 match &conditional.condition {
                     Condition::Truthy(operand) | Condition::Negated(operand) => note(operand),
@@ -62,7 +71,7 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
                 }
             }
             StmtKind::For { body, .. }
-            | StmtKind::Box(body)
+            | StmtKind::Box { body, .. }
             | StmtKind::DefDef { body, .. }
             | StmtKind::GateDef { body, .. } => walk_operands(body, note),
             StmtKind::Switch { operand, arms } => {
@@ -74,6 +83,156 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
             _ => {}
         }
     }
+}
+
+/// Fold an expression to a number, where a ratio of two durations counts as
+/// one. The duration path runs only once the plain fold has failed, so a
+/// program that names no duration never pays for it.
+fn number_of(
+    expr: &Expr,
+    line: usize,
+    vars: Option<&HashMap<&str, f64>>,
+    durations: &HashMap<&str, Timed>,
+    arrays: &HashMap<&str, ClassicalArray>,
+) -> Result<f64> {
+    let value = syntax_expr::eval(expr, line, vars);
+    if value.is_ok() {
+        return value;
+    }
+    if !arrays.is_empty() && expr.reads_element() {
+        let resolved = resolve_elements(expr, line, vars, durations, arrays)?;
+        return number_of(&resolved, line, vars, durations, arrays);
+    }
+    if !syntax_expr::is_timed(expr, durations) {
+        return value;
+    }
+    match syntax_expr::eval_timed(expr, line, vars, durations)? {
+        Timed::Number(value) => Ok(value),
+        Timed::Duration(_) => Err(parse_error(
+            line,
+            format!("`{expr}` is a duration where a number belongs"),
+        )),
+        Timed::Stretch => Err(parse_error(
+            line,
+            format!("`{expr}` is a stretch where a number belongs"),
+        )),
+    }
+}
+
+fn compound(op: AssignOp, current: f64, folded: f64, line: usize) -> Result<f64> {
+    Ok(match op {
+        AssignOp::Add => current + folded,
+        AssignOp::Sub => current - folded,
+        AssignOp::Mul => current * folded,
+        AssignOp::Div if folded == 0.0 => {
+            return Err(parse_error(
+                line,
+                "division by zero in a compound assignment",
+            ));
+        }
+        AssignOp::Rem if folded == 0.0 => {
+            return Err(parse_error(line, "modulo by zero in a compound assignment"));
+        }
+        AssignOp::Div => current / folded,
+        AssignOp::Rem => current % folded,
+    })
+}
+
+/// Fold a timing expression, resolving the array elements it reads first.
+fn timed_of(
+    expr: &Expr,
+    line: usize,
+    vars: Option<&HashMap<&str, f64>>,
+    durations: &HashMap<&str, Timed>,
+    arrays: &HashMap<&str, ClassicalArray>,
+) -> Result<Timed> {
+    if arrays.is_empty() || !expr.reads_element() {
+        return syntax_expr::eval_timed(expr, line, vars, durations);
+    }
+    let resolved = resolve_elements(expr, line, vars, durations, arrays)?;
+    syntax_expr::eval_timed(&resolved, line, vars, durations)
+}
+
+/// `expr` with each array element it reads replaced by that element's value.
+fn resolve_elements<'e>(
+    expr: &Expr<'e>,
+    line: usize,
+    vars: Option<&HashMap<&str, f64>>,
+    durations: &HashMap<&str, Timed>,
+    arrays: &HashMap<&str, ClassicalArray>,
+) -> Result<Expr<'e>> {
+    let resolve = |inner: &Expr<'e>| resolve_elements(inner, line, vars, durations, arrays);
+    Ok(match expr {
+        Expr::Element(element) => {
+            let array = arrays.get(element.array).ok_or_else(|| {
+                parse_error(line, format!("`{}` is not a declared array", element.array))
+            })?;
+            let at = element_offset(array, element.array, &element.indices, line, |index| {
+                number_of(index, line, vars, durations, arrays)
+            })?;
+            Expr::Number(array.values[at])
+        }
+        Expr::Negate(inner) => Expr::Negate(Box::new(resolve(inner)?)),
+        Expr::Binary { op, left, right } => Expr::Binary {
+            op: *op,
+            left: Box::new(resolve(left)?),
+            right: Box::new(resolve(right)?),
+        },
+        Expr::Call(call) => Expr::Call(Box::new(syntax_expr::Call {
+            name: call.name,
+            args: call.args.iter().map(resolve).collect::<Result<_>>()?,
+        })),
+        other => other.clone(),
+    })
+}
+
+/// Row-major position of `array[indices]`, each index folded by `fold`.
+fn element_offset(
+    array: &ClassicalArray,
+    name: &str,
+    indices: &[Expr],
+    line: usize,
+    fold: impl Fn(&Expr) -> Result<f64>,
+) -> Result<usize> {
+    if indices.len() != array.dims.len() {
+        return Err(parse_error(
+            line,
+            format!(
+                "`{name}` has {} dimension(s) but is indexed with {}",
+                array.dims.len(),
+                indices.len()
+            ),
+        ));
+    }
+    let mut at = 0usize;
+    for (index, &size) in indices.iter().zip(&array.dims) {
+        let value = fold(index)?;
+        if value.fract() != 0.0 || value < 0.0 || value >= size as f64 {
+            return Err(parse_error(
+                line,
+                format!("index {value} is outside `{name}`, whose dimension has size {size}"),
+            ));
+        }
+        at = at * size + value as usize;
+    }
+    Ok(at)
+}
+
+fn is_bit_param(args: &[DefParam], name: &str) -> bool {
+    args.iter()
+        .any(|arg| matches!(arg, DefParam::Bit { name: param, .. } if *param == name))
+}
+
+/// Line of the first `return` in `block`, nested bodies included.
+fn return_line(block: &[Stmt]) -> Option<usize> {
+    block.iter().find_map(|stmt| match &stmt.kind {
+        StmtKind::Return(_) => Some(stmt.line),
+        StmtKind::If(conditional) => return_line(&conditional.then_body)
+            .or_else(|| conditional.else_body.as_deref().and_then(return_line)),
+        StmtKind::For { body, .. } | StmtKind::Box { body, .. } => return_line(body),
+        StmtKind::Switch { arms, .. } => arms.iter().find_map(|arm| return_line(&arm.body)),
+        _ => None,
+    })
 }
 
 impl<'a> Parser<'a> {
@@ -148,6 +307,26 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             StmtKind::RegisterDecl { kind, name, size } => {
+                if let Some(result) = self.def_result.as_ref().filter(|result| {
+                    *kind == ast::RegisterKind::Classical && result.local == Some(*name)
+                }) {
+                    // The returned bit is the caller's target, bound before the
+                    // body ran, so its declaration allocates nothing.
+                    let width = match size {
+                        Some(size) => self.integer_of(size, line)?,
+                        None => 1,
+                    };
+                    if width != result.bits.len() as i64 {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "`{name}` declares {width} bit(s) where the def returns {}",
+                                result.bits.len()
+                            ),
+                        ));
+                    }
+                    return Ok(());
+                }
                 self.declare_register(*kind, name, size.as_ref(), line)?;
                 Ok(())
             }
@@ -216,6 +395,16 @@ impl<'a> Parser<'a> {
                 out.push(Instruction::Barrier { qubits });
                 Ok(())
             }
+            // An ideal simulation has no clock, so a delay is the identity on
+            // its qubits. It emits nothing, which also leaves fusion free to
+            // merge across it.
+            StmtKind::Delay { duration, targets } => {
+                self.span_of(duration, "delay", line)?;
+                for target in targets {
+                    self.qubits_of(target)?;
+                }
+                Ok(())
+            }
             StmtKind::If(conditional) => {
                 out.extend(self.exec_if(conditional, line)?);
                 Ok(())
@@ -254,24 +443,39 @@ impl<'a> Parser<'a> {
                 );
                 Ok(())
             }
-            StmtKind::DefDef { name, args, body } => {
-                self.declare_def(name, args, body, line)?;
+            StmtKind::DefDef {
+                name,
+                args,
+                result,
+                body,
+            } => {
+                self.declare_def(name, args, result.as_ref(), body, line)?;
                 Ok(())
             }
-            StmtKind::Box(body) => {
-                if !self.verbatim_pending {
+            StmtKind::Return(value) => {
+                let Some(result) = &self.def_result else {
                     return Err(PrismError::UnsupportedConstruct {
-                        construct: "box".to_string(),
+                        construct: "`return` outside a def".to_string(),
                         line,
                     });
+                };
+                if let Some(ast::ReturnValue::Measure(source)) = value {
+                    let qubits = self.qubits_of(source)?;
+                    out.extend(Self::build_measurements(qubits, result.bits.clone(), line)?);
                 }
-                // Verbatim marks a region the device compiler must not rewrite,
-                // which a simulator has nothing to honour.
+                Ok(())
+            }
+            StmtKind::CallAssign(assign) => self.exec_call_assign(assign, line, out),
+            StmtKind::ArrayDecl(decl) => self.declare_array(decl, line),
+            StmtKind::ElementAssign(assign) => self.assign_element(assign, line),
+            StmtKind::Box { duration, body } => {
+                // A box and Braket's verbatim pragma both direct a scheduler or
+                // a device compiler, which a simulator has nothing to honour.
                 self.verbatim_pending = false;
-                let was_nested = std::mem::replace(&mut self.nested, true);
-                let result = self.execute(body);
-                self.nested = was_nested;
-                out.extend(result?);
+                if let Some(duration) = duration {
+                    self.span_of(duration, "box", line)?;
+                }
+                out.extend(self.exec_box(body)?);
                 Ok(())
             }
             StmtKind::Pragma(text) => {
@@ -359,6 +563,8 @@ impl<'a> Parser<'a> {
             "int" | "uint" => ClassicalType::Int,
             "bool" => ClassicalType::Bool,
             "float" | "angle" => ClassicalType::Float,
+            "duration" => ClassicalType::Duration,
+            "stretch" => ClassicalType::Stretch,
             other => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!("`{other}` declarations"),
@@ -374,11 +580,58 @@ impl<'a> Parser<'a> {
                     format!("`const {ty} {name}` needs a value"),
                 ));
             }
-            self.bind_classical(name, kind, 0.0, constant);
+            if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
+                let zero = Timed::Duration(Duration::default());
+                self.bind_duration(name, kind, zero, constant);
+            } else {
+                self.bind_classical(name, kind, 0.0, constant);
+            }
             return Ok(());
         };
+        if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
+            let folded = self.duration_of(value, line)?;
+            self.bind_duration(name, kind, folded, constant);
+            return Ok(());
+        }
         let folded = self.fold_typed(kind, value, line)?;
         self.bind_classical(name, kind, folded, constant);
+        Ok(())
+    }
+
+    /// Bind a `duration` or `stretch`. A stretch keeps no value: a scheduler
+    /// sizes it, so whatever it was initialised with is only a lower bound.
+    fn bind_duration(&mut self, name: &'a str, ty: ClassicalType, value: Timed, constant: bool) {
+        let value = if ty == ClassicalType::Stretch {
+            Timed::Stretch
+        } else {
+            value
+        };
+        self.classical.insert(name, ClassicalDecl { ty, constant });
+        self.durations.insert(name, value);
+    }
+
+    /// Fold an expression that has to be a duration or a stretch.
+    fn duration_of(&self, expr: &Expr, line: usize) -> Result<Timed> {
+        let vars = self.param_vars.as_ref();
+        match timed_of(expr, line, vars, &self.durations, &self.arrays)? {
+            Timed::Number(value) => Err(parse_error(
+                line,
+                format!("`{expr}` is the number {value} where a duration belongs; give it a unit"),
+            )),
+            timed => Ok(timed),
+        }
+    }
+
+    /// Check the length a `delay` or `box` names, which has no further effect.
+    fn span_of(&self, expr: &Expr, what: &str, line: usize) -> Result<()> {
+        if let Timed::Duration(duration) = self.duration_of(expr, line)? {
+            if duration.is_negative() {
+                return Err(parse_error(
+                    line,
+                    format!("`{what}` needs a non-negative duration, got `{expr}`"),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -402,30 +655,204 @@ impl<'a> Parser<'a> {
                 format!("`{target}` is `const` and cannot be assigned"),
             ));
         }
+        self.reject_guarded_write(target, line)?;
+        if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
+            return self.assign_duration(target, kind, op, value, line);
+        }
         let folded = self.fold_typed(kind, value, line)?;
         let updated = match op {
             None => folded,
             Some(op) => {
                 let current = self.fold_typed(kind, &Expr::Ident(target), line)?;
-                match op {
-                    AssignOp::Add => current + folded,
-                    AssignOp::Sub => current - folded,
-                    AssignOp::Mul => current * folded,
-                    AssignOp::Div if folded == 0.0 => {
-                        return Err(parse_error(
-                            line,
-                            "division by zero in a compound assignment",
-                        ));
-                    }
-                    AssignOp::Rem if folded == 0.0 => {
-                        return Err(parse_error(line, "modulo by zero in a compound assignment"));
-                    }
-                    AssignOp::Div => current / folded,
-                    AssignOp::Rem => current % folded,
-                }
+                compound(op, current, folded, line)?
             }
         };
         self.bind_classical(target, kind, updated, false);
+        Ok(())
+    }
+
+    fn declare_array(&mut self, decl: &ast::ArrayDecl<'a>, line: usize) -> Result<()> {
+        let kind = match decl.ty {
+            "int" | "uint" => ClassicalType::Int,
+            "bool" => ClassicalType::Bool,
+            "float" | "angle" => ClassicalType::Float,
+            other => {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!(
+                        "`array[{other}, ...]`; an array holds `int`, `uint`, `float`, \
+                         `angle` or `bool`, and bits belong in a `bit[n]` register"
+                    ),
+                    line,
+                });
+            }
+        };
+        self.reject_redeclaration(decl.name, line)?;
+        let mut dims = Vec::with_capacity(decl.dims.len());
+        let mut total = 1usize;
+        for dim in &decl.dims {
+            let size = self.integer_of(dim, line)?;
+            let size = usize::try_from(size)
+                .ok()
+                .filter(|&size| size > 0)
+                .ok_or_else(|| parse_error(line, format!("array size must be > 0, got {size}")))?;
+            total = total
+                .checked_mul(size)
+                .filter(|&total| total <= MAX_ARRAY_ELEMENTS)
+                .ok_or_else(|| {
+                    parse_error(
+                        line,
+                        format!(
+                            "array `{}` holds more than {MAX_ARRAY_ELEMENTS} elements",
+                            decl.name
+                        ),
+                    )
+                })?;
+            dims.push(size);
+        }
+        if decl.constant && decl.init.is_none() {
+            return Err(parse_error(
+                line,
+                format!("`const array {}` needs a value", decl.name),
+            ));
+        }
+        let mut values = Vec::with_capacity(total);
+        match &decl.init {
+            None => values.resize(total, 0.0),
+            Some(init) => self.fold_initializer(kind, init, &dims, decl.name, line, &mut values)?,
+        }
+        self.arrays.insert(
+            decl.name,
+            ClassicalArray {
+                ty: kind,
+                constant: decl.constant,
+                dims,
+                values,
+            },
+        );
+        Ok(())
+    }
+
+    /// Fold an initializer into `values` in row-major order, checking that each
+    /// braced list has one entry per index of the dimension it stands at.
+    fn fold_initializer(
+        &self,
+        kind: ClassicalType,
+        init: &ast::ArrayInit,
+        dims: &[usize],
+        name: &str,
+        line: usize,
+        values: &mut Vec<f64>,
+    ) -> Result<()> {
+        match (init, dims.split_first()) {
+            (ast::ArrayInit::Value(expr), None) => {
+                values.push(self.fold_typed(kind, expr, line)?);
+                Ok(())
+            }
+            (ast::ArrayInit::List(entries), Some((&size, inner))) if entries.len() == size => {
+                for entry in entries {
+                    self.fold_initializer(kind, entry, inner, name, line, values)?;
+                }
+                Ok(())
+            }
+            (ast::ArrayInit::List(entries), Some((&size, _))) => Err(parse_error(
+                line,
+                format!(
+                    "initializer for `{name}` lists {} entries where a dimension of size \
+                     {size} stands",
+                    entries.len()
+                ),
+            )),
+            _ => Err(parse_error(
+                line,
+                format!("initializer for `{name}` does not match its dimensions"),
+            )),
+        }
+    }
+
+    fn assign_element(&mut self, assign: &ast::ElementAssign<'a>, line: usize) -> Result<()> {
+        let Some(array) = self.arrays.get(assign.array) else {
+            return Err(parse_error(
+                line,
+                format!(
+                    "`{}` is not a name an assignment can write",
+                    Expr::Element(Box::new(syntax_expr::Element {
+                        array: assign.array,
+                        indices: assign.indices.clone(),
+                    }))
+                ),
+            ));
+        };
+        if array.constant {
+            return Err(parse_error(
+                line,
+                format!("`{}` is `const` and cannot be assigned", assign.array),
+            ));
+        }
+        self.reject_guarded_write(assign.array, line)?;
+        let at = element_offset(array, assign.array, &assign.indices, line, |index| {
+            self.value_of(index, line)
+        })?;
+        let kind = array.ty;
+        let current = array.values[at];
+        let folded = self.fold_typed(kind, &assign.value, line)?;
+        let updated = match assign.op {
+            None => folded,
+            Some(op) => compound(op, current, folded, line)?,
+        };
+        if let Some(array) = self.arrays.get_mut(assign.array) {
+            array.values[at] = updated;
+        }
+        Ok(())
+    }
+
+    fn assign_duration(
+        &mut self,
+        target: &'a str,
+        kind: ClassicalType,
+        op: Option<AssignOp>,
+        value: &Expr<'a>,
+        line: usize,
+    ) -> Result<()> {
+        if kind == ClassicalType::Stretch {
+            return Err(parse_error(
+                line,
+                format!(
+                    "`{target}` is a stretch, which a scheduler sizes and a program cannot assign"
+                ),
+            ));
+        }
+        let value = timed_of(
+            value,
+            line,
+            self.param_vars.as_ref(),
+            &self.durations,
+            &self.arrays,
+        )?;
+        let updated = match op {
+            None => value,
+            Some(op) => {
+                let op = match op {
+                    AssignOp::Add => BinaryOp::Add,
+                    AssignOp::Sub => BinaryOp::Sub,
+                    AssignOp::Mul => BinaryOp::Mul,
+                    AssignOp::Div => BinaryOp::Div,
+                    AssignOp::Rem => BinaryOp::Rem,
+                };
+                let current = self
+                    .durations
+                    .get(target)
+                    .copied()
+                    .unwrap_or(Timed::Stretch);
+                syntax_expr::combine_timed(op, current, value, line)?
+            }
+        };
+        if let Timed::Number(number) = updated {
+            return Err(parse_error(
+                line,
+                format!("assignment leaves duration `{target}` holding the number {number}"),
+            ));
+        }
+        self.bind_duration(target, kind, updated, false);
         Ok(())
     }
 
@@ -441,7 +868,9 @@ impl<'a> Parser<'a> {
             });
         }
         match kind {
-            ClassicalType::Float => self.value_of(value, line),
+            ClassicalType::Float | ClassicalType::Duration | ClassicalType::Stretch => {
+                self.value_of(value, line)
+            }
             ClassicalType::Int => Ok(self.integer_of(value, line)? as f64),
             ClassicalType::Bool => Ok(f64::from(self.integer_of(value, line)? != 0)),
         }
@@ -497,38 +926,171 @@ impl<'a> Parser<'a> {
         &mut self,
         name: &'a str,
         args: &[DefParam<'a>],
+        result: Option<&ast::BitResult<'a>>,
         body: &Block<'a>,
         line: usize,
     ) -> Result<()> {
-        if body.is_empty() {
+        let Some((last, rest)) = body.split_last() else {
             return Err(parse_error(line, format!("def `{name}` has an empty body")));
+        };
+        // A `return` anywhere but last decides at run time whether the rest of
+        // the body runs, which no guarded region can say.
+        let early = return_line(rest).or_else(|| match last.kind {
+            StmtKind::Return(_) => None,
+            _ => return_line(std::slice::from_ref(last)),
+        });
+        if let Some(at) = early {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "`return` before the end of def `{name}`, which needs control flow \
+                     beyond a guarded region"
+                ),
+                line: at,
+            });
         }
-        for stmt in body {
-            let rejected = match &stmt.kind {
-                StmtKind::Measure { .. } => Some("measure"),
-                StmtKind::Reset { .. } => Some("reset"),
-                StmtKind::RegisterDecl {
-                    kind: ast::RegisterKind::Classical,
-                    ..
-                } => Some("bit"),
-                _ => None,
-            };
-            if let Some(what) = rejected {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
-                        "`{what}` inside def `{name}` (V1 supports unitary subroutines only)"
-                    ),
-                    line: stmt.line,
-                });
-            }
-        }
+        let local = Self::def_result_local(name, args, result.is_some(), last, rest)?;
+        Self::check_def_writes(name, args, local, body, true)?;
         self.def_defs.insert(
             name,
             DefDefinition {
                 args: args.to_vec(),
+                result: result.cloned(),
+                local,
                 body: body.clone(),
             },
         );
+        Ok(())
+    }
+
+    /// The bit a `def` body declares and returns by name, after checking that
+    /// its final statement returns what the signature promises.
+    fn def_result_local(
+        name: &str,
+        args: &[DefParam<'a>],
+        has_result: bool,
+        last: &Stmt<'a>,
+        rest: &[Stmt<'a>],
+    ) -> Result<Option<&'a str>> {
+        let value = match &last.kind {
+            StmtKind::Return(value) => value.as_ref(),
+            _ if has_result => None,
+            _ => return Ok(None),
+        };
+        let Some(value) = value else {
+            if has_result {
+                return Err(parse_error(
+                    last.line,
+                    format!(
+                        "def `{name}` declares a `bit` result but does not end by returning one"
+                    ),
+                ));
+            }
+            return Ok(None);
+        };
+        if !has_result {
+            return Err(parse_error(
+                last.line,
+                format!("def `{name}` returns a value but declares no `-> bit` result"),
+            ));
+        }
+        let ast::ReturnValue::Value(expr) = value else {
+            return Ok(None);
+        };
+        let declared = |local: &str| {
+            rest.iter().any(|stmt| {
+                matches!(
+                    &stmt.kind,
+                    StmtKind::RegisterDecl {
+                        kind: ast::RegisterKind::Classical,
+                        name,
+                        ..
+                    } if *name == local
+                )
+            })
+        };
+        match expr.as_ident() {
+            Some(local) if is_bit_param(args, local) => Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "def `{name}` returning its bit parameter `{local}`, a copy the \
+                     instruction list has no classical move for"
+                ),
+                line: last.line,
+            }),
+            Some(local) if declared(local) => Ok(Some(local)),
+            _ => Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "return of `{expr}` from def `{name}`; a def returns a measurement or a \
+                     bit it declares"
+                ),
+                line: last.line,
+            }),
+        }
+    }
+
+    /// Check that a `def` body writes classical bits only through its result.
+    ///
+    /// A bit parameter is a copy, and any other bit would need a classical
+    /// register the program never declared, so neither can be written here.
+    fn check_def_writes(
+        name: &str,
+        args: &[DefParam<'a>],
+        local: Option<&str>,
+        block: &Block<'a>,
+        top: bool,
+    ) -> Result<()> {
+        for stmt in block {
+            match &stmt.kind {
+                StmtKind::RegisterDecl {
+                    kind: ast::RegisterKind::Classical,
+                    name: declared,
+                    ..
+                } if !(top && local == Some(*declared)) => {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "`bit {declared}` inside def `{name}`, which does not return it; \
+                             holding it would need a classical bit the program never declared"
+                        ),
+                        line: stmt.line,
+                    });
+                }
+                StmtKind::Measure(measure) => {
+                    let target = measure.target.register();
+                    if target.is_some() && target == local {
+                        continue;
+                    }
+                    let construct = match target {
+                        Some(param) if is_bit_param(args, param) => format!(
+                            "measure into bit parameter `{param}` of def `{name}`, which is \
+                             passed by value"
+                        ),
+                        _ => format!(
+                            "measure into `{}` inside def `{name}`, which writes classical \
+                             bits only through its result",
+                            measure.target.describe()
+                        ),
+                    };
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct,
+                        line: stmt.line,
+                    });
+                }
+                StmtKind::If(conditional) => {
+                    Self::check_def_writes(name, args, local, &conditional.then_body, false)?;
+                    if let Some(body) = &conditional.else_body {
+                        Self::check_def_writes(name, args, local, body, false)?;
+                    }
+                }
+                StmtKind::For { body, .. } | StmtKind::Box { body, .. } => {
+                    Self::check_def_writes(name, args, local, body, false)?;
+                }
+                StmtKind::Switch { arms, .. } => {
+                    for arm in arms {
+                        Self::check_def_writes(name, args, local, &arm.body, false)?;
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(())
     }
 
@@ -682,7 +1244,13 @@ impl<'a> Parser<'a> {
     // ------------------------------------------------------------ expressions
 
     pub(super) fn value_of(&self, expr: &Expr, line: usize) -> Result<f64> {
-        syntax_expr::eval(expr, line, self.param_vars.as_ref())
+        number_of(
+            expr,
+            line,
+            self.param_vars.as_ref(),
+            &self.durations,
+            &self.arrays,
+        )
     }
 
     pub(super) fn integer_of(&self, expr: &Expr, line: usize) -> Result<i64> {
@@ -713,7 +1281,7 @@ impl<'a> Parser<'a> {
         let modifiers = self.fold_modifiers(modifiers, line)?;
 
         if self.def_defs.contains_key(name) {
-            let instrs = self.expand_def(name, params, line)?;
+            let instrs = self.expand_def(name, params, None, line)?;
             out.extend(Self::modify_expansion(instrs, &modifiers, name, line)?);
             return Ok(());
         }
@@ -814,11 +1382,16 @@ impl<'a> Parser<'a> {
         let mut values = Vec::with_capacity(params.len());
         let mut input_slot = None;
         for param in params {
-            let Argument::Value(expr) = param else {
-                return Err(parse_error(
-                    line,
-                    "a gate angle cannot be a qubit reference",
-                ));
+            let element = self.element_argument(param);
+            let expr = match (param, &element) {
+                (_, Some(element)) => element,
+                (Argument::Value(expr), None) => expr,
+                (Argument::Operand(_), None) => {
+                    return Err(parse_error(
+                        line,
+                        "a gate angle cannot be a qubit reference",
+                    ));
+                }
             };
             let (value, slot) = self.fold_angle(expr, line)?;
             if slot.is_some() && input_slot.is_some() {
@@ -831,6 +1404,24 @@ impl<'a> Parser<'a> {
             values.push(value);
         }
         Ok((values, input_slot))
+    }
+
+    /// An argument written `a[i]` parses as a qubit or bit reference; read it
+    /// as an array element when `a` names an array.
+    fn element_argument<'e>(&self, argument: &Argument<'e>) -> Option<Expr<'e>> {
+        let Argument::Operand(operand) = argument else {
+            return None;
+        };
+        let array = operand
+            .register()
+            .filter(|name| self.arrays.contains_key(name))?;
+        let Some(Index::Single(index)) = &operand.index else {
+            return None;
+        };
+        Some(Expr::Element(Box::new(syntax_expr::Element {
+            array,
+            indices: vec![index.clone()],
+        })))
     }
 
     /// One angle argument, reporting the slot when it is exactly an `input`.
@@ -918,9 +1509,62 @@ impl<'a> Parser<'a> {
         Ok(Some(sub.execute(&def.body)?))
     }
 
+    /// `target = f(...);`: a `def` call whose `bit` result lands on `target`,
+    /// or a builtin on the right of a classical assignment.
+    fn exec_call_assign(
+        &mut self,
+        assign: &ast::CallAssign<'a>,
+        line: usize,
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
+        if self.def_defs.contains_key(assign.name) {
+            let bits = self.bits_of(&assign.target)?;
+            out.extend(self.expand_def(assign.name, &assign.args, Some(&bits), line)?);
+            return Ok(());
+        }
+        let Some(target) = assign
+            .target
+            .register()
+            .filter(|_| assign.target.index.is_none())
+        else {
+            return Err(parse_error(
+                line,
+                format!(
+                    "`{}` is not a name an assignment can write",
+                    assign.target.describe()
+                ),
+            ));
+        };
+        let args = assign
+            .args
+            .iter()
+            .map(|arg| match arg {
+                Argument::Value(expr) => Ok(expr.clone()),
+                Argument::Operand(operand) => Err(parse_error(
+                    line,
+                    format!(
+                        "`{}` is a qubit or bit where a value belongs",
+                        operand.describe()
+                    ),
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let value = Expr::Call(Box::new(syntax_expr::Call {
+            name: assign.name,
+            args,
+        }));
+        self.assign_classical(target, None, &value, line)
+    }
+
     /// Inline a `def` call, binding each argument by the kind its declaration
-    /// gave it.
-    fn expand_def(&self, name: &str, args: &[Argument], line: usize) -> Result<Vec<Instruction>> {
+    /// gave it and the result, when there is one, to `result`.
+    fn expand_def(
+        &self,
+        name: &str,
+        args: &[Argument],
+        result: Option<&[usize]>,
+        line: usize,
+    ) -> Result<Vec<Instruction>> {
         if self.gate_expansion_depth >= MAX_GATE_EXPANSION_DEPTH {
             return Err(parse_error(
                 line,
@@ -940,7 +1584,9 @@ impl<'a> Parser<'a> {
         }
 
         let mut bindings: HashMap<&'a str, f64> = self.param_vars.clone().unwrap_or_default();
+        let mut durations = self.durations.clone();
         let mut qubit_bindings: Vec<(&'a str, usize)> = Vec::new();
+        let mut bit_bindings: Vec<(&'a str, SmallVec<[usize; 4]>)> = Vec::new();
         for (slot, argument) in def.args.iter().zip(args) {
             match slot {
                 DefParam::Qubit(param_name) => {
@@ -983,11 +1629,16 @@ impl<'a> Parser<'a> {
                     integral,
                 } => {
                     let param_name = *param_name;
-                    let Argument::Value(expr) = argument else {
-                        return Err(parse_error(
-                            line,
-                            format!("def `{name}` parameter `{param_name}` takes a value"),
-                        ));
+                    let element = self.element_argument(argument);
+                    let expr = match (argument, &element) {
+                        (_, Some(element)) => element,
+                        (Argument::Value(expr), None) => expr,
+                        (Argument::Operand(_), None) => {
+                            return Err(parse_error(
+                                line,
+                                format!("def `{name}` parameter `{param_name}` takes a value"),
+                            ));
+                        }
                     };
                     // The body reads the argument's value, so an input bound
                     // later would never reach it.
@@ -998,7 +1649,7 @@ impl<'a> Parser<'a> {
                             line,
                         });
                     }
-                    let value = syntax_expr::eval(expr, line, Some(&bindings))?;
+                    let value = number_of(expr, line, Some(&bindings), &durations, &self.arrays)?;
                     let value = if *integral {
                         let rounded = value.round();
                         if (value - rounded).abs() > 0.0 {
@@ -1013,10 +1664,137 @@ impl<'a> Parser<'a> {
                     };
                     bindings.insert(param_name, value);
                 }
+                DefParam::Duration(param_name) => {
+                    let Argument::Value(expr) = argument else {
+                        return Err(parse_error(
+                            line,
+                            format!("def `{name}` parameter `{param_name}` takes a duration"),
+                        ));
+                    };
+                    let value = timed_of(expr, line, Some(&bindings), &durations, &self.arrays)?;
+                    if let Timed::Number(number) = value {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "def `{name}` parameter `{param_name}` takes a duration, got {number}"
+                            ),
+                        ));
+                    }
+                    durations.insert(param_name, value);
+                }
+                DefParam::Bit {
+                    name: param_name,
+                    width,
+                } => {
+                    let operand = match argument {
+                        Argument::Operand(operand) => operand.clone(),
+                        Argument::Value(expr) => match expr.as_ident() {
+                            Some(register) => Operand {
+                                name: OperandName::Register(register),
+                                index: None,
+                                line,
+                            },
+                            None => {
+                                return Err(parse_error(
+                                    line,
+                                    format!(
+                                        "def `{name}` bit parameter `{param_name}` needs a bit, \
+                                         not an expression"
+                                    ),
+                                ));
+                            }
+                        },
+                    };
+                    let bits = self.bits_of(&operand)?;
+                    let wanted = match width {
+                        Some(width) => self.integer_of(width, line)?,
+                        None => 1,
+                    };
+                    if bits.len() as i64 != wanted {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "def `{name}` bit parameter `{param_name}` takes {wanted} bit(s), \
+                                 got {}",
+                                bits.len()
+                            ),
+                        ));
+                    }
+                    bit_bindings.push((param_name, bits));
+                }
             }
         }
 
+        let frame = match (&def.result, result) {
+            (None, None) => DefResult {
+                bits: SmallVec::new(),
+                local: None,
+            },
+            (None, Some(_)) => {
+                return Err(parse_error(
+                    line,
+                    format!("def `{name}` declares no result to assign"),
+                ));
+            }
+            (Some(_), None) => {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!(
+                        "a call to def `{name}` that drops its `bit` result, which would need \
+                         a classical bit the program never declared"
+                    ),
+                    line,
+                });
+            }
+            (Some(declared), Some(bits)) => {
+                let wanted = match &declared.width {
+                    Some(width) => self.integer_of(width, line)?,
+                    None => 1,
+                };
+                if bits.len() as i64 != wanted {
+                    return Err(parse_error(
+                        line,
+                        format!(
+                            "def `{name}` returns {wanted} bit(s) where its target names {}",
+                            bits.len()
+                        ),
+                    ));
+                }
+                // The named result is written in place, so a parameter reading
+                // the same bit would see the new value rather than its copy.
+                let aliased = def.local.is_some()
+                    && bit_bindings
+                        .iter()
+                        .any(|(_, param)| param.iter().any(|bit| bits.contains(bit)));
+                if aliased {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "a call to def `{name}` passing a bit it also assigns, which the \
+                             body would read after writing its result"
+                        ),
+                        line,
+                    });
+                }
+                DefResult {
+                    bits: bits.iter().copied().collect(),
+                    local: def.local,
+                }
+            }
+        };
+
         let mut sub = self.expansion_parser(bindings);
+        // The body runs in a parser of its own, so a write it made to an outer
+        // variable would be dropped on return; only the constants it may read
+        // stay declared, and a write to anything else is rejected.
+        sub.classical.retain(|_, decl| decl.constant);
+        sub.durations = durations;
+        // A def sees the global constants and nothing else it does not take as
+        // an argument, so only a `const` array reaches its body.
+        sub.arrays = self
+            .arrays
+            .iter()
+            .filter(|(_, array)| array.constant)
+            .map(|(name, array)| (*name, array.clone()))
+            .collect();
         for (param_name, qubit) in qubit_bindings {
             sub.aliases.insert(
                 param_name,
@@ -1026,7 +1804,42 @@ impl<'a> Parser<'a> {
                 },
             );
         }
+        for (param_name, bits) in bit_bindings {
+            sub.bind_bits(param_name, bits);
+        }
+        if let Some(local) = frame.local {
+            sub.bind_bits(local, frame.bits.clone());
+        }
+        sub.def_result = Some(frame);
         sub.execute(&def.body)
+    }
+
+    /// Name `bits` inside an expanded body: as a register when they run
+    /// contiguously, which a register comparison needs, and as an alias
+    /// otherwise.
+    fn bind_bits(&mut self, name: &'a str, bits: SmallVec<[usize; 4]>) {
+        let contiguous = bits.windows(2).all(|pair| pair[1] == pair[0] + 1);
+        match bits.first() {
+            Some(&offset) if contiguous => {
+                self.aliases.remove(name);
+                self.cregs.insert(
+                    name,
+                    Register {
+                        offset,
+                        size: bits.len(),
+                    },
+                );
+            }
+            _ => {
+                self.aliases.insert(
+                    name,
+                    Alias {
+                        kind: ast::RegisterKind::Classical,
+                        indices: bits.to_vec(),
+                    },
+                );
+            }
+        }
     }
 
     /// A parser for an expanded body: the enclosing registers and definitions,
@@ -1056,6 +1869,10 @@ impl<'a> Parser<'a> {
             physical: self.physical,
             aliases: HashMap::new(),
             classical: self.classical_copy(),
+            durations: HashMap::new(),
+            arrays: HashMap::new(),
+            def_result: None,
+            guard: None,
         };
         for (name, register) in &self.qregs {
             sub.qregs.insert(
@@ -1099,6 +1916,8 @@ impl<'a> Parser<'a> {
                 *name,
                 DefDefinition {
                     args: def.args.clone(),
+                    result: def.result.clone(),
+                    local: def.local,
                     body: def.body.clone(),
                 },
             );
@@ -1135,14 +1954,80 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    /// Run a block one nesting level down.
+    /// Run a `box` body in place, with no guard and no barrier at either edge.
+    ///
+    /// A box only fixes timing, which an ideal simulation does not model, so
+    /// fusion may merge across its boundary as freely as across a `delay`. The
+    /// names its body declares go out of scope with it.
+    fn exec_box(&mut self, body: &Block<'a>) -> Result<Vec<Instruction>> {
+        let scope = self.open_scope();
+        let was_nested = std::mem::replace(&mut self.nested, true);
+        let result = self.execute(body);
+        self.nested = was_nested;
+        self.close_scope(&scope);
+        result
+    }
+
+    /// The classical and array names in scope, for [`Parser::close_scope`].
+    fn open_scope(&self) -> Scope<'a> {
+        (
+            self.classical.keys().copied().collect(),
+            self.arrays.keys().copied().collect(),
+        )
+    }
+
+    /// Drop the names declared since `scope` was opened. Names declared before
+    /// it keep whatever the body wrote to them.
+    fn close_scope(&mut self, scope: &Scope<'a>) {
+        let (classical, arrays) = scope;
+        let declared: Vec<&'a str> = self
+            .classical
+            .keys()
+            .copied()
+            .filter(|name| !classical.contains(name))
+            .collect();
+        for name in declared {
+            self.classical.remove(name);
+            self.durations.remove(name);
+            if let Some(values) = self.param_vars.as_mut() {
+                values.remove(name);
+            }
+        }
+        self.arrays.retain(|name, _| arrays.contains(name));
+    }
+
+    /// Run a guarded block one nesting level down, in a scope of its own.
+    ///
+    /// Whether the block runs is decided by a measurement, while a classical
+    /// variable is folded here at parse time, so the block may not write any
+    /// variable declared outside it.
     fn region(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
         self.enter_region_depth(block)?;
+        let scope = self.open_scope();
+        let outer_guard = self.guard.replace(scope.clone());
         let was_nested = std::mem::replace(&mut self.nested, true);
         let body = self.execute(block);
         self.nested = was_nested;
+        self.guard = outer_guard;
+        self.close_scope(&scope);
         self.region_depth -= 1;
         body
+    }
+
+    fn reject_guarded_write(&self, name: &str, line: usize) -> Result<()> {
+        let Some((classical, arrays)) = &self.guard else {
+            return Ok(());
+        };
+        if classical.contains(&name) || arrays.contains(&name) {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "a write to `{name}` under a runtime `if` or `switch`; the variable is \
+                     folded at parse time and cannot depend on a measurement"
+                ),
+                line,
+            });
+        }
+        Ok(())
     }
 
     fn enter_region_depth(&mut self, block: &Block<'a>) -> Result<()> {
@@ -1174,22 +2059,39 @@ impl<'a> Parser<'a> {
             ));
         }
         let mut out = Vec::new();
+        // The loop variable may shadow an outer name, whose value comes back
+        // once the loop ends.
+        let shadowed = self
+            .param_vars
+            .as_ref()
+            .and_then(|vars| vars.get(variable).copied());
+        let scope = self.open_scope();
+        let mut result = Ok(());
         for value in values {
-            // The body binds for one pass, so the whole classical scope is
-            // restored rather than the loop variable alone.
-            let saved_values = self.param_vars.clone();
-            let saved_decls = self.classical_copy();
+            // Each pass drops what the body declared, so a declaration binds
+            // for one pass, while a write to an outer name carries on.
             self.param_vars
                 .get_or_insert_with(HashMap::new)
                 .insert(variable, value as f64);
             let was_nested = std::mem::replace(&mut self.nested, true);
             let produced = self.execute(body);
             self.nested = was_nested;
-            self.param_vars = saved_values;
-            self.classical = saved_decls;
-            out.extend(produced?);
+            self.close_scope(&scope);
+            match produced {
+                Ok(produced) => out.extend(produced),
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
         }
-        Ok(out)
+        if let Some(vars) = self.param_vars.as_mut() {
+            match shadowed {
+                Some(value) => vars.insert(variable, value),
+                None => vars.remove(variable),
+            };
+        }
+        result.map(|()| out)
     }
 
     fn for_values(&self, range: &ForRange, line: usize) -> Result<Vec<i64>> {
@@ -1342,9 +2244,24 @@ impl<'a> Parser<'a> {
         Ok((register.offset, register.size))
     }
 
+    /// The bit an unsubscripted name stands for when it names exactly one,
+    /// as `bit b;` or a `def`'s `bit` parameter does.
+    fn single_bit(&self, operand: &Operand) -> Option<usize> {
+        if operand.index.is_some() {
+            return None;
+        }
+        match self.bits_of(operand).ok()?.as_slice() {
+            [bit] => Some(*bit),
+            _ => None,
+        }
+    }
+
     fn condition_of(&self, condition: &Condition, line: usize) -> Result<ClassicalCondition> {
         match condition {
             Condition::Truthy(operand) => {
+                if let Some(bit) = self.single_bit(operand) {
+                    return Ok(ClassicalCondition::BitIsOne(bit));
+                }
                 if operand.index.is_none() {
                     return Err(parse_error(
                         line,
@@ -1358,6 +2275,9 @@ impl<'a> Parser<'a> {
                 Ok(ClassicalCondition::BitIsOne(self.bit_of(operand)?))
             }
             Condition::Negated(operand) => {
+                if let Some(bit) = self.single_bit(operand) {
+                    return Ok(ClassicalCondition::BitIsZero(bit));
+                }
                 if operand.index.is_none() {
                     return Err(parse_error(
                         line,

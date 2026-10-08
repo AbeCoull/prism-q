@@ -18,7 +18,9 @@
 //!
 //! # Gate support
 //!
-//! The full gate set, including MCU and every fused or batched variant.
+//! The full gate set, including MCU and every fused or batched variant, except
+//! the dense k-qubit [`Gate::Unitary`], which returns
+//! [`PrismError::BackendUnsupported`](crate::error::PrismError::BackendUnsupported).
 //! Diagonal gates scale amplitudes in place without moving keys. Shot
 //! sampling and Pauli expectations run natively on the map.
 //!

@@ -238,11 +238,21 @@ count, which is not a difference a caller should discover from a wall clock.
 
 The method back-propagates two statevectors. With `U = U_L…U_1` and `|φ⟩ = U|0⟩`:
 
-1. Forward pass (unfused) keeps `|φ⟩`. Build `|λ⟩ = H|φ⟩`; the value is
+1. Forward pass (fused) keeps `|φ⟩`. Build `|λ⟩ = H|φ⟩`; the value is
    `Re⟨φ|λ⟩`.
 2. Sweep `i = L…1`. For a trainable gate with generator `G_i`, accumulate
    `Im⟨λ|G_i|φ⟩` (projector form for `P`), then step both states back through
    `U_i†` (`Gate::inverse()`).
+
+The sweep does not visit gates one at a time. A gate may be inverted once every gate
+above it that it does not commute with has been, and a trainable gate's sandwich can be
+read as soon as every gate still above it commutes with its generator. A planner gives
+each gate its earliest such step, so one sandwich pass serves every gate that becomes
+ready together (an Rz layer and then an Ry layer of a hardware-efficient ansatz, rather
+than one pass per qubit). The gates inverted between two steps run through the fusion
+pipeline at the state width and apply to both states as one stretch. Commutation is
+decided structurally: exactly between two Pauli rotations, and per qubit otherwise, with
+each gate acting on a qubit as Z, X, Y, or anything.
 
 The `⟨λ|G|φ⟩` sandwich generalizes the forward `pauli_expectation_from_masks`
 kernel to two vectors (`pauli_sandwich`, Rayon-parallel at 16+ qubits).
@@ -256,12 +266,14 @@ other gates, non-unitary instructions, and `QftBlock` are rejected. Parameter
 identity is an index-based side table (`Parameters`, instruction→slot links
 recorded by `CircuitBuilder::param`); many gates may share a slot.
 
-Differentiation runs on the unfused instruction stream so each gate keeps a 1:1
+The planner reads the unfused instruction stream so each gate keeps a 1:1
 correspondence with its generator (fusion would erase both the stored angle and
-that correspondence). Two prunings cut work without changing results: the sweep
-stops at the earliest in-cone trainable gate (a non-trainable prefix costs no
-inverse applications), and a trainable gate outside the Hamiltonian's inverse
-light cone has a provably zero gradient, so its sandwich is skipped.
+that correspondence); only the forward pass and the inverted stretches are fused. Three
+prunings cut work without changing results: the sweep stops at the earliest in-cone
+trainable gate (a non-trainable prefix costs no inverse applications), a gate no
+trainable gate below it waits on is never inverted, and a trainable gate outside the
+Hamiltonian's inverse light cone has a provably zero gradient, so its sandwich is
+skipped.
 
 Memory is two statevectors, so the qubit ceiling is about one below a single
 run. Only the statevector backend is supported.

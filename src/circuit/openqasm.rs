@@ -22,7 +22,11 @@
 //! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` and `negctrl @` (chainable), `pow(k) @` for any real k. A control applies to whatever the gate expanded to, so it reaches a user `gate` and a lowered gate as well as a direct one; a fractional `pow` is the principal power of what the call expanded to |
 //! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
 //! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand |
-//! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name |
+//! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name; declined under a runtime `if` or `switch` for a name declared outside it |
+//! | Classical array | `array[int, 2, 2] a = {{1, 2}, {3, 4}};` `a[0, 1] = 5;` `h q[a[1][0]];` | `int`, `uint`, `float`, `angle` or `bool` elements, any number of dimensions, folded at parse time like a scalar; a `def` reads only `const` arrays |
+//! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number |
+//! | Delay | `delay[d] q[0];` `delay[s];` | The identity on its qubits, all of them when none is named; emits nothing |
+//! | Box | `box { ... }` `box[100ns] { ... }` | The body runs in place with no barrier at its edges; names it declares go out of scope with it |
 //! | Register slice | `h q[0:2];` `h q[0:2:6];` `h q[{0, 3}];` | Inclusive range with an optional step in the middle, or an explicit index set. Broadcasts like a whole register |
 //! | Register alias | `let a = q[0:1];` `let a = q[2] ++ q[0];` | Names qubits or bits in the order written; an alias is itself sliceable |
 //! | Physical qubits | `h $0;` `cx $0, $1;` | Absolute indices with no declaration; the register is as wide as the highest one named, and a declared register alongside is rejected |
@@ -35,7 +39,7 @@
 //! | Conditional inequality | `if (c != 0) x q[0];` | Register or bit `!=` |
 //! | Conditional bit literal | `if (c[0] == 1) x q[0];` | Bit equality vs `0` / `1` |
 //! | Conditional negation | `if (!c[0]) x q[0];` | Negated bit truthy test |
-//! | Guarded region | `if (c[0]) { x q[0]; measure q[1] -> c[1]; }` | Braced body, any statement, nestable |
+//! | Guarded region | `if (c[0]) { x q[0]; measure q[1] -> c[1]; }` | Braced body, any statement, nestable; names it declares go out of scope with it |
 //! | Conditional parity | `if (c[0] ^ c[2]) x q[0];` | Parity over bits, optionally `(...) == 0` |
 //! | Else arm | `if (c[0]) { ... } else { ... }` | Lowers to a second guard on the negated condition |
 //! | Else-if chain | `if (c[0]) { ... } else if (c[1]) { ... }` | Nests under the negated arm |
@@ -43,7 +47,8 @@
 //! | Hex / binary literals | `if (c == 0xff) ...` | `0x`, `0b`, `0o` integer prefixes with optional `_` separators |
 //! | Boolean literals | `rx(true * pi) ...` | `true` / `false` evaluate to `1.0` / `0.0` |
 //! | Gate definition | `gate rxx(t) a,b { ... }` | User-defined gates |
-//! | Subroutine definition | `def myg(qubit a, float t) { ... }` | Unitary `def` bodies, inlined at the call site |
+//! | Subroutine definition | `def myg(qubit a, float t) { ... }` | Inlined at the call site. Takes `qubit`, `int`, `float`, `angle`, `duration` and `bit[n]` parameters, a bit parameter being a read-only copy |
+//! | Subroutine result | `def mx(qubit a) -> bit { h a; return measure a; }` then `c[0] = mx(q[0]);` | A `bit` or `bit[n]` result lands on the assigned bits; `return` stands last and returns a measurement or a bit the body declares |
 //! | Static for loop | `for int i in [0:n] { ... }` | Inclusive ranges, optional step, set form `{a,b,c}` |
 //! | Barrier | `barrier q[0], q[1];` | |
 //! | Line comments | `// comment` | |
@@ -53,15 +58,17 @@
 //! | Result pragma | `#pragma braket result expectation z(q[0])` | [`Dialect::Braket`] only; reaches the caller through [`parse_braket`] |
 //! | Noise pragma | `#pragma braket noise bit_flip(0.1) q[0]` | Builds a [`NoiseModel`] event after the preceding instruction |
 //! | Inline unitary | `#pragma braket unitary([[0, 1], [1, 0]]) q[0]` | Up to four targets |
-//! | Verbatim box | `#pragma braket verbatim` then `box { ... }` | The body runs as written; a `box` without the pragma is rejected |
+//! | Verbatim box | `#pragma braket verbatim` then `box { ... }` | The body runs as written, as any `box` does |
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
 //!
-//! - `defcal`, `extern`, `opaque`, `while`, `return`, `break`, and a `box`
-//!   that no `#pragma braket verbatim` precedes
-//! - `def` bodies that contain `measure`, `reset`, `bit`, `creg`, `return`,
-//!   or the `=measure` assignment shape (V1 supports unitary subroutines only)
-//! - `def` declarations with a return type
+//! - `defcal`, `extern`, `opaque`, `while`, `break`, and `return` outside a
+//!   `def`
+//! - a `def` result of any type but `bit`, a call that drops a `bit` result, and
+//!   a `return` anywhere but last in the body: each needs control flow or
+//!   classical storage the instruction list does not have
+//! - a `def` body that measures into anything but the bit it returns, or
+//!   declares a `bit` it does not return
 //! - `ctrl @` on a `def` call: a subroutine is not a gate and the language
 //!   gives it no controlled form
 //! - `ctrl @` and a fractional `pow(k) @` on a call spanning more than four
@@ -75,9 +82,9 @@
 //!   `switch` whose arm measures into the switched register: both lowerings
 //!   re-read the bits after an earlier body ran
 //! - `switch` with a `default` and more case labels than the region depth bound
-//! - `duration`, `stretch` and `delay` outside `def` parameter lists, and `array`
-//!   declarations. Each declines by name rather than as a syntax error on its
-//!   operands, which is what `delay[10ns] q[0]` would otherwise produce
+//! - an `array` of `bit`, `duration` or any other non-numeric element type
+//! - `durationof`, a ratio over a `stretch`, and a ratio mixing `dt` with SI
+//!   units: nothing here sizes a stretch or knows a backend's sample period
 //! - `input` of any type but `float` and `angle`, and `output` of any type but
 //!   `bit`
 //! - an `input` anywhere but as the whole angle argument of a top-level
@@ -96,6 +103,7 @@ use num_complex::Complex64;
 
 use super::braket::{self, NoiseSpec, ResultSpec};
 use crate::circuit::qasm::ast::{self, DefParam};
+use crate::circuit::qasm::expr::Timed;
 use crate::circuit::synthesis;
 use crate::circuit::{
     Circuit, ClassicalCondition, Instruction, MAX_REGION_DEPTH, ParamLink, Parameters, SmallVec,
@@ -271,7 +279,17 @@ struct GateDefinition<'a> {
 
 struct DefDefinition<'a> {
     args: Vec<DefParam<'a>>,
+    result: Option<ast::BitResult<'a>>,
+    /// The bit the body declares and returns, when it returns one by name.
+    local: Option<&'a str>,
     body: ast::Block<'a>,
+}
+
+/// Where the `def` being expanded writes its result: the caller's target bits,
+/// empty for a call with none, and the name the body gives them.
+struct DefResult<'a> {
+    bits: SmallVec<[usize; 4]>,
+    local: Option<&'a str>,
 }
 
 /// A `let` alias: the qubits or bits it names, in the order it named them.
@@ -286,12 +304,28 @@ enum ClassicalType {
     Int,
     Bool,
     Float,
+    Duration,
+    Stretch,
 }
 
 struct ClassicalDecl {
     ty: ClassicalType,
     constant: bool,
 }
+
+/// A classical array, its elements folded at parse time like any classical
+/// value and stored row-major.
+#[derive(Clone)]
+struct ClassicalArray {
+    ty: ClassicalType,
+    constant: bool,
+    dims: Vec<usize>,
+    values: Vec<f64>,
+}
+
+/// Most elements an array may hold, which bounds the allocation a declared
+/// size makes.
+const MAX_ARRAY_ELEMENTS: usize = 1 << 20;
 
 /// The error an out-of-range subscript raises, on the side of the register
 /// wall the reference sits on.
@@ -345,9 +379,21 @@ pub(crate) struct Parser<'a> {
     /// `let` aliases by name; the values live beside the registers they index.
     aliases: HashMap<&'a str, Alias>,
     /// Declared classical variables. The values sit in `param_vars`, which is
-    /// where every expression already reads them.
+    /// where every expression already reads them, or in `durations`.
     classical: HashMap<&'a str, ClassicalDecl>,
+    /// `duration` and `stretch` values, which no numeric expression reads
+    /// directly.
+    durations: HashMap<&'a str, Timed>,
+    arrays: HashMap<&'a str, ClassicalArray>,
+    /// The `def` body being expanded; `None` outside one.
+    def_result: Option<DefResult<'a>>,
+    /// The classical and array names in scope where the innermost runtime
+    /// guard opened, none of which its body may write; `None` outside a guard.
+    guard: Option<Scope<'a>>,
 }
+
+/// Classical and array names in scope at some point, classical first.
+type Scope<'a> = (Vec<&'a str>, Vec<&'a str>);
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
 const MAX_FOR_ITERATIONS: i64 = 1_000_000;
@@ -442,6 +488,10 @@ impl<'a> Parser<'a> {
             physical: false,
             aliases: HashMap::new(),
             classical: HashMap::new(),
+            durations: HashMap::new(),
+            arrays: HashMap::new(),
+            def_result: None,
+            guard: None,
         }
     }
 
@@ -478,6 +528,8 @@ impl<'a> Parser<'a> {
     fn reject_redeclaration(&self, name: &str, line_num: usize) -> Result<()> {
         let clash = if self.classical.contains_key(name) {
             "a classical variable"
+        } else if self.arrays.contains_key(name) {
+            "an array"
         } else if self.aliases.contains_key(name) {
             "an alias"
         } else if self.qregs.contains_key(name) || self.cregs.contains_key(name) {

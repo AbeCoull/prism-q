@@ -889,7 +889,8 @@ pub(crate) fn pauli_expectation_from_masks(
     pauli_sandwich(state, state, xmask, zmask, num_y).re / norm
 }
 
-/// Exact `⟨ψ|P_i|ψ⟩` for every mask triple in one traversal of `state`.
+/// Exact `⟨ψ|P_i|ψ⟩` for every mask triple in one traversal of `state`, and the
+/// norm `Σ|amp|^2` the values were divided by, read in that same traversal.
 ///
 /// Same value as [`pauli_expectation_from_masks`] per entry, to within the
 /// association of the sum. A Z-only observable has `xmask == 0` and therefore
@@ -899,20 +900,23 @@ pub(crate) fn pauli_expectation_from_masks(
 pub(crate) fn pauli_expectations_from_masks(
     state: &[Complex64],
     masks: &[(usize, usize, u32)],
-    norm: f64,
-) -> Vec<f64> {
+) -> (Vec<f64>, f64) {
+    if masks.is_empty() {
+        return (Vec::new(), crate::backend::state_norm_sqr(state));
+    }
+    let (z_sum, g_sum, norm) = expectation_sums(state, masks);
     if norm == 0.0 {
-        return vec![0.0; masks.len()];
+        return (vec![0.0; masks.len()], norm);
     }
-    if masks.len() < 2 {
-        return masks
-            .iter()
-            .map(|&(xmask, zmask, num_y)| {
-                pauli_expectation_from_masks(state, xmask, zmask, num_y, norm)
-            })
-            .collect();
-    }
+    (finish_expectations(masks, &z_sum, &g_sum, norm), norm)
+}
 
+/// Unnormalized sums of the two families [`finish_expectations`] interleaves,
+/// and `Σ|amp|^2`.
+fn expectation_sums(
+    state: &[Complex64],
+    masks: &[(usize, usize, u32)],
+) -> (Vec<f64>, Vec<Complex64>, f64) {
     let z_only: Vec<usize> = masks
         .iter()
         .filter(|&&(xmask, _, _)| xmask == 0)
@@ -924,46 +928,48 @@ pub(crate) fn pauli_expectations_from_masks(
         .map(|&(xmask, zmask, _)| (xmask, zmask))
         .collect();
 
-    let accumulate = |z_acc: &mut [f64], g_acc: &mut [Complex64], base: usize, len: usize| {
-        for j in base..base + len {
-            let amp = state[j];
-            let n2 = amp.norm_sqr();
-            for (slot, &zmask) in z_acc.iter_mut().zip(z_only.iter()) {
-                *slot += if (j & zmask).count_ones() & 1 == 1 {
-                    -n2
-                } else {
-                    n2
-                };
+    let accumulate =
+        |z_acc: &mut [f64], g_acc: &mut [Complex64], norm: &mut f64, base: usize, len: usize| {
+            for j in base..base + len {
+                let amp = state[j];
+                let n2 = amp.norm_sqr();
+                *norm += n2;
+                for (slot, &zmask) in z_acc.iter_mut().zip(z_only.iter()) {
+                    *slot += if (j & zmask).count_ones() & 1 == 1 {
+                        -n2
+                    } else {
+                        n2
+                    };
+                }
+                for (slot, &(xmask, zmask)) in g_acc.iter_mut().zip(general.iter()) {
+                    let partner = state[j ^ xmask];
+                    let sign = if (j & zmask).count_ones() & 1 == 1 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    *slot += partner.conj() * amp * sign;
+                }
             }
-            for (slot, &(xmask, zmask)) in g_acc.iter_mut().zip(general.iter()) {
-                let partner = state[j ^ xmask];
-                let sign = if (j & zmask).count_ones() & 1 == 1 {
-                    -1.0
-                } else {
-                    1.0
-                };
-                *slot += partner.conj() * amp * sign;
-            }
-        }
-    };
+        };
 
     let zeros = || {
         (
             vec![0.0f64; z_only.len()],
             vec![Complex64::new(0.0, 0.0); general.len()],
+            0.0f64,
         )
     };
-    let (mut z_sum, mut g_sum) = zeros();
 
     #[cfg(feature = "parallel")]
     if state.len() >= crate::backend::MIN_PAR_REDUCE_ELEMS {
         use rayon::prelude::*;
         let chunk = crate::backend::MIN_PAR_ELEMS;
-        let (z, g) = state
+        return state
             .par_chunks(chunk)
             .enumerate()
             .fold(zeros, |mut acc, (c, block)| {
-                accumulate(&mut acc.0, &mut acc.1, c * chunk, block.len());
+                accumulate(&mut acc.0, &mut acc.1, &mut acc.2, c * chunk, block.len());
                 acc
             })
             .reduce(zeros, |mut a, b| {
@@ -973,13 +979,14 @@ pub(crate) fn pauli_expectations_from_masks(
                 for (slot, v) in a.1.iter_mut().zip(b.1) {
                     *slot += v;
                 }
+                a.2 += b.2;
                 a
             });
-        return finish_expectations(masks, &z, &g, norm);
     }
 
-    accumulate(&mut z_sum, &mut g_sum, 0, state.len());
-    finish_expectations(masks, &z_sum, &g_sum, norm)
+    let mut sums = zeros();
+    accumulate(&mut sums.0, &mut sums.1, &mut sums.2, 0, state.len());
+    sums
 }
 
 /// Interleave the two accumulator families back into observable order.

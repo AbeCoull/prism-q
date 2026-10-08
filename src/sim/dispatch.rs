@@ -855,6 +855,10 @@ impl BackendPlan {
         }
     }
 
+    pub(super) fn is_host_statevector(&self) -> bool {
+        matches!(self, BackendPlan::Statevector { accel: Accel::Cpu })
+    }
+
     pub(super) fn is_gpu(&self) -> bool {
         match self {
             BackendPlan::Stabilizer { accel, .. }

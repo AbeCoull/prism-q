@@ -23,10 +23,7 @@ use crate::backend::{Backend, max_statevector_qubits, reserve_dense_output};
 use crate::circuit::parameter::{ParamLink, Parameters, angle_mut, angle_of};
 use crate::circuit::{Circuit, Instruction, PreparedCircuit, SmallVec, smallvec};
 use crate::error::{PrismError, Result};
-use crate::gates::{
-    BatchRzzData, DiagEntry, DiagonalBatchData, Gate, GeneratorKind, MultiFusedData,
-    pauli_rot_masks,
-};
+use crate::gates::{Gate, GeneratorKind, is_diagonal_2x2, pauli_rot_masks};
 
 use super::noise::NoiseModel;
 use super::unified_pauli::PauliTerm;
@@ -141,141 +138,250 @@ pub fn run_expectation_gradient(
 
     let mut gradient = vec![0.0; params.num_slots()];
 
-    // In-cone links sorted by descending instruction index, matching the
-    // reverse sweep. A cursor walks this list so the per-instruction lookup
-    // stays O(params), not O(instructions). An out-of-cone trainable gate has
-    // a provably zero gradient, so its links carry nothing to accumulate.
+    // In-cone links sorted by instruction index. An out-of-cone trainable gate
+    // has a provably zero gradient, so its links carry nothing to accumulate.
     let mut links: Vec<_> = params
         .links()
         .iter()
         .filter(|l| in_cone[l.instruction])
         .copied()
         .collect();
-    links.sort_unstable_by_key(|l| std::cmp::Reverse(l.instruction));
+    links.sort_by_key(|l| l.instruction);
 
     // The sweep stops at the earliest in-cone trainable gate: nothing before
     // it contributes, so a non-trainable prefix costs no inverse applications.
     // If no trainable gate reaches the observable, the gradient is zero
     // everywhere.
-    let Some(earliest) = links.last().map(|l| l.instruction) else {
+    let Some(earliest) = links.first().map(|l| l.instruction) else {
         return Ok(ExpectationGradient { value, gradient });
     };
 
     let mut lambda = StatevectorBackend::new(seed);
     lambda.init_from_state(lambda_state, circuit.num_classical_bits)?;
 
-    // The sweep is the in-cone tail from the earliest trainable gate, walked
-    // backwards. Its trainable gates group into commuting runs, which share
-    // one state pair for their sandwiches and one fused pass for their
-    // inverses; a non-trainable gate carries no contribution and splits runs.
+    // The sweep is the in-cone tail from the earliest trainable gate. Sweep
+    // position `s` owns `links[first_link[s]..first_link[s + 1]]`.
     let sweep = &kept[kept.partition_point(|&i| i < earliest)..];
+    let mut first_link = Vec::with_capacity(sweep.len() + 1);
     let mut cursor = 0;
-    let mut end = sweep.len();
-    let mut run: Vec<RunGate> = Vec::new();
-    let mut masks: Vec<(usize, usize, u32)> = Vec::new();
-
-    while end > 0 {
-        let i = sweep[end - 1];
-        if cursor >= links.len() || links[cursor].instruction != i {
-            let inverse = inverse_instruction(&circuit.instructions[i]);
-            phi.apply(&inverse)?;
-            lambda.apply(&inverse)?;
-            end -= 1;
-            continue;
+    for &i in sweep {
+        first_link.push(cursor);
+        while cursor < links.len() && links[cursor].instruction == i {
+            cursor += 1;
         }
+    }
+    first_link.push(cursor);
 
-        run.clear();
-        let mut start = end;
-        let mut lookahead = cursor;
-        while start > 0 {
-            let index = sweep[start - 1];
-            if lookahead >= links.len() || links[lookahead].instruction != index {
-                break;
-            }
-            let Instruction::Gate { gate, targets } = &circuit.instructions[index] else {
+    let trainable: Vec<bool> = first_link.windows(2).map(|w| w[0] < w[1]).collect();
+    let footprints: Vec<Footprint> = sweep
+        .iter()
+        .map(|&i| {
+            let Instruction::Gate { gate, targets } = &circuit.instructions[i] else {
                 unreachable!("the light cone keeps gate instructions only")
             };
-            let kind = gate
-                .pauli_generator()
-                .expect("trainable instruction validated as differentiable");
-            let candidate = RunGate::new(index, kind, targets);
-            if run.iter().any(|member| !member.commutes_with(&candidate)) {
-                break;
+            Footprint::of(gate, targets)
+        })
+        .collect();
+    let plan = plan_sweep(&footprints, &trainable, circuit.num_qubits);
+
+    let mut masks: Vec<(usize, usize, u32)> = Vec::new();
+    let (mut evaluated, mut inverted) = (0, 0);
+    for step in 0..=plan.last_step {
+        let evaluate = evaluated..plan.evaluate.partition_point(|&(t, _)| t <= step);
+        evaluated = evaluate.end;
+        if !evaluate.is_empty() {
+            masks.clear();
+            masks.extend(plan.evaluate[evaluate.clone()].iter().map(|&(_, s)| {
+                let f = &footprints[s];
+                (f.xmask, f.zmask, f.num_y)
+            }));
+            let values =
+                pauli_sandwiches_from_masks(lambda.state_vector(), phi.state_vector(), &masks);
+            for (&(_, s), value) in plan.evaluate[evaluate].iter().zip(&values) {
+                for link in &links[first_link[s]..first_link[s + 1]] {
+                    gradient[link.slot] += value.im;
+                }
             }
-            while lookahead < links.len() && links[lookahead].instruction == index {
-                lookahead += 1;
-            }
-            run.push(candidate);
-            start -= 1;
         }
 
-        masks.clear();
-        masks.extend(run.iter().map(|g| (g.xmask, g.zmask, g.num_y)));
-        let values = pauli_sandwiches_from_masks(lambda.state_vector(), phi.state_vector(), &masks);
-
-        for (g, value) in run.iter().zip(&values) {
-            while cursor < links.len() && links[cursor].instruction == g.index {
-                gradient[links[cursor].slot] += value.im;
-                cursor += 1;
-            }
+        let invert = inverted..plan.invert.partition_point(|&(t, _)| t <= step);
+        inverted = invert.end;
+        if !invert.is_empty() {
+            let stretch = circuit.with_instructions(
+                plan.invert[invert]
+                    .iter()
+                    .map(|&(_, s)| inverse_instruction(&circuit.instructions[sweep[s]]))
+                    .collect(),
+            );
+            let expanded = super::expand_for_backend(&phi, &stretch);
+            let fused = super::fuse_for_backend(&phi, &expanded);
+            phi.apply_instructions(&fused.instructions)?;
+            lambda.apply_instructions(&fused.instructions)?;
         }
-
-        // The earliest in-cone trainable gate is the last one evaluated; its
-        // inverse and every gate before it can be skipped.
-        let applied = run.len() - usize::from(sweep[start] == earliest);
-        for inverse in run_inverse_instructions(circuit, &run[..applied]) {
-            phi.apply(&inverse)?;
-            lambda.apply(&inverse)?;
-        }
-        end = start;
     }
 
     Ok(ExpectationGradient { value, gradient })
 }
 
-/// One trainable gate staged in a commuting run: its instruction index and the
-/// Pauli masks of its generator.
-struct RunGate {
-    index: usize,
-    xmask: usize,
-    zmask: usize,
-    num_y: u32,
+/// How a gate acts on one qubit: within the algebra of `I` and one Pauli, or
+/// anything. Two gates commute when their actions agree on every shared qubit
+/// and neither is `Any`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalAction {
+    Z,
+    X,
+    Y,
+    Any,
 }
 
-impl RunGate {
-    fn new(index: usize, kind: GeneratorKind<'_>, targets: &[usize]) -> Self {
-        let (xmask, zmask, num_y) = match kind {
-            GeneratorKind::RotX => (1usize << targets[0], 0, 0),
-            GeneratorKind::RotY => {
-                let bit = 1usize << targets[0];
-                (bit, bit, 1)
-            }
-            GeneratorKind::RotZ => (0, 1usize << targets[0], 0),
-            GeneratorKind::RotZz => (0, (1usize << targets[0]) | (1usize << targets[1]), 0),
-            // The projector generator differs from Z by the identity, whose
-            // sandwich `⟨λ|φ⟩ = ⟨φ|H|φ⟩` is real and contributes nothing to the
-            // imaginary part, so `P(θ) = e^{iθ/2} Rz(θ)` differentiates as `Rz`.
-            GeneratorKind::Phase => (0, 1usize << targets[0], 0),
-            GeneratorKind::RotPauli(axes) => pauli_rot_masks(targets, axes),
-        };
-        Self {
-            index,
-            xmask,
-            zmask,
-            num_y,
+impl LocalAction {
+    fn from_bits(x: bool, z: bool) -> Option<Self> {
+        match (x, z) {
+            (false, false) => None,
+            (true, false) => Some(Self::X),
+            (false, true) => Some(Self::Z),
+            (true, true) => Some(Self::Y),
         }
     }
 
-    /// Two Pauli strings commute exactly when they anticommute on an even
-    /// number of qubits. `exp(-iθP/2)` then commutes with the other string as
-    /// well, which is what lets a run share one state pair: conjugating a
-    /// member's generator by the inverses of the members that follow it leaves
-    /// the generator, so every sandwich in the run reads the same `⟨λ|` and
-    /// `|φ⟩` as it would at its own position.
-    fn commutes_with(&self, other: &RunGate) -> bool {
-        let anticommuting =
-            (self.xmask & other.zmask).count_ones() + (self.zmask & other.xmask).count_ones();
-        anticommuting.is_multiple_of(2)
+    fn bit(self) -> u8 {
+        match self {
+            Self::Z => 1,
+            Self::X => 2,
+            Self::Y => 4,
+            Self::Any => 7,
+        }
+    }
+}
+
+/// What the sweep planner knows about how one gate commutes.
+///
+/// `pauli` marks a gate in the span of `I` and one Pauli string with masks
+/// `(xmask, zmask, num_y)`, the generator for a rotation. Two such gates commute
+/// exactly when their strings do, which the per-qubit `support` test misses for
+/// strings that anticommute on an even number of qubits; every other pair falls
+/// back to it.
+struct Footprint {
+    pauli: bool,
+    xmask: usize,
+    zmask: usize,
+    num_y: u32,
+    support: SmallVec<[(usize, LocalAction); 4]>,
+}
+
+impl Footprint {
+    fn pauli((xmask, zmask, num_y): (usize, usize, u32), targets: &[usize]) -> Self {
+        let support = targets
+            .iter()
+            .filter_map(|&q| {
+                LocalAction::from_bits(xmask >> q & 1 == 1, zmask >> q & 1 == 1).map(|a| (q, a))
+            })
+            .collect();
+        Self {
+            pauli: true,
+            xmask,
+            zmask,
+            num_y,
+            support,
+        }
+    }
+
+    fn of(gate: &Gate, targets: &[usize]) -> Self {
+        use LocalAction::{Any, X, Z};
+        if let Some(kind) = gate.pauli_generator() {
+            return Self::pauli(generator_masks(kind, targets), targets);
+        }
+        let bit = || 1usize << targets[0];
+        let diagonal_or_any = |diagonal: bool| if diagonal { Z } else { Any };
+        let support: SmallVec<[(usize, LocalAction); 4]> = match gate {
+            Gate::Id => SmallVec::new(),
+            Gate::X | Gate::SX | Gate::SXdg => return Self::pauli((bit(), 0, 0), targets),
+            Gate::Y => return Self::pauli((bit(), bit(), 1), targets),
+            Gate::Z | Gate::S | Gate::Sdg | Gate::T | Gate::Tdg => {
+                return Self::pauli((0, bit(), 0), targets);
+            }
+            Gate::Cx => smallvec![(targets[0], Z), (targets[1], X)],
+            Gate::Cu(mat) => smallvec![
+                (targets[0], Z),
+                (targets[1], diagonal_or_any(is_diagonal_2x2(mat)))
+            ],
+            Gate::Mcu(data) => {
+                let (&target, controls) = targets.split_last().expect("Mcu has a target");
+                controls
+                    .iter()
+                    .map(|&q| (q, Z))
+                    .chain([(target, diagonal_or_any(is_diagonal_2x2(&data.mat)))])
+                    .collect()
+            }
+            Gate::Fused(mat) => smallvec![(targets[0], diagonal_or_any(is_diagonal_2x2(mat)))],
+            Gate::BatchPhase(data) => targets
+                .iter()
+                .copied()
+                .chain(data.phases.iter().map(|&(q, _)| q))
+                .map(|q| (q, Z))
+                .collect(),
+            Gate::Cz | Gate::BatchRzz(_) | Gate::DiagonalBatch(_) => {
+                targets.iter().map(|&q| (q, Z)).collect()
+            }
+            Gate::MultiFused(data) => {
+                let action = diagonal_or_any(data.all_diagonal);
+                targets.iter().map(|&q| (q, action)).collect()
+            }
+            _ => targets.iter().map(|&q| (q, Any)).collect(),
+        };
+        Self {
+            pauli: false,
+            xmask: 0,
+            zmask: 0,
+            num_y: 0,
+            support,
+        }
+    }
+
+    fn commutes_with(&self, other: &Footprint) -> bool {
+        if self.pauli && other.pauli {
+            let anticommuting =
+                (self.xmask & other.zmask).count_ones() + (self.zmask & other.xmask).count_ones();
+            return anticommuting.is_multiple_of(2);
+        }
+        self.support.iter().all(|&(q, a)| {
+            other
+                .support
+                .iter()
+                .all(|&(p, b)| p != q || (a == b && a != LocalAction::Any))
+        })
+    }
+
+    /// Whether a conflicting action on any one shared qubit already stops this
+    /// gate commuting with another, as it does for all but a Pauli string over
+    /// several qubits.
+    fn decides_locally(&self) -> bool {
+        !self.pauli || self.support.len() == 1
+    }
+
+    fn action_on(&self, qubit: usize) -> LocalAction {
+        self.support
+            .iter()
+            .find_map(|&(q, a)| (q == qubit).then_some(a))
+            .expect("a gate is listed only under qubits it acts on")
+    }
+}
+
+/// Pauli masks `(xmask, zmask, num_y)` of a rotation's generator.
+fn generator_masks(kind: GeneratorKind<'_>, targets: &[usize]) -> (usize, usize, u32) {
+    match kind {
+        GeneratorKind::RotX => (1usize << targets[0], 0, 0),
+        GeneratorKind::RotY => {
+            let bit = 1usize << targets[0];
+            (bit, bit, 1)
+        }
+        GeneratorKind::RotZ => (0, 1usize << targets[0], 0),
+        GeneratorKind::RotZz => (0, (1usize << targets[0]) | (1usize << targets[1]), 0),
+        // The projector generator differs from Z by the identity, whose
+        // sandwich `⟨λ|φ⟩ = ⟨φ|H|φ⟩` is real and contributes nothing to the
+        // imaginary part, so `P(θ) = e^{iθ/2} Rz(θ)` differentiates as `Rz`.
+        GeneratorKind::Phase => (0, 1usize << targets[0], 0),
+        GeneratorKind::RotPauli(axes) => pauli_rot_masks(targets, axes),
     }
 }
 
@@ -289,119 +395,155 @@ fn inverse_instruction(instruction: &Instruction) -> Instruction {
     }
 }
 
-/// Inverses of a commuting run, collapsed into a batch gate where the run's
-/// gate type has one: `MultiFused` for single-qubit rotations on distinct
-/// qubits, `BatchRzz` for an Rzz layer, `DiagonalBatch` for a mixed diagonal
-/// run. Anything else falls back to one instruction per gate. Order within a
-/// run is free because its gates commute.
-fn run_inverse_instructions(circuit: &Circuit, run: &[RunGate]) -> Vec<Instruction> {
-    let gates: Vec<(&Gate, &[usize])> = run
+/// Gates the planner checks above a gate on one qubit before it counts every
+/// gate left there as blocking. The bound keeps planning near linear through a
+/// long commuting stretch; past it the plan stays exact but may take more steps.
+const SWEEP_SCAN_LIMIT: usize = 64;
+
+/// Backward-sweep schedule, as `(step, sweep position)` pairs sorted by step.
+///
+/// Step `t` reads the sandwiches of `evaluate`'s entries at `t` from one state
+/// pair, then applies the inverses of `invert`'s entries at `t`, highest
+/// position first.
+struct SweepPlan {
+    evaluate: Vec<(usize, usize)>,
+    invert: Vec<(usize, usize)>,
+    last_step: usize,
+}
+
+/// Schedule the backward sweep so every trainable gate is evaluated at the
+/// earliest step its sandwich is exact.
+///
+/// The states always sit after the gates not yet inverted, applied in order. A
+/// gate may be inverted once every gate above it that it does not commute with
+/// has been, since it then commutes past the rest to the end of the circuit. A
+/// trainable gate's sandwich at that frontier equals the one at its own place
+/// once every gate left above it commutes with its generator. A top-down pass
+/// gives each gate its earliest step, and a bottom-up pass keeps only the gates
+/// some trainable gate below transitively waits on, so the earliest trainable
+/// gate is never inverted.
+fn plan_sweep(footprints: &[Footprint], trainable: &[bool], num_qubits: usize) -> SweepPlan {
+    let len = footprints.len();
+    let mut on_qubit: Vec<Vec<usize>> = vec![Vec::new(); num_qubits];
+    let rows: Vec<SmallVec<[usize; 4]>> = footprints
         .iter()
-        .map(|g| {
-            let Instruction::Gate { gate, targets } = &circuit.instructions[g.index] else {
-                unreachable!("the light cone keeps gate instructions only")
-            };
-            (gate, targets.as_slice())
+        .enumerate()
+        .map(|(s, f)| {
+            f.support
+                .iter()
+                .map(|&(q, _)| {
+                    on_qubit[q].push(s);
+                    on_qubit[q].len() - 1
+                })
+                .collect()
         })
         .collect();
 
-    if gates.len() > 1 {
-        if let Some(fused) = multi_fused_inverse(&gates) {
-            return vec![fused];
-        }
-        if let Some(batched) = batch_rzz_inverse(&gates) {
-            return batched;
-        }
-        if let Some(diagonal) = diagonal_batch_inverse(&gates) {
-            return vec![diagonal];
-        }
-    }
-
-    gates
-        .iter()
-        .map(|&(gate, targets)| Instruction::Gate {
-            gate: gate.inverse(),
-            targets: targets.iter().copied().collect(),
-        })
-        .collect()
-}
-
-fn multi_fused_inverse(gates: &[(&Gate, &[usize])]) -> Option<Instruction> {
-    let mut fused: Vec<(usize, [[Complex64; 2]; 2])> = Vec::with_capacity(gates.len());
-    for &(gate, targets) in gates {
-        if !matches!(gate, Gate::Rx(_) | Gate::Ry(_) | Gate::Rz(_) | Gate::P(_))
-            || fused.iter().any(|&(q, _)| q == targets[0])
-        {
-            return None;
-        }
-        fused.push((targets[0], gate.inverse().matrix_2x2()));
-    }
-    let targets: SmallVec<[usize; 4]> = fused.iter().map(|&(q, _)| q).collect();
-    Some(Instruction::Gate {
-        gate: Gate::MultiFused(Box::new(MultiFusedData::new(fused))),
-        targets,
-    })
-}
-
-fn batch_rzz_inverse(gates: &[(&Gate, &[usize])]) -> Option<Vec<Instruction>> {
-    let mut edges: Vec<(usize, usize, f64)> = Vec::with_capacity(gates.len());
-    for &(gate, targets) in gates {
-        let Gate::Rzz(theta) = gate else {
-            return None;
-        };
-        edges.push((targets[0], targets[1], -theta));
-    }
-    Some(
-        edges
-            .chunks(BatchRzzData::MAX_EDGES)
-            .map(|chunk| match chunk {
-                [(q0, q1, theta)] => Instruction::Gate {
-                    gate: Gate::Rzz(*theta),
-                    targets: smallvec![*q0, *q1],
-                },
-                _ => {
-                    let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
-                    for &(q0, q1, _) in chunk {
-                        for q in [q0, q1] {
-                            if !targets.contains(&q) {
-                                targets.push(q);
-                            }
-                        }
-                    }
-                    Instruction::Gate {
-                        gate: Gate::BatchRzz(Box::new(BatchRzzData {
-                            edges: chunk.to_vec(),
-                        })),
-                        targets,
+    // `blockers[blocker_start[s]..blocker_start[s + 1]]` holds gates above `s`
+    // that it does not commute with. A scan on a qubit stops once its blockers
+    // there take two different actions, or one `Any`, from gates that decide
+    // locally: every later gate on the qubit then fails to commute with one of
+    // them and waits on it already. A scan that hits the limit instead leaves a
+    // `(s, qubit, row)` spill standing for every gate from `row` up.
+    let mut blocker_start = Vec::with_capacity(len + 1);
+    let mut blockers: Vec<usize> = Vec::new();
+    let mut spills: Vec<(usize, usize, usize)> = Vec::new();
+    blocker_start.push(0);
+    for (s, f) in footprints.iter().enumerate() {
+        for (&(q, _), &row) in f.support.iter().zip(&rows[s]) {
+            let list = &on_qubit[q];
+            let limit = list.len().min(row + 1 + SWEEP_SCAN_LIMIT);
+            let mut covered = 0u8;
+            let mut next = row + 1;
+            while next < limit && covered.count_ones() < 2 {
+                let above = &footprints[list[next]];
+                if !f.commutes_with(above) {
+                    blockers.push(list[next]);
+                    if above.decides_locally() {
+                        covered |= above.action_on(q).bit();
                     }
                 }
-            })
-            .collect(),
-    )
-}
-
-/// A run of diagonal rotations collapsed into one `DiagonalBatch` sweep. The
-/// kernel has no entry cap: a payload whose connected components outgrow the
-/// phase tables falls back to a per-element pass, still one traversal.
-fn diagonal_batch_inverse(gates: &[(&Gate, &[usize])]) -> Option<Instruction> {
-    let mut entries: Vec<DiagEntry> = Vec::with_capacity(gates.len());
-    let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
-    for &(gate, gate_targets) in gates {
-        if !matches!(gate, Gate::Rz(_) | Gate::P(_) | Gate::Rzz(_)) {
-            return None;
-        }
-        entries.extend(gate.inverse().diag_entries(gate_targets));
-        for &q in gate_targets {
-            if !targets.contains(&q) {
-                targets.push(q);
+                next += 1;
+            }
+            if covered.count_ones() < 2 && next < list.len() {
+                spills.push((s, q, next));
             }
         }
+        blocker_start.push(blockers.len());
     }
-    targets.sort_unstable();
-    Some(Instruction::Gate {
-        gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })),
-        targets,
-    })
+
+    // A trainable gate is evaluated one step after the last of its blockers is
+    // inverted and inverted in the step it is evaluated; any other gate is
+    // inverted in the step its last blocker is.
+    let mut step = vec![0usize; len];
+    let mut latest_from: Vec<Vec<usize>> = on_qubit.iter().map(|l| vec![0; l.len()]).collect();
+    let mut spill = spills.len();
+    for s in (0..len).rev() {
+        let mut latest = blockers[blocker_start[s]..blocker_start[s + 1]]
+            .iter()
+            .map(|&i| step[i])
+            .max();
+        while spill > 0 && spills[spill - 1].0 == s {
+            spill -= 1;
+            let (_, q, row) = spills[spill];
+            latest = latest.max(Some(latest_from[q][row]));
+        }
+        step[s] = match latest {
+            Some(t) if trainable[s] => t + 1,
+            Some(t) => t,
+            None => 0,
+        };
+        for (&(q, _), &row) in footprints[s].support.iter().zip(&rows[s]) {
+            let above = latest_from[q].get(row + 1).copied().unwrap_or(0);
+            latest_from[q][row] = step[s].max(above);
+        }
+    }
+
+    let mut needed = vec![false; len];
+    let mut needed_from = vec![usize::MAX; num_qubits];
+    let mut spill = 0;
+    for s in 0..len {
+        needed[s] = needed[s]
+            || footprints[s]
+                .support
+                .iter()
+                .zip(&rows[s])
+                .any(|(&(q, _), &row)| row >= needed_from[q]);
+        let waits = needed[s] || trainable[s];
+        if waits {
+            for &i in &blockers[blocker_start[s]..blocker_start[s + 1]] {
+                needed[i] = true;
+            }
+        }
+        while spill < spills.len() && spills[spill].0 == s {
+            let (_, q, row) = spills[spill];
+            if waits {
+                needed_from[q] = needed_from[q].min(row);
+            }
+            spill += 1;
+        }
+    }
+
+    let last_step = (0..len)
+        .filter(|&s| trainable[s])
+        .map(|s| step[s])
+        .max()
+        .unwrap_or(0);
+    let mut evaluate: Vec<(usize, usize)> = (0..len)
+        .filter(|&s| trainable[s])
+        .map(|s| (step[s], s))
+        .collect();
+    evaluate.sort_unstable();
+    let mut invert: Vec<(usize, usize)> = (0..len)
+        .filter(|&s| needed[s] && step[s] < last_step)
+        .map(|s| (step[s], s))
+        .collect();
+    invert.sort_unstable_by_key(|&(t, s)| (t, std::cmp::Reverse(s)));
+    SweepPlan {
+        evaluate,
+        invert,
+        last_step,
+    }
 }
 
 /// The gates `kept` indexes, as a circuit of the original width so the fusion
@@ -1155,17 +1297,19 @@ mod tests {
     #[test]
     fn pauli_rot_generators_commute_on_an_even_anticommuting_count() {
         use crate::sim::unified_pauli::PauliAxis;
-        let gate = |index: usize, axes: &[PauliAxis], targets: &[usize]| {
-            RunGate::new(index, GeneratorKind::RotPauli(axes), targets)
+        let gate = |axes: &[PauliAxis], targets: &[usize]| {
+            Footprint::pauli(
+                generator_masks(GeneratorKind::RotPauli(axes), targets),
+                targets,
+            )
         };
-        let x0y1 = gate(0, &[PauliAxis::X, PauliAxis::Y], &[0, 1]);
-        let y0x1 = gate(1, &[PauliAxis::Y, PauliAxis::X], &[0, 1]);
+        let x0y1 = gate(&[PauliAxis::X, PauliAxis::Y], &[0, 1]);
+        let y0x1 = gate(&[PauliAxis::Y, PauliAxis::X], &[0, 1]);
         let wide = gate(
-            2,
             &[PauliAxis::Y, PauliAxis::X, PauliAxis::X, PauliAxis::X],
             &[0, 1, 2, 3],
         );
-        let x1y2 = gate(3, &[PauliAxis::X, PauliAxis::Y], &[1, 2]);
+        let x1y2 = gate(&[PauliAxis::X, PauliAxis::Y], &[1, 2]);
 
         assert!(x0y1.commutes_with(&y0x1));
         assert!(x0y1.commutes_with(&x0y1));
@@ -1174,93 +1318,197 @@ mod tests {
     }
 
     #[test]
-    fn a_run_collapses_to_one_batch_gate_only_when_its_type_has_one() {
-        let mut c = Circuit::new(4, 0);
-        c.add_gate(Gate::Rz(0.3), &[0]);
-        c.add_gate(Gate::Rz(0.5), &[1]);
-        c.add_gate(Gate::Rz(0.7), &[0]);
-        c.add_gate(Gate::Rzz(0.9), &[0, 1]);
-        c.add_gate(Gate::Rzz(1.1), &[2, 3]);
-        c.add_gate(Gate::Rx(1.3), &[0]);
-
-        let run = |indices: &[usize]| -> Vec<RunGate> {
-            indices
-                .iter()
-                .map(|&i| {
-                    let Instruction::Gate { gate, targets } = &c.instructions[i] else {
-                        unreachable!()
-                    };
-                    RunGate::new(i, gate.pauli_generator().unwrap(), targets)
-                })
-                .collect()
+    fn footprints_commute_through_control_and_target_actions() {
+        let cx = Footprint::of(&Gate::Cx, &[0, 1]);
+        let commutes = |gate: Gate, targets: &[usize]| {
+            let f = Footprint::of(&gate, targets);
+            assert_eq!(f.commutes_with(&cx), cx.commutes_with(&f));
+            f.commutes_with(&cx)
         };
+        assert!(commutes(Gate::Rz(0.3), &[0]));
+        assert!(commutes(Gate::Rx(0.3), &[1]));
+        assert!(commutes(Gate::Cz, &[0, 2]));
+        assert!(commutes(Gate::H, &[2]));
+        assert!(!commutes(Gate::Rz(0.3), &[1]));
+        assert!(!commutes(Gate::Ry(0.3), &[0]));
+        assert!(!commutes(Gate::Rzz(0.3), &[0, 1]));
+        assert!(!commutes(Gate::H, &[0]));
+        assert!(!commutes(Gate::Cx, &[1, 0]));
+    }
 
-        let distinct = run_inverse_instructions(&c, &run(&[1, 0]));
-        assert!(matches!(
-            distinct.as_slice(),
-            [Instruction::Gate {
-                gate: Gate::MultiFused(_),
-                ..
-            }]
-        ));
+    fn plan_for(circuit: &Circuit, params: &Parameters) -> SweepPlan {
+        let mut linked: Vec<usize> = params.links().iter().map(|l| l.instruction).collect();
+        linked.sort_unstable();
+        let start = linked[0];
+        let sweep: Vec<usize> = (start..circuit.instructions.len()).collect();
+        let trainable: Vec<bool> = sweep
+            .iter()
+            .map(|i| linked.binary_search(i).is_ok())
+            .collect();
+        let footprints: Vec<Footprint> = sweep
+            .iter()
+            .map(|&i| {
+                let Instruction::Gate { gate, targets } = &circuit.instructions[i] else {
+                    unreachable!()
+                };
+                Footprint::of(gate, targets)
+            })
+            .collect();
+        plan_sweep(&footprints, &trainable, circuit.num_qubits)
+    }
 
-        let rzz_layer = run_inverse_instructions(&c, &run(&[4, 3]));
-        assert!(matches!(
-            rzz_layer.as_slice(),
-            [Instruction::Gate {
-                gate: Gate::BatchRzz(_),
-                ..
-            }]
-        ));
-
-        let repeated_qubit = run_inverse_instructions(&c, &run(&[2, 0]));
-        assert!(matches!(
-            repeated_qubit.as_slice(),
-            [Instruction::Gate {
-                gate: Gate::DiagonalBatch(_),
-                ..
-            }]
-        ));
-
-        let non_diagonal = run_inverse_instructions(&c, &run(&[5, 4]));
-        assert_eq!(non_diagonal.len(), 2);
+    // Interleaved Ry and Rz on each qubit evaluate as one Rz step and one Ry
+    // step per layer, where a run that must commute internally splits at every
+    // qubit.
+    #[test]
+    fn a_hardware_efficient_layer_takes_two_steps() {
+        let (n, layers) = (8, 3);
+        let circuit = crate::circuits::hardware_efficient_ansatz(n, layers, 7);
+        let plan = plan_for(&circuit, &Parameters::all_rotations(&circuit));
+        assert_eq!(plan.evaluate.len(), 2 * n * layers);
+        assert!(
+            plan.last_step <= 2 * layers,
+            "{} steps for {layers} layers",
+            plan.last_step + 1
+        );
+        let stretches = plan
+            .invert
+            .iter()
+            .map(|&(t, _)| t)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(stretches.len() <= 2 * layers);
     }
 
     #[test]
-    fn a_mixed_diagonal_run_collapses_into_one_diagonal_batch() {
-        // The Rz layer and the Rzz chain of an Ising ansatz merge into one run:
-        // every generator is Z type, so nothing splits them.
-        let n = 6;
-        let mut c = Circuit::new(n, 0);
-        for q in 0..n - 1 {
-            c.add_gate(Gate::Rzz(0.31 + 0.07 * q as f64), &[q, q + 1]);
-        }
-        for q in 0..3 {
-            c.add_gate(Gate::Rz(0.4 + 0.11 * q as f64), &[q]);
-        }
+    fn a_qaoa_layer_takes_two_steps() {
+        let circuit = crate::circuits::qaoa_circuit(8, 3, 7);
+        let plan = plan_for(&circuit, &Parameters::all_rotations(&circuit));
+        assert_eq!(plan.last_step, 5);
+    }
 
-        let run: Vec<RunGate> = (0..c.instructions.len())
-            .rev()
-            .map(|i| {
-                let Instruction::Gate { gate, targets } = &c.instructions[i] else {
-                    unreachable!()
-                };
-                RunGate::new(i, gate.pauli_generator().unwrap(), targets)
+    #[test]
+    fn the_plan_never_inverts_the_earliest_trainable_gate_or_an_idle_one() {
+        let mut c = Circuit::new(3, 0);
+        c.add_gate(Gate::Ry(0.4), &[0]);
+        c.add_gate(Gate::H, &[2]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Rz(0.7), &[1]);
+        let mut params = Parameters::new(2);
+        params.link(0, 0);
+        params.link(3, 1);
+
+        let plan = plan_for(&c, &params);
+        let inverted: Vec<usize> = plan.invert.iter().map(|&(_, s)| s).collect();
+        assert_eq!(inverted, [3, 2]);
+        assert_eq!(plan.last_step, 1);
+    }
+
+    fn assert_adjoint_matches_shift(
+        circuit: &Circuit,
+        ham: &[(f64, Vec<PauliTerm>)],
+        params: &Parameters,
+    ) {
+        let adjoint = run_expectation_gradient(circuit, ham, params, 42).unwrap();
+        let shift = run_expectation_gradient_shift(circuit, ham, params, 42).unwrap();
+        let n = circuit.num_qubits;
+        assert!((adjoint.value - shift.value).abs() < 1e-10, "{n}q value");
+        for (slot, (got, want)) in adjoint.gradient.iter().zip(&shift.gradient).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-10,
+                "{n}q slot {slot}: {got} vs {want}"
+            );
+        }
+    }
+
+    fn mixed_hamiltonian(n: usize) -> Vec<(f64, Vec<PauliTerm>)> {
+        (0..n - 1)
+            .map(|q| {
+                (
+                    0.5 + 0.1 * q as f64,
+                    vec![PauliTerm::z(q), PauliTerm::z(q + 1)],
+                )
             })
-            .collect();
+            .chain([
+                (0.7, vec![PauliTerm::x(1)]),
+                (-0.4, vec![PauliTerm::y(0), PauliTerm::x(n - 1)]),
+            ])
+            .collect()
+    }
 
-        let inverses = run_inverse_instructions(&c, &run);
-        let [
-            Instruction::Gate {
-                gate: Gate::DiagonalBatch(data),
-                targets,
-            },
-        ] = inverses.as_slice()
-        else {
-            panic!("expected one DiagonalBatch, got {inverses:?}")
-        };
-        assert_eq!(data.entries.len(), 8);
-        assert_eq!(targets.as_slice(), &[0, 1, 2, 3, 4, 5]);
+    // Widths on both sides of the fusion floors, so the inverted stretches run
+    // both unfused and through the 1q, 2q, and batch passes.
+    #[test]
+    fn frontier_sweep_matches_parameter_shift_on_hea_and_qaoa() {
+        for n in [5, 12, 16] {
+            let ham = mixed_hamiltonian(n);
+            let (hea, shared) = hea_with_shared_slots(n);
+            assert_adjoint_matches_shift(&hea, &ham, &shared);
+            assert_adjoint_matches_shift(&hea, &ham, &Parameters::all_rotations(&hea));
+
+            let qaoa = crate::circuits::qaoa_circuit(n, 2, 11);
+            let mut params = Parameters::new(4);
+            for (k, link) in Parameters::all_rotations(&qaoa).links().iter().enumerate() {
+                let layer = k / (2 * n - 1);
+                let mixer = k % (2 * n - 1) >= n - 1;
+                params.link(link.instruction, 2 * layer + usize::from(mixer));
+            }
+            assert_adjoint_matches_shift(&qaoa, &ham, &params);
+        }
+    }
+
+    // Fixed gates of every commutation kind sit between trainable ones, some
+    // trainable gates share a slot, one rotation stays fixed, and a fixed
+    // prefix precedes the earliest trainable gate.
+    #[test]
+    fn frontier_sweep_matches_parameter_shift_with_fixed_gates_between() {
+        use crate::sim::unified_pauli::PauliAxis;
+        for n in [4, 12, 16] {
+            let mut c = Circuit::new(n, 0);
+            for q in 0..n {
+                c.add_gate(Gate::H, &[q]);
+            }
+            for layer in 0..2 {
+                for q in 0..n {
+                    let angle = 0.3 + 0.17 * (q + layer * n) as f64;
+                    c.add_gate(Gate::Ry(angle), &[q]);
+                    c.add_gate(if q % 3 == 0 { Gate::T } else { Gate::SX }, &[q]);
+                    c.add_gate(Gate::Rz(angle * 0.5), &[q]);
+                }
+                for q in (layer..n - 1).step_by(2) {
+                    c.add_gate(Gate::Cx, &[q, q + 1]);
+                    c.add_gate(Gate::Rzz(0.2 + 0.05 * q as f64), &[q, q + 1]);
+                }
+                c.add_gate(Gate::Cz, &[0, n - 1]);
+                c.add_gate(Gate::Swap, &[1, 2]);
+                c.add_gate(Gate::P(0.6), &[n - 1]);
+                c.add_pauli_rotation(
+                    0.45,
+                    &[
+                        PauliTerm::new(0, PauliAxis::X),
+                        PauliTerm::new(2, PauliAxis::Y),
+                        PauliTerm::new(3, PauliAxis::Z),
+                    ],
+                );
+                c.add_gate(Gate::Rx(0.9), &[n / 2]);
+            }
+
+            let mut params = Parameters::new(5);
+            let rotations = c
+                .instructions
+                .iter()
+                .enumerate()
+                .filter(|(_, inst)| {
+                    matches!(inst, Instruction::Gate { gate, .. } if gate.pauli_generator().is_some())
+                })
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+            for (k, &i) in rotations.iter().enumerate() {
+                if k % 7 != 3 {
+                    params.link(i, k % 5);
+                }
+            }
+            assert_adjoint_matches_shift(&c, &mixed_hamiltonian(n), &params);
+        }
     }
 
     #[test]

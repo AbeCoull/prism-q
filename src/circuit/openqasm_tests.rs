@@ -2312,7 +2312,7 @@ fn def_subroutine_with_for_loop_inside_body() {
 }
 
 #[test]
-fn def_subroutine_with_return_type_rejected() {
+fn def_returning_a_literal_is_rejected() {
     let qasm = r#"
         OPENQASM 3.0;
         qubit[1] q;

@@ -22,7 +22,8 @@ pub mod unified_pauli;
 pub use braket::ResultValue;
 pub(crate) use decomposed::merge_probabilities;
 use decomposed::{
-    MIN_DECOMPOSITION_QUBITS, run_decomposed, run_decomposed_prefused, should_decompose,
+    MIN_DECOMPOSITION_QUBITS, PreparedBlocks, run_decomposed, run_decomposed_prefused,
+    should_decompose,
 };
 pub use dispatch::BackendKind;
 use dispatch::{
@@ -1505,8 +1506,7 @@ fn expectation_values_from_initial_state(
     }
 
     let evolved = backend.export_statevector()?;
-    let norm = crate::backend::state_norm_sqr(&evolved);
-    let values = pauli_expectations_from_masks(&evolved, &masks, norm);
+    let (values, _) = pauli_expectations_from_masks(&evolved, &masks);
     Ok(analytic_expectations(values, metadata))
 }
 
@@ -2412,16 +2412,19 @@ fn compile_measurements_for_kind(
     Ok(sampler)
 }
 
+/// Components to decompose with, and whether every gate is Clifford.
+type Decomposition = (Vec<Vec<usize>>, bool);
+
 /// Independence analysis shared by the routing prelude in
 /// `run_with_internal`, the shots slow path, and the terminal fast-path
-/// candidacy. Returns the components to decompose with when full
-/// decomposition should fire, plus the partial-independence flag otherwise.
-fn analyze_independence(circuit: &Circuit) -> (Option<Vec<Vec<usize>>>, bool) {
+/// candidacy. Returns the decomposition when full decomposition should fire,
+/// plus the partial-independence flag otherwise.
+fn analyze_independence(circuit: &Circuit) -> (Option<Decomposition>, bool) {
     if circuit.num_qubits >= MIN_DECOMPOSITION_QUBITS {
-        let components = circuit.independent_subsystems();
+        let (components, clifford_only) = circuit.subsystems_and_clifford();
         if components.len() > 1 {
             if should_decompose(&components, circuit.num_qubits) {
-                return (Some(components), false);
+                return (Some((components, clifford_only)), false);
             }
             return (None, true);
         }
@@ -2468,10 +2471,10 @@ enum ProbabilityRoute {
 
 fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityRoute {
     let (decompose, has_partial_independence) = analyze_independence(circuit);
-    if let Some(components) = decompose {
+    if let Some((components, clifford_only)) = decompose {
         let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
         if kind.is_auto()
-            && circuit.is_clifford_only()
+            && clifford_only
             && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
             && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
         {
@@ -3362,8 +3365,7 @@ fn grouped_expectation_on_state(
         Some(values) => (values?, None),
         None => {
             let state = backend.state_vector();
-            let norm = crate::backend::state_norm_sqr(state);
-            let values = pauli_expectations_from_masks(state, &combined, norm);
+            let (values, norm) = pauli_expectations_from_masks(state, &combined);
             (values, Some((state, norm)))
         }
     };
@@ -3802,11 +3804,7 @@ fn expectation_values_statevector(
 
     let values = match backend.pauli_expectations_on_device(&masks) {
         Some(values) => values?,
-        None => {
-            let state = backend.state_vector();
-            let norm = crate::backend::state_norm_sqr(state);
-            pauli_expectations_from_masks(state, &masks, norm)
-        }
+        None => pauli_expectations_from_masks(backend.state_vector(), &masks).0,
     };
     let metadata = backend_metadata(&backend);
     Ok(analytic_expectations(values, metadata))
@@ -3992,10 +3990,16 @@ fn run_shots_per_shot(
         }
         // Decomposable circuits with a temporal prefix keep the per-shot
         // full-pipeline route; the prefix spans blocks that decomposition
-        // would otherwise split.
+        // would otherwise split. Its blocks are partitioned and planned once.
         let opts = SimOptions::classical_only();
         let route = resolve_backend(&kind, circuit, has_partial_independence).resolved();
         let plan = plan_probability_route(&kind, circuit);
+        let blocks = match &plan {
+            ProbabilityRoute::Decomposed(components) => {
+                Some(PreparedBlocks::new(&kind, components.clone(), circuit))
+            }
+            _ => None,
+        };
         let states = [(route, circuit.num_qubits)];
         return collect_shots(
             circuit,
@@ -4005,7 +4009,10 @@ fn run_shots_per_shot(
             &kind,
             &states,
             |shot_seed| {
-                let outcome = run_route(&kind, circuit, shot_seed, opts, &plan)?;
+                let outcome = match &blocks {
+                    Some(blocks) => blocks.run(&kind, circuit, shot_seed, &opts)?,
+                    None => run_route(&kind, circuit, shot_seed, opts, &plan)?,
+                };
                 Ok((outcome.classical_bits, outcome.metadata))
             },
         );
@@ -4013,7 +4020,7 @@ fn run_shots_per_shot(
 
     let opts = SimOptions::classical_only();
 
-    if let Some(ref comps) = decompose {
+    if let Some((ref comps, _)) = decompose {
         let partitions = circuit.partition_subcircuits(comps);
         let block_plans: Vec<BackendPlan> = partitions
             .iter()
@@ -4067,6 +4074,17 @@ fn run_shots_per_shot(
 
         let route = plan.resolved();
         let states = [(route, circuit.num_qubits)];
+        let split = fused
+            .instructions
+            .iter()
+            .position(|inst| {
+                !matches!(inst, Instruction::Gate { .. } | Instruction::Barrier { .. })
+            })
+            .unwrap_or(fused.instructions.len());
+        if split > 0 && plan.is_host_statevector() && circuit.num_qubits < max_statevector_qubits()
+        {
+            return collect_prefix_shots(&fused, split, num_shots, seed, &kind, &states);
+        }
         collect_shots(
             circuit,
             num_shots,
@@ -4081,6 +4099,55 @@ fn run_shots_per_shot(
             },
         )
     }
+}
+
+/// Run the shots of `fused` on the host statevector from one evolution of its
+/// first `split` instructions, all gates or barriers.
+///
+/// That prefix draws nothing from the RNG, so each shot copies the evolved state
+/// into a reused backend, reseeds it with the shot's own seed, and applies only
+/// the rest: the operation sequence and draws of a fresh run from |0...0⟩, which
+/// therefore ends on the same bits. Shots split across workers as
+/// [`collect_shots`] splits them.
+fn collect_prefix_shots(
+    fused: &Circuit,
+    split: usize,
+    num_shots: usize,
+    seed: u64,
+    kind: &BackendKind,
+    states: &[(ResolvedBackend, usize)],
+) -> Result<ShotsResult> {
+    use rand::SeedableRng;
+
+    let (prefix, suffix) = fused.instructions.split_at(split);
+    let mut evolved = StatevectorBackend::new(seed);
+    evolved.init(fused.num_qubits, fused.num_classical_bits)?;
+    evolved.apply_instructions(prefix)?;
+    let (amplitudes, pending_norm) = (evolved.state_vector(), evolved.pending_norm);
+    let shot = |backend: &mut StatevectorBackend, i: usize| {
+        backend.copy_amplitudes_from(amplitudes, pending_norm, fused.num_classical_bits);
+        backend.rng = rand_chacha::ChaCha8Rng::seed_from_u64(mix_seed(seed, i));
+        apply_recording_saves(backend, suffix)?;
+        Ok((
+            backend.classical_results().to_vec(),
+            backend_metadata(backend),
+        ))
+    };
+    let route = ResolvedBackend::Statevector;
+
+    #[cfg(feature = "parallel")]
+    if num_shots > 1 && shots_split_across_workers(kind, states) {
+        use rayon::prelude::*;
+        let runs: Vec<Result<(Vec<bool>, RunMetadata)>> = (0..num_shots)
+            .into_par_iter()
+            .map_init(|| StatevectorBackend::new(seed), &shot)
+            .collect();
+        return fold_shots(fused, route, runs);
+    }
+    #[cfg(not(feature = "parallel"))]
+    let _ = (kind, states);
+    let mut backend = StatevectorBackend::new(seed);
+    fold_shots(fused, route, (0..num_shots).map(|i| shot(&mut backend, i)))
 }
 
 pub(crate) const fn splitmix64(mut z: u64) -> u64 {
@@ -4186,7 +4253,9 @@ fn general_noise_plan(
 /// or classical conditionals. Pauli noise on the host statevector, or on a
 /// tensor network whose probabilities fit the dense cap, under the same limits
 /// draws every shot's errors first and simulates each distinct pattern once;
-/// see [`trajectory::PauliGroups`].
+/// see [`trajectory::PauliGroups`]. On the host statevector, a circuit with a
+/// mid-circuit measurement, reset or condition shares the gates before the first
+/// of them the same way, and each shot finishes its own trajectory from there.
 pub(crate) fn run_shots_with_noise(
     kind: BackendKind,
     circuit: &Circuit,
@@ -4351,6 +4420,20 @@ pub(crate) fn run_shots_with_noise(
                 noise_model,
                 seed,
                 dense_tensor_network.then_some(&build as trajectory::GroupBackendFactory<'_>),
+                plan.resolved(),
+            );
+        }
+    }
+    // A checkpoint, a group state and a shot state at once.
+    if host_statevector && circuit.num_qubits + 1 < max_statevector_qubits() {
+        if let Some(groups) =
+            trajectory::PauliGroups::sample_replayed(circuit, noise_model, num_shots, seed)
+        {
+            return trajectory::run_replayed_groups(
+                &groups,
+                circuit,
+                noise_model,
+                seed,
                 plan.resolved(),
             );
         }

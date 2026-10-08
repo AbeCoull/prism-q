@@ -7,8 +7,11 @@ use crate::circuit::Circuit;
 use crate::error::Result;
 
 use super::{
-    BackendKind, FactoredBlock, Probabilities, RunMetadata, RunOutcome, SimOptions,
-    dispatch::BackendPlan, execute_circuit,
+    BackendKind, ExecutionPlan, FactoredBlock, Probabilities, ProbabilityRoute, RunMetadata,
+    RunOutcome, SimOptions,
+    dispatch::{BackendPlan, TemporalCliffordPlan},
+    ensure_saves_recorded, execute_circuit, expand_for_backend, fuse_for_backend,
+    plan_probability_route, plan_temporal_clifford, resolve, run_route, run_temporal_clifford,
 };
 
 pub(super) const MIN_DECOMPOSITION_QUBITS: usize = 8;
@@ -21,13 +24,14 @@ pub(super) fn should_decompose(components: &[Vec<usize>], total_qubits: usize) -
 #[cfg(feature = "parallel")]
 const MAX_BLOCK_QUBITS_FOR_PAR: usize = crate::backend::PARALLEL_THRESHOLD_QUBITS;
 
+/// Run block `i` of `k` on `run(i, mix_seed(seed, i))`, across Rayon workers
+/// when every block sits below the parallel floor.
 fn run_blocks_maybe_par(
-    kind: &BackendKind,
-    partitions: &[(Circuit, Vec<usize>, Vec<usize>)],
+    _kind: &BackendKind,
     _components: &[Vec<usize>],
     seed: u64,
-    opts: &SimOptions,
     k: usize,
+    run: impl Fn(usize, u64) -> Result<RunOutcome> + Sync,
 ) -> Vec<Result<RunOutcome>> {
     #[cfg(feature = "parallel")]
     {
@@ -38,19 +42,17 @@ fn run_blocks_maybe_par(
         let all_small = all_small
             && _components
                 .iter()
-                .all(|c| !super::dispatch::may_resolve_to_gpu(kind, c.len()));
+                .all(|c| !super::dispatch::may_resolve_to_gpu(_kind, c.len()));
         if all_small && k >= 2 {
             use rayon::prelude::*;
             crate::backend::init_thread_pool();
             return (0..k)
                 .into_par_iter()
-                .map(|i| run_subcircuit(kind, &partitions[i].0, super::mix_seed(seed, i), opts))
+                .map(|i| run(i, super::mix_seed(seed, i)))
                 .collect();
         }
     }
-    (0..k)
-        .map(|i| run_subcircuit(kind, &partitions[i].0, super::mix_seed(seed, i), opts))
-        .collect()
+    (0..k).map(|i| run(i, super::mix_seed(seed, i))).collect()
 }
 
 fn run_subcircuit(
@@ -83,7 +85,9 @@ pub(super) fn run_decomposed(
         *opts
     };
     let results: Vec<Result<RunOutcome>> =
-        run_blocks_maybe_par(kind, &partitions, components, seed, &block_opts, k);
+        run_blocks_maybe_par(kind, components, seed, k, |i, block_seed| {
+            run_subcircuit(kind, &partitions[i].0, block_seed, &block_opts)
+        });
 
     merge_decomposed_results(
         results,
@@ -93,6 +97,120 @@ pub(super) fn run_decomposed(
         circuit.num_qubits,
         opts,
     )
+}
+
+/// One block's route, settled once for a loop that runs the block per seed.
+enum BlockRoute {
+    TemporalClifford(TemporalCliffordPlan),
+    Backend { plan: BackendPlan, fused: Circuit },
+    Route(ProbabilityRoute),
+}
+
+impl BlockRoute {
+    fn prepare(kind: &BackendKind, block: &Circuit) -> Self {
+        let has_partial_independence = match plan_probability_route(kind, block) {
+            ProbabilityRoute::TemporalClifford {
+                has_partial_independence,
+            } => match plan_temporal_clifford(kind, block) {
+                Some(plan) => return BlockRoute::TemporalClifford(plan),
+                None => has_partial_independence,
+            },
+            ProbabilityRoute::Direct {
+                has_partial_independence,
+            } => has_partial_independence,
+            route => return BlockRoute::Route(route),
+        };
+        match resolve(kind, block, has_partial_independence) {
+            ExecutionPlan::Backend(plan) => {
+                let probe = plan.build(0);
+                let expanded = expand_for_backend(&*probe, block);
+                let fused = fuse_for_backend(&*probe, &expanded).into_owned();
+                BlockRoute::Backend { plan, fused }
+            }
+            _ => BlockRoute::Route(ProbabilityRoute::Direct {
+                has_partial_independence,
+            }),
+        }
+    }
+
+    /// What `run_with_internal` returns for `block` on an auto `kind`.
+    fn run(
+        &self,
+        kind: &BackendKind,
+        block: &Circuit,
+        seed: u64,
+        opts: &SimOptions,
+    ) -> Result<RunOutcome> {
+        let outcome = match self {
+            BlockRoute::TemporalClifford(plan) => {
+                run_temporal_clifford(plan, seed, opts.probabilities)?
+            }
+            BlockRoute::Backend { plan, fused } => {
+                let mut backend = plan.build(seed);
+                execute_circuit(&mut *backend, fused, opts)?
+            }
+            BlockRoute::Route(route) => run_route(kind, block, seed, *opts, route)?,
+        };
+        ensure_saves_recorded(block, &outcome)?;
+        Ok(outcome)
+    }
+}
+
+/// The blocks of a decomposed circuit with each block's route settled once, so
+/// a shot loop on an auto kind runs [`run_decomposed`]'s blocks per seed without
+/// partitioning and planning them per shot.
+pub(super) struct PreparedBlocks {
+    components: Vec<Vec<usize>>,
+    partitions: Vec<(Circuit, Vec<usize>, Vec<usize>)>,
+    routes: Vec<BlockRoute>,
+}
+
+impl PreparedBlocks {
+    pub(super) fn new(kind: &BackendKind, components: Vec<Vec<usize>>, circuit: &Circuit) -> Self {
+        let partitions = circuit.partition_subcircuits(&components);
+        let routes = partitions
+            .iter()
+            .map(|(block, _, _)| BlockRoute::prepare(kind, block))
+            .collect();
+        Self {
+            components,
+            partitions,
+            routes,
+        }
+    }
+
+    /// [`run_decomposed`] of `circuit` on `seed`, for the `kind` and circuit the
+    /// blocks were prepared from.
+    pub(super) fn run(
+        &self,
+        kind: &BackendKind,
+        circuit: &Circuit,
+        seed: u64,
+        opts: &SimOptions,
+    ) -> Result<RunOutcome> {
+        let block_opts = if circuit.num_qubits > 64 {
+            SimOptions::classical_only()
+        } else {
+            *opts
+        };
+        let results = run_blocks_maybe_par(
+            kind,
+            &self.components,
+            seed,
+            self.partitions.len(),
+            |i, block_seed| {
+                self.routes[i].run(kind, &self.partitions[i].0, block_seed, &block_opts)
+            },
+        );
+        merge_decomposed_results(
+            results,
+            &self.components,
+            &self.partitions,
+            circuit.num_classical_bits,
+            circuit.num_qubits,
+            opts,
+        )
+    }
 }
 
 fn merge_decomposed_results(

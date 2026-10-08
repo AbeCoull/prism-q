@@ -111,7 +111,60 @@ h q[cursor];
 ```
 
 A declaration inside a `for` body binds for that pass only: the scope the body
-opened is dropped at the end of each iteration.
+opened is dropped at the end of each iteration, while a write to a name declared
+outside the loop carries on to the next pass and past the loop.
+
+An `if`, `else` or `switch` body opens a scope too, but whether it runs is decided by a
+measurement, and a classical variable is folded here at parse time. Such a body may
+declare and write its own variables, but a write to one declared outside it returns
+`UnsupportedConstruct`: the value would otherwise change whatever the measurement read.
+Holding a value that does depend on one needs a control-flow graph, which the IR does
+not build.
+
+An `array` of any of those element types takes a size per dimension, fixed at parse
+time, and folds the same way. An element reads as `a[i, j]` or `a[i][j]` wherever a
+value would, and takes plain and compound assignment. A write made inside a loop
+outlives the pass, which is what filling an array needs.
+
+```qasm
+array[float[64], 2, 2] angles = {{0.1, 0.2}, {0.3, 0.4}};
+array[int, 4] order;
+for int k in [0:3] { order[k] = 3 - k; }
+rx(angles[1, 0]) q[order[0]];   // rx(0.3) q[3]
+```
+
+Elements of `bit` belong in a `bit[n]` register, so `array[bit, n]` declines. A `def`
+body sees the program's `const` arrays and no others, as it sees no other non-constant
+global.
+
+### Timing
+
+A simulation has no clock, so timing parses and then has no effect. `delay` is the
+identity on the qubits it names, or on every qubit when it names none, and emits no
+instruction, so fusion merges across it as if it were absent. A `box`, with or without
+a duration, runs its body in place: its edges carry no barrier, since a box only fixes
+when its contents run, and the names its body declares go out of scope with it.
+
+```qasm
+OPENQASM 3.0;
+qubit[2] q;
+const duration pulse = 40ns;
+duration settle = 2 * pulse + 1us;
+stretch slack;
+h q[0];
+delay[settle] q[0];
+delay[slack] q;
+rz(settle / pulse) q[1];   // a ratio of durations is a number: 27
+box[settle] {
+  cx q[0], q[1];
+}
+```
+
+Literals take `dt`, `ns`, `us` (or `µs`), `ms` and `s`. Durations add, subtract,
+scale by a number and divide into a number, all folded at parse time. A ratio needs
+both sides in SI units or both in `dt`, since only a backend's sample period relates
+the two. A `stretch` is sized by a scheduler, so it may stand wherever a delay takes a
+length but is rejected where its value would be read.
 
 ## Input parameters
 
@@ -219,8 +272,8 @@ cnot q[0], q[1];
   targets. A wider matrix has no gate variant to carry it and says so.
 - **Verbatim boxes**: `#pragma braket verbatim` followed by `box { ... }`. The
   body runs as written, verbatim being a directive to a device compiler that a
-  simulator has nothing to honour. A `box` without the pragma is rejected, and
-  so is the pragma without a box.
+  simulator has nothing to honour. A `box` without the pragma runs the same way;
+  the pragma without a box is rejected.
 
 Matrix entries take Braket's complex notation: a real (`0`, `-1.5`), an
 imaginary (`1im`, `-1im`), or their sum (`0.7 + 0.7im`).
@@ -308,6 +361,44 @@ The indices are absolute, so the register is as wide as the highest one named
 and nothing declares it. A `qubit` or `qreg` declaration in the same program is
 rejected: a physical index and a register offset would give `0` two meanings.
 
+## Subroutines
+
+A `def` is inlined at each call. Beside qubits and classical values it takes `bit`
+and `bit[n]` arguments, passed by value as the language specifies: the body reads the
+caller's bits and may branch on them, but cannot write them.
+
+A `-> bit` or `-> bit[n]` result lands on the bits the call is assigned to. The body
+ends with `return measure q;`, or with `return r;` for a bit it declared, which it may
+branch on before returning.
+
+```qasm
+OPENQASM 3.0;
+qubit[3] q;
+bit[3] c;
+def mx(qubit a) -> bit {
+  h a;
+  return measure a;
+}
+def herald(qubit a, qubit flag) -> bit {
+  bit r;
+  r = measure a;
+  if (r) x flag;
+  return r;
+}
+def fix(bit b, qubit a) {
+  if (b) z a;
+}
+c[0] = mx(q[0]);
+c[1] = herald(q[1], q[2]);
+fix(c[0], q[2]);
+```
+
+The call expands to exactly the instructions the inlined body would, so `c[1] =
+herald(q[1], q[2]);` is `c[1] = measure q[1]; if (c[1]) x q[2];`. A form that would
+need more than that declines by name: a result of a type other than `bit`, a call that
+discards its result, a `return` before the end of the body, a measurement into a
+bit parameter or a global register, and a `bit` the body declares without returning.
+
 ## The subset
 
 `UnsupportedConstruct` means the program is valid OpenQASM that this parser does not
@@ -321,19 +412,21 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `include "..."` | Accepted and ignored | Nothing. The standard gates are built in, so an include adds no names; a gate it would have defined declines later by name |
 | `qubit`, `qreg`, `bit`, `creg` | Parses | |
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
-| `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type |
-| `array` declarations | Declines | `UnsupportedConstruct` |
-| `duration`, `stretch`, `delay` | Declines | `UnsupportedConstruct`. Timing has no meaning here: nothing schedules |
+| `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` |
+| `array` | Parses; folded at parse time | An element type other than `int`, `uint`, `float`, `angle` or `bool`: `UnsupportedConstruct`. An initializer of the wrong shape, an index out of range, or more than 2^20 elements: `Parse` |
+| `box`, `box[d]` | Runs its body in place | A length that is not a duration or is negative: `Parse` |
+| `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, and `durationof`: `UnsupportedConstruct` |
 | `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |
 | `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
 | `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present: `UnsupportedConstruct` |
 | `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
-| `while` | Declines | `UnsupportedConstruct` |
-| `def` | Inlines a unitary body at the call site | A classical bit parameter or a return type: `UnsupportedConstruct` |
+| `while` | Declines | `UnsupportedConstruct`. A loop that exits on a measurement has no finite instruction list; it needs a control-flow graph the IR does not build |
+| `def` | Inlines its body at the call site, with `bit` parameters and a `bit` result | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width: `Parse` |
+| `return` | Parses as the last statement of a `def` | Anywhere else: `UnsupportedConstruct` |
 | `gate` blocks | Parses | |
-| `defcal`, `extern`, `opaque`, `box` | Declines | `UnsupportedConstruct` |
+| `defcal`, `extern`, `opaque` | Declines | `UnsupportedConstruct`. Pulse-level calibration and calls out of the program have nothing to run against here |
 | `ctrl`, `negctrl`, `inv`, `pow(k)` | Parses, chainable in any order | See [Other supported constructs](#other-supported-constructs) for the reach of each, and below for the declines |
 | `gphase(theta)` | Parses and is carried | |
 | `#pragma braket ...` | Parses under `Dialect::Braket` | Any other dialect, or any other pragma: `UnsupportedConstruct` naming the pragma |

@@ -625,6 +625,22 @@ fn record_sites(
             }
             true
         }
+        Gate::MultiPauliRot(d) => {
+            if prov.len() != d.rotations.len() {
+                return false;
+            }
+            for (entry, p) in prov.iter().enumerate() {
+                let [Step::M1 { src } | Step::M2 { src, .. }] = p.as_slice() else {
+                    return false;
+                };
+                sites.push(Site {
+                    instruction: index,
+                    entry: entry as u32,
+                    recipe: Recipe::Angle(*src),
+                });
+            }
+            true
+        }
         // Batch payloads built from angles the passes already folded away, with
         // no recipe to rebuild them.
         Gate::DiagonalBatch(_) | Gate::BatchPhase(_) => false,
@@ -723,6 +739,13 @@ pub(super) fn write_angle(inst: &mut Instruction, entry: usize, theta: f64) -> b
         Gate::BatchRzz(d) => match d.edges.get_mut(entry) {
             Some(edge) => {
                 edge.2 = theta;
+                true
+            }
+            None => false,
+        },
+        Gate::MultiPauliRot(d) => match d.rotations.get_mut(entry) {
+            Some(rotation) => {
+                rotation.2 = theta;
                 true
             }
             None => false,

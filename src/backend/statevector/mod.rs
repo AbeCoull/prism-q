@@ -130,6 +130,37 @@ pub(super) fn rdm_sum_add(
 /// free memory (stub device) falls through to the allocation attempt, whose
 /// own error stays authoritative; so does a lost race against another process
 /// allocating between this check and the allocation.
+/// Apply `exp(-i θ P / 2)` on the device through its CNOT-ladder lowering.
+#[cfg(feature = "gpu")]
+fn launch_pauli_rotation_gpu(
+    ctx: &GpuContext,
+    gpu: &mut GpuState,
+    theta: f64,
+    targets: &[usize],
+    axes: &[crate::sim::unified_pauli::PauliAxis],
+) -> Result<()> {
+    use crate::gpu::kernels::dense as k;
+
+    let mut result = Ok(());
+    crate::circuit::pauli_rotation_lowering(theta, targets, axes, |step, tgts| {
+        if result.is_err() {
+            return;
+        }
+        result = match &step {
+            Gate::Cx => k::launch_apply_cx(ctx, gpu, tgts[0], tgts[1]),
+            _ => {
+                let mat = step.matrix_2x2();
+                if step.is_diagonal_1q() {
+                    k::launch_apply_diagonal_1q(ctx, gpu, tgts[0], mat[0][0], mat[1][1])
+                } else {
+                    k::launch_apply_gate_1q(ctx, gpu, tgts[0], mat)
+                }
+            }
+        };
+    });
+    result
+}
+
 #[cfg(feature = "gpu")]
 fn check_device_budget(context: &GpuContext, num_qubits: usize) -> crate::error::Result<()> {
     if num_qubits >= usize::BITS as usize - 4 {
@@ -371,26 +402,13 @@ impl StatevectorBackend {
                 Ok(())
             }
             Gate::PauliRot(data) => {
+                launch_pauli_rotation_gpu(&ctx, gpu, data.theta, targets, &data.axes)
+            }
+            Gate::MultiPauliRot(data) => {
                 let mut result = Ok(());
-                crate::circuit::pauli_rotation_lowering(data.theta, targets, &data.axes, {
-                    let (result, gpu) = (&mut result, &mut *gpu);
-                    move |step, tgts| {
-                        if result.is_err() {
-                            return;
-                        }
-                        *result = match &step {
-                            Gate::Cx => k::launch_apply_cx(&ctx, gpu, tgts[0], tgts[1]),
-                            _ => {
-                                let mat = step.matrix_2x2();
-                                if step.is_diagonal_1q() {
-                                    k::launch_apply_diagonal_1q(
-                                        &ctx, gpu, tgts[0], mat[0][0], mat[1][1],
-                                    )
-                                } else {
-                                    k::launch_apply_gate_1q(&ctx, gpu, tgts[0], mat)
-                                }
-                            }
-                        };
+                data.for_each_rotation(|theta, targets, axes| {
+                    if result.is_ok() {
+                        result = launch_pauli_rotation_gpu(&ctx, gpu, theta, targets, axes);
                     }
                 });
                 result
@@ -529,6 +547,22 @@ impl StatevectorBackend {
         self.pending_norm = source.pending_norm;
         self.classical_bits.clone_from(&source.classical_bits);
         self.state.clone_from(&source.state);
+    }
+
+    /// [`copy_state_from`](Self::copy_state_from) for a source held as its
+    /// amplitudes, which unlike a backend can be shared across threads. Every
+    /// classical bit reads zero.
+    pub(crate) fn copy_amplitudes_from(
+        &mut self,
+        amplitudes: &[Complex64],
+        pending_norm: f64,
+        num_classical_bits: usize,
+    ) {
+        self.num_qubits = amplitudes.len().trailing_zeros() as usize;
+        self.pending_norm = pending_norm;
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+        self.state.clear();
+        self.state.extend_from_slice(amplitudes);
     }
 
     /// Probabilities of the host state, skipping the dense-output cap.
@@ -758,6 +792,9 @@ impl StatevectorBackend {
             }
             Gate::PauliRot(data) => {
                 self.apply_pauli_rot(targets, data.theta, &data.axes);
+            }
+            Gate::MultiPauliRot(data) => {
+                self.apply_multi_pauli_rot(&data.rotations);
             }
             Gate::Unitary(data) => {
                 self.apply_unitary(targets, data.matrix());
@@ -1060,12 +1097,7 @@ impl Backend for StatevectorBackend {
         if let Some(values) = self.pauli_expectations_on_device(&masks) {
             return values;
         }
-        let norm = crate::backend::state_norm_sqr(&self.state);
-        Ok(crate::sim::pauli_expectations_from_masks(
-            &self.state,
-            &masks,
-            norm,
-        ))
+        Ok(crate::sim::pauli_expectations_from_masks(&self.state, &masks).0)
     }
 
     fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {

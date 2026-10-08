@@ -1233,7 +1233,7 @@ fn temporal_prefix_block_shots_match_seeded_runs() {
     for block_size in [6usize, 8] {
         let circuit = crate::circuits::clifford_prefix_measured_blocks(2, block_size, 4, 7);
         assert!(has_temporal_clifford_opportunity(&kind, &circuit));
-        let (Some(components), _) = analyze_independence(&circuit) else {
+        let (Some((components, _)), _) = analyze_independence(&circuit) else {
             panic!("{block_size}: the blocks must decompose");
         };
         for (sub, _, _) in circuit.partition_subcircuits(&components) {

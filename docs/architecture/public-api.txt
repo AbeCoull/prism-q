@@ -1830,6 +1830,8 @@ pub fn prism_q::qec::QecProgram::set_options(&mut self, prism_q::qec::QecOptions
 pub fn prism_q::qec::QecProgram::with_options(usize, prism_q::qec::QecOptions) -> Self
 impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::detector_error_model(&self) -> prism_q::error::Result<prism_q::DetectorErrorModel>
+impl prism_q::qec::QecProgram
+pub fn prism_q::qec::QecProgram::to_text(&self) -> prism_q::error::Result<alloc::string::String>
 #[non_exhaustive] pub struct prism_q::qec::QecSampleResult
 pub prism_q::qec::QecSampleResult::accepted_shots: usize
 pub prism_q::qec::QecSampleResult::detectors: prism_q::sim::compiled::PackedShots
@@ -3616,6 +3618,8 @@ pub fn prism_q::qec::QecProgram::set_options(&mut self, prism_q::qec::QecOptions
 pub fn prism_q::qec::QecProgram::with_options(usize, prism_q::qec::QecOptions) -> Self
 impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::detector_error_model(&self) -> prism_q::error::Result<prism_q::DetectorErrorModel>
+impl prism_q::qec::QecProgram
+pub fn prism_q::qec::QecProgram::to_text(&self) -> prism_q::error::Result<alloc::string::String>
 #[non_exhaustive] pub struct prism_q::QecSampleResult
 pub prism_q::QecSampleResult::accepted_shots: usize
 pub prism_q::QecSampleResult::detectors: prism_q::sim::compiled::PackedShots

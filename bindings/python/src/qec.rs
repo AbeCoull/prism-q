@@ -164,6 +164,11 @@ impl PyQecProgram {
         })
     }
 
+    /// Render the program in the native QEC text format that `from_text` reads.
+    fn to_text(&self) -> PyPrismResult<String> {
+        Ok(self.inner.to_text()?)
+    }
+
     #[pyo3(signature = (shots, seed = 42, chunk_size = None, keep_measurements = true))]
     fn set_options(
         &mut self,

@@ -52,6 +52,16 @@ resolves `rec[-k]` references while building the program. Numeric arguments on
 basis measurements, such as `M(0.001)`, lower to pre-measurement Pauli flips
 that affect the measurement record.
 
+`QecProgram::to_text` writes the same subset back, and parsing its output
+reproduces the op list. Consecutive gates, measurements, resets, and `MPP`
+products of one kind share a line, so `MR` comes back as `M` followed by `R`.
+Record references print as `rec[-k]`, which the parser resolves to absolute
+indices, so a program built with lookbacks reads back with absolute references
+to the same records. A leading `QUBIT_COORDS` line keeps the register width
+when the highest qubit is idle. `QecOptions` are not part of the text,
+zero-probability noise reads back as nothing, and a gate outside the parser's
+set or a `FEEDFORWARD` op is an error rather than a lossy write.
+
 ## Lowering
 
 `compile_qec_program_rows` lowers basis measurements and `MPP` records into the

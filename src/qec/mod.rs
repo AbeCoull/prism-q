@@ -28,6 +28,7 @@ mod parse;
 mod result;
 mod runner;
 mod t_sampler;
+mod text;
 
 pub use decoder::UnionFindDecoder;
 pub use dem::{DetectorErrorModel, ErrorMechanism};

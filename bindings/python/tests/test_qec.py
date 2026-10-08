@@ -282,3 +282,11 @@ def test_pauli_channel_2_requires_fifteen_rates():
 
     with pytest.raises((TypeError, ValueError)):
         QecNoise.pauli_channel_2([0.1] * 14)
+
+
+def test_program_text_round_trips():
+    text = "R 0 1\nH 0\nCX 0 1\nDEPOLARIZE2(0.01) 0 1\nM 0 1\nDETECTOR(0, 1) rec[-1] rec[-2]\n"
+    qp = QecProgram.from_text(text)
+    assert qp.to_text() == text
+    again = QecProgram.from_text(qp.to_text())
+    assert again.num_detectors == qp.num_detectors == 1

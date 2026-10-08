@@ -108,7 +108,8 @@ let result = run_qec_program(&program).unwrap();
 
 `run_qec_program` lowers Clifford-compatible programs into the packed compiled sampler.
 `run_qec_program_reference` is the per-shot statevector oracle for validating small
-programs.
+programs. `program.to_text()` writes a program back in the same text format, so a
+program built in code can be saved and parsed again.
 
 ```admonish info title="What QEC programs support"
 Clifford gates, basis resets and measurements, `MPP` Pauli-product measurements,

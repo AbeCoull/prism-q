@@ -2012,12 +2012,11 @@ fn pauli_expectations_ignore_the_deferred_measurement_norm() {
     let got = backend.pauli_expectations(&observables).unwrap();
 
     let normalized = backend.export_statevector().unwrap();
-    let norm = crate::backend::state_norm_sqr(&normalized);
     let masks = observables
         .iter()
         .map(|o| crate::sim::pauli_masks(o, 3).unwrap())
         .collect::<Vec<_>>();
-    let want = crate::sim::pauli_expectations_from_masks(&normalized, &masks, norm);
+    let (want, _) = crate::sim::pauli_expectations_from_masks(&normalized, &masks);
 
     for (index, (g, w)) in got.iter().zip(&want).enumerate() {
         assert!(

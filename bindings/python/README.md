@@ -64,7 +64,8 @@ qubit. This is reversed relative to Qiskit. For example, the state where only
   Pauli propagation, ...).
 - Parameter sweeps without a rebuild (`Parameters`, `PreparedCircuit`) plus
   adjoint gradients.
-- Noise models (`NoiseModel`, `NoiseChannel`) for shot sampling.
+- Noise models (`NoiseModel`, `NoiseChannel`, two-qubit Kraus channels included) for
+  shot sampling.
 - Native QEC programs (`QecProgram`) with detector and observable sampling.
 - NumPy output for probabilities, statevectors, and QEC bit matrices.
 

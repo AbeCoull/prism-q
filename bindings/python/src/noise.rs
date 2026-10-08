@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use crate::circuit::PyCircuit;
 use crate::error::{PyPrismResult, invalid};
-use crate::gate::extract_2x2;
+use crate::gate::{extract_2x2, extract_4x4};
 
 /// A one- or two-qubit noise channel, built by the static methods.
 #[pyclass(name = "NoiseChannel", module = "prism_q", frozen, from_py_object)]
@@ -79,8 +79,38 @@ impl PyNoiseChannel {
         Ok(Self(NoiseChannel::Custom { kraus: mats }))
     }
 
+    /// General two-qubit channel from a list of 4x4 complex Kraus operators,
+    /// indexed with the first target qubit as the high bit of both indices.
+    #[staticmethod]
+    fn custom_2q(kraus: Vec<Bound<'_, PyAny>>) -> PyPrismResult<Self> {
+        let mats: Vec<[[Complex64; 4]; 4]> = kraus
+            .iter()
+            .map(extract_4x4)
+            .collect::<PyPrismResult<_>>()?;
+        if mats.is_empty() {
+            return Err(invalid(
+                "custom_2q channel requires at least one Kraus operator",
+            ));
+        }
+        Ok(Self(NoiseChannel::Kraus2q { kraus: mats }))
+    }
+
+    /// Number of target qubits an event carrying this channel names.
+    #[getter]
+    fn num_qubits(&self) -> usize {
+        self.0.num_qubits()
+    }
+
     fn __repr__(&self) -> String {
-        format!("NoiseChannel({:?})", self.0)
+        match &self.0 {
+            NoiseChannel::Custom { kraus } => {
+                format!("NoiseChannel.custom({} operators)", kraus.len())
+            }
+            NoiseChannel::Kraus2q { kraus } => {
+                format!("NoiseChannel.custom_2q({} operators)", kraus.len())
+            }
+            other => format!("NoiseChannel({other:?})"),
+        }
     }
 }
 

@@ -738,13 +738,31 @@ model = calibration.to_noise_model(circuit)
 
 Channels are `pauli(px, py, pz)`, `depolarizing(p)`, `amplitude_damping(gamma)`,
 `phase_damping(gamma)`, `thermal_relaxation(t1, t2, gate_time, excited_population=0.0)`,
-`two_qubit_depolarizing(p)`, and `custom(kraus)` for an explicit list of 2x2
-Kraus operators. `validate()` checks probabilities and Kraus completeness;
+`two_qubit_depolarizing(p)`, `custom(kraus)` for an explicit list of 2x2
+Kraus operators, and `custom_2q(kraus)` for 4x4 operators on two qubits, indexed with
+the first target as the high bit. `validate()` checks probabilities and Kraus completeness;
 `is_pauli_only()` reports whether the model holds only single-qubit Pauli
 channels and no readout error. A model carrying readout error or
 `two_qubit_depolarizing` answers `False` there and still runs on the stabilizer
 samplers, which apply readout to the measurement record and sample the pair
 channel as one joint draw over its 15 branches.
+
+A two-qubit Kraus channel models correlated noise, here `ZZ` dephasing:
+
+```python
+import numpy as np
+
+p = 0.02
+zz_dephasing = NoiseChannel.custom_2q(
+    [np.sqrt(1 - p) * np.eye(4), np.sqrt(p) * np.diag([1, -1, -1, 1])]
+)
+model = NoiseModel.empty(circuit)
+model.add_event(1, zz_dephasing, [0, 1])
+model.validate()
+```
+
+It runs exactly on the density matrix and by trajectories on the statevector, sparse,
+factored, and MPS backends; the stabilizer samplers decline it.
 
 ## Expectation values
 

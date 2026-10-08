@@ -549,6 +549,22 @@ impl StatevectorBackend {
         self.state.clone_from(&source.state);
     }
 
+    /// [`copy_state_from`](Self::copy_state_from) for a source held as its
+    /// amplitudes, which unlike a backend can be shared across threads. Every
+    /// classical bit reads zero.
+    pub(crate) fn copy_amplitudes_from(
+        &mut self,
+        amplitudes: &[Complex64],
+        pending_norm: f64,
+        num_classical_bits: usize,
+    ) {
+        self.num_qubits = amplitudes.len().trailing_zeros() as usize;
+        self.pending_norm = pending_norm;
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+        self.state.clear();
+        self.state.extend_from_slice(amplitudes);
+    }
+
     /// Probabilities of the host state, skipping the dense-output cap.
     ///
     /// For a caller whose vector is a working buffer sized by a state it

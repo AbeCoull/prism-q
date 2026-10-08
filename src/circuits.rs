@@ -6,7 +6,7 @@ use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::circuit::Circuit;
+use crate::circuit::{Circuit, ClassicalCondition, Instruction, smallvec};
 use crate::gates::Gate;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
@@ -500,6 +500,74 @@ pub fn local_clifford_blocks(
                     c.add_gate(Gate::Cx, &[base + q, base + q + 1]);
                 }
             }
+        }
+    }
+    c
+}
+
+/// `num_blocks` blocks of `block_size` qubits with no gate between blocks: `depth`
+/// Clifford brick layers on every block first, then per block a rotation layer, a
+/// mid-circuit measurement of its first qubit that conditions an X on its second
+/// and resets the first, a second rotation layer, and every qubit measured.
+///
+/// All Clifford layers precede the first rotation, so the whole circuit and each
+/// block open on a Clifford prefix, and the measurement makes every shot replay
+/// the rest.
+///
+/// # Panics
+/// Panics if `block_size < 2`.
+pub fn clifford_prefix_measured_blocks(
+    num_blocks: usize,
+    block_size: usize,
+    depth: usize,
+    seed: u64,
+) -> Circuit {
+    assert!(
+        block_size >= 2,
+        "clifford_prefix_measured_blocks needs at least 2 qubits per block"
+    );
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(num_blocks * block_size, num_blocks * (block_size + 1));
+    let cliffords = [Gate::H, Gate::S, Gate::X, Gate::Y, Gate::Z];
+
+    for block in 0..num_blocks {
+        let base = block * block_size;
+        for layer in 0..depth {
+            for q in 0..block_size {
+                c.add_gate(
+                    cliffords[rng.random_range(0..cliffords.len())].clone(),
+                    &[base + q],
+                );
+            }
+            for q in (layer % 2..block_size - 1).step_by(2) {
+                c.add_gate(Gate::Cx, &[base + q, base + q + 1]);
+            }
+        }
+    }
+
+    let mut rotations = |c: &mut Circuit, base: usize| {
+        for q in base..base + block_size {
+            c.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            c.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+        }
+        for q in base..base + block_size - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    };
+    for block in 0..num_blocks {
+        let base = block * block_size;
+        let mid = block * (block_size + 1);
+        rotations(&mut c, base);
+        c.add_measure(base, mid);
+        c.instructions.push(Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(mid),
+            gate: Gate::X,
+            targets: smallvec![base + 1],
+        });
+        c.add_reset(base);
+        rotations(&mut c, base);
+        for q in 0..block_size {
+            c.add_measure(base + q, mid + 1 + q);
         }
     }
     c

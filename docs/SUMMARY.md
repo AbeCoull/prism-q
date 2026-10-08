@@ -9,6 +9,16 @@
 - [Shots and Sampling](./getting-started/shots.md)
 - [Choosing a Backend](./getting-started/choosing-a-backend.md)
 
+# Tutorials
+
+- [Tutorials](./tutorials/index.md)
+  - [Simulate and Sample](./tutorials/simulate-and-sample.md)
+  - [Variational Circuits and Gradients](./tutorials/variational.md)
+  - [Noisy Simulation](./tutorials/noisy-simulation.md)
+  - [A QEC Memory Experiment](./tutorials/qec-memory.md)
+  - [Dynamic Circuits](./tutorials/dynamic-circuits.md)
+  - [Large and Structured Circuits](./tutorials/large-circuits.md)
+
 # Guides
 
 - [Python Bindings](./guides/python.md)
@@ -17,6 +27,7 @@
 - [Performance and SIMD](./guides/performance.md)
 - [Benchmark Methodology](./guides/benchmarking.md)
 - [OpenQASM Support](./guides/openqasm.md)
+- [Drawing Circuits](./guides/drawing.md)
 - [Clifford+T Simulation](./guides/clifford-t.md)
 - [Noise and QEC](./guides/qec.md)
 - [GPU Backend](./guides/gpu.md)

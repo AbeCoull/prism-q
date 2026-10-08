@@ -125,7 +125,7 @@ impl PyGpuInfo {
 
 /// Open CUDA device `device_id` and report its name, or why it cannot be used.
 ///
-/// Opening compiles the kernels through NVRTC unless a PTX cache from an earlier run
+/// Opening compiles the kernels through NVRTC unless an image cached by an earlier run
 /// matches, so a missing NVRTC shows here rather than at the first GPU run.
 #[pyfunction]
 #[pyo3(signature = (device_id = 0))]

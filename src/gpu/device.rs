@@ -1,12 +1,15 @@
-//! CUDA device handle, kernel module loading, and the on-disk PTX cache.
+//! CUDA device handle, kernel module loading, and the on-disk kernel image cache.
 
 use std::collections::HashMap;
+use std::ffi::{CStr, CString};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream};
-use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
+use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream, DriverError};
+use cudarc::nvrtc::{
+    CompileOptions, Ptx, compile_ptx_with_opts, result as nvrtc, sys as nvrtc_sys,
+};
 
 use crate::error::{PrismError, Result};
 
@@ -15,7 +18,7 @@ use super::kernels::{KERNEL_NAMES, kernel_source};
 
 /// Handle to a CUDA-capable device.
 ///
-/// Owns the CUDA context, default stream, and compiled PTX module. A stub variant lets unit
+/// Owns the CUDA context, default stream, and compiled kernel module. A stub variant lets unit
 /// tests exercise the `with_gpu()` builder path without CUDA.
 #[derive(Debug)]
 pub struct GpuDevice {
@@ -37,12 +40,13 @@ enum DeviceInner {
 impl GpuDevice {
     /// Open the device with the given ordinal and load the kernel module.
     ///
-    /// PTX is compiled targeting the newest supported arch at or below the device's
-    /// compute capability so the running NVIDIA driver can load it regardless of the
-    /// toolkit NVRTC version. A capability below 6.0 is rejected rather than targeted.
-    /// The compiled PTX is shared by every device opened in the process and cached on
-    /// disk in `prism-q-ptx` under the user cache dir (`XDG_CACHE_HOME`, `LOCALAPPDATA`,
-    /// or `HOME/.cache`), so NVRTC runs once per source change per user and host.
+    /// NVRTC compiles the kernels to SASS for the device's exact architecture, which any
+    /// CUDA 12 driver loads whatever the NVRTC minor version. When the NVRTC predates the
+    /// device, it emits PTX for the newest known arch below it instead, which the driver
+    /// JITs. A capability below 6.0 is rejected rather than targeted. The image is shared
+    /// by every device opened in the process and cached on disk in `prism-q-ptx` under the
+    /// user cache dir (`XDG_CACHE_HOME`, `LOCALAPPDATA`, or `HOME/.cache`), so NVRTC runs
+    /// once per source change, NVRTC version, user, and host.
     pub fn new(device_id: usize) -> Result<Self> {
         let version = driver_version()?;
         if version < MIN_DRIVER_VERSION {
@@ -53,8 +57,8 @@ impl GpuDevice {
         }
         let context = CudaContext::new(device_id).map_err(|e| driver_err("init", e))?;
         let stream = context.default_stream();
-        let arch = detect_arch(&context)?;
-        let module = load_kernel_module(&context, arch)?;
+        let capability = detect_capability(&context)?;
+        let module = load_kernel_module(&context, capability)?;
         // Pre-resolve every kernel once, to amortise driver lookups away from the gate
         // dispatch hot path.
         let mut functions = HashMap::with_capacity(KERNEL_NAMES.len());
@@ -167,57 +171,214 @@ impl GpuDevice {
     }
 }
 
-/// Compiled PTX per target arch, shared by every device opened in this process.
-static PTX_BY_ARCH: LazyLock<Mutex<HashMap<&'static str, Arc<Ptx>>>> =
+/// Compiled kernels for one device architecture.
+#[derive(Debug)]
+enum KernelImage {
+    /// SASS for the exact device architecture.
+    Cubin(Vec<u8>),
+    /// PTX for the driver to JIT, used when NVRTC cannot target the device.
+    Ptx(String),
+}
+
+impl KernelImage {
+    fn load(
+        &self,
+        context: &Arc<CudaContext>,
+    ) -> std::result::Result<Arc<CudaModule>, DriverError> {
+        context.load_module(match self {
+            Self::Cubin(bytes) => Ptx::from_binary(bytes.clone()),
+            Self::Ptx(src) => Ptx::from_src(src.clone()),
+        })
+    }
+
+    fn extension(&self) -> &'static str {
+        match self {
+            Self::Cubin(_) => "cubin",
+            Self::Ptx(_) => "ptx",
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Cubin(bytes) => bytes,
+            Self::Ptx(src) => src.as_bytes(),
+        }
+    }
+
+    fn read(path: &Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        match path.extension()?.to_str()? {
+            "cubin" => Some(Self::Cubin(bytes)),
+            "ptx" => String::from_utf8(bytes).ok().map(Self::Ptx),
+            _ => None,
+        }
+    }
+}
+
+/// Compiled kernels per device compute capability, shared by every device opened in
+/// this process.
+static IMAGE_BY_CAPABILITY: LazyLock<Mutex<ImageCache>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn load_kernel_module(context: &Arc<CudaContext>, arch: &'static str) -> Result<Arc<CudaModule>> {
-    let mut cache = PTX_BY_ARCH.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(ptx) = cache.get(arch) {
-        return context
-            .load_module(Ptx::clone(ptx))
+type ImageCache = HashMap<(i32, i32), Arc<KernelImage>>;
+
+fn load_kernel_module(
+    context: &Arc<CudaContext>,
+    capability: (i32, i32),
+) -> Result<Arc<CudaModule>> {
+    let mut cache = IMAGE_BY_CAPABILITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(image) = cache.get(&capability) {
+        return image
+            .load(context)
             .map_err(|e| driver_err("load_module", e));
     }
-    let (ptx, module) = load_or_compile(context, arch, &ptx_cache_dir())?;
-    cache.insert(arch, ptx);
+    let (image, module) = load_or_compile(context, capability, &ptx_cache_dir())?;
+    cache.insert(capability, image);
     Ok(module)
 }
 
-/// Load the module from the PTX cached in `cache_dir`, or compile through NVRTC when
-/// the file is missing or the driver rejects its contents. The file name binds arch,
-/// NVRTC options, crate version, and a hash of the source text, so a changed kernel
-/// never resolves to stale PTX. A fresh compile is written back atomically; a write
-/// failure is ignored, the module is already loaded.
+/// Load the module from an image cached in `cache_dir`, or compile through NVRTC when
+/// none loads. The file name binds crate version, device architecture, a hash of the
+/// source text, and the NVRTC version, so a changed kernel or NVRTC never resolves to a
+/// stale image. Without NVRTC, any cached image for this source and architecture is
+/// tried. A fresh compile is written back atomically; a write failure is ignored, the
+/// module is already loaded.
 fn load_or_compile(
     context: &Arc<CudaContext>,
-    arch: &'static str,
+    capability: (i32, i32),
     cache_dir: &Path,
-) -> Result<(Arc<Ptx>, Arc<CudaModule>)> {
-    let opts = CompileOptions {
-        arch: Some(arch),
-        ..Default::default()
-    };
+) -> Result<(Arc<KernelImage>, Arc<CudaModule>)> {
     let source = kernel_source();
-    let path = cache_dir.join(ptx_cache_file_name(arch, &opts, &source));
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        let ptx = Ptx::from_src(text);
-        if let Ok(module) = context.load_module(ptx.clone()) {
-            return Ok((Arc::new(ptx), module));
+    let stem = cache_stem(capability, &source);
+    let nvrtc_version = if nvrtc_present() {
+        Some(
+            nvrtc_version()
+                .ok_or_else(|| gpu_unusable("NVRTC did not report its version".to_string()))?,
+        )
+    } else {
+        None
+    };
+    let candidates: Vec<PathBuf> = match nvrtc_version {
+        Some(version) => ["cubin", "ptx"]
+            .iter()
+            .map(|ext| cache_dir.join(cache_file_name(&stem, version, ext)))
+            .collect(),
+        None => {
+            let prefix = format!("{stem}-nvrtc");
+            std::fs::read_dir(cache_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(&prefix))
+                })
+                .collect()
+        }
+    };
+    for image in candidates.iter().filter_map(|path| KernelImage::read(path)) {
+        if let Ok(module) = image.load(context) {
+            return Ok((Arc::new(image), module));
         }
     }
-    if !nvrtc_present() {
+    let Some(version) = nvrtc_version else {
         return Err(gpu_unusable(
             "NVRTC, the CUDA runtime compiler, did not load (looked for libnvrtc.so.12 or \
              nvrtc64_120_0.dll); install a CUDA 12 toolkit or put its NVRTC library on the \
              loader path"
                 .to_string(),
         ));
+    };
+    let image = compile_kernels(&source, capability)?;
+    let module = image.load(context).map_err(fresh_module_err)?;
+    write_image_cache(
+        &cache_dir.join(cache_file_name(&stem, version, image.extension())),
+        image.bytes(),
+    );
+    Ok((Arc::new(image), module))
+}
+
+/// SASS for `sm_XY` when this NVRTC can emit it, otherwise PTX for the newest
+/// [`KNOWN_ARCHS`] entry at or below the device.
+fn compile_kernels(source: &str, capability: (i32, i32)) -> Result<KernelImage> {
+    if nvrtc_sass_archs()?.contains(&(capability.0 * 10 + capability.1)) {
+        let arch = format!("sm_{}{}", capability.0, capability.1);
+        return compile_cubin(source, &arch).map(KernelImage::Cubin);
     }
-    let ptx = compile_ptx_with_opts(&source, opts)
+    let arch = arch_for_capability(capability).ok_or_else(|| below_floor(capability))?;
+    let opts = CompileOptions {
+        arch: Some(arch),
+        ..Default::default()
+    };
+    let ptx = compile_ptx_with_opts(source, opts)
         .map_err(|e| driver_err(&format!("PTX compilation (arch={arch})"), e))?;
-    let module = context.load_module(ptx.clone()).map_err(fresh_module_err)?;
-    write_ptx_cache(&path, &ptx.to_src());
-    Ok((Arc::new(ptx), module))
+    Ok(KernelImage::Ptx(ptx.to_src()))
+}
+
+/// NVRTC program handle, destroyed on drop.
+struct NvrtcProgram(nvrtc_sys::nvrtcProgram);
+
+impl Drop for NvrtcProgram {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from create_program and is destroyed only here.
+        let _ = unsafe { nvrtc::destroy_program(self.0) };
+    }
+}
+
+/// Compile `source` to a cubin for `arch`. cudarc's safe wrapper returns PTX only, so
+/// this drives the NVRTC calls directly.
+fn compile_cubin(source: &str, arch: &str) -> Result<Vec<u8>> {
+    let src = CString::new(source).expect("kernel source contains no NUL byte");
+    let program = NvrtcProgram(
+        nvrtc::create_program(&src, None).map_err(|e| driver_err("NVRTC create_program", e))?,
+    );
+    let options = [format!("--gpu-architecture={arch}")];
+    // SAFETY: `program` is live, and `src` outlives it.
+    if let Err(e) = unsafe { nvrtc::compile_program(program.0, &options) } {
+        // SAFETY: `program` is live.
+        let log = unsafe { nvrtc::get_program_log(program.0) }
+            .map(|log| {
+                // SAFETY: NVRTC NUL-terminates the log it writes.
+                unsafe { CStr::from_ptr(log.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .unwrap_or_default();
+        return Err(driver_err(
+            &format!("SASS compilation (arch={arch})"),
+            format!("{e}: {}", log.trim()),
+        ));
+    }
+    let mut size = 0;
+    // SAFETY: `program` compiled; nvrtcGetCUBINSize only writes its out-parameter.
+    unsafe { nvrtc_sys::nvrtcGetCUBINSize(program.0, &mut size) }
+        .result()
+        .map_err(|e| driver_err("NVRTC cubin size", e))?;
+    let mut cubin = vec![0u8; size];
+    // SAFETY: `cubin` holds the `size` bytes nvrtcGetCUBINSize reported.
+    unsafe { nvrtc_sys::nvrtcGetCUBIN(program.0, cubin.as_mut_ptr().cast()) }
+        .result()
+        .map_err(|e| driver_err("NVRTC cubin", e))?;
+    Ok(cubin)
+}
+
+/// Real architectures this NVRTC emits SASS for, as `10 * major + minor`.
+fn nvrtc_sass_archs() -> Result<Vec<i32>> {
+    let mut count = 0;
+    // SAFETY: NVRTC loads (checked by the caller); the call only writes its out-parameter.
+    unsafe { nvrtc_sys::nvrtcGetNumSupportedArchs(&mut count) }
+        .result()
+        .map_err(|e| driver_err("NVRTC supported archs", e))?;
+    let mut archs = vec![0; usize::try_from(count).unwrap_or(0)];
+    // SAFETY: `archs` holds the `count` entries nvrtcGetNumSupportedArchs reported.
+    unsafe { nvrtc_sys::nvrtcGetSupportedArchs(archs.as_mut_ptr()) }
+        .result()
+        .map_err(|e| driver_err("NVRTC supported archs", e))?;
+    Ok(archs)
 }
 
 /// Per-user cache location: `XDG_CACHE_HOME`, `LOCALAPPDATA`, or `HOME/.cache`, falling
@@ -232,30 +393,38 @@ fn ptx_cache_dir() -> PathBuf {
     base.join("prism-q-ptx")
 }
 
-fn ptx_cache_file_name(arch: &str, opts: &CompileOptions, source: &str) -> String {
+fn cache_stem(capability: (i32, i32), source: &str) -> String {
     let mut hasher = DefaultHasher::new();
-    opts.hash(&mut hasher);
     source.hash(&mut hasher);
     format!(
-        "{}-{arch}-{:016x}.ptx",
+        "{}-sm_{}{}-{:016x}",
         env!("CARGO_PKG_VERSION"),
+        capability.0,
+        capability.1,
         hasher.finish()
     )
 }
 
-fn write_ptx_cache(path: &Path, ptx_src: &str) {
+fn cache_file_name(stem: &str, nvrtc_version: (i32, i32), extension: &str) -> String {
+    format!(
+        "{stem}-nvrtc{}.{}.{extension}",
+        nvrtc_version.0, nvrtc_version.1
+    )
+}
+
+fn write_image_cache(path: &Path, bytes: &[u8]) {
     let Some(dir) = path.parent() else { return };
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, ptx_src).is_ok() && std::fs::rename(&tmp, path).is_err() {
+    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
 }
 
 /// Oldest driver, as `cuDriverGetVersion` encodes it, that the pinned `cudarc` bindings
-/// and the NVRTC 12 PTX run on.
+/// and NVRTC 12 output run on.
 const MIN_DRIVER_VERSION: i32 = 12_000;
 
 /// CUDA version the installed driver supports, or an error naming the missing library.
@@ -290,7 +459,7 @@ pub(crate) fn nvrtc_present() -> bool {
 
 fn nvrtc_version() -> Option<(i32, i32)> {
     let (mut major, mut minor) = (0, 0);
-    // SAFETY: called after a compile, so NVRTC is loaded; nvrtcVersion only writes its
+    // SAFETY: NVRTC loads (checked by the caller); nvrtcVersion only writes its
     // out-parameters.
     let status = unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor) };
     (status == cudarc::nvrtc::sys::nvrtcResult::NVRTC_SUCCESS).then_some((major, minor))
@@ -300,9 +469,9 @@ fn cuda_version(encoded: i32) -> String {
     format!("{}.{}", encoded / 1000, encoded % 1000 / 10)
 }
 
-/// Map a failure to load freshly compiled PTX, naming the version mismatch when the
-/// driver predates the NVRTC that emitted the PTX.
-fn fresh_module_err(err: cudarc::driver::DriverError) -> PrismError {
+/// Map a failure to load a freshly compiled image, naming the version mismatch when the
+/// driver predates the NVRTC that emitted PTX.
+fn fresh_module_err(err: DriverError) -> PrismError {
     if err.0 != cudarc::driver::sys::CUresult::CUDA_ERROR_UNSUPPORTED_PTX_VERSION {
         return driver_err("load_module", err);
     }
@@ -321,7 +490,7 @@ fn gpu_unusable(reason: String) -> PrismError {
     }
 }
 
-/// Virtual architectures NVRTC is asked to target, ascending by capability.
+/// Virtual architectures the PTX fallback targets, ascending by capability.
 ///
 /// The ceiling tracks the newest arch the pinned `cudarc` NVRTC binding
 /// (`cuda-12040` in `Cargo.toml`) accepts. Naming a newer one fails compilation
@@ -354,17 +523,24 @@ fn arch_for_capability(capability: (i32, i32)) -> Option<&'static str> {
         .map(|&(_, arch)| arch)
 }
 
-fn detect_arch(context: &Arc<CudaContext>) -> Result<&'static str> {
+fn detect_capability(context: &Arc<CudaContext>) -> Result<(i32, i32)> {
     let capability = context
         .compute_capability()
         .map_err(|e| driver_err("compute_capability", e))?;
-    arch_for_capability(capability).ok_or_else(|| PrismError::BackendUnsupported {
+    match arch_for_capability(capability) {
+        Some(_) => Ok(capability),
+        None => Err(below_floor(capability)),
+    }
+}
+
+fn below_floor(capability: (i32, i32)) -> PrismError {
+    PrismError::BackendUnsupported {
         backend: "gpu".to_string(),
         operation: format!(
             "compute capability {}.{} is below the 6.0 floor the kernels target",
             capability.0, capability.1
         ),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -411,18 +587,39 @@ mod tests {
 
     // Skips without a usable GPU, matching the golden suites.
     #[test]
-    fn second_device_reuses_the_process_cached_ptx() {
+    fn second_device_reuses_the_process_cached_image() {
         if !GpuDevice::is_available() {
             eprintln!("SKIP: no usable GPU");
             return;
         }
         let context = CudaContext::new(0).unwrap();
-        let arch = detect_arch(&context).unwrap();
+        let capability = detect_capability(&context).unwrap();
         let _first = GpuDevice::new(0).unwrap();
-        let before = Arc::clone(&PTX_BY_ARCH.lock().unwrap()[arch]);
+        let before = Arc::clone(&IMAGE_BY_CAPABILITY.lock().unwrap()[&capability]);
         let _second = GpuDevice::new(0).unwrap();
-        let after = Arc::clone(&PTX_BY_ARCH.lock().unwrap()[arch]);
+        let after = Arc::clone(&IMAGE_BY_CAPABILITY.lock().unwrap()[&capability]);
         assert!(Arc::ptr_eq(&before, &after));
+    }
+
+    // Skips without a usable GPU or without NVRTC.
+    #[test]
+    fn device_architecture_known_to_nvrtc_compiles_to_sass() {
+        if !GpuDevice::is_available() || !nvrtc_present() {
+            eprintln!("SKIP: no usable GPU or NVRTC");
+            return;
+        }
+        let context = CudaContext::new(0).unwrap();
+        let capability = detect_capability(&context).unwrap();
+        if !nvrtc_sass_archs()
+            .unwrap()
+            .contains(&(capability.0 * 10 + capability.1))
+        {
+            eprintln!("SKIP: NVRTC cannot target this device");
+            return;
+        }
+        let image = compile_kernels(&kernel_source(), capability).unwrap();
+        assert!(matches!(image, KernelImage::Cubin(_)));
+        image.load(&context).unwrap();
     }
 
     // A corrupt cache file is overwritten by a recompile; the valid file is then
@@ -430,26 +627,26 @@ mod tests {
     // is the hit).
     #[test]
     fn corrupt_disk_cache_falls_back_to_a_recompile() {
-        if !GpuDevice::is_available() {
-            eprintln!("SKIP: no usable GPU");
+        if !GpuDevice::is_available() || !nvrtc_present() {
+            eprintln!("SKIP: no usable GPU or NVRTC");
             return;
         }
         let context = CudaContext::new(0).unwrap();
-        let arch = detect_arch(&context).unwrap();
+        let capability = detect_capability(&context).unwrap();
         let dir = std::env::temp_dir().join(format!("prism-q-ptx-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let opts = CompileOptions {
-            arch: Some(arch),
-            ..Default::default()
-        };
-        let path = dir.join(ptx_cache_file_name(arch, &opts, &kernel_source()));
-        std::fs::write(&path, "not ptx").unwrap();
+        let (image, _module) = load_or_compile(&context, capability, &dir).unwrap();
+        let path = dir.join(cache_file_name(
+            &cache_stem(capability, &kernel_source()),
+            nvrtc_version().unwrap(),
+            image.extension(),
+        ));
+        std::fs::write(&path, "not a kernel image").unwrap();
 
-        let (ptx, _module) = load_or_compile(&context, arch, &dir).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), ptx.to_src());
+        let (image, _module) = load_or_compile(&context, capability, &dir).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), image.bytes());
         let written = std::fs::metadata(&path).unwrap().modified().unwrap();
 
-        let (_ptx, _module) = load_or_compile(&context, arch, &dir).unwrap();
+        let (_image, _module) = load_or_compile(&context, capability, &dir).unwrap();
         assert_eq!(
             std::fs::metadata(&path).unwrap().modified().unwrap(),
             written

@@ -15,10 +15,16 @@ cargo nextest run --features "parallel gpu" --test golden_gpu --test golden_gpu_
 ```
 
 Constructing a `GpuContext` compiles the CUDA kernels through NVRTC, one to three seconds on a
-GTX 1080 Ti. The PTX is shared by every context in the process and cached on disk in
+GTX 1080 Ti. NVRTC emits SASS (a cubin) for the device's exact architecture, so a cubin
+from any CUDA 12 NVRTC loads on any CUDA 12 driver. When the NVRTC is older than the
+device and cannot target it, the kernels compile to PTX for the newest architecture below
+it instead, and the driver JITs that PTX; this needs a driver at least as new as the
+NVRTC, and `GpuContext::new` names both versions when it is not. The image is shared by
+every context in the process and cached on disk in
 `prism-q-ptx` under the user cache directory (`XDG_CACHE_HOME`, else `LOCALAPPDATA`,
 else `HOME/.cache`, else the OS temp directory), keyed by device arch, crate version,
-and a hash of the kernel source, so later processes skip the compile. A missing,
+NVRTC version, and a hash of the kernel source, so later processes skip the compile.
+Without NVRTC, any cached image for the device and source is used. A missing,
 unreadable, or corrupt cache file only costs a recompile; delete the directory to force
 one.
 
@@ -88,7 +94,7 @@ NVRTC from PyPI. See [Python Bindings](python.md#gpu-backends).
 | File | Role |
 | ---- | ---- |
 | `mod.rs` | `GpuContext`, `GpuState` public entry points |
-| `device.rs` | `GpuDevice`: cudarc wrapper, compiles PTX at device construction |
+| `device.rs` | `GpuDevice`: cudarc wrapper, compiles the kernel image at device construction |
 | `memory.rs` | `GpuBuffer`: device `Complex64` storage |
 | `kernels/mod.rs` | `KERNEL_NAMES`, `LauncherScratch`, composed `kernel_source()` concatenating dense, stabilizer, BTS and density |
 | `kernels/dense.rs` | Rust launchers for every `Gate` variant; CUDA C source in `kernels/dense.cu` |

@@ -11,7 +11,8 @@ cargo build --all-features            # everything
 
 The `gpu` feature builds without a CUDA toolkit. Running it needs a CUDA capable device,
 an NVIDIA driver for CUDA 12.0 or newer, and NVRTC from a CUDA 12 toolkit, all loaded at
-run time. PTX is compiled at runtime via NVRTC against the device's compute capability.
+run time. NVRTC compiles the kernels at run time to SASS for the device's compute
+capability, or to PTX when the NVRTC predates the device.
 
 ### From source
 

@@ -32,7 +32,7 @@ pub fn is_available() -> bool {
     GpuContext::is_available()
 }
 
-/// Whether NVRTC, which compiles the kernels when no cached PTX matches, loads in this
+/// Whether NVRTC, which compiles the kernels when no cached image matches, loads in this
 /// process under one of the names `cudarc` searches (`libnvrtc.so.12`, `nvrtc64_120_0.dll`).
 pub fn nvrtc_available() -> bool {
     device::nvrtc_present()
@@ -128,7 +128,7 @@ impl std::fmt::Debug for GpuContext {
 impl GpuContext {
     /// Initialise the context for the given CUDA device ordinal.
     ///
-    /// Compiles the kernel module at construction. Subsequent calls reuse the cached PTX.
+    /// Compiles the kernel module at construction. Subsequent calls reuse the cached image.
     pub fn new(device_id: usize) -> Result<Arc<Self>> {
         let device = Arc::new(GpuDevice::new(device_id)?);
         Ok(Arc::new(Self {

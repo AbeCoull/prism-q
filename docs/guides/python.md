@@ -439,13 +439,14 @@ not at import. The driver must support CUDA 12.0 or newer. NVRTC comes from the
 `nvidia-cuda-nvrtc-cu12` package that the `cuda12` extra installs, and otherwise
 from a CUDA 12 toolkit on the loader path (`PATH` on Windows, the `ld.so` search
 path on Linux). When either is missing, `GpuContext(...)` raises `PrismError`
-naming it. NVRTC runs only when no cached PTX matches the device, so a host with a
-warm cache keeps working without it.
+naming it. NVRTC runs only when no cached kernel image matches the device, so a
+host with a warm cache keeps working without it.
 
-PTX from an NVRTC newer than the driver does not load. The extra resolves to the
-newest 12.x NVRTC, so on an older driver either update the driver or pin NVRTC to
-the driver's CUDA version, for example `pip install "nvidia-cuda-nvrtc-cu12==12.4.*"`
-for a CUDA 12.4 driver. `GpuContext(...)` names both versions when they disagree.
+The kernels compile to SASS for the device's own architecture, which any CUDA 12
+driver loads, so the newest NVRTC the extra installs also runs on older 12.x
+drivers. Only a device newer than the NVRTC falls back to PTX, which the driver
+compiles itself and which needs a driver at least as new as the NVRTC;
+`GpuContext(...)` names both versions when they disagree.
 
 `gpu_info()` opens a device and reports its name, or the reason it cannot be used:
 

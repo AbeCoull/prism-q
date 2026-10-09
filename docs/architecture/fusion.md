@@ -101,6 +101,11 @@ diagonal `Fused2q`, an all-diagonal `MultiFused` or `Multi2q`, and every `BatchP
 A gate on no qubit of the open run is emitted ahead of it, so a layer of 1q gates elsewhere
 does not split the run, and a gate on one of its qubits closes it.
 
+`fuse_controlled_phases` roots each chain on its control. A chain holding one phase whose
+target is also the target of another one-phase chain flushes with it as one `BatchPhase`
+rooted on that target, since a controlled phase is symmetric in its qubits. The controlled
+powers of phase estimation all share the eigenstate qubit and run as one batch.
+
 ## Plan capture and replay
 
 A variational sweep holds one gate sequence and varies only the angles. Fusion

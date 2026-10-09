@@ -856,6 +856,51 @@ fn fusion_controlled_diagonal_joins_diagonal_batch() {
 }
 
 #[test]
+fn fusion_qpe_controlled_phases_share_one_batch() {
+    for n in [16usize, 18, 20] {
+        let c = circuits::phase_estimation_circuit(n);
+        let recognized = prism_q::circuit::recognize_qft_blocks(&c);
+        let fused = prism_q::circuit::fusion::fuse_circuit(&recognized, true);
+        assert_eq!(count_gates(&fused, |g| matches!(g, Gate::Cu(_))), 0);
+        assert_eq!(
+            count_gates(&fused, |g| matches!(g, Gate::BatchPhase(_))),
+            1,
+            "the controlled phases on the eigenstate qubit should share one batch at {n}q"
+        );
+        assert_fusion_preserves_state(&c);
+    }
+}
+
+// Lone controlled phases on one target re-root into a batch on it, while a control
+// holding two phases keeps its own chain, a repeated pair folds, and an H on the
+// target splits the phases before it from those after it.
+#[test]
+fn fusion_lone_controlled_phases_re_root_on_their_target() {
+    for n in [16usize, 18, 20] {
+        let target = n - 1;
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+        }
+        for k in 0..6 {
+            c.add_gate(Gate::cphase(0.3 * (k + 1) as f64), &[k, target]);
+        }
+        c.add_gate(Gate::cphase(0.5), &[2, target]);
+        c.add_gate(Gate::cphase(1.7), &[3, 9]);
+        c.add_gate(Gate::H, &[target]);
+        for k in 6..n - 1 {
+            c.add_gate(Gate::cphase(-0.2 * k as f64), &[k, target]);
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::H, &[q]);
+        }
+        let fused = prism_q::circuit::fusion::fuse_circuit(&c, true);
+        assert!(count_gates(&fused, |g| matches!(g, Gate::BatchPhase(_))) >= 2);
+        assert_fusion_preserves_state(&c);
+    }
+}
+
+#[test]
 fn fusion_seeded_sweep_matches_unfused() {
     let mut state = common::SEED;
     let mut next = |bound: u64| {

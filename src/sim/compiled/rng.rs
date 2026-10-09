@@ -51,7 +51,7 @@ impl Xoshiro256PlusPlus {
 
 /// Sample Binomial(n, p): inversion for small `n * p`, BTPE otherwise.
 #[inline(never)]
-pub(super) fn binomial_sample(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64) -> usize {
+pub(crate) fn binomial_sample(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64) -> usize {
     if n == 0 || p <= 0.0 {
         return 0;
     }
@@ -76,7 +76,10 @@ fn binomial_inversion(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64, _nf: f64) 
     let q = 1.0 - p;
     let s = p / q;
     let a = ((n + 1) as f64) * s;
-    let mut r = q.powi(n as i32);
+    let mut r = match i32::try_from(n) {
+        Ok(n) => q.powi(n),
+        Err(_) => 0.0,
+    };
     if r <= 0.0 {
         r = (-((n as f64) * p)).exp();
     }
@@ -96,17 +99,18 @@ fn binomial_inversion(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64, _nf: f64) 
     }
 }
 
-/// BTPE rejection sampler (Kachitvichyanukul and Schmeiser, 1988).
+/// BTPE rejection sampler (Kachitvichyanukul and Schmeiser, 1988), for
+/// `p <= 0.5`. The triangle region accepts outright; the parallelograms and the
+/// exponential tails carry their own transformed `v` into the acceptance test.
 fn binomial_btpe(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64, nf: f64, np: f64) -> usize {
     let q = 1.0 - p;
-    let r = p / q;
-    let nr = (nf + 1.0) * r;
+    let npq = np * q;
 
     let fm = np + p;
     let m = fm as usize;
     let mf = m as f64;
 
-    let p1 = (2.195 * (np * q).sqrt() - 4.6 * q).floor() + 0.5;
+    let p1 = (2.195 * npq.sqrt() - 4.6 * q).floor() + 0.5;
     let xm = mf + 0.5;
     let xl = xm - p1;
     let xr = xm + p1;
@@ -122,81 +126,72 @@ fn binomial_btpe(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64, nf: f64, np: f6
 
     loop {
         let u = rng.next_f64() * p4;
-        let v = rng.next_f64();
-
-        let y: isize;
+        let mut v = rng.next_f64();
 
         if u <= p1 {
-            y = (xm - p1 * v + u) as isize;
-        } else if u <= p2 {
-            let x1 = xl + (u - p1) / c;
-            let fv = 1.0 - (mf - x1 + 0.5).abs() / p1;
-            if v > fv {
-                continue;
-            }
-            y = x1 as isize;
-        } else if u <= p3 {
-            let lv = if v > 0.0 { v.ln() } else { -700.0 };
-            y = (xl + lv / lambda_l) as isize;
-            if y < 0 {
-                continue;
-            }
-            // v already set for step F
-        } else {
-            let lv = if v > 0.0 { v.ln() } else { -700.0 };
-            y = (xr - lv / lambda_r) as isize;
-            if y as usize > n {
-                continue;
-            }
+            return (xm - p1 * v + u) as usize;
         }
 
-        if y < 0 || y as usize > n {
+        let iy: usize;
+        if u <= p2 {
+            let x = xl + (u - p1) / c;
+            v = v * c + 1.0 - (mf - x + 0.5).abs() / p1;
+            if v > 1.0 || x < 0.0 {
+                continue;
+            }
+            iy = x as usize;
+        } else if u <= p3 {
+            if v == 0.0 {
+                continue;
+            }
+            let y = (xl + v.ln() / lambda_l).floor();
+            if y < 0.0 {
+                continue;
+            }
+            iy = y as usize;
+            v *= (u - p2) * lambda_l;
+        } else {
+            if v == 0.0 {
+                continue;
+            }
+            let y = (xr - v.ln() / lambda_r).floor();
+            if y > nf {
+                continue;
+            }
+            iy = y as usize;
+            v *= (u - p3) * lambda_r;
+        }
+        if iy > n {
             continue;
         }
-        let iy = y as usize;
 
         let k = iy.abs_diff(m);
         let kf = k as f64;
 
-        if kf <= 20.0 || kf * kf + kf >= np * q * 3.0 {
-            let mut a_val = 1.0;
+        if k <= 20 || kf >= npq / 2.0 - 1.0 {
+            // Explicit ratio f(y) / f(m) by the recurrence.
+            let s = p / q;
+            let a = s * (nf + 1.0);
+            let mut f = 1.0;
             if m < iy {
                 for i in (m + 1)..=iy {
-                    a_val *= nr / i as f64 - r;
+                    f *= a / i as f64 - s;
                 }
             } else if m > iy {
                 for i in (iy + 1)..=m {
-                    a_val *= nr / i as f64 - r;
+                    f /= a / i as f64 - s;
                 }
-                a_val = 1.0 / a_val;
             }
-
-            let v_adj = if u <= p2 {
-                v
-            } else if u <= p3 {
-                (u - p2) * lambda_l
-            } else {
-                (u - p3) * lambda_r
-            };
-
-            if v_adj <= a_val {
+            if v <= f {
                 return iy;
             }
             continue;
         }
 
-        let rho = (kf / (np * q)) * ((kf * (kf / 3.0 + 0.625) + 1.0 / 6.0) / (np * q) + 0.5);
-        let t = -kf * kf / (2.0 * np * q);
-
-        let v_adj = if u <= p1 || u <= p2 {
-            v
-        } else if u <= p3 {
-            (u - p2) * lambda_l
-        } else {
-            (u - p3) * lambda_r
-        };
-        let log_v = if v_adj > 0.0 { v_adj.ln() } else { -700.0 };
-
+        // Squeeze on log(v), then the Stirling bound on log(f(y) / f(m)).
+        let rho = (kf / npq) * ((kf * (kf / 3.0 + 0.625) + 1.0 / 6.0) / npq + 0.5);
+        let t = -kf * kf / (2.0 * npq);
+        let log_v = v.ln();
         if log_v < t - rho {
             return iy;
         }
@@ -205,15 +200,11 @@ fn binomial_btpe(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64, nf: f64, np: f6
         }
 
         let x1 = (iy + 1) as f64;
-        let f1 = (m + 1) as f64;
-        let z = (n + 1 - m) as f64;
-        let w = (n - iy + 1) as f64;
-        let x2 = x1 * x1;
-        let f2 = f1 * f1;
-        let z2 = z * z;
-        let w2 = w * w;
-
-        let stirling = |x: f64, x_sq: f64| {
+        let f1 = mf + 1.0;
+        let z = nf + 1.0 - mf;
+        let w = nf - iy as f64 + 1.0;
+        let stirling = |x: f64| {
+            let x_sq = x * x;
             (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / x_sq) / x_sq) / x_sq) / x_sq)
                 / x
                 / 166320.0
@@ -221,11 +212,11 @@ fn binomial_btpe(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64, nf: f64, np: f6
 
         let bound = xm * (f1 / x1).ln()
             + (nf - mf + 0.5) * (z / w).ln()
-            + ((iy as f64) - mf) * (w * r / (x1 * q)).ln()
-            + stirling(f1, f2)
-            + stirling(z, z2)
-            + stirling(x1, x2)
-            + stirling(w, w2);
+            + (iy as f64 - mf) * (w * p / (x1 * q)).ln()
+            + stirling(f1)
+            + stirling(z)
+            + stirling(x1)
+            + stirling(w);
 
         if log_v <= bound {
             return iy;
@@ -484,6 +475,62 @@ mod tests {
         let mean = sum as f64 / trials as f64;
         let expected = n as f64 * p;
         assert!((mean - expected).abs() < 5.0);
+    }
+
+    fn binomial_pmf(n: usize, p: f64) -> Vec<f64> {
+        let (ln_p, ln_q) = (p.ln(), (1.0 - p).ln());
+        let mut ln_choose = 0.0f64;
+        (0..=n)
+            .map(|k| {
+                if k > 0 {
+                    ln_choose += ((n - k + 1) as f64).ln() - (k as f64).ln();
+                }
+                (ln_choose + k as f64 * ln_p + (n - k) as f64 * ln_q).exp()
+            })
+            .collect()
+    }
+
+    // Pearson statistic over every outcome expected five or more times. The
+    // bound is the mean plus six standard deviations of a chi-square with that
+    // many degrees of freedom, so a correct sampler fails it about once in a
+    // billion runs while a misshapen one lands orders of magnitude above it.
+    fn assert_binomial_law(n: usize, p: f64) {
+        let trials = 200_000;
+        let mut r = rng();
+        let mut counts = vec![0usize; n + 1];
+        for _ in 0..trials {
+            counts[binomial_sample(&mut r, n, p)] += 1;
+        }
+        let pmf = binomial_pmf(n, p);
+        let (mut chi, mut dof) = (0.0, 0usize);
+        for (k, &prob) in pmf.iter().enumerate() {
+            let expected = prob * trials as f64;
+            if expected >= 5.0 {
+                chi += (counts[k] as f64 - expected).powi(2) / expected;
+                dof += 1;
+            }
+        }
+        let bound = dof as f64 + 6.0 * (2.0 * dof as f64).sqrt();
+        assert!(
+            chi < bound,
+            "n={n} p={p}: chi-square {chi:.1} over {dof} bins"
+        );
+    }
+
+    #[test]
+    fn binomial_sample_follows_the_binomial_law() {
+        for (n, p) in [
+            (30, 0.2),
+            (40, 0.4),
+            (100, 0.5),
+            (1_000, 0.02),
+            (1_000, 0.3),
+            (1_000, 0.97),
+            (5_000, 0.5),
+            (100_000, 0.25),
+        ] {
+            assert_binomial_law(n, p);
+        }
     }
 
     #[cfg(feature = "parallel")]

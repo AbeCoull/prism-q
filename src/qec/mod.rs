@@ -27,6 +27,7 @@ mod decoder;
 mod dem;
 mod dem_text;
 mod generators;
+mod leakage;
 mod matching;
 mod noise;
 pub mod observable_reroute;
@@ -151,7 +152,8 @@ impl QecRecordRef {
     }
 }
 
-/// Pauli-noise annotation for native QEC programs.
+/// Noise annotation for native QEC programs: Pauli channels, and the leakage channels
+/// [`run_qec_program`] samples as heralded erasure.
 ///
 /// Probabilities are validated on append to a [`QecProgram`]; probability zero makes
 /// the annotation inactive.
@@ -175,20 +177,43 @@ pub enum QecNoise {
     /// IZ, XI, XX, XY, XZ, YI, YX, YY, YZ, ZI, ZX, ZY, ZZ` (`P0` on the first target of the
     /// pair). The target list must have even length. Boxed so [`QecOp`] stays 64 bytes.
     PauliChannel2(Box<[f64; 15]>),
+    /// Per target, an unleaked qubit leaks with probability `p`. Each target adds one
+    /// column to [`QecSampleResult::heralds`], set when the qubit is leaked just after
+    /// this annotation, so `LEAK(0)` reads the flags without changing them.
+    ///
+    /// While leaked, a qubit is erased: a two-qubit gate on it fully depolarizes both
+    /// of its qubits, its own measurement reports 1, and an `MPP` over it reports a
+    /// uniformly random parity. A reset or a [`QecNoise::Seep`] ends the leak.
+    Leak(f64),
+    /// Per target, a leaked qubit returns with probability `p`, in a uniformly random
+    /// computational basis state.
+    Seep(f64),
+    /// Per target pair, when exactly one of the two qubits is leaked the other leaks
+    /// too with probability `p`. The target list must have even length.
+    LeakTransport(f64),
 }
 
 impl QecNoise {
-    /// Probability that the channel applies any non-identity Pauli to one target or pair.
+    /// Probability that the channel fires on one target or pair: a non-identity Pauli, or
+    /// a leakage transition.
     pub fn probability(&self) -> f64 {
         match self {
             Self::XError(p)
             | Self::ZError(p)
             | Self::Depolarize1(p)
             | Self::Depolarize2(p)
-            | Self::YError(p) => *p,
+            | Self::YError(p)
+            | Self::Leak(p)
+            | Self::Seep(p)
+            | Self::LeakTransport(p) => *p,
             Self::PauliChannel1(probabilities) => probabilities.iter().sum(),
             Self::PauliChannel2(probabilities) => probabilities.iter().sum(),
         }
+    }
+
+    /// True for the channels that carry a leak flag between annotations.
+    pub fn is_leakage(&self) -> bool {
+        matches!(self, Self::Leak(_) | Self::Seep(_) | Self::LeakTransport(_))
     }
 
     /// Native text instruction name for this channel.
@@ -201,6 +226,9 @@ impl QecNoise {
             Self::YError(_) => "Y_ERROR",
             Self::PauliChannel1(_) => "PAULI_CHANNEL_1",
             Self::PauliChannel2(_) => "PAULI_CHANNEL_2",
+            Self::Leak(_) => "LEAK",
+            Self::Seep(_) => "SEEP",
+            Self::LeakTransport(_) => "LEAK_TRANSPORT",
         }
     }
 
@@ -211,7 +239,10 @@ impl QecNoise {
             | Self::ZError(p)
             | Self::Depolarize1(p)
             | Self::Depolarize2(p)
-            | Self::YError(p) => vec![*p],
+            | Self::YError(p)
+            | Self::Leak(p)
+            | Self::Seep(p)
+            | Self::LeakTransport(p) => vec![*p],
             Self::PauliChannel1(probabilities) => probabilities.to_vec(),
             Self::PauliChannel2(probabilities) => probabilities.to_vec(),
         }
@@ -219,10 +250,14 @@ impl QecNoise {
 
     /// Whether targets are consumed in pairs.
     pub(crate) fn is_pair(&self) -> bool {
-        matches!(self, Self::Depolarize2(_) | Self::PauliChannel2(_))
+        matches!(
+            self,
+            Self::Depolarize2(_) | Self::PauliChannel2(_) | Self::LeakTransport(_)
+        )
     }
 
-    /// Single-qubit branch probabilities `(px, py, pz)`, `None` for a pair channel.
+    /// Single-qubit branch probabilities `(px, py, pz)`, `None` for a pair or leakage
+    /// channel.
     pub(crate) fn single_rates(&self) -> Option<(f64, f64, f64)> {
         match *self {
             Self::XError(p) => Some((p, 0.0, 0.0)),
@@ -230,7 +265,11 @@ impl QecNoise {
             Self::ZError(p) => Some((0.0, 0.0, p)),
             Self::Depolarize1(p) => Some((p / 3.0, p / 3.0, p / 3.0)),
             Self::PauliChannel1(ref p) => Some((p[0], p[1], p[2])),
-            Self::Depolarize2(_) | Self::PauliChannel2(_) => None,
+            Self::Depolarize2(_)
+            | Self::PauliChannel2(_)
+            | Self::Leak(_)
+            | Self::Seep(_)
+            | Self::LeakTransport(_) => None,
         }
     }
 }
@@ -596,6 +635,14 @@ impl QecProgram {
             })
             .max()
             .map_or(0, |max_idx| max_idx + 1)
+    }
+
+    /// True when any op is a leakage annotation, which routes [`run_qec_program`] to
+    /// the leakage sampler and fills [`QecSampleResult::heralds`].
+    pub fn has_leakage(&self) -> bool {
+        self.ops
+            .iter()
+            .any(|op| matches!(op, QecOp::Noise { channel, .. } if channel.is_leakage()))
     }
 
     /// Number of `EXP_VAL` ops.

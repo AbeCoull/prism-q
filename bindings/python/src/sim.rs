@@ -1591,6 +1591,19 @@ impl PyShotsResult {
         PyRunMetadata::new(self.inner.metadata.clone())
     }
 
+    /// Erasure herald as a `(num_shots, num_qubits)` bool array, set where a qubit
+    /// leaked at any point of the shot; `None` unless the noise model carries a
+    /// leakage channel.
+    #[getter]
+    fn leaked<'py>(&self, py: Python<'py>) -> PyPrismResult<Option<Bound<'py, PyArray2<bool>>>> {
+        let Some(leaked) = &self.inner.leaked else {
+            return Ok(None);
+        };
+        let cols = leaked.first().map_or(0, Vec::len);
+        let flat: Vec<bool> = leaked.iter().flatten().copied().collect();
+        bool_matrix(py, leaked.len(), cols, flat).map(Some)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "ShotsResult(num_shots={}, num_classical_bits={})",

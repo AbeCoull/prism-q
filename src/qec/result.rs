@@ -45,6 +45,11 @@ pub struct QecSampleResult {
     /// squared truncation weight (0.0 when exact). Zero accepted shots
     /// yield `{mean: 0.0, variance: 0.0, num_shots: 0}`.
     pub expectation_values: Option<Vec<QecObservableEstimate>>,
+    /// Erasure heralds: one column per target of each
+    /// [`QecNoise::Leak`](super::QecNoise::Leak) in program order, set on the shots
+    /// where that qubit is leaked just after the annotation. Every shot is present,
+    /// postselected or not. `None` for a program without leakage.
+    pub heralds: Option<PackedShots>,
 }
 
 /// Unbiased expectation estimate for one observable under a weighted
@@ -76,6 +81,7 @@ impl QecSampleResult {
             logical_errors: vec![0; num_observables],
             observable_expectations: None,
             expectation_values: None,
+            heralds: None,
         }
     }
 
@@ -157,6 +163,7 @@ impl QecSampleResult {
             logical_errors,
             observable_expectations: None,
             expectation_values: None,
+            heralds: None,
         })
     }
 
@@ -182,6 +189,12 @@ impl QecSampleResult {
     /// Attach `EXP_VAL` estimates, one per op in op order; the length is not checked.
     pub fn with_expectation_values(mut self, estimates: Vec<QecObservableEstimate>) -> Self {
         self.expectation_values = Some(estimates);
+        self
+    }
+
+    /// Attach erasure herald columns; see [`QecSampleResult::heralds`].
+    pub fn with_heralds(mut self, heralds: PackedShots) -> Self {
+        self.heralds = Some(heralds);
         self
     }
 

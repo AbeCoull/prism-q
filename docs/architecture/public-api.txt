@@ -1688,12 +1688,16 @@ pub fn prism_q::sim::unified_pauli::PauliAxis::from(prism_q::qec::QecBasis) -> S
 #[non_exhaustive] pub enum prism_q::qec::QecNoise
 pub prism_q::qec::QecNoise::Depolarize1(f64)
 pub prism_q::qec::QecNoise::Depolarize2(f64)
+pub prism_q::qec::QecNoise::Leak(f64)
+pub prism_q::qec::QecNoise::LeakTransport(f64)
 pub prism_q::qec::QecNoise::PauliChannel1([f64; 3])
 pub prism_q::qec::QecNoise::PauliChannel2(alloc::boxed::Box<[f64; 15]>)
+pub prism_q::qec::QecNoise::Seep(f64)
 pub prism_q::qec::QecNoise::XError(f64)
 pub prism_q::qec::QecNoise::YError(f64)
 pub prism_q::qec::QecNoise::ZError(f64)
 impl prism_q::qec::QecNoise
+pub fn prism_q::qec::QecNoise::is_leakage(&self) -> bool
 pub fn prism_q::qec::QecNoise::name(&self) -> &'static str
 pub fn prism_q::qec::QecNoise::probability(&self) -> f64
 #[non_exhaustive] pub enum prism_q::qec::QecOp
@@ -1851,6 +1855,7 @@ pub fn prism_q::qec::QecProgram::expectation_value_ops(&self) -> alloc::vec::Vec
 pub fn prism_q::qec::QecProgram::feedforward(&mut self, &[prism_q::qec::QecRecordRef], bool, alloc::vec::Vec<prism_q::qec::QecOp>) -> prism_q::error::Result<()>
 pub fn prism_q::qec::QecProgram::from_ops(usize, prism_q::qec::QecOptions, alloc::vec::Vec<prism_q::qec::QecOp>) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::from_text(&str) -> prism_q::error::Result<Self>
+pub fn prism_q::qec::QecProgram::has_leakage(&self) -> bool
 pub fn prism_q::qec::QecProgram::measure(&mut self, prism_q::qec::QecBasis, usize) -> prism_q::error::Result<usize>
 pub fn prism_q::qec::QecProgram::measure_pauli_product(&mut self, &[prism_q::qec::QecPauli]) -> prism_q::error::Result<usize>
 pub fn prism_q::qec::QecProgram::measure_x(&mut self, usize) -> prism_q::error::Result<usize>
@@ -1882,6 +1887,7 @@ pub prism_q::qec::QecSampleResult::accepted_shots: usize
 pub prism_q::qec::QecSampleResult::detectors: prism_q::sim::compiled::PackedShots
 pub prism_q::qec::QecSampleResult::discarded_shots: usize
 pub prism_q::qec::QecSampleResult::expectation_values: core::option::Option<alloc::vec::Vec<prism_q::QecObservableEstimate>>
+pub prism_q::qec::QecSampleResult::heralds: core::option::Option<prism_q::sim::compiled::PackedShots>
 pub prism_q::qec::QecSampleResult::logical_errors: alloc::vec::Vec<u64>
 pub prism_q::qec::QecSampleResult::measurements: prism_q::sim::compiled::PackedShots
 pub prism_q::qec::QecSampleResult::observable_expectations: core::option::Option<alloc::vec::Vec<prism_q::QecObservableEstimate>>
@@ -1896,6 +1902,7 @@ pub fn prism_q::QecSampleResult::new_with_total_shots(usize, prism_q::sim::compi
 pub fn prism_q::QecSampleResult::survivor_rate(&self) -> f64
 pub fn prism_q::QecSampleResult::survivor_rate_wilson_interval(&self, f64) -> (f64, f64)
 pub fn prism_q::QecSampleResult::with_expectation_values(self, alloc::vec::Vec<prism_q::QecObservableEstimate>) -> Self
+pub fn prism_q::QecSampleResult::with_heralds(self, prism_q::sim::compiled::PackedShots) -> Self
 pub fn prism_q::QecSampleResult::with_observable_expectations(self, alloc::vec::Vec<prism_q::QecObservableEstimate>) -> prism_q::error::Result<Self>
 pub struct prism_q::qec::UnionFindDecoder
 impl prism_q::UnionFindDecoder
@@ -1930,16 +1937,25 @@ impl prism_q::sim::calibration::DeviceCalibration
 pub fn prism_q::sim::calibration::DeviceCalibration::gate1q(&self) -> &prism_q::sim::calibration::GateCalibration
 pub fn prism_q::sim::calibration::DeviceCalibration::gate2q(&self) -> &prism_q::sim::calibration::GateCalibration
 pub fn prism_q::sim::calibration::DeviceCalibration::gate2q_on(&self, usize, usize) -> &prism_q::sim::calibration::GateCalibration
+pub fn prism_q::sim::calibration::DeviceCalibration::gate_times(&self) -> prism_q::sim::calibration::GateTimes
 pub fn prism_q::sim::calibration::DeviceCalibration::new(alloc::vec::Vec<prism_q::sim::calibration::QubitCalibration>, prism_q::sim::calibration::GateCalibration, prism_q::sim::calibration::GateCalibration) -> prism_q::error::Result<Self>
 pub fn prism_q::sim::calibration::DeviceCalibration::num_qubits(&self) -> usize
 pub fn prism_q::sim::calibration::DeviceCalibration::parse(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::sim::calibration::DeviceCalibration::qubit(&self, usize) -> &prism_q::sim::calibration::QubitCalibration
 pub fn prism_q::sim::calibration::DeviceCalibration::qubits(&self) -> &[prism_q::sim::calibration::QubitCalibration]
 pub fn prism_q::sim::calibration::DeviceCalibration::to_noise_model(&self, &prism_q::circuit::Circuit) -> prism_q::error::Result<prism_q::sim::noise::NoiseModel>
+pub fn prism_q::sim::calibration::DeviceCalibration::to_scheduled_noise_model(&self, &prism_q::circuit::Circuit) -> prism_q::error::Result<prism_q::sim::noise::NoiseModel>
 pub fn prism_q::sim::calibration::DeviceCalibration::with_pair(self, usize, usize, prism_q::sim::calibration::GateCalibration) -> prism_q::error::Result<Self>
 pub struct prism_q::sim::calibration::GateCalibration
 pub prism_q::sim::calibration::GateCalibration::error: f64
 pub prism_q::sim::calibration::GateCalibration::time: f64
+pub struct prism_q::sim::calibration::GateTimes
+impl prism_q::sim::calibration::GateTimes
+pub fn prism_q::sim::calibration::GateTimes::new(f64, f64) -> Self
+pub fn prism_q::sim::calibration::GateTimes::with_gate(self, impl core::convert::Into<alloc::string::String>, f64) -> Self
+pub fn prism_q::sim::calibration::GateTimes::with_measure(self, f64) -> Self
+pub fn prism_q::sim::calibration::GateTimes::with_pair(self, usize, usize, f64) -> Self
+pub fn prism_q::sim::calibration::GateTimes::with_reset(self, f64) -> Self
 pub struct prism_q::sim::calibration::QubitCalibration
 pub prism_q::sim::calibration::QubitCalibration::p01: f64
 pub prism_q::sim::calibration::QubitCalibration::p10: f64
@@ -2099,6 +2115,14 @@ pub fn prism_q::sim::homological::ErrorChainComplex::noisy_marginals(&self, &[f6
 pub fn prism_q::sim::homological::noisy_marginals_analytical(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub mod prism_q::sim::noise
 pub mod prism_q::sim::noise::builder
+pub struct prism_q::sim::noise::builder::DriftDistribution
+impl prism_q::sim::noise::builder::DriftDistribution
+pub fn prism_q::sim::noise::builder::DriftDistribution::covariance(&self) -> &[f64]
+pub fn prism_q::sim::noise::builder::DriftDistribution::from_covariance(alloc::vec::Vec<alloc::vec::Vec<f64>>) -> Self
+pub fn prism_q::sim::noise::builder::DriftDistribution::from_t2_star(impl core::iter::traits::collect::IntoIterator<Item = f64>) -> Self
+pub fn prism_q::sim::noise::builder::DriftDistribution::independent(impl core::iter::traits::collect::IntoIterator<Item = f64>) -> Self
+pub fn prism_q::sim::noise::builder::DriftDistribution::num_qubits(&self) -> usize
+pub fn prism_q::sim::noise::builder::DriftDistribution::with_neighbour_correlation(self, impl core::iter::traits::collect::IntoIterator<Item = (usize, usize)>, f64) -> Self
 pub struct prism_q::sim::noise::builder::GateFilter
 impl prism_q::sim::noise::builder::GateFilter
 pub fn prism_q::sim::noise::builder::GateFilter::all() -> Self
@@ -2117,7 +2141,12 @@ pub fn prism_q::sim::noise::builder::NoiseBuilder::crosstalk(self, prism_q::sim:
 pub fn prism_q::sim::noise::builder::NoiseBuilder::new() -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::on_idle_qubits(self, prism_q::sim::noise::NoiseChannel) -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::over_rotation(self, prism_q::sim::noise::builder::GateFilter, f64) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::over_rotation_drift(self, prism_q::sim::noise::builder::GateFilter, f64) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::over_rotation_drift_per_qubit(self, prism_q::sim::noise::builder::GateFilter, prism_q::sim::noise::builder::DriftDistribution) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::quasi_static_detuning(self, prism_q::sim::noise::builder::DriftDistribution) -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::readout_error(self, usize, f64, f64) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::schedule(self, prism_q::sim::calibration::GateTimes) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::scheduled_idle(self, impl core::iter::traits::collect::IntoIterator<Item = (f64, f64)>) -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::uniform_readout_error(self, f64, f64) -> Self
 #[non_exhaustive] pub enum prism_q::sim::noise::NoiseChannel
 pub prism_q::sim::noise::NoiseChannel::AmplitudeDamping
@@ -2128,12 +2157,21 @@ pub prism_q::sim::noise::NoiseChannel::Depolarizing
 pub prism_q::sim::noise::NoiseChannel::Depolarizing::p: f64
 pub prism_q::sim::noise::NoiseChannel::Kraus2q
 pub prism_q::sim::noise::NoiseChannel::Kraus2q::kraus: alloc::vec::Vec<[[num_complex::Complex64; 4]; 4]>
+pub prism_q::sim::noise::NoiseChannel::Leakage
+pub prism_q::sim::noise::NoiseChannel::Leakage::p: f64
+pub prism_q::sim::noise::NoiseChannel::LeakageTransport
+pub prism_q::sim::noise::NoiseChannel::LeakageTransport::p: f64
 pub prism_q::sim::noise::NoiseChannel::Pauli
 pub prism_q::sim::noise::NoiseChannel::Pauli::px: f64
 pub prism_q::sim::noise::NoiseChannel::Pauli::py: f64
 pub prism_q::sim::noise::NoiseChannel::Pauli::pz: f64
 pub prism_q::sim::noise::NoiseChannel::PhaseDamping
 pub prism_q::sim::noise::NoiseChannel::PhaseDamping::gamma: f64
+pub prism_q::sim::noise::NoiseChannel::QuasiStatic
+pub prism_q::sim::noise::NoiseChannel::QuasiStatic::axis: prism_q::sim::unified_pauli::PauliAxis
+pub prism_q::sim::noise::NoiseChannel::QuasiStatic::weights: alloc::vec::Vec<(usize, f64)>
+pub prism_q::sim::noise::NoiseChannel::Seepage
+pub prism_q::sim::noise::NoiseChannel::Seepage::p: f64
 pub prism_q::sim::noise::NoiseChannel::ThermalRelaxation
 pub prism_q::sim::noise::NoiseChannel::ThermalRelaxation::excited_population: f64
 pub prism_q::sim::noise::NoiseChannel::ThermalRelaxation::gate_time: f64
@@ -2148,6 +2186,14 @@ pub fn prism_q::sim::noise::NoiseChannel::is_pauli(&self) -> bool
 pub fn prism_q::sim::noise::NoiseChannel::num_qubits(&self) -> usize
 pub fn prism_q::sim::noise::NoiseChannel::pauli_pair_rate(&self) -> core::option::Option<f64>
 pub fn prism_q::sim::noise::NoiseChannel::validate(&self) -> prism_q::error::Result<()>
+pub struct prism_q::sim::noise::DriftDistribution
+impl prism_q::sim::noise::builder::DriftDistribution
+pub fn prism_q::sim::noise::builder::DriftDistribution::covariance(&self) -> &[f64]
+pub fn prism_q::sim::noise::builder::DriftDistribution::from_covariance(alloc::vec::Vec<alloc::vec::Vec<f64>>) -> Self
+pub fn prism_q::sim::noise::builder::DriftDistribution::from_t2_star(impl core::iter::traits::collect::IntoIterator<Item = f64>) -> Self
+pub fn prism_q::sim::noise::builder::DriftDistribution::independent(impl core::iter::traits::collect::IntoIterator<Item = f64>) -> Self
+pub fn prism_q::sim::noise::builder::DriftDistribution::num_qubits(&self) -> usize
+pub fn prism_q::sim::noise::builder::DriftDistribution::with_neighbour_correlation(self, impl core::iter::traits::collect::IntoIterator<Item = (usize, usize)>, f64) -> Self
 pub struct prism_q::sim::noise::GateFilter
 impl prism_q::sim::noise::builder::GateFilter
 pub fn prism_q::sim::noise::builder::GateFilter::all() -> Self
@@ -2166,7 +2212,12 @@ pub fn prism_q::sim::noise::builder::NoiseBuilder::crosstalk(self, prism_q::sim:
 pub fn prism_q::sim::noise::builder::NoiseBuilder::new() -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::on_idle_qubits(self, prism_q::sim::noise::NoiseChannel) -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::over_rotation(self, prism_q::sim::noise::builder::GateFilter, f64) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::over_rotation_drift(self, prism_q::sim::noise::builder::GateFilter, f64) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::over_rotation_drift_per_qubit(self, prism_q::sim::noise::builder::GateFilter, prism_q::sim::noise::builder::DriftDistribution) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::quasi_static_detuning(self, prism_q::sim::noise::builder::DriftDistribution) -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::readout_error(self, usize, f64, f64) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::schedule(self, prism_q::sim::calibration::GateTimes) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::scheduled_idle(self, impl core::iter::traits::collect::IntoIterator<Item = (f64, f64)>) -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::uniform_readout_error(self, f64, f64) -> Self
 pub struct prism_q::sim::noise::NoiseEvent
 pub prism_q::sim::noise::NoiseEvent::channel: prism_q::sim::noise::NoiseChannel
@@ -2459,6 +2510,7 @@ pub prism_q::sim::RunOutcome::probabilities: core::option::Option<prism_q::Proba
 pub prism_q::sim::RunOutcome::saves: alloc::vec::Vec<prism_q::circuit::SaveRecord>
 pub struct prism_q::sim::Seeded
 pub struct prism_q::sim::ShotsResult
+pub prism_q::sim::ShotsResult::leaked: core::option::Option<alloc::vec::Vec<alloc::vec::Vec<bool>>>
 pub prism_q::sim::ShotsResult::metadata: prism_q::RunMetadata
 pub prism_q::sim::ShotsResult::shots: alloc::vec::Vec<alloc::vec::Vec<bool>>
 impl prism_q::ShotsResult
@@ -2674,12 +2726,21 @@ pub prism_q::NoiseChannel::Depolarizing
 pub prism_q::NoiseChannel::Depolarizing::p: f64
 pub prism_q::NoiseChannel::Kraus2q
 pub prism_q::NoiseChannel::Kraus2q::kraus: alloc::vec::Vec<[[num_complex::Complex64; 4]; 4]>
+pub prism_q::NoiseChannel::Leakage
+pub prism_q::NoiseChannel::Leakage::p: f64
+pub prism_q::NoiseChannel::LeakageTransport
+pub prism_q::NoiseChannel::LeakageTransport::p: f64
 pub prism_q::NoiseChannel::Pauli
 pub prism_q::NoiseChannel::Pauli::px: f64
 pub prism_q::NoiseChannel::Pauli::py: f64
 pub prism_q::NoiseChannel::Pauli::pz: f64
 pub prism_q::NoiseChannel::PhaseDamping
 pub prism_q::NoiseChannel::PhaseDamping::gamma: f64
+pub prism_q::NoiseChannel::QuasiStatic
+pub prism_q::NoiseChannel::QuasiStatic::axis: prism_q::sim::unified_pauli::PauliAxis
+pub prism_q::NoiseChannel::QuasiStatic::weights: alloc::vec::Vec<(usize, f64)>
+pub prism_q::NoiseChannel::Seepage
+pub prism_q::NoiseChannel::Seepage::p: f64
 pub prism_q::NoiseChannel::ThermalRelaxation
 pub prism_q::NoiseChannel::ThermalRelaxation::excited_population: f64
 pub prism_q::NoiseChannel::ThermalRelaxation::gate_time: f64
@@ -2769,12 +2830,16 @@ pub fn prism_q::sim::unified_pauli::PauliAxis::from(prism_q::qec::QecBasis) -> S
 #[non_exhaustive] pub enum prism_q::QecNoise
 pub prism_q::QecNoise::Depolarize1(f64)
 pub prism_q::QecNoise::Depolarize2(f64)
+pub prism_q::QecNoise::Leak(f64)
+pub prism_q::QecNoise::LeakTransport(f64)
 pub prism_q::QecNoise::PauliChannel1([f64; 3])
 pub prism_q::QecNoise::PauliChannel2(alloc::boxed::Box<[f64; 15]>)
+pub prism_q::QecNoise::Seep(f64)
 pub prism_q::QecNoise::XError(f64)
 pub prism_q::QecNoise::YError(f64)
 pub prism_q::QecNoise::ZError(f64)
 impl prism_q::qec::QecNoise
+pub fn prism_q::qec::QecNoise::is_leakage(&self) -> bool
 pub fn prism_q::qec::QecNoise::name(&self) -> &'static str
 pub fn prism_q::qec::QecNoise::probability(&self) -> f64
 #[non_exhaustive] pub enum prism_q::QecOp
@@ -3088,12 +3153,14 @@ impl prism_q::sim::calibration::DeviceCalibration
 pub fn prism_q::sim::calibration::DeviceCalibration::gate1q(&self) -> &prism_q::sim::calibration::GateCalibration
 pub fn prism_q::sim::calibration::DeviceCalibration::gate2q(&self) -> &prism_q::sim::calibration::GateCalibration
 pub fn prism_q::sim::calibration::DeviceCalibration::gate2q_on(&self, usize, usize) -> &prism_q::sim::calibration::GateCalibration
+pub fn prism_q::sim::calibration::DeviceCalibration::gate_times(&self) -> prism_q::sim::calibration::GateTimes
 pub fn prism_q::sim::calibration::DeviceCalibration::new(alloc::vec::Vec<prism_q::sim::calibration::QubitCalibration>, prism_q::sim::calibration::GateCalibration, prism_q::sim::calibration::GateCalibration) -> prism_q::error::Result<Self>
 pub fn prism_q::sim::calibration::DeviceCalibration::num_qubits(&self) -> usize
 pub fn prism_q::sim::calibration::DeviceCalibration::parse(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::sim::calibration::DeviceCalibration::qubit(&self, usize) -> &prism_q::sim::calibration::QubitCalibration
 pub fn prism_q::sim::calibration::DeviceCalibration::qubits(&self) -> &[prism_q::sim::calibration::QubitCalibration]
 pub fn prism_q::sim::calibration::DeviceCalibration::to_noise_model(&self, &prism_q::circuit::Circuit) -> prism_q::error::Result<prism_q::sim::noise::NoiseModel>
+pub fn prism_q::sim::calibration::DeviceCalibration::to_scheduled_noise_model(&self, &prism_q::circuit::Circuit) -> prism_q::error::Result<prism_q::sim::noise::NoiseModel>
 pub fn prism_q::sim::calibration::DeviceCalibration::with_pair(self, usize, usize, prism_q::sim::calibration::GateCalibration) -> prism_q::error::Result<Self>
 pub struct prism_q::DevicePackedShots
 impl prism_q::sim::compiled::DevicePackedShots
@@ -3159,6 +3226,14 @@ pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend:
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_pauli_rotation(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_qft_block(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_two_qubit_kraus(&self) -> bool
+pub struct prism_q::DriftDistribution
+impl prism_q::sim::noise::builder::DriftDistribution
+pub fn prism_q::sim::noise::builder::DriftDistribution::covariance(&self) -> &[f64]
+pub fn prism_q::sim::noise::builder::DriftDistribution::from_covariance(alloc::vec::Vec<alloc::vec::Vec<f64>>) -> Self
+pub fn prism_q::sim::noise::builder::DriftDistribution::from_t2_star(impl core::iter::traits::collect::IntoIterator<Item = f64>) -> Self
+pub fn prism_q::sim::noise::builder::DriftDistribution::independent(impl core::iter::traits::collect::IntoIterator<Item = f64>) -> Self
+pub fn prism_q::sim::noise::builder::DriftDistribution::num_qubits(&self) -> usize
+pub fn prism_q::sim::noise::builder::DriftDistribution::with_neighbour_correlation(self, impl core::iter::traits::collect::IntoIterator<Item = (usize, usize)>, f64) -> Self
 pub struct prism_q::DynamicProgram
 impl prism_q::circuit::dynamic::DynamicProgram
 pub fn prism_q::circuit::dynamic::DynamicProgram::blocks(&self) -> &[prism_q::circuit::dynamic::BasicBlock]
@@ -3312,6 +3387,13 @@ pub fn prism_q::sim::noise::builder::GateFilter::arity(self, usize) -> Self
 pub fn prism_q::sim::noise::builder::GateFilter::named(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn prism_q::sim::noise::builder::GateFilter::on_qubits(self, impl core::iter::traits::collect::IntoIterator<Item = usize>) -> Self
 pub fn prism_q::sim::noise::builder::GateFilter::on_targets(self, impl core::iter::traits::collect::IntoIterator<Item = usize>) -> Self
+pub struct prism_q::GateTimes
+impl prism_q::sim::calibration::GateTimes
+pub fn prism_q::sim::calibration::GateTimes::new(f64, f64) -> Self
+pub fn prism_q::sim::calibration::GateTimes::with_gate(self, impl core::convert::Into<alloc::string::String>, f64) -> Self
+pub fn prism_q::sim::calibration::GateTimes::with_measure(self, f64) -> Self
+pub fn prism_q::sim::calibration::GateTimes::with_pair(self, usize, usize, f64) -> Self
+pub fn prism_q::sim::calibration::GateTimes::with_reset(self, f64) -> Self
 pub struct prism_q::HistogramAccumulator
 impl prism_q::HistogramAccumulator
 pub fn prism_q::HistogramAccumulator::into_counts(self) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
@@ -3415,7 +3497,12 @@ pub fn prism_q::sim::noise::builder::NoiseBuilder::crosstalk(self, prism_q::sim:
 pub fn prism_q::sim::noise::builder::NoiseBuilder::new() -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::on_idle_qubits(self, prism_q::sim::noise::NoiseChannel) -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::over_rotation(self, prism_q::sim::noise::builder::GateFilter, f64) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::over_rotation_drift(self, prism_q::sim::noise::builder::GateFilter, f64) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::over_rotation_drift_per_qubit(self, prism_q::sim::noise::builder::GateFilter, prism_q::sim::noise::builder::DriftDistribution) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::quasi_static_detuning(self, prism_q::sim::noise::builder::DriftDistribution) -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::readout_error(self, usize, f64, f64) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::schedule(self, prism_q::sim::calibration::GateTimes) -> Self
+pub fn prism_q::sim::noise::builder::NoiseBuilder::scheduled_idle(self, impl core::iter::traits::collect::IntoIterator<Item = (f64, f64)>) -> Self
 pub fn prism_q::sim::noise::builder::NoiseBuilder::uniform_readout_error(self, f64, f64) -> Self
 pub struct prism_q::NoiseEvent
 pub prism_q::NoiseEvent::channel: prism_q::sim::noise::NoiseChannel
@@ -3685,6 +3772,7 @@ pub fn prism_q::qec::QecProgram::expectation_value_ops(&self) -> alloc::vec::Vec
 pub fn prism_q::qec::QecProgram::feedforward(&mut self, &[prism_q::qec::QecRecordRef], bool, alloc::vec::Vec<prism_q::qec::QecOp>) -> prism_q::error::Result<()>
 pub fn prism_q::qec::QecProgram::from_ops(usize, prism_q::qec::QecOptions, alloc::vec::Vec<prism_q::qec::QecOp>) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::from_text(&str) -> prism_q::error::Result<Self>
+pub fn prism_q::qec::QecProgram::has_leakage(&self) -> bool
 pub fn prism_q::qec::QecProgram::measure(&mut self, prism_q::qec::QecBasis, usize) -> prism_q::error::Result<usize>
 pub fn prism_q::qec::QecProgram::measure_pauli_product(&mut self, &[prism_q::qec::QecPauli]) -> prism_q::error::Result<usize>
 pub fn prism_q::qec::QecProgram::measure_x(&mut self, usize) -> prism_q::error::Result<usize>
@@ -3716,6 +3804,7 @@ pub prism_q::QecSampleResult::accepted_shots: usize
 pub prism_q::QecSampleResult::detectors: prism_q::sim::compiled::PackedShots
 pub prism_q::QecSampleResult::discarded_shots: usize
 pub prism_q::QecSampleResult::expectation_values: core::option::Option<alloc::vec::Vec<prism_q::QecObservableEstimate>>
+pub prism_q::QecSampleResult::heralds: core::option::Option<prism_q::sim::compiled::PackedShots>
 pub prism_q::QecSampleResult::logical_errors: alloc::vec::Vec<u64>
 pub prism_q::QecSampleResult::measurements: prism_q::sim::compiled::PackedShots
 pub prism_q::QecSampleResult::observable_expectations: core::option::Option<alloc::vec::Vec<prism_q::QecObservableEstimate>>
@@ -3730,6 +3819,7 @@ pub fn prism_q::QecSampleResult::new_with_total_shots(usize, prism_q::sim::compi
 pub fn prism_q::QecSampleResult::survivor_rate(&self) -> f64
 pub fn prism_q::QecSampleResult::survivor_rate_wilson_interval(&self, f64) -> (f64, f64)
 pub fn prism_q::QecSampleResult::with_expectation_values(self, alloc::vec::Vec<prism_q::QecObservableEstimate>) -> Self
+pub fn prism_q::QecSampleResult::with_heralds(self, prism_q::sim::compiled::PackedShots) -> Self
 pub fn prism_q::QecSampleResult::with_observable_expectations(self, alloc::vec::Vec<prism_q::QecObservableEstimate>) -> prism_q::error::Result<Self>
 pub struct prism_q::QubitCalibration
 pub prism_q::QubitCalibration::p01: f64
@@ -3783,6 +3873,7 @@ pub fn prism_q::distributed::comm::SerialComm::rank(&self) -> usize
 pub fn prism_q::distributed::comm::SerialComm::sendrecv_c64(&self, usize, &[num_complex::Complex64], &mut [num_complex::Complex64])
 pub fn prism_q::distributed::comm::SerialComm::size(&self) -> usize
 pub struct prism_q::ShotsResult
+pub prism_q::ShotsResult::leaked: core::option::Option<alloc::vec::Vec<alloc::vec::Vec<bool>>>
 pub prism_q::ShotsResult::metadata: prism_q::RunMetadata
 pub prism_q::ShotsResult::shots: alloc::vec::Vec<alloc::vec::Vec<bool>>
 impl prism_q::ShotsResult

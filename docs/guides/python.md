@@ -764,6 +764,75 @@ model.validate()
 It runs exactly on the density matrix and by trajectories on the statevector, sparse,
 factored, and MPS backends; the stabilizer samplers decline it.
 
+### Leakage
+
+`leakage(p)`, `seepage(p)` and the two-qubit `leakage_transport(p)` give each
+trajectory a leak flag per qubit. A leaked qubit ignores gates, a gate pairing it
+with others depolarizes them with a uniformly random Pauli, measuring it reports 1,
+and a reset or a seepage (to a uniformly random basis state) clears it.
+`ShotsResult.leaked` is the erasure herald, a `(num_shots, num_qubits)` bool array
+marking qubits that leaked at any point of the shot, and `None` for a model without
+leakage:
+
+```python
+leaky = (
+    NoiseBuilder()
+    .after_gates_joint(GateFilter.all().arity(2), NoiseChannel.leakage_transport(0.1))
+    .after_gates(GateFilter.all(), NoiseChannel.leakage(0.01))
+    .after_gates(GateFilter.all(), NoiseChannel.seepage(0.1))
+    .build(circuit)
+)
+result = simulate(circuit).backend(BackendKind.statevector()).seed(42).noise(leaky).shots(1000)
+assert result.leaked.shape == (1000, circuit.num_qubits)
+```
+
+Leakage needs a per-shot trajectory, so the density-matrix backend rejects it. QEC
+programs take `QecNoise.leak(p)`, `seep(p)` and `leak_transport(p)` (text form
+`LEAK(p)`, `SEEP(p)`, `LEAK_TRANSPORT(p)`), sampled as heralded erasures with one
+`QecResult.heralds` column per `LEAK` target; the [Noise and QEC guide](./qec.md)
+describes both models.
+
+### Timed and correlated noise
+
+`NoiseBuilder.schedule(GateTimes(one_qubit, two_qubit))` lays the circuit out as
+soon as possible, with durations in seconds; `with_gate(name, t)`,
+`with_pair(a, b, t)`, `with_measure(t)` and `with_reset(t)` refine it, and a
+`"id"` entry turns identity gates into delays. Three rules read that schedule or
+draw once per shot:
+
+| Rule | Effect |
+|------|--------|
+| `scheduled_idle(coherence)` | Thermal relaxation over each qubit's idle time in every layer, from its `(t1, t2)`; replaces `on_idle_qubits` |
+| `quasi_static_detuning(drift)` | A per-shot frequency offset per qubit in rad/s, applied as a Z phase over each layer's duration |
+| `over_rotation_drift(filter, sigma)` | One per-shot fractional angle error shared by matching `rx`, `ry`, `rz`, `p` gates |
+| `over_rotation_drift_per_qubit(filter, drift)` | One per-shot fractional angle error per target qubit |
+
+A `DriftDistribution` is a zero-mean Gaussian over per-qubit offsets, built by
+`independent(sigmas)`, `from_t2_star(t2_star)` (widths `sqrt(2) / t2_star`), or
+`from_covariance(matrix)`, and `with_neighbour_correlation(coupling, rho)`
+correlates the two qubits of each coupling edge. Drawn offsets have exactly the
+requested covariance, and a matrix that is not positive semidefinite raises at
+`build`:
+
+```python
+drift = DriftDistribution.from_t2_star([40e-6, 55e-6]).with_neighbour_correlation(
+    [(0, 1)], 0.5
+)
+timed = (
+    NoiseBuilder()
+    .schedule(GateTimes(35e-9, 300e-9).with_measure(1e-6))
+    .scheduled_idle([(100e-6, 80e-6), (90e-6, 70e-6)])
+    .quasi_static_detuning(drift)
+    .build(circuit)
+)
+counts = simulate(circuit).seed(42).noise(timed).sample_counts(1000).counts()
+```
+
+Drift makes every shot a different unitary, so models carrying it run per-shot
+trajectories; models without it keep the shared-evolution fast paths.
+`DeviceCalibration.to_scheduled_noise_model(circuit)` is `to_noise_model` plus
+`scheduled_idle` timed by the table's own `gate_times()`.
+
 ## Expectation values
 
 An observable is a list of `(qubit, axis)` factors with `axis` one of `"X"`,

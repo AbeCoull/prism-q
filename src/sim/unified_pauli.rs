@@ -1343,7 +1343,12 @@ fn channel_action(channel: &NoiseChannel) -> Option<ChannelAction> {
         NoiseChannel::TwoQubitDepolarizing { p } => Some(ChannelAction::Depolarizing2q {
             lambda: 1.0 - 16.0 * p / 15.0,
         }),
-        NoiseChannel::Custom { .. } | NoiseChannel::Kraus2q { .. } => None,
+        NoiseChannel::Custom { .. }
+        | NoiseChannel::Kraus2q { .. }
+        | NoiseChannel::Leakage { .. }
+        | NoiseChannel::Seepage { .. }
+        | NoiseChannel::LeakageTransport { .. }
+        | NoiseChannel::QuasiStatic { .. } => None,
     }
 }
 

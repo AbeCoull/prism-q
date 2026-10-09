@@ -2,6 +2,7 @@
 //! lowering, the Pauli frame pass that flips sampled records, the shared noise draw,
 //! and the density-matrix lowering for noisy `EXP_VAL` estimation.
 
+use super::leakage::{QecDeferredLeakEvent, push_deferred_leak_event};
 #[cfg(test)]
 use super::runner::QecParityProjection;
 use super::{
@@ -128,6 +129,9 @@ pub(super) struct QecDeferredProgram {
     pub(super) final_qubit_aliases: Vec<usize>,
     /// Branch rates of each `PAULI_CHANNEL_2` op, in [`qec_pair_branch_flips`] order.
     pub(super) pair_tables: Vec<[f64; 15]>,
+    /// Leakage annotations in program order, which only
+    /// [`QecLeakageSampler`](super::leakage::QecLeakageSampler) reads.
+    pub(super) leak_events: Vec<QecDeferredLeakEvent>,
 }
 
 impl QecDeferredProgram {
@@ -690,7 +694,7 @@ impl QecRecordNoise {
 
 /// Pauli frame of one unit's shots: a packed X row and Z row per live alias, one bit
 /// per shot.
-struct Frame {
+pub(super) struct Frame {
     words: usize,
     x: Vec<u64>,
     z: Vec<u64>,
@@ -699,7 +703,7 @@ struct Frame {
 }
 
 impl Frame {
-    fn new(words: usize, num_aliases: usize) -> Self {
+    pub(super) fn new(words: usize, num_aliases: usize) -> Self {
         Self {
             words,
             x: Vec::new(),
@@ -711,7 +715,7 @@ impl Frame {
 
     /// Row of `alias`, zero where the frame first meets it.
     #[inline(always)]
-    fn slot(&mut self, alias: usize) -> usize {
+    pub(super) fn slot(&mut self, alias: usize) -> usize {
         let mapped = self.slot_of_alias[alias];
         if mapped != u32::MAX {
             return mapped as usize;
@@ -740,13 +744,29 @@ impl Frame {
         self.free.push(slot as u32);
     }
 
-    fn x_row(&self, slot: usize) -> &[u64] {
+    pub(super) fn x_row(&self, slot: usize) -> &[u64] {
         &self.x[slot * self.words..(slot + 1) * self.words]
+    }
+
+    /// XOR `x_bits` and `z_bits` into word `word` of `slot` where `mask` is set,
+    /// which for uniform random bits is a uniformly random Pauli on those shots.
+    #[inline(always)]
+    pub(super) fn scramble(
+        &mut self,
+        slot: usize,
+        word: usize,
+        mask: u64,
+        x_bits: u64,
+        z_bits: u64,
+    ) {
+        let at = slot * self.words + word;
+        self.x[at] ^= x_bits & mask;
+        self.z[at] ^= z_bits & mask;
     }
 
     /// XOR Pauli `letter` (1 X, 2 Y, 3 Z, else none) into `shot` of `slot`.
     #[inline(always)]
-    fn flip(&mut self, slot: usize, shot: usize, letter: usize) {
+    pub(super) fn flip(&mut self, slot: usize, shot: usize, letter: usize) {
         let at = slot * self.words + shot / 64;
         let bit = 1u64 << (shot % 64);
         match letter {
@@ -762,7 +782,7 @@ impl Frame {
 
     /// Push the frame through `gate` on `slots`, `P <- U P U†` up to sign.
     #[inline(always)]
-    fn gate(&mut self, gate: &Gate, slots: &[usize]) {
+    pub(super) fn gate(&mut self, gate: &Gate, slots: &[usize]) {
         let words = self.words;
         let row = |slot: usize| slot * words..(slot + 1) * words;
         match *slots {
@@ -1049,6 +1069,11 @@ impl QecSingleNoiseRates {
 }
 
 pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompiledNoiseSampler> {
+    if program.has_leakage() {
+        return Err(super::leakage::leakage_rejection(
+            "QEC record-noise sampler",
+        ));
+    }
     let deferred = lower_qec_program_to_deferred_circuit(program)?;
     let noiseless = compile_measurements(&deferred.to_circuit(), program.options().seed)?;
     let num_measurements = deferred.measurement_qubits.len();
@@ -1152,6 +1177,24 @@ fn push_density_matrix_noise_events(
                 qubits: SmallVec::from_slice(pair),
             }));
         }
+        QecNoise::Leak(p) => {
+            events.extend(targets.iter().map(|&q| NoiseEvent {
+                channel: NoiseChannel::Leakage { p },
+                qubits: SmallVec::from_slice(&[q]),
+            }));
+        }
+        QecNoise::Seep(p) => {
+            events.extend(targets.iter().map(|&q| NoiseEvent {
+                channel: NoiseChannel::Seepage { p },
+                qubits: SmallVec::from_slice(&[q]),
+            }));
+        }
+        QecNoise::LeakTransport(p) => {
+            events.extend(targets.chunks_exact(2).map(|pair| NoiseEvent {
+                channel: NoiseChannel::LeakageTransport { p },
+                qubits: SmallVec::from_slice(pair),
+            }));
+        }
         _ => {
             let (px, py, pz) = channel
                 .single_rates()
@@ -1223,6 +1266,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
     let mut deferred_measurements = Vec::with_capacity(program.num_measurements());
     let mut noise_events = Vec::new();
     let mut pair_tables = Vec::new();
+    let mut leak_events = Vec::new();
 
     for op in program.ops() {
         match op {
@@ -1294,6 +1338,17 @@ fn lower_qec_program_to_deferred_circuit_inner(
                     last_use[alias] = Some(gates.len());
                 }
             }
+            QecOp::Noise { channel, targets } if channel.is_leakage() => {
+                push_deferred_leak_event(
+                    channel,
+                    targets,
+                    &aliases,
+                    &measured_aliases,
+                    gates.len(),
+                    noise_events.len(),
+                    &mut leak_events,
+                )?;
+            }
             QecOp::Noise { channel, targets } => {
                 if channel.probability() > 0.0 {
                     let first = noise_events.len();
@@ -1353,6 +1408,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
         last_use,
         final_qubit_aliases,
         pair_tables,
+        leak_events,
     })
 }
 

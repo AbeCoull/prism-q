@@ -130,6 +130,10 @@ def test_noise_round_trips():
         NoiseChannel.amplitude_damping(0.2),
         NoiseChannel.phase_damping(0.3),
         NoiseChannel.two_qubit_depolarizing(0.05),
+        NoiseChannel.leakage(0.01),
+        NoiseChannel.seepage(0.2),
+        NoiseChannel.leakage_transport(0.1),
+        NoiseChannel.quasi_static("y", [(0, 0.5), (3, -1.25)]),
     ):
         assert repr(_round_trip(channel)) == repr(channel)
 
@@ -174,6 +178,9 @@ def test_small_values_round_trip():
         QecNoise.y_error(0.02),
         QecNoise.pauli_channel_1(0.1, 0.2, 0.3),
         QecNoise.pauli_channel_2([0.001 * (k + 1) for k in range(15)]),
+        QecNoise.leak(0.01),
+        QecNoise.seep(0.2),
+        QecNoise.leak_transport(0.1),
         PauliObservable([(0.5, [(0, "X"), (2, "Z")]), (-1.0, [])]),
     ):
         assert repr(_round_trip(value)) == repr(value)

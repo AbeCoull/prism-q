@@ -77,6 +77,100 @@ let result = simulate(&circuit)
 a technology class, the same on every qubit, for exploring how such a model behaves;
 they are not a measured device. Write the text form for a specific device.
 
+`to_noise_model` charges decoherence only to the qubits a gate touches. A qubit that
+waits while others run decays too, and `to_scheduled_noise_model(&circuit)` adds that
+from the table's own gate durations: the circuit is laid out as soon as possible in
+the greedy layers `Circuit::depth` counts, each layer lasting as long as its longest
+gate, and at the end of each layer every qubit relaxes with its own `t1` and `t2`
+over the part of the layer it spent idle. `gate_times()` returns those durations as
+a `GateTimes` for a builder to use.
+
+## Leakage
+
+A leakage channel moves a qubit out of the computational subspace. The trajectory
+engines carry it as a per-qubit flag:
+
+| Channel | Effect |
+| --- | --- |
+| `Leakage { p }` | An unleaked qubit leaks with probability `p` |
+| `Seepage { p }` | A leaked qubit returns with probability `p`, to a uniformly random basis state |
+| `LeakageTransport { p }` | Two-qubit: when exactly one qubit is leaked, the other leaks with probability `p` |
+
+While a qubit is leaked, gates on it do not act, and a gate pairing it with
+unleaked qubits applies a uniformly random Pauli to each of those instead.
+Measuring it reports 1, a reset clears the flag, and every other channel skips it.
+`ShotsResult::leaked` holds, per shot, the qubits that leaked at any point: an
+erasure herald for a decoder.
+
+```rust
+use prism_q::{simulate, BackendKind, GateFilter, NoiseBuilder, NoiseChannel};
+
+# let circuit = prism_q::CircuitBuilder::new_with_classical(3, 3).h(0).cx(0, 1).cx(1, 2).measure_all().build();
+let noise = NoiseBuilder::new()
+    .after_gates_joint(GateFilter::all().arity(2), NoiseChannel::LeakageTransport { p: 0.1 })
+    .after_gates(GateFilter::all(), NoiseChannel::Leakage { p: 1e-3 })
+    .after_gates(GateFilter::all(), NoiseChannel::Seepage { p: 0.05 })
+    .build(&circuit)
+    .unwrap();
+let result = simulate(&circuit)
+    .backend(BackendKind::Statevector)
+    .noise(&noise)
+    .seed(42)
+    .shots(1024)
+    .unwrap();
+let heralds = result.leaked.as_ref().unwrap();
+assert_eq!(heralds[0].len(), 3);
+```
+
+A transport event reads the flags when it fires, so declare it before the leakage
+rule on the same gates to spread only the leakage the gate itself saw. Leakage runs
+on the trajectory engines; the density matrix rejects it, since a mixture evolved
+event by event has no flag to carry.
+
+## Correlated and time-dependent noise
+
+`NoiseBuilder::schedule(GateTimes)` times the circuit for the rules that act over
+elapsed time. `GateTimes::new(one_qubit, two_qubit)` takes family durations in
+seconds, `with_gate(name, t)` overrides one gate (an `"id"` entry turns identities
+into delays), `with_pair(a, b, t)` one qubit pair, and `with_measure` and `with_reset`
+the non-gate instructions.
+
+- `scheduled_idle(coherence)` relaxes each qubit over the idle part of every layer
+  from its `(t1, t2)`. It replaces `on_idle_qubits`, and declaring both is an error.
+- `quasi_static_detuning(drift)` draws one frequency offset per qubit per shot, in
+  radians per second, and turns each qubit about `Z` by its offset times every
+  layer's duration. A qubit left for time `t` then dephases on average as
+  `exp(-(sigma t)^2 / 2)`.
+- `over_rotation_drift(filter, sigma)` draws one fractional angle error per shot,
+  shared by every matching `rx`, `ry`, `rz` or `p` gate, and
+  `over_rotation_drift_per_qubit(filter, drift)` draws one per qubit.
+
+A `DriftDistribution` is a zero-mean Gaussian over per-qubit offsets:
+`independent(sigmas)`, `from_t2_star(t2_star)` for widths `sqrt(2) / t2_star`, a full
+`from_covariance(matrix)`, or `with_neighbour_correlation(coupling, rho)` to correlate
+the qubits of each coupling edge. Each shot draws independent standard normals and
+correlates them through the covariance's Cholesky factor, so the offsets have the
+requested covariance; one that is not positive semidefinite is rejected at `build`.
+
+```rust
+use prism_q::{DriftDistribution, GateFilter, GateTimes, NoiseBuilder};
+
+# let circuit = prism_q::CircuitBuilder::new_with_classical(3, 3).rx(0.4, 0).cx(0, 1).cx(1, 2).measure_all().build();
+let detuning = DriftDistribution::from_t2_star([40e-6, 55e-6, 30e-6])
+    .with_neighbour_correlation([(0, 1), (1, 2)], 0.3);
+let noise = NoiseBuilder::new()
+    .schedule(GateTimes::new(35e-9, 300e-9).with_measure(1e-6))
+    .scheduled_idle([(100e-6, 80e-6); 3])
+    .quasi_static_detuning(detuning)
+    .over_rotation_drift(GateFilter::all().named("rx"), 0.01)
+    .build(&circuit)
+    .unwrap();
+```
+
+The drift rules lower onto `NoiseChannel::QuasiStatic` events, which make each shot
+a different unitary and so run on the per-shot trajectory engines only. A model
+without them keeps the shared-evolution fast paths.
+
 ## Detector sampling
 
 For repeated syndrome extraction, `compile_detector_sampler` compiles a Clifford circuit
@@ -114,8 +208,9 @@ program built in code can be saved and parsed again.
 ```admonish info title="What QEC programs support"
 Clifford gates, basis resets and measurements, `MPP` Pauli-product measurements,
 detectors, observables, postselection, `X_ERROR` / `Y_ERROR` / `Z_ERROR` /
-`DEPOLARIZE1` / `DEPOLARIZE2` / `PAULI_CHANNEL_1` / `PAULI_CHANNEL_2` noise, and
-terminal `EXP_VAL` final-state expectation estimates.
+`DEPOLARIZE1` / `DEPOLARIZE2` / `PAULI_CHANNEL_1` / `PAULI_CHANNEL_2` noise,
+`LEAK` / `SEEP` / `LEAK_TRANSPORT` leakage, and terminal `EXP_VAL` final-state
+expectation estimates.
 A noiseless `EXP_VAL` uses the analytical T strategies, with any detector records
 still sampled by the packed runner. A noisy one is estimated exactly on the density
 matrix when it fits, and falls to the per-shot reference runner when the program
@@ -124,6 +219,41 @@ Non-Clifford gates are rejected on the packed sampling path.
 See the [QEC IR reference](../architecture/qec-ir.md) for the full
 grammar, and [QEC program execution](../architecture/qec-programs.md) for the
 runner routing, the V1 reset requirement, and the `EXP_VAL` placement rules.
+```
+
+### Leakage as heralded erasure
+
+`LEAK(p) q ...` leaks each target with probability `p`, `SEEP(p) q ...` returns each
+leaked target to a random basis state with probability `p`, and
+`LEAK_TRANSPORT(p) a b ...` spreads leakage across each pair at rate `p`.
+`run_qec_program` samples them as erasures: a leaking qubit gets a uniformly random
+Pauli frame, a two-qubit gate meeting a leaked qubit fully depolarizes both of its
+qubits, other noise annotations naming a leaked qubit are skipped, and the leaked
+qubit's own measurement reports 1. On a Clifford program that
+is the trajectory leakage model above in distribution.
+
+Each `LEAK` target adds one column to `QecSampleResult::heralds`, set when that
+qubit is leaked just after the annotation; `LEAK(0)` reads the flags without
+changing them. An `MPP` over a leaked qubit reports a random parity. The detector
+error model and the reference runner have no leak flag and reject these programs,
+and the memory-experiment generators below emit no leakage.
+
+```rust
+use prism_q::{QecProgram, run_qec_program};
+
+let program = QecProgram::from_text(
+    "R 0 1 2
+     CX 0 1
+     LEAK(0.01) 0 1
+     CX 1 2
+     LEAK_TRANSPORT(0.1) 1 2
+     M 0 1 2
+     DETECTOR rec[-1] rec[-2]",
+)?;
+let result = run_qec_program(&program)?;
+let heralds = result.heralds.as_ref().unwrap();
+assert_eq!(heralds.num_measurements(), 2);
+# Ok::<(), prism_q::PrismError>(())
 ```
 
 ## Memory experiments

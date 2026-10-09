@@ -1,6 +1,7 @@
 //! Device calibration tables and their lowering to a [`NoiseModel`]: per-qubit
 //! coherence times and readout rates, per-family gate durations and error
-//! rates, a line-oriented text form, and illustrative presets in [`presets`].
+//! rates, a line-oriented text form, illustrative presets in [`presets`], and the
+//! [`GateTimes`] a scheduled noise model times its layers with.
 
 use smallvec::smallvec;
 
@@ -85,6 +86,113 @@ impl GateCalibration {
     fn check(&self) -> std::result::Result<(), String> {
         check_time("time", self.time)?;
         check_probability("error", self.error)
+    }
+}
+
+/// Instruction durations in seconds, for timing an as-soon-as-possible layered
+/// schedule.
+///
+/// A gate takes the entry named for it if one is given, else the entry of its
+/// qubit pair for a two-qubit gate, else the one-qubit duration on one target and
+/// the two-qubit duration on more. Measurements and resets take their own entries,
+/// zero unless set, and barriers and saves take no time. Durations must be finite
+/// and non-negative, checked when a model is built from them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateTimes {
+    one_qubit: f64,
+    two_qubit: f64,
+    measure: f64,
+    reset: f64,
+    named: Vec<(String, f64)>,
+    pairs: Vec<(usize, usize, f64)>,
+}
+
+impl GateTimes {
+    pub fn new(one_qubit: f64, two_qubit: f64) -> Self {
+        Self {
+            one_qubit,
+            two_qubit,
+            measure: 0.0,
+            reset: 0.0,
+            named: Vec::new(),
+            pairs: Vec::new(),
+        }
+    }
+
+    /// Give every gate whose [`Gate::name`](crate::Gate::name) is `name` its own
+    /// duration; an `"id"` entry turns identity gates into timed delays.
+    pub fn with_gate(mut self, name: impl Into<String>, time: f64) -> Self {
+        let name = name.into();
+        self.named.retain(|(existing, _)| *existing != name);
+        self.named.push((name, time));
+        self
+    }
+
+    /// Give two-qubit gates on the unordered pair `(a, b)` their own duration.
+    pub fn with_pair(mut self, a: usize, b: usize, time: f64) -> Self {
+        let (lo, hi) = (a.min(b), a.max(b));
+        self.pairs.retain(|&(x, y, _)| (x, y) != (lo, hi));
+        self.pairs.push((lo, hi, time));
+        self
+    }
+
+    pub fn with_measure(mut self, time: f64) -> Self {
+        self.measure = time;
+        self
+    }
+
+    pub fn with_reset(mut self, time: f64) -> Self {
+        self.reset = time;
+        self
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        let check = |field: &str, value: f64| {
+            if !value.is_finite() || value < 0.0 {
+                return Err(invalid(format!(
+                    "gate time {field} = {value} must be finite and non-negative"
+                )));
+            }
+            Ok(())
+        };
+        check("one_qubit", self.one_qubit)?;
+        check("two_qubit", self.two_qubit)?;
+        check("measure", self.measure)?;
+        check("reset", self.reset)?;
+        for (name, time) in &self.named {
+            check(name, *time)?;
+        }
+        for &(a, b, time) in &self.pairs {
+            check(&format!("pair ({a}, {b})"), time)?;
+        }
+        Ok(())
+    }
+
+    /// Duration of `instr` under these entries.
+    pub(crate) fn duration(&self, instr: &Instruction) -> f64 {
+        let (gate, targets) = match instr {
+            Instruction::Gate { gate, targets }
+            | Instruction::Conditional { gate, targets, .. } => (gate, targets),
+            Instruction::Measure { .. } => return self.measure,
+            Instruction::Reset { .. } => return self.reset,
+            Instruction::Barrier { .. } | Instruction::Save { .. } | Instruction::Region(_) => {
+                return 0.0;
+            }
+        };
+        if let Some(&(_, time)) = self.named.iter().find(|(name, _)| name == gate.name()) {
+            return time;
+        }
+        if let [a, b] = targets.as_slice() {
+            let (lo, hi) = ((*a).min(*b), (*a).max(*b));
+            if let Some(&(_, _, time)) = self.pairs.iter().find(|&&(x, y, _)| (x, y) == (lo, hi)) {
+                return time;
+            }
+        }
+        if targets.len() == 1 {
+            self.one_qubit
+        } else {
+            self.two_qubit
+        }
     }
 }
 
@@ -334,6 +442,37 @@ impl DeviceCalibration {
             .iter()
             .find(|&&(x, y, _)| (x, y) == (lo, hi))
             .map_or(&self.gate2q, |(_, _, gate)| gate)
+    }
+
+    /// The gate durations of the table, pair entries included, for timing a
+    /// schedule; measurements and resets take no time.
+    pub fn gate_times(&self) -> GateTimes {
+        let mut times = GateTimes::new(self.gate1q.time, self.gate2q.time);
+        for &(a, b, gate) in &self.pairs {
+            times = times.with_pair(a, b, gate.time);
+        }
+        times
+    }
+
+    /// [`DeviceCalibration::to_noise_model`] plus idling timed by the table's own
+    /// schedule: after each layer of the as-soon-as-possible schedule
+    /// [`NoiseBuilder::scheduled_idle`](crate::NoiseBuilder::scheduled_idle)
+    /// describes, every qubit idle for part or all of the layer relaxes with its
+    /// own `t1` and `t2` over that idle time.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`DeviceCalibration::to_noise_model`] rejects.
+    pub fn to_scheduled_noise_model(&self, circuit: &Circuit) -> Result<NoiseModel> {
+        let mut model = self.to_noise_model(circuit)?;
+        let idle = crate::sim::noise::NoiseBuilder::new()
+            .schedule(self.gate_times())
+            .scheduled_idle(self.qubits.iter().map(|q| (q.t1, q.t2)))
+            .build(circuit)?;
+        for (slot, events) in model.after_gate.iter_mut().zip(idle.after_gate) {
+            slot.extend(events);
+        }
+        Ok(model)
     }
 
     /// Lower the table onto `circuit`.

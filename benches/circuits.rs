@@ -4501,6 +4501,63 @@ fn bench_density_matrix_exact_vs_trajectory(c: &mut Criterion) {
     group.finish();
 }
 
+/// Trajectories carrying per-shot memory: leak flags on the `exact_vs_trajectory`
+/// circuit at 12 and 16 qubits, and quasi-static detuning plus amplitude drift at 12
+/// qubits over 1000 shots. Leakage at `1e-3` per gate target with seepage back keeps a
+/// few leaked qubits live per shot, so the blocked-gate and reset paths both run.
+fn bench_noise_with_memory(c: &mut Criterion) {
+    let mut group = c.benchmark_group("noise/memory_trajectory");
+    configure_group(&mut group);
+
+    for &n in &[12usize, 16] {
+        let circuit = non_clifford_noise_circuit(n, 4);
+        let noise = prism_q::NoiseBuilder::new()
+            .after_gates(
+                prism_q::GateFilter::all(),
+                prism_q::NoiseChannel::Depolarizing { p: 0.001 },
+            )
+            .after_gates_joint(
+                prism_q::GateFilter::all().arity(2),
+                prism_q::NoiseChannel::LeakageTransport { p: 0.1 },
+            )
+            .after_gates(
+                prism_q::GateFilter::all(),
+                prism_q::NoiseChannel::Leakage { p: 0.001 },
+            )
+            .after_gates(
+                prism_q::GateFilter::all(),
+                prism_q::NoiseChannel::Seepage { p: 0.05 },
+            )
+            .build(&circuit)
+            .unwrap();
+        group.bench_function(BenchmarkId::new("leakage", format!("{n}q_128")), |b| {
+            b.iter(|| {
+                run_shots_with_noise(BackendKind::Statevector, &circuit, &noise, 128, SEED)
+                    .unwrap();
+            });
+        });
+    }
+
+    let n = 12;
+    let circuit = non_clifford_noise_circuit(n, 4);
+    let drift = prism_q::DriftDistribution::independent(vec![2.0e4; n])
+        .with_neighbour_correlation((0..n - 1).map(|q| (q, q + 1)), 0.3);
+    let noise = prism_q::NoiseBuilder::new()
+        .schedule(prism_q::GateTimes::new(35e-9, 300e-9))
+        .scheduled_idle(vec![(100e-6, 80e-6); n])
+        .quasi_static_detuning(drift)
+        .over_rotation_drift(prism_q::GateFilter::all().named("rz"), 0.01)
+        .build(&circuit)
+        .unwrap();
+    group.bench_function(BenchmarkId::new("drift", format!("{n}q_1000")), |b| {
+        b.iter(|| {
+            run_shots_with_noise(BackendKind::Statevector, &circuit, &noise, 1000, SEED).unwrap();
+        });
+    });
+
+    group.finish();
+}
+
 /// Exact noisy evolution on circuit and noise shapes whose two-qubit gates
 /// have cheap native kernels (CX chains, controlled phases) or whose noise
 /// skips the two-qubit gates, from widths where the buffer sits in cache to
@@ -5321,6 +5378,8 @@ criterion_group! {
     bench_dynamic_mid_circuit_shots,
     bench_dynamic_clifford_shots,
     bench_dynamic_temporal_prefix_blocks,
-    bench_dynamic_rus
+    bench_dynamic_rus,
+    // Trajectories with leak flags and quasi-static draws
+    bench_noise_with_memory
 }
 criterion_main!(benches);

@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::gates::Gate;
 use crate::sim::ShotsResult;
 use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError};
+use crate::sim::unified_pauli::PauliAxis;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -464,6 +465,263 @@ fn apply_noise_event(
         NoiseChannel::Kraus2q { kraus } => {
             apply_custom_kraus_2q(backend, event.qubits[0], event.qubits[1], kraus, rng)
         }
+        NoiseChannel::Leakage { .. }
+        | NoiseChannel::Seepage { .. }
+        | NoiseChannel::LeakageTransport { .. }
+        | NoiseChannel::QuasiStatic { .. } => {
+            unreachable!("channels with per-shot memory run through apply_memory_event")
+        }
+    }
+}
+
+/// What a model asks of each shot beyond its event stream: leak flags when it
+/// carries a leakage channel, and `sources` quasi-static standard normal draws.
+#[derive(Clone, Copy)]
+pub(crate) struct MemorySpec {
+    leakage: bool,
+    sources: usize,
+}
+
+impl MemorySpec {
+    /// `None` for a model whose events need no per-shot memory, which keeps the
+    /// trajectory loop and its draws exactly as they were before these channels.
+    pub(crate) fn of(noise: &NoiseModel) -> Option<Self> {
+        let spec = Self {
+            leakage: noise.has_leakage(),
+            sources: noise.quasi_static_sources(),
+        };
+        (spec.leakage || spec.sources > 0).then_some(spec)
+    }
+}
+
+/// Leak flags and quasi-static draws of one shot.
+///
+/// A qubit is reset and flipped to `|1>` when it leaks, and nothing acts on it
+/// again until it returns. The reset is one trajectory of the channel that
+/// traces the qubit out (see [`Backend::reset`]), so averaged over shots every
+/// other qubit holds the reduced state it would hold had the qubit left the
+/// register. The leaked qubit is then an unentangled `|1>`: measuring it
+/// reports 1 and collapses nothing else, and a return to a random basis state
+/// takes one coin and at most one `X`.
+struct ShotMemory {
+    leaked: Vec<bool>,
+    ever_leaked: Vec<bool>,
+    drift: Vec<f64>,
+}
+
+impl ShotMemory {
+    fn new(num_qubits: usize, spec: MemorySpec, rng: &mut ChaCha8Rng) -> Self {
+        let mut drift = vec![0.0; spec.sources];
+        standard_normals(rng, &mut drift);
+        let flags = if spec.leakage { num_qubits } else { 0 };
+        Self {
+            leaked: vec![false; flags],
+            ever_leaked: vec![false; flags],
+            drift,
+        }
+    }
+
+    #[inline]
+    fn is_leaked(&self, qubit: usize) -> bool {
+        self.leaked.get(qubit).copied().unwrap_or(false)
+    }
+
+    fn any_leaked(&self, qubits: &[usize]) -> bool {
+        qubits.iter().any(|&q| self.is_leaked(q))
+    }
+}
+
+/// Fill `out` with independent standard normal draws, two per Box-Muller pair
+/// of uniforms.
+pub(crate) fn standard_normals(rng: &mut ChaCha8Rng, out: &mut [f64]) {
+    for pair in out.chunks_mut(2) {
+        let u1: f64 = 1.0 - rand::RngExt::random::<f64>(rng);
+        let u2: f64 = rand::RngExt::random(rng);
+        let radius = (-2.0 * u1.ln()).sqrt();
+        let (sin, cos) = (std::f64::consts::TAU * u2).sin_cos();
+        pair[0] = radius * cos;
+        if let Some(second) = pair.get_mut(1) {
+            *second = radius * sin;
+        }
+    }
+}
+
+fn leak(backend: &mut dyn Backend, qubit: usize, memory: &mut ShotMemory) -> Result<()> {
+    backend.apply(&Instruction::Reset { qubit })?;
+    apply_pauli_op(backend, qubit, PauliOp::X)?;
+    memory.leaked[qubit] = true;
+    memory.ever_leaked[qubit] = true;
+    Ok(())
+}
+
+/// Stand in for a gate a leaked target blocks: the gate does not act, and each
+/// unleaked target of a multi-qubit gate takes a uniformly random Pauli.
+fn apply_blocked_gate(
+    backend: &mut dyn Backend,
+    targets: &[usize],
+    memory: &ShotMemory,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    if targets.len() < 2 {
+        return Ok(());
+    }
+    for &qubit in targets {
+        if memory.is_leaked(qubit) {
+            continue;
+        }
+        let letter = match rand::RngExt::random::<u64>(rng) >> 62 {
+            0 => PauliOp::I,
+            1 => PauliOp::X,
+            2 => PauliOp::Y,
+            _ => PauliOp::Z,
+        };
+        apply_pauli_op(backend, qubit, letter)?;
+    }
+    Ok(())
+}
+
+fn apply_leaky_instruction(
+    backend: &mut dyn Backend,
+    instr: &Instruction,
+    memory: &mut ShotMemory,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    match instr {
+        Instruction::Gate { targets, .. } if memory.any_leaked(targets) => {
+            apply_blocked_gate(backend, targets, memory, rng)
+        }
+        Instruction::Conditional {
+            condition, targets, ..
+        } if memory.any_leaked(targets) => {
+            if condition.evaluate(backend.classical_results()) {
+                apply_blocked_gate(backend, targets, memory, rng)
+            } else {
+                Ok(())
+            }
+        }
+        Instruction::Reset { qubit } => {
+            backend.apply(instr)?;
+            memory.leaked[*qubit] = false;
+            Ok(())
+        }
+        _ => backend.apply(instr),
+    }
+}
+
+/// Apply one event on the memory path. A channel without memory of its own
+/// skips an event naming a leaked qubit, and a skipped thermal event still
+/// advances `thermal_rates` so later ones keep their prepared rates.
+fn apply_memory_event(
+    backend: &mut dyn Backend,
+    event: &NoiseEvent,
+    thermal_rates: &mut std::slice::Iter<'_, (f64, f64)>,
+    memory: &mut ShotMemory,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    let qubit = event.qubits[0];
+    match &event.channel {
+        NoiseChannel::Leakage { p } => {
+            if !memory.is_leaked(qubit) && rand::RngExt::random::<f64>(rng) < *p {
+                leak(backend, qubit, memory)?;
+            }
+        }
+        NoiseChannel::Seepage { p } => {
+            if memory.is_leaked(qubit) && rand::RngExt::random::<f64>(rng) < *p {
+                memory.leaked[qubit] = false;
+                if rand::RngExt::random::<bool>(rng) {
+                    apply_pauli_op(backend, qubit, PauliOp::X)?;
+                }
+            }
+        }
+        NoiseChannel::LeakageTransport { p } => {
+            let other = event.qubits[1];
+            if memory.is_leaked(qubit) != memory.is_leaked(other)
+                && rand::RngExt::random::<f64>(rng) < *p
+            {
+                let target = if memory.is_leaked(qubit) {
+                    other
+                } else {
+                    qubit
+                };
+                leak(backend, target, memory)?;
+            }
+        }
+        NoiseChannel::QuasiStatic { axis, weights } => {
+            if !memory.is_leaked(qubit) {
+                let angle: f64 = weights
+                    .iter()
+                    .map(|&(source, weight)| weight * memory.drift[source])
+                    .sum();
+                let gate = match axis {
+                    PauliAxis::X => Gate::Rx(angle),
+                    PauliAxis::Y => Gate::Ry(angle),
+                    PauliAxis::Z => Gate::Rz(angle),
+                };
+                backend.apply(&Instruction::Gate {
+                    gate,
+                    targets: smallvec![qubit],
+                })?;
+            }
+        }
+        NoiseChannel::ThermalRelaxation {
+            t1, t2, gate_time, ..
+        } if memory.is_leaked(qubit) => {
+            if *t1 > 0.0 && *t2 > 0.0 && *gate_time > 0.0 {
+                thermal_rates.next();
+            }
+        }
+        _ if memory.any_leaked(&event.qubits) => {}
+        _ => apply_noise_event(backend, event, thermal_rates, rng)?,
+    }
+    Ok(())
+}
+
+/// [`run_trajectory_shot`] for a model with per-shot memory, also returning
+/// which qubits leaked at any point of the shot (empty without leakage).
+fn run_memory_shot(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    readout: &[Option<ReadoutError>],
+    thermal_rates: &[(f64, f64)],
+    spec: MemorySpec,
+    rng: &mut ChaCha8Rng,
+) -> Result<(Vec<bool>, Vec<bool>)> {
+    backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+    let mut memory = ShotMemory::new(circuit.num_qubits, spec, rng);
+    let mut thermal_rates = thermal_rates.iter();
+    for (instr, events) in circuit.instructions.iter().zip(&noise.after_gate) {
+        if spec.leakage {
+            apply_leaky_instruction(backend, instr, &mut memory, rng)?;
+        } else {
+            backend.apply(instr)?;
+        }
+        for event in events {
+            apply_memory_event(backend, event, &mut thermal_rates, &mut memory, rng)?;
+        }
+    }
+    let mut results = backend.classical_results().to_vec();
+    apply_readout_errors(&mut results, readout, rng);
+    Ok((results, memory.ever_leaked))
+}
+
+/// One trajectory on the path `memory` selects: its record, and the qubits it
+/// leaked when the model carries leakage.
+fn run_shot(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    readout: &[Option<ReadoutError>],
+    thermal_rates: &[(f64, f64)],
+    memory: Option<MemorySpec>,
+    rng: &mut ChaCha8Rng,
+) -> Result<(Vec<bool>, Vec<bool>)> {
+    match memory {
+        None => Ok((
+            run_trajectory_shot(backend, circuit, noise, readout, thermal_rates, rng)?,
+            Vec::new(),
+        )),
+        Some(spec) => run_memory_shot(backend, circuit, noise, readout, thermal_rates, spec, rng),
     }
 }
 
@@ -595,18 +853,21 @@ pub(crate) fn run_trajectories(
     }
 
     let readout = written_readout(circuit, &noise.readout);
+    let memory = MemorySpec::of(noise);
     let mut shots = Vec::with_capacity(num_shots);
+    let mut leaked = Vec::new();
     let mut metadata = crate::sim::RunMetadata::exact(route);
     for i in 0..num_shots {
         let shot_seed = crate::sim::mix_seed(seed, i);
         let mut rng = noise_rng(shot_seed);
         let mut backend = backend_factory(shot_seed);
-        let result = run_trajectory_shot(
+        let (result, shot_leaked) = run_shot(
             backend.as_mut(),
             circuit,
             noise,
             &readout,
             &thermal_rates,
+            memory,
             &mut rng,
         )?;
         let shot_metadata = crate::sim::backend_metadata(backend.as_ref());
@@ -616,9 +877,25 @@ pub(crate) fn run_trajectories(
             metadata.weaken_with(&shot_metadata);
         }
         shots.push(result);
+        leaked.push(shot_leaked);
     }
 
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
+    Ok(with_leak_record(
+        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata),
+        memory,
+        leaked,
+    ))
+}
+
+fn with_leak_record(
+    result: ShotsResult,
+    memory: Option<MemorySpec>,
+    leaked: Vec<Vec<bool>>,
+) -> ShotsResult {
+    match memory {
+        Some(spec) if spec.leakage => result.with_leaked(leaked),
+        _ => result,
+    }
 }
 
 #[cfg(feature = "parallel")]
@@ -632,35 +909,44 @@ fn run_trajectories_par(
     route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
     let readout = written_readout(circuit, &noise.readout);
-    let results: Result<Vec<(Vec<bool>, crate::sim::RunMetadata)>> = (0..num_shots)
+    let memory = MemorySpec::of(noise);
+    type ParShot = (Vec<bool>, Vec<bool>, crate::sim::RunMetadata);
+    let results: Result<Vec<ParShot>> = (0..num_shots)
         .into_par_iter()
         .map(|i| {
             let shot_seed = crate::sim::mix_seed(seed, i);
             let mut rng = noise_rng(shot_seed);
             let mut backend = backend_factory(shot_seed);
-            let bits = run_trajectory_shot(
+            let (bits, leaked) = run_shot(
                 backend.as_mut(),
                 circuit,
                 noise,
                 &readout,
                 thermal_rates,
+                memory,
                 &mut rng,
             )?;
-            Ok((bits, crate::sim::backend_metadata(backend.as_ref())))
+            Ok((bits, leaked, crate::sim::backend_metadata(backend.as_ref())))
         })
         .collect();
 
     let mut metadata = crate::sim::RunMetadata::exact(route);
     let mut shots = Vec::with_capacity(num_shots);
-    for (index, (bits, shot_metadata)) in results?.into_iter().enumerate() {
+    let mut leaked = Vec::with_capacity(num_shots);
+    for (index, (bits, shot_leaked, shot_metadata)) in results?.into_iter().enumerate() {
         if index == 0 {
             metadata = shot_metadata;
         } else {
             metadata.weaken_with(&shot_metadata);
         }
         shots.push(bits);
+        leaked.push(shot_leaked);
     }
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
+    Ok(with_leak_record(
+        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata),
+        memory,
+        leaked,
+    ))
 }
 
 /// One sampled Pauli error: the ordinal of the event that fired, counting the

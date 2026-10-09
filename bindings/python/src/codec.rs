@@ -722,6 +722,27 @@ pub(crate) fn write_channel(w: &mut Writer, channel: &NoiseChannel) -> PyPrismRe
                 w.c64s(flat(mat));
             }
         }
+        NoiseChannel::Leakage { p } => {
+            w.u8(8);
+            w.f64(*p);
+        }
+        NoiseChannel::Seepage { p } => {
+            w.u8(9);
+            w.f64(*p);
+        }
+        NoiseChannel::LeakageTransport { p } => {
+            w.u8(10);
+            w.f64(*p);
+        }
+        NoiseChannel::QuasiStatic { axis, weights } => {
+            w.u8(11);
+            w.u8(axis_tag(*axis));
+            w.usize(weights.len());
+            for &(source, weight) in weights {
+                w.usize(source);
+                w.f64(weight);
+            }
+        }
         other => {
             return Err(invalid(format!(
                 "noise channel {other:?} has no pickle encoding"
@@ -775,6 +796,19 @@ pub(crate) fn read_channel(r: &mut Reader<'_>) -> PyPrismResult<NoiseChannel> {
             NoiseChannel::Kraus2q {
                 kraus: (0..len)
                     .map(|_| r.matrix::<4>())
+                    .collect::<PyPrismResult<_>>()?,
+            }
+        }
+        8 => NoiseChannel::Leakage { p: r.f64()? },
+        9 => NoiseChannel::Seepage { p: r.f64()? },
+        10 => NoiseChannel::LeakageTransport { p: r.f64()? },
+        11 => {
+            let axis = axis_of(r.u8()?)?;
+            let len = r.len(16)?;
+            NoiseChannel::QuasiStatic {
+                axis,
+                weights: (0..len)
+                    .map(|_| Ok((r.usize()?, r.f64()?)))
                     .collect::<PyPrismResult<_>>()?,
             }
         }
@@ -1041,6 +1075,9 @@ pub(crate) fn write_qec_noise(w: &mut Writer, channel: &QecNoise) -> PyPrismResu
         QecNoise::YError(p) => (4, std::slice::from_ref(p)),
         QecNoise::PauliChannel1(rates) => (5, rates),
         QecNoise::PauliChannel2(rates) => (6, rates.as_slice()),
+        QecNoise::Leak(p) => (7, std::slice::from_ref(p)),
+        QecNoise::Seep(p) => (8, std::slice::from_ref(p)),
+        QecNoise::LeakTransport(p) => (9, std::slice::from_ref(p)),
         other => {
             return Err(invalid(format!(
                 "QEC noise {other:?} has no pickle encoding"
@@ -1071,6 +1108,9 @@ pub(crate) fn read_qec_noise(r: &mut Reader<'_>) -> PyPrismResult<QecNoise> {
         4 => QecNoise::YError(r.f64()?),
         5 => QecNoise::PauliChannel1(read_rates(r)?),
         6 => QecNoise::PauliChannel2(Box::new(read_rates(r)?)),
+        7 => QecNoise::Leak(r.f64()?),
+        8 => QecNoise::Seep(r.f64()?),
+        9 => QecNoise::LeakTransport(r.f64()?),
         other => return Err(bad_tag("QEC noise", other)),
     })
 }

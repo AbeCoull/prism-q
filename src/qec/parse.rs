@@ -16,8 +16,9 @@ const MAX_QEC_EXPANDED_LINES: usize = 1_000_000;
 /// `CZ`, `R`/`RX`/`RY`, `M`/`MX`/`MY`, `MR`/`MRX`/`MRY`, `MPP`, `DETECTOR`,
 /// `OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, `X_ERROR`, `Y_ERROR`, `Z_ERROR`,
 /// `DEPOLARIZE1`, `DEPOLARIZE2`, `PAULI_CHANNEL_1`, `PAULI_CHANNEL_2`, `TICK`,
-/// `QUBIT_COORDS`, `SHIFT_COORDS` (ignored), and flattened `REPEAT` blocks. Comments use
-/// `#`.
+/// `QUBIT_COORDS`, `SHIFT_COORDS` (ignored), flattened `REPEAT` blocks, and the leakage
+/// annotations `LEAK(p)`, `SEEP(p)`, and `LEAK_TRANSPORT(p)` (pairs) described on
+/// [`QecNoise`]. Comments use `#`.
 ///
 /// `M(p)` and `MR(p)` lower `p` into a Pauli flip before the measurement; `MPP` takes
 /// no measurement-error argument.
@@ -69,7 +70,7 @@ impl QecTextParser {
             "POSTSELECT" => self.parse_postselect(args.as_deref(), &targets, line_num),
             "EXP_VAL" => self.parse_exp_val(args.as_deref(), &targets, line_num),
             "X_ERROR" | "Z_ERROR" | "DEPOLARIZE1" | "DEPOLARIZE2" | "Y_ERROR"
-            | "PAULI_CHANNEL_1" | "PAULI_CHANNEL_2" => {
+            | "PAULI_CHANNEL_1" | "PAULI_CHANNEL_2" | "LEAK" | "SEEP" | "LEAK_TRANSPORT" => {
                 self.parse_noise(&name, args.as_deref(), &targets, line_num)
             }
             "QUBIT_COORDS" => self.parse_qubit_coords(&targets, line_num),
@@ -317,6 +318,9 @@ impl QecTextParser {
                     "Z_ERROR" => QecNoise::ZError(p),
                     "DEPOLARIZE1" => QecNoise::Depolarize1(p),
                     "DEPOLARIZE2" => QecNoise::Depolarize2(p),
+                    "LEAK" => QecNoise::Leak(p),
+                    "SEEP" => QecNoise::Seep(p),
+                    "LEAK_TRANSPORT" => QecNoise::LeakTransport(p),
                     _ => unreachable!(),
                 }
             }
@@ -332,7 +336,7 @@ impl QecTextParser {
         for &qubit in &qubits {
             self.note_qubit(qubit);
         }
-        if channel.probability() > 0.0 {
+        if channel.probability() > 0.0 || channel.is_leakage() {
             self.ops.push(QecOp::Noise {
                 channel,
                 targets: qubits,

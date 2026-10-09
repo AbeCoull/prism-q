@@ -4,8 +4,8 @@ use num_complex::Complex64;
 use numpy::PyArray1;
 use prism_q::sim::calibration::presets;
 use prism_q::{
-    DeviceCalibration, ErrorChainComplex, GateFilter, NoiseBuilder, NoiseChannel, NoiseEvent,
-    NoiseModel,
+    DeviceCalibration, DriftDistribution, ErrorChainComplex, GateFilter, GateTimes, NoiseBuilder,
+    NoiseChannel, NoiseEvent, NoiseModel, PauliAxis,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -122,6 +122,37 @@ impl PyNoiseChannel {
         reduce(slf.as_any(), w.finish())
     }
 
+    /// An unleaked qubit leaves the computational subspace with probability `p`.
+    #[staticmethod]
+    fn leakage(p: f64) -> Self {
+        Self(NoiseChannel::Leakage { p })
+    }
+
+    /// A leaked qubit returns in a uniformly random basis state with probability `p`.
+    #[staticmethod]
+    fn seepage(p: f64) -> Self {
+        Self(NoiseChannel::Seepage { p })
+    }
+
+    /// Two-qubit: when exactly one qubit is leaked, the other leaks with probability `p`.
+    #[staticmethod]
+    fn leakage_transport(p: f64) -> Self {
+        Self(NoiseChannel::LeakageTransport { p })
+    }
+
+    /// Rotation about `axis` (`"x"`, `"y"` or `"z"`) by `sum(w * z[source])` over
+    /// `(source, w)` pairs, `z` standard normal draws made once per shot.
+    #[staticmethod]
+    fn quasi_static(axis: &str, weights: Vec<(usize, f64)>) -> PyPrismResult<Self> {
+        let axis = match axis {
+            "x" | "X" => PauliAxis::X,
+            "y" | "Y" => PauliAxis::Y,
+            "z" | "Z" => PauliAxis::Z,
+            other => return Err(invalid(format!("axis must be x, y or z, got {other:?}"))),
+        };
+        Ok(Self(NoiseChannel::QuasiStatic { axis, weights }))
+    }
+
     fn __repr__(&self) -> String {
         match &self.0 {
             NoiseChannel::Custom { kraus } => {
@@ -132,6 +163,104 @@ impl PyNoiseChannel {
             }
             other => format!("NoiseChannel({other:?})"),
         }
+    }
+}
+
+/// Instruction durations in seconds for timing an as-soon-as-possible schedule.
+#[pyclass(name = "GateTimes", module = "prism_q", from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyGateTimes(GateTimes);
+
+#[pymethods]
+impl PyGateTimes {
+    /// Durations of one-qubit gates and of gates on two or more qubits.
+    #[new]
+    fn new(one_qubit: f64, two_qubit: f64) -> Self {
+        Self(GateTimes::new(one_qubit, two_qubit))
+    }
+
+    /// Give gates named `name` their own duration; `"id"` makes identities delays.
+    fn with_gate(mut slf: PyRefMut<'_, Self>, name: String, time: f64) -> PyRefMut<'_, Self> {
+        slf.0 = slf.0.clone().with_gate(name, time);
+        slf
+    }
+
+    fn with_pair(mut slf: PyRefMut<'_, Self>, a: usize, b: usize, time: f64) -> PyRefMut<'_, Self> {
+        slf.0 = slf.0.clone().with_pair(a, b, time);
+        slf
+    }
+
+    fn with_measure(mut slf: PyRefMut<'_, Self>, time: f64) -> PyRefMut<'_, Self> {
+        slf.0 = slf.0.clone().with_measure(time);
+        slf
+    }
+
+    fn with_reset(mut slf: PyRefMut<'_, Self>, time: f64) -> PyRefMut<'_, Self> {
+        slf.0 = slf.0.clone().with_reset(time);
+        slf
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.0)
+    }
+}
+
+/// Zero-mean Gaussian over one quasi-static offset per qubit, drawn once per shot.
+#[pyclass(name = "DriftDistribution", module = "prism_q", from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyDriftDistribution(DriftDistribution);
+
+#[pymethods]
+impl PyDriftDistribution {
+    #[staticmethod]
+    fn independent(sigmas: Vec<f64>) -> Self {
+        Self(DriftDistribution::independent(sigmas))
+    }
+
+    /// Detuning widths `sqrt(2) / t2_star` in radians per second.
+    #[staticmethod]
+    fn from_t2_star(t2_star: Vec<f64>) -> Self {
+        Self(DriftDistribution::from_t2_star(t2_star))
+    }
+
+    #[staticmethod]
+    fn from_covariance(matrix: Vec<Vec<f64>>) -> Self {
+        Self(DriftDistribution::from_covariance(matrix))
+    }
+
+    /// Correlate each undirected coupling edge with coefficient `rho`.
+    fn with_neighbour_correlation(
+        mut slf: PyRefMut<'_, Self>,
+        coupling: Vec<(usize, usize)>,
+        rho: f64,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let n = slf.0.num_qubits();
+        if let Some(&(a, b)) = coupling.iter().find(|&&(a, b)| a >= n || b >= n) {
+            return Err(invalid(format!(
+                "coupling edge ({a}, {b}) is outside the {n}-qubit drift distribution"
+            )));
+        }
+        slf.0 = slf.0.clone().with_neighbour_correlation(coupling, rho);
+        Ok(slf)
+    }
+
+    #[getter]
+    fn num_qubits(&self) -> usize {
+        self.0.num_qubits()
+    }
+
+    /// Covariance as a list of rows.
+    fn covariance(&self) -> Vec<Vec<f64>> {
+        let n = self.0.num_qubits();
+        self.0
+            .covariance()
+            .chunks(n.max(1))
+            .map(<[f64]>::to_vec)
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("DriftDistribution(num_qubits={})", self.0.num_qubits())
     }
 }
 
@@ -251,6 +380,51 @@ impl PyNoiseBuilder {
         channel: &PyNoiseChannel,
     ) -> PyRefMut<'py, Self> {
         slf.0 = std::mem::take(&mut slf.0).before_measurements(channel.0.clone());
+        slf
+    }
+
+    /// Time the circuit for `scheduled_idle` and `quasi_static_detuning`.
+    fn schedule<'py>(mut slf: PyRefMut<'py, Self>, times: &PyGateTimes) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).schedule(times.0.clone());
+        slf
+    }
+
+    /// Relax each qubit over the idle part of every scheduled layer from its `(t1, t2)`.
+    fn scheduled_idle(
+        mut slf: PyRefMut<'_, Self>,
+        coherence: Vec<(f64, f64)>,
+    ) -> PyRefMut<'_, Self> {
+        slf.0 = std::mem::take(&mut slf.0).scheduled_idle(coherence);
+        slf
+    }
+
+    /// Per-shot detuning in rad/s, applied as a Z phase over each scheduled layer.
+    fn quasi_static_detuning<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        drift: &PyDriftDistribution,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).quasi_static_detuning(drift.0.clone());
+        slf
+    }
+
+    /// One per-shot fractional angle error with deviation `sigma` shared by matching rotations.
+    fn over_rotation_drift<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        filter: &PyGateFilter,
+        sigma: f64,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0).over_rotation_drift(filter.0.clone(), sigma);
+        slf
+    }
+
+    /// Per-shot fractional angle errors per target qubit, drawn jointly from `drift`.
+    fn over_rotation_drift_per_qubit<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        filter: &PyGateFilter,
+        drift: &PyDriftDistribution,
+    ) -> PyRefMut<'py, Self> {
+        slf.0 = std::mem::take(&mut slf.0)
+            .over_rotation_drift_per_qubit(filter.0.clone(), drift.0.clone());
         slf
     }
 
@@ -415,6 +589,18 @@ impl PyDeviceCalibration {
         Ok(PyNoiseModel {
             inner: self.0.to_noise_model(circuit.inner())?,
         })
+    }
+
+    /// `to_noise_model` plus idle relaxation timed by the table's own gate durations.
+    fn to_scheduled_noise_model(&self, circuit: &PyCircuit) -> PyPrismResult<PyNoiseModel> {
+        Ok(PyNoiseModel {
+            inner: self.0.to_scheduled_noise_model(circuit.inner())?,
+        })
+    }
+
+    /// The table's gate durations, pair entries included.
+    fn gate_times(&self) -> PyGateTimes {
+        PyGateTimes(self.0.gate_times())
     }
 
     fn __repr__(&self) -> String {

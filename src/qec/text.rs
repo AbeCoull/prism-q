@@ -38,7 +38,8 @@ impl QecProgram {
     /// line. Record references print as `rec[-k]` and parse back as absolute indices.
     /// A `QUBIT_COORDS` line keeps the qubit count when the highest qubit is unused.
     /// [`QecOptions`](super::QecOptions) are not part of the text, and the parser drops
-    /// zero-probability noise.
+    /// zero-probability Pauli noise but keeps a zero-rate leakage annotation, since
+    /// `LEAK(0)` still reads herald columns.
     ///
     /// # Errors
     ///

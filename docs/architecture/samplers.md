@@ -171,8 +171,14 @@ channels alone and each engine applies readout itself.
 same per-instruction vector: per-gate-type and per-qubit rates, idle
 decoherence against circuit layers, crosstalk through a coupling map, coherent
 over-rotation proportional to a rotation gate's own angle, reset error,
-pre-measurement error, and per-bit readout. Every rule is evaluated once at
-build time, so nothing it expresses reaches a per-shot or per-instruction loop.
+pre-measurement error, per-bit readout, idle relaxation and detuning timed by an
+as-soon-as-possible schedule of gate durations, and per-shot amplitude drift.
+Every rule is evaluated once at build time, so nothing it expresses reaches a
+per-shot or per-instruction loop; the drift rules emit fixed weights over draws
+the trajectory makes per shot. A timed rule places each qubit's events for a
+layer just before that qubit's next instruction rather than after the layer's
+last one, because instruction order can list a later layer's gate or
+measurement on the qubit ahead of an earlier layer's last instruction.
 
 Two-qubit Kraus operators are indexed `K[t][t']` with `t = 2*bit(q0) +
 bit(q1)`, the packing `Gate::matrix_4x4` uses. The density matrix compiles the
@@ -301,6 +307,70 @@ output matches CPU output statistically, not bit for bit. On-device counts are
 limited to 512 measurements (8 packed words); larger circuits fall back to the
 CPU reduction. Golden test: `noisy_compiled_gpu_reductions_match_cpu_statistics`
 (`tests/golden_gpu.rs`).
+
+## Leakage and quasi-static drift (`src/sim/trajectory.rs`, `src/qec/leakage.rs`)
+
+Two channel families carry state from one event to the next within a shot:
+leakage (`Leakage`, `Seepage`, `LeakageTransport`) keeps a leak flag per qubit,
+and `QuasiStatic` reads standard normal draws made once at the start of the
+shot. Neither is a CPTP map applied event by event, so the density matrix and
+the Pauli-path estimator decline them and they run on the per-shot trajectory
+engines only. A model holding none of them takes the trajectory loop unchanged,
+with the same draws; `MemorySpec::of` decides that once per run.
+
+**Leaked qubit in a trajectory.** When a qubit leaks, the engine resets it and
+flips it to `|1>`, then leaves it alone until it returns: gates naming it are
+skipped, every other channel skips events naming it, and a measurement of it
+reports 1. The reset is one trajectory of the channel
+`rho -> |0><0| (x) tr_q rho` (see `Backend::reset`), so averaged over shots the
+rest of the register holds exactly `tr_q rho`, the state it would hold had the
+qubit left the register. After the reset the qubit is an unentangled basis
+state, which is what makes the rest cheap:
+
+- Measuring it is a deterministic outcome that collapses nothing else, so the
+  ordinary measurement path reports 1, and a classical condition reading the
+  bit sees the same 1.
+- A skipped gate needs no kernel, and the stand-in for a multi-qubit gate it
+  blocks is one uniformly random Pauli (`I`, `X`, `Y`, `Z` at a quarter each) on
+  each unleaked target, which is complete depolarization.
+- Seepage returns the qubit to a uniformly random basis state with one coin and
+  at most one `X`, uncorrelated with the rest because nothing entangled it.
+
+Holding the leaked qubit at `|0>` would cost the same, but the measurement would
+then need a special case to report 1, and a conditional reading that bit would
+need one too. The reset costs one probability pass and one collapse per leak
+event, which is rare at realistic rates, and nothing per gate.
+
+`ShotsResult::leaked` records, per shot, which qubits leaked at any point: the
+erasure herald.
+
+**Quasi-static draws.** `QuasiStatic { axis, weights }` rotates its qubit by
+`sum_k w_k z_k`, where `z` holds one independent standard normal per source
+index, drawn by Box-Muller from the shot's noise stream before its first event.
+`NoiseBuilder` lowers a `DriftDistribution` with covariance `Sigma` through its
+Cholesky factor `L`: qubit `q`'s offset is row `q` of `L` against `z`, so the
+offsets have covariance `L L^T = Sigma` exactly, and detuning scales the row by
+each scheduled layer's duration. A singular `Sigma` (perfect correlation) keeps
+zero columns where the factor has no variance left.
+
+**Leakage on the compiled QEC path.** A Pauli frame cannot skip a gate, but it
+does not need to. `QecLeakageSampler` walks the deferred circuit forward per unit
+of 8192 shots, holding a packed leak row per alias next to the frame rows. A
+qubit that leaks gets a uniformly random frame Pauli, and every two-qubit gate
+meeting a leaked qubit scrambles the frames of both its qubits on the shots
+where either is leaked. Scrambling both qubits fully depolarizes the pair, and
+`tr_ab(U rho U^dag) = tr_ab(rho)` for any `U` on the pair, so the rest of the
+register sees exactly what it sees in a trajectory where the gate is skipped and
+the partner depolarized. Pauli annotations replay in program order with the
+leakage ones, and a firing that names a leaked qubit is dropped, as a trajectory
+skips it. The leaked qubit's own record is forced to 1 after the frame flips
+land. The result matches trajectory leakage in distribution on a
+Clifford program (`erasure_heralds_agree_with_trajectory_leakage_in_distribution`,
+`tests/qec_leakage.rs`). The flag of a measured alias cannot change before its
+record is read, since the lowering admits no gate on it and freezes its leakage
+targets, so the record reads the flag at measurement. `LEAK` targets add herald
+columns, `QecSampleResult::heralds`. Forcing a bit is not a linear flip, so these
+programs bypass the record-noise and parity-projection samplers.
 
 ## Error chain complex (`src/sim/homological.rs`)
 

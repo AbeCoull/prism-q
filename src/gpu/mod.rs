@@ -32,6 +32,12 @@ pub fn is_available() -> bool {
     GpuContext::is_available()
 }
 
+/// Whether NVRTC, which compiles the kernels when no cached image matches, loads in this
+/// process under one of the names `cudarc` searches (`libnvrtc.so.12`, `nvrtc64_120_0.dll`).
+pub fn nvrtc_available() -> bool {
+    device::nvrtc_present()
+}
+
 /// Statevector GPU crossover in qubits, read from `PRISM_GPU_MIN_QUBITS` once per process.
 pub fn min_qubits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -122,7 +128,7 @@ impl std::fmt::Debug for GpuContext {
 impl GpuContext {
     /// Initialise the context for the given CUDA device ordinal.
     ///
-    /// Compiles the kernel module at construction. Subsequent calls reuse the cached PTX.
+    /// Compiles the kernel module at construction. Subsequent calls reuse the cached image.
     pub fn new(device_id: usize) -> Result<Arc<Self>> {
         let device = Arc::new(GpuDevice::new(device_id)?);
         Ok(Arc::new(Self {
@@ -133,6 +139,11 @@ impl GpuContext {
 
     pub fn is_available() -> bool {
         GpuDevice::is_available()
+    }
+
+    /// Product name of the device bound to this context.
+    pub fn device_name(&self) -> Result<String> {
+        self.device.name()
     }
 
     /// Total VRAM on the device bound to this context.

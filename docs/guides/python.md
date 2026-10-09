@@ -16,8 +16,18 @@ distribution, which needs a Rust toolchain.
 pip install prism-q
 ```
 
-NumPy is the only runtime dependency. Building from a source checkout needs
-[maturin](https://www.maturin.rs/):
+NumPy is the only runtime dependency. The Linux and Windows wheels also carry the
+CUDA paths (see [GPU backends](#gpu-backends)), which need an NVIDIA driver and
+NVRTC, the CUDA runtime compiler. The `cuda12` extra installs NVRTC from PyPI:
+
+```bash
+pip install "prism-q[cuda12]"
+```
+
+Neither is loaded at import, so on a host without them the package runs on the CPU
+as usual and only `GpuContext(...)` raises. The macOS wheel has no CUDA paths.
+
+Building from a source checkout needs [maturin](https://www.maturin.rs/):
 
 ```bash
 pip install maturin
@@ -25,9 +35,10 @@ maturin develop --manifest-path bindings/python/Cargo.toml
 ```
 
 The bindings enable the `parallel` feature by default. `gpu` and `distributed-mpi`
-are optional and off in the published wheels, so a wheel from PyPI has neither the CUDA
-paths (see [GPU backends](#gpu-backends)) nor the sharded statevector (see
-[Distributed](#distributed-backend)); building from source turns either on.
+are optional. `--features gpu` adds the CUDA paths to a source build and needs no
+CUDA toolkit to compile. The sharded statevector (see
+[Distributed](#distributed-backend)) is in no wheel, so `distributed-mpi` always
+means a source build.
 
 ## Quick start
 
@@ -418,29 +429,38 @@ every noisy terminal that `density_matrix()` serves answers from the device buff
 and a width whose `4^n` buffer does not fit in free device memory raises `PrismError`
 before anything is allocated (13 qubits on an 11 GiB card).
 
-The published wheels are built without CUDA, because the Linux and Windows wheel
-runners have no CUDA toolkit and macOS has no CUDA at all. In those wheels the
-constructors still exist and `GpuContext(...)` raises `PrismError` naming the
-missing build feature, so code written against the GPU API fails with a message
-rather than an `AttributeError`. Two predicates separate the cases:
+The Linux and Windows wheels are built with CUDA support; the macOS wheel and a
+default source build are not. Without it the constructors still exist and
+`GpuContext(...)` raises `PrismError` naming the missing build feature, so code
+written against the GPU API fails with a message rather than an `AttributeError`.
+
+A CUDA build loads the NVIDIA driver when the first `GpuContext` opens, not at
+import, and NVRTC only when no cached kernel image matches the device, so a host
+with a warm cache never opens NVRTC. The driver must support CUDA 12.0 or newer.
+NVRTC comes from a CUDA 12 toolkit on the loader path (`PATH` on Windows, the
+`ld.so` search path on Linux), and otherwise from the `nvidia-cuda-nvrtc-cu12`
+package that the `cuda12` extra installs. When either is missing, `GpuContext(...)`
+raises `PrismError` naming it.
+
+The kernels compile to SASS for the device's own architecture, which any CUDA 12
+driver loads, so the newest NVRTC the extra installs also runs on older 12.x
+drivers. Only a device newer than the NVRTC falls back to PTX, which the driver
+compiles itself and which needs a driver at least as new as the NVRTC;
+`GpuContext(...)` names both versions when they disagree.
+
+`gpu_info()` opens a device and reports its name, or the reason it cannot be used:
+
+```python
+info = prism_q.gpu_info()
+print(info)   # GpuInfo(available=True, device="NVIDIA GeForce GTX 1080 Ti")
+```
+
+Two cheaper predicates stop short of compiling the kernels:
 
 ```python
 GpuContext.is_supported()   # was this build compiled with CUDA support
-GpuContext.is_available()   # ... and is a usable device present
+GpuContext.is_available()   # ... and does the driver open a device
 ```
-
-To get a build with CUDA support, install the CUDA toolkit (12.x or newer) and
-build from a checkout:
-
-```bash
-maturin develop --manifest-path bindings/python/Cargo.toml --features gpu
-```
-
-On Windows that build links the toolkit's NVRTC library (`nvrtc64_120_0.dll`
-for CUDA 12.x) from the toolkit `bin` directory, which Python does not search.
-The package adds it on import when `CUDA_PATH` is set, which the toolkit
-installer does; without it the import fails with `DLL load failed while
-importing _prism_q`.
 
 ## Distributed backend
 

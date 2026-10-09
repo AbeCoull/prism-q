@@ -11,18 +11,18 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Features exercised on runners without CUDA. The `gpu` feature links against CUDA via
-  # cudarc's dynamic-linking mode and can't build on hosts that don't have the NVIDIA
-  # toolkit installed, so CI enumerates features instead of using --all-features.
+  # Features exercised on every runner. `gpu` gets its own job below, and
+  # `distributed-mpi` needs a system MPI, so CI enumerates features instead of using
+  # --all-features.
   CI_FEATURES: parallel
   # Separate from CI_FEATURES so the default published feature set stays tested alone.
   CI_DIST_FEATURES: parallel distributed
   # Mirrors `rust-version` in Cargo.toml and `msrv` in clippy.toml. Update all three together.
   CI_MSRV: 1.87.0
-  # Doc surface. rustdoc compiles but never links, and cudarc's build script with the
-  # pinned cuda-12040 feature does not probe for a toolkit, so the gpu and distributed
-  # docs build on a bare runner. distributed-mpi stays out: mpi-sys fails in its build
-  # script when no MPI library is installed.
+  # Doc surface. cudarc's build script with the pinned cuda-12040 feature does not
+  # probe for a toolkit, so the gpu and distributed docs build on a bare runner.
+  # distributed-mpi stays out: mpi-sys fails in its build script when no MPI library
+  # is installed.
   CI_DOC_FEATURES: parallel,gpu,distributed
   CI_BENCH_FEATURES: parallel,bench-fast
   REGRESSION_THRESHOLD: ${{ vars.REGRESSION_THRESHOLD || '5.0' }}
@@ -637,35 +637,19 @@ jobs:
       - name: Cross-backend correctness matrix
         run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --test backend_matrix
 
-  # Compile-check the GPU paths with the CUDA toolkit but no device. The job only
-  # compiles and runs the device-free KERNEL_NAMES test (nothing opens a device),
-  # enforcing the exhaustive GPU dispatch matches and the golden_gpu registry at
-  # compile time. Pinned to ubuntu-22.04: CUDA 12.4 (matching cudarc's cuda-12040
-  # bindings) has no package for the ubuntu2404 repo on ubuntu-latest. The device
-  # suites (tests/golden_gpu.rs, tests/golden_gpu_density_matrix.rs) skip without a
-  # card and are not run anywhere in CI; scripts/test-gpu.ps1 runs them on a host
-  # with a device under PRISM_REQUIRE_GPU=1.
+  # Compile-check the GPU paths with no CUDA toolkit and no device, the setup the
+  # wheel jobs build in: cudarc loads the driver and NVRTC at run time, so neither
+  # is needed to build, link, or start a test binary. The job only compiles and runs
+  # the device-free KERNEL_NAMES test, enforcing the exhaustive GPU dispatch matches
+  # and the golden_gpu registry at compile time. The device suites
+  # (tests/golden_gpu.rs, tests/golden_gpu_density_matrix.rs) skip without a card
+  # and are not run anywhere in CI; scripts/test-gpu.ps1 runs them on a host with a
+  # device under PRISM_REQUIRE_GPU=1.
   gpu-check:
     name: GPU compile-check (no device)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: '12.4.0'
-          method: network
-      # cudarc links the driver rather than loading it on demand, so a test binary
-      # that reaches a driver symbol needs libcuda.so.1 present just to start, and
-      # nextest starts every binary to enumerate its tests. Whether the toolkit
-      # install drags a real driver in has changed upstream, so rely on the stub
-      # it ships instead: it satisfies the loader, and nothing here calls into it.
-      - name: Point the loader at the driver stub
-        run: |
-          stub=$(find "$CUDA_PATH" -path '*stubs*' -name libcuda.so | head -1)
-          test -n "$stub"
-          mkdir -p "$RUNNER_TEMP/cuda-stub"
-          ln -sf "$stub" "$RUNNER_TEMP/cuda-stub/libcuda.so.1"
-          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

@@ -27,7 +27,7 @@ smallvec = "1"
 thiserror = "2"
 rayon = { version = "1.12", optional = true }
 faer = { version = "0.24", optional = true, default-features = false, features = ["std", "rayon", "linalg"] }
-cudarc = { version = "0.19", optional = true, default-features = false, features = ["cuda-12040", "dynamic-linking", "driver", "nvrtc", "std"] }
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["cuda-12040", "dynamic-loading", "driver", "nvrtc", "std"] }
 mpi = { version = "0.8", optional = true }
 
 [dev-dependencies]
@@ -42,8 +42,8 @@ distributed-mpi = ["distributed", "dep:mpi"]
 bench-fast = []
 bench-internal = []
 
-# rustdoc compiles but never links, so the gpu surface documents without a CUDA toolkit
-# (cudarc's build script with the pinned cuda-12040 feature does not probe for one).
+# The gpu surface documents without a CUDA toolkit: cudarc's build script with the pinned
+# cuda-12040 feature does not probe for one, and the driver and NVRTC load at run time.
 # distributed-mpi is excluded: mpi-sys fails in its build script without an MPI library,
 # which the docs.rs sandbox does not have.
 [package.metadata.docs.rs]

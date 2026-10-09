@@ -1,8 +1,13 @@
 # GPU Backend
 
 ```admonish info
-The GPU backend is optional and gated behind the `gpu` feature. It requires the CUDA
-toolkit (12.x or newer) and a CUDA-capable device.
+The GPU backend is optional and gated behind the `gpu` feature. Building it needs no
+CUDA toolkit: the NVIDIA driver loads when the first `GpuContext` opens, and NVRTC
+when kernels need compiling.
+Running it needs a CUDA-capable device, a driver for CUDA 12.0 or newer, and NVRTC
+from a CUDA 12 toolkit on the loader path (`PATH` on Windows, the `ld.so` search path
+on Linux). A missing driver or NVRTC is a `PrismError` from `GpuContext::new`, not a
+load failure.
 ```
 
 ```bash
@@ -11,10 +16,17 @@ cargo nextest run --features "parallel gpu" --test golden_gpu --test golden_gpu_
 ```
 
 Constructing a `GpuContext` compiles the CUDA kernels through NVRTC, one to three seconds on a
-GTX 1080 Ti. The PTX is shared by every context in the process and cached on disk in
+GTX 1080 Ti. NVRTC emits SASS (a cubin) for the device's exact architecture, so a cubin
+from any CUDA 12 NVRTC loads on any CUDA 12 driver. When the NVRTC is older than the
+device and cannot target it, the kernels compile to PTX for the newest architecture below
+it instead, and the driver JITs that PTX; this needs a driver at least as new as the
+NVRTC, and `GpuContext::new` names both versions when it is not. The image is shared by
+every context in the process and cached on disk in
 `prism-q-ptx` under the user cache directory (`XDG_CACHE_HOME`, else `LOCALAPPDATA`,
 else `HOME/.cache`, else the OS temp directory), keyed by device arch, crate version,
-and a hash of the kernel source, so later processes skip the compile. A missing,
+and a hash of the kernel source, so later processes skip the compile. File names also
+record the NVRTC version. A cached cubin is used whichever NVRTC made it, without
+opening NVRTC; cached PTX is used only after it, since the driver may refuse it. A missing,
 unreadable, or corrupt cache file only costs a recompile; delete the directory to force
 one.
 
@@ -75,15 +87,16 @@ currently free VRAM is rejected at `init` with an error naming the requested and
 device memory; `GpuContext::max_qubits_for_statevector` reports the advisory cap from
 free memory.
 
-The four `BackendKind` entry points are also reachable from Python, from a build
-carrying the `gpu` feature. See [Python Bindings](python.md#gpu-backends).
+The four `BackendKind` entry points are also reachable from Python. The Linux and
+Windows wheels carry the `gpu` feature, and `pip install "prism-q[cuda12]"` adds
+NVRTC from PyPI. See [Python Bindings](python.md#gpu-backends).
 
 ## Module layout (`src/gpu/`)
 
 | File | Role |
 | ---- | ---- |
 | `mod.rs` | `GpuContext`, `GpuState` public entry points |
-| `device.rs` | `GpuDevice`: cudarc wrapper, compiles PTX at device construction |
+| `device.rs` | `GpuDevice`: cudarc wrapper, compiles the kernel image at device construction |
 | `memory.rs` | `GpuBuffer`: device `Complex64` storage |
 | `kernels/mod.rs` | `KERNEL_NAMES`, `LauncherScratch`, composed `kernel_source()` concatenating dense, stabilizer, BTS and density |
 | `kernels/dense.rs` | Rust launchers for every `Gate` variant; CUDA C source in `kernels/dense.cu` |

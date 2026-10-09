@@ -30,12 +30,15 @@ jobs:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
+      # The gpu feature loads the CUDA driver and NVRTC at run time, so these
+      # runners build it without a toolkit and the wheel imports on hosts without
+      # one. macOS has no CUDA.
       matrix:
         platform:
-          - { os: linux, runner: ubuntu-latest, target: x86_64 }
-          - { os: linux, runner: ubuntu-24.04-arm, target: aarch64 }
-          - { os: macos, runner: macos-latest, target: aarch64 }
-          - { os: windows, runner: windows-latest, target: x64 }
+          - { os: linux, runner: ubuntu-latest, target: x86_64, features: --features gpu }
+          - { os: linux, runner: ubuntu-24.04-arm, target: aarch64, features: --features gpu }
+          - { os: macos, runner: macos-latest, target: aarch64, features: "" }
+          - { os: windows, runner: windows-latest, target: x64, features: --features gpu }
     steps:
       - uses: actions/checkout@v7
 
@@ -50,7 +53,7 @@ jobs:
         with:
           command: build
           target: ${{ matrix.platform.target }}
-          args: --profile python-release --manifest-path bindings/python/Cargo.toml --out dist
+          args: --profile python-release --manifest-path bindings/python/Cargo.toml --out dist ${{ matrix.platform.features }}
           manylinux: auto
 
       - name: Smoke test and pytest

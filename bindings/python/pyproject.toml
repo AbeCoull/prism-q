@@ -36,6 +36,9 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+cuda12 = ["nvidia-cuda-nvrtc-cu12"]
+
 [project.urls]
 Homepage = "https://github.com/AbeCoull/prism-q"
 Documentation = "https://abecoull.github.io/prism-q/"

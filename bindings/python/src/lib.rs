@@ -21,7 +21,7 @@ use braket::PyBraketProgram;
 use circuit::{PyCircuit, PyCircuitBuilder, PySaveSpec};
 use error::PrismError;
 use gate::PyGate;
-use gpu::PyGpuContext;
+use gpu::{PyGpuContext, PyGpuInfo};
 use noise::{PyDeviceCalibration, PyGateFilter, PyNoiseBuilder, PyNoiseChannel, PyNoiseModel};
 use parameter::{PyParameters, PyPreparedCircuit};
 use qec::{
@@ -47,6 +47,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyParameters>()?;
     m.add_class::<PyPreparedCircuit>()?;
     m.add_class::<PyGpuContext>()?;
+    m.add_class::<PyGpuInfo>()?;
     m.add_class::<crate::distributed::PyDistributedContext>()?;
     m.add_class::<PyNoiseChannel>()?;
     m.add_class::<PyGateFilter>()?;
@@ -81,6 +82,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sim::simulate, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu::gpu_info, m)?)?;
 
     circuit::register_circuits(m)?;
 

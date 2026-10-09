@@ -18,7 +18,7 @@ use crate::circuit::qasm::{lexer, parser as syntax};
 ///
 /// Physical qubits declare no register, so the width comes from the tree
 /// before any of it runs.
-fn highest_physical(block: &Block) -> Option<usize> {
+pub(super) fn highest_physical(block: &Block) -> Option<usize> {
     let mut highest: Option<usize> = None;
     let mut note = |operand: &Operand| {
         if let OperandName::Physical(index) = operand.name {
@@ -64,6 +64,7 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
                     Condition::Truthy(operand) | Condition::Negated(operand) => note(operand),
                     Condition::Compare { lhs, .. } => note(lhs),
                     Condition::Parity { bits, .. } => bits.iter().for_each(&mut *note),
+                    Condition::Expr(_) => {}
                 }
                 walk_operands(&conditional.then_body, note);
                 if let Some(body) = &conditional.else_body {
@@ -71,6 +72,7 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
                 }
             }
             StmtKind::For { body, .. }
+            | StmtKind::While { body, .. }
             | StmtKind::Box { body, .. }
             | StmtKind::DefDef { body, .. }
             | StmtKind::GateDef { body, .. } => walk_operands(body, note),
@@ -173,6 +175,8 @@ fn resolve_elements<'e>(
             Expr::Number(array.values[at])
         }
         Expr::Negate(inner) => Expr::Negate(Box::new(resolve(inner)?)),
+        Expr::Not(inner) => Expr::Not(Box::new(resolve(inner)?)),
+        Expr::BitNot(inner) => Expr::BitNot(Box::new(resolve(inner)?)),
         Expr::Binary { op, left, right } => Expr::Binary {
             op: *op,
             left: Box::new(resolve(left)?),
@@ -229,7 +233,9 @@ fn return_line(block: &[Stmt]) -> Option<usize> {
         StmtKind::Return(_) => Some(stmt.line),
         StmtKind::If(conditional) => return_line(&conditional.then_body)
             .or_else(|| conditional.else_body.as_deref().and_then(return_line)),
-        StmtKind::For { body, .. } | StmtKind::Box { body, .. } => return_line(body),
+        StmtKind::For { body, .. } | StmtKind::While { body, .. } | StmtKind::Box { body, .. } => {
+            return_line(body)
+        }
         StmtKind::Switch { arms, .. } => arms.iter().find_map(|arm| return_line(&arm.body)),
         _ => None,
     })
@@ -294,6 +300,10 @@ impl<'a> Parser<'a> {
                 }
                 self.noise_specs.push((base - 1, spec));
             }
+            if self.streaming() {
+                let produced = std::mem::take(&mut instructions);
+                self.flush(produced);
+            }
         }
         Ok(instructions)
     }
@@ -327,10 +337,25 @@ impl<'a> Parser<'a> {
                     }
                     return Ok(());
                 }
+                if self.in_while() {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "register `{name}` declared inside a `while` loop; declare it \
+                             before the loop"
+                        ),
+                        line,
+                    });
+                }
                 self.declare_register(*kind, name, size.as_ref(), line)?;
                 Ok(())
             }
             StmtKind::InputDecl { ty, name } => {
+                if self.dynamic.is_some() {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!("input `{name}` in a dynamic program"),
+                        line,
+                    });
+                }
                 self.declare_input(ty, name, line)?;
                 Ok(())
             }
@@ -347,9 +372,20 @@ impl<'a> Parser<'a> {
             StmtKind::ClassicalDecl {
                 constant,
                 ty,
+                width,
                 name,
                 value,
             } => {
+                if self.is_runtime_decl(stmt) {
+                    return self.declare_runtime(
+                        *constant,
+                        ty,
+                        width.as_ref(),
+                        name,
+                        value.as_ref(),
+                        line,
+                    );
+                }
                 self.declare_classical(*constant, ty, name, value.as_ref(), line)?;
                 Ok(())
             }
@@ -368,6 +404,19 @@ impl<'a> Parser<'a> {
                 operands,
             } => self.exec_call(modifiers, name, params, operands, line, out),
             StmtKind::Measure(measure) => {
+                if let Some(name) = measure
+                    .target
+                    .register()
+                    .filter(|name| self.dynamic.is_some() && self.classical.contains_key(name))
+                {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "a measurement into variable `{name}`; measure into a bit and \
+                             assign the bit"
+                        ),
+                        line,
+                    });
+                }
                 let qubits = self.qubits_of(&measure.source)?;
                 let bits = self.bits_of(&measure.target)?;
                 out.extend(Self::build_measurements(qubits, bits, line)?);
@@ -405,6 +454,9 @@ impl<'a> Parser<'a> {
                 }
                 Ok(())
             }
+            StmtKind::If(conditional) if self.dynamic.is_some() => {
+                self.exec_if_dynamic(stmt, conditional, line, out)
+            }
             StmtKind::If(conditional) => {
                 out.extend(self.exec_if(conditional, line)?);
                 Ok(())
@@ -417,9 +469,29 @@ impl<'a> Parser<'a> {
                 out.extend(self.exec_for(variable, range, body, line)?);
                 Ok(())
             }
+            StmtKind::Switch { operand, arms } if self.switch_needs_graph(stmt, operand) => {
+                self.exec_switch_branches(operand, arms, line)
+            }
             StmtKind::Switch { operand, arms } => {
                 out.extend(self.exec_switch(operand, arms, line)?);
                 Ok(())
+            }
+            StmtKind::While { condition, body } if self.dynamic.is_some() => {
+                self.exec_while(condition, body, line)
+            }
+            StmtKind::Break | StmtKind::Continue if self.dynamic.is_some() => {
+                self.exec_loop_exit(matches!(stmt.kind, StmtKind::Break), line)
+            }
+            StmtKind::While { .. } | StmtKind::Break | StmtKind::Continue => {
+                let construct = match stmt.kind {
+                    StmtKind::While { .. } => "while",
+                    StmtKind::Break => "break",
+                    _ => "continue",
+                };
+                Err(PrismError::UnsupportedConstruct {
+                    construct: construct.to_string(),
+                    line,
+                })
             }
             StmtKind::GateDef {
                 name,
@@ -466,6 +538,15 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             StmtKind::CallAssign(assign) => self.exec_call_assign(assign, line, out),
+            StmtKind::ArrayDecl(decl) if self.is_runtime_decl(stmt) => {
+                Err(PrismError::UnsupportedConstruct {
+                    construct: format!(
+                        "array `{}`, written where a loop or a measurement decides the value",
+                        decl.name
+                    ),
+                    line,
+                })
+            }
             StmtKind::ArrayDecl(decl) => self.declare_array(decl, line),
             StmtKind::ElementAssign(assign) => self.assign_element(assign, line),
             StmtKind::Box { duration, body } => {
@@ -642,6 +723,9 @@ impl<'a> Parser<'a> {
         value: &Expr<'a>,
         line: usize,
     ) -> Result<()> {
+        if let Some(var) = self.runtime_var(target) {
+            return self.assign_runtime(var, op, value, line);
+        }
         let Some(decl) = self.classical.get(target) else {
             return Err(parse_error(
                 line,
@@ -1125,7 +1209,7 @@ impl<'a> Parser<'a> {
         self.register_indices(&self.cregs, ast::RegisterKind::Classical, name, operand)
     }
 
-    fn bit_of(&self, operand: &Operand) -> Result<usize> {
+    pub(super) fn bit_of(&self, operand: &Operand) -> Result<usize> {
         match self.bits_of(operand)?.as_slice() {
             [single] => Ok(*single),
             other => Err(parse_error(
@@ -1244,6 +1328,7 @@ impl<'a> Parser<'a> {
     // ------------------------------------------------------------ expressions
 
     pub(super) fn value_of(&self, expr: &Expr, line: usize) -> Result<f64> {
+        self.reject_runtime(expr, line)?;
         number_of(
             expr,
             line,
@@ -1278,6 +1363,9 @@ impl<'a> Parser<'a> {
         line: usize,
         out: &mut Vec<Instruction>,
     ) -> Result<()> {
+        if self.dynamic.is_some() && params.iter().any(|param| self.argument_is_runtime(param)) {
+            return self.exec_runtime_rotation(modifiers, name, params, operands, line, out);
+        }
         let modifiers = self.fold_modifiers(modifiers, line)?;
 
         if self.def_defs.contains_key(name) {
@@ -1873,6 +1961,7 @@ impl<'a> Parser<'a> {
             arrays: HashMap::new(),
             def_result: None,
             guard: None,
+            dynamic: None,
         };
         for (name, register) in &self.qregs {
             sub.qregs.insert(
@@ -1959,7 +2048,7 @@ impl<'a> Parser<'a> {
     /// A box only fixes timing, which an ideal simulation does not model, so
     /// fusion may merge across its boundary as freely as across a `delay`. The
     /// names its body declares go out of scope with it.
-    fn exec_box(&mut self, body: &Block<'a>) -> Result<Vec<Instruction>> {
+    pub(super) fn exec_box(&mut self, body: &Block<'a>) -> Result<Vec<Instruction>> {
         let scope = self.open_scope();
         let was_nested = std::mem::replace(&mut self.nested, true);
         let result = self.execute(body);
@@ -1969,7 +2058,7 @@ impl<'a> Parser<'a> {
     }
 
     /// The classical and array names in scope, for [`Parser::close_scope`].
-    fn open_scope(&self) -> Scope<'a> {
+    pub(super) fn open_scope(&self) -> Scope<'a> {
         (
             self.classical.keys().copied().collect(),
             self.arrays.keys().copied().collect(),
@@ -1978,7 +2067,7 @@ impl<'a> Parser<'a> {
 
     /// Drop the names declared since `scope` was opened. Names declared before
     /// it keep whatever the body wrote to them.
-    fn close_scope(&mut self, scope: &Scope<'a>) {
+    pub(super) fn close_scope(&mut self, scope: &Scope<'a>) {
         let (classical, arrays) = scope;
         let declared: Vec<&'a str> = self
             .classical
@@ -1987,6 +2076,7 @@ impl<'a> Parser<'a> {
             .filter(|name| !classical.contains(name))
             .collect();
         for name in declared {
+            self.forget_runtime(name);
             self.classical.remove(name);
             self.durations.remove(name);
             if let Some(values) = self.param_vars.as_mut() {
@@ -2001,12 +2091,14 @@ impl<'a> Parser<'a> {
     /// Whether the block runs is decided by a measurement, while a classical
     /// variable is folded here at parse time, so the block may not write any
     /// variable declared outside it.
-    fn region(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
+    pub(super) fn region(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
         self.enter_region_depth(block)?;
         let scope = self.open_scope();
         let outer_guard = self.guard.replace(scope.clone());
         let was_nested = std::mem::replace(&mut self.nested, true);
+        self.enter_collecting();
         let body = self.execute(block);
+        self.leave_collecting();
         self.nested = was_nested;
         self.guard = outer_guard;
         self.close_scope(&scope);
@@ -2022,7 +2114,8 @@ impl<'a> Parser<'a> {
             return Err(PrismError::UnsupportedConstruct {
                 construct: format!(
                     "a write to `{name}` under a runtime `if` or `switch`; the variable is \
-                     folded at parse time and cannot depend on a measurement"
+                     folded at parse time and cannot depend on a measurement, so parse the \
+                     program with `openqasm::parse_dynamic` to evaluate it at runtime"
                 ),
                 line,
             });
@@ -2067,6 +2160,7 @@ impl<'a> Parser<'a> {
             .and_then(|vars| vars.get(variable).copied());
         let scope = self.open_scope();
         let mut result = Ok(());
+        self.enter_static_loop();
         for value in values {
             // Each pass drops what the body declared, so a declaration binds
             // for one pass, while a write to an outer name carries on.
@@ -2085,6 +2179,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        self.leave_static_loop();
         if let Some(vars) = self.param_vars.as_mut() {
             match shadowed {
                 Some(value) => vars.insert(variable, value),
@@ -2256,7 +2351,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn condition_of(&self, condition: &Condition, line: usize) -> Result<ClassicalCondition> {
+    pub(super) fn condition_of(
+        &self,
+        condition: &Condition,
+        line: usize,
+    ) -> Result<ClassicalCondition> {
         match condition {
             Condition::Truthy(operand) => {
                 if let Some(bit) = self.single_bit(operand) {
@@ -2321,6 +2420,10 @@ impl<'a> Parser<'a> {
                     expected,
                 })
             }
+            Condition::Expr(expr) => Err(parse_error(
+                line,
+                format!("`{expr}` has no form a guard on classical bits can take"),
+            )),
             Condition::Compare { lhs, op, rhs } => {
                 let negate = *op == CmpOp::NotEqual;
                 let value = self.integer_of(rhs, line)?;

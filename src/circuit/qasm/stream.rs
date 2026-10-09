@@ -8,11 +8,30 @@ use crate::error::{PrismError, Result};
 pub(crate) struct Stream<'t, 'a> {
     tokens: &'t [Token<'a>],
     at: usize,
+    /// Read the grammar `parse_dynamic` accepts: loops, and conditions and
+    /// values over the full classical operator set.
+    dynamic: bool,
 }
 
 impl<'t, 'a> Stream<'t, 'a> {
     pub(crate) fn new(tokens: &'t [Token<'a>]) -> Self {
-        Self { tokens, at: 0 }
+        Self {
+            tokens,
+            at: 0,
+            dynamic: false,
+        }
+    }
+
+    pub(crate) fn dynamic(tokens: &'t [Token<'a>]) -> Self {
+        Self {
+            tokens,
+            at: 0,
+            dynamic: true,
+        }
+    }
+
+    pub(crate) fn is_dynamic(&self) -> bool {
+        self.dynamic
     }
 
     /// The token the cursor sits on. Never past the end: a stream always ends

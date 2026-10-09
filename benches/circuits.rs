@@ -11,15 +11,17 @@ use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 #[cfg(feature = "bench-internal")]
 use prism_q::backend::tensornetwork::{scalar_expectation, scalar_expectation_capped};
+use prism_q::circuit::dynamic::ClassicalType;
 use prism_q::circuit::fusion::fuse_circuit;
 use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{
-    BackendKind, ClassicalCondition, Instruction, MpsBackend, Parameters, PauliAxis,
-    PauliObservable, PauliTerm, PreparedCircuit, run_expectation_gradient,
-    run_expectation_gradient_shift, run_expectation_values, run_observable_expectation,
+    BackendKind, ClassicalCondition, DynamicProgram, DynamicProgramBuilder, Instruction,
+    MpsBackend, Parameters, PauliAxis, PauliObservable, PauliTerm, PreparedCircuit,
+    run_expectation_gradient, run_expectation_gradient_shift, run_expectation_values,
+    run_observable_expectation,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -5109,6 +5111,60 @@ fn bench_dynamic_temporal_prefix_blocks(c: &mut Criterion) {
     group.finish();
 }
 
+/// Random Ry/Rz layers with brick CX over `n` qubits, then a repeat-until-success
+/// loop on qubits 0 and 1 that succeeds with probability one half per attempt and
+/// counts its attempts, then every other qubit measured.
+fn rus_program(n: usize) -> DynamicProgram {
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let mut b = DynamicProgramBuilder::new(n, n);
+    for layer in 0..2 {
+        for q in 0..n {
+            b.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            b.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+        }
+        for q in ((layer % 2)..n - 1).step_by(2) {
+            b.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    let tries = b.declare("tries", ClassicalType::Uint { width: 8 }, 0i64.into());
+    b.add_measure(0, 0);
+    let condition = b.expr("c[0] && tries < 64").unwrap();
+    b.begin_while("rus", condition);
+    b.add_reset(0)
+        .add_gate(Gate::H, &[0])
+        .add_gate(Gate::Cx, &[0, 1])
+        .add_gate(Gate::Rz(0.7), &[1])
+        .add_gate(Gate::Cx, &[0, 1])
+        .add_measure(0, 0);
+    let next = b.expr("tries + 1").unwrap();
+    b.assign(tries, next);
+    b.end().unwrap();
+    for q in 1..n {
+        b.add_measure(q, q);
+    }
+    b.build().unwrap()
+}
+
+/// A dynamic program walked once per shot: the per-shot cliff plus the loop's
+/// block boundaries and classical evaluation.
+fn bench_dynamic_rus(c: &mut Criterion) {
+    let shots = 1_000usize;
+    let mut group = c.benchmark_group("dynamic/rus");
+    configure_group(&mut group);
+    for &n in &[10usize, 16] {
+        let program = rus_program(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &program, |b, program| {
+            b.iter(|| {
+                prism_q::simulate_program(program)
+                    .seed(SEED)
+                    .shots(shots)
+                    .unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -5264,6 +5320,7 @@ criterion_group! {
     bench_dynamic_shots,
     bench_dynamic_mid_circuit_shots,
     bench_dynamic_clifford_shots,
-    bench_dynamic_temporal_prefix_blocks
+    bench_dynamic_temporal_prefix_blocks,
+    bench_dynamic_rus
 }
 criterion_main!(benches);

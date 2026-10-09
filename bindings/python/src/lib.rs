@@ -15,6 +15,7 @@ mod noise;
 mod numpy_util;
 mod parameter;
 mod pickle;
+mod program;
 mod qec;
 mod sampler;
 mod sim;
@@ -30,6 +31,7 @@ use noise::{
     PyNoiseModel,
 };
 use parameter::{PyParameters, PyPreparedCircuit};
+use program::{PyDynamicProgram, PyDynamicProgramBuilder, PyProgramSimulation};
 use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
 };
@@ -85,10 +87,15 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDetectorErrorModel>()?;
     m.add_class::<PyDecoder>()?;
     m.add_class::<PyBraketProgram>()?;
+    m.add_class::<PyDynamicProgram>()?;
+    m.add_class::<PyDynamicProgramBuilder>()?;
+    m.add_class::<PyProgramSimulation>()?;
 
     m.add_function(wrap_pyfunction!(circuit::parse_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(circuit::parse_qasm_parametric, m)?)?;
     m.add_function(wrap_pyfunction!(braket::parse_braket, m)?)?;
+    m.add_function(wrap_pyfunction!(program::parse_qasm_dynamic, m)?)?;
+    m.add_function(wrap_pyfunction!(program::simulate_program, m)?)?;
     m.add_function(wrap_pyfunction!(sim::simulate, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_batch, m)?)?;

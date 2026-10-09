@@ -19,6 +19,19 @@ pub(crate) enum BinaryOp {
     Div,
     Rem,
     Pow,
+    Shl,
+    Shr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
 }
 
 impl BinaryOp {
@@ -30,6 +43,19 @@ impl BinaryOp {
             BinaryOp::Div => "/",
             BinaryOp::Rem => "%",
             BinaryOp::Pow => "**",
+            BinaryOp::Shl => "<<",
+            BinaryOp::Shr => ">>",
+            BinaryOp::BitAnd => "&",
+            BinaryOp::BitOr => "|",
+            BinaryOp::BitXor => "^",
+            BinaryOp::Eq => "==",
+            BinaryOp::Ne => "!=",
+            BinaryOp::Lt => "<",
+            BinaryOp::Le => "<=",
+            BinaryOp::Gt => ">",
+            BinaryOp::Ge => ">=",
+            BinaryOp::And => "&&",
+            BinaryOp::Or => "||",
         }
     }
 }
@@ -80,6 +106,10 @@ pub(crate) enum Expr<'a> {
     Duration(Duration),
     Ident(&'a str),
     Negate(Box<Expr<'a>>),
+    /// `!x`, logical negation.
+    Not(Box<Expr<'a>>),
+    /// `~x`, bitwise complement.
+    BitNot(Box<Expr<'a>>),
     Binary {
         op: BinaryOp,
         left: Box<Expr<'a>>,
@@ -110,7 +140,7 @@ impl<'a> Expr<'a> {
         match self {
             Expr::Number(_) | Expr::Duration(_) => false,
             Expr::Ident(ident) => *ident == name,
-            Expr::Negate(inner) => inner.mentions(name),
+            Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.mentions(name),
             Expr::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
             Expr::Call(call) => call.args.iter().any(|arg| arg.mentions(name)),
             Expr::Element(element) => element.indices.iter().any(|index| index.mentions(name)),
@@ -121,7 +151,7 @@ impl<'a> Expr<'a> {
     pub(crate) fn reads_element(&self) -> bool {
         match self {
             Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) => false,
-            Expr::Negate(inner) => inner.reads_element(),
+            Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.reads_element(),
             Expr::Binary { left, right, .. } => left.reads_element() || right.reads_element(),
             Expr::Call(call) => call.args.iter().any(Expr::reads_element),
             Expr::Element(_) => true,
@@ -155,6 +185,14 @@ impl fmt::Display for Expr<'_> {
             Expr::Ident(name) => f.write_str(name),
             Expr::Negate(inner) => {
                 f.write_str("-")?;
+                grouped(f, inner)
+            }
+            Expr::Not(inner) => {
+                f.write_str("!")?;
+                grouped(f, inner)
+            }
+            Expr::BitNot(inner) => {
+                f.write_str("~")?;
                 grouped(f, inner)
             }
             Expr::Binary { op, left, right } => {
@@ -196,8 +234,52 @@ fn grouped(f: &mut fmt::Formatter<'_>, expr: &Expr<'_>) -> fmt::Result {
 }
 
 /// Parse one expression, leaving the cursor on whatever follows it.
+///
+/// A dynamic stream reads the full classical operator set, loosest first:
+/// `||`, `&&`, `|`, `^`, `&`, equality, ordering, shifts, then arithmetic.
+/// Otherwise the grammar stops at arithmetic, as every static construct reads.
 pub(crate) fn parse<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
+    if stream.is_dynamic() {
+        return parse_level(stream, 0);
+    }
     parse_sum(stream)
+}
+
+/// Arithmetic alone, for the operand of a static condition's comparison.
+pub(crate) fn parse_arithmetic<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
+    parse_sum(stream)
+}
+
+/// Binary operator levels above arithmetic, loosest first.
+const LEVELS: &[&[(Kind, BinaryOp)]] = &[
+    &[(Kind::OrOr, BinaryOp::Or)],
+    &[(Kind::AndAnd, BinaryOp::And)],
+    &[(Kind::Pipe, BinaryOp::BitOr)],
+    &[(Kind::Caret, BinaryOp::BitXor)],
+    &[(Kind::Amp, BinaryOp::BitAnd)],
+    &[(Kind::EqEq, BinaryOp::Eq), (Kind::NotEq, BinaryOp::Ne)],
+    &[
+        (Kind::Lt, BinaryOp::Lt),
+        (Kind::Le, BinaryOp::Le),
+        (Kind::Gt, BinaryOp::Gt),
+        (Kind::Ge, BinaryOp::Ge),
+    ],
+    &[(Kind::Shl, BinaryOp::Shl), (Kind::Shr, BinaryOp::Shr)],
+];
+
+fn parse_level<'a>(stream: &mut Stream<'_, 'a>, level: usize) -> Result<Expr<'a>> {
+    let Some(ops) = LEVELS.get(level) else {
+        return parse_sum(stream);
+    };
+    let mut left = parse_level(stream, level + 1)?;
+    loop {
+        let kind = stream.kind();
+        let Some(&(_, op)) = ops.iter().find(|(token, _)| *token == kind) else {
+            return Ok(left);
+        };
+        stream.advance();
+        left = binary(op, left, parse_level(stream, level + 1)?);
+    }
 }
 
 fn parse_sum<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
@@ -231,6 +313,12 @@ fn parse_unary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
     if stream.eat(Kind::Minus) {
         return Ok(Expr::Negate(Box::new(parse_unary(stream)?)));
     }
+    if stream.is_dynamic() && stream.eat(Kind::Bang) {
+        return Ok(Expr::Not(Box::new(parse_unary(stream)?)));
+    }
+    if stream.is_dynamic() && stream.eat(Kind::Tilde) {
+        return Ok(Expr::BitNot(Box::new(parse_unary(stream)?)));
+    }
     if stream.eat(Kind::Plus) {
         return parse_unary(stream);
     }
@@ -251,7 +339,7 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
     match stream.kind() {
         Kind::LParen => {
             stream.advance();
-            let inner = parse_sum(stream)?;
+            let inner = parse(stream)?;
             if !stream.eat(Kind::RParen) {
                 return Err(PrismError::Parse {
                     line: stream.line(),
@@ -285,9 +373,9 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
                     line: stream.line(),
                 });
             }
-            let mut args = vec![parse_sum(stream)?];
+            let mut args = vec![parse(stream)?];
             while stream.eat(Kind::Comma) {
-                args.push(parse_sum(stream)?);
+                args.push(parse(stream)?);
             }
             if !stream.eat(Kind::RParen) {
                 return Err(PrismError::Parse {
@@ -309,9 +397,9 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
 pub(crate) fn index_groups<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Expr<'a>>> {
     let mut indices = Vec::new();
     while stream.eat(Kind::LBracket) {
-        indices.push(parse_sum(stream)?);
+        indices.push(parse(stream)?);
         while stream.eat(Kind::Comma) {
-            indices.push(parse_sum(stream)?);
+            indices.push(parse(stream)?);
         }
         stream.expect(Kind::RBracket)?;
     }
@@ -416,6 +504,8 @@ fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Resu
             message: format!("`{}` is not a declared array", element.array),
         }),
         Expr::Negate(inner) => Ok(-evaluate(inner, line, vars)?),
+        Expr::Not(inner) => Ok(f64::from(u8::from(evaluate(inner, line, vars)? == 0.0))),
+        Expr::BitNot(inner) => Ok(!integral("~", evaluate(inner, line, vars)?, line)? as f64),
         Expr::Binary { op, left, right } => {
             let left = evaluate(left, line, vars)?;
             let right = evaluate(right, line, vars)?;
@@ -433,6 +523,8 @@ fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Resu
 }
 
 fn arithmetic(op: BinaryOp, left: f64, right: f64, line: usize) -> Result<f64> {
+    let truth = |value: bool| Ok(f64::from(u8::from(value)));
+    let bits = |value: f64| integral(op.spelling(), value, line);
     match op {
         BinaryOp::Add => Ok(left + right),
         BinaryOp::Sub => Ok(left - right),
@@ -440,7 +532,40 @@ fn arithmetic(op: BinaryOp, left: f64, right: f64, line: usize) -> Result<f64> {
         BinaryOp::Div => divide("division", left, right, line),
         BinaryOp::Rem => divide("modulo", left, right, line),
         BinaryOp::Pow => finite(line, op.spelling(), left.powf(right)),
+        BinaryOp::Eq => truth(left == right),
+        BinaryOp::Ne => truth(left != right),
+        BinaryOp::Lt => truth(left < right),
+        BinaryOp::Le => truth(left <= right),
+        BinaryOp::Gt => truth(left > right),
+        BinaryOp::Ge => truth(left >= right),
+        BinaryOp::And => truth(left != 0.0 && right != 0.0),
+        BinaryOp::Or => truth(left != 0.0 || right != 0.0),
+        BinaryOp::BitAnd => Ok((bits(left)? & bits(right)?) as f64),
+        BinaryOp::BitOr => Ok((bits(left)? | bits(right)?) as f64),
+        BinaryOp::BitXor => Ok((bits(left)? ^ bits(right)?) as f64),
+        BinaryOp::Shl | BinaryOp::Shr => {
+            let (value, shift) = (bits(left)?, bits(right)?);
+            match (op, u32::try_from(shift).ok().filter(|&shift| shift < 64)) {
+                (BinaryOp::Shl, Some(shift)) => Ok(value.wrapping_shl(shift) as f64),
+                (_, Some(shift)) => Ok((value >> shift) as f64),
+                _ => Err(PrismError::Parse {
+                    line,
+                    message: format!("shift by {right} is outside 0 to 63"),
+                }),
+            }
+        }
     }
+}
+
+/// An operand of a bitwise operator, which has to be a whole number.
+fn integral(op: &str, value: f64, line: usize) -> Result<i64> {
+    if value.fract() != 0.0 || value.abs() > i64::MAX as f64 {
+        return Err(PrismError::Parse {
+            line,
+            message: format!("`{op}` takes whole numbers, got {value}"),
+        });
+    }
+    Ok(value as i64)
 }
 
 /// True when the expression reads a duration: a literal, or a name `times` holds.
@@ -449,7 +574,7 @@ pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
         Expr::Number(_) => false,
         Expr::Duration(_) => true,
         Expr::Ident(name) => times.contains_key(name),
-        Expr::Negate(inner) => is_timed(inner, times),
+        Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => is_timed(inner, times),
         Expr::Binary { left, right, .. } => is_timed(left, times) || is_timed(right, times),
         Expr::Call(call) => call.args.iter().any(|arg| is_timed(arg, times)),
         Expr::Element(element) => element.indices.iter().any(|index| is_timed(index, times)),
@@ -480,6 +605,10 @@ pub(crate) fn eval_timed(
             Timed::Number(value) => Timed::Number(-value),
             Timed::Duration(duration) => Timed::Duration(duration.scaled(-1.0)),
             Timed::Stretch => Timed::Stretch,
+        }),
+        Expr::Not(_) | Expr::BitNot(_) => Err(PrismError::Parse {
+            line,
+            message: format!("`{expr}` applies a logical or bitwise operator to a duration"),
         }),
         Expr::Binary { op, left, right } => {
             let left = eval_timed(left, line, vars, times)?;

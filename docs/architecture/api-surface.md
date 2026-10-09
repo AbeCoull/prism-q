@@ -16,6 +16,7 @@ Fallible public APIs return `Result<T, PrismError>`. Error variants:
 | `ExportUnsupported` | Export | Instruction with no OpenQASM 3.0 spelling |
 | `BackendUnsupported` | Runtime | Backend can't perform requested operation |
 | `IncompatibleBackend` | Runtime | Backend incompatible with circuit |
+| `StepLimit` | Runtime | A dynamic program shot ran more blocks than its step bound; names the loop |
 | `ResourceLimit` | Runtime | An allocation over a memory cap; the boxed `ResourceLimit` carries the operation, the `ResourceKind` unit, `required` and `limit`, and the environment variable that overrides the cap |
 
 ```admonish note
@@ -59,6 +60,11 @@ returns an `OverlapResult` carrying the squared inner product and the provenance
 runs. All three require a unitary circuit, and under `BackendKind::Auto` a route that
 cannot answer falls back to the statevector. Which backends answer each is tabulated in
 [Backends](./backends.md).
+
+**Dynamic programs:**
+`DynamicProgram`, `DynamicProgramBuilder`, `simulate_program`, `SimulateProgram`,
+`openqasm::parse_dynamic`, and the IR types under `circuit::dynamic`. See
+[Dynamic Programs](./dynamic-programs.md).
 
 **Gradients:**
 `run_expectation_gradient`, `run_expectation_gradient_shift`, `ExpectationGradient`

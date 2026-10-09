@@ -118,8 +118,8 @@ An `if`, `else` or `switch` body opens a scope too, but whether it runs is decid
 measurement, and a classical variable is folded here at parse time. Such a body may
 declare and write its own variables, but a write to one declared outside it returns
 `UnsupportedConstruct`: the value would otherwise change whatever the measurement read.
-Holding a value that does depend on one needs a control-flow graph, which the IR does
-not build.
+Holding a value that does depend on one needs a control-flow graph, which
+[`parse_dynamic`](#dynamic-programs) builds.
 
 An `array` of any of those element types takes a size per dimension, fixed at parse
 time, and folds the same way. An element reads as `a[i, j]` or `a[i][j]` wherever a
@@ -206,6 +206,67 @@ directly named parametric gate at the top level. `rx(2 * theta)`, an input on a
 gate carrying no rotation angle, one reaching a `gate`, `def`, `for`, or guarded
 body, and one on a modified gate all return `UnsupportedConstruct` naming the
 reason rather than binding something the source did not mean.
+
+## Dynamic programs
+
+`openqasm::parse` returns a `Circuit`, a finite instruction list, so it declines a
+`while` loop and a classical value a measurement decides. `openqasm::parse_dynamic`
+reads the same language plus those, and returns a `DynamicProgram`: basic blocks of
+ordinary circuits joined by branches on classical expressions, run once per shot by
+`simulate_program`.
+
+```rust
+use prism_q::circuit::openqasm;
+use prism_q::simulate_program;
+
+let source = "
+    OPENQASM 3.0;
+    qubit[1] q;
+    bit[1] c;
+    uint[8] tries = 1;
+    h q[0];
+    c[0] = measure q[0];
+    while (c[0]) {
+        reset q[0];
+        h q[0];
+        c[0] = measure q[0];
+        tries += 1;
+        if (tries == 10) break;
+    }";
+let program = openqasm::parse_dynamic(source)?;
+let shots = simulate_program(&program).seed(42).shots(1000)?;
+# Ok::<(), prism_q::PrismError>(())
+```
+
+On top of what `parse` reads, `parse_dynamic` accepts:
+
+- `while (condition) { ... }`, with `break` and `continue`.
+- Conditions and values over the full classical operator set: `&&`, `||`, `!`, the
+  comparisons `<`, `<=`, `>`, `>=`, `==`, `!=`, and `&`, `|`, `^`, `~`, `<<`, `>>`,
+  with C precedence.
+- A classical bit read as a value (`c[0]`) and a bit register read as an unsigned
+  integer (`c`), up to 64 bits.
+- A write to a variable under a measured `if` or `switch`, which is evaluated when the
+  program runs rather than declined.
+- A runtime value as the angle of `rx`, `ry`, `rz`, `p` or `rzz`.
+
+A variable lives at runtime only when it has to: when a measured bit or another runtime
+variable reaches it, or when a loop or a measured branch writes it from outside the
+scope it was declared in. Every other variable folds at parse time as it does under
+`parse`, so a program `parse` accepts gives the same circuit under `parse_dynamic`, and
+runs with the same seeded shots. Runtime `int` and `uint` variables wrap at their
+declared width, 64 bits when none is given, and integer `/` truncates.
+
+A shot that runs more than a million blocks stops with `PrismError::StepLimit` naming
+its loop, rather than hanging; `SimulateProgram::max_steps` sets another bound. The
+architecture page on [dynamic programs](../architecture/dynamic-programs.md) covers the
+block structure, the backends that run it, and what it costs.
+
+Declined under `parse_dynamic`, all `UnsupportedConstruct`: a runtime value where a
+parse-time constant belongs (an index, a loop bound, a `def` argument, the angle of any
+other gate), a builtin function over a runtime value, a register declared inside a
+`while` body, an `array` a loop or measurement writes, a measurement into a variable
+rather than a bit, `break` or `continue` inside a `for`, and `input` parameters.
 
 ## Supported gates
 
@@ -412,7 +473,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `include "..."` | Accepted and ignored | Nothing. The standard gates are built in, so an include adds no names; a gate it would have defined declines later by name |
 | `qubit`, `qreg`, `bit`, `creg` | Parses | |
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
-| `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` |
+| `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic` |
 | `array` | Parses; folded at parse time | An element type other than `int`, `uint`, `float`, `angle` or `bool`: `UnsupportedConstruct`. An initializer of the wrong shape, an index out of range, or more than 2^20 elements: `Parse` |
 | `box`, `box[d]` | Runs its body in place | A length that is not a duration or is negative: `Parse` |
 | `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, and `durationof`: `UnsupportedConstruct` |
@@ -422,7 +483,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
 | `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present: `UnsupportedConstruct` |
 | `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
-| `while` | Declines | `UnsupportedConstruct`. A loop that exits on a measurement has no finite instruction list; it needs a control-flow graph the IR does not build |
+| `while`, `break`, `continue` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list. `break` or `continue` inside a `for`: `UnsupportedConstruct` |
 | `def` | Inlines its body at the call site, with `bit` parameters and a `bit` result | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width: `Parse` |
 | `return` | Parses as the last statement of a `def` | Anywhere else: `UnsupportedConstruct` |
 | `gate` blocks | Parses | |
@@ -512,7 +573,8 @@ any arm measures into the switched register. Both lower to a chain of guards tha
 the classical bits, so such a source could otherwise take two arms of one choice. An
 `else` body may write freely, since nothing re-reads after it.
 
-Classical expressions beyond the condition language are outside the subset, as is `while`.
+Under `parse`, classical expressions beyond the condition language are outside the
+subset, as is `while`; [`parse_dynamic`](#dynamic-programs) reads both.
 ```
 
 ```admonish note title="Qubit ordering"

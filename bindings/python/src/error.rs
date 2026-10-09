@@ -36,6 +36,7 @@ fn error_kind(err: &prism_q::PrismError) -> &'static str {
         E::ExportUnsupported { .. } => "export_unsupported",
         E::IncompatibleBackend { .. } => "incompatible_backend",
         E::ResourceLimit { .. } => "resource_limit",
+        E::StepLimit { .. } => "step_limit",
         _ => "other",
     }
 }

@@ -62,8 +62,9 @@
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
 //!
-//! - `defcal`, `extern`, `opaque`, `while`, `break`, and `return` outside a
-//!   `def`
+//! - `defcal`, `extern`, `opaque`, and `return` outside a `def`
+//! - `while`, `break` and `continue`, which [`parse_dynamic`] reads into a
+//!   control-flow graph
 //! - a `def` result of any type but `bit`, a call that drops a `bit` result, and
 //!   a `return` anywhere but last in the body: each needs control flow or
 //!   classical storage the instruction list does not have
@@ -390,6 +391,9 @@ pub(crate) struct Parser<'a> {
     /// The classical and array names in scope where the innermost runtime
     /// guard opened, none of which its body may write; `None` outside a guard.
     guard: Option<Scope<'a>>,
+    /// Lowering into a control-flow graph, for [`parse_dynamic`]; `None` for
+    /// every other entry point.
+    dynamic: Option<Box<dynamic::DynamicState<'a>>>,
 }
 
 /// Classical and array names in scope at some point, classical first.
@@ -492,6 +496,7 @@ impl<'a> Parser<'a> {
             arrays: HashMap::new(),
             def_result: None,
             guard: None,
+            dynamic: None,
         }
     }
 
@@ -1764,6 +1769,12 @@ impl<'a> Parser<'a> {
 
 #[path = "openqasm_eval.rs"]
 mod eval;
+
+#[path = "openqasm_dynamic.rs"]
+mod dynamic;
+
+pub(crate) use dynamic::builder_expr;
+pub use dynamic::parse_dynamic;
 
 #[cfg(test)]
 #[path = "openqasm_tests.rs"]

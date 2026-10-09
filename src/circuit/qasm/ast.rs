@@ -42,6 +42,8 @@ pub(crate) enum StmtKind<'a> {
     ClassicalDecl {
         constant: bool,
         ty: &'a str,
+        /// `n` in `int[n]`; only a runtime variable wraps to it.
+        width: Option<Expr<'a>>,
         name: &'a str,
         value: Option<Expr<'a>>,
     },
@@ -89,6 +91,13 @@ pub(crate) enum StmtKind<'a> {
         operand: Operand<'a>,
         arms: Vec<SwitchArm<'a>>,
     },
+    /// `while (cond) { ... }`, read only by `parse_dynamic`.
+    While {
+        condition: Condition<'a>,
+        body: Block<'a>,
+    },
+    Break,
+    Continue,
     GateDef {
         name: &'a str,
         params: Vec<&'a str>,
@@ -329,6 +338,8 @@ pub(crate) enum Condition<'a> {
         bits: Vec<Operand<'a>>,
         compare: Option<(CmpOp, Expr<'a>)>,
     },
+    /// Any other expression, which only a dynamic parse reads.
+    Expr(Expr<'a>),
 }
 
 #[derive(Clone, Debug)]

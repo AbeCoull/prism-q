@@ -37,6 +37,7 @@
 
 - [Overview and Layered Design](./architecture/overview.md)
 - [Parser and Circuit IR](./architecture/ir.md)
+- [Dynamic Programs](./architecture/dynamic-programs.md)
 - [Fusion Pipeline](./architecture/fusion.md)
 - [Simulation Engine and Dispatch](./architecture/engine.md)
 - [Backends](./architecture/backends.md)

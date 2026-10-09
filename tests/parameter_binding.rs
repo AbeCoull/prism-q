@@ -4,10 +4,10 @@
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
-use prism_q::circuit::fusion::fuse_circuit;
+use prism_q::circuit::fusion::{fuse_circuit, fuse_circuit_for_width};
 use prism_q::{
-    Circuit, CircuitBuilder, Gate, Instruction, ObservableExpectation, ParamLink, Parameters,
-    PauliObservable, PauliTerm, PreparedCircuit, circuits,
+    BackendKind, Circuit, CircuitBuilder, Gate, Instruction, ObservableExpectation, ParamLink,
+    Parameters, PauliObservable, PauliTerm, PreparedCircuit, SaveSpec, SavedValue, circuits,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -1129,6 +1129,165 @@ fn run_many_with_mid_circuit_measurement_matches_simulate() {
             let independent = params.bind(&template, values).unwrap();
             let expected = prism_q::simulate(&independent).seed(seed).run().unwrap();
             assert_eq!(got.classical_bits, expected.classical_bits, "{values:?}");
+        }
+    }
+}
+
+fn density_matrix_cases() -> Vec<(String, Circuit)> {
+    let mut cases = Vec::new();
+    for n in [5, 6, 8, 10, 12] {
+        cases.push((format!("qaoa/{n}"), circuits::qaoa_circuit(n, 2, SEED)));
+        if n <= 10 {
+            cases.push((
+                format!("hea/{n}"),
+                circuits::hardware_efficient_ansatz(n, 2, SEED),
+            ));
+        }
+    }
+    cases
+}
+
+// A 12-qubit mixture is a 24-qubit buffer, so the widest case keeps one generic
+// binding and one that falls back off the plan.
+fn density_matrix_points(n: usize, slots: usize, seed: u64) -> Vec<Vec<f64>> {
+    let mut points = bindings_with_fallback(slots, seed);
+    if n >= 12 {
+        points = vec![points.swap_remove(3), points.swap_remove(0)];
+    }
+    points
+}
+
+fn saved_mixture(outcome: &prism_q::RunOutcome) -> &[Complex64] {
+    match &outcome.saves[0].value {
+        SavedValue::DensityMatrix(rho) => rho,
+        other => panic!("expected a density matrix save, got {other:?}"),
+    }
+}
+
+#[test]
+fn prepared_streams_fuse_at_the_held_buffer_width() {
+    let mut cases: Vec<(String, Circuit, BackendKind)> = density_matrix_cases()
+        .into_iter()
+        .map(|(name, c)| (name, c, BackendKind::DensityMatrix))
+        .collect();
+    for (name, c) in [
+        ("qaoa/12", circuits::qaoa_circuit(12, 2, SEED)),
+        ("hea/12", circuits::hardware_efficient_ansatz(12, 2, SEED)),
+    ] {
+        cases.push((name.to_string(), c, BackendKind::Statevector));
+    }
+    for (name, template, kind) in cases {
+        let n = template.num_qubits;
+        let mixture = matches!(kind, BackendKind::DensityMatrix);
+        let width = if mixture { 2 * n } else { n };
+        let params = Parameters::all_rotations(&template);
+        let mut prepared =
+            PreparedCircuit::with_backend(template.clone(), params.clone(), kind.clone()).unwrap();
+        if name.starts_with("qaoa") {
+            assert!(prepared.reuses_fusion_plan(), "{name} {kind:?}");
+        }
+        for (point, values) in density_matrix_points(n, params.num_slots(), 9100)
+            .iter()
+            .enumerate()
+        {
+            let what = format!("{name} {kind:?} point {point}");
+            let independent = params.bind(&template, values).unwrap();
+            let expected = fuse_circuit_for_width(&independent, true, width).into_owned();
+            let got = prepared.bind_fused(values).unwrap();
+            assert_streams_match(got, &expected, &what);
+            if mixture && n >= 8 && point == 0 {
+                assert!(
+                    got.instructions.len() < template.instructions.len(),
+                    "{what}: the buffer width admits fusion"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn prepared_density_matrix_matches_a_direct_run_on_every_binding() {
+    for (name, mut template) in density_matrix_cases() {
+        let n = template.num_qubits;
+        let params = Parameters::all_rotations(&template);
+        template.add_save(SaveSpec::DensityMatrix, "rho");
+        let mut prepared = PreparedCircuit::with_backend(
+            template.clone(),
+            params.clone(),
+            BackendKind::DensityMatrix,
+        )
+        .unwrap();
+        let points = density_matrix_points(n, params.num_slots(), 9200);
+        let many = prepared.run_many(&points, SEED).unwrap();
+
+        for (point, values) in points.iter().enumerate() {
+            let what = format!("{name} point {point}");
+            let independent = params.bind(&template, values).unwrap();
+            let direct = prism_q::simulate(&independent)
+                .backend(BackendKind::DensityMatrix)
+                .seed(SEED)
+                .run()
+                .unwrap();
+            let expected = saved_mixture(&direct);
+            let looped = prepared.run(values, SEED).unwrap();
+            for (label, got) in [
+                ("run", saved_mixture(&looped)),
+                ("run_many", saved_mixture(&many[point])),
+            ] {
+                assert_eq!(got.len(), expected.len(), "{what} {label}");
+                for (i, (a, b)) in got.iter().zip(expected).enumerate() {
+                    assert!(
+                        (a - b).norm() < 1e-12,
+                        "{what} {label}: entry {i}, {a} vs {b}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// X and Y terms read the off-diagonal entries a probabilities check never sees.
+#[test]
+fn prepared_density_matrix_expectations_match_a_direct_run() {
+    for (name, template) in density_matrix_cases() {
+        let n = template.num_qubits;
+        let params = Parameters::all_rotations(&template);
+        let mut observables = vec![
+            vec![PauliTerm::x(0), PauliTerm::x(1)],
+            vec![PauliTerm::y(1), PauliTerm::z(2), PauliTerm::x(n - 1)],
+        ];
+        observables.extend((0..n).map(|q| vec![PauliTerm::x(q)]));
+        observables.extend((0..n).map(|q| vec![PauliTerm::y(q)]));
+        let observable = energy(n);
+        let mut prepared = PreparedCircuit::with_backend(
+            template.clone(),
+            params.clone(),
+            BackendKind::DensityMatrix,
+        )
+        .unwrap();
+
+        for (point, values) in density_matrix_points(n, params.num_slots(), 9300)
+            .iter()
+            .enumerate()
+        {
+            let what = format!("{name} point {point}");
+            let independent = params.bind(&template, values).unwrap();
+            let sim = || {
+                prism_q::simulate(&independent)
+                    .backend(BackendKind::DensityMatrix)
+                    .seed(SEED)
+            };
+            let expected = sim().expectation_values(&observables).unwrap();
+            let got = prepared
+                .expectation_values(values, &observables, SEED)
+                .unwrap();
+            assert_values_close(&got, &expected, &what);
+
+            let expected = sim().observable_expectation(&observable).unwrap();
+            let got = prepared
+                .observable_expectation(values, &observable, SEED)
+                .unwrap();
+            assert_observables_close(&got, &expected, &what);
         }
     }
 }

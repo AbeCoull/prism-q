@@ -1530,12 +1530,12 @@ pub fn fuse_circuit_for_width<'a>(
     fuse_at_width(circuit, state_qubits, &mut Tracer::off())
 }
 
-/// The pass pipeline at the circuit's own width, recording provenance into `t`.
-pub(super) fn fuse_traced<'a>(circuit: &'a Circuit, t: &mut Tracer) -> Cow<'a, Circuit> {
-    fuse_at_width(circuit, circuit.num_qubits, t)
-}
-
-fn fuse_at_width<'a>(circuit: &'a Circuit, n: usize, t: &mut Tracer) -> Cow<'a, Circuit> {
+/// The pass pipeline with every floor gated at `n` qubits, recording provenance into `t`.
+pub(super) fn fuse_at_width<'a>(
+    circuit: &'a Circuit,
+    n: usize,
+    t: &mut Tracer,
+) -> Cow<'a, Circuit> {
     let pass_r = fuse_region_bodies(circuit, n);
     let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
     let pass0r = apply_pass(pass0, t, fuse_rzz);

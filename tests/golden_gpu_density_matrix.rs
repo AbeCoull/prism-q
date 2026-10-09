@@ -24,8 +24,8 @@ use prism_q::gates::{
 };
 use prism_q::gpu::GpuContext;
 use prism_q::{
-    BackendKind, NoiseChannel, NoiseEvent, NoiseModel, Parameters, PauliTerm, Placement, circuits,
-    sim,
+    BackendKind, NoiseChannel, NoiseEvent, NoiseModel, Parameters, PauliTerm, Placement,
+    PreparedCircuit, SaveSpec, SavedValue, circuits, sim,
 };
 
 const EPS: f64 = 1e-12;
@@ -544,6 +544,52 @@ fn dm_gpu_fused_stream_matches_unfused_cpu() {
             EPS,
             &format!("{label} dispatched device run"),
         );
+    }
+}
+
+#[test]
+fn dm_gpu_prepared_runs_match_a_direct_cpu_run() {
+    // The held device backend applies a stream fused at the 2n buffer width,
+    // replayed per binding; the all-zero binding falls back off the plan.
+    let Some(f) = Fixture::try_new() else { return };
+    for (label, mut template) in [
+        ("qaoa/6", circuits::qaoa_circuit(6, 3, SEED)),
+        ("qaoa/8", circuits::qaoa_circuit(8, 3, SEED)),
+        ("hea/8", circuits::hardware_efficient_ansatz(8, 2, SEED)),
+    ] {
+        let params = Parameters::all_rotations(&template);
+        template.add_save(SaveSpec::DensityMatrix, "rho");
+        let mut prepared =
+            PreparedCircuit::with_backend(template.clone(), params.clone(), f.kind()).unwrap();
+        for point in 0..3 {
+            let values: Vec<f64> = (0..params.num_slots())
+                .map(|k| match point {
+                    2 => 0.0,
+                    _ => 0.3 + 0.71 * (k + 5 * point) as f64,
+                })
+                .collect();
+            let what = format!("{label} point {point}");
+            let bound = params.bind(&template, &values).unwrap();
+            let host = sim::simulate(&bound)
+                .backend(BackendKind::DensityMatrix)
+                .seed(SEED)
+                .run()
+                .unwrap();
+            let device = prepared.run(&values, SEED).unwrap();
+            assert_eq!(device.metadata.placement, Placement::Device, "{what}");
+            let (SavedValue::DensityMatrix(want), SavedValue::DensityMatrix(got)) =
+                (&host.saves[0].value, &device.saves[0].value)
+            else {
+                panic!("{what}: expected density matrix saves");
+            };
+            assert_eq!(want.len(), got.len(), "{what}");
+            for (i, (c, g)) in want.iter().zip(got).enumerate() {
+                assert!(
+                    (c - g).norm() < EPS,
+                    "{what}: entry {i} cpu={c:?} gpu={g:?}"
+                );
+            }
+        }
     }
 }
 

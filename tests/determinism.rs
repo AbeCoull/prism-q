@@ -574,9 +574,14 @@ fn mps_terminal_shots_identical_across_thread_counts() {
 
 // The product and factored samplers draw 256-shot blocks on streams keyed by
 // the block index, so the words match at any thread count, including a
-// partial trailing block.
-fn assert_block_sampled_shots_stable(circuit: &Circuit, kind: &BackendKind, label: &str) {
-    for num_shots in [SAMPLING_SHOTS, SAMPLING_SHOTS - 37] {
+// partial trailing block. Each fixture makes enough draws to fork its blocks.
+fn assert_block_sampled_shots_stable(
+    circuit: &Circuit,
+    kind: &BackendKind,
+    shots_per_run: usize,
+    label: &str,
+) {
+    for num_shots in [shots_per_run, shots_per_run - 37] {
         let shots = |threads: usize| {
             in_pool(threads, || {
                 simulate(circuit)
@@ -603,15 +608,21 @@ fn product_terminal_shots_identical_across_thread_counts() {
         circuit.add_gate(Gate::Ry(0.23 + 0.11 * q as f64), &[q]);
     }
     circuit.measure_all();
-    assert_block_sampled_shots_stable(&circuit, &BackendKind::ProductState, "product");
+    assert_block_sampled_shots_stable(
+        &circuit,
+        &BackendKind::ProductState,
+        SAMPLING_SHOTS,
+        "product",
+    );
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
 fn factored_terminal_shots_identical_across_thread_counts() {
+    // Two sub-states, so two draws a shot: 10,000 shots clear the parallel floor.
     let mut circuit = prism_q::circuits::partially_independent_circuit(18, 5, SEED);
     circuit.measure_all();
-    assert_block_sampled_shots_stable(&circuit, &BackendKind::Factored, "factored");
+    assert_block_sampled_shots_stable(&circuit, &BackendKind::Factored, 10_000, "factored");
 }
 
 const PER_SHOT_SHOTS: usize = 512;

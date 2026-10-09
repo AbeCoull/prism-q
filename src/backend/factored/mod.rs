@@ -992,13 +992,12 @@ impl Backend for FactoredBackend {
             .collect();
 
         use crate::sim::shots::{
-            MIN_QUBITS_FOR_PAR_DRAWS, MIN_SHOTS_FOR_PAR, sample_from_cdf, sample_in_shot_blocks,
+            draws_split_across_workers, sample_from_cdf, sample_in_shot_blocks,
         };
 
         let mut samples = BasisSamples::new(num_shots, self.num_qubits);
         let words_per_shot = samples.words_per_shot();
-        let parallel =
-            num_shots >= MIN_SHOTS_FOR_PAR && self.num_qubits >= MIN_QUBITS_FOR_PAR_DRAWS;
+        let parallel = draws_split_across_workers(num_shots, blocks.len());
         sample_in_shot_blocks(
             samples.words_mut(),
             words_per_shot,

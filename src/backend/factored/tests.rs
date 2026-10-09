@@ -1075,7 +1075,7 @@ fn native_sampler_matches_the_dense_factored_sampler_shot_for_shot() {
 
     let blocks = fac.block_probabilities().expect("factored blocks");
     let meas_map: Vec<(usize, usize)> = (0..n).map(|q| (q, q)).collect();
-    for shots in [1_000, 300, 31] {
+    for shots in [8_192, 1_000, 300, 31] {
         let dense = crate::sim::shots::sample_shots(&blocks, &meas_map, n, shots, 42);
         let native = fac.sample_basis_states(shots, 42).unwrap();
         let native = crate::sim::shots::shots_from_basis_samples(&native, &meas_map, n);

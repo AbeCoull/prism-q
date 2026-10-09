@@ -154,9 +154,16 @@ pub(crate) const SHOTS_PER_STREAM: usize = 256;
 /// Shot count below which a block sampler stays on the calling thread.
 pub(crate) const MIN_SHOTS_FOR_PAR: usize = 32;
 
-/// Qubits a shot must cover before the product and factored samplers split
-/// their blocks across workers; below it fork-join costs more than the draws.
-pub(crate) const MIN_QUBITS_FOR_PAR_DRAWS: usize = 16;
+/// Draws a call must make before the product and factored samplers split their
+/// blocks across workers: 2000 factored draws (1000 shots over two sub-states)
+/// ran 18% slower forked than serial.
+const MIN_DRAWS_FOR_PAR: usize = 1 << 14;
+
+/// Whether `num_shots` shots of `draws_per_shot` draws each carry enough work
+/// to fill their blocks in parallel. The blocks draw the same values either way.
+pub(crate) fn draws_split_across_workers(num_shots: usize, draws_per_shot: usize) -> bool {
+    num_shots >= MIN_SHOTS_FOR_PAR && num_shots.saturating_mul(draws_per_shot) >= MIN_DRAWS_FOR_PAR
+}
 
 /// Fill `rows`, `per_shot` entries to a shot, one block of [`SHOTS_PER_STREAM`]
 /// shots at a time. Block `b` draws from stream `b + 2` of the ChaCha8 generator
@@ -226,13 +233,9 @@ pub(crate) fn sample_shots(
         }
         // Same blocks, streams and per-shot draw order as the factored
         // backend's native sampler, so the two routes agree shot for shot.
-        Probabilities::Factored {
-            blocks,
-            total_qubits,
-        } => {
+        Probabilities::Factored { blocks, .. } => {
             let block_cdfs: Vec<Vec<f64>> = blocks.iter().map(|b| build_cdf(&b.probs)).collect();
-            let parallel =
-                num_shots >= MIN_SHOTS_FOR_PAR && *total_qubits >= MIN_QUBITS_FOR_PAR_DRAWS;
+            let parallel = draws_split_across_workers(num_shots, blocks.len());
             sample_in_shot_blocks(&mut shots, 1, seed, parallel, |rng, block_shots| {
                 for shot in block_shots {
                     let mut global_idx = 0usize;

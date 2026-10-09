@@ -5,6 +5,7 @@
 //! with identical symptoms into weighted error mechanisms.
 
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use super::noise::lower_qec_program_to_deferred_circuit;
 use super::parity_walk::compile_fault_sites;
@@ -19,9 +20,24 @@ pub struct ErrorMechanism {
     probability: f64,
     detectors: Vec<usize>,
     observables: Vec<usize>,
+    components: Vec<Symptom>,
 }
 
 impl ErrorMechanism {
+    pub(super) fn new(
+        probability: f64,
+        detectors: Vec<usize>,
+        observables: Vec<usize>,
+        components: Vec<Symptom>,
+    ) -> Self {
+        Self {
+            probability,
+            detectors,
+            observables,
+            components,
+        }
+    }
+
     pub fn probability(&self) -> f64 {
         self.probability
     }
@@ -34,6 +50,13 @@ impl ErrorMechanism {
     /// Observable indices this mechanism flips, ascending.
     pub fn observables(&self) -> &[usize] {
         &self.observables
+    }
+
+    /// Suggested split into components, each `(detectors, observables)` ascending, whose
+    /// symmetric difference is this mechanism's symptom; empty when none is carried. Read
+    /// from the `^` separators of imported text.
+    pub fn suggested_decomposition(&self) -> &[(Vec<usize>, Vec<usize>)] {
+        &self.components
     }
 }
 
@@ -52,6 +75,55 @@ pub struct DetectorErrorModel {
 }
 
 impl DetectorErrorModel {
+    pub(super) fn from_parts(
+        mechanisms: Vec<ErrorMechanism>,
+        detector_coords: Vec<Vec<f64>>,
+        num_detectors: usize,
+        num_observables: usize,
+    ) -> Self {
+        Self {
+            mechanisms,
+            detector_coords,
+            num_detectors,
+            num_observables,
+        }
+    }
+
+    /// Parse the common detector error model text format.
+    ///
+    /// Reads `error(p)` with `D` and `L` targets and `^` separators, `detector` with
+    /// optional coordinates, `logical_observable`, `shift_detectors`, and `repeat N {
+    /// ... }` blocks, which expand as they are read. Detector targets add the
+    /// accumulated `shift_detectors` offset and coordinates its accumulated coordinate
+    /// shift. Each `error` line becomes one mechanism, kept in order and not merged with
+    /// others of the same symptom; `^` separators become its
+    /// [`ErrorMechanism::suggested_decomposition`]. Instruction tags (`error[tag](p)`)
+    /// are ignored and `#` starts a comment. The detector and observable counts are one
+    /// past the highest index any instruction names.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prism_q::DetectorErrorModel;
+    ///
+    /// let model = DetectorErrorModel::from_text(
+    ///     "error(0.1) D0 D1 ^ D2 L0
+    ///      repeat 2 {
+    ///          error(0.01) D0
+    ///          shift_detectors 1
+    ///      }
+    ///      detector(1, 0) D0",
+    /// )?;
+    /// assert_eq!(model.num_mechanisms(), 3);
+    /// assert_eq!(model.mechanisms()[0].detectors(), [0, 1, 2]);
+    /// assert_eq!(model.mechanisms()[2].detectors(), [1]);
+    /// assert_eq!(model.detector_coords()[2], [1.0, 0.0]);
+    /// # Ok::<(), prism_q::PrismError>(())
+    /// ```
+    pub fn from_text(text: &str) -> Result<Self> {
+        super::dem_text::parse_detector_error_model(text)
+    }
+
     pub fn mechanisms(&self) -> &[ErrorMechanism] {
         &self.mechanisms
     }
@@ -79,9 +151,12 @@ impl DetectorErrorModel {
     /// A mechanism with more is replaced by existing graphlike mechanisms
     /// whose non-empty detector sets partition its detectors and whose
     /// observable XOR matches; its probability composes into every component
-    /// as `p = p1(1-p2) + p2(1-p1)`. Cross-component correlations are lost;
-    /// single-detector marginals are unchanged. Deterministic: retained
-    /// mechanisms keep their order, the first cover in mechanism order wins.
+    /// as `p = p1(1-p2) + p2(1-p1)`. A mechanism carrying a
+    /// [`suggested_decomposition`](ErrorMechanism::suggested_decomposition) whose
+    /// components each flip one or two detectors splits along it instead, a component
+    /// with no matching mechanism being appended at the end. Cross-component
+    /// correlations are lost; single-detector marginals are unchanged. Deterministic:
+    /// retained mechanisms keep their order, the first cover in mechanism order wins.
     ///
     /// # Errors
     ///
@@ -93,12 +168,43 @@ impl DetectorErrorModel {
                 graphlike.push(mechanism.clone());
             }
         }
+        let index = CoverIndex::new(&graphlike, self.num_detectors);
+        let mut by_symptom: Option<HashMap<Symptom, usize>> = None;
 
         for mechanism in &self.mechanisms {
             if mechanism.detectors.len() <= 2 {
                 continue;
             }
-            let Some(components) = partition_cover(mechanism, &graphlike) else {
+            let p = mechanism.probability;
+            if !mechanism.components.is_empty()
+                && mechanism
+                    .components
+                    .iter()
+                    .all(|(detectors, _)| matches!(detectors.len(), 1 | 2))
+            {
+                let by_symptom = by_symptom.get_or_insert_with(|| {
+                    graphlike
+                        .iter()
+                        .enumerate()
+                        .map(|(at, m)| ((m.detectors.clone(), m.observables.clone()), at))
+                        .collect()
+                });
+                for component in &mechanism.components {
+                    let at = *by_symptom.entry(component.clone()).or_insert_with(|| {
+                        graphlike.push(ErrorMechanism::new(
+                            0.0,
+                            component.0.clone(),
+                            component.1.clone(),
+                            Vec::new(),
+                        ));
+                        graphlike.len() - 1
+                    });
+                    let prior = graphlike[at].probability;
+                    graphlike[at].probability = prior * (1.0 - p) + p * (1.0 - prior);
+                }
+                continue;
+            }
+            let Some(components) = partition_cover(mechanism, &graphlike, &index) else {
                 return Err(PrismError::InvalidParameter {
                     message: format!(
                         "graphlike decomposition failed: mechanism `{}` has no \
@@ -107,7 +213,6 @@ impl DetectorErrorModel {
                     ),
                 });
             };
-            let p = mechanism.probability;
             for at in components {
                 let prior = graphlike[at].probability;
                 graphlike[at].probability = prior * (1.0 - p) + p * (1.0 - prior);
@@ -126,36 +231,79 @@ impl DetectorErrorModel {
     ///
     /// One `error(p) D.. L..` line per mechanism in mechanism order, then one
     /// `detector` line per detector (with its coordinates when present), then
-    /// one `logical_observable` line per observable slot. The grammar is
-    /// documented in `docs/architecture/qec-programs.md`.
+    /// one `logical_observable` line per observable slot. A mechanism on more than
+    /// two detectors is written as `^`-separated components: its suggested
+    /// decomposition when it carries one, else the cover
+    /// [`decompose_graphlike`](Self::decompose_graphlike) would use, else flat. The
+    /// output is flat otherwise: no `repeat` blocks and no `shift_detectors`. The
+    /// grammar is documented in `docs/architecture/qec-programs.md`.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
+        let mut cover: Option<(Vec<ErrorMechanism>, CoverIndex)> = None;
         for mechanism in &self.mechanisms {
-            out.push_str(&format!("error({})", mechanism.probability));
-            for detector in &mechanism.detectors {
-                out.push_str(&format!(" D{detector}"));
-            }
-            for observable in &mechanism.observables {
-                out.push_str(&format!(" L{observable}"));
+            write!(out, "error({})", mechanism.probability).expect("String write");
+            if !mechanism.components.is_empty() {
+                for (k, (detectors, observables)) in mechanism.components.iter().enumerate() {
+                    if k > 0 {
+                        out.push_str(" ^");
+                    }
+                    write_symptom(&mut out, detectors, observables);
+                }
+            } else if mechanism.detectors.len() > 2 {
+                let (graphlike, index) = cover.get_or_insert_with(|| {
+                    let graphlike: Vec<ErrorMechanism> = self
+                        .mechanisms
+                        .iter()
+                        .filter(|m| m.detectors.len() <= 2)
+                        .cloned()
+                        .collect();
+                    let index = CoverIndex::new(&graphlike, self.num_detectors);
+                    (graphlike, index)
+                });
+                match partition_cover(mechanism, graphlike, index) {
+                    Some(components) => {
+                        for (k, at) in components.into_iter().enumerate() {
+                            if k > 0 {
+                                out.push_str(" ^");
+                            }
+                            let component = &graphlike[at];
+                            write_symptom(&mut out, &component.detectors, &component.observables);
+                        }
+                    }
+                    None => write_symptom(&mut out, &mechanism.detectors, &mechanism.observables),
+                }
+            } else {
+                write_symptom(&mut out, &mechanism.detectors, &mechanism.observables);
             }
             out.push('\n');
         }
         for (detector, coords) in self.detector_coords.iter().enumerate() {
-            if coords.is_empty() {
-                out.push_str(&format!("detector D{detector}\n"));
-            } else {
-                let coords = coords
-                    .iter()
-                    .map(f64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.push_str(&format!("detector({coords}) D{detector}\n"));
+            out.push_str("detector");
+            if !coords.is_empty() {
+                out.push('(');
+                for (k, c) in coords.iter().enumerate() {
+                    if k > 0 {
+                        out.push_str(", ");
+                    }
+                    write!(out, "{c}").expect("String write");
+                }
+                out.push(')');
             }
+            writeln!(out, " D{detector}").expect("String write");
         }
         for observable in 0..self.num_observables {
-            out.push_str(&format!("logical_observable L{observable}\n"));
+            writeln!(out, "logical_observable L{observable}").expect("String write");
         }
         out
+    }
+}
+
+fn write_symptom(out: &mut String, detectors: &[usize], observables: &[usize]) {
+    for detector in detectors {
+        write!(out, " D{detector}").expect("String write");
+    }
+    for observable in observables {
+        write!(out, " L{observable}").expect("String write");
     }
 }
 
@@ -163,12 +311,12 @@ impl QecProgram {
     /// Derive the detector error model implied by the program's Pauli-noise
     /// annotations, detectors, and observables.
     ///
-    /// Each annotation expands into Pauli fault branches per fault site (one per
-    /// target for `X_ERROR` / `Z_ERROR`, three per target for `DEPOLARIZE1`,
-    /// fifteen per target pair for `DEPOLARIZE2`), each propagated to the
-    /// detectors and observables it flips. Exclusive branches at one site with the
-    /// same symptom sum; independent sites (distinct targets of one annotation
-    /// included) with the same symptom compose as `p = p1(1-p2) + p2(1-p1)`.
+    /// Each annotation expands into Pauli fault branches per fault site (the nonzero
+    /// ones of three per target for a one-qubit channel, of fifteen per target pair
+    /// for a two-qubit channel), each propagated to the detectors and observables
+    /// it flips. Exclusive branches at one site with the same symptom sum;
+    /// independent sites (distinct targets of one annotation included) with the same
+    /// symptom compose as `p = p1(1-p2) + p2(1-p1)`.
     /// Faults that flip nothing are omitted. Mechanisms are independent in the
     /// model, so its joint statistics agree with the sampler to second order in
     /// the branch probabilities.
@@ -201,7 +349,7 @@ impl QecProgram {
 }
 
 /// Flipped (detector indices, observable indices), both ascending.
-type Symptom = (Vec<usize>, Vec<usize>);
+pub(super) type Symptom = (Vec<usize>, Vec<usize>);
 
 fn derive_detector_error_model(program: &QecProgram) -> Result<DetectorErrorModel> {
     let detector_rows = program.detector_rows()?;
@@ -248,11 +396,12 @@ fn derive_detector_error_model(program: &QecProgram) -> Result<DetectorErrorMode
                 None => {
                     index.insert(symptom.clone(), mechanisms.len());
                     let (detectors, observables) = symptom;
-                    mechanisms.push(ErrorMechanism {
+                    mechanisms.push(ErrorMechanism::new(
                         probability,
                         detectors,
                         observables,
-                    });
+                        Vec::new(),
+                    ));
                 }
             }
         }
@@ -266,20 +415,43 @@ fn derive_detector_error_model(program: &QecProgram) -> Result<DetectorErrorMode
     })
 }
 
+/// Graphlike mechanisms by the detectors they flip, for [`partition_cover`].
+struct CoverIndex {
+    by_detector: Vec<Vec<u32>>,
+}
+
+impl CoverIndex {
+    fn new(graphlike: &[ErrorMechanism], num_detectors: usize) -> Self {
+        let mut by_detector = vec![Vec::new(); num_detectors];
+        for (at, mechanism) in graphlike.iter().enumerate() {
+            for &detector in &mechanism.detectors {
+                by_detector[detector].push(at as u32);
+            }
+        }
+        Self { by_detector }
+    }
+}
+
 /// Depth-first over candidates in mechanism order; the first cover found is
-/// the result.
-fn partition_cover(mechanism: &ErrorMechanism, graphlike: &[ErrorMechanism]) -> Option<Vec<usize>> {
+/// the result. Only graphlike mechanisms whose detectors all belong to `mechanism` can
+/// sit in a cover, so the search walks those alone, which finds the same first cover.
+fn partition_cover(
+    mechanism: &ErrorMechanism,
+    graphlike: &[ErrorMechanism],
+    index: &CoverIndex,
+) -> Option<Vec<usize>> {
     fn search(
         remaining: &[usize],
         observables: &[usize],
         start: usize,
+        candidates: &[usize],
         graphlike: &[ErrorMechanism],
         chosen: &mut Vec<usize>,
     ) -> bool {
         if remaining.is_empty() {
             return observables.is_empty();
         }
-        for at in start..graphlike.len() {
+        for (next, &at) in candidates.iter().enumerate().skip(start) {
             let candidate = &graphlike[at];
             if candidate.detectors.is_empty() || !is_subset(&candidate.detectors, remaining) {
                 continue;
@@ -290,7 +462,8 @@ fn partition_cover(mechanism: &ErrorMechanism, graphlike: &[ErrorMechanism]) -> 
             if search(
                 &next_remaining,
                 &next_observables,
-                at + 1,
+                next + 1,
+                candidates,
                 graphlike,
                 chosen,
             ) {
@@ -301,11 +474,22 @@ fn partition_cover(mechanism: &ErrorMechanism, graphlike: &[ErrorMechanism]) -> 
         false
     }
 
+    let mut candidates: Vec<usize> = mechanism
+        .detectors
+        .iter()
+        .filter_map(|&detector| index.by_detector.get(detector))
+        .flatten()
+        .map(|&at| at as usize)
+        .filter(|&at| is_subset(&graphlike[at].detectors, &mechanism.detectors))
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
     let mut chosen = Vec::new();
     search(
         &mechanism.detectors,
         &mechanism.observables,
         0,
+        &candidates,
         graphlike,
         &mut chosen,
     )

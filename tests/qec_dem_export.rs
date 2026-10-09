@@ -4,7 +4,10 @@
 
 mod qec_common;
 
-use prism_q::{Gate, PackedShots, QecNoise, QecPauli, QecProgram, QecRecordRef, run_qec_program};
+use prism_q::{
+    DetectorErrorModel, Gate, PackedShots, QecNoise, QecPauli, QecProgram, QecRecordRef,
+    run_qec_program,
+};
 
 const STAT_SHOTS: usize = 20_000;
 
@@ -20,37 +23,29 @@ struct ParsedModel {
     observable_lines: usize,
 }
 
-// Test-local reader for the emitted text, so every statistical check consumes
-// only the export artifact rather than the in-memory model.
+// Read the emitted text back, so every statistical check consumes only the export
+// artifact rather than the in-memory model.
 fn parse_dem_text(text: &str) -> ParsedModel {
     let mut model = ParsedModel {
-        mechanisms: Vec::new(),
+        mechanisms: DetectorErrorModel::from_text(text)
+            .unwrap()
+            .mechanisms()
+            .iter()
+            .map(|m| ParsedMechanism {
+                probability: m.probability(),
+                detectors: m.detectors().to_vec(),
+                observables: m.observables().to_vec(),
+            })
+            .collect(),
         detector_lines: 0,
         observable_lines: 0,
     };
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() {
+        if line.is_empty() || line.starts_with("error(") {
             continue;
         }
-        if let Some(rest) = line.strip_prefix("error(") {
-            let (probability, targets) = rest.split_once(')').expect("unterminated error line");
-            let mut mechanism = ParsedMechanism {
-                probability: probability.parse().unwrap(),
-                detectors: Vec::new(),
-                observables: Vec::new(),
-            };
-            for target in targets.split_whitespace() {
-                if let Some(detector) = target.strip_prefix('D') {
-                    mechanism.detectors.push(detector.parse().unwrap());
-                } else if let Some(observable) = target.strip_prefix('L') {
-                    mechanism.observables.push(observable.parse().unwrap());
-                } else {
-                    panic!("unknown error target {target}");
-                }
-            }
-            model.mechanisms.push(mechanism);
-        } else if line.starts_with("detector") {
+        if line.starts_with("detector") {
             model.detector_lines += 1;
         } else if line.starts_with("logical_observable") {
             model.observable_lines += 1;

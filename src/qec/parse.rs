@@ -1,7 +1,10 @@
 //! Text parser for the native measurement-record QEC format: line-oriented
 //! instructions, `rec[-k]` record references, and flattened `REPEAT` blocks.
 
-use super::{QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef};
+use super::{
+    QEC_PROBABILITY_SUM_TOLERANCE, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram,
+    QecRecordRef,
+};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
@@ -11,9 +14,10 @@ const MAX_QEC_EXPANDED_LINES: usize = 1_000_000;
 ///
 /// Recognized instructions: `I`, `X`, `Y`, `Z`, `H`, `S`, `S_DAG`, `T`, `T_DAG`, `CX`,
 /// `CZ`, `R`/`RX`/`RY`, `M`/`MX`/`MY`, `MR`/`MRX`/`MRY`, `MPP`, `DETECTOR`,
-/// `OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, `X_ERROR`, `Z_ERROR`, `DEPOLARIZE1`,
-/// `DEPOLARIZE2`, `TICK`, `QUBIT_COORDS`, `SHIFT_COORDS` (ignored), and flattened
-/// `REPEAT` blocks. Comments use `#`.
+/// `OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, `X_ERROR`, `Y_ERROR`, `Z_ERROR`,
+/// `DEPOLARIZE1`, `DEPOLARIZE2`, `PAULI_CHANNEL_1`, `PAULI_CHANNEL_2`, `TICK`,
+/// `QUBIT_COORDS`, `SHIFT_COORDS` (ignored), and flattened `REPEAT` blocks. Comments use
+/// `#`.
 ///
 /// `M(p)` and `MR(p)` lower `p` into a Pauli flip before the measurement; `MPP` takes
 /// no measurement-error argument.
@@ -64,7 +68,8 @@ impl QecTextParser {
             }
             "POSTSELECT" => self.parse_postselect(args.as_deref(), &targets, line_num),
             "EXP_VAL" => self.parse_exp_val(args.as_deref(), &targets, line_num),
-            "X_ERROR" | "Z_ERROR" | "DEPOLARIZE1" | "DEPOLARIZE2" => {
+            "X_ERROR" | "Z_ERROR" | "DEPOLARIZE1" | "DEPOLARIZE2" | "Y_ERROR"
+            | "PAULI_CHANNEL_1" | "PAULI_CHANNEL_2" => {
                 self.parse_noise(&name, args.as_deref(), &targets, line_num)
             }
             "QUBIT_COORDS" => self.parse_qubit_coords(&targets, line_num),
@@ -291,11 +296,35 @@ impl QecTextParser {
         targets: &[String],
         line_num: usize,
     ) -> Result<()> {
-        let p = parse_single_f64_arg(args, name, line_num)?;
-        if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        let channel = match name {
+            "PAULI_CHANNEL_1" => {
+                QecNoise::PauliChannel1(parse_f64_array_arg::<3>(args, name, line_num)?)
+            }
+            "PAULI_CHANNEL_2" => {
+                QecNoise::PauliChannel2(Box::new(parse_f64_array_arg::<15>(args, name, line_num)?))
+            }
+            _ => {
+                let p = parse_single_f64_arg(args, name, line_num)?;
+                if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+                    return Err(qec_parse_error(
+                        line_num,
+                        format!("`{name}` probability must be finite and in [0, 1]"),
+                    ));
+                }
+                match name {
+                    "X_ERROR" => QecNoise::XError(p),
+                    "Y_ERROR" => QecNoise::YError(p),
+                    "Z_ERROR" => QecNoise::ZError(p),
+                    "DEPOLARIZE1" => QecNoise::Depolarize1(p),
+                    "DEPOLARIZE2" => QecNoise::Depolarize2(p),
+                    _ => unreachable!(),
+                }
+            }
+        };
+        if channel.probability() > 1.0 + QEC_PROBABILITY_SUM_TOLERANCE {
             return Err(qec_parse_error(
                 line_num,
-                format!("`{name}` probability must be finite and in [0, 1]"),
+                format!("`{name}` probabilities must sum to at most 1"),
             ));
         }
         let qubits = parse_qubit_targets(targets, line_num)?;
@@ -303,14 +332,7 @@ impl QecTextParser {
         for &qubit in &qubits {
             self.note_qubit(qubit);
         }
-        let channel = match name {
-            "X_ERROR" => QecNoise::XError(p),
-            "Z_ERROR" => QecNoise::ZError(p),
-            "DEPOLARIZE1" => QecNoise::Depolarize1(p),
-            "DEPOLARIZE2" => QecNoise::Depolarize2(p),
-            _ => unreachable!(),
-        };
-        if p > 0.0 {
+        if channel.probability() > 0.0 {
             self.ops.push(QecOp::Noise {
                 channel,
                 targets: qubits,
@@ -516,6 +538,27 @@ fn parse_single_f64_arg(args: Option<&str>, name: &str, line_num: usize) -> Resu
         ));
     }
     Ok(values[0])
+}
+
+fn parse_f64_array_arg<const N: usize>(
+    args: Option<&str>,
+    name: &str,
+    line_num: usize,
+) -> Result<[f64; N]> {
+    let values = parse_f64_args(args, line_num)?;
+    let values: [f64; N] = values.try_into().map_err(|_| {
+        qec_parse_error(line_num, format!("`{name}` requires {N} numeric arguments"))
+    })?;
+    if values
+        .iter()
+        .any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
+    {
+        return Err(qec_parse_error(
+            line_num,
+            format!("`{name}` probabilities must be finite and in [0, 1]"),
+        ));
+    }
+    Ok(values)
 }
 
 fn parse_optional_coefficient(args: Option<&str>, line_num: usize) -> Result<f64> {

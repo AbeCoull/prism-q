@@ -1678,11 +1678,14 @@ pub fn prism_q::sim::unified_pauli::PauliAxis::from(prism_q::qec::QecBasis) -> S
 #[non_exhaustive] pub enum prism_q::qec::QecNoise
 pub prism_q::qec::QecNoise::Depolarize1(f64)
 pub prism_q::qec::QecNoise::Depolarize2(f64)
+pub prism_q::qec::QecNoise::PauliChannel1([f64; 3])
+pub prism_q::qec::QecNoise::PauliChannel2(alloc::boxed::Box<[f64; 15]>)
 pub prism_q::qec::QecNoise::XError(f64)
+pub prism_q::qec::QecNoise::YError(f64)
 pub prism_q::qec::QecNoise::ZError(f64)
 impl prism_q::qec::QecNoise
-pub fn prism_q::qec::QecNoise::name(self) -> &'static str
-pub fn prism_q::qec::QecNoise::probability(self) -> f64
+pub fn prism_q::qec::QecNoise::name(&self) -> &'static str
+pub fn prism_q::qec::QecNoise::probability(&self) -> f64
 #[non_exhaustive] pub enum prism_q::qec::QecOp
 pub prism_q::qec::QecOp::Detector
 pub prism_q::qec::QecOp::Detector::coords: alloc::vec::Vec<f64>
@@ -1732,6 +1735,7 @@ pub struct prism_q::qec::DetectorErrorModel
 impl prism_q::DetectorErrorModel
 pub fn prism_q::DetectorErrorModel::decompose_graphlike(&self) -> prism_q::error::Result<prism_q::DetectorErrorModel>
 pub fn prism_q::DetectorErrorModel::detector_coords(&self) -> &[alloc::vec::Vec<f64>]
+pub fn prism_q::DetectorErrorModel::from_text(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::DetectorErrorModel::mechanisms(&self) -> &[prism_q::ErrorMechanism]
 pub fn prism_q::DetectorErrorModel::num_detectors(&self) -> usize
 pub fn prism_q::DetectorErrorModel::num_mechanisms(&self) -> usize
@@ -1742,6 +1746,14 @@ impl prism_q::ErrorMechanism
 pub fn prism_q::ErrorMechanism::detectors(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::observables(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::probability(&self) -> f64
+pub fn prism_q::ErrorMechanism::suggested_decomposition(&self) -> &[(alloc::vec::Vec<usize>, alloc::vec::Vec<usize>)]
+pub struct prism_q::qec::QecCircuitNoise
+pub prism_q::qec::QecCircuitNoise::after_clifford_depolarization: f64
+pub prism_q::qec::QecCircuitNoise::after_reset_flip_probability: f64
+pub prism_q::qec::QecCircuitNoise::before_measure_flip_probability: f64
+pub prism_q::qec::QecCircuitNoise::before_round_data_depolarization: f64
+impl prism_q::QecCircuitNoise
+pub fn prism_q::QecCircuitNoise::uniform(f64) -> Self
 pub struct prism_q::qec::QecCompiledRows
 impl prism_q::qec::QecCompiledRows
 pub fn prism_q::qec::QecCompiledRows::detector_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
@@ -1794,6 +1806,10 @@ pub fn prism_q::qec::QecPauli::y(usize) -> Self
 pub fn prism_q::qec::QecPauli::z(usize) -> Self
 pub struct prism_q::qec::QecProgram
 impl prism_q::qec::QecProgram
+pub fn prism_q::qec::QecProgram::color_memory(usize, usize, prism_q::qec::QecBasis, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
+pub fn prism_q::qec::QecProgram::repetition_memory(usize, usize, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
+pub fn prism_q::qec::QecProgram::surface_memory(usize, usize, prism_q::qec::QecBasis, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
+impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::detector(&mut self, &[prism_q::qec::QecRecordRef]) -> prism_q::error::Result<usize>
 pub fn prism_q::qec::QecProgram::detector_rows(&self) -> prism_q::error::Result<alloc::vec::Vec<alloc::vec::Vec<usize>>>
 pub fn prism_q::qec::QecProgram::detector_with_coords(&mut self, &[prism_q::qec::QecRecordRef], &[f64]) -> prism_q::error::Result<usize>
@@ -1827,6 +1843,8 @@ pub fn prism_q::qec::QecProgram::set_options(&mut self, prism_q::qec::QecOptions
 pub fn prism_q::qec::QecProgram::with_options(usize, prism_q::qec::QecOptions) -> Self
 impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::detector_error_model(&self) -> prism_q::error::Result<prism_q::DetectorErrorModel>
+impl prism_q::qec::QecProgram
+pub fn prism_q::qec::QecProgram::to_text(&self) -> prism_q::error::Result<alloc::string::String>
 #[non_exhaustive] pub struct prism_q::qec::QecSampleResult
 pub prism_q::qec::QecSampleResult::accepted_shots: usize
 pub prism_q::qec::QecSampleResult::detectors: prism_q::sim::compiled::PackedShots
@@ -2708,11 +2726,14 @@ pub fn prism_q::sim::unified_pauli::PauliAxis::from(prism_q::qec::QecBasis) -> S
 #[non_exhaustive] pub enum prism_q::QecNoise
 pub prism_q::QecNoise::Depolarize1(f64)
 pub prism_q::QecNoise::Depolarize2(f64)
+pub prism_q::QecNoise::PauliChannel1([f64; 3])
+pub prism_q::QecNoise::PauliChannel2(alloc::boxed::Box<[f64; 15]>)
 pub prism_q::QecNoise::XError(f64)
+pub prism_q::QecNoise::YError(f64)
 pub prism_q::QecNoise::ZError(f64)
 impl prism_q::qec::QecNoise
-pub fn prism_q::qec::QecNoise::name(self) -> &'static str
-pub fn prism_q::qec::QecNoise::probability(self) -> f64
+pub fn prism_q::qec::QecNoise::name(&self) -> &'static str
+pub fn prism_q::qec::QecNoise::probability(&self) -> f64
 #[non_exhaustive] pub enum prism_q::QecOp
 pub prism_q::QecOp::Detector
 pub prism_q::QecOp::Detector::coords: alloc::vec::Vec<f64>
@@ -2994,6 +3015,7 @@ pub struct prism_q::DetectorErrorModel
 impl prism_q::DetectorErrorModel
 pub fn prism_q::DetectorErrorModel::decompose_graphlike(&self) -> prism_q::error::Result<prism_q::DetectorErrorModel>
 pub fn prism_q::DetectorErrorModel::detector_coords(&self) -> &[alloc::vec::Vec<f64>]
+pub fn prism_q::DetectorErrorModel::from_text(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::DetectorErrorModel::mechanisms(&self) -> &[prism_q::ErrorMechanism]
 pub fn prism_q::DetectorErrorModel::num_detectors(&self) -> usize
 pub fn prism_q::DetectorErrorModel::num_mechanisms(&self) -> usize
@@ -3125,6 +3147,7 @@ impl prism_q::ErrorMechanism
 pub fn prism_q::ErrorMechanism::detectors(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::observables(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::probability(&self) -> f64
+pub fn prism_q::ErrorMechanism::suggested_decomposition(&self) -> &[(alloc::vec::Vec<usize>, alloc::vec::Vec<usize>)]
 pub struct prism_q::ExpectationGradient
 pub prism_q::ExpectationGradient::gradient: alloc::vec::Vec<f64>
 pub prism_q::ExpectationGradient::value: f64
@@ -3525,6 +3548,13 @@ pub fn prism_q::backend::product::ProductStateBackend::supports_pauli_expectatio
 pub fn prism_q::backend::product::ProductStateBackend::supports_pauli_rotation(&self) -> bool
 pub fn prism_q::backend::product::ProductStateBackend::supports_qft_block(&self) -> bool
 pub fn prism_q::backend::product::ProductStateBackend::supports_two_qubit_kraus(&self) -> bool
+pub struct prism_q::QecCircuitNoise
+pub prism_q::QecCircuitNoise::after_clifford_depolarization: f64
+pub prism_q::QecCircuitNoise::after_reset_flip_probability: f64
+pub prism_q::QecCircuitNoise::before_measure_flip_probability: f64
+pub prism_q::QecCircuitNoise::before_round_data_depolarization: f64
+impl prism_q::QecCircuitNoise
+pub fn prism_q::QecCircuitNoise::uniform(f64) -> Self
 pub struct prism_q::QecCompiledRows
 impl prism_q::qec::QecCompiledRows
 pub fn prism_q::qec::QecCompiledRows::detector_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
@@ -3577,6 +3607,10 @@ pub fn prism_q::qec::QecPauli::y(usize) -> Self
 pub fn prism_q::qec::QecPauli::z(usize) -> Self
 pub struct prism_q::QecProgram
 impl prism_q::qec::QecProgram
+pub fn prism_q::qec::QecProgram::color_memory(usize, usize, prism_q::qec::QecBasis, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
+pub fn prism_q::qec::QecProgram::repetition_memory(usize, usize, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
+pub fn prism_q::qec::QecProgram::surface_memory(usize, usize, prism_q::qec::QecBasis, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
+impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::detector(&mut self, &[prism_q::qec::QecRecordRef]) -> prism_q::error::Result<usize>
 pub fn prism_q::qec::QecProgram::detector_rows(&self) -> prism_q::error::Result<alloc::vec::Vec<alloc::vec::Vec<usize>>>
 pub fn prism_q::qec::QecProgram::detector_with_coords(&mut self, &[prism_q::qec::QecRecordRef], &[f64]) -> prism_q::error::Result<usize>
@@ -3610,6 +3644,8 @@ pub fn prism_q::qec::QecProgram::set_options(&mut self, prism_q::qec::QecOptions
 pub fn prism_q::qec::QecProgram::with_options(usize, prism_q::qec::QecOptions) -> Self
 impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::detector_error_model(&self) -> prism_q::error::Result<prism_q::DetectorErrorModel>
+impl prism_q::qec::QecProgram
+pub fn prism_q::qec::QecProgram::to_text(&self) -> prism_q::error::Result<alloc::string::String>
 #[non_exhaustive] pub struct prism_q::QecSampleResult
 pub prism_q::QecSampleResult::accepted_shots: usize
 pub prism_q::QecSampleResult::detectors: prism_q::sim::compiled::PackedShots

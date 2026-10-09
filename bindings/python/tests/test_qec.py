@@ -227,3 +227,140 @@ def test_feedforward_body_takes_gates_and_resets_only():
     resetting = QecProgram(2)
     resetting.reset(QecBasis.Z, 1)
     qp.feedforward([RecordRef.lookback(1)], False, resetting)
+
+
+def _bell_channel_program(channel, shots=4096):
+    qp = QecProgram(2)
+    qp.set_options(shots=shots, seed=42)
+    qp.push_gate(prism_q.Gate.h(), [0])
+    qp.push_gate(prism_q.Gate.cx(), [0, 1])
+    qp.noise(channel, [0])
+    zz = qp.measure_pauli_product([(QecBasis.Z, 0), (QecBasis.Z, 1)])
+    xx = qp.measure_pauli_product([(QecBasis.X, 0), (QecBasis.X, 1)])
+    qp.detector([RecordRef.absolute(zz)])
+    qp.detector([RecordRef.absolute(xx)])
+    return qp
+
+
+def test_pauli_channels_flip_their_detectors():
+    det = _bell_channel_program(QecNoise.y_error(1.0)).run().detectors
+    assert det.all()
+
+    channel = QecNoise.pauli_channel_1(0.0, 0.0, 1.0)
+    det = _bell_channel_program(channel).run().detectors
+    assert not det[:, 0].any() and det[:, 1].all()
+
+    channel = QecNoise.pauli_channel_1(0.1, 0.2, 0.3)
+    dem = _bell_channel_program(channel).detector_error_model()
+    assert sorted(dem.probabilities().tolist()) == [0.1, 0.2, 0.3]
+
+
+def test_pauli_channel_2_branches_reach_the_model():
+    rates = [0.005 * (k + 1) for k in range(15)]
+    qp = QecProgram(2)
+    qp.noise(QecNoise.pauli_channel_2(rates), [0, 1])
+    qp.detector([RecordRef.absolute(qp.measure_z(0))])
+    qp.detector([RecordRef.absolute(qp.measure_z(1))])
+    dem = qp.detector_error_model()
+    # Z readout flips on X or Y: first letter on qubit 0, second on qubit 1.
+    x_or_y = {1, 2}
+    expected = {}
+    for k, p in enumerate(rates):
+        first, second = (k + 1) // 4, (k + 1) % 4
+        key = (first in x_or_y, second in x_or_y)
+        if any(key):
+            expected[key] = expected.get(key, 0.0) + p
+    matrix = dem.detector_matrix()
+    got = {
+        (bool(matrix[0, m]), bool(matrix[1, m])): p
+        for m, p in enumerate(dem.probabilities())
+    }
+    assert got.keys() == expected.keys()
+    for key, p in expected.items():
+        assert abs(got[key] - p) < 1e-12
+
+
+def test_pauli_channel_2_requires_fifteen_rates():
+    import pytest
+
+    with pytest.raises((TypeError, ValueError)):
+        QecNoise.pauli_channel_2([0.1] * 14)
+
+
+def test_program_text_round_trips():
+    text = "R 0 1\nH 0\nCX 0 1\nDEPOLARIZE2(0.01) 0 1\nM 0 1\nDETECTOR(0, 1) rec[-1] rec[-2]\n"
+    qp = QecProgram.from_text(text)
+    assert qp.to_text() == text
+    again = QecProgram.from_text(qp.to_text())
+    assert again.num_detectors == qp.num_detectors == 1
+
+
+def test_detector_error_model_text_round_trips():
+    dem = prism_q.DetectorErrorModel.from_text(
+        "error(0.1) D0 D1 ^ D2 L0\nrepeat 2 {\n error(0.01) D0\n shift_detectors(0, 1) 1\n}\n"
+        "detector(1, 2) D0\n"
+    )
+    assert dem.num_mechanisms == 3
+    assert dem.num_detectors == 3
+    assert dem.num_observables == 1
+    assert dem.detector_coords()[2] == [1.0, 4.0]
+    assert dem.suggested_decompositions()[0] == [([0, 1], []), ([2], [0])]
+    assert dem.suggested_decompositions()[1] == []
+    again = prism_q.DetectorErrorModel.from_text(dem.to_text())
+    assert again.to_text() == dem.to_text()
+    assert (again.detector_matrix() == dem.detector_matrix()).all()
+
+    import pytest
+
+    with pytest.raises(prism_q.PrismError):
+        prism_q.DetectorErrorModel.from_text("error(2) D0")
+
+
+def test_memory_generators_are_deterministic_without_noise():
+    programs = [
+        QecProgram.repetition_memory(3, 2),
+        QecProgram.surface_memory(3, 2),
+        QecProgram.surface_memory(3, 2, basis=QecBasis.X),
+        QecProgram.color_memory(5, 2, QecBasis.Z),
+    ]
+    for qp in programs:
+        qp.set_options(shots=256, seed=42)
+        res = qp.run()
+        assert not res.detectors.any()
+        assert not res.observables.any()
+    assert programs[1].num_qubits == 17
+    assert programs[3].num_qubits == 19 + 9
+
+
+def test_memory_generator_noise_and_decoding():
+    noise = prism_q.QecCircuitNoise(
+        after_clifford_depolarization=0.01, before_measure_flip_probability=0.01
+    )
+    assert noise.after_reset_flip_probability == 0.0
+    assert prism_q.QecCircuitNoise.uniform(0.02).before_round_data_depolarization == 0.02
+
+    rates = []
+    for d in (3, 7):
+        qp = QecProgram.repetition_memory(d, d, prism_q.QecCircuitNoise.uniform(0.02))
+        qp.set_options(shots=20_000, seed=42)
+        decoder = prism_q.Decoder(qp.detector_error_model().decompose_graphlike())
+        res = qp.run()
+        predicted = decoder.decode(res.detectors)
+        rates.append(float((predicted[:, 0] != res.observables[:, 0]).mean()))
+    assert rates[1] < rates[0]
+
+    qp = QecProgram.surface_memory(3, 3, QecBasis.Z, noise)
+    again = QecProgram.from_text(qp.to_text())
+    assert again.num_detectors == qp.num_detectors
+    assert again.detector_error_model().to_text() == qp.detector_error_model().to_text()
+
+
+def test_memory_generators_reject_bad_parameters():
+    import pytest
+
+    with pytest.raises(prism_q.PrismError):
+        QecProgram.color_memory(4, 2)
+    with pytest.raises(prism_q.PrismError):
+        QecProgram.surface_memory(3, 2, basis=QecBasis.Y)
+    with pytest.raises(prism_q.PrismError):
+        QecProgram.repetition_memory(3, 0)

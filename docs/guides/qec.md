@@ -108,12 +108,14 @@ let result = run_qec_program(&program).unwrap();
 
 `run_qec_program` lowers Clifford-compatible programs into the packed compiled sampler.
 `run_qec_program_reference` is the per-shot statevector oracle for validating small
-programs.
+programs. `program.to_text()` writes a program back in the same text format, so a
+program built in code can be saved and parsed again.
 
 ```admonish info title="What QEC programs support"
 Clifford gates, basis resets and measurements, `MPP` Pauli-product measurements,
-detectors, observables, postselection, `X_ERROR` / `Z_ERROR` / `DEPOLARIZE1` /
-`DEPOLARIZE2` noise, and terminal `EXP_VAL` final-state expectation estimates.
+detectors, observables, postselection, `X_ERROR` / `Y_ERROR` / `Z_ERROR` /
+`DEPOLARIZE1` / `DEPOLARIZE2` / `PAULI_CHANNEL_1` / `PAULI_CHANNEL_2` noise, and
+terminal `EXP_VAL` final-state expectation estimates.
 A noiseless `EXP_VAL` uses the analytical T strategies, with any detector records
 still sampled by the packed runner. A noisy one is estimated exactly on the density
 matrix when it fits, and falls to the per-shot reference runner when the program
@@ -123,6 +125,37 @@ See the [QEC IR reference](../architecture/qec-ir.md) for the full
 grammar, and [QEC program execution](../architecture/qec-programs.md) for the
 runner routing, the V1 reset requirement, and the `EXP_VAL` placement rules.
 ```
+
+## Memory experiments
+
+`QecProgram::repetition_memory`, `surface_memory`, and `color_memory` build
+the standard memory experiments with circuit-level noise from a
+`QecCircuitNoise`: depolarization after every Clifford gate, a flip before
+every measurement and after every reset, and depolarization of the data at
+the start of each round. Each program carries detectors with coordinates and
+logical observable 0, ready for sampling, model derivation, and decoding:
+
+```rust
+use prism_q::{QecBasis, QecCircuitNoise, QecProgram, UnionFindDecoder, run_qec_program};
+
+let noise = QecCircuitNoise::uniform(0.002);
+let program = QecProgram::surface_memory(3, 3, QecBasis::Z, &noise)?;
+let model = program.detector_error_model()?.decompose_graphlike()?;
+let decoder = UnionFindDecoder::from_model(&model)?;
+let result = run_qec_program(&program)?;
+let predicted = decoder.decode_packed(&result.detectors)?;
+let failures = (0..result.total_shots)
+    .filter(|&shot| predicted.get_bit(shot, 0) != result.observables.get_bit(shot, 0))
+    .count();
+# Ok::<(), prism_q::PrismError>(())
+```
+
+The repetition code protects a Z memory; the rotated surface and triangular
+6.6.6 color codes take an X or Z memory basis. A zero rate adds no annotation,
+so `QecCircuitNoise::default()` gives the noiseless program, whose detectors
+and observable never fire. In Python the same generators are static methods
+of `QecProgram`, with an optional `QecCircuitNoise`. See the
+[QEC IR reference](../architecture/qec-ir.md) for the layouts and schedules.
 
 ## Detector error model export
 
@@ -154,8 +187,30 @@ model also exposes `probabilities()`, `detector_matrix()`, and
 libraries accept directly. Matching decoders need at most two detectors per
 mechanism: `decompose_graphlike` returns that form, splitting each hypergraph
 mechanism across existing graphlike ones and erroring loudly when no split
-exists. See [QEC program execution](../architecture/qec-programs.md) for the
-derivation semantics and the emitted grammar.
+exists. `to_text` writes those splits as `^`-separated components.
+
+`DetectorErrorModel::from_text` reads the same format, `repeat` blocks and
+`shift_detectors` included, so a model written by another tool can drive the
+in-crate decoder:
+
+```rust
+use prism_q::{DetectorErrorModel, UnionFindDecoder};
+
+let model = DetectorErrorModel::from_text(
+    "error(0.1) D0
+     repeat 2 {
+         error(0.1) D0 D1
+         shift_detectors 1
+     }
+     error(0.1) D0 L0",
+)?;
+assert_eq!(model.num_detectors(), 3);
+let decoder = UnionFindDecoder::from_model(&model)?;
+# Ok::<(), prism_q::PrismError>(())
+```
+
+See [QEC program execution](../architecture/qec-programs.md) for the
+derivation semantics and the grammar both directions cover.
 
 ## Decoding
 

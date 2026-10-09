@@ -2,8 +2,8 @@
 
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
-    DetectorErrorModel, PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
+    DetectorErrorModel, PackedShots, QecBasis, QecCircuitNoise, QecNoise, QecOptions, QecPauli,
+    QecProgram, QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
     run_qec_program_reference,
 };
 use pyo3::prelude::*;
@@ -85,7 +85,7 @@ impl PyRecordRef {
 
 /// Pauli-noise annotation for a QEC program.
 #[pyclass(name = "QecNoise", module = "prism_q", frozen, from_py_object)]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PyQecNoise(QecNoise);
 
 #[pymethods]
@@ -106,6 +106,21 @@ impl PyQecNoise {
     fn depolarize2(p: f64) -> Self {
         Self(QecNoise::Depolarize2(p))
     }
+    #[staticmethod]
+    fn y_error(p: f64) -> Self {
+        Self(QecNoise::YError(p))
+    }
+    /// X, Y, Z with probabilities `px`, `py`, `pz` per target.
+    #[staticmethod]
+    fn pauli_channel_1(px: f64, py: f64, pz: f64) -> Self {
+        Self(QecNoise::PauliChannel1([px, py, pz]))
+    }
+    /// Fifteen two-qubit Pauli probabilities per target pair, in the order `IX, IY, IZ,
+    /// XI, ..., ZZ` with the first letter on the first target.
+    #[staticmethod]
+    fn pauli_channel_2(probabilities: [f64; 15]) -> Self {
+        Self(QecNoise::PauliChannel2(Box::new(probabilities)))
+    }
 
     #[staticmethod]
     fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
@@ -117,13 +132,73 @@ impl PyQecNoise {
 
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
         let mut w = Writer::new(Kind::QecNoise);
-        codec::write_qec_noise(&mut w, slf.get().0)?;
+        codec::write_qec_noise(&mut w, &slf.get().0)?;
         reduce(slf.as_any(), w.finish())
     }
 
     fn __repr__(&self) -> String {
         format!("QecNoise({:?})", self.0)
     }
+}
+
+/// Circuit-level noise for the memory-experiment generators; a zero rate adds nothing.
+#[pyclass(name = "QecCircuitNoise", module = "prism_q", frozen, from_py_object)]
+#[derive(Clone, Copy)]
+pub struct PyQecCircuitNoise(QecCircuitNoise);
+
+#[pymethods]
+impl PyQecCircuitNoise {
+    #[new]
+    #[pyo3(signature = (
+        after_clifford_depolarization = 0.0,
+        before_measure_flip_probability = 0.0,
+        after_reset_flip_probability = 0.0,
+        before_round_data_depolarization = 0.0,
+    ))]
+    fn new(
+        after_clifford_depolarization: f64,
+        before_measure_flip_probability: f64,
+        after_reset_flip_probability: f64,
+        before_round_data_depolarization: f64,
+    ) -> Self {
+        Self(QecCircuitNoise {
+            after_clifford_depolarization,
+            before_measure_flip_probability,
+            after_reset_flip_probability,
+            before_round_data_depolarization,
+        })
+    }
+
+    /// Every term at rate `p`.
+    #[staticmethod]
+    fn uniform(p: f64) -> Self {
+        Self(QecCircuitNoise::uniform(p))
+    }
+
+    #[getter]
+    fn after_clifford_depolarization(&self) -> f64 {
+        self.0.after_clifford_depolarization
+    }
+    #[getter]
+    fn before_measure_flip_probability(&self) -> f64 {
+        self.0.before_measure_flip_probability
+    }
+    #[getter]
+    fn after_reset_flip_probability(&self) -> f64 {
+        self.0.after_reset_flip_probability
+    }
+    #[getter]
+    fn before_round_data_depolarization(&self) -> f64 {
+        self.0.before_round_data_depolarization
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.0)
+    }
+}
+
+fn generator_noise(noise: Option<PyQecCircuitNoise>) -> QecCircuitNoise {
+    noise.map_or_else(QecCircuitNoise::default, |noise| noise.0)
 }
 
 /// A native measurement-record QEC program.
@@ -146,6 +221,62 @@ impl PyQecProgram {
     fn from_text(text: &str) -> PyPrismResult<Self> {
         Ok(Self {
             inner: QecProgram::from_text(text)?,
+        })
+    }
+
+    /// Render the program in the native QEC text format that `from_text` reads.
+    fn to_text(&self) -> PyPrismResult<String> {
+        Ok(self.inner.to_text()?)
+    }
+
+    /// Repetition-code Z memory with `distance` data qubits and `rounds` rounds.
+    #[staticmethod]
+    #[pyo3(signature = (distance, rounds, noise = None))]
+    fn repetition_memory(
+        distance: usize,
+        rounds: usize,
+        noise: Option<PyQecCircuitNoise>,
+    ) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: QecProgram::repetition_memory(distance, rounds, &generator_noise(noise))?,
+        })
+    }
+
+    /// Rotated surface-code memory in the X or Z logical basis.
+    #[staticmethod]
+    #[pyo3(signature = (distance, rounds, basis = PyQecBasis::Z, noise = None))]
+    fn surface_memory(
+        distance: usize,
+        rounds: usize,
+        basis: PyQecBasis,
+        noise: Option<PyQecCircuitNoise>,
+    ) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: QecProgram::surface_memory(
+                distance,
+                rounds,
+                basis.to_core(),
+                &generator_noise(noise),
+            )?,
+        })
+    }
+
+    /// Triangular 6.6.6 color-code memory in the X or Z logical basis, odd distance.
+    #[staticmethod]
+    #[pyo3(signature = (distance, rounds, basis = PyQecBasis::Z, noise = None))]
+    fn color_memory(
+        distance: usize,
+        rounds: usize,
+        basis: PyQecBasis,
+        noise: Option<PyQecCircuitNoise>,
+    ) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: QecProgram::color_memory(
+                distance,
+                rounds,
+                basis.to_core(),
+                &generator_noise(noise),
+            )?,
         })
     }
 
@@ -274,7 +405,7 @@ impl PyQecProgram {
 
     /// Append a Pauli-noise annotation on `targets`.
     fn noise(&mut self, channel: &PyQecNoise, targets: Vec<usize>) -> PyPrismResult<()> {
-        self.inner.noise(channel.0, &targets)?;
+        self.inner.noise(channel.0.clone(), &targets)?;
         Ok(())
     }
 
@@ -334,6 +465,24 @@ pub struct PyDetectorErrorModel {
 
 #[pymethods]
 impl PyDetectorErrorModel {
+    /// Parse the common detector error model text format, expanding `repeat` blocks.
+    #[staticmethod]
+    fn from_text(text: &str) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: DetectorErrorModel::from_text(text)?,
+        })
+    }
+
+    /// Suggested `^` decomposition of each mechanism as lists of `(detectors,
+    /// observables)` components, empty for mechanisms without one.
+    fn suggested_decompositions(&self) -> Vec<Vec<(Vec<usize>, Vec<usize>)>> {
+        self.inner
+            .mechanisms()
+            .iter()
+            .map(|m| m.suggested_decomposition().to_vec())
+            .collect()
+    }
+
     #[getter]
     fn num_detectors(&self) -> usize {
         self.inner.num_detectors()

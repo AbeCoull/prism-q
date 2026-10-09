@@ -256,3 +256,29 @@ the exceptions. The `Backend` trait is sealed, so only the crate implements it a
 method is additive. Items hidden from the rendered API docs, such as
 `prism_q::circuit::fusion`, are reachable for tests and tooling but are not part of the
 surface either.
+
+### Seeded output
+
+A seed reproduces a result within a version, under the thread-count rules each path
+states in [Determinism](../architecture/threading-simd.md#determinism). It does not
+promise the same bits across versions: a minor release may change what a seed draws,
+and its release notes say so. Such a change moves which bits a seed lands on, not the
+distribution they are drawn from; the distribution changes only to fix a bug.
+
+Seeded output has changed in these releases:
+
+- 0.33.0 seeds shot `i` with a SplitMix64 hash of the run seed and `i` instead of
+  `seed + i`. That covers per-shot replay of circuits with mid-circuit measurements,
+  the distributed per-shot loop, noise trajectories (serial and parallel, noisy
+  stabilizer trajectories included), the block seeds of a decomposed run, and the
+  per-qubit and per-observable seeds of Stochastic Pauli Propagation. Fixed-seed
+  results on those routes changed, and on a replay route `shots(1)` with seed `x` no
+  longer reproduces `run()` with seed `x`.
+- 0.35.0 changes three sampling routes and fixes a fourth. Product-state and factored terminal shots and counts
+  draw in blocks of 256 shots, one stream per block, so they fill in parallel; the
+  dense sampler over factored block probabilities, which also serves decomposed
+  terminal shots, draws the same blocks so the two still agree shot for shot.
+  Noiseless circuits with mid-circuit measurements on the host statevector evolve
+  once per outcome history and split shots binomially, so a shot no longer
+  corresponds to a run on its own seed. Compiled Clifford counts at high shot counts
+  draw from a corrected binomial sampler, which also fixes their spread.

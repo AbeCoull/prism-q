@@ -4315,7 +4315,7 @@ impl StatevectorBackend {
     /// - Individual (target 17+): one shared traversal, or a single
     ///   full-state pass when only one gate lands there
     #[inline(always)]
-    pub(super) fn apply_multi_1q(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
+    pub(crate) fn apply_multi_1q(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
         if gates.is_empty() {
             return;
         }

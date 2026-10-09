@@ -551,6 +551,8 @@ pub struct QecProgram {
     num_qubits: usize,
     ops: Vec<QecOp>,
     options: QecOptions,
+    num_measurements: usize,
+    num_detectors: usize,
 }
 
 impl QecProgram {
@@ -563,6 +565,8 @@ impl QecProgram {
             num_qubits,
             ops: Vec::new(),
             options,
+            num_measurements: 0,
+            num_detectors: 0,
         }
     }
 
@@ -570,16 +574,9 @@ impl QecProgram {
     /// operations are appended.
     pub fn from_ops(num_qubits: usize, options: QecOptions, ops: Vec<QecOp>) -> Result<Self> {
         let mut program = Self::with_options(num_qubits, options);
-        let mut next_measurement = 0usize;
+        program.ops.reserve_exact(ops.len());
         for op in ops {
-            program.validate_op(&op, next_measurement)?;
-            if matches!(
-                op,
-                QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. }
-            ) {
-                next_measurement += 1;
-            }
-            program.ops.push(op);
+            program.push_op(op)?;
         }
         Ok(program)
     }
@@ -607,22 +604,11 @@ impl QecProgram {
 
     /// Number of measurement records produced by the operation stream.
     pub fn num_measurements(&self) -> usize {
-        self.ops
-            .iter()
-            .filter(|op| {
-                matches!(
-                    op,
-                    QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. }
-                )
-            })
-            .count()
+        self.num_measurements
     }
 
     pub fn num_detectors(&self) -> usize {
-        self.ops
-            .iter()
-            .filter(|op| matches!(op, QecOp::Detector { .. }))
-            .count()
+        self.num_detectors
     }
 
     /// Observable slot count, `max included index + 1`.
@@ -667,7 +653,14 @@ impl QecProgram {
     }
 
     pub fn push_op(&mut self, op: QecOp) -> Result<()> {
-        self.validate_op(&op, self.num_measurements())?;
+        self.validate_op(&op, self.num_measurements)?;
+        match op {
+            QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => {
+                self.num_measurements += 1;
+            }
+            QecOp::Detector { .. } => self.num_detectors += 1,
+            _ => {}
+        }
         self.ops.push(op);
         Ok(())
     }

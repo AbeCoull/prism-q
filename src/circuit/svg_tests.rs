@@ -620,3 +620,41 @@ fn topology_no_graph_without_2q() {
         "no topology when no 2q gates"
     );
 }
+
+fn x_before(svg: &str, marker: &str, element: &str) -> f64 {
+    let end = svg
+        .find(marker)
+        .unwrap_or_else(|| panic!("{marker} missing"));
+    let start = svg[..end].rfind(element).unwrap() + element.len();
+    svg[start..].split('"').next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn barrier_sits_between_the_gates_it_separates() {
+    let circuit = CircuitBuilder::new(2)
+        .h(0)
+        .h(1)
+        .barrier(&[0, 1])
+        .x(0)
+        .x(1)
+        .build();
+    let opts = SvgOptions {
+        show_stats_header: true,
+        ..Default::default()
+    };
+    let svg = circuit.to_svg(&opts);
+    let barrier_left = x_before(&svg, "fill=\"var(--barrier)\"", "<rect x=\"");
+    let h = x_before(&svg, "central\">H</text>", "<text x=\"");
+    let x = x_before(&svg, "central\">X</text>", "<text x=\"");
+    let barrier = barrier_left + 2.0;
+    assert!(
+        h < barrier && barrier < x,
+        "H {h}, barrier {barrier}, X {x}"
+    );
+    let gate_half_width = SvgOptions::default().gate_min_width / 2.0;
+    assert!(
+        x - barrier > gate_half_width,
+        "barrier {barrier} under X {x}"
+    );
+    assert!(svg.contains("depth 2"), "a barrier adds no depth");
+}

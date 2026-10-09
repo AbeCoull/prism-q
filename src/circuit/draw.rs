@@ -1,6 +1,7 @@
 //! Unicode text rendering for circuits: [`Circuit::draw`], [`Circuit::summary`],
 //! and [`Circuit::heatmap`], configured through [`TextOptions`].
 
+use std::borrow::Cow;
 use std::fmt;
 
 use crate::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
@@ -228,7 +229,7 @@ impl GridCell {
     }
 
     fn gate(label: &str, width: usize) -> Self {
-        let pad_total = width.saturating_sub(label.len());
+        let pad_total = width.saturating_sub(label.chars().count());
         let pad_left = pad_total / 2;
         let pad_right = pad_total - pad_left;
         let content = format!(
@@ -269,6 +270,39 @@ impl GridCell {
     }
 }
 
+/// Text a measurement or conditional cell shows, which its column must fit. Other
+/// kinds draw `op.label` or a glyph no wider than it.
+fn cell_label(op: &PlacedOp) -> Cow<'_, str> {
+    match &op.kind {
+        OpKind::Measure { cbit } => Cow::Owned(format!("M{cbit}")),
+        OpKind::Conditional { cbit_label } => Cow::Owned(format!("{cbit_label}?{}", op.label)),
+        _ => Cow::Borrowed(&op.label),
+    }
+}
+
+/// Give each moment's barriers a column ahead of its gates, or drop them when hidden.
+///
+/// Placement synchronizes a barrier's qubits without advancing them, so the next gate
+/// on those qubits shares the barrier's moment and would be drawn over it.
+pub(super) fn barrier_columns(
+    moments: Vec<Vec<PlacedOp>>,
+    show_barriers: bool,
+) -> Vec<Vec<PlacedOp>> {
+    let mut columns = Vec::with_capacity(moments.len());
+    for moment in moments {
+        let (barriers, ops): (Vec<_>, Vec<_>) = moment
+            .into_iter()
+            .partition(|op| matches!(op.kind, OpKind::Barrier));
+        if show_barriers && !barriers.is_empty() {
+            columns.push(barriers);
+        }
+        if !ops.is_empty() {
+            columns.push(ops);
+        }
+    }
+    columns
+}
+
 #[allow(clippy::needless_range_loop)]
 fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptions) -> Vec<String> {
     if moments.is_empty() || num_qubits == 0 {
@@ -288,7 +322,7 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
             if matches!(op.kind, OpKind::Barrier) {
                 continue;
             }
-            max_label = max_label.max(op.label.len());
+            max_label = max_label.max(cell_label(op).chars().count());
         }
         col_widths.push(max_label + 2);
     }
@@ -451,14 +485,13 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
                         }
                     }
                 }
-                OpKind::Measure { cbit } => {
+                OpKind::Measure { .. } => {
                     if let Some(row) = op
                         .qubits
                         .first()
                         .and_then(|&q| qubit_to_row.get(q).copied().flatten())
                     {
-                        let label = format!("M{}", cbit);
-                        grid[row * 2][m_idx] = GridCell::gate(&label, w);
+                        grid[row * 2][m_idx] = GridCell::gate(&cell_label(op), w);
                     }
                 }
                 OpKind::Reset => {
@@ -470,10 +503,10 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
                         grid[row * 2][m_idx] = GridCell::gate("|0⟩", w);
                     }
                 }
-                OpKind::Conditional { cbit_label } => {
+                OpKind::Conditional { .. } => {
+                    let label = cell_label(op);
                     for &q in &op.qubits {
                         if let Some(row) = qubit_to_row.get(q).copied().flatten() {
-                            let label = format!("{}?{}", cbit_label, op.label);
                             grid[row * 2][m_idx] = GridCell::gate(&label, w);
                         }
                     }
@@ -989,6 +1022,7 @@ impl Circuit {
             return render_summary(self).join("\n");
         }
 
+        let moments = barrier_columns(moments, opts.show_barriers);
         let lines = render_moments(&moments, self.num_qubits, opts);
         if lines.is_empty() {
             return "(empty circuit)".to_string();
@@ -1250,5 +1284,110 @@ mod tests {
         let circuit = crate::circuits::ghz_circuit(8);
         let summary = circuit.summary();
         assert!(summary.contains("nearest-neighbor"));
+    }
+
+    #[test]
+    fn multibyte_labels_pad_by_char_count() {
+        let rotation = CircuitBuilder::new(2)
+            .ry(std::f64::consts::FRAC_PI_2, 0)
+            .h(1)
+            .build();
+        assert_eq!(
+            rotation.draw(&TextOptions::default()),
+            ["q[0]: ─Ry(π/2)─", "q[1]: ────H────"].join("\n"),
+        );
+
+        let mut builder = CircuitBuilder::new(2);
+        builder.h(0).h(1).reset(0).x(1);
+        assert_eq!(
+            builder.build().draw(&TextOptions::default()),
+            ["q[0]: ─H──|0⟩─", "q[1]: ─H───X──"].join("\n"),
+        );
+    }
+
+    #[test]
+    fn swap_connector_aligns_with_markers() {
+        let circuit = CircuitBuilder::new(3).swap(0, 2).h(0).h(2).build();
+        assert_eq!(
+            circuit.draw(&TextOptions::default()),
+            [
+                "q[0]: ──×────H─",
+                "        │",
+                "q[1]: ──│──────",
+                "        │",
+                "q[2]: ──×────H─",
+            ]
+            .join("\n"),
+        );
+
+        let odd_width = CircuitBuilder::new(3)
+            .swap(0, 1)
+            .rx(std::f64::consts::FRAC_PI_4, 2)
+            .build();
+        assert_eq!(
+            odd_width.draw(&TextOptions::default()),
+            [
+                "q[0]: ────×────",
+                "          │",
+                "q[1]: ────×────",
+                "q[2]: ─Rx(π/4)─",
+            ]
+            .join("\n"),
+        );
+    }
+
+    #[test]
+    fn barrier_gets_its_own_column() {
+        let mut builder = CircuitBuilder::new(2);
+        builder.h(0).h(1).barrier(&[0, 1]).x(0).x(1);
+        let circuit = builder.build();
+        assert_eq!(
+            circuit.draw(&TextOptions::default()),
+            ["q[0]: ─H─┊┊┊─X─", "q[1]: ─H─┊┊┊─X─"].join("\n"),
+        );
+
+        let hidden = TextOptions {
+            show_barriers: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            circuit.draw(&hidden),
+            ["q[0]: ─H──X─", "q[1]: ─H──X─"].join("\n"),
+        );
+    }
+
+    #[test]
+    fn partial_barrier_precedes_later_gates() {
+        let mut builder = CircuitBuilder::new(3);
+        builder.h(0).h(2).barrier(&[0, 1]).h(1);
+        assert_eq!(
+            builder.build().draw(&TextOptions::default()),
+            ["q[0]: ─H─┊┊┊───", "q[1]: ───┊┊┊─H─", "q[2]: ─H───────"].join("\n"),
+        );
+    }
+
+    #[test]
+    fn measurement_column_fits_its_classical_bit() {
+        let circuit = CircuitBuilder::new_with_classical(1, 101)
+            .h(0)
+            .measure(0, 100)
+            .x(0)
+            .build();
+        assert_eq!(circuit.draw(&TextOptions::default()), "q[0]: ─H──M100──X─");
+    }
+
+    #[test]
+    fn conditional_column_fits_its_condition() {
+        let circuit = CircuitBuilder::new_with_classical(2, 1)
+            .h(0)
+            .measure(0, 0)
+            .x(1)
+            .x(1)
+            .conditional(ClassicalCondition::BitIsOne(0), Gate::X, &[1])
+            .build();
+        assert_eq!(
+            circuit.draw(&TextOptions::default()),
+            ["q[0]: ─H──M0─────────", "q[1]: ─X──X───c[0]?X─"].join("\n"),
+        );
     }
 }

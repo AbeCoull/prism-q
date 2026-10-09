@@ -1,5 +1,5 @@
 //! Measurement-record QEC programs ([`QecProgram`]): parser, runners, detector error
-//! models, and a union-find decoder. The IR is separate from `Circuit` so measurement
+//! models, and decoders. The IR is separate from `Circuit` so measurement
 //! records need not fit final-measurement OpenQASM semantics.
 //!
 //! - [`run_qec_program`] lowers into the packed compiled Clifford sampler and applies
@@ -12,10 +12,12 @@
 //!   X/Z Pauli rows without executing gates, resets, or noise.
 //! - [`QecProgram::detector_error_model`] derives the [`DetectorErrorModel`] for export
 //!   to matching and belief-propagation decoders.
-//! - [`UnionFindDecoder`] decodes packed detector samples against a graphlike model.
+//! - [`UnionFindDecoder`] and the exact [`MatchingDecoder`] decode packed detector
+//!   samples against a graphlike model; [`BpOsdDecoder`] decodes any model.
 //! - [`QecProgram::surface_memory`] and its repetition and color code siblings generate
 //!   memory experiments with circuit-level noise.
 
+mod bposd;
 pub(crate) mod camps_prefix;
 /// Treewidth-aware cut-selection heuristics, benchmark-only: the dispatcher follows a
 /// fixed SPD -> CAMPS -> tensor-network ladder and does not use them.
@@ -25,6 +27,7 @@ mod decoder;
 mod dem;
 mod dem_text;
 mod generators;
+mod matching;
 mod noise;
 pub mod observable_reroute;
 mod parity_walk;
@@ -34,9 +37,11 @@ mod runner;
 mod t_sampler;
 mod text;
 
+pub use bposd::{BpMethod, BpOsdDecoder, BpOsdOptions, OsdMethod};
 pub use decoder::UnionFindDecoder;
 pub use dem::{DetectorErrorModel, ErrorMechanism};
 pub use generators::QecCircuitNoise;
+pub use matching::MatchingDecoder;
 pub use parse::parse_qec_program;
 pub use result::{QecObservableEstimate, QecSampleResult};
 #[cfg(feature = "bench-internal")]

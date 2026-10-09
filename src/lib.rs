@@ -93,11 +93,12 @@ pub use gates::{
     BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData, UnitaryData,
 };
 pub use qec::{
-    DetectorErrorModel, ErrorMechanism, QecBasis, QecCircuitNoise, QecCompiledRows,
-    QecMeasurementRow, QecNoise, QecObservableEstimate, QecObservableReroute, QecOp, QecOptions,
-    QecPauli, QecProgram, QecRecordRef, QecSampleResult, QecTStrategy, UnionFindDecoder,
-    compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference,
-    run_qec_program_spd_rerouted, run_qec_program_with_strategy,
+    BpMethod, BpOsdDecoder, BpOsdOptions, DetectorErrorModel, ErrorMechanism, MatchingDecoder,
+    OsdMethod, QecBasis, QecCircuitNoise, QecCompiledRows, QecMeasurementRow, QecNoise,
+    QecObservableEstimate, QecObservableReroute, QecOp, QecOptions, QecPauli, QecProgram,
+    QecRecordRef, QecSampleResult, QecTStrategy, UnionFindDecoder, compile_qec_program_rows,
+    parse_qec_program, run_qec_program, run_qec_program_reference, run_qec_program_spd_rerouted,
+    run_qec_program_with_strategy,
 };
 #[cfg(feature = "bench-internal")]
 pub use qec::{QecProfiledCounts, QecProfiledSampler, compile_qec_profiled_sampler};

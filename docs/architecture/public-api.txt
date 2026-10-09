@@ -1669,6 +1669,16 @@ pub const prism_q::qec::observable_reroute::MAX_REROUTE_STABILIZERS: usize
 pub fn prism_q::qec::observable_reroute::cone_telemetry(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm]) -> prism_q::qec::observable_reroute::ConeTelemetry
 pub fn prism_q::qec::observable_reroute::min_cone_z_representative(&prism_q::circuit::Circuit, &[usize], &[alloc::vec::Vec<usize>]) -> prism_q::error::Result<prism_q::qec::observable_reroute::ObservableRerouteResult>
 pub fn prism_q::qec::observable_reroute::xor_z_support(&[usize], &[usize]) -> alloc::vec::Vec<usize>
+pub enum prism_q::qec::BpMethod
+pub prism_q::qec::BpMethod::MinSum
+pub prism_q::qec::BpMethod::MinSum::scaling: f64
+pub prism_q::qec::BpMethod::ProductSum
+pub enum prism_q::qec::OsdMethod
+pub prism_q::qec::OsdMethod::CombinationSweep
+pub prism_q::qec::OsdMethod::CombinationSweep::order: usize
+pub prism_q::qec::OsdMethod::Exhaustive
+pub prism_q::qec::OsdMethod::Exhaustive::order: usize
+pub prism_q::qec::OsdMethod::Zero
 pub enum prism_q::qec::QecBasis
 pub prism_q::qec::QecBasis::X
 pub prism_q::qec::QecBasis::Y
@@ -1731,6 +1741,21 @@ pub prism_q::qec::QecTStrategy::Reference
 pub prism_q::qec::QecTStrategy::Spd
 impl prism_q::QecTStrategy
 pub fn prism_q::QecTStrategy::label(self) -> &'static str
+pub struct prism_q::qec::BpOsdDecoder
+impl prism_q::BpOsdDecoder
+pub fn prism_q::BpOsdDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::BpOsdDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
+pub fn prism_q::BpOsdDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::BpOsdDecoder::num_detectors(&self) -> usize
+pub fn prism_q::BpOsdDecoder::num_observables(&self) -> usize
+pub fn prism_q::BpOsdDecoder::options(&self) -> prism_q::BpOsdOptions
+pub fn prism_q::BpOsdDecoder::with_options(&prism_q::DetectorErrorModel, prism_q::BpOsdOptions) -> prism_q::error::Result<Self>
+pub struct prism_q::qec::BpOsdOptions
+pub prism_q::qec::BpOsdOptions::bp_method: prism_q::BpMethod
+pub prism_q::qec::BpOsdOptions::max_iterations: usize
+pub prism_q::qec::BpOsdOptions::osd_method: prism_q::OsdMethod
+impl core::default::Default for prism_q::BpOsdOptions
+pub fn prism_q::BpOsdOptions::default() -> Self
 pub struct prism_q::qec::DetectorErrorModel
 impl prism_q::DetectorErrorModel
 pub fn prism_q::DetectorErrorModel::decompose_graphlike(&self) -> prism_q::error::Result<prism_q::DetectorErrorModel>
@@ -1747,6 +1772,13 @@ pub fn prism_q::ErrorMechanism::detectors(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::observables(&self) -> &[usize]
 pub fn prism_q::ErrorMechanism::probability(&self) -> f64
 pub fn prism_q::ErrorMechanism::suggested_decomposition(&self) -> &[(alloc::vec::Vec<usize>, alloc::vec::Vec<usize>)]
+pub struct prism_q::qec::MatchingDecoder
+impl prism_q::MatchingDecoder
+pub fn prism_q::MatchingDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::MatchingDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
+pub fn prism_q::MatchingDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::MatchingDecoder::num_detectors(&self) -> usize
+pub fn prism_q::MatchingDecoder::num_observables(&self) -> usize
 pub struct prism_q::qec::QecCircuitNoise
 pub prism_q::qec::QecCircuitNoise::after_clifford_depolarization: f64
 pub prism_q::qec::QecCircuitNoise::after_reset_flip_probability: f64
@@ -1869,6 +1901,7 @@ pub struct prism_q::qec::UnionFindDecoder
 impl prism_q::UnionFindDecoder
 pub fn prism_q::UnionFindDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
 pub fn prism_q::UnionFindDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
+pub fn prism_q::UnionFindDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
 pub fn prism_q::UnionFindDecoder::num_detectors(&self) -> usize
 pub fn prism_q::UnionFindDecoder::num_observables(&self) -> usize
 pub fn prism_q::qec::compile_qec_program_rows(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::qec::QecCompiledRows>
@@ -2525,6 +2558,10 @@ pub prism_q::BackendKind::TensorNetworkBounded::tolerance: f64
 impl prism_q::BackendKind
 pub fn prism_q::BackendKind::supports_general_noise(&self) -> bool
 pub fn prism_q::BackendKind::supports_noisy_per_shot(&self) -> bool
+pub enum prism_q::BpMethod
+pub prism_q::BpMethod::MinSum
+pub prism_q::BpMethod::MinSum::scaling: f64
+pub prism_q::BpMethod::ProductSum
 #[non_exhaustive] pub enum prism_q::ClassicalCondition
 pub prism_q::ClassicalCondition::BitIsOne(usize)
 pub prism_q::ClassicalCondition::BitIsZero(usize)
@@ -2657,6 +2694,12 @@ pub fn prism_q::sim::noise::NoiseChannel::is_pauli(&self) -> bool
 pub fn prism_q::sim::noise::NoiseChannel::num_qubits(&self) -> usize
 pub fn prism_q::sim::noise::NoiseChannel::pauli_pair_rate(&self) -> core::option::Option<f64>
 pub fn prism_q::sim::noise::NoiseChannel::validate(&self) -> prism_q::error::Result<()>
+pub enum prism_q::OsdMethod
+pub prism_q::OsdMethod::CombinationSweep
+pub prism_q::OsdMethod::CombinationSweep::order: usize
+pub prism_q::OsdMethod::Exhaustive
+pub prism_q::OsdMethod::Exhaustive::order: usize
+pub prism_q::OsdMethod::Zero
 pub enum prism_q::PauliAxis
 pub prism_q::PauliAxis::X
 pub prism_q::PauliAxis::Y
@@ -2832,6 +2875,21 @@ pub prism_q::BondReport::cap: usize
 pub prism_q::BondReport::peak: usize
 impl prism_q::BondReport
 pub fn prism_q::BondReport::saturated(&self) -> bool
+pub struct prism_q::BpOsdDecoder
+impl prism_q::BpOsdDecoder
+pub fn prism_q::BpOsdDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::BpOsdDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
+pub fn prism_q::BpOsdDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::BpOsdDecoder::num_detectors(&self) -> usize
+pub fn prism_q::BpOsdDecoder::num_observables(&self) -> usize
+pub fn prism_q::BpOsdDecoder::options(&self) -> prism_q::BpOsdOptions
+pub fn prism_q::BpOsdDecoder::with_options(&prism_q::DetectorErrorModel, prism_q::BpOsdOptions) -> prism_q::error::Result<Self>
+pub struct prism_q::BpOsdOptions
+pub prism_q::BpOsdOptions::bp_method: prism_q::BpMethod
+pub prism_q::BpOsdOptions::max_iterations: usize
+pub prism_q::BpOsdOptions::osd_method: prism_q::OsdMethod
+impl core::default::Default for prism_q::BpOsdOptions
+pub fn prism_q::BpOsdOptions::default() -> Self
 pub struct prism_q::Circuit
 pub prism_q::Circuit::instructions: alloc::vec::Vec<prism_q::circuit::Instruction>
 pub prism_q::Circuit::num_classical_bits: usize
@@ -3274,6 +3332,13 @@ pub prism_q::MarginalsResult::marginals: alloc::vec::Vec<(f64, f64)>
 pub prism_q::MarginalsResult::metadata: prism_q::RunMetadata
 impl prism_q::sim::MarginalsResult
 pub fn prism_q::sim::MarginalsResult::into_vec(self) -> alloc::vec::Vec<(f64, f64)>
+pub struct prism_q::MatchingDecoder
+impl prism_q::MatchingDecoder
+pub fn prism_q::MatchingDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::MatchingDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
+pub fn prism_q::MatchingDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::MatchingDecoder::num_detectors(&self) -> usize
+pub fn prism_q::MatchingDecoder::num_observables(&self) -> usize
 pub struct prism_q::McuData
 impl prism_q::gates::McuData
 pub fn prism_q::gates::McuData::mat(&self) -> &[[num_complex::Complex64; 2]; 2]
@@ -4021,6 +4086,7 @@ pub struct prism_q::UnionFindDecoder
 impl prism_q::UnionFindDecoder
 pub fn prism_q::UnionFindDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
 pub fn prism_q::UnionFindDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
+pub fn prism_q::UnionFindDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
 pub fn prism_q::UnionFindDecoder::num_detectors(&self) -> usize
 pub fn prism_q::UnionFindDecoder::num_observables(&self) -> usize
 pub struct prism_q::UnitaryData

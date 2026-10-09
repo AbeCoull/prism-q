@@ -246,9 +246,49 @@ one-detector mechanisms are boundary edges, and mechanisms flipping no
 detector bound the achievable logical error rate from below. Construction
 rejects hypergraph models with a pointer to `decompose_graphlike`. Decoding is
 deterministic and allocation-free per shot; large batches decode in parallel.
+
+Two more decoders take the same model input and expose the same
+`decode_packed` and `logical_error_rate` calls:
+
+- `MatchingDecoder` is exact minimum-weight perfect matching over the same
+  graphlike model. It finds the least-weight correction for every shot, so it
+  fails no more often than union-find on hard noise, at a higher per-shot cost.
+- `BpOsdDecoder` runs belief propagation with ordered-statistics
+  post-processing on the check matrix and accepts hypergraph models directly,
+  which color codes and qLDPC codes need. `BpOsdOptions` picks the BP rule
+  (`MinSum { scaling }` or `ProductSum`), the iteration cap, and the OSD
+  search (`Zero`, `CombinationSweep { order }`, or `Exhaustive { order }`).
+
+```rust
+use prism_q::{BpOsdDecoder, BpOsdOptions, MatchingDecoder, OsdMethod, run_qec_program};
+
+# let program = prism_q::parse_qec_program(
+#     "R 0 1 2 3 4
+#      X_ERROR(0.01) 0 2 4
+#      CX 0 1 2 1 2 3 4 3
+#      MR 1 3
+#      DETECTOR rec[-2]
+#      DETECTOR rec[-1]
+#      M 0 2 4
+#      OBSERVABLE_INCLUDE(0) rec[-1]",
+# )?;
+let result = run_qec_program(&program)?;
+let model = program.detector_error_model()?;
+let matching = MatchingDecoder::from_model(&model.decompose_graphlike()?)?;
+let matching_rate = matching.logical_error_rate(&result.detectors, &result.observables)?;
+
+let options = BpOsdOptions {
+    osd_method: OsdMethod::CombinationSweep { order: 10 },
+    ..BpOsdOptions::default()
+};
+let bposd = BpOsdDecoder::with_options(&model, options)?;
+let bposd_rate = bposd.logical_error_rate(&result.detectors, &result.observables)?;
+# Ok::<(), prism_q::PrismError>(())
+```
+
 See the decoding section of
-[QEC program execution](../architecture/qec-programs.md) for the growth and
-peeling semantics and the validation against the exact ML rate.
+[QEC program execution](../architecture/qec-programs.md) for each algorithm, its
+complexity, and its validation against brute force and the exact ML rate.
 
 ## Error chain complex
 

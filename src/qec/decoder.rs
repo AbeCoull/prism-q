@@ -1,4 +1,5 @@
-//! Union-find decoder over graphlike detector error models.
+//! Union-find decoder over graphlike detector error models, and the batch driver
+//! every in-crate decoder runs through.
 //!
 //! Weighted cluster growth in the `ln((1-p)/p)` metric followed by peeling on
 //! the grown erasure, per Delfosse and Nickerson (arXiv:1709.06218).
@@ -11,14 +12,10 @@ use super::dem::symptom_label;
 use crate::error::{PrismError, Result};
 use crate::sim::compiled::{PackedShots, ShotLayout};
 
-const BOUNDARY: u32 = u32::MAX;
+pub(super) const BOUNDARY: u32 = u32::MAX;
 const EDGE_NONE: u32 = u32::MAX;
 const VERTEX_NONE: u32 = u32::MAX;
 const GROWTH_EPS: f64 = 1e-9;
-#[cfg(feature = "parallel")]
-const PARALLEL_SHOT_THRESHOLD: usize = 1024;
-#[cfg(feature = "parallel")]
-const SHOT_CHUNK: usize = 256;
 
 /// Union-find decoder compiled from a graphlike detector error model.
 ///
@@ -53,79 +50,19 @@ impl UnionFindDecoder {
     /// probabilities must lie in `[0, 1)`; a zero-probability mechanism is
     /// skipped rather than rejected.
     pub fn from_model(model: &DetectorErrorModel) -> Result<Self> {
-        if model.num_detectors() >= BOUNDARY as usize {
-            return Err(PrismError::InvalidParameter {
-                message: format!(
-                    "{} detectors exceed the decoder's index range",
-                    model.num_detectors()
-                ),
-            });
-        }
-        let num_detectors = model.num_detectors();
-        let num_observables = model.num_observables();
+        let GraphEdges {
+            num_detectors,
+            num_observables,
+            edge_u,
+            edge_v,
+            edge_p,
+            edge_obs,
+        } = graphlike_edges(model, "union-find")?;
         let obs_words = num_observables.div_ceil(64);
-
-        let mut edge_u: Vec<u32> = Vec::new();
-        let mut edge_v: Vec<u32> = Vec::new();
-        let mut edge_p: Vec<f64> = Vec::new();
-        let mut edge_obs_rows: Vec<&[usize]> = Vec::new();
-        let mut slots: HashMap<(u32, u32), u32> = HashMap::new();
-        for mechanism in model.mechanisms() {
-            let p = mechanism.probability();
-            if !(0.0..1.0).contains(&p) {
-                return Err(PrismError::InvalidParameter {
-                    message: format!(
-                        "mechanism `{}` has probability {p}, outside [0, 1)",
-                        symptom_label(mechanism)
-                    ),
-                });
-            }
-            if p == 0.0 {
-                continue;
-            }
-            let endpoints = match *mechanism.detectors() {
-                [] => continue,
-                [d] => (d as u32, BOUNDARY),
-                [d0, d1] => (d0 as u32, d1 as u32),
-                _ => {
-                    return Err(PrismError::InvalidParameter {
-                        message: format!(
-                            "mechanism `{}` flips {} detectors; union-find decoding needs a \
-                             graphlike model, apply `decompose_graphlike` first",
-                            symptom_label(mechanism),
-                            mechanism.detectors().len()
-                        ),
-                    });
-                }
-            };
-            match slots.entry(endpoints) {
-                Entry::Occupied(slot) => {
-                    let at = *slot.get() as usize;
-                    if p > edge_p[at] {
-                        edge_p[at] = p;
-                        edge_obs_rows[at] = mechanism.observables();
-                    }
-                }
-                Entry::Vacant(slot) => {
-                    slot.insert(edge_u.len() as u32);
-                    edge_u.push(endpoints.0);
-                    edge_v.push(endpoints.1);
-                    edge_p.push(p);
-                    edge_obs_rows.push(mechanism.observables());
-                }
-            }
-        }
-
         let edge_weight: Vec<f64> = edge_p
             .iter()
             .map(|&p| ((1.0 - p) / p).ln().max(0.0))
             .collect();
-        let mut edge_obs = vec![0u64; edge_u.len() * obs_words];
-        for (edge, row) in edge_obs_rows.iter().enumerate() {
-            for &observable in *row {
-                edge_obs[edge * obs_words + observable / 64] |= 1u64 << (observable % 64);
-            }
-        }
 
         let mut adj_offsets = vec![0u32; num_detectors + 1];
         for edge in 0..edge_u.len() {
@@ -184,76 +121,22 @@ impl UnionFindDecoder {
     /// parity and no boundary edge rejects the batch, naming the first such
     /// shot.
     pub fn decode_packed(&self, detectors: &PackedShots) -> Result<PackedShots> {
-        if detectors.num_measurements() != self.num_detectors {
-            return Err(PrismError::InvalidParameter {
-                message: format!(
-                    "detector shots carry {} measurements, the model has {} detectors",
-                    detectors.num_measurements(),
-                    self.num_detectors
-                ),
-            });
-        }
-        let num_shots = detectors.num_shots();
-        let m_words = self.num_detectors.div_ceil(64);
-        let transposed;
-        let rows: &[u64] = match detectors.layout() {
-            ShotLayout::ShotMajor => detectors.raw_data(),
-            ShotLayout::MeasMajor => {
-                transposed = detectors.clone().into_shot_major_data();
-                &transposed
-            }
-        };
-        let out_words = self.obs_words;
-        let mut out = vec![0u64; num_shots * out_words];
+        decode_batch(self, detectors)
+    }
 
-        #[cfg(feature = "parallel")]
-        if num_shots >= PARALLEL_SHOT_THRESHOLD && out_words > 0 {
-            use rayon::prelude::*;
-            let failure = out
-                .par_chunks_mut(SHOT_CHUNK * out_words)
-                .enumerate()
-                .map_init(
-                    || DecodeScratch::new(self),
-                    |scratch, (chunk, chunk_out)| {
-                        for (offset, shot_out) in chunk_out.chunks_mut(out_words).enumerate() {
-                            let shot = chunk * SHOT_CHUNK + offset;
-                            let row = &rows[shot * m_words..(shot + 1) * m_words];
-                            if let Err(stuck) = self.decode_shot(row, shot_out, scratch) {
-                                return Some((shot, stuck));
-                            }
-                        }
-                        None
-                    },
-                )
-                .reduce(
-                    || None,
-                    |a, b| match (a, b) {
-                        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
-                        (a, b) => a.or(b),
-                    },
-                );
-            if let Some((shot, stuck)) = failure {
-                return Err(stuck.into_error(shot));
-            }
-            return Ok(PackedShots::from_shot_major(
-                out,
-                num_shots,
-                self.num_observables,
-            ));
-        }
-
-        let mut scratch = DecodeScratch::new(self);
-        for shot in 0..num_shots {
-            let row = &rows[shot * m_words..(shot + 1) * m_words];
-            let shot_out = &mut out[shot * out_words..(shot + 1) * out_words];
-            self.decode_shot(row, shot_out, &mut scratch)
-                .map_err(|stuck| stuck.into_error(shot))?;
-        }
-        Ok(PackedShots::from_shot_major(
-            out,
-            num_shots,
-            self.num_observables,
-        ))
+    /// Decode `detectors` and return the fraction of shots whose predicted
+    /// flips differ from `observables` in any observable; `0.0` for no shots.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_packed`], and `observables` must hold one bit per
+    /// observable for the same shot count.
+    pub fn logical_error_rate(
+        &self,
+        detectors: &PackedShots,
+        observables: &PackedShots,
+    ) -> Result<f64> {
+        logical_error_rate(&self.decode_packed(detectors)?, observables)
     }
 
     fn decode_shot(
@@ -491,16 +374,289 @@ impl UnionFindDecoder {
     }
 }
 
-struct Stuck {
-    detector: u32,
+/// Deduplicated edges of a graphlike model. `edge_v` is [`BOUNDARY`] for a
+/// one-detector mechanism; `edge_obs` packs `ceil(num_observables / 64)` words
+/// per edge.
+pub(super) struct GraphEdges {
+    pub(super) num_detectors: usize,
+    pub(super) num_observables: usize,
+    pub(super) edge_u: Vec<u32>,
+    pub(super) edge_v: Vec<u32>,
+    pub(super) edge_p: Vec<f64>,
+    pub(super) edge_obs: Vec<u64>,
+}
+
+/// Collect a graphlike model's edges, collapsing mechanisms that share one
+/// detector set to the most probable of them. `decoding` names the decoder in
+/// the hypergraph rejection message.
+pub(super) fn graphlike_edges(model: &DetectorErrorModel, decoding: &str) -> Result<GraphEdges> {
+    if model.num_detectors() >= BOUNDARY as usize {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "{} detectors exceed the decoder's index range",
+                model.num_detectors()
+            ),
+        });
+    }
+    let obs_words = model.num_observables().div_ceil(64);
+    let mut edge_u: Vec<u32> = Vec::new();
+    let mut edge_v: Vec<u32> = Vec::new();
+    let mut edge_p: Vec<f64> = Vec::new();
+    let mut edge_obs_rows: Vec<&[usize]> = Vec::new();
+    let mut slots: HashMap<(u32, u32), u32> = HashMap::new();
+    for mechanism in model.mechanisms() {
+        let p = mechanism.probability();
+        if !(0.0..1.0).contains(&p) {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "mechanism `{}` has probability {p}, outside [0, 1)",
+                    symptom_label(mechanism)
+                ),
+            });
+        }
+        if p == 0.0 {
+            continue;
+        }
+        let endpoints = match *mechanism.detectors() {
+            [] => continue,
+            [d] => (d as u32, BOUNDARY),
+            [d0, d1] => (d0 as u32, d1 as u32),
+            _ => {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "mechanism `{}` flips {} detectors; {decoding} decoding needs a                          graphlike model, apply `decompose_graphlike` first",
+                        symptom_label(mechanism),
+                        mechanism.detectors().len()
+                    ),
+                });
+            }
+        };
+        match slots.entry(endpoints) {
+            Entry::Occupied(slot) => {
+                let at = *slot.get() as usize;
+                if p > edge_p[at] {
+                    edge_p[at] = p;
+                    edge_obs_rows[at] = mechanism.observables();
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(edge_u.len() as u32);
+                edge_u.push(endpoints.0);
+                edge_v.push(endpoints.1);
+                edge_p.push(p);
+                edge_obs_rows.push(mechanism.observables());
+            }
+        }
+    }
+
+    let mut edge_obs = vec![0u64; edge_u.len() * obs_words];
+    for (edge, row) in edge_obs_rows.iter().enumerate() {
+        for &observable in *row {
+            edge_obs[edge * obs_words + observable / 64] |= 1u64 << (observable % 64);
+        }
+    }
+    Ok(GraphEdges {
+        num_detectors: model.num_detectors(),
+        num_observables: model.num_observables(),
+        edge_u,
+        edge_v,
+        edge_p,
+        edge_obs,
+    })
+}
+
+impl ShotDecoder for UnionFindDecoder {
+    type Scratch = DecodeScratch;
+    type Failure = Stuck;
+
+    fn num_detectors(&self) -> usize {
+        self.num_detectors
+    }
+
+    fn num_observables(&self) -> usize {
+        self.num_observables
+    }
+
+    fn scratch(&self) -> DecodeScratch {
+        DecodeScratch::new(self)
+    }
+
+    fn decode_shot(
+        &self,
+        row: &[u64],
+        out_row: &mut [u64],
+        scratch: &mut DecodeScratch,
+    ) -> std::result::Result<(), Stuck> {
+        UnionFindDecoder::decode_shot(self, row, out_row, scratch)
+    }
+
+    fn failure_error(failure: Stuck, shot: usize) -> PrismError {
+        failure.into_error(shot)
+    }
+}
+
+/// Per-shot contract the batch driver runs a decoder through. A shot reads
+/// one shot-major detector row and XORs its prediction into a zeroed
+/// observable row.
+pub(super) trait ShotDecoder: Sync {
+    type Scratch;
+    type Failure: Send;
+    /// Batches at least this large decode on Rayon.
+    #[cfg(feature = "parallel")]
+    const PARALLEL_SHOT_THRESHOLD: usize = 1024;
+    /// Shots per Rayon task; each task builds one scratch.
+    #[cfg(feature = "parallel")]
+    const SHOT_CHUNK: usize = 256;
+
+    fn num_detectors(&self) -> usize;
+    fn num_observables(&self) -> usize;
+    fn scratch(&self) -> Self::Scratch;
+    fn decode_shot(
+        &self,
+        row: &[u64],
+        out_row: &mut [u64],
+        scratch: &mut Self::Scratch,
+    ) -> std::result::Result<(), Self::Failure>;
+    fn failure_error(failure: Self::Failure, shot: usize) -> PrismError;
+}
+
+pub(super) fn decode_batch<D: ShotDecoder>(
+    decoder: &D,
+    detectors: &PackedShots,
+) -> Result<PackedShots> {
+    let num_detectors = decoder.num_detectors();
+    let num_observables = decoder.num_observables();
+    if detectors.num_measurements() != num_detectors {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "detector shots carry {} measurements, the model has {} detectors",
+                detectors.num_measurements(),
+                num_detectors
+            ),
+        });
+    }
+    let num_shots = detectors.num_shots();
+    let m_words = num_detectors.div_ceil(64);
+    let transposed;
+    let rows: &[u64] = match detectors.layout() {
+        ShotLayout::ShotMajor => detectors.raw_data(),
+        ShotLayout::MeasMajor => {
+            transposed = detectors.clone().into_shot_major_data();
+            &transposed
+        }
+    };
+    let out_words = num_observables.div_ceil(64);
+    let mut out = vec![0u64; num_shots * out_words];
+
+    #[cfg(feature = "parallel")]
+    if num_shots >= D::PARALLEL_SHOT_THRESHOLD && out_words > 0 {
+        use rayon::prelude::*;
+        let failure = out
+            .par_chunks_mut(D::SHOT_CHUNK * out_words)
+            .enumerate()
+            .map_init(
+                || decoder.scratch(),
+                |scratch, (chunk, chunk_out)| {
+                    for (offset, shot_out) in chunk_out.chunks_mut(out_words).enumerate() {
+                        let shot = chunk * D::SHOT_CHUNK + offset;
+                        let row = &rows[shot * m_words..(shot + 1) * m_words];
+                        if let Err(failure) = decoder.decode_shot(row, shot_out, scratch) {
+                            return Some((shot, failure));
+                        }
+                    }
+                    None
+                },
+            )
+            .reduce(
+                || None,
+                |a, b| match (a, b) {
+                    (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+                    (a, b) => a.or(b),
+                },
+            );
+        if let Some((shot, failure)) = failure {
+            return Err(D::failure_error(failure, shot));
+        }
+        return Ok(PackedShots::from_shot_major(
+            out,
+            num_shots,
+            num_observables,
+        ));
+    }
+
+    let mut scratch = decoder.scratch();
+    for shot in 0..num_shots {
+        let row = &rows[shot * m_words..(shot + 1) * m_words];
+        let shot_out = &mut out[shot * out_words..(shot + 1) * out_words];
+        decoder
+            .decode_shot(row, shot_out, &mut scratch)
+            .map_err(|failure| D::failure_error(failure, shot))?;
+    }
+    Ok(PackedShots::from_shot_major(
+        out,
+        num_shots,
+        num_observables,
+    ))
+}
+
+pub(super) fn logical_error_rate(
+    predicted: &PackedShots,
+    observables: &PackedShots,
+) -> Result<f64> {
+    if observables.num_shots() != predicted.num_shots()
+        || observables.num_measurements() != predicted.num_measurements()
+    {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "observable records hold {} shots of {} observables, the prediction {} shots of {}",
+                observables.num_shots(),
+                observables.num_measurements(),
+                predicted.num_shots(),
+                predicted.num_measurements()
+            ),
+        });
+    }
+    let num_shots = predicted.num_shots();
+    if num_shots == 0 {
+        return Ok(0.0);
+    }
+    let words = predicted.num_measurements().div_ceil(64);
+    if words == 0 {
+        return Ok(0.0);
+    }
+    let transposed;
+    let actual: &[u64] = match observables.layout() {
+        ShotLayout::ShotMajor => observables.raw_data(),
+        ShotLayout::MeasMajor => {
+            transposed = observables.clone().into_shot_major_data();
+            &transposed
+        }
+    };
+    let tail = match predicted.num_measurements() % 64 {
+        0 => u64::MAX,
+        bits => (1u64 << bits) - 1,
+    };
+    let failures = predicted
+        .raw_data()
+        .chunks_exact(words)
+        .zip(actual.chunks_exact(words))
+        .filter(|(p, a)| {
+            let last = words - 1;
+            p[..last] != a[..last] || (p[last] ^ a[last]) & tail != 0
+        })
+        .count();
+    Ok(failures as f64 / num_shots as f64)
+}
+
+pub(super) struct Stuck {
+    pub(super) detector: u32,
 }
 
 impl Stuck {
-    fn into_error(self, shot: usize) -> PrismError {
+    pub(super) fn into_error(self, shot: usize) -> PrismError {
         PrismError::InvalidParameter {
             message: format!(
-                "shot {shot}: the detector component containing D{} has odd syndrome parity \
-                 but no boundary edge, so the syndrome is impossible under the model",
+                "shot {shot}: the detector component containing D{} has odd syndrome parity                  but no boundary edge, so the syndrome is impossible under the model",
                 self.detector
             ),
         }
@@ -510,7 +666,7 @@ impl Stuck {
 /// Reusable per-shot decode state. Vertex and edge slots are validated by
 /// stamp comparison against the current shot or round, so nothing is cleared
 /// between shots and untouched slots cost nothing.
-struct DecodeScratch {
+pub(super) struct DecodeScratch {
     stamp: u64,
     shot_stamp: u64,
     parent: Vec<u32>,

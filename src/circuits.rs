@@ -22,6 +22,9 @@ pub fn qft_circuit(n: usize) -> Circuit {
         Gate::QftBlock {
             start: 0,
             num: n as u8,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
         },
         &targets,
     );

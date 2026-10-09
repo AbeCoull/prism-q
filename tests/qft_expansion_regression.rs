@@ -5,6 +5,7 @@
 //! a uniform distribution and phase errors are invisible, so these checks
 //! feed a non-|0> input and compare amplitudes.
 
+use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::{Circuit, expand_qft_blocks};
 use prism_q::circuits::{phase_estimation_circuit, qft_circuit};
@@ -24,6 +25,21 @@ fn prep_basis(n: usize, j: usize) -> Circuit {
 fn amplitudes(circuit: &Circuit) -> Vec<(f64, f64)> {
     let mut backend = StatevectorBackend::new(42);
     run_on(&mut backend, circuit).unwrap();
+    backend
+        .state_vector()
+        .iter()
+        .map(|z| (z.re, z.im))
+        .collect()
+}
+
+// Applies each instruction directly, so the expansion runs gate by gate rather than
+// being folded back into a block by the routed pipeline.
+fn gate_by_gate_amplitudes(circuit: &Circuit) -> Vec<(f64, f64)> {
+    let mut backend = StatevectorBackend::new(42);
+    backend.init(circuit.num_qubits, 0).unwrap();
+    for inst in &circuit.instructions {
+        backend.apply(inst).unwrap();
+    }
     backend
         .state_vector()
         .iter()
@@ -71,7 +87,7 @@ fn qft_textbook_expansion_matches_native_nontrivial_input() {
         circuit.instructions.extend(qft_circuit(n).instructions);
 
         let native = amplitudes(&circuit);
-        let expanded = amplitudes(&expand_qft_blocks(&circuit));
+        let expanded = gate_by_gate_amplitudes(&expand_qft_blocks(&circuit));
 
         let diff = max_abs_diff(&native, &expanded);
         assert!(

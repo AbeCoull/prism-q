@@ -215,7 +215,16 @@ fn gate_instructions() -> Vec<Instruction> {
             Gate::Multi2q(Box::new(Multi2qData::new(vec![(0, 1, m4), (3, 5, m4)]))),
             &[0, 1, 3, 5],
         ),
-        g(Gate::QftBlock { start: 1, num: 4 }, &[1, 2, 3, 4]),
+        g(
+            Gate::QftBlock {
+                start: 1,
+                num: 4,
+                inverse: false,
+                swaps: true,
+                big_endian: false,
+            },
+            &[1, 2, 3, 4],
+        ),
         g(pauli_rot_sample(), &[0, 2, 5]),
     ]
 }

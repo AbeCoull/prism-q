@@ -116,7 +116,7 @@ regressions. Check `size_of::<Gate>()` after adding a variant, and `Box` large p
 | `Id`, `X`, `Y`, `Z`, `H`, `S`, `Sdg`, `T`, `Tdg`, `SX`, `SXdg` | None | 16B |
 | `Rx(f64)`, `Ry(f64)`, `Rz(f64)`, `P(f64)`, `Rzz(f64)` | Inline f64 | 16B |
 | `Cx`, `Cz`, `Swap` | None | 16B |
-| `QftBlock { start: u8, num: u8 }` | Inline pair, the one boxless composite | 16B |
+| `QftBlock { start: u8, num: u8, inverse: bool, swaps: bool, big_endian: bool }` | Inline range and form flags, the one boxless composite | 16B |
 | `Cu(Box<[[Complex64; 2]; 2]>)` | Boxed 2×2 | 16B |
 | `Mcu(Box<McuData>)` | Boxed matrix + control count | 16B |
 | `Fused(Box<[[Complex64; 2]; 2]>)` | Boxed pre-fused 1q matrix | 16B |

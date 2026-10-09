@@ -1355,7 +1355,8 @@ pub const prism_q::circuit::MAX_REGION_DEPTH: usize
 pub fn prism_q::circuit::expand_pauli_rotations(&prism_q::circuit::Circuit) -> alloc::borrow::Cow<'_, prism_q::circuit::Circuit>
 pub fn prism_q::circuit::expand_qft_blocks(&prism_q::circuit::Circuit) -> alloc::borrow::Cow<'_, prism_q::circuit::Circuit>
 pub fn prism_q::circuit::guarded(prism_q::circuit::ClassicalCondition, alloc::vec::Vec<prism_q::circuit::Instruction>) -> core::option::Option<prism_q::circuit::Instruction>
-pub fn prism_q::circuit::qft_textbook_steps(usize, usize) -> impl core::iter::traits::iterator::Iterator<Item = prism_q::circuit::QftTextbookStep>
+pub fn prism_q::circuit::qft_textbook_steps(usize, usize, bool, bool, bool) -> impl core::iter::traits::iterator::Iterator<Item = prism_q::circuit::QftTextbookStep>
+pub fn prism_q::circuit::recognize_qft_blocks(&prism_q::circuit::Circuit) -> alloc::borrow::Cow<'_, prism_q::circuit::Circuit>
 pub mod prism_q::circuits
 pub fn prism_q::circuits::brickwork_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::clifford_heavy_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
@@ -1544,8 +1545,11 @@ pub prism_q::gates::Gate::MultiPauliRot(alloc::boxed::Box<prism_q::gates::MultiP
 pub prism_q::gates::Gate::P(f64)
 pub prism_q::gates::Gate::PauliRot(alloc::boxed::Box<prism_q::gates::PauliRotData>)
 pub prism_q::gates::Gate::QftBlock
+pub prism_q::gates::Gate::QftBlock::big_endian: bool
+pub prism_q::gates::Gate::QftBlock::inverse: bool
 pub prism_q::gates::Gate::QftBlock::num: u8
 pub prism_q::gates::Gate::QftBlock::start: u8
+pub prism_q::gates::Gate::QftBlock::swaps: bool
 pub prism_q::gates::Gate::Rx(f64)
 pub prism_q::gates::Gate::Ry(f64)
 pub prism_q::gates::Gate::Rz(f64)
@@ -2668,8 +2672,11 @@ pub prism_q::Gate::MultiPauliRot(alloc::boxed::Box<prism_q::gates::MultiPauliRot
 pub prism_q::Gate::P(f64)
 pub prism_q::Gate::PauliRot(alloc::boxed::Box<prism_q::gates::PauliRotData>)
 pub prism_q::Gate::QftBlock
+pub prism_q::Gate::QftBlock::big_endian: bool
+pub prism_q::Gate::QftBlock::inverse: bool
 pub prism_q::Gate::QftBlock::num: u8
 pub prism_q::Gate::QftBlock::start: u8
+pub prism_q::Gate::QftBlock::swaps: bool
 pub prism_q::Gate::Rx(f64)
 pub prism_q::Gate::Ry(f64)
 pub prism_q::Gate::Rz(f64)

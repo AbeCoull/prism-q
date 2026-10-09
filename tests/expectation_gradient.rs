@@ -354,7 +354,16 @@ fn shift_differentiates_a_circuit_holding_a_qft_block() {
     // through it because it only ever calls the forward observable path.
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::Rx(0.4), &[0]);
-    c.add_gate(Gate::QftBlock { start: 0, num: 3 }, &[0, 1, 2]);
+    c.add_gate(
+        Gate::QftBlock {
+            start: 0,
+            num: 3,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+        &[0, 1, 2],
+    );
     let mut params = Parameters::new(1);
     params.link(0, 0);
 

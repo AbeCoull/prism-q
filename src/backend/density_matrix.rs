@@ -453,9 +453,18 @@ fn diagonal_batch_entries(gate: &Gate, targets: &[usize]) -> Option<Vec<DiagEntr
 /// before the two-product route is reached.
 fn ket_register_gate(gate: &Gate, n: usize) -> Cow<'_, Gate> {
     match gate {
-        Gate::QftBlock { start, num } => Cow::Owned(Gate::QftBlock {
+        Gate::QftBlock {
+            start,
+            num,
+            inverse,
+            swaps,
+            big_endian,
+        } => Cow::Owned(Gate::QftBlock {
             start: start + n as u8,
             num: *num,
+            inverse: *inverse,
+            swaps: *swaps,
+            big_endian: *big_endian,
         }),
         _ => Cow::Borrowed(gate),
     }

@@ -489,7 +489,13 @@ mod tests {
             Gate::Cu(Box::new(h)),
             Gate::Fused(Box::new(h)),
             Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())),
-            Gate::QftBlock { start: 0, num: 2 },
+            Gate::QftBlock {
+                start: 0,
+                num: 2,
+                inverse: false,
+                swaps: true,
+                big_endian: false,
+            },
         ];
         for gate in gates {
             let targets: SmallVec<[usize; 4]> = (0..gate.num_qubits()).collect();

@@ -66,7 +66,16 @@ fn subrange_qft_block_matches_textbook_expansion() {
     let mut c = Circuit::new(5, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::X, &[4]);
-    c.add_gate(Gate::QftBlock { start: 1, num: 3 }, &[1, 2, 3]);
+    c.add_gate(
+        Gate::QftBlock {
+            start: 1,
+            num: 3,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+        &[1, 2, 3],
+    );
     c.add_gate(Gate::Ry(0.37), &[2]);
 
     assert_fusion_preserves_state(&c);

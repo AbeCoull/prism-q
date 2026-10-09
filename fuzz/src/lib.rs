@@ -436,6 +436,9 @@ fn push_op(c: &mut Circuit, b: &mut Bytes<'_>) {
                 Gate::QftBlock {
                     start: start as u8,
                     num: num as u8,
+                    inverse: false,
+                    swaps: true,
+                    big_endian: false,
                 },
                 &targets,
             );

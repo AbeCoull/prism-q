@@ -21,10 +21,12 @@ pub(crate) mod plan;
 pub mod prepared;
 pub(crate) mod qasm;
 pub mod qasm_export;
+mod qft_recognition;
 pub(crate) mod synthesis;
 
 pub use parameter::{ParamLink, Parameters};
 pub use prepared::PreparedCircuit;
+pub use qft_recognition::recognize_qft_blocks;
 
 use crate::gates::{Gate, PauliRotData};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
@@ -772,22 +774,65 @@ pub enum QftTextbookStep {
     Swap(usize, usize),
 }
 
-/// Yield the textbook QFT decomposition for `num` qubits starting at `start`.
-/// Order: for each qubit `q` from `num - 1` down to `0`, `H q[start+q]` followed
-/// by `cphase(TAU / 2^(q-k+1))` controlled by `q[start+k]` for `k in 0..q`, then
-/// bit-reversal swaps. Matches the native FFT (`apply_qft_block`).
-pub fn qft_textbook_steps(start: usize, num: usize) -> impl Iterator<Item = QftTextbookStep> {
-    let outer = (0..num).rev().flat_map(move |q| {
-        let head = std::iter::once(QftTextbookStep::Hadamard(start + q));
+/// Yield the textbook decomposition of the [`Gate::QftBlock`] with these fields.
+///
+/// Forward order: for each qubit `q` from `num - 1` down to `0`, `H q[start+q]`
+/// followed by `cphase(pi / 2^(q-k))` controlled by `q[start+k]` for `k in 0..q`,
+/// then, with `swaps`, the bit-reversal swaps. `big_endian` maps `q[start+i]` to
+/// `q[start+num-1-i]` throughout, and `inverse` yields the forward sequence
+/// reversed with negated angles.
+pub fn qft_textbook_steps(
+    start: usize,
+    num: usize,
+    inverse: bool,
+    swaps: bool,
+    big_endian: bool,
+) -> impl Iterator<Item = QftTextbookStep> {
+    let label = move |i: usize| {
+        if big_endian {
+            start + num - 1 - i
+        } else {
+            start + i
+        }
+    };
+    let columns = (0..num).rev().flat_map(move |q| {
+        let head = std::iter::once(QftTextbookStep::Hadamard(label(q)));
         let phases = (0..q).map(move |k| QftTextbookStep::CPhase {
-            control: start + k,
-            target: start + q,
+            control: label(k),
+            target: label(q),
             theta: std::f64::consts::TAU / (1u64 << (q - k + 1)) as f64,
         });
         head.chain(phases)
     });
-    let swaps = (0..num / 2).map(move |i| QftTextbookStep::Swap(start + i, start + num - 1 - i));
-    outer.chain(swaps)
+    let swap_count = if swaps { num / 2 } else { 0 };
+    let forward = columns
+        .chain((0..swap_count).map(move |i| QftTextbookStep::Swap(start + i, start + num - 1 - i)));
+    let (forward, reversed) = if inverse {
+        (None, Some(forward.rev().map(QftTextbookStep::adjoint)))
+    } else {
+        (Some(forward), None)
+    };
+    forward
+        .into_iter()
+        .flatten()
+        .chain(reversed.into_iter().flatten())
+}
+
+impl QftTextbookStep {
+    fn adjoint(self) -> Self {
+        match self {
+            QftTextbookStep::CPhase {
+                control,
+                target,
+                theta,
+            } => QftTextbookStep::CPhase {
+                control,
+                target,
+                theta: -theta,
+            },
+            step => step,
+        }
+    }
 }
 
 /// Expand `Gate::QftBlock` instructions to textbook QFT gates.
@@ -807,11 +852,24 @@ fn expanded_qft_blocks(instructions: &[Instruction]) -> Vec<Instruction> {
     let mut out: Vec<Instruction> = Vec::with_capacity(instructions.len() * 2);
     for inst in instructions {
         if let Instruction::Gate {
-            gate: Gate::QftBlock { start, num },
+            gate:
+                Gate::QftBlock {
+                    start,
+                    num,
+                    inverse,
+                    swaps,
+                    big_endian,
+                },
             ..
         } = inst
         {
-            for step in qft_textbook_steps(*start as usize, *num as usize) {
+            for step in qft_textbook_steps(
+                *start as usize,
+                *num as usize,
+                *inverse,
+                *swaps,
+                *big_endian,
+            ) {
                 match step {
                     QftTextbookStep::Hadamard(q) => out.push(Instruction::Gate {
                         gate: Gate::H,

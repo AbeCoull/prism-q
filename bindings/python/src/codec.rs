@@ -298,10 +298,30 @@ pub(crate) fn write_gate(w: &mut Writer, gate: &Gate) -> PyPrismResult<()> {
             w.u8(22);
             w.c64s(flat(mat));
         }
-        Gate::QftBlock { start, num } => {
+        Gate::QftBlock {
+            start,
+            num,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        } => {
             w.u8(23);
             w.u8(*start);
             w.u8(*num);
+        }
+        Gate::QftBlock {
+            start,
+            num,
+            inverse,
+            swaps,
+            big_endian,
+        } => {
+            w.u8(26);
+            w.u8(*start);
+            w.u8(*num);
+            w.bool(*inverse);
+            w.bool(*swaps);
+            w.bool(*big_endian);
         }
         Gate::PauliRot(data) => {
             w.u8(24);
@@ -366,6 +386,9 @@ fn read_gate(r: &mut Reader<'_>, targets: &[usize]) -> PyPrismResult<Gate> {
         23 => Gate::QftBlock {
             start: r.u8()?,
             num: r.u8()?,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
         },
         24 => {
             let theta = r.f64()?;
@@ -400,6 +423,13 @@ fn read_gate(r: &mut Reader<'_>, targets: &[usize]) -> PyPrismResult<Gate> {
             let num_qubits = r.usize()?;
             Gate::unitary(r.c64s()?, num_qubits)?
         }
+        26 => Gate::QftBlock {
+            start: r.u8()?,
+            num: r.u8()?,
+            inverse: r.bool()?,
+            swaps: r.bool()?,
+            big_endian: r.bool()?,
+        },
         other => return Err(bad_tag("gate", other)),
     })
 }

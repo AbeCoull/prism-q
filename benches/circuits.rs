@@ -584,6 +584,60 @@ fn bench_statevector_qft_textbook(c: &mut Criterion) {
     group.finish();
 }
 
+/// An expanded `n`-qubit QFT as OpenQASM 2.0 in the gate order Qiskit's QFT
+/// decomposes to: `h` on the top qubit, `cp(pi/2^d)` to each lower qubit, final
+/// swaps. `inverse` emits the exact reverse with negated angles.
+fn qft_qasm(n: usize, inverse: bool) -> String {
+    let sign = if inverse { "-" } else { "" };
+    let mut gates = Vec::new();
+    for j in (0..n).rev() {
+        gates.push(format!("h q[{j}];"));
+        for k in (0..j).rev() {
+            gates.push(format!("cp({sign}pi/{}) q[{j}],q[{k}];", 1u64 << (j - k)));
+        }
+    }
+    for i in 0..n / 2 {
+        gates.push(format!("swap q[{i}],q[{}];", n - 1 - i));
+    }
+    if inverse {
+        gates.reverse();
+    }
+    let mut text = format!("OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[{n}];\n");
+    for gate in gates {
+        text.push_str(&gate);
+        text.push('\n');
+    }
+    text
+}
+
+// The QFT as it arrives from a QASM file: gate by gate, not as the `QftBlock`
+// `qft_textbook` builds.
+fn bench_statevector_qft_qasm(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/qft_qasm");
+    configure_group(&mut group);
+
+    for &n in &[16, 20, 24] {
+        let circuit = prism_q::circuit::openqasm::parse(&qft_qasm(n, false)).unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+
+    let mut group = c.benchmark_group("statevector/iqft_qasm");
+    configure_group(&mut group);
+    let circuit = prism_q::circuit::openqasm::parse(&qft_qasm(20, true)).unwrap();
+    group.bench_with_input(BenchmarkId::from_parameter(20), &circuit, |b, circ| {
+        b.iter(|| {
+            run_with(BackendKind::Statevector, circ, 42).unwrap();
+        });
+    });
+    group.finish();
+}
+
 fn bench_statevector_qpe(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qpe_t_gate");
     configure_group(&mut group);
@@ -5230,6 +5284,7 @@ criterion_group! {
     bench_statevector_random,
     bench_statevector_qft,
     bench_statevector_qft_textbook,
+    bench_statevector_qft_qasm,
     bench_statevector_qpe,
     bench_statevector_hea,
     bench_statevector_qaoa,

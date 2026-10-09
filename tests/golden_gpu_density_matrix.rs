@@ -501,7 +501,7 @@ fn dm_gpu_fused_stream_matches_unfused_cpu() {
         (
             "diagonal mixed",
             circuits::diagonal_mixed_circuit(N, 3, SEED),
-            &[("BatchRzz", 1), ("DiagonalBatch", 1)][..],
+            &[("DiagonalBatch", 1)][..],
         ),
         (
             "random",

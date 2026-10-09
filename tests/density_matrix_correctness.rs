@@ -954,7 +954,7 @@ fn dm_batched_diagonal_layer_matches_the_per_gate_route() {
         (
             "diagonal mixed",
             circuits::diagonal_mixed_circuit(N, 3, SEED),
-            1,
+            0,
             1,
         ),
     ] {

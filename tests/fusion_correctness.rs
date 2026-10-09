@@ -659,7 +659,7 @@ fn fusion_batch_rzz_still_batches_around_a_barrier() {
             matches!(
                 inst,
                 prism_q::circuit::Instruction::Gate {
-                    gate: Gate::BatchRzz(_),
+                    gate: Gate::BatchRzz(_) | Gate::DiagonalBatch(_),
                     ..
                 }
             )
@@ -750,6 +750,107 @@ fn fusion_diag_mixed_batches_and_matches_unfused() {
             batches > 0,
             "expected a DiagonalBatch in the fused stream at {n}q"
         );
+        assert_fusion_preserves_state(&c);
+    }
+}
+
+fn count_gates(circuit: &Circuit, pred: impl Fn(&Gate) -> bool) -> usize {
+    circuit
+        .instructions
+        .iter()
+        .filter(|inst| matches!(inst, Instruction::Gate { gate, .. } if pred(gate)))
+        .count()
+}
+
+fn is_diagonal_fused_2q(gate: &Gate) -> bool {
+    let Gate::Fused2q(mat) = gate else {
+        return false;
+    };
+    (0..4).all(|r| (0..4).all(|c| r == c || mat[r][c].norm() < 1e-12))
+}
+
+fn crz(theta: f64) -> Gate {
+    Gate::cu(Gate::Rz(theta).matrix_2x2())
+}
+
+/// An H layer, then CZ on a chain across the register with diagonal 1q gates on
+/// both sides, which `fuse_2q_gates` folds into diagonal `Fused2q` blocks. The chain
+/// joins every qubit, more than one kernel group holds, and repeats one pair.
+fn diagonal_fused_2q_chain(num_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(num_qubits, 0);
+    for q in 0..num_qubits {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..num_qubits {
+        c.add_gate(
+            Gate::cphase(0.2 + 0.1 * q as f64),
+            &[q, (q + 1) % num_qubits],
+        );
+    }
+    for q in 0..num_qubits - 1 {
+        c.add_gate(Gate::T, &[q]);
+        c.add_gate(Gate::Rz(0.3 + 0.05 * q as f64), &[q + 1]);
+        c.add_gate(Gate::Cz, &[q, q + 1]);
+        c.add_gate(Gate::P(0.7), &[q]);
+    }
+    c.add_gate(Gate::S, &[0]);
+    c.add_gate(Gate::Cz, &[0, 1]);
+    c
+}
+
+#[test]
+fn fusion_diagonal_fused_2q_joins_diagonal_batch() {
+    for n in [16usize, 18, 20] {
+        let c = diagonal_fused_2q_chain(n);
+        let fused = prism_q::circuit::fusion::fuse_circuit(&c, true);
+        assert_eq!(
+            count_gates(&fused, is_diagonal_fused_2q),
+            0,
+            "a diagonal Fused2q ran as a dense pass at {n}q"
+        );
+        assert!(
+            count_gates(&fused, |g| matches!(g, Gate::DiagonalBatch(_))) >= 2,
+            "a chain across {n} qubits should split into several batches"
+        );
+        assert_fusion_preserves_state(&c);
+    }
+}
+
+/// Controlled-Rz gates, diagonal but not controlled phases, among controlled phases,
+/// with a repeated pair and an H that a later gate on its qubit must stay behind.
+fn controlled_diagonal_circuit(num_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(num_qubits, 0);
+    for q in 0..num_qubits {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::Rx(0.1 * q as f64), &[q]);
+    }
+    for q in 0..num_qubits / 2 {
+        c.add_gate(crz(0.4 + 0.1 * q as f64), &[q, q + num_qubits / 2]);
+        c.add_gate(
+            Gate::cphase(0.9),
+            &[q + num_qubits / 2, (q + 1) % num_qubits],
+        );
+    }
+    c.add_gate(crz(1.3), &[2, 7]);
+    c.add_gate(crz(-0.6), &[2, 7]);
+    c.add_gate(Gate::H, &[7]);
+    c.add_gate(crz(0.8), &[7, 3]);
+    c.add_gate(Gate::T, &[7]);
+    c.add_gate(crz(2.1), &[11, 4]);
+    c
+}
+
+#[test]
+fn fusion_controlled_diagonal_joins_diagonal_batch() {
+    for n in [16usize, 18, 20] {
+        let c = controlled_diagonal_circuit(n);
+        let fused = prism_q::circuit::fusion::fuse_circuit(&c, true);
+        let cu = count_gates(&fused, |g| matches!(g, Gate::Cu(_)));
+        assert!(
+            cu < 2,
+            "{cu} controlled diagonals stayed outside a batch at {n}q"
+        );
+        assert!(count_gates(&fused, |g| matches!(g, Gate::DiagonalBatch(_))) >= 1);
         assert_fusion_preserves_state(&c);
     }
 }
@@ -952,6 +1053,17 @@ fn fusion_batch_rzz_splits_oversize_run() {
                 data.edges().len()
             );
             edges += data.edges().len();
+        }
+        if let prism_q::circuit::Instruction::Gate {
+            gate: Gate::DiagonalBatch(data),
+            ..
+        } = inst
+        {
+            edges += data
+                .entries()
+                .iter()
+                .filter(|e| matches!(e, prism_q::gates::DiagEntry::Parity2q { .. }))
+                .count();
         }
     }
     assert_eq!(edges, 45, "every Rzz edge should survive the split");

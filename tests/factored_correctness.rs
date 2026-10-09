@@ -538,8 +538,9 @@ fn factored_block_probabilities_expand_to_the_merged_vector() {
 //
 // The layers are ordered to reach both batched families: the Cz and cphase
 // layers fuse to one `DiagonalBatch` over all eight pairs, and the Rzz layer to
-// one `BatchRzz` over the same eight. A fixture carrying only `Rzz` exercises
-// half the fix.
+// one `BatchRzz` over the same eight. The Rx layer between them closes the
+// diagonal run, which would otherwise absorb the `BatchRzz`. A fixture carrying
+// only `Rzz` exercises half the fix.
 #[test]
 fn batched_diagonal_gates_keep_independent_blocks_apart() {
     use prism_q::backend::Backend;
@@ -566,6 +567,9 @@ fn batched_diagonal_gates_keep_independent_blocks_apart() {
     }
     for p in 0..pairs {
         circuit.add_gate(Gate::cphase(0.4 + 0.01 * p as f64), &[2 * p, 2 * p + 1]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.5 + 0.01 * q as f64), &[q]);
     }
     for p in 0..pairs {
         circuit.add_gate(Gate::Rzz(0.2 + 0.01 * p as f64), &[2 * p, 2 * p + 1]);

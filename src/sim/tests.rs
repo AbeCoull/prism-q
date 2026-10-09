@@ -1028,6 +1028,81 @@ fn test_has_terminal_measurements_only() {
 }
 
 #[test]
+fn reset_keeps_terminal_sampling_only_on_uncoupled_qubits() {
+    let mut leading = Circuit::new(70, 2);
+    for q in 0..70 {
+        leading.add_reset(q);
+    }
+    leading.add_gate(Gate::H, &[69]);
+    leading.add_reset(69);
+    leading.add_gate(Gate::H, &[0]);
+    leading.add_gate(Gate::Cx, &[0, 68]);
+    leading.add_reset(1);
+    leading.add_measure(0, 0);
+    leading.add_measure(68, 1);
+    assert!(leading.has_terminal_measurements_only());
+    assert!(leading.has_terminal_measurements_under_reset_channel());
+
+    let mut coupled = Circuit::new(70, 2);
+    coupled.add_gate(Gate::H, &[0]);
+    coupled.add_gate(Gate::Cx, &[0, 68]);
+    coupled.add_reset(68);
+    coupled.add_measure(0, 0);
+    coupled.add_measure(68, 1);
+    assert!(!coupled.has_terminal_measurements_only());
+    assert!(coupled.has_terminal_measurements_under_reset_channel());
+
+    let mut late = coupled.clone();
+    late.instructions.remove(2);
+    late.instructions.insert(0, Instruction::Reset { qubit: 5 });
+    late.instructions.insert(3, Instruction::Reset { qubit: 0 });
+    assert!(!late.has_terminal_measurements_only());
+}
+
+#[test]
+fn coupled_reset_shots_replay_per_shot_off_the_mixture() {
+    let mut local = Circuit::new(3, 2);
+    local.add_reset(0);
+    local.add_reset(1);
+    local.add_gate(Gate::H, &[2]);
+    local.add_reset(2);
+    local.add_gate(Gate::H, &[0]);
+    local.add_gate(Gate::Cx, &[0, 1]);
+    local.add_measure(0, 0);
+    local.add_measure(1, 1);
+
+    let mut coupled = Circuit::new(3, 2);
+    coupled.add_gate(Gate::H, &[0]);
+    coupled.add_gate(Gate::Cx, &[0, 1]);
+    coupled.add_reset(0);
+    coupled.add_gate(Gate::Cx, &[1, 0]);
+    coupled.add_measure(0, 0);
+    coupled.add_measure(1, 1);
+
+    let terminal = |kind: &BackendKind, circuit: &Circuit| {
+        !matches!(
+            prepare_shot_source(kind, circuit, 64, 42).unwrap(),
+            ShotSource::PerShot
+        )
+    };
+    for kind in [
+        BackendKind::Statevector,
+        BackendKind::Mps { max_bond_dim: 16 },
+        BackendKind::Sparse,
+        BackendKind::Factored,
+        BackendKind::TensorNetwork,
+    ] {
+        assert!(terminal(&kind, &local), "{kind:?}: local resets");
+        assert!(!terminal(&kind, &coupled), "{kind:?}: coupled reset");
+    }
+    assert!(matches!(
+        prepare_shot_source(&BackendKind::Statevector, &local, 64, 42).unwrap(),
+        ShotSource::TerminalStatevector { .. }
+    ));
+    assert!(terminal(&BackendKind::DensityMatrix, &coupled));
+}
+
+#[test]
 fn test_measurement_map() {
     let qasm = r#"
         OPENQASM 3.0;

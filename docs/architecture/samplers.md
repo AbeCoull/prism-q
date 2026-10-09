@@ -79,6 +79,15 @@ before `init`, so a backend without one costs an allocation and nothing else.
 two can differ at a finite shot count. Only the distributed branch delegates to
 `run_shots_with(..).counts()`.
 
+Every draw from one evolved state needs the circuit to pass
+`Circuit::has_terminal_measurements_only`, which counts a reset as a measurement
+unless no multi-qubit gate has touched its qubit. Such a qubit is still a product
+factor, so the reset is deterministic and the leading resets of an OpenQASM program
+keep the terminal route. A reset on an entangled qubit draws an outcome, and one
+evolution would share that outcome across every shot, so the circuit replays per
+shot. The density matrix is the exception: it applies reset as the channel, and its
+terminal draw stays exact.
+
 The product state is the one backend taken past subsystem decomposition. It
 already stores one factor per qubit, so splitting a non-entangling circuit into
 independent blocks pays a backend, a partition, and a merge per block to rebuild

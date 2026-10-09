@@ -1425,7 +1425,7 @@ fn shots_from_initial_state(
     seed: u64,
 ) -> Result<ShotsResult> {
     let bits = circuit.num_classical_bits;
-    if circuit.has_terminal_measurements_only() {
+    if circuit.has_terminal_measurements_only() && !circuit.has_resets() {
         let stripped = circuit.without_measurements();
         let mut backend = backend_from_initial_state(kind, &stripped, state, seed)?;
         apply_fused_circuit(&mut *backend, &stripped)?;
@@ -2777,7 +2777,9 @@ fn prepare_shot_source(
         return Ok(ShotSource::StabilizerRank);
     }
 
-    if circuit.has_terminal_measurements_only() {
+    if circuit.has_terminal_measurements_only()
+        || (kind.is_density_matrix() && circuit.has_terminal_measurements_under_reset_channel())
+    {
         let stripped = circuit.without_measurements();
         if let Some(backend) = try_native_terminal_backend(kind, &stripped, seed)? {
             return Ok(ShotSource::Native {

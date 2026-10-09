@@ -175,7 +175,10 @@ two statevector passes, plus two conjugations only for the variants with no conj
 form. The diagonal gates carry math of their own: `Rzz` and the batched
 families (`BatchPhase`, `BatchRzz`, `DiagonalBatch`) have both factors diagonal, so the
 ket and bra phases cancel wherever the two registers agree on the parity of the targets,
-and each sandwich collapses to a single pass over a combined table.
+and each sandwich collapses to a single pass over a combined table. Fused batches stay
+batched: a `MultiFused` or `Multi2q` block runs its ket constituents and their bra
+conjugates through the statevector tiled kernels together, with `Multi2q` cut into the
+runs those kernels apply in list order.
 
 Memory is `16 * 4^n` bytes, so the ceiling is about 14 qubits on a 16 GiB host and 15 on
 32 GiB (`PRISM_MAX_DM_QUBITS` moves it within the statevector budget). With a device

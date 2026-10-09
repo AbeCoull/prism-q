@@ -20,9 +20,9 @@
 //! `apply_2q_depolarizing`), and exact `Tr(rho P)` through
 //! [`Backend::pauli_expectations`]. Fusion runs, gated on the `2n` buffer width.
 //! `QftBlock` is remapped onto the ket register before the left product.
-//! Past the parallel threshold `MultiFused` runs its constituents and their
-//! conjugates as one batch in the statevector kernel; `Multi2q` applies its ket
-//! constituents one at a time (see [`Backend::supports_fused_gates`] for why).
+//! On the host, `MultiFused` past the parallel threshold and `Multi2q` run their
+//! constituents and the bra conjugates as batches in the statevector kernels,
+//! `Multi2q` in the longest runs that keep list order.
 //! Diagonal gates skip the two-product route: their two factors combine into one
 //! table, so `Rzz` and the diagonal batches each sweep the buffer once.
 //!
@@ -512,8 +512,10 @@ pub struct DensityMatrixBackend {
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     sv: StatevectorBackend,
-    /// The doubled constituent list of a batched `MultiFused`, kept between calls.
+    /// The doubled constituent lists of a batched `MultiFused` and `Multi2q`,
+    /// kept between calls.
     multi_1q_scratch: Vec<(usize, [[Complex64; 2]; 2])>,
+    multi_2q_scratch: Vec<(usize, usize, [[Complex64; 4]; 4])>,
     #[cfg(feature = "gpu")]
     gpu_context: Option<Arc<GpuContext>>,
 }
@@ -526,6 +528,7 @@ impl DensityMatrixBackend {
             rng: ChaCha8Rng::seed_from_u64(seed),
             sv: StatevectorBackend::new(seed),
             multi_1q_scratch: Vec::new(),
+            multi_2q_scratch: Vec::new(),
             #[cfg(feature = "gpu")]
             gpu_context: None,
         }
@@ -711,17 +714,12 @@ impl DensityMatrixBackend {
     /// three fold both products into one pass rather than taking a conjugate
     /// form here.
     ///
-    /// `Multi2q` runs tier by tier in the statevector kernel, which preserves
-    /// application order only while the whole list sits in one tier. Fusion
-    /// guarantees that against the circuit's own qubit indices, but the `+n`
-    /// shift onto the ket register moves gates across tier bounds, so the ket
-    /// half applies its constituents one at a time. The bra half keeps the
-    /// circuit's indices, so it batches through the tiled pass whenever
-    /// [`kernels::multi_2q_single_tier`] holds and falls back to per-constituent
-    /// application otherwise. `MultiFused` entries are one per qubit and
-    /// commute, so its list is order independent: past the parallel threshold
-    /// on the host it takes [`DensityMatrixBackend::apply_multi_1q_sandwich`],
-    /// and elsewhere the per-constituent one-qubit sandwich.
+    /// `Multi2q` takes [`DensityMatrixBackend::apply_multi_2q_sandwich`] on the
+    /// host and one constituent at a time on the device. `MultiFused` entries
+    /// are one per qubit and commute, so its list is order independent: past
+    /// the parallel threshold on the host it takes
+    /// [`DensityMatrixBackend::apply_multi_1q_sandwich`], and elsewhere the
+    /// per-constituent one-qubit sandwich.
     fn apply_unitary(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         let n = self.num_qubits;
 
@@ -744,22 +742,15 @@ impl DensityMatrixBackend {
                 return self.apply_rzz_sandwich(targets[0], targets[1], *theta);
             }
             Gate::Multi2q(data) => {
+                if !self.sv.is_gpu_resident() {
+                    self.apply_multi_2q_sandwich(&data.gates);
+                    return Ok(());
+                }
                 for &(q0, q1, ref mat) in data.gates.iter() {
                     self.fused_2q(q0 + n, q1 + n, mat)?;
                 }
-                if !self.sv.is_gpu_resident()
-                    && kernels::multi_2q_single_tier(&data.gates, self.sv.num_qubits)
-                {
-                    let conjugated: Vec<(usize, usize, [[Complex64; 4]; 4])> = data
-                        .gates
-                        .iter()
-                        .map(|&(q0, q1, ref mat)| (q0, q1, conjugate_4x4(mat)))
-                        .collect();
-                    self.sv.apply_multi_2q(&conjugated);
-                } else {
-                    for &(q0, q1, ref mat) in data.gates.iter() {
-                        self.fused_2q(q0, q1, &conjugate_4x4(mat))?;
-                    }
+                for &(q0, q1, ref mat) in data.gates.iter() {
+                    self.fused_2q(q0, q1, &conjugate_4x4(mat))?;
                 }
                 return Ok(());
             }
@@ -805,6 +796,34 @@ impl DensityMatrixBackend {
         }
         self.sv.apply_1q_matrix(qubit + n, matrix)?;
         self.sv.apply_1q_matrix(qubit, &conjugate_2x2(matrix))
+    }
+
+    /// Evolve `rho -> U rho U^dagger` for a `Multi2q` batch `U`.
+    ///
+    /// The statevector kernel keeps list order only for a batch that fits one
+    /// subcube or the in-place tile; past that its tiered pass reorders gates
+    /// across tiers, and the `+n` shift onto the ket register pushes a list
+    /// fusion built to fit past it. The ket constituents and their bra
+    /// conjugates act on disjoint registers and commute, so the doubled list
+    /// is cut into the longest runs [`kernels::multi_2q_ordered_prefix`]
+    /// allows, each one tiled pass.
+    fn apply_multi_2q_sandwich(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
+        let n = self.num_qubits;
+        self.multi_2q_scratch.clear();
+        self.multi_2q_scratch
+            .extend(gates.iter().map(|&(q0, q1, mat)| (q0 + n, q1 + n, mat)));
+        self.multi_2q_scratch.extend(
+            gates
+                .iter()
+                .map(|&(q0, q1, ref mat)| (q0, q1, conjugate_4x4(mat))),
+        );
+        let mut rest = &self.multi_2q_scratch[..];
+        while !rest.is_empty() {
+            let (run, tail) =
+                rest.split_at(kernels::multi_2q_ordered_prefix(rest, self.sv.num_qubits));
+            self.sv.apply_multi_2q(run);
+            rest = tail;
+        }
     }
 
     /// Evolve `rho -> U rho U^dagger` for a `MultiFused` batch `U`.
@@ -1659,9 +1678,9 @@ impl Backend for DensityMatrixBackend {
         self.num_qubits
     }
 
-    /// `Multi2q` applies its ket constituents one at a time here rather than
-    /// through the tiled kernel, which the ket register's shifted indices would
-    /// reorder.
+    /// `Multi2q` cuts its doubled list into runs the tiled kernel applies in
+    /// order, since the ket register's shifted indices can push a batch past
+    /// one tier.
     fn supports_fused_gates(&self) -> bool {
         true
     }

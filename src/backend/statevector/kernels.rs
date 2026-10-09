@@ -66,16 +66,39 @@ fn multi_2q_small_tile(num_qubits: usize) -> usize {
 const MULTI_GATE_L3_TILE: usize = 131_072;
 const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
 
-/// True when every gate's high target sits in the L2 tile, so the tiled pass
-/// runs the whole list as one tier and preserves application order. Callers
-/// that need order beyond one tier (the density-matrix bra half) batch only
-/// under this predicate and apply per constituent otherwise.
-pub(crate) fn multi_2q_single_tier(
+/// Length of the longest prefix of `gates` that
+/// [`StatevectorBackend::apply_multi_2q`] applies in list order on a
+/// `num_qubits` state: every gate sits in the in-place tile, so the tiered pass
+/// runs one tier, or the prefix fits a [`subcube_plan`]. Past both, the tiered
+/// pass reorders gates across tiers, so callers that need list order beyond
+/// one batch (the density-matrix registers) cut the list into runs of this
+/// length. At least 1 for a non-empty list, since one gate is always in order.
+pub(crate) fn multi_2q_ordered_prefix(
     gates: &[(usize, usize, [[Complex64; 4]; 4])],
     num_qubits: usize,
-) -> bool {
-    let max_l2_target = max_target_for_tile(multi_2q_small_tile(num_qubits));
-    gates.iter().all(|&(q0, q1, _)| q0.max(q1) <= max_l2_target)
+) -> usize {
+    let tile_bits = multi_2q_tile_bits_for(num_qubits);
+    let budget = multi_2q_high_budget_for(num_qubits);
+    let low_bits = multi_2q_low_bits();
+    let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
+    let mut in_tile = true;
+    let mut over_budget = false;
+    for (i, &(q0, q1, _)) in gates.iter().enumerate() {
+        in_tile &= q0.max(q1) < tile_bits;
+        for q in [q0, q1] {
+            if q >= low_bits && !high.contains(&q) {
+                if high.len() == budget {
+                    over_budget = true;
+                } else {
+                    high.push(q);
+                }
+            }
+        }
+        if over_budget && !in_tile {
+            return i.max(1);
+        }
+    }
+    gates.len()
 }
 
 /// Tile geometry for a `Multi2q` batch that reaches past the lowest tile bits:

@@ -4,13 +4,15 @@
 use std::sync::Mutex;
 
 use numpy::{PyArray2, PyReadonlyArray2};
-use prism_q::{BackendKind, Parameters, PreparedCircuit, RunOutcome};
+use prism_q::{BackendKind, Circuit, Instruction, Parameters, PreparedCircuit, RunOutcome};
 use pyo3::prelude::*;
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
+use crate::codec::{Pin, decode_parameters, encode_parameters, restore_parameters};
 use crate::error::{PyPrismResult, invalid};
 use crate::numpy_util::f64_matrix;
+use crate::pickle::{Reduced, reduce};
 use crate::sim::{
     DEFAULT_SEED, Hamiltonian, PyObservableExpectation, PyRunOutcome, parse_observables,
 };
@@ -22,20 +24,58 @@ use crate::sim::{
 /// Bindable gates are `rx`, `ry`, `rz`, `rzz`, `p`, and `pauli_rot`.
 #[pyclass(name = "Parameters", module = "prism_q", from_py_object)]
 #[derive(Clone)]
-pub struct PyParameters(pub Parameters);
+pub struct PyParameters(pub Parameters, Option<Pin>);
+
+impl PyParameters {
+    /// Wrap a set that carries no pin.
+    pub(crate) fn unpinned(params: Parameters) -> Self {
+        Self(params, None)
+    }
+
+    /// Wrap a set that may be pinned to `circuit`, recording the gates the pin
+    /// compared so pickling can rebuild it.
+    pub(crate) fn against(params: Parameters, circuit: &Circuit) -> Self {
+        let pin: Option<Pin> = params
+            .links()
+            .iter()
+            .map(|link| match circuit.instructions.get(link.instruction) {
+                Some(Instruction::Gate { gate, targets }) => Some((gate.clone(), targets.clone())),
+                _ => None,
+            })
+            .collect();
+        let pin = pin.filter(|pin| {
+            let links = params.links().to_vec();
+            let names = names_of(&params);
+            let pinned =
+                restore_parameters(params.num_slots(), links.clone(), names.clone(), Some(pin));
+            let unpinned = restore_parameters(params.num_slots(), links, names, None);
+            pinned.is_ok_and(|p| p == params) && unpinned.is_ok_and(|p| p != params)
+        });
+        Self(params, pin)
+    }
+}
+
+fn names_of(params: &Parameters) -> Option<Vec<String>> {
+    params.name_of(0)?;
+    Some(
+        (0..params.num_slots())
+            .map(|slot| params.name_of(slot).unwrap_or_default().to_owned())
+            .collect(),
+    )
+}
 
 #[pymethods]
 impl PyParameters {
     /// Declare `num_slots` slots with no links yet.
     #[new]
     fn new(num_slots: usize) -> Self {
-        Self(Parameters::new(num_slots))
+        Self::unpinned(Parameters::new(num_slots))
     }
 
     /// Give every bindable gate in `circuit` its own slot, in circuit order.
     #[staticmethod]
     fn all_rotations(circuit: &PyCircuit) -> Self {
-        Self(Parameters::all_rotations(circuit.inner()))
+        Self::against(Parameters::all_rotations(circuit.inner()), circuit.inner())
     }
 
     /// Record that instruction `instruction` reads `slot`.
@@ -60,7 +100,7 @@ impl PyParameters {
                 names.len()
             )));
         }
-        Ok(Self(self.0.clone().with_names(names)))
+        Ok(Self(self.0.clone().with_names(names), self.1.clone()))
     }
 
     /// Length of the value vector `bind` expects.
@@ -112,6 +152,17 @@ impl PyParameters {
     /// Read the angle each slot currently holds in `circuit`.
     fn values(&self, circuit: &PyCircuit) -> PyPrismResult<Vec<f64>> {
         Ok(self.0.values(circuit.inner())?)
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let (params, pin) = decode_parameters(data)?;
+        Ok(Self(params, pin))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let this = slf.borrow();
+        reduce(slf.as_any(), encode_parameters(&this.0, this.1.as_ref())?)
     }
 
     fn __repr__(&self) -> String {
@@ -283,7 +334,8 @@ impl PyPreparedCircuit {
 
     #[getter]
     fn parameters(&self) -> PyParameters {
-        PyParameters(self.locked().parameters().clone())
+        let prepared = self.locked();
+        PyParameters::against(prepared.parameters().clone(), prepared.template())
     }
 
     /// True when the fused structure was captured and bindings reuse it, false

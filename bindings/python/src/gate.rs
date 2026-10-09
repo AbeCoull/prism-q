@@ -7,7 +7,9 @@ use prism_q::Gate;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
+use crate::codec::{self, Kind, Reader, Writer};
 use crate::error::{PyPrismResult, invalid};
+use crate::pickle::{Reduced, reduce};
 
 /// A quantum gate. Construct via the named static methods (`Gate.h()`,
 /// `Gate.rx(theta)`, `Gate.cu(matrix)`, ...).
@@ -27,6 +29,24 @@ pub fn extract_2x2(obj: &Bound<'_, PyAny>) -> PyPrismResult<[[Complex64; 2]; 2]>
         )));
     }
     Ok([[rows[0][0], rows[0][1]], [rows[1][0], rows[1][1]]])
+}
+
+/// Extract a 4x4 complex matrix from a nested Python sequence or NumPy array.
+pub fn extract_4x4(obj: &Bound<'_, PyAny>) -> PyPrismResult<[[Complex64; 4]; 4]> {
+    let rows: Vec<Vec<Complex64>> = obj
+        .extract()
+        .map_err(|_| invalid("expected a 4x4 complex matrix (nested sequence or ndarray)"))?;
+    if rows.len() != 4 || rows.iter().any(|r| r.len() != 4) {
+        return Err(invalid(format!(
+            "matrix must be 4x4, got {} rows",
+            rows.len()
+        )));
+    }
+    let mut mat = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (dst, src) in mat.iter_mut().zip(&rows) {
+        dst.copy_from_slice(src);
+    }
+    Ok(mat)
 }
 
 #[pymethods]
@@ -161,6 +181,20 @@ impl PyGate {
     #[getter]
     fn name(&self) -> &'static str {
         self.0.name()
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let mut r = Reader::new(data, Kind::Gate)?;
+        let gate = codec::read_lone_gate(&mut r)?;
+        r.finish()?;
+        Ok(Self(gate))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let mut w = Writer::new(Kind::Gate);
+        codec::write_gate(&mut w, &slf.get().0)?;
+        reduce(slf.as_any(), w.finish())
     }
 
     fn __repr__(&self) -> String {

@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 mod backend;
 mod braket;
 mod circuit;
+mod codec;
 mod distributed;
 mod error;
 mod gate;
@@ -13,20 +14,26 @@ mod gpu;
 mod noise;
 mod numpy_util;
 mod parameter;
+mod pickle;
 mod qec;
+mod sampler;
 mod sim;
 
 use backend::{PyBackendKind, PyStabilizerBackend};
 use braket::PyBraketProgram;
-use circuit::{PyCircuit, PyCircuitBuilder, PySaveSpec};
+use circuit::{PyCircuit, PyCircuitBuilder, PyClassicalCondition, PySaveSpec};
 use error::PrismError;
 use gate::PyGate;
 use gpu::{PyGpuContext, PyGpuInfo};
-use noise::{PyDeviceCalibration, PyGateFilter, PyNoiseBuilder, PyNoiseChannel, PyNoiseModel};
+use noise::{
+    PyDeviceCalibration, PyErrorChainComplex, PyGateFilter, PyNoiseBuilder, PyNoiseChannel,
+    PyNoiseModel,
+};
 use parameter::{PyParameters, PyPreparedCircuit};
 use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
 };
+use sampler::PyCompiledSampler;
 use sim::{
     PyBondReport, PyCountsResult, PyEntropyResult, PyExpectationResult, PyObservableExpectation,
     PyObservableVariance, PyOverlapResult, PyPauliObservable, PyReducedDensityMatrix,
@@ -42,6 +49,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCircuit>()?;
     m.add_class::<PyCircuitBuilder>()?;
     m.add_class::<PySaveSpec>()?;
+    m.add_class::<PyClassicalCondition>()?;
     m.add_class::<PyBackendKind>()?;
     m.add_class::<PyStabilizerBackend>()?;
     m.add_class::<PyParameters>()?;
@@ -54,10 +62,12 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNoiseBuilder>()?;
     m.add_class::<PyNoiseModel>()?;
     m.add_class::<PyDeviceCalibration>()?;
+    m.add_class::<PyErrorChainComplex>()?;
     m.add_class::<PySimulation>()?;
     m.add_class::<PyRunOutcome>()?;
     m.add_class::<PyShotsResult>()?;
     m.add_class::<PyCountsResult>()?;
+    m.add_class::<PyCompiledSampler>()?;
     m.add_class::<PyRunMetadata>()?;
     m.add_class::<PyBondReport>()?;
     m.add_class::<PyPauliObservable>()?;
@@ -83,6 +93,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sim::run_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_batch, m)?)?;
     m.add_function(wrap_pyfunction!(gpu::gpu_info, m)?)?;
+    m.add_function(wrap_pyfunction!(noise::noisy_marginals_analytical, m)?)?;
 
     circuit::register_circuits(m)?;
 

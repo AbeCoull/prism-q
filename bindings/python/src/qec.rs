@@ -4,12 +4,15 @@ use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
     DetectorErrorModel, PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram,
     QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
+    run_qec_program_reference,
 };
 use pyo3::prelude::*;
 
+use crate::codec::{self, Kind, Reader, Writer};
 use crate::error::PyPrismResult;
 use crate::gate::PyGate;
 use crate::numpy_util::{bool_matrix, f64_array, u8_matrix};
+use crate::pickle::{Reduced, ReducedMember, reduce, reduce_member};
 
 /// Pauli basis for QEC measurements and resets.
 #[pyclass(name = "QecBasis", module = "prism_q", eq, eq_int, from_py_object)]
@@ -18,6 +21,18 @@ pub enum PyQecBasis {
     X,
     Y,
     Z,
+}
+
+#[pymethods]
+impl PyQecBasis {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<ReducedMember<'py>> {
+        let name = match *slf.borrow() {
+            PyQecBasis::X => "X",
+            PyQecBasis::Y => "Y",
+            PyQecBasis::Z => "Z",
+        };
+        reduce_member(slf.as_any(), name)
+    }
 }
 
 impl PyQecBasis {
@@ -49,6 +64,20 @@ impl PyRecordRef {
         Ok(Self(QecRecordRef::lookback(distance)?))
     }
 
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let mut r = Reader::new(data, Kind::RecordRef)?;
+        let record = codec::read_record(&mut r)?;
+        r.finish()?;
+        Ok(Self(record))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let mut w = Writer::new(Kind::RecordRef);
+        codec::write_record(&mut w, &slf.get().0)?;
+        reduce(slf.as_any(), w.finish())
+    }
+
     fn __repr__(&self) -> String {
         format!("RecordRef({:?})", self.0)
     }
@@ -76,6 +105,20 @@ impl PyQecNoise {
     #[staticmethod]
     fn depolarize2(p: f64) -> Self {
         Self(QecNoise::Depolarize2(p))
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let mut r = Reader::new(data, Kind::QecNoise)?;
+        let channel = codec::read_qec_noise(&mut r)?;
+        r.finish()?;
+        Ok(Self(channel))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let mut w = Writer::new(Kind::QecNoise);
+        codec::write_qec_noise(&mut w, slf.get().0)?;
+        reduce(slf.as_any(), w.finish())
     }
 
     fn __repr__(&self) -> String {
@@ -214,6 +257,21 @@ impl PyQecProgram {
         Ok(())
     }
 
+    /// Apply the operations of `body` only in shots where the parity over
+    /// `records` equals `expected`. `body` admits gates and resets only, so the
+    /// measurement record keeps one layout across shots.
+    fn feedforward(
+        &mut self,
+        records: Vec<PyRecordRef>,
+        expected: bool,
+        body: &PyQecProgram,
+    ) -> PyPrismResult<()> {
+        let refs: Vec<QecRecordRef> = records.iter().map(|r| r.0).collect();
+        self.inner
+            .feedforward(&refs, expected, body.inner.ops().to_vec())?;
+        Ok(())
+    }
+
     /// Append a Pauli-noise annotation on `targets`.
     fn noise(&mut self, channel: &PyQecNoise, targets: Vec<usize>) -> PyPrismResult<()> {
         self.inner.noise(channel.0, &targets)?;
@@ -227,12 +285,33 @@ impl PyQecProgram {
         Ok(PyQecResult { inner: result })
     }
 
+    /// Sample through the per-shot statevector reference path, the route that
+    /// executes `feedforward`. Costs `O(shots * 2^n)`, so it suits small
+    /// programs rather than bulk sampling.
+    fn run_reference(&self, py: Python<'_>) -> PyPrismResult<PyQecResult> {
+        let program = &self.inner;
+        let result = py.detach(|| run_qec_program_reference(program))?;
+        Ok(PyQecResult { inner: result })
+    }
+
     /// Derive the detector error model from the program's noise annotations,
     /// detectors, and observables.
     fn detector_error_model(&self) -> PyPrismResult<PyDetectorErrorModel> {
         Ok(PyDetectorErrorModel {
             inner: self.inner.detector_error_model()?,
         })
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: codec::decode_qec_program(data)?,
+        })
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let data = codec::encode_qec_program(&slf.borrow().inner)?;
+        reduce(slf.as_any(), data)
     }
 
     fn __repr__(&self) -> String {
@@ -427,7 +506,7 @@ fn unpack_word(word: u64, out: &mut [bool]) {
     }
 }
 
-fn packed_to_2d<'py>(
+pub(crate) fn packed_to_2d<'py>(
     py: Python<'py>,
     packed: &PackedShots,
 ) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
@@ -461,7 +540,7 @@ fn packed_to_2d<'py>(
 
 /// Repack shot-major as `(shots, ceil(n / 8))` bytes: record `j` is bit `j % 8` of
 /// byte `j / 8`, and the padding bits of the last byte are clear.
-fn packed_to_bytes<'py>(
+pub(crate) fn packed_to_bytes<'py>(
     py: Python<'py>,
     packed: &PackedShots,
 ) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {

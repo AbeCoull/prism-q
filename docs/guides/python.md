@@ -83,7 +83,8 @@ circuit = (
 | Two qubit | `cx(control, target)`, `cz(q0, q1)`, `swap(q0, q1)`, `rzz(theta, q0, q1)`, `cphase(theta, control, target)` |
 | Multi-qubit rotation | `pauli_rotation(theta, factors)` |
 | Arbitrary unitary | `cu(matrix, control, target)`, `mcu(matrix, controls, target)`, `gate(gate, targets)` |
-| Non-unitary | `measure(qubit, bit)`, `measure_all()`, `barrier(qubits)` |
+| Non-unitary | `measure(qubit, bit)`, `measure_all()`, `measure_in_basis(qubit, axis, bit)`, `measure_pauli_product(factors, bit)`, `reset(qubit)`, `barrier(qubits)` |
+| Classical control | `conditional(condition, gate, targets)`, `guarded(condition, body, else_body=None)` |
 | Parameters | `param(slot)`, `parameters()`, `parameter_links()` |
 
 `pauli_rotation(theta, factors)` appends `exp(-i * theta * P / 2)` for the Pauli
@@ -116,6 +117,120 @@ The `circuits` submodule mirrors the Rust builders documented in
 `single_qubit_rotation`, `clifford_t`, `quantum_volume`, `cz_chain`,
 `phase_estimation`, `independent_bell_pairs`, `independent_random_blocks`, and
 `local_clifford_blocks`. Seeded builders default to seed 42.
+
+### Measuring in other bases
+
+`measure_in_basis(qubit, axis, bit)` rotates `axis` onto Z and measures, recording
+the `+1` eigenvalue as `0`. The qubit is left in the Z eigenstate, not the `axis` one.
+`measure_pauli_product(factors, bit)` measures a multi-qubit Pauli product such as
+`X0 X1` without measuring its factors one by one. The parity collects on one extra
+qubit appended past the register on the first call, so the built circuit is one qubit
+wider; a second call resets that qubit, which takes the circuit off the compiled
+sampling route.
+
+```python
+from prism_q import CircuitBuilder, simulate
+
+bell = CircuitBuilder(2, 2).h(0).cx(0, 1)
+bell.measure_pauli_product([(0, "X"), (1, "X")], 0)
+bell.measure_pauli_product([(0, "Z"), (1, "Z")], 1)
+checked = bell.build()
+print(checked.num_qubits)                              # 3
+print(simulate(checked).seed(1).shots(100).counts())   # {'00': 100}
+```
+
+### Classical control
+
+A `ClassicalCondition` tests measured bits at runtime. `ClassicalCondition.bit(b,
+value=True)` reads one bit, `parity(bits, expected=True)` the XOR of several, and
+`register_equals(offset, size, value)` and `register_not_equals` read `size` bits as an
+integer with bit `offset` least significant. `~condition` is the negation.
+
+`conditional(condition, gate, targets)` applies one gate when the condition holds:
+
+```python
+from prism_q import ClassicalCondition, Gate
+
+teleport = CircuitBuilder(3, 3).ry(0.8, 0).h(1).cx(1, 2).cx(0, 1).h(0)
+teleport.measure(0, 0).measure(1, 1)
+teleport.conditional(ClassicalCondition.bit(1), Gate.x(), [2])
+teleport.conditional(ClassicalCondition.bit(0), Gate.z(), [2])
+teleport.ry(-0.8, 2).measure(2, 2)
+received = simulate(teleport.build()).seed(5).shots(500)
+assert not received.shots[:, 2].any()
+```
+
+`guarded(condition, body, else_body=None)` calls `body` with a fresh `CircuitBuilder` of
+the same width and turns whatever it appends, measurements and resets included, into a
+region that runs only when the condition holds. `else_body` builds a second region for
+the shots where it does not:
+
+```python
+coin = CircuitBuilder(2, 2).h(0).measure(0, 0)
+coin.guarded(
+    ClassicalCondition.bit(0),
+    lambda then: then.x(1),
+    lambda otherwise: otherwise.z(1),
+)
+coin.measure(1, 1)
+print(simulate(coin.build()).seed(3).shots(1000).counts())   # {'00': 507, '11': 493}
+```
+
+The else region reads the condition again after the first has run, so a `body` that
+measures into a bit the condition reads cannot take an `else_body` and raises
+`PrismError`. A body cannot widen the circuit, which rules out `measure_pauli_product`
+and `measure_all` inside one. Regions nest. A noise model carrying quantum events
+rejects a circuit that holds a region, because its event slots index top-level
+instructions; readout error alone is accepted.
+
+## Exporting and drawing circuits
+
+`to_qasm()` writes OpenQASM 3.0 that `parse_qasm` reads back to the same instruction
+stream, with inline angles exact:
+
+```python
+from prism_q import CircuitBuilder, parse_qasm
+
+circuit = (
+    CircuitBuilder(3, 3)
+    .h(0)
+    .cx(0, 1)
+    .pauli_rotation(0.3, [(0, "X"), (1, "Y"), (2, "Z")])
+    .measure_all()
+    .build()
+)
+text = circuit.to_qasm()
+assert parse_qasm(text).to_qasm() == text
+portable = circuit.to_qasm(expand_pauli_rotations=True)
+```
+
+A multi-letter Pauli rotation keeps its `rxyz(0.3)` spelling, which only PRISM-Q
+parses. `expand_pauli_rotations=True` lowers it to basis changes around a CNOT ladder so
+other toolchains read the file. Guarded regions export as `if` blocks. Save points and
+dense unitaries on three or more qubits have no OpenQASM spelling and raise `PrismError`
+with `kind == "export_unsupported"`.
+
+`print(circuit)` draws the text wire diagram. `draw()` takes the layout options
+`fold_width`, `show_idle_wires`, `show_barriers`, `max_qubits`, and `max_moments`, and
+past 64 qubits or 500 moments returns `summary()` instead: gate counts, connectivity,
+and the depth profile. `heatmap()` draws gate density by qubit and moment.
+
+```python
+print(circuit)
+print(circuit.draw(fold_width=80, show_idle_wires=False))
+with open("circuit.svg", "w", encoding="utf-8") as f:
+    f.write(circuit.to_svg(dark_mode=True, show_legend=True))
+```
+
+`to_svg()` writes a self-contained SVG. Its keyword options cover the theme
+(`dark_mode`, or `auto_theme` to embed both and follow the viewer's color scheme),
+`animate`, `compact`, the `show_legend`, `show_stats_header`, and `show_topology`
+layers, truncation (`max_qubits`, `max_moments`, and `ellipsis=(first, last)` to keep
+only the leading and trailing moments), and geometry in SVG units (`wire_spacing`,
+`moment_width`, `gate_height`, `gate_min_width`, `font_size`, `control_radius`, and
+`padding` as `(left, top, right, bottom)`). `to_svg_heatmap()` renders the density
+heatmap. In Jupyter a circuit displays as its diagram, static and following the page
+theme, cut to 64 wires and 200 moments.
 
 ## Running a simulation
 
@@ -623,13 +738,31 @@ model = calibration.to_noise_model(circuit)
 
 Channels are `pauli(px, py, pz)`, `depolarizing(p)`, `amplitude_damping(gamma)`,
 `phase_damping(gamma)`, `thermal_relaxation(t1, t2, gate_time, excited_population=0.0)`,
-`two_qubit_depolarizing(p)`, and `custom(kraus)` for an explicit list of 2x2
-Kraus operators. `validate()` checks probabilities and Kraus completeness;
+`two_qubit_depolarizing(p)`, `custom(kraus)` for an explicit list of 2x2
+Kraus operators, and `custom_2q(kraus)` for 4x4 operators on two qubits, indexed with
+the first target as the high bit. `validate()` checks probabilities and Kraus completeness;
 `is_pauli_only()` reports whether the model holds only single-qubit Pauli
 channels and no readout error. A model carrying readout error or
 `two_qubit_depolarizing` answers `False` there and still runs on the stabilizer
 samplers, which apply readout to the measurement record and sample the pair
 channel as one joint draw over its 15 branches.
+
+A two-qubit Kraus channel models correlated noise, here `ZZ` dephasing:
+
+```python
+import numpy as np
+
+p = 0.02
+zz_dephasing = NoiseChannel.custom_2q(
+    [np.sqrt(1 - p) * np.eye(4), np.sqrt(p) * np.diag([1, -1, -1, 1])]
+)
+model = NoiseModel.empty(circuit)
+model.add_event(1, zz_dephasing, [0, 1])
+model.validate()
+```
+
+It runs exactly on the density matrix and by trajectories on the statevector, sparse,
+factored, and MPS backends; the stabilizer samplers decline it.
 
 ## Expectation values
 
@@ -712,6 +845,59 @@ GIL released, one circuit per core: a 200-point sweep of a two-layer ansatz ran 
 than the batch run one circuit at a time at 14 and 16 qubits. From 17 qubits up each
 circuit uses every core itself, and the batch saves only the crossing into Rust, about
 2.4 microseconds a call.
+
+## Compiled sampling
+
+`simulate(circuit).shots(n)` compiles a Clifford circuit's measurements into a parity
+sampler on every call. `CompiledSampler` keeps the compiled form, so repeated draws
+skip the compile, and adds reductions that stream shots through in bounded chunks
+rather than holding them:
+
+```python
+from prism_q import CircuitBuilder, CompiledSampler
+
+ghz = CircuitBuilder(3, 3).h(0).cx(0, 1).cx(1, 2).measure_all().build()
+sampler = CompiledSampler(ghz, seed=7)
+shots = sampler.sample(1000)                    # (1000, 3) bool
+counts = sampler.sample_counts(10**9)           # closed form at small rank
+marginals = sampler.marginals(10**6)            # P(record reads 1)
+parities = sampler.parity_expectations([[0, 1], [0, 1, 2]], 10**6)
+correlators = sampler.correlators([(0, 2)], 10**6)
+```
+
+Columns, count keys, and indices are measurement records in circuit order: record `j`
+is the `j`-th measurement, and `circuit.measurement_map()[j]` names its qubit and
+classical bit. `shots()` reports classical bits instead. Each call continues one seeded
+stream, so successive calls draw fresh shots and a sampler built again with the same
+seed replays them. `rank` counts the independent random bits behind the record, and
+`exact_counts()` enumerates all `2 ** rank` outcomes up to rank 25. `sample_packed(n)`
+returns records eight to a byte in the `QecResult.packed_measurements()` layout.
+
+`parity_expectations(rows, n)` estimates `<(-1)^parity>` over each row of record
+indices, the expectation of the Z-type Pauli product those records measure, and
+`correlators(pairs, n)` is its two-record case.
+
+`noise=model` compiles a Pauli noise model, readout error included, into the sampler;
+`rank` and `exact_counts()` are then `None`. The circuit must be Clifford with terminal
+measurements and no reset or classical condition, and other input raises `PrismError`
+naming the reason.
+
+```python
+from prism_q import ErrorChainComplex, NoiseModel, noisy_marginals_analytical
+
+model = NoiseModel.uniform_depolarizing(ghz, 0.01)
+noisy = CompiledSampler(ghz, seed=7, noise=model)
+estimate = noisy.marginals(10**6)
+exact = noisy_marginals_analytical(ghz, model)
+logical_classes = ErrorChainComplex(ghz, model).homology_dim
+```
+
+`noisy_marginals_analytical(circuit, model)` returns the exact probability that each
+classical bit reads 1 under Pauli noise, with no sampling and no rank limit.
+`ErrorChainComplex(circuit, model)` exposes the GF(2) chain complex behind it:
+`homology_dim` counts the independent logical error classes, `boundary_dim` the
+stabilizer generators no measurement detects, and `noisy_marginals(noiseless)` maps
+noiseless record marginals to noisy ones.
 
 ## Parameter sweeps
 
@@ -881,6 +1067,28 @@ predicted = decoder.decode(res.detectors)
 failures = (predicted[:, 0] != res.observables[:, 0]).sum()
 ```
 
+`feedforward(records, expected, body)` applies the gates and resets of `body`, a
+second `QecProgram` holding the correction, only in shots where the parity over
+`records` equals `expected`: an adaptive correction keyed on a syndrome. The compiled
+sampler behind `run()` evaluates one affine map for every shot, which a feed-forward
+breaks, so a program carrying one runs through `run_reference()`, the per-shot
+statevector path. It costs `O(shots * 2^n)` and suits small programs.
+
+```python
+from prism_q import Gate, QecProgram, RecordRef
+
+prog = QecProgram(2)
+prog.set_options(shots=1000, seed=1)
+prog.push_gate(Gate.h(), [0])
+prog.push_gate(Gate.cx(), [0, 1])
+flag = prog.measure_z(0)
+fix = QecProgram(2)
+fix.push_gate(Gate.x(), [1])
+prog.feedforward([RecordRef.absolute(flag)], True, fix)
+prog.measure_z(1)
+assert not prog.run_reference().measurements[:, 1].any()
+```
+
 `packed_detectors()`, `packed_observables()`, and `packed_measurements()` return
 the same records eight to a byte, as `(shots, ceil(n / 8))` `uint8` arrays: record
 `j` of a shot is bit `j % 8` of byte `j // 8`, and the unused high bits of the
@@ -894,6 +1102,32 @@ packed = res.packed_detectors()
 detectors = np.unpackbits(packed, axis=1, count=qp.num_detectors, bitorder="little")
 assert (detectors.astype(bool) == res.detectors).all()
 ```
+
+## Pickling and multiprocessing
+
+`Circuit`, `Gate`, `Parameters`, `NoiseChannel`, `NoiseModel`, `QecProgram`,
+`PauliObservable`, `ClassicalCondition`, `RecordRef`, `QecNoise`, `SaveSpec`, and
+`QecBasis` pickle, so they cross `multiprocessing`, `concurrent.futures`, Ray, and Dask
+boundaries. The payload is a versioned binary encoding that carries every float as its
+IEEE bits, so an unpickled value is identical to the original rather than close to it,
+and a `Parameters` set keeps the edit guard it was pinned with.
+
+```python
+import pickle
+
+from prism_q import CircuitBuilder, simulate
+
+circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
+restored = pickle.loads(pickle.dumps(circuit))
+assert pickle.dumps(restored) == pickle.dumps(circuit)
+assert simulate(restored).seed(1).shots(100).counts() == simulate(circuit).seed(1).shots(
+    100
+).counts()
+```
+
+A payload from a newer format version raises `PrismError` naming the version rather
+than decoding wrongly. Builders, results, samplers, backends, and contexts do not
+pickle: return a result's arrays or counts from a worker instead.
 
 ## Errors and typing
 

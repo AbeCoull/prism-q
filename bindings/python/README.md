@@ -55,15 +55,24 @@ qubit. This is reversed relative to Qiskit. For example, the state where only
 ## Features
 
 - Fluent `CircuitBuilder` and OpenQASM 3.0 parsing.
+- Classical control on measured bits (`ClassicalCondition`, `guarded` with an else
+  branch) and measurement in a Pauli basis or of a Pauli product.
+- OpenQASM 3.0 export (`Circuit.to_qasm`) and text, SVG, and Jupyter circuit drawing.
 - Reusable circuit generators (`prism_q.circuits`): QFT, GHZ, QAOA,
   hardware-efficient ansatz, quantum volume, and more.
 - Backend selection via `BackendKind` (statevector, stabilizer, sparse, MPS,
   Pauli propagation, ...).
 - Parameter sweeps without a rebuild (`Parameters`, `PreparedCircuit`) plus
   adjoint gradients.
-- Noise models (`NoiseModel`, `NoiseChannel`) for shot sampling.
-- Native QEC programs (`QecProgram`) with detector and observable sampling.
+- Noise models (`NoiseModel`, `NoiseChannel`, two-qubit Kraus channels included) for
+  shot sampling.
+- Compiled Clifford samplers (`CompiledSampler`) with streamed marginals, parities,
+  and correlators, plus analytic noisy marginals (`noisy_marginals_analytical`).
+- Native QEC programs (`QecProgram`) with detector and observable sampling and
+  feed-forward corrections.
 - NumPy output for probabilities, statevectors, and QEC bit matrices.
+- Pickling for circuits, parameters, noise models, and QEC programs, so they cross
+  `multiprocessing`, Ray, and Dask boundaries.
 
 ## License
 

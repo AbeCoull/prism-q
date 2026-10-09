@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 import prism_q
@@ -110,3 +111,73 @@ def test_add_event_out_of_range_raises():
     model = NoiseModel.empty(circuit)
     with pytest.raises(prism_q.PrismError):
         model.add_event(9999, NoiseChannel.depolarizing(0.05), [0])
+
+
+def _zz_dephasing(p):
+    identity = np.eye(4)
+    zz = np.diag([1.0, -1.0, -1.0, 1.0])
+    return NoiseChannel.custom_2q([np.sqrt(1 - p) * identity, np.sqrt(p) * zz])
+
+
+def test_two_qubit_kraus_channel_is_exact_on_the_density_matrix():
+    circuit = CircuitBuilder(2).h(0).h(1).build()
+    model = NoiseModel.empty(circuit)
+    model.add_event(1, _zz_dephasing(0.1), [0, 1])
+    model.validate()
+    values = (
+        simulate(circuit)
+        .seed(1)
+        .noise(model)
+        .density_matrix_expectation_values([[(0, "X")], [(0, "X"), (1, "X")]])
+    )
+    assert values[0] == pytest.approx(0.8, abs=1e-12)
+    assert values[1] == pytest.approx(1.0, abs=1e-12)
+
+
+def test_two_qubit_kraus_channel_samples_on_trajectories():
+    circuit = CircuitBuilder(2, 2).h(0).h(1).h(0).measure_all().build()
+    model = NoiseModel.empty(circuit)
+    model.add_event(1, _zz_dephasing(0.5), [0, 1])
+    counts = simulate(circuit).seed(3).noise(model).sample_counts(4000).counts()
+    flipped = counts.get("10", 0) + counts.get("11", 0)
+    assert 1700 < flipped < 2300
+
+
+def test_two_qubit_kraus_channel_shape_and_completeness():
+    channel = _zz_dephasing(0.1)
+    assert channel.num_qubits == 2
+    assert NoiseChannel.depolarizing(0.1).num_qubits == 1
+    assert repr(channel) == "NoiseChannel.custom_2q(2 operators)"
+    with pytest.raises(prism_q.PrismError):
+        NoiseChannel.custom_2q([])
+    with pytest.raises(prism_q.PrismError):
+        NoiseChannel.custom_2q([np.eye(2)])
+    circuit = CircuitBuilder(2).h(0).build()
+    model = NoiseModel.empty(circuit)
+    model.add_event(0, NoiseChannel.custom_2q([0.5 * np.eye(4)]), [0, 1])
+    with pytest.raises(prism_q.PrismError):
+        model.validate()
+
+
+def test_chain_complex_and_analytic_marginals_match_sampling():
+    circuit = CircuitBuilder(2, 2).x(0).cx(0, 1).measure_all().build()
+    model = NoiseModel.uniform_depolarizing(circuit, 0.03)
+    analytic = prism_q.noisy_marginals_analytical(circuit, model)
+    sampled = prism_q.CompiledSampler(circuit, seed=5, noise=model).marginals(200_000)
+    np.testing.assert_allclose(analytic, sampled, atol=5e-3)
+
+    complex_ = prism_q.ErrorChainComplex(circuit, model)
+    np.testing.assert_allclose(complex_.noisy_marginals([1.0, 1.0]), analytic, atol=1e-12)
+    assert complex_.boundary_dim >= 0 and complex_.homology_dim >= 0
+    with pytest.raises(prism_q.PrismError):
+        complex_.noisy_marginals([1.0])
+
+
+def test_chain_complex_rejects_a_model_for_another_circuit():
+    circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
+    other = CircuitBuilder(1, 1).h(0).build()
+    model = NoiseModel.uniform_depolarizing(other, 0.01)
+    with pytest.raises(prism_q.PrismError):
+        prism_q.ErrorChainComplex(circuit, model)
+    with pytest.raises(prism_q.PrismError):
+        prism_q.noisy_marginals_analytical(circuit, model)

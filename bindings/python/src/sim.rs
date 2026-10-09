@@ -19,9 +19,11 @@ use pyo3::types::{PyDict, PyList, PyString};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
+use crate::codec;
 use crate::error::{PyPrismResult, invalid};
 use crate::noise::PyNoiseModel;
 use crate::numpy_util::{bool_matrix, complex_array, complex_matrix, f64_array};
+use crate::pickle::{Reduced, reduce};
 
 pub(crate) const DEFAULT_SEED: u64 = 42;
 
@@ -918,12 +920,21 @@ impl PyPauliObservable {
         self.0.num_groups()
     }
 
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        Ok(Self(codec::decode_observable(data)?))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        reduce(slf.as_any(), codec::encode_observable(&slf.get().0))
+    }
+
     fn __repr__(&self) -> String {
         format!("PauliObservable(num_terms={})", self.0.num_terms())
     }
 }
 
-fn parse_axis(axis: &str) -> PyPrismResult<PauliAxis> {
+pub(crate) fn parse_axis(axis: &str) -> PyPrismResult<PauliAxis> {
     match axis.to_ascii_uppercase().as_str() {
         "X" => Ok(PauliAxis::X),
         "Y" => Ok(PauliAxis::Y),
@@ -989,7 +1000,7 @@ pub fn run_qasm(source: &str, seed: u64) -> PyPrismResult<PyRunOutcome> {
     Ok(PyRunOutcome::from_outcome(outcome))
 }
 
-fn counts_to_dict<'py>(
+pub(crate) fn counts_to_dict<'py>(
     py: Python<'py>,
     counts: &HashMap<Vec<u64>, u64>,
     num_bits: usize,

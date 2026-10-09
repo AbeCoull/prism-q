@@ -1,14 +1,19 @@
 //! Circuit construction, OpenQASM parsing, and reusable circuit builders.
 
-use prism_q::circuit::openqasm;
-use prism_q::{Circuit, CircuitBuilder, Gate, Instruction, PauliTerm, SaveSpec, circuits};
+use prism_q::circuit::{openqasm, qasm_export};
+use prism_q::{
+    Circuit, CircuitBuilder, ClassicalCondition, Gate, Instruction, PauliTerm, SaveSpec,
+    SvgOptions, TextOptions, circuits,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
+use crate::codec::{self, Kind, Reader, Writer};
 use crate::error::{PyPrismResult, invalid};
 use crate::gate::PyGate;
 use crate::parameter::PyParameters;
-use crate::sim::parse_pauli_string;
+use crate::pickle::{Reduced, ReducedMember, reduce, reduce_member};
+use crate::sim::{parse_axis, parse_pauli_string};
 
 /// A quantum circuit. Construct via [`CircuitBuilder`], [`parse_qasm`], or one
 /// of the reusable circuit generators under `prism_q.circuits`.
@@ -95,6 +100,225 @@ fn check_mcu_targets(num_qubits: usize, controls: &[usize], target: usize) -> Py
     Ok(())
 }
 
+const REPR_MAX_QUBITS: usize = 64;
+const REPR_MAX_MOMENTS: usize = 200;
+
+/// A runtime test on measured classical bits that guards a gate or region.
+#[pyclass(
+    name = "ClassicalCondition",
+    module = "prism_q",
+    frozen,
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct PyClassicalCondition(pub ClassicalCondition);
+
+/// Classical bits `condition` reads.
+pub(crate) fn condition_bits(condition: &ClassicalCondition) -> PyPrismResult<Vec<usize>> {
+    Ok(match condition {
+        ClassicalCondition::BitIsOne(bit) | ClassicalCondition::BitIsZero(bit) => vec![*bit],
+        ClassicalCondition::Parity { bits, .. } => bits.to_vec(),
+        ClassicalCondition::RegisterEquals { offset, size, .. }
+        | ClassicalCondition::RegisterNotEquals { offset, size, .. } => {
+            (*offset..offset + size).collect()
+        }
+        other => {
+            return Err(invalid(format!(
+                "condition {other:?} is newer than this binding"
+            )));
+        }
+    })
+}
+
+fn check_condition(num_bits: usize, condition: &ClassicalCondition) -> PyPrismResult<()> {
+    for bit in condition_bits(condition)? {
+        check_classical_bit(num_bits, bit)?;
+    }
+    Ok(())
+}
+
+fn check_register(size: usize, value: u64) -> PyPrismResult<()> {
+    if size == 0 || size > 64 {
+        return Err(invalid(format!(
+            "register conditions span 1 to 64 bits, got {size}"
+        )));
+    }
+    if size < 64 && value >> size != 0 {
+        return Err(invalid(format!(
+            "value {value} does not fit in a {size}-bit register"
+        )));
+    }
+    Ok(())
+}
+
+#[pymethods]
+impl PyClassicalCondition {
+    /// Holds when classical bit `bit` reads `value`.
+    #[staticmethod]
+    #[pyo3(signature = (bit, value = true))]
+    fn bit(bit: usize, value: bool) -> Self {
+        Self(if value {
+            ClassicalCondition::BitIsOne(bit)
+        } else {
+            ClassicalCondition::BitIsZero(bit)
+        })
+    }
+
+    /// Holds when the XOR of `bits` equals `expected`.
+    #[staticmethod]
+    #[pyo3(signature = (bits, expected = true))]
+    fn parity(bits: Vec<usize>, expected: bool) -> PyPrismResult<Self> {
+        if bits.is_empty() {
+            return Err(invalid("parity condition needs at least one bit"));
+        }
+        Ok(Self(ClassicalCondition::Parity {
+            bits: bits.into_boxed_slice(),
+            expected,
+        }))
+    }
+
+    /// Holds when bits `offset .. offset + size`, read with `offset` as the
+    /// least significant bit, equal `value`.
+    #[staticmethod]
+    fn register_equals(offset: usize, size: usize, value: u64) -> PyPrismResult<Self> {
+        check_register(size, value)?;
+        Ok(Self(ClassicalCondition::RegisterEquals {
+            offset,
+            size,
+            value,
+        }))
+    }
+
+    /// The negation of `register_equals` over the same bits.
+    #[staticmethod]
+    fn register_not_equals(offset: usize, size: usize, value: u64) -> PyPrismResult<Self> {
+        check_register(size, value)?;
+        Ok(Self(ClassicalCondition::RegisterNotEquals {
+            offset,
+            size,
+            value,
+        }))
+    }
+
+    /// The condition that holds exactly when this one does not.
+    fn negate(&self) -> Self {
+        Self(self.0.negate())
+    }
+
+    fn __invert__(&self) -> Self {
+        self.negate()
+    }
+
+    /// Classical bits the condition reads.
+    #[getter]
+    fn bits(&self) -> PyPrismResult<Vec<usize>> {
+        condition_bits(&self.0)
+    }
+
+    /// Evaluate against a classical record, bit `i` at index `i`.
+    fn evaluate(&self, classical_bits: Vec<bool>) -> PyPrismResult<bool> {
+        for bit in condition_bits(&self.0)? {
+            check_classical_bit(classical_bits.len(), bit)?;
+        }
+        Ok(self.0.evaluate(&classical_bits))
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let mut r = Reader::new(data, Kind::Condition)?;
+        let condition = codec::read_condition(&mut r)?;
+        r.finish()?;
+        Ok(Self(condition))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let mut w = Writer::new(Kind::Condition);
+        codec::write_condition(&mut w, &slf.get().0)?;
+        reduce(slf.as_any(), w.finish())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ClassicalCondition({:?})", self.0)
+    }
+}
+
+/// Replay `instructions` onto `builder`, which has no generic append.
+fn replay(builder: &mut CircuitBuilder, instructions: Vec<Instruction>) -> PyPrismResult<()> {
+    for inst in instructions {
+        match inst {
+            Instruction::Gate { gate, targets } => {
+                builder.gate(gate, &targets);
+            }
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => {
+                builder.measure(qubit, classical_bit);
+            }
+            Instruction::Reset { qubit } => {
+                builder.reset(qubit);
+            }
+            Instruction::Barrier { qubits } => {
+                builder.barrier(&qubits);
+            }
+            Instruction::Conditional {
+                condition,
+                gate,
+                targets,
+            } => {
+                builder.conditional(condition, gate, &targets);
+            }
+            Instruction::Region(region) => {
+                let body = region.body().to_vec();
+                let mut nested = Ok(());
+                builder.guarded(region.condition().clone(), |inner| {
+                    nested = replay(inner, body);
+                });
+                nested?;
+            }
+            Instruction::Save { label, .. } => {
+                return Err(invalid(format!(
+                    "save point `{label}` cannot sit inside a guarded region"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Call `body` on a fresh builder of the given width and take what it appended.
+fn region_body(
+    body: &Bound<'_, PyAny>,
+    num_qubits: usize,
+    num_bits: usize,
+) -> PyResult<Vec<Instruction>> {
+    let builder = Bound::new(
+        body.py(),
+        PyCircuitBuilder {
+            inner: CircuitBuilder::new_with_classical(num_qubits, num_bits),
+        },
+    )?;
+    body.call1((builder.clone(),))?;
+    let builder = builder.borrow();
+    let circuit = builder.inner.circuit();
+    if circuit.num_qubits != num_qubits || circuit.num_classical_bits != num_bits {
+        return Err(invalid(
+            "a guarded body cannot widen the circuit (measure_pauli_product or measure_all)",
+        )
+        .into());
+    }
+    Ok(circuit.instructions.clone())
+}
+
+/// True when a measurement in `instructions` writes one of `bits`.
+fn writes_any(instructions: &[Instruction], bits: &[usize]) -> bool {
+    instructions.iter().any(|inst| match inst {
+        Instruction::Measure { classical_bit, .. } => bits.contains(classical_bit),
+        Instruction::Region(region) => writes_any(region.body(), bits),
+        _ => false,
+    })
+}
+
 /// What a save point records.
 #[pyclass(name = "SaveSpec", module = "prism_q", eq, eq_int, from_py_object)]
 #[derive(Clone, Copy, PartialEq)]
@@ -102,6 +326,18 @@ pub enum PySaveSpec {
     StateVector,
     Probabilities,
     DensityMatrix,
+}
+
+#[pymethods]
+impl PySaveSpec {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<ReducedMember<'py>> {
+        let name = match *slf.borrow() {
+            PySaveSpec::StateVector => "StateVector",
+            PySaveSpec::Probabilities => "Probabilities",
+            PySaveSpec::DensityMatrix => "DensityMatrix",
+        };
+        reduce_member(slf.as_any(), name)
+    }
 }
 
 impl PySaveSpec {
@@ -209,6 +445,197 @@ impl PyCircuit {
         }
         self.0.add_barrier(&qubits);
         Ok(())
+    }
+
+    /// Render as an OpenQASM 3.0 program that `parse_qasm` reads back.
+    ///
+    /// A multi-letter Pauli rotation keeps its `r<letters>` spelling, an
+    /// extension only PRISM-Q parses; `expand_pauli_rotations=True` lowers it
+    /// to basis changes around a CNOT ladder for other toolchains. Save points
+    /// and dense gates on three or more qubits have no spelling and raise.
+    #[pyo3(signature = (*, expand_pauli_rotations = false))]
+    fn to_qasm(&self, expand_pauli_rotations: bool) -> PyPrismResult<String> {
+        if expand_pauli_rotations {
+            let expanded = prism_q::circuit::expand_pauli_rotations(&self.0);
+            Ok(qasm_export::to_qasm3(&expanded)?)
+        } else {
+            Ok(qasm_export::to_qasm3(&self.0)?)
+        }
+    }
+
+    /// Text wire diagram, folded at `fold_width` columns. Past 64 qubits or
+    /// 500 moments it returns `summary()` instead.
+    #[pyo3(signature = (
+        *,
+        fold_width = TextOptions::default().fold_width,
+        show_idle_wires = true,
+        show_barriers = true,
+        max_qubits = None,
+        max_moments = None,
+    ))]
+    fn draw(
+        &self,
+        fold_width: usize,
+        show_idle_wires: bool,
+        show_barriers: bool,
+        max_qubits: Option<usize>,
+        max_moments: Option<usize>,
+    ) -> String {
+        self.0.draw(&TextOptions {
+            fold_width,
+            show_idle_wires,
+            show_barriers,
+            max_qubits,
+            max_moments,
+        })
+    }
+
+    /// Gate-density heatmap of qubits by moments as text, bucketed to fit
+    /// `fold_width` columns.
+    #[pyo3(signature = (
+        *,
+        fold_width = TextOptions::default().fold_width,
+        show_idle_wires = true,
+        show_barriers = true,
+        max_qubits = None,
+        max_moments = None,
+    ))]
+    fn heatmap(
+        &self,
+        fold_width: usize,
+        show_idle_wires: bool,
+        show_barriers: bool,
+        max_qubits: Option<usize>,
+        max_moments: Option<usize>,
+    ) -> String {
+        self.0.heatmap(&TextOptions {
+            fold_width,
+            show_idle_wires,
+            show_barriers,
+            max_qubits,
+            max_moments,
+        })
+    }
+
+    /// Gate counts, connectivity, and depth profile as text.
+    fn summary(&self) -> String {
+        self.0.summary()
+    }
+
+    /// Self-contained SVG wire diagram. Lengths are SVG user units and
+    /// `font_size` is in pixels. `ellipsis` as `(first, last)` draws only those
+    /// leading and trailing moments when the circuit does not fit.
+    #[pyo3(signature = (
+        *,
+        dark_mode = false,
+        auto_theme = false,
+        animate = true,
+        compact = false,
+        show_legend = false,
+        show_stats_header = false,
+        show_topology = false,
+        show_idle_wires = true,
+        show_barriers = true,
+        max_qubits = None,
+        max_moments = None,
+        ellipsis = None,
+        wire_spacing = SvgOptions::default().wire_spacing,
+        moment_width = SvgOptions::default().moment_width,
+        gate_height = SvgOptions::default().gate_height,
+        gate_min_width = SvgOptions::default().gate_min_width,
+        font_size = SvgOptions::default().font_size,
+        control_radius = SvgOptions::default().control_radius,
+        padding = (
+            SvgOptions::default().padding_left,
+            SvgOptions::default().padding_top,
+            SvgOptions::default().padding_right,
+            SvgOptions::default().padding_bottom,
+        ),
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn to_svg(
+        &self,
+        dark_mode: bool,
+        auto_theme: bool,
+        animate: bool,
+        compact: bool,
+        show_legend: bool,
+        show_stats_header: bool,
+        show_topology: bool,
+        show_idle_wires: bool,
+        show_barriers: bool,
+        max_qubits: Option<usize>,
+        max_moments: Option<usize>,
+        ellipsis: Option<(usize, usize)>,
+        wire_spacing: f64,
+        moment_width: f64,
+        gate_height: f64,
+        gate_min_width: f64,
+        font_size: f64,
+        control_radius: f64,
+        padding: (f64, f64, f64, f64),
+    ) -> String {
+        self.0.to_svg(&SvgOptions {
+            dark_mode,
+            auto_theme,
+            animate,
+            compact,
+            show_legend,
+            show_stats_header,
+            show_topology,
+            show_idle_wires,
+            show_barriers,
+            max_qubits,
+            max_moments,
+            ellipsis_mode: ellipsis,
+            wire_spacing,
+            moment_width,
+            gate_height,
+            gate_min_width,
+            font_size,
+            control_radius,
+            padding_left: padding.0,
+            padding_top: padding.1,
+            padding_right: padding.2,
+            padding_bottom: padding.3,
+        })
+    }
+
+    /// Gate-density heatmap as self-contained SVG, with marginal activity bars
+    /// and a color legend.
+    #[pyo3(signature = (*, dark_mode = false, auto_theme = false))]
+    fn to_svg_heatmap(&self, dark_mode: bool, auto_theme: bool) -> String {
+        self.0.to_svg_heatmap(&SvgOptions {
+            dark_mode,
+            auto_theme,
+            ..SvgOptions::default()
+        })
+    }
+
+    /// Jupyter rich display: a static diagram following the page theme, cut to
+    /// 64 wires and 200 moments.
+    fn _repr_svg_(&self) -> String {
+        self.0.to_svg(&SvgOptions {
+            auto_theme: true,
+            animate: false,
+            max_qubits: Some(REPR_MAX_QUBITS),
+            max_moments: Some(REPR_MAX_MOMENTS),
+            ..SvgOptions::default()
+        })
+    }
+
+    fn __str__(&self) -> String {
+        self.0.to_string()
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        Ok(Self(codec::decode_circuit(data)?))
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let data = codec::encode_circuit(&slf.borrow().0)?;
+        reduce(slf.as_any(), data)
     }
 
     fn __repr__(&self) -> String {
@@ -385,12 +812,8 @@ impl PyCircuitBuilder {
     /// `Parameters.bind`. Pinned to the circuit as it stands, so binding after
     /// further edits fails rather than writing the wrong gates.
     fn parameters(&self) -> PyParameters {
-        PyParameters(
-            self.inner
-                .parameters()
-                .clone()
-                .pinned_to(self.inner.circuit()),
-        )
+        let circuit = self.inner.circuit();
+        PyParameters::against(self.inner.parameters().clone().pinned_to(circuit), circuit)
     }
 
     fn cx(
@@ -481,6 +904,111 @@ impl PyCircuitBuilder {
         slf
     }
 
+    /// Measure `qubit` along `axis` (`"X"`, `"Y"` or `"Z"`) into
+    /// `classical_bit`, `+1` reading False. The qubit is left in the Z
+    /// eigenstate, not the `axis` one.
+    fn measure_in_basis<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        qubit: usize,
+        axis: &str,
+        classical_bit: usize,
+    ) -> PyPrismResult<PyRefMut<'py, Self>> {
+        let circuit = slf.inner.circuit();
+        check_qubit(circuit.num_qubits, qubit, "qubit")?;
+        check_classical_bit(circuit.num_classical_bits, classical_bit)?;
+        let axis = parse_axis(axis)?;
+        slf.inner.measure_in_basis(qubit, axis, classical_bit);
+        Ok(slf)
+    }
+
+    /// Measure the Pauli product over `(qubit, axis)` factors into
+    /// `classical_bit`, `+1` reading False, leaving the named qubits in the
+    /// post-measurement eigenstate.
+    ///
+    /// The parity collects on one extra qubit appended past the register on the
+    /// first call, so the built circuit is one qubit wider. Later calls reset
+    /// that qubit, which takes the circuit off the compiled sampling route.
+    fn measure_pauli_product(
+        mut slf: PyRefMut<'_, Self>,
+        factors: Vec<(usize, String)>,
+        classical_bit: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let circuit = slf.inner.circuit();
+        let terms = check_pauli_factors(circuit.num_qubits, factors)?;
+        check_classical_bit(circuit.num_classical_bits, classical_bit)?;
+        slf.inner.measure_pauli_product(&terms, classical_bit);
+        Ok(slf)
+    }
+
+    fn reset(mut slf: PyRefMut<'_, Self>, qubit: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
+        check_qubit(slf.inner.circuit().num_qubits, qubit, "qubit")?;
+        slf.inner.reset(qubit);
+        Ok(slf)
+    }
+
+    /// Append `gate` on `targets`, applied only when `condition` holds.
+    fn conditional<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        condition: PyClassicalCondition,
+        gate: &PyGate,
+        targets: Vec<usize>,
+    ) -> PyPrismResult<PyRefMut<'py, Self>> {
+        let circuit = slf.inner.circuit();
+        check_targets(circuit.num_qubits, gate.inner(), &targets)?;
+        check_condition(circuit.num_classical_bits, &condition.0)?;
+        slf.inner
+            .conditional(condition.0, gate.inner().clone(), &targets);
+        Ok(slf)
+    }
+
+    /// Append a region that runs only when `condition` holds, and with
+    /// `else_body` one that runs only when it does not.
+    ///
+    /// Each body is called with a fresh `CircuitBuilder` of the same width,
+    /// whose indices are this circuit's; whatever it appends, measurement and
+    /// reset included, becomes the region. An `else_body` needs a `body` that
+    /// does not measure into a bit the condition reads.
+    #[pyo3(signature = (condition, body, else_body = None))]
+    fn guarded<'py>(
+        slf: Bound<'py, Self>,
+        condition: PyClassicalCondition,
+        body: Bound<'py, PyAny>,
+        else_body: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let (num_qubits, num_bits) = {
+            let builder = slf.borrow();
+            let circuit = builder.inner.circuit();
+            (circuit.num_qubits, circuit.num_classical_bits)
+        };
+        check_condition(num_bits, &condition.0)?;
+        let then_body = region_body(&body, num_qubits, num_bits)?;
+        let else_body = else_body
+            .map(|body| region_body(&body, num_qubits, num_bits))
+            .transpose()?;
+        if else_body.is_some() && writes_any(&then_body, &condition_bits(&condition.0)?) {
+            return Err(invalid(
+                "an else branch needs a body that does not measure into a bit the condition reads",
+            )
+            .into());
+        }
+        {
+            let mut builder = slf.borrow_mut();
+            let mut replayed = Ok(());
+            builder.inner.guarded(condition.0.clone(), |inner| {
+                replayed = replay(inner, then_body);
+            });
+            replayed?;
+            if let Some(else_body) = else_body {
+                let mut replayed = Ok(());
+                builder.inner.guarded(condition.0.negate(), |inner| {
+                    replayed = replay(inner, else_body);
+                });
+                replayed?;
+            }
+        }
+        Ok(slf)
+    }
+
     fn barrier(
         mut slf: PyRefMut<'_, Self>,
         qubits: Vec<usize>,
@@ -519,7 +1047,8 @@ pub fn parse_qasm(source: &str) -> PyPrismResult<PyCircuit> {
 #[pyfunction]
 pub fn parse_qasm_parametric(source: &str) -> PyPrismResult<(PyCircuit, PyParameters)> {
     let (circuit, parameters) = openqasm::parse_parametric(source)?;
-    Ok((PyCircuit(circuit), PyParameters(parameters)))
+    let parameters = PyParameters::against(parameters, &circuit);
+    Ok((PyCircuit(circuit), parameters))
 }
 
 macro_rules! circuit_fn {

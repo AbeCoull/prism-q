@@ -112,7 +112,7 @@ impl PyBraketProgram {
 
     #[getter]
     fn parameters(&self) -> PyParameters {
-        PyParameters(self.parameters.clone())
+        PyParameters::against(self.parameters.clone(), &self.circuit)
     }
 
     /// The noise model the `#pragma braket noise` lines built, or `None`.

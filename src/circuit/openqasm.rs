@@ -1456,27 +1456,13 @@ impl<'a> Parser<'a> {
             }
             "cswap" | "fredkin" => {
                 Self::check_arity(name, qubits, 3)?;
-                let ctrl = qubits[0];
-                let t1 = qubits[1];
-                let t2 = qubits[2];
-                Ok(Some(vec![
-                    Self::ig(Gate::Cx, &[t2, t1]),
-                    Self::ig(Gate::mcu(Gate::X.matrix_2x2(), 2), &[ctrl, t1, t2]),
-                    Self::ig(Gate::Cx, &[t2, t1]),
-                ]))
+                Ok(Some(
+                    Self::cswap_expansion(qubits[0], qubits[1], qubits[2]).into(),
+                ))
             }
             "iswap" => {
                 Self::check_arity(name, qubits, 2)?;
-                let q0 = qubits[0];
-                let q1 = qubits[1];
-                Ok(Some(vec![
-                    Self::ig(Gate::S, &[q0]),
-                    Self::ig(Gate::S, &[q1]),
-                    Self::ig(Gate::H, &[q0]),
-                    Self::ig(Gate::Cx, &[q0, q1]),
-                    Self::ig(Gate::Cx, &[q1, q0]),
-                    Self::ig(Gate::H, &[q1]),
-                ]))
+                Ok(Some(Self::iswap_expansion(qubits[0], qubits[1]).into()))
             }
             "dcx" => {
                 Self::check_arity(name, qubits, 2)?;
@@ -1525,6 +1511,27 @@ impl<'a> Parser<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Controlled swap as a Toffoli between two CNOTs.
+    pub(crate) fn cswap_expansion(control: usize, t1: usize, t2: usize) -> [Instruction; 3] {
+        [
+            Self::ig(Gate::Cx, &[t2, t1]),
+            Self::ig(Gate::mcu(Gate::X.matrix_2x2(), 2), &[control, t1, t2]),
+            Self::ig(Gate::Cx, &[t2, t1]),
+        ]
+    }
+
+    /// iSWAP as two phase gates, two Hadamards and two CNOTs.
+    pub(crate) fn iswap_expansion(q0: usize, q1: usize) -> [Instruction; 6] {
+        [
+            Self::ig(Gate::S, &[q0]),
+            Self::ig(Gate::S, &[q1]),
+            Self::ig(Gate::H, &[q0]),
+            Self::ig(Gate::Cx, &[q0, q1]),
+            Self::ig(Gate::Cx, &[q1, q0]),
+            Self::ig(Gate::H, &[q1]),
+        ]
     }
 
     fn check_arity(name: &str, qubits: &[usize], expected: usize) -> Result<()> {

@@ -34,7 +34,7 @@ any backend other than the statevector.
 | Product State | Yes | Scalar | Yes | Scalar | No | No | No |
 | Tensor Network | Yes | Scalar | Yes | Scalar | No | No | No |
 | Factored | Yes | SIMD | Yes | SIMD | No | No | No |
-| Density Matrix | Yes | SIMD | Yes | SIMD | No | No | No |
+| Density Matrix | Yes | SIMD | Yes | SIMD | Yes | No | No |
 
 The Clifford+T engines below are not `Backend` implementations; they serve
 probability, shot, and observable queries through their own routes (see
@@ -53,9 +53,10 @@ Notes:
   [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
 - **NEON** is the ARM64 SIMD tier. Backends marked `SIMD` carry a NEON kernel that
   mirrors the x86-64 path; the rest fall back to scalar code on ARM64.
-- **CUDA** covers the optional `gpu` feature. Only the statevector and stabilizer
-  paths have device kernels; every other backend runs on CPU. See the
-  [GPU Backend](./gpu.md) guide.
+- **CUDA** covers the optional `gpu` feature. The statevector, stabilizer and
+  density-matrix paths have device kernels; every other backend runs on CPU. The
+  density matrix runs on the device only when selected explicitly
+  (`BackendKind::DensityMatrixGpu`). See the [GPU Backend](./gpu.md) guide.
 - **Distributed** covers the optional `distributed` and `distributed-mpi` features.
   The statevector backend splits the state across MPI ranks with exact results,
   including gates, measurement, reset, and multi-shot sampling without gathering

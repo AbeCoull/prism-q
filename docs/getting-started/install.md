@@ -7,8 +7,22 @@ pip install prism-q                        # Python bindings
 ```
 
 `cargo add` writes the current release into `Cargo.toml`; to pin a version by hand, take
-it from [crates.io](https://crates.io/crates/prism-q). The Python package is covered in
-[Python Bindings](../guides/python.md).
+it from [crates.io](https://crates.io/crates/prism-q).
+
+## Python
+
+PyPI carries `abi3` wheels for Python 3.11 and newer on Linux x86_64 and aarch64
+(manylinux), macOS arm64 and Windows x64. Other platforms build from the source
+distribution, which needs a Rust toolchain. The Linux and Windows wheels carry the CUDA
+paths, which load the NVIDIA driver and NVRTC at run time; the `cuda12` extra installs
+NVRTC from PyPI:
+
+```bash
+pip install "prism-q[cuda12]"
+```
+
+Without a driver or NVRTC the package runs on the CPU and only `GpuContext(...)` raises.
+The package is covered in [Python Bindings](../guides/python.md).
 
 ## Feature flags
 

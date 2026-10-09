@@ -2,6 +2,7 @@
 //! terminal queries. Entry points: [`simulate`], [`run_qasm`], [`run_on`].
 
 pub mod braket;
+mod branching;
 pub mod calibration;
 mod clifford_register;
 pub mod compiled;
@@ -2833,7 +2834,7 @@ pub(crate) fn run_counts_with(
     let bits = circuit.num_classical_bits;
     let source = prepare_shot_source(&kind, circuit, num_shots, seed)?;
     let Some(metadata) = source.metadata() else {
-        let shots = run_shots_per_shot(kind, circuit, num_shots, seed)?;
+        let shots = run_shots_per_shot(kind, circuit, num_shots, seed, ShotRows::CountedOnly)?;
         return Ok((shots.counts(), shots.metadata));
     };
     let counts = match source {
@@ -3920,7 +3921,7 @@ pub(crate) fn run_shots_with(
     let bits = circuit.num_classical_bits;
     let source = prepare_shot_source(&kind, circuit, num_shots, seed)?;
     let Some(metadata) = source.metadata() else {
-        return run_shots_per_shot(kind, circuit, num_shots, seed);
+        return run_shots_per_shot(kind, circuit, num_shots, seed, ShotRows::Exchangeable);
     };
     let result = match source {
         ShotSource::Compiled {
@@ -3968,12 +3969,23 @@ pub(crate) fn run_shots_with(
     Ok(result.with_metadata(metadata))
 }
 
-/// Run `circuit` once per shot, which mid-circuit measurements force.
+/// Whether a caller of [`run_shots_per_shot`] reads the rows themselves or only
+/// counts them, which spares the shuffle that keeps branched rows exchangeable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShotRows {
+    Exchangeable,
+    CountedOnly,
+}
+
+/// Run `circuit` once per shot, which mid-circuit measurements force, or on
+/// the host statevector once per outcome history
+/// ([`branching::branch_shots`]).
 fn run_shots_per_shot(
     kind: BackendKind,
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
+    rows: ShotRows,
 ) -> Result<ShotsResult> {
     // Pre-compute seed-independent analysis to avoid redundant work.
     if !kind.is_auto() {
@@ -4103,16 +4115,20 @@ fn run_shots_per_shot(
 
         let route = plan.resolved();
         let states = [(route, circuit.num_qubits)];
-        let split = fused
-            .instructions
-            .iter()
-            .position(|inst| {
-                !matches!(inst, Instruction::Gate { .. } | Instruction::Barrier { .. })
-            })
-            .unwrap_or(fused.instructions.len());
-        if split > 0 && plan.is_host_statevector() && circuit.num_qubits < max_statevector_qubits()
-        {
-            return collect_prefix_shots(&fused, split, num_shots, seed, &kind, &states);
+        if plan.is_host_statevector() && circuit.num_qubits < max_statevector_qubits() {
+            #[cfg(feature = "parallel")]
+            let parallel = shots_split_across_workers(&kind, &states)
+                && circuit.num_qubits >= branching::MIN_QUBITS_FOR_PARALLEL_SPLITS;
+            #[cfg(not(feature = "parallel"))]
+            let parallel = false;
+            let limits = branching::BranchLimits::for_width(circuit.num_qubits, parallel);
+            return branching::branch_shots(
+                &fused,
+                num_shots,
+                seed,
+                &limits,
+                rows == ShotRows::Exchangeable,
+            );
         }
         collect_shots(
             circuit,
@@ -4128,55 +4144,6 @@ fn run_shots_per_shot(
             },
         )
     }
-}
-
-/// Run the shots of `fused` on the host statevector from one evolution of its
-/// first `split` instructions, all gates or barriers.
-///
-/// That prefix draws nothing from the RNG, so each shot copies the evolved state
-/// into a reused backend, reseeds it with the shot's own seed, and applies only
-/// the rest: the operation sequence and draws of a fresh run from |0...0⟩, which
-/// therefore ends on the same bits. Shots split across workers as
-/// [`collect_shots`] splits them.
-fn collect_prefix_shots(
-    fused: &Circuit,
-    split: usize,
-    num_shots: usize,
-    seed: u64,
-    kind: &BackendKind,
-    states: &[(ResolvedBackend, usize)],
-) -> Result<ShotsResult> {
-    use rand::SeedableRng;
-
-    let (prefix, suffix) = fused.instructions.split_at(split);
-    let mut evolved = StatevectorBackend::new(seed);
-    evolved.init(fused.num_qubits, fused.num_classical_bits)?;
-    evolved.apply_instructions(prefix)?;
-    let (amplitudes, pending_norm) = (evolved.state_vector(), evolved.pending_norm);
-    let shot = |backend: &mut StatevectorBackend, i: usize| {
-        backend.copy_amplitudes_from(amplitudes, pending_norm, fused.num_classical_bits);
-        backend.rng = rand_chacha::ChaCha8Rng::seed_from_u64(mix_seed(seed, i));
-        apply_recording_saves(backend, suffix)?;
-        Ok((
-            backend.classical_results().to_vec(),
-            backend_metadata(backend),
-        ))
-    };
-    let route = ResolvedBackend::Statevector;
-
-    #[cfg(feature = "parallel")]
-    if num_shots > 1 && shots_split_across_workers(kind, states) {
-        use rayon::prelude::*;
-        let runs: Vec<Result<(Vec<bool>, RunMetadata)>> = (0..num_shots)
-            .into_par_iter()
-            .map_init(|| StatevectorBackend::new(seed), &shot)
-            .collect();
-        return fold_shots(fused, route, runs);
-    }
-    #[cfg(not(feature = "parallel"))]
-    let _ = (kind, states);
-    let mut backend = StatevectorBackend::new(seed);
-    fold_shots(fused, route, (0..num_shots).map(|i| shot(&mut backend, i)))
 }
 
 pub(crate) const fn splitmix64(mut z: u64) -> u64 {

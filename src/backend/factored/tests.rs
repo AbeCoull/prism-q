@@ -1042,13 +1042,18 @@ fn dynamic_shots_match_statevector_per_shot() {
             .seed(seed)
             .shots(64)
             .unwrap();
-        let sv = sim::simulate(&c)
-            .backend(crate::BackendKind::Statevector)
-            .seed(seed)
-            .shots(64)
-            .unwrap();
+        let sv: Vec<Vec<bool>> = (0..64)
+            .map(|i| {
+                sim::simulate(&c)
+                    .backend(crate::BackendKind::Statevector)
+                    .seed(crate::sim::mix_seed(seed, i))
+                    .run()
+                    .unwrap()
+                    .classical_bits
+            })
+            .collect();
         assert_eq!(fac.metadata.backend, crate::sim::ResolvedBackend::Factored);
-        assert_eq!(fac.shots, sv.shots, "seed {seed}");
+        assert_eq!(fac.shots, sv, "seed {seed}");
     }
 }
 

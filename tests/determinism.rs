@@ -674,14 +674,32 @@ fn assert_per_shot_matches_serial(circuit: &Circuit, route: ResolvedBackend) {
     assert_eq!(single.shots, separate, "shots differ from seeded runs");
 }
 
+// Noiseless mid-circuit shots on the statevector branch on outcomes, with
+// split draws seeded by the outcome path, so no shot matches a run on its own
+// seed; the pin is the pool width. From 10 qubits the two sides of a split run
+// on separate workers.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn mid_circuit_shots_identical_across_thread_counts() {
-    let n = 8;
-    let mut circuit = Circuit::new(n, n + 1);
-    add_mid_circuit_block(&mut circuit, &(0..n).collect::<Vec<_>>(), 0);
-    measure_every_qubit(&mut circuit, 1);
-    assert_per_shot_matches_serial(&circuit, ResolvedBackend::Statevector);
+    for n in [8, 12] {
+        let mut circuit = Circuit::new(n, n + 1);
+        add_mid_circuit_block(&mut circuit, &(0..n).collect::<Vec<_>>(), 0);
+        measure_every_qubit(&mut circuit, 1);
+
+        let shots = |threads: usize| {
+            in_pool(threads, || {
+                simulate(&circuit)
+                    .seed(SEED)
+                    .shots(PER_SHOT_SHOTS)
+                    .expect("shots")
+            })
+        };
+        let single = shots(1);
+        let wide = shots(THREADS_HI);
+        assert_eq!(single.metadata.backend, ResolvedBackend::Statevector);
+        assert_eq!(single.shots, wide.shots, "{n}q branched shots differ");
+        assert_eq!(single.shots, shots(1).shots, "{n}q not seed stable");
+    }
 }
 
 #[test]

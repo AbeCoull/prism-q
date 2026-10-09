@@ -730,8 +730,11 @@ jobs:
         run: cargo nextest run --features "$CI_FEATURES"
       - name: Doc tests
         run: cargo test --doc --features "$CI_FEATURES"
-      - name: Debug executable on the main thread
-        run: cargo run --features "$CI_FEATURES" --example backends
+      - name: Debug examples on the main thread
+        run: |
+          for example in bell_state qft shots backends noise gradients qec_memory dynamic_circuits; do
+            cargo run --features "$CI_FEATURES" --example "$example"
+          done
 
   security:
     name: Security & Licenses

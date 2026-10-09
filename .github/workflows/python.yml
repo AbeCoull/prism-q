@@ -7,6 +7,7 @@ on:
     paths:
       - "bindings/python/**"
       - "docs/guides/python.md"
+      - "docs/tutorials/**"
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"

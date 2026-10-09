@@ -172,6 +172,18 @@ println!("<H> = {}, gradient = {:?}", g.value, g.gradient);
 `expectation_gradient_shift` uses the parameter-shift rule and covers the backends and
 circuit shapes the adjoint declines.
 
+## Learn
+
+The [Tutorials](https://abecoull.github.io/prism-q/tutorials/index.html) walk through
+sampling, variational gradients, noise, a QEC memory experiment, dynamic circuits and
+wide structured circuits, in Python with the Rust equivalents. Runnable scripts sit in
+[`bindings/python/examples`](bindings/python/examples) and [`examples`](examples):
+
+```bash
+python bindings/python/examples/qec_memory.py
+cargo run --release --example qec_memory
+```
+
 ## Backends and automatic selection
 
 | Backend | Best for | Scaling | Key property |
@@ -281,6 +293,7 @@ and [`benches/README.md`](benches/README.md).
 | Task | Page |
 | --- | --- |
 | Install the crate or the wheel | [Installation](https://abecoull.github.io/prism-q/getting-started/install.html) |
+| Work through a task end to end | [Tutorials](https://abecoull.github.io/prism-q/tutorials/index.html) |
 | Let the dispatcher pick a backend, or override it | [Choosing a Backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html) |
 | Compare the backends' memory and scaling | [Backends Deep Dive](https://abecoull.github.io/prism-q/guides/backends.html) |
 | Use the simulator from Python | [Python Bindings](https://abecoull.github.io/prism-q/guides/python.html) |

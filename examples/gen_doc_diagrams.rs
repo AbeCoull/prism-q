@@ -43,6 +43,10 @@ fn main() {
         ("qaoa_4", qaoa_circuit(4, 1, SEED).to_svg(&opts)),
         ("hea_4", hardware_efficient_ansatz(4, 2, SEED).to_svg(&opts)),
         ("qpe_4", phase_estimation_circuit(4).to_svg(&opts)),
+        (
+            "hea_12_heatmap",
+            hardware_efficient_ansatz(12, 4, SEED).to_svg_heatmap(&opts),
+        ),
     ];
 
     for (name, svg) in diagrams {

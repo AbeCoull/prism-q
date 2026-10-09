@@ -82,6 +82,15 @@ fn check_pauli_factors(
     Ok(terms)
 }
 
+fn check_distinct(qubits: &[usize]) -> PyPrismResult<()> {
+    for (idx, qubit) in qubits.iter().enumerate() {
+        if qubits[..idx].contains(qubit) {
+            return Err(invalid(format!("qubit {qubit} named twice")));
+        }
+    }
+    Ok(())
+}
+
 fn check_mcu_targets(num_qubits: usize, controls: &[usize], target: usize) -> PyPrismResult<()> {
     if controls.is_empty() {
         return Err(invalid("mcu requires at least one control qubit"));
@@ -374,6 +383,12 @@ impl PyCircuit {
 
     fn t_count(&self) -> usize {
         self.0.t_count()
+    }
+
+    /// Layers when every operation takes the earliest layer its qubits are free
+    /// in. A measurement counts as one layer and a barrier as none.
+    fn depth(&self) -> usize {
+        self.0.depth()
     }
 
     fn is_clifford_only(&self) -> bool {
@@ -884,6 +899,164 @@ impl PyCircuitBuilder {
         check_mcu_targets(slf.inner.circuit().num_qubits, &controls, target)?;
         let mat = crate::gate::extract_2x2(matrix)?;
         slf.inner.mcu(mat, &controls, target);
+        Ok(slf)
+    }
+
+    /// Append the general rotation `U(theta, phi, lam)` of OpenQASM's `u` and
+    /// `u3`, as one fused matrix.
+    fn u(
+        mut slf: PyRefMut<'_, Self>,
+        theta: f64,
+        phi: f64,
+        lam: f64,
+        q: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        check_qubit(slf.inner.circuit().num_qubits, q, "qubit")?;
+        slf.inner.u(theta, phi, lam, q);
+        Ok(slf)
+    }
+
+    /// Append `exp(-i * theta * XX / 2)`; `.param(slot)` may follow.
+    fn rxx(
+        mut slf: PyRefMut<'_, Self>,
+        theta: f64,
+        q0: usize,
+        q1: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, q0, "q0")?;
+        check_qubit(num_qubits, q1, "q1")?;
+        check_distinct(&[q0, q1])?;
+        slf.inner.rxx(theta, q0, q1);
+        Ok(slf)
+    }
+
+    /// Append `exp(-i * theta * YY / 2)`; `.param(slot)` may follow.
+    fn ryy(
+        mut slf: PyRefMut<'_, Self>,
+        theta: f64,
+        q0: usize,
+        q1: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, q0, "q0")?;
+        check_qubit(num_qubits, q1, "q1")?;
+        check_distinct(&[q0, q1])?;
+        slf.inner.ryy(theta, q0, q1);
+        Ok(slf)
+    }
+
+    fn cy(
+        mut slf: PyRefMut<'_, Self>,
+        control: usize,
+        target: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, control, "control")?;
+        check_qubit(num_qubits, target, "target")?;
+        check_distinct(&[control, target])?;
+        slf.inner.cy(control, target);
+        Ok(slf)
+    }
+
+    fn ch(
+        mut slf: PyRefMut<'_, Self>,
+        control: usize,
+        target: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, control, "control")?;
+        check_qubit(num_qubits, target, "target")?;
+        check_distinct(&[control, target])?;
+        slf.inner.ch(control, target);
+        Ok(slf)
+    }
+
+    fn crx(
+        mut slf: PyRefMut<'_, Self>,
+        theta: f64,
+        control: usize,
+        target: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, control, "control")?;
+        check_qubit(num_qubits, target, "target")?;
+        check_distinct(&[control, target])?;
+        slf.inner.crx(theta, control, target);
+        Ok(slf)
+    }
+
+    fn cry(
+        mut slf: PyRefMut<'_, Self>,
+        theta: f64,
+        control: usize,
+        target: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, control, "control")?;
+        check_qubit(num_qubits, target, "target")?;
+        check_distinct(&[control, target])?;
+        slf.inner.cry(theta, control, target);
+        Ok(slf)
+    }
+
+    fn crz(
+        mut slf: PyRefMut<'_, Self>,
+        theta: f64,
+        control: usize,
+        target: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, control, "control")?;
+        check_qubit(num_qubits, target, "target")?;
+        check_distinct(&[control, target])?;
+        slf.inner.crz(theta, control, target);
+        Ok(slf)
+    }
+
+    /// Append iSWAP, lowered to the six Clifford gates the QASM parser emits.
+    fn iswap(
+        mut slf: PyRefMut<'_, Self>,
+        q0: usize,
+        q1: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, q0, "q0")?;
+        check_qubit(num_qubits, q1, "q1")?;
+        check_distinct(&[q0, q1])?;
+        slf.inner.iswap(q0, q1);
+        Ok(slf)
+    }
+
+    /// Append a Toffoli flipping `target` when both controls are |1>.
+    fn ccx(
+        mut slf: PyRefMut<'_, Self>,
+        control0: usize,
+        control1: usize,
+        target: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, control0, "control0")?;
+        check_qubit(num_qubits, control1, "control1")?;
+        check_qubit(num_qubits, target, "target")?;
+        check_distinct(&[control0, control1, target])?;
+        slf.inner.ccx(control0, control1, target);
+        Ok(slf)
+    }
+
+    /// Append a controlled swap of `q0` and `q1`.
+    fn cswap(
+        mut slf: PyRefMut<'_, Self>,
+        control: usize,
+        q0: usize,
+        q1: usize,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let num_qubits = slf.inner.circuit().num_qubits;
+        check_qubit(num_qubits, control, "control")?;
+        check_qubit(num_qubits, q0, "q0")?;
+        check_qubit(num_qubits, q1, "q1")?;
+        check_distinct(&[control, q0, q1])?;
+        slf.inner.cswap(control, q0, q1);
         Ok(slf)
     }
 

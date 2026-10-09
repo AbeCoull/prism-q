@@ -132,7 +132,7 @@ impl PyCompiledSampler {
     }
 
     /// Draw `shots` records eight to a byte, as `(shots, ceil(num_measurements /
-    /// 8))` uint8 in little bit order, the layout `QecResult.packed_measurements`
+    /// 8))` uint8 in little bit order, the layout `QecSampleResult.packed_measurements`
     /// uses.
     fn sample_packed<'py>(
         &self,

@@ -353,3 +353,119 @@ def test_measurement_map_lists_every_written_bit():
         "OPENQASM 3.0;\nqubit[2] q;\nbit[2] c;\nh q[0];\nc = measure q;"
     )
     assert circuit.measurement_map() == [(0, 0), (1, 1)]
+
+
+STANDARD_GATES_QASM = """
+OPENQASM 3.0;
+include "stdgates.inc";
+qubit[3] q;
+ccx q[0], q[1], q[2];
+cy q[0], q[1];
+ch q[1], q[2];
+crx(0.3) q[0], q[2];
+cry(-0.7) q[2], q[1];
+crz(1.1) q[1], q[0];
+u(0.4, -1.2, 2.5) q[1];
+rxx(0.6) q[0], q[2];
+ryy(-0.9) q[2], q[1];
+iswap q[0], q[1];
+cswap q[2], q[0], q[1];
+"""
+
+
+def test_builder_standard_gates_lower_as_the_parser_does():
+    built = (
+        CircuitBuilder(3)
+        .ccx(0, 1, 2)
+        .cy(0, 1)
+        .ch(1, 2)
+        .crx(0.3, 0, 2)
+        .cry(-0.7, 2, 1)
+        .crz(1.1, 1, 0)
+        .u(0.4, -1.2, 2.5, 1)
+        .rxx(0.6, 0, 2)
+        .ryy(-0.9, 2, 1)
+        .iswap(0, 1)
+        .cswap(2, 0, 1)
+        .build()
+    )
+    parsed = parse_qasm(STANDARD_GATES_QASM)
+    assert built.gate_count() == parsed.gate_count()
+    assert _pickled(built) == _pickled(parsed)
+
+
+def _pickled(circuit):
+    return circuit.__reduce__()[1][0]
+
+
+def test_builder_standard_gates_reject_bad_qubits():
+    with pytest.raises(prism_q.PrismError):
+        CircuitBuilder(2).ccx(0, 1, 2)
+    with pytest.raises(prism_q.PrismError):
+        CircuitBuilder(2).rxx(0.1, 1, 1)
+    with pytest.raises(prism_q.PrismError):
+        CircuitBuilder(3).cswap(0, 1, 1)
+
+
+def test_rxx_and_ryy_are_bindable():
+    builder = CircuitBuilder(2).rxx(0.2, 0, 1).param(0).ryy(0.3, 0, 1).param(1)
+    assert builder.parameter_links() == [(0, 0), (1, 1)]
+
+
+def test_run_qasm_seed_defaults_to_42():
+    default = run_qasm(BELL_QASM)
+    explicit = run_qasm(BELL_QASM, 42)
+    assert default.classical_bits == explicit.classical_bits
+
+
+def test_marginals_carry_metadata_and_read_as_a_list():
+    bell = CircuitBuilder(2).h(0).cx(0, 1).build()
+    result = simulate(bell).seed(1).marginals()
+    assert isinstance(result, prism_q.MarginalsResult)
+    assert result.metadata.is_exact
+    assert len(result) == 2
+    assert list(result) == result.marginals
+    assert result[-1] == result[1]
+    with pytest.raises(IndexError):
+        result[2]
+
+
+def test_thread_pool_runs_a_call_on_its_workers():
+    pool = prism_q.ThreadPool(2)
+    assert pool.num_threads == 2
+    bell = CircuitBuilder(2).h(0).cx(0, 1).build()
+    probabilities = pool.install(lambda c: simulate(c).seed(42).run().probabilities, bell)
+    assert np.allclose(probabilities, [0.5, 0.0, 0.0, 0.5])
+    assert pool.install(sum, [1, 2], start=3) == 6
+    with pytest.raises(ZeroDivisionError):
+        pool.install(lambda: 1 / 0)
+
+
+def test_prism_error_resource_fields_are_none_outside_resource_limits():
+    with pytest.raises(prism_q.PrismError) as excinfo:
+        parse_qasm("OPENQASM 3.0; qubit[1] q; nope q[0];")
+    error = excinfo.value
+    assert error.kind != "resource_limit"
+    assert (error.resource, error.required, error.limit, error.env_var) == (None,) * 4
+
+
+def test_circuit_depth_counts_layers():
+    circuit = CircuitBuilder(3).h(0).h(1).cx(0, 1).h(2).measure_all().build()
+    assert circuit.depth() == 3
+
+
+def test_expectation_result_reports_std_errors_only_when_sampled():
+    from prism_q import BackendKind
+
+    circuit = CircuitBuilder(2).h(0).t(0).cx(0, 1).build()
+    observables = [[(0, "Z")], [(0, "X"), (1, "X")]]
+    exact = simulate(circuit).seed(3).expectation_values_reported(observables)
+    assert exact.std_errors is None
+    sampled = (
+        simulate(circuit)
+        .backend(BackendKind.stochastic_pauli(num_samples=500))
+        .seed(3)
+        .expectation_values_reported(observables)
+    )
+    assert sampled.std_errors.shape == (2,)
+    assert np.all(sampled.std_errors >= 0.0)

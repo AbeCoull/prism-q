@@ -16,7 +16,7 @@ record it writes, and detectors and observables are parities over records. Data 
 take the even indices and ancillas the odd ones.
 
 ```python
-from prism_q import Gate, QecBasis, QecNoise, QecProgram, RecordRef
+from prism_q import Gate, QecBasis, QecNoise, QecProgram, QecRecordRef
 
 
 def repetition_memory(distance, rounds, p, shots):
@@ -38,16 +38,16 @@ def repetition_memory(distance, rounds, p, shots):
             current.append(qp.measure_z(a))
             qp.reset(QecBasis.Z, a)
         for i, record in enumerate(current):
-            refs = [RecordRef.absolute(record)]
+            refs = [QecRecordRef.absolute(record)]
             if previous is not None:
-                refs.append(RecordRef.absolute(previous[i]))
+                refs.append(QecRecordRef.absolute(previous[i]))
             qp.detector(refs)
         previous = current
 
     final = [qp.measure_z(q) for q in data]
     for i, record in enumerate(previous):
-        qp.detector([RecordRef.absolute(r) for r in (final[i], final[i + 1], record)])
-    qp.observable_include(0, [RecordRef.absolute(final[0])])
+        qp.detector([QecRecordRef.absolute(r) for r in (final[i], final[i + 1], record)])
+    qp.observable_include(0, [QecRecordRef.absolute(final[0])])
     return qp
 ```
 
@@ -67,14 +67,14 @@ observables each error flips and with what probability. The built-in union-find 
 needs the graphlike form, where each mechanism flips at most two detectors.
 
 ```python
-from prism_q import Decoder
+from prism_q import UnionFindDecoder
 
 qp = repetition_memory(distance=5, rounds=5, p=0.05, shots=20_000)
 model = qp.detector_error_model().decompose_graphlike()
 print(qp.num_detectors, model.num_mechanisms)   # 24 25
 
 result = qp.run()
-predicted = Decoder(model).decode(result.detectors)
+predicted = UnionFindDecoder(model).decode(result.detectors)
 failures = (predicted[:, 0] != result.observables[:, 0]).sum()
 print(result.detectors.shape)                    # (20000, 24)
 print(failures / result.total_shots)             # 0.00545
@@ -91,7 +91,7 @@ for distance in (3, 5, 7):
     qp = repetition_memory(distance, rounds=distance, p=0.05, shots=20_000)
     model = qp.detector_error_model().decompose_graphlike()
     result = qp.run()
-    predicted = Decoder(model).decode(result.detectors)
+    predicted = UnionFindDecoder(model).decode(result.detectors)
     decoded = (predicted[:, 0] != result.observables[:, 0]).mean()
     raw = result.logical_error_rates()[0]
     print(f"d={distance}: raw {raw:.4f}, decoded {decoded:.4f}")

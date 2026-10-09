@@ -17,7 +17,7 @@ from prism_q import (
     QecBasis,
     QecNoise,
     QecProgram,
-    RecordRef,
+    QecRecordRef,
     SaveSpec,
     circuits,
     simulate,
@@ -151,10 +151,10 @@ def test_qec_program_round_trip_keeps_options_and_ops():
         "R 0 1 2\nX_ERROR(0.01) 0 2\nDEPOLARIZE2(0.002) 0 1\nCX 0 1 2 1\nTICK\nMR 1\n"
         "DETECTOR(1, 0.5) rec[-1]\nM 0 2\nOBSERVABLE_INCLUDE(0) rec[-1]\n"
     )
-    qp.postselect([RecordRef.lookback(1)], False)
+    qp.postselect([QecRecordRef.lookback(1)], False)
     body = QecProgram(3)
     body.push_gate(Gate.x(), [2])
-    qp.feedforward([RecordRef.absolute(0)], True, body)
+    qp.feedforward([QecRecordRef.absolute(0)], True, body)
     qp.set_options(shots=300, seed=8, chunk_size=128, keep_measurements=False)
     restored = _round_trip(qp)
     assert repr(restored) == repr(qp)
@@ -172,8 +172,8 @@ def test_small_values_round_trip():
         Gate.unitary(np.eye(4)[[0, 1, 3, 2]]),
         ClassicalCondition.bit(2, False),
         ClassicalCondition.register_not_equals(1, 3, 5),
-        RecordRef.lookback(3),
-        RecordRef.absolute(4),
+        QecRecordRef.lookback(3),
+        QecRecordRef.absolute(4),
         QecNoise.depolarize2(0.01),
         QecNoise.y_error(0.02),
         QecNoise.pauli_channel_1(0.1, 0.2, 0.3),
@@ -213,3 +213,13 @@ def test_circuits_cross_a_process_boundary():
     with ProcessPoolExecutor(max_workers=1) as pool:
         counts = pool.submit(_counts_in_a_worker, circuit).result(timeout=120)
     assert counts == _counts_in_a_worker(circuit)
+
+
+def test_a_record_ref_pickled_under_its_old_name_still_loads():
+    record = QecRecordRef.lookback(2)
+    payload = pickle.dumps(record, protocol=0)
+    assert b"QecRecordRef" in payload
+    legacy = payload.replace(b"QecRecordRef", b"RecordRef")
+    with pytest.warns(DeprecationWarning):
+        restored = pickle.loads(legacy)
+    assert pickle.dumps(restored, protocol=0) == payload

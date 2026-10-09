@@ -5,6 +5,7 @@ Thin Python bindings over the Rust ``prism-q`` crate. The compiled extension
 """
 
 import sys as _sys
+import warnings as _warnings
 
 from ._prism_q import (
     __version__,
@@ -17,7 +18,6 @@ from ._prism_q import (
     ClassicalCondition,
     CompiledSampler,
     CountsResult,
-    Decoder,
     DeviceCalibration,
     DetectorErrorModel,
     DistributedContext,
@@ -27,6 +27,7 @@ from ._prism_q import (
     EntropyResult,
     ErrorChainComplex,
     ExpectationResult,
+    MarginalsResult,
     Gate,
     GateFilter,
     GateTimes,
@@ -47,9 +48,10 @@ from ._prism_q import (
     QecBasis,
     QecCircuitNoise,
     QecNoise,
+    QecObservableEstimate,
     QecProgram,
-    QecResult,
-    RecordRef,
+    QecRecordRef,
+    QecSampleResult,
     ReducedDensityMatrix,
     RunMetadata,
     RunOutcome,
@@ -57,6 +59,8 @@ from ._prism_q import (
     ShotsResult,
     Simulation,
     StabilizerBackend,
+    ThreadPool,
+    UnionFindDecoder,
     circuits,
     gpu_info,
     noisy_marginals_analytical,
@@ -83,7 +87,6 @@ __all__ = [
     "ClassicalCondition",
     "CompiledSampler",
     "CountsResult",
-    "Decoder",
     "DeviceCalibration",
     "DetectorErrorModel",
     "DistributedContext",
@@ -93,6 +96,7 @@ __all__ = [
     "EntropyResult",
     "ErrorChainComplex",
     "ExpectationResult",
+    "MarginalsResult",
     "Gate",
     "GateFilter",
     "GateTimes",
@@ -113,9 +117,10 @@ __all__ = [
     "QecBasis",
     "QecCircuitNoise",
     "QecNoise",
+    "QecObservableEstimate",
     "QecProgram",
-    "QecResult",
-    "RecordRef",
+    "QecRecordRef",
+    "QecSampleResult",
     "ReducedDensityMatrix",
     "RunMetadata",
     "RunOutcome",
@@ -123,6 +128,8 @@ __all__ = [
     "ShotsResult",
     "Simulation",
     "StabilizerBackend",
+    "ThreadPool",
+    "UnionFindDecoder",
     "circuits",
     "gpu_info",
     "noisy_marginals_analytical",
@@ -135,3 +142,22 @@ __all__ = [
     "simulate",
     "simulate_program",
 ]
+
+_DEPRECATED_NAMES = {
+    "Decoder": "UnionFindDecoder",
+    "QecResult": "QecSampleResult",
+    "RecordRef": "QecRecordRef",
+}
+
+
+def __getattr__(name):
+    replacement = _DEPRECATED_NAMES.get(name)
+    if replacement is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    _warnings.warn(
+        f"prism_q.{name} is deprecated and will be removed in the next minor release; "
+        f"use prism_q.{replacement}",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return globals()[replacement]

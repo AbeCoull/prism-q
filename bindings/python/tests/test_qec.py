@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import prism_q
-from prism_q import QecBasis, QecNoise, QecProgram, RecordRef
+from prism_q import QecBasis, QecNoise, QecProgram, QecRecordRef
 
 
 def _repetition_round():
@@ -13,10 +13,10 @@ def _repetition_round():
     qp.push_gate(prism_q.Gate.x(), [0])
     r0 = qp.measure_pauli_product([(QecBasis.Z, 0), (QecBasis.Z, 1)])
     r1 = qp.measure_pauli_product([(QecBasis.Z, 1), (QecBasis.Z, 2)])
-    qp.detector([RecordRef.absolute(r0)])
+    qp.detector([QecRecordRef.absolute(r0)])
     qp.detector_lookback([1])
     m0 = qp.measure_z(0)
-    qp.observable_include(0, [RecordRef.absolute(m0)])
+    qp.observable_include(0, [QecRecordRef.absolute(m0)])
     return qp
 
 
@@ -52,7 +52,7 @@ def test_noise_randomizes_detector():
     qp.reset(QecBasis.Z, 1)
     qp.noise(QecNoise.x_error(0.5), [1])
     rr = qp.measure_pauli_product([(QecBasis.Z, 0), (QecBasis.Z, 1)])
-    qp.detector([RecordRef.absolute(rr)])
+    qp.detector([QecRecordRef.absolute(rr)])
     res = qp.run()
     frac = res.detectors[:, 0].mean()
     assert 0.4 < frac < 0.6
@@ -64,7 +64,7 @@ def test_postselect_rejects_shots():
     qp.reset(QecBasis.Z, 0)
     qp.push_gate(prism_q.Gate.h(), [0])
     r = qp.measure_z(0)
-    qp.postselect([RecordRef.absolute(r)], False)
+    qp.postselect([QecRecordRef.absolute(r)], False)
     res = qp.run()
     assert res.accepted_shots + res.discarded_shots == res.total_shots == 512
     assert 0 < res.accepted_shots < 512
@@ -81,7 +81,7 @@ def test_lookback_zero_raises():
     import pytest
 
     with pytest.raises(prism_q.PrismError):
-        RecordRef.lookback(0)
+        QecRecordRef.lookback(0)
 
 
 def test_detector_error_model_matches_program():
@@ -89,10 +89,10 @@ def test_detector_error_model_matches_program():
     qp.noise(QecNoise.x_error(0.05), [0, 1, 2])
     r0 = qp.measure_pauli_product([(QecBasis.Z, 0), (QecBasis.Z, 1)])
     r1 = qp.measure_pauli_product([(QecBasis.Z, 1), (QecBasis.Z, 2)])
-    qp.detector([RecordRef.absolute(r0)], coords=[0.5, 0.0])
-    qp.detector([RecordRef.absolute(r1)])
+    qp.detector([QecRecordRef.absolute(r0)], coords=[0.5, 0.0])
+    qp.detector([QecRecordRef.absolute(r1)])
     m0 = qp.measure_z(0)
-    qp.observable_include(0, [RecordRef.absolute(m0)])
+    qp.observable_include(0, [QecRecordRef.absolute(m0)])
 
     dem = qp.detector_error_model()
     assert dem.num_detectors == qp.num_detectors == 2
@@ -132,28 +132,28 @@ def _repetition_memory(rounds, p, shots):
         ]
         if prev is None:
             for record in checks:
-                qp.detector([RecordRef.absolute(record)])
+                qp.detector([QecRecordRef.absolute(record)])
         else:
             for record, prior in zip(checks, prev):
-                qp.detector([RecordRef.absolute(record), RecordRef.absolute(prior)])
+                qp.detector([QecRecordRef.absolute(record), QecRecordRef.absolute(prior)])
         prev = checks
     readout = [qp.measure_z(q) for q in range(3)]
     for check in range(2):
         qp.detector(
             [
-                RecordRef.absolute(readout[check]),
-                RecordRef.absolute(readout[check + 1]),
-                RecordRef.absolute(prev[check]),
+                QecRecordRef.absolute(readout[check]),
+                QecRecordRef.absolute(readout[check + 1]),
+                QecRecordRef.absolute(prev[check]),
             ]
         )
-    qp.observable_include(0, [RecordRef.absolute(readout[0])])
+    qp.observable_include(0, [QecRecordRef.absolute(readout[0])])
     return qp
 
 
 def test_decoder_beats_physical_error_rate():
     p = 0.02
     qp = _repetition_memory(3, p, 20_000)
-    decoder = prism_q.Decoder(qp.detector_error_model())
+    decoder = prism_q.UnionFindDecoder(qp.detector_error_model())
     assert decoder.num_detectors == qp.num_detectors == 8
     assert decoder.num_observables == 1
 
@@ -172,7 +172,7 @@ def test_decoder_rejects_bad_inputs():
 
     qp = _repetition_memory(1, 0.05, 16)
     dem = qp.detector_error_model()
-    decoder = prism_q.Decoder(dem)
+    decoder = prism_q.UnionFindDecoder(dem)
     with pytest.raises(prism_q.PrismError):
         decoder.decode(np.zeros((4, 2), dtype=np.bool_))
 
@@ -180,9 +180,9 @@ def test_decoder_rejects_bad_inputs():
     hyper.noise(QecNoise.x_error(0.1), [0])
     for _ in range(3):
         record = hyper.measure_pauli_product([(QecBasis.Z, 0)])
-        hyper.detector([RecordRef.absolute(record)])
+        hyper.detector([QecRecordRef.absolute(record)])
     with pytest.raises(prism_q.PrismError, match="decompose_graphlike"):
-        prism_q.Decoder(hyper.detector_error_model())
+        prism_q.UnionFindDecoder(hyper.detector_error_model())
 
 
 def _corrected_bell_pair(shots=256):
@@ -193,7 +193,7 @@ def _corrected_bell_pair(shots=256):
     record = qp.measure_z(0)
     body = QecProgram(2)
     body.push_gate(prism_q.Gate.x(), [1])
-    qp.feedforward([RecordRef.absolute(record)], True, body)
+    qp.feedforward([QecRecordRef.absolute(record)], True, body)
     qp.measure_z(1)
     return qp
 
@@ -217,16 +217,16 @@ def test_feedforward_body_takes_gates_and_resets_only():
     measuring = QecProgram(2)
     measuring.measure_z(1)
     with pytest.raises(prism_q.PrismError):
-        qp.feedforward([RecordRef.absolute(r)], True, measuring)
+        qp.feedforward([QecRecordRef.absolute(r)], True, measuring)
     with pytest.raises(prism_q.PrismError):
-        qp.feedforward([RecordRef.absolute(r)], True, QecProgram(2))
+        qp.feedforward([QecRecordRef.absolute(r)], True, QecProgram(2))
     wide = QecProgram(3)
     wide.push_gate(prism_q.Gate.x(), [2])
     with pytest.raises(prism_q.PrismError):
-        qp.feedforward([RecordRef.absolute(r)], True, wide)
+        qp.feedforward([QecRecordRef.absolute(r)], True, wide)
     resetting = QecProgram(2)
     resetting.reset(QecBasis.Z, 1)
-    qp.feedforward([RecordRef.lookback(1)], False, resetting)
+    qp.feedforward([QecRecordRef.lookback(1)], False, resetting)
 
 
 def _bell_channel_program(channel, shots=4096):
@@ -237,8 +237,8 @@ def _bell_channel_program(channel, shots=4096):
     qp.noise(channel, [0])
     zz = qp.measure_pauli_product([(QecBasis.Z, 0), (QecBasis.Z, 1)])
     xx = qp.measure_pauli_product([(QecBasis.X, 0), (QecBasis.X, 1)])
-    qp.detector([RecordRef.absolute(zz)])
-    qp.detector([RecordRef.absolute(xx)])
+    qp.detector([QecRecordRef.absolute(zz)])
+    qp.detector([QecRecordRef.absolute(xx)])
     return qp
 
 
@@ -259,8 +259,8 @@ def test_pauli_channel_2_branches_reach_the_model():
     rates = [0.005 * (k + 1) for k in range(15)]
     qp = QecProgram(2)
     qp.noise(QecNoise.pauli_channel_2(rates), [0, 1])
-    qp.detector([RecordRef.absolute(qp.measure_z(0))])
-    qp.detector([RecordRef.absolute(qp.measure_z(1))])
+    qp.detector([QecRecordRef.absolute(qp.measure_z(0))])
+    qp.detector([QecRecordRef.absolute(qp.measure_z(1))])
     dem = qp.detector_error_model()
     # Z readout flips on X or Y: first letter on qubit 0, second on qubit 1.
     x_or_y = {1, 2}
@@ -343,7 +343,7 @@ def test_memory_generator_noise_and_decoding():
     for d in (3, 7):
         qp = QecProgram.repetition_memory(d, d, prism_q.QecCircuitNoise.uniform(0.02))
         qp.set_options(shots=20_000, seed=42)
-        decoder = prism_q.Decoder(qp.detector_error_model().decompose_graphlike())
+        decoder = prism_q.UnionFindDecoder(qp.detector_error_model().decompose_graphlike())
         res = qp.run()
         predicted = decoder.decode(res.detectors)
         rates.append(float((predicted[:, 0] != res.observables[:, 0]).mean()))
@@ -372,7 +372,7 @@ def _hypergraph_program():
     hyper.noise(QecNoise.x_error(0.1), [0])
     for _ in range(3):
         record = hyper.measure_pauli_product([(QecBasis.Z, 0)])
-        hyper.detector([RecordRef.absolute(record)])
+        hyper.detector([QecRecordRef.absolute(record)])
     return hyper
 
 
@@ -381,7 +381,7 @@ def test_matching_decoder_never_worse_than_union_find():
     qp = _repetition_memory(3, p, 20_000)
     dem = qp.detector_error_model()
     res = qp.run()
-    union_find = prism_q.Decoder(dem)
+    union_find = prism_q.UnionFindDecoder(dem)
     matching = prism_q.MatchingDecoder(dem)
     assert matching.num_detectors == 8
     assert matching.num_observables == 1
@@ -419,7 +419,7 @@ def test_bposd_decoder_matches_union_find_on_repetition_memory():
     qp = _repetition_memory(3, p, 20_000)
     dem = qp.detector_error_model()
     res = qp.run()
-    union_find = prism_q.Decoder(dem).logical_error_rate(res.detectors, res.observables)
+    union_find = prism_q.UnionFindDecoder(dem).logical_error_rate(res.detectors, res.observables)
     for bp_method in ("min_sum", "product_sum"):
         decoder = prism_q.BpOsdDecoder(dem, bp_method=bp_method, max_iterations=20)
         rate = decoder.logical_error_rate(res.detectors, res.observables)
@@ -441,3 +441,62 @@ def test_bposd_decoder_rejects_bad_options():
     decoder = prism_q.BpOsdDecoder(dem)
     with pytest.raises(prism_q.PrismError):
         decoder.decode(np.zeros((4, 2), dtype=np.bool_))
+
+
+def test_decoders_take_packed_rows():
+    import pytest
+
+    qp = _repetition_memory(3, 0.02, 2_000)
+    dem = qp.detector_error_model()
+    res = qp.run()
+    for decoder in (
+        prism_q.UnionFindDecoder(dem),
+        prism_q.MatchingDecoder(dem),
+        prism_q.BpOsdDecoder(dem),
+    ):
+        packed = decoder.decode_packed(res.packed_detectors())
+        assert packed.dtype == np.uint8
+        assert packed.shape == (res.total_shots, 1)
+        unpacked = np.unpackbits(packed, axis=1, bitorder="little")[:, :1].astype(bool)
+        assert np.array_equal(unpacked, decoder.decode(res.detectors))
+        assert decoder.logical_error_rate(
+            res.packed_detectors(), res.packed_observables()
+        ) == decoder.logical_error_rate(res.detectors, res.observables)
+        with pytest.raises(prism_q.PrismError):
+            decoder.decode_packed(np.zeros((4, 3), dtype=np.uint8))
+
+
+def test_expectation_values_reach_python():
+    qp = QecProgram(2)
+    qp.set_options(shots=64, seed=42)
+    qp.push_gate(prism_q.Gate.x(), [0])
+    qp.expectation_value([(QecBasis.Z, 0)], 2.0)
+    qp.expectation_value([(QecBasis.Z, 0), (QecBasis.Z, 1)])
+    assert qp.num_expectation_values == 2
+    for result in (qp.run(), qp.run_reference()):
+        estimates = result.expectation_values
+        assert [e.mean for e in estimates] == [-2.0, -1.0]
+        assert all(e.variance == 0.0 for e in estimates)
+    assert QecProgram.from_text("EXP_VAL Z0").run().expectation_values[0].mean == 1.0
+    assert _repetition_memory(3, 0.02, 16).run().expectation_values is None
+
+
+def test_wilson_intervals_bracket_the_rates():
+    res = _repetition_memory(3, 0.05, 4_000).run()
+    low, high = res.survivor_rate_wilson_interval()
+    assert low <= res.survivor_rate() <= high
+    (low, high), = res.logical_error_rate_wilson_intervals(1.0)
+    assert low <= res.logical_error_rates()[0] <= high
+
+
+def test_renamed_qec_types_keep_deprecated_aliases():
+    import pytest
+
+    for old, new in (
+        ("Decoder", "UnionFindDecoder"),
+        ("QecResult", "QecSampleResult"),
+        ("RecordRef", "QecRecordRef"),
+    ):
+        with pytest.warns(DeprecationWarning, match=new):
+            assert getattr(prism_q, old) is getattr(prism_q, new)
+    assert isinstance(QecProgram(1).run(), prism_q.QecSampleResult)

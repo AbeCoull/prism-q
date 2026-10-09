@@ -104,6 +104,16 @@ impl PyBackendKind {
         })
     }
 
+    /// Heisenberg Pauli propagation through the attached noise model, for
+    /// expectation values and observable expectations. Terms below `epsilon`
+    /// drop once the sum passes `max_terms`; `max_terms=0` keeps every term.
+    /// Never selected by `auto()`.
+    #[staticmethod]
+    #[pyo3(signature = (epsilon = 1e-8, max_terms = 65536))]
+    fn pauli_path(epsilon: f64, max_terms: usize) -> Self {
+        Self(BackendKind::PauliPath { epsilon, max_terms })
+    }
+
     /// Structure-driven dispatch with the supplied device opted in. Blocks that
     /// clear the family crossover with VRAM to spare run on the device; every
     /// other block takes the path `auto()` would.

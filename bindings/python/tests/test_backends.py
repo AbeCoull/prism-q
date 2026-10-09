@@ -97,3 +97,26 @@ def test_stabilizer_import_rejects_a_short_word_array():
     with pytest.raises(PrismError) as excinfo:
         prep.import_tableau(4, words[:-1], phases)
     assert excinfo.value.kind == "invalid_parameter"
+
+
+def test_pauli_path_matches_the_density_matrix_under_noise():
+    from prism_q import NoiseModel
+
+    circuit = CircuitBuilder(3).h(0).cx(0, 1).rz(0.3, 1).cx(1, 2).ry(0.2, 2).build()
+    noise = NoiseModel.uniform_depolarizing(circuit, 0.02)
+    observables = [[(0, "Z"), (2, "Z")], [(1, "X")]]
+    exact = (
+        simulate(circuit)
+        .backend(BackendKind.density_matrix())
+        .noise(noise)
+        .seed(1)
+        .expectation_values(observables)
+    )
+    path = (
+        simulate(circuit)
+        .backend(BackendKind.pauli_path(max_terms=0))
+        .noise(noise)
+        .seed(1)
+        .expectation_values(observables)
+    )
+    assert np.allclose(path, exact, atol=1e-10)

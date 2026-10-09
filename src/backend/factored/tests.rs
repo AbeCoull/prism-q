@@ -1051,3 +1051,29 @@ fn dynamic_shots_match_statevector_per_shot() {
         assert_eq!(fac.shots, sv.shots, "seed {seed}");
     }
 }
+
+#[test]
+fn native_sampler_matches_the_dense_factored_sampler_shot_for_shot() {
+    let n = 18;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Ry(0.3 + 0.07 * q as f64), &[q]);
+    }
+    for block in [0..6, 6..13, 13..18] {
+        for q in block.start..block.end - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            circuit.add_gate(Gate::Rz(0.41 + 0.05 * q as f64), &[q + 1]);
+        }
+    }
+    let mut fac = FactoredBackend::new(42);
+    sim::run_on(&mut fac, &circuit).unwrap();
+
+    let blocks = fac.block_probabilities().expect("factored blocks");
+    let meas_map: Vec<(usize, usize)> = (0..n).map(|q| (q, q)).collect();
+    for shots in [1_000, 300, 31] {
+        let dense = crate::sim::shots::sample_shots(&blocks, &meas_map, n, shots, 42);
+        let native = fac.sample_basis_states(shots, 42).unwrap();
+        let native = crate::sim::shots::shots_from_basis_samples(&native, &meas_map, n);
+        assert_eq!(native, dense, "{shots} shots");
+    }
+}

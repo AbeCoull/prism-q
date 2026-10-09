@@ -83,6 +83,11 @@ comparison run used.
   are collected in shot order. Pauli-noise runs that simulate each distinct error pattern
   once keep the rule: a shot's pattern, outcome and readout flips all draw from its own
   seed, so the group a worker picks up moves no record.
+- **Native block sampling: bitwise for a given seed, at any thread count.** The sparse,
+  factored and product-state samplers draw shots in blocks of 256, each block from its
+  own ChaCha8 stream keyed on the block index, and the blocks depend on the shot count
+  alone, so whether they fill in parallel moves no bit. The dense sampler over factored
+  block probabilities walks the same blocks. Pinned for all three backends.
 - **Per-shot replay: bitwise for a given seed, at any thread count.** A circuit with a
   mid-circuit measurement, a condition or a region runs once per shot, and below the
   width where the resolved engine's own kernels go parallel those runs split across

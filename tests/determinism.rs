@@ -572,6 +572,48 @@ fn mps_terminal_shots_identical_across_thread_counts() {
     );
 }
 
+// The product and factored samplers draw 256-shot blocks on streams keyed by
+// the block index, so the words match at any thread count, including a
+// partial trailing block.
+fn assert_block_sampled_shots_stable(circuit: &Circuit, kind: &BackendKind, label: &str) {
+    for num_shots in [SAMPLING_SHOTS, SAMPLING_SHOTS - 37] {
+        let shots = |threads: usize| {
+            in_pool(threads, || {
+                simulate(circuit)
+                    .backend(kind.clone())
+                    .seed(SEED)
+                    .shots(num_shots)
+                    .expect("shots")
+                    .shots
+            })
+        };
+        let single = shots(1);
+        assert_eq!(single.len(), num_shots);
+        assert_eq!(single, shots(THREADS_HI), "{label} shots differ");
+        assert_eq!(single, shots(1), "{label} shots not seed stable");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn product_terminal_shots_identical_across_thread_counts() {
+    let n = 24;
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(Gate::Ry(0.23 + 0.11 * q as f64), &[q]);
+    }
+    circuit.measure_all();
+    assert_block_sampled_shots_stable(&circuit, &BackendKind::ProductState, "product");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn factored_terminal_shots_identical_across_thread_counts() {
+    let mut circuit = prism_q::circuits::partially_independent_circuit(18, 5, SEED);
+    circuit.measure_all();
+    assert_block_sampled_shots_stable(&circuit, &BackendKind::Factored, "factored");
+}
+
 const PER_SHOT_SHOTS: usize = 512;
 
 // Rotations and CX on `qubits`, a measurement of the first into `bit`, then

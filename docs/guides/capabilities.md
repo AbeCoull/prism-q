@@ -113,7 +113,7 @@ bounded only by their own representation.
 | Density Matrix | Dense | Native, `Tr(rho P)` per observable |
 
 Native sampling is deterministic from the seed alone: the same seed and shot
-count reproduce the same bitstrings. It is not shot-for-shot identical to the
+count reproduce the same bitstrings at any thread count. It is not shot-for-shot identical to the
 dense route, which consumes its randomness on a different schedule; the
 distributions agree.
 

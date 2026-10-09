@@ -45,16 +45,7 @@ use rand_chacha::ChaCha8Rng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-#[cfg(feature = "parallel")]
 const MIN_STATES_FOR_PAR: usize = 4096;
-
-#[cfg(feature = "parallel")]
-const MIN_SHOTS_FOR_PAR: usize = 32;
-
-/// Shots drawn per ChaCha8 substream. One stream per shot block rather than
-/// per shot: cipher setup and the first keystream block cost more than an
-/// entire draw when the CDF is short, so the block grain amortizes them.
-const SHOTS_PER_STREAM: usize = 256;
 
 use crate::backend::{
     Backend, BasisSamples, dense_probability_len, dense_statevector_len, is_phase_one, overlap,
@@ -880,32 +871,20 @@ impl Backend for SparseBackend {
 
         let mut samples = BasisSamples::new(num_shots, self.num_qubits);
         let words_per_shot = samples.words_per_shot();
-        let sample_block = |block: usize, block_words: &mut [u64]| {
-            let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            rng.set_stream(block as u64 + 2);
-            for shot_words in block_words.chunks_mut(words_per_shot) {
-                let r: f64 = rng.random();
-                shot_words[0] = indices[crate::sim::shots::sample_from_cdf(&cdf, r)] as u64;
-            }
-        };
-
-        #[cfg(feature = "parallel")]
-        if num_shots >= MIN_SHOTS_FOR_PAR && cdf.len() >= MIN_STATES_FOR_PAR {
-            samples
-                .words_mut()
-                .par_chunks_mut(SHOTS_PER_STREAM * words_per_shot)
-                .enumerate()
-                .for_each(|(block, block_words)| sample_block(block, block_words));
-            return Ok(samples);
-        }
-
-        for (block, block_words) in samples
-            .words_mut()
-            .chunks_mut(SHOTS_PER_STREAM * words_per_shot)
-            .enumerate()
-        {
-            sample_block(block, block_words);
-        }
+        let parallel =
+            num_shots >= crate::sim::shots::MIN_SHOTS_FOR_PAR && cdf.len() >= MIN_STATES_FOR_PAR;
+        crate::sim::shots::sample_in_shot_blocks(
+            samples.words_mut(),
+            words_per_shot,
+            seed,
+            parallel,
+            |rng, block_words| {
+                for shot_words in block_words.chunks_mut(words_per_shot) {
+                    let r: f64 = rng.random();
+                    shot_words[0] = indices[crate::sim::shots::sample_from_cdf(&cdf, r)] as u64;
+                }
+            },
+        );
         Ok(samples)
     }
 

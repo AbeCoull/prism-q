@@ -146,6 +146,52 @@ pub(crate) fn build_cdf(probs: &[f64]) -> Vec<f64> {
     cdf
 }
 
+/// Shots drawn per ChaCha8 substream by the block samplers. One stream per
+/// block rather than per shot: cipher setup and the first keystream block cost
+/// more than a whole draw when the per-shot work is short.
+pub(crate) const SHOTS_PER_STREAM: usize = 256;
+
+/// Shot count below which a block sampler stays on the calling thread.
+pub(crate) const MIN_SHOTS_FOR_PAR: usize = 32;
+
+/// Qubits a shot must cover before the product and factored samplers split
+/// their blocks across workers; below it fork-join costs more than the draws.
+pub(crate) const MIN_QUBITS_FOR_PAR_DRAWS: usize = 16;
+
+/// Fill `rows`, `per_shot` entries to a shot, one block of [`SHOTS_PER_STREAM`]
+/// shots at a time. Block `b` draws from stream `b + 2` of the ChaCha8 generator
+/// seeded with `seed`, so the partition, and with it every draw, is a function
+/// of the shot count alone: `parallel` moves the schedule, never a value.
+pub(crate) fn sample_in_shot_blocks<T: Send>(
+    rows: &mut [T],
+    per_shot: usize,
+    seed: u64,
+    parallel: bool,
+    sample_block: impl Fn(&mut ChaCha8Rng, &mut [T]) + Sync,
+) {
+    let block_len = SHOTS_PER_STREAM * per_shot;
+    let run = |block: usize, rows: &mut [T]| {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        rng.set_stream(block as u64 + 2);
+        sample_block(&mut rng, rows);
+    };
+
+    #[cfg(feature = "parallel")]
+    if parallel {
+        use rayon::prelude::*;
+        rows.par_chunks_mut(block_len)
+            .enumerate()
+            .for_each(|(block, rows)| run(block, rows));
+        return;
+    }
+    #[cfg(not(feature = "parallel"))]
+    let _ = parallel;
+
+    for (block, rows) in rows.chunks_mut(block_len).enumerate() {
+        run(block, rows);
+    }
+}
+
 pub(crate) fn sample_from_cdf(cdf: &[f64], r: f64) -> usize {
     match cdf.binary_search_by(|p| p.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal)) {
         Ok(i) => i,
@@ -160,8 +206,6 @@ pub(crate) fn sample_shots(
     num_shots: usize,
     seed: u64,
 ) -> Vec<Vec<bool>> {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-
     if meas_map.is_empty() {
         return vec![vec![false; num_classical_bits]; num_shots];
     }
@@ -170,6 +214,7 @@ pub(crate) fn sample_shots(
 
     match probs {
         Probabilities::Dense(v) => {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let cdf = build_cdf(v);
             for shot in &mut shots {
                 let r: f64 = rng.random();
@@ -179,28 +224,37 @@ pub(crate) fn sample_shots(
                 }
             }
         }
-        Probabilities::Factored { blocks, .. } => {
+        // Same blocks, streams and per-shot draw order as the factored
+        // backend's native sampler, so the two routes agree shot for shot.
+        Probabilities::Factored {
+            blocks,
+            total_qubits,
+        } => {
             let block_cdfs: Vec<Vec<f64>> = blocks.iter().map(|b| build_cdf(&b.probs)).collect();
-            for shot in &mut shots {
-                let mut global_idx = 0usize;
-                for (block, cdf) in blocks.iter().zip(block_cdfs.iter()) {
-                    let r: f64 = rng.random();
-                    let local_idx = sample_from_cdf(cdf, r);
-                    let mut m = block.mask;
-                    let mut bit = 0;
-                    while m != 0 {
-                        let pos = m.trailing_zeros() as usize;
-                        if local_idx & (1 << bit) != 0 {
-                            global_idx |= 1 << pos;
+            let parallel =
+                num_shots >= MIN_SHOTS_FOR_PAR && *total_qubits >= MIN_QUBITS_FOR_PAR_DRAWS;
+            sample_in_shot_blocks(&mut shots, 1, seed, parallel, |rng, block_shots| {
+                for shot in block_shots {
+                    let mut global_idx = 0usize;
+                    for (block, cdf) in blocks.iter().zip(block_cdfs.iter()) {
+                        let r: f64 = rng.random();
+                        let local_idx = sample_from_cdf(cdf, r);
+                        let mut m = block.mask;
+                        let mut bit = 0;
+                        while m != 0 {
+                            let pos = m.trailing_zeros() as usize;
+                            if local_idx & (1 << bit) != 0 {
+                                global_idx |= 1 << pos;
+                            }
+                            bit += 1;
+                            m &= m.wrapping_sub(1);
                         }
-                        bit += 1;
-                        m &= m.wrapping_sub(1);
+                    }
+                    for &(qubit, cbit) in meas_map {
+                        shot[cbit] = (global_idx >> qubit) & 1 == 1;
                     }
                 }
-                for &(qubit, cbit) in meas_map {
-                    shot[cbit] = (global_idx >> qubit) & 1 == 1;
-                }
-            }
+            });
         }
     }
 

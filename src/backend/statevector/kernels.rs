@@ -764,23 +764,106 @@ fn qft_max_tile_bits() -> usize {
 /// bit narrower where that leaves an even count of stages above the tile, which then
 /// all run as radix-4 pairs instead of paying a radix-2 pass.
 fn qft_tile_bits(n: usize, state_bits: usize) -> usize {
-    let chunks_log2 = state_bits - n;
-    qft_tile_bits_for(
-        n,
-        qft_max_tile_bits(),
-        (cache::min_parallel_tiles().ilog2() as usize).saturating_sub(chunks_log2),
-    )
+    qft_tile_bits_for(n, qft_max_tile_bits(), qft_min_tiles_log2(n, state_bits))
+}
+
+/// Log2 of the tiles each `2^n` chunk of a `state_bits`-qubit state owes the pool.
+fn qft_min_tiles_log2(n: usize, state_bits: usize) -> usize {
+    (cache::min_parallel_tiles().ilog2() as usize).saturating_sub(state_bits - n)
+}
+
+/// Tile width before the radix-4 pairing adjustment of [`qft_tile_bits_for`], which
+/// the gathered high-stage passes do not need.
+fn qft_widest_tile_bits_for(n: usize, max_tile_bits: usize, min_tiles_log2: usize) -> usize {
+    max_tile_bits
+        .min(n.saturating_sub(min_tiles_log2))
+        .max(QFT_MIN_TILE_BITS.min(n))
 }
 
 fn qft_tile_bits_for(n: usize, max_tile_bits: usize, min_tiles_log2: usize) -> usize {
-    let widest = max_tile_bits
-        .min(n.saturating_sub(min_tiles_log2))
-        .max(QFT_MIN_TILE_BITS.min(n));
+    let widest = qft_widest_tile_bits_for(n, max_tile_bits, min_tiles_log2);
     if widest > QFT_MIN_TILE_BITS && (n - widest) % 2 == 1 {
         widest - 1
     } else {
         widest
     }
+}
+
+/// Smallest QFT the gathered high-stage passes run on, where a whole-register transform
+/// on an 8-thread host first leaves [`QFT_GATHER_MIN_STAGES`] stages above its tile.
+/// Provisional until swept.
+const QFT_GATHER_MIN_QUBITS: usize = 16;
+
+/// Fewest stages above the tile that take the gathered passes. From three, one gathered
+/// pass replaces at least two radix-2 or radix-4 passes; at two or fewer both take one.
+const QFT_GATHER_MIN_STAGES: usize = 3;
+
+/// Fewest amplitudes per gathered row: four cache lines, so a strided row read is a
+/// burst rather than a lone line.
+const QFT_GATHER_MIN_ROW: usize = 16;
+
+/// Amplitudes one gathered group holds: half the tile budget, so the buffers of two SMT
+/// siblings share one L2.
+#[inline(always)]
+fn qft_gather_len() -> usize {
+    cache::tile_budget_bytes() / 2 / size_of::<Complex64>()
+}
+
+/// Most stages one gathered pass runs: 9 on a 256 KiB tile budget.
+#[inline(always)]
+fn qft_gather_max_bits() -> usize {
+    (qft_gather_len() / QFT_GATHER_MIN_ROW).ilog2() as usize
+}
+
+/// Unit phases `exp(2 pi i x / 2^total_bits)` for `x < 2^total_bits`, conjugated for
+/// `inverse`, as a product of three tables. The low table spans a gathered group, so a
+/// phase below that length is one read.
+struct QftGatherPhases {
+    low: Box<[Complex64]>,
+    mid: Box<[Complex64]>,
+    high: Box<[Complex64]>,
+    low_bits: usize,
+    mid_bits: usize,
+}
+
+impl QftGatherPhases {
+    fn new(total_bits: usize, inverse: bool) -> Self {
+        let low_bits = (qft_gather_len().ilog2() as usize).min(total_bits);
+        let rest = total_bits - low_bits;
+        let mid_bits = rest.div_ceil(2);
+        let scale = std::f64::consts::TAU / (1u64 << total_bits) as f64;
+        let table = |bits: usize, shift: usize| -> Box<[Complex64]> {
+            (0..1usize << bits)
+                .map(|x| {
+                    let w = Complex64::from_polar(1.0, (x << shift) as f64 * scale);
+                    if inverse { w.conj() } else { w }
+                })
+                .collect()
+        };
+        Self {
+            low: table(low_bits, 0),
+            mid: table(mid_bits, low_bits),
+            high: table(rest - mid_bits, low_bits + mid_bits),
+            low_bits,
+            mid_bits,
+        }
+    }
+
+    #[inline(always)]
+    fn phase(&self, x: usize) -> Complex64 {
+        let mid = (x >> self.low_bits) & ((1 << self.mid_bits) - 1);
+        self.low[x & (self.low.len() - 1)]
+            * self.mid[mid]
+            * self.high[x >> (self.low_bits + self.mid_bits)]
+    }
+}
+
+fn qft_gather_phases(total_bits: usize, inverse: bool) -> &'static QftGatherPhases {
+    const WIDTHS: usize = usize::BITS as usize;
+    static FORWARD: [OnceLock<QftGatherPhases>; WIDTHS] = [const { OnceLock::new() }; WIDTHS];
+    static INVERSE: [OnceLock<QftGatherPhases>; WIDTHS] = [const { OnceLock::new() }; WIDTHS];
+    let slots = if inverse { &INVERSE } else { &FORWARD };
+    slots[total_bits].get_or_init(|| QftGatherPhases::new(total_bits, inverse))
 }
 
 /// Per-stride QFT twiddles for the in-tile stages: entries `[s, 2s)` hold
@@ -2355,6 +2438,371 @@ fn fft_stage_pair_par(
         twiddles_scaled,
         inv_sqrt2,
     );
+}
+
+/// Run the DIF stages above `tile_bits` of every `2^n` chunk as gathered passes of at
+/// most [`qft_gather_max_bits`] stages each, split evenly.
+fn qft_gather_high_stages(state: &mut [Complex64], n: usize, tile_bits: usize, inverse: bool) {
+    let passes = (n - tile_bits).div_ceil(qft_gather_max_bits());
+    let mut top = n;
+    for left in (1..=passes).rev() {
+        let bits = (top - tile_bits).div_ceil(left);
+        qft_gather_pass(state, QftGatherPass::new(top - bits, bits, inverse));
+        top -= bits;
+    }
+}
+
+fn qft_gather_pass(state: &mut [Complex64], pass: QftGatherPass) {
+    let groups = state.len() >> (pass.bits + pass.row_len.ilog2() as usize);
+    let len = pass.row_len << pass.bits;
+
+    #[cfg(feature = "parallel")]
+    if state.len() >= 1usize << PARALLEL_THRESHOLD_QUBITS {
+        let ptr = SendPtr(state.as_mut_ptr());
+        (0..groups).into_par_iter().for_each_init(
+            || vec![Complex64::new(0.0, 0.0); len],
+            move |buf, g| {
+                // SAFETY: a group owns `row_len` offsets of each of its rows, and the
+                // groups tile the state, so no two tasks share an amplitude.
+                unsafe { pass.run_group(ptr.as_complex_ptr(), g, buf) }
+            },
+        );
+        return;
+    }
+
+    let mut buf = vec![Complex64::new(0.0, 0.0); len];
+    let ptr = state.as_mut_ptr();
+    for g in 0..groups {
+        // SAFETY: `ptr` spans the whole state, borrowed mutably for this loop alone.
+        unsafe { pass.run_group(ptr, g, &mut buf) }
+    }
+}
+
+/// One gathered pass of the QFT's DIF network: stages `lo..lo + bits` of every
+/// `2^(lo + bits)` chunk, a group of `2^bits` rows at a time.
+///
+/// A group copies, for `row_len` consecutive offsets `L` below `lo`, the amplitudes at
+/// every value of the pass bits into a row each. The stage at local stride `2^u`
+/// twiddles position `k 2^lo + L` by `exp(2 pi i (k 2^lo + L) / 2^(lo + u + 1))`, the
+/// local DIF twiddle for `k` times a factor in `L` alone. Both inputs of every later
+/// butterfly carry the same factor, so the rows run a plain `2^bits`-point DIF on
+/// [`qft_compact_twiddles`] and the factors collect into one phase
+/// `exp(2 pi i L rev(r) / 2^(lo + bits))` on output row `r`, applied on the way back.
+#[derive(Clone, Copy)]
+struct QftGatherPass {
+    lo: usize,
+    bits: usize,
+    row_len: usize,
+    compact: &'static [Complex64],
+    phases: &'static QftGatherPhases,
+}
+
+impl QftGatherPass {
+    fn new(lo: usize, bits: usize, inverse: bool) -> Self {
+        Self {
+            lo,
+            bits,
+            row_len: (qft_gather_len() >> bits).min(1 << lo),
+            compact: qft_compact_twiddles(inverse),
+            phases: qft_gather_phases(lo + bits, inverse),
+        }
+    }
+
+    /// Gather group `g` into `buf`, run its stages, and scatter it back phased.
+    ///
+    /// # Safety
+    ///
+    /// `state` must be valid for every amplitude of group `g`, and no other thread may
+    /// access them during the call.
+    #[inline]
+    unsafe fn run_group(&self, state: *mut Complex64, g: usize, buf: &mut [Complex64]) {
+        let blocks_log2 = self.lo - self.row_len.ilog2() as usize;
+        let col0 = (g & ((1 << blocks_log2) - 1)) * self.row_len;
+        let base = ((g >> blocks_log2) << (self.lo + self.bits)) + col0;
+        for (r, row) in buf.chunks_exact_mut(self.row_len).enumerate() {
+            // SAFETY: same contract as the enclosing unsafe fn.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    state.add(base + (r << self.lo)),
+                    row.as_mut_ptr(),
+                    self.row_len,
+                );
+            }
+        }
+        qft_dif_rows(buf, self.row_len, self.bits, self.compact);
+        for (r, row) in buf.chunks_exact(self.row_len).enumerate() {
+            let rev = reverse_low_bits(r, self.bits);
+            // SAFETY: same contract as the enclosing unsafe fn.
+            let out = unsafe {
+                std::slice::from_raw_parts_mut(state.add(base + (r << self.lo)), self.row_len)
+            };
+            qft_scatter_row(
+                out,
+                row,
+                self.phases.phase(col0 * rev),
+                &self.phases.low,
+                rev,
+            );
+        }
+    }
+}
+
+/// Run a `2^bits`-point DIF down the rows of `buf`, every column of `row_len` an
+/// independent transform, in the stage order of the in-tile stages.
+fn qft_dif_rows(buf: &mut [Complex64], row_len: usize, bits: usize, compact: &[Complex64]) {
+    let mut top = bits;
+    if bits % 2 == 1 {
+        top -= 1;
+        let s = 1usize << top;
+        for block in buf.chunks_exact_mut(2 * s * row_len) {
+            let (a, b) = block.split_at_mut(s * row_len);
+            for (k, (ra, rb)) in a
+                .chunks_exact_mut(row_len)
+                .zip(b.chunks_exact_mut(row_len))
+                .enumerate()
+            {
+                radix2_rows(ra, rb, compact[s + k]);
+            }
+        }
+    }
+    while top > 0 {
+        let s = 1usize << (top - 2);
+        let quarter = s * row_len;
+        for block in buf.chunks_exact_mut(4 * quarter) {
+            let (a, rest) = block.split_at_mut(quarter);
+            let (b, rest) = rest.split_at_mut(quarter);
+            let (c, d) = rest.split_at_mut(quarter);
+            let rows = a
+                .chunks_exact_mut(row_len)
+                .zip(b.chunks_exact_mut(row_len))
+                .zip(c.chunks_exact_mut(row_len))
+                .zip(d.chunks_exact_mut(row_len));
+            for (k, (((ra, rb), rc), rd)) in rows.enumerate() {
+                radix4_rows(
+                    ra,
+                    rb,
+                    rc,
+                    rd,
+                    compact[2 * s + k],
+                    compact[3 * s + k],
+                    compact[s + k],
+                );
+            }
+        }
+        top -= 2;
+    }
+}
+
+/// Radix-2 DIF butterflies between two rows of one even length sharing twiddle `w`.
+#[inline(always)]
+fn radix2_rows(lo: &mut [Complex64], hi: &mut [Complex64], w: Complex64) {
+    debug_assert_eq!(lo.len(), hi.len());
+    #[cfg(target_arch = "x86_64")]
+    if simd::has_avx2_fma() {
+        // SAFETY: AVX2 detected. The rows share one even length.
+        unsafe { radix2_rows_avx2fma(lo, hi, w) };
+        return;
+    }
+    let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
+    for (a, b) in lo.iter_mut().zip(hi.iter_mut()) {
+        (*a, *b) = radix2_butterfly_values(*a, *b, w, inv_sqrt2);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn radix2_rows_avx2fma(lo: &mut [Complex64], hi: &mut [Complex64], w: Complex64) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_storeu_pd,
+            _mm256_sub_pd,
+        };
+        let inv_sqrt2_v = _mm256_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
+        let (w_rr, w_ii) = (_mm256_set1_pd(w.re), _mm256_set1_pd(w.im));
+        let (pl, ph) = (lo.as_mut_ptr() as *mut f64, hi.as_mut_ptr() as *mut f64);
+        for off in (0..2 * lo.len()).step_by(4) {
+            let a = _mm256_loadu_pd(pl.add(off));
+            let b = _mm256_loadu_pd(ph.add(off));
+            _mm256_storeu_pd(pl.add(off), _mm256_mul_pd(_mm256_add_pd(a, b), inv_sqrt2_v));
+            _mm256_storeu_pd(
+                ph.add(off),
+                simd::complex_mul_avx2fma(w_rr, w_ii, _mm256_sub_pd(a, b)),
+            );
+        }
+    }
+}
+
+/// Radix-4 DIF butterflies across four rows of one even length sharing one twiddle
+/// triple, in the argument order of [`radix4_butterfly_values`].
+#[inline(always)]
+fn radix4_rows(
+    qa: &mut [Complex64],
+    qb: &mut [Complex64],
+    qc: &mut [Complex64],
+    qd: &mut [Complex64],
+    w_outer: Complex64,
+    w_outer_s: Complex64,
+    w_inner: Complex64,
+) {
+    let n = qa.len();
+    debug_assert!(qb.len() == n && qc.len() == n && qd.len() == n);
+
+    #[cfg(target_arch = "x86_64")]
+    if simd::has_avx2_fma() {
+        // SAFETY: AVX2 detected. The four rows share one even length.
+        unsafe { radix4_rows_avx2fma(qa, qb, qc, qd, w_outer, w_outer_s, w_inner) };
+        return;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON is baseline on aarch64. Each call reads and writes the amplitude at
+    // offset `j < n` of four disjoint rows of length `n`.
+    unsafe {
+        let (pa, pb, pc, pd) = (
+            qa.as_mut_ptr() as *mut f64,
+            qb.as_mut_ptr() as *mut f64,
+            qc.as_mut_ptr() as *mut f64,
+            qd.as_mut_ptr() as *mut f64,
+        );
+        for j in 0..n {
+            radix4_butterfly_slices_neon(
+                pa.add(j * 2),
+                pb.add(j * 2),
+                pc.add(j * 2),
+                pd.add(j * 2),
+                w_outer,
+                w_outer_s,
+                w_inner,
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    for j in 0..n {
+        radix4_butterfly_quartet_scalar(
+            qa,
+            qb,
+            qc,
+            qd,
+            j,
+            w_outer,
+            w_outer_s,
+            w_inner,
+            std::f64::consts::FRAC_1_SQRT_2,
+        );
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn radix4_rows_avx2fma(
+    qa: &mut [Complex64],
+    qb: &mut [Complex64],
+    qc: &mut [Complex64],
+    qd: &mut [Complex64],
+    w_outer: Complex64,
+    w_outer_s: Complex64,
+    w_inner: Complex64,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_storeu_pd,
+            _mm256_sub_pd,
+        };
+        let inv_sqrt2_v = _mm256_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
+        let (wo_rr, wo_ii) = (_mm256_set1_pd(w_outer.re), _mm256_set1_pd(w_outer.im));
+        let (ws_rr, ws_ii) = (_mm256_set1_pd(w_outer_s.re), _mm256_set1_pd(w_outer_s.im));
+        let (wi_rr, wi_ii) = (_mm256_set1_pd(w_inner.re), _mm256_set1_pd(w_inner.im));
+        let (pa, pb, pc, pd) = (
+            qa.as_mut_ptr() as *mut f64,
+            qb.as_mut_ptr() as *mut f64,
+            qc.as_mut_ptr() as *mut f64,
+            qd.as_mut_ptr() as *mut f64,
+        );
+        for off in (0..2 * qa.len()).step_by(4) {
+            let a = _mm256_loadu_pd(pa.add(off));
+            let b = _mm256_loadu_pd(pb.add(off));
+            let c = _mm256_loadu_pd(pc.add(off));
+            let d = _mm256_loadu_pd(pd.add(off));
+
+            let t_ac_sum = _mm256_mul_pd(_mm256_add_pd(a, c), inv_sqrt2_v);
+            let t_ac_diff = simd::complex_mul_avx2fma(wo_rr, wo_ii, _mm256_sub_pd(a, c));
+            let t_bd_sum = _mm256_mul_pd(_mm256_add_pd(b, d), inv_sqrt2_v);
+            let t_bd_diff = simd::complex_mul_avx2fma(ws_rr, ws_ii, _mm256_sub_pd(b, d));
+
+            _mm256_storeu_pd(
+                pa.add(off),
+                _mm256_mul_pd(_mm256_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
+            );
+            _mm256_storeu_pd(
+                pb.add(off),
+                simd::complex_mul_avx2fma(wi_rr, wi_ii, _mm256_sub_pd(t_ac_sum, t_bd_sum)),
+            );
+            _mm256_storeu_pd(
+                pc.add(off),
+                _mm256_mul_pd(_mm256_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
+            );
+            _mm256_storeu_pd(
+                pd.add(off),
+                simd::complex_mul_avx2fma(wi_rr, wi_ii, _mm256_sub_pd(t_ac_diff, t_bd_diff)),
+            );
+        }
+    }
+}
+
+/// Write `row` into `out` with amplitude `j` times `anchor * low[j * step]`.
+#[inline(always)]
+fn qft_scatter_row(
+    out: &mut [Complex64],
+    row: &[Complex64],
+    anchor: Complex64,
+    low: &[Complex64],
+    step: usize,
+) {
+    debug_assert_eq!(out.len(), row.len());
+    #[cfg(target_arch = "x86_64")]
+    if simd::has_avx2_fma() {
+        // SAFETY: AVX2 detected. `out` and `row` share one even length.
+        unsafe { qft_scatter_row_avx2fma(out, row, anchor, low, step) };
+        return;
+    }
+    for (j, (o, &a)) in out.iter_mut().zip(row).enumerate() {
+        *o = a * (anchor * low[j * step]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn qft_scatter_row_avx2fma(
+    out: &mut [Complex64],
+    row: &[Complex64],
+    anchor: Complex64,
+    low: &[Complex64],
+    step: usize,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm256_loadu_pd, _mm256_movedup_pd, _mm256_permute_pd, _mm256_set_pd, _mm256_set1_pd,
+            _mm256_storeu_pd,
+        };
+        let (a_rr, a_ii) = (_mm256_set1_pd(anchor.re), _mm256_set1_pd(anchor.im));
+        let (src, dst) = (row.as_ptr() as *const f64, out.as_mut_ptr() as *mut f64);
+        let mut x = 0;
+        for off in (0..2 * row.len()).step_by(4) {
+            let (p0, p1) = (low[x], low[x + step]);
+            let w =
+                simd::complex_mul_avx2fma(a_rr, a_ii, _mm256_set_pd(p1.im, p1.re, p0.im, p0.re));
+            let v = _mm256_loadu_pd(src.add(off));
+            _mm256_storeu_pd(
+                dst.add(off),
+                simd::complex_mul_avx2fma(_mm256_movedup_pd(w), _mm256_permute_pd(w, 0b1111), v),
+            );
+            x += 2 * step;
+        }
+    }
 }
 
 /// Shortest run of contiguous pairs handed to the SIMD pair kernel. Below it the
@@ -4179,69 +4627,48 @@ impl StatevectorBackend {
         swaps: bool,
         big_endian: bool,
     ) {
+        let gather = num >= QFT_GATHER_MIN_QUBITS;
+        self.apply_qft_block_with(num, inverse, swaps, big_endian, gather);
+    }
+
+    /// [`Self::apply_qft_block`] with the high-stage route chosen: `gather` runs the
+    /// stages above the tile as gathered passes when at least [`QFT_GATHER_MIN_STAGES`]
+    /// of them sit there, and otherwise they run as full-state radix-4 pairs.
+    fn apply_qft_block_with(
+        &mut self,
+        num: usize,
+        inverse: bool,
+        swaps: bool,
+        big_endian: bool,
+        gather: bool,
+    ) {
         assert!(num >= 1 && num <= self.num_qubits);
         let reverse_input = big_endian != (inverse && !swaps);
         let reverse_output = big_endian != (swaps || inverse);
 
         let n = num;
-        let fft_len = 1usize << n;
         let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
-
-        let twiddles_scaled = qft_twiddles_scaled(n, inverse);
-        let twiddles_scaled = twiddles_scaled.as_ref();
 
         if reverse_input {
             apply_bit_reverse_chunks(&mut self.state, n);
         }
 
         // Cache-tiled DIF FFT:
-        //   - High-stride stages run as full-state passes.
+        //   - High-stride stages run as gathered passes or full-state passes.
         //   - Low-stride stages run together inside each cache-sized tile.
-        let tile_bits = qft_tile_bits(n, self.num_qubits);
-
-        // Phase 1: high-stride stages.
-        //
-        // Fuse adjacent high-stride stages as radix-4 pairs to cut memory
-        // traffic. If the count is odd, run one radix-2 stage first.
-        let high_stride_count = n - tile_bits;
-        let mut stage_top = n;
-        let mut stages_left = high_stride_count;
-
-        let run_radix2_stage = |state: &mut Vec<Complex64>, stage: usize| {
-            let stride = 1usize << stage;
-            let block_size = stride << 1;
-            let twiddle_step = fft_len / block_size;
-
-            #[cfg(feature = "parallel")]
-            if state.len() >= 1usize << PARALLEL_THRESHOLD_QUBITS {
-                fft_stage_par(
-                    state,
-                    stride,
-                    block_size,
-                    twiddle_step,
-                    twiddles_scaled,
-                    inv_sqrt2,
-                );
-                return;
-            }
-
-            run_radix2_stage_seq(state, stride, twiddles_scaled, twiddle_step, inv_sqrt2);
+        let widest = qft_widest_tile_bits_for(
+            n,
+            qft_max_tile_bits(),
+            qft_min_tiles_log2(n, self.num_qubits),
+        );
+        let tile_bits = if gather && n - widest >= QFT_GATHER_MIN_STAGES {
+            qft_gather_high_stages(&mut self.state, n, widest, inverse);
+            widest
+        } else {
+            let tile_bits = qft_tile_bits(n, self.num_qubits);
+            self.qft_high_stage_pairs(n, tile_bits, inverse);
+            tile_bits
         };
-
-        if stages_left % 2 == 1 {
-            stage_top -= 1;
-            run_radix2_stage(&mut self.state, stage_top);
-            stages_left -= 1;
-        }
-
-        while stages_left > 0 {
-            // Fuse pair (stage_top - 1, stage_top - 2): outer stride
-            // = 2^(stage_top - 1), inner stride = 2^(stage_top - 2).
-            let inner_stride = 1usize << (stage_top - 2);
-            fft_stage_pair_par(&mut self.state, inner_stride, twiddles_scaled, inv_sqrt2);
-            stage_top -= 2;
-            stages_left -= 2;
-        }
 
         // Phase 2: low-stride stages on cache-resident tiles.
         let tile_size = 1usize << tile_bits;
@@ -4285,6 +4712,55 @@ impl StatevectorBackend {
 
         if reverse_output {
             apply_bit_reverse_chunks(&mut self.state, n);
+        }
+    }
+
+    /// Run the DIF stages above `tile_bits` as full-state passes: radix-4 pairs, after
+    /// one radix-2 stage when the count is odd.
+    fn qft_high_stage_pairs(&mut self, n: usize, tile_bits: usize, inverse: bool) {
+        let fft_len = 1usize << n;
+        let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
+        let twiddles_scaled = qft_twiddles_scaled(n, inverse);
+        let twiddles_scaled = twiddles_scaled.as_ref();
+
+        let high_stride_count = n - tile_bits;
+        let mut stage_top = n;
+        let mut stages_left = high_stride_count;
+
+        let run_radix2_stage = |state: &mut Vec<Complex64>, stage: usize| {
+            let stride = 1usize << stage;
+            let block_size = stride << 1;
+            let twiddle_step = fft_len / block_size;
+
+            #[cfg(feature = "parallel")]
+            if state.len() >= 1usize << PARALLEL_THRESHOLD_QUBITS {
+                fft_stage_par(
+                    state,
+                    stride,
+                    block_size,
+                    twiddle_step,
+                    twiddles_scaled,
+                    inv_sqrt2,
+                );
+                return;
+            }
+
+            run_radix2_stage_seq(state, stride, twiddles_scaled, twiddle_step, inv_sqrt2);
+        };
+
+        if stages_left % 2 == 1 {
+            stage_top -= 1;
+            run_radix2_stage(&mut self.state, stage_top);
+            stages_left -= 1;
+        }
+
+        while stages_left > 0 {
+            // Fuse pair (stage_top - 1, stage_top - 2): outer stride
+            // = 2^(stage_top - 1), inner stride = 2^(stage_top - 2).
+            let inner_stride = 1usize << (stage_top - 2);
+            fft_stage_pair_par(&mut self.state, inner_stride, twiddles_scaled, inv_sqrt2);
+            stage_top -= 2;
+            stages_left -= 2;
         }
     }
 
@@ -5488,6 +5964,195 @@ mod qft_layout_tests {
                 assert_eq!(*amp, Complex64::new(src, -src), "bits {bits}, index {i}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod qft_gather_tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    const TOL: f64 = 1e-12;
+
+    fn random_state(bits: usize, seed: u64) -> Vec<Complex64> {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut state: Vec<Complex64> = (0..1usize << bits)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect();
+        let norm = state.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+        state.iter_mut().for_each(|a| *a /= norm);
+        state
+    }
+
+    fn max_diff(a: &[Complex64], b: &[Complex64]) -> f64 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).norm())
+            .fold(0.0, f64::max)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Route {
+        Gathered,
+        Paired,
+        Textbook,
+    }
+
+    fn run(
+        state: &[Complex64],
+        num: usize,
+        form: (bool, bool, bool),
+        route: Route,
+    ) -> Vec<Complex64> {
+        let (inverse, swaps, big_endian) = form;
+        let mut backend = StatevectorBackend::new(42);
+        backend.num_qubits = state.len().ilog2() as usize;
+        backend.state = state.to_vec();
+        match route {
+            Route::Gathered => backend.apply_qft_block_with(num, inverse, swaps, big_endian, true),
+            Route::Paired => backend.apply_qft_block_with(num, inverse, swaps, big_endian, false),
+            Route::Textbook => backend.apply_qft_block_textbook(0, num, inverse, swaps, big_endian),
+        }
+        backend.state
+    }
+
+    fn forms() -> impl Iterator<Item = (bool, bool, bool)> {
+        (0..8).map(|f| (f & 1 != 0, f & 2 != 0, f & 4 != 0))
+    }
+
+    fn assert_routes_agree(state_bits: usize, num: usize, textbook: bool) {
+        let state = random_state(state_bits, 42 + (state_bits * 64 + num) as u64);
+        for form in forms() {
+            let gathered = run(&state, num, form, Route::Gathered);
+            let mut against = vec![Route::Paired];
+            if textbook {
+                against.push(Route::Textbook);
+            }
+            for route in against {
+                let diff = max_diff(&gathered, &run(&state, num, form, route));
+                assert!(
+                    diff < TOL,
+                    "{num} of {state_bits} qubits, (inverse, swaps, big_endian) {form:?}: \
+                     gathered vs {route:?} differ by {diff:e}"
+                );
+            }
+        }
+    }
+
+    // Reference DIF stages straight from the definition: stage `t` twiddles position
+    // `k` of its block by `exp(2 pi i k / 2^(t + 1))`, read from the whole-state table.
+    fn dif_stages(
+        state: &mut [Complex64],
+        n: usize,
+        stages: std::ops::Range<usize>,
+        inverse: bool,
+    ) {
+        let table = qft_twiddles_scaled(n, inverse);
+        for chunk in state.chunks_mut(1 << n) {
+            for t in stages.clone().rev() {
+                let stride = 1usize << t;
+                let step = (1usize << n) / (2 * stride);
+                run_radix2_stage_seq(chunk, stride, &table, step, std::f64::consts::FRAC_1_SQRT_2);
+            }
+        }
+    }
+
+    #[test]
+    fn gathered_passes_match_the_dif_definition_for_any_split() {
+        // Splits cover odd and even pass widths, rows clamped to the offsets below a
+        // narrow pass, and several 2^n chunks in one state.
+        let cases: &[(usize, usize, &[usize])] = &[
+            (10, 10, &[3, 3, 3]),
+            (12, 12, &[1, 2, 4]),
+            (12, 10, &[5, 4]),
+            (14, 13, &[2, 7]),
+            (16, 16, &[9, 6]),
+            (17, 15, &[6]),
+        ];
+        for &(state_bits, n, split) in cases {
+            for inverse in [false, true] {
+                let mut expected = random_state(state_bits, 42 + state_bits as u64);
+                let mut actual = expected.clone();
+                let bottom = n - split.iter().sum::<usize>();
+                dif_stages(&mut expected, n, bottom..n, inverse);
+                let mut top = n;
+                for &bits in split {
+                    qft_gather_pass(&mut actual, QftGatherPass::new(top - bits, bits, inverse));
+                    top -= bits;
+                }
+                let diff = max_diff(&actual, &expected);
+                assert!(
+                    diff < TOL,
+                    "{n} of {state_bits} qubits, split {split:?}, inverse {inverse}: {diff:e}"
+                );
+            }
+        }
+    }
+
+    // The textbook circuit costs one full pass per gate, so the widest registers check
+    // against the paired route alone, which the narrower ones tie to the textbook.
+    #[test]
+    fn gathered_route_matches_paired_and_textbook_routes() {
+        for n in QFT_GATHER_MIN_QUBITS..=22 {
+            assert_routes_agree(n, n, n <= 20);
+        }
+    }
+
+    #[test]
+    fn gathered_route_matches_on_sub_register_chunks() {
+        for (state_bits, num) in [(19, 16), (20, 18), (21, 19), (22, 20)] {
+            assert_routes_agree(state_bits, num, state_bits <= 20);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn row_kernels_match_scalar_butterflies() {
+        if !simd::has_avx2_fma() {
+            return;
+        }
+        let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
+        let rows: Vec<Vec<Complex64>> = (0..4).map(|r| random_state(4, 7 + r)).collect();
+        let w = [0.3, 1.7, -2.4].map(|angle| Complex64::from_polar(inv_sqrt2, angle));
+
+        let (mut lo, mut hi) = (rows[0].clone(), rows[1].clone());
+        // SAFETY: AVX2 detected above; the rows share one even length.
+        unsafe { radix2_rows_avx2fma(&mut lo, &mut hi, w[0]) };
+        for j in 0..lo.len() {
+            let (elo, ehi) = radix2_butterfly_values(rows[0][j], rows[1][j], w[0], inv_sqrt2);
+            assert!((lo[j] - elo).norm() < TOL && (hi[j] - ehi).norm() < TOL);
+        }
+
+        let mut q: [Vec<Complex64>; 4] = std::array::from_fn(|r| rows[r].clone());
+        let [qa, qb, qc, qd] = q.each_mut().map(Vec::as_mut_slice);
+        // SAFETY: AVX2 detected above; the rows share one even length.
+        unsafe { radix4_rows_avx2fma(qa, qb, qc, qd, w[0], w[1], w[2]) };
+        for j in 0..rows[0].len() {
+            let expected = radix4_butterfly_values(
+                rows[0][j], rows[1][j], rows[2][j], rows[3][j], w[0], w[1], w[2], inv_sqrt2,
+            );
+            let expected = [expected.0, expected.1, expected.2, expected.3];
+            for (row, e) in q.iter().zip(expected) {
+                assert!((row[j] - e).norm() < TOL);
+            }
+        }
+
+        let phases = qft_gather_phases(16, true);
+        let (anchor, step) = (phases.phase(12345), 37);
+        let mut out = vec![Complex64::new(0.0, 0.0); rows[0].len()];
+        // SAFETY: AVX2 detected above; `out` and the row share one even length.
+        unsafe { qft_scatter_row_avx2fma(&mut out, &rows[0], anchor, &phases.low, step) };
+        for (j, o) in out.iter().enumerate() {
+            let expected = rows[0][j] * (anchor * phases.low[j * step]);
+            assert!((o - expected).norm() < TOL);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "256 MiB states, run with --release")]
+    fn gathered_route_matches_paired_route_at_24_qubits() {
+        assert_routes_agree(24, 24, false);
     }
 }
 

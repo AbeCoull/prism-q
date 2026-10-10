@@ -688,11 +688,12 @@ fn assert_per_shot_matches_serial(circuit: &Circuit, route: ResolvedBackend) {
 // Noiseless mid-circuit shots on the statevector branch on outcomes, with
 // split draws seeded by the outcome path, so no shot matches a run on its own
 // seed; the pin is the pool width. From 10 qubits the two sides of a split run
-// on separate workers.
+// on separate workers. The readout after the last split draws from each branch's
+// state, at 16 qubits through the parallel outcome distribution.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn mid_circuit_shots_identical_across_thread_counts() {
-    for n in [8, 12] {
+    for n in [8, 12, 16] {
         let mut circuit = Circuit::new(n, n + 1);
         add_mid_circuit_block(&mut circuit, &(0..n).collect::<Vec<_>>(), 0);
         measure_every_qubit(&mut circuit, 1);

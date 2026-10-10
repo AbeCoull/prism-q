@@ -104,8 +104,10 @@ comparison run used.
   qubits up to the dense floor the two sides of a split run on separate workers. Rows
   are laid out in record order and then shuffled from the run seed, so the schedule
   reaches neither. The split compares a draw against a collapse probability, which
-  above the dense floor is a parallel reduction and carries the caveat below. Pinned
-  for an 8-qubit and a 12-qubit circuit.
+  above the dense floor is a parallel reduction and carries the caveat below. Once
+  only measurements remain, a branch draws its readout from its own state through
+  the terminal sampler, seeded from its outcome path. Pinned for 8-, 12- and 16-qubit
+  circuits.
 - **Parallel reductions: stable to about 1e-12, not bitwise.** Norms, measurement
   collapse probabilities, reduced density matrices, and expectation values sum
   deterministic per-chunk partials in Rayon's combine order, which varies with pool width

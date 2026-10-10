@@ -283,5 +283,6 @@ Seeded output has changed in these releases:
   terminal shots, draws the same blocks so the two still agree shot for shot.
   Noiseless circuits with mid-circuit measurements on the host statevector evolve
   once per outcome history and split shots binomially, so a shot no longer
-  corresponds to a run on its own seed. Compiled Clifford counts at high shot counts
+  corresponds to a run on its own seed; once only measurements remain, each branch
+  draws its readout from its own state in one pass. Compiled Clifford counts at high shot counts
   draw from a corrected binomial sampler, which also fixes their spread.

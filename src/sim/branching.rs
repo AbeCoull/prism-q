@@ -6,7 +6,10 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use super::compiled::rng::{Xoshiro256PlusPlus, binomial_sample};
-use super::{ShotsResult, apply_recording_saves, backend_metadata, mix_seed, read_save};
+use super::{
+    ShotsResult, apply_recording_saves, backend_metadata, mix_seed, read_save,
+    sample_counts_from_state,
+};
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction};
@@ -72,7 +75,9 @@ impl BranchLimits {
 /// [`BranchLimits::max_live_states`] runs its shots one at a time from the
 /// branch state instead. Instructions after the last one that writes a
 /// classical bit or reads a save are never applied: nothing they do reaches a
-/// result.
+/// result. Once only measurements remain, a branch draws all of its shots from
+/// its state's distribution over the measured qubits in one pass, with no
+/// further splits or clones.
 ///
 /// Branching groups shots by outcome, so the rows are shuffled with a seeded
 /// Fisher-Yates pass when `shuffle` is set; a caller that only counts them
@@ -97,8 +102,9 @@ pub(super) fn branch_shots(
         .iter()
         .rposition(needs_state)
         .map_or(0, |last| last + 1);
+    let live = &fused.instructions[..live_end];
     let mut cursor = Cursor::default();
-    cursor.enter(&fused.instructions[..live_end]);
+    cursor.enter(live);
 
     let root = Branch {
         sv: root,
@@ -106,7 +112,11 @@ pub(super) fn branch_shots(
         rng: stream_rng(seed, SPLIT_STREAM),
     };
     let mut leaves = Vec::new();
-    Walk { limits }.run(root, cursor, 1, 0, &mut leaves)?;
+    let walk = Walk {
+        limits,
+        tail_start: terminal_tail_start(live),
+    };
+    walk.run(root, cursor, 1, 0, &mut leaves)?;
 
     // Traversal order depends on which branches ran in parallel, so the rows
     // are laid out in record order; equal records are interchangeable.
@@ -138,6 +148,18 @@ fn needs_state(inst: &Instruction) -> bool {
         Instruction::Region(region) => region.body().iter().any(needs_state),
         _ => false,
     }
+}
+
+/// Start of the run of measurements and barriers that ends `body`.
+fn terminal_tail_start(body: &[Instruction]) -> usize {
+    body.iter()
+        .rposition(|inst| {
+            !matches!(
+                inst,
+                Instruction::Measure { .. } | Instruction::Barrier { .. }
+            )
+        })
+        .map_or(0, |last| last + 1)
 }
 
 fn draw_ones(rng: &mut ChaCha8Rng, shots: usize, prob_one: f64) -> usize {
@@ -187,6 +209,22 @@ impl<'a> Cursor<'a> {
             }
         })
     }
+
+    /// Whether the instruction [`Self::next`] just returned opens a stretch of
+    /// measurements and barriers that runs to the end. `top_tail` is
+    /// [`terminal_tail_start`] of the top-level list.
+    fn in_terminal_tail(&self, top_tail: usize) -> bool {
+        let last = self.frames.len() - 1;
+        self.frames.iter().enumerate().all(|(depth, &(body, idx))| {
+            let from = if depth == last { idx - 1 } else { idx };
+            let start = if depth == 0 {
+                top_tail
+            } else {
+                terminal_tail_start(body)
+            };
+            from >= start
+        })
+    }
 }
 
 /// One branch of the walk: its state, the shots that followed it, and the
@@ -199,6 +237,8 @@ struct Branch {
 
 struct Walk<'l> {
     limits: &'l BranchLimits,
+    /// [`terminal_tail_start`] of the top-level list.
+    tail_start: usize,
 }
 
 impl Walk<'_> {
@@ -216,6 +256,12 @@ impl Walk<'_> {
         #[cfg(not(feature = "parallel"))]
         let _ = depth;
         while let Some(inst) = cursor.next() {
+            if matches!(inst, Instruction::Measure { .. })
+                && cursor.in_terminal_tail(self.tail_start)
+            {
+                sample_tail(&mut branch, inst, &cursor, leaves);
+                return Ok(());
+            }
             let sv = &mut branch.sv;
             let (qubit, classical_bit) = match inst {
                 Instruction::Measure {
@@ -335,6 +381,47 @@ fn project(
     }
 }
 
+/// Draw the branch's shots for `first` and the measurements left in `cursor`
+/// from its state, one leaf per distinct record.
+fn sample_tail(
+    branch: &mut Branch,
+    first: &Instruction,
+    cursor: &Cursor<'_>,
+    leaves: &mut Vec<Leaf>,
+) {
+    let ahead = cursor
+        .frames
+        .iter()
+        .rev()
+        .flat_map(|&(body, idx)| &body[idx..]);
+    let meas_map: Vec<(usize, usize)> = std::iter::once(first)
+        .chain(ahead)
+        .filter_map(|inst| match inst {
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => Some((*qubit, *classical_bit)),
+            _ => None,
+        })
+        .collect();
+    let sv = &branch.sv;
+    let counts = sample_counts_from_state(
+        sv.state_vector(),
+        sv.probability_scale(),
+        &meas_map,
+        sv.classical_bits.len(),
+        branch.shots,
+        branch.rng.next_u64(),
+    );
+    for (packed, count) in counts {
+        let mut record = sv.classical_bits.clone();
+        for &(_, bit) in &meas_map {
+            record[bit] = (packed[bit / 64] >> (bit % 64)) & 1 == 1;
+        }
+        leaves.push((record, count as usize));
+    }
+}
+
 /// Run each of the branch's shots on its own from its state and `cursor`, one
 /// scratch state reused across them, for a split the memory budget cannot
 /// hold.
@@ -437,6 +524,198 @@ mod tests {
             chi < 16.27,
             "chi-square {chi:.2}: {counts:?} against {expected:?}"
         );
+    }
+
+    // Pearson statistic over `expected`, cells under five expected shots pooled
+    // into one, against the 0.001 critical value from the Wilson-Hilferty
+    // approximation.
+    fn assert_law(counts: &[usize], expected: &[f64]) {
+        let total = counts.iter().sum::<usize>() as f64;
+        let (mut chi, mut cells) = (0.0, 0usize);
+        let (mut pooled_count, mut pooled_mean) = (0.0, 0.0);
+        for (&c, &p) in counts.iter().zip(expected) {
+            let mean = p * total;
+            if mean < 5.0 {
+                pooled_count += c as f64;
+                pooled_mean += mean;
+                continue;
+            }
+            chi += (c as f64 - mean).powi(2) / mean;
+            cells += 1;
+        }
+        if pooled_mean > 0.0 {
+            chi += (pooled_count - pooled_mean).powi(2) / pooled_mean;
+            cells += 1;
+        }
+        let df = (cells - 1) as f64;
+        let h = 2.0 / (9.0 * df);
+        let critical = df * (1.0 - h + 3.09 * h.sqrt()).powi(3);
+        assert!(chi < critical, "chi-square {chi:.2} over {cells} cells");
+    }
+
+    // Rotation layers, qubit 2 measured into bit 0, more layers, then every qubit
+    // `q` read into bit `q + 1`.
+    fn mid_then_readout(n: usize) -> Circuit {
+        let mut c = Circuit::new(n, n + 1);
+        rotation_layers(&mut c, n, 0.4);
+        c.add_measure(2, 0);
+        rotation_layers(&mut c, n, 1.1);
+        for q in 0..n {
+            c.add_measure(q, q + 1);
+        }
+        c
+    }
+
+    // Exact law of `mid_then_readout`, cell `mid + 2 * readout`.
+    fn exact_readout_joint(n: usize) -> Vec<f64> {
+        let mut prefix = Circuit::new(n, 0);
+        rotation_layers(&mut prefix, n, 0.4);
+        let mut suffix = Circuit::new(n, 0);
+        rotation_layers(&mut suffix, n, 1.1);
+
+        let mut sv = StatevectorBackend::new(0);
+        sv.init(n, 0).unwrap();
+        sv.apply_instructions(&prefix.instructions).unwrap();
+        let p_mid = sv.qubit_probability(2).unwrap();
+        let mut joint = vec![0.0; 2 << n];
+        for mid in [false, true] {
+            let mut branch = StatevectorBackend::new(0);
+            branch.copy_state_from(&sv);
+            branch.collapse_qubit(2, mid, p_mid);
+            branch.apply_instructions(&suffix.instructions).unwrap();
+            let p_branch = if mid { p_mid } else { 1.0 - p_mid };
+            for (index, p) in branch.probabilities().unwrap().iter().enumerate() {
+                joint[usize::from(mid) + 2 * index] = p_branch * p;
+            }
+        }
+        joint
+    }
+
+    fn readout_cells(shots: &[Vec<bool>]) -> Vec<usize> {
+        let n = shots[0].len() - 1;
+        let mut counts = vec![0usize; 2 << n];
+        for s in shots {
+            let readout = (0..n).fold(0, |acc, q| acc | (usize::from(s[q + 1]) << q));
+            counts[usize::from(s[0]) + 2 * readout] += 1;
+        }
+        counts
+    }
+
+    #[test]
+    fn a_terminal_readout_after_a_split_follows_the_joint_law() {
+        let n = 5;
+        let circuit = mid_then_readout(n);
+        for parallel in [false, true] {
+            let limits = BranchLimits::for_width(n, parallel);
+            let shots = branch_shots(&circuit, 40_000, 42, &limits, true)
+                .unwrap()
+                .shots;
+            assert_law(&readout_cells(&shots), &exact_readout_joint(n));
+        }
+    }
+
+    // Ten qubits read after the split: each branch's readout lands on hundreds
+    // of distinct records drawn from one pass over its state.
+    #[test]
+    fn a_readout_branch_with_many_leaves_keeps_every_shot() {
+        let n = 10;
+        let circuit = mid_then_readout(n);
+        let limits = BranchLimits::for_width(n, false);
+        let result = branch_shots(&circuit, 20_000, 42, &limits, false).unwrap();
+        assert_eq!(result.shots.len(), 20_000);
+        let counts = result.counts();
+        assert!(counts.len() > 500, "{} distinct records", counts.len());
+        assert!(result.shots.is_sorted(), "rows run in record order");
+
+        let mut by_mid = [0usize; 2];
+        for s in &result.shots {
+            by_mid[usize::from(s[0])] += 1;
+        }
+        let exact = exact_readout_joint(n);
+        let p_one: f64 = exact.iter().skip(1).step_by(2).sum();
+        assert_law(&by_mid, &[1.0 - p_one, p_one]);
+    }
+
+    #[test]
+    fn the_terminal_tail_opens_only_where_measurements_run_to_the_end() {
+        let tail_flags = |c: &Circuit| -> Vec<bool> {
+            let body = &c.instructions[..];
+            let top = terminal_tail_start(body);
+            let mut cursor = Cursor::default();
+            cursor.enter(body);
+            let mut flags = Vec::new();
+            while let Some(inst) = cursor.next() {
+                if let Instruction::Region(region) = inst {
+                    cursor.enter(region.body());
+                } else if matches!(inst, Instruction::Measure { .. }) {
+                    flags.push(cursor.in_terminal_tail(top));
+                }
+            }
+            flags
+        };
+
+        assert_eq!(tail_flags(&mid_then_last(4)), [false, true]);
+        assert_eq!(
+            tail_flags(&mid_then_readout(3)),
+            [false, true, true, true],
+            "gates after the mid-circuit measurement"
+        );
+
+        let mut adjacent = Circuit::new(3, 4);
+        adjacent.add_gate(Gate::H, &[0]);
+        adjacent.add_measure(0, 3);
+        adjacent.add_barrier(&[0, 1, 2]);
+        for q in 0..3 {
+            adjacent.add_measure(q, q);
+        }
+        assert_eq!(tail_flags(&adjacent), [true; 4]);
+
+        let mut conditioned = Circuit::new(2, 2);
+        conditioned.add_gate(Gate::H, &[0]);
+        conditioned.add_measure(0, 0);
+        conditioned.instructions.push(Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(0),
+            gate: Gate::X,
+            targets: smallvec::smallvec![1],
+        });
+        conditioned.add_measure(1, 1);
+        assert_eq!(tail_flags(&conditioned), [false, true]);
+
+        let mut nested = Circuit::new(2, 3);
+        nested.add_gate(Gate::H, &[0]);
+        nested.add_measure(0, 0);
+        let mut body = Circuit::new(2, 3);
+        body.add_gate(Gate::H, &[1]);
+        body.add_measure(1, 1);
+        nested
+            .instructions
+            .push(guarded(ClassicalCondition::BitIsOne(0), body.instructions).unwrap());
+        nested.add_measure(0, 2);
+        assert_eq!(tail_flags(&nested), [false, true, true]);
+    }
+
+    #[test]
+    fn a_readout_inside_a_taken_region_draws_from_the_branch_state() {
+        let mut c = Circuit::new(3, 4);
+        c.add_gate(Gate::Ry(1.2), &[0]);
+        c.add_measure(0, 0);
+        let mut body = Circuit::new(3, 4);
+        body.add_gate(Gate::H, &[1]);
+        body.add_gate(Gate::Cx, &[1, 2]);
+        body.add_measure(1, 1);
+        c.instructions
+            .push(guarded(ClassicalCondition::BitIsOne(0), body.instructions).unwrap());
+        c.add_measure(2, 2);
+        c.add_measure(0, 3);
+        let limits = BranchLimits::for_width(3, false);
+        let shots = branch_shots(&c, 20_000, 42, &limits, true).unwrap().shots;
+        assert!(shots.iter().all(|s| s[0] == s[3]));
+        assert!(shots.iter().filter(|s| !s[0]).all(|s| !s[1] && !s[2]));
+        let taken: Vec<Vec<bool>> = shots.iter().filter(|s| s[0]).cloned().collect();
+        assert!(taken.iter().all(|s| s[1] == s[2]));
+        assert_near(frequency(&taken, 1), 0.5, taken.len(), "region readout");
+        let p = (1.2f64 / 2.0).sin().powi(2);
+        assert_near(frequency(&shots, 0), p, shots.len(), "guard");
     }
 
     #[test]

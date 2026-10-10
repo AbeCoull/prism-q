@@ -54,6 +54,7 @@ exclude = [
 "circuit::openqasm::parse_with" = { rust_only = "dialect selection; Python reads Braket's dialect through parse_braket" }
 "circuit::qasm_export::to_qasm3" = "Circuit.to_qasm"
 "circuit::qft_textbook_steps" = { rust_only = "QFT expansion helper for the fusion pass" }
+"circuit::recognize_qft_blocks" = { rust_only = "fusion-pass lowering" }
 "circuits::brickwork_circuit" = { rust_only = "benchmark workload" }
 "circuits::clifford_heavy_circuit" = "circuits.clifford_heavy"
 "circuits::clifford_prefix_measured_blocks" = { rust_only = "benchmark workload" }

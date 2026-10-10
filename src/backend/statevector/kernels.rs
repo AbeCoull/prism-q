@@ -3902,8 +3902,6 @@ impl StatevectorBackend {
         let twiddles_scaled = qft_twiddles_scaled(n, inverse);
         let twiddles_scaled = twiddles_scaled.as_ref();
 
-        let total = self.state.len();
-
         if reverse_input {
             apply_bit_reverse_chunks(&mut self.state, n);
         }
@@ -3980,7 +3978,7 @@ impl StatevectorBackend {
 
         #[cfg(feature = "parallel")]
         let low_done_parallel =
-            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS && total / tile_size >= 4 {
+            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS && self.state.len() / tile_size >= 4 {
                 self.state
                     .par_chunks_mut(tile_size)
                     .for_each(apply_low_stages_in_tile);

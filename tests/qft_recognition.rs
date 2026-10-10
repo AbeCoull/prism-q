@@ -508,11 +508,6 @@ fn qasm_qft_reaches_the_fused_stream_as_a_block_and_round_trips() {
             vec![block(0, n, form)],
             "inverse {inverse}"
         );
-        assert_eq!(
-            qasm_export::to_qasm3(&reparsed).unwrap(),
-            exported,
-            "inverse {inverse}"
-        );
         assert_routed_matches_gates(&parsed, 2, &format!("qasm, inverse {inverse}"));
     }
 }

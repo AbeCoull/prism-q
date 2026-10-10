@@ -5374,8 +5374,8 @@ fn rus_program(n: usize) -> DynamicProgram {
     b.build().unwrap()
 }
 
-/// A dynamic program walked once per shot: the per-shot cliff plus the loop's
-/// block boundaries and classical evaluation.
+/// A dynamic program: on the host statevector the shots walk the loop together,
+/// splitting at each attempt's measurement, then read every other qubit.
 fn bench_dynamic_rus(c: &mut Criterion) {
     let shots = 1_000usize;
     let mut group = c.benchmark_group("dynamic/rus");

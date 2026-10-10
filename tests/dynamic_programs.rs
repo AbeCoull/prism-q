@@ -5,7 +5,6 @@ mod common;
 
 use std::collections::HashMap;
 
-use common::mix_seed;
 use prism_q::circuit::dynamic::{
     BinaryOp, ClassicalExpr, ClassicalType, DynamicProgramBuilder, RotationKind, Terminator,
 };
@@ -367,9 +366,9 @@ fn entangled_with_midcircuit_measurement() -> Circuit {
     circuit
 }
 
-// Split across blocks by an action, the same instructions run on the same
-// backend from the same per-shot seeds, so each shot matches a run of the
-// circuit on its seed bit for bit.
+// Split across blocks by an action, the same instructions branch on the same
+// outcome draws on the host statevector, so the shots match the circuit's bit
+// for bit.
 #[test]
 fn a_program_split_into_blocks_reproduces_the_seeded_circuit_shots() {
     let circuit = entangled_with_midcircuit_measurement();
@@ -386,22 +385,17 @@ fn a_program_split_into_blocks_reproduces_the_seeded_circuit_shots() {
     let program = b.build().unwrap();
     assert_eq!(program.blocks().len(), 2);
     assert!(program.static_circuit().is_none());
-    let plain: Vec<Vec<bool>> = (0..300)
-        .map(|i| {
-            simulate(&circuit)
-                .backend(BackendKind::Statevector)
-                .seed(mix_seed(SEED, i))
-                .run()
-                .unwrap()
-                .classical_bits
-        })
-        .collect();
+    let plain = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .shots(300)
+        .unwrap();
     let dynamic = simulate_program(&program)
         .backend(BackendKind::Statevector)
         .seed(SEED)
         .shots(300)
         .unwrap();
-    assert_eq!(plain, dynamic.shots);
+    assert_eq!(plain.shots, dynamic.shots);
 }
 
 // Auto samples a terminal-measurement circuit from one evolved distribution,

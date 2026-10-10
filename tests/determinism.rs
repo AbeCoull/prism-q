@@ -9,11 +9,12 @@ mod common;
 use common::{SEED, count_gates, mix_seed};
 use num_complex::Complex64;
 use prism_q::circuit::SmallVec;
+use prism_q::circuit::dynamic::{ClassicalType, DynamicProgramBuilder};
 use prism_q::circuits::qft_circuit;
 use prism_q::{
     BackendKind, Circuit, ClassicalCondition, Gate, Instruction, McuData, NoiseModel, Parameters,
     PauliObservable, PauliTerm, PreparedCircuit, ResolvedBackend, StatevectorBackend, ThreadPool,
-    run_on, run_on_state, run_shots_compiled, simulate,
+    run_on, run_on_state, run_shots_compiled, simulate, simulate_program,
 };
 
 #[cfg(not(miri))]
@@ -712,6 +713,47 @@ fn mid_circuit_shots_identical_across_thread_counts() {
         assert_eq!(single.shots, wide.shots, "{n}q branched shots differ");
         assert_eq!(single.shots, shots(1).shots, "{n}q not seed stable");
     }
+}
+
+// A dynamic program on the host statevector branches the same way: the walk
+// follows the graph per branch, its splits seeded by the outcome path, so a
+// repeat-until-success loop over 12 qubits draws the same rows at any pool width.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn program_shots_identical_across_thread_counts() {
+    let n = 12;
+    let mut b = DynamicProgramBuilder::new(n, n);
+    let mut prefix = Circuit::new(n, n);
+    add_mid_circuit_block(&mut prefix, &(0..n).collect::<Vec<_>>(), 0);
+    b.append(&prefix);
+    let tries = b.declare("tries", ClassicalType::Uint { width: 8 }, 0i64.into());
+    let condition = b.expr("c[0] && tries < 20").unwrap();
+    b.begin_while("retry", condition);
+    b.add_reset(0)
+        .add_gate(Gate::Ry(1.3), &[0])
+        .add_gate(Gate::Cx, &[0, 1])
+        .add_measure(0, 0);
+    let next = b.expr("tries + 1").unwrap();
+    b.assign(tries, next);
+    b.end().unwrap();
+    for q in 1..n {
+        b.add_measure(q, q);
+    }
+    let program = b.build().unwrap();
+
+    let shots = |threads: usize| {
+        in_pool(threads, || {
+            simulate_program(&program)
+                .seed(SEED)
+                .shots(PER_SHOT_SHOTS)
+                .expect("shots")
+        })
+    };
+    let single = shots(1);
+    let wide = shots(THREADS_HI);
+    assert_eq!(single.metadata.backend, ResolvedBackend::Statevector);
+    assert_eq!(single.shots, wide.shots, "branched program shots differ");
+    assert_eq!(single.shots, shots(1).shots, "not seed stable");
 }
 
 #[test]

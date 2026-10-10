@@ -5,7 +5,8 @@ bounded `for` loops all fit in one, because each lowers to a span of the list at
 time. A program whose instruction count depends on what it measures does not: a
 `while` loop that repeats until an outcome comes up, or a counter that a measurement
 increments, has no finite list to lower to. `DynamicProgram` holds those programs as a
-control-flow graph and runs them once per shot.
+control-flow graph and walks it per shot, or per outcome history on the host
+statevector.
 
 The rest of the engine is unchanged. Every block holds an ordinary `Circuit`, every
 pass that works on a circuit works on a block, and a program with no runtime control
@@ -102,11 +103,20 @@ Every shot initializes one backend, resets the variables to their initial values
 walks the graph from block 0, applying each block's fused circuit, evaluating its
 actions against that shot's bits and variables, and following its terminator.
 
-Shot `i` draws from `mix_seed(seed, i)`, the seed the per-shot circuit routes give
-shot `i` off the host statevector, and shots split across Rayon workers under the same rule those routes use. The
-host statevector keeps one backend per worker and reseeds it per shot, so its buffer is
-allocated once per worker rather than once per shot; every other backend is built per
-shot.
+On the host statevector the shots walk the graph together, by the outcome branching
+that circuits with mid-circuit measurements use. At each measurement the shots on a
+branch split by a binomial draw on the outcome probability, and each non-empty outcome
+carries its own state, variables, and step count onward. Variables, loop tests, and
+branch conditions are functions of the outcome history, so every shot on a branch takes
+the same path, and a prefix shared by all shots, the entry block included, evolves
+once. The live-state budget and the per-shot fallback past it are the circuit walk's.
+Only a block that ends the graph with no actions is cut after its last measurement or
+drawn as a terminal readout, since anywhere else a later block may still read the
+state.
+
+On every other backend shot `i` draws from `mix_seed(seed, i)`, the seed the per-shot
+circuit routes give shot `i`, and shots split across Rayon workers under the same rule
+those routes use. Each backend is built per shot.
 
 A shot that runs more blocks than its step bound stops with `PrismError::StepLimit`
 naming the loop it was in. The bound is one million blocks by default and
@@ -140,8 +150,9 @@ measurement only, which no backend relaxes.
 
 ## Cost
 
-A dynamic program runs once per shot, so it pays the per-shot cliff every guarded
-circuit pays, plus one evaluation per action and terminator. Fusion runs within a block
+Off the host statevector a dynamic program runs once per shot, so it pays the per-shot
+cliff every guarded circuit pays, plus one evaluation per action and terminator. On
+the host statevector it pays one evolution per distinct outcome history instead. Fusion runs within a block
 and never across a block boundary, which is the cost a branch imposes: the loop body and
 the code around it fuse separately. `dynamic/rus/{10,16}` price a repeat-until-success
 loop at 1000 shots on 10 and 16 qubits.

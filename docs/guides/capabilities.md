@@ -284,5 +284,6 @@ Seeded output has changed in these releases:
   Noiseless circuits with mid-circuit measurements on the host statevector evolve
   once per outcome history and split shots binomially, so a shot no longer
   corresponds to a run on its own seed; once only measurements remain, each branch
-  draws its readout from its own state in one pass. Compiled Clifford counts at high shot counts
+  draws its readout from its own state in one pass. Dynamic programs on the host
+  statevector branch the same way, so their shots no longer follow `mix_seed(seed, i)`. Compiled Clifford counts at high shot counts
   draw from a corrected binomial sampler, which also fixes their spread.

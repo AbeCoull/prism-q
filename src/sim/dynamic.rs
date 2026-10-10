@@ -2,14 +2,15 @@
 
 use rand::SeedableRng;
 
+use super::branching::{self, BranchLimits};
 use super::dispatch::{BackendPlan, ExecutionPlan};
 use super::{
     BackendKind, CountsResult, RunMetadata, Seeded, ShotsResult, Unseeded, backend_metadata,
     expand_for_backend, fuse_for_backend, mix_seed, resolve, run_counts_with, run_shots_with,
     validate_explicit_backend,
 };
-use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
+use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::Instruction;
 use crate::circuit::dynamic::{Action, BasicBlock, ClassicalValue, DynamicProgram, Terminator};
 use crate::error::{PrismError, Result};
@@ -31,9 +32,12 @@ pub struct SimulateProgram<'p, SeedState> {
 ///
 /// A program with no runtime control flow runs as its one circuit does, through
 /// [`simulate`](super::simulate), so it keeps every sampling shortcut and the
-/// same seeded shots. Any other program runs once per shot: each block is
-/// fused for the backend once, then every shot walks the graph on a fresh
-/// state, seeded as the per-shot circuit routes seed shot `i`.
+/// same seeded shots. Any other program has each block fused for the backend
+/// once. On the host statevector the shots then walk the graph together,
+/// splitting binomially at each measurement as circuits with mid-circuit
+/// measurements do, so the program evolves once per distinct outcome history.
+/// On any other backend every shot walks the graph on a fresh state, seeded as
+/// the per-shot circuit routes seed shot `i`.
 ///
 /// Auto routing reads every block at once, so a program holding only Clifford
 /// gates runs on the stabilizer tableau, and a runtime rotation counts as a
@@ -123,7 +127,7 @@ struct PreparedBlock<'p> {
 }
 
 /// A program fused for one backend plan, ready to run any number of shots.
-struct Prepared<'p> {
+pub(super) struct Prepared<'p> {
     program: &'p DynamicProgram,
     plan: BackendPlan,
     blocks: Vec<PreparedBlock<'p>>,
@@ -132,7 +136,7 @@ struct Prepared<'p> {
 }
 
 impl<'p> Prepared<'p> {
-    fn new(
+    pub(super) fn new(
         program: &'p DynamicProgram,
         kind: &BackendKind,
         seed: u64,
@@ -185,6 +189,21 @@ impl<'p> Prepared<'p> {
     }
 
     fn run(&self, kind: &BackendKind, num_shots: usize, seed: u64) -> Result<ShotsResult> {
+        let num_qubits = self.program.num_qubits();
+        if self.plan.is_host_statevector() && num_qubits < max_statevector_qubits() {
+            #[cfg(feature = "parallel")]
+            let parallel =
+                super::shots_split_across_workers(kind, &[(self.plan.resolved(), num_qubits)])
+                    && num_qubits >= branching::MIN_QUBITS_FOR_PARALLEL_SPLITS;
+            #[cfg(not(feature = "parallel"))]
+            let parallel = false;
+            let limits = BranchLimits::for_width(num_qubits, parallel);
+            return branching::branch_program_shots(self, num_shots, seed, &limits);
+        }
+        self.run_per_shot(kind, num_shots, seed)
+    }
+
+    fn run_per_shot(&self, kind: &BackendKind, num_shots: usize, seed: u64) -> Result<ShotsResult> {
         let reuse = self.plan.is_host_statevector();
         let shot = |state: &mut ShotState, i: usize| -> Result<(Vec<bool>, RunMetadata)> {
             let shot_seed = mix_seed(seed, i);
@@ -252,62 +271,120 @@ impl<'p> Prepared<'p> {
         backend.init(self.program.num_qubits(), self.program.num_classical_bits())?;
         vars.clear();
         vars.extend_from_slice(&self.initial);
-        let variables = self.program.variables();
-        let mut at = 0usize;
-        let mut steps = 0u64;
-        loop {
-            if steps == self.max_steps {
-                return Err(self.step_limit(at));
-            }
-            steps += 1;
-            let prepared = &self.blocks[at];
-            if !prepared.instructions.is_empty() {
-                backend.apply_instructions(&prepared.instructions)?;
-            }
-            for action in &prepared.block.actions {
-                match action {
-                    Action::Assign { var, value } => {
-                        let evaluated = value.eval(backend.classical_results(), vars)?;
-                        vars[var.index()] = variables[var.index()].ty.store(evaluated);
-                    }
-                    Action::Rotation {
-                        kind,
-                        targets,
-                        angle,
-                    } => {
-                        let angle = angle.eval(backend.classical_results(), vars)?.to_float();
-                        if !angle.is_finite() {
-                            return Err(PrismError::InvalidParameter {
-                                message: format!(
-                                    "a runtime {kind:?} angle evaluated to {angle}, which no \
-                                     gate can carry"
-                                ),
-                            });
-                        }
-                        backend.apply(&Instruction::Gate {
-                            gate: kind.gate(angle),
-                            targets: targets.clone(),
-                        })?;
-                    }
-                }
-            }
-            at = match &prepared.block.terminator {
-                Terminator::Jump(target) => target.index(),
-                Terminator::Branch {
-                    condition,
-                    then,
-                    otherwise,
-                } => {
-                    if condition.eval(backend.classical_results(), vars)?.truthy() {
-                        then.index()
-                    } else {
-                        otherwise.index()
-                    }
-                }
-                Terminator::End => break,
-            };
-        }
+        let mut steps = 0;
+        self.count_step(0, &mut steps)?;
+        self.apply_block(0, backend)?;
+        self.run_from(0, steps, backend, vars)?;
         Ok(backend.classical_results().to_vec())
+    }
+
+    /// Carry a shot whose state has run block `at`'s circuit to the end of the
+    /// graph, `steps` blocks entered so far.
+    pub(super) fn run_from(
+        &self,
+        mut at: usize,
+        mut steps: u64,
+        backend: &mut dyn Backend,
+        vars: &mut [ClassicalValue],
+    ) -> Result<()> {
+        while let Some(next) = self.finish_block(at, backend, vars)? {
+            self.count_step(next, &mut steps)?;
+            self.apply_block(next, backend)?;
+            at = next;
+        }
+        Ok(())
+    }
+
+    fn apply_block(&self, at: usize, backend: &mut dyn Backend) -> Result<()> {
+        let instructions = &self.blocks[at].instructions;
+        if !instructions.is_empty() {
+            backend.apply_instructions(instructions)?;
+        }
+        Ok(())
+    }
+
+    /// Count entry into block `at` against the step bound.
+    pub(super) fn count_step(&self, at: usize, steps: &mut u64) -> Result<()> {
+        if *steps == self.max_steps {
+            return Err(self.step_limit(at));
+        }
+        *steps += 1;
+        Ok(())
+    }
+
+    /// Run block `at`'s actions and terminator, returning the next block or
+    /// `None` at the end of the graph.
+    pub(super) fn finish_block(
+        &self,
+        at: usize,
+        backend: &mut dyn Backend,
+        vars: &mut [ClassicalValue],
+    ) -> Result<Option<usize>> {
+        let block = self.blocks[at].block;
+        let variables = self.program.variables();
+        for action in &block.actions {
+            match action {
+                Action::Assign { var, value } => {
+                    let evaluated = value.eval(backend.classical_results(), vars)?;
+                    vars[var.index()] = variables[var.index()].ty.store(evaluated);
+                }
+                Action::Rotation {
+                    kind,
+                    targets,
+                    angle,
+                } => {
+                    let angle = angle.eval(backend.classical_results(), vars)?.to_float();
+                    if !angle.is_finite() {
+                        return Err(PrismError::InvalidParameter {
+                            message: format!(
+                                "a runtime {kind:?} angle evaluated to {angle}, which no \
+                                 gate can carry"
+                            ),
+                        });
+                    }
+                    backend.apply(&Instruction::Gate {
+                        gate: kind.gate(angle),
+                        targets: targets.clone(),
+                    })?;
+                }
+            }
+        }
+        Ok(match &block.terminator {
+            Terminator::Jump(target) => Some(target.index()),
+            Terminator::Branch {
+                condition,
+                then,
+                otherwise,
+            } => {
+                if condition.eval(backend.classical_results(), vars)?.truthy() {
+                    Some(then.index())
+                } else {
+                    Some(otherwise.index())
+                }
+            }
+            Terminator::End => None,
+        })
+    }
+
+    /// Block `at`'s fused circuit, and whether the shot ends with it: no
+    /// actions follow and its terminator ends the graph.
+    pub(super) fn block_body(&self, at: usize) -> (&[Instruction], bool) {
+        let prepared = &self.blocks[at];
+        let ends =
+            prepared.block.actions.is_empty() && prepared.block.terminator == Terminator::End;
+        (&prepared.instructions, ends)
+    }
+
+    pub(super) fn initial_vars(&self) -> &[ClassicalValue] {
+        &self.initial
+    }
+
+    pub(super) fn num_qubits(&self) -> usize {
+        self.program.num_qubits()
+    }
+
+    pub(super) fn num_classical_bits(&self) -> usize {
+        self.program.num_classical_bits()
     }
 
     fn step_limit(&self, at: usize) -> PrismError {
@@ -397,12 +474,10 @@ mod tests {
         );
         b.end().unwrap();
         let program = b.build().unwrap();
-        let reused = simulate_program(&program)
-            .backend(BackendKind::Statevector)
-            .seed(3)
-            .shots(64)
-            .unwrap();
         let prepared = Prepared::new(&program, &BackendKind::Statevector, 3, 100).unwrap();
+        let reused = prepared
+            .run_per_shot(&BackendKind::Statevector, 64, 3)
+            .unwrap();
         let fresh: Vec<Vec<bool>> = (0..64)
             .map(|i| {
                 let mut backend = StatevectorBackend::new(mix_seed(3, i));

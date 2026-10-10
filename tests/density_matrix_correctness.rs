@@ -1880,6 +1880,256 @@ fn dm_multi_2q_batched_bra_preserves_gate_order() {
     );
 }
 
+/// Widths around the doubled register's parallel threshold (`2n >= 15`): 7
+/// stays below it, 8 crosses it, and 12 puts ket targets in every tier of the
+/// tiled kernels.
+const BATCH_WIDTHS: [usize; 5] = [7, 8, 9, 10, 12];
+
+fn random_unitary_2x2(rng: &mut rand_chacha::ChaCha8Rng) -> [[Complex64; 2]; 2] {
+    use rand::RngExt;
+    let tau = std::f64::consts::TAU;
+    let (theta, a, b, g) = (
+        rng.random::<f64>() * tau,
+        rng.random::<f64>() * tau,
+        rng.random::<f64>() * tau,
+        rng.random::<f64>() * tau,
+    );
+    let (s, co) = theta.sin_cos();
+    let e = |phase: f64| Complex64::from_polar(1.0, phase);
+    [
+        [e(g) * co, -e(g + b) * s],
+        [e(g + a) * s, e(g + a + b) * co],
+    ]
+}
+
+fn apply_gate(backend: &mut DensityMatrixBackend, gate: Gate, targets: &[usize]) {
+    backend
+        .apply(&prism_q::circuit::Instruction::Gate {
+            gate,
+            targets: targets.iter().copied().collect(),
+        })
+        .unwrap();
+}
+
+/// A mixed state with complex coherences on every qubit: rotation layers around
+/// a CX chain, with amplitude damping on every third qubit in between.
+fn mixed_dm(n: usize) -> DensityMatrixBackend {
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(n, 0).unwrap();
+    for q in 0..n {
+        apply_gate(&mut backend, Gate::Ry(0.3 + 0.2 * q as f64), &[q]);
+        apply_gate(&mut backend, Gate::Rz(0.1 + 0.15 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        apply_gate(&mut backend, Gate::Cx, &[q, q + 1]);
+    }
+    for q in (0..n).step_by(3) {
+        backend.apply_1q_kraus(q, &amplitude_damping(0.25));
+    }
+    for q in 0..n {
+        apply_gate(&mut backend, Gate::Rx(0.4 + 0.1 * q as f64), &[q]);
+    }
+    backend
+}
+
+/// The full buffer and each qubit's `<X>`, `<Y>`, `<Z>` after `evolve` runs on
+/// [`mixed_dm`]. The backend drops before the caller builds the next one.
+fn evolved_mixture(
+    n: usize,
+    evolve: impl FnOnce(&mut DensityMatrixBackend),
+) -> (Vec<Complex64>, Vec<[f64; 3]>) {
+    let mut backend = mixed_dm(n);
+    evolve(&mut backend);
+    let bloch = (0..n)
+        .map(|q| {
+            let rdm = backend.reduced_density_matrix_1q(q).unwrap();
+            [
+                (rdm[0][1] + rdm[1][0]).re,
+                (Complex64::new(0.0, 1.0) * (rdm[0][1] - rdm[1][0])).re,
+                (rdm[0][0] - rdm[1][1]).re,
+            ]
+        })
+        .collect();
+    (backend.density_matrix().unwrap(), bloch)
+}
+
+fn assert_mixtures_close(
+    got: &(Vec<Complex64>, Vec<[f64; 3]>),
+    want: &(Vec<Complex64>, Vec<[f64; 3]>),
+    label: &str,
+) {
+    let worst = got
+        .0
+        .iter()
+        .zip(&want.0)
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0, f64::max);
+    assert!(worst < DM_EPS, "{label}: max entry deviation {worst:e}");
+    for (q, (a, b)) in got.1.iter().zip(&want.1).enumerate() {
+        for (k, basis) in ["X", "Y", "Z"].iter().enumerate() {
+            assert!(
+                (a[k] - b[k]).abs() < DM_EPS,
+                "{label}: qubit {q} <{basis}> {} vs {}",
+                a[k],
+                b[k]
+            );
+        }
+    }
+}
+
+// The batched route runs the ket constituents and their bra conjugates through
+// the statevector tiled kernel; the reference applies each constituent as its
+// own one-qubit sandwich. The batches cover every qubit, the two edge qubits
+// alone (usually no cheaper batched, so it keeps the sandwiches), an
+// all-diagonal batch, which takes the diagonal sandwich, and qubits 0 and 1,
+// whose doubled targets all sit in one tile.
+#[test]
+fn dm_multi_fused_batch_matches_per_constituent() {
+    use prism_q::gates::MultiFusedData;
+    use rand::SeedableRng;
+
+    for n in BATCH_WIDTHS {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(SEED + n as u64);
+        let full: Vec<_> = (0..n).map(|q| (q, random_unitary_2x2(&mut rng))).collect();
+        let edges: Vec<_> = [n - 1, 0]
+            .into_iter()
+            .map(|q| (q, random_unitary_2x2(&mut rng)))
+            .collect();
+        let zero = Complex64::new(0.0, 0.0);
+        let diagonal: Vec<_> = [0, n / 2, n - 1]
+            .into_iter()
+            .map(|q| {
+                let m = random_unitary_2x2(&mut rng);
+                (
+                    q,
+                    [
+                        [m[0][0] / m[0][0].norm(), zero],
+                        [zero, m[1][1] / m[1][1].norm()],
+                    ],
+                )
+            })
+            .collect();
+        let low_pair: Vec<_> = (0..2).map(|q| (q, random_unitary_2x2(&mut rng))).collect();
+        let batches = [full, edges, diagonal, low_pair];
+        assert!(MultiFusedData::new(batches[2].clone()).all_diagonal());
+
+        let batched = evolved_mixture(n, |backend| {
+            for gates in &batches {
+                let targets: Vec<usize> = gates.iter().map(|&(q, _)| q).collect();
+                let data = MultiFusedData::new(gates.clone());
+                apply_gate(backend, Gate::MultiFused(Box::new(data)), &targets);
+            }
+        });
+        let reference = evolved_mixture(n, |backend| {
+            for &(q, m) in batches.iter().flatten() {
+                apply_gate(backend, Gate::Fused(Box::new(m)), &[q]);
+            }
+        });
+        assert_mixtures_close(&batched, &reference, &format!("MultiFused at {n}q"));
+    }
+}
+
+fn kron_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Complex64; 4]; 4] {
+    let mut out = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (r, row) in out.iter_mut().enumerate() {
+        for (col, entry) in row.iter_mut().enumerate() {
+            *entry = a[r >> 1][col >> 1] * b[r & 1][col & 1];
+        }
+    }
+    out
+}
+
+fn mul_4x4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
+    let mut out = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (r, row) in out.iter_mut().enumerate() {
+        for (col, entry) in row.iter_mut().enumerate() {
+            *entry = (0..4).map(|k| a[r][k] * b[k][col]).sum();
+        }
+    }
+    out
+}
+
+/// `(A x B) CX (C x D)` for random one-qubit `A..D`: entangling, complex, and
+/// non-commuting with its neighbours on a shared qubit.
+fn random_unitary_4x4(rng: &mut rand_chacha::ChaCha8Rng) -> [[Complex64; 4]; 4] {
+    let outer = kron_2x2(&random_unitary_2x2(rng), &random_unitary_2x2(rng));
+    let inner = kron_2x2(&random_unitary_2x2(rng), &random_unitary_2x2(rng));
+    mul_4x4(&outer, &mul_4x4(&Gate::Cx.matrix_4x4(), &inner))
+}
+
+// The ket half lands on qubits `n..2n`, so a batch fusion sized for the circuit
+// indices can outgrow one subcube there and must be cut into runs that keep
+// list order; batching the whole list through the tiered pass reorders
+// non-commuting constituents. The chain overlaps on every qubit, wraps from
+// `n - 1` back to 0, and is long enough at 12 qubits to need several runs.
+#[test]
+fn dm_multi_2q_batch_matches_per_constituent() {
+    use prism_q::gates::Multi2qData;
+    use rand::SeedableRng;
+
+    for n in BATCH_WIDTHS {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(SEED + n as u64);
+        let mut chain: Vec<(usize, usize)> = (0..n - 1).map(|q| (q, q + 1)).collect();
+        chain.push((n - 1, 0));
+        chain.extend((1..n).rev().map(|q| (q, q - 1)));
+        let edges = vec![(0, n - 1), (n - 1, 1), (1, 0), (0, n - 1)];
+        let batches: Vec<Vec<_>> = [chain, edges]
+            .into_iter()
+            .map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(q0, q1)| (q0, q1, random_unitary_4x4(&mut rng)))
+                    .collect()
+            })
+            .collect();
+
+        let batched = evolved_mixture(n, |backend| {
+            for gates in &batches {
+                let mut targets: Vec<usize> = gates.iter().flat_map(|&(a, b, _)| [a, b]).collect();
+                targets.sort_unstable();
+                targets.dedup();
+                let data = Multi2qData::new(gates.clone());
+                apply_gate(backend, Gate::Multi2q(Box::new(data)), &targets);
+            }
+        });
+        let reference = evolved_mixture(n, |backend| {
+            for &(q0, q1, m) in batches.iter().flatten() {
+                apply_gate(backend, Gate::Fused2q(Box::new(m)), &[q0, q1]);
+            }
+        });
+        assert_mixtures_close(&batched, &reference, &format!("Multi2q at {n}q"));
+    }
+}
+
+// The fused circuit carries `MultiFused` and `Multi2q` from the doubled-width
+// floors on; applied to a mixed state it must leave the same buffer as the
+// unfused instructions.
+#[test]
+fn dm_fused_circuit_matches_unfused_on_a_mixed_state() {
+    for n in [8usize, 10] {
+        for (name, circuit) in [
+            ("qaoa", circuits::qaoa_circuit(n, 3, SEED)),
+            ("random", circuits::random_circuit(n, 8, SEED)),
+        ] {
+            let fused = dm_fused(&circuit);
+            assert!(
+                count_gates(&fused, |g| matches!(
+                    g,
+                    Gate::MultiFused(_) | Gate::Multi2q(_)
+                )) > 0,
+                "{name} at {n}q fused no batch"
+            );
+            let got = evolved_mixture(n, |backend| {
+                backend.apply_instructions(&fused.instructions).unwrap()
+            });
+            let want = evolved_mixture(n, |backend| {
+                backend.apply_instructions(&circuit.instructions).unwrap()
+            });
+            assert_mixtures_close(&got, &want, &format!("{name} fused at {n}q"));
+        }
+    }
+}
+
 // `Rzz` is diagonal, so it leaves probabilities untouched and the cross-backend
 // probability matrix above cannot see it at all. These two pin it instead: the
 // first against the general channel route over full Pauli tomography, the

@@ -1903,27 +1903,51 @@ mod gpu_scaffold {
     }
 }
 
-// The density-matrix bra half batches only under this predicate, so the
-// boundary pins the highest target the L2 tile holds: a tile of 2^(t + 1)
-// amplitudes takes target t and not t + 1.
+// The density-matrix registers batch only in runs of this length. On a state
+// past the tile, the in-place tile takes target `t` and not `t + 1`, and a run
+// that reaches past the tile ends where its high qubits outgrow the subcube.
 #[test]
-fn multi_2q_single_tier_boundary_pins_the_l2_tile() {
+fn multi_2q_ordered_prefix_ends_where_order_would_break() {
     let mat = crate::gates::Gate::Cx.matrix_4x4();
-    let t = kernels::multi_gate_max_l2_target();
+    let wide = 24;
+    let tile_bits = crate::gates::multi_2q_tile_bits_for(wide);
+    let budget = crate::gates::multi_2q_high_budget_for(wide);
+    let low = crate::gates::multi_2q_low_bits();
+    let t = tile_bits - 1;
     assert_eq!(
-        1usize << (t + 1),
-        crate::backend::cache::tile_budget_bytes() / 16
+        kernels::multi_2q_ordered_prefix(&[(0, t, mat), (t - 1, t, mat)], wide),
+        2
     );
-    let small = 10;
-    assert!(kernels::multi_2q_single_tier(&[(t - 1, t, mat)], small));
-    assert!(!kernels::multi_2q_single_tier(
-        &[(t - 1, t + 1, mat)],
-        small
-    ));
-    assert!(!kernels::multi_2q_single_tier(
-        &[(0, 1, mat), (0, t + 1, mat)],
-        small
-    ));
+
+    let mut gates: Vec<_> = (0..budget - 1).map(|j| (low + j, wide - 1, mat)).collect();
+    assert_eq!(kernels::multi_2q_ordered_prefix(&gates, wide), budget - 1);
+    gates.push((0, low + budget - 1, mat));
+    gates.push((0, 1, mat));
+    assert_eq!(kernels::multi_2q_ordered_prefix(&gates, wide), budget - 1);
+    assert_eq!(
+        kernels::multi_2q_ordered_prefix(&gates[budget - 1..], wide),
+        2
+    );
+}
+
+// The density matrix batches a `MultiFused` block only when this count beats one
+// pass per constituent, so it has to match the tiers `apply_multi_1q` runs. The
+// targets above 16 sit past the L3 tier on every host, so their count depends only
+// on whether they share traversals.
+#[test]
+fn multi_1q_sweeps_counts_the_tier_passes() {
+    let h = crate::gates::Gate::H.matrix_2x2();
+    let gates = |targets: &[usize]| targets.iter().map(|&t| (t, h)).collect::<Vec<_>>();
+    let wide = 24;
+    assert_eq!(kernels::multi_1q_sweeps(&[], wide), 0);
+    assert_eq!(kernels::multi_1q_sweeps(&gates(&[23]), wide), 1);
+    assert_eq!(kernels::multi_1q_sweeps(&gates(&[0, 1, 2, 3]), wide), 1);
+    let high = gates(&[17, 18, 19, 20, 21, 22]);
+    let shared = if cfg!(feature = "parallel") { 2 } else { 6 };
+    assert_eq!(kernels::multi_1q_sweeps(&high, wide), shared);
+    let mut mixed = gates(&[0, 1]);
+    mixed.extend(high);
+    assert_eq!(kernels::multi_1q_sweeps(&mixed, wide), 1 + shared);
 }
 
 // Pair-aware grouping keeps every benched `diag_mixed_l6` batch on the LUT path. The

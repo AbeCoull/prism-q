@@ -110,6 +110,13 @@ def test_oversize_circuit_reports_the_qubit_cap():
     assert "PRISM_MAX_DM_QUBITS and PRISM_MAX_SV_QUBITS" in message
 
 
+
+def test_measured_circuit_is_rejected():
+    circuit = CircuitBuilder(1, 1).h(0).measure(0, 0).build()
+    with pytest.raises(prism_q.PrismError, match="remove the measurements") as excinfo:
+        simulate(circuit).seed(SEED).density_matrix_expectation_values([[(0, "X")]])
+    assert excinfo.value.kind == "incompatible_backend"
+
 def test_noisy_shots_sample_the_exact_distribution():
     circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
     model = NoiseModel.uniform_depolarizing(circuit, 0.01)

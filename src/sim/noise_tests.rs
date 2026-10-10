@@ -948,6 +948,23 @@ fn sampled_chain_expectations(shots: &[Vec<bool>], n: usize) -> Vec<f64> {
 /// variance, rounded up.
 const CHAIN_BAND: f64 = 0.036;
 
+/// `circuit` and `noise` without the terminal measurements and their event
+/// slots, the unitary half the density-matrix oracle accepts.
+fn unmeasured(circuit: &Circuit, noise: &NoiseModel) -> (Circuit, NoiseModel) {
+    let after_gate = circuit
+        .instructions
+        .iter()
+        .zip(&noise.after_gate)
+        .filter(|(inst, _)| !matches!(inst, Instruction::Measure { .. }))
+        .map(|(_, events)| events.clone())
+        .collect();
+    let noise = NoiseModel {
+        after_gate,
+        readout: noise.readout.clone(),
+    };
+    (circuit.without_measurements(), noise)
+}
+
 fn assert_chain_matches_density_matrix(
     circuit: &Circuit,
     noise: &NoiseModel,
@@ -960,8 +977,14 @@ fn assert_chain_matches_density_matrix(
         .shots(20_000)
         .unwrap();
     assert_eq!(result.metadata.engine, Some(engine));
-    let want =
-        density_matrix_expectation_values(circuit, &chain_observables(n), Some(noise), 42).unwrap();
+    let (unitary, unitary_noise) = unmeasured(circuit, noise);
+    let want = density_matrix_expectation_values(
+        &unitary,
+        &chain_observables(n),
+        Some(&unitary_noise),
+        42,
+    )
+    .unwrap();
 
     for (i, (g, w)) in sampled_chain_expectations(&result.shots, n)
         .iter()
@@ -1263,7 +1286,9 @@ fn the_filtered_compile_carries_an_in_block_pair() {
             crate::PauliTerm::z(1),
         ]))
         .collect();
-    let want = density_matrix_expectation_values(&circuit, &observables, Some(&noise), 42).unwrap();
+    let (unitary, unitary_noise) = unmeasured(&circuit, &noise);
+    let want = density_matrix_expectation_values(&unitary, &observables, Some(&unitary_noise), 42)
+        .unwrap();
 
     let total = shots.len() as f64;
     let mut got: Vec<f64> = (0..4)

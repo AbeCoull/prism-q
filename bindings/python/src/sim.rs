@@ -788,11 +788,10 @@ impl PySimulation {
     /// density-matrix backend through the circuit and the attached noise model.
     ///
     /// Observables take the same `(qubit, axis)` form as
-    /// `expectation_values()`. Measurements are read off the final mixed state
-    /// without collapse, so this is the zero-variance analogue of
-    /// trajectory-averaged expectation values. Always uses the density-matrix
-    /// backend regardless of `.backend(...)`, so the circuit must fit that
-    /// backend's qubit cap.
+    /// `expectation_values()`. The zero-variance analogue of trajectory-averaged
+    /// expectation values; a circuit containing a measurement raises `PrismError`.
+    /// Always uses the density-matrix backend regardless of `.backend(...)`, so the
+    /// circuit must fit that backend's qubit cap.
     #[pyo3(signature = (observables))]
     fn density_matrix_expectation_values(
         &self,

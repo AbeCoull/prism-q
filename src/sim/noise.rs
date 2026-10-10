@@ -3567,11 +3567,11 @@ pub(crate) fn dm_noisy_marginals(
 }
 
 /// Exact `Tr(rho P_k)` for each joint Pauli `P_k`, evolving the density-matrix
-/// backend through `circuit` and (optionally) `noise`. Measurements are read off
-/// the final mixed state without collapse, so this is the exact (zero-variance)
+/// backend through `circuit` and (optionally) `noise`: the exact (zero-variance)
 /// analogue of trajectory-averaged expectation values. The circuit must fit the
-/// density-matrix qubit cap; observables reuse the same Pauli-mask reduction as
-/// [`run_expectation_values`](crate::sim::run_expectation_values).
+/// density-matrix qubit cap and contain no measurement, which returns
+/// `IncompatibleBackend`; resets are applied as channels. Observables reuse the same
+/// Pauli-mask reduction as [`run_expectation_values`](crate::sim::run_expectation_values).
 pub fn density_matrix_expectation_values(
     circuit: &Circuit,
     observables: &[Vec<crate::PauliTerm>],
@@ -3599,6 +3599,19 @@ pub(crate) fn dm_expectation_values(
     initial_state: Option<super::StartState<'_>>,
     seed: u64,
 ) -> Result<Vec<f64>> {
+    if circuit
+        .instructions
+        .iter()
+        .any(|inst| matches!(inst, Instruction::Measure { .. }))
+    {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: "density_matrix".into(),
+            reason: "density-matrix expectation values require a circuit without \
+                     measurements, since the evolution skips them and a measured qubit would \
+                     report its pre-measurement value; remove the measurements"
+                .into(),
+        });
+    }
     let dm = evolve_density_matrix(kind, circuit, noise, initial_state, seed)?;
     let masks = observables
         .iter()

@@ -1319,18 +1319,139 @@ fn fuse_pauli_rot_batches<'a>(circuit: Cow<'a, Circuit>, tracer: &mut Tracer) ->
     }
 }
 
-/// Batch contiguous runs of diagonal gates into `DiagonalBatch` instructions.
+/// A run of diagonal gates bound for one `DiagonalBatch`, with the qubit components its
+/// two-qubit entries join.
+struct DiagRun {
+    entries: Vec<DiagEntry>,
+    srcs: Vec<usize>,
+    used: Vec<bool>,
+    parent: Vec<usize>,
+    sizes: Vec<usize>,
+}
+
+impl DiagRun {
+    fn new(n: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            srcs: Vec::new(),
+            used: vec![false; n],
+            parent: (0..n).collect(),
+            sizes: vec![0; n],
+        }
+    }
+
+    fn root(&mut self, mut q: usize) -> usize {
+        while self.parent[q] != q {
+            self.parent[q] = self.parent[self.parent[q]];
+            q = self.parent[q];
+        }
+        q
+    }
+
+    fn join(&mut self, from: usize) {
+        for k in from..self.entries.len() {
+            match self.entries[k] {
+                DiagEntry::Phase1q { qubit, .. } => self.used[qubit] = true,
+                DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                    self.used[q0] = true;
+                    self.used[q1] = true;
+                    let (r0, r1) = (self.root(q0), self.root(q1));
+                    if r0 != r1 {
+                        self.parent[r0] = r1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether the kernel can pack the run's components into its lookup tables. Mirrors
+    /// the first-fit-decreasing packing in `fill_diagonal_batch_tables`, which otherwise
+    /// falls back to evaluating every entry per amplitude.
+    fn fits(&mut self) -> bool {
+        self.sizes.fill(0);
+        for q in 0..self.used.len() {
+            if self.used[q] {
+                let r = self.root(q);
+                self.sizes[r] += 1;
+            }
+        }
+        let mut components: SmallVec<[usize; 64]> =
+            self.sizes.iter().copied().filter(|&len| len > 0).collect();
+        components.sort_unstable_by(|a, b| b.cmp(a));
+        let mut groups = [0usize; DiagonalBatchData::MAX_GROUPS];
+        components.iter().all(|&len| {
+            match groups
+                .iter_mut()
+                .find(|used| **used + len <= DiagonalBatchData::MAX_QUBITS_PER_GROUP)
+            {
+                Some(group) => {
+                    *group += len;
+                    true
+                }
+                None => false,
+            }
+        })
+    }
+
+    /// Add instruction `src` unless the run already holds a gate and the new entries
+    /// would leave it ungroupable. Returns whether it was added.
+    fn admit(&mut self, gate: &Gate, targets: &[usize], src: usize) -> bool {
+        let mark = self.entries.len();
+        gate.push_diag_entries(targets, &mut self.entries);
+        self.join(mark);
+        if !self.srcs.is_empty() && !self.fits() {
+            self.entries.truncate(mark);
+            self.reset_components();
+            self.join(0);
+            return false;
+        }
+        self.srcs.push(src);
+        true
+    }
+
+    fn reset_components(&mut self) {
+        self.used.fill(false);
+        for (q, parent) in self.parent.iter_mut().enumerate() {
+            *parent = q;
+        }
+    }
+
+    /// Emit the run as one `DiagonalBatch`, or as its source instruction when it holds
+    /// one, and start a new run. Returns whether a batch was emitted.
+    fn flush(&mut self, source: &[Instruction], output: &mut Vec<Instruction>) -> bool {
+        if self.srcs.is_empty() {
+            return false;
+        }
+        let batched = self.srcs.len() >= 2;
+        if batched {
+            let targets: SmallVec<[usize; 4]> =
+                (0..self.used.len()).filter(|&q| self.used[q]).collect();
+            output.push(Instruction::Gate {
+                gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData {
+                    entries: std::mem::take(&mut self.entries),
+                })),
+                targets,
+            });
+        } else {
+            output.push(source[self.srcs[0]].clone());
+            self.entries.clear();
+        }
+        self.srcs.clear();
+        self.reset_components();
+        batched
+    }
+}
+
+/// Batch runs of diagonal gates into `DiagonalBatch` instructions.
 ///
-/// Diagonal gates (Z, S, T, Rz, P, CZ, Rzz, CPhase) commute, so a run collapses into one
-/// LUT pass. Non-diagonal 1q gates on qubits outside the run are deferred past it.
+/// Diagonal gates commute, so a run collapses into one LUT pass. Besides the named
+/// diagonal gates, a run takes the diagonal fused and batched forms earlier passes
+/// emit: a diagonal `Fused2q`, `Cu`, `Multi2q` or `MultiFused`, and every `BatchPhase`
+/// and `BatchRzz`. A gate on no qubit of the run is emitted ahead of it, so the run
+/// keeps growing past it. A run closes before its components outgrow the kernel tables.
 fn fuse_diagonal_batch<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
     let circuit = input.as_ref();
     let insts = &circuit.instructions;
-    let n = insts.len();
-    if n < 2 {
-        return input;
-    }
-
     let diag_count = insts
         .iter()
         .filter(|i| matches!(i, Instruction::Gate { gate, .. } if gate.is_diag_batchable()))
@@ -1338,100 +1459,35 @@ fn fuse_diagonal_batch<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, C
     if diag_count < 2 {
         return input;
     }
-    t.bail();
 
-    let mut output: Vec<Instruction> = Vec::with_capacity(n);
-    let mut run_entries: Vec<DiagEntry> = Vec::new();
-    let mut run_originals: Vec<Instruction> = Vec::new();
-    let mut run_qubits = vec![false; circuit.num_qubits];
-    let mut deferred: Vec<Instruction> = Vec::new();
-    let mut deferred_qubits = vec![false; circuit.num_qubits];
+    let mut output: Vec<Instruction> = Vec::with_capacity(insts.len());
+    let mut run = DiagRun::new(circuit.num_qubits);
+    let mut changed = false;
 
-    let flush_diag_run = |output: &mut Vec<Instruction>,
-                          entries: &mut Vec<DiagEntry>,
-                          originals: &mut Vec<Instruction>,
-                          deferred: &mut Vec<Instruction>,
-                          run_qubits: &mut [bool],
-                          deferred_qubits: &mut [bool]| {
-        if entries.len() >= 2 {
-            let mut tgts: SmallVec<[usize; 4]> = SmallVec::new();
-            for (i, &used) in run_qubits.iter().enumerate() {
-                if used {
-                    tgts.push(i);
-                }
-            }
-            output.push(Instruction::Gate {
-                gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData {
-                    entries: std::mem::take(entries),
-                })),
-                targets: tgts,
-            });
-        } else {
-            output.append(originals);
-        }
-        entries.clear();
-        originals.clear();
-        output.append(deferred);
-        run_qubits.fill(false);
-        deferred_qubits.fill(false);
-    };
-
-    for inst in insts {
+    for (i, inst) in insts.iter().enumerate() {
         if let Instruction::Gate { gate, targets } = inst {
             if gate.is_diag_batchable() {
-                // Deferred gates are re-emitted after the whole batch. Admitting
-                // a diagonal gate on a deferred gate's qubit would sink that
-                // gate behind one it does not commute with, so close the run
-                // first and let this gate open a new one.
-                if targets.iter().any(|t| deferred_qubits[*t]) {
-                    flush_diag_run(
-                        &mut output,
-                        &mut run_entries,
-                        &mut run_originals,
-                        &mut deferred,
-                        &mut run_qubits,
-                        &mut deferred_qubits,
-                    );
+                if !run.admit(gate, targets, i) {
+                    changed |= run.flush(insts, &mut output);
+                    run.admit(gate, targets, i);
                 }
-                let new_entries = gate.diag_entries(targets);
-                for t in targets.iter() {
-                    run_qubits[*t] = true;
-                }
-                run_entries.extend(new_entries);
-                run_originals.push(inst.clone());
                 continue;
             }
-
-            if !run_entries.is_empty() && gate.num_qubits() == 1 && !run_qubits[targets[0]] {
-                deferred_qubits[targets[0]] = true;
-                deferred.push(inst.clone());
+            if !run.srcs.is_empty() && targets.iter().all(|&q| !run.used[q]) {
+                output.push(inst.clone());
                 continue;
             }
         }
-
-        flush_diag_run(
-            &mut output,
-            &mut run_entries,
-            &mut run_originals,
-            &mut deferred,
-            &mut run_qubits,
-            &mut deferred_qubits,
-        );
+        changed |= run.flush(insts, &mut output);
         output.push(inst.clone());
     }
+    changed |= run.flush(insts, &mut output);
 
-    flush_diag_run(
-        &mut output,
-        &mut run_entries,
-        &mut run_originals,
-        &mut deferred,
-        &mut run_qubits,
-        &mut deferred_qubits,
-    );
-
-    let mut c = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
-    c.instructions = output;
-    Cow::Owned(c)
+    if !changed {
+        return input;
+    }
+    t.bail();
+    Cow::Owned(circuit.with_instructions(output))
 }
 
 /// Threads a `&Circuit -> Cow<Circuit>` pass over a `Cow<Circuit>` while
@@ -1530,12 +1586,12 @@ pub fn fuse_circuit_for_width<'a>(
     fuse_at_width(circuit, state_qubits, &mut Tracer::off())
 }
 
-/// The pass pipeline at the circuit's own width, recording provenance into `t`.
-pub(super) fn fuse_traced<'a>(circuit: &'a Circuit, t: &mut Tracer) -> Cow<'a, Circuit> {
-    fuse_at_width(circuit, circuit.num_qubits, t)
-}
-
-fn fuse_at_width<'a>(circuit: &'a Circuit, n: usize, t: &mut Tracer) -> Cow<'a, Circuit> {
+/// The pass pipeline with every floor gated at `n` qubits, recording provenance into `t`.
+pub(super) fn fuse_at_width<'a>(
+    circuit: &'a Circuit,
+    n: usize,
+    t: &mut Tracer,
+) -> Cow<'a, Circuit> {
     let pass_r = fuse_region_bodies(circuit, n);
     let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
     let pass0r = apply_pass(pass0, t, fuse_rzz);

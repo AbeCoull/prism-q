@@ -441,6 +441,64 @@ fn dm_noisy_terminals_reject_branching_circuits_naming_the_mixture() {
     }
 }
 
+// A terminal measurement dephases the measured qubit, so reading the mixture
+// before it would report <X> = 1 for `h; measure` where the measured state has 0.
+#[test]
+fn dm_expectation_values_reject_a_measured_circuit() {
+    use prism_q::{NoiseModel, PauliTerm};
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+
+    for model in [None, Some(&noise)] {
+        let err = prism_q::density_matrix_expectation_values(
+            &circuit,
+            &[vec![PauliTerm::x(0)]],
+            model,
+            SEED,
+        )
+        .unwrap_err();
+        match err {
+            prism_q::PrismError::IncompatibleBackend { backend, reason } => {
+                assert_eq!(backend, "density_matrix");
+                assert!(
+                    reason.contains("remove the measurements"),
+                    "the rejection must name the fix, got {reason}"
+                );
+            }
+            other => panic!("expected a measurement rejection, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn dm_expectation_values_read_x_and_y_on_a_unitary_circuit() {
+    use prism_q::{NoiseModel, PauliTerm};
+    let observables = [
+        vec![PauliTerm::x(0)],
+        vec![PauliTerm::y(0)],
+        vec![PauliTerm::z(0)],
+    ];
+    let mut plus = Circuit::new(1, 0);
+    plus.add_gate(Gate::H, &[0]);
+    let mut plus_i = plus.clone();
+    plus_i.add_gate(Gate::S, &[0]);
+    let shrink = 1.0 - 4.0 * DEPOLARIZING_P / 3.0;
+
+    for (circuit, ideal, gates) in [(&plus, [1.0, 0.0, 0.0], 1), (&plus_i, [0.0, 1.0, 0.0], 2)] {
+        let noise = NoiseModel::uniform_depolarizing(circuit, DEPOLARIZING_P);
+        let exact =
+            prism_q::density_matrix_expectation_values(circuit, &observables, None, SEED).unwrap();
+        let noisy =
+            prism_q::density_matrix_expectation_values(circuit, &observables, Some(&noise), SEED)
+                .unwrap();
+        let damped: Vec<f64> = ideal.iter().map(|v| v * shrink.powi(gates)).collect();
+        assert_probs_close(&exact, &ideal, DM_EPS, "noiseless Bloch vector");
+        assert_probs_close(&noisy, &damped, DM_EPS, "depolarized Bloch vector");
+    }
+}
+
 // Without a noise model there is no mixture to read, so the backend runs a
 // branching circuit the way the statevector does: one sampled branch per run.
 #[test]
@@ -954,7 +1012,7 @@ fn dm_batched_diagonal_layer_matches_the_per_gate_route() {
         (
             "diagonal mixed",
             circuits::diagonal_mixed_circuit(N, 3, SEED),
-            1,
+            0,
             1,
         ),
     ] {

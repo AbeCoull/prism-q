@@ -18,9 +18,9 @@ use crate::backend::simd;
 use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::gates::{
-    BatchPhaseData, BatchRzzData, DiagEntry, Gate, MAX_UNITARY_QUBITS, MULTI_2Q_HIGH_BUDGET,
-    diag_entries_phase, multi_2q_high_budget_for, multi_2q_low_bits, multi_2q_tile_bits_for,
-    pauli_rot_masks,
+    BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData, Gate, MAX_UNITARY_QUBITS,
+    MULTI_2Q_HIGH_BUDGET, diag_entries_phase, multi_2q_high_budget_for, multi_2q_low_bits,
+    multi_2q_tile_bits_for, pauli_rot_masks,
 };
 use crate::sim::unified_pauli::PauliAxis;
 #[cfg(feature = "parallel")]
@@ -511,9 +511,9 @@ const _: () = assert!(
     "fusion splits these runs against the gate-level cap, which must match the table shape"
 );
 
-pub(crate) const DIAG_BATCH_MAX_QUBITS_PER_GROUP: usize = 10;
-pub(crate) const DIAG_BATCH_TABLE_SIZE: usize = 1024; // 2^10
-pub(crate) const MAX_DIAG_BATCH_GROUPS: usize = 4;
+pub(crate) const DIAG_BATCH_MAX_QUBITS_PER_GROUP: usize = DiagonalBatchData::MAX_QUBITS_PER_GROUP;
+pub(crate) const DIAG_BATCH_TABLE_SIZE: usize = 1 << DIAG_BATCH_MAX_QUBITS_PER_GROUP;
+pub(crate) const MAX_DIAG_BATCH_GROUPS: usize = DiagonalBatchData::MAX_GROUPS;
 
 type QftTwiddleTable = Arc<[Complex64]>;
 

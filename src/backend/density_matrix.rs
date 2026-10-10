@@ -92,6 +92,29 @@ fn block_superoperator(kraus: &[[[Complex64; 2]; 2]]) -> [[Complex64; 4]; 4] {
     s
 }
 
+/// Compile a two-qubit Kraus set into the 16x16 block superoperator
+/// [`DensityMatrixBackend::apply_2q_kraus`] sweeps:
+/// `S[4*tr+tc][4*trp+tcp] = sum_k K_k[tr][trp] * conj(K_k[tc][tcp])`.
+fn kraus_2q_superoperator(kraus: &[[[Complex64; 4]; 4]]) -> [[Complex64; 16]; 16] {
+    let mut s = [[Complex64::new(0.0, 0.0); 16]; 16];
+    for k in kraus {
+        for tr in 0..4 {
+            for trp in 0..4 {
+                let kr = k[tr][trp];
+                if kr == Complex64::new(0.0, 0.0) {
+                    continue;
+                }
+                for tc in 0..4 {
+                    for tcp in 0..4 {
+                        s[4 * tr + tc][4 * trp + tcp] += kr * k[tc][tcp].conj();
+                    }
+                }
+            }
+        }
+    }
+    s
+}
+
 /// Collapse one tile of `rho` onto the `outcome` subspace of the qubit whose
 /// row and column bits in the buffer index are `rmask` and `cmask`, scaling the
 /// survivors by `scale`. `base` is the tile's buffer index, and the tile must
@@ -286,14 +309,63 @@ fn min_folded_maps(num_qubits: usize) -> usize {
 /// One-qubit block superoperators the exact noisy walk holds back per qubit.
 ///
 /// Gates and one-qubit channels on a qubit compose here rather than sweeping
-/// the buffer one at a time. A two-qubit gate folds both its qubits' pending
-/// maps and its own trailing one-qubit channels into one 16x16 sweep, and any
-/// other instruction flushes first. Every sweep costs about the same on a
-/// buffer past the caches, so a gate with channels on both targets drops from
-/// five sweeps to one.
+/// the buffer one at a time, whichever instruction the channel trails. A
+/// two-qubit gate folds both its qubits' pending maps and its own trailing
+/// channels on the pair, one- or two-qubit, into one 16x16 sweep, and any
+/// other instruction on a held qubit flushes it first. Every sweep costs about
+/// the same on a buffer past the caches, so a CX with relaxation on both
+/// targets and a pair depolarizing channel drops from five sweeps to one.
 pub(crate) struct DeferredSuperoperators {
     pending: Vec<Option<[[Complex64; 4]; 4]>>,
     min_maps: usize,
+}
+
+/// A channel trailing a two-qubit gate, lowered for
+/// [`DeferredSuperoperators::apply_2q`].
+pub(crate) enum PairChannel {
+    /// Block superoperator on one of the gate's two qubits.
+    Block(usize, Box<[[Complex64; 4]; 4]>),
+    /// 16x16 superoperator over the gate's pair, indexed for `(q0, q1)` as
+    /// [`DensityMatrixBackend::apply_2q_kraus`] compiles it.
+    Pair(Box<[[Complex64; 16]; 16]>),
+}
+
+impl PairChannel {
+    pub(crate) fn block(qubit: usize, kraus: &[[[Complex64; 2]; 2]]) -> Self {
+        Self::Block(qubit, Box::new(block_superoperator(kraus)))
+    }
+
+    /// A two-qubit Kraus set given on `(q1, q0)` when `swapped`.
+    pub(crate) fn kraus_2q(kraus: &[[[Complex64; 4]; 4]], swapped: bool) -> Self {
+        let s = kraus_2q_superoperator(kraus);
+        if !swapped {
+            return Self::Pair(Box::new(s));
+        }
+        let swap = |i: usize| {
+            let t = |t: usize| ((t & 1) << 1) | (t >> 1);
+            4 * t(i >> 2) + t(i & 3)
+        };
+        Self::Pair(Box::new(std::array::from_fn(|r| {
+            std::array::from_fn(|c| s[swap(r)][swap(c)])
+        })))
+    }
+
+    /// Symmetric two-qubit depolarizing, the 16x16 form of
+    /// [`DensityMatrixBackend::apply_2q_depolarizing`]'s closed form.
+    pub(crate) fn depolarizing_2q(p: f64) -> Self {
+        let alpha = Complex64::new(1.0 - 16.0 * p / 15.0, 0.0);
+        let beta = Complex64::new(4.0 * p / 15.0, 0.0);
+        let zero = Complex64::new(0.0, 0.0);
+        Self::Pair(Box::new(std::array::from_fn(|r| {
+            std::array::from_fn(|c| {
+                let mut e = if r == c { alpha } else { zero };
+                if r % 5 == 0 && c % 5 == 0 {
+                    e += beta;
+                }
+                e
+            })
+        })))
+    }
 }
 
 impl DeferredSuperoperators {
@@ -304,48 +376,54 @@ impl DeferredSuperoperators {
         }
     }
 
-    /// Compose `gate` and then each Kraus set in `channels` onto `qubit`'s
-    /// pending map. False, with nothing held, when `gate` has no 2x2 matrix.
-    pub(crate) fn defer_1q(
-        &mut self,
-        gate: &Gate,
-        qubit: usize,
-        channels: &[Vec<[[Complex64; 2]; 2]>],
-    ) -> bool {
+    /// Compose `gate` onto `qubit`'s pending map. False, with nothing held,
+    /// when `gate` has no 2x2 matrix.
+    pub(crate) fn defer_gate(&mut self, gate: &Gate, qubit: usize) -> bool {
         let Some(mat) = matrix_1q(gate) else {
             return false;
         };
-        let mut s = block_superoperator(&[mat]);
-        if let Some(prior) = &self.pending[qubit] {
-            s = mat_mul_4x4(&s, prior);
-        }
-        for kraus in channels {
-            s = mat_mul_4x4(&block_superoperator(kraus), &s);
-        }
-        self.pending[qubit] = Some(s);
+        self.defer_channel(qubit, &[mat]);
         true
     }
 
+    /// Compose the Kraus set onto `qubit`'s pending map.
+    pub(crate) fn defer_channel(&mut self, qubit: usize, kraus: &[[[Complex64; 2]; 2]]) {
+        let mut s = block_superoperator(kraus);
+        if let Some(prior) = &self.pending[qubit] {
+            s = mat_mul_4x4(&s, prior);
+        }
+        self.pending[qubit] = Some(s);
+    }
+
     /// Apply `gate` on `(q0, q1)` in one sweep, preceded by both qubits'
-    /// pending maps and followed by `channels`, one-qubit Kraus sets each on
-    /// `q0` or `q1`, in order. False, with nothing applied, when `gate` has no
-    /// 4x4 matrix or the fold would absorb fewer pending maps and channel
-    /// targets than the register width calls for.
+    /// pending maps and followed by `channels` in order, each on `q0`, `q1`,
+    /// or the pair. False, with nothing applied, when `gate` has no 4x4 matrix
+    /// or the fold would absorb fewer pending maps and channels than the
+    /// register width calls for; one-qubit channels count once per qubit.
     pub(crate) fn apply_2q(
         &mut self,
         dm: &mut DensityMatrixBackend,
         gate: &Gate,
         q0: usize,
         q1: usize,
-        channels: &[(usize, Vec<[[Complex64; 2]; 2]>)],
+        channels: &[PairChannel],
     ) -> bool {
         let Some(g) = matrix_2q(gate) else {
             return false;
         };
+        let on = |qubit: usize| {
+            channels
+                .iter()
+                .any(|c| matches!(c, PairChannel::Block(q, _) if *q == qubit))
+        };
         let maps = usize::from(self.pending[q0].is_some())
             + usize::from(self.pending[q1].is_some())
-            + usize::from(channels.iter().any(|(q, _)| *q == q0))
-            + usize::from(channels.iter().any(|(q, _)| *q == q1));
+            + usize::from(on(q0))
+            + usize::from(on(q1))
+            + channels
+                .iter()
+                .filter(|c| matches!(c, PairChannel::Pair(_)))
+                .count();
         if maps < self.min_maps {
             return false;
         }
@@ -354,21 +432,42 @@ impl DeferredSuperoperators {
             self.pending[q0].as_ref().unwrap_or(&IDENTITY_4X4),
             self.pending[q1].as_ref().unwrap_or(&IDENTITY_4X4),
         );
-        let (mut after0, mut after1) = (IDENTITY_4X4, IDENTITY_4X4);
-        for (qubit, kraus) in channels {
-            let target = if *qubit == q0 {
-                &mut after0
-            } else {
-                &mut after1
-            };
-            *target = mat_mul_4x4(&block_superoperator(kraus), target);
-        }
-        let after = kron_block_superoperators(&after0, &after1);
         let gate_map: [[Complex64; 16]; 16] = std::array::from_fn(|row| {
             std::array::from_fn(|col| g[row >> 2][col >> 2] * g[row & 3][col & 3].conj())
         });
+        let mut s = mat_mul_16x16(&gate_map, &before);
+        let (mut after0, mut after1) = (None, None);
+        let close = |s: &mut [[Complex64; 16]; 16], a0: &mut Option<_>, a1: &mut Option<_>| {
+            if a0.is_some() || a1.is_some() {
+                let after = kron_block_superoperators(
+                    a0.as_ref().unwrap_or(&IDENTITY_4X4),
+                    a1.as_ref().unwrap_or(&IDENTITY_4X4),
+                );
+                *s = mat_mul_16x16(&after, s);
+                (*a0, *a1) = (None, None);
+            }
+        };
+        for channel in channels {
+            match channel {
+                PairChannel::Block(qubit, b) => {
+                    let target = if *qubit == q0 {
+                        &mut after0
+                    } else {
+                        &mut after1
+                    };
+                    *target = Some(match target {
+                        Some(prior) => mat_mul_4x4(b, prior),
+                        None => **b,
+                    });
+                }
+                PairChannel::Pair(p) => {
+                    close(&mut s, &mut after0, &mut after1);
+                    s = mat_mul_16x16(p, &s);
+                }
+            }
+        }
+        close(&mut s, &mut after0, &mut after1);
 
-        let s = mat_mul_16x16(&after, &mat_mul_16x16(&gate_map, &before));
         self.pending[q0] = None;
         self.pending[q1] = None;
         dm.apply_2q_superoperator(q0, q1, &s);
@@ -1263,25 +1362,7 @@ impl DensityMatrixBackend {
     /// If `q0` and `q1` are equal or outside the register. A model built through
     /// [`NoiseModel`](crate::NoiseModel) is rejected before it reaches here.
     pub fn apply_2q_kraus(&mut self, q0: usize, q1: usize, kraus: &[[[Complex64; 4]; 4]]) {
-        // S[4*tr+tc][4*trp+tcp] = sum_k K_k[tr][trp] * conj(K_k[tc][tcp]).
-        let mut s = [[Complex64::new(0.0, 0.0); 16]; 16];
-        for k in kraus {
-            for tr in 0..4 {
-                for trp in 0..4 {
-                    let kr = k[tr][trp];
-                    if kr == Complex64::new(0.0, 0.0) {
-                        continue;
-                    }
-                    for tc in 0..4 {
-                        for tcp in 0..4 {
-                            s[4 * tr + tc][4 * trp + tcp] += kr * k[tc][tcp].conj();
-                        }
-                    }
-                }
-            }
-        }
-
-        self.apply_2q_superoperator(q0, q1, &s);
+        self.apply_2q_superoperator(q0, q1, &kraus_2q_superoperator(kraus));
     }
 
     /// Sweep a compiled 16x16 block superoperator over `(q0, q1)`, indexed as

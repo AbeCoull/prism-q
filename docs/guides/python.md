@@ -863,9 +863,9 @@ values = simulate(circuit).seed(42).expectation_values(observables)
 
 `expectation_values` requires a unitary circuit and gives `⟨ψ|P|ψ⟩`.
 `density_matrix_expectation_values` evolves the density matrix through the
-circuit and any attached noise model and gives exact `Tr(rho P)`, with
-measurements read off the final mixed state without collapse. It is the
-zero-variance analogue of averaging over trajectories:
+circuit and any attached noise model and gives exact `Tr(rho P)`, the
+zero-variance analogue of averaging over trajectories. A circuit containing a
+measurement raises `PrismError`, so strip the measurements before the call:
 
 ```python
 model = NoiseModel.empty(circuit)

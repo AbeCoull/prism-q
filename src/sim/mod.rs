@@ -1688,6 +1688,7 @@ fn execute(backend: &mut dyn Backend, circuit: &Circuit, opts: &SimOptions) -> R
 pub(crate) struct PreparedRoute {
     plan: BackendPlan,
     supports_fused: bool,
+    fusion_state_qubits: usize,
     /// Backend held across points. `init` reuses its state buffer when the
     /// width matches, so a sweep pays one `2^n` allocation rather than one per
     /// point. Rebuilt when the seed changes, since the seed feeds its RNG.
@@ -1726,6 +1727,12 @@ impl PreparedRoute {
     /// hand `run` a fused stream rather than the bound template.
     pub(crate) fn supports_fused(&self) -> bool {
         self.supports_fused
+    }
+
+    /// The width `simulate` fuses at for the held backend, so a stream fused
+    /// here matches the one a direct run applies.
+    pub(crate) fn fusion_state_qubits(&self) -> usize {
+        self.fusion_state_qubits
     }
 
     /// Apply `circuit` verbatim, with no further fusion.
@@ -1857,6 +1864,7 @@ pub(crate) fn prepared_route(kind: &BackendKind, template: &Circuit) -> Option<P
     let (values, observable) = prepared_expectations(kind, template, &*probe);
     Some(PreparedRoute {
         supports_fused: probe.supports_fused_gates(),
+        fusion_state_qubits: probe.fusion_state_qubits(template.num_qubits),
         plan,
         held: None,
         draws_randomness: draws_randomness(template),

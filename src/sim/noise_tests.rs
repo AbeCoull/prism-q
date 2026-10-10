@@ -1364,6 +1364,257 @@ fn deferred_density_matrix_walk_matches_one_sweep_per_map() {
     }
 }
 
+/// Apply every instruction and channel on its own, measurements skipped as the
+/// exact walk skips them.
+fn native_density_matrix_walk(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+) -> crate::backend::density_matrix::DensityMatrixBackend {
+    let mut reference = crate::backend::density_matrix::DensityMatrixBackend::new(42);
+    reference
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    for (inst, events) in circuit.instructions.iter().zip(&noise.after_gate) {
+        if !matches!(inst, Instruction::Measure { .. }) {
+            reference.apply(inst).unwrap();
+        }
+        for event in events {
+            apply_noise_event_dm(&mut reference, event);
+        }
+    }
+    reference
+}
+
+/// The folded walk against [`native_density_matrix_walk`]: every matrix entry,
+/// then one-qubit X, Y, and Z expectations and an X(x)Y pair on each neighbour.
+fn assert_walk_matches_native(circuit: &Circuit, noise: &NoiseModel, label: &str) {
+    use crate::PauliTerm;
+
+    let n = circuit.num_qubits;
+    let folded =
+        evolve_density_matrix(&BackendKind::DensityMatrix, circuit, Some(noise), None, 42).unwrap();
+    let reference = native_density_matrix_walk(circuit, noise);
+    let (a, b) = (
+        folded.density_matrix().unwrap(),
+        reference.density_matrix().unwrap(),
+    );
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert!(
+            (x - y).norm() < 1e-12,
+            "{label}, entry {i}: folded {x} vs reference {y}"
+        );
+    }
+
+    let mut observables: Vec<Vec<PauliTerm>> = (0..n)
+        .flat_map(|q| {
+            [
+                vec![PauliTerm::x(q)],
+                vec![PauliTerm::y(q)],
+                vec![PauliTerm::z(q)],
+            ]
+        })
+        .collect();
+    observables.extend((0..n - 1).map(|q| vec![PauliTerm::x(q), PauliTerm::y(q + 1)]));
+    let masks: Vec<_> = observables
+        .iter()
+        .map(|obs| crate::sim::pauli_masks(obs, n).unwrap())
+        .collect();
+    let (x, y) = (
+        folded.expectations_pauli(&masks),
+        reference.expectations_pauli(&masks),
+    );
+    for (i, (x, y)) in x.iter().zip(&y).enumerate() {
+        assert!(
+            (x - y).abs() < 1e-12,
+            "{label}, observable {i}: folded {x} vs reference {y}"
+        );
+    }
+}
+
+// Two-qubit channels on a gate's own pair fold into its sweep in either
+// orientation, one-qubit channels on other qubits wait on those qubits, and a
+// channel straddling the pair ends the fold. Barriers carry idle channels and
+// keep pending maps alive.
+#[test]
+fn exact_walk_folds_pair_and_idle_channels() {
+    let damp = |q: usize, gamma: f64| NoiseEvent {
+        channel: NoiseChannel::AmplitudeDamping { gamma },
+        qubits: smallvec::smallvec![q],
+    };
+    let relax = |q: usize| NoiseEvent {
+        channel: NoiseChannel::ThermalRelaxation {
+            t1: 50.0,
+            t2: 40.0,
+            gate_time: 1.5,
+            excited_population: 0.0,
+        },
+        qubits: smallvec::smallvec![q],
+    };
+    let depol2 = |a: usize, b: usize, p: f64| NoiseEvent {
+        channel: NoiseChannel::TwoQubitDepolarizing { p },
+        qubits: smallvec::smallvec![a, b],
+    };
+    // {sqrt(1-p) I, sqrt(p) (X(x)Z) with a phase on one entry}: not symmetric
+    // under swapping the pair, so a wrong orientation shows.
+    let kraus2 = |a: usize, b: usize| {
+        let z = Complex64::new(0.0, 0.0);
+        let p: f64 = 0.06;
+        let mut k0 = [[z; 4]; 4];
+        let mut k1 = [[z; 4]; 4];
+        for t in 0..4 {
+            k0[t][t] = Complex64::new((1.0 - p).sqrt(), 0.0);
+            let sign = if t & 1 == 0 { 1.0 } else { -1.0 };
+            k1[t ^ 2][t] = Complex64::new(p.sqrt() * sign, 0.0);
+        }
+        k1[3][1] *= Complex64::new(0.0, 1.0);
+        NoiseEvent {
+            channel: NoiseChannel::Kraus2q {
+                kraus: vec![k0, k1],
+            },
+            qubits: smallvec::smallvec![a, b],
+        }
+    };
+
+    for n in [4, 7, 9] {
+        let mut circuit = Circuit::new(n, 0);
+        let mut after_gate: Vec<Vec<NoiseEvent>> = Vec::new();
+        let mut push = |gate: Gate, targets: &[usize], events: Vec<NoiseEvent>| {
+            circuit.add_gate(gate, targets);
+            after_gate.push(events);
+        };
+        for q in 0..4 {
+            push(Gate::Ry(0.3 + 0.4 * q as f64), &[q], vec![]);
+        }
+        push(Gate::H, &[0], vec![damp(2, 0.05), relax(3)]);
+        push(
+            Gate::Cx,
+            &[0, 1],
+            vec![relax(0), relax(1), depol2(0, 1, 0.04), damp(3, 0.02)],
+        );
+        push(Gate::Cz, &[2, 1], vec![kraus2(1, 2), damp(2, 0.1)]);
+        push(Gate::Cx, &[3, 2], vec![kraus2(3, 2), relax(0)]);
+        push(
+            Gate::Fused2q(Box::new(Gate::Rzz(0.7).matrix_4x4())),
+            &[1, 3],
+            vec![
+                damp(1, 0.03),
+                kraus2(3, 1),
+                relax(3),
+                depol2(1, 3, 0.02),
+                damp(0, 0.04),
+            ],
+        );
+        push(
+            Gate::cu(Gate::Ry(0.9).matrix_2x2()),
+            &[0, 2],
+            vec![
+                damp(0, 0.05),
+                kraus2(2, 3),
+                damp(0, 0.07),
+                depol2(0, 2, 0.03),
+            ],
+        );
+        push(Gate::Rzz(0.5), &[1, 2], vec![depol2(2, 1, 0.05)]);
+        push(Gate::Swap, &[0, 3], vec![]);
+        push(Gate::Sdg, &[1], vec![depol2(0, 2, 0.01), damp(1, 0.02)]);
+        circuit.add_barrier(&(0..n).collect::<Vec<_>>());
+        after_gate.push(vec![relax(0), relax(2), depol2(1, 3, 0.02)]);
+        let mut push = |gate: Gate, targets: &[usize], events: Vec<NoiseEvent>| {
+            circuit.add_gate(gate, targets);
+            after_gate.push(events);
+        };
+        push(Gate::Rx(0.8), &[2], vec![relax(1)]);
+        push(
+            Gate::Cx,
+            &[2, 0],
+            vec![relax(2), relax(0), depol2(2, 0, 0.03)],
+        );
+        push(
+            Gate::mcu(Gate::X.matrix_2x2(), 2),
+            &[0, 1, 3],
+            vec![damp(2, 0.04)],
+        );
+        push(Gate::Cz, &[1, 2], vec![kraus2(1, 2), relax(3)]);
+        let noise = NoiseModel {
+            after_gate,
+            readout: Vec::new(),
+        };
+        assert_walk_matches_native(&circuit, &noise, &format!("{n} qubits"));
+    }
+}
+
+/// `n` qubits of `H`, `T`, `Rz` per layer, then a CX chain, measured.
+fn non_clifford_layers(n: usize, depth: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, n);
+    for layer in 0..depth {
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+            circuit.add_gate(Gate::Rz(0.03 * (layer + q + 1) as f64), &[q]);
+        }
+        for q in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+#[test]
+fn exact_walk_matches_native_on_device_presets() {
+    use crate::sim::calibration::presets;
+
+    for n in [4, 7, 8] {
+        let circuit = non_clifford_layers(n, 2);
+        for (name, calibration) in [
+            ("transmon", presets::superconducting_transmon(n)),
+            ("neutral atom", presets::neutral_atom(n)),
+        ] {
+            let plain = calibration.to_noise_model(&circuit).unwrap();
+            assert!(plain.readout.iter().any(Option::is_some));
+            assert_walk_matches_native(&circuit, &plain, &format!("{name}, {n} qubits"));
+            let scheduled = calibration.to_scheduled_noise_model(&circuit).unwrap();
+            assert_walk_matches_native(
+                &circuit,
+                &scheduled,
+                &format!("{name} scheduled, {n} qubits"),
+            );
+        }
+    }
+}
+
+#[test]
+fn noiseless_exact_walk_runs_the_fused_stream() {
+    use crate::PauliTerm;
+
+    for n in [5, 8] {
+        let circuit = circuits::random_circuit(n, 6, 42);
+        let observables: Vec<Vec<PauliTerm>> = (0..n)
+            .flat_map(|q| [vec![PauliTerm::x(q)], vec![PauliTerm::y(q)]])
+            .collect();
+        let fused = density_matrix_expectation_values(&circuit, &observables, None, 42).unwrap();
+        let mut reference = crate::backend::density_matrix::DensityMatrixBackend::new(42);
+        reference.init(n, 0).unwrap();
+        reference.apply_instructions(&circuit.instructions).unwrap();
+        let masks: Vec<_> = observables
+            .iter()
+            .map(|obs| crate::sim::pauli_masks(obs, n).unwrap())
+            .collect();
+        for (i, (x, y)) in fused
+            .iter()
+            .zip(reference.expectations_pauli(&masks))
+            .enumerate()
+        {
+            assert!(
+                (x - y).abs() < 1e-12,
+                "{n} qubits, observable {i}: fused {x} vs reference {y}"
+            );
+        }
+    }
+}
+
 /// Each qubit's detuning over one unit-length layer, per shot, as the
 /// trajectory engine draws it.
 fn drawn_detunings(drift: DriftDistribution, num_qubits: usize, shots: usize) -> Vec<Vec<f64>> {

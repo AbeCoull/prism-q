@@ -2738,6 +2738,49 @@ fn split_multi_1q_diagonal_tiers(
     }
 }
 
+/// Passes over a `num_qubits` state that [`StatevectorBackend::apply_multi_1q`] makes
+/// for a non-diagonal `gates` batch: one per populated tile tier, plus one per shared
+/// traversal, or per gate, above the tiles. Callers weigh it against the passes of
+/// another route.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+pub(crate) fn multi_1q_sweeps(gates: &[(usize, [[Complex64; 2]; 2])], num_qubits: usize) -> usize {
+    if gates.len() <= 1 {
+        return gates.len();
+    }
+    #[cfg(feature = "parallel")]
+    if num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        let state_len = 1usize << num_qubits;
+        return tier_sweeps(
+            gates,
+            max_target_for_tile(multi_gate_l2_tile_par(state_len)),
+            keep_l3_tier(state_len),
+            MAX_SHARED_1Q_TARGETS,
+        );
+    }
+    tier_sweeps(gates, multi_gate_max_l2_target(), true, 1)
+}
+
+/// The passes [`split_multi_1q_tiers`] leads to with these tier bounds, when the gates
+/// above the tiles share traversals `shared` at a time.
+fn tier_sweeps(
+    gates: &[(usize, [[Complex64; 2]; 2])],
+    max_l2_target: usize,
+    medium_tiled: bool,
+    shared: usize,
+) -> usize {
+    let (mut small, mut medium, mut large) = (false, false, 0usize);
+    for &(target, _) in gates {
+        if target <= max_l2_target {
+            small = true;
+        } else if target <= MULTI_GATE_MAX_L3_TARGET && medium_tiled {
+            medium = true;
+        } else {
+            large += 1;
+        }
+    }
+    small as usize + medium as usize + large.div_ceil(shared)
+}
+
 /// Apply a `MultiFused` batch in the tiered tiled pass. Shared with the factored
 /// backend, whose blocks are bare statevector slices.
 #[cfg(feature = "parallel")]

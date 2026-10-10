@@ -22,7 +22,8 @@
 //! `QftBlock` is remapped onto the ket register before the left product.
 //! On the host, `MultiFused` past the parallel threshold and `Multi2q` run their
 //! constituents and the bra conjugates as batches in the statevector kernels,
-//! `Multi2q` in the longest runs that keep list order.
+//! `Multi2q` in the longest runs that keep list order, whenever the batch takes
+//! fewer buffer passes than one constituent at a time.
 //! Diagonal gates skip the two-product route: their two factors combine into one
 //! table, so `Rzz` and the diagonal batches each sweep the buffer once.
 //!
@@ -443,6 +444,22 @@ fn diagonal_batch_entries(gate: &Gate, targets: &[usize]) -> Option<Vec<DiagEntr
     }
 }
 
+/// `gates` cut into the runs [`kernels::multi_2q_ordered_prefix`] allows, in order.
+fn ordered_runs(
+    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+    num_qubits: usize,
+) -> impl Iterator<Item = &[(usize, usize, [[Complex64; 4]; 4])]> {
+    let mut rest = gates;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let (run, tail) = rest.split_at(kernels::multi_2q_ordered_prefix(rest, num_qubits));
+        rest = tail;
+        Some(run)
+    })
+}
+
 /// The gate with every qubit index stored inside its payload shifted onto the
 /// ket register. Offsetting the instruction targets is not enough for
 /// `QftBlock`, whose whole range lives in the variant. Borrows the gate when it
@@ -806,7 +823,8 @@ impl DensityMatrixBackend {
     /// fusion built to fit past it. The ket constituents and their bra
     /// conjugates act on disjoint registers and commute, so the doubled list
     /// is cut into the longest runs [`kernels::multi_2q_ordered_prefix`]
-    /// allows, each one tiled pass.
+    /// allows, each one tiled pass. A split that needs no fewer passes than one
+    /// per ket constituent plus the bra half keeps that route instead.
     fn apply_multi_2q_sandwich(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
         let n = self.num_qubits;
         self.multi_2q_scratch.clear();
@@ -817,12 +835,25 @@ impl DensityMatrixBackend {
                 .iter()
                 .map(|&(q0, q1, ref mat)| (q0, q1, conjugate_4x4(mat))),
         );
-        let mut rest = &self.multi_2q_scratch[..];
-        while !rest.is_empty() {
-            let (run, tail) =
-                rest.split_at(kernels::multi_2q_ordered_prefix(rest, self.sv.num_qubits));
-            self.sv.apply_multi_2q(run);
-            rest = tail;
+        let num_qubits = self.sv.num_qubits;
+        let (ket, bra) = self.multi_2q_scratch.split_at(gates.len());
+        let bra_ordered = kernels::multi_2q_ordered_prefix(bra, num_qubits) == bra.len();
+        let per_constituent = ket.len() + if bra_ordered { 1 } else { bra.len() };
+        if ordered_runs(&self.multi_2q_scratch, num_qubits).count() < per_constituent {
+            for run in ordered_runs(&self.multi_2q_scratch, num_qubits) {
+                self.sv.apply_multi_2q(run);
+            }
+            return;
+        }
+        for &(q0, q1, ref mat) in ket {
+            self.sv.apply_fused_2q(q0, q1, mat);
+        }
+        if bra_ordered {
+            self.sv.apply_multi_2q(bra);
+        } else {
+            for &(q0, q1, ref mat) in bra {
+                self.sv.apply_fused_2q(q0, q1, mat);
+            }
         }
     }
 
@@ -830,15 +861,17 @@ impl DensityMatrixBackend {
     ///
     /// The constituents on the ket register and their conjugates on the bra
     /// register are `2k` one-qubit gates on distinct qubits, so the doubled list
-    /// runs through the statevector `MultiFused` kernel as one tiered batch
-    /// rather than `k` sweeps, one per constituent. An all-diagonal batch takes
-    /// [`DensityMatrixBackend::apply_diagonal_sandwich`], one sweep.
+    /// can run through the statevector `MultiFused` kernel as one tiered batch.
+    /// It does when [`kernels::multi_1q_sweeps`] counts fewer passes than the
+    /// `k` one-qubit sandwiches; otherwise the sandwiches run. An all-diagonal
+    /// batch of two or more takes [`DensityMatrixBackend::apply_diagonal_sandwich`],
+    /// one sweep.
     fn apply_multi_1q_sandwich(
         &mut self,
         gates: &[(usize, [[Complex64; 2]; 2])],
         all_diagonal: bool,
     ) -> Result<()> {
-        if all_diagonal {
+        if all_diagonal && gates.len() > 1 {
             let entries: Vec<DiagEntry> = gates
                 .iter()
                 .map(|&(qubit, m)| DiagEntry::Phase1q {
@@ -849,13 +882,21 @@ impl DensityMatrixBackend {
                 .collect();
             return self.apply_diagonal_sandwich(&entries);
         }
-        let n = self.num_qubits;
-        self.multi_1q_scratch.clear();
-        for &(qubit, ref mat) in gates {
-            self.multi_1q_scratch.push((qubit + n, *mat));
-            self.multi_1q_scratch.push((qubit, conjugate_2x2(mat)));
+        if !all_diagonal {
+            let n = self.num_qubits;
+            self.multi_1q_scratch.clear();
+            for &(qubit, ref mat) in gates {
+                self.multi_1q_scratch.push((qubit + n, *mat));
+                self.multi_1q_scratch.push((qubit, conjugate_2x2(mat)));
+            }
+            if kernels::multi_1q_sweeps(&self.multi_1q_scratch, self.sv.num_qubits) < gates.len() {
+                self.sv.apply_multi_1q(&self.multi_1q_scratch);
+                return Ok(());
+            }
         }
-        self.sv.apply_multi_1q(&self.multi_1q_scratch);
+        for (qubit, mat) in gates {
+            self.apply_1q_sandwich(*qubit, mat)?;
+        }
         Ok(())
     }
 

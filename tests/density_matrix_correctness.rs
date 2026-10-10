@@ -1922,7 +1922,9 @@ fn assert_mixtures_close(
 // The batched route runs the ket constituents and their bra conjugates through
 // the statevector tiled kernel; the reference applies each constituent as its
 // own one-qubit sandwich. The batches cover every qubit, the two edge qubits
-// alone, and an all-diagonal batch, which takes the diagonal sandwich instead.
+// alone (usually no cheaper batched, so it keeps the sandwiches), an
+// all-diagonal batch, which takes the diagonal sandwich, and qubits 0 and 1,
+// whose doubled targets all sit in one tile.
 #[test]
 fn dm_multi_fused_batch_matches_per_constituent() {
     use prism_q::gates::MultiFusedData;
@@ -1949,7 +1951,8 @@ fn dm_multi_fused_batch_matches_per_constituent() {
                 )
             })
             .collect();
-        let batches = [full, edges, diagonal];
+        let low_pair: Vec<_> = (0..2).map(|q| (q, random_unitary_2x2(&mut rng))).collect();
+        let batches = [full, edges, diagonal, low_pair];
         assert!(MultiFusedData::new(batches[2].clone()).all_diagonal());
 
         let batched = evolved_mixture(n, |backend| {

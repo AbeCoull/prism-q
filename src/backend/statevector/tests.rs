@@ -1930,6 +1930,26 @@ fn multi_2q_ordered_prefix_ends_where_order_would_break() {
     );
 }
 
+// The density matrix batches a `MultiFused` block only when this count beats one
+// pass per constituent, so it has to match the tiers `apply_multi_1q` runs. The
+// targets above 16 sit past the L3 tier on every host, so their count depends only
+// on whether they share traversals.
+#[test]
+fn multi_1q_sweeps_counts_the_tier_passes() {
+    let h = crate::gates::Gate::H.matrix_2x2();
+    let gates = |targets: &[usize]| targets.iter().map(|&t| (t, h)).collect::<Vec<_>>();
+    let wide = 24;
+    assert_eq!(kernels::multi_1q_sweeps(&[], wide), 0);
+    assert_eq!(kernels::multi_1q_sweeps(&gates(&[23]), wide), 1);
+    assert_eq!(kernels::multi_1q_sweeps(&gates(&[0, 1, 2, 3]), wide), 1);
+    let high = gates(&[17, 18, 19, 20, 21, 22]);
+    let shared = if cfg!(feature = "parallel") { 2 } else { 6 };
+    assert_eq!(kernels::multi_1q_sweeps(&high, wide), shared);
+    let mut mixed = gates(&[0, 1]);
+    mixed.extend(high);
+    assert_eq!(kernels::multi_1q_sweeps(&mixed, wide), 1 + shared);
+}
+
 // Pair-aware grouping keeps every benched `diag_mixed_l6` batch on the LUT path. The
 // batch counts are asserted alongside the fallback counts because a fusion change that
 // stopped emitting `DiagonalBatch` would otherwise satisfy this test by emptying it.

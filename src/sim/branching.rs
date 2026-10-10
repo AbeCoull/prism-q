@@ -78,9 +78,9 @@ impl BranchLimits {
 /// [`BranchLimits::max_live_states`] runs its shots one at a time from the
 /// branch state instead. Instructions after the last one that writes a
 /// classical bit or reads a save are never applied: nothing they do reaches a
-/// result. Once only measurements remain, a branch draws all of its shots from
-/// its state's distribution over the measured qubits in one pass, with no
-/// further splits or clones.
+/// result. Once only measurements remain, two or more of them, a branch draws
+/// all of its shots from its state's distribution over the measured qubits in
+/// one pass, with no further splits or clones.
 ///
 /// Branching groups shots by outcome, so the rows are shuffled with a seeded
 /// Fisher-Yates pass when `shuffle` is set; a caller that only counts them
@@ -268,6 +268,20 @@ impl<'a> Cursor<'a> {
             from >= start
         })
     }
+
+    /// Whether the instruction [`Self::next`] just returned opens a terminal
+    /// stretch holding at least one more measurement. A lone last measurement
+    /// stays on the split path, where it costs one marginal pass and one
+    /// binomial draw; the sampler would pay a keyed pass over the state and a
+    /// draw per shot for it.
+    fn opens_sampled_tail(&self) -> bool {
+        self.in_terminal_tail()
+            && self.frames.iter().any(|&(body, idx)| {
+                body[idx..]
+                    .iter()
+                    .any(|inst| matches!(inst, Instruction::Measure { .. }))
+            })
+    }
 }
 
 /// One branch of the walk: its state, the shots that followed it, and the
@@ -361,7 +375,7 @@ impl<'l> Walk<'l> {
         #[cfg(not(feature = "parallel"))]
         let _ = depth;
         while let Some(inst) = self.next(&mut cursor, &mut branch.sv)? {
-            if matches!(inst, Instruction::Measure { .. }) && cursor.in_terminal_tail() {
+            if matches!(inst, Instruction::Measure { .. }) && cursor.opens_sampled_tail() {
                 sample_tail(&mut branch, inst, &cursor, leaves);
                 return Ok(());
             }
@@ -759,16 +773,20 @@ mod tests {
                 if let Instruction::Region(region) = inst {
                     cursor.enter(region.body());
                 } else if matches!(inst, Instruction::Measure { .. }) {
-                    flags.push(cursor.in_terminal_tail());
+                    flags.push(cursor.opens_sampled_tail());
                 }
             }
             flags
         };
 
-        assert_eq!(tail_flags(&mid_then_last(4)), [false, true]);
+        assert_eq!(
+            tail_flags(&mid_then_last(4)),
+            [false, false],
+            "a lone last measurement splits"
+        );
         assert_eq!(
             tail_flags(&mid_then_readout(3)),
-            [false, true, true, true],
+            [false, true, true, false],
             "gates after the mid-circuit measurement"
         );
 
@@ -779,7 +797,7 @@ mod tests {
         for q in 0..3 {
             adjacent.add_measure(q, q);
         }
-        assert_eq!(tail_flags(&adjacent), [true; 4]);
+        assert_eq!(tail_flags(&adjacent), [true, true, true, false]);
 
         let mut conditioned = Circuit::new(2, 2);
         conditioned.add_gate(Gate::H, &[0]);
@@ -790,7 +808,7 @@ mod tests {
             targets: smallvec::smallvec![1],
         });
         conditioned.add_measure(1, 1);
-        assert_eq!(tail_flags(&conditioned), [false, true]);
+        assert_eq!(tail_flags(&conditioned), [false, false]);
 
         let mut nested = Circuit::new(2, 3);
         nested.add_gate(Gate::H, &[0]);
@@ -802,7 +820,7 @@ mod tests {
             .instructions
             .push(guarded(ClassicalCondition::BitIsOne(0), body.instructions).unwrap());
         nested.add_measure(0, 2);
-        assert_eq!(tail_flags(&nested), [false, true, true]);
+        assert_eq!(tail_flags(&nested), [false, true, false]);
     }
 
     #[test]

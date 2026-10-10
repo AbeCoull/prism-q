@@ -312,13 +312,22 @@ and [`benches/README.md`](benches/README.md).
 
 ## Roadmap
 
-- Mid-circuit branching beyond the current `if` form.
 - Multi-GPU and distributed GPU execution. A GPU context binds one device and the
   distributed backend is CPU only; sharding one statevector across devices also needs
   peer access, since a host-staged exchange costs far more than the gate it serves.
 - ROCm ports of the CUDA statevector and stabilizer kernels.
-- Noisy shots on the distributed backend, which rejects noise models today because
-  trajectory execution is not lockstep across ranks.
+- Noisy shots on the distributed backend. It rejects noise models today because
+  trajectories run as Rayon tasks whose order differs per rank, so their collectives
+  would not line up. The planned route runs shots in lockstep: every rank takes the shots
+  in the same order and seeds each shot's noise stream from the run seed and the shot
+  index, as the host trajectory loop already does, so all ranks draw the same Pauli and
+  Kraus branches without exchanging them. Pauli and depolarizing events read nothing
+  from the state. A damping or thermal-relaxation event weighs its branches by the
+  qubit's excited population, one `Allreduce` of rank-local sums per event, and a custom
+  Kraus channel also needs the qubit's coherence, so a qubit sitting in a rank bit is
+  relabeled local before that reduction. Two-qubit Kraus channels stay out, since the
+  backend has no two-qubit reduced density matrix, and shots run one at a time across
+  all ranks rather than in parallel on each.
 
 ## Contributing
 

@@ -19,10 +19,12 @@ runtime where one exists, and a scalar path runs otherwise.
 
 The nine CPU backends implement the `Backend` trait; the distributed statevector
 backend is a tenth, feature-gated implementation covered by the Distributed
-column. `Planned` marks only work the roadmap carries: a ROCm port of the
-existing CUDA kernels. Backends without a CUDA kernel have nothing to port, so
-their ROCm cell is `No`, and the roadmap carries no distributed execution for
-any backend other than the statevector.
+column. `Planned` marks only work the roadmap carries: in this table a ROCm port
+of the existing CUDA kernels, and under [Not yet supported](#not-yet-supported)
+multi-GPU and distributed GPU execution and noisy shots on the distributed
+statevector, run in lockstep across ranks. Backends without a CUDA kernel have
+nothing to port, so their ROCm cell is `No`, and the roadmap carries no
+distributed execution for any backend other than the statevector.
 
 | Backend | x86-64 | AVX2/FMA/BMI2 | ARM64 | NEON | CUDA (NVIDIA) | ROCm (AMD) | Distributed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -103,14 +105,14 @@ bounded only by their own representation.
 | Backend | Shots and counts | Expectation values |
 | --- | --- | --- |
 | Sparse | Native, CDF over the stored amplitudes | Native, `O(k)` over the amplitude map |
-| MPS | Native, sequential conditional sampling | Native, one chain contraction per observable |
+| MPS | Native, sequential conditional sampling | Native, one contraction over each observable's span between shared identity environments |
 | Factored | Native, one draw per sub-state | Native, product over the blocks |
 | Product State | Native, one Bernoulli draw per qubit | Native, one closed-form factor per qubit |
 | Distributed Statevector | Native, rank-local CDF plus one scalar per rank | Native, rank-local sandwich plus one `Allreduce` |
 | Statevector | Dense (streams from amplitudes, no probability vector) | Dense |
 | Stabilizer, Factored Stabilizer | Compiled Clifford sampler | Sparse Pauli Dynamics, exact |
 | Stochastic / Deterministic Pauli | Not applicable | Native Pauli propagation |
-| Tensor Network | Dense | Native, one doubled-network contraction per observable over its backward light cone |
+| Tensor Network | Dense below `PRISM_MAX_PROB_QUBITS`, then native conditional sampling, one doubled-network contraction per qubit per shot | Native, one doubled-network contraction per observable over its backward light cone |
 | Density Matrix | Dense | Native, `Tr(rho P)` per observable |
 
 Native sampling is deterministic from the seed alone: the same seed and shot

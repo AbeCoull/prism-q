@@ -572,6 +572,59 @@ fn mps_terminal_shots_identical_across_thread_counts() {
     );
 }
 
+// The product and factored samplers draw 256-shot blocks on streams keyed by
+// the block index, so the words match at any thread count, including a
+// partial trailing block. Each fixture makes enough draws to fork its blocks.
+fn assert_block_sampled_shots_stable(
+    circuit: &Circuit,
+    kind: &BackendKind,
+    shots_per_run: usize,
+    label: &str,
+) {
+    for num_shots in [shots_per_run, shots_per_run - 37] {
+        let shots = |threads: usize| {
+            in_pool(threads, || {
+                simulate(circuit)
+                    .backend(kind.clone())
+                    .seed(SEED)
+                    .shots(num_shots)
+                    .expect("shots")
+                    .shots
+            })
+        };
+        let single = shots(1);
+        assert_eq!(single.len(), num_shots);
+        assert_eq!(single, shots(THREADS_HI), "{label} shots differ");
+        assert_eq!(single, shots(1), "{label} shots not seed stable");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn product_terminal_shots_identical_across_thread_counts() {
+    let n = 24;
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(Gate::Ry(0.23 + 0.11 * q as f64), &[q]);
+    }
+    circuit.measure_all();
+    assert_block_sampled_shots_stable(
+        &circuit,
+        &BackendKind::ProductState,
+        SAMPLING_SHOTS,
+        "product",
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn factored_terminal_shots_identical_across_thread_counts() {
+    // Two sub-states, so two draws a shot: 10,000 shots clear the parallel floor.
+    let mut circuit = prism_q::circuits::partially_independent_circuit(18, 5, SEED);
+    circuit.measure_all();
+    assert_block_sampled_shots_stable(&circuit, &BackendKind::Factored, 10_000, "factored");
+}
+
 const PER_SHOT_SHOTS: usize = 512;
 
 // Rotations and CX on `qubits`, a measurement of the first into `bit`, then
@@ -632,14 +685,32 @@ fn assert_per_shot_matches_serial(circuit: &Circuit, route: ResolvedBackend) {
     assert_eq!(single.shots, separate, "shots differ from seeded runs");
 }
 
+// Noiseless mid-circuit shots on the statevector branch on outcomes, with
+// split draws seeded by the outcome path, so no shot matches a run on its own
+// seed; the pin is the pool width. From 10 qubits the two sides of a split run
+// on separate workers.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn mid_circuit_shots_identical_across_thread_counts() {
-    let n = 8;
-    let mut circuit = Circuit::new(n, n + 1);
-    add_mid_circuit_block(&mut circuit, &(0..n).collect::<Vec<_>>(), 0);
-    measure_every_qubit(&mut circuit, 1);
-    assert_per_shot_matches_serial(&circuit, ResolvedBackend::Statevector);
+    for n in [8, 12] {
+        let mut circuit = Circuit::new(n, n + 1);
+        add_mid_circuit_block(&mut circuit, &(0..n).collect::<Vec<_>>(), 0);
+        measure_every_qubit(&mut circuit, 1);
+
+        let shots = |threads: usize| {
+            in_pool(threads, || {
+                simulate(&circuit)
+                    .seed(SEED)
+                    .shots(PER_SHOT_SHOTS)
+                    .expect("shots")
+            })
+        };
+        let single = shots(1);
+        let wide = shots(THREADS_HI);
+        assert_eq!(single.metadata.backend, ResolvedBackend::Statevector);
+        assert_eq!(single.shots, wide.shots, "{n}q branched shots differ");
+        assert_eq!(single.shots, shots(1).shots, "{n}q not seed stable");
+    }
 }
 
 #[test]

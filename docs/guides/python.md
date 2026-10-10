@@ -245,7 +245,9 @@ theme, cut to 64 wires and 200 moments.
 
 `simulate(circuit)` returns a `Simulation` you configure with `.seed()`,
 `.backend()`, and `.noise()`, then finish with a terminal method. The default
-seed is 42.
+seed is 42. A seed reproduces a result within a release; [Seeded
+output](capabilities.md#seeded-output) lists the releases that changed what a seed
+draws.
 
 ```python
 from prism_q import BackendKind, simulate

@@ -3297,8 +3297,9 @@ pub(crate) fn apply_noise_event_dm(dm: &mut DensityMatrixBackend, event: &NoiseE
 ///
 /// Measurements are not collapsed; observables and marginals are read off the
 /// final mixed state, so the circuit must carry terminal measurements only and
-/// no classical conditionals, which [`Circuit::has_terminal_measurements_only`]
-/// decides and this function rejects. The circuit is checked against the
+/// no classical conditionals, which
+/// [`Circuit::has_terminal_measurements_under_reset_channel`] decides and this
+/// function rejects. The circuit is checked against the
 /// density-matrix qubit cap and the noise model is validated before any
 /// allocation.
 pub(crate) fn evolve_density_matrix(
@@ -3319,7 +3320,7 @@ pub(crate) fn evolve_density_matrix(
             crate::backend::DM_QUBIT_CAP_ENV,
         )?;
     }
-    if !circuit.has_terminal_measurements_only() {
+    if !circuit.has_terminal_measurements_under_reset_channel() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: "density_matrix".into(),
             reason: "the mixture holds every measurement branch at once, so mid-circuit \
@@ -3418,7 +3419,7 @@ pub(crate) fn density_matrix_probabilities(
     initial_state: Option<super::StartState<'_>>,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    let noise = if circuit.has_terminal_measurements_only() {
+    let noise = if circuit.has_terminal_measurements_under_reset_channel() {
         settle_measured_qubits(circuit, noise)?
     } else {
         std::borrow::Cow::Borrowed(noise)

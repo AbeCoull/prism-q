@@ -4,9 +4,9 @@
 
 use prism_q::circuit::openqasm;
 use prism_q::{
-    Gate, PackedShots, PrismError, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult, ShotLayout, compile_qec_program_rows, parse_qec_program,
-    run_qec_program, run_qec_program_reference,
+    Gate, PackedShots, PrismError, QecBasis, QecCircuitNoise, QecNoise, QecOp, QecOptions,
+    QecPauli, QecProgram, QecRecordRef, QecSampleResult, ShotLayout, compile_qec_program_rows,
+    parse_qec_program, run_qec_program, run_qec_program_reference,
 };
 
 mod qec_common;
@@ -100,6 +100,118 @@ fn qec_program_from_ops_validates_records_and_qubits() {
             .noise(QecNoise::Depolarize2(0.001), &[0, 0])
             .is_err()
     );
+}
+
+#[test]
+fn qec_program_append_methods_match_from_ops_on_a_surface_memory() {
+    let memory =
+        QecProgram::surface_memory(5, 5, QecBasis::Z, &QecCircuitNoise::uniform(0.001)).unwrap();
+    let mut ops = memory.ops().to_vec();
+    ops.push(QecOp::MeasurePauliProduct {
+        terms: vec![QecPauli::x(0), QecPauli::z(1)],
+    });
+    ops.push(QecOp::Detector {
+        records: vec![
+            QecRecordRef::lookback(1).unwrap(),
+            QecRecordRef::lookback(2).unwrap(),
+        ],
+        coords: Vec::new(),
+    });
+    ops.push(QecOp::Postselect {
+        records: vec![QecRecordRef::lookback(1).unwrap()],
+        expected: false,
+    });
+    let expected = QecProgram::from_ops(memory.num_qubits(), QecOptions::default(), ops).unwrap();
+
+    let mut built = QecProgram::new(expected.num_qubits());
+    let mut records = 0;
+    let mut detectors = 0;
+    for op in expected.ops() {
+        match op {
+            QecOp::Gate { gate, targets } => built.push_gate(gate.clone(), targets).unwrap(),
+            QecOp::Reset { basis, qubit } => built.reset(*basis, *qubit).unwrap(),
+            QecOp::Measure { basis, qubit } => {
+                assert_eq!(built.measure(*basis, *qubit).unwrap(), records);
+                records += 1;
+            }
+            QecOp::MeasurePauliProduct { terms } => {
+                assert_eq!(built.measure_pauli_product(terms).unwrap(), records);
+                records += 1;
+            }
+            QecOp::Detector {
+                records: refs,
+                coords,
+            } => {
+                assert_eq!(built.detector_with_coords(refs, coords).unwrap(), detectors);
+                detectors += 1;
+            }
+            QecOp::ObservableInclude {
+                observable,
+                records: refs,
+            } => built.observable_include(*observable, refs).unwrap(),
+            QecOp::Noise { channel, targets } => built.noise(channel.clone(), targets).unwrap(),
+            other => built.push_op(other.clone()).unwrap(),
+        }
+        assert_eq!(built.num_measurements(), records);
+        assert_eq!(built.num_detectors(), detectors);
+    }
+
+    let scanned_records = expected
+        .ops()
+        .iter()
+        .filter(|op| {
+            matches!(
+                op,
+                QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. }
+            )
+        })
+        .count();
+    let scanned_detectors = expected
+        .ops()
+        .iter()
+        .filter(|op| matches!(op, QecOp::Detector { .. }))
+        .count();
+    assert_eq!(expected.num_measurements(), scanned_records);
+    assert_eq!(expected.num_detectors(), scanned_detectors);
+    assert_eq!(records, scanned_records);
+    assert_eq!(detectors, scanned_detectors);
+    assert_eq!(built, expected);
+    assert_eq!(
+        built.detector_rows().unwrap(),
+        expected.detector_rows().unwrap()
+    );
+    assert_eq!(
+        built.observable_rows().unwrap(),
+        expected.observable_rows().unwrap()
+    );
+    assert_eq!(
+        built.postselection_rows().unwrap(),
+        expected.postselection_rows().unwrap()
+    );
+}
+
+#[test]
+fn qec_program_rejected_appends_leave_counts_unchanged() {
+    let mut program = QecProgram::new(2);
+    program.measure_z(0).unwrap();
+    program
+        .detector(&[QecRecordRef::lookback(1).unwrap()])
+        .unwrap();
+
+    assert!(program.measure_z(2).is_err());
+    assert!(program.measure_pauli_product(&[]).is_err());
+    assert!(program.detector(&[QecRecordRef::absolute(1)]).is_err());
+    assert!(
+        program
+            .detector_with_coords(&[QecRecordRef::absolute(0)], &[f64::NAN])
+            .is_err()
+    );
+    assert_eq!(program.num_measurements(), 1);
+    assert_eq!(program.num_detectors(), 1);
+    assert_eq!(program.ops().len(), 2);
+
+    assert_eq!(program.measure_x(1).unwrap(), 1);
+    assert_eq!(program.detector(&[QecRecordRef::absolute(1)]).unwrap(), 1);
 }
 
 #[test]

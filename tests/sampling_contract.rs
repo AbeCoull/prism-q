@@ -869,6 +869,168 @@ fn deterministic_dynamic_routes_return_one_key() {
     }
 }
 
+/// `h q0; cx q0, q1; reset q0; cx q1, q0`, read into both bits: the reset
+/// collapses the Bell pair, so `00` and `11` each come up half the time.
+fn entangled_reset_case() -> Circuit {
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_reset(0);
+    c.add_gate(Gate::Cx, &[1, 0]);
+    c.add_measure(0, 0);
+    c.add_measure(1, 1);
+    c
+}
+
+/// A reset on the middle of an entangled chain of non-Clifford rotations,
+/// followed by gates that couple the reset qubit back to both neighbours.
+fn mid_circuit_reset_case() -> Circuit {
+    let mut c = Circuit::new(3, 3);
+    c.add_gate(Gate::Ry(1.1), &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Ry(0.4), &[2]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_reset(1);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Cx, &[1, 0]);
+    c.add_gate(Gate::Ry(0.9), &[2]);
+    c.add_gate(Gate::Cx, &[2, 1]);
+    c.add_measure(0, 2);
+    c.add_measure(1, 0);
+    c.add_measure(2, 1);
+    c
+}
+
+/// Resets on qubits no multi-qubit gate has reached: the leading resets a
+/// program opens with, and one on a qubit that only saw a rotation.
+fn local_reset_case() -> Circuit {
+    let mut c = Circuit::new(3, 3);
+    for q in 0..3 {
+        c.add_reset(q);
+    }
+    c.add_gate(Gate::Ry(0.7), &[0]);
+    c.add_gate(Gate::Ry(1.3), &[1]);
+    c.add_reset(0);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::Ry(0.5), &[0]);
+    c.add_measure(0, 0);
+    c.add_measure(1, 1);
+    c.add_measure(2, 2);
+    c
+}
+
+#[test]
+fn entangled_reset_routes_sample_per_shot() {
+    use ResolvedBackend as R;
+    let circuit = entangled_reset_case();
+    assert!(!circuit.has_terminal_measurements_only());
+    let exact = exact_distribution(&circuit);
+    assert_eq!(exact.len(), 2);
+    for key in [vec![0b00u64], vec![0b11u64]] {
+        assert!(
+            (exact[&key] - 0.5).abs() < 1e-12,
+            "{key:?}: {}",
+            exact[&key]
+        );
+    }
+    check_routes(
+        "entangled reset",
+        &circuit,
+        &[
+            compiled("auto deferred", BackendKind::Auto),
+            route("statevector", BackendKind::Statevector, R::Statevector),
+            route("mps", mps(), R::Mps),
+            route("sparse", BackendKind::Sparse, R::Sparse),
+            route("factored", BackendKind::Factored, R::Factored),
+            route(
+                "tensor network",
+                BackendKind::TensorNetwork,
+                R::TensorNetwork,
+            ),
+            compiled("stabilizer deferred", BackendKind::Stabilizer),
+            route(
+                "density matrix",
+                BackendKind::DensityMatrix,
+                R::DensityMatrix,
+            ),
+        ],
+        SHOTS,
+    );
+
+    let circuit = mid_circuit_reset_case();
+    assert!(!circuit.has_terminal_measurements_only());
+    check_routes(
+        "mid-circuit reset",
+        &circuit,
+        &[
+            route("auto", BackendKind::Auto, R::Statevector),
+            route("statevector", BackendKind::Statevector, R::Statevector),
+            route("mps", mps(), R::Mps),
+            route("sparse", BackendKind::Sparse, R::Sparse),
+            route("factored", BackendKind::Factored, R::Factored),
+            route(
+                "tensor network",
+                BackendKind::TensorNetwork,
+                R::TensorNetwork,
+            ),
+            route(
+                "density matrix",
+                BackendKind::DensityMatrix,
+                R::DensityMatrix,
+            ),
+            noisy("zero noise", R::Statevector, None),
+        ],
+        SHOTS,
+    );
+}
+
+#[test]
+fn local_resets_keep_terminal_routes() {
+    use ResolvedBackend as R;
+    let circuit = local_reset_case();
+    assert!(circuit.has_terminal_measurements_only());
+    check_routes(
+        "local resets",
+        &circuit,
+        &[
+            route("auto", BackendKind::Auto, R::Statevector),
+            route("statevector", BackendKind::Statevector, R::Statevector),
+            route("mps", mps(), R::Mps),
+            route("sparse", BackendKind::Sparse, R::Sparse),
+            route("factored", BackendKind::Factored, R::Factored),
+            route(
+                "tensor network",
+                BackendKind::TensorNetwork,
+                R::TensorNetwork,
+            ),
+        ],
+        SHOTS,
+    );
+
+    let mut product = Circuit::new(3, 3);
+    for q in 0..3 {
+        product.add_reset(q);
+        product.add_gate(Gate::Ry(0.3 + q as f64), &[q]);
+    }
+    product.add_reset(1);
+    product.add_gate(Gate::Rx(0.8), &[1]);
+    for q in 0..3 {
+        product.add_measure(q, 2 - q);
+    }
+    assert!(product.has_terminal_measurements_only());
+    check_routes(
+        "product resets",
+        &product,
+        &[
+            route("auto", BackendKind::Auto, R::ProductState),
+            route("product", BackendKind::ProductState, R::ProductState),
+            route("statevector", BackendKind::Statevector, R::Statevector),
+        ],
+        SHOTS,
+    );
+}
+
 const WIDE_QUBITS: usize = 72;
 const WIDE_BITS: usize = 80;
 

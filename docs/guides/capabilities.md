@@ -105,7 +105,7 @@ bounded only by their own representation.
 | Backend | Shots and counts | Expectation values |
 | --- | --- | --- |
 | Sparse | Native, CDF over the stored amplitudes | Native, `O(k)` over the amplitude map |
-| MPS | Native, sequential conditional sampling | Native, one chain contraction per observable |
+| MPS | Native, sequential conditional sampling | Native, one contraction over each observable's span between shared identity environments |
 | Factored | Native, one draw per sub-state | Native, product over the blocks |
 | Product State | Native, one Bernoulli draw per qubit | Native, one closed-form factor per qubit |
 | Distributed Statevector | Native, rank-local CDF plus one scalar per rank | Native, rank-local sandwich plus one `Allreduce` |

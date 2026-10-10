@@ -312,7 +312,6 @@ and [`benches/README.md`](benches/README.md).
 
 ## Roadmap
 
-- Mid-circuit branching beyond the current `if` form.
 - Multi-GPU and distributed GPU execution. A GPU context binds one device and the
   distributed backend is CPU only; sharding one statevector across devices also needs
   peer access, since a host-staged exchange costs far more than the gate it serves.

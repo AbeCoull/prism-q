@@ -4616,6 +4616,12 @@ fn bench_noise_with_memory(c: &mut Criterion) {
 /// have cheap native kernels (CX chains, controlled phases) or whose noise
 /// skips the two-qubit gates, from widths where the buffer sits in cache to
 /// the first past an 8 MB last-level cache.
+///
+/// The `transmon` rows lower the transmon calibration preset: relaxation on
+/// every target plus pair depolarizing after each CX. `transmon_scheduled`
+/// adds the preset's scheduled idling, which puts relaxation on every qubit a
+/// layer leaves idle; the CX chain serializes, so it runs one layer of the
+/// circuit where `transmon` runs two to keep both rows near the same cost.
 fn bench_density_matrix_exact_noise(c: &mut Criterion) {
     let mut group = c.benchmark_group("density_matrix/exact_noise");
     configure_group(&mut group);
@@ -4668,12 +4674,47 @@ fn bench_density_matrix_exact_noise(c: &mut Criterion) {
         let noise = prism_q::NoiseModel::uniform_depolarizing(&random, 0.001);
         rows.push(("random_depolarizing", n, random, noise));
     }
+    for n in [9, 10] {
+        let transmon = prism_q::sim::calibration::presets::superconducting_transmon(n);
+        let circuit = non_clifford_noise_circuit(n, 2);
+        let noise = transmon.to_noise_model(&circuit).unwrap();
+        rows.push(("transmon", n, circuit, noise));
+        let circuit = non_clifford_noise_circuit(n, 1);
+        let noise = transmon.to_scheduled_noise_model(&circuit).unwrap();
+        rows.push(("transmon_scheduled", n, circuit, noise));
+    }
 
     for (label, n, circuit, noise) in &rows {
         group.bench_function(BenchmarkId::new(*label, n), |b| {
             b.iter(|| {
                 run_shots_with_noise(BackendKind::DensityMatrix, circuit, noise, 256, SEED)
                     .unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// The noiseless exact-mixture free function, which evolves the density
+/// matrix itself rather than through `Simulate`: one-qubit X and Y
+/// expectations on the `density_matrix/fused_layers` circuit family at four
+/// layers.
+fn bench_density_matrix_exact_expectation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/exact_expectation");
+    configure_group(&mut group);
+
+    for n in [8, 10] {
+        let circuit = circuits::random_circuit(n, 4, SEED);
+        let observables: Vec<Vec<PauliTerm>> = (0..n)
+            .flat_map(|q| [vec![PauliTerm::x(q)], vec![PauliTerm::y(q)]])
+            .collect();
+        group.bench_function(BenchmarkId::new("noiseless", n), |b| {
+            b.iter(|| {
+                black_box(
+                    prism_q::density_matrix_expectation_values(&circuit, &observables, None, SEED)
+                        .unwrap(),
+                );
             });
         });
     }
@@ -5422,6 +5463,7 @@ criterion_group! {
     bench_density_matrix_fused_layers,
     bench_density_matrix_exact_vs_trajectory,
     bench_density_matrix_exact_noise,
+    bench_density_matrix_exact_expectation,
     bench_density_matrix_noisy_channels,
     bench_density_matrix_noisy_shots,
     bench_density_matrix_shots_fused,

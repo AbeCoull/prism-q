@@ -399,6 +399,7 @@ enum NoiseMix {
     QubitZeroOnly,
     EveryTarget,
     OffTarget,
+    PairAndIdle,
     Silent,
 }
 
@@ -566,6 +567,36 @@ fn events_for(
         NoiseMix::OffTarget => {
             if let Some(q) = off_target(rng) {
                 one(rng, &mut out, q);
+            }
+        }
+        NoiseMix::PairAndIdle => {
+            for &q in targets {
+                one(rng, &mut out, q);
+            }
+            if targets.len() == 2 && !diagonal {
+                let qs = if rng.random_bool(0.5) {
+                    targets.to_vec()
+                } else {
+                    vec![targets[1], targets[0]]
+                };
+                let (channel, reference) = random_2q_channel(rng);
+                out.push((channel, reference, qs));
+                if rng.random_bool(0.3) {
+                    let q = targets[rng.random_range(0..2)];
+                    one(rng, &mut out, q);
+                }
+            }
+            if !diagonal && rng.random_bool(0.2) {
+                if let Some(q) = off_target(rng) {
+                    let (channel, reference) = random_2q_channel(rng);
+                    out.push((channel, reference, vec![targets[0], q]));
+                    one(rng, &mut out, targets[0]);
+                }
+            }
+            for _ in 0..rng.random_range(0..3) {
+                if let Some(q) = off_target(rng) {
+                    one(rng, &mut out, q);
+                }
             }
         }
         NoiseMix::Mixed => match rng.random_range(0..10) {
@@ -757,12 +788,13 @@ const GATE_MIXES: [GateMix; 7] = [
     GateMix::Everything,
 ];
 
-const NOISE_MIXES: [NoiseMix; 6] = [
+const NOISE_MIXES: [NoiseMix; 7] = [
     NoiseMix::Mixed,
     NoiseMix::OneQubitGatesOnly,
     NoiseMix::QubitZeroOnly,
     NoiseMix::EveryTarget,
     NoiseMix::OffTarget,
+    NoiseMix::PairAndIdle,
     NoiseMix::Silent,
 ];
 
@@ -796,4 +828,9 @@ fn selective_fold_at_eight_qubits() {
 #[test]
 fn fold_any_pending_map_at_nine_qubits() {
     sweep(9, 42..43, &[NoiseMix::Mixed, NoiseMix::EveryTarget]);
+}
+
+#[test]
+fn fold_pair_and_idle_channels_at_nine_qubits() {
+    sweep(9, 42..43, &[NoiseMix::PairAndIdle]);
 }

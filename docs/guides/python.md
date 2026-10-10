@@ -79,8 +79,11 @@ circuit = (
 | Group | Methods |
 |-------|---------|
 | Single qubit | `id`, `x`, `y`, `z`, `h`, `s`, `sdg`, `t`, `tdg`, `sx`, `sxdg` |
-| Rotations | `rx(theta, q)`, `ry(theta, q)`, `rz(theta, q)`, `p(theta, q)` |
-| Two qubit | `cx(control, target)`, `cz(q0, q1)`, `swap(q0, q1)`, `rzz(theta, q0, q1)`, `cphase(theta, control, target)` |
+| Rotations | `rx(theta, q)`, `ry(theta, q)`, `rz(theta, q)`, `p(theta, q)`, `u(theta, phi, lam, q)` |
+| Two qubit | `cx(control, target)`, `cy(control, target)`, `cz(q0, q1)`, `ch(control, target)`, `swap(q0, q1)`, `iswap(q0, q1)`, `cphase(theta, control, target)` |
+| Controlled rotations | `crx(theta, control, target)`, `cry(theta, control, target)`, `crz(theta, control, target)` |
+| Two-qubit rotations | `rxx(theta, q0, q1)`, `ryy(theta, q0, q1)`, `rzz(theta, q0, q1)` |
+| Three qubit | `ccx(control0, control1, target)`, `cswap(control, q0, q1)` |
 | Multi-qubit rotation | `pauli_rotation(theta, factors)` |
 | Arbitrary unitary | `cu(matrix, control, target)`, `mcu(matrix, controls, target)`, `gate(gate, targets)` |
 | Non-unitary | `measure(qubit, bit)`, `measure_all()`, `measure_in_basis(qubit, axis, bit)`, `measure_pauli_product(factors, bit)`, `reset(qubit)`, `barrier(qubits)` |
@@ -97,9 +100,15 @@ keep firing on them. `Circuit.add_pauli_rotation` is the imperative spelling.
 builder.pauli_rotation(0.4, [(0, "X"), (1, "Y"), (3, "Z")]).param(0)
 ```
 
+The standard gates lower as the OpenQASM parser lowers the same names, so a builder
+circuit equals the parsed one instruction for instruction: `crx`, `cy` and the
+other controlled gates become one controlled-unitary, `rxx` and `ryy` become Pauli
+rotations that `.param(slot)` can bind, `u` becomes one fused matrix, and `iswap`
+and `cswap` expand to Clifford gates and a Toffoli.
+
 `cu` and `mcu` take a 2x2 matrix as nested Python sequences of complex numbers.
-Out-of-range qubits raise `PrismError` at build time rather than at simulation
-time.
+Out-of-range or repeated qubits raise `PrismError` at build time rather than at
+simulation time.
 
 Three other routes produce a `Circuit`:
 
@@ -252,25 +261,27 @@ outcome = sim.run()
 | `run()` | `RunOutcome`: classical bits and the full probability array | density matrix only | yes |
 | `shots(n)` | `ShotsResult`: per-shot measurement records | yes | without `.noise()` |
 | `sample_counts(n)` | `CountsResult`: frequency histogram | yes | without `.noise()` |
-| `marginals()` | `list[tuple[float, float]]`, per-qubit `(p0, p1)` | density matrix only | yes |
+| `marginals()` | `MarginalsResult`: per-qubit `(p0, p1)` with `.metadata`; indexes and iterates as the list of pairs | density matrix only | yes |
 | `state_vector()` | `complex128` amplitudes | no | yes |
 | `probabilities_of(qubits)` | `float64` joint distribution over a subset, `qubits[0]` the lowest bit | density matrix only | yes |
 | `reduced_density_matrix(qubits)` | `ReducedDensityMatrix`: `.matrix` over a subset with `qubits[0]` the lowest bit, `.purity`, `.metadata` | density matrix only | yes |
 | `entanglement_entropy(subsystem)` | `EntropyResult`: von Neumann and Renyi-2 entropy of the cut | density matrix only | yes |
 | `expectation_values(obs)` | `list[float]`, `⟨ψ\|P\|ψ⟩` per observable | density matrix only | yes |
-| `expectation_values_reported(obs)` | `ExpectationResult`: the same values with `.metadata` naming the backend that served them | density matrix only | yes |
+| `expectation_values_reported(obs)` | `ExpectationResult`: the same values with `.metadata` naming the backend that served them and `.std_errors` from a sampling route | density matrix only | yes |
 | `observable_variance(obs)` | `ObservableVariance`: `<H^2> - <H>^2` beside the mean | density matrix only | yes |
 | `observable_expectation(h)` | `ObservableExpectation`: the weighted mean with its variance, group variances and standard error | density matrix only | yes |
 | `density_matrix_expectation_values(obs)` | `list[float]`, exact `Tr(rho P)` | yes | no |
 | `expectation_gradient(h, params)` | `(value, gradient)` via the adjoint method | no | no |
-| `expectation_gradient_shift(h, params)` | `(value, gradient)` via the parameter-shift rule | no | no |
+| `expectation_gradient_shift(h, params)` | `(value, gradient)` via the parameter-shift rule | density matrix or `pauli_path()` | yes |
 | `overlap(other)` | `OverlapResult`: `\|<a\|b>\|^2` against a second seeded builder, with one `.metadata` per side | no | yes |
 
 Call `expectation_values_reported()` instead of `expectation_values()` when the
 route matters: under `auto()` a wide shallow circuit can be answered by a tensor
 contraction rather than by the state vector, and only the metadata says which ran. `expectation_gradient_shift()` computes the same gradient as
 `expectation_gradient()` at two extra circuit runs per parameter, and is the
-only route on a backend with no adjoint pass. `overlap()` takes a second seeded
+only route on a backend with no adjoint pass or with a noise model attached; under
+noise every evaluation reads the exact mixture, and the shift stays exact because
+the channels do not depend on the shifted angle. `overlap()` takes a second seeded
 builder, so each side keeps its own backend, seed and start state; both circuits
 must declare the same width and both must be unitary.
 
@@ -322,7 +333,8 @@ caller can branch on the failure without matching its message. A run over a memo
 cap raises kind `"resource_limit"` with the numbers attached: `resource` names the
 unit (`"qubits"`, `"amplitudes"`, `"entries"`, `"elements"` or
 `"bytes of device memory"`), `required` and `limit` are integers in that unit, and
-`env_var` names the variable that overrides the cap, or is `None`.
+`env_var` names the variable that overrides the cap, or is `None`. On every other
+kind those four attributes are `None`.
 
 ### Distributions too wide to write down
 
@@ -499,11 +511,13 @@ Pass an explicit one to override it.
 | `product_state()` | No entangling gates |
 | `factored()` | Partially independent subsystems |
 | `tensor_network()` | Contraction over a network |
+| `tensor_network_bounded(tolerance)` | The tensor network with bond truncation, discarding at most `tolerance` of each cut's squared weight; approximate |
 | `mps(max_bond_dim=256)` | Approximate, truncates at the bond dimension |
 | `density_matrix()` | Exact mixed states, never chosen by `auto()` |
 | `stochastic_pauli(num_samples=1000)` | Sampled Pauli propagation |
 | `deterministic_pauli(epsilon=0.0, max_terms=65536)` | Truncated Pauli propagation |
 | `deterministic_pauli_budget(max_terms=65536)` | Pauli propagation holding a fixed term count |
+| `pauli_path(epsilon=1e-8, max_terms=65536)` | Heisenberg Pauli propagation through the attached noise model, for expectation values only; never chosen by `auto()`, and `max_terms=0` keeps every term |
 | `auto_gpu(context)`, `statevector_gpu(context)`, `stabilizer_gpu(context)`, `density_matrix_gpu(context)` | CUDA device paths, see [GPU backends](#gpu-backends) |
 
 The density-matrix backend stores `4^n` amplitudes, so its qubit ceiling is
@@ -791,7 +805,7 @@ assert result.leaked.shape == (1000, circuit.num_qubits)
 Leakage needs a per-shot trajectory, so the density-matrix backend rejects it. QEC
 programs take `QecNoise.leak(p)`, `seep(p)` and `leak_transport(p)` (text form
 `LEAK(p)`, `SEEP(p)`, `LEAK_TRANSPORT(p)`), sampled as heralded erasures with one
-`QecResult.heralds` column per `LEAK` target; the [Noise and QEC guide](./qec.md)
+`QecSampleResult.heralds` column per `LEAK` target; the [Noise and QEC guide](./qec.md)
 describes both models.
 
 ### Timed and correlated noise
@@ -917,6 +931,29 @@ than the batch run one circuit at a time at 14 and 16 qubits. From 17 qubits up 
 circuit uses every core itself, and the batch saves only the crossing into Rust, about
 2.4 microseconds a call.
 
+## Threads
+
+Parallel kernels run on one process-wide pool sized to every logical core. Set
+`RAYON_NUM_THREADS` before the first simulation to cap it; the pool is built once, so
+a later change has no effect.
+
+To run some calls on a different width without touching that pool, build a
+`ThreadPool` and call through it:
+
+```python
+from prism_q import ThreadPool, simulate
+
+pool = ThreadPool(2)
+outcome = pool.install(lambda: simulate(circuit).seed(42).run())
+```
+
+`install(fn, *args, **kwargs)` calls `fn` on one of the pool's workers, blocks until
+it returns, and passes its result or exception through. Every parallel kernel a
+PRISM-Q call inside `fn` reaches runs on those workers. `fn` runs on another OS
+thread, so thread-local state of the caller is not visible to it. Pool width changes
+results only where thread count does, as the
+[threading contract](../architecture/threading-simd.md) states.
+
 ## Compiled sampling
 
 `simulate(circuit).shots(n)` compiles a Clifford circuit's measurements into a parity
@@ -942,7 +979,7 @@ classical bit. `shots()` reports classical bits instead. Each call continues one
 stream, so successive calls draw fresh shots and a sampler built again with the same
 seed replays them. `rank` counts the independent random bits behind the record, and
 `exact_counts()` enumerates all `2 ** rank` outcomes up to rank 25. `sample_packed(n)`
-returns records eight to a byte in the `QecResult.packed_measurements()` layout.
+returns records eight to a byte in the `QecSampleResult.packed_measurements()` layout.
 
 `parity_expectations(rows, n)` estimates `<(-1)^parity>` over each row of record
 indices, the expectation of the Z-type Pauli product those records measure, and
@@ -1104,12 +1141,30 @@ the circuit must be unitary.
 ## Quantum error correction
 
 `QecProgram` exposes the native QEC IR: `reset`, `measure`, `detector`,
-`observable_include`, `postselect`, and `noise`, with `QecBasis`, `QecNoise`,
-and `RecordRef` as the supporting types. `run()` returns a `QecResult` carrying
-detector, observable, and measurement arrays as NumPy `bool_` matrices, plus
-`logical_error_rates()` and `survivor_rate()`. Programs can also be parsed from
-text with `QecProgram.from_text`. See the [Noise and QEC guide](./qec.md) for the
-model itself.
+`observable_include`, `postselect`, `noise` and `expectation_value`, with `QecBasis`,
+`QecNoise`, and `QecRecordRef` as the supporting types. `run()` returns a
+`QecSampleResult` carrying detector, observable, and measurement arrays as NumPy
+`bool_` matrices, plus `logical_error_rates()` and `survivor_rate()` with
+`logical_error_rate_wilson_intervals(z_score)` and
+`survivor_rate_wilson_interval(z_score)` beside them (the default `z_score` gives a
+two-sided 95 percent interval). Programs can also be parsed from text with
+`QecProgram.from_text`. See the [Noise and QEC guide](./qec.md) for the model itself.
+
+`expectation_value(terms, coefficient=1.0)` appends an `EXP_VAL` op over `(basis,
+qubit)` terms, the same op the text format spells `EXP_VAL`. The estimates arrive in
+op order as `QecSampleResult.expectation_values`, a list of `QecObservableEstimate`
+with `mean`, `variance` and `num_shots`, or `None` for a program without one.
+`observable_expectations` carries the same shape for the logical observables when a
+weighted or analytical T strategy produced them:
+
+```python
+prog = QecProgram(2)
+prog.set_options(shots=1000, seed=1)
+prog.push_gate(Gate.h(), [0])
+prog.push_gate(Gate.cx(), [0, 1])
+prog.expectation_value([(QecBasis.Z, 0), (QecBasis.Z, 1)])
+zz = prog.run().expectation_values[0].mean   # 1.0
+```
 
 `detector_error_model()` derives the program's `DetectorErrorModel` for
 decoding: `probabilities()` (float64), `detector_matrix()`, and
@@ -1126,13 +1181,13 @@ with open("memory_d3.dem", "w") as f:
     f.write(dem.to_text())
 ```
 
-`Decoder` runs the built-in union-find decoder over a graphlike model, so a
+`UnionFindDecoder` runs the built-in union-find decoder over a graphlike model, so a
 memory experiment's logical error rate needs no external decoder. `decode`
 takes the `(shots, num_detectors)` bool detector array and returns the
 `(shots, num_observables)` predicted observable flips:
 
 ```python
-decoder = prism_q.Decoder(dem.decompose_graphlike())
+decoder = prism_q.UnionFindDecoder(dem.decompose_graphlike())
 res = qp.run()
 predicted = decoder.decode(res.detectors)
 failures = (predicted[:, 0] != res.observables[:, 0]).sum()
@@ -1141,7 +1196,10 @@ failures = (predicted[:, 0] != res.observables[:, 0]).sum()
 `MatchingDecoder` (exact minimum-weight perfect matching, graphlike models) and
 `BpOsdDecoder` (belief propagation with ordered statistics, any model) share that
 surface. Every decoder also offers `logical_error_rate(detectors, observables)`,
-the fraction of shots with any observable mispredicted. `BpOsdDecoder` takes
+the fraction of shots with any observable mispredicted, and `decode_packed`, which
+takes the `packed_detectors()` layout described below and returns flips in the same
+layout. `logical_error_rate` accepts either the bool arrays or the packed ones, as
+long as both arguments use the same form. `BpOsdDecoder` takes
 keyword options `max_iterations`, `bp_method` (`"min_sum"` or `"product_sum"`),
 `min_sum_scaling`, `osd_method` (`"osd0"`, `"cs"`, or `"exhaustive"`), and
 `osd_order`:
@@ -1160,7 +1218,7 @@ breaks, so a program carrying one runs through `run_reference()`, the per-shot
 statevector path. It costs `O(shots * 2^n)` and suits small programs.
 
 ```python
-from prism_q import Gate, QecProgram, RecordRef
+from prism_q import Gate, QecProgram, QecRecordRef
 
 prog = QecProgram(2)
 prog.set_options(shots=1000, seed=1)
@@ -1169,7 +1227,7 @@ prog.push_gate(Gate.cx(), [0, 1])
 flag = prog.measure_z(0)
 fix = QecProgram(2)
 fix.push_gate(Gate.x(), [1])
-prog.feedforward([RecordRef.absolute(flag)], True, fix)
+prog.feedforward([QecRecordRef.absolute(flag)], True, fix)
 prog.measure_z(1)
 assert not prog.run_reference().measurements[:, 1].any()
 ```
@@ -1191,7 +1249,7 @@ assert (detectors.astype(bool) == res.detectors).all()
 ## Pickling and multiprocessing
 
 `Circuit`, `Gate`, `Parameters`, `NoiseChannel`, `NoiseModel`, `QecProgram`,
-`PauliObservable`, `ClassicalCondition`, `RecordRef`, `QecNoise`, `SaveSpec`, and
+`PauliObservable`, `ClassicalCondition`, `QecRecordRef`, `QecNoise`, `SaveSpec`, and
 `QecBasis` pickle, so they cross `multiprocessing`, `concurrent.futures`, Ray, and Dask
 boundaries. The payload is a versioned binary encoding that carries every float as its
 IEEE bits, so an unpickled value is identical to the original rather than close to it,
@@ -1282,6 +1340,80 @@ shots. Statevector, stabilizer, sparse, MPS, product-state, factored, tensor
 network, and density-matrix backends run dynamic programs; the stabilizer-rank
 and Pauli propagation engines keep no per-shot state and raise
 `incompatible_backend`.
+
+## Rust and Python names
+
+Python names follow the Rust ones, written in Python's own conventions: a Rust
+constructor such as `CircuitBuilder::new_with_classical` is the class call, a builder
+consumed by value is a method chain on a mutable object, and a result field is a
+property. Two names differ for the reader's sake: `simulate()` returns a `Simulation`
+where Rust has the `Simulate` typestate builder (and `simulate_program()` a
+`ProgramSimulation`), and the `circuits` generators drop the `_circuit` suffix their
+module already states. `bindings/python/parity.toml` records, for every Rust function,
+method and result field in the user-facing surface, the Python name that reaches it or
+the reason it stays Rust-only, and a test keeps that record complete as the Rust API
+grows.
+
+Three classes have taken their Rust names: `Decoder` is now `UnionFindDecoder`,
+`QecResult` is `QecSampleResult`, and `RecordRef` is `QecRecordRef`. The old names
+still resolve, with a `DeprecationWarning`, until the next minor release, and pickles
+written under the old names load.
+
+Free functions with a Python counterpart map as follows, with Rust paths relative to
+the crate root. The manifest gives the reason for each function left out.
+
+<!-- parity-table:start -->
+| Rust | Python |
+|------|--------|
+| `circuit::guarded` | `CircuitBuilder.guarded` |
+| `circuit::openqasm::parse` | `parse_qasm` |
+| `circuit::openqasm::parse_braket` | `parse_braket` |
+| `circuit::openqasm::parse_dynamic` | `parse_qasm_dynamic` |
+| `circuit::openqasm::parse_parametric` | `parse_qasm_parametric` |
+| `circuit::qasm_export::to_qasm3` | `Circuit.to_qasm` |
+| `circuits::clifford_heavy_circuit` | `circuits.clifford_heavy` |
+| `circuits::clifford_random_pairs` | `circuits.clifford_random_pairs` |
+| `circuits::clifford_t_circuit` | `circuits.clifford_t` |
+| `circuits::cz_chain_circuit` | `circuits.cz_chain` |
+| `circuits::ghz_circuit` | `circuits.ghz` |
+| `circuits::hardware_efficient_ansatz` | `circuits.hardware_efficient_ansatz` |
+| `circuits::independent_bell_pairs` | `circuits.independent_bell_pairs` |
+| `circuits::independent_random_blocks` | `circuits.independent_random_blocks` |
+| `circuits::local_clifford_blocks` | `circuits.local_clifford_blocks` |
+| `circuits::phase_estimation_circuit` | `circuits.phase_estimation` |
+| `circuits::qaoa_circuit` | `circuits.qaoa` |
+| `circuits::qft_circuit` | `circuits.qft` |
+| `circuits::quantum_volume_circuit` | `circuits.quantum_volume` |
+| `circuits::random_circuit` | `circuits.random` |
+| `circuits::single_qubit_rotation_circuit` | `circuits.single_qubit_rotation` |
+| `circuits::w_state_circuit` | `circuits.w_state` |
+| `compile_measurements` | `CompiledSampler` |
+| `compile_noisy` | `CompiledSampler` |
+| `density_matrix_expectation_values` | `Simulation.density_matrix_expectation_values` |
+| `gpu::is_available` | `GpuContext.is_available` |
+| `noisy_marginals_analytical` | `noisy_marginals_analytical` |
+| `parse_qec_program` | `QecProgram.from_text` |
+| `run_expectation_gradient` | `Simulation.expectation_gradient` |
+| `run_expectation_gradient_shift` | `Simulation.expectation_gradient_shift` |
+| `run_expectation_values` | `Simulation.expectation_values` |
+| `run_observable_expectation` | `Simulation.observable_expectation` |
+| `run_qasm` | `run_qasm` |
+| `run_qec_program` | `QecProgram.run` |
+| `run_qec_program_reference` | `QecProgram.run_reference` |
+| `run_shots_compiled` | `Simulation.shots` |
+| `run_shots_noisy` | `Simulation.shots` |
+| `run_spd` | `BackendKind.deterministic_pauli` |
+| `run_spd_with` | `BackendKind.deterministic_pauli_budget` |
+| `run_spp` | `BackendKind.stochastic_pauli` |
+| `run_stabilizer_rank` | `BackendKind.stabilizer_rank` |
+| `sim::calibration::presets::neutral_atom` | `DeviceCalibration.neutral_atom` |
+| `sim::calibration::presets::superconducting_transmon` | `DeviceCalibration.superconducting_transmon` |
+| `sim::calibration::presets::trapped_ion` | `DeviceCalibration.trapped_ion` |
+| `sim::run_batch` | `run_batch` |
+| `sim::unified_pauli::run_pauli_path_observable` | `BackendKind.pauli_path` |
+| `simulate` | `simulate` |
+| `simulate_program` | `simulate_program` |
+<!-- parity-table:end -->
 
 ## Errors and typing
 

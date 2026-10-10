@@ -14,6 +14,7 @@
 
 use num_complex::Complex64;
 
+use super::openqasm::Parser;
 use super::parameter::Parameters;
 use super::{
     Circuit, ClassicalCondition, Instruction, SmallVec, append_axis_to_z_rotation,
@@ -155,6 +156,69 @@ impl CircuitBuilder {
     gate_2q!(cx, Cx, control, target);
     gate_2q!(cz, Cz, q0, q1);
     gate_2q!(swap, Swap, q0, q1);
+
+    /// Append the general single-qubit rotation `U(theta, phi, lambda)` of OpenQASM's
+    /// `u`/`u3`, as one fused matrix.
+    pub fn u(&mut self, theta: f64, phi: f64, lambda: f64, q: usize) -> &mut Self {
+        let mat = Parser::u_matrix(theta, phi, lambda);
+        self.circuit.add_gate(Gate::Fused(Box::new(mat)), &[q]);
+        self
+    }
+
+    /// Append `exp(-i theta X⊗X / 2)` on `q0` and `q1`.
+    pub fn rxx(&mut self, theta: f64, q0: usize, q1: usize) -> &mut Self {
+        self.pauli_rotation(theta, &[PauliTerm::x(q0), PauliTerm::x(q1)])
+    }
+
+    /// Append `exp(-i theta Y⊗Y / 2)` on `q0` and `q1`.
+    pub fn ryy(&mut self, theta: f64, q0: usize, q1: usize) -> &mut Self {
+        self.pauli_rotation(theta, &[PauliTerm::y(q0), PauliTerm::y(q1)])
+    }
+
+    /// Append a controlled Y as one [`Gate::Cu`], as OpenQASM `cy` parses.
+    pub fn cy(&mut self, control: usize, target: usize) -> &mut Self {
+        self.cu(Gate::Y.matrix_2x2(), control, target)
+    }
+
+    /// Append a controlled Hadamard as one [`Gate::Cu`], as OpenQASM `ch` parses.
+    pub fn ch(&mut self, control: usize, target: usize) -> &mut Self {
+        self.cu(Gate::H.matrix_2x2(), control, target)
+    }
+
+    /// Append a controlled `rx(theta)` as one [`Gate::Cu`], as OpenQASM `crx` parses.
+    pub fn crx(&mut self, theta: f64, control: usize, target: usize) -> &mut Self {
+        self.cu(Gate::Rx(theta).matrix_2x2(), control, target)
+    }
+
+    /// Append a controlled `ry(theta)` as one [`Gate::Cu`], as OpenQASM `cry` parses.
+    pub fn cry(&mut self, theta: f64, control: usize, target: usize) -> &mut Self {
+        self.cu(Gate::Ry(theta).matrix_2x2(), control, target)
+    }
+
+    /// Append a controlled `rz(theta)` as one [`Gate::Cu`], as OpenQASM `crz` parses.
+    pub fn crz(&mut self, theta: f64, control: usize, target: usize) -> &mut Self {
+        self.cu(Gate::Rz(theta).matrix_2x2(), control, target)
+    }
+
+    /// Append a Toffoli flipping `target` when both controls are |1⟩.
+    pub fn ccx(&mut self, control0: usize, control1: usize, target: usize) -> &mut Self {
+        self.circuit.add_gate(
+            Gate::mcu(Gate::X.matrix_2x2(), 2),
+            &[control0, control1, target],
+        );
+        self
+    }
+
+    /// Append iSWAP, lowered to the six Clifford gates the OpenQASM parser emits.
+    pub fn iswap(&mut self, q0: usize, q1: usize) -> &mut Self {
+        self.push_expansion(Parser::iswap_expansion(q0, q1))
+    }
+
+    /// Append a controlled swap of `q0` and `q1`, lowered to a Toffoli between two
+    /// CNOTs as the OpenQASM parser does.
+    pub fn cswap(&mut self, control: usize, q0: usize, q1: usize) -> &mut Self {
+        self.push_expansion(Parser::cswap_expansion(control, q0, q1))
+    }
 
     /// Append a controlled unitary applying `mat` to `target` when `control` is |1⟩.
     pub fn cu(&mut self, mat: [[Complex64; 2]; 2], control: usize, target: usize) -> &mut Self {
@@ -316,6 +380,16 @@ impl CircuitBuilder {
     /// match `targets.len()`.
     pub fn gate(&mut self, gate: Gate, targets: &[usize]) -> &mut Self {
         self.circuit.add_gate(gate, targets);
+        self
+    }
+
+    fn push_expansion(&mut self, expansion: impl IntoIterator<Item = Instruction>) -> &mut Self {
+        for instruction in expansion {
+            let Instruction::Gate { gate, targets } = instruction else {
+                unreachable!("a gate expansion holds gates only");
+            };
+            self.circuit.add_gate(gate, &targets);
+        }
         self
     }
 
@@ -530,6 +604,46 @@ mod tests {
             }
             _ => panic!("expected Gate instruction"),
         }
+    }
+
+    #[test]
+    fn standard_gates_match_the_parsed_lowering() {
+        let built = CircuitBuilder::new(3)
+            .ccx(0, 1, 2)
+            .cy(0, 1)
+            .ch(1, 2)
+            .crx(0.3, 0, 2)
+            .cry(-0.7, 2, 1)
+            .crz(1.1, 1, 0)
+            .u(0.4, -1.2, 2.5, 1)
+            .rxx(0.6, 0, 2)
+            .ryy(-0.9, 2, 1)
+            .iswap(0, 1)
+            .cswap(2, 0, 1)
+            .build();
+        let parsed = crate::circuit::openqasm::parse(
+            "OPENQASM 3.0;
+include \"stdgates.inc\";
+qubit[3] q;
+             ccx q[0], q[1], q[2];
+cy q[0], q[1];
+ch q[1], q[2];
+             crx(0.3) q[0], q[2];
+cry(-0.7) q[2], q[1];
+crz(1.1) q[1], q[0];
+             u(0.4, -1.2, 2.5) q[1];
+rxx(0.6) q[0], q[2];
+ryy(-0.9) q[2], q[1];
+             iswap q[0], q[1];
+cswap q[2], q[0], q[1];
+",
+        )
+        .expect("parse");
+        assert_eq!(built.num_qubits, parsed.num_qubits);
+        assert_eq!(
+            format!("{:?}", built.instructions),
+            format!("{:?}", parsed.instructions)
+        );
     }
 
     #[test]

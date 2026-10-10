@@ -54,6 +54,10 @@ impl From<PyPrismError> for PyErr {
                 let _ = value.setattr("required", data.required);
                 let _ = value.setattr("limit", data.limit);
                 let _ = value.setattr("env_var", data.env_var);
+            } else {
+                for name in ["resource", "required", "limit", "env_var"] {
+                    let _ = value.setattr(name, py.None());
+                }
             }
         });
         py_err

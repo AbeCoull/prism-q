@@ -13,9 +13,9 @@ use prism_q::{
     Probabilities, ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue,
     ShotsResult, simulate as core_simulate,
 };
-use pyo3::exceptions::PyNotImplementedError;
+use pyo3::exceptions::{PyIndexError, PyNotImplementedError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyString};
+use pyo3::types::{PyDict, PyIterator, PyList, PyString};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
@@ -237,8 +237,9 @@ impl PySimulation {
         })
     }
 
-    /// Per-qubit marginal probabilities `(p0, p1)`.
-    fn marginals(&self, py: Python<'_>) -> PyPrismResult<Vec<(f64, f64)>> {
+    /// Per-qubit marginal probabilities `(p0, p1)` with the route that produced
+    /// them. The result indexes and iterates as the list of pairs.
+    fn marginals(&self, py: Python<'_>) -> PyPrismResult<PyMarginalsResult> {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let require_exact = self.require_exact;
@@ -265,7 +266,10 @@ impl PySimulation {
             }
             sim.seed(seed).marginals()
         })?;
-        Ok(result.marginals)
+        Ok(PyMarginalsResult {
+            marginals: result.marginals,
+            metadata: PyRunMetadata::new(result.metadata),
+        })
     }
 
     /// Exact statevector amplitudes as a `complex128` array.
@@ -360,6 +364,10 @@ impl PySimulation {
     /// parameter instead of one backward sweep, and the only route for a
     /// backend with no adjoint pass. Takes the `expectation_gradient()`
     /// argument shape and returns the same pair.
+    ///
+    /// Honours `.initial_state()`. With a noise model attached every evaluation
+    /// reads the exact mixture, so the backend must be
+    /// `BackendKind.density_matrix()`, its GPU sibling, or `pauli_path()`.
     #[pyo3(signature = (hamiltonian, parameters))]
     fn expectation_gradient_shift<'py>(
         &self,
@@ -367,11 +375,6 @@ impl PySimulation {
         hamiltonian: Hamiltonian<'py>,
         parameters: Vec<(usize, usize)>,
     ) -> PyPrismResult<(f64, Bound<'py, PyArray1<f64>>)> {
-        if self.noise.is_some() {
-            return Err(invalid(
-                "expectation_gradient_shift() does not support noise",
-            ));
-        }
         let terms = hamiltonian.terms()?;
         let links: Vec<ParamLink> = parameters
             .into_iter()
@@ -383,6 +386,7 @@ impl PySimulation {
         let kind = self.kind.clone();
         let require_exact = self.require_exact;
         let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
         let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
@@ -393,7 +397,9 @@ impl PySimulation {
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
             }
-            // Carried so the core rejects it rather than ignoring it here.
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
+            }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
             }
@@ -669,6 +675,7 @@ impl PySimulation {
         })?;
         Ok(PyExpectationResult {
             values: result.values,
+            std_errors: result.std_errors,
             metadata: PyRunMetadata::new(result.metadata),
         })
     }
@@ -995,6 +1002,7 @@ pub fn run_batch(
 
 /// Parse an OpenQASM string and run with automatic backend selection.
 #[pyfunction]
+#[pyo3(signature = (source, seed = DEFAULT_SEED))]
 pub fn run_qasm(source: &str, seed: u64) -> PyPrismResult<PyRunOutcome> {
     let outcome = prism_q::run_qasm(source, seed)?;
     Ok(PyRunOutcome::from_outcome(outcome))
@@ -1231,10 +1239,55 @@ impl PyReducedDensityMatrix {
     }
 }
 
+/// Per-qubit marginals with the provenance of the run that produced them.
+///
+/// Indexes, iterates and measures its length as the `(p0, p1)` list it holds.
+#[pyclass(name = "MarginalsResult", module = "prism_q", sequence)]
+pub struct PyMarginalsResult {
+    marginals: Vec<(f64, f64)>,
+    metadata: PyRunMetadata,
+}
+
+#[pymethods]
+impl PyMarginalsResult {
+    /// `(P(0), P(1))` per qubit, indexed by qubit number.
+    #[getter]
+    fn marginals(&self) -> Vec<(f64, f64)> {
+        self.marginals.clone()
+    }
+
+    #[getter]
+    fn metadata(&self) -> PyRunMetadata {
+        self.metadata.clone()
+    }
+
+    fn __len__(&self) -> usize {
+        self.marginals.len()
+    }
+
+    fn __getitem__(&self, index: isize) -> PyResult<(f64, f64)> {
+        let len = self.marginals.len() as isize;
+        let resolved = if index < 0 { index + len } else { index };
+        if !(0..len).contains(&resolved) {
+            return Err(PyIndexError::new_err("marginal index out of range"));
+        }
+        Ok(self.marginals[resolved as usize])
+    }
+
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyIterator>> {
+        PyList::new(py, &self.marginals)?.try_iter()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("MarginalsResult(num_qubits={})", self.marginals.len())
+    }
+}
+
 /// Expectation values with the provenance of the run that produced them.
 #[pyclass(name = "ExpectationResult", module = "prism_q")]
 pub struct PyExpectationResult {
     values: Vec<f64>,
+    std_errors: Option<Vec<f64>>,
     metadata: PyRunMetadata,
 }
 
@@ -1244,6 +1297,15 @@ impl PyExpectationResult {
     #[getter]
     fn values<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         f64_array(py, self.values.clone())
+    }
+
+    /// One standard error per value as a `float64` array when a sampling route
+    /// estimated them, `None` when the route evaluates exactly.
+    #[getter]
+    fn std_errors<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.std_errors
+            .as_ref()
+            .map(|errors| f64_array(py, errors.clone()))
     }
 
     #[getter]

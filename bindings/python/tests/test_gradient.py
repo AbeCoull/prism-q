@@ -86,3 +86,57 @@ def test_parameter_shift_matches_the_adjoint_gradient():
 
     assert math.isclose(value, shift_value, abs_tol=1e-9)
     assert np.allclose(grad, shift_grad, atol=1e-9)
+
+
+def test_parameter_shift_reads_a_noisy_mixture_on_the_density_matrix():
+    from prism_q import BackendKind, NoiseModel
+
+    def circuit(theta):
+        return CircuitBuilder(2).ry(theta, 0).param(0).cx(0, 1).rx(0.4, 1).build()
+
+    def noisy_value(theta):
+        c = circuit(theta)
+        noise = NoiseModel.uniform_depolarizing(c, 0.05)
+        sim = simulate(c).backend(BackendKind.density_matrix()).noise(noise).seed(42)
+        return sim.expectation_values([[(0, "Z"), (1, "Z")]])[0]
+
+    theta = 0.7
+    template = circuit(theta)
+    noise = NoiseModel.uniform_depolarizing(template, 0.05)
+    hamiltonian = [(1.0, [(0, "Z"), (1, "Z")])]
+    value, grad = (
+        simulate(template)
+        .backend(BackendKind.density_matrix())
+        .noise(noise)
+        .seed(42)
+        .expectation_gradient_shift(hamiltonian, [(0, 0)])
+    )
+    step = 1e-5
+    finite = (noisy_value(theta + step) - noisy_value(theta - step)) / (2 * step)
+    assert math.isclose(value, noisy_value(theta), abs_tol=1e-10)
+    assert math.isclose(grad[0], finite, abs_tol=1e-6)
+
+
+def test_parameter_shift_under_noise_needs_the_mixture():
+    import pytest
+    from prism_q import NoiseModel, PrismError
+
+    template = CircuitBuilder(1).ry(0.3, 0).param(0).build()
+    noise = NoiseModel.uniform_depolarizing(template, 0.05)
+    with pytest.raises(PrismError):
+        simulate(template).noise(noise).seed(42).expectation_gradient_shift(
+            [(1.0, [(0, "Z")])], [(0, 0)]
+        )
+
+
+def test_parameter_shift_honours_the_initial_state():
+    theta = 0.9
+    template = CircuitBuilder(1).ry(theta, 0).param(0).build()
+    value, grad = (
+        simulate(template)
+        .initial_state([0, 1])
+        .seed(42)
+        .expectation_gradient_shift([(1.0, [(0, "Z")])], [(0, 0)])
+    )
+    assert math.isclose(value, -math.cos(theta), abs_tol=1e-12)
+    assert math.isclose(grad[0], math.sin(theta), abs_tol=1e-9)

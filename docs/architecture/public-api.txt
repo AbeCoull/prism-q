@@ -935,16 +935,24 @@ impl prism_q::circuit::builder::CircuitBuilder
 pub fn prism_q::circuit::builder::CircuitBuilder::barrier(&mut self, &[usize]) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::build(&mut self) -> prism_q::circuit::Circuit
 pub fn prism_q::circuit::builder::CircuitBuilder::build_parametric(&mut self) -> (prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)
+pub fn prism_q::circuit::builder::CircuitBuilder::ccx(&mut self, usize, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::ch(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::circuit(&self) -> &prism_q::circuit::Circuit
 pub fn prism_q::circuit::builder::CircuitBuilder::conditional(&mut self, prism_q::circuit::ClassicalCondition, prism_q::gates::Gate, &[usize]) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cphase(&mut self, f64, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::crx(&mut self, f64, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::cry(&mut self, f64, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::crz(&mut self, f64, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::cswap(&mut self, usize, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cu(&mut self, [[num_complex::Complex64; 2]; 2], usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cx(&mut self, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::cy(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cz(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::gate(&mut self, prism_q::gates::Gate, &[usize]) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::guarded(&mut self, prism_q::circuit::ClassicalCondition, impl core::ops::function::FnOnce(&mut prism_q::circuit::builder::CircuitBuilder)) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::h(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::id(&mut self, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::iswap(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::mcu(&mut self, [[num_complex::Complex64; 2]; 2], &[usize], usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::measure(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::measure_all(&mut self) -> &mut Self
@@ -961,7 +969,9 @@ pub fn prism_q::circuit::builder::CircuitBuilder::run(&self, u64) -> prism_q::er
 pub fn prism_q::circuit::builder::CircuitBuilder::run_shots(&self, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
 pub fn prism_q::circuit::builder::CircuitBuilder::run_with(&self, prism_q::BackendKind, u64) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::circuit::builder::CircuitBuilder::rx(&mut self, f64, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::rxx(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::ry(&mut self, f64, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::ryy(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::rz(&mut self, f64, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::rzz(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::s(&mut self, usize) -> &mut Self
@@ -971,6 +981,7 @@ pub fn prism_q::circuit::builder::CircuitBuilder::sx(&mut self, usize) -> &mut S
 pub fn prism_q::circuit::builder::CircuitBuilder::sxdg(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::t(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::tdg(&mut self, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::u(&mut self, f64, f64, f64, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::x(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::y(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::z(&mut self, usize) -> &mut Self
@@ -2998,16 +3009,24 @@ impl prism_q::circuit::builder::CircuitBuilder
 pub fn prism_q::circuit::builder::CircuitBuilder::barrier(&mut self, &[usize]) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::build(&mut self) -> prism_q::circuit::Circuit
 pub fn prism_q::circuit::builder::CircuitBuilder::build_parametric(&mut self) -> (prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)
+pub fn prism_q::circuit::builder::CircuitBuilder::ccx(&mut self, usize, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::ch(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::circuit(&self) -> &prism_q::circuit::Circuit
 pub fn prism_q::circuit::builder::CircuitBuilder::conditional(&mut self, prism_q::circuit::ClassicalCondition, prism_q::gates::Gate, &[usize]) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cphase(&mut self, f64, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::crx(&mut self, f64, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::cry(&mut self, f64, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::crz(&mut self, f64, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::cswap(&mut self, usize, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cu(&mut self, [[num_complex::Complex64; 2]; 2], usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cx(&mut self, usize, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::cy(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cz(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::gate(&mut self, prism_q::gates::Gate, &[usize]) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::guarded(&mut self, prism_q::circuit::ClassicalCondition, impl core::ops::function::FnOnce(&mut prism_q::circuit::builder::CircuitBuilder)) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::h(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::id(&mut self, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::iswap(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::mcu(&mut self, [[num_complex::Complex64; 2]; 2], &[usize], usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::measure(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::measure_all(&mut self) -> &mut Self
@@ -3024,7 +3043,9 @@ pub fn prism_q::circuit::builder::CircuitBuilder::run(&self, u64) -> prism_q::er
 pub fn prism_q::circuit::builder::CircuitBuilder::run_shots(&self, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
 pub fn prism_q::circuit::builder::CircuitBuilder::run_with(&self, prism_q::BackendKind, u64) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::circuit::builder::CircuitBuilder::rx(&mut self, f64, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::rxx(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::ry(&mut self, f64, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::ryy(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::rz(&mut self, f64, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::rzz(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::s(&mut self, usize) -> &mut Self
@@ -3034,6 +3055,7 @@ pub fn prism_q::circuit::builder::CircuitBuilder::sx(&mut self, usize) -> &mut S
 pub fn prism_q::circuit::builder::CircuitBuilder::sxdg(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::t(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::tdg(&mut self, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::u(&mut self, f64, f64, f64, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::x(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::y(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::z(&mut self, usize) -> &mut Self

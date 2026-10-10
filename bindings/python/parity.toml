@@ -1,0 +1,637 @@
+# Rust-to-Python parity manifest, checked by tests/test_parity.py.
+#
+# The test reads docs/architecture/public-api.txt, keeps the items the [scope] rules
+# select, and fails when a tracked item has no entry under [items] or an entry names a
+# Rust item that no longer exists. CI regenerates the snapshot for every new public
+# Rust item, so each one reaching the tracked surface needs a Python decision here.
+#
+# Keys: `Type::member` for a method, field or enum variant (module path dropped,
+# generic parameters stripped), a bare name for a crate-root function, and the module
+# path below the crate root for a function exported only from a module. Methods of
+# trait impls and fields of enum variants are never tracked.
+#
+# Values: the Python name, dotted from the `prism_q` package, which must resolve; or
+# `{ rust_only = "reason" }`.
+
+[scope]
+# Every member of these types is tracked.
+types = [
+  # Entry points and builders
+  "Simulate", "SimulateProgram", "CircuitBuilder", "Circuit", "BackendKind",
+  "Parameters", "PreparedCircuit", "PauliObservable", "CompiledSampler",
+  "DynamicProgram", "DynamicProgramBuilder", "ThreadPool",
+  # Results
+  "RunOutcome", "ShotsResult", "CountsResult", "MarginalsResult", "ExpectationResult",
+  "ObservableExpectation", "ObservableVariance", "OverlapResult", "EntropyResult",
+  "ReducedDensityMatrix", "RunMetadata", "BondReport", "ExpectationGradient",
+  # QEC
+  "QecProgram", "QecSampleResult", "QecObservableEstimate", "QecOptions", "QecBasis",
+  "QecPauli", "QecRecordRef", "QecNoise", "QecCircuitNoise", "QecTStrategy",
+  "DetectorErrorModel", "ErrorMechanism", "UnionFindDecoder", "MatchingDecoder",
+  "BpOsdDecoder", "BpOsdOptions", "BpMethod", "OsdMethod",
+  # Noise construction
+  "NoiseModel", "NoiseBuilder", "NoiseChannel", "GateFilter", "GateTimes",
+  "DriftDistribution", "DeviceCalibration", "ReadoutError",
+]
+# Every free function is tracked except those matching these patterns.
+exclude = [
+  "distributed::*",               # communicator plumbing under the distributed backend
+  "qec::observable_reroute::*",   # SPD rerouting internals of the T-strategy runner
+  "sim::compiled::*_chunk_size",  # sampler chunk tuning
+]
+
+[items]
+# Free functions
+"bitstring" = { rust_only = "Python count keys are already bitstrings" }
+"circuit::expand_pauli_rotations" = { rust_only = "lowering pass; Circuit.to_qasm(expand_pauli_rotations=True) applies it on export" }
+"circuit::expand_qft_blocks" = { rust_only = "fusion-pass lowering" }
+"circuit::guarded" = "CircuitBuilder.guarded"
+"circuit::openqasm::parse" = "parse_qasm"
+"circuit::openqasm::parse_braket" = "parse_braket"
+"circuit::openqasm::parse_dynamic" = "parse_qasm_dynamic"
+"circuit::openqasm::parse_parametric" = "parse_qasm_parametric"
+"circuit::openqasm::parse_parametric_with" = { rust_only = "dialect selection; Python reads Braket's dialect through parse_braket" }
+"circuit::openqasm::parse_with" = { rust_only = "dialect selection; Python reads Braket's dialect through parse_braket" }
+"circuit::qasm_export::to_qasm3" = "Circuit.to_qasm"
+"circuit::qft_textbook_steps" = { rust_only = "QFT expansion helper for the fusion pass" }
+"circuits::brickwork_circuit" = { rust_only = "benchmark workload" }
+"circuits::clifford_heavy_circuit" = "circuits.clifford_heavy"
+"circuits::clifford_prefix_measured_blocks" = { rust_only = "benchmark workload" }
+"circuits::clifford_random_pairs" = "circuits.clifford_random_pairs"
+"circuits::clifford_t_circuit" = "circuits.clifford_t"
+"circuits::cz_chain_circuit" = "circuits.cz_chain"
+"circuits::diagonal_mixed_circuit" = { rust_only = "benchmark workload" }
+"circuits::disjoint_block_layers_circuit" = { rust_only = "benchmark workload" }
+"circuits::ghz_circuit" = "circuits.ghz"
+"circuits::hardware_efficient_ansatz" = "circuits.hardware_efficient_ansatz"
+"circuits::independent_bell_pairs" = "circuits.independent_bell_pairs"
+"circuits::independent_random_blocks" = "circuits.independent_random_blocks"
+"circuits::jordan_wigner_hamiltonian" = { rust_only = "benchmark Hamiltonian" }
+"circuits::local_clifford_blocks" = "circuits.local_clifford_blocks"
+"circuits::matched_brickwork_circuit" = { rust_only = "benchmark workload" }
+"circuits::measure_split_circuit" = { rust_only = "benchmark workload" }
+"circuits::partially_independent_circuit" = { rust_only = "benchmark workload" }
+"circuits::phase_estimation_circuit" = "circuits.phase_estimation"
+"circuits::qaoa_circuit" = "circuits.qaoa"
+"circuits::qft_circuit" = "circuits.qft"
+"circuits::quantum_volume_circuit" = "circuits.quantum_volume"
+"circuits::random_circuit" = "circuits.random"
+"circuits::single_qubit_rotation_circuit" = "circuits.single_qubit_rotation"
+"circuits::sparse_walk_circuit" = { rust_only = "benchmark workload" }
+"circuits::w_state_circuit" = "circuits.w_state"
+"compile_detector_sampler" = { rust_only = "detector sampling of a Circuit; Python samples detectors through QecProgram" }
+"compile_forward" = { rust_only = "alternate compile route; CompiledSampler picks the route" }
+"compile_measurements" = "CompiledSampler"
+"compile_noisy" = "CompiledSampler"
+"compile_qec_program_rows" = { rust_only = "QEC compiler internals" }
+"density_matrix_expectation_values" = "Simulation.density_matrix_expectation_values"
+"gpu::is_available" = "GpuContext.is_available"
+"gpu::min_qubits" = { rust_only = "crossover read from PRISM_GPU_MIN_QUBITS, which Python sets directly" }
+"gpu::nvrtc_available" = { rust_only = "gpu_info reports why a device is unusable" }
+"gpu::stabilizer_min_qubits" = { rust_only = "crossover read from PRISM_STABILIZER_GPU_MIN_QUBITS, which Python sets directly" }
+"inverse_light_cone" = { rust_only = "analysis helper of the Pauli propagation engines" }
+"noisy_marginals_analytical" = "noisy_marginals_analytical"
+"parse_qec_program" = "QecProgram.from_text"
+"run_expectation_gradient" = "Simulation.expectation_gradient"
+"run_expectation_gradient_shift" = "Simulation.expectation_gradient_shift"
+"run_expectation_values" = "Simulation.expectation_values"
+"run_observable_expectation" = "Simulation.observable_expectation"
+"run_on" = { rust_only = "runs on a caller-held Backend trait object" }
+"run_on_state" = { rust_only = "runs on a caller-held Backend trait object" }
+"run_qasm" = "run_qasm"
+"run_qec_program" = "QecProgram.run"
+"run_qec_program_reference" = "QecProgram.run_reference"
+"run_qec_program_spd_rerouted" = { rust_only = "SPD observable rerouting for research runs" }
+"run_qec_program_with_strategy" = { rust_only = "T-strategy override; Python runs the automatic strategy" }
+"run_shots_compiled" = "Simulation.shots"
+"run_shots_compiled_with_gpu" = { rust_only = "Python selects BackendKind.stabilizer_gpu(context) for device shots" }
+"run_shots_noisy" = "Simulation.shots"
+"run_spd" = "BackendKind.deterministic_pauli"
+"run_spd_observable" = { rust_only = "same engine through Simulation.expectation_values with BackendKind.deterministic_pauli()" }
+"run_spd_observable_budgeted" = { rust_only = "same engine through Simulation.expectation_values with BackendKind.deterministic_pauli_budget()" }
+"run_spd_observable_light_cone" = { rust_only = "light-cone pruned SPD for research runs" }
+"run_spd_with" = "BackendKind.deterministic_pauli_budget"
+"run_spp" = "BackendKind.stochastic_pauli"
+"run_spp_observable" = { rust_only = "same engine through Simulation.expectation_values with BackendKind.stochastic_pauli()" }
+"run_stabilizer_rank" = "BackendKind.stabilizer_rank"
+"run_stabilizer_rank_approx" = { rust_only = "pruned stabilizer-rank expansion for research runs" }
+"sim::calibration::presets::neutral_atom" = "DeviceCalibration.neutral_atom"
+"sim::calibration::presets::superconducting_transmon" = "DeviceCalibration.superconducting_transmon"
+"sim::calibration::presets::trapped_ion" = "DeviceCalibration.trapped_ion"
+"sim::run_batch" = "run_batch"
+"sim::stabilizer_rank::run_stabilizer_rank_shots" = { rust_only = "shot sampling of the stabilizer-rank expansion; Simulation.shots reaches it under BackendKind.auto()" }
+"sim::unified_pauli::run_pauli_path_observable" = "BackendKind.pauli_path"
+"simulate" = "simulate"
+"simulate_program" = "simulate_program"
+"stabilizer_inner_product" = { rust_only = "operates on held tableaux; Python compares states through Simulation.overlap" }
+"stabilizer_overlap_sq" = { rust_only = "operates on held tableaux; Python compares states through Simulation.overlap" }
+
+# Simulate and SimulateProgram
+"Simulate::backend" = "Simulation.backend"
+"Simulate::braket_results" = { rust_only = "Python evaluates Braket result types through BraketProgram.evaluate" }
+"Simulate::braket_results_sampled" = { rust_only = "Python evaluates Braket result types through BraketProgram.evaluate" }
+"Simulate::distributed" = { rust_only = "Python selects BackendKind.statevector_distributed(context)" }
+"Simulate::entanglement_entropy" = "Simulation.entanglement_entropy"
+"Simulate::expectation_gradient" = "Simulation.expectation_gradient"
+"Simulate::expectation_gradient_shift" = "Simulation.expectation_gradient_shift"
+"Simulate::expectation_values" = "Simulation.expectation_values"
+"Simulate::expectation_values_reported" = "Simulation.expectation_values_reported"
+"Simulate::gpu" = { rust_only = "Python selects BackendKind.statevector_gpu(context)" }
+"Simulate::gpu_auto" = { rust_only = "Python selects BackendKind.auto_gpu(context)" }
+"Simulate::initial_density_matrix" = "Simulation.initial_density_matrix"
+"Simulate::initial_state" = "Simulation.initial_state"
+"Simulate::marginals" = "Simulation.marginals"
+"Simulate::noise" = "Simulation.noise"
+"Simulate::observable_expectation" = "Simulation.observable_expectation"
+"Simulate::observable_variance" = "Simulation.observable_variance"
+"Simulate::overlap" = "Simulation.overlap"
+"Simulate::probabilities_of" = "Simulation.probabilities_of"
+"Simulate::reduced_density_matrix" = "Simulation.reduced_density_matrix"
+"Simulate::require_exact" = "Simulation.require_exact"
+"Simulate::run" = "Simulation.run"
+"Simulate::sample_counts" = "Simulation.sample_counts"
+"Simulate::seed" = "Simulation.seed"
+"Simulate::shots" = "Simulation.shots"
+"Simulate::state_vector" = "Simulation.state_vector"
+"SimulateProgram::backend" = "ProgramSimulation.backend"
+"SimulateProgram::max_steps" = "ProgramSimulation.max_steps"
+"SimulateProgram::sample_counts" = "ProgramSimulation.sample_counts"
+"SimulateProgram::seed" = "ProgramSimulation.seed"
+"SimulateProgram::shots" = "ProgramSimulation.shots"
+
+# CircuitBuilder
+"CircuitBuilder::barrier" = "CircuitBuilder.barrier"
+"CircuitBuilder::build" = "CircuitBuilder.build"
+"CircuitBuilder::build_parametric" = { rust_only = "Python reads build() and parameters() separately" }
+"CircuitBuilder::ccx" = "CircuitBuilder.ccx"
+"CircuitBuilder::ch" = "CircuitBuilder.ch"
+"CircuitBuilder::circuit" = { rust_only = "borrow of the circuit in progress; Python's build() returns a copy and keeps the builder" }
+"CircuitBuilder::conditional" = "CircuitBuilder.conditional"
+"CircuitBuilder::cphase" = "CircuitBuilder.cphase"
+"CircuitBuilder::crx" = "CircuitBuilder.crx"
+"CircuitBuilder::cry" = "CircuitBuilder.cry"
+"CircuitBuilder::crz" = "CircuitBuilder.crz"
+"CircuitBuilder::cswap" = "CircuitBuilder.cswap"
+"CircuitBuilder::cu" = "CircuitBuilder.cu"
+"CircuitBuilder::cx" = "CircuitBuilder.cx"
+"CircuitBuilder::cy" = "CircuitBuilder.cy"
+"CircuitBuilder::cz" = "CircuitBuilder.cz"
+"CircuitBuilder::gate" = "CircuitBuilder.gate"
+"CircuitBuilder::guarded" = "CircuitBuilder.guarded"
+"CircuitBuilder::h" = "CircuitBuilder.h"
+"CircuitBuilder::id" = "CircuitBuilder.id"
+"CircuitBuilder::iswap" = "CircuitBuilder.iswap"
+"CircuitBuilder::mcu" = "CircuitBuilder.mcu"
+"CircuitBuilder::measure" = "CircuitBuilder.measure"
+"CircuitBuilder::measure_all" = "CircuitBuilder.measure_all"
+"CircuitBuilder::measure_in_basis" = "CircuitBuilder.measure_in_basis"
+"CircuitBuilder::measure_pauli_product" = "CircuitBuilder.measure_pauli_product"
+"CircuitBuilder::new" = "CircuitBuilder"
+"CircuitBuilder::new_with_classical" = "CircuitBuilder"
+"CircuitBuilder::p" = "CircuitBuilder.p"
+"CircuitBuilder::param" = "CircuitBuilder.param"
+"CircuitBuilder::parameters" = "CircuitBuilder.parameters"
+"CircuitBuilder::pauli_rotation" = "CircuitBuilder.pauli_rotation"
+"CircuitBuilder::reset" = "CircuitBuilder.reset"
+"CircuitBuilder::run" = { rust_only = "Python runs through simulate(builder.build())" }
+"CircuitBuilder::run_shots" = { rust_only = "Python runs through simulate(builder.build())" }
+"CircuitBuilder::run_with" = { rust_only = "Python runs through simulate(builder.build())" }
+"CircuitBuilder::rx" = "CircuitBuilder.rx"
+"CircuitBuilder::rxx" = "CircuitBuilder.rxx"
+"CircuitBuilder::ry" = "CircuitBuilder.ry"
+"CircuitBuilder::ryy" = "CircuitBuilder.ryy"
+"CircuitBuilder::rz" = "CircuitBuilder.rz"
+"CircuitBuilder::rzz" = "CircuitBuilder.rzz"
+"CircuitBuilder::s" = "CircuitBuilder.s"
+"CircuitBuilder::sdg" = "CircuitBuilder.sdg"
+"CircuitBuilder::swap" = "CircuitBuilder.swap"
+"CircuitBuilder::sx" = "CircuitBuilder.sx"
+"CircuitBuilder::sxdg" = "CircuitBuilder.sxdg"
+"CircuitBuilder::t" = "CircuitBuilder.t"
+"CircuitBuilder::tdg" = "CircuitBuilder.tdg"
+"CircuitBuilder::u" = "CircuitBuilder.u"
+"CircuitBuilder::x" = "CircuitBuilder.x"
+"CircuitBuilder::y" = "CircuitBuilder.y"
+"CircuitBuilder::z" = "CircuitBuilder.z"
+
+# Circuit
+"Circuit::add_barrier" = "Circuit.add_barrier"
+"Circuit::add_gate" = "Circuit.add_gate"
+"Circuit::add_measure" = "Circuit.add_measure"
+"Circuit::add_pauli_rotation" = "Circuit.add_pauli_rotation"
+"Circuit::add_reset" = "Circuit.add_reset"
+"Circuit::add_save" = "Circuit.add_save"
+"Circuit::add_unitary" = { rust_only = "Python builds the gate with Gate.unitary and appends it with add_gate" }
+"Circuit::depth" = "Circuit.depth"
+"Circuit::draw" = "Circuit.draw"
+"Circuit::fold_static_guards" = { rust_only = "lowering pass run before dispatch" }
+"Circuit::gate_count" = "Circuit.gate_count"
+"Circuit::has_entangling_gates" = { rust_only = "dispatch predicate" }
+"Circuit::has_resets" = { rust_only = "dispatch predicate" }
+"Circuit::has_t_gates" = { rust_only = "dispatch predicate; Circuit.t_count covers it" }
+"Circuit::has_terminal_measurements_only" = { rust_only = "dispatch predicate" }
+"Circuit::heatmap" = "Circuit.heatmap"
+"Circuit::independent_subsystems" = { rust_only = "dispatch analysis" }
+"Circuit::instructions" = { rust_only = "the instruction list is not exposed; Python reads gate_count, measurement_map and to_qasm" }
+"Circuit::is_clifford_only" = "Circuit.is_clifford_only"
+"Circuit::is_clifford_plus_t" = { rust_only = "dispatch predicate" }
+"Circuit::is_sparse_friendly" = { rust_only = "dispatch predicate" }
+"Circuit::measure_all" = "CircuitBuilder.measure_all"
+"Circuit::measurement_map" = "Circuit.measurement_map"
+"Circuit::new" = "Circuit"
+"Circuit::num_classical_bits" = "Circuit.num_classical_bits"
+"Circuit::num_qubits" = "Circuit.num_qubits"
+"Circuit::save_count" = "Circuit.save_count"
+"Circuit::summary" = "Circuit.summary"
+"Circuit::t_count" = "Circuit.t_count"
+"Circuit::to_svg" = "Circuit.to_svg"
+"Circuit::to_svg_heatmap" = "Circuit.to_svg_heatmap"
+"Circuit::without_measurements" = { rust_only = "lowering helper of the expectation terminals" }
+
+# BackendKind
+"BackendKind::Auto" = "BackendKind.auto"
+"BackendKind::AutoGpu" = "BackendKind.auto_gpu"
+"BackendKind::DensityMatrix" = "BackendKind.density_matrix"
+"BackendKind::DensityMatrixGpu" = "BackendKind.density_matrix_gpu"
+"BackendKind::DeterministicPauli" = "BackendKind.deterministic_pauli"
+"BackendKind::Factored" = "BackendKind.factored"
+"BackendKind::FactoredStabilizer" = "BackendKind.factored_stabilizer"
+"BackendKind::Mps" = "BackendKind.mps"
+"BackendKind::PauliPath" = "BackendKind.pauli_path"
+"BackendKind::ProductState" = "BackendKind.product_state"
+"BackendKind::Sparse" = "BackendKind.sparse"
+"BackendKind::Stabilizer" = "BackendKind.stabilizer"
+"BackendKind::StabilizerGpu" = "BackendKind.stabilizer_gpu"
+"BackendKind::StabilizerRank" = "BackendKind.stabilizer_rank"
+"BackendKind::Statevector" = "BackendKind.statevector"
+"BackendKind::StatevectorDistributed" = "BackendKind.statevector_distributed"
+"BackendKind::StatevectorGpu" = "BackendKind.statevector_gpu"
+"BackendKind::StochasticPauli" = "BackendKind.stochastic_pauli"
+"BackendKind::TensorNetwork" = "BackendKind.tensor_network"
+"BackendKind::TensorNetworkBounded" = "BackendKind.tensor_network_bounded"
+"BackendKind::supports_general_noise" = { rust_only = "capability query the dispatcher reads" }
+"BackendKind::supports_noisy_per_shot" = { rust_only = "capability query the dispatcher reads" }
+
+# Parameters and PreparedCircuit
+"Parameters::all_rotations" = "Parameters.all_rotations"
+"Parameters::bind" = "Parameters.bind"
+"Parameters::bind_into" = { rust_only = "in-place bind; Python's bind returns a new Circuit" }
+"Parameters::from_links" = { rust_only = "Python builds with Parameters(num_slots) and link()" }
+"Parameters::is_empty" = "Parameters.is_empty"
+"Parameters::link" = "Parameters.link"
+"Parameters::links" = "Parameters.links"
+"Parameters::name_of" = "Parameters.name_of"
+"Parameters::new" = "Parameters"
+"Parameters::num_slots" = "Parameters.num_slots"
+"Parameters::pinned_to" = { rust_only = "Python pins a set to its circuit when it is built" }
+"Parameters::slot_of" = "Parameters.slot_of"
+"Parameters::unread_slots" = "Parameters.unread_slots"
+"Parameters::validate" = "Parameters.validate"
+"Parameters::values" = "Parameters.values"
+"Parameters::with_names" = "Parameters.with_names"
+"PreparedCircuit::bind" = "PreparedCircuit.bind"
+"PreparedCircuit::bind_fused" = { rust_only = "returns the fused circuit the engine replays" }
+"PreparedCircuit::expectation_values" = "PreparedCircuit.expectation_values"
+"PreparedCircuit::expectation_values_many" = "PreparedCircuit.expectation_values_many"
+"PreparedCircuit::new" = "PreparedCircuit"
+"PreparedCircuit::observable_expectation" = "PreparedCircuit.observable_expectation"
+"PreparedCircuit::observable_expectation_many" = "PreparedCircuit.observable_expectation_many"
+"PreparedCircuit::parameters" = "PreparedCircuit.parameters"
+"PreparedCircuit::reuses_fusion_plan" = "PreparedCircuit.reuses_fusion_plan"
+"PreparedCircuit::run" = "PreparedCircuit.run"
+"PreparedCircuit::run_many" = "PreparedCircuit.run_many"
+"PreparedCircuit::template" = "PreparedCircuit.template"
+"PreparedCircuit::with_backend" = "PreparedCircuit"
+
+# PauliObservable and CompiledSampler
+"PauliObservable::add_term" = { rust_only = "Python builds an observable from its full term list" }
+"PauliObservable::from_terms" = "PauliObservable"
+"PauliObservable::new" = "PauliObservable"
+"PauliObservable::num_groups" = "PauliObservable.num_groups"
+"PauliObservable::num_terms" = "PauliObservable.num_terms"
+"PauliObservable::split_identity" = { rust_only = "helper of the variance terminals" }
+"PauliObservable::square" = { rust_only = "helper of the variance terminals; Simulation.observable_variance applies it" }
+"PauliObservable::terms" = "PauliObservable.terms"
+"CompiledSampler::exact_counts" = "CompiledSampler.exact_counts"
+"CompiledSampler::num_measurements" = "CompiledSampler.num_measurements"
+"CompiledSampler::parity_report" = { rust_only = "diagnostic text of the parity structure" }
+"CompiledSampler::parity_stats" = { rust_only = "diagnostic counts of the parity structure" }
+"CompiledSampler::rank" = "CompiledSampler.rank"
+"CompiledSampler::sample" = { rust_only = "one shot; Python draws batches with sample(shots)" }
+"CompiledSampler::sample_bulk" = "CompiledSampler.sample"
+"CompiledSampler::sample_bulk_packed" = "CompiledSampler.sample_packed"
+"CompiledSampler::sample_bulk_packed_device" = { rust_only = "device-resident shots for CUDA consumers" }
+"CompiledSampler::sample_chunked" = { rust_only = "accumulator streaming; Python reads marginals, parity_expectations and correlators" }
+"CompiledSampler::sample_chunked_with_size" = { rust_only = "accumulator streaming; Python reads marginals, parity_expectations and correlators" }
+"CompiledSampler::sample_counts" = "CompiledSampler.sample_counts"
+"CompiledSampler::sample_detection_events" = { rust_only = "detector sampling; Python samples detectors through QecProgram" }
+"CompiledSampler::sample_marginals" = "CompiledSampler.marginals"
+"CompiledSampler::sparse" = { rust_only = "internal parity representation" }
+"CompiledSampler::try_sample_bulk_packed" = "CompiledSampler.sample_packed"
+"CompiledSampler::try_sample_counts" = "CompiledSampler.sample_counts"
+"CompiledSampler::try_sample_marginals" = "CompiledSampler.marginals"
+"CompiledSampler::with_gpu" = { rust_only = "device sampling for CUDA consumers" }
+
+# Dynamic programs
+"DynamicProgram::blocks" = { rust_only = "basic-block representation" }
+"DynamicProgram::new" = { rust_only = "Python builds through DynamicProgramBuilder or parse_qasm_dynamic" }
+"DynamicProgram::num_classical_bits" = "DynamicProgram.num_classical_bits"
+"DynamicProgram::num_qubits" = "DynamicProgram.num_qubits"
+"DynamicProgram::static_circuit" = "DynamicProgram.static_circuit"
+"DynamicProgram::variables" = "DynamicProgram.variables"
+"DynamicProgramBuilder::add_gate" = "DynamicProgramBuilder.add_gate"
+"DynamicProgramBuilder::add_instruction" = { rust_only = "takes a raw Instruction" }
+"DynamicProgramBuilder::add_measure" = "DynamicProgramBuilder.add_measure"
+"DynamicProgramBuilder::add_reset" = "DynamicProgramBuilder.add_reset"
+"DynamicProgramBuilder::add_rotation" = "DynamicProgramBuilder.add_rotation"
+"DynamicProgramBuilder::append" = "DynamicProgramBuilder.append"
+"DynamicProgramBuilder::assign" = "DynamicProgramBuilder.assign"
+"DynamicProgramBuilder::begin_else" = "DynamicProgramBuilder.begin_else"
+"DynamicProgramBuilder::begin_if" = "DynamicProgramBuilder.begin_if"
+"DynamicProgramBuilder::begin_while" = "DynamicProgramBuilder.begin_while"
+"DynamicProgramBuilder::break_loop" = "DynamicProgramBuilder.break_loop"
+"DynamicProgramBuilder::build" = "DynamicProgramBuilder.build"
+"DynamicProgramBuilder::continue_loop" = "DynamicProgramBuilder.continue_loop"
+"DynamicProgramBuilder::declare" = "DynamicProgramBuilder.declare"
+"DynamicProgramBuilder::end" = "DynamicProgramBuilder.end"
+"DynamicProgramBuilder::expr" = { rust_only = "Python passes expressions as strings and parses them on the way in" }
+"DynamicProgramBuilder::new" = "DynamicProgramBuilder"
+"DynamicProgramBuilder::num_classical_bits" = { rust_only = "read from the built DynamicProgram" }
+"DynamicProgramBuilder::num_qubits" = { rust_only = "read from the built DynamicProgram" }
+"DynamicProgramBuilder::variable" = { rust_only = "Python names variables by string" }
+
+"ThreadPool::install" = "ThreadPool.install"
+"ThreadPool::num_threads" = "ThreadPool.num_threads"
+"ThreadPool::with_threads" = "ThreadPool"
+
+# Results
+"RunOutcome::classical_bits" = "RunOutcome.classical_bits"
+"RunOutcome::metadata" = "RunOutcome.metadata"
+"RunOutcome::probabilities" = "RunOutcome.probabilities"
+"RunOutcome::saves" = "RunOutcome.saves"
+"ShotsResult::counts" = "ShotsResult.counts"
+"ShotsResult::leaked" = "ShotsResult.leaked"
+"ShotsResult::metadata" = "ShotsResult.metadata"
+"ShotsResult::num_classical_bits" = "ShotsResult.num_classical_bits"
+"ShotsResult::num_shots" = "ShotsResult.num_shots"
+"ShotsResult::shots" = "ShotsResult.shots"
+"CountsResult::counts" = "CountsResult.counts"
+"CountsResult::into_counts" = { rust_only = "ownership helper" }
+"CountsResult::metadata" = "CountsResult.metadata"
+"CountsResult::num_classical_bits" = "CountsResult.num_classical_bits"
+"MarginalsResult::into_vec" = { rust_only = "ownership helper" }
+"MarginalsResult::marginals" = "MarginalsResult.marginals"
+"MarginalsResult::metadata" = "MarginalsResult.metadata"
+"ExpectationResult::into_values" = { rust_only = "ownership helper" }
+"ExpectationResult::metadata" = "ExpectationResult.metadata"
+"ExpectationResult::std_errors" = "ExpectationResult.std_errors"
+"ExpectationResult::values" = "ExpectationResult.values"
+"ObservableExpectation::group_variances" = "ObservableExpectation.group_variances"
+"ObservableExpectation::mean" = "ObservableExpectation.mean"
+"ObservableExpectation::metadata" = "ObservableExpectation.metadata"
+"ObservableExpectation::std_error" = "ObservableExpectation.std_error"
+"ObservableExpectation::variance" = "ObservableExpectation.variance"
+"ObservableVariance::mean" = "ObservableVariance.mean"
+"ObservableVariance::metadata" = "ObservableVariance.metadata"
+"ObservableVariance::variance" = "ObservableVariance.variance"
+"OverlapResult::fidelity" = "OverlapResult.fidelity"
+"OverlapResult::left" = "OverlapResult.left"
+"OverlapResult::right" = "OverlapResult.right"
+"EntropyResult::entropy" = "EntropyResult.entropy"
+"EntropyResult::metadata" = "EntropyResult.metadata"
+"EntropyResult::schmidt_values" = "EntropyResult.schmidt_values"
+"EntropyResult::subsystem" = "EntropyResult.subsystem"
+"ReducedDensityMatrix::data" = "ReducedDensityMatrix.matrix"
+"ReducedDensityMatrix::metadata" = "ReducedDensityMatrix.metadata"
+"ReducedDensityMatrix::purity" = "ReducedDensityMatrix.purity"
+"ReducedDensityMatrix::qubits" = "ReducedDensityMatrix.qubits"
+"RunMetadata::backend" = "RunMetadata.backend"
+"RunMetadata::bond" = "RunMetadata.bond"
+"RunMetadata::engine" = "RunMetadata.engine"
+"RunMetadata::exactness" = { rust_only = "Python reads the same fact through is_exact and fidelity_lower_bound" }
+"RunMetadata::fidelity_lower_bound" = "RunMetadata.fidelity_lower_bound"
+"RunMetadata::is_exact" = "RunMetadata.is_exact"
+"RunMetadata::placement" = "RunMetadata.placement"
+"RunMetadata::shots" = "RunMetadata.shots"
+"BondReport::cap" = "BondReport.cap"
+"BondReport::peak" = "BondReport.peak"
+"BondReport::saturated" = "BondReport.saturated"
+"ExpectationGradient::gradient" = "Simulation.expectation_gradient"
+"ExpectationGradient::value" = "Simulation.expectation_gradient"
+
+# QEC programs and results
+"QecProgram::color_memory" = "QecProgram.color_memory"
+"QecProgram::detector" = "QecProgram.detector"
+"QecProgram::detector_error_model" = "QecProgram.detector_error_model"
+"QecProgram::detector_rows" = { rust_only = "compiled row view" }
+"QecProgram::detector_with_coords" = "QecProgram.detector"
+"QecProgram::empty_result" = { rust_only = "constructor for custom samplers" }
+"QecProgram::expectation_value" = "QecProgram.expectation_value"
+"QecProgram::expectation_value_ops" = { rust_only = "op-level view" }
+"QecProgram::feedforward" = "QecProgram.feedforward"
+"QecProgram::from_ops" = { rust_only = "op-level construction; Python builds through methods or from_text" }
+"QecProgram::from_text" = "QecProgram.from_text"
+"QecProgram::has_leakage" = { rust_only = "router predicate" }
+"QecProgram::measure" = "QecProgram.measure"
+"QecProgram::measure_pauli_product" = "QecProgram.measure_pauli_product"
+"QecProgram::measure_x" = "QecProgram.measure_x"
+"QecProgram::measure_z" = "QecProgram.measure_z"
+"QecProgram::new" = "QecProgram"
+"QecProgram::noise" = "QecProgram.noise"
+"QecProgram::num_detectors" = "QecProgram.num_detectors"
+"QecProgram::num_expectation_values" = "QecProgram.num_expectation_values"
+"QecProgram::num_measurements" = "QecProgram.num_measurements"
+"QecProgram::num_observables" = "QecProgram.num_observables"
+"QecProgram::num_qubits" = "QecProgram.num_qubits"
+"QecProgram::observable_include" = "QecProgram.observable_include"
+"QecProgram::observable_rows" = { rust_only = "compiled row view" }
+"QecProgram::ops" = { rust_only = "op-level view" }
+"QecProgram::options" = { rust_only = "Python sets options through set_options and does not read them back" }
+"QecProgram::postselect" = "QecProgram.postselect"
+"QecProgram::postselection_rows" = { rust_only = "compiled row view" }
+"QecProgram::push_gate" = "QecProgram.push_gate"
+"QecProgram::push_op" = { rust_only = "op-level construction" }
+"QecProgram::repetition_memory" = "QecProgram.repetition_memory"
+"QecProgram::reset" = "QecProgram.reset"
+"QecProgram::set_options" = "QecProgram.set_options"
+"QecProgram::surface_memory" = "QecProgram.surface_memory"
+"QecProgram::to_text" = "QecProgram.to_text"
+"QecProgram::with_options" = { rust_only = "Python constructs then calls set_options" }
+"QecOptions::chunk_size" = "QecProgram.set_options"
+"QecOptions::keep_measurements" = "QecProgram.set_options"
+"QecOptions::seed" = "QecProgram.set_options"
+"QecOptions::shots" = "QecProgram.set_options"
+"QecSampleResult::accepted_shots" = "QecSampleResult.accepted_shots"
+"QecSampleResult::detectors" = "QecSampleResult.detectors"
+"QecSampleResult::discarded_shots" = "QecSampleResult.discarded_shots"
+"QecSampleResult::empty" = { rust_only = "constructor for custom samplers" }
+"QecSampleResult::expectation_values" = "QecSampleResult.expectation_values"
+"QecSampleResult::heralds" = "QecSampleResult.heralds"
+"QecSampleResult::logical_error_rate_wilson_intervals" = "QecSampleResult.logical_error_rate_wilson_intervals"
+"QecSampleResult::logical_error_rates" = "QecSampleResult.logical_error_rates"
+"QecSampleResult::logical_errors" = "QecSampleResult.logical_errors"
+"QecSampleResult::measurements" = "QecSampleResult.measurements"
+"QecSampleResult::new" = { rust_only = "constructor for custom samplers" }
+"QecSampleResult::new_with_total_shots" = { rust_only = "constructor for custom samplers" }
+"QecSampleResult::observable_expectations" = "QecSampleResult.observable_expectations"
+"QecSampleResult::observables" = "QecSampleResult.observables"
+"QecSampleResult::survivor_rate" = "QecSampleResult.survivor_rate"
+"QecSampleResult::survivor_rate_wilson_interval" = "QecSampleResult.survivor_rate_wilson_interval"
+"QecSampleResult::total_shots" = "QecSampleResult.total_shots"
+"QecSampleResult::with_expectation_values" = { rust_only = "constructor for custom samplers" }
+"QecSampleResult::with_heralds" = { rust_only = "constructor for custom samplers" }
+"QecSampleResult::with_observable_expectations" = { rust_only = "constructor for custom samplers" }
+"QecObservableEstimate::mean" = "QecObservableEstimate.mean"
+"QecObservableEstimate::num_shots" = "QecObservableEstimate.num_shots"
+"QecObservableEstimate::variance" = "QecObservableEstimate.variance"
+"QecBasis::X" = "QecBasis.X"
+"QecBasis::Y" = "QecBasis.Y"
+"QecBasis::Z" = "QecBasis.Z"
+"QecPauli::basis" = { rust_only = "Python passes (QecBasis, qubit) tuples" }
+"QecPauli::new" = { rust_only = "Python passes (QecBasis, qubit) tuples" }
+"QecPauli::qubit" = { rust_only = "Python passes (QecBasis, qubit) tuples" }
+"QecPauli::x" = { rust_only = "Python passes (QecBasis, qubit) tuples" }
+"QecPauli::y" = { rust_only = "Python passes (QecBasis, qubit) tuples" }
+"QecPauli::z" = { rust_only = "Python passes (QecBasis, qubit) tuples" }
+"QecRecordRef::Absolute" = "QecRecordRef.absolute"
+"QecRecordRef::Lookback" = "QecRecordRef.lookback"
+"QecRecordRef::absolute" = "QecRecordRef.absolute"
+"QecRecordRef::lookback" = "QecRecordRef.lookback"
+"QecNoise::Depolarize1" = "QecNoise.depolarize1"
+"QecNoise::Depolarize2" = "QecNoise.depolarize2"
+"QecNoise::Leak" = "QecNoise.leak"
+"QecNoise::LeakTransport" = "QecNoise.leak_transport"
+"QecNoise::PauliChannel1" = "QecNoise.pauli_channel_1"
+"QecNoise::PauliChannel2" = "QecNoise.pauli_channel_2"
+"QecNoise::Seep" = "QecNoise.seep"
+"QecNoise::XError" = "QecNoise.x_error"
+"QecNoise::YError" = "QecNoise.y_error"
+"QecNoise::ZError" = "QecNoise.z_error"
+"QecNoise::is_leakage" = { rust_only = "router predicate" }
+"QecNoise::name" = { rust_only = "text-format mnemonic" }
+"QecNoise::probability" = { rust_only = "read back by the compiler" }
+"QecCircuitNoise::after_clifford_depolarization" = "QecCircuitNoise.after_clifford_depolarization"
+"QecCircuitNoise::after_reset_flip_probability" = "QecCircuitNoise.after_reset_flip_probability"
+"QecCircuitNoise::before_measure_flip_probability" = "QecCircuitNoise.before_measure_flip_probability"
+"QecCircuitNoise::before_round_data_depolarization" = "QecCircuitNoise.before_round_data_depolarization"
+"QecCircuitNoise::uniform" = "QecCircuitNoise.uniform"
+"QecTStrategy::Auto" = { rust_only = "T-strategy override; Python runs the automatic strategy" }
+"QecTStrategy::Camps" = { rust_only = "T-strategy override; Python runs the automatic strategy" }
+"QecTStrategy::Reference" = { rust_only = "T-strategy override; Python runs the automatic strategy" }
+"QecTStrategy::Spd" = { rust_only = "T-strategy override; Python runs the automatic strategy" }
+"QecTStrategy::label" = { rust_only = "T-strategy override; Python runs the automatic strategy" }
+
+# Detector error models and decoders
+"DetectorErrorModel::decompose_graphlike" = "DetectorErrorModel.decompose_graphlike"
+"DetectorErrorModel::detector_coords" = "DetectorErrorModel.detector_coords"
+"DetectorErrorModel::from_text" = "DetectorErrorModel.from_text"
+"DetectorErrorModel::mechanisms" = { rust_only = "Python reads mechanisms column-wise through probabilities, detector_matrix and observable_matrix" }
+"DetectorErrorModel::num_detectors" = "DetectorErrorModel.num_detectors"
+"DetectorErrorModel::num_mechanisms" = "DetectorErrorModel.num_mechanisms"
+"DetectorErrorModel::num_observables" = "DetectorErrorModel.num_observables"
+"DetectorErrorModel::to_text" = "DetectorErrorModel.to_text"
+"ErrorMechanism::detectors" = "DetectorErrorModel.detector_matrix"
+"ErrorMechanism::observables" = "DetectorErrorModel.observable_matrix"
+"ErrorMechanism::probability" = "DetectorErrorModel.probabilities"
+"ErrorMechanism::suggested_decomposition" = "DetectorErrorModel.suggested_decompositions"
+"UnionFindDecoder::decode_packed" = "UnionFindDecoder.decode_packed"
+"UnionFindDecoder::from_model" = "UnionFindDecoder"
+"UnionFindDecoder::logical_error_rate" = "UnionFindDecoder.logical_error_rate"
+"UnionFindDecoder::num_detectors" = "UnionFindDecoder.num_detectors"
+"UnionFindDecoder::num_observables" = "UnionFindDecoder.num_observables"
+"MatchingDecoder::decode_packed" = "MatchingDecoder.decode_packed"
+"MatchingDecoder::from_model" = "MatchingDecoder"
+"MatchingDecoder::logical_error_rate" = "MatchingDecoder.logical_error_rate"
+"MatchingDecoder::num_detectors" = "MatchingDecoder.num_detectors"
+"MatchingDecoder::num_observables" = "MatchingDecoder.num_observables"
+"BpOsdDecoder::decode_packed" = "BpOsdDecoder.decode_packed"
+"BpOsdDecoder::from_model" = "BpOsdDecoder"
+"BpOsdDecoder::logical_error_rate" = "BpOsdDecoder.logical_error_rate"
+"BpOsdDecoder::num_detectors" = "BpOsdDecoder.num_detectors"
+"BpOsdDecoder::num_observables" = "BpOsdDecoder.num_observables"
+"BpOsdDecoder::options" = { rust_only = "options are fixed at construction and not read back" }
+"BpOsdDecoder::with_options" = "BpOsdDecoder"
+"BpOsdOptions::bp_method" = "BpOsdDecoder"
+"BpOsdOptions::max_iterations" = "BpOsdDecoder"
+"BpOsdOptions::osd_method" = "BpOsdDecoder"
+"BpMethod::MinSum" = "BpOsdDecoder"
+"BpMethod::ProductSum" = "BpOsdDecoder"
+"OsdMethod::CombinationSweep" = "BpOsdDecoder"
+"OsdMethod::Exhaustive" = "BpOsdDecoder"
+"OsdMethod::Zero" = "BpOsdDecoder"
+
+# Noise construction
+"NoiseModel::after_gate" = { rust_only = "event table; Python appends events through add_event" }
+"NoiseModel::has_noise" = { rust_only = "dispatch predicate" }
+"NoiseModel::is_pauli_only" = "NoiseModel.is_pauli_only"
+"NoiseModel::readout" = { rust_only = "readout table; Python sets it through with_readout_error and NoiseBuilder" }
+"NoiseModel::set_bit_readout_error" = { rust_only = "Python sets per-bit rates through NoiseBuilder.readout_error" }
+"NoiseModel::uniform_depolarizing" = "NoiseModel.uniform_depolarizing"
+"NoiseModel::validate" = "NoiseModel.validate"
+"NoiseModel::validate_for" = { rust_only = "circuit-specific check run by every terminal" }
+"NoiseModel::with_amplitude_damping" = "NoiseModel.with_amplitude_damping"
+"NoiseModel::with_readout_error" = "NoiseModel.with_readout_error"
+"NoiseBuilder::after_gates" = "NoiseBuilder.after_gates"
+"NoiseBuilder::after_gates_joint" = "NoiseBuilder.after_gates_joint"
+"NoiseBuilder::after_resets" = "NoiseBuilder.after_resets"
+"NoiseBuilder::before_measurements" = "NoiseBuilder.before_measurements"
+"NoiseBuilder::build" = "NoiseBuilder.build"
+"NoiseBuilder::crosstalk" = "NoiseBuilder.crosstalk"
+"NoiseBuilder::new" = "NoiseBuilder"
+"NoiseBuilder::on_idle_qubits" = "NoiseBuilder.on_idle_qubits"
+"NoiseBuilder::over_rotation" = "NoiseBuilder.over_rotation"
+"NoiseBuilder::over_rotation_drift" = "NoiseBuilder.over_rotation_drift"
+"NoiseBuilder::over_rotation_drift_per_qubit" = "NoiseBuilder.over_rotation_drift_per_qubit"
+"NoiseBuilder::quasi_static_detuning" = "NoiseBuilder.quasi_static_detuning"
+"NoiseBuilder::readout_error" = "NoiseBuilder.readout_error"
+"NoiseBuilder::schedule" = "NoiseBuilder.schedule"
+"NoiseBuilder::scheduled_idle" = "NoiseBuilder.scheduled_idle"
+"NoiseBuilder::uniform_readout_error" = "NoiseBuilder.uniform_readout_error"
+"NoiseChannel::AmplitudeDamping" = "NoiseChannel.amplitude_damping"
+"NoiseChannel::Custom" = "NoiseChannel.custom"
+"NoiseChannel::Depolarizing" = "NoiseChannel.depolarizing"
+"NoiseChannel::Kraus2q" = "NoiseChannel.custom_2q"
+"NoiseChannel::Leakage" = "NoiseChannel.leakage"
+"NoiseChannel::LeakageTransport" = "NoiseChannel.leakage_transport"
+"NoiseChannel::Pauli" = "NoiseChannel.pauli"
+"NoiseChannel::PhaseDamping" = "NoiseChannel.phase_damping"
+"NoiseChannel::QuasiStatic" = "NoiseChannel.quasi_static"
+"NoiseChannel::Seepage" = "NoiseChannel.seepage"
+"NoiseChannel::ThermalRelaxation" = "NoiseChannel.thermal_relaxation"
+"NoiseChannel::TwoQubitDepolarizing" = "NoiseChannel.two_qubit_depolarizing"
+"NoiseChannel::as_pauli" = { rust_only = "sampler classification" }
+"NoiseChannel::is_exactly_samplable" = { rust_only = "sampler classification" }
+"NoiseChannel::is_pauli" = { rust_only = "sampler classification" }
+"NoiseChannel::num_qubits" = "NoiseChannel.num_qubits"
+"NoiseChannel::pauli_pair_rate" = { rust_only = "sampler classification" }
+"NoiseChannel::validate" = { rust_only = "run by NoiseModel.validate" }
+"GateFilter::all" = "GateFilter.all"
+"GateFilter::arity" = "GateFilter.arity"
+"GateFilter::named" = "GateFilter.named"
+"GateFilter::on_qubits" = "GateFilter.on_qubits"
+"GateFilter::on_targets" = "GateFilter.on_targets"
+"GateTimes::new" = "GateTimes"
+"GateTimes::with_gate" = "GateTimes.with_gate"
+"GateTimes::with_measure" = "GateTimes.with_measure"
+"GateTimes::with_pair" = "GateTimes.with_pair"
+"GateTimes::with_reset" = "GateTimes.with_reset"
+"DriftDistribution::covariance" = "DriftDistribution.covariance"
+"DriftDistribution::from_covariance" = "DriftDistribution.from_covariance"
+"DriftDistribution::from_t2_star" = "DriftDistribution.from_t2_star"
+"DriftDistribution::independent" = "DriftDistribution.independent"
+"DriftDistribution::num_qubits" = "DriftDistribution.num_qubits"
+"DriftDistribution::with_neighbour_correlation" = "DriftDistribution.with_neighbour_correlation"
+"DeviceCalibration::gate1q" = { rust_only = "calibration tables; Python builds a calibration from text with parse" }
+"DeviceCalibration::gate2q" = { rust_only = "calibration tables; Python builds a calibration from text with parse" }
+"DeviceCalibration::gate2q_on" = { rust_only = "calibration tables; Python builds a calibration from text with parse" }
+"DeviceCalibration::gate_times" = "DeviceCalibration.gate_times"
+"DeviceCalibration::new" = { rust_only = "calibration tables; Python builds a calibration from text with parse" }
+"DeviceCalibration::num_qubits" = "DeviceCalibration.num_qubits"
+"DeviceCalibration::parse" = "DeviceCalibration.parse"
+"DeviceCalibration::qubit" = { rust_only = "calibration tables; Python builds a calibration from text with parse" }
+"DeviceCalibration::qubits" = { rust_only = "calibration tables; Python builds a calibration from text with parse" }
+"DeviceCalibration::to_noise_model" = "DeviceCalibration.to_noise_model"
+"DeviceCalibration::to_scheduled_noise_model" = "DeviceCalibration.to_scheduled_noise_model"
+"DeviceCalibration::with_pair" = { rust_only = "calibration tables; Python builds a calibration from text with parse" }
+"ReadoutError::p01" = "NoiseModel.with_readout_error"
+"ReadoutError::p10" = "NoiseModel.with_readout_error"

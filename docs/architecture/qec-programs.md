@@ -546,10 +546,11 @@ p = 0.02 (20k shots, seed 42) union-find fails 603 times and exact matching 654
 times over the decomposed model, while BP+OSD over the full model fails 436
 times.
 
-Python exposes the same surface as `Decoder(model)`, `MatchingDecoder(model)`, and
-`BpOsdDecoder(model, ...)`, each with `decode(detectors) -> (shots,
-num_observables)` and `logical_error_rate(detectors, observables)` over numpy bool
-arrays.
+Python exposes the same surface as `UnionFindDecoder(model)`, `MatchingDecoder(model)`,
+and `BpOsdDecoder(model, ...)`, each with `decode(detectors) -> (shots,
+num_observables)` over numpy bool arrays, `decode_packed(detectors)` over the packed
+`uint8` rows of `packed_detectors()`, and `logical_error_rate(detectors, observables)`
+over either form.
 
 ## Expectation values
 

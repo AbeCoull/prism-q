@@ -3,14 +3,14 @@
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
     BpMethod, BpOsdDecoder, BpOsdOptions, DetectorErrorModel, MatchingDecoder, OsdMethod,
-    PackedShots, PrismError, QecBasis, QecCircuitNoise, QecNoise, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
-    run_qec_program_reference,
+    PackedShots, PrismError, QecBasis, QecCircuitNoise, QecNoise, QecObservableEstimate,
+    QecOptions, QecPauli, QecProgram, QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder,
+    run_qec_program, run_qec_program_reference,
 };
 use pyo3::prelude::*;
 
 use crate::codec::{self, Kind, Reader, Writer};
-use crate::error::PyPrismResult;
+use crate::error::{PyPrismResult, invalid};
 use crate::gate::PyGate;
 use crate::numpy_util::{bool_matrix, f64_array, u8_matrix};
 use crate::pickle::{Reduced, ReducedMember, reduce, reduce_member};
@@ -47,7 +47,7 @@ impl PyQecBasis {
 }
 
 /// Reference to a prior measurement record (absolute index or lookback).
-#[pyclass(name = "RecordRef", module = "prism_q", frozen, from_py_object)]
+#[pyclass(name = "QecRecordRef", module = "prism_q", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyRecordRef(QecRecordRef);
 
@@ -80,7 +80,7 @@ impl PyRecordRef {
     }
 
     fn __repr__(&self) -> String {
-        format!("RecordRef({:?})", self.0)
+        format!("QecRecordRef({:?})", self.0)
     }
 }
 
@@ -428,20 +428,42 @@ impl PyQecProgram {
         Ok(())
     }
 
+    /// Append an `EXP_VAL` op estimating `coefficient * <P>` for the Pauli
+    /// product over `(basis, qubit)` terms. The estimates arrive in op order in
+    /// `QecSampleResult.expectation_values`.
+    #[pyo3(signature = (terms, coefficient = 1.0))]
+    fn expectation_value(
+        &mut self,
+        terms: Vec<(PyQecBasis, usize)>,
+        coefficient: f64,
+    ) -> PyPrismResult<()> {
+        let terms: Vec<QecPauli> = terms
+            .into_iter()
+            .map(|(basis, qubit)| QecPauli::new(basis.to_core(), qubit))
+            .collect();
+        self.inner.expectation_value(&terms, coefficient)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn num_expectation_values(&self) -> usize {
+        self.inner.num_expectation_values()
+    }
+
     /// Sample the program through the compiled Clifford path.
-    fn run(&self, py: Python<'_>) -> PyPrismResult<PyQecResult> {
+    fn run(&self, py: Python<'_>) -> PyPrismResult<PyQecSampleResult> {
         let program = &self.inner;
         let result = py.detach(|| run_qec_program(program))?;
-        Ok(PyQecResult { inner: result })
+        Ok(PyQecSampleResult { inner: result })
     }
 
     /// Sample through the per-shot statevector reference path, the route that
     /// executes `feedforward`. Costs `O(shots * 2^n)`, so it suits small
     /// programs rather than bulk sampling.
-    fn run_reference(&self, py: Python<'_>) -> PyPrismResult<PyQecResult> {
+    fn run_reference(&self, py: Python<'_>) -> PyPrismResult<PyQecSampleResult> {
         let program = &self.inner;
         let result = py.detach(|| run_qec_program_reference(program))?;
-        Ok(PyQecResult { inner: result })
+        Ok(PyQecSampleResult { inner: result })
     }
 
     /// Derive the detector error model from the program's noise annotations,
@@ -582,13 +604,13 @@ impl PyDetectorErrorModel {
 
 /// Union-find decoder over a graphlike detector error model: predicts
 /// observable flips from detector samples.
-#[pyclass(name = "Decoder", module = "prism_q", frozen)]
-pub struct PyDecoder {
+#[pyclass(name = "UnionFindDecoder", module = "prism_q", frozen)]
+pub struct PyUnionFindDecoder {
     inner: UnionFindDecoder,
 }
 
 #[pymethods]
-impl PyDecoder {
+impl PyUnionFindDecoder {
     /// Compile a decoder from a graphlike model (at most two detectors per
     /// mechanism; apply `decompose_graphlike` first when needed).
     #[new]
@@ -619,22 +641,35 @@ impl PyDecoder {
         packed_to_2d(py, &decoded)
     }
 
-    /// Fraction of shots whose predicted flips differ from `observables`
-    /// (`(shots, num_observables)` bool) in any observable.
+    /// Decode detector rows in the `QecSampleResult.packed_detectors()` layout
+    /// into predicted observable flips in the same layout.
+    fn decode_packed<'py>(
+        &self,
+        py: Python<'py>,
+        detectors: &Bound<'py, PyAny>,
+    ) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {
+        let packed = pack_rows(detectors, self.inner.num_detectors(), "detectors")?;
+        let decoded = py.detach(|| self.inner.decode_packed(&packed))?;
+        packed_to_bytes(py, &decoded)
+    }
+
+    /// Fraction of shots whose predicted flips differ from `observables` in any
+    /// observable. Both arrays are bool rows, or both are packed in the
+    /// `packed_detectors()` layout.
     fn logical_error_rate<'py>(
         &self,
         py: Python<'py>,
-        detectors: PyReadonlyArray2<'py, bool>,
-        observables: PyReadonlyArray2<'py, bool>,
+        detectors: &Bound<'py, PyAny>,
+        observables: &Bound<'py, PyAny>,
     ) -> PyPrismResult<f64> {
-        let detectors = pack_bool_rows(&detectors)?;
-        let observables = pack_bool_rows(&observables)?;
+        let detectors = pack_rows(detectors, self.inner.num_detectors(), "detectors")?;
+        let observables = pack_rows(observables, self.inner.num_observables(), "observables")?;
         Ok(py.detach(|| self.inner.logical_error_rate(&detectors, &observables))?)
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "Decoder(detectors={}, observables={})",
+            "UnionFindDecoder(detectors={}, observables={})",
             self.inner.num_detectors(),
             self.inner.num_observables()
         )
@@ -680,16 +715,29 @@ impl PyMatchingDecoder {
         packed_to_2d(py, &decoded)
     }
 
-    /// Fraction of shots whose predicted flips differ from `observables`
-    /// (`(shots, num_observables)` bool) in any observable.
+    /// Decode detector rows in the `QecSampleResult.packed_detectors()` layout
+    /// into predicted observable flips in the same layout.
+    fn decode_packed<'py>(
+        &self,
+        py: Python<'py>,
+        detectors: &Bound<'py, PyAny>,
+    ) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {
+        let packed = pack_rows(detectors, self.inner.num_detectors(), "detectors")?;
+        let decoded = py.detach(|| self.inner.decode_packed(&packed))?;
+        packed_to_bytes(py, &decoded)
+    }
+
+    /// Fraction of shots whose predicted flips differ from `observables` in any
+    /// observable. Both arrays are bool rows, or both are packed in the
+    /// `packed_detectors()` layout.
     fn logical_error_rate<'py>(
         &self,
         py: Python<'py>,
-        detectors: PyReadonlyArray2<'py, bool>,
-        observables: PyReadonlyArray2<'py, bool>,
+        detectors: &Bound<'py, PyAny>,
+        observables: &Bound<'py, PyAny>,
     ) -> PyPrismResult<f64> {
-        let detectors = pack_bool_rows(&detectors)?;
-        let observables = pack_bool_rows(&observables)?;
+        let detectors = pack_rows(detectors, self.inner.num_detectors(), "detectors")?;
+        let observables = pack_rows(observables, self.inner.num_observables(), "observables")?;
         Ok(py.detach(|| self.inner.logical_error_rate(&detectors, &observables))?)
     }
 
@@ -791,16 +839,29 @@ impl PyBpOsdDecoder {
         packed_to_2d(py, &decoded)
     }
 
-    /// Fraction of shots whose predicted flips differ from `observables`
-    /// (`(shots, num_observables)` bool) in any observable.
+    /// Decode detector rows in the `QecSampleResult.packed_detectors()` layout
+    /// into predicted observable flips in the same layout.
+    fn decode_packed<'py>(
+        &self,
+        py: Python<'py>,
+        detectors: &Bound<'py, PyAny>,
+    ) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {
+        let packed = pack_rows(detectors, self.inner.num_detectors(), "detectors")?;
+        let decoded = py.detach(|| self.inner.decode_packed(&packed))?;
+        packed_to_bytes(py, &decoded)
+    }
+
+    /// Fraction of shots whose predicted flips differ from `observables` in any
+    /// observable. Both arrays are bool rows, or both are packed in the
+    /// `packed_detectors()` layout.
     fn logical_error_rate<'py>(
         &self,
         py: Python<'py>,
-        detectors: PyReadonlyArray2<'py, bool>,
-        observables: PyReadonlyArray2<'py, bool>,
+        detectors: &Bound<'py, PyAny>,
+        observables: &Bound<'py, PyAny>,
     ) -> PyPrismResult<f64> {
-        let detectors = pack_bool_rows(&detectors)?;
-        let observables = pack_bool_rows(&observables)?;
+        let detectors = pack_rows(detectors, self.inner.num_detectors(), "detectors")?;
+        let observables = pack_rows(observables, self.inner.num_observables(), "observables")?;
         Ok(py.detach(|| self.inner.logical_error_rate(&detectors, &observables))?)
     }
 
@@ -831,11 +892,85 @@ fn pack_bool_rows(array: &PyReadonlyArray2<'_, bool>) -> PyPrismResult<PackedSho
     Ok(PackedShots::try_from_shot_major(data, shots, columns)?)
 }
 
+/// Pack a bool `(shots, columns)` array, or take a `uint8` one already in the
+/// `packed_to_bytes` layout, whose width alone cannot carry the column count.
+fn pack_rows(array: &Bound<'_, PyAny>, columns: usize, what: &str) -> PyPrismResult<PackedShots> {
+    if let Ok(bools) = array.extract::<PyReadonlyArray2<'_, bool>>() {
+        return pack_bool_rows(&bools);
+    }
+    let Ok(bytes) = array.extract::<PyReadonlyArray2<'_, u8>>() else {
+        return Err(invalid(format!(
+            "{what} must be a 2-D bool array or a 2-D uint8 array of packed rows"
+        )));
+    };
+    let bytes = bytes.as_array();
+    let (shots, width) = bytes.dim();
+    let row_bytes = columns.div_ceil(8);
+    if width != row_bytes {
+        return Err(invalid(format!(
+            "packed {what} rows hold {width} bytes; {columns} columns pack into {row_bytes}"
+        )));
+    }
+    let m_words = columns.div_ceil(64);
+    let mut data = vec![0u64; shots * m_words];
+    for (shot, row) in bytes.outer_iter().enumerate() {
+        for (index, &byte) in row.iter().enumerate() {
+            data[shot * m_words + index / 8] |= u64::from(byte) << (8 * (index % 8));
+        }
+    }
+    Ok(PackedShots::try_from_shot_major(data, shots, columns)?)
+}
+
+/// One `EXP_VAL` op or one observable, estimated over the accepted shots.
+#[pyclass(name = "QecObservableEstimate", module = "prism_q", frozen)]
+pub struct PyQecObservableEstimate(QecObservableEstimate);
+
+#[pymethods]
+impl PyQecObservableEstimate {
+    #[getter]
+    fn mean(&self) -> f64 {
+        self.0.mean
+    }
+
+    /// Per-shot sample variance, or the squared truncation weight on an
+    /// analytical route (0.0 when exact).
+    #[getter]
+    fn variance(&self) -> f64 {
+        self.0.variance
+    }
+
+    /// Shots that contributed, postselection rejections excluded.
+    #[getter]
+    fn num_shots(&self) -> usize {
+        self.0.num_shots
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "QecObservableEstimate(mean={}, variance={}, num_shots={})",
+            self.0.mean, self.0.variance, self.0.num_shots
+        )
+    }
+}
+
+fn estimates(values: &Option<Vec<QecObservableEstimate>>) -> Option<Vec<PyQecObservableEstimate>> {
+    values.as_ref().map(|values| {
+        values
+            .iter()
+            .copied()
+            .map(PyQecObservableEstimate)
+            .collect()
+    })
+}
+
 /// Result of sampling a QEC program.
-#[pyclass(name = "QecResult", module = "prism_q")]
-pub struct PyQecResult {
+#[pyclass(name = "QecSampleResult", module = "prism_q")]
+pub struct PyQecSampleResult {
     inner: QecSampleResult,
 }
+
+/// The z-score of a two-sided 95 percent interval.
+const WILSON_95: f64 = 1.959963984540054;
 
 /// Byte value to its eight bits, least significant first.
 const BYTE_BITS: [[bool; 8]; 256] = {
@@ -935,7 +1070,7 @@ pub(crate) fn packed_to_bytes<'py>(
 }
 
 #[pymethods]
-impl PyQecResult {
+impl PyQecSampleResult {
     #[getter]
     fn total_shots(&self) -> usize {
         self.inner.total_shots
@@ -961,6 +1096,33 @@ impl PyQecResult {
     /// Fraction of shots accepted after postselection.
     fn survivor_rate(&self) -> f64 {
         self.inner.survivor_rate()
+    }
+
+    /// Wilson score interval `(low, high)` for `survivor_rate()`; the default
+    /// `z_score` gives a two-sided 95 percent interval.
+    #[pyo3(signature = (z_score = WILSON_95))]
+    fn survivor_rate_wilson_interval(&self, z_score: f64) -> (f64, f64) {
+        self.inner.survivor_rate_wilson_interval(z_score)
+    }
+
+    /// Wilson score intervals for `logical_error_rates()`, one per observable.
+    #[pyo3(signature = (z_score = WILSON_95))]
+    fn logical_error_rate_wilson_intervals(&self, z_score: f64) -> Vec<(f64, f64)> {
+        self.inner.logical_error_rate_wilson_intervals(z_score)
+    }
+
+    /// One estimate per `EXP_VAL` op in op order, each scaled by its coefficient;
+    /// `None` when the program has none.
+    #[getter]
+    fn expectation_values(&self) -> Option<Vec<PyQecObservableEstimate>> {
+        estimates(&self.inner.expectation_values)
+    }
+
+    /// Per-observable `<1 - 2 * parity>` estimates from a weighted or analytical
+    /// T strategy; `None` when only bit counts exist.
+    #[getter]
+    fn observable_expectations(&self) -> Option<Vec<PyQecObservableEstimate>> {
+        estimates(&self.inner.observable_expectations)
     }
 
     /// Detector records as a `(shots, num_detectors)` bool array.
@@ -1011,7 +1173,7 @@ impl PyQecResult {
 
     fn __repr__(&self) -> String {
         format!(
-            "QecResult(total_shots={}, accepted={}, discarded={}, observables={})",
+            "QecSampleResult(total_shots={}, accepted={}, discarded={}, observables={})",
             self.inner.total_shots,
             self.inner.accepted_shots,
             self.inner.discarded_shots,

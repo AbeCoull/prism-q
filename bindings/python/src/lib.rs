@@ -19,6 +19,7 @@ mod program;
 mod qec;
 mod sampler;
 mod sim;
+mod threading;
 
 use backend::{PyBackendKind, PyStabilizerBackend};
 use braket::PyBraketProgram;
@@ -33,15 +34,17 @@ use noise::{
 use parameter::{PyParameters, PyPreparedCircuit};
 use program::{PyDynamicProgram, PyDynamicProgramBuilder, PyProgramSimulation};
 use qec::{
-    PyBpOsdDecoder, PyDecoder, PyDetectorErrorModel, PyMatchingDecoder, PyQecBasis,
-    PyQecCircuitNoise, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
+    PyBpOsdDecoder, PyDetectorErrorModel, PyMatchingDecoder, PyQecBasis, PyQecCircuitNoise,
+    PyQecNoise, PyQecObservableEstimate, PyQecProgram, PyQecSampleResult, PyRecordRef,
+    PyUnionFindDecoder,
 };
 use sampler::PyCompiledSampler;
 use sim::{
-    PyBondReport, PyCountsResult, PyEntropyResult, PyExpectationResult, PyObservableExpectation,
-    PyObservableVariance, PyOverlapResult, PyPauliObservable, PyReducedDensityMatrix,
-    PyRunMetadata, PyRunOutcome, PyShotsResult, PySimulation,
+    PyBondReport, PyCountsResult, PyEntropyResult, PyExpectationResult, PyMarginalsResult,
+    PyObservableExpectation, PyObservableVariance, PyOverlapResult, PyPauliObservable,
+    PyReducedDensityMatrix, PyRunMetadata, PyRunOutcome, PyShotsResult, PySimulation,
 };
+use threading::PyThreadPool;
 
 #[pymodule]
 fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -80,15 +83,17 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyObservableVariance>()?;
     m.add_class::<PyEntropyResult>()?;
     m.add_class::<PyExpectationResult>()?;
+    m.add_class::<PyMarginalsResult>()?;
     m.add_class::<PyOverlapResult>()?;
     m.add_class::<PyReducedDensityMatrix>()?;
     m.add_class::<PyQecBasis>()?;
     m.add_class::<PyRecordRef>()?;
     m.add_class::<PyQecNoise>()?;
     m.add_class::<PyQecProgram>()?;
-    m.add_class::<PyQecResult>()?;
+    m.add_class::<PyQecSampleResult>()?;
+    m.add_class::<PyQecObservableEstimate>()?;
     m.add_class::<PyDetectorErrorModel>()?;
-    m.add_class::<PyDecoder>()?;
+    m.add_class::<PyUnionFindDecoder>()?;
     m.add_class::<PyQecCircuitNoise>()?;
     m.add_class::<PyMatchingDecoder>()?;
     m.add_class::<PyBpOsdDecoder>()?;
@@ -96,6 +101,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDynamicProgram>()?;
     m.add_class::<PyDynamicProgramBuilder>()?;
     m.add_class::<PyProgramSimulation>()?;
+    m.add_class::<PyThreadPool>()?;
 
     m.add_function(wrap_pyfunction!(circuit::parse_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(circuit::parse_qasm_parametric, m)?)?;

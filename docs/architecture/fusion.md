@@ -110,7 +110,8 @@ powers of phase estimation all share the eigenstate qubit and run as one batch.
 
 A variational sweep holds one gate sequence and varies only the angles. Fusion
 decides the same block structure at every point, so `PreparedCircuit` settles it once
-and rebinds against it.
+and rebinds against it. Capture gates the floors on the buffer width of the backend the
+prepared circuit holds, so a prepared density matrix fuses at `2n` as a direct run does.
 
 The plan is reusable and the matrices are not, since a changed angle changes every fused
 matrix it feeds. `FusionPlan` records a recipe per angle-derived payload: a list of

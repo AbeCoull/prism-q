@@ -4523,6 +4523,38 @@ fn bench_density_matrix_fused_layers(c: &mut Criterion) {
     group.finish();
 }
 
+/// `run` on a held [`PreparedCircuit`] on the density matrix, alternating two
+/// bindings so each iteration replays the fusion plan with new angles.
+///
+/// The sibling of `density_matrix/rzz_layers_fused`, which fuses the same
+/// circuit through `simulate`. Widths 6 and 8 sit below the statevector fusion
+/// floors at the circuit width but clear them at the `2n` buffer width.
+fn bench_density_matrix_prepared(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/prepared");
+    configure_group(&mut group);
+
+    for &n in &[6, 8, 10, 12] {
+        let template = circuits::qaoa_circuit(n, 6, SEED);
+        let params = Parameters::all_rotations(&template);
+        let points = binding_points(&params, 2);
+        group.bench_function(BenchmarkId::new("qaoa", n), |b| {
+            let mut prepared = PreparedCircuit::with_backend(
+                template.clone(),
+                params.clone(),
+                BackendKind::DensityMatrix,
+            )
+            .unwrap();
+            let mut k = 0;
+            b.iter(|| {
+                k ^= 1;
+                black_box(prepared.run(&points[k], SEED).unwrap())
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// The two noisy-sampling routes over the same circuit and noise model, swept
 /// over width and shot count.
 ///
@@ -5461,6 +5493,7 @@ criterion_group! {
     bench_density_matrix_hardware_basis,
     bench_density_matrix_rzz_sandwich,
     bench_density_matrix_fused_layers,
+    bench_density_matrix_prepared,
     bench_density_matrix_exact_vs_trajectory,
     bench_density_matrix_exact_noise,
     bench_density_matrix_exact_expectation,

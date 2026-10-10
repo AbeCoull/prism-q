@@ -387,14 +387,17 @@ fn identity_prov(index: u32, inst: &Instruction) -> Prov {
 }
 
 impl FusionPlan {
-    /// Settle the fused structure of `template` and record how to rebuild the
-    /// angle-derived payloads.
+    /// Settle the fused structure of `template` for a `state_qubits`-wide buffer
+    /// and record how to rebuild the angle-derived payloads.
     ///
     /// Returns the fused skeleton, and the plan when every payload in it has a
     /// recipe. A `None` plan means a binding has to run fusion itself.
-    pub(super) fn capture(template: &Circuit) -> (Circuit, Option<FusionPlan>) {
+    pub(super) fn capture(
+        template: &Circuit,
+        state_qubits: usize,
+    ) -> (Circuit, Option<FusionPlan>) {
         let mut tracer = Tracer::tracking(template);
-        let fused = super::fusion::fuse_traced(template, &mut tracer).into_owned();
+        let fused = super::fusion::fuse_at_width(template, state_qubits, &mut tracer).into_owned();
         if tracer.bailed || tracer.input.len() != fused.instructions.len() {
             return (fused, None);
         }

@@ -1080,8 +1080,9 @@ fn bench_chunked_high_shots(c: &mut Criterion) {
     group.finish();
 }
 
-// Building a distance-13 surface memory of 1000 rounds, and reading back the exported
-// detector error model of its 100-round sibling, 340k mechanisms in 18 MB of text.
+// Building a distance-13 surface memory of 1000 rounds, replaying a 20-round one through
+// the `QecProgram` append methods (27k ops), and reading back the exported detector
+// error model of its 100-round sibling, 340k mechanisms in 18 MB of text.
 fn bench_qec_workflow(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_workflow");
     group.sample_size(10);
@@ -1091,6 +1092,34 @@ fn bench_qec_workflow(c: &mut Criterion) {
     let noise = QecCircuitNoise::uniform(0.001);
     group.bench_function("surface_memory/d13_r1000", |b| {
         b.iter(|| QecProgram::surface_memory(13, 1000, QecBasis::Z, &noise).unwrap());
+    });
+
+    let template = QecProgram::surface_memory(13, 20, QecBasis::Z, &noise).unwrap();
+    group.bench_function("surface_memory_builder/d13_r20", |b| {
+        b.iter(|| {
+            let mut program = QecProgram::new(template.num_qubits());
+            for op in template.ops() {
+                match op {
+                    QecOp::Gate { gate, targets } => program.push_gate(gate.clone(), targets),
+                    QecOp::Reset { basis, qubit } => program.reset(*basis, *qubit),
+                    QecOp::Measure { basis, qubit } => program.measure(*basis, *qubit).map(drop),
+                    QecOp::MeasurePauliProduct { terms } => {
+                        program.measure_pauli_product(terms).map(drop)
+                    }
+                    QecOp::Detector { records, coords } => {
+                        program.detector_with_coords(records, coords).map(drop)
+                    }
+                    QecOp::ObservableInclude {
+                        observable,
+                        records,
+                    } => program.observable_include(*observable, records),
+                    QecOp::Noise { channel, targets } => program.noise(channel.clone(), targets),
+                    other => program.push_op(other.clone()),
+                }
+                .unwrap();
+            }
+            program
+        });
     });
 
     let text = QecProgram::surface_memory(13, 100, QecBasis::Z, &noise)

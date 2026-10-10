@@ -129,9 +129,10 @@ harness in `comparison/` under the controls below; this page carries the rules.
   API, which is what the harness in `comparison/` does; parsing OpenQASM into the other
   simulator is the alternative, and then its importer's transpilation sits inside its
   measurement. The QFT generator's `QftBlock` has no gate-level spelling, so the shared
-  list is the textbook sequence and PRISM-Q runs it as ordinary gates too; its block FFT
-  path is measured on the Benchmarks page, not in the comparison. Record the gate count
-  after each simulator's own optimization, since fusion changes what runs.
+  list is the textbook sequence. PRISM-Q folds that exact sequence back into its block
+  FFT, as it does for any QFT that arrives as gates, so the comparison times the path a
+  user's expanded QFT takes; `PRISM_NO_QFT_BLOCK` restores gate-by-gate replay. Record
+  the gate count after each simulator's own optimization, since fusion changes what runs.
 - Same output. The suite times `run()`, which ends with a `2^n` probability vector.
   Time the other simulator to the same observable, or time both to the final state
   only; mixing the two moves a 26-qubit row by the cost of a full pass over the state.

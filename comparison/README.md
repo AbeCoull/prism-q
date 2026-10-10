@@ -101,7 +101,7 @@ page, from the `prism_q::circuits` generators with circuit seed `0xDEAD_BEEF`:
 | Family | Circuit |
 | --- | --- |
 | `ghz` | H on qubit 0, then a CX chain |
-| `qft` | Textbook quantum Fourier transform: H, controlled phases, final swaps (the generator's `QftBlock`, expanded; PRISM-Q replays the expansion like every other simulator, so its block FFT path is not part of the comparison) |
+| `qft` | Textbook quantum Fourier transform: H, controlled phases, final swaps (the generator's `QftBlock`, expanded; PRISM-Q folds the exact expansion back into its block FFT, as it does for a QFT parsed from OpenQASM) |
 | `hea` | Hardware-efficient ansatz: 5 layers of Ry and Rz on every qubit, then a CX chain |
 | `qv` | Quantum volume: `n` layers of random pairings, each pair a random SU(4) as CX and rotations |
 

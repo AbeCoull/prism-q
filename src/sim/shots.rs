@@ -146,6 +146,59 @@ pub(crate) fn build_cdf(probs: &[f64]) -> Vec<f64> {
     cdf
 }
 
+/// Shots drawn per ChaCha8 substream by the block samplers. One stream per
+/// block rather than per shot: cipher setup and the first keystream block cost
+/// more than a whole draw when the per-shot work is short.
+pub(crate) const SHOTS_PER_STREAM: usize = 256;
+
+/// Shot count below which a block sampler stays on the calling thread.
+pub(crate) const MIN_SHOTS_FOR_PAR: usize = 32;
+
+/// Draws a call must make before the product and factored samplers split their
+/// blocks across workers: 2000 factored draws (1000 shots over two sub-states)
+/// ran 18% slower forked than serial.
+const MIN_DRAWS_FOR_PAR: usize = 1 << 14;
+
+/// Whether `num_shots` shots of `draws_per_shot` draws each carry enough work
+/// to fill their blocks in parallel. The blocks draw the same values either way.
+pub(crate) fn draws_split_across_workers(num_shots: usize, draws_per_shot: usize) -> bool {
+    num_shots >= MIN_SHOTS_FOR_PAR && num_shots.saturating_mul(draws_per_shot) >= MIN_DRAWS_FOR_PAR
+}
+
+/// Fill `rows`, `per_shot` entries to a shot, one block of [`SHOTS_PER_STREAM`]
+/// shots at a time. Block `b` draws from stream `b + 2` of the ChaCha8 generator
+/// seeded with `seed`, so the partition, and with it every draw, is a function
+/// of the shot count alone: `parallel` moves the schedule, never a value.
+pub(crate) fn sample_in_shot_blocks<T: Send>(
+    rows: &mut [T],
+    per_shot: usize,
+    seed: u64,
+    parallel: bool,
+    sample_block: impl Fn(&mut ChaCha8Rng, &mut [T]) + Sync,
+) {
+    let block_len = SHOTS_PER_STREAM * per_shot;
+    let run = |block: usize, rows: &mut [T]| {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        rng.set_stream(block as u64 + 2);
+        sample_block(&mut rng, rows);
+    };
+
+    #[cfg(feature = "parallel")]
+    if parallel {
+        use rayon::prelude::*;
+        rows.par_chunks_mut(block_len)
+            .enumerate()
+            .for_each(|(block, rows)| run(block, rows));
+        return;
+    }
+    #[cfg(not(feature = "parallel"))]
+    let _ = parallel;
+
+    for (block, rows) in rows.chunks_mut(block_len).enumerate() {
+        run(block, rows);
+    }
+}
+
 pub(crate) fn sample_from_cdf(cdf: &[f64], r: f64) -> usize {
     match cdf.binary_search_by(|p| p.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal)) {
         Ok(i) => i,
@@ -160,8 +213,6 @@ pub(crate) fn sample_shots(
     num_shots: usize,
     seed: u64,
 ) -> Vec<Vec<bool>> {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-
     if meas_map.is_empty() {
         return vec![vec![false; num_classical_bits]; num_shots];
     }
@@ -170,6 +221,7 @@ pub(crate) fn sample_shots(
 
     match probs {
         Probabilities::Dense(v) => {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let cdf = build_cdf(v);
             for shot in &mut shots {
                 let r: f64 = rng.random();
@@ -179,28 +231,33 @@ pub(crate) fn sample_shots(
                 }
             }
         }
+        // Same blocks, streams and per-shot draw order as the factored
+        // backend's native sampler, so the two routes agree shot for shot.
         Probabilities::Factored { blocks, .. } => {
             let block_cdfs: Vec<Vec<f64>> = blocks.iter().map(|b| build_cdf(&b.probs)).collect();
-            for shot in &mut shots {
-                let mut global_idx = 0usize;
-                for (block, cdf) in blocks.iter().zip(block_cdfs.iter()) {
-                    let r: f64 = rng.random();
-                    let local_idx = sample_from_cdf(cdf, r);
-                    let mut m = block.mask;
-                    let mut bit = 0;
-                    while m != 0 {
-                        let pos = m.trailing_zeros() as usize;
-                        if local_idx & (1 << bit) != 0 {
-                            global_idx |= 1 << pos;
+            let parallel = draws_split_across_workers(num_shots, blocks.len());
+            sample_in_shot_blocks(&mut shots, 1, seed, parallel, |rng, block_shots| {
+                for shot in block_shots {
+                    let mut global_idx = 0usize;
+                    for (block, cdf) in blocks.iter().zip(block_cdfs.iter()) {
+                        let r: f64 = rng.random();
+                        let local_idx = sample_from_cdf(cdf, r);
+                        let mut m = block.mask;
+                        let mut bit = 0;
+                        while m != 0 {
+                            let pos = m.trailing_zeros() as usize;
+                            if local_idx & (1 << bit) != 0 {
+                                global_idx |= 1 << pos;
+                            }
+                            bit += 1;
+                            m &= m.wrapping_sub(1);
                         }
-                        bit += 1;
-                        m &= m.wrapping_sub(1);
+                    }
+                    for &(qubit, cbit) in meas_map {
+                        shot[cbit] = (global_idx >> qubit) & 1 == 1;
                     }
                 }
-                for &(qubit, cbit) in meas_map {
-                    shot[cbit] = (global_idx >> qubit) & 1 == 1;
-                }
-            }
+            });
         }
     }
 

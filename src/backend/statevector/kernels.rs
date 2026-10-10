@@ -432,9 +432,8 @@ fn negate_slice_kernel(slice: &mut [Complex64]) {
 }
 
 /// Fold the `|1>` branch of a reset onto the `|0>` branch over one aligned
-/// `(lo, hi)` pair, then clear `hi`. Shared by the block and sub-tile arms of
-/// [`StatevectorBackend::fold_reset_par`], which differ only in what they pass.
-#[cfg(feature = "parallel")]
+/// `(lo, hi)` pair, then clear `hi`. Shared by the sequential reset and the
+/// block and sub-tile arms of [`StatevectorBackend::fold_reset_par`].
 #[inline(always)]
 fn fold_reset_pair(lo: &mut [Complex64], hi: &mut [Complex64], outcome: bool) {
     if outcome {
@@ -4013,6 +4012,64 @@ impl StatevectorBackend {
         self.pending_norm *= inv_norm;
     }
 
+    /// Project `qubit` onto `outcome` without drawing, given the probability of
+    /// one the caller read with [`Self::qubit_probability_one`]: the collapse
+    /// half of a measurement, for a caller that chose the outcome itself.
+    pub(crate) fn collapse_qubit(&mut self, qubit: usize, outcome: bool, prob_one: f64) {
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            if self.state.len() / block_size >= 4 {
+                self.state
+                    .par_chunks_mut(block_size)
+                    .with_min_len(chunk_min_len(block_size))
+                    .for_each(|chunk| {
+                        let (lo, hi) = chunk.split_at_mut(half);
+                        simd::zero_slice(if outcome { lo } else { hi });
+                    });
+            } else {
+                for chunk in self.state.chunks_mut(block_size) {
+                    let (lo, hi) = chunk.split_at_mut(half);
+                    let dropped = if outcome { lo } else { hi };
+                    dropped
+                        .par_chunks_mut(MIN_PAR_ELEMS)
+                        .for_each(simd::zero_slice);
+                }
+            }
+            self.pending_norm *= measurement_inv_norm(outcome, prob_one);
+            return;
+        }
+
+        for chunk in self.state.chunks_mut(block_size) {
+            let (lo, hi) = chunk.split_at_mut(half);
+            simd::zero_slice(if outcome { lo } else { hi });
+        }
+        self.pending_norm *= measurement_inv_norm(outcome, prob_one);
+    }
+
+    /// Reset `qubit` along the branch where it measured `outcome`: collapse
+    /// onto that outcome and fold it down to `|0>`, as [`Self::apply_reset`]
+    /// does after its own draw.
+    pub(crate) fn reset_qubit_from(&mut self, qubit: usize, outcome: bool, prob_one: f64) {
+        let inv_norm = measurement_inv_norm(outcome, prob_one);
+
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            self.fold_reset_par(qubit, outcome);
+            self.pending_norm *= inv_norm;
+            return;
+        }
+
+        let half = 1usize << qubit;
+        for block in self.state.chunks_mut(half << 1) {
+            let (lo, hi) = block.split_at_mut(half);
+            fold_reset_pair(lo, hi, outcome);
+        }
+        self.pending_norm *= inv_norm;
+    }
+
     #[inline(always)]
     pub(super) fn qubit_probability_one(&self, qubit: usize) -> f64 {
         #[cfg(feature = "parallel")]
@@ -4191,28 +4248,7 @@ impl StatevectorBackend {
     pub(super) fn apply_reset(&mut self, qubit: usize) {
         let prob_one = self.qubit_probability_one(qubit);
         let outcome = self.rng.random::<f64>() < prob_one;
-        let inv_norm = measurement_inv_norm(outcome, prob_one);
-
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
-            self.fold_reset_par(qubit, outcome);
-            self.pending_norm *= inv_norm;
-            return;
-        }
-
-        let half = 1usize << qubit;
-        let block_size = half << 1;
-        let zero = Complex64::new(0.0, 0.0);
-        for block in self.state.chunks_mut(block_size) {
-            let (lo, hi) = block.split_at_mut(half);
-            if outcome {
-                lo.copy_from_slice(hi);
-            }
-            for amp in hi.iter_mut() {
-                *amp = zero;
-            }
-        }
-        self.pending_norm *= inv_norm;
+        self.reset_qubit_from(qubit, outcome, prob_one);
     }
 
     /// Apply multiple single-qubit gates in a multi-tier tiled pass.
@@ -4547,29 +4583,7 @@ impl StatevectorBackend {
         let prob_one = self.qubit_probability_one_par(qubit);
         let outcome = self.rng.random::<f64>() < prob_one;
         self.classical_bits[classical_bit] = outcome;
-
-        let half = 1usize << qubit;
-        let block_size = half << 1;
-        let num_blocks = self.state.len() / block_size;
-        if num_blocks >= 4 {
-            self.state
-                .par_chunks_mut(block_size)
-                .with_min_len(chunk_min_len(block_size))
-                .for_each(|chunk| {
-                    let (lo, hi) = chunk.split_at_mut(half);
-                    simd::zero_slice(if outcome { lo } else { hi });
-                });
-        } else {
-            for chunk in self.state.chunks_mut(block_size) {
-                let (lo, hi) = chunk.split_at_mut(half);
-                let dropped = if outcome { lo } else { hi };
-                dropped
-                    .par_chunks_mut(MIN_PAR_ELEMS)
-                    .for_each(simd::zero_slice);
-            }
-        }
-
-        self.pending_norm *= measurement_inv_norm(outcome, prob_one);
+        self.collapse_qubit(qubit, outcome, prob_one);
     }
 
     #[cfg(feature = "parallel")]

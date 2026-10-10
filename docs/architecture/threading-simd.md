@@ -83,15 +83,29 @@ comparison run used.
   are collected in shot order. Pauli-noise runs that simulate each distinct error pattern
   once keep the rule: a shot's pattern, outcome and readout flips all draw from its own
   seed, so the group a worker picks up moves no record.
+- **Native block sampling: bitwise for a given seed, at any thread count.** The sparse,
+  factored and product-state samplers draw shots in blocks of 256, each block from its
+  own ChaCha8 stream keyed on the block index, and the blocks depend on the shot count
+  alone, so whether they fill in parallel moves no bit. The dense sampler over factored
+  block probabilities walks the same blocks. Pinned for all three backends.
 - **Per-shot replay: bitwise for a given seed, at any thread count.** A circuit with a
-  mid-circuit measurement, a condition or a region runs once per shot, and below the
-  width where the resolved engine's own kernels go parallel those runs split across
-  workers: 15 qubits for dense engines, 128 for a tableau, any width for a product
-  state. Noisy trajectories follow the same rule. Shot `i` runs on a seed hashed from
-  the run seed and `i` with SplitMix64, and results fold in shot order. Runs on
-  adjacent seeds draw unrelated shots rather than the same shots offset by one.
-  Pinned for dense, decomposed, tableau and product-state circuits, and for tableau
-  trajectories.
+  mid-circuit measurement, a condition or a region runs once per shot off the host
+  statevector, and below the width where the resolved engine's own kernels go parallel
+  those runs split across workers: 15 qubits for dense engines, 128 for a tableau, any
+  width for a product state. Noisy trajectories follow the same rule, on every engine.
+  Shot `i` runs on a seed hashed from the run seed and `i` with SplitMix64, and results
+  fold in shot order. Runs on adjacent seeds draw unrelated shots rather than the same
+  shots offset by one. Pinned for decomposed, tableau and product-state circuits, and
+  for tableau trajectories.
+- **Outcome branching: bitwise for a given seed, at any thread count.** A noiseless
+  circuit of that kind on the host statevector evolves once per distinct outcome
+  history instead: at each measurement the shots on a branch split by a binomial draw
+  from a generator seeded by the run seed and the branch's outcome path, and from 10
+  qubits up to the dense floor the two sides of a split run on separate workers. Rows
+  are laid out in record order and then shuffled from the run seed, so the schedule
+  reaches neither. The split compares a draw against a collapse probability, which
+  above the dense floor is a parallel reduction and carries the caveat below. Pinned
+  for an 8-qubit and a 12-qubit circuit.
 - **Parallel reductions: stable to about 1e-12, not bitwise.** Norms, measurement
   collapse probabilities, reduced density matrices, and expectation values sum
   deterministic per-chunk partials in Rayon's combine order, which varies with pool width

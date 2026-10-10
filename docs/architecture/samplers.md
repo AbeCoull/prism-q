@@ -71,6 +71,12 @@ divided by `⟨ψ|ψ⟩` rather than assumed unit.
 | Distributed | `O(2^(n-p))` once, `O(log)` per shot | CDF over the rank-local slice; one scalar gathered per rank picks the owner |
 | Everything else | dense | Unchanged: `probabilities()` then CDF |
 
+The sparse, factored and product-state samplers draw in blocks of 256 shots, each
+block from its own ChaCha8 stream keyed on the seed and the block index, so the blocks
+fill in parallel and the bits do not depend on the thread count. The dense sampler over
+factored block probabilities walks the same blocks in the same order, so it agrees with
+the factored backend's native draws shot for shot.
+
 `run_shots_with` picks the native path through `try_native_terminal_backend`,
 which requires the route to land on a single backend and probes the capability
 before `init`, so a backend without one costs an allocation and nothing else.

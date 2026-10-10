@@ -327,7 +327,9 @@ impl Backend for ProductStateBackend {
 
     /// Qubits are independent, so a shot is `n` Bernoulli draws on the
     /// per-qubit `|β|²` rather than one draw from a `2^n` CDF: `O(shots·n)`
-    /// with the probabilities computed once up front.
+    /// with the probabilities computed once up front. Shots draw in blocks of
+    /// 256, one ChaCha8 stream per block, which split across workers once the
+    /// call makes enough draws; the words are the same at any thread count.
     fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
         let prob_one: Vec<f64> = self
             .qubits
@@ -343,15 +345,26 @@ impl Backend for ProductStateBackend {
             })
             .collect();
 
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        use crate::sim::shots::{draws_split_across_workers, sample_in_shot_blocks};
+
         let mut samples = BasisSamples::new(num_shots, self.num_qubits);
-        for shot in 0..num_shots {
-            for (qubit, &p1) in prob_one.iter().enumerate() {
-                if rng.random::<f64>() < p1 {
-                    samples.set(shot, qubit);
+        let words_per_shot = samples.words_per_shot();
+        let parallel = draws_split_across_workers(num_shots, self.num_qubits);
+        sample_in_shot_blocks(
+            samples.words_mut(),
+            words_per_shot,
+            seed,
+            parallel,
+            |rng, block_words| {
+                for shot_words in block_words.chunks_mut(words_per_shot) {
+                    for (qubit, &p1) in prob_one.iter().enumerate() {
+                        if rng.random::<f64>() < p1 {
+                            shot_words[qubit / 64] |= 1u64 << (qubit % 64);
+                        }
+                    }
                 }
-            }
-        }
+            },
+        );
         Ok(samples)
     }
 

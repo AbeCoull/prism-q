@@ -19,10 +19,12 @@ runtime where one exists, and a scalar path runs otherwise.
 
 The nine CPU backends implement the `Backend` trait; the distributed statevector
 backend is a tenth, feature-gated implementation covered by the Distributed
-column. `Planned` marks only work the roadmap carries: a ROCm port of the
-existing CUDA kernels. Backends without a CUDA kernel have nothing to port, so
-their ROCm cell is `No`, and the roadmap carries no distributed execution for
-any backend other than the statevector.
+column. `Planned` marks only work the roadmap carries: in this table a ROCm port
+of the existing CUDA kernels, and under [Not yet supported](#not-yet-supported)
+multi-GPU and distributed GPU execution and noisy shots on the distributed
+statevector, run in lockstep across ranks. Backends without a CUDA kernel have
+nothing to port, so their ROCm cell is `No`, and the roadmap carries no
+distributed execution for any backend other than the statevector.
 
 | Backend | x86-64 | AVX2/FMA/BMI2 | ARM64 | NEON | CUDA (NVIDIA) | ROCm (AMD) | Distributed |
 | --- | --- | --- | --- | --- | --- | --- | --- |

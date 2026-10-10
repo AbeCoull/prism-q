@@ -988,7 +988,7 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
     };
     lines.push(format!("Classification: {}", classification));
 
-    if circuit.has_terminal_measurements_only() {
+    if circuit.has_terminal_measurements_under_reset_channel() {
         lines.push(format!("Measurements: terminal-only ({})", measure_count));
     } else if measure_count > 0 {
         lines.push(format!("Measurements: mid-circuit ({})", measure_count));

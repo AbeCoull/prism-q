@@ -71,6 +71,12 @@ divided by `⟨ψ|ψ⟩` rather than assumed unit.
 | Distributed | `O(2^(n-p))` once, `O(log)` per shot | CDF over the rank-local slice; one scalar gathered per rank picks the owner |
 | Everything else | dense | Unchanged: `probabilities()` then CDF |
 
+The sparse, factored and product-state samplers draw in blocks of 256 shots, each
+block from its own ChaCha8 stream keyed on the seed and the block index, so the blocks
+fill in parallel and the bits do not depend on the thread count. The dense sampler over
+factored block probabilities walks the same blocks in the same order, so it agrees with
+the factored backend's native draws shot for shot.
+
 `run_shots_with` picks the native path through `try_native_terminal_backend`,
 which requires the route to land on a single backend and probes the capability
 before `init`, so a backend without one costs an allocation and nothing else.
@@ -78,6 +84,15 @@ before `init`, so a backend without one costs an allocation and nothing else.
 `sample_basis_states` directly instead of materializing shots, so seeded counts from the
 two can differ at a finite shot count. Only the distributed branch delegates to
 `run_shots_with(..).counts()`.
+
+Every draw from one evolved state needs the circuit to pass
+`Circuit::has_terminal_measurements_only`, which counts a reset as a measurement
+unless no multi-qubit gate has touched its qubit. Such a qubit is still a product
+factor, so the reset is deterministic and the leading resets of an OpenQASM program
+keep the terminal route. A reset on an entangled qubit draws an outcome, and one
+evolution would share that outcome across every shot, so the circuit replays per
+shot. The density matrix is the exception: it applies reset as the channel, and its
+terminal draw stays exact.
 
 The product state is the one backend taken past subsystem decomposition. It
 already stores one factor per qubit, so splitting a non-entangling circuit into

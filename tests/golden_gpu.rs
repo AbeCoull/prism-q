@@ -787,8 +787,10 @@ fn statevector_gpu_builder_matches_cpu_random() {
     assert_probs_close(&gpu_p, &cpu_p, 1e-10, "gpu/dispatch_random_14q");
 }
 
-// A mid-circuit measurement forces the per-shot slow path. Shots match bit for
-// bit only because every measured probability here is exactly 0.5; see
+// A mid-circuit measurement forces the per-shot slow path on the device, so each
+// device shot is compared with a seeded host run of that shot (host statevector
+// shots branch on outcomes instead). Shots match bit for bit only because every
+// measured probability here is exactly 0.5; see
 // `statevector_gpu_shot_frequencies_match_cpu_off_dyadic` for why that is a
 // special case rather than the contract.
 #[test]
@@ -806,11 +808,16 @@ fn statevector_gpu_mid_measure_shots_match_cpu() {
     circuit.add_gate(Gate::H, &[1]);
     circuit.add_measure(1, 1);
 
-    let cpu = prism_q::simulate(&circuit)
-        .backend(BackendKind::Statevector)
-        .seed(42)
-        .shots(16)
-        .expect("cpu shots failed");
+    let cpu: Vec<Vec<bool>> = (0..16)
+        .map(|i| {
+            prism_q::simulate(&circuit)
+                .backend(BackendKind::Statevector)
+                .seed(common::mix_seed(42, i))
+                .run()
+                .expect("cpu run failed")
+                .classical_bits
+        })
+        .collect();
     let gpu = prism_q::simulate(&circuit)
         .backend(BackendKind::StatevectorGpu {
             context: f.ctx.clone(),
@@ -819,7 +826,7 @@ fn statevector_gpu_mid_measure_shots_match_cpu() {
         .shots(16)
         .expect("gpu shots failed");
 
-    assert_eq!(cpu.shots, gpu.shots);
+    assert_eq!(cpu, gpu.shots);
 }
 
 // `sin^2(0.15)` is not a dyadic rational, so the device tree reduction and the

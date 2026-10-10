@@ -103,7 +103,7 @@ walks the graph from block 0, applying each block's fused circuit, evaluating it
 actions against that shot's bits and variables, and following its terminator.
 
 Shot `i` draws from `mix_seed(seed, i)`, the seed the per-shot circuit routes give
-shot `i`, and shots split across Rayon workers under the same rule those routes use. The
+shot `i` off the host statevector, and shots split across Rayon workers under the same rule those routes use. The
 host statevector keeps one backend per worker and reseeds it per shot, so its buffer is
 allocated once per worker rather than once per shot; every other backend is built per
 shot.

@@ -1028,6 +1028,81 @@ fn test_has_terminal_measurements_only() {
 }
 
 #[test]
+fn reset_keeps_terminal_sampling_only_on_uncoupled_qubits() {
+    let mut leading = Circuit::new(70, 2);
+    for q in 0..70 {
+        leading.add_reset(q);
+    }
+    leading.add_gate(Gate::H, &[69]);
+    leading.add_reset(69);
+    leading.add_gate(Gate::H, &[0]);
+    leading.add_gate(Gate::Cx, &[0, 68]);
+    leading.add_reset(1);
+    leading.add_measure(0, 0);
+    leading.add_measure(68, 1);
+    assert!(leading.has_terminal_measurements_only());
+    assert!(leading.has_terminal_measurements_under_reset_channel());
+
+    let mut coupled = Circuit::new(70, 2);
+    coupled.add_gate(Gate::H, &[0]);
+    coupled.add_gate(Gate::Cx, &[0, 68]);
+    coupled.add_reset(68);
+    coupled.add_measure(0, 0);
+    coupled.add_measure(68, 1);
+    assert!(!coupled.has_terminal_measurements_only());
+    assert!(coupled.has_terminal_measurements_under_reset_channel());
+
+    let mut late = coupled.clone();
+    late.instructions.remove(2);
+    late.instructions.insert(0, Instruction::Reset { qubit: 5 });
+    late.instructions.insert(3, Instruction::Reset { qubit: 0 });
+    assert!(!late.has_terminal_measurements_only());
+}
+
+#[test]
+fn coupled_reset_shots_replay_per_shot_off_the_mixture() {
+    let mut local = Circuit::new(3, 2);
+    local.add_reset(0);
+    local.add_reset(1);
+    local.add_gate(Gate::H, &[2]);
+    local.add_reset(2);
+    local.add_gate(Gate::H, &[0]);
+    local.add_gate(Gate::Cx, &[0, 1]);
+    local.add_measure(0, 0);
+    local.add_measure(1, 1);
+
+    let mut coupled = Circuit::new(3, 2);
+    coupled.add_gate(Gate::H, &[0]);
+    coupled.add_gate(Gate::Cx, &[0, 1]);
+    coupled.add_reset(0);
+    coupled.add_gate(Gate::Cx, &[1, 0]);
+    coupled.add_measure(0, 0);
+    coupled.add_measure(1, 1);
+
+    let terminal = |kind: &BackendKind, circuit: &Circuit| {
+        !matches!(
+            prepare_shot_source(kind, circuit, 64, 42).unwrap(),
+            ShotSource::PerShot
+        )
+    };
+    for kind in [
+        BackendKind::Statevector,
+        BackendKind::Mps { max_bond_dim: 16 },
+        BackendKind::Sparse,
+        BackendKind::Factored,
+        BackendKind::TensorNetwork,
+    ] {
+        assert!(terminal(&kind, &local), "{kind:?}: local resets");
+        assert!(!terminal(&kind, &coupled), "{kind:?}: coupled reset");
+    }
+    assert!(matches!(
+        prepare_shot_source(&BackendKind::Statevector, &local, 64, 42).unwrap(),
+        ShotSource::TerminalStatevector { .. }
+    ));
+    assert!(terminal(&BackendKind::DensityMatrix, &coupled));
+}
+
+#[test]
 fn test_measurement_map() {
     let qasm = r#"
         OPENQASM 3.0;
@@ -1197,7 +1272,7 @@ fn test_fast_path_no_measurements() {
 }
 
 #[test]
-fn test_shots_cached_fusion_matches_uncached() {
+fn test_branched_shots_keep_the_measured_correlation() {
     let qasm = r#"
         OPENQASM 3.0;
         qubit[2] q;
@@ -1211,17 +1286,10 @@ fn test_shots_cached_fusion_matches_uncached() {
     let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
     assert!(!circuit.has_terminal_measurements_only());
 
-    let cached = run_shots_with(BackendKind::Statevector, &circuit, 20, 42).unwrap();
-    for i in 0..20 {
-        let single = run_with_internal(
-            BackendKind::Statevector,
-            &circuit,
-            mix_seed(42, i),
-            SimOptions::default(),
-        )
-        .unwrap();
-        assert_eq!(cached.shots[i], single.classical_bits, "shot {i} mismatch");
-    }
+    let result = run_shots_with(BackendKind::Statevector, &circuit, 200, 42).unwrap();
+    assert!(result.shots.iter().all(|shot| shot[0] != shot[1]));
+    assert!(result.shots.iter().any(|shot| shot[0]));
+    assert!(result.shots.iter().any(|shot| !shot[0]));
 }
 
 // The fixture takes the temporal-prefix shot branch with a decomposition, and
@@ -1265,22 +1333,32 @@ fn temporal_prefix_block_shots_match_seeded_runs() {
     }
 }
 
-// Shots restore one evolution of the gates before the first measurement. At 12
-// qubits the loop splits across workers and at 16 it runs serially; both widths
-// fuse the prefix, and the suffix carries a condition and a reset.
+// Noiseless mid-circuit shots on the statevector branch on outcomes. At 12
+// qubits the two sides of a split run on separate workers and at 16 the walk
+// stays serial; the suffix carries a condition and a reset. Auto and the
+// explicit kind take the same walk, and the mid-circuit bit follows the
+// prefix's Born probability.
 #[test]
-fn prefix_restored_shots_match_fresh_runs() {
-    for n in [12usize, 16] {
-        let mut circuit = Circuit::new(n, n + 1);
+fn branched_shots_match_across_auto_and_the_explicit_statevector() {
+    for (n, shots) in [(12usize, 2_000usize), (16, 64)] {
+        let mut prefix = Circuit::new(n, n + 1);
         for layer in 0..2 {
             for q in 0..n {
-                circuit.add_gate(Gate::Ry(0.31 + 0.07 * (q + layer) as f64), &[q]);
-                circuit.add_gate(Gate::Rz(0.53 + 0.05 * q as f64), &[q]);
+                prefix.add_gate(Gate::Ry(0.31 + 0.07 * (q + layer) as f64), &[q]);
+                prefix.add_gate(Gate::Rz(0.53 + 0.05 * q as f64), &[q]);
             }
             for q in (layer % 2..n - 1).step_by(2) {
-                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+                prefix.add_gate(Gate::Cx, &[q, q + 1]);
             }
         }
+        let p_mid = {
+            let mut sv = StatevectorBackend::new(0);
+            sv.init(n, 0).unwrap();
+            sv.apply_instructions(&prefix.instructions).unwrap();
+            sv.qubit_probability(0).unwrap()
+        };
+
+        let mut circuit = prefix;
         circuit.add_measure(0, n);
         circuit.instructions.push(Instruction::Conditional {
             condition: crate::circuit::ClassicalCondition::BitIsOne(n),
@@ -1295,23 +1373,17 @@ fn prefix_restored_shots_match_fresh_runs() {
             circuit.add_measure(q, q);
         }
 
-        let shots = 12;
-        for kind in [BackendKind::Auto, BackendKind::Statevector] {
-            let result = run_shots_with(kind.clone(), &circuit, shots, 42).unwrap();
-            assert_eq!(result.metadata.backend, ResolvedBackend::Statevector);
-            for i in 0..shots {
-                let single = run_with_internal(
-                    kind.clone(),
-                    &circuit,
-                    mix_seed(42, i),
-                    SimOptions::classical_only(),
-                )
-                .unwrap();
-                assert_eq!(
-                    result.shots[i], single.classical_bits,
-                    "{n}q {kind:?} shot {i}"
-                );
-            }
+        let auto = run_shots_with(BackendKind::Auto, &circuit, shots, 42).unwrap();
+        let explicit = run_shots_with(BackendKind::Statevector, &circuit, shots, 42).unwrap();
+        assert_eq!(auto.metadata.backend, ResolvedBackend::Statevector);
+        assert_eq!(auto.shots, explicit.shots, "{n}q");
+        if shots >= 1_000 {
+            let mid = auto.shots.iter().filter(|shot| shot[n]).count() as f64 / shots as f64;
+            let sigma = (p_mid * (1.0 - p_mid) / shots as f64).sqrt();
+            assert!(
+                (mid - p_mid).abs() < 5.0 * sigma,
+                "{n}q: {mid} against {p_mid}"
+            );
         }
     }
 }

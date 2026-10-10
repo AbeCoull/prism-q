@@ -975,8 +975,10 @@ impl Backend for FactoredBackend {
     /// Draws one local index per sub-state and concatenates them, so the cost
     /// is the sum of the block dimensions rather than their product.
     ///
-    /// Blocks are visited in slot order and each consumes one draw per shot,
-    /// which is the order and the count the dense factored sampler uses.
+    /// Shots draw in blocks of 256, one ChaCha8 stream per block, and within a
+    /// shot the sub-states are visited in slot order with one draw each: the
+    /// streams, order and count the dense factored sampler uses, so the two
+    /// agree shot for shot at any thread count.
     fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
         let blocks: Vec<(Vec<f64>, &[usize])> = self
             .substates
@@ -989,19 +991,32 @@ impl Backend for FactoredBackend {
             })
             .collect();
 
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        use crate::sim::shots::{
+            draws_split_across_workers, sample_from_cdf, sample_in_shot_blocks,
+        };
+
         let mut samples = BasisSamples::new(num_shots, self.num_qubits);
-        for shot in 0..num_shots {
-            for (cdf, qubits) in &blocks {
-                let r: f64 = rng.random();
-                let local = crate::sim::shots::sample_from_cdf(cdf, r);
-                for (bit, &qubit) in qubits.iter().enumerate() {
-                    if (local >> bit) & 1 == 1 {
-                        samples.set(shot, qubit);
+        let words_per_shot = samples.words_per_shot();
+        let parallel = draws_split_across_workers(num_shots, blocks.len());
+        sample_in_shot_blocks(
+            samples.words_mut(),
+            words_per_shot,
+            seed,
+            parallel,
+            |rng, block_words| {
+                for shot_words in block_words.chunks_mut(words_per_shot) {
+                    for (cdf, qubits) in &blocks {
+                        let r: f64 = rng.random();
+                        let local = sample_from_cdf(cdf, r);
+                        for (bit, &qubit) in qubits.iter().enumerate() {
+                            if (local >> bit) & 1 == 1 {
+                                shot_words[qubit / 64] |= 1u64 << (qubit % 64);
+                            }
+                        }
                     }
                 }
-            }
-        }
+            },
+        );
         Ok(samples)
     }
 

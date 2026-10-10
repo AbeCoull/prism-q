@@ -276,17 +276,61 @@ impl Circuit {
         any_gate(&self.instructions, &mut |gate| gate.num_qubits() >= 2)
     }
 
-    /// True if no gate or conditional appears after any measurement.
+    /// True if every shot can be sampled from one evolved pure state: no gate,
+    /// reset, or conditional follows a measurement, and every reset acts on a
+    /// qubit no multi-qubit gate has touched, so from `|0...0>` it is still a
+    /// product factor and the reset is deterministic.
+    ///
+    /// A reset on an entangled qubit is a measurement in disguise, and each
+    /// shot must draw its own outcome. A start state other than `|0...0>`
+    /// voids the product argument, so callers holding one also check
+    /// [`Self::has_resets`].
     pub fn has_terminal_measurements_only(&self) -> bool {
+        self.terminal_scan(false)
+    }
+
+    /// [`Self::has_terminal_measurements_only`] with every reset before the
+    /// first measurement accepted, which holds where reset is the channel on a
+    /// mixed state rather than one sampled branch.
+    pub(crate) fn has_terminal_measurements_under_reset_channel(&self) -> bool {
+        self.terminal_scan(true)
+    }
+
+    fn terminal_scan(&self, reset_is_channel: bool) -> bool {
         let mut seen_measurement = false;
-        for inst in &self.instructions {
+        // Built on the first reset only, so a reset-free circuit allocates nothing.
+        let mut coupled: Option<Vec<u64>> = None;
+        for (index, inst) in self.instructions.iter().enumerate() {
             match inst {
                 Instruction::Conditional { .. } | Instruction::Region(_) => return false,
                 Instruction::Measure { .. } => {
                     seen_measurement = true;
                 }
-                Instruction::Gate { .. } | Instruction::Reset { .. } => {
+                Instruction::Gate { targets, .. } => {
                     if seen_measurement {
+                        return false;
+                    }
+                    if let Some(coupled) = coupled.as_mut() {
+                        mark_coupled(coupled, targets);
+                    }
+                }
+                Instruction::Reset { qubit } => {
+                    if seen_measurement {
+                        return false;
+                    }
+                    if reset_is_channel {
+                        continue;
+                    }
+                    let coupled = coupled.get_or_insert_with(|| {
+                        let mut words = vec![0u64; self.num_qubits.div_ceil(64)];
+                        for prior in &self.instructions[..index] {
+                            if let Instruction::Gate { targets, .. } = prior {
+                                mark_coupled(&mut words, targets);
+                            }
+                        }
+                        words
+                    });
+                    if (coupled[qubit / 64] >> (qubit % 64)) & 1 == 1 {
                         return false;
                     }
                 }
@@ -1185,6 +1229,14 @@ fn any_instruction(
                 _ => false,
             }
     })
+}
+
+fn mark_coupled(words: &mut [u64], targets: &[usize]) {
+    if targets.len() >= 2 {
+        for &q in targets {
+            words[q / 64] |= 1 << (q % 64);
+        }
+    }
 }
 
 fn strip_measurements(instructions: &[Instruction]) -> Vec<Instruction> {

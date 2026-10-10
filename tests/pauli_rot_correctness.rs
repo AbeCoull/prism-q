@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{MPS_EPS, SEED, SV_EPS, assert_probs_close};
+use common::{MPS_EPS, SEED, SV_EPS, assert_probs_close, mix_seed};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
@@ -214,17 +214,22 @@ fn per_shot_route_expands_for_mps() {
     c.add_pauli_rotation(0.31, &[PauliTerm::x(1), PauliTerm::y(2), PauliTerm::z(3)]);
     c.add_measure(3, 1);
 
-    let sv = sim::simulate(&c)
-        .backend(BackendKind::Statevector)
-        .seed(SEED)
-        .shots(32)
-        .unwrap();
+    let sv: Vec<Vec<bool>> = (0..32)
+        .map(|i| {
+            sim::simulate(&c)
+                .backend(BackendKind::Statevector)
+                .seed(mix_seed(SEED, i))
+                .run()
+                .unwrap()
+                .classical_bits
+        })
+        .collect();
     let mps = sim::simulate(&c)
         .backend(BackendKind::Mps { max_bond_dim: 64 })
         .seed(SEED)
         .shots(32)
         .unwrap();
-    assert_eq!(sv.shots, mps.shots);
+    assert_eq!(sv, mps.shots);
 }
 
 #[test]

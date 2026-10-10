@@ -179,9 +179,10 @@ fn subcube_plan(
     })
 }
 
-/// [`subcube_plan`] over `qubits`, the X and Y qubits a `MultiPauliRot` batch needs
-/// inside the tile, with the same `None` cases.
-fn pauli_rot_subcube_plan(
+/// [`subcube_plan`] over `qubits`, the qubits a batch needs inside the tile (the X and
+/// Y qubits of a `MultiPauliRot` batch, the targets of a `MultiFused` one), with the
+/// same `None` cases.
+fn qubit_subcube_plan(
     qubits: impl Iterator<Item = usize> + Clone,
     num_qubits: usize,
 ) -> Option<SubcubePlan> {
@@ -404,6 +405,97 @@ unsafe fn apply_pauli_rot_subcube(
             }
         }
     });
+}
+
+/// [`apply_subcube`] for a `MultiFused` batch, each gate keyed by its bit in the
+/// gathered tile. Kept apart from the `Multi2q` gather for the reason
+/// [`apply_pauli_rot_subcube`] gives.
+///
+/// # Safety
+/// `state` must point at `2^num_qubits` amplitudes laid out for `plan` and
+/// `rest`, and no other access to this subcube may overlap the call.
+unsafe fn apply_multi_1q_subcube(
+    state: *mut Complex64,
+    plan: &SubcubePlan,
+    rest: &[usize],
+    outer: usize,
+    gates: &[(usize, simd::PreparedGate1q)],
+) {
+    let run = 1usize << plan.low;
+    let mut base = 0usize;
+    for (j, &p) in rest.iter().enumerate() {
+        base |= ((outer >> j) & 1) << p;
+    }
+    let run_offset = |c: usize| {
+        let mut off = base;
+        for (j, &h) in plan.high.iter().enumerate() {
+            off |= ((c >> j) & 1) << h;
+        }
+        off
+    };
+    let runs = 1usize << plan.high.len();
+    with_subcube_tile(plan.tile_bits, |tile| {
+        for c in 0..runs {
+            // SAFETY: same contract as the enclosing unsafe fn; the run is
+            // inside the subcube and the tile holds `runs << low` elements.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    state.add(run_offset(c)),
+                    tile.as_mut_ptr().add(c << plan.low),
+                    run,
+                );
+            }
+        }
+        // A zero subcube stays zero under any unitary.
+        if tile[..runs << plan.low]
+            .iter()
+            .all(|a| a.re == 0.0 && a.im == 0.0)
+        {
+            return;
+        }
+        for &(bit, ref prepared) in gates {
+            prepared.apply_tiled(tile, bit);
+        }
+        for c in 0..runs {
+            // SAFETY: same contract as the enclosing unsafe fn.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    tile.as_ptr().add(c << plan.low),
+                    state.add(run_offset(c)),
+                    run,
+                );
+            }
+        }
+    });
+}
+
+/// Run `gates`, keyed by tile bit, over every subcube of `state` that `plan` selects:
+/// one pass over the state.
+fn apply_multi_1q_subcubes(
+    state: &mut [Complex64],
+    plan: &SubcubePlan,
+    gates: &[(usize, simd::PreparedGate1q)],
+) {
+    let num_qubits = state.len().trailing_zeros() as usize;
+    let rest = plan.rest(num_qubits);
+    let subcubes = 1usize << (num_qubits - plan.tile_bits);
+    #[cfg(feature = "parallel")]
+    if num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        let ptr = SendPtr(state.as_mut_ptr());
+        (0..subcubes).into_par_iter().for_each(|outer| {
+            // SAFETY: `ptr` holds 2^num_qubits amplitudes and distinct `outer`
+            // values address disjoint subcubes, so no two tasks touch the same
+            // amplitude.
+            unsafe { apply_multi_1q_subcube(ptr.as_complex_ptr(), plan, &rest, outer, gates) };
+        });
+        return;
+    }
+    let ptr = state.as_mut_ptr();
+    for outer in 0..subcubes {
+        // SAFETY: `ptr` holds 2^num_qubits amplitudes and each `outer` addresses
+        // its own subcube, applied one at a time here.
+        unsafe { apply_multi_1q_subcube(ptr, plan, &rest, outer, gates) };
+    }
 }
 
 /// Targets folded into one shared high-target traversal. `lanes * tile_len` is
@@ -2739,25 +2831,22 @@ fn split_multi_1q_diagonal_tiers(
 }
 
 /// Passes over a `num_qubits` state that [`StatevectorBackend::apply_multi_1q`] makes
-/// for a non-diagonal `gates` batch: one per populated tile tier, plus one per shared
-/// traversal, or per gate, above the tiles. Callers weigh it against the passes of
-/// another route.
-#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+/// for a non-diagonal `gates` batch, on the route [`multi_1q_route`] picks. Callers
+/// weigh it against the passes of another route.
 pub(crate) fn multi_1q_sweeps(gates: &[(usize, [[Complex64; 2]; 2])], num_qubits: usize) -> usize {
-    if gates.len() <= 1 {
-        return gates.len();
-    }
     #[cfg(feature = "parallel")]
     if num_qubits >= PARALLEL_THRESHOLD_QUBITS {
         let state_len = 1usize << num_qubits;
-        return tier_sweeps(
+        return multi_1q_route(
             gates,
+            num_qubits,
             max_target_for_tile(multi_gate_l2_tile_par(state_len)),
             keep_l3_tier(state_len),
             MAX_SHARED_1Q_TARGETS,
-        );
+        )
+        .1;
     }
-    tier_sweeps(gates, multi_gate_max_l2_target(), true, 1)
+    multi_1q_route(gates, num_qubits, multi_gate_max_l2_target(), true, 1).1
 }
 
 /// The passes [`split_multi_1q_tiers`] leads to with these tier bounds, when the gates
@@ -2781,22 +2870,124 @@ fn tier_sweeps(
     small as usize + medium as usize + large.div_ceil(shared)
 }
 
-/// Apply a `MultiFused` batch in the tiered tiled pass. Shared with the factored
-/// backend, whose blocks are bare statevector slices.
+/// How a `MultiFused` batch runs. Every route applies the targets inside the
+/// in-place tile first, in list order, then the rest by ascending target, so the
+/// routes agree bitwise.
+enum Multi1qRoute {
+    /// The tile tiers, then shared traversals of the targets above them.
+    Tiered,
+    /// One subcube gather over every target.
+    Whole(SubcubePlan),
+    /// The in-place tile pass, then the targets above it cut into runs of the
+    /// `Multi2q` high budget, each `(len, plan)`: one subcube gather per run with a
+    /// plan, shared traversals for a run whose gather would save no pass.
+    Split(SmallVec<[(usize, Option<SubcubePlan>); 2]>),
+}
+
+/// The route for `gates` on a `num_qubits` state and its pass count. A gather route
+/// is taken only when it makes strictly fewer passes than the tiers, whose targets
+/// above `max_l2_target` share traversals `shared` at a time.
+fn multi_1q_route(
+    gates: &[TargetedGate1q],
+    num_qubits: usize,
+    max_l2_target: usize,
+    medium_tiled: bool,
+    shared: usize,
+) -> (Multi1qRoute, usize) {
+    let tiered = tier_sweeps(gates, max_l2_target, medium_tiled, shared);
+    if tiered <= 1 {
+        return (Multi1qRoute::Tiered, tiered);
+    }
+    if let Some(plan) = qubit_subcube_plan(gates.iter().map(|&(target, _)| target), num_qubits) {
+        return (Multi1qRoute::Whole(plan), 1);
+    }
+    let mut above: SmallVec<[usize; 16]> = gates
+        .iter()
+        .map(|&(target, _)| target)
+        .filter(|&target| target > max_l2_target)
+        .collect();
+    above.sort_unstable();
+    let mut passes = usize::from(above.len() < gates.len());
+    let mut runs = SmallVec::new();
+    for run in above.chunks(multi_2q_high_budget_for(num_qubits)) {
+        let plan = if run.len() > shared {
+            qubit_subcube_plan(run.iter().copied(), num_qubits)
+        } else {
+            None
+        };
+        passes += if plan.is_some() {
+            1
+        } else {
+            run.len().div_ceil(shared)
+        };
+        runs.push((run.len(), plan));
+    }
+    if passes < tiered {
+        (Multi1qRoute::Split(runs), passes)
+    } else {
+        (Multi1qRoute::Tiered, tiered)
+    }
+}
+
+/// The gates of a [`Multi1qRoute::Whole`] gather keyed by their bit in `plan`'s tile:
+/// `small` in its list order, then `above` by ascending target.
+fn whole_subcube_gates(
+    plan: &SubcubePlan,
+    small: SmallVec<[(usize, simd::PreparedGate1q); 16]>,
+    above: &[TargetedGate1q],
+) -> SmallVec<[(usize, simd::PreparedGate1q); 16]> {
+    small
+        .into_iter()
+        .map(|(target, prepared)| (plan.map[target], prepared))
+        .chain(
+            above
+                .iter()
+                .map(|&(target, ref mat)| (plan.map[target], simd::PreparedGate1q::new(mat))),
+        )
+        .collect()
+}
+
+/// Apply `above`, the gates past the in-place tile by ascending target, in the runs
+/// of a [`Multi1qRoute::Split`].
+fn apply_multi_1q_runs(
+    state: &mut [Complex64],
+    above: &[TargetedGate1q],
+    runs: &[(usize, Option<SubcubePlan>)],
+) {
+    let mut rest = above;
+    for &(len, ref plan) in runs {
+        let (run, tail) = rest.split_at(len);
+        rest = tail;
+        if let Some(plan) = plan {
+            let tiled: SmallVec<[(usize, simd::PreparedGate1q); 16]> = run
+                .iter()
+                .map(|&(target, ref mat)| (plan.map[target], simd::PreparedGate1q::new(mat)))
+                .collect();
+            apply_multi_1q_subcubes(state, plan, &tiled);
+            continue;
+        }
+        #[cfg(feature = "parallel")]
+        if state.len() >= 1 << PARALLEL_THRESHOLD_QUBITS {
+            for chunk in run.chunks(MAX_SHARED_1Q_TARGETS) {
+                if chunk.len() > 1 {
+                    apply_multi_1q_shared(state, chunk);
+                } else {
+                    apply_single_gate_par(state, chunk[0].0, &chunk[0].1);
+                }
+            }
+            continue;
+        }
+        for &(target, ref mat) in run {
+            simd::PreparedGate1q::new(mat).apply_full_sequential(state, target);
+        }
+    }
+}
+
+/// Apply a `MultiFused` batch on the route [`multi_1q_route`] picks. Shared with the
+/// factored backend, whose blocks are bare statevector slices.
 #[cfg(feature = "parallel")]
 #[inline(always)]
 pub(crate) fn apply_multi_1q_par(state: &mut [Complex64], gates: &[(usize, [[Complex64; 2]; 2])]) {
-    apply_multi_1q_par_tiered(state, gates, keep_l3_tier(state.len()));
-}
-
-/// [`apply_multi_1q_par`] with the L3 tier on or folded into the shared passes.
-#[cfg(feature = "parallel")]
-#[inline(always)]
-fn apply_multi_1q_par_tiered(
-    state: &mut [Complex64],
-    gates: &[(usize, [[Complex64; 2]; 2])],
-    medium_tiled: bool,
-) {
     if gates.is_empty() {
         return;
     }
@@ -2804,7 +2995,27 @@ fn apply_multi_1q_par_tiered(
         apply_single_gate_par(state, gates[0].0, &gates[0].1);
         return;
     }
+    let medium_tiled = keep_l3_tier(state.len());
+    let (route, _) = multi_1q_route(
+        gates,
+        state.len().trailing_zeros() as usize,
+        max_target_for_tile(multi_gate_l2_tile_par(state.len())),
+        medium_tiled,
+        MAX_SHARED_1Q_TARGETS,
+    );
+    apply_multi_1q_par_routed(state, gates, medium_tiled, &route);
+}
 
+/// [`apply_multi_1q_par`] on `route`, with the L3 tier on or folded into the shared
+/// passes when the route is [`Multi1qRoute::Tiered`].
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_multi_1q_par_routed(
+    state: &mut [Complex64],
+    gates: &[(usize, [[Complex64; 2]; 2])],
+    medium_tiled: bool,
+    route: &Multi1qRoute,
+) {
     let tile_size = multi_gate_l2_tile_par(state.len());
     let mut small_gates = SmallVec::new();
     let mut medium_gates = SmallVec::new();
@@ -2812,11 +3023,17 @@ fn apply_multi_1q_par_tiered(
     split_multi_1q_tiers(
         gates,
         max_target_for_tile(tile_size),
-        medium_tiled,
+        medium_tiled && matches!(route, Multi1qRoute::Tiered),
         &mut small_gates,
         &mut medium_gates,
         &mut large_gates,
     );
+
+    if let Multi1qRoute::Whole(plan) = route {
+        let tiled = whole_subcube_gates(plan, small_gates, &large_gates);
+        apply_multi_1q_subcubes(state, plan, &tiled);
+        return;
+    }
 
     if !small_gates.is_empty() {
         state
@@ -2840,6 +3057,11 @@ fn apply_multi_1q_par_tiered(
                     prepared.apply_tiled(tile, target);
                 }
             });
+    }
+
+    if let Multi1qRoute::Split(runs) = route {
+        apply_multi_1q_runs(state, &large_gates, runs);
+        return;
     }
 
     for chunk in large_gates.chunks(MAX_SHARED_1Q_TARGETS) {
@@ -3231,7 +3453,7 @@ impl StatevectorBackend {
     pub(super) fn apply_multi_pauli_rot(&mut self, rotations: &[(usize, usize, f64)]) {
         let xall = rotations.iter().fold(0usize, |acc, &(x, _, _)| acc | x);
         let xqubits = (0..self.num_qubits).filter(|&q| xall >> q & 1 == 1);
-        if let Some(plan) = pauli_rot_subcube_plan(xqubits, self.num_qubits) {
+        if let Some(plan) = qubit_subcube_plan(xqubits, self.num_qubits) {
             let tiled: Vec<TiledPauliRot> = rotations
                 .iter()
                 .map(|&(x, z, theta)| {
@@ -4380,6 +4602,11 @@ impl StatevectorBackend {
     ///   one tile per worker fits it, otherwise folded into the shared traversal
     /// - Individual (target 17+): one shared traversal, or a single
     ///   full-state pass when only one gate lands there
+    ///
+    /// Where that costs more passes, the targets above the L2 tier are gathered into
+    /// subcube tiles as `Multi2q` gathers its high qubits (see [`subcube_plan`]), up
+    /// to the same high budget per pass, together with the low targets when they all
+    /// fit one tile.
     #[inline(always)]
     pub(crate) fn apply_multi_1q(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
         if gates.is_empty() {
@@ -4396,17 +4623,25 @@ impl StatevectorBackend {
             return;
         }
 
+        let max_l2_target = multi_gate_max_l2_target();
+        let (route, _) = multi_1q_route(gates, self.num_qubits, max_l2_target, true, 1);
         let mut small_gates = SmallVec::new();
         let mut medium_gates = SmallVec::new();
         let mut large_gates = SmallVec::new();
         split_multi_1q_tiers(
             gates,
-            multi_gate_max_l2_target(),
-            true,
+            max_l2_target,
+            matches!(route, Multi1qRoute::Tiered),
             &mut small_gates,
             &mut medium_gates,
             &mut large_gates,
         );
+
+        if let Multi1qRoute::Whole(plan) = &route {
+            let tiled = whole_subcube_gates(plan, small_gates, &large_gates);
+            apply_multi_1q_subcubes(&mut self.state, plan, &tiled);
+            return;
+        }
 
         if !small_gates.is_empty() {
             let tile_size = multi_gate_l2_tile();
@@ -4425,6 +4660,11 @@ impl StatevectorBackend {
                     prepared.apply_tiled(tile, target);
                 }
             }
+        }
+
+        if let Multi1qRoute::Split(runs) = &route {
+            apply_multi_1q_runs(&mut self.state, &large_gates, runs);
+            return;
         }
 
         for (target, mat) in large_gates {
@@ -5251,9 +5491,10 @@ mod qft_layout_tests {
     }
 }
 
-#[cfg(all(test, feature = "parallel"))]
+#[cfg(test)]
 mod multi_1q_tier_tests {
     use super::*;
+    use crate::backend::Backend;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -5270,6 +5511,12 @@ mod multi_1q_tier_tests {
         ]
     }
 
+    fn random_state(num_qubits: usize, rng: &mut ChaCha8Rng) -> Vec<Complex64> {
+        (0..1usize << num_qubits)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect()
+    }
+
     fn apply_scalar(state: &mut [Complex64], target: usize, mat: &[[Complex64; 2]; 2]) {
         let bit = 1usize << target;
         for i in (0..state.len()).filter(|i| i & bit == 0) {
@@ -5279,15 +5526,23 @@ mod multi_1q_tier_tests {
         }
     }
 
+    fn assert_matches(got: &[Complex64], want: &[Complex64], label: &str) {
+        for (i, (got, want)) in got.iter().zip(want).enumerate() {
+            assert!(
+                (got - want).norm() < 1e-12,
+                "{label}, amplitude {i}: {got} vs {want}"
+            );
+        }
+    }
+
     // Targets span the L2, L3 and untiled tiers in no particular order. The route
-    // depends on the thread count, so the two must agree bitwise.
+    // depends on the thread count, so every route must agree bitwise.
+    #[cfg(feature = "parallel")]
     #[test]
     fn medium_tier_routes_match_per_gate_application() {
         const NUM_QUBITS: usize = 18;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let start: Vec<Complex64> = (0..1usize << NUM_QUBITS)
-            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
-            .collect();
+        let start = random_state(NUM_QUBITS, &mut rng);
         let gates: Vec<TargetedGate1q> = [17, 0, 14, 5, 16, 13, 15]
             .into_iter()
             .map(|target| (target, random_unitary(&mut rng)))
@@ -5297,21 +5552,84 @@ mod multi_1q_tier_tests {
         for (target, mat) in &gates {
             apply_scalar(&mut expected, *target, mat);
         }
-        let mut routes = [true, false].map(|medium_tiled| {
+        let (gathered, _) = multi_1q_route(
+            &gates,
+            NUM_QUBITS,
+            max_target_for_tile(multi_gate_l2_tile_par(start.len())),
+            false,
+            MAX_SHARED_1Q_TARGETS,
+        );
+        assert!(!matches!(gathered, Multi1qRoute::Tiered));
+        let routes = [
+            (true, Multi1qRoute::Tiered),
+            (false, Multi1qRoute::Tiered),
+            (false, gathered),
+        ]
+        .map(|(medium_tiled, route)| {
             let mut state = start.clone();
-            apply_multi_1q_par_tiered(&mut state, &gates, medium_tiled);
+            apply_multi_1q_par_routed(&mut state, &gates, medium_tiled, &route);
             state
         });
-        for (i, (got, want)) in routes[0].iter().zip(&expected).enumerate() {
+        assert_matches(&routes[0], &expected, "L3 tier");
+        for route in &routes[1..] {
             assert!(
-                (got - want).norm() < 1e-12,
-                "amplitude {i}: {got} vs {want}"
+                route.iter().zip(&routes[0]).all(|(a, b)| a == b),
+                "the routes must agree bitwise, or results depend on the thread count"
             );
         }
-        let [tiled, shared] = &mut routes;
-        assert!(
-            tiled.iter().zip(shared.iter()).all(|(a, b)| a == b),
-            "the two routes must agree bitwise, or results depend on the thread count"
-        );
+    }
+
+    // Every shape the router separates: targets in the tile only, a full layer, and
+    // one to ten targets at the top of the register, alone and with low targets.
+    // Under `parallel` the routed result must also equal the tiers bitwise.
+    #[test]
+    fn gathered_routes_match_per_gate_application() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        for num_qubits in [14usize, 16, 18, 20] {
+            let start = random_state(num_qubits, &mut rng);
+            let mut cases: Vec<Vec<usize>> = vec![
+                (0..num_qubits.min(12)).rev().collect(),
+                (0..num_qubits).collect(),
+            ];
+            for k in 1..=10 {
+                let high: Vec<usize> = (num_qubits - k..num_qubits).rev().collect();
+                let mut mixed: Vec<usize> = [0, 3, 7, 11]
+                    .into_iter()
+                    .filter(|&q| q < num_qubits - k)
+                    .collect();
+                mixed.extend(&high);
+                cases.push(high);
+                cases.push(mixed);
+            }
+            for targets in cases {
+                let gates: Vec<TargetedGate1q> = targets
+                    .iter()
+                    .map(|&target| (target, random_unitary(&mut rng)))
+                    .collect();
+                let mut expected = start.clone();
+                for (target, mat) in &gates {
+                    apply_scalar(&mut expected, *target, mat);
+                }
+                let mut backend = StatevectorBackend::new(42);
+                backend.init(num_qubits, 0).unwrap();
+                backend.state.copy_from_slice(&start);
+                backend.apply_multi_1q(&gates);
+                let label = format!("{num_qubits}q targets {targets:?}");
+                assert_matches(&backend.state, &expected, &label);
+
+                #[cfg(feature = "parallel")]
+                if num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+                    let mut tiered = start.clone();
+                    let medium_tiled = keep_l3_tier(tiered.len());
+                    apply_multi_1q_par_routed(
+                        &mut tiered,
+                        &gates,
+                        medium_tiled,
+                        &Multi1qRoute::Tiered,
+                    );
+                    assert!(tiered == backend.state, "{label}: routes differ bitwise");
+                }
+            }
+        }
     }
 }

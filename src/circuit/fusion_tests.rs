@@ -1552,3 +1552,85 @@ fn pauli_rotations_stay_native_below_the_batch_floor() {
             .all(|&(name, _)| name == "pauli_rot")
     );
 }
+
+// The producer's packing check has to agree with the kernel's, or a batch it emits
+// runs every entry per amplitude on the fallback path.
+#[test]
+fn diagonal_batches_stay_within_the_kernel_tables() {
+    use crate::backend::statevector::kernels::build_diagonal_batch_tables;
+    let mut state = 42u64;
+    let mut next = |bound: usize| {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) as usize % bound
+    };
+    let mut batches = 0usize;
+    for _ in 0..60 {
+        let n = 16 + next(5);
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+        }
+        for _ in 0..40 + next(60) {
+            let q0 = next(n);
+            let q1 = (q0 + 1 + next(n - 1)) % n;
+            let theta = next(628) as f64 / 100.0;
+            match next(6) {
+                0 => c.add_gate(Gate::Cz, &[q0, q1]),
+                1 => c.add_gate(Gate::Rzz(theta), &[q0, q1]),
+                2 => c.add_gate(Gate::cphase(theta), &[q0, q1]),
+                3 => c.add_gate(Gate::cu(Gate::Rz(theta).matrix_2x2()), &[q0, q1]),
+                4 => c.add_gate(Gate::T, &[q0]),
+                _ => c.add_gate(Gate::Rx(theta), &[q0]),
+            }
+        }
+        let fused = fuse_circuit(&c, true);
+        for inst in &fused.instructions {
+            if let Instruction::Gate {
+                gate: Gate::DiagonalBatch(data),
+                ..
+            } = inst
+            {
+                batches += 1;
+                assert!(
+                    build_diagonal_batch_tables(&data.entries).is_some(),
+                    "a {n}q batch outgrew the kernel tables"
+                );
+            }
+        }
+    }
+    assert!(
+        batches > 60,
+        "the sweep should form batches, formed {batches}"
+    );
+}
+
+#[test]
+fn diagonal_entries_reproduce_each_batchable_gate() {
+    use crate::gates::diag_entries_phase;
+    let rz = Gate::Rz(0.7).matrix_2x2();
+    let dense = Gate::Fused2q(Box::new(mat_mul_4x4(
+        &Gate::cphase(1.1).matrix_4x4(),
+        &kron_2x2(&Gate::T.matrix_2x2(), &rz),
+    )));
+    for (gate, targets) in [
+        (Gate::cu(rz), [3usize, 1]),
+        (Gate::cphase(0.4), [0, 2]),
+        (dense, [2, 0]),
+        (Gate::Rzz(0.9), [1, 3]),
+    ] {
+        assert!(gate.is_diag_batchable(), "{}", gate.name());
+        let mut entries = Vec::new();
+        gate.push_diag_entries(&targets, &mut entries);
+        let mat = gate.matrix_4x4();
+        for index in 0..16usize {
+            let row = 2 * (index >> targets[0] & 1) + (index >> targets[1] & 1);
+            assert!(
+                (diag_entries_phase(index, &entries) - mat[row][row]).norm() < EPS,
+                "{} at basis state {index}",
+                gate.name()
+            );
+        }
+    }
+}

@@ -1935,7 +1935,7 @@ fn diagonal_mixed_batches_avoid_the_per_amplitude_fallback() {
     use crate::circuit::fusion::fuse_circuit;
     use crate::circuits::diagonal_mixed_circuit;
 
-    for (n, expected_batches) in [(16usize, 9usize), (20, 10), (22, 10), (26, 15)] {
+    for (n, expected_batches) in [(16usize, 4usize), (20, 5), (22, 5), (26, 5)] {
         let circuit = diagonal_mixed_circuit(n, 6, 0xDEAD_BEEF);
         let fused = fuse_circuit(&circuit, true);
         let batches: Vec<_> = fused

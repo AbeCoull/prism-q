@@ -79,6 +79,12 @@ fn flush_phase_control(
     output: &mut Vec<Instruction>,
     changed: &mut bool,
 ) {
+    if let Some([(target, _)]) = pending[control].as_deref() {
+        let target = *target;
+        if flush_lone_phases_on(target, pending, target_users, output, changed) {
+            return;
+        }
+    }
     let Some(phases) = pending[control].take() else {
         return;
     };
@@ -86,6 +92,38 @@ fn flush_phase_control(
         remove_target_user(target_users, target, control);
     }
     emit_phase_chain(control, phases, output, changed);
+}
+
+/// Emit every pending single-phase chain on `target` as one batch rooted on `target`,
+/// when there are at least two. A controlled phase is symmetric in its qubits, so the
+/// chains that would each emit a lone `Cu` share one pass. Returns whether it emitted.
+fn flush_lone_phases_on(
+    target: usize,
+    pending: &mut [Option<PhaseVec>],
+    target_users: &mut [TargetUserVec],
+    output: &mut Vec<Instruction>,
+    changed: &mut bool,
+) -> bool {
+    let is_lone =
+        |chain: &Option<PhaseVec>| matches!(chain.as_deref(), Some([(t, _)]) if *t == target);
+    let lone = target_users[target]
+        .iter()
+        .filter(|&&user| is_lone(&pending[user]))
+        .count();
+    if lone < MIN_BATCH_PHASES {
+        return false;
+    }
+    let mut re_rooted: PhaseVec = SmallVec::new();
+    target_users[target].retain(|user| {
+        if !is_lone(&pending[*user]) {
+            return true;
+        }
+        let phases = pending[*user].take().expect("a lone chain is pending");
+        re_rooted.push((*user, phases[0].1));
+        false
+    });
+    emit_phase_chain(target, re_rooted, output, changed);
+    true
 }
 
 fn push_pending_phase(

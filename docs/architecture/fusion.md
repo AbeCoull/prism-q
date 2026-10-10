@@ -74,19 +74,37 @@ them is what keeps the payload inside it. Both caps are declared on the gate pay
 table shape by a compile-time assertion; the kernels assert on entry in release builds
 as well, so a producer that outgrows a table fails loudly instead of dropping work.
 
-| Payload      | Cap        | Producer behavior past the cap                                     |
-|--------------|------------|--------------------------------------------------------------------|
-| `BatchRzz`   | 32 edges   | `fuse_batch_rzz` splits the run into consecutive batches           |
-| `BatchPhase` | 40 entries | `fuse_controlled_phases` splits the chain into consecutive batches |
+| Payload         | Cap                   | Producer behavior past the cap                                     |
+|-----------------|-----------------------|--------------------------------------------------------------------|
+| `BatchRzz`      | 32 edges              | `fuse_batch_rzz` splits the run into consecutive batches           |
+| `BatchPhase`    | 40 entries            | `fuse_controlled_phases` splits the chain into consecutive batches |
+| `DiagonalBatch` | 4 tables of 10 qubits | `fuse_diagonal_batch` closes the run and opens a new one           |
 
-Splitting is sound because both payloads hold mutually commuting diagonal terms. A
+Splitting the first two is sound because both hold mutually commuting diagonal terms. A
 repeated `(control, target)` pair folds into the entry already present. That keeps the
 BMI2 and fallback paths in agreement, since the BMI2 kernel indexes one bit per distinct
 qubit and a repeated target has no bit of its own, and it bounds a chain by the qubit
 count.
 
-`DiagonalBatch` instead declines at the kernel: `build_diagonal_batch_tables` returns
-`None` when the grouping does not fit and the backend runs the per-element path.
+A `DiagonalBatch` kernel table covers the qubits its two-qubit entries join, so the cap
+is on those components rather than on the entry count: they must pack into
+`DiagonalBatchData::MAX_GROUPS` tables of `MAX_QUBITS_PER_GROUP` qubits. The producer runs
+the kernel's first-fit packing on every gate it admits and closes the run before a gate
+breaks it. A hand-built batch that does not fit still runs, on the per-element path.
+
+## Diagonal batching
+
+`fuse_diagonal_batch` takes every diagonal form the earlier passes leave behind: the named
+diagonal gates, a `Cu` with a diagonal matrix (`crz` as well as controlled phases), a
+diagonal `Fused2q`, an all-diagonal `MultiFused` or `Multi2q`, and every `BatchPhase` and
+`BatchRzz`. A diagonal two-qubit block enters as a phase on each qubit and one on `|11>`.
+A gate on no qubit of the open run is emitted ahead of it, so a layer of 1q gates elsewhere
+does not split the run, and a gate on one of its qubits closes it.
+
+`fuse_controlled_phases` roots each chain on its control. A chain holding one phase whose
+target is also the target of another one-phase chain flushes with it as one `BatchPhase`
+rooted on that target, since a controlled phase is symmetric in its qubits. The controlled
+powers of phase estimation all share the eigenstate qubit and run as one batch.
 
 ## Plan capture and replay
 

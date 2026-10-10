@@ -2,7 +2,7 @@
 //! structure implies.
 
 use super::Circuit;
-use super::fusion::fuse_circuit;
+use super::fusion::fuse_circuit_for_width;
 use super::parameter::Parameters;
 use super::plan::FusionPlan;
 use crate::error::Result;
@@ -71,18 +71,22 @@ impl PreparedCircuit {
     /// Same conditions as [`new`](Self::new).
     pub fn with_backend(template: Circuit, params: Parameters, kind: BackendKind) -> Result<Self> {
         params.validate(&template)?;
-        let (skeleton, plan) = FusionPlan::capture(&template);
-        Ok(Self::assemble(template, params, kind, plan, skeleton))
+        let route = prepared_route(&kind, &template);
+        let (skeleton, plan) =
+            FusionPlan::capture(&template, fusion_state_qubits(route.as_ref(), &template));
+        Ok(Self::assemble(
+            template, params, kind, route, plan, skeleton,
+        ))
     }
 
     fn assemble(
         template: Circuit,
         params: Parameters,
         kind: BackendKind,
+        route: Option<PreparedRoute>,
         plan: Option<FusionPlan>,
         skeleton: Circuit,
     ) -> Self {
-        let route = prepared_route(&kind, &template);
         let bound = template.clone();
         let fused = skeleton.clone();
         Self {
@@ -123,7 +127,7 @@ impl PreparedCircuit {
     }
 
     /// Bind `values` and return the circuit fused for a backend that accepts
-    /// fused gates.
+    /// fused gates, at the buffer width of the backend [`run`](Self::run) holds.
     ///
     /// The result is legal only on such a backend: a fused Clifford circuit no
     /// longer reads as Clifford, so handing this to an explicit stabilizer run
@@ -145,7 +149,8 @@ impl PreparedCircuit {
             }
             self.fused_off_plan = true;
         }
-        self.fused = fuse_circuit(&self.bound, true).into_owned();
+        let width = fusion_state_qubits(self.route.as_ref(), &self.template);
+        self.fused = fuse_circuit_for_width(&self.bound, true, width).into_owned();
         Ok(&self.fused)
     }
 
@@ -346,6 +351,7 @@ impl PreparedCircuit {
                                 template.clone(),
                                 params.clone(),
                                 kind.clone(),
+                                prepared_route(kind, template),
                                 plan.clone(),
                                 skeleton.clone(),
                             )
@@ -360,4 +366,10 @@ impl PreparedCircuit {
         }
         items.iter().map(|item| eval(self, item)).collect()
     }
+}
+
+/// The width the held route's backend fuses at, or the template width when no
+/// backend is held.
+fn fusion_state_qubits(route: Option<&PreparedRoute>, template: &Circuit) -> usize {
+    route.map_or(template.num_qubits, PreparedRoute::fusion_state_qubits)
 }

@@ -637,6 +637,13 @@ impl DiagonalBatchData {
     pub fn entries(&self) -> &[DiagEntry] {
         &self.entries
     }
+
+    /// Widest qubit group one kernel lookup table covers. Qubits joined by a two-qubit
+    /// entry share a group, so the fusion pass closes a batch before a component outgrows it.
+    pub(crate) const MAX_QUBITS_PER_GROUP: usize = 10;
+
+    /// Most lookup tables one kernel sweep combines.
+    pub(crate) const MAX_GROUPS: usize = 4;
 }
 
 /// Data for a `MultiFused` batch of `(target_qubit, 2×2 matrix)` entries.
@@ -1559,53 +1566,80 @@ impl Gate {
         }
     }
 
+    /// True when this gate is diagonal and [`Self::push_diag_entries`] can express it.
     #[inline]
     pub(crate) fn is_diag_batchable(&self) -> bool {
         match self {
-            Gate::Cz | Gate::Rzz(_) => true,
+            Gate::Cz | Gate::Rzz(_) | Gate::BatchPhase(_) | Gate::BatchRzz(_) => true,
             _ if self.is_diagonal_1q() => true,
-            Gate::Cu(_) if self.controlled_phase().is_some() => true,
+            Gate::Cu(mat) => is_diagonal_2x2(mat),
+            Gate::Fused2q(mat) => is_diagonal_4x4(mat),
+            Gate::MultiFused(data) => data.all_diagonal,
+            Gate::Multi2q(data) => data.gates.iter().all(|(_, _, m)| is_diagonal_4x4(m)),
             _ => false,
         }
     }
 
-    /// The `DiagEntry` values equivalent to this gate on `targets`. Only valid when
-    /// `is_diag_batchable()` holds.
-    pub(crate) fn diag_entries(&self, targets: &[usize]) -> SmallVec<[DiagEntry; 2]> {
+    /// Append the `DiagEntry` values equivalent to this gate on `targets`. Only valid
+    /// when `is_diag_batchable()` holds; off-diagonal entries are ignored.
+    pub(crate) fn push_diag_entries(&self, targets: &[usize], out: &mut Vec<DiagEntry>) {
         match self {
-            Gate::Cz => {
-                smallvec::smallvec![DiagEntry::Phase2q {
+            Gate::Cz => out.push(DiagEntry::Phase2q {
+                q0: targets[0],
+                q1: targets[1],
+                phase: Complex64::new(-1.0, 0.0),
+            }),
+            Gate::Rzz(theta) => out.push(rzz_entry(targets[0], targets[1], *theta)),
+            Gate::BatchRzz(data) => out.extend(
+                data.edges
+                    .iter()
+                    .map(|&(q0, q1, theta)| rzz_entry(q0, q1, theta)),
+            ),
+            Gate::BatchPhase(data) => {
+                out.extend(data.phases.iter().map(|&(q1, phase)| DiagEntry::Phase2q {
                     q0: targets[0],
-                    q1: targets[1],
-                    phase: Complex64::new(-1.0, 0.0),
-                }]
+                    q1,
+                    phase,
+                }))
             }
-            Gate::Rzz(theta) => {
-                let half = theta / 2.0;
-                let same = Complex64::new((-half).cos(), (-half).sin()); // e^{-iθ/2}
-                let diff = Complex64::new(half.cos(), half.sin()); // e^{iθ/2}
-                smallvec::smallvec![DiagEntry::Parity2q {
-                    q0: targets[0],
-                    q1: targets[1],
-                    same,
-                    diff,
-                }]
-            }
-            _ if self.controlled_phase().is_some() => {
-                let phase = self.controlled_phase().unwrap();
-                smallvec::smallvec![DiagEntry::Phase2q {
+            Gate::Cu(mat) => {
+                let phase = match self.controlled_phase() {
+                    Some(phase) => phase,
+                    None => {
+                        out.push(DiagEntry::Phase1q {
+                            qubit: targets[0],
+                            d0: Complex64::new(1.0, 0.0),
+                            d1: mat[0][0],
+                        });
+                        mat[1][1] / mat[0][0]
+                    }
+                };
+                out.push(DiagEntry::Phase2q {
                     q0: targets[0],
                     q1: targets[1],
                     phase,
-                }]
+                });
+            }
+            Gate::Fused2q(mat) => push_diag_4x4_entries(targets[0], targets[1], mat, out),
+            Gate::Multi2q(data) => {
+                for (q0, q1, mat) in &data.gates {
+                    push_diag_4x4_entries(*q0, *q1, mat, out);
+                }
+            }
+            Gate::MultiFused(data) => {
+                out.extend(data.gates.iter().map(|(qubit, m)| DiagEntry::Phase1q {
+                    qubit: *qubit,
+                    d0: m[0][0],
+                    d1: m[1][1],
+                }))
             }
             _ => {
                 let mat = self.matrix_2x2();
-                smallvec::smallvec![DiagEntry::Phase1q {
+                out.push(DiagEntry::Phase1q {
                     qubit: targets[0],
                     d0: mat[0][0],
                     d1: mat[1][1],
-                }]
+                });
             }
         }
     }
@@ -1745,6 +1779,41 @@ pub(crate) fn is_diagonal_4x4(mat: &[[Complex64; 4]; 4]) -> bool {
         }
     }
     true
+}
+
+fn rzz_entry(q0: usize, q1: usize, theta: f64) -> DiagEntry {
+    DiagEntry::Parity2q {
+        q0,
+        q1,
+        same: Complex64::from_polar(1.0, -theta / 2.0),
+        diff: Complex64::from_polar(1.0, theta / 2.0),
+    }
+}
+
+/// Split a diagonal two-qubit unitary on `[q0, q1]` (row index `2 * b0 + b1`) into a
+/// phase on each qubit and one on `|11>`. Unitarity keeps every divisor at unit modulus.
+fn push_diag_4x4_entries(
+    q0: usize,
+    q1: usize,
+    mat: &[[Complex64; 4]; 4],
+    out: &mut Vec<DiagEntry>,
+) {
+    let (d00, d01, d10, d11) = (mat[0][0], mat[1][1], mat[2][2], mat[3][3]);
+    out.push(DiagEntry::Phase1q {
+        qubit: q0,
+        d0: d00,
+        d1: d10,
+    });
+    out.push(DiagEntry::Phase1q {
+        qubit: q1,
+        d0: Complex64::new(1.0, 0.0),
+        d1: d01 / d00,
+    });
+    out.push(DiagEntry::Phase2q {
+        q0,
+        q1,
+        phase: d11 * d00 / (d10 * d01),
+    });
 }
 
 /// Per-entry magnitude tolerance for `recognize_matrix` and

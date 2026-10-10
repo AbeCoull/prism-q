@@ -9,7 +9,7 @@ use smallvec::smallvec;
 
 use crate::backend::Backend;
 use crate::backend::density_matrix::{
-    DeferredSuperoperators, DensityMatrixBackend, MIN_DEFERRED_QUBITS,
+    DeferredSuperoperators, DensityMatrixBackend, MIN_DEFERRED_QUBITS, PairChannel,
 };
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
@@ -3344,7 +3344,9 @@ pub(crate) fn evolve_density_matrix(
         None => dm.init(circuit.num_qubits, circuit.num_classical_bits)?,
     }
     let Some(noise) = noise else {
-        for inst in &circuit.instructions {
+        let expanded = super::expand_for_backend(&dm, circuit);
+        let fused = super::fuse_for_backend(&dm, &expanded);
+        for inst in &fused.instructions {
             if !matches!(inst, Instruction::Measure { .. }) {
                 dm.apply(inst)?;
             }
@@ -3355,56 +3357,94 @@ pub(crate) fn evolve_density_matrix(
     let defer = circuit.num_qubits >= MIN_DEFERRED_QUBITS;
     let mut deferred = DeferredSuperoperators::new(circuit.num_qubits);
     for (inst, events) in circuit.instructions.iter().zip(&noise.after_gate) {
-        let foldable = match inst {
-            Instruction::Gate { gate, targets }
-                if events.iter().all(|event| {
-                    event.channel.num_qubits() == 1 && targets.contains(&event.qubits[0])
-                }) =>
-            {
-                Some((gate, targets))
-            }
-            _ => None,
-        };
-        if let Some((gate, targets)) = foldable {
-            let folded = match *targets.as_slice() {
-                [q] if defer || !events.is_empty() => {
-                    let channels: Vec<Vec<[[Complex64; 2]; 2]>> =
-                        events.iter().map(|e| kraus_1q(&e.channel)).collect();
-                    let held = deferred.defer_1q(gate, q, &channels);
-                    if held && !defer {
-                        deferred.flush_qubits(&mut dm, &[q]);
-                    }
-                    held
-                }
-                [q0, q1] if defer => {
-                    let channels: Vec<(usize, Vec<[[Complex64; 2]; 2]>)> = events
-                        .iter()
-                        .map(|e| (e.qubits[0], kraus_1q(&e.channel)))
-                        .collect();
-                    deferred.apply_2q(&mut dm, gate, q0, q1, &channels)
-                }
-                _ => false,
-            };
-            if folded {
-                continue;
-            }
-        }
-
+        let mut trailing: &[NoiseEvent] = events;
+        let mut folded_pair = None;
         match inst {
-            Instruction::Gate { targets, .. } => deferred.flush_qubits(&mut dm, targets),
-            Instruction::Measure { .. } => {}
-            _ => deferred.flush(&mut dm),
+            Instruction::Gate { gate, targets } => match *targets.as_slice() {
+                [q] if (defer || events.iter().any(|e| e.qubits[..] == [q]))
+                    && deferred.defer_gate(gate, q) => {}
+                [q0, q1] if defer && fold_2q(&mut dm, &mut deferred, gate, q0, q1, events) => {
+                    folded_pair = Some((q0, q1));
+                }
+                _ => {
+                    deferred.flush_qubits(&mut dm, targets);
+                    dm.apply(inst)?;
+                }
+            },
+            Instruction::Measure { .. } | Instruction::Barrier { .. } => {}
+            _ => {
+                deferred.flush(&mut dm);
+                dm.apply(inst)?;
+            }
         }
-        if !matches!(inst, Instruction::Measure { .. }) {
-            dm.apply(inst)?;
+        if let Some((q0, q1)) = folded_pair {
+            let split = events
+                .iter()
+                .position(|e| straddles(e, q0, q1))
+                .unwrap_or(events.len());
+            for event in events[..split]
+                .iter()
+                .filter(|e| e.qubits.iter().all(|&q| q != q0 && q != q1))
+            {
+                defer_event(&mut dm, &mut deferred, event);
+            }
+            trailing = &events[split..];
         }
-        for event in events {
-            deferred.flush_qubits(&mut dm, &event.qubits);
-            apply_noise_event_dm(&mut dm, event);
+        for event in trailing {
+            defer_event(&mut dm, &mut deferred, event);
+        }
+        if !defer {
+            deferred.flush(&mut dm);
         }
     }
     deferred.flush(&mut dm);
     Ok(dm)
+}
+
+/// Whether `event` touches exactly one qubit of `(q0, q1)` along with one
+/// outside it, which a sweep over the pair can neither absorb nor commute past.
+fn straddles(event: &NoiseEvent, q0: usize, q1: usize) -> bool {
+    let inside = event.qubits.iter().filter(|&&q| q == q0 || q == q1).count();
+    inside > 0 && inside < event.qubits.len()
+}
+
+/// Fold the two-qubit `gate` on `(q0, q1)` and the channels in `events` that
+/// act on the pair, up to the first that straddles it, into one sweep. False,
+/// with nothing applied, when [`DeferredSuperoperators::apply_2q`] declines.
+fn fold_2q(
+    dm: &mut DensityMatrixBackend,
+    deferred: &mut DeferredSuperoperators,
+    gate: &Gate,
+    q0: usize,
+    q1: usize,
+    events: &[NoiseEvent],
+) -> bool {
+    let channels: Vec<PairChannel> = events
+        .iter()
+        .take_while(|e| !straddles(e, q0, q1))
+        .filter(|e| e.qubits.iter().all(|&q| q == q0 || q == q1))
+        .map(|e| match &e.channel {
+            NoiseChannel::TwoQubitDepolarizing { p } => PairChannel::depolarizing_2q(*p),
+            NoiseChannel::Kraus2q { kraus } => PairChannel::kraus_2q(kraus, e.qubits[0] != q0),
+            other => PairChannel::block(e.qubits[0], &kraus_1q(other)),
+        })
+        .collect();
+    deferred.apply_2q(dm, gate, q0, q1, &channels)
+}
+
+/// Hold a one-qubit channel on its qubit's pending map, or sweep a two-qubit
+/// one after flushing both its qubits.
+fn defer_event(
+    dm: &mut DensityMatrixBackend,
+    deferred: &mut DeferredSuperoperators,
+    event: &NoiseEvent,
+) {
+    if event.channel.num_qubits() == 1 {
+        deferred.defer_channel(event.qubits[0], &kraus_1q(&event.channel));
+    } else {
+        deferred.flush_qubits(dm, &event.qubits);
+        apply_noise_event_dm(dm, event);
+    }
 }
 
 /// Exact output distribution of `circuit` under `noise`, read off the diagonal

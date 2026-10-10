@@ -334,8 +334,10 @@ been applied, so the MPS bound reflects the singular values this run actually
 discarded, and `placement` reflects where the amplitudes ended up after any
 device fallback. Only the MPS answers `bond_report`, and a peak that reached
 the cap is the hard signal that the cap bound the run. The MPS accumulates
-discarded weight per SVD and returns `1 - total` as a fidelity lower bound; the
-sum is over relative discarded weights, so the bound is conservative.
+discarded weight per SVD and returns `1 - total` as the fidelity lower bound. That
+is a first-order estimate, not a certificate: errors compound across SVDs, and the
+strict bound on the infidelity is the square of the summed square roots, which
+matches the sum only when a single SVD truncates.
 
 The decomposed route runs one backend per independent block and merges: its
 exactness is the weakest of the parts, its fidelity bound is the product, and its

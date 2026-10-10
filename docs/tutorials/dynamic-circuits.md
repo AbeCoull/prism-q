@@ -78,9 +78,12 @@ branch, so they read `110`. The other half took `h`, which leaves `c[1]` a fair 
 `000` or `010`. `c[2]` is always 0 because of the reset.
 
 Conditions can also test a parity, `if (c[0] ^ c[1])`, and `switch` with `case` arms
-lowers to the same guards. `while` is not supported, since a loop that exits on a
-measurement has no fixed instruction list. The
-[OpenQASM guide](../guides/openqasm.md#the-subset) has the full subset.
+lowers to the same guards. `parse_qasm` declines `while`, since a loop that exits on a
+measurement has no fixed instruction list. `parse_qasm_dynamic` reads it, with `break`
+and `continue`, and `simulate_program` runs the result once per shot; a shot that runs
+past a million blocks stops with a step-limit error unless `max_steps` raises the bound.
+The [OpenQASM guide](../guides/openqasm.md#dynamic-programs) covers what the dynamic
+parser reads, and [the subset](../guides/openqasm.md#the-subset) has the rest.
 
 ## In Rust
 

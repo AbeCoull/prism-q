@@ -110,7 +110,7 @@ bounded only by their own representation.
 | Statevector | Dense (streams from amplitudes, no probability vector) | Dense |
 | Stabilizer, Factored Stabilizer | Compiled Clifford sampler | Sparse Pauli Dynamics, exact |
 | Stochastic / Deterministic Pauli | Not applicable | Native Pauli propagation |
-| Tensor Network | Dense | Native, one doubled-network contraction per observable over its backward light cone |
+| Tensor Network | Dense below `PRISM_MAX_PROB_QUBITS`, then native conditional sampling, one doubled-network contraction per qubit per shot | Native, one doubled-network contraction per observable over its backward light cone |
 | Density Matrix | Dense | Native, `Tr(rho P)` per observable |
 
 Native sampling is deterministic from the seed alone: the same seed and shot

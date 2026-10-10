@@ -43,6 +43,29 @@ flowchart TD
 | `MIN_QUBITS_FOR_MULTI_2Q_FUSION` | 12 | Same as 2q fusion |
 | `MIN_QUBITS_FOR_PAULI_ROT_BATCH` | 16 | At 15q a parallel subcube pass has tiles for half of an eight-thread pool |
 
+## QFT recognition
+
+Before this pipeline runs, a backend with a native `QftBlock` kernel (the CPU
+statevector) has `recognize_qft_blocks` (`src/circuit/qft_recognition.rs`) fold each
+expanded QFT back into one block, so a QFT parsed from OpenQASM runs as the FFT rather
+than as `n^2 / 2` controlled phases. It matches every sequence `qft_textbook_steps`
+emits: forward or inverse, with or without the bit-reversal swaps, and in either label
+order. The phases of one column may come in any order with either qubit as control, and
+the swaps in any order, which covers the gate order Qiskit's QFT decomposes to. Each
+phase must equal `e^{±iπ/2^d}` to within `1e-12`, so an approximate QFT stays as gates.
+
+Only ranges the FFT runs natively fold: blocks starting at `q[0]` that span the register
+or at least 10 qubits (`MIN_SUBRANGE_QFT_QUBITS`). A narrower QFT stays as gates, which
+the tiled passes run in a sweep or two. The gates must be consecutive top-level
+instructions, so a QFT with another gate inside it, or on non-contiguous qubits, is left
+alone. The scan allocates nothing until it finds a match and returns the circuit
+borrowed when there is none. `PRISM_NO_QFT_BLOCK` turns off the kernel and the
+recognition together.
+
+The kernel runs the DIF network over each `2^num` amplitude chunk, with conjugate
+twiddles for the inverse, and reaches every form by adding a bit reversal of the chunk
+index before the network, after it, or both.
+
 ## Payload capacities
 
 The batched gates carry a lookup table sized at compile time, so the pass that emits

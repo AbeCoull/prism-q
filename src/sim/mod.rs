@@ -1324,14 +1324,15 @@ fn backend_from_initial_state(
 }
 
 /// Expand the gate forms `backend` has no native kernel for, `QftBlock` and
-/// `PauliRot`, leaving the stream borrowed when both probes accept it.
+/// `PauliRot`, or on a backend with the `QftBlock` kernel fold expanded QFTs into
+/// blocks. The stream stays borrowed when nothing changes.
 fn expand_for_backend<'c>(
     backend: &dyn Backend,
     circuit: &'c Circuit,
 ) -> std::borrow::Cow<'c, Circuit> {
     use std::borrow::Cow;
     let expanded = if backend.supports_qft_block() {
-        Cow::Borrowed(circuit)
+        crate::circuit::recognize_qft_blocks(circuit)
     } else {
         crate::circuit::expand_qft_blocks(circuit)
     };

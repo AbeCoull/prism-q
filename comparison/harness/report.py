@@ -162,10 +162,9 @@ def render(results: dict[str, Any]) -> str:
         "routes it to its stabilizer backend, so that row compares two tableau simulations "
         "plus the dense read-out rather than two statevector runs. The GHZ rows at every "
         "size are dominated by materializing the `2^n` probability vector, not by the gates. "
-        "The QFT rows run the expanded textbook sequence on every simulator, PRISM-Q included, "
-        "so PRISM-Q's block FFT path (which the Benchmarks page measures through the "
-        "generator's `QftBlock`) is not exercised here and its QFT times are higher than on "
-        "that page."
+        "The QFT rows hand every simulator the same expanded textbook sequence. PRISM-Q "
+        "recognizes the exact QFT in that gate list and runs it on its block FFT path, as it "
+        "would a QFT parsed from OpenQASM; `PRISM_NO_QFT_BLOCK` turns the recognition off."
     )
     lines.append("")
 

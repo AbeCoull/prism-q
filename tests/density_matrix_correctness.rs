@@ -1605,7 +1605,16 @@ fn assert_rdm_close(a: &DensityMatrixBackend, b: &StatevectorBackend, n: usize, 
 fn dm_qft_block_through_apply_evolves_the_state() {
     let mut circuit = Circuit::new(2, 0);
     circuit.add_gate(Gate::X, &[0]);
-    circuit.add_gate(Gate::QftBlock { start: 0, num: 2 }, &[0, 1]);
+    circuit.add_gate(
+        Gate::QftBlock {
+            start: 0,
+            num: 2,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+        &[0, 1],
+    );
 
     let mut dm = DensityMatrixBackend::new(SEED);
     dm.init(2, 0).unwrap();

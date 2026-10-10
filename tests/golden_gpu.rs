@@ -141,7 +141,13 @@ fn gate_samples() -> Vec<Gate> {
         Gate::MultiFused(Box::new(MultiFusedData::new(vec![(0, m2), (1, m2)]))),
         Gate::Fused2q(Box::new(m4)),
         Gate::Multi2q(Box::new(Multi2qData::new(vec![(0, 1, m4)]))),
-        Gate::QftBlock { start: 0, num: 4 },
+        Gate::QftBlock {
+            start: 0,
+            num: 4,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
         pauli_rot_sample(),
     ]
 }
@@ -178,7 +184,7 @@ fn representative(gate: &Gate) -> (usize, Vec<Instruction>) {
         Gate::MultiFused(_) => (0..N).collect(),
         Gate::Fused2q(_) => vec![0, 1],
         Gate::Multi2q(_) => vec![0, 1],
-        Gate::QftBlock { start, num } => {
+        Gate::QftBlock { start, num, .. } => {
             (*start as usize..*start as usize + *num as usize).collect()
         }
         Gate::PauliRot(data) => (0..data.axes().len()).map(|i| i + 1).collect(),
@@ -2615,6 +2621,9 @@ fn auto_gpu_temporal_clifford_qft_tail_matches_cpu_auto() {
         Gate::QftBlock {
             start: 0,
             num: n as u8,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
         },
         &targets,
     );

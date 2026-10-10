@@ -43,7 +43,9 @@ matrices with no OpenQASM spelling, and `to_qasm3` returns `ExportUnsupported`
 naming the instruction index. Export the circuit before fusing it, or the template
 a `PreparedCircuit` binds. `QftBlock` and `PauliRot` are the exceptions: export
 expands the first to its textbook Hadamard, controlled-phase, and swap sequence
-and the second to its CNOT-ladder lowering on the way out.
+and the second to its CNOT-ladder lowering on the way out. On the CPU statevector, an
+expanded QFT parsed back in runs as one block again (see
+[QFT recognition](../architecture/fusion.md#qft-recognition)).
 
 ## Declarations and measurement
 

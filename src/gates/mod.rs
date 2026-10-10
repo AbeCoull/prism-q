@@ -95,11 +95,22 @@ pub enum Gate {
     /// Two-qubit gates applied in one tiled pass.
     Multi2q(Box<Multi2qData>),
 
-    /// Quantum Fourier Transform on `start..start+num`.
+    /// Quantum Fourier Transform on `start..start+num`, `q[start]` the least
+    /// significant bit unless `big_endian`.
     ///
-    /// The CPU statevector runs a whole-state FFT. Subrange blocks and other
-    /// backends expand to textbook H, cphase, and swap gates before execution.
-    QftBlock { start: u8, num: u8 },
+    /// The flags select the gate sequence [`crate::circuit::qft_textbook_steps`]
+    /// expands to: `swaps` appends the bit-reversal swaps, `big_endian` mirrors
+    /// the qubit labels so the first H lands on `q[start]`, and `inverse` is the
+    /// exact adjoint of that sequence. The CPU statevector runs blocks starting at
+    /// `q[0]` as an FFT over each `2^num` amplitude chunk. Other blocks and other
+    /// backends expand to the textbook gates before execution.
+    QftBlock {
+        start: u8,
+        num: u8,
+        inverse: bool,
+        swaps: bool,
+        big_endian: bool,
+    },
 
     /// Multi-qubit Pauli rotation `exp(-i θ P / 2)`. The `PauliRotData` letter
     /// at index `i` acts on the instruction's `targets[i]`.
@@ -1232,7 +1243,7 @@ impl Gate {
         }
     }
 
-    /// Adjoint of this gate. Panics on `QftBlock`, which has no in-place inverse.
+    /// Adjoint of this gate.
     pub fn inverse(&self) -> Gate {
         match self {
             Gate::Id | Gate::X | Gate::Y | Gate::Z | Gate::H => self.clone(),
@@ -1254,13 +1265,19 @@ impl Gate {
             Gate::BatchPhase(data) => Gate::BatchPhase(Box::new(BatchPhaseData {
                 phases: data.phases.iter().map(|&(q, p)| (q, p.conj())).collect(),
             })),
-            Gate::QftBlock { .. } => {
-                panic!(
-                    "Gate::QftBlock has no in-place inverse. Run \
-                     circuit::expand_qft_blocks before applying `inv @` or any \
-                     transform that calls Gate::inverse()."
-                )
-            }
+            Gate::QftBlock {
+                start,
+                num,
+                inverse,
+                swaps,
+                big_endian,
+            } => Gate::QftBlock {
+                start: *start,
+                num: *num,
+                inverse: !inverse,
+                swaps: *swaps,
+                big_endian: *big_endian,
+            },
             Gate::PauliRot(data) => Gate::PauliRot(Box::new(PauliRotData {
                 theta: -data.theta,
                 axes: data.axes.clone(),
@@ -1850,7 +1867,19 @@ impl fmt::Display for Gate {
             Gate::Unitary(data) => write!(f, "U{}", data.num_qubits()),
             Gate::MultiFused(data) => write!(f, "MF[{}]", data.gates.len()),
             Gate::BatchPhase(data) => write!(f, "BP[{}]", data.phases.len()),
-            Gate::QftBlock { start, num } => write!(f, "QFT[{}..{}]", start, start + num),
+            Gate::QftBlock {
+                start,
+                num,
+                inverse,
+                swaps,
+                big_endian,
+            } => {
+                let end = *start as usize + *num as usize;
+                let prefix = if *inverse { "I" } else { "" };
+                let no_swaps = if *swaps { "" } else { ",ns" };
+                let endian = if *big_endian { ",be" } else { "" };
+                write!(f, "{prefix}QFT[{start}..{end}{no_swaps}{endian}]")
+            }
             Gate::PauliRot(data) => {
                 f.write_str("R[")?;
                 for axis in &data.axes {

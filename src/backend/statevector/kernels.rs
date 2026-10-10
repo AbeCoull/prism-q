@@ -509,6 +509,8 @@ struct QftTwiddleCache {
     bytes: usize,
     limit_bytes: usize,
     tick: AtomicU64,
+    /// Holds the conjugate tables the inverse transform reads.
+    inverse: bool,
 }
 
 impl QftTwiddleCache {
@@ -518,6 +520,7 @@ impl QftTwiddleCache {
             bytes: 0,
             limit_bytes,
             tick: AtomicU64::new(0),
+            inverse: false,
         }
     }
 
@@ -550,15 +553,25 @@ fn qft_twiddle_table_bytes(table_len: usize) -> usize {
     table_len.saturating_mul(std::mem::size_of::<Complex64>())
 }
 
-fn qft_twiddles_scaled(n: usize) -> QftTwiddleTable {
-    static CACHE: OnceLock<RwLock<QftTwiddleCache>> = OnceLock::new();
-    let cache =
-        CACHE.get_or_init(|| RwLock::new(QftTwiddleCache::new(qft_twiddle_cache_limit_bytes())));
+/// DIF twiddles `exp(2 pi i k / 2^n) / sqrt(2)`, conjugated for `inverse`.
+fn qft_twiddles_scaled(n: usize, inverse: bool) -> QftTwiddleTable {
+    static FORWARD: OnceLock<RwLock<QftTwiddleCache>> = OnceLock::new();
+    static INVERSE: OnceLock<RwLock<QftTwiddleCache>> = OnceLock::new();
+    let cache = if inverse {
+        INVERSE.get_or_init(|| {
+            RwLock::new(QftTwiddleCache {
+                inverse: true,
+                ..QftTwiddleCache::new(qft_twiddle_cache_limit_bytes())
+            })
+        })
+    } else {
+        FORWARD.get_or_init(|| RwLock::new(QftTwiddleCache::new(qft_twiddle_cache_limit_bytes())))
+    };
     cached_qft_twiddles(cache, n)
 }
 
 fn cached_qft_twiddles(cache: &RwLock<QftTwiddleCache>, n: usize) -> QftTwiddleTable {
-    let cache_limit = {
+    let (cache_limit, inverse) = {
         let guard = cache.read().unwrap();
         if let Some(Some(entry)) = guard.entries.get(n) {
             entry
@@ -566,7 +579,7 @@ fn cached_qft_twiddles(cache: &RwLock<QftTwiddleCache>, n: usize) -> QftTwiddleT
                 .fetch_max(guard.next_tick(), Ordering::Relaxed);
             return Arc::clone(&entry.table);
         }
-        guard.limit_bytes
+        (guard.limit_bytes, guard.inverse)
     };
 
     let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
@@ -574,7 +587,8 @@ fn cached_qft_twiddles(cache: &RwLock<QftTwiddleCache>, n: usize) -> QftTwiddleT
     let mut twiddles = Vec::with_capacity(qft_size / 2);
     for k in 0..qft_size / 2 {
         let angle = std::f64::consts::TAU * k as f64 / qft_size as f64;
-        twiddles.push(Complex64::from_polar(inv_sqrt2, angle));
+        let w = Complex64::from_polar(inv_sqrt2, angle);
+        twiddles.push(if inverse { w.conj() } else { w });
     }
     let twiddles: Arc<[Complex64]> = twiddles.into();
     let table_bytes = qft_twiddle_table_bytes(twiddles.len());
@@ -630,15 +644,16 @@ fn qft_max_tile_bits() -> usize {
     (2 * cache::tile_budget_bytes() / size_of::<Complex64>()).ilog2() as usize
 }
 
-/// Tile width for an `n`-qubit QFT: as wide as leaves the pool its tile count
-/// ([`cache::min_parallel_tiles`]), and above the minimum one bit narrower where that
-/// leaves an even count of stages above the tile, which then all run as radix-4 pairs
-/// instead of paying a radix-2 pass.
-fn qft_tile_bits(n: usize) -> usize {
+/// Tile width for an `n`-qubit QFT over a `state_bits`-qubit state: as wide as leaves
+/// the pool its tile count ([`cache::min_parallel_tiles`]), and above the minimum one
+/// bit narrower where that leaves an even count of stages above the tile, which then
+/// all run as radix-4 pairs instead of paying a radix-2 pass.
+fn qft_tile_bits(n: usize, state_bits: usize) -> usize {
+    let chunks_log2 = state_bits - n;
     qft_tile_bits_for(
         n,
         qft_max_tile_bits(),
-        cache::min_parallel_tiles().ilog2() as usize,
+        (cache::min_parallel_tiles().ilog2() as usize).saturating_sub(chunks_log2),
     )
 }
 
@@ -654,24 +669,31 @@ fn qft_tile_bits_for(n: usize, max_tile_bits: usize, min_tiles_log2: usize) -> u
 }
 
 /// Per-stride QFT twiddles for the in-tile stages: entries `[s, 2s)` hold
-/// `exp(2 pi i k / 2s) / sqrt(2)` for each power of two `s`. They are bit-identical to
-/// the whole-state table's entries `k * total / 2s`, which a small stride would read
-/// one page apart.
-fn qft_compact_twiddles() -> &'static [Complex64] {
-    static TABLE: OnceLock<Box<[Complex64]>> = OnceLock::new();
-    TABLE.get_or_init(|| {
+/// `exp(2 pi i k / 2s) / sqrt(2)` for each power of two `s`, conjugated for `inverse`.
+/// They are bit-identical to the whole-state table's entries `k * total / 2s`, which a
+/// small stride would read one page apart.
+fn qft_compact_twiddles(inverse: bool) -> &'static [Complex64] {
+    static FORWARD: OnceLock<Box<[Complex64]>> = OnceLock::new();
+    static INVERSE: OnceLock<Box<[Complex64]>> = OnceLock::new();
+    let build = || {
         let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
         let mut table = vec![Complex64::new(0.0, 0.0); 1 << qft_max_tile_bits()];
         let mut s = 1;
         while s < table.len() {
             for k in 0..s {
                 let angle = std::f64::consts::TAU * k as f64 / (2 * s) as f64;
-                table[s + k] = Complex64::from_polar(inv_sqrt2, angle);
+                let w = Complex64::from_polar(inv_sqrt2, angle);
+                table[s + k] = if inverse { w.conj() } else { w };
             }
             s <<= 1;
         }
         table.into_boxed_slice()
-    })
+    };
+    if inverse {
+        INVERSE.get_or_init(build)
+    } else {
+        FORWARD.get_or_init(build)
+    }
 }
 
 #[inline(always)]
@@ -777,6 +799,29 @@ fn apply_bit_reverse_permutation(state: &mut [Complex64], bits: usize) {
     for b in (0..1usize << middle).filter(owns_pair) {
         // SAFETY: `ptr` spans the whole state, borrowed mutably for this loop alone.
         unsafe { bit_reverse_tile_pair(ptr, bits, b) }
+    }
+}
+
+/// Reverse the low `bits` index bits within every `2^bits` chunk of `state`.
+fn apply_bit_reverse_chunks(state: &mut [Complex64], bits: usize) {
+    let chunk = 1usize << bits;
+    if state.len() == chunk {
+        apply_bit_reverse_permutation(state, bits);
+        return;
+    }
+    #[cfg(feature = "parallel")]
+    if state.len() >= 1usize << PARALLEL_THRESHOLD_QUBITS {
+        state
+            .par_chunks_mut(chunk.max(MIN_PAR_ELEMS))
+            .for_each(|task| {
+                for c in task.chunks_mut(chunk) {
+                    apply_bit_reverse_permutation(c, bits);
+                }
+            });
+        return;
+    }
+    for c in state.chunks_mut(chunk) {
+        apply_bit_reverse_permutation(c, bits);
     }
 }
 
@@ -2165,7 +2210,8 @@ fn radix4_runs(
     }
 }
 
-/// Run two DIF FFT stages as one radix-4 pass.
+/// Run two DIF FFT stages as one radix-4 pass over every `2 * twiddles_scaled.len()`
+/// amplitude chunk of `state`.
 ///
 /// `inner_stride = 2^(outer_stage - 1)`. Falls back to a sequential loop when
 /// the `parallel` feature is off.
@@ -2177,9 +2223,9 @@ fn fft_stage_pair_par(
     inv_sqrt2: f64,
 ) {
     let s = inner_stride;
-    let total = state.len();
-    let step_outer = total / (s << 2);
-    let step_inner = total / (s << 1);
+    let fft_len = 2 * twiddles_scaled.len();
+    let step_outer = fft_len / (s << 2);
+    let step_inner = fft_len / (s << 1);
 
     #[cfg(feature = "parallel")]
     fft_stage_pair_chunked(state, s, step_outer, step_inner, twiddles_scaled, inv_sqrt2);
@@ -3831,36 +3877,39 @@ impl StatevectorBackend {
             });
     }
 
-    /// Apply a whole-state QFT with a tiled DIF FFT.
+    /// Apply a QFT on qubits `0..num`, a tiled DIF FFT over every `2^num` amplitude
+    /// chunk, in the [`Gate::QftBlock`] form the flags name.
     ///
-    /// The DIF output is bit-reversed; the final pass restores textbook order.
-    pub(super) fn apply_qft_block(&mut self, start: usize, num: usize) {
-        assert!(start + num <= self.num_qubits);
-        assert!(num >= 1);
-
-        assert_eq!(
-            start, 0,
-            "QftBlock with non-zero start is not supported by the FFT kernel; \
-             sim::expand_qft_blocks should pre-expand before reaching this point"
-        );
+    /// With `D` the DIF network and `P` the chunk bit reversal, the forward swap form is
+    /// `P D` and the forward no-swap form `D`. Conjugate twiddles turn `D` into
+    /// `conj(D)`, giving `P conj(D)` for the inverse swap form and `P conj(D) P` for the
+    /// inverse no-swap form. Mirroring the labels conjugates each form by `P`.
+    pub(super) fn apply_qft_block(
+        &mut self,
+        num: usize,
+        inverse: bool,
+        swaps: bool,
+        big_endian: bool,
+    ) {
+        assert!(num >= 1 && num <= self.num_qubits);
+        let reverse_input = big_endian != (inverse && !swaps);
+        let reverse_output = big_endian != (swaps || inverse);
 
         let n = num;
-        let qft_size = 1usize << n;
+        let fft_len = 1usize << n;
         let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
 
-        let twiddles_scaled = qft_twiddles_scaled(n);
+        let twiddles_scaled = qft_twiddles_scaled(n, inverse);
         let twiddles_scaled = twiddles_scaled.as_ref();
 
-        let total = self.state.len();
-        assert_eq!(
-            total, qft_size,
-            "QftBlock currently requires whole-state QFT"
-        );
+        if reverse_input {
+            apply_bit_reverse_chunks(&mut self.state, n);
+        }
 
         // Cache-tiled DIF FFT:
         //   - High-stride stages run as full-state passes.
         //   - Low-stride stages run together inside each cache-sized tile.
-        let tile_bits = qft_tile_bits(n);
+        let tile_bits = qft_tile_bits(n, self.num_qubits);
 
         // Phase 1: high-stride stages.
         //
@@ -3873,7 +3922,7 @@ impl StatevectorBackend {
         let run_radix2_stage = |state: &mut Vec<Complex64>, stage: usize| {
             let stride = 1usize << stage;
             let block_size = stride << 1;
-            let twiddle_step = total / block_size;
+            let twiddle_step = fft_len / block_size;
 
             #[cfg(feature = "parallel")]
             if state.len() >= 1usize << PARALLEL_THRESHOLD_QUBITS {
@@ -3907,12 +3956,9 @@ impl StatevectorBackend {
         }
 
         // Phase 2: low-stride stages on cache-resident tiles.
-        if tile_bits == 0 {
-            return;
-        }
         let tile_size = 1usize << tile_bits;
 
-        let compact = qft_compact_twiddles();
+        let compact = qft_compact_twiddles(inverse);
         let apply_low_stages_in_tile = |tile: &mut [Complex64]| {
             let mut stage_top = tile_bits;
             let mut stages_left = tile_bits;
@@ -3932,7 +3978,7 @@ impl StatevectorBackend {
 
         #[cfg(feature = "parallel")]
         let low_done_parallel =
-            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS && total / tile_size >= 4 {
+            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS && self.state.len() / tile_size >= 4 {
                 self.state
                     .par_chunks_mut(tile_size)
                     .for_each(apply_low_stages_in_tile);
@@ -3949,16 +3995,25 @@ impl StatevectorBackend {
             }
         }
 
-        apply_bit_reverse_permutation(&mut self.state, n);
+        if reverse_output {
+            apply_bit_reverse_chunks(&mut self.state, n);
+        }
     }
 
     #[inline]
-    pub(super) fn apply_qft_block_textbook(&mut self, start: usize, num: usize) {
+    pub(super) fn apply_qft_block_textbook(
+        &mut self,
+        start: usize,
+        num: usize,
+        inverse: bool,
+        swaps: bool,
+        big_endian: bool,
+    ) {
         assert!(start + num <= self.num_qubits);
         assert!(num >= 1);
 
         let h = Gate::H.matrix_2x2();
-        for step in qft_textbook_steps(start, num) {
+        for step in qft_textbook_steps(start, num, inverse, swaps, big_endian) {
             match step {
                 QftTextbookStep::Hadamard(q) => self.apply_single_gate(q, h),
                 QftTextbookStep::CPhase {
@@ -5086,15 +5141,21 @@ mod qft_layout_tests {
         // The whole-state table has to reach the compact table's widest stride.
         let n = qft_max_tile_bits().max(16);
         let total = 1usize << n;
-        let whole = qft_twiddles_scaled(n);
-        let compact = qft_compact_twiddles();
-        let mut s = 1;
-        while s < compact.len() {
-            let step = total / (2 * s);
-            for k in 0..s {
-                assert_eq!(compact[s + k], whole[k * step], "stride {s}, k {k}");
+        for inverse in [false, true] {
+            let whole = qft_twiddles_scaled(n, inverse);
+            let compact = qft_compact_twiddles(inverse);
+            let mut s = 1;
+            while s < compact.len() {
+                let step = total / (2 * s);
+                for k in 0..s {
+                    assert_eq!(
+                        compact[s + k],
+                        whole[k * step],
+                        "inverse {inverse}, stride {s}, k {k}"
+                    );
+                }
+                s <<= 1;
             }
-            s <<= 1;
         }
     }
 

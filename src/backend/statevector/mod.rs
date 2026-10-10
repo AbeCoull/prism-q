@@ -13,7 +13,7 @@
 //! # Gate support
 //!
 //! The full gate set, including MCU, every fused or batched variant, a native
-//! `Gate::QftBlock` kernel on the CPU whole-state path, and native
+//! `Gate::QftBlock` kernel on the CPU path for blocks starting at qubit 0, and native
 //! `Gate::PauliRot` and `Gate::Unitary` kernels on the CPU path. The device
 //! path declines `Gate::Unitary` by name.
 //!
@@ -256,7 +256,7 @@ pub struct StatevectorBackend {
     gpu_soft: bool,
 }
 
-/// Kill switch for the native whole-state `QftBlock` FFT path.
+/// Kill switch for the native `QftBlock` FFT path and the QFT recognition that feeds it.
 ///
 /// Set `PRISM_NO_QFT_BLOCK=1` to force textbook expansion for A/B runs.
 #[inline]
@@ -380,9 +380,21 @@ impl StatevectorBackend {
             }
             Gate::BatchRzz(data) => k::launch_apply_batch_rzz(&ctx, gpu, &data.edges),
             Gate::DiagonalBatch(data) => k::launch_apply_diagonal_batch(&ctx, gpu, &data.entries),
-            Gate::QftBlock { start, num } => {
+            Gate::QftBlock {
+                start,
+                num,
+                inverse,
+                swaps,
+                big_endian,
+            } => {
                 let h = Gate::H.matrix_2x2();
-                for step in qft_textbook_steps(*start as usize, *num as usize) {
+                for step in qft_textbook_steps(
+                    *start as usize,
+                    *num as usize,
+                    *inverse,
+                    *swaps,
+                    *big_endian,
+                ) {
                     match step {
                         QftTextbookStep::Hadamard(q) => k::launch_apply_gate_1q(&ctx, gpu, q, h)?,
                         QftTextbookStep::CPhase {
@@ -759,13 +771,23 @@ impl StatevectorBackend {
             Gate::BatchPhase(data) => {
                 self.apply_batch_phase(targets[0], &data.phases);
             }
-            Gate::QftBlock { start, num } => {
-                let start = *start as usize;
-                let num = *num as usize;
-                if start == 0 && num == self.num_qubits {
-                    self.apply_qft_block(start, num);
+            &Gate::QftBlock {
+                start,
+                num,
+                inverse,
+                swaps,
+                big_endian,
+            } => {
+                if start == 0 {
+                    self.apply_qft_block(num as usize, inverse, swaps, big_endian);
                 } else {
-                    self.apply_qft_block_textbook(start, num);
+                    self.apply_qft_block_textbook(
+                        start as usize,
+                        num as usize,
+                        inverse,
+                        swaps,
+                        big_endian,
+                    );
                 }
             }
             Gate::BatchRzz(data) => {

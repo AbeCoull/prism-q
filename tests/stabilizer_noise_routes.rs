@@ -231,6 +231,33 @@ fn pair_noise(circuit: &Circuit, p: f64) -> NoiseModel {
     }
 }
 
+/// Exact expectations on `circuit` with its terminal measurements and their
+/// event slots dropped, the unitary half the density-matrix oracle accepts.
+fn density_matrix_reference(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    observables: &[Vec<PauliTerm>],
+) -> Vec<f64> {
+    let after_gate = circuit
+        .instructions
+        .iter()
+        .zip(&noise.after_gate)
+        .filter(|(inst, _)| !matches!(inst, Instruction::Measure { .. }))
+        .map(|(_, events)| events.clone())
+        .collect();
+    let unitary_noise = NoiseModel {
+        after_gate,
+        readout: noise.readout.clone(),
+    };
+    density_matrix_expectation_values(
+        &circuit.without_measurements(),
+        observables,
+        Some(&unitary_noise),
+        SEED,
+    )
+    .unwrap()
+}
+
 /// Every single-qubit Z, then every nearest-neighbour ZZ.
 fn z_observables(n: usize) -> Vec<Vec<PauliTerm>> {
     let mut observables: Vec<Vec<PauliTerm>> = (0..n).map(|q| vec![PauliTerm::z(q)]).collect();
@@ -279,8 +306,7 @@ fn chain_correlators_match_the_density_matrix() {
         .unwrap();
     assert_eq!(result.metadata.engine, Some(Engine::NoisyCompiledSampler));
 
-    let want =
-        density_matrix_expectation_values(&circuit, &z_observables(n), Some(&noise), SEED).unwrap();
+    let want = density_matrix_reference(&circuit, &noise, &z_observables(n));
     assert_within_band(&z_expectations(&result.shots, n), &want, "ones chain");
 }
 
@@ -292,8 +318,7 @@ fn the_compiled_aggregates_carry_the_pair_channel() {
     let n = 8;
     let circuit = ones_chain(n, 18);
     let noise = pair_noise(&circuit, 0.05);
-    let want =
-        density_matrix_expectation_values(&circuit, &z_observables(n), Some(&noise), SEED).unwrap();
+    let want = density_matrix_reference(&circuit, &noise, &z_observables(n));
 
     let mut sampler = compile_noisy(&circuit, &noise, SEED).unwrap();
     let marginals = sampler.sample_marginals(SHOTS);
@@ -341,8 +366,7 @@ fn a_block_straddling_pair_keeps_both_qubits_noisy() {
         .map(|q| vec![PauliTerm::z(q)])
         .chain(std::iter::once(vec![PauliTerm::z(1), PauliTerm::z(2)]))
         .collect();
-    let want =
-        density_matrix_expectation_values(&circuit, &observables, Some(&noise), SEED).unwrap();
+    let want = density_matrix_reference(&circuit, &noise, &observables);
 
     let mut sampler = compile_noisy(&circuit, &noise, SEED).unwrap();
     let shots = sampler.sample_bulk_packed(SHOTS).to_shots();

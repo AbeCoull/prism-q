@@ -689,12 +689,6 @@ fn two_qubit_kraus_trajectory_branch_weight_reads_the_state() {
         channel,
         qubits: smallvec![0, 1],
     }];
-    circuit.add_measure(0, 0);
-    circuit.add_measure(1, 1);
-    noise
-        .after_gate
-        .resize_with(circuit.instructions.len(), Vec::new);
-
     let exact = density_matrix_expectation_values(
         &circuit,
         &[vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]],
@@ -702,6 +696,12 @@ fn two_qubit_kraus_trajectory_branch_weight_reads_the_state() {
         SEED,
     )
     .unwrap();
+
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    noise
+        .after_gate
+        .resize_with(circuit.instructions.len(), Vec::new);
 
     // Every representation that reaches the pair runs the same channel against
     // the same exact mixture, so a reduction that reads the wrong pair fails

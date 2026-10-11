@@ -1931,11 +1931,11 @@ fn multi_2q_ordered_prefix_ends_where_order_would_break() {
 }
 
 // The density matrix batches a `MultiFused` block only when this count beats one
-// pass per constituent, so it has to match the tiers `apply_multi_1q` runs. The
-// targets above 16 sit past the L3 tier on every host, so their count depends only
-// on whether they share traversals.
+// pass per constituent, so it has to match the route `apply_multi_1q` takes. Up to
+// the high budget of targets past the low bits gather into one subcube; a full layer
+// takes the in-place tile, then one gather per budget of the targets above it.
 #[test]
-fn multi_1q_sweeps_counts_the_tier_passes() {
+fn multi_1q_sweeps_counts_the_route_passes() {
     let h = crate::gates::Gate::H.matrix_2x2();
     let gates = |targets: &[usize]| targets.iter().map(|&t| (t, h)).collect::<Vec<_>>();
     let wide = 24;
@@ -1943,11 +1943,28 @@ fn multi_1q_sweeps_counts_the_tier_passes() {
     assert_eq!(kernels::multi_1q_sweeps(&gates(&[23]), wide), 1);
     assert_eq!(kernels::multi_1q_sweeps(&gates(&[0, 1, 2, 3]), wide), 1);
     let high = gates(&[17, 18, 19, 20, 21, 22]);
-    let shared = if cfg!(feature = "parallel") { 2 } else { 6 };
-    assert_eq!(kernels::multi_1q_sweeps(&high, wide), shared);
+    assert_eq!(kernels::multi_1q_sweeps(&high, wide), 1);
     let mut mixed = gates(&[0, 1]);
     mixed.extend(high);
-    assert_eq!(kernels::multi_1q_sweeps(&mixed, wide), 1 + shared);
+    assert_eq!(kernels::multi_1q_sweeps(&mixed, wide), 1);
+
+    let tile_bits = crate::gates::multi_2q_tile_bits_for(wide);
+    let budget = crate::gates::multi_2q_high_budget_for(wide);
+    let layer: Vec<usize> = (0..wide).collect();
+    assert_eq!(
+        kernels::multi_1q_sweeps(&gates(&layer), wide),
+        1 + (wide - tile_bits).div_ceil(budget)
+    );
+    let taller = 26;
+    let budget = crate::gates::multi_2q_high_budget_for(taller);
+    for k in 1..=10 {
+        let top: Vec<usize> = (taller - k..taller).collect();
+        assert_eq!(
+            kernels::multi_1q_sweeps(&gates(&top), taller),
+            k.div_ceil(budget),
+            "top {k} targets"
+        );
+    }
 }
 
 // Pair-aware grouping keeps every benched `diag_mixed_l6` batch on the LUT path. The

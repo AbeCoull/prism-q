@@ -960,7 +960,7 @@ impl DensityMatrixBackend {
     ///
     /// The constituents on the ket register and their conjugates on the bra
     /// register are `2k` one-qubit gates on distinct qubits, so the doubled list
-    /// can run through the statevector `MultiFused` kernel as one tiered batch.
+    /// can run through the statevector `MultiFused` kernel as one batch.
     /// It does when [`kernels::multi_1q_sweeps`] counts fewer passes than the
     /// `k` one-qubit sandwiches; otherwise the sandwiches run. An all-diagonal
     /// batch of two or more takes [`DensityMatrixBackend::apply_diagonal_sandwich`],

@@ -5199,6 +5199,51 @@ fn bench_dynamic_mid_circuit_shots(c: &mut Criterion) {
     group.finish();
 }
 
+/// Two random Ry/Rz layers with brick CX, qubits 0 and 1 measured into bits `n`
+/// and `n + 1`, two more layers, then every qubit measured.
+fn mid_circuit_measure_all_circuit(n: usize) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let mut circuit = Circuit::new(n, n + 2);
+    let mut layers = |circuit: &mut Circuit| {
+        for layer in 0..2 {
+            for q in 0..n {
+                circuit.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+                circuit.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            }
+            for q in ((layer % 2)..n - 1).step_by(2) {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+    };
+    layers(&mut circuit);
+    circuit.add_measure(0, n);
+    circuit.add_measure(1, n + 1);
+    layers(&mut circuit);
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+/// Mid-circuit measurements followed by a full readout: nearly every shot ends
+/// on its own record.
+fn bench_dynamic_mid_circuit_measure_all(c: &mut Criterion) {
+    let shots = 1_000usize;
+    let mut group = c.benchmark_group("dynamic/mid_circuit_measure_all");
+    configure_group(&mut group);
+    for &n in &[12usize, 16] {
+        let circuit = mid_circuit_measure_all_circuit(n);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| run_shots_with(BackendKind::Auto, circ, shots, SEED).unwrap());
+            },
+        );
+    }
+    group.finish();
+}
+
 /// Clifford layers, a measurement of qubit 0 that conditions an X on qubit 1,
 /// a reset of qubit 0, more layers, then every qubit measured. The condition and
 /// the reset keep it off the compiled sampler, so Auto replays it per shot on a
@@ -5329,8 +5374,8 @@ fn rus_program(n: usize) -> DynamicProgram {
     b.build().unwrap()
 }
 
-/// A dynamic program walked once per shot: the per-shot cliff plus the loop's
-/// block boundaries and classical evaluation.
+/// A dynamic program: on the host statevector the shots walk the loop together,
+/// splitting at each attempt's measurement, then read every other qubit.
 fn bench_dynamic_rus(c: &mut Criterion) {
     let shots = 1_000usize;
     let mut group = c.benchmark_group("dynamic/rus");
@@ -5506,6 +5551,7 @@ criterion_group! {
     bench_dynamic_dead_region,
     bench_dynamic_shots,
     bench_dynamic_mid_circuit_shots,
+    bench_dynamic_mid_circuit_measure_all,
     bench_dynamic_clifford_shots,
     bench_dynamic_temporal_prefix_blocks,
     bench_dynamic_rus,

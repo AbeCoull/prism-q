@@ -73,7 +73,8 @@ A circuit holding a region runs once per shot: measurement-conditioned execution
 has no single evolved distribution to sample, so the compiled samplers reject it
 and the run falls back to replay. A noiseless run on the host statevector replays
 once per distinct outcome history rather than once per shot, splitting the shots
-binomially at each measurement. Routes requiring a unitary circuit (adjoint
+binomially at each measurement until only measurements remain, then drawing each
+branch's readout from its state. Routes requiring a unitary circuit (adjoint
 gradients, exact expectation values, Pauli propagation, stabilizer-rank
 probabilities) reject a region for the same reason they reject a bare
 conditional. Noise models index one event slot per instruction, so they reject a

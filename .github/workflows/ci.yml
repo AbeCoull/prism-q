@@ -18,7 +18,7 @@ env:
   # Separate from CI_FEATURES so the default published feature set stays tested alone.
   CI_DIST_FEATURES: parallel distributed
   # Mirrors `rust-version` in Cargo.toml and `msrv` in clippy.toml. Update all three together.
-  CI_MSRV: 1.87.0
+  CI_MSRV: 1.88.0
   # Doc surface. cudarc's build script with the pinned cuda-12040 feature does not
   # probe for a toolkit, so the gpu and distributed docs build on a bare runner.
   # distributed-mpi stays out: mpi-sys fails in its build script when no MPI library
@@ -262,10 +262,12 @@ jobs:
           --features parallel --test determinism --test backend_equivalence
 
   # `rust-version` is published to crates.io, and every other job runs on stable, far
-  # ahead of the floor. 1.87 rather than the edition-2024 floor of 1.85: the SIMD kernels
+  # ahead of the floor. 1.88 rather than the edition-2024 floor of 1.85: the SIMD kernels
   # call `std::arch` intrinsics from `#[target_feature]` functions without an inner unsafe
-  # block, which 1.87 is the first release to accept without warning. Library targets
-  # only, since dev-dependencies do not constrain a consumer.
+  # block, which 1.87 is the first release to accept without warning, and the `gpu`
+  # feature reaches libloading 0.9 through cudarc, which requires 1.88. Library targets
+  # only, since dev-dependencies do not constrain a consumer. `distributed-mpi` stays out
+  # because mpi-sys needs a system MPI to build.
   msrv:
     name: MSRV floor
     runs-on: ubuntu-latest
@@ -286,6 +288,15 @@ jobs:
 
       - name: Check (no default features)
         run: cargo +"$CI_MSRV" check --no-default-features
+
+      - name: Check (gpu)
+        run: cargo +"$CI_MSRV" check --features "parallel gpu"
+
+      - name: Check (distributed)
+        run: cargo +"$CI_MSRV" check --features "$CI_DIST_FEATURES"
+
+      - name: Check (gpu and distributed)
+        run: cargo +"$CI_MSRV" check --features "parallel gpu distributed"
 
   # The release workflow publishes to crates.io with --no-confirm --execute and no
   # manual gate, so the version arithmetic in front of it is verified here rather

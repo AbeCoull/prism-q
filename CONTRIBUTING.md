@@ -14,6 +14,14 @@ an NVIDIA driver for CUDA 12.0 or newer, and NVRTC from a CUDA 12 toolkit, all l
 run time. NVRTC compiles the kernels at run time to SASS for the device's compute
 capability, or to PTX when the NVRTC predates the device.
 
+`rust-toolchain.toml` pins the development toolchain to an exact stable release, and
+rustup installs it on the first `cargo` call in the checkout. CI builds with the same
+release, apart from the MSRV job and the nightly jobs (Miri, ThreadSanitizer, fuzzing,
+public API), so lints and codegen move only when the pin does. Bumping it is a change
+of its own: update the channel there and the `dtolnay/rust-toolchain@<version>` steps
+in `.github/workflows/`, then fix whatever new lints fire. The supported floor is a
+separate number; see [Compatibility](docs/guides/capabilities.md#compatibility).
+
 ### From source
 
 ```bash

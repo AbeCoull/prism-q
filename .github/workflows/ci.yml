@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -123,7 +123,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -156,7 +156,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -261,13 +261,13 @@ jobs:
           cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
           --features parallel --test determinism --test backend_equivalence
 
-  # `rust-version` is published to crates.io, and every other job runs on stable, far
-  # ahead of the floor. 1.88 rather than the edition-2024 floor of 1.85: the SIMD kernels
-  # call `std::arch` intrinsics from `#[target_feature]` functions without an inner unsafe
-  # block, which 1.87 is the first release to accept without warning, and the `gpu`
-  # feature reaches libloading 0.9 through cudarc, which requires 1.88. Library targets
-  # only, since dev-dependencies do not constrain a consumer. `distributed-mpi` stays out
-  # because mpi-sys needs a system MPI to build.
+  # `rust-version` is published to crates.io, and every other job runs on the toolchain
+  # `rust-toolchain.toml` pins, far ahead of the floor. 1.88 rather than the edition-2024
+  # floor of 1.85: the SIMD kernels call `std::arch` intrinsics from `#[target_feature]`
+  # functions without an inner unsafe block, which 1.87 is the first release to accept
+  # without warning, and the `gpu` feature reaches libloading 0.9 through cudarc, which
+  # requires 1.88. Library targets only, since dev-dependencies do not constrain a
+  # consumer. `distributed-mpi` stays out because mpi-sys needs a system MPI to build.
   msrv:
     name: MSRV floor
     runs-on: ubuntu-latest
@@ -282,7 +282,8 @@ jobs:
         with:
           cache-bin: false
 
-      # `rust-toolchain.toml` pins stable and would override the installed floor.
+      # `rust-toolchain.toml` pins the development toolchain and would override the
+      # installed floor.
       - name: Check (default features)
         run: cargo +"$CI_MSRV" check --features "$CI_FEATURES"
 
@@ -334,7 +335,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
@@ -383,7 +384,7 @@ jobs:
           path: head
           fetch-depth: 1
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       # `actions/cache` rejects a comma in a key, and the feature list carries
       # one, so the key takes a slug of it rather than the list itself.
       - id: toolchain
@@ -464,7 +465,7 @@ jobs:
             echo "No Rust source or manifest change. Nothing to measure." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         if: steps.scope.outputs.run == 'true'
 
       - id: toolchain
@@ -550,7 +551,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
@@ -602,7 +603,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
@@ -628,7 +629,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
@@ -661,7 +662,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -687,7 +688,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -712,7 +713,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2

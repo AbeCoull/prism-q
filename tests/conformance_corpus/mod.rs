@@ -531,7 +531,7 @@ impl CaseRng {
     }
 
     fn entangling_layer(&mut self, circuit: &mut Circuit, qubits: &[usize], offset: usize) {
-        for pair in qubits[offset.min(qubits.len())..].chunks_exact(2) {
+        for pair in qubits[offset.min(qubits.len())..].as_chunks::<2>().0 {
             if self.chance(0.75) {
                 let gate = self.clifford_2q();
                 circuit.add_gate(gate, &[pair[0], pair[1]]);
@@ -634,7 +634,7 @@ fn build_rotation_unitary(rng: &mut CaseRng) -> Circuit {
             };
             circuit.add_gate(gate, &[q]);
         }
-        for pair in qubits[(layer % 2).min(n)..].chunks_exact(2) {
+        for pair in qubits[(layer % 2).min(n)..].as_chunks::<2>().0 {
             let gate = if rng.chance(0.5) {
                 Gate::Rzz(rng.angle())
             } else {
@@ -833,7 +833,7 @@ fn build_decomposable(rng: &mut CaseRng) -> Circuit {
                 };
                 circuit.add_gate(gate, &[q]);
             }
-            for pair in qubits[layer % 2..].chunks_exact(2) {
+            for pair in qubits[layer % 2..].as_chunks::<2>().0 {
                 circuit.add_gate(Gate::Cx, &[pair[0], pair[1]]);
             }
         }
@@ -855,7 +855,7 @@ fn build_wide_entangled(rng: &mut CaseRng) -> Circuit {
             let gate = rng.rotation_1q();
             circuit.add_gate(gate, &[q]);
         }
-        for pair in qubits[layer % 2..].chunks_exact(2) {
+        for pair in qubits[layer % 2..].as_chunks::<2>().0 {
             circuit.add_gate(Gate::Cx, &[pair[0], pair[1]]);
         }
     }

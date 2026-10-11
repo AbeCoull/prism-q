@@ -1025,19 +1025,19 @@ fn render_svg(
                                 .strip_prefix("c[")
                                 .and_then(|s| s.strip_suffix(']'))
                                 .and_then(|s| s.parse::<usize>().ok());
-                            if let Some(ci) = cbit_idx {
-                                if ci < num_classical_bits {
-                                    let cbit_y = classical_y(ci);
-                                    let gate_bottom = cy + opts.gate_height / 2.0;
-                                    let _ = writeln!(
-                                        svg,
-                                        "<line x1=\"{:.1}\" y1=\"{:.1}\" \
+                            if let Some(ci) = cbit_idx
+                                && ci < num_classical_bits
+                            {
+                                let cbit_y = classical_y(ci);
+                                let gate_bottom = cy + opts.gate_height / 2.0;
+                                let _ = writeln!(
+                                    svg,
+                                    "<line x1=\"{:.1}\" y1=\"{:.1}\" \
                                          x2=\"{:.1}\" y2=\"{:.1}\" \
                                          stroke=\"var(--wire)\" stroke-width=\"0.75\" \
                                          stroke-dasharray=\"3,3\"/>",
-                                        center_x, gate_bottom, center_x, cbit_y,
-                                    );
-                                }
+                                    center_x, gate_bottom, center_x, cbit_y,
+                                );
                             }
                         }
                     }

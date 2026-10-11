@@ -589,7 +589,13 @@ pub(crate) fn launch_apply_fused_2q(
     let (stream, func) = stream_and_fn(ctx, "apply_fused_2q")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
     let mut mat = FusedMatArg { v: [0.0; 32] };
-    for (slot, entry) in mat.v.chunks_exact_mut(2).zip(matrix.iter().flatten()) {
+    for (slot, entry) in mat
+        .v
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(matrix.iter().flatten())
+    {
         slot[0] = entry.re;
         slot[1] = entry.im;
     }
@@ -964,9 +970,13 @@ fn group_moments_pass(
     }
     let mut partials = vec![0.0_f64; 3 * grid as usize];
     result.copy_to_host(device, &mut partials)?;
-    let (s0, s1, s2) = partials.chunks_exact(3).fold((0.0, 0.0, 0.0), |acc, p| {
-        (acc.0 + p[0], acc.1 + p[1], acc.2 + p[2])
-    });
+    let (s0, s1, s2) = partials
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .fold((0.0, 0.0, 0.0), |acc, p| {
+            (acc.0 + p[0], acc.1 + p[1], acc.2 + p[2])
+        });
     Ok(if s0 == 0.0 {
         (0.0, 0.0)
     } else {
@@ -1454,7 +1464,9 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
         for (slot, &g) in pass_gates.iter().enumerate() {
             arg.targets |= (position(gates[g].0) as u64) << (4 * slot);
             for (d, entry) in arg.v[8 * slot..8 * slot + 8]
-                .chunks_exact_mut(2)
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
                 .zip(gates[g].1.iter().flatten())
             {
                 d[0] = entry.re;

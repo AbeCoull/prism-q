@@ -747,13 +747,13 @@ fn noisy_sampling_rows_take_the_compiled_sampler() {
 
     let mut pair = NoiseModel::uniform_depolarizing(&circuit, 0.001);
     for (events, instruction) in pair.after_gate.iter_mut().zip(&circuit.instructions) {
-        if let prism_q::Instruction::Gate { targets, .. } = instruction {
-            if targets.len() == 2 {
-                events.push(NoiseEvent {
-                    channel: NoiseChannel::TwoQubitDepolarizing { p: 0.01 },
-                    qubits: targets.iter().copied().collect(),
-                });
-            }
+        if let prism_q::Instruction::Gate { targets, .. } = instruction
+            && targets.len() == 2
+        {
+            events.push(NoiseEvent {
+                channel: NoiseChannel::TwoQubitDepolarizing { p: 0.01 },
+                qubits: targets.iter().copied().collect(),
+            });
         }
     }
 

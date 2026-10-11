@@ -116,13 +116,13 @@ fn xor_reduce_scalar(cols: &[u32], random_bits: &[u64]) -> u64 {
                 ^ (random_bits[cols[2] as usize] ^ random_bits[cols[3] as usize])
         }
         _ => {
-            let mut chunks = cols.chunks_exact(4);
+            let (quads, rest) = cols.as_chunks::<4>();
             let mut acc = 0u64;
-            for chunk in &mut chunks {
+            for chunk in quads {
                 acc ^= (random_bits[chunk[0] as usize] ^ random_bits[chunk[1] as usize])
                     ^ (random_bits[chunk[2] as usize] ^ random_bits[chunk[3] as usize]);
             }
-            for &c in chunks.remainder() {
+            for &c in rest {
                 acc ^= random_bits[c as usize];
             }
             acc
@@ -696,9 +696,9 @@ unsafe fn xor_reduce_avx2_tiled(
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         use std::arch::x86_64::*;
-        let mut chunks = cols.chunks_exact(4);
+        let (quads, rest) = cols.as_chunks::<4>();
         let mut acc = _mm256_setzero_si256();
-        for chunk in &mut chunks {
+        for chunk in quads {
             acc = _mm256_xor_si256(
                 acc,
                 _mm256_xor_si256(
@@ -713,7 +713,7 @@ unsafe fn xor_reduce_avx2_tiled(
                 ),
             );
         }
-        for &c in chunks.remainder() {
+        for &c in rest {
             acc = _mm256_xor_si256(acc, random_tile[c as usize * tile + t]);
         }
         acc
@@ -729,9 +729,9 @@ unsafe fn xor_reduce_avx2(
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         use std::arch::x86_64::*;
-        let mut chunks = cols.chunks_exact(4);
+        let (quads, rest) = cols.as_chunks::<4>();
         let mut acc = _mm256_setzero_si256();
-        for chunk in &mut chunks {
+        for chunk in quads {
             acc = _mm256_xor_si256(
                 acc,
                 _mm256_xor_si256(
@@ -740,7 +740,7 @@ unsafe fn xor_reduce_avx2(
                 ),
             );
         }
-        for &c in chunks.remainder() {
+        for &c in rest {
             acc = _mm256_xor_si256(acc, random[c as usize]);
         }
         acc
@@ -959,9 +959,9 @@ unsafe fn xor_reduce_neon_tiled(
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         use std::arch::aarch64::*;
-        let mut chunks = cols.chunks_exact(4);
+        let (quads, rest) = cols.as_chunks::<4>();
         let mut acc = vdupq_n_u64(0);
-        for chunk in &mut chunks {
+        for chunk in quads {
             acc = veorq_u64(
                 acc,
                 veorq_u64(
@@ -976,7 +976,7 @@ unsafe fn xor_reduce_neon_tiled(
                 ),
             );
         }
-        for &c in chunks.remainder() {
+        for &c in rest {
             acc = veorq_u64(acc, random_tile[c as usize * tile + t]);
         }
         acc
@@ -992,9 +992,9 @@ unsafe fn xor_reduce_neon(
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         use std::arch::aarch64::*;
-        let mut chunks = cols.chunks_exact(4);
+        let (quads, rest) = cols.as_chunks::<4>();
         let mut acc = vdupq_n_u64(0);
-        for chunk in &mut chunks {
+        for chunk in quads {
             acc = veorq_u64(
                 acc,
                 veorq_u64(
@@ -1003,7 +1003,7 @@ unsafe fn xor_reduce_neon(
                 ),
             );
         }
-        for &c in chunks.remainder() {
+        for &c in rest {
             acc = veorq_u64(acc, random[c as usize]);
         }
         acc

@@ -217,24 +217,24 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
     for inst in &circuit.instructions {
         match inst {
             Instruction::Gate { gate, targets } => {
-                if let Some(phase) = gate.controlled_phase() {
-                    if gate.num_qubits() == 2 {
-                        let control = targets[0];
-                        let target = targets[1];
-                        // Incoming cphase on target, its action depends on
-                        // the current diagonal-frame phase of `target`, so
-                        // any pending control chain on `target` must flush first.
-                        flush_phase_qubits_in_use(
-                            std::slice::from_ref(&target),
-                            true,
-                            &mut pending,
-                            &mut target_users,
-                            &mut output,
-                            &mut changed,
-                        );
-                        push_pending_phase(control, target, phase, &mut pending, &mut target_users);
-                        continue;
-                    }
+                if let Some(phase) = gate.controlled_phase()
+                    && gate.num_qubits() == 2
+                {
+                    let control = targets[0];
+                    let target = targets[1];
+                    // Incoming cphase on target, its action depends on
+                    // the current diagonal-frame phase of `target`, so
+                    // any pending control chain on `target` must flush first.
+                    flush_phase_qubits_in_use(
+                        std::slice::from_ref(&target),
+                        true,
+                        &mut pending,
+                        &mut target_users,
+                        &mut output,
+                        &mut changed,
+                    );
+                    push_pending_phase(control, target, phase, &mut pending, &mut target_users);
+                    continue;
                 }
                 let diagonal_only = gate.num_qubits() == 1 && gate.is_diagonal_1q();
                 flush_phase_qubits_in_use(

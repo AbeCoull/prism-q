@@ -1100,29 +1100,29 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             if let Some(pos) = char_col(line, VERT) {
-                if i > 0 {
-                    if let Some(ctrl_pos) = char_col(lines[i - 1], CTRL) {
-                        assert_eq!(
-                            ctrl_pos,
-                            pos,
-                            "connector at line {} misaligned with control at line {}\n{}",
-                            i,
-                            i - 1,
-                            text,
-                        );
-                    }
+                if i > 0
+                    && let Some(ctrl_pos) = char_col(lines[i - 1], CTRL)
+                {
+                    assert_eq!(
+                        ctrl_pos,
+                        pos,
+                        "connector at line {} misaligned with control at line {}\n{}",
+                        i,
+                        i - 1,
+                        text,
+                    );
                 }
-                if i + 1 < lines.len() {
-                    if let Some(x_pos) = char_col(lines[i + 1], 'X') {
-                        assert_eq!(
-                            x_pos,
-                            pos,
-                            "connector at line {} misaligned with target at line {}\n{}",
-                            i,
-                            i + 1,
-                            text,
-                        );
-                    }
+                if i + 1 < lines.len()
+                    && let Some(x_pos) = char_col(lines[i + 1], 'X')
+                {
+                    assert_eq!(
+                        x_pos,
+                        pos,
+                        "connector at line {} misaligned with target at line {}\n{}",
+                        i,
+                        i + 1,
+                        text,
+                    );
                 }
             }
         }

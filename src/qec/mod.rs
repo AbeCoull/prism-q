@@ -1276,7 +1276,7 @@ fn validate_noise(channel: &QecNoise, targets: &[usize], num_qubits: usize) -> R
                 message: format!("{name} requires an even number of targets"),
             });
         }
-        for pair in targets.chunks_exact(2) {
+        for pair in targets.as_chunks::<2>().0 {
             if pair[0] == pair[1] {
                 return Err(PrismError::InvalidParameter {
                     message: format!("{name} target pairs must use distinct qubits"),

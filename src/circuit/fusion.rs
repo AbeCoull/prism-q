@@ -99,11 +99,11 @@ fn inst_qubits(inst: &Instruction) -> &[usize] {
 
 /// Clear the pending entry for qubit `q` and its partner.
 fn clear_pending(q: usize, instructions: &[Instruction], pending: &mut [Option<usize>]) {
-    if let Some(pi) = pending[q] {
-        if let Instruction::Gate { targets, .. } = &instructions[pi] {
-            for &t in targets.iter() {
-                pending[t] = None;
-            }
+    if let Some(pi) = pending[q]
+        && let Instruction::Gate { targets, .. } = &instructions[pi]
+    {
+        for &t in targets.iter() {
+            pending[t] = None;
         }
     }
 }
@@ -574,12 +574,12 @@ fn flush_all_pending(
 fn has_multi_1q_run(circuit: &Circuit) -> bool {
     let mut total_1q = 0usize;
     for inst in &circuit.instructions {
-        if let Instruction::Gate { gate, .. } = inst {
-            if gate.num_qubits() == 1 {
-                total_1q += 1;
-                if total_1q >= 2 {
-                    return true;
-                }
+        if let Instruction::Gate { gate, .. } = inst
+            && gate.num_qubits() == 1
+        {
+            total_1q += 1;
+            if total_1q >= 2 {
+                return true;
             }
         }
     }

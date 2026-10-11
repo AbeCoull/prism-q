@@ -1023,17 +1023,16 @@ pub(crate) fn try_count_meas_major(
 
     if let Ok(shot_major) =
         launch_bts_transpose_meas_to_shot(ctx, meas_major, num_meas, num_shots, s_words, m_words)
-    {
-        if let Some(counts) = try_count_shot_major(
+        && let Some(counts) = try_count_shot_major(
             ctx,
             &shot_major,
             num_shots,
             m_words,
             rank,
             raw_transfer_bytes,
-        )? {
-            return Ok(Some(counts));
-        }
+        )?
+    {
+        return Ok(Some(counts));
     }
 
     let Some(mut table) = CountTable::alloc(ctx, num_shots, m_words, rank)? else {

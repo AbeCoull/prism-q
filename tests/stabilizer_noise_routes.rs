@@ -216,13 +216,13 @@ fn ones_chain(n: usize, pad: usize) -> Circuit {
 fn pair_noise(circuit: &Circuit, p: f64) -> NoiseModel {
     let mut after_gate = vec![Vec::new(); circuit.instructions.len()];
     for (slot, inst) in after_gate.iter_mut().zip(&circuit.instructions) {
-        if let Instruction::Gate { targets, .. } = inst {
-            if targets.len() == 2 {
-                slot.push(NoiseEvent {
-                    channel: NoiseChannel::TwoQubitDepolarizing { p },
-                    qubits: targets.iter().copied().collect(),
-                });
-            }
+        if let Instruction::Gate { targets, .. } = inst
+            && targets.len() == 2
+        {
+            slot.push(NoiseEvent {
+                channel: NoiseChannel::TwoQubitDepolarizing { p },
+                qubits: targets.iter().copied().collect(),
+            });
         }
     }
     NoiseModel {

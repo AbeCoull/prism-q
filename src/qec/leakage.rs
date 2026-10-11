@@ -332,7 +332,7 @@ fn apply_pauli_event(
     };
     match event.channel {
         QecDeferredChannel::Depolarize2(p) => {
-            for pair in event.targets.chunks_exact(2) {
+            for pair in event.targets.as_chunks::<2>().0 {
                 for_each_firing(p, shots, rng, |shot, rng| {
                     let sample = 1 + ((rng.next_f64() * 15.0) as usize).min(14);
                     flip_pair(pair, shot, sample);
@@ -341,7 +341,7 @@ fn apply_pauli_event(
         }
         QecDeferredChannel::PairTable { p, table } => {
             let rates = &pair_tables[table as usize];
-            for pair in event.targets.chunks_exact(2) {
+            for pair in event.targets.as_chunks::<2>().0 {
                 for_each_firing(p, shots, rng, |shot, rng| {
                     let mut r = rng.next_f64() * p;
                     let branch = rates
@@ -427,7 +427,7 @@ fn apply_leak_event(
             }
         }
         LeakChannel::Transport(p) => {
-            for pair in event.targets.chunks_exact(2) {
+            for pair in event.targets.as_chunks::<2>().0 {
                 let ((a, a_live), (b, b_live)) = (pair[0], pair[1]);
                 if !(a_live && b_live) {
                     continue;

@@ -461,7 +461,7 @@ impl StabilizerBackend {
         cpu.num_words = self.num_words;
         cpu.xz = xz;
         cpu.phase = phase;
-        for chunk in self.pending_gpu_ops.chunks_exact(CLIFOP_STRIDE) {
+        for chunk in self.pending_gpu_ops.as_chunks::<CLIFOP_STRIDE>().0 {
             let opcode = chunk[0];
             let a = chunk[1] as usize;
             let b = chunk[2] as usize;
@@ -1287,12 +1287,13 @@ impl Backend for StabilizerBackend {
         if let Some(tableau) = other
             .as_any()
             .and_then(|any| any.downcast_ref::<StabilizerBackend>())
+            && tableau.n == self.n
+            && self.host_rows_live()
+            && tableau.host_rows_live()
         {
-            if tableau.n == self.n && self.host_rows_live() && tableau.host_rows_live() {
-                return Ok(crate::sim::stabilizer_rank::stabilizer_overlap_sq(
-                    self, tableau, self.n,
-                ));
-            }
+            return Ok(crate::sim::stabilizer_rank::stabilizer_overlap_sq(
+                self, tableau, self.n,
+            ));
         }
         overlap::export_overlap_sq(
             self.name(),

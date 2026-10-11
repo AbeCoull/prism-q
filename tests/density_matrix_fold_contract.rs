@@ -586,12 +586,13 @@ fn events_for(
                     one(rng, &mut out, q);
                 }
             }
-            if !diagonal && rng.random_bool(0.2) {
-                if let Some(q) = off_target(rng) {
-                    let (channel, reference) = random_2q_channel(rng);
-                    out.push((channel, reference, vec![targets[0], q]));
-                    one(rng, &mut out, targets[0]);
-                }
+            if !diagonal
+                && rng.random_bool(0.2)
+                && let Some(q) = off_target(rng)
+            {
+                let (channel, reference) = random_2q_channel(rng);
+                out.push((channel, reference, vec![targets[0], q]));
+                one(rng, &mut out, targets[0]);
             }
             for _ in 0..rng.random_range(0..3) {
                 if let Some(q) = off_target(rng) {

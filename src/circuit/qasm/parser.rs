@@ -449,10 +449,10 @@ fn parenthesized_condition<'a>(stream: &mut Stream<'_, 'a>) -> Result<Condition<
         return Ok(condition);
     }
     let mark = stream.mark();
-    if let Ok(condition) = parse_condition(stream) {
-        if stream.eat(Kind::RParen) {
-            return Ok(condition);
-        }
+    if let Ok(condition) = parse_condition(stream)
+        && stream.eat(Kind::RParen)
+    {
+        return Ok(condition);
     }
     stream.rewind(mark);
     let condition = Condition::Expr(expr::parse(stream)?);
@@ -743,10 +743,8 @@ fn call_or_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         stream.peek_at(1).kind,
         Kind::Ident | Kind::Physical | Kind::LParen | Kind::At
     );
-    if !call_shape {
-        if let Some(kind) = try_assignment(stream)? {
-            return Ok(kind);
-        }
+    if !call_shape && let Some(kind) = try_assignment(stream)? {
+        return Ok(kind);
     }
     let modifiers = modifier_chain(stream)?;
     let name = stream.expect_ident()?;
@@ -813,14 +811,14 @@ fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>
         let value_mark = stream.mark();
         let name = stream.advance().text;
         stream.advance();
-        if let Ok(args) = call_arguments(stream) {
-            if stream.eat(Kind::Semicolon) {
-                return Ok(Some(StmtKind::CallAssign(Box::new(CallAssign {
-                    target,
-                    name,
-                    args,
-                }))));
-            }
+        if let Ok(args) = call_arguments(stream)
+            && stream.eat(Kind::Semicolon)
+        {
+            return Ok(Some(StmtKind::CallAssign(Box::new(CallAssign {
+                target,
+                name,
+                args,
+            }))));
         }
         stream.rewind(value_mark);
     }
@@ -949,10 +947,10 @@ fn argument<'a>(stream: &mut Stream<'_, 'a>) -> Result<Argument<'a>> {
         || (stream.kind() == Kind::Ident && stream.peek_at(1).kind == Kind::LBracket)
     {
         let mark = stream.mark();
-        if let Ok(operand) = operand(stream) {
-            if matches!(stream.kind(), Kind::Comma | Kind::RParen) {
-                return Ok(Argument::Operand(operand));
-            }
+        if let Ok(operand) = operand(stream)
+            && matches!(stream.kind(), Kind::Comma | Kind::RParen)
+        {
+            return Ok(Argument::Operand(operand));
         }
         stream.rewind(mark);
     }

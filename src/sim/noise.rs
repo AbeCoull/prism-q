@@ -667,20 +667,19 @@ impl NoiseModel {
         // slots to carry noise and would run noiselessly without this. A model
         // carrying no quantum events has nothing to lose there, so readout-only
         // noise stays legal on a circuit with regions.
-        if self.after_gate.iter().any(|events| !events.is_empty()) {
-            if let Some(index) = circuit
+        if self.after_gate.iter().any(|events| !events.is_empty())
+            && let Some(index) = circuit
                 .instructions
                 .iter()
                 .position(|inst| matches!(inst, Instruction::Region(_)))
-            {
-                return Err(crate::error::PrismError::IncompatibleBackend {
-                    backend: "NoiseModel".to_string(),
-                    reason: format!(
-                        "noise events are indexed per instruction, which leaves the body of the \
+        {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "NoiseModel".to_string(),
+                reason: format!(
+                    "noise events are indexed per instruction, which leaves the body of the \
                          guarded region at instruction {index} without noise slots"
-                    ),
-                });
-            }
+                ),
+            });
         }
 
         for (instr_idx, events) in self.after_gate.iter().enumerate() {
@@ -3557,10 +3556,9 @@ pub(crate) fn dm_noisy_marginals(
             qubit,
             classical_bit,
         } = inst
+            && *classical_bit < result.len()
         {
-            if *classical_bit < result.len() {
-                result[*classical_bit] = dm.qubit_probability(*qubit)?;
-            }
+            result[*classical_bit] = dm.qubit_probability(*qubit)?;
         }
     }
     Ok(result)

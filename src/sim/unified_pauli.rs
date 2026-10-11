@@ -936,14 +936,14 @@ impl SpdTruncation {
     /// ceiling. Called by every entry point, so a policy built by hand cannot
     /// reach the propagation loop unchecked.
     fn validate(&self) -> Result<()> {
-        if let SpdTruncation::Budget { max_terms } = *self {
-            if max_terms == 0 || max_terms > SPD_MAX_TERMS_CEILING {
-                return Err(PrismError::InvalidParameter {
-                    message: format!(
-                        "budgeted SPD needs a term budget between 1 and {SPD_MAX_TERMS_CEILING}"
-                    ),
-                });
-            }
+        if let SpdTruncation::Budget { max_terms } = *self
+            && (max_terms == 0 || max_terms > SPD_MAX_TERMS_CEILING)
+        {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "budgeted SPD needs a term budget between 1 and {SPD_MAX_TERMS_CEILING}"
+                ),
+            });
         }
         Ok(())
     }
@@ -968,10 +968,10 @@ impl SpdTruncation {
 
     /// Terminal sweep after the backward pass.
     fn final_sweep(&self, sum: &mut WeightedPauliSum, total_discarded: &mut f64) {
-        if let SpdTruncation::Threshold { epsilon, .. } = *self {
-            if epsilon > 0.0 {
-                *total_discarded += sum.truncate(epsilon);
-            }
+        if let SpdTruncation::Threshold { epsilon, .. } = *self
+            && epsilon > 0.0
+        {
+            *total_discarded += sum.truncate(epsilon);
         }
     }
 }

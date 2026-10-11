@@ -184,13 +184,13 @@ fn mixed_channels_match_density_matrix_at_ten_qubits() {
     let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
     let mut noise = noise_after_every_gate(&circuit, NoiseChannel::Depolarizing { p: 0.01 });
     for (inst, events) in circuit.instructions.iter().zip(&mut noise.after_gate) {
-        if let Instruction::Gate { targets, .. } = inst {
-            if targets.len() == 2 {
-                events.push(NoiseEvent {
-                    channel: NoiseChannel::AmplitudeDamping { gamma: 0.02 },
-                    qubits: [targets[0]].into_iter().collect(),
-                });
-            }
+        if let Instruction::Gate { targets, .. } = inst
+            && targets.len() == 2
+        {
+            events.push(NoiseEvent {
+                channel: NoiseChannel::AmplitudeDamping { gamma: 0.02 },
+                qubits: [targets[0]].into_iter().collect(),
+            });
         }
     }
     let observables = probe_observables(n);

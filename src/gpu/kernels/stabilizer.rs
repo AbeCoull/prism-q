@@ -240,7 +240,7 @@ impl CliffordBatchScratch {
         ops: &[u32],
     ) -> Result<()> {
         self.prepare(tableau.num_words());
-        for chunk in ops.chunks_exact(CLIFOP_STRIDE) {
+        for chunk in ops.as_chunks::<CLIFOP_STRIDE>().0 {
             let opcode = chunk[0];
             let a = chunk[1];
             let b = chunk[2];

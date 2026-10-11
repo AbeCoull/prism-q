@@ -496,12 +496,10 @@ fn qec_repetition_program_with_postselection(
     program
         .observable_include(0, &[QecRecordRef::absolute(logical)])
         .unwrap();
-    if include_postselection {
-        if let Some(first_check) = first_check {
-            program
-                .postselect(&[QecRecordRef::absolute(first_check)], false)
-                .unwrap();
-        }
+    if include_postselection && let Some(first_check) = first_check {
+        program
+            .postselect(&[QecRecordRef::absolute(first_check)], false)
+            .unwrap();
     }
     program
 }

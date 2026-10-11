@@ -234,15 +234,16 @@ fn merge_decomposed_results(
             merged_classical[global_idx] = result.classical_bits[local_idx];
         }
 
-        if opts.probabilities && num_qubits <= 64 {
-            if let Some(probs) = result.probabilities {
-                let dense = probs.to_vec();
-                let mut mask = 0u64;
-                for &global_qubit in qubit_map {
-                    mask |= 1u64 << global_qubit;
-                }
-                factored_blocks.push(FactoredBlock { probs: dense, mask });
+        if opts.probabilities
+            && num_qubits <= 64
+            && let Some(probs) = result.probabilities
+        {
+            let dense = probs.to_vec();
+            let mut mask = 0u64;
+            for &global_qubit in qubit_map {
+                mask |= 1u64 << global_qubit;
             }
+            factored_blocks.push(FactoredBlock { probs: dense, mask });
         }
     }
 

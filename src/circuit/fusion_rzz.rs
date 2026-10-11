@@ -21,8 +21,8 @@ pub(super) fn fuse_rzz<'a>(circuit: &'a Circuit, t: &mut Tracer) -> Cow<'a, Circ
     let mut merged: Vec<Option<usize>> = Vec::new();
     let mut i = 0;
     while i < n {
-        if i + 2 < n {
-            if let (
+        if i + 2 < n
+            && let (
                 Instruction::Gate {
                     gate: Gate::Cx,
                     targets: t1,
@@ -36,27 +36,27 @@ pub(super) fn fuse_rzz<'a>(circuit: &'a Circuit, t: &mut Tracer) -> Cow<'a, Circ
                     targets: t3,
                 },
             ) = (&insts[i], &insts[i + 1], &insts[i + 2])
-            {
-                if t1.as_slice() == t3.as_slice() && t2.len() == 1 && t2[0] == t1[1] {
-                    let buf = out.get_or_insert_with(|| {
-                        if t.on {
-                            kept.extend(0..i);
-                            merged.extend(std::iter::repeat_n(None, i));
-                        }
-                        insts[..i].to_vec()
-                    });
-                    buf.push(Instruction::Gate {
-                        gate: Gate::Rzz(*theta),
-                        targets: smallvec![t1[0], t1[1]],
-                    });
-                    if t.on {
-                        kept.push(i + 1);
-                        merged.push(Some(i + 1));
-                    }
-                    i += 3;
-                    continue;
+            && t1.as_slice() == t3.as_slice()
+            && t2.len() == 1
+            && t2[0] == t1[1]
+        {
+            let buf = out.get_or_insert_with(|| {
+                if t.on {
+                    kept.extend(0..i);
+                    merged.extend(std::iter::repeat_n(None, i));
                 }
+                insts[..i].to_vec()
+            });
+            buf.push(Instruction::Gate {
+                gate: Gate::Rzz(*theta),
+                targets: smallvec![t1[0], t1[1]],
+            });
+            if t.on {
+                kept.push(i + 1);
+                merged.push(Some(i + 1));
             }
+            i += 3;
+            continue;
         }
         if let Some(buf) = out.as_mut() {
             buf.push(insts[i].clone());

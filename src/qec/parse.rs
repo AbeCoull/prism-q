@@ -131,7 +131,7 @@ impl QecTextParser {
             ));
         }
         let gate = if name == "CZ" { Gate::Cz } else { Gate::Cx };
-        for pair in qubits.chunks_exact(2) {
+        for pair in qubits.as_chunks::<2>().0 {
             self.note_qubit(pair[0]);
             self.note_qubit(pair[1]);
             self.ops.push(QecOp::Gate {

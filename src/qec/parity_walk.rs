@@ -1082,7 +1082,7 @@ impl WalkVisitor for WindowVisitor {
                 return;
             }
         };
-        for (offset, pair) in slots.chunks_exact(2).enumerate() {
+        for (offset, pair) in slots.as_chunks::<2>().0.iter().enumerate() {
             self.pair(
                 rows,
                 [pair[0], pair[1]],

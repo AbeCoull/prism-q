@@ -309,6 +309,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "apply_mcu",
     "apply_mcu_phase",
     "apply_fused_2q",
+    "apply_monomial_2q",
     "measure_prob_one",
     "measure_prob_one_finalize",
     "rdm_qubit",

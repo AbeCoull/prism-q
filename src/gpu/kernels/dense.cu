@@ -17,6 +17,7 @@
 // copy synchronizes the stream before it starts, so uploading 32 doubles per gate
 // serialized the host against every queued kernel. Layout mirrors `FusedMatArg`.
 struct FusedMat { double v[32]; };
+struct MonoScale { double v[8]; };
 struct QubitList { int q[PARAM_QUBITS]; };
 struct DiagList { double d[4 * PARAM_QUBITS]; int t[PARAM_QUBITS]; };
 struct TileGates { double v[8 * TILE_Q]; unsigned long long qubits; unsigned long long targets; };
@@ -291,6 +292,32 @@ extern "C" __global__ void apply_fused_2q(
         }
         state[indices[row]].x = rr;
         state[indices[row]].y = ri;
+    }
+}
+
+// Monomial 4x4 in the apply_fused_2q basis: row r takes the amplitude of basis state
+// `(src >> 2r) & 3` times scale r. Every source is read before any row is written.
+
+extern "C" __global__ void apply_monomial_2q(
+    double2 *state, unsigned long long pair_count, int q0, int q1,
+    MonoScale scale, unsigned int src)
+{
+    unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= pair_count) return;
+    unsigned long long idx = expand_2q(k, q0, q1);
+    unsigned long long b0 = 1ULL << q0;
+    unsigned long long b1 = 1ULL << q1;
+
+    double2 in[4];
+    #pragma unroll
+    for (int row = 0; row < 4; ++row) {
+        unsigned int c = (src >> (2 * row)) & 3u;
+        in[row] = state[idx | ((c & 2u) ? b0 : 0ULL) | ((c & 1u) ? b1 : 0ULL)];
+    }
+    #pragma unroll
+    for (int row = 0; row < 4; ++row) {
+        unsigned long long i = idx | ((row & 2) ? b0 : 0ULL) | ((row & 1) ? b1 : 0ULL);
+        state[i] = cmul(make_double2(scale.v[2 * row], scale.v[2 * row + 1]), in[row]);
     }
 }
 

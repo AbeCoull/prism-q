@@ -117,8 +117,10 @@ Non-diagonal `MultiFused` uses a shared memory tiled kernel (`apply_multi_fused_
 lowest qubits, which keep a warp's loads contiguous, plus up to five of the sub-gates'
 higher targets. A `MultiFused` over `n` qubits therefore takes about `(n - 5) / 5` passes,
 each applying its sub-gates in shared memory. A pass with fewer than three sub-gates
-falls back to per gate launches. `Multi2q` still launches once per sub-gate; rare in
-practice.
+falls back to per gate launches. `Multi2q` launches once per sub-gate. A sub-gate or
+`Fused2q` whose matrix is exactly a CX, swap, CZ or controlled phase runs on that gate's
+kernel, and one with a single nonzero per row (a permutation with phases, or a diagonal)
+on `apply_monomial_2q`; only the rest pay the dense 4x4 multiply.
 
 The CUDA C source lives in `.cu` files beside the Rust launchers and reaches
 `KERNEL_SOURCE_TEMPLATE` through `include_str!`. `kernels/dense.cu` carries placeholders

@@ -5,7 +5,8 @@
 //! launch over per-group phase tables (built by the CPU `build_*_tables` helpers) plus
 //! small shift and qubit metadata, instead of one launch per sub-gate. Non-diagonal
 //! `MultiFused` runs as shared-memory tiled passes of `apply_multi_fused_tiled`;
-//! `Multi2q` launches once per sub-gate.
+//! `Multi2q` launches once per sub-gate, on the permutation or diagonal kernel when the
+//! sub-gate's matrix is exactly one.
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
@@ -580,6 +581,146 @@ pub(crate) fn launch_apply_mcu_phase(
         builder
             .launch(cfg)
             .map_err(|e| driver_err("apply_mcu_phase", e))?;
+    }
+    ctx.device().count_launch(1);
+    Ok(())
+}
+
+/// Kernel route for a 4x4 matrix in the `apply_fused_2q` basis, where `q0` is the high
+/// bit. Structural zeros and ones only, no tolerance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Route2q {
+    /// `CX` with the high basis bit (`q0`) as control when `control_high`.
+    Cx {
+        control_high: bool,
+    },
+    Swap,
+    Cz,
+    ControlledPhase(Complex64),
+    /// `out[r] = scale[r] * in[src[r]]`, a permutation with phases or a diagonal.
+    Monomial {
+        src: [u8; 4],
+        scale: [Complex64; 4],
+    },
+    Dense,
+}
+
+fn route_2q(matrix: &[[Complex64; 4]; 4]) -> Route2q {
+    let zero = Complex64::new(0.0, 0.0);
+    let one = Complex64::new(1.0, 0.0);
+    let mut src = [0u8; 4];
+    let mut scale = [zero; 4];
+    let mut used = 0u8;
+    for (r, row) in matrix.iter().enumerate() {
+        let mut nonzero = row.iter().enumerate().filter(|(_, v)| **v != zero);
+        let Some((c, &v)) = nonzero.next() else {
+            return Route2q::Dense;
+        };
+        if nonzero.next().is_some() || used & (1 << c) != 0 {
+            return Route2q::Dense;
+        }
+        used |= 1 << c;
+        src[r] = c as u8;
+        scale[r] = v;
+    }
+    if scale.iter().all(|&v| v == one) {
+        match src {
+            [0, 1, 3, 2] => return Route2q::Cx { control_high: true },
+            [0, 3, 2, 1] => {
+                return Route2q::Cx {
+                    control_high: false,
+                };
+            }
+            [0, 2, 1, 3] => return Route2q::Swap,
+            _ => {}
+        }
+    }
+    if src == [0, 1, 2, 3] && scale[..3].iter().all(|&v| v == one) {
+        return if scale[3] == -one {
+            Route2q::Cz
+        } else {
+            Route2q::ControlledPhase(scale[3])
+        };
+    }
+    Route2q::Monomial { src, scale }
+}
+
+/// Apply a 4x4 matrix through the cheapest kernel its exact structure admits:
+/// `apply_cx`, `apply_swap`, `apply_cz`, `apply_cu_phase`, `apply_monomial_2q`, or the
+/// dense `apply_fused_2q`.
+pub(crate) fn launch_apply_matrix_2q(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    q0: usize,
+    q1: usize,
+    matrix: &[[Complex64; 4]; 4],
+) -> Result<()> {
+    match route_2q(matrix) {
+        Route2q::Cx { control_high: true } => launch_apply_cx(ctx, state, q0, q1),
+        Route2q::Cx {
+            control_high: false,
+        } => launch_apply_cx(ctx, state, q1, q0),
+        Route2q::Swap => launch_apply_swap(ctx, state, q0, q1),
+        Route2q::Cz => launch_apply_cz(ctx, state, q0, q1),
+        Route2q::ControlledPhase(phase) => launch_apply_cu_phase(ctx, state, q0, q1, phase),
+        Route2q::Monomial { src, scale } => {
+            launch_apply_monomial_2q(ctx, state, q0, q1, src, &scale)
+        }
+        Route2q::Dense => launch_apply_fused_2q(ctx, state, q0, q1, matrix),
+    }
+}
+
+/// Monomial scales as a by-value kernel parameter, re/im pairs per output row; mirrors
+/// `struct MonoScale`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MonoScaleArg {
+    v: [f64; 8],
+}
+
+// SAFETY: a plain `repr(C)` array of f64 with the layout the kernel declares.
+unsafe impl cudarc::driver::DeviceRepr for MonoScaleArg {}
+
+fn launch_apply_monomial_2q(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    q0: usize,
+    q1: usize,
+    src: [u8; 4],
+    scale: &[Complex64; 4],
+) -> Result<()> {
+    let n = state.num_qubits();
+    check_pair(n, q0, q1)?;
+    let pair_count: u64 = 1u64 << (n - 2);
+    let (stream, func) = stream_and_fn(ctx, "apply_monomial_2q")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
+    let mut arg = MonoScaleArg { v: [0.0; 8] };
+    for (slot, entry) in arg.v.as_chunks_mut::<2>().0.iter_mut().zip(scale) {
+        slot[0] = entry.re;
+        slot[1] = entry.im;
+    }
+    let packed_src: u32 = src
+        .iter()
+        .enumerate()
+        .map(|(r, &c)| u32::from(c) << (2 * r))
+        .sum();
+    let q0_i = q0 as i32;
+    let q1_i = q1 as i32;
+    let mut builder = stream.launch_builder(&func);
+    let buffer = state.buffer_mut().raw_mut();
+    builder
+        .arg(buffer)
+        .arg(&pair_count)
+        .arg(&q0_i)
+        .arg(&q1_i)
+        .arg(&arg)
+        .arg(&packed_src);
+    // SAFETY: signature matches; the scales ride in parameter space and the grid covers
+    // pair_count.
+    unsafe {
+        builder
+            .launch(cfg)
+            .map_err(|e| driver_err("apply_monomial_2q", e))?;
     }
     ctx.device().count_launch(1);
     Ok(())
@@ -1510,4 +1651,50 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
         ctx.device().count_launch(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Route2q, route_2q};
+    use crate::gates::Gate;
+    use num_complex::Complex64;
+
+    #[test]
+    fn route_2q_reads_exact_structure_only() {
+        let z = Complex64::new(0.0, 0.0);
+        let o = Complex64::new(1.0, 0.0);
+        let phase = Complex64::from_polar(1.0, 0.4);
+        assert_eq!(
+            route_2q(&Gate::Cx.matrix_4x4()),
+            Route2q::Cx { control_high: true }
+        );
+        assert_eq!(
+            route_2q(&[[o, z, z, z], [z, z, z, o], [z, z, o, z], [z, o, z, z]]),
+            Route2q::Cx {
+                control_high: false
+            }
+        );
+        assert_eq!(route_2q(&Gate::Swap.matrix_4x4()), Route2q::Swap);
+        assert_eq!(route_2q(&Gate::Cz.matrix_4x4()), Route2q::Cz);
+        assert_eq!(
+            route_2q(&[[o, z, z, z], [z, o, z, z], [z, z, o, z], [z, z, z, phase]]),
+            Route2q::ControlledPhase(phase)
+        );
+        assert_eq!(
+            route_2q(&[[z, o, z, z], [phase, z, z, z], [z, z, o, z], [z, z, z, o]]),
+            Route2q::Monomial {
+                src: [1, 0, 2, 3],
+                scale: [o, phase, o, o]
+            }
+        );
+        let mut near = Gate::Cx.matrix_4x4();
+        near[0][1] = Complex64::new(1e-300, 0.0);
+        assert_eq!(route_2q(&near), Route2q::Dense);
+        let mut singular = Gate::Swap.matrix_4x4();
+        singular[3][3] = z;
+        assert_eq!(route_2q(&singular), Route2q::Dense);
+        let mut repeated = Gate::Swap.matrix_4x4();
+        repeated[0] = [z, o, z, z];
+        assert_eq!(route_2q(&repeated), Route2q::Dense);
+    }
 }

@@ -36,6 +36,7 @@ struct PassCounters {
     launches: AtomicU64,
     passes: AtomicU64,
     drains: AtomicU64,
+    dense_2q: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -174,12 +175,21 @@ impl GpuDevice {
         self.census.drains.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record one launch of the dense 4x4 kernel, on top of its `count_launch`. Compiles
+    /// to nothing without `bench-internal`.
+    #[inline(always)]
+    pub(crate) fn count_dense_2q(&self) {
+        #[cfg(feature = "bench-internal")]
+        self.census.dense_2q.fetch_add(1, Ordering::Relaxed);
+    }
+
     #[cfg(feature = "bench-internal")]
     pub(crate) fn census(&self) -> crate::gpu::GpuPassCensus {
         crate::gpu::GpuPassCensus {
             launches: self.census.launches.load(Ordering::Relaxed),
             passes: self.census.passes.load(Ordering::Relaxed),
             drains: self.census.drains.load(Ordering::Relaxed),
+            dense_2q: self.census.dense_2q.load(Ordering::Relaxed),
         }
     }
 

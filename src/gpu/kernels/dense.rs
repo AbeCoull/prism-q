@@ -626,6 +626,7 @@ pub(crate) fn launch_apply_fused_2q(
             .map_err(|e| driver_err("apply_fused_2q", e))?;
     }
     ctx.device().count_launch(1);
+    ctx.device().count_dense_2q();
     Ok(())
 }
 

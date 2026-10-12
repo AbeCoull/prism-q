@@ -59,6 +59,7 @@ fn each_gate_kernel_is_one_launch_and_one_pass() {
             launches: gates,
             passes: gates,
             drains: 0,
+            dense_2q: 0,
         }
     );
 }
@@ -84,6 +85,7 @@ fn staged_tables_and_measurement_readbacks_drain_the_stream() {
             launches: 5,
             passes: 4,
             drains: 2,
+            dense_2q: 0,
         }
     );
 }

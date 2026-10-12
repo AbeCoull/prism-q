@@ -153,6 +153,10 @@ required-features = ["gpu"]
 name = "gpu_pass_census"
 required-features = ["gpu", "bench-internal"]
 
+[[example]]
+name = "sweep_census"
+required-features = ["bench-internal"]
+
 [[bench]]
 name = "qec_t_strategies"
 harness = false

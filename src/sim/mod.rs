@@ -1326,7 +1326,7 @@ fn backend_from_initial_state(
 /// Expand the gate forms `backend` has no native kernel for, `QftBlock` and
 /// `PauliRot`, or on a backend with the `QftBlock` kernel fold expanded QFTs into
 /// blocks. The stream stays borrowed when nothing changes.
-fn expand_for_backend<'c>(
+pub(crate) fn expand_for_backend<'c>(
     backend: &dyn Backend,
     circuit: &'c Circuit,
 ) -> std::borrow::Cow<'c, Circuit> {
@@ -1353,7 +1353,7 @@ fn expand_for_backend<'c>(
 
 /// Fuse `circuit` against what `backend` accepts and how wide a buffer it
 /// sweeps, the two backend facts the pass pipeline is gated on.
-fn fuse_for_backend<'a>(
+pub(crate) fn fuse_for_backend<'a>(
     backend: &dyn Backend,
     circuit: &'a Circuit,
 ) -> std::borrow::Cow<'a, Circuit> {

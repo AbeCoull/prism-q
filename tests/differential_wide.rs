@@ -105,7 +105,7 @@ fn layered_mixed(n: usize, layers: usize) -> Circuit {
         for i in (1..n).rev() {
             order.swap(i, rng.random_range(0..=i));
         }
-        for pair in order.chunks_exact(2) {
+        for pair in order.as_chunks::<2>().0 {
             let theta = rng.random::<f64>() * TAU;
             let gate = match rng.random_range(0..5) {
                 0 => Gate::Cx,

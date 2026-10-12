@@ -216,7 +216,7 @@ impl<'a> Reader<'a> {
             )));
         }
         let mut mat = [[Complex64::new(0.0, 0.0); N]; N];
-        for (row, chunk) in mat.iter_mut().zip(flat.chunks_exact(N)) {
+        for (row, chunk) in mat.iter_mut().zip(flat.as_chunks::<N>().0) {
             row.copy_from_slice(chunk);
         }
         Ok(mat)

@@ -217,7 +217,7 @@ pub fn measure_split_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
             c.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
             c.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
         }
-        for pair in kept[layer % 2..].chunks_exact(2) {
+        for pair in kept[layer % 2..].as_chunks::<2>().0 {
             c.add_gate(Gate::Cx, &[pair[0], pair[1]]);
         }
     }
@@ -638,7 +638,7 @@ pub fn matched_brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
             let j = rng.random_range(0..=i);
             order.swap(i, j);
         }
-        for pair in order.chunks_exact(2) {
+        for pair in order.as_chunks::<2>().0 {
             c.add_gate(Gate::Cz, &[pair[0], pair[1]]);
         }
     }

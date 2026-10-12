@@ -705,13 +705,13 @@ impl<'a> Parser<'a> {
 
     /// Check the length a `delay` or `box` names, which has no further effect.
     fn span_of(&self, expr: &Expr, what: &str, line: usize) -> Result<()> {
-        if let Timed::Duration(duration) = self.duration_of(expr, line)? {
-            if duration.is_negative() {
-                return Err(parse_error(
-                    line,
-                    format!("`{what}` needs a non-negative duration, got `{expr}`"),
-                ));
-            }
+        if let Timed::Duration(duration) = self.duration_of(expr, line)?
+            && duration.is_negative()
+        {
+            return Err(parse_error(
+                line,
+                format!("`{what}` needs a non-negative duration, got `{expr}`"),
+            ));
         }
         Ok(())
     }

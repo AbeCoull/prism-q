@@ -568,10 +568,8 @@ fn rotate2<const Y: bool>(amps: &mut [Complex64], q: usize) {
 
 fn rotate4<const Y1: bool, const Y2: bool>(amps: &mut [Complex64], q1: usize, q2: usize) {
     if (q1, q2) == (0, 1) {
-        for chunk in amps.chunks_exact_mut(4) {
-            if let [a, b, c, d] = chunk {
-                quad::<Y1, Y2>(a, b, c, d);
-            }
+        for [a, b, c, d] in amps.as_chunks_mut::<4>().0 {
+            quad::<Y1, Y2>(a, b, c, d);
         }
         return;
     }

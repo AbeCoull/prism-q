@@ -2037,10 +2037,10 @@ impl Backend for DistributedStatevectorBackend {
         self.inner.init(local_qubits, num_classical_bits)?;
 
         // inner.init seeds index 0 on every rank; only rank 0 owns |0...0>.
-        if self.context.rank() != 0 {
-            if let Some(amp) = self.inner.state.get_mut(0) {
-                *amp = Complex64::new(0.0, 0.0);
-            }
+        if self.context.rank() != 0
+            && let Some(amp) = self.inner.state.get_mut(0)
+        {
+            *amp = Complex64::new(0.0, 0.0);
         }
         Ok(())
     }

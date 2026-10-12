@@ -1,3 +1,4 @@
 [toolchain]
-channel = "stable"
+# Mirrors the dtolnay/rust-toolchain@<version> steps in .github/workflows. Update together.
+channel = "1.99.0"
 components = ["rustfmt", "clippy", "rust-analyzer"]

@@ -112,13 +112,13 @@ impl Parameters {
     pub fn all_rotations(circuit: &Circuit) -> Self {
         let mut links = Vec::new();
         for (i, inst) in circuit.instructions.iter().enumerate() {
-            if let Instruction::Gate { gate, .. } = inst {
-                if gate.pauli_generator().is_some() {
-                    links.push(ParamLink {
-                        instruction: i,
-                        slot: links.len(),
-                    });
-                }
+            if let Instruction::Gate { gate, .. } = inst
+                && gate.pauli_generator().is_some()
+            {
+                links.push(ParamLink {
+                    instruction: i,
+                    slot: links.len(),
+                });
             }
         }
         let num_slots = links.len();

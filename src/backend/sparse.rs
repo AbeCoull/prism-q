@@ -806,18 +806,17 @@ impl Backend for SparseBackend {
         if let Some(sparse) = other
             .as_any()
             .and_then(|any| any.downcast_ref::<SparseBackend>())
+            && sparse.num_qubits == self.num_qubits
         {
-            if sparse.num_qubits == self.num_qubits {
-                let mut inner = Complex64::new(0.0, 0.0);
-                for (index, amp) in &self.state {
-                    if let Some(theirs) = sparse.state.get(index) {
-                        inner += amp.conj() * theirs;
-                    }
+            let mut inner = Complex64::new(0.0, 0.0);
+            for (index, amp) in &self.state {
+                if let Some(theirs) = sparse.state.get(index) {
+                    inner += amp.conj() * theirs;
                 }
-                let left: f64 = self.state.values().map(Complex64::norm_sqr).sum();
-                let right: f64 = sparse.state.values().map(Complex64::norm_sqr).sum();
-                return Ok(overlap::normalized(inner.norm_sqr(), left, right));
             }
+            let left: f64 = self.state.values().map(Complex64::norm_sqr).sum();
+            let right: f64 = sparse.state.values().map(Complex64::norm_sqr).sum();
+            return Ok(overlap::normalized(inner.norm_sqr(), left, right));
         }
         overlap::export_overlap_sq(
             self.name(),

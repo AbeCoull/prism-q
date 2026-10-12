@@ -230,10 +230,16 @@ them; see [Shot and observable queries above the dense cap](#shot-and-observable
 
 ## Compatibility
 
-The minimum supported Rust version is 1.87.0. It is pinned in three places that are
+The minimum supported Rust version is 1.88.0. It is pinned in three places that are
 updated together: `rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`, and the
-`CI_MSRV` variable the `msrv` CI job builds against. Raising it is a minor bump
-while the crate is below 1.0.
+`CI_MSRV` variable the `msrv` CI job builds against. That job checks the library with
+`parallel`, `gpu` and `distributed`; `distributed-mpi` needs a system MPI to build and
+is not checked at the floor. Raising the MSRV is a minor bump while the crate is below
+1.0.
+
+The floor is separate from the toolchain the repository develops on, which
+`rust-toolchain.toml` pins to an exact stable release; see
+[Contributing](https://github.com/AbeCoull/prism-q/blob/main/CONTRIBUTING.md#build).
 
 Four feature flags are part of the surface: `parallel`, on by default, and `gpu`,
 `distributed` and `distributed-mpi`, each off. `bench-fast` and `bench-internal` are

@@ -991,7 +991,12 @@ const BYTE_BITS: [[bool; 8]; 256] = {
 fn unpack_word(word: u64, out: &mut [bool]) {
     let full = out.len() / 8;
     let (bytes, tail) = out.split_at_mut(full * 8);
-    for (chunk, byte) in bytes.chunks_exact_mut(8).zip(word.to_le_bytes()) {
+    for (chunk, byte) in bytes
+        .as_chunks_mut::<8>()
+        .0
+        .iter_mut()
+        .zip(word.to_le_bytes())
+    {
         chunk.copy_from_slice(&BYTE_BITS[byte as usize]);
     }
     for (bit, slot) in tail.iter_mut().enumerate() {

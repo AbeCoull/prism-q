@@ -340,13 +340,13 @@ fn thermal_noise_model(circuit: &Circuit) -> prism_q::NoiseModel {
 fn pair_depolarizing_noise(circuit: &Circuit, p_single: f64, p_pair: f64) -> prism_q::NoiseModel {
     let mut model = prism_q::NoiseModel::uniform_depolarizing(circuit, p_single);
     for (events, instruction) in model.after_gate.iter_mut().zip(&circuit.instructions) {
-        if let Instruction::Gate { targets, .. } = instruction {
-            if targets.len() == 2 {
-                events.push(prism_q::NoiseEvent {
-                    channel: prism_q::NoiseChannel::TwoQubitDepolarizing { p: p_pair },
-                    qubits: targets.iter().copied().collect(),
-                });
-            }
+        if let Instruction::Gate { targets, .. } = instruction
+            && targets.len() == 2
+        {
+            events.push(prism_q::NoiseEvent {
+                channel: prism_q::NoiseChannel::TwoQubitDepolarizing { p: p_pair },
+                qubits: targets.iter().copied().collect(),
+            });
         }
     }
     model
@@ -693,7 +693,13 @@ fn bench_statevector_qaoa_ring_matching(c: &mut Criterion) {
         for i in (1..n).rev() {
             order.swap(i, rng.random_range(0..=i));
         }
-        edges.extend(order.chunks_exact(2).map(|pair| (pair[0], pair[1])));
+        edges.extend(
+            order
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| (pair[0], pair[1])),
+        );
         for _ in 0..3 {
             let gamma = rng.random::<f64>() * std::f64::consts::PI;
             let beta = rng.random::<f64>() * std::f64::consts::PI;
@@ -2600,7 +2606,7 @@ fn wide_clifford_t_circuit(n: usize, t_count: usize, depth: usize, seed: u64) ->
             c.add_gate(gate, &[q]);
         }
         shuffle(&mut order, &mut rng);
-        for pair in order.chunks_exact(2) {
+        for pair in order.as_chunks::<2>().0 {
             c.add_gate(Gate::Cx, &[pair[0], pair[1]]);
         }
     }
@@ -3939,7 +3945,7 @@ fn random_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -
         for i in (1..n).rev() {
             perm.swap(i, rng.random_range(0..=i));
         }
-        for pair in perm.chunks_exact(2) {
+        for pair in perm.as_chunks::<2>().0 {
             c.add_gate(Gate::Cx, &[pair[0], pair[1]]);
         }
     }

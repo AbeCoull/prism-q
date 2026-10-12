@@ -450,7 +450,7 @@ impl MemoryBuilder {
             return;
         }
         self.ops
-            .extend(pairs.chunks_exact(2).map(|pair| QecOp::Gate {
+            .extend(pairs.as_chunks::<2>().0.iter().map(|pair| QecOp::Gate {
                 gate: Gate::Cx,
                 targets: pair.to_vec(),
             }));

@@ -2759,14 +2759,14 @@ fn prepare_shot_source(
         });
     }
 
-    if should_use_deferred_clifford_sampling(kind, circuit, num_shots) {
-        if let Ok(deferred) = compiled::defer_measure_reset_circuit(circuit) {
-            return Ok(ShotSource::Compiled {
-                sampler: Box::new(compile_measurements_for_kind(kind, &deferred, seed)?),
-                meas_map: deferred.measurement_map(),
-                deferred: true,
-            });
-        }
+    if should_use_deferred_clifford_sampling(kind, circuit, num_shots)
+        && let Ok(deferred) = compiled::defer_measure_reset_circuit(circuit)
+    {
+        return Ok(ShotSource::Compiled {
+            sampler: Box::new(compile_measurements_for_kind(kind, &deferred, seed)?),
+            meas_map: deferred.measurement_map(),
+            deferred: true,
+        });
     }
 
     if kind.is_auto() && auto_prefers_clifford_register(circuit) {
@@ -4022,23 +4022,23 @@ fn run_shots_per_shot(
     }
 
     if has_temporal_clifford_opportunity(&kind, circuit) {
-        if decompose.is_none() {
-            if let Some(tc) = plan_temporal_clifford(&kind, circuit) {
-                let route = ResolvedBackend::Statevector;
-                let states = [(route, circuit.num_qubits)];
-                return collect_shots(
-                    circuit,
-                    num_shots,
-                    seed,
-                    route,
-                    &kind,
-                    &states,
-                    |shot_seed| {
-                        let outcome = run_temporal_clifford(&tc, shot_seed, false)?;
-                        Ok((outcome.classical_bits, outcome.metadata))
-                    },
-                );
-            }
+        if decompose.is_none()
+            && let Some(tc) = plan_temporal_clifford(&kind, circuit)
+        {
+            let route = ResolvedBackend::Statevector;
+            let states = [(route, circuit.num_qubits)];
+            return collect_shots(
+                circuit,
+                num_shots,
+                seed,
+                route,
+                &kind,
+                &states,
+                |shot_seed| {
+                    let outcome = run_temporal_clifford(&tc, shot_seed, false)?;
+                    Ok((outcome.classical_bits, outcome.metadata))
+                },
+            );
         }
         // Decomposable circuits with a temporal prefix keep the per-shot
         // full-pipeline route; the prefix spans blocks that decomposition
@@ -4417,33 +4417,32 @@ pub(crate) fn run_shots_with_noise(
     let host_statevector = matches!(plan, BackendPlan::Statevector { .. }) && !plan.is_gpu();
     let dense_tensor_network = matches!(plan, BackendPlan::TensorNetwork { .. })
         && crate::backend::tensor_probability_len("tensor network", circuit.num_qubits).is_ok();
-    if host_statevector || dense_tensor_network {
-        if let Some(groups) = trajectory::PauliGroups::sample(circuit, noise_model, num_shots, seed)
-        {
-            let build = |s| plan.build(s);
-            return trajectory::run_pauli_groups(
-                &groups,
-                circuit,
-                noise_model,
-                seed,
-                dense_tensor_network.then_some(&build as trajectory::GroupBackendFactory<'_>),
-                plan.resolved(),
-            );
-        }
+    if (host_statevector || dense_tensor_network)
+        && let Some(groups) = trajectory::PauliGroups::sample(circuit, noise_model, num_shots, seed)
+    {
+        let build = |s| plan.build(s);
+        return trajectory::run_pauli_groups(
+            &groups,
+            circuit,
+            noise_model,
+            seed,
+            dense_tensor_network.then_some(&build as trajectory::GroupBackendFactory<'_>),
+            plan.resolved(),
+        );
     }
     // A checkpoint, a group state and a shot state at once.
-    if host_statevector && circuit.num_qubits + 1 < max_statevector_qubits() {
-        if let Some(groups) =
+    if host_statevector
+        && circuit.num_qubits + 1 < max_statevector_qubits()
+        && let Some(groups) =
             trajectory::PauliGroups::sample_replayed(circuit, noise_model, num_shots, seed)
-        {
-            return trajectory::run_replayed_groups(
-                &groups,
-                circuit,
-                noise_model,
-                seed,
-                plan.resolved(),
-            );
-        }
+    {
+        return trajectory::run_replayed_groups(
+            &groups,
+            circuit,
+            noise_model,
+            seed,
+            plan.resolved(),
+        );
     }
     let route = plan.resolved();
     trajectory::run_trajectories(

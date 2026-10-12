@@ -1163,14 +1163,14 @@ fn push_density_matrix_noise_events(
             }));
         }
         QecNoise::Depolarize2(p) => {
-            events.extend(targets.chunks_exact(2).map(|pair| NoiseEvent {
+            events.extend(targets.as_chunks::<2>().0.iter().map(|pair| NoiseEvent {
                 channel: NoiseChannel::TwoQubitDepolarizing { p },
                 qubits: SmallVec::from_slice(pair),
             }));
         }
         QecNoise::PauliChannel2(ref rates) => {
             let kraus = pauli_channel_2_kraus(rates);
-            events.extend(targets.chunks_exact(2).map(|pair| NoiseEvent {
+            events.extend(targets.as_chunks::<2>().0.iter().map(|pair| NoiseEvent {
                 channel: NoiseChannel::Kraus2q {
                     kraus: kraus.clone(),
                 },
@@ -1190,7 +1190,7 @@ fn push_density_matrix_noise_events(
             }));
         }
         QecNoise::LeakTransport(p) => {
-            events.extend(targets.chunks_exact(2).map(|pair| NoiseEvent {
+            events.extend(targets.as_chunks::<2>().0.iter().map(|pair| NoiseEvent {
                 channel: NoiseChannel::LeakageTransport { p },
                 qubits: SmallVec::from_slice(pair),
             }));
@@ -1544,7 +1544,7 @@ fn push_qec_deferred_noise_events(
         }
         _ => unreachable!("one-qubit channels return above"),
     };
-    for pair in targets.chunks_exact(2) {
+    for pair in targets.as_chunks::<2>().0 {
         let first = qec_deferred_noise_target(pair[0], aliases, measured_aliases)?;
         let second = qec_deferred_noise_target(pair[1], aliases, measured_aliases)?;
         let (alias, side) = match (first, second) {

@@ -177,7 +177,7 @@ pub(crate) fn stage_complex(
         std::iter::empty(),
         2 * values.len(),
         |dst| {
-            for (pair, v) in dst.chunks_exact_mut(2).zip(values) {
+            for (pair, v) in dst.as_chunks_mut::<2>().0.iter_mut().zip(values) {
                 pair[0] = v.re;
                 pair[1] = v.im;
             }
@@ -270,7 +270,9 @@ pub(super) fn finalize_pauli_sums(
     let mut host = vec![0.0_f64; 2 * num_masks as usize];
     result.copy_to_host(device, &mut host)?;
     Ok(host
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Complex64::new(pair[0], pair[1]) * scale)
         .collect())
 }

@@ -1561,7 +1561,7 @@ fn apply_reference_noise(
             }
         }
         QecNoise::Depolarize2(p) => {
-            for pair in targets.chunks_exact(2) {
+            for pair in targets.as_chunks::<2>().0 {
                 if rng.random::<f64>() < p {
                     let sample = rng.random_range(1..16);
                     let first = (sample / 4) as usize;
@@ -1572,7 +1572,7 @@ fn apply_reference_noise(
             }
         }
         QecNoise::PauliChannel2(ref rates) => {
-            for pair in targets.chunks_exact(2) {
+            for pair in targets.as_chunks::<2>().0 {
                 let mut r = rng.random::<f64>();
                 for (branch, &rate) in rates.iter().enumerate() {
                     if r < rate {

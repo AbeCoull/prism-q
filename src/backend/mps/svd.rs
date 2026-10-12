@@ -148,14 +148,14 @@ impl ThinQr {
                     // Four accumulators: one would be a loop-carried floating
                     // point chain the compiler cannot reassociate.
                     let mut acc = [ZERO; 4];
-                    let mut basis_chunks = basis.chunks_exact(4);
-                    let mut v_chunks = v.chunks_exact(4);
-                    for (b4, x4) in basis_chunks.by_ref().zip(v_chunks.by_ref()) {
+                    let (basis_quads, basis_rest) = basis.as_chunks::<4>();
+                    let (v_quads, v_rest) = v.as_chunks::<4>();
+                    for (b4, x4) in basis_quads.iter().zip(v_quads) {
                         for k in 0..4 {
                             acc[k] += b4[k].conj() * x4[k];
                         }
                     }
-                    for (b, x) in basis_chunks.remainder().iter().zip(v_chunks.remainder()) {
+                    for (b, x) in basis_rest.iter().zip(v_rest) {
                         acc[0] += b.conj() * x;
                     }
                     let dot = (acc[0] + acc[1]) + (acc[2] + acc[3]);

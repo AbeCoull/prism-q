@@ -19,41 +19,42 @@ use super::fusion_rzz::{fuse_batch_rzz, fuse_rzz};
 use super::plan::{Place, Tracer};
 
 // Under miri the fusion floors drop to the reduced parallel threshold (see
-// `PARALLEL_THRESHOLD_QUBITS` in `backend/mod.rs`), so the fused kernel forms
-// appear at sizes the interpreter can execute. Native values are unchanged.
+// `PARALLEL_THRESHOLD_QUBITS` in `backend/mod.rs`), and the `prism_lowered_thresholds`
+// test cfg drops them to the same value, so the fused kernel forms appear at small
+// widths. Native values are unchanged.
 
 /// Floor for the 1q fusion, reorder, and batching passes. Below it gate execution takes
 /// nanoseconds and cloning the instruction stream costs more than fusion saves.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 pub(crate) const MIN_QUBITS_FOR_FUSION: usize = 10;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 pub(crate) const MIN_QUBITS_FOR_FUSION: usize = 8;
 
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 14;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 8;
 
 /// Floor for the diagonal batch passes (BatchRzz, BatchPhase, DiagonalBatch), whose LUT
 /// setup needs a large state to amortize.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 16;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 8;
 
 /// Floor for batching the 1q runs left after `fuse_controlled_phases` (the H gates in
 /// QFT). At 16q the 1 MB state sits in L3 and tiling costs more than it saves.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 18;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 8;
 
 /// Floor for absorbing 1q gates into a 2q gate. The generic 4×4 kernel does ~4x the
 /// FLOPs of CX/CZ plus SIMD 1q kernels; the saved memory passes win from 12q on QV and
 /// random sweeps.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_2Q_FUSION: usize = 12;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_2Q_FUSION: usize = 8;
 
 /// A/B kill switch: setting `PRISM_NO_REORDER` disables `reorder_fused2q_into_tiles`. Read
@@ -74,9 +75,9 @@ const MIN_MULTI_2Q_BATCH: usize = 2;
 /// splits the state into `2^(n - 13)` tiles at the widths just past the parallel
 /// threshold, so at 15 qubits it would feed half of an eight-thread pool where the
 /// per-rotation pass feeds all of it.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_PAULI_ROT_BATCH: usize = 16;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_PAULI_ROT_BATCH: usize = 8;
 
 #[inline]

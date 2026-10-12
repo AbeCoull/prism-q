@@ -18,15 +18,19 @@
 
 #![cfg(feature = "gpu")]
 
+use std::borrow::Cow;
 use std::hint::black_box;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
-use prism_q::circuit::{Circuit, Instruction};
+use prism_q::circuit::fusion::fuse_circuit_for_width;
+use prism_q::circuit::{
+    Circuit, Instruction, expand_pauli_rotations, expand_qft_blocks, recognize_qft_blocks, smallvec,
+};
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::gpu::GpuContext;
@@ -240,6 +244,146 @@ fn bench_gpu_measurement(c: &mut Criterion) {
                 run_with(kind.clone(), circ, 42).unwrap();
             });
         });
+    }
+
+    group.finish();
+}
+
+// ---- Device throughput ----
+//
+// `gpu/throughput` times one resident state per row: the circuit is expanded and fused
+// for the device backend once, outside the timer, and each iteration applies the fused
+// stream and waits for the stream, with no readback. `gpu/floor` times one launch on
+// the top qubit or pair at the same widths, the unit a circuit row divides by to read
+// as sweep equivalents. Widths that do not fit free VRAM are skipped.
+
+fn throughput_sizes() -> &'static [usize] {
+    if is_fast() {
+        &[20]
+    } else {
+        &[20, 22, 24, 26, 28]
+    }
+}
+
+const THROUGHPUT_CIRCUITS: [&str; 4] = ["qft", "hea_l5", "qv", "random_d10"];
+
+/// The circuit rows of `gpu/throughput`; `examples/gpu_pass_census.rs` counts the same
+/// set.
+fn throughput_circuit(name: &str, n: usize) -> Circuit {
+    match name {
+        "qft" => circuits::qft_circuit(n),
+        "hea_l5" => circuits::hardware_efficient_ansatz(n, 5, SEED),
+        "qv" => circuits::quantum_volume_circuit(n, n, SEED),
+        "random_d10" => circuits::random_circuit(n, 10, SEED),
+        _ => unreachable!("unknown throughput circuit {name}"),
+    }
+}
+
+/// The expansion and fusion `simulate` applies before handing `circuit` to `backend`.
+fn fuse_for(backend: &StatevectorBackend, circuit: &Circuit) -> Circuit {
+    let blocks = if backend.supports_qft_block() {
+        recognize_qft_blocks(circuit)
+    } else {
+        expand_qft_blocks(circuit)
+    };
+    let rotations = if backend.supports_pauli_rotation() {
+        Cow::Borrowed(&*blocks)
+    } else {
+        expand_pauli_rotations(&blocks)
+    };
+    fuse_circuit_for_width(
+        &rotations,
+        backend.supports_fused_gates(),
+        backend.fusion_state_qubits(circuit.num_qubits),
+    )
+    .into_owned()
+}
+
+/// Ten flat samples from 26 qubits, where one iteration runs to tens of milliseconds.
+fn configure_width(
+    group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
+    n: usize,
+) {
+    if n >= 26 {
+        group.sample_size(10);
+        group.sampling_mode(SamplingMode::Flat);
+    } else {
+        configure_group(group);
+        group.sampling_mode(SamplingMode::Auto);
+    }
+}
+
+fn resident_backend(ctx: &Arc<GpuContext>, n: usize) -> Option<StatevectorBackend> {
+    if !ctx.fits_statevector_with_scratch(n).unwrap_or(false) {
+        eprintln!("SKIP: {n} qubits do not fit free VRAM");
+        return None;
+    }
+    let mut backend = StatevectorBackend::new(42).with_gpu(ctx.clone());
+    backend.init(n, 0).unwrap();
+    Some(backend)
+}
+
+fn bench_gpu_throughput(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/throughput");
+
+    for name in THROUGHPUT_CIRCUITS {
+        for &n in throughput_sizes() {
+            let Some(mut backend) = resident_backend(&ctx, n) else {
+                continue;
+            };
+            let circuit = throughput_circuit(name, n);
+            let fused = fuse_for(&backend, &circuit);
+            configure_width(&mut group, n);
+            group.bench_function(BenchmarkId::new(name, n), |b| {
+                b.iter(|| {
+                    backend.apply_instructions(&fused.instructions).unwrap();
+                    ctx.synchronize().unwrap();
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_gpu_floor(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/floor");
+    let h = Gate::H.matrix_2x2();
+    let ry = Gate::Ry(0.7).matrix_2x2();
+    let mut dense_2q = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (r, row) in dense_2q.iter_mut().enumerate() {
+        for (col, entry) in row.iter_mut().enumerate() {
+            *entry = h[r >> 1][col >> 1] * ry[r & 1][col & 1];
+        }
+    }
+
+    for &n in throughput_sizes() {
+        let top = n - 1;
+        let rows = [
+            ("diag_top", Gate::Rz(0.3), smallvec![top]),
+            ("gate1q_top", Gate::Ry(0.7), smallvec![top]),
+            (
+                "fused2q_top",
+                Gate::Fused2q(Box::new(dense_2q)),
+                smallvec![top - 1, top],
+            ),
+            ("cx_top", Gate::Cx, smallvec![top - 1, top]),
+        ];
+        for (name, gate, targets) in rows {
+            let Some(mut backend) = resident_backend(&ctx, n) else {
+                continue;
+            };
+            let launch = [Instruction::Gate { gate, targets }];
+            configure_width(&mut group, n);
+            group.bench_function(BenchmarkId::new(name, n), |b| {
+                b.iter(|| {
+                    backend.apply_instructions(&launch).unwrap();
+                    ctx.synchronize().unwrap();
+                });
+            });
+        }
     }
 
     group.finish();
@@ -1134,6 +1278,8 @@ criterion_group! {
     bench_gpu_marginals,
     bench_gpu_pauli_sum_grouped,
     bench_gpu_export,
+    bench_gpu_throughput,
+    bench_gpu_floor,
     bench_gpu_noisy_kraus,
     bench_cpu_noisy_kraus,
     bench_stab_cpu_clifford_d10,

@@ -165,6 +165,9 @@ cargo bench --bench bench_driver -- "single_qubit_gates/h_gate/16"
 # Quick smoke (fast settings)
 cargo bench --bench bench_driver -- --warm-up-time 1 --measurement-time 3 --sample-size 10
 
+# Every row once in Criterion's test mode, no timing (the CI smoke job)
+bash scripts/bench_smoke.sh
+
 # Save baseline
 cargo bench -- --save-baseline my_baseline
 
@@ -225,7 +228,15 @@ RERUN. `--no-confirm` turns this off.
 threshold is measured again on the full tier against the same two binaries, and that run
 decides the verdict.
 
-Exit status: 0 PASS, 1 FAIL, 2 host too busy to start, 3 RERUN.
+**A row that cannot run.** Before any measurement each binary runs every row of the
+filter and the control filter once in Criterion's test mode (`--test`), which costs one
+iteration per row. A binary that panics or exits non-zero stops the run with exit 4 and a
+message naming the lane (`ref` or `new`), the row it was on, and the tail of its output.
+Without this, a reference binary that panicked on one row surfaced in the middle of a
+measured pass, after the warmups and the earlier passes had been paid for.
+
+Exit status: 0 PASS, 1 FAIL, 2 host too busy to start, 3 RERUN, 4 a binary failed the
+smoke test.
 
 ## Unattended queues
 

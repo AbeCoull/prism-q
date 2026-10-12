@@ -81,6 +81,19 @@ fn a_classical_bit_no_measurement_writes_is_never_flipped() {
 }
 
 #[test]
+fn a_rate_below_double_precision_epsilon_almost_never_fires() {
+    let circuit = deterministic_circuit();
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 1e-20);
+    let result = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(SHOTS)
+        .unwrap();
+    assert_eq!(result.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert!(result.shots.iter().all(|s| s == &[true, true, false]));
+}
+
+#[test]
 fn compiled_sampler_counts_and_marginals_carry_readout() {
     let circuit = deterministic_circuit();
     let noise = asymmetric_model(&circuit);

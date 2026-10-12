@@ -70,6 +70,20 @@ fn auto_expectations_route_a_wide_shallow_circuit_to_the_tensor_path() {
 }
 
 #[test]
+fn an_identity_term_on_the_tensor_path_reads_one() {
+    let circuit = random_circuit(20, 10, SEED);
+    let mut observables = two_local(20);
+    observables.push(Vec::new());
+    let auto = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert_eq!(auto.metadata.backend, ResolvedBackend::TensorNetwork);
+    assert!((auto.values[observables.len() - 1] - 1.0).abs() < 1e-12);
+}
+
+#[test]
 fn auto_marginals_route_a_wide_shallow_circuit_to_the_tensor_path() {
     let circuit = brickwork_circuit(20, 4, SEED);
     let auto = simulate(&circuit)

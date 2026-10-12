@@ -478,7 +478,7 @@ mod tests {
     }
 
     fn binomial_pmf(n: usize, p: f64) -> Vec<f64> {
-        let (ln_p, ln_q) = (p.ln(), (1.0 - p).ln());
+        let (ln_p, ln_q) = (p.ln(), (-p).ln_1p());
         let mut ln_choose = 0.0f64;
         (0..=n)
             .map(|k| {

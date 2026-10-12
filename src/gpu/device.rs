@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "bench-internal")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream, DriverError};
@@ -23,6 +25,17 @@ use super::kernels::{KERNEL_NAMES, kernel_source};
 #[derive(Debug)]
 pub struct GpuDevice {
     inner: DeviceInner,
+    #[cfg(feature = "bench-internal")]
+    census: PassCounters,
+}
+
+/// Running totals behind [`crate::gpu::GpuPassCensus`].
+#[cfg(feature = "bench-internal")]
+#[derive(Debug, Default)]
+struct PassCounters {
+    launches: AtomicU64,
+    passes: AtomicU64,
+    drains: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -75,6 +88,8 @@ impl GpuDevice {
                 _module: module,
                 functions,
             },
+            #[cfg(feature = "bench-internal")]
+            census: PassCounters::default(),
         })
     }
 
@@ -133,6 +148,38 @@ impl GpuDevice {
     pub(crate) fn stub_for_tests() -> Self {
         Self {
             inner: DeviceInner::Stub,
+            #[cfg(feature = "bench-internal")]
+            census: PassCounters::default(),
+        }
+    }
+
+    /// Record one kernel launch that sweeps the state `passes` times. Compiles to nothing
+    /// without `bench-internal`.
+    #[inline(always)]
+    pub(crate) fn count_launch(&self, passes: u64) {
+        #[cfg(feature = "bench-internal")]
+        {
+            self.census.launches.fetch_add(1, Ordering::Relaxed);
+            self.census.passes.fetch_add(passes, Ordering::Relaxed);
+        }
+        #[cfg(not(feature = "bench-internal"))]
+        let _ = passes;
+    }
+
+    /// Record one host copy, which waits for the stream to drain. Compiles to nothing
+    /// without `bench-internal`.
+    #[inline(always)]
+    pub(crate) fn count_drain(&self) {
+        #[cfg(feature = "bench-internal")]
+        self.census.drains.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "bench-internal")]
+    pub(crate) fn census(&self) -> crate::gpu::GpuPassCensus {
+        crate::gpu::GpuPassCensus {
+            launches: self.census.launches.load(Ordering::Relaxed),
+            passes: self.census.passes.load(Ordering::Relaxed),
+            drains: self.census.drains.load(Ordering::Relaxed),
         }
     }
 

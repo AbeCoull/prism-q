@@ -873,7 +873,7 @@ fn geometric_sample(rng: &mut ChaCha8Rng, ln_1mp: f64) -> usize {
     (u.ln() / ln_1mp) as usize
 }
 
-/// [`geometric_sample`] on the sampler's own generator. `ln_1mp` is `(1 - p).ln()`,
+/// [`geometric_sample`] on the sampler's own generator. `ln_1mp` is `ln(1 - p)`,
 /// precomputed by the caller.
 #[inline(always)]
 pub(crate) fn geometric_sample_xoshiro(
@@ -958,7 +958,7 @@ fn fill_one_event(
 
     // Low-p: skip inactive shots via geometric sampling. `px_frac` / `pxy_frac`
     // rescale to the conditional distribution given an event fired.
-    let ln_1mp = (1.0 - p_event).ln();
+    let ln_1mp = (-p_event).ln_1p();
     let px_frac = px / p_event;
     let pxy_frac = pxy / p_event;
     let mut pos = rng.geom(ln_1mp);
@@ -1113,7 +1113,7 @@ fn apply_readout_packed(
             continue;
         }
 
-        let ln_1mp = (1.0 - p_max).ln();
+        let ln_1mp = (-p_max).ln_1p();
         let accept_set = entry.p10 / p_max;
         let accept_clear = entry.p01 / p_max;
         let mut pos = geometric_sample(rng, ln_1mp);
@@ -2080,7 +2080,7 @@ impl NoisyCompiledSampler {
                     }
                 }
             } else {
-                let ln_1mp = (1.0 - p_event).ln();
+                let ln_1mp = (-p_event).ln_1p();
                 let px_frac = px / p_event;
                 let pxy_frac = (px + py) / p_event;
 
@@ -2130,7 +2130,7 @@ impl NoisyCompiledSampler {
                     }
                 }
             } else {
-                let ln_1mp = (1.0 - p).ln();
+                let ln_1mp = (-p).ln_1p();
                 let mut pos = start + geometric_sample(rng, ln_1mp);
                 while pos < end {
                     let r: f64 = rand::RngExt::random(rng);
@@ -2176,7 +2176,7 @@ impl NoisyCompiledSampler {
                         }
                     }
                 } else {
-                    let ln_1mp = (1.0 - p_event).ln();
+                    let ln_1mp = (-p_event).ln_1p();
                     let px_frac = px / p_event;
                     let pxy_frac = (px + py) / p_event;
 
@@ -2812,7 +2812,7 @@ fn run_shots_noisy_frame(
                                 continue;
                             }
                             if p < 0.5 && batch_n >= 32 {
-                                let ln_1mp = (1.0 - p).ln();
+                                let ln_1mp = (-p).ln_1p();
                                 let mut pos = geometric_sample(&mut rng, ln_1mp);
                                 while pos < batch_n {
                                     let r: f64 = rand::RngExt::random(&mut rng);
@@ -2845,7 +2845,7 @@ fn run_shots_noisy_frame(
                         let pxy_frac = (px + py) / p_event;
 
                         if p_event < 0.5 && batch_n >= 32 {
-                            let ln_1mp = (1.0 - p_event).ln();
+                            let ln_1mp = (-p_event).ln_1p();
                             let mut pos = geometric_sample(&mut rng, ln_1mp);
                             while pos < batch_n {
                                 let r: f64 = rand::RngExt::random(&mut rng);

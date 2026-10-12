@@ -951,21 +951,21 @@ impl QecNoiseDraw {
                 py: pxy_frac - px_frac,
                 p_event: 1.0,
             },
-            ln_1mp: (1.0 - p_event).ln(),
+            ln_1mp: (-p_event).ln_1p(),
         }
     }
 
     pub(super) fn pair(p: f64) -> Self {
         Self::Pair {
             p,
-            ln_1mp: (1.0 - p).ln(),
+            ln_1mp: (-p).ln_1p(),
         }
     }
 
     pub(super) fn pair_table(p: f64, table: u32) -> Self {
         Self::PairTable {
             p,
-            ln_1mp: (1.0 - p).ln(),
+            ln_1mp: (-p).ln_1p(),
             table,
         }
     }

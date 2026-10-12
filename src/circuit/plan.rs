@@ -647,8 +647,26 @@ fn record_sites(
         // Batch payloads built from angles the passes already folded away, with
         // no recipe to rebuild them.
         Gate::DiagonalBatch(_) | Gate::BatchPhase(_) => false,
-        // Everything else carries no angle, so a binding leaves it untouched.
-        _ => true,
+        // No angle, so a binding leaves these untouched. Listed rather than
+        // wildcarded so a new angle-carrying variant fails to compile here.
+        Gate::Id
+        | Gate::X
+        | Gate::Y
+        | Gate::Z
+        | Gate::H
+        | Gate::S
+        | Gate::Sdg
+        | Gate::T
+        | Gate::Tdg
+        | Gate::SX
+        | Gate::SXdg
+        | Gate::Cx
+        | Gate::Cz
+        | Gate::Swap
+        | Gate::Cu(_)
+        | Gate::Mcu(_)
+        | Gate::QftBlock { .. }
+        | Gate::Unitary(_) => true,
     }
 }
 

@@ -46,7 +46,8 @@
 #
 # Exit status: 0 when every step exited 0, otherwise 1. A step's own exit code
 # is in the status file; bench_ab.sh uses 1 for FAIL, 2 for a host too busy to
-# start, and 3 for RERUN.
+# start, 3 for RERUN, and 4 for a binary that failed its smoke test, whose lane
+# and row the status file's summary names.
 
 set -uo pipefail
 
@@ -298,6 +299,8 @@ mark "ALLDONE"
             verdict="$(grep -m1 -E '^\*\*Regression verdict' "$OUT_DIR/$name.md")"
             final="$(grep -E '^\*\*Final verdict' "$OUT_DIR/$name.md" | tail -1)"
             printf '%s: %s\n' "$name" "${final:-$verdict}"
+        elif [[ -f "$OUT_DIR/$name.log" ]] && grep -q '^Error: smoke test failed' "$OUT_DIR/$name.log"; then
+            printf '%s: %s\n' "$name" "$(grep -m1 '^Error: smoke test failed' "$OUT_DIR/$name.log")"
         fi
     done
 } >> "$STATUS"

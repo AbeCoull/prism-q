@@ -12,9 +12,11 @@
 #   2. Build the same bench binary from a reference git ref in a separate
 #      worktree and copy it aside.
 #   3. Verify the working tree did not change between the two builds.
-#   4. Run the two binaries adjacent, no build in between: one discarded warmup
+#   4. Run every row the filters match once per binary in Criterion's test mode,
+#      and stop before any measurement if either binary fails a row.
+#   5. Run the two binaries adjacent, no build in between: one discarded warmup
 #      pass each at 10 samples, then four measured passes.
-#   5. Emit a markdown table with a same-code control column per row.
+#   6. Emit a markdown table with a same-code control column per row.
 #
 # The measured pass order is ref, new, new, ref. Both means are centred on the
 # same point in time, so linear drift cancels, and each binary is measured twice
@@ -136,7 +138,15 @@
 #                   threshold on the full tier against the same two binaries,
 #                   and take the verdict from that run.
 #
-# Exit status: 0 PASS, 1 FAIL, 2 host too busy to start, 3 RERUN.
+# Smoke test:
+#   Step 4 costs one iteration of each row per binary. A row that panics or
+#   exits non-zero stops the run with exit 4 and names the lane and the row,
+#   rather than surfacing partway through a measured pass after the warmups
+#   and earlier passes have been paid for. Runs started by this script for a
+#   confirmation or an escalation skip it, since the same binaries passed it.
+#
+# Exit status: 0 PASS, 1 FAIL, 2 host too busy to start, 3 RERUN, 4 a binary
+# failed the smoke test.
 #
 # Environment:
 #   REGRESSION_THRESHOLD   regression gate in percent (default: 5.0)
@@ -730,6 +740,32 @@ check_load() {
     fi
 }
 
+# Run every row of the filters once in Criterion's test mode, which prints
+# `Testing <id>` before a row and `Success` after it, so the row a failing binary
+# was on is the last `Testing` line in its log.
+smoke_test() {
+    local label="$1" exe="$2"
+    local filter log status row rows
+    for filter in "$FILTER" ${CONTROL_FILTER:+"$CONTROL_FILTER"}; do
+        log="$WORKDIR/smoke-$label.log"
+        status=0
+        CRITERION_HOME="$(native_path "$WORKDIR/smoke-home")" \
+            "$exe" --test "$filter" > "$log" 2>&1 || status=$?
+        rows="$(grep -c '^Testing ' "$log" || true)"
+        if (( status != 0 )); then
+            row="$(awk '/^Testing / { id = substr($0, 9) } END { print id }' "$log")"
+            echo "" >&2
+            echo "Error: smoke test failed on the $label binary: it exited $status on row '${row:-unknown}'." >&2
+            echo "  Filter: $filter" >&2
+            echo "  Last lines of its output:" >&2
+            tail -n 15 "$log" | sed 's/^/    /' >&2
+            echo "  No measurement ran. Fix the row or leave it out of the filter." >&2
+            exit 4
+        fi
+        echo "    $label: $rows row(s) ran once under '$filter'"
+    done
+}
+
 # --- Build both binaries ---
 
 if [[ -n "$BUILD_ONLY" ]]; then
@@ -810,6 +846,13 @@ if [[ -z "$(git status --porcelain)" && "$(git rev-parse HEAD)" == "$(git rev-pa
 fi
 
 # --- Measure ---
+
+if [[ -z "$NESTED" ]]; then
+    echo ">>> smoke test: every row once per binary in Criterion's test mode"
+    smoke_test ref "$WORKDIR/exe-ref"
+    smoke_test new "$WORKDIR/exe-new"
+    echo ""
+fi
 
 echo "=== $TIER tier: two discarded warmup passes, then $PASS_COUNT adjacent passes ($PASS_ORDER) ==="
 echo ""

@@ -74,6 +74,7 @@ echo "=== bench_ci FAIL confirmation ==="
 check first-pass                     0/pass            0/none            0 1
 check first-rerun-blocks             3/rerun           0/none            1 1
 check first-host-busy-blocks         2/none            0/none            1 1
+check first-smoke-test-blocks        4/none            0/none            1 1
 check confirm-pass-clears            1/fail:a/1        0/pass            0 2
 check confirm-same-row-blocks        1/fail:a/1        1/fail:a/1        1 2
 check confirm-disjoint-rows-clear    1/fail:a/1        1/fail:b/2        0 2

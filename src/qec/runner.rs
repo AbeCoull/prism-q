@@ -314,6 +314,7 @@ pub struct QecProfiledSampler {
 }
 
 #[cfg(feature = "bench-internal")]
+#[allow(clippy::large_enum_variant)]
 enum QecProfiledMeasurementSampler {
     Empty,
     Clean(CompiledDetectorSampler),

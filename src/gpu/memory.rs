@@ -31,6 +31,7 @@ impl<T: DeviceRepr> GpuBuffer<T> {
         let slice = stream
             .clone_htod(host)
             .map_err(|e| driver_err("from_host", e))?;
+        device.count_drain();
         Ok(Self { slice })
     }
 
@@ -39,7 +40,9 @@ impl<T: DeviceRepr> GpuBuffer<T> {
         let stream = device.stream()?;
         stream
             .memcpy_htod(host, &mut self.slice)
-            .map_err(|e| driver_err("copy_from_host", e))
+            .map_err(|e| driver_err("copy_from_host", e))?;
+        device.count_drain();
+        Ok(())
     }
 
     /// Copy all of `src` into the start of this buffer on the device.
@@ -59,7 +62,9 @@ impl<T: DeviceRepr> GpuBuffer<T> {
         let stream = device.stream()?;
         stream
             .memcpy_dtoh(&self.slice, host)
-            .map_err(|e| driver_err("copy_to_host", e))
+            .map_err(|e| driver_err("copy_to_host", e))?;
+        device.count_drain();
+        Ok(())
     }
 }
 

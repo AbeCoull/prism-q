@@ -540,11 +540,9 @@ fn qec_repetition_program_text(
     text.push_str("M 0\n");
     records += 1;
     text.push_str("OBSERVABLE_INCLUDE(0) rec[-1]\n");
-    if include_postselection {
-        if let Some(first_check) = first_check {
-            let first_distance = records - first_check;
-            text.push_str(&format!("POSTSELECT rec[-{first_distance}]\n"));
-        }
+    if include_postselection && let Some(first_check) = first_check {
+        let first_distance = records - first_check;
+        text.push_str(&format!("POSTSELECT rec[-{first_distance}]\n"));
     }
     text
 }

@@ -233,3 +233,22 @@ fn qec_profiled_sampler_stages_match_public_runner_result() {
     );
     assert_eq!(staged_result.logical_errors, public_result.logical_errors);
 }
+
+#[test]
+fn rates_below_double_precision_epsilon_almost_never_fire() {
+    let text = "X_ERROR(1e-20) 0\nZ_ERROR(1e-20) 1\nDEPOLARIZE1(1e-20) 2\nDEPOLARIZE2(1e-20) 3 4\nH 1\nM 0 1 2 3 4";
+    let mut program = parse_qec_program(text).unwrap();
+    program.set_options(qec_options(STAT_SHOTS, true));
+    for (label, result) in [
+        ("compiled", run_qec_program(&program).unwrap()),
+        ("reference", run_qec_program_reference(&program).unwrap()),
+    ] {
+        for column in [0, 2, 3, 4] {
+            assert_eq!(
+                bit_rate(&result.measurements, column),
+                0.0,
+                "{label} column {column}"
+            );
+        }
+    }
+}

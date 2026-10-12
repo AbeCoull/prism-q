@@ -1945,6 +1945,9 @@ impl ScalarExpectationNetwork {
     }
 
     fn contract_on(mut self, plan: &ContractionPlan, limits: ContractionLimits) -> Result<f64> {
+        if self.tensors.is_empty() {
+            return Ok(1.0);
+        }
         let result = contract_within(
             &mut self.tensors,
             plan,

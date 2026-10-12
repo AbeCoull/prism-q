@@ -305,7 +305,7 @@ fn for_each_firing(
         }
         return;
     }
-    let ln_1mp = (1.0 - p).ln();
+    let ln_1mp = (-p).ln_1p();
     let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
     while shot < shots {
         fire(shot, rng);

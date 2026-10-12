@@ -487,8 +487,9 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
 
 /// Compute thin SVD using the faer library (SIMD-accelerated bidiag + D&C).
 ///
-/// faer's divide-and-conquer stage can return `Ok` with NaN singular vectors
-/// on a rank-deficient input, so non-finite output is recomputed by QR
+/// faer's divide-and-conquer stage can return `Ok` on a rank-deficient input
+/// with NaN singular vectors, or with finite ones that miss the input by 1e-8,
+/// so output that is non-finite or fails a probe product is recomputed by QR
 /// iteration on the bidiagonal, and by [`svd_jacobi`] if that fails too.
 #[cfg(feature = "parallel")]
 #[doc(hidden)]
@@ -560,11 +561,50 @@ fn faer_thin_svd(
         return None;
     }
 
-    Some(SvdResult {
+    let result = SvdResult {
         u,
         u_rows: m,
         s,
         vt,
         vt_cols: n,
-    })
+    };
+    (probe_residual(a, &result) <= SVD_PROBE_TOL).then_some(result)
+}
+
+/// Largest [`probe_residual`] a faer factorization may leave before the next
+/// fallback recomputes it. Sound factorizations up to 512 wide read under 2e-15;
+/// faer's divide-and-conquer on rank-64 cuts 128 and 256 wide reads 5e-9 to 1e-7.
+#[cfg(feature = "parallel")]
+const SVD_PROBE_TOL: f64 = 1e-12;
+
+/// `|A x - U S V^H x| / (|A|_F |x|)` for a fixed unit-modulus probe `x`: one
+/// matrix-vector product, about `1 / k` of the factorization it checks.
+#[cfg(feature = "parallel")]
+fn probe_residual(a: &[Complex64], r: &SvdResult) -> f64 {
+    const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
+    let (m, n) = (r.u_rows, r.vt_cols);
+    let x: Vec<Complex64> = (0..n)
+        .map(|j| Complex64::from_polar(1.0, j as f64 * GOLDEN_ANGLE))
+        .collect();
+    let mut residual = vec![ZERO; m];
+    let mut a_norm_sqr = 0.0;
+    for (col, &xj) in a.chunks_exact(m).zip(&x) {
+        for (out, &aij) in residual.iter_mut().zip(col) {
+            *out += aij * xj;
+            a_norm_sqr += aij.norm_sqr();
+        }
+    }
+    for (g, &sg) in r.s.iter().enumerate() {
+        let row = &r.vt[g * n..(g + 1) * n];
+        let y = row.iter().zip(&x).map(|(v, x)| v * x).sum::<Complex64>() * sg;
+        for (out, &ug) in residual.iter_mut().zip(&r.u[g * m..(g + 1) * m]) {
+            *out -= ug * y;
+        }
+    }
+    let scale = (a_norm_sqr * n as f64).sqrt();
+    if scale > 0.0 {
+        l2_norm(&residual) / scale
+    } else {
+        0.0
+    }
 }

@@ -3054,7 +3054,7 @@ fn apply_multi_1q_shared(state: &mut [Complex64], gates: &[(usize, [[Complex64; 
     }
 
     let run = 1usize << low_target;
-    let tile_len = (multi_gate_l2_tile() / lanes).max(1);
+    let tile_len = (multi_gate_l2_tile() / lanes).min(run);
     let tiles_per_run = run / tile_len;
     let blocks = (state.len() >> k) >> low_target;
 
@@ -6240,6 +6240,38 @@ mod multi_1q_tier_tests {
             assert!(
                 route.iter().zip(&routes[0]).all(|(a, b)| a == b),
                 "the routes must agree bitwise, or results depend on the thread count"
+            );
+        }
+    }
+
+    // A shared traversal whose lowest target sits below the per-lane tile: the run
+    // under that target is shorter than the tile, as on the parallel route once the
+    // pool cuts the L2 tile below a quarter of the budget.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn shared_traversal_handles_runs_shorter_than_the_lane_tile() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        for (num_qubits, targets) in [
+            (10usize, vec![6usize, 7]),
+            (10, vec![9, 6, 8]),
+            (15, vec![12, 13]),
+            (15, vec![12, 13, 14]),
+        ] {
+            let start = random_state(num_qubits, &mut rng);
+            let gates: Vec<TargetedGate1q> = targets
+                .iter()
+                .map(|&target| (target, random_unitary(&mut rng)))
+                .collect();
+            let mut expected = start.clone();
+            for (target, mat) in &gates {
+                apply_scalar(&mut expected, *target, mat);
+            }
+            let mut state = start;
+            apply_multi_1q_shared(&mut state, &gates);
+            assert_matches(
+                &state,
+                &expected,
+                &format!("{num_qubits}q targets {targets:?}"),
             );
         }
     }

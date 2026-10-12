@@ -267,6 +267,7 @@ pub(super) fn finalize_pauli_sums(
             .launch(cfg)
             .map_err(|e| driver_err("dm_pauli_expect_finalize", e))?;
     }
+    device.count_launch(0);
     let mut host = vec![0.0_f64; 2 * num_masks as usize];
     result.copy_to_host(device, &mut host)?;
     Ok(host

@@ -235,6 +235,12 @@ impl GpuContext {
             .map_err(|e| driver_err("synchronize", e))
     }
 
+    /// Totals since this context opened; difference two reads to census one run.
+    #[cfg(feature = "bench-internal")]
+    pub fn pass_census(&self) -> GpuPassCensus {
+        self.device.census()
+    }
+
     pub(crate) fn device(&self) -> &GpuDevice {
         &self.device
     }
@@ -251,6 +257,31 @@ impl GpuContext {
             device: Arc::new(GpuDevice::stub_for_tests()),
             launcher_scratch: std::sync::Mutex::new(kernels::LauncherScratch::default()),
         })
+    }
+}
+
+/// Statevector kernel launches and host copies on one [`GpuContext`]'s stream;
+/// `bench-internal` only, not stable API.
+#[cfg(feature = "bench-internal")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuPassCensus {
+    pub launches: u64,
+    /// Sweeps over the state; a finalize over block partials is a launch with none.
+    pub passes: u64,
+    /// Host copies, each of which waits for every queued kernel to finish.
+    pub drains: u64,
+}
+
+#[cfg(feature = "bench-internal")]
+impl std::ops::Sub for GpuPassCensus {
+    type Output = Self;
+
+    fn sub(self, earlier: Self) -> Self {
+        Self {
+            launches: self.launches - earlier.launches,
+            passes: self.passes - earlier.passes,
+            drains: self.drains - earlier.drains,
+        }
     }
 }
 

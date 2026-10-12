@@ -161,6 +161,7 @@ pub(crate) fn launch_set_initial_state(ctx: &GpuContext, state: &mut GpuState) -
             .launch(cfg)
             .map_err(|e| driver_err("set_initial_state", e))?;
     }
+    ctx.device().count_launch(0);
     Ok(())
 }
 
@@ -189,6 +190,7 @@ pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -
             .launch(cfg)
             .map_err(|e| driver_err("compute_probabilities", e))?;
     }
+    ctx.device().count_launch(1);
     let mut host = vec![0.0_f64; dim as usize];
     scratch.copy_to_host(device, &mut host)?;
     Ok(host)
@@ -234,6 +236,7 @@ pub(crate) fn launch_apply_gate_1q(
             .launch(cfg)
             .map_err(|e| driver_err("apply_gate_1q", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -270,6 +273,7 @@ pub(crate) fn launch_apply_diagonal_1q(
             .launch(cfg)
             .map_err(|e| driver_err("apply_diagonal_1q", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -296,6 +300,7 @@ fn launch_2q(
     unsafe {
         builder.launch(cfg).map_err(|e| driver_err(kernel, e))?;
     }
+    device.count_launch(1);
     Ok(())
 }
 
@@ -364,6 +369,7 @@ pub(crate) fn launch_apply_parity_phase(
             .launch(cfg)
             .map_err(|e| driver_err("apply_parity_phase", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -424,6 +430,7 @@ pub(crate) fn launch_apply_cu(
     unsafe {
         builder.launch(cfg).map_err(|e| driver_err("apply_cu", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -458,6 +465,7 @@ pub(crate) fn launch_apply_cu_phase(
             .launch(cfg)
             .map_err(|e| driver_err("apply_cu_phase", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -531,6 +539,7 @@ pub(crate) fn launch_apply_mcu(
             .launch(cfg)
             .map_err(|e| driver_err("apply_mcu", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -572,6 +581,7 @@ pub(crate) fn launch_apply_mcu_phase(
             .launch(cfg)
             .map_err(|e| driver_err("apply_mcu_phase", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -615,6 +625,7 @@ pub(crate) fn launch_apply_fused_2q(
             .launch(cfg)
             .map_err(|e| driver_err("apply_fused_2q", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -663,6 +674,7 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
                 .launch(stage1_cfg)
                 .map_err(|e| driver_err("measure_prob_one", e))?;
         }
+        device.count_launch(1);
     }
 
     let result = super::ensure_capacity(&mut scratch.measure_result, device, 1)?;
@@ -680,6 +692,7 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
                 .launch(stage2_cfg)
                 .map_err(|e| driver_err("measure_prob_one_finalize", e))?;
         }
+        device.count_launch(0);
     }
 
     let mut host_result = [0.0_f64];
@@ -747,6 +760,7 @@ pub(crate) fn reduced_density_matrix_1q(
                 .launch(stage1_cfg)
                 .map_err(|e| driver_err("rdm_qubit", e))?;
         }
+        device.count_launch(1);
     }
 
     let result = super::ensure_capacity(&mut scratch.rdm_result, device, 4)?;
@@ -764,6 +778,7 @@ pub(crate) fn reduced_density_matrix_1q(
                 .launch(stage2_cfg)
                 .map_err(|e| driver_err("rdm_qubit_finalize", e))?;
         }
+        device.count_launch(0);
     }
 
     let mut host_result = [0.0_f64; 4];
@@ -864,6 +879,7 @@ pub(crate) fn pauli_sums(
                 .launch(cfg)
                 .map_err(|e| driver_err("sv_pauli_expect", e))?;
         }
+        device.count_launch(u64::from(num_groups));
     }
     let norm_sq = state.pending_norm() * state.pending_norm();
     super::finalize_pauli_sums(
@@ -968,6 +984,7 @@ fn group_moments_pass(
             .launch(cfg)
             .map_err(|e| driver_err("sv_group_moments", e))?;
     }
+    ctx.device().count_launch(1);
     let mut partials = vec![0.0_f64; 3 * grid as usize];
     result.copy_to_host(device, &mut partials)?;
     let (s0, s1, s2) = partials
@@ -1017,6 +1034,7 @@ pub(crate) fn measure_collapse(
             .launch(cfg)
             .map_err(|e| driver_err("measure_collapse", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -1068,6 +1086,7 @@ pub(crate) fn launch_apply_multi_fused_diagonal(
             .launch(cfg)
             .map_err(|e| driver_err("apply_multi_fused_diagonal", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -1156,6 +1175,7 @@ pub(crate) fn launch_apply_batch_phase(
             .launch(cfg)
             .map_err(|e| driver_err("apply_batch_phase", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -1241,6 +1261,7 @@ pub(crate) fn launch_apply_batch_rzz(
             .launch(cfg)
             .map_err(|e| driver_err("apply_batch_rzz", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -1338,6 +1359,7 @@ pub(crate) fn launch_apply_diagonal_batch(
             .launch(cfg)
             .map_err(|e| driver_err("apply_diagonal_batch", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -1484,6 +1506,7 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
                 .launch(cfg)
                 .map_err(|e| driver_err("apply_multi_fused_tiled", e))?;
         }
+        ctx.device().count_launch(1);
     }
     Ok(())
 }

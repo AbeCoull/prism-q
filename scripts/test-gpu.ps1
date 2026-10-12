@@ -4,7 +4,8 @@
 #
 # tests/golden_gpu.rs and tests/golden_gpu_density_matrix.rs compare device against
 # host for every gate, channel, and fusion shape, and the lib's gpu_scaffold tests
-# round-trip a state through the device. All of them skip silently when no CUDA
+# round-trip a state through the device. tests/gpu_pass_census.rs checks the launch,
+# pass and drain counters behind bench-internal. All of them skip silently when no CUDA
 # device opens, so a green run on a host without a card means "not tested".
 # This script sets PRISM_REQUIRE_GPU so a missing or unusable device fails the run
 # instead. CI never opens a device (the gpu-check job runs the device-free kernel
@@ -16,15 +17,16 @@ $ErrorActionPreference = 'Stop'
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 
 $env:PRISM_REQUIRE_GPU = '1'
-$suites = @('--lib', '--test', 'golden_gpu', '--test', 'golden_gpu_density_matrix')
+$features = 'parallel gpu bench-internal'
+$suites = @('--lib', '--test', 'golden_gpu', '--test', 'golden_gpu_density_matrix', '--test', 'gpu_pass_census')
 $filter = @('-E', 'not kind(lib) or test(/gpu_scaffold::/)')
 
-Write-Host "`n== Building GPU golden suites (parallel gpu) =="
-cargo nextest run --features "parallel gpu" @suites --no-run
+Write-Host "`n== Building GPU golden suites ($features) =="
+cargo nextest run --features $features @suites --no-run
 if ($LASTEXITCODE -ne 0) { throw "GPU golden suite build failed" }
 
 Write-Host "`n== Running GPU golden suites (PRISM_REQUIRE_GPU=1) =="
-cargo nextest run --features "parallel gpu" @suites @filter
+cargo nextest run --features $features @suites @filter
 if ($LASTEXITCODE -ne 0) { throw "GPU golden suites failed" }
 
 $clock.Stop()

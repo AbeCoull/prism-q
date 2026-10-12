@@ -146,6 +146,10 @@ required-features = ["distributed-mpi"]
 name = "bench_gpu_dispatch"
 required-features = ["gpu"]
 
+[[example]]
+name = "gpu_pass_census"
+required-features = ["gpu", "bench-internal"]
+
 [[bench]]
 name = "qec_t_strategies"
 harness = false

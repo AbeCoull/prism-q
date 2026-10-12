@@ -198,7 +198,6 @@ const TENSOR_ROUTE_WIDTH: usize = 18;
 const TENSOR_ROUTE_WIDTH: usize = 4;
 
 #[test]
-#[ignore = "the Auto tensor-network expectation route panics on an identity term (the network is never empty)"]
 fn an_identity_term_reads_one_on_the_auto_tensor_route() {
     let circuit = identity_cases(TENSOR_ROUTE_WIDTH).remove(2);
     let values = simulate(&circuit)
@@ -509,7 +508,6 @@ fn tiny_rates_leave_the_ideal_record_on_trajectory_routes() {
 }
 
 #[test]
-#[ignore = "the frame and noisy compiled Clifford samplers fire every event once 1 - p rounds to 1"]
 fn tiny_rates_leave_the_ideal_record_on_the_clifford_samplers() {
     let circuit = flip_circuit(true);
     for channel in tiny_channels() {

@@ -2705,7 +2705,10 @@ impl ShotSource {
 /// Narrowest register `Auto` samples through the Clifford register rather than the
 /// statevector. At 12 qubits the statevector still wins, 0.8 against 1.3 ms for 1024
 /// shots; at 16 the register takes 1.5 ms against 3.3.
+#[cfg(not(prism_lowered_thresholds))]
 const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 16;
+#[cfg(prism_lowered_thresholds)]
+const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 4;
 
 /// Whether terminal shots of `circuit` go to the Clifford register ahead of the
 /// statevector: Clifford+T, at least [`MIN_AUTO_CLIFFORD_REGISTER_QUBITS`] wide, and
@@ -3686,7 +3689,10 @@ fn diagnostic_backend(
 /// Width from which an `Auto` expectation terminal tries the scalar tensor
 /// path first. Below it the statevector run takes a few milliseconds and the
 /// bounded dry run that decides the route would cost as much as the run.
+#[cfg(not(prism_lowered_thresholds))]
 const TENSOR_ROUTE_MIN_QUBITS: usize = 18;
+#[cfg(prism_lowered_thresholds)]
+const TENSOR_ROUTE_MIN_QUBITS: usize = 4;
 
 /// The scalar tensor route for an `Auto` expectation terminal under the
 /// statevector cap: `None` below [`TENSOR_ROUTE_MIN_QUBITS`], on a circuit the

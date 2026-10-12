@@ -14,7 +14,10 @@ use crate::qec::camps_prefix::{SignedCliffordPrefix, SignedPauli};
 
 /// Widest register [`TerminalSampler::compile`] builds. Diagonalizing the measured Paulis on it
 /// costs about `k^2 2^k` amplitude updates.
+#[cfg(not(prism_lowered_thresholds))]
 pub(super) const MAX_REGISTER_QUBITS: usize = 20;
+#[cfg(prism_lowered_thresholds)]
+pub(super) const MAX_REGISTER_QUBITS: usize = 2;
 
 /// The state `C (|0> ⊗ φ)`: a Clifford `C` over `n` qubits, `|0>` on every qubit that no
 /// T rotation has reached, and dense amplitudes `φ` over the rest.

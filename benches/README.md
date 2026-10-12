@@ -165,6 +165,9 @@ cargo bench --bench bench_driver -- "single_qubit_gates/h_gate/16"
 # Quick smoke (fast settings)
 cargo bench --bench bench_driver -- --warm-up-time 1 --measurement-time 3 --sample-size 10
 
+# Every row once in Criterion's test mode, no timing (the CI smoke job)
+bash scripts/bench_smoke.sh
+
 # Save baseline
 cargo bench -- --save-baseline my_baseline
 

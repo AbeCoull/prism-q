@@ -319,6 +319,24 @@ jobs:
       - name: Verify that only a valid second run clears a FAIL
         run: bash scripts/bench_ci_test.sh
 
+  # Every bench row once in Criterion's test mode. Many wide paths run only in a
+  # bench fixture, so a panic there would otherwise surface in the middle of a
+  # timed run. The script builds under `ci-release` rather than the fat-LTO bench
+  # profile and lists the rows it leaves out, each with its reason.
+  bench-smoke:
+    name: Bench fixtures smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: bench-smoke
+      - name: Run every bench row once
+        run: bash scripts/bench_smoke.sh
+
   # Compares the public API against the last release, at the release type the
   # conventional commits since it imply before the pre-1.0 clamp, with the PR
   # title standing in for the squash subject it becomes. A break therefore passes

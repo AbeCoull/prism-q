@@ -93,6 +93,38 @@ jobs:
           --test golden_small_circuits --test openqasm_goldens
           --test density_matrix_correctness --test backend_equivalence
 
+  # Routes behind a size or count crossover (the tensor expectation route, the
+  # Clifford register, the factored stabilizer split, the wide frame sampler, the
+  # fusion floors) switch on above the widths the correctness corpora reach.
+  # `prism_lowered_thresholds` drops those crossovers so the route ledger and the
+  # differential binaries drive every route at small widths. The cfg changes
+  # constants only. Two rows stay out until their defects are fixed:
+  # `tn_pauli_expectations_match_statevector`, where the Auto tensor expectation route
+  # panics on an identity term, and `layered_mixed_14q`, where the MPS applies a wide
+  # `DiagonalBatch` with an amplitude error near 4e-7.
+  check-lowered-thresholds:
+    name: Test (lowered route thresholds)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg prism_lowered_thresholds
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: lowered-thresholds
+      - uses: taiki-e/install-action@cargo-nextest
+
+      - name: Route ledger and differential binaries
+        run: >-
+          cargo nextest run --features "$CI_FEATURES"
+          --lib --test degenerate_inputs --test conformance_matrix --test backend_matrix
+          --test measurement_matrix --test golden_small_circuits --test backend_equivalence
+          --test differential_wide --test sampling_contract
+          -E 'test(route_ledger) | (kind(test) - test(=tn_pauli_expectations_match_statevector)
+          - test(=layered_mixed_14q))'
+
   check-no-default-features:
     name: Lint & Test (no default features)
     runs-on: ubuntu-latest

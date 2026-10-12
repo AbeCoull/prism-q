@@ -347,10 +347,9 @@ fn simulate_terminals() -> Vec<&'static str> {
     let start = source
         .find("impl<'c> Simulate<'c, Seeded> {")
         .expect("seeded Simulate impl");
-    let body = &source[start..];
-    let end = body.find("\n}\n").expect("end of the seeded Simulate impl");
-    body[..end]
+    source[start..]
         .lines()
+        .take_while(|line| *line != "}")
         .filter_map(|line| line.strip_prefix("    pub fn "))
         .map(|rest| &rest[..rest.find('(').expect("method signature")])
         .collect()

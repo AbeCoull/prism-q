@@ -4473,3 +4473,6 @@ mod terminal_candidate_matrix_tests;
 
 #[cfg(test)]
 mod diagnostic_terminal_tests;
+
+#[cfg(test)]
+mod route_ledger_tests;

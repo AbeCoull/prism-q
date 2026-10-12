@@ -2,6 +2,68 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.35.0] - 2026-10-12
+
+### Bug Fixes
+
+- **noise:** Reject measured circuits in density-matrix expectations (#461)([740496f](https://github.com/AbeCoull/prism-q/commit/740496f1df363f1893fe85ee4f7544e5f6746c84))
+- **sim:** Sample shots per shot after a reset on an entangled qubit (#453)([307d270](https://github.com/AbeCoull/prism-q/commit/307d2701f884aa940b3f99e4f499177ae162b8b1))
+- Correct diagram layout and require_exact route checks (#444)([68d20ff](https://github.com/AbeCoull/prism-q/commit/68d20ff8f8b20f7342a5960d809ee48171244c89))
+- **sim:** Unpack the decomposition tuple in the temporal prefix test (#443)([e0814b5](https://github.com/AbeCoull/prism-q/commit/e0814b5c46ebdc9e6bdb544aaf12d4771211fc95))
+- **sim:** Correct sampling correlations and strengthen tests (#436)([02efbd3](https://github.com/AbeCoull/prism-q/commit/02efbd379e6acde1c8a70534b63603af1f987edd))
+
+### CI
+
+- **python:** Test the wheel on Python 3.14 and declare it (#467)([b93be31](https://github.com/AbeCoull/prism-q/commit/b93be316fbe3dc61e6dff34cde71b386b31558fb))
+- Refresh action majors and pin release tool versions (#468)([ed28bd1](https://github.com/AbeCoull/prism-q/commit/ed28bd153ae9ec2a35dd0eb984866671330d5085))
+
+### Documentation
+
+- Correct stale capability text and plan distributed noisy shots (#463)([4dd71b3](https://github.com/AbeCoull/prism-q/commit/4dd71b3e3e636489250d61ef749c9401b2f1f338))
+- Add tutorials, example programs and a drawing guide (#452)([0a6d33a](https://github.com/AbeCoull/prism-q/commit/0a6d33aacbe34c6a0c0b3f84825de2f70a990342))
+
+### Features
+
+- **python:** Align names with Rust and require a parity decision (#455) (**BREAKING**)([ab280d1](https://github.com/AbeCoull/prism-q/commit/ab280d102fe6d1ef3cd4dd8bb48d8622034356c0))
+- **noise:** Add leakage, quasi-static drift and scheduled idling (#451)([30c05c8](https://github.com/AbeCoull/prism-q/commit/30c05c8b671581d70428af1624c19c1f7a1d9387))
+- **qec:** Add exact matching and BP+OSD decoders (#450)([5dbee10](https://github.com/AbeCoull/prism-q/commit/5dbee10d5d629d99d6621154dc0284d97982430a))
+- **qec:** Add code generators, DEM text import and Pauli channels (#449) (**BREAKING**)([a12be4a](https://github.com/AbeCoull/prism-q/commit/a12be4a84d825386496c351427c05718d7f87079))
+- Run while loops and runtime classical values per shot (#448)([e93c4c2](https://github.com/AbeCoull/prism-q/commit/e93c4c259759d1728090bdf5eeda5cae19c0e2fc))
+- **python:** Close the main gaps between the Python and Rust APIs (#447)([2facc58](https://github.com/AbeCoull/prism-q/commit/2facc584d0ceea7fab54e8f37ddf445db5776fec))
+- **gpu:** Ship CUDA support in the Linux and Windows wheels (#446)([07dfa01](https://github.com/AbeCoull/prism-q/commit/07dfa016f3722c7b537f390b56f7eba3008b1451))
+- **qasm:** Accept timing, box, bit subroutines and classical arrays (#440)([a0b8ca0](https://github.com/AbeCoull/prism-q/commit/a0b8ca0e905b4865516185ae393cbb849afa368b))
+- Extend Python APIs and accelerate noisy and compiled sampling (#435)([722df63](https://github.com/AbeCoull/prism-q/commit/722df6361435611d42092b94e526a945b6a202f1))
+
+### Miscellaneous
+
+- Raise the MSRV to 1.88 and pin the toolchain to 1.99.0 (#470) (**BREAKING**)([66c4abd](https://github.com/AbeCoull/prism-q/commit/66c4abd2ea65218549076c876b74250d3db936e1))
+- **deps:** Refresh lockfiles and drop yanked versions (#469)([44d6cb8](https://github.com/AbeCoull/prism-q/commit/44d6cb8a74d0024c11e08c0dc92e7003605c0e50))
+
+### Performance
+
+- **statevector:** Run high QFT stages as gathered passes (#465)([87b6d32](https://github.com/AbeCoull/prism-q/commit/87b6d32ac8dad7376a1e2053ff4e52a89fb51e65))
+- **sim:** Branch dynamic programs and sample terminal readouts (#464) (**BREAKING**)([ee8bdb1](https://github.com/AbeCoull/prism-q/commit/ee8bdb13cb46be41f05c1322999034ef52461e47))
+- **statevector:** Gather high MultiFused targets into subcube tiles (#466)([b1cc3cf](https://github.com/AbeCoull/prism-q/commit/b1cc3cfda33790ad6d4c7cfc4f7b8c6105f4b07e))
+- **dm:** Batch fused blocks on the density-matrix fused route (#462)([85fc820](https://github.com/AbeCoull/prism-q/commit/85fc820e03eb217a5016447877623190078d4bd3))
+- **dm:** Fuse prepared circuits at the density-matrix buffer width (#460)([77d01b6](https://github.com/AbeCoull/prism-q/commit/77d01b6d90fa6523ce692d7514a6670b2c6f0dc9))
+- **dm:** Fold pair and idle channels into the exact noisy walk (#459)([170272a](https://github.com/AbeCoull/prism-q/commit/170272a3106571cc4610742c8b09e23d8948ebb1))
+- **fusion:** Route diagonal gates into DiagonalBatch (#457)([1360ea8](https://github.com/AbeCoull/prism-q/commit/1360ea8f9b9be510bbcc69f842864c1b882f0576))
+- **qft:** Run QFTs that arrive as gates on the native FFT (#456)([edf8634](https://github.com/AbeCoull/prism-q/commit/edf8634d33b73931fc58e02b33fa78eb3c76aa28))
+- **qec:** Keep QecProgram record and detector counts incremental (#454)([36626c0](https://github.com/AbeCoull/prism-q/commit/36626c07d1d0d73d2ac826a0d32130ecdae4284d))
+- **sim:** Branch mid-circuit shots and draw sampled shots in blocks (#458) (**BREAKING**)([12c037f](https://github.com/AbeCoull/prism-q/commit/12c037f6a07df778bc1e6087e2e988df19b2de97))
+- **qec:** Land parity noise on lazily zeroed detector rows (#441)([9a8bd4b](https://github.com/AbeCoull/prism-q/commit/9a8bd4bdd78a16304fae9dfe261d99f697d046cf))
+- **gradient:** Schedule the adjoint sweep by commutation frontier (#437)([21492cc](https://github.com/AbeCoull/prism-q/commit/21492cccf6dfecbdd109b301617ebf985a38f642))
+- **sim:** Reuse shot-invariant work in shot and trajectory loops (#438)([3d35bb3](https://github.com/AbeCoull/prism-q/commit/3d35bb37b98fc005c37b2b9d39a28f1c0b8e5836))
+- **statevector:** Batch Pauli rotations into cache-tiled passes (#442)([ea147db](https://github.com/AbeCoull/prism-q/commit/ea147db91a0b11d85478a3f8f538ae7331d5cc26))
+
+### Bench
+
+- Cover factored sampling, sparse noise and the fstab floor (#439)([66db32a](https://github.com/AbeCoull/prism-q/commit/66db32a07be08828ac323f146647c1af1de0140d))
+## [py-v0.34.0] - 2026-10-06
+
+### Miscellaneous
+
+- **python:** Release 0.34.0([006c345](https://github.com/AbeCoull/prism-q/commit/006c345dcaef7f12d06a1c78b58e2c0aebedb082))
 ## [0.34.0] - 2026-10-06
 
 ### Bug Fixes
@@ -33,6 +95,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Miscellaneous
 
+- Release([7ba831c](https://github.com/AbeCoull/prism-q/commit/7ba831cfdb571467bf4556fd5521e1f3db58341c))
 - **deps:** Bump pyo3 to 0.29.3 (#406)([b883ac8](https://github.com/AbeCoull/prism-q/commit/b883ac8a46f12a69f87a13e6e3cecf652ae99f19))
 
 ### Performance

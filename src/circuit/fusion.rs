@@ -1637,6 +1637,30 @@ pub(super) fn fuse_at_width<'a>(
     })
 }
 
+/// The [`fuse_at_width`] stream as it leaves `fuse_same_pair_2q_blocks`, before the
+/// batching passes group it into tiles: the input a pass planner would stage.
+#[cfg(any(test, feature = "bench-internal"))]
+pub(crate) fn fuse_before_batching(circuit: &Circuit, n: usize) -> Cow<'_, Circuit> {
+    let t = &mut Tracer::off();
+    let pass_r = fuse_region_bodies(circuit, n);
+    let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
+    let pass0r = apply_pass(pass0, t, fuse_rzz);
+    let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
+        apply_pass(c, t, fuse_batch_rzz)
+    });
+    if n < MIN_QUBITS_FOR_FUSION {
+        return pass0b;
+    }
+    let pass1 = apply_pass(pass0b, t, fuse_single_qubit_gates);
+    let pass1r = reorder_1q_gates(pass1, t);
+    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
+    let pass1f = apply_pass(pass1c, t, fuse_single_qubit_gates);
+    let pass_2q = gated(pass1f, n, MIN_QUBITS_FOR_2Q_FUSION, |c| fuse_2q_gates(c, t));
+    gated(pass_2q, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
+        fuse_same_pair_2q_blocks(c, t)
+    })
+}
+
 #[cfg(test)]
 #[path = "fusion_tests.rs"]
 mod tests;

@@ -77,6 +77,10 @@ pub use backend::product::ProductStateBackend;
 pub use backend::sparse::SparseBackend;
 pub use backend::stabilizer::StabilizerBackend;
 pub use backend::statevector::StatevectorBackend;
+#[cfg(feature = "bench-internal")]
+pub use backend::statevector::sweeps::{
+    SweepCount, SweepKind, SweepProfile, sweep_lower_bound, sweep_profile_for,
+};
 pub use backend::tensornetwork::TensorNetworkBackend;
 pub use circuit::builder::CircuitBuilder;
 pub use circuit::dynamic::{DynamicProgram, DynamicProgramBuilder};

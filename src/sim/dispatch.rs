@@ -10,13 +10,11 @@ use crate::backend::sparse::{MAX_SPARSE_INDEX_QUBITS, SparseBackend};
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::tensornetwork::TensorNetworkBackend;
-use crate::backend::{
-    Backend, DM_QUBIT_CAP_ENV, check_state_allocation, max_density_matrix_qubits,
-    max_statevector_qubits,
-};
+use crate::backend::{Backend, check_state_allocation};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
+use crate::limits::{LimitKnob, ResolvedLimits};
 use crate::sim::unified_pauli::SpdTruncation;
 
 #[cfg(any(feature = "gpu", feature = "distributed"))]
@@ -33,8 +31,6 @@ use crate::distributed::DistributedContext;
 use super::StartState;
 use super::metadata::ResolvedBackend;
 use super::{RunOutcome, try_backend_probabilities};
-
-pub(super) const AUTO_MPS_BOND_DIM: usize = 256;
 
 /// Fixed cost of one gate at one cut in [`mps_apply_cost`] units, standing for
 /// the per-gate work (tensor reshapes, gauge moves, allocation) a small bond does
@@ -425,7 +421,11 @@ impl BackendKind {
     }
 }
 
-pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
+pub(super) fn validate_explicit_backend(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    limits: &ResolvedLimits,
+) -> Result<()> {
     if kind.is_stabilizer_family() && !circuit.is_clifford_only() {
         return Err(PrismError::IncompatibleBackend {
             backend: "stabilizer".into(),
@@ -459,8 +459,8 @@ pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -
             check_state_allocation(
                 "density_matrix",
                 circuit.num_qubits,
-                max_density_matrix_qubits(),
-                DM_QUBIT_CAP_ENV,
+                limits.density_matrix_qubits,
+                LimitKnob::DensityMatrixQubits,
             )?;
         }
         _ => {}
@@ -483,15 +483,19 @@ pub(super) enum Family {
     DensityMatrix,
 }
 
-fn select_auto_backend_choice(circuit: &Circuit, has_partial_independence: bool) -> Family {
+fn select_auto_backend_choice(
+    circuit: &Circuit,
+    has_partial_independence: bool,
+    limits: &ResolvedLimits,
+) -> Family {
     if !circuit.has_entangling_gates() {
         Family::ProductState
     } else if circuit.is_clifford_only() {
         Family::Stabilizer
-    } else if circuit.num_qubits > max_statevector_qubits() {
+    } else if circuit.num_qubits > limits.statevector_qubits.value {
         if circuit.num_qubits <= MAX_SPARSE_INDEX_QUBITS
             && (circuit.is_sparse_friendly()
-                || sparse_support_fits(circuit, AUTO_SPARSE_MAX_SUPPORT))
+                || sparse_support_fits(circuit, AUTO_SPARSE_MAX_SUPPORT, limits))
         {
             Family::Sparse
         } else {
@@ -507,11 +511,11 @@ fn select_auto_backend_choice(circuit: &Circuit, has_partial_independence: bool)
 /// Run the circuit's gates on a sparse map and report whether it stays within
 /// `cap` entries throughout. Declines resets, saves, and anything after a
 /// measurement, whose branch could reach a different support.
-fn sparse_support_fits(circuit: &Circuit, cap: usize) -> bool {
+fn sparse_support_fits(circuit: &Circuit, cap: usize, limits: &ResolvedLimits) -> bool {
     if !circuit.has_terminal_measurements_only() {
         return false;
     }
-    let mut probe = SparseBackend::new(0);
+    let mut probe = SparseBackend::with_limits(0, limits);
     if probe.init(circuit.num_qubits, 0).is_err() {
         return false;
     }
@@ -525,9 +529,10 @@ fn sparse_support_fits(circuit: &Circuit, cap: usize) -> bool {
 pub(super) fn auto_selects_cpu_statevector(
     circuit: &Circuit,
     has_partial_independence: bool,
+    limits: &ResolvedLimits,
 ) -> bool {
     matches!(
-        select_auto_backend_choice(circuit, has_partial_independence),
+        select_auto_backend_choice(circuit, has_partial_independence, limits),
         Family::Statevector
     )
 }
@@ -658,27 +663,37 @@ pub(super) fn accel_for(_kind: &BackendKind, _family: Family, _num_qubits: usize
     Accel::Cpu
 }
 
-pub(super) fn build_statevector(accel: &Accel, seed: u64) -> StatevectorBackend {
+pub(super) fn build_statevector(
+    accel: &Accel,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> StatevectorBackend {
+    let sv = StatevectorBackend::with_limits(seed, limits);
     match accel {
-        Accel::Cpu => StatevectorBackend::new(seed),
+        Accel::Cpu => sv,
         #[cfg(feature = "gpu")]
         Accel::Gpu {
             context,
             soft: true,
-        } => StatevectorBackend::new(seed).with_gpu_auto(context.clone()),
+        } => sv.with_gpu_auto(context.clone()),
         #[cfg(feature = "gpu")]
         Accel::Gpu {
             context,
             soft: false,
-        } => StatevectorBackend::new(seed).with_gpu(context.clone()),
+        } => sv.with_gpu(context.clone()),
     }
 }
 
-pub(super) fn build_density_matrix(accel: &Accel, seed: u64) -> DensityMatrixBackend {
+pub(super) fn build_density_matrix(
+    accel: &Accel,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> DensityMatrixBackend {
+    let dm = DensityMatrixBackend::with_limits(seed, limits);
     match accel {
-        Accel::Cpu => DensityMatrixBackend::new(seed),
+        Accel::Cpu => dm,
         #[cfg(feature = "gpu")]
-        Accel::Gpu { context, .. } => DensityMatrixBackend::new(seed).with_gpu(context.clone()),
+        Accel::Gpu { context, .. } => dm.with_gpu(context.clone()),
     }
 }
 
@@ -696,7 +711,12 @@ fn stabilizer_can_run_lazy(circuit: &Circuit) -> bool {
     })
 }
 
-fn build_stabilizer(accel: &Accel, lazy: bool, seed: u64) -> StabilizerBackend {
+fn build_stabilizer(
+    accel: &Accel,
+    lazy: bool,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> StabilizerBackend {
     // Lazy destabilizers: gates touch half the tableau. The plan sets `lazy`
     // only for circuits that never measure or reset, so the Gaussian
     // elimination that materialization costs is never paid; on a measuring
@@ -704,11 +724,8 @@ fn build_stabilizer(accel: &Accel, lazy: bool, seed: u64) -> StabilizerBackend {
     // measure-all shape loses outright, since its SGI gate cost is already
     // near zero). GPU init overrides the flag; the soft-fallback host path
     // keeps it.
-    let stab = if lazy {
-        StabilizerBackend::new_lazy(seed)
-    } else {
-        StabilizerBackend::new(seed)
-    };
+    let stab = StabilizerBackend::with_limits(seed, limits);
+    let stab = if lazy { stab.with_lazy_destab() } else { stab };
     match accel {
         Accel::Cpu => stab,
         #[cfg(feature = "gpu")]
@@ -830,28 +847,35 @@ impl BackendPlan {
         }
     }
 
-    pub(super) fn build(&self, seed: u64) -> Box<dyn Backend + Send> {
+    pub(super) fn build(&self, seed: u64, limits: &ResolvedLimits) -> Box<dyn Backend + Send> {
         match self {
-            BackendPlan::ProductState => Box::new(ProductStateBackend::new(seed)),
-            BackendPlan::Sparse => Box::new(SparseBackend::new(seed)),
-            BackendPlan::TensorNetwork { tolerance } => Box::new(match *tolerance {
-                Some(tolerance) => TensorNetworkBackend::with_tolerance(seed, tolerance),
-                None => TensorNetworkBackend::new(seed),
-            }),
-            BackendPlan::Factored => Box::new(crate::backend::factored::FactoredBackend::new(seed)),
-            BackendPlan::FactoredStabilizer => {
-                Box::new(crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed))
+            BackendPlan::ProductState => Box::new(ProductStateBackend::with_limits(seed, limits)),
+            BackendPlan::Sparse => Box::new(SparseBackend::with_limits(seed, limits)),
+            BackendPlan::TensorNetwork { tolerance } => {
+                Box::new(TensorNetworkBackend::with_limits(seed, *tolerance, limits))
             }
-            BackendPlan::Mps { max_bond_dim } => Box::new(MpsBackend::new(seed, *max_bond_dim)),
+            BackendPlan::Factored => Box::new(
+                crate::backend::factored::FactoredBackend::with_limits(seed, limits),
+            ),
+            BackendPlan::FactoredStabilizer => Box::new(
+                crate::backend::factored_stabilizer::FactoredStabilizerBackend::with_limits(
+                    seed, limits,
+                ),
+            ),
+            BackendPlan::Mps { max_bond_dim } => {
+                Box::new(MpsBackend::with_limits(seed, *max_bond_dim, limits))
+            }
             BackendPlan::Stabilizer { accel, lazy } => {
-                Box::new(build_stabilizer(accel, *lazy, seed))
+                Box::new(build_stabilizer(accel, *lazy, seed, limits))
             }
-            BackendPlan::Statevector { accel } => Box::new(build_statevector(accel, seed)),
-            BackendPlan::DensityMatrix { accel } => Box::new(build_density_matrix(accel, seed)),
+            BackendPlan::Statevector { accel } => Box::new(build_statevector(accel, seed, limits)),
+            BackendPlan::DensityMatrix { accel } => {
+                Box::new(build_density_matrix(accel, seed, limits))
+            }
             #[cfg(feature = "distributed")]
-            BackendPlan::Distributed(context) => {
-                Box::new(DistributedStatevectorBackend::new(context.clone(), seed))
-            }
+            BackendPlan::Distributed(context) => Box::new(
+                DistributedStatevectorBackend::with_limits(context.clone(), seed, limits),
+            ),
         }
     }
 
@@ -927,6 +951,7 @@ pub(super) fn approximate_route_name(
     kind: &BackendKind,
     circuit: &Circuit,
     sampling: bool,
+    limits: &ResolvedLimits,
 ) -> Option<&'static str> {
     // Diagonal and permutation gates keep the all-zero start on a single basis
     // state, so an MPS holds it at bond 1 and has nothing to truncate. A start
@@ -961,7 +986,7 @@ pub(super) fn approximate_route_name(
         return None;
     }
     let (_, has_partial_independence) = crate::sim::analyze_independence(circuit);
-    match select_auto_backend_choice(circuit, has_partial_independence) {
+    match select_auto_backend_choice(circuit, has_partial_independence, limits) {
         Family::Mps if !mps_is_exact => Some("Mps"),
         _ => None,
     }
@@ -971,6 +996,7 @@ pub(super) fn plan_for_family(
     kind: &BackendKind,
     family: Family,
     num_qubits: usize,
+    limits: &ResolvedLimits,
 ) -> BackendPlan {
     match family {
         Family::ProductState => BackendPlan::ProductState,
@@ -984,7 +1010,7 @@ pub(super) fn plan_for_family(
         Family::Factored => BackendPlan::Factored,
         Family::FactoredStabilizer => BackendPlan::FactoredStabilizer,
         Family::Mps => BackendPlan::Mps {
-            max_bond_dim: AUTO_MPS_BOND_DIM,
+            max_bond_dim: limits.auto_mps_bond_dim.value,
         },
         Family::Stabilizer => BackendPlan::Stabilizer {
             accel: accel_for(kind, Family::Stabilizer, num_qubits),
@@ -1015,12 +1041,13 @@ pub(super) fn resolve(
     kind: &BackendKind,
     circuit: &Circuit,
     has_partial_independence: bool,
+    limits: &ResolvedLimits,
 ) -> ExecutionPlan {
     let family = match kind {
-        BackendKind::Auto => select_auto_backend_choice(circuit, has_partial_independence),
+        BackendKind::Auto => select_auto_backend_choice(circuit, has_partial_independence, limits),
         #[cfg(feature = "gpu")]
         BackendKind::AutoGpu { .. } => {
-            select_auto_backend_choice(circuit, has_partial_independence)
+            select_auto_backend_choice(circuit, has_partial_independence, limits)
         }
         BackendKind::Statevector => Family::Statevector,
         BackendKind::Stabilizer => Family::Stabilizer,
@@ -1060,7 +1087,7 @@ pub(super) fn resolve(
             return ExecutionPlan::Backend(BackendPlan::Distributed(context.clone()));
         }
     };
-    let mut plan = plan_for_family(kind, family, circuit.num_qubits);
+    let mut plan = plan_for_family(kind, family, circuit.num_qubits, limits);
     if let BackendPlan::Stabilizer { lazy, .. } = &mut plan {
         *lazy = stabilizer_can_run_lazy(circuit);
     }
@@ -1088,16 +1115,23 @@ pub(super) fn initial_state_plan(
     kind: &BackendKind,
     num_qubits: usize,
     start: StartState<'_>,
+    limits: &ResolvedLimits,
 ) -> Result<BackendPlan> {
     if let StartState::DensityMatrix(_) = start {
         return match kind {
-            BackendKind::DensityMatrix => {
-                Ok(plan_for_family(kind, Family::DensityMatrix, num_qubits))
-            }
+            BackendKind::DensityMatrix => Ok(plan_for_family(
+                kind,
+                Family::DensityMatrix,
+                num_qubits,
+                limits,
+            )),
             #[cfg(feature = "gpu")]
-            BackendKind::DensityMatrixGpu { .. } => {
-                Ok(plan_for_family(kind, Family::DensityMatrix, num_qubits))
-            }
+            BackendKind::DensityMatrixGpu { .. } => Ok(plan_for_family(
+                kind,
+                Family::DensityMatrix,
+                num_qubits,
+                limits,
+            )),
             other => Err(PrismError::IncompatibleBackend {
                 backend: format!("{other:?}"),
                 reason: "a start density matrix runs on the density matrix, which holds a \
@@ -1108,18 +1142,32 @@ pub(super) fn initial_state_plan(
         };
     }
     match kind {
-        BackendKind::Auto | BackendKind::Statevector => {
-            Ok(plan_for_family(kind, Family::Statevector, num_qubits))
-        }
+        BackendKind::Auto | BackendKind::Statevector => Ok(plan_for_family(
+            kind,
+            Family::Statevector,
+            num_qubits,
+            limits,
+        )),
         #[cfg(feature = "gpu")]
-        BackendKind::AutoGpu { .. } | BackendKind::StatevectorGpu { .. } => {
-            Ok(plan_for_family(kind, Family::Statevector, num_qubits))
-        }
-        BackendKind::DensityMatrix => Ok(plan_for_family(kind, Family::DensityMatrix, num_qubits)),
+        BackendKind::AutoGpu { .. } | BackendKind::StatevectorGpu { .. } => Ok(plan_for_family(
+            kind,
+            Family::Statevector,
+            num_qubits,
+            limits,
+        )),
+        BackendKind::DensityMatrix => Ok(plan_for_family(
+            kind,
+            Family::DensityMatrix,
+            num_qubits,
+            limits,
+        )),
         #[cfg(feature = "gpu")]
-        BackendKind::DensityMatrixGpu { .. } => {
-            Ok(plan_for_family(kind, Family::DensityMatrix, num_qubits))
-        }
+        BackendKind::DensityMatrixGpu { .. } => Ok(plan_for_family(
+            kind,
+            Family::DensityMatrix,
+            num_qubits,
+            limits,
+        )),
         #[cfg(feature = "distributed")]
         BackendKind::StatevectorDistributed { context } => {
             Ok(BackendPlan::Distributed(context.clone()))
@@ -1137,8 +1185,9 @@ pub(super) fn resolve_backend(
     kind: &BackendKind,
     circuit: &Circuit,
     has_partial_independence: bool,
+    limits: &ResolvedLimits,
 ) -> BackendPlan {
-    match resolve(kind, circuit, has_partial_independence) {
+    match resolve(kind, circuit, has_partial_independence, limits) {
         ExecutionPlan::Backend(plan) => plan,
         _ => unreachable!("non-backend dispatch should be handled by caller"),
     }
@@ -1149,11 +1198,15 @@ pub(super) fn min_clifford_prefix_gates(num_qubits: usize) -> usize {
     (num_qubits * 2).max(16)
 }
 
-pub(super) fn has_temporal_clifford_opportunity(kind: &BackendKind, circuit: &Circuit) -> bool {
+pub(super) fn has_temporal_clifford_opportunity(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    limits: &ResolvedLimits,
+) -> bool {
     if !kind.is_auto() {
         return false;
     }
-    if circuit.num_qubits > max_statevector_qubits() {
+    if circuit.num_qubits > limits.statevector_qubits.value {
         return false;
     }
     // The split pays for itself only when the tail needs a dense state. A
@@ -1193,16 +1246,18 @@ pub(super) struct TemporalCliffordPlan {
     fused_tail: Circuit,
     tail_num_classical_bits: usize,
     tail_accel: Accel,
+    limits: ResolvedLimits,
 }
 
 pub(super) fn plan_temporal_clifford(
     kind: &BackendKind,
     circuit: &Circuit,
+    limits: &ResolvedLimits,
 ) -> Option<TemporalCliffordPlan> {
     if !kind.is_auto() {
         return None;
     }
-    if circuit.num_qubits > max_statevector_qubits() {
+    if circuit.num_qubits > limits.statevector_qubits.value {
         return None;
     }
     if circuit.is_clifford_only() {
@@ -1228,6 +1283,7 @@ pub(super) fn plan_temporal_clifford(
         fused_tail,
         tail_num_classical_bits,
         tail_accel,
+        limits: *limits,
     })
 }
 
@@ -1236,7 +1292,7 @@ pub(super) fn run_temporal_clifford(
     seed: u64,
     want_probabilities: bool,
 ) -> Result<RunOutcome> {
-    let mut stab = StabilizerBackend::new(seed);
+    let mut stab = StabilizerBackend::with_limits(seed, &plan.limits);
     stab.init(plan.prefix.num_qubits, plan.prefix.num_classical_bits)?;
     stab.enable_lazy_destab();
     for inst in &plan.prefix.instructions {
@@ -1245,7 +1301,7 @@ pub(super) fn run_temporal_clifford(
 
     let state = stab.export_statevector()?;
 
-    let mut sv = build_statevector(&plan.tail_accel, seed);
+    let mut sv = build_statevector(&plan.tail_accel, seed, &plan.limits);
     sv.init_from_state(state, plan.tail_num_classical_bits)?;
     for inst in &plan.fused_tail.instructions {
         sv.apply(inst)?;
@@ -1628,7 +1684,7 @@ mod dispatch_matrix_tests {
     /// One qubit past the statevector memory cap, or `None` when memory
     /// detection failed and the cap is disabled (no width is oversize then).
     fn oversize_qubits() -> Option<usize> {
-        let cap = max_statevector_qubits();
+        let cap = ResolvedLimits::process_default().statevector_qubits.value;
         if cap >= usize::BITS as usize {
             eprintln!(
                 "SKIP: statevector qubit cap disabled on this host; skipping oversize checks"
@@ -1661,7 +1717,7 @@ mod dispatch_matrix_tests {
     }
 
     fn resolved(kind: &BackendKind, circuit: &Circuit, hpi: bool) -> BackendPlan {
-        match resolve(kind, circuit, hpi) {
+        match resolve(kind, circuit, hpi, &ResolvedLimits::process_default()) {
             ExecutionPlan::Backend(plan) => plan,
             _ => panic!("expected a backend plan"),
         }
@@ -1719,19 +1775,36 @@ mod dispatch_matrix_tests {
         // A W state ends on 64 basis states but holds 126 midway through its last
         // controlled rotation.
         let w_state = crate::circuits::w_state_circuit(64);
-        assert!(sparse_support_fits(&w_state, 126));
-        assert!(!sparse_support_fits(&w_state, 125));
+        assert!(sparse_support_fits(
+            &w_state,
+            126,
+            &ResolvedLimits::process_default()
+        ));
+        assert!(!sparse_support_fits(
+            &w_state,
+            125,
+            &ResolvedLimits::process_default()
+        ));
         assert!(!sparse_support_fits(
             &oversize_dense(40),
-            AUTO_SPARSE_MAX_SUPPORT
+            AUTO_SPARSE_MAX_SUPPORT,
+            &ResolvedLimits::process_default()
         ));
 
         let mut measured = Circuit::new(8, 1);
         measured.instructions = crate::circuits::w_state_circuit(8).instructions;
         measured.add_measure(0, 0);
-        assert!(sparse_support_fits(&measured, AUTO_SPARSE_MAX_SUPPORT));
+        assert!(sparse_support_fits(
+            &measured,
+            AUTO_SPARSE_MAX_SUPPORT,
+            &ResolvedLimits::process_default()
+        ));
         measured.add_gate(Gate::H, &[1]);
-        assert!(!sparse_support_fits(&measured, AUTO_SPARSE_MAX_SUPPORT));
+        assert!(!sparse_support_fits(
+            &measured,
+            AUTO_SPARSE_MAX_SUPPORT,
+            &ResolvedLimits::process_default()
+        ));
     }
 
     #[test]
@@ -1739,11 +1812,10 @@ mod dispatch_matrix_tests {
         let Some(n) = oversize_qubits() else { return };
         for kind in auto_kinds() {
             let plan = resolved(&kind, &oversize_dense(n), false);
+            let auto_bond = ResolvedLimits::process_default().auto_mps_bond_dim.value;
             assert!(matches!(
                 plan,
-                BackendPlan::Mps {
-                    max_bond_dim: AUTO_MPS_BOND_DIM
-                }
+                BackendPlan::Mps { max_bond_dim } if max_bond_dim == auto_bond
             ));
         }
     }
@@ -1774,14 +1846,20 @@ mod dispatch_matrix_tests {
     fn non_backend_kinds_resolve_to_their_engines() {
         let circuit = dense(6);
         assert!(matches!(
-            resolve(&BackendKind::StabilizerRank, &circuit, false),
+            resolve(
+                &BackendKind::StabilizerRank,
+                &circuit,
+                false,
+                &ResolvedLimits::process_default()
+            ),
             ExecutionPlan::StabilizerRank
         ));
         assert!(matches!(
             resolve(
                 &BackendKind::StochasticPauli { num_samples: 9 },
                 &circuit,
-                false
+                false,
+                &ResolvedLimits::process_default()
             ),
             ExecutionPlan::StochasticPauli { num_samples: 9 }
         ));
@@ -1794,8 +1872,7 @@ mod dispatch_matrix_tests {
                     }
                 },
                 &circuit,
-                false
-            ),
+                false, &ResolvedLimits::process_default()),
             ExecutionPlan::DeterministicPauli {
                 truncation: SpdTruncation::Threshold {
                     epsilon: e,
@@ -1820,22 +1897,39 @@ mod dispatch_matrix_tests {
         // backend it builds accepts fused payloads on every terminal.
         let plan = resolved(&BackendKind::DensityMatrix, &dense(6), false);
         assert_eq!(plan.family(), Family::DensityMatrix);
-        assert!(plan.build(42).supports_fused_gates());
+        assert!(
+            plan.build(42, &ResolvedLimits::process_default())
+                .supports_fused_gates()
+        );
         assert!(matches!(plan.accel(), Accel::Cpu));
     }
 
     #[test]
     fn density_matrix_rejects_over_cap() {
-        let cap = max_density_matrix_qubits();
+        let cap = ResolvedLimits::process_default()
+            .density_matrix_qubits
+            .value;
         if cap >= usize::BITS as usize {
             eprintln!("SKIP: density-matrix cap disabled on this host");
             return;
         }
         let circuit = dense(cap + 1);
-        let err = validate_explicit_backend(&BackendKind::DensityMatrix, &circuit).unwrap_err();
+        let err = validate_explicit_backend(
+            &BackendKind::DensityMatrix,
+            &circuit,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap_err();
         assert!(matches!(err, PrismError::ResourceLimit(_)));
         // At or below the cap the same shape validates.
-        assert!(validate_explicit_backend(&BackendKind::DensityMatrix, &dense(cap)).is_ok());
+        assert!(
+            validate_explicit_backend(
+                &BackendKind::DensityMatrix,
+                &dense(cap),
+                &ResolvedLimits::process_default()
+            )
+            .is_ok()
+        );
     }
 
     // Explicit GPU kinds resolve hard device execution at their crossover

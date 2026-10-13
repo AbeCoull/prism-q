@@ -259,11 +259,8 @@ pub(crate) const NORM_CLAMP_MIN: f64 = 1e-30;
 pub(crate) const PHASE_IS_ONE_EPS: f64 = 1e-15;
 
 pub(crate) use memory::{
-    DM_QUBIT_CAP_ENV, check_state_allocation, dense_probability_len, dense_statevector_len,
-    max_dense_outcome_bits, max_density_matrix_qubits, max_factored_merge_qubits,
-    max_sparse_entries, max_stabilizer_cluster_qubits, max_statevector_qubits,
-    mps_workspace_cap_elements, reserve_dense_output, stabilizer_cluster_error,
-    statevector_probability_len, tensor_peak_cap_elements, tensor_peak_error,
+    check_state_allocation, dense_probability_len, dense_statevector_len, reserve_dense_output,
+    stabilizer_cluster_error, statevector_probability_len, tensor_peak_error,
     tensor_probability_len, workspace_allocation_error,
 };
 
@@ -461,7 +458,10 @@ impl BasisSamples {
 }
 
 pub(crate) mod sealed {
-    pub trait Sealed {}
+    pub trait Sealed {
+        /// Caps the backend was built under.
+        fn limits(&self) -> crate::limits::ResolvedLimits;
+    }
 }
 
 /// Trait that all simulation backends must implement.
@@ -857,6 +857,7 @@ pub trait Backend: sealed::Sealed {
             self.num_qubits(),
             || self.export_statevector(),
             other,
+            &self.limits(),
         )
     }
 

@@ -6,6 +6,7 @@ use num_complex::Complex64;
 
 use super::mps::svd;
 use crate::error::{PrismError, Result};
+use crate::limits::{LimitKnob, ResolvedLimits};
 
 /// Relative floor under which a singular value is numerical noise. The SVD
 /// resolves the spectrum to about `1e-16` of its largest value, and a value at
@@ -179,7 +180,12 @@ pub(crate) fn entropy_of_schmidt_values(values: &[f64]) -> f64 {
 /// statevector, so that is the width priced against the dense export cap.
 /// Without `parallel` the eigensolver is the Jacobi sweep, which bounds the
 /// side at [`MAX_JACOBI_SIDE`] as well.
-pub(crate) fn check_schmidt_side(backend: &str, what: &str, side: usize) -> Result<()> {
+pub(crate) fn check_schmidt_side(
+    backend: &str,
+    what: &str,
+    side: usize,
+    limits: &ResolvedLimits,
+) -> Result<()> {
     #[cfg(not(feature = "parallel"))]
     if side > MAX_JACOBI_SIDE {
         return Err(PrismError::BackendUnsupported {
@@ -191,11 +197,12 @@ pub(crate) fn check_schmidt_side(backend: &str, what: &str, side: usize) -> Resu
         });
     }
     let width = 2 * side;
-    if width > export_cap() {
+    if width > limits.export_cap() {
         return Err(export_cap_exceeded(
             backend,
             format!("{what} with {side} qubits on the smaller side, as a reduced density matrix"),
             width,
+            limits,
         ));
     }
     Ok(())
@@ -205,36 +212,41 @@ pub(crate) fn check_schmidt_side(backend: &str, what: &str, side: usize) -> Resu
 /// the gathered copy of the state plus the thin SVD's wide factor, two vectors
 /// of the state's length, so it is priced as one statevector of
 /// `num_qubits + 1` qubits against the dense export cap.
-fn check_dense_schmidt_width(backend: &str, num_qubits: usize) -> Result<()> {
+fn check_dense_schmidt_width(
+    backend: &str,
+    num_qubits: usize,
+    limits: &ResolvedLimits,
+) -> Result<()> {
     let width = num_qubits + 1;
-    if width > export_cap() {
+    if width > limits.export_cap() {
         return Err(export_cap_exceeded(
             backend,
             "Schmidt values across a cut, as a gathered copy and thin factor".to_string(),
             width,
+            limits,
         ));
     }
     Ok(())
 }
 
-/// The dense export cap as `dense_statevector_len` applies it, so a check
-/// against it formats no message on the path that passes.
-pub(crate) fn export_cap() -> usize {
-    super::memory::max_dense_statevector_qubits().min(usize::BITS as usize - 1)
-}
-
 /// The error a diagnostic raises past the dense export cap: the same variant a
 /// statevector export raises there, so nothing reads it as a missing terminal,
 /// with `what` naming the allocation that was priced.
-pub(crate) fn export_cap_exceeded(backend: &str, what: String, width: usize) -> PrismError {
-    PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
-        backend: backend.to_string(),
-        operation: what,
-        resource: crate::error::ResourceKind::Qubits,
-        required: width as u128,
-        limit: export_cap() as u128,
-        env_var: Some("PRISM_MAX_EXPORT_QUBITS"),
-    }))
+pub(crate) fn export_cap_exceeded(
+    backend: &str,
+    what: String,
+    width: usize,
+    limits: &ResolvedLimits,
+) -> PrismError {
+    crate::limits::resource_limit_error(
+        backend,
+        what,
+        crate::error::ResourceKind::Qubits,
+        width as u128,
+        limits.export_cap() as u128,
+        LimitKnob::ExportQubits,
+        limits.export_qubits.source,
+    )
 }
 
 /// Schmidt values of a dense `2^num_qubits` amplitude vector across
@@ -246,8 +258,9 @@ pub(crate) fn dense_schmidt_values(
     state: &[Complex64],
     num_qubits: usize,
     subsystem: &[usize],
+    limits: &ResolvedLimits,
 ) -> Result<Vec<f64>> {
-    check_dense_schmidt_width(backend, num_qubits)?;
+    check_dense_schmidt_width(backend, num_qubits, limits)?;
 
     let k = subsystem.len();
     let side = k.min(num_qubits - k);

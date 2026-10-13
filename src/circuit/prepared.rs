@@ -6,10 +6,11 @@ use super::fusion::fuse_circuit_for_width;
 use super::parameter::Parameters;
 use super::plan::FusionPlan;
 use crate::error::Result;
+use crate::limits::Limits;
 use crate::sim::unified_pauli::PauliTerm;
 use crate::sim::{
-    BackendKind, ObservableExpectation, PauliObservable, PreparedRoute, RunOutcome, prepared_route,
-    simulate,
+    BackendKind, ObservableExpectation, PauliObservable, PreparedRoute, RunOutcome, Simulate,
+    Unseeded, prepared_route, simulate,
 };
 
 /// A parameter template plus the fusion and dispatch work its structure
@@ -20,14 +21,16 @@ use crate::sim::{
 /// collapses a block to the identity or a named gate, or flips its diagonality, falls
 /// back to the full pass pipeline, so the result matches an independently fused circuit.
 ///
-/// Each terminal answers what the [`Simulate`](crate::sim::Simulate) terminal of the same
-/// name answers on the bound circuit under the same backend kind and seed. Where the held
+/// Each terminal answers what the [`Simulate`] terminal of the same name answers on the
+/// bound circuit under the same backend kind and seed. Where the held
 /// backend would answer differently, such as a route that bypasses backends or a
 /// template the terminal rejects, the call binds and hands the circuit to `simulate`.
 pub struct PreparedCircuit {
     template: Circuit,
     params: Parameters,
     kind: BackendKind,
+    /// A request's own limits, when it set them; `None` runs under the process default.
+    limits: Option<Limits>,
     plan: Option<FusionPlan>,
     route: Option<PreparedRoute>,
     skeleton: Circuit,
@@ -44,8 +47,9 @@ impl Clone for PreparedCircuit {
             template: self.template.clone(),
             params: self.params.clone(),
             kind: self.kind.clone(),
+            limits: self.limits,
             plan: self.plan.clone(),
-            route: prepared_route(&self.kind, &self.template),
+            route: prepared_route(&self.kind, &self.template, self.limits.as_ref()),
             skeleton: self.skeleton.clone(),
             bound: self.bound.clone(),
             fused: self.fused.clone(),
@@ -70,12 +74,22 @@ impl PreparedCircuit {
     /// # Errors
     /// Same conditions as [`new`](Self::new).
     pub fn with_backend(template: Circuit, params: Parameters, kind: BackendKind) -> Result<Self> {
+        Self::with_limits(template, params, kind, None)
+    }
+
+    /// [`with_backend`](Self::with_backend) under a request's own limits.
+    pub(crate) fn with_limits(
+        template: Circuit,
+        params: Parameters,
+        kind: BackendKind,
+        limits: Option<Limits>,
+    ) -> Result<Self> {
         params.validate(&template)?;
-        let route = prepared_route(&kind, &template);
+        let route = prepared_route(&kind, &template, limits.as_ref());
         let (skeleton, plan) =
             FusionPlan::capture(&template, fusion_state_qubits(route.as_ref(), &template));
         Ok(Self::assemble(
-            template, params, kind, route, plan, skeleton,
+            template, params, kind, limits, route, plan, skeleton,
         ))
     }
 
@@ -83,6 +97,7 @@ impl PreparedCircuit {
         template: Circuit,
         params: Parameters,
         kind: BackendKind,
+        limits: Option<Limits>,
         route: Option<PreparedRoute>,
         plan: Option<FusionPlan>,
         skeleton: Circuit,
@@ -93,6 +108,7 @@ impl PreparedCircuit {
             template,
             params,
             kind,
+            limits,
             plan,
             route,
             skeleton,
@@ -164,6 +180,7 @@ impl PreparedCircuit {
         let fused = self.bind_for_route(values)?;
         let Self {
             kind,
+            limits,
             route,
             bound,
             fused: fused_circuit,
@@ -172,7 +189,7 @@ impl PreparedCircuit {
         let circuit = if fused { &*fused_circuit } else { &*bound };
         match route {
             Some(route) => route.run(circuit, seed),
-            None => simulate(circuit).backend(kind.clone()).seed(seed).run(),
+            None => request(circuit, kind, *limits).seed(seed).run(),
         }
     }
 
@@ -191,6 +208,7 @@ impl PreparedCircuit {
         let fused = self.bind_for_route(values)?;
         let Self {
             kind,
+            limits,
             route,
             bound,
             fused: fused_circuit,
@@ -203,8 +221,7 @@ impl PreparedCircuit {
         {
             return result;
         }
-        simulate(bound)
-            .backend(kind.clone())
+        request(bound, kind, *limits)
             .seed(seed)
             .expectation_values(observables)
     }
@@ -225,6 +242,7 @@ impl PreparedCircuit {
         let fused = self.bind_for_route(values)?;
         let Self {
             kind,
+            limits,
             route,
             bound,
             fused: fused_circuit,
@@ -237,8 +255,7 @@ impl PreparedCircuit {
         {
             return result;
         }
-        simulate(bound)
-            .backend(kind.clone())
+        request(bound, kind, *limits)
             .seed(seed)
             .observable_expectation(observable)
     }
@@ -328,6 +345,7 @@ impl PreparedCircuit {
                 template,
                 params,
                 kind,
+                limits,
                 plan,
                 skeleton,
                 ..
@@ -351,7 +369,8 @@ impl PreparedCircuit {
                                 template.clone(),
                                 params.clone(),
                                 kind.clone(),
-                                prepared_route(kind, template),
+                                *limits,
+                                prepared_route(kind, template, limits.as_ref()),
                                 plan.clone(),
                                 skeleton.clone(),
                             )
@@ -372,4 +391,17 @@ impl PreparedCircuit {
 /// backend is held.
 fn fusion_state_qubits(route: Option<&PreparedRoute>, template: &Circuit) -> usize {
     route.map_or(template.num_qubits, PreparedRoute::fusion_state_qubits)
+}
+
+/// The `Simulate` request a binding falls back to when no route was settled.
+fn request<'c>(
+    circuit: &'c Circuit,
+    kind: &BackendKind,
+    limits: Option<Limits>,
+) -> Simulate<'c, Unseeded> {
+    let sim = simulate(circuit).backend(kind.clone());
+    match limits {
+        Some(limits) => sim.limits(limits),
+        None => sim,
+    }
 }

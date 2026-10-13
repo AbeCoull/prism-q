@@ -61,20 +61,46 @@ fn assert_expectations_close(left: &[f64], right: &[f64]) {
 #[test]
 fn auto_gpu_terminal_counts_match_auto_on_stub() {
     let circuit = measured_chain_circuit(16);
-    let auto_counts = run_counts_with(BackendKind::Auto, &circuit, 500, 42)
-        .unwrap()
-        .0;
-    let gpu_counts = run_counts_with(auto_gpu_stub(), &circuit, 500, 42)
-        .unwrap()
-        .0;
+    let auto_counts = run_counts_with(
+        BackendKind::Auto,
+        &circuit,
+        500,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
+    let gpu_counts = run_counts_with(
+        auto_gpu_stub(),
+        &circuit,
+        500,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
     assert_eq!(auto_counts, gpu_counts);
 }
 
 #[test]
 fn auto_gpu_terminal_shots_match_auto_on_stub() {
     let circuit = measured_chain_circuit(16);
-    let auto_shots = run_shots_with(BackendKind::Auto, &circuit, 64, 42).unwrap();
-    let gpu_shots = run_shots_with(auto_gpu_stub(), &circuit, 64, 42).unwrap();
+    let auto_shots = run_shots_with(
+        BackendKind::Auto,
+        &circuit,
+        64,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let gpu_shots = run_shots_with(
+        auto_gpu_stub(),
+        &circuit,
+        64,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(auto_shots.shots, gpu_shots.shots);
 }
 
@@ -84,7 +110,14 @@ fn auto_gpu_terminal_shots_match_auto_on_stub() {
 #[test]
 fn statevector_gpu_terminal_counts_hard_above_crossover_on_stub() {
     let circuit = measured_chain_circuit(16);
-    let err = run_counts_with(statevector_gpu_stub(), &circuit, 100, 42).unwrap_err();
+    let err = run_counts_with(
+        statevector_gpu_stub(),
+        &circuit,
+        100,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         crate::error::PrismError::BackendUnsupported { .. }
@@ -96,22 +129,46 @@ fn statevector_gpu_terminal_counts_hard_above_crossover_on_stub() {
 #[test]
 fn statevector_gpu_terminal_counts_below_crossover_match_statevector() {
     let circuit = measured_chain_circuit(6);
-    let sv = run_counts_with(BackendKind::Statevector, &circuit, 200, 42)
-        .unwrap()
-        .0;
-    let gpu = run_counts_with(statevector_gpu_stub(), &circuit, 200, 42)
-        .unwrap()
-        .0;
+    let sv = run_counts_with(
+        BackendKind::Statevector,
+        &circuit,
+        200,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
+    let gpu = run_counts_with(
+        statevector_gpu_stub(),
+        &circuit,
+        200,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
     assert_eq!(sv, gpu);
 }
 
 #[test]
 fn auto_gpu_expectation_matches_auto_on_stub() {
     let circuit = chain_circuit(16);
-    let auto_vals =
-        run_expectation_values_with(BackendKind::Auto, &circuit, &observables(), 42).unwrap();
-    let gpu_vals =
-        run_expectation_values_with(auto_gpu_stub(), &circuit, &observables(), 42).unwrap();
+    let auto_vals = run_expectation_values_with(
+        BackendKind::Auto,
+        &circuit,
+        &observables(),
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let gpu_vals = run_expectation_values_with(
+        auto_gpu_stub(),
+        &circuit,
+        &observables(),
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_expectations_close(&auto_vals, &gpu_vals);
 }
 
@@ -120,8 +177,14 @@ fn auto_gpu_expectation_matches_auto_on_stub() {
 #[test]
 fn statevector_gpu_expectation_hard_above_crossover_on_stub() {
     let circuit = chain_circuit(16);
-    let err = run_expectation_values_with(statevector_gpu_stub(), &circuit, &observables(), 42)
-        .unwrap_err();
+    let err = run_expectation_values_with(
+        statevector_gpu_stub(),
+        &circuit,
+        &observables(),
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         crate::error::PrismError::BackendUnsupported { .. }
@@ -131,10 +194,22 @@ fn statevector_gpu_expectation_hard_above_crossover_on_stub() {
 #[test]
 fn statevector_gpu_expectation_below_crossover_matches_statevector() {
     let circuit = chain_circuit(6);
-    let sv = run_expectation_values_with(BackendKind::Statevector, &circuit, &observables(), 42)
-        .unwrap();
-    let gpu =
-        run_expectation_values_with(statevector_gpu_stub(), &circuit, &observables(), 42).unwrap();
+    let sv = run_expectation_values_with(
+        BackendKind::Statevector,
+        &circuit,
+        &observables(),
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let gpu = run_expectation_values_with(
+        statevector_gpu_stub(),
+        &circuit,
+        &observables(),
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_expectations_close(&sv, &gpu);
 }
 
@@ -145,8 +220,24 @@ fn statevector_gpu_expectation_below_crossover_matches_statevector() {
 fn auto_gpu_general_noise_matches_auto_on_stub() {
     let circuit = measured_chain_circuit(14);
     let noise = noise::NoiseModel::with_amplitude_damping(&circuit, 0.05);
-    let auto_shots = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 16, 42).unwrap();
-    let gpu_shots = run_shots_with_noise(auto_gpu_stub(), &circuit, &noise, 16, 42).unwrap();
+    let auto_shots = run_shots_with_noise(
+        BackendKind::Auto,
+        &circuit,
+        &noise,
+        16,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let gpu_shots = run_shots_with_noise(
+        auto_gpu_stub(),
+        &circuit,
+        &noise,
+        16,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(auto_shots.shots, gpu_shots.shots);
 }
 
@@ -162,7 +253,23 @@ fn auto_gpu_general_noise_product_circuit_matches_auto() {
         circuit.add_measure(q, q);
     }
     let noise = noise::NoiseModel::with_amplitude_damping(&circuit, 0.05);
-    let auto_shots = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 64, 42).unwrap();
-    let gpu_shots = run_shots_with_noise(auto_gpu_stub(), &circuit, &noise, 64, 42).unwrap();
+    let auto_shots = run_shots_with_noise(
+        BackendKind::Auto,
+        &circuit,
+        &noise,
+        64,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let gpu_shots = run_shots_with_noise(
+        auto_gpu_stub(),
+        &circuit,
+        &noise,
+        64,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(auto_shots.shots, gpu_shots.shots);
 }

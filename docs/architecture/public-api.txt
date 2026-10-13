@@ -1507,7 +1507,9 @@ pub fn prism_q::error::ResourceKind::fmt(&self, &mut core::fmt::Formatter<'_>) -
 #[non_exhaustive] pub struct prism_q::error::ResourceLimit
 pub prism_q::error::ResourceLimit::backend: alloc::string::String
 pub prism_q::error::ResourceLimit::env_var: core::option::Option<&'static str>
+pub prism_q::error::ResourceLimit::knob: core::option::Option<prism_q::LimitKnob>
 pub prism_q::error::ResourceLimit::limit: u128
+pub prism_q::error::ResourceLimit::limit_source: prism_q::LimitSource
 pub prism_q::error::ResourceLimit::operation: alloc::string::String
 pub prism_q::error::ResourceLimit::required: u128
 pub prism_q::error::ResourceLimit::resource: prism_q::error::ResourceKind
@@ -2542,6 +2544,7 @@ pub fn prism_q::sim::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q
 pub fn prism_q::sim::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub fn prism_q::sim::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
 pub fn prism_q::sim::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::sim::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
 pub fn prism_q::sim::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
 pub fn prism_q::sim::Simulate<'c, SeedState>::require_exact(self) -> Self
 impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
@@ -2735,6 +2738,23 @@ pub prism_q::Instruction::Save
 pub prism_q::Instruction::Save::label: alloc::string::String
 pub prism_q::Instruction::Save::qubits: smallvec::SmallVec<[usize; 4]>
 pub prism_q::Instruction::Save::spec: prism_q::circuit::SaveSpec
+#[non_exhaustive] pub enum prism_q::LimitKnob
+pub prism_q::LimitKnob::DensityMatrixQubits
+pub prism_q::LimitKnob::ExportQubits
+pub prism_q::LimitKnob::FactoredMergeQubits
+pub prism_q::LimitKnob::MpsWorkspaceQubits
+pub prism_q::LimitKnob::ProbabilityQubits
+pub prism_q::LimitKnob::SparseQubits
+pub prism_q::LimitKnob::StabilizerClusterQubits
+pub prism_q::LimitKnob::StatevectorQubits
+pub prism_q::LimitKnob::TnPeakQubits
+impl prism_q::LimitKnob
+pub fn prism_q::LimitKnob::name(self) -> &'static str
+#[non_exhaustive] pub enum prism_q::LimitSource
+pub prism_q::LimitSource::Detected
+pub prism_q::LimitSource::Env
+pub prism_q::LimitSource::ProcessDefault
+pub prism_q::LimitSource::Request
 #[non_exhaustive] pub enum prism_q::NoiseChannel
 pub prism_q::NoiseChannel::AmplitudeDamping
 pub prism_q::NoiseChannel::AmplitudeDamping::gamma: f64
@@ -3431,6 +3451,33 @@ impl core::default::Default for prism_q::HistogramAccumulator
 pub fn prism_q::HistogramAccumulator::default() -> Self
 impl prism_q::ShotAccumulator for prism_q::HistogramAccumulator
 pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+#[non_exhaustive] pub struct prism_q::Limits
+pub prism_q::Limits::auto_mps_bond_dim: core::option::Option<usize>
+pub prism_q::Limits::max_density_matrix_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_export_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_factored_merge_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_mps_workspace_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_probability_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_sparse_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_stabilizer_cluster_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_statevector_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_tn_peak_qubits: core::option::Option<usize>
+pub prism_q::Limits::max_tn_slices: core::option::Option<usize>
+pub prism_q::Limits::memory_budget_bytes: core::option::Option<u64>
+impl prism_q::Limits
+pub fn prism_q::Limits::auto_mps_bond_dim(self, usize) -> Self
+pub fn prism_q::Limits::max_density_matrix_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_export_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_factored_merge_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_mps_workspace_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_probability_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_sparse_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_stabilizer_cluster_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_statevector_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_tn_peak_qubits(self, usize) -> Self
+pub fn prism_q::Limits::max_tn_slices(self, usize) -> Self
+pub fn prism_q::Limits::memory_budget_bytes(self, u64) -> Self
+pub fn prism_q::Limits::new() -> Self
 pub struct prism_q::MarginalsAccumulator
 impl prism_q::MarginalsAccumulator
 pub fn prism_q::MarginalsAccumulator::marginals(&self) -> alloc::vec::Vec<f64>
@@ -3867,7 +3914,9 @@ pub fn prism_q::sim::ReducedDensityMatrix::purity(&self) -> f64
 #[non_exhaustive] pub struct prism_q::ResourceLimit
 pub prism_q::ResourceLimit::backend: alloc::string::String
 pub prism_q::ResourceLimit::env_var: core::option::Option<&'static str>
+pub prism_q::ResourceLimit::knob: core::option::Option<prism_q::LimitKnob>
 pub prism_q::ResourceLimit::limit: u128
+pub prism_q::ResourceLimit::limit_source: prism_q::LimitSource
 pub prism_q::ResourceLimit::operation: alloc::string::String
 pub prism_q::ResourceLimit::required: u128
 pub prism_q::ResourceLimit::resource: prism_q::error::ResourceKind
@@ -3919,6 +3968,7 @@ pub fn prism_q::sim::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q
 pub fn prism_q::sim::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub fn prism_q::sim::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
 pub fn prism_q::sim::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::sim::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
 pub fn prism_q::sim::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
 pub fn prism_q::sim::Simulate<'c, SeedState>::require_exact(self) -> Self
 impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
@@ -4252,6 +4302,7 @@ pub fn prism_q::compile_forward(&prism_q::circuit::Circuit, u64) -> prism_q::err
 pub fn prism_q::compile_measurements(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::compiled::CompiledSampler>
 pub fn prism_q::compile_noisy(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<prism_q::sim::noise::NoisyCompiledSampler>
 pub fn prism_q::compile_qec_program_rows(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::qec::QecCompiledRows>
+pub fn prism_q::default_limits() -> prism_q::Limits
 pub fn prism_q::density_matrix_expectation_values(&prism_q::circuit::Circuit, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], core::option::Option<&prism_q::sim::noise::NoiseModel>, u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::inverse_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm]) -> alloc::vec::Vec<bool>
 pub fn prism_q::noisy_marginals_analytical(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
@@ -4279,6 +4330,7 @@ pub fn prism_q::run_spp(&prism_q::circuit::Circuit, usize, u64) -> prism_q::erro
 pub fn prism_q::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize, u64) -> prism_q::error::Result<prism_q::sim::unified_pauli::SppObservableResult>
 pub fn prism_q::run_stabilizer_rank(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
 pub fn prism_q::run_stabilizer_rank_approx(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
+pub fn prism_q::set_default_limits(prism_q::Limits)
 pub fn prism_q::simulate(&prism_q::circuit::Circuit) -> prism_q::sim::Simulate<'_, prism_q::sim::Unseeded>
 pub fn prism_q::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::sim::Unseeded>
 pub fn prism_q::stabilizer_inner_product(&prism_q::backend::stabilizer::StabilizerBackend, &prism_q::backend::stabilizer::StabilizerBackend, usize) -> prism_q::error::Result<num_complex::Complex64>

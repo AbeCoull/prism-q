@@ -67,6 +67,7 @@ use crate::error::Result;
 use crate::gates::{DiagEntry, Gate, McuData, diag_entries_phase, mat_mul_4x4};
 #[cfg(feature = "gpu")]
 use crate::gpu::{GpuContext, GpuState, kernels::density as dk};
+use crate::limits::{LimitKnob, ResolvedLimits};
 use crate::sim::i_pow;
 use crate::sim::unified_pauli::PauliTerm;
 
@@ -609,6 +610,8 @@ fn check_device_budget(context: &GpuContext, num_qubits: usize) -> Result<()> {
                 required: needed as u128,
                 limit: free as u128,
                 env_var: None,
+                knob: None,
+                limit_source: crate::limits::LimitSource::Detected,
             },
         )));
     }
@@ -632,17 +635,24 @@ pub struct DensityMatrixBackend {
     /// kept between calls.
     multi_1q_scratch: Vec<(usize, [[Complex64; 2]; 2])>,
     multi_2q_scratch: Vec<(usize, usize, [[Complex64; 4]; 4])>,
+    limits: ResolvedLimits,
     #[cfg(feature = "gpu")]
     gpu_context: Option<Arc<GpuContext>>,
 }
 
 impl DensityMatrixBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64) -> Self {
+        Self::with_limits(seed, &ResolvedLimits::process_default())
+    }
+
+    pub(crate) fn with_limits(seed: u64, limits: &ResolvedLimits) -> Self {
         Self {
             num_qubits: 0,
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
-            sv: StatevectorBackend::new(seed),
+            sv: StatevectorBackend::with_limits(seed, limits),
+            limits: *limits,
             multi_1q_scratch: Vec::new(),
             multi_2q_scratch: Vec::new(),
             #[cfg(feature = "gpu")]
@@ -693,8 +703,8 @@ impl DensityMatrixBackend {
         crate::backend::check_state_allocation(
             "density_matrix",
             num_qubits,
-            crate::backend::max_density_matrix_qubits(),
-            crate::backend::DM_QUBIT_CAP_ENV,
+            self.limits.density_matrix_qubits,
+            LimitKnob::DensityMatrixQubits,
         )
     }
 
@@ -1636,7 +1646,11 @@ impl DensityMatrixBackend {
     }
 }
 
-impl crate::backend::sealed::Sealed for DensityMatrixBackend {}
+impl crate::backend::sealed::Sealed for DensityMatrixBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
 
 impl Backend for DensityMatrixBackend {
     fn name(&self) -> &'static str {
@@ -1671,7 +1685,8 @@ impl Backend for DensityMatrixBackend {
     /// buffer itself comes back, its rows and columns in `subsystem` order.
     fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
         schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
-        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let dim =
+            reduced_density::reduced_density_side(self.name(), subsystem.len(), &self.limits)?;
         #[cfg(feature = "gpu")]
         let readback = self
             .sv

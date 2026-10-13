@@ -12,11 +12,12 @@ use super::{
     ShotsResult, apply_recording_saves, backend_metadata, mix_seed, read_save,
     sample_counts_from_state,
 };
+use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
-use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::dynamic::ClassicalValue;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
+use crate::limits::ResolvedLimits;
 
 /// Stream of the run seed whose generator draws the root's outcome splits.
 const SPLIT_STREAM: u64 = u64::MAX;
@@ -43,11 +44,13 @@ pub(super) struct BranchLimits {
     /// Whether the two branches of a split may run on separate workers.
     #[cfg(feature = "parallel")]
     pub(super) parallel: bool,
+    /// Caps every branch state is built under.
+    caps: ResolvedLimits,
 }
 
 impl BranchLimits {
-    pub(super) fn for_width(num_qubits: usize, parallel: bool) -> Self {
-        let headroom = max_statevector_qubits().saturating_sub(num_qubits);
+    pub(super) fn for_width(num_qubits: usize, parallel: bool, caps: &ResolvedLimits) -> Self {
+        let headroom = caps.statevector_qubits.value.saturating_sub(num_qubits);
         let max_live_states = u32::try_from(headroom)
             .ok()
             .and_then(|shift| 1usize.checked_shl(shift))
@@ -58,6 +61,7 @@ impl BranchLimits {
             max_live_states,
             #[cfg(feature = "parallel")]
             parallel,
+            caps: *caps,
         }
     }
 }
@@ -307,7 +311,7 @@ impl<'l> Walk<'l> {
         seed: u64,
         shuffle: bool,
     ) -> Result<ShotsResult> {
-        let mut root = StatevectorBackend::new(seed);
+        let mut root = StatevectorBackend::with_limits(seed, &self.limits.caps);
         let metadata = backend_metadata(&root);
         let bits = num_classical_bits;
         if num_shots == 0 {
@@ -436,7 +440,7 @@ impl<'l> Walk<'l> {
                 return self.per_shot(&mut branch, &cursor, leaves);
             }
 
-            let mut sv_one = StatevectorBackend::new(0);
+            let mut sv_one = StatevectorBackend::with_limits(0, &self.limits.caps);
             sv_one.copy_state_from(sv);
             if let Some(bit) = classical_bit {
                 sv.classical_bits[bit] = false;
@@ -494,7 +498,7 @@ impl<'l> Walk<'l> {
         leaves: &mut Vec<Leaf>,
     ) -> Result<()> {
         let base = branch.rng.next_u64();
-        let mut scratch = StatevectorBackend::new(base);
+        let mut scratch = StatevectorBackend::with_limits(base, &self.limits.caps);
         let mut vars = Vec::new();
         for i in 0..branch.shots {
             scratch.copy_state_from(&branch.sv);
@@ -556,6 +560,7 @@ fn sample_tail(
         sv.classical_bits.len(),
         branch.shots,
         branch.rng.next_u64(),
+        &sv.limits,
     );
     for (packed, count) in counts {
         let mut record = sv.classical_bits.clone();
@@ -733,7 +738,7 @@ mod tests {
         let n = 5;
         let circuit = mid_then_readout(n);
         for parallel in [false, true] {
-            let limits = BranchLimits::for_width(n, parallel);
+            let limits = BranchLimits::for_width(n, parallel, &ResolvedLimits::process_default());
             let shots = branch_shots(&circuit, 40_000, 42, &limits, true)
                 .unwrap()
                 .shots;
@@ -747,7 +752,7 @@ mod tests {
     fn a_readout_branch_with_many_leaves_keeps_every_shot() {
         let n = 10;
         let circuit = mid_then_readout(n);
-        let limits = BranchLimits::for_width(n, false);
+        let limits = BranchLimits::for_width(n, false, &ResolvedLimits::process_default());
         let result = branch_shots(&circuit, 20_000, 42, &limits, false).unwrap();
         assert_eq!(result.shots.len(), 20_000);
         let counts = result.counts();
@@ -836,7 +841,7 @@ mod tests {
             .push(guarded(ClassicalCondition::BitIsOne(0), body.instructions).unwrap());
         c.add_measure(2, 2);
         c.add_measure(0, 3);
-        let limits = BranchLimits::for_width(3, false);
+        let limits = BranchLimits::for_width(3, false, &ResolvedLimits::process_default());
         let shots = branch_shots(&c, 20_000, 42, &limits, true).unwrap().shots;
         assert!(shots.iter().all(|s| s[0] == s[3]));
         assert!(shots.iter().filter(|s| !s[0]).all(|s| !s[1] && !s[2]));
@@ -857,7 +862,14 @@ mod tests {
         num_shots: usize,
         limits: &BranchLimits,
     ) -> Vec<Vec<bool>> {
-        let prepared = Prepared::new(program, &BackendKind::Statevector, 42, 10_000).unwrap();
+        let prepared = Prepared::new(
+            program,
+            &BackendKind::Statevector,
+            42,
+            10_000,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
         branch_program_shots(&prepared, num_shots, 42, limits)
             .unwrap()
             .shots
@@ -927,7 +939,7 @@ mod tests {
     fn program_attempt_counts_follow_the_geometric_law() {
         let rus = rus_attempts();
         for parallel in [false, true] {
-            let limits = BranchLimits::for_width(6, parallel);
+            let limits = BranchLimits::for_width(6, parallel, &ResolvedLimits::process_default());
             assert_geometric_attempts(&program_shots(&rus, 20_000, &limits));
         }
     }
@@ -940,6 +952,7 @@ mod tests {
                 max_live_states,
                 #[cfg(feature = "parallel")]
                 parallel: false,
+                caps: ResolvedLimits::process_default(),
             };
             let shots = program_shots(&rus, 6_000, &limits);
             assert_eq!(shots.len(), 6_000);
@@ -970,7 +983,7 @@ mod tests {
             {}",
             readout("ones", 1, 2)
         ));
-        let limits = BranchLimits::for_width(3, false);
+        let limits = BranchLimits::for_width(3, false, &ResolvedLimits::process_default());
         let shots = program_shots(&loop_program, 20_000, &limits);
         let mut counts = [0usize; 4];
         for s in &shots {
@@ -1009,7 +1022,7 @@ mod tests {
             c[2] = measure q[2];",
         );
         assert!(teleport.static_circuit().is_none());
-        let limits = BranchLimits::for_width(3, false);
+        let limits = BranchLimits::for_width(3, false, &ResolvedLimits::process_default());
         let shots = program_shots(&teleport, 8_000, &limits);
         assert!(shots.iter().all(|s| !s[2]), "teleported qubit read one");
         assert_near(frequency(&shots, 0), 0.5, shots.len(), "bit 0");
@@ -1019,8 +1032,15 @@ mod tests {
     #[test]
     fn a_program_branch_counts_its_own_steps() {
         let rus = rus_attempts();
-        let prepared = Prepared::new(&rus, &BackendKind::Statevector, 42, 3).unwrap();
-        let limits = BranchLimits::for_width(6, false);
+        let prepared = Prepared::new(
+            &rus,
+            &BackendKind::Statevector,
+            42,
+            3,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
+        let limits = BranchLimits::for_width(6, false, &ResolvedLimits::process_default());
         let err = branch_program_shots(&prepared, 1_000, 42, &limits).unwrap_err();
         assert!(matches!(err, crate::PrismError::StepLimit { .. }), "{err}");
         let empty = branch_program_shots(&prepared, 0, 42, &limits).unwrap();
@@ -1030,9 +1050,15 @@ mod tests {
     #[test]
     fn mid_circuit_outcomes_follow_the_born_rule() {
         let n = 8;
-        let shots = run_shots_with(BackendKind::Statevector, &mid_then_last(n), 20_000, 42)
-            .unwrap()
-            .shots;
+        let shots = run_shots_with(
+            BackendKind::Statevector,
+            &mid_then_last(n),
+            20_000,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap()
+        .shots;
         assert_joint_law(&shots, exact_joint(n));
     }
 
@@ -1045,6 +1071,7 @@ mod tests {
                 max_live_states,
                 #[cfg(feature = "parallel")]
                 parallel: false,
+                caps: ResolvedLimits::process_default(),
             };
             let result = branch_shots(&circuit, 8_000, 42, &limits, true).unwrap();
             assert_eq!(result.shots.len(), 8_000);
@@ -1055,7 +1082,7 @@ mod tests {
     #[test]
     fn rows_are_shuffled_and_count_like_the_unshuffled_walk() {
         let circuit = mid_then_last(6);
-        let limits = BranchLimits::for_width(6, false);
+        let limits = BranchLimits::for_width(6, false, &ResolvedLimits::process_default());
         let shuffled = branch_shots(&circuit, 2_000, 42, &limits, true).unwrap();
         let ordered = branch_shots(&circuit, 2_000, 42, &limits, false).unwrap();
         assert_eq!(shuffled.counts(), ordered.counts());
@@ -1089,9 +1116,15 @@ mod tests {
         c.add_gate(Gate::Ry(-theta), &[2]);
         c.add_measure(2, 2);
 
-        let shots = run_shots_with(BackendKind::Statevector, &c, 8_000, 42)
-            .unwrap()
-            .shots;
+        let shots = run_shots_with(
+            BackendKind::Statevector,
+            &c,
+            8_000,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap()
+        .shots;
         assert!(shots.iter().all(|s| !s[2]), "teleported qubit read one");
         assert_near(frequency(&shots, 0), 0.5, shots.len(), "bit 0");
         assert_near(frequency(&shots, 1), 0.5, shots.len(), "bit 1");
@@ -1116,9 +1149,15 @@ mod tests {
             .push(guarded(ClassicalCondition::BitIsZero(0), retry.instructions).unwrap());
         c.add_measure(1, 2);
 
-        let shots = run_shots_with(BackendKind::Statevector, &c, 20_000, 42)
-            .unwrap()
-            .shots;
+        let shots = run_shots_with(
+            BackendKind::Statevector,
+            &c,
+            20_000,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap()
+        .shots;
         assert_near(frequency(&shots, 0), p, shots.len(), "first attempt");
         let retried: Vec<Vec<bool>> = shots.iter().filter(|s| !s[0]).cloned().collect();
         assert_near(frequency(&retried, 1), p, retried.len(), "second attempt");
@@ -1136,7 +1175,7 @@ mod tests {
         c.add_gate(Gate::Cx, &[1, 0]);
         c.add_measure(0, 0);
         c.add_measure(1, 1);
-        let limits = BranchLimits::for_width(2, false);
+        let limits = BranchLimits::for_width(2, false, &ResolvedLimits::process_default());
         let shots = branch_shots(&c, 4_000, 42, &limits, true).unwrap().shots;
         assert!(shots.iter().all(|s| s[0] == s[1]));
         assert_near(frequency(&shots, 1), 0.5, shots.len(), "partner");
@@ -1153,7 +1192,14 @@ mod tests {
             c.add_gate(Gate::Rz(0.3), &[2]);
             c.add_measure(0, bit);
         }
-        let result = run_shots_with(BackendKind::Statevector, &c, 1_000_000, 42).unwrap();
+        let result = run_shots_with(
+            BackendKind::Statevector,
+            &c,
+            1_000_000,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
         let counts = result.counts();
         assert_eq!(counts.len(), 2);
         assert_eq!(counts.values().sum::<u64>(), 1_000_000);
@@ -1172,7 +1218,7 @@ mod tests {
         c.add_gate(Gate::H, &[0]);
         c.add_measure(0, 0);
         c.add_gate(Gate::H, &[1]);
-        let limits = BranchLimits::for_width(2, false);
+        let limits = BranchLimits::for_width(2, false, &ResolvedLimits::process_default());
         let result = branch_shots(&c, 1_000, 42, &limits, true).unwrap();
         assert_near(frequency(&result.shots, 0), 0.5, 1_000, "bit 0");
 

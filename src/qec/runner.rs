@@ -224,7 +224,10 @@ fn run_qec_program_noisy_exp_val(program: &QecProgram) -> Result<QecSampleResult
     qec_runner_chunk_size(program.options())?;
     if program.num_measurements() > 0
         || !program.postselection_rows()?.is_empty()
-        || program.num_qubits() > crate::backend::max_density_matrix_qubits()
+        || program.num_qubits()
+            > crate::limits::ResolvedLimits::process_default()
+                .density_matrix_qubits
+                .value
     {
         return run_qec_program_reference(program);
     }

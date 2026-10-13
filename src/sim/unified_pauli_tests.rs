@@ -1,4 +1,5 @@
 use super::*;
+use crate::limits::ResolvedLimits;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::f64::consts::{FRAC_PI_4, SQRT_2};
@@ -120,7 +121,13 @@ fn test_run_spp_vs_statevector_3q_2t() {
     circuit.add_gate(Gate::Cx, &[1, 2]);
     circuit.add_gate(Gate::H, &[0]);
 
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &circuit, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
 
     let spp = run_spp(&circuit, 200_000, 42).unwrap();
@@ -156,7 +163,13 @@ fn test_run_spp_vs_statevector_4q_4t() {
         circuit.add_gate(Gate::H, &[q]);
     }
 
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &circuit, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
 
     let spp = run_spp(&circuit, 200_000, 42).unwrap();
@@ -242,7 +255,13 @@ fn test_spd_vs_statevector_3q_2t() {
     circuit.add_gate(Gate::Cx, &[1, 2]);
     circuit.add_gate(Gate::H, &[0]);
 
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &circuit, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
     let spd = run_spd(&circuit, 0.0, 0).unwrap();
     assert_eq!(spd.t_count, 2);
@@ -275,7 +294,13 @@ fn test_spd_vs_statevector_4q_4t() {
         circuit.add_gate(Gate::H, &[q]);
     }
 
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &circuit, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
     let spd = run_spd(&circuit, 0.0, 0).unwrap();
     assert_eq!(spd.t_count, 4);
@@ -359,7 +384,13 @@ fn test_spd_h_t_h_t_h_phase_regression() {
     circuit.add_gate(Gate::T, &[0]);
     circuit.add_gate(Gate::H, &[0]);
 
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &circuit, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
     let exact_ez = 2.0 * sv_probs[0] - 1.0;
 
@@ -376,7 +407,13 @@ fn test_spd_vs_statevector_14q_clifford_t() {
     let c = crate::circuits::clifford_t_circuit(14, 10, 0.1, 42);
     let spd = run_spd(&c, 0.0, 0).unwrap();
 
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &c, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &c,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
 
     for q in 0..14 {
@@ -552,7 +589,13 @@ fn u3(theta: f64, phi: f64, lam: f64) -> Gate {
 }
 
 fn assert_spd_matches_statevector(circuit: &Circuit, tol: f64) {
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, circuit, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
     let spd = run_spd(circuit, 0.0, 0).unwrap();
     for q in 0..circuit.num_qubits {

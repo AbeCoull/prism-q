@@ -14,7 +14,10 @@ pub(super) fn rx_cx_chain(circuit: &mut Circuit, qubits: std::ops::Range<usize>)
 fn dense_entangled_circuit_is_candidate() {
     let mut circuit = Circuit::new(8, 0);
     rx_cx_chain(&mut circuit, 0..8);
-    assert!(auto_terminal_statevector_candidate(&circuit));
+    assert!(auto_terminal_statevector_candidate(
+        &circuit,
+        &ResolvedLimits::process_default()
+    ));
 }
 
 #[test]
@@ -22,7 +25,10 @@ fn decomposable_circuit_is_not_candidate() {
     let mut circuit = Circuit::new(12, 0);
     rx_cx_chain(&mut circuit, 0..6);
     rx_cx_chain(&mut circuit, 6..12);
-    assert!(!auto_terminal_statevector_candidate(&circuit));
+    assert!(!auto_terminal_statevector_candidate(
+        &circuit,
+        &ResolvedLimits::process_default()
+    ));
 }
 
 #[test]
@@ -30,7 +36,10 @@ fn partial_independent_circuit_is_not_candidate() {
     let mut circuit = Circuit::new(10, 0);
     rx_cx_chain(&mut circuit, 0..8);
     rx_cx_chain(&mut circuit, 8..10);
-    assert!(!auto_terminal_statevector_candidate(&circuit));
+    assert!(!auto_terminal_statevector_candidate(
+        &circuit,
+        &ResolvedLimits::process_default()
+    ));
 }
 
 // A Clifford+T circuit inside the stabilizer-rank budget stays a statevector
@@ -49,7 +58,10 @@ fn clifford_t_inside_the_rank_budget_is_a_candidate() {
     for q in 0..budget {
         within.add_gate(Gate::T, &[q]);
     }
-    assert!(auto_terminal_statevector_candidate(&within));
+    assert!(auto_terminal_statevector_candidate(
+        &within,
+        &ResolvedLimits::process_default()
+    ));
 }
 
 #[test]
@@ -67,9 +79,13 @@ fn temporal_prefix_circuit_is_not_candidate() {
     }
     assert!(has_temporal_clifford_opportunity(
         &BackendKind::Auto,
-        &circuit
+        &circuit,
+        &ResolvedLimits::process_default()
     ));
-    assert!(!auto_terminal_statevector_candidate(&circuit));
+    assert!(!auto_terminal_statevector_candidate(
+        &circuit,
+        &ResolvedLimits::process_default()
+    ));
 }
 
 // A Clifford-only circuit has no dense tail to accelerate, so exporting the
@@ -105,15 +121,24 @@ fn clifford_only_circuit_is_not_a_temporal_prefix_candidate() {
     assert!(circuit.is_clifford_only());
     assert!(!has_temporal_clifford_opportunity(
         &BackendKind::Auto,
-        &circuit
+        &circuit,
+        &ResolvedLimits::process_default()
     ));
-    assert!(plan_temporal_clifford(&BackendKind::Auto, &circuit).is_none());
+    assert!(
+        plan_temporal_clifford(
+            &BackendKind::Auto,
+            &circuit,
+            &ResolvedLimits::process_default()
+        )
+        .is_none()
+    );
 
     // The same prefix with a non-Clifford tail still qualifies.
     let mut mixed = circuit.clone();
     mixed.add_gate(Gate::Rx(0.3), &[0]);
     assert!(has_temporal_clifford_opportunity(
         &BackendKind::Auto,
-        &mixed
+        &mixed,
+        &ResolvedLimits::process_default()
     ));
 }

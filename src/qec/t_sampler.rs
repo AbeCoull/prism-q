@@ -728,9 +728,10 @@ fn run_qec_program_camps(program: &QecProgram) -> Result<QecSampleResult> {
 fn run_qec_program_tensor_network_observable(program: &QecProgram) -> Result<QecSampleResult> {
     let lowered = lower_pauli_observables(program)?;
     let circuit = &lowered.circuit;
+    let limits = &crate::limits::ResolvedLimits::process_default();
     evaluate_observable_program(program, &lowered, |terms| {
         Ok(ConditionalEval {
-            mean: crate::backend::tensornetwork::expectation_zero_state(circuit, terms)?,
+            mean: crate::backend::tensornetwork::expectation_zero_state(circuit, terms, limits)?,
             discarded_sq: 0.0,
         })
     })

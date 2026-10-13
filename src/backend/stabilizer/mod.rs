@@ -51,6 +51,7 @@ use crate::circuit::Instruction;
 use crate::error::PrismError;
 use crate::error::Result;
 use crate::gates::Gate;
+use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::PauliTerm;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -97,6 +98,7 @@ pub struct StabilizerBackend {
     pub(super) sgi_stale: bool,
     pub(super) lazy_destab: bool,
     pub(super) gate_row_start: usize,
+    pub(super) limits: ResolvedLimits,
     #[cfg(feature = "gpu")]
     pub(super) gpu_context: Option<Arc<GpuContext>>,
     #[cfg(feature = "gpu")]
@@ -142,6 +144,7 @@ impl Clone for StabilizerBackend {
             sgi_stale: self.sgi_stale,
             lazy_destab: self.lazy_destab,
             gate_row_start: self.gate_row_start,
+            limits: self.limits,
             #[cfg(feature = "gpu")]
             gpu_context: self.gpu_context.clone(),
             #[cfg(feature = "gpu")]
@@ -157,7 +160,12 @@ impl Clone for StabilizerBackend {
 }
 
 impl StabilizerBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64) -> Self {
+        Self::with_limits(seed, &ResolvedLimits::process_default())
+    }
+
+    pub(crate) fn with_limits(seed: u64, limits: &ResolvedLimits) -> Self {
         Self {
             n: 0,
             num_words: 0,
@@ -174,6 +182,7 @@ impl StabilizerBackend {
             sgi_stale: false,
             lazy_destab: false,
             gate_row_start: 0,
+            limits: *limits,
             #[cfg(feature = "gpu")]
             gpu_context: None,
             #[cfg(feature = "gpu")]
@@ -496,6 +505,7 @@ impl StabilizerBackend {
             self.num_words,
             self.stride(),
             self.name(),
+            &self.limits,
         )
     }
 
@@ -504,7 +514,7 @@ impl StabilizerBackend {
     /// the device so the result matches a fully-flushed state.
     #[cfg(feature = "gpu")]
     fn probabilities_gpu(&self) -> Result<Vec<f64>> {
-        dense_probability_len(self.name(), self.n)?;
+        dense_probability_len(self.name(), self.n, &self.limits)?;
         let (xz, phase) = self.copy_device_tableau_with_pending()?;
         self.dense_probabilities(&xz, &phase)
     }
@@ -639,9 +649,12 @@ impl StabilizerBackend {
     /// Create a backend that starts in lazy destabilizer mode (see
     /// [`Self::enable_lazy_destab`]).
     pub fn new_lazy(seed: u64) -> Self {
-        let mut s = Self::new(seed);
-        s.lazy_destab = true;
-        s
+        Self::new(seed).with_lazy_destab()
+    }
+
+    pub(crate) fn with_lazy_destab(mut self) -> Self {
+        self.lazy_destab = true;
+        self
     }
 
     /// Defer destabilizer rows: gates update only the n stabilizer rows until
@@ -1061,11 +1074,16 @@ impl StabilizerBackend {
             self.stride(),
             self.name(),
             "statevector export",
+            &self.limits,
         )
     }
 }
 
-impl crate::backend::sealed::Sealed for StabilizerBackend {}
+impl crate::backend::sealed::Sealed for StabilizerBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
 
 impl Backend for StabilizerBackend {
     fn name(&self) -> &'static str {
@@ -1247,7 +1265,7 @@ impl Backend for StabilizerBackend {
     /// [`Backend::entanglement_entropy`] answers.
     fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
         schmidt::validate_subsystem(subsystem, self.n)?;
-        diagnostics::flat_spectrum(self.name(), self.cut_rank(subsystem)?)
+        diagnostics::flat_spectrum(self.name(), self.cut_rank(subsystem)?, &self.limits)
     }
 
     /// `(rank of the generators restricted to the cut) - |A|` in units of
@@ -1264,7 +1282,8 @@ impl Backend for StabilizerBackend {
     /// the `2^n` export is never taken.
     fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
         schmidt::validate_qubit_set(subsystem, self.n)?;
-        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let dim =
+            reduced_density::reduced_density_side(self.name(), subsystem.len(), &self.limits)?;
         let (xz, phase) = self.stabilizer_rows()?;
         Ok(diagnostics::subsystem_density(
             &xz,
@@ -1300,6 +1319,7 @@ impl Backend for StabilizerBackend {
             self.num_qubits(),
             || self.export_statevector(),
             other,
+            &self.limits,
         )
     }
 

@@ -1188,7 +1188,13 @@ pub fn run_stabilizer_rank_shots(
     let lowered = lower_clifford_t_circuit(circuit)?;
     let circuit = &*lowered;
     if !circuit.has_t_gates() {
-        return super::run_shots_with(super::BackendKind::Stabilizer, circuit, num_shots, seed);
+        return super::run_shots_with(
+            super::BackendKind::Stabilizer,
+            circuit,
+            num_shots,
+            seed,
+            &crate::limits::ResolvedLimits::process_default(),
+        );
     }
 
     if circuit.has_terminal_measurements_only() && !circuit.has_resets() {

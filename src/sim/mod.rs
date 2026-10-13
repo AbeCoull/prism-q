@@ -29,12 +29,12 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    AUTO_MPS_BOND_DIM, BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_SHOTS,
-    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name, auto_selects_cpu_statevector,
-    auto_spd_work_budget, build_statevector, has_temporal_clifford_opportunity, initial_state_plan,
-    mps_apply_cost, plan_for_family, plan_temporal_clifford, resolve, resolve_backend,
-    run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
+    BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
+    MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
+    accel_for, approximate_route_name, auto_selects_cpu_statevector, auto_spd_work_budget,
+    build_statevector, has_temporal_clifford_opportunity, initial_state_plan, mps_apply_cost,
+    plan_for_family, plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
+    stabilizer_rank_budget, validate_explicit_backend,
 };
 pub use dynamic::{SimulateProgram, simulate_program};
 pub use metadata::{
@@ -54,11 +54,12 @@ use std::collections::HashMap;
 
 use num_complex::Complex64;
 
+use crate::backend::Backend;
 use crate::backend::sparse::MAX_SPARSE_INDEX_QUBITS;
 use crate::backend::statevector::StatevectorBackend;
-use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction, SaveRecord, SaveSpec, SavedValue};
 use crate::error::{PrismError, Result};
+use crate::limits::{Limits, ResolvedLimits};
 use crate::sim::noise::NoiseModel;
 use shots::{
     counts_from_basis_samples, packed_shots_to_classical_bits, record_counts_to_classical_bits,
@@ -247,6 +248,7 @@ pub struct Simulate<'c, SeedState> {
     noise_model: Option<&'c noise::NoiseModel>,
     initial_state: Option<StartState<'c>>,
     require_exact: bool,
+    limits: Option<Limits>,
 }
 
 impl<'c, SeedState> Simulate<'c, SeedState> {
@@ -276,6 +278,20 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     #[inline]
     pub fn require_exact(mut self) -> Self {
         self.require_exact = true;
+        self
+    }
+
+    /// Run under `limits` instead of the process default ([`set_default_limits`]).
+    ///
+    /// Values `limits` leaves unset come from the process default, then the
+    /// `PRISM_MAX_*` variables, then detection; see [`Limits`] for how a memory
+    /// budget interacts with the per-cap values below it. A cap the run exceeds
+    /// reports [`PrismError::ResourceLimit`] naming the field to raise.
+    ///
+    /// [`set_default_limits`]: crate::set_default_limits
+    #[inline]
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = Some(limits);
         self
     }
 
@@ -384,6 +400,7 @@ impl<'c> Simulate<'c, Unseeded> {
             noise_model: self.noise_model,
             initial_state: self.initial_state,
             require_exact: self.require_exact,
+            limits: self.limits,
         }
     }
 }
@@ -392,6 +409,10 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     fn seed_value(&self) -> u64 {
         self.seed.seed
+    }
+
+    fn resolved_limits(&self) -> ResolvedLimits {
+        ResolvedLimits::resolve(self.limits.as_ref())
     }
 
     /// Trajectory replay reinitializes a pure state per shot and the compiled
@@ -419,8 +440,9 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     pub fn run(self) -> Result<RunOutcome> {
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "a single run")?;
@@ -431,6 +453,7 @@ impl<'c> Simulate<'c, Seeded> {
                 noise_model,
                 self.initial_state,
                 seed,
+                limits,
             )?;
             let classical_bits =
                 sample_exact_noisy_shots(&probabilities, self.circuit, noise_model, 1, seed)
@@ -451,9 +474,11 @@ impl<'c> Simulate<'c, Seeded> {
                 state,
                 seed,
                 &SimOptions::default(),
+                limits,
             );
         }
-        let outcome = run_with_internal(self.kind, self.circuit, seed, SimOptions::default())?;
+        let outcome =
+            run_with_internal(self.kind, self.circuit, seed, SimOptions::default(), limits)?;
         ensure_exact_result(self.require_exact, &outcome.metadata)?;
         Ok(outcome)
     }
@@ -476,9 +501,14 @@ impl<'c> Simulate<'c, Seeded> {
 
     /// [`reject_approximate_route`] for the shot terminals, which without a noise
     /// model or a start state can sample through the stabilizer-rank expansion.
-    fn reject_approximate_shot_route(&self) -> Result<()> {
+    fn reject_approximate_shot_route(&self, limits: &ResolvedLimits) -> Result<()> {
         let sampling = self.noise_model.is_none() && self.initial_state.is_none();
-        reject_predicted_route(approximate_route_name(&self.kind, self.circuit, sampling))
+        reject_predicted_route(approximate_route_name(
+            &self.kind,
+            self.circuit,
+            sampling,
+            limits,
+        ))
     }
 
     /// Execute `num_shots` times, collecting per-shot classical bits. Accepts
@@ -487,17 +517,25 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
         self.reject_saves("shots")?;
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         let require_exact = self.require_exact;
         if require_exact {
-            self.reject_approximate_shot_route()?;
+            self.reject_approximate_shot_route(limits)?;
         }
         let result = if let Some(noise_model) = self.noise_model {
             self.require_no_initial_state_under_noise("shot sampling")?;
-            run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)?
+            run_shots_with_noise(
+                self.kind,
+                self.circuit,
+                noise_model,
+                num_shots,
+                seed,
+                limits,
+            )?
         } else if let Some(state) = self.initial_state {
-            shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed)?
+            shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed, limits)?
         } else {
-            run_shots_with(self.kind, self.circuit, num_shots, seed)?
+            run_shots_with(self.kind, self.circuit, num_shots, seed, limits)?
         };
         ensure_exact_result(require_exact, &result.metadata)?;
         Ok(result)
@@ -513,19 +551,27 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn sample_counts(self, num_shots: usize) -> Result<CountsResult> {
         self.reject_saves("sample_counts")?;
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         if self.require_exact {
-            self.reject_approximate_shot_route()?;
+            self.reject_approximate_shot_route(limits)?;
         }
         let (counts, metadata) = if let Some(noise_model) = self.noise_model {
             self.require_no_initial_state_under_noise("count sampling")?;
-            let shots =
-                run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)?;
+            let shots = run_shots_with_noise(
+                self.kind,
+                self.circuit,
+                noise_model,
+                num_shots,
+                seed,
+                limits,
+            )?;
             (shots.counts(), shots.metadata)
         } else if let Some(state) = self.initial_state {
-            let shots = shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed)?;
+            let shots =
+                shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed, limits)?;
             (shots.counts(), shots.metadata)
         } else {
-            run_counts_with(self.kind, self.circuit, num_shots, seed)?
+            run_counts_with(self.kind, self.circuit, num_shots, seed, limits)?
         };
         ensure_exact_result(self.require_exact, &metadata)?;
         Ok(CountsResult {
@@ -544,8 +590,9 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn marginals(self) -> Result<MarginalsResult> {
         self.reject_saves("marginals")?;
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "marginals")?;
@@ -556,6 +603,7 @@ impl<'c> Simulate<'c, Seeded> {
                 noise_model,
                 self.initial_state,
                 seed,
+                limits,
             )?;
             return Ok(MarginalsResult {
                 marginals: probs.marginals(),
@@ -563,9 +611,9 @@ impl<'c> Simulate<'c, Seeded> {
             });
         }
         let result = if let Some(state) = self.initial_state {
-            marginals_from_initial_state(&self.kind, self.circuit, state, seed)?
+            marginals_from_initial_state(&self.kind, self.circuit, state, seed, limits)?
         } else {
-            run_marginals_result_with(self.kind, self.circuit, seed)?
+            run_marginals_result_with(self.kind, self.circuit, seed, limits)?
         };
         ensure_exact_result(self.require_exact, &result.metadata)?;
         Ok(result)
@@ -600,8 +648,9 @@ impl<'c> Simulate<'c, Seeded> {
         observables: &[Vec<PauliTerm>],
     ) -> Result<ExpectationResult> {
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if let Some(noise_model) = self.noise_model {
             reject_readout_at(self.circuit, noise_model, "expectation values")?;
@@ -626,6 +675,7 @@ impl<'c> Simulate<'c, Seeded> {
                 Some(noise_model),
                 self.initial_state,
                 seed,
+                limits,
             )?;
             return Ok(analytic_expectations(
                 values,
@@ -640,9 +690,11 @@ impl<'c> Simulate<'c, Seeded> {
                 state,
                 observables,
                 seed,
+                limits,
             );
         }
-        let result = run_expectation_values_reported(self.kind, self.circuit, observables, seed)?;
+        let result =
+            run_expectation_values_reported(self.kind, self.circuit, observables, seed, limits)?;
         ensure_exact_result(self.require_exact, &result.metadata)?;
         Ok(result)
     }
@@ -673,8 +725,9 @@ impl<'c> Simulate<'c, Seeded> {
         observable: &PauliObservable,
     ) -> Result<ObservableExpectation> {
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if let Some(noise_model) = self.noise_model {
             reject_readout_at(self.circuit, noise_model, "observable expectation")?;
@@ -706,6 +759,7 @@ impl<'c> Simulate<'c, Seeded> {
                 Some(noise_model),
                 self.initial_state,
                 seed,
+                limits,
             )?;
             return Ok(weighted_observable_result(
                 observable,
@@ -722,6 +776,7 @@ impl<'c> Simulate<'c, Seeded> {
                 state,
                 &observable_vecs(observable),
                 seed,
+                limits,
             )?;
             return Ok(weighted_observable_result(
                 observable,
@@ -730,8 +785,13 @@ impl<'c> Simulate<'c, Seeded> {
                 result.metadata,
             ));
         }
-        let result =
-            run_observable_expectation_reported(self.kind.clone(), self.circuit, observable, seed)?;
+        let result = run_observable_expectation_reported(
+            self.kind.clone(),
+            self.circuit,
+            observable,
+            seed,
+            limits,
+        )?;
         ensure_exact_result(self.require_exact, &result.metadata)?;
         Ok(result)
     }
@@ -806,10 +866,11 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn state_vector(self) -> Result<Vec<Complex64>> {
         self.reject_saves("state_vector")?;
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         let diagnostic = Diagnostic::StateVector;
         require_unitary_circuit(&self.kind, self.circuit, "a statevector requires")?;
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if self.noise_model.is_some() {
             return Err(PrismError::IncompatibleBackend {
@@ -828,6 +889,7 @@ impl<'c> Simulate<'c, Seeded> {
             seed,
             diagnostic,
             self.circuit.num_qubits,
+            limits,
         )?;
         ensure_exact_result(self.require_exact, &backend_metadata(&*backend))?;
         backend.export_statevector()
@@ -850,6 +912,7 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn reduced_density_matrix(self, qubits: &[usize]) -> Result<ReducedDensityMatrix> {
         self.reject_saves("reduced_density_matrix")?;
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         let diagnostic = Diagnostic::ReducedDensityMatrix;
         let terminal = diagnostic.terminal();
         crate::backend::schmidt::validate_qubit_set(qubits, self.circuit.num_qubits)?;
@@ -859,7 +922,7 @@ impl<'c> Simulate<'c, Seeded> {
             "a reduced density matrix requires",
         )?;
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if let Some(noise_model) = self.noise_model {
             reject_readout_at(self.circuit, noise_model, terminal)?;
@@ -870,6 +933,7 @@ impl<'c> Simulate<'c, Seeded> {
                 Some(noise_model),
                 self.initial_state,
                 seed,
+                limits,
             )?;
             return Ok(ReducedDensityMatrix {
                 qubits: qubits.to_vec(),
@@ -884,6 +948,7 @@ impl<'c> Simulate<'c, Seeded> {
             seed,
             diagnostic,
             qubits.len(),
+            limits,
         )?;
         let metadata = backend_metadata(&*backend);
         ensure_exact_result(self.require_exact, &metadata)?;
@@ -913,12 +978,13 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn entanglement_entropy(self, subsystem: &[usize]) -> Result<EntropyResult> {
         self.reject_saves("entanglement_entropy")?;
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         let diagnostic = Diagnostic::Entropy;
         let terminal = diagnostic.terminal();
         crate::backend::schmidt::validate_subsystem(subsystem, self.circuit.num_qubits)?;
         require_unitary_circuit(&self.kind, self.circuit, "entanglement entropy requires")?;
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if let Some(noise_model) = self.noise_model {
             reject_readout_at(self.circuit, noise_model, terminal)?;
@@ -929,6 +995,7 @@ impl<'c> Simulate<'c, Seeded> {
                 Some(noise_model),
                 self.initial_state,
                 seed,
+                limits,
             )?;
             return Ok(EntropyResult {
                 subsystem: subsystem.to_vec(),
@@ -944,6 +1011,7 @@ impl<'c> Simulate<'c, Seeded> {
             seed,
             diagnostic,
             subsystem.len(),
+            limits,
         )?;
         let metadata = backend_metadata(&*backend);
         ensure_exact_result(self.require_exact, &metadata)?;
@@ -1011,10 +1079,11 @@ impl<'c> Simulate<'c, Seeded> {
     /// its provenance.
     fn overlap_side(self, diagnostic: Diagnostic) -> Result<(Box<dyn Backend>, RunMetadata)> {
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         let terminal = diagnostic.terminal();
         require_unitary_circuit(&self.kind, self.circuit, "a state overlap requires")?;
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if self.noise_model.is_some() {
             return Err(PrismError::IncompatibleBackend {
@@ -1033,6 +1102,7 @@ impl<'c> Simulate<'c, Seeded> {
             seed,
             diagnostic,
             0,
+            limits,
         )?;
         let metadata = backend_metadata(&*backend);
         ensure_exact_result(self.require_exact, &metadata)?;
@@ -1055,8 +1125,9 @@ impl<'c> Simulate<'c, Seeded> {
     ) -> Result<gradient::ExpectationGradient> {
         self.reject_saves("expectation_gradient")?;
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if self.noise_model.is_some() {
             return Err(PrismError::IncompatibleBackend {
@@ -1083,7 +1154,7 @@ impl<'c> Simulate<'c, Seeded> {
                         .into(),
             });
         }
-        gradient::run_expectation_gradient(self.circuit, hamiltonian, params, seed)
+        gradient::expectation_gradient_within(self.circuit, hamiltonian, params, seed, limits)
     }
 
     /// Compute `⟨H⟩` and its gradient by the parameter-shift rule on the
@@ -1108,8 +1179,9 @@ impl<'c> Simulate<'c, Seeded> {
     ) -> Result<gradient::ExpectationGradient> {
         self.reject_saves("expectation_gradient_shift")?;
         let seed = self.seed_value();
+        let limits = &self.resolved_limits();
         if self.require_exact {
-            reject_approximate_route(&self.kind, self.circuit)?;
+            reject_approximate_route(&self.kind, self.circuit, limits)?;
         }
         if self.noise_model.is_some()
             && !self.kind.is_density_matrix()
@@ -1132,6 +1204,7 @@ impl<'c> Simulate<'c, Seeded> {
             self.noise_model,
             self.initial_state,
             seed,
+            self.limits.as_ref(),
         )
     }
 }
@@ -1166,6 +1239,7 @@ pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
         noise_model: None,
         initial_state: None,
         require_exact: false,
+        limits: None,
     }
 }
 
@@ -1313,12 +1387,14 @@ fn backend_from_initial_state(
     circuit: &Circuit,
     state: StartState<'_>,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Box<dyn Backend>> {
     if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit)?;
+        validate_explicit_backend(kind, circuit, limits)?;
     }
     check_initial_state_len(state, circuit.num_qubits)?;
-    let mut backend = initial_state_plan(kind, circuit.num_qubits, state)?.build(seed);
+    let mut backend =
+        initial_state_plan(kind, circuit.num_qubits, state, limits)?.build(seed, limits);
     state.load(&mut *backend, circuit.num_classical_bits)?;
     Ok(backend)
 }
@@ -1399,8 +1475,9 @@ fn run_from_initial_state(
     state: StartState<'_>,
     seed: u64,
     opts: &SimOptions,
+    limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
-    let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
+    let mut backend = backend_from_initial_state(kind, circuit, state, seed, limits)?;
     let saves = apply_fused_circuit(&mut *backend, circuit)?;
 
     let probabilities = if opts.probabilities {
@@ -1425,11 +1502,12 @@ fn shots_from_initial_state(
     state: StartState<'_>,
     num_shots: usize,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
     let bits = circuit.num_classical_bits;
     if circuit.has_terminal_measurements_only() && !circuit.has_resets() {
         let stripped = circuit.without_measurements();
-        let mut backend = backend_from_initial_state(kind, &stripped, state, seed)?;
+        let mut backend = backend_from_initial_state(kind, &stripped, state, seed, limits)?;
         apply_fused_circuit(&mut *backend, &stripped)?;
         let meas_map = circuit.measurement_map();
         let shots = if backend.supports_native_sampling() {
@@ -1449,11 +1527,11 @@ fn shots_from_initial_state(
     // Plan, expansion, and fusion are shot independent, so they are hoisted out
     // of the replay loop, matching `run_shots_per_shot`.
     if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit)?;
+        validate_explicit_backend(kind, circuit, limits)?;
     }
     check_initial_state_len(state, circuit.num_qubits)?;
-    let plan = initial_state_plan(kind, circuit.num_qubits, state)?;
-    let probe = plan.build(seed);
+    let plan = initial_state_plan(kind, circuit.num_qubits, state, limits)?;
+    let probe = plan.build(seed, limits);
     let expanded = expand_for_backend(&*probe, circuit);
     let fused = fuse_for_backend(&*probe, &expanded);
 
@@ -1467,7 +1545,7 @@ fn shots_from_initial_state(
         kind,
         &states,
         |shot_seed| {
-            let mut backend = plan.build(shot_seed);
+            let mut backend = plan.build(shot_seed, limits);
             state.load(&mut *backend, circuit.num_classical_bits)?;
             backend.apply_instructions(&fused.instructions)?;
             Ok((
@@ -1483,8 +1561,9 @@ fn marginals_from_initial_state(
     circuit: &Circuit,
     state: StartState<'_>,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<MarginalsResult> {
-    let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
+    let mut backend = backend_from_initial_state(kind, circuit, state, seed, limits)?;
     apply_fused_without_saves(&mut *backend, circuit, "marginals")?;
     if backend.supports_pauli_expectation() {
         return marginals_from_pauli_expectations(&*backend, circuit.num_qubits);
@@ -1501,6 +1580,7 @@ fn expectation_values_from_initial_state(
     state: StartState<'_>,
     observables: &[Vec<PauliTerm>],
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ExpectationResult> {
     // Before the run, matching the dense statevector path.
     let masks = observables
@@ -1508,7 +1588,7 @@ fn expectation_values_from_initial_state(
         .map(|obs| pauli_masks(obs, circuit.num_qubits))
         .collect::<Result<Vec<_>>>()?;
 
-    let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
+    let mut backend = backend_from_initial_state(kind, circuit, state, seed, limits)?;
     apply_fused_without_saves(&mut *backend, circuit, "expectation_values")?;
     let metadata = backend_metadata(&*backend);
     if backend.supports_pauli_expectation() {
@@ -1539,8 +1619,12 @@ fn ensure_exact_result(require_exact: bool, metadata: &RunMetadata) -> Result<()
 }
 
 /// Reject an approximate route for a caller that opted out of one.
-fn reject_approximate_route(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
-    reject_predicted_route(approximate_route_name(kind, circuit, false))
+fn reject_approximate_route(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    limits: &ResolvedLimits,
+) -> Result<()> {
+    reject_predicted_route(approximate_route_name(kind, circuit, false, limits))
 }
 
 /// The engine is named in the error, since a caller who asked for exactness
@@ -1597,6 +1681,7 @@ fn exact_noisy_probabilities(
     noise_model: &noise::NoiseModel,
     initial_state: Option<StartState<'_>>,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Probabilities> {
     Ok(Probabilities::Dense(noise::density_matrix_probabilities(
         kind,
@@ -1604,6 +1689,7 @@ fn exact_noisy_probabilities(
         noise_model,
         initial_state,
         seed,
+        limits,
     )?))
 }
 
@@ -1687,6 +1773,8 @@ fn execute(backend: &mut dyn Backend, circuit: &Circuit, opts: &SimOptions) -> R
 /// looks Clifford).
 pub(crate) struct PreparedRoute {
     plan: BackendPlan,
+    /// Resolved when the route was settled; every point runs under them.
+    limits: ResolvedLimits,
     supports_fused: bool,
     fusion_state_qubits: usize,
     /// Backend held across points. `init` reuses its state buffer when the
@@ -1738,7 +1826,7 @@ impl PreparedRoute {
     /// Apply `circuit` verbatim, with no further fusion.
     pub(crate) fn run(&mut self, circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
         if self.draws_randomness {
-            let mut backend = self.plan.build(seed);
+            let mut backend = self.plan.build(seed, &self.limits);
             return execute_circuit(&mut *backend, circuit, &SimOptions::default());
         }
         execute_circuit(self.held_backend(seed), circuit, &SimOptions::default())
@@ -1756,7 +1844,7 @@ impl PreparedRoute {
         match self.values {
             PreparedValues::Simulate => return None,
             PreparedValues::TensorFirst => {
-                if let Some(result) = tensor_route_expectations(bound, observables) {
+                if let Some(result) = tensor_route_expectations(bound, observables, &self.limits) {
                     return Some(result.map(ExpectationResult::into_values));
                 }
             }
@@ -1790,7 +1878,7 @@ impl PreparedRoute {
 
     fn held_backend(&mut self, seed: u64) -> &mut dyn Backend {
         if !matches!(&self.held, Some((s, _)) if *s == seed) {
-            self.held = Some((seed, self.plan.build(seed)));
+            self.held = Some((seed, self.plan.build(seed, &self.limits)));
         }
         let (_, backend) = self.held.as_mut().expect("just built");
         &mut **backend
@@ -1835,20 +1923,26 @@ impl PreparedRoute {
 /// Settle the route for `template`, or `None` when it takes one that reshapes
 /// execution (decomposition, stabilizer rank, temporal Clifford) or expands
 /// `QftBlock`, where a caller-supplied stream has nowhere to go.
-pub(crate) fn prepared_route(kind: &BackendKind, template: &Circuit) -> Option<PreparedRoute> {
-    if !kind.is_auto() && validate_explicit_backend(kind, template).is_err() {
+pub(crate) fn prepared_route(
+    kind: &BackendKind,
+    template: &Circuit,
+    request: Option<&Limits>,
+) -> Option<PreparedRoute> {
+    let limits = &ResolvedLimits::resolve(request);
+    if !kind.is_auto() && validate_explicit_backend(kind, template, limits).is_err() {
         return None;
     }
     let ProbabilityRoute::Direct {
         has_partial_independence,
-    } = plan_probability_route(kind, template)
+    } = plan_probability_route(kind, template, limits)
     else {
         return None;
     };
-    let ExecutionPlan::Backend(plan) = resolve(kind, template, has_partial_independence) else {
+    let ExecutionPlan::Backend(plan) = resolve(kind, template, has_partial_independence, limits)
+    else {
         return None;
     };
-    let probe = plan.build(0);
+    let probe = plan.build(0, limits);
     let has_qft_block = crate::circuit::any_gate(&template.instructions, &mut |gate| {
         matches!(gate, crate::gates::Gate::QftBlock { .. })
     });
@@ -1861,11 +1955,12 @@ pub(crate) fn prepared_route(kind: &BackendKind, template: &Circuit) -> Option<P
     if has_pauli_rot && !probe.supports_pauli_rotation() {
         return None;
     }
-    let (values, observable) = prepared_expectations(kind, template, &*probe);
+    let (values, observable) = prepared_expectations(kind, template, &*probe, limits);
     Some(PreparedRoute {
         supports_fused: probe.supports_fused_gates(),
         fusion_state_qubits: probe.fusion_state_qubits(template.num_qubits),
         plan,
+        limits: *limits,
         held: None,
         draws_randomness: draws_randomness(template),
         values,
@@ -1886,6 +1981,7 @@ fn prepared_expectations(
     kind: &BackendKind,
     template: &Circuit,
     probe: &dyn Backend,
+    limits: &ResolvedLimits,
 ) -> (PreparedValues, PreparedObservable) {
     let clifford_route =
         (kind.is_auto() || kind.is_stabilizer_family()) && template.is_clifford_only();
@@ -1896,7 +1992,7 @@ fn prepared_expectations(
     {
         return (PreparedValues::Simulate, PreparedObservable::Simulate);
     }
-    let fits_dense = template.num_qubits <= max_statevector_qubits();
+    let fits_dense = template.num_qubits <= limits.statevector_qubits.value;
     let values = if kind.is_auto() && fits_dense && template.num_qubits >= TENSOR_ROUTE_MIN_QUBITS {
         PreparedValues::TensorFirst
     } else {
@@ -2023,13 +2119,23 @@ pub(crate) fn backend_metadata(backend: &dyn Backend) -> RunMetadata {
 
 #[cfg(test)]
 fn run(circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
-    run_with(BackendKind::Auto, circuit, seed)
+    run_with(
+        BackendKind::Auto,
+        circuit,
+        seed,
+        &ResolvedLimits::process_default(),
+    )
 }
 
 /// Build the backend `kind` selects and run the circuit on it. For a
 /// pre-constructed backend, use [`run_on`].
-pub(crate) fn run_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
-    run_with_internal(kind, circuit, seed, SimOptions::default())
+pub(crate) fn run_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<RunOutcome> {
+    run_with_internal(kind, circuit, seed, SimOptions::default(), limits)
 }
 
 fn run_with_internal(
@@ -2037,9 +2143,10 @@ fn run_with_internal(
     circuit: &Circuit,
     seed: u64,
     opts: SimOptions,
+    limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
     if !kind.is_auto() {
-        validate_explicit_backend(&kind, circuit)?;
+        validate_explicit_backend(&kind, circuit, limits)?;
     }
     // The distributed backend runs the whole circuit across ranks in lockstep.
     // Subsystem decomposition, Clifford+T, and temporal-Clifford shortcuts all
@@ -2047,18 +2154,18 @@ fn run_with_internal(
     // calls every rank must issue in the same order. Dispatch directly.
     #[cfg(feature = "distributed")]
     if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
-        let mut backend = resolve_backend(&kind, circuit, false).build(seed);
+        let mut backend = resolve_backend(&kind, circuit, false, limits).build(seed, limits);
         if opts.probabilities {
             // The gather cap follows from the register width alone, so a
             // register past it is rejected here rather than after the run has
             // been paid for. Same check `probabilities()` applies, so the
             // message does not depend on where it surfaced.
-            crate::backend::dense_probability_len(backend.name(), circuit.num_qubits)?;
+            crate::backend::dense_probability_len(backend.name(), circuit.num_qubits, limits)?;
         }
         return execute(&mut *backend, circuit, &opts);
     }
-    let route = plan_probability_route(&kind, circuit);
-    let outcome = run_route(&kind, circuit, seed, opts, &route)?;
+    let route = plan_probability_route(&kind, circuit, limits);
+    let outcome = run_route(&kind, circuit, seed, opts, &route, limits)?;
     ensure_saves_recorded(circuit, &outcome)?;
     Ok(outcome)
 }
@@ -2071,11 +2178,14 @@ fn run_route(
     seed: u64,
     opts: SimOptions,
     route: &ProbabilityRoute,
+    limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
     match route {
         ProbabilityRoute::FactoredStabilizer => {
             let mut backend =
-                crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed);
+                crate::backend::factored_stabilizer::FactoredStabilizerBackend::with_limits(
+                    seed, limits,
+                );
             let fs_opts = if circuit.num_qubits > 64 {
                 SimOptions {
                     probabilities: false,
@@ -2086,17 +2196,17 @@ fn run_route(
             execute(&mut backend, circuit, &fs_opts)
         }
         ProbabilityRoute::Decomposed(components) => {
-            run_decomposed(kind, components, circuit, seed, &opts)
+            run_decomposed(kind, components, circuit, seed, &opts, limits)
         }
         ProbabilityRoute::TemporalClifford {
             has_partial_independence,
-        } => match plan_temporal_clifford(kind, circuit) {
+        } => match plan_temporal_clifford(kind, circuit, limits) {
             Some(tc) => run_temporal_clifford(&tc, seed, opts.probabilities),
-            None => run_direct(kind, circuit, seed, opts, *has_partial_independence),
+            None => run_direct(kind, circuit, seed, opts, *has_partial_independence, limits),
         },
         ProbabilityRoute::Direct {
             has_partial_independence,
-        } => run_direct(kind, circuit, seed, opts, *has_partial_independence),
+        } => run_direct(kind, circuit, seed, opts, *has_partial_independence, limits),
     }
 }
 
@@ -2106,10 +2216,11 @@ fn run_direct(
     seed: u64,
     opts: SimOptions,
     has_partial_independence: bool,
+    limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
-    match resolve(kind, circuit, has_partial_independence) {
+    match resolve(kind, circuit, has_partial_independence, limits) {
             ExecutionPlan::Backend(plan) => {
-                let mut backend = plan.build(seed);
+                let mut backend = plan.build(seed, limits);
                 execute(&mut *backend, circuit, &opts)
             }
             ExecutionPlan::StabilizerRank => {
@@ -2192,6 +2303,7 @@ pub fn run_on_state(
 /// Returns the error of the first failing circuit in list order. A caller that
 /// wants every circuit's result should call this per circuit.
 pub fn run_batch(circuits: &[Circuit], kind: BackendKind, seed: u64) -> Result<Vec<RunOutcome>> {
+    let limits = &ResolvedLimits::process_default();
     #[cfg(feature = "parallel")]
     if circuits.len() > 1
         && circuits
@@ -2203,7 +2315,7 @@ pub fn run_batch(circuits: &[Circuit], kind: BackendKind, seed: u64) -> Result<V
             .par_iter()
             .map_init(
                 || None,
-                |held, circuit| run_batch_entry(&kind, circuit, seed, held),
+                |held, circuit| run_batch_entry(&kind, circuit, seed, held, limits),
             )
             .collect();
         return outcomes.into_iter().collect();
@@ -2212,7 +2324,7 @@ pub fn run_batch(circuits: &[Circuit], kind: BackendKind, seed: u64) -> Result<V
     let mut held = None;
     circuits
         .iter()
-        .map(|circuit| run_batch_entry(&kind, circuit, seed, &mut held))
+        .map(|circuit| run_batch_entry(&kind, circuit, seed, &mut held, limits))
         .collect()
 }
 
@@ -2223,13 +2335,14 @@ fn run_batch_entry(
     circuit: &Circuit,
     seed: u64,
     held: &mut HeldBackend,
+    limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
-    let Some(plan) = batch_plan(kind, circuit) else {
+    let Some(plan) = batch_plan(kind, circuit, limits) else {
         *held = None;
-        return run_with_internal(kind.clone(), circuit, seed, SimOptions::default());
+        return run_with_internal(kind.clone(), circuit, seed, SimOptions::default(), limits);
     };
     if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit)?;
+        validate_explicit_backend(kind, circuit, limits)?;
     }
 
     let reusable = matches!(
@@ -2237,7 +2350,7 @@ fn run_batch_entry(
         Some((p, width, _)) if *width == circuit.num_qubits && dispatch::same_plan(p, &plan)
     );
     if !reusable {
-        *held = Some((plan.clone(), circuit.num_qubits, plan.build(seed)));
+        *held = Some((plan.clone(), circuit.num_qubits, plan.build(seed, limits)));
     }
     let (_, _, backend) = held.as_mut().expect("just built");
     execute(&mut **backend, circuit, &SimOptions::default())
@@ -2319,17 +2432,21 @@ fn bound_to_one_context(kind: &BackendKind) -> bool {
 ///
 /// A circuit that draws randomness needs a fresh RNG to match its solo run, and
 /// anything that is not a direct backend route has no single plan to hold.
-fn batch_plan(kind: &BackendKind, circuit: &Circuit) -> Option<dispatch::BackendPlan> {
+fn batch_plan(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    limits: &ResolvedLimits,
+) -> Option<dispatch::BackendPlan> {
     if draws_randomness(circuit) {
         return None;
     }
     let ProbabilityRoute::Direct {
         has_partial_independence,
-    } = plan_probability_route(kind, circuit)
+    } = plan_probability_route(kind, circuit, limits)
     else {
         return None;
     };
-    match resolve(kind, circuit, has_partial_independence) {
+    match resolve(kind, circuit, has_partial_independence, limits) {
         ExecutionPlan::Backend(plan) => Some(plan),
         _ => None,
     }
@@ -2357,7 +2474,13 @@ pub fn run_qasm(qasm: &str, seed: u64) -> Result<RunOutcome> {
 
 #[cfg(test)]
 fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
-    run_shots_with(BackendKind::Auto, circuit, num_shots, seed)
+    run_shots_with(
+        BackendKind::Auto,
+        circuit,
+        num_shots,
+        seed,
+        &ResolvedLimits::process_default(),
+    )
 }
 
 pub(crate) fn supports_compiled_measurement_sampling(circuit: &Circuit) -> bool {
@@ -2492,7 +2615,11 @@ enum ProbabilityRoute {
     },
 }
 
-fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityRoute {
+fn plan_probability_route(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    limits: &ResolvedLimits,
+) -> ProbabilityRoute {
     let (decompose, has_partial_independence) = analyze_independence(circuit);
     if let Some((components, clifford_only)) = decompose {
         let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
@@ -2505,7 +2632,7 @@ fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityR
         }
         return ProbabilityRoute::Decomposed(components);
     }
-    if has_temporal_clifford_opportunity(kind, circuit) {
+    if has_temporal_clifford_opportunity(kind, circuit, limits) {
         return ProbabilityRoute::TemporalClifford {
             has_partial_independence,
         };
@@ -2517,18 +2644,22 @@ fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityR
 
 /// True when the auto probability route falls through to direct family
 /// resolution and that resolver picks the CPU statevector.
-fn auto_terminal_statevector_candidate(circuit: &Circuit) -> bool {
-    match plan_probability_route(&BackendKind::Auto, circuit) {
+fn auto_terminal_statevector_candidate(circuit: &Circuit, limits: &ResolvedLimits) -> bool {
+    match plan_probability_route(&BackendKind::Auto, circuit, limits) {
         ProbabilityRoute::Direct {
             has_partial_independence,
-        } => auto_selects_cpu_statevector(circuit, has_partial_independence),
+        } => auto_selects_cpu_statevector(circuit, has_partial_independence, limits),
         _ => false,
     }
 }
 
-fn terminal_statevector_candidate(kind: &BackendKind, circuit: &Circuit) -> bool {
+fn terminal_statevector_candidate(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    limits: &ResolvedLimits,
+) -> bool {
     if kind.is_auto() {
-        return auto_terminal_statevector_candidate(circuit);
+        return auto_terminal_statevector_candidate(circuit, limits);
     }
     match kind {
         BackendKind::Statevector => true,
@@ -2542,6 +2673,7 @@ fn try_terminal_statevector_backend(
     kind: &BackendKind,
     circuit: &Circuit,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Option<TerminalStatevector>> {
     if !circuit.has_terminal_measurements_only() {
         return Ok(None);
@@ -2553,12 +2685,12 @@ fn try_terminal_statevector_backend(
     }
 
     let stripped = circuit.without_measurements();
-    if !terminal_statevector_candidate(kind, &stripped) {
+    if !terminal_statevector_candidate(kind, &stripped, limits) {
         return Ok(None);
     }
 
     let accel = accel_for(kind, Family::Statevector, stripped.num_qubits);
-    let mut backend = build_statevector(&accel, seed);
+    let mut backend = build_statevector(&accel, seed, limits);
     let expanded = expand_for_backend(&backend, &stripped);
     let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
@@ -2585,24 +2717,27 @@ fn try_native_terminal_backend(
     kind: &BackendKind,
     stripped: &Circuit,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Option<Box<dyn Backend>>> {
     if !kind.is_auto() {
-        validate_explicit_backend(kind, stripped)?;
+        validate_explicit_backend(kind, stripped, limits)?;
     }
-    let (decomposed, has_partial_independence) = match plan_probability_route(kind, stripped) {
-        ProbabilityRoute::Direct {
-            has_partial_independence,
-        } => (false, has_partial_independence),
-        ProbabilityRoute::Decomposed(_) => (true, false),
-        _ => return Ok(None),
-    };
-    let ExecutionPlan::Backend(plan) = resolve(kind, stripped, has_partial_independence) else {
+    let (decomposed, has_partial_independence) =
+        match plan_probability_route(kind, stripped, limits) {
+            ProbabilityRoute::Direct {
+                has_partial_independence,
+            } => (false, has_partial_independence),
+            ProbabilityRoute::Decomposed(_) => (true, false),
+            _ => return Ok(None),
+        };
+    let ExecutionPlan::Backend(plan) = resolve(kind, stripped, has_partial_independence, limits)
+    else {
         return Ok(None);
     };
     if decomposed && !matches!(plan, BackendPlan::ProductState) {
         return Ok(None);
     }
-    let mut backend = plan.build(seed);
+    let mut backend = plan.build(seed, limits);
     if !backend.supports_native_sampling() {
         return Ok(None);
     }
@@ -2627,24 +2762,27 @@ fn try_native_marginal_backend(
     kind: &BackendKind,
     circuit: &Circuit,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Option<Box<dyn Backend>>> {
     if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit)?;
+        validate_explicit_backend(kind, circuit, limits)?;
     }
-    let (decomposed, has_partial_independence) = match plan_probability_route(kind, circuit) {
+    let (decomposed, has_partial_independence) = match plan_probability_route(kind, circuit, limits)
+    {
         ProbabilityRoute::Direct {
             has_partial_independence,
         } => (false, has_partial_independence),
         ProbabilityRoute::Decomposed(_) => (true, false),
         _ => return Ok(None),
     };
-    let ExecutionPlan::Backend(plan) = resolve(kind, circuit, has_partial_independence) else {
+    let ExecutionPlan::Backend(plan) = resolve(kind, circuit, has_partial_independence, limits)
+    else {
         return Ok(None);
     };
     if decomposed && !matches!(plan, BackendPlan::ProductState) {
         return Ok(None);
     }
-    let mut backend = plan.build(seed);
+    let mut backend = plan.build(seed, limits);
     if !backend.supports_pauli_expectation() {
         return Ok(None);
     }
@@ -2750,6 +2888,7 @@ fn prepare_shot_source(
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ShotSource> {
     if should_use_compiled_clifford_sampling(kind, circuit, num_shots) {
         return Ok(ShotSource::Compiled {
@@ -2773,7 +2912,9 @@ fn prepare_shot_source(
         return Ok(ShotSource::StabilizerRank);
     }
 
-    if let Some((backend, meas_map)) = try_terminal_statevector_backend(kind, circuit, seed)? {
+    if let Some((backend, meas_map)) =
+        try_terminal_statevector_backend(kind, circuit, seed, limits)?
+    {
         return Ok(ShotSource::TerminalStatevector {
             backend: Box::new(backend),
             meas_map,
@@ -2791,13 +2932,14 @@ fn prepare_shot_source(
         || (kind.is_density_matrix() && circuit.has_terminal_measurements_under_reset_channel())
     {
         let stripped = circuit.without_measurements();
-        if let Some(backend) = try_native_terminal_backend(kind, &stripped, seed)? {
+        if let Some(backend) = try_native_terminal_backend(kind, &stripped, seed, limits)? {
             return Ok(ShotSource::Native {
                 backend,
                 meas_map: circuit.measurement_map(),
             });
         }
-        let result = run_with_internal(kind.clone(), &stripped, seed, SimOptions::default())?;
+        let result =
+            run_with_internal(kind.clone(), &stripped, seed, SimOptions::default(), limits)?;
         if let Some(probs) = result.probabilities {
             return Ok(ShotSource::TerminalProbabilities {
                 probs,
@@ -2812,7 +2954,14 @@ fn prepare_shot_source(
 
 #[cfg(test)]
 fn run_counts(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<HashMap<Vec<u64>, u64>> {
-    run_counts_with(BackendKind::Auto, circuit, num_shots, seed).map(|(counts, _)| counts)
+    run_counts_with(
+        BackendKind::Auto,
+        circuit,
+        num_shots,
+        seed,
+        &ResolvedLimits::process_default(),
+    )
+    .map(|(counts, _)| counts)
 }
 
 /// Execute a circuit multiple times with explicit backend selection and return counts.
@@ -2826,16 +2975,17 @@ fn run_counts(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<HashMap<
 ///
 /// Optimized terminal statevector paths sample counts directly from the output
 /// distribution. The distribution is equivalent to materializing shots first,
-/// but finite seeded counts may differ from `run_shots_with(...).counts()`.
+/// but finite seeded counts may differ from `run_shots_with(..., limits).counts()`.
 pub(crate) fn run_counts_with(
     kind: BackendKind,
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<(HashMap<Vec<u64>, u64>, RunMetadata)> {
     #[cfg(feature = "distributed")]
     if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
-        let shots = run_shots_with(kind, circuit, num_shots, seed)?;
+        let shots = run_shots_with(kind, circuit, num_shots, seed, limits)?;
         return Ok((shots.counts(), shots.metadata));
     }
 
@@ -2843,9 +2993,16 @@ pub(crate) fn run_counts_with(
     let circuit = folded.as_ref();
 
     let bits = circuit.num_classical_bits;
-    let source = prepare_shot_source(&kind, circuit, num_shots, seed)?;
+    let source = prepare_shot_source(&kind, circuit, num_shots, seed, limits)?;
     let Some(metadata) = source.metadata() else {
-        let shots = run_shots_per_shot(kind, circuit, num_shots, seed, ShotRows::CountedOnly)?;
+        let shots = run_shots_per_shot(
+            kind,
+            circuit,
+            num_shots,
+            seed,
+            ShotRows::CountedOnly,
+            limits,
+        )?;
         return Ok((shots.counts(), shots.metadata));
     };
     let counts = match source {
@@ -2871,7 +3028,7 @@ pub(crate) fn run_counts_with(
         ShotSource::TerminalStatevector { backend, meas_map } => {
             if backend.is_gpu_resident() {
                 let probs = backend.probabilities()?;
-                sample_counts_from_probs(&probs, &meas_map, bits, num_shots, seed)
+                sample_counts_from_probs(&probs, &meas_map, bits, num_shots, seed, limits)
             } else {
                 sample_counts_from_state(
                     backend.state_vector(),
@@ -2880,6 +3037,7 @@ pub(crate) fn run_counts_with(
                     bits,
                     num_shots,
                     seed,
+                    limits,
                 )
             }
         }
@@ -2907,12 +3065,23 @@ fn counts_of(shots: Vec<Vec<bool>>, num_classical_bits: usize) -> HashMap<Vec<u6
 
 #[cfg(test)]
 fn run_marginals(circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
-    run_marginals_result_with(BackendKind::Auto, circuit, seed).map(MarginalsResult::into_vec)
+    run_marginals_result_with(
+        BackendKind::Auto,
+        circuit,
+        seed,
+        &ResolvedLimits::process_default(),
+    )
+    .map(MarginalsResult::into_vec)
 }
 
 #[cfg(test)]
-fn run_marginals_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
-    run_marginals_result_with(kind, circuit, seed).map(MarginalsResult::into_vec)
+fn run_marginals_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<Vec<(f64, f64)>> {
+    run_marginals_result_with(kind, circuit, seed, limits).map(MarginalsResult::into_vec)
 }
 
 /// Per-qubit marginals from native single-qubit Z expectations, for a backend
@@ -2986,6 +3155,7 @@ fn run_marginals_result_with(
     kind: BackendKind,
     circuit: &Circuit,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<MarginalsResult> {
     let n = circuit.num_qubits;
 
@@ -3019,7 +3189,7 @@ fn run_marginals_result_with(
             epsilon: 0.0,
             max_terms: 0,
         };
-        let spd = if n <= max_statevector_qubits() {
+        let spd = if n <= limits.statevector_qubits.value {
             unified_pauli::run_spd_exact_within(circuit, auto_spd_work_budget(circuit))?
         } else {
             Some(unified_pauli::run_spd_with(circuit, &exact)?)
@@ -3037,9 +3207,10 @@ fn run_marginals_result_with(
     #[cfg(feature = "distributed")]
     if let BackendKind::StatevectorDistributed { context } = &kind {
         let mut backend =
-            crate::backend::distributed_statevector::DistributedStatevectorBackend::new(
+            crate::backend::distributed_statevector::DistributedStatevectorBackend::with_limits(
                 context.clone(),
                 seed,
+                limits,
             );
         execute(&mut backend, circuit, &SimOptions::classical_only())?;
         return marginals_from_pauli_expectations(&backend, n);
@@ -3049,10 +3220,10 @@ fn run_marginals_result_with(
     // tensor routes the expectation terminal takes.
     if kind.is_auto() && !has_nonunitary_or_classical_ops(circuit) {
         let observables: Vec<Vec<PauliTerm>> = (0..n).map(|q| vec![PauliTerm::z(q)]).collect();
-        let tensor_route = if n <= max_statevector_qubits() {
-            tensor_route_expectations(circuit, &observables)
+        let tensor_route = if n <= limits.statevector_qubits.value {
+            tensor_route_expectations(circuit, &observables, limits)
         } else {
-            tensor_route_over_mps(circuit, &observables)
+            tensor_route_over_mps(circuit, &observables, limits)
         };
         if let Some(result) = tensor_route {
             let result = result?;
@@ -3063,11 +3234,11 @@ fn run_marginals_result_with(
         }
     }
 
-    if let Some(backend) = try_native_marginal_backend(&kind, circuit, seed)? {
+    if let Some(backend) = try_native_marginal_backend(&kind, circuit, seed, limits)? {
         return marginals_from_pauli_expectations(&*backend, n);
     }
 
-    let result = run_with(kind, circuit, seed)?;
+    let result = run_with(kind, circuit, seed, limits)?;
     if let Some(probs) = &result.probabilities {
         Ok(MarginalsResult {
             marginals: probs.marginals(),
@@ -3111,7 +3282,8 @@ pub fn run_expectation_values(
     observables: &[Vec<PauliTerm>],
     seed: u64,
 ) -> Result<Vec<f64>> {
-    run_expectation_values_with(BackendKind::Auto, circuit, observables, seed)
+    let limits = &ResolvedLimits::process_default();
+    run_expectation_values_with(BackendKind::Auto, circuit, observables, seed, limits)
 }
 
 fn run_expectation_values_with(
@@ -3119,8 +3291,9 @@ fn run_expectation_values_with(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Vec<f64>> {
-    run_expectation_values_reported(kind, circuit, observables, seed)
+    run_expectation_values_reported(kind, circuit, observables, seed, limits)
         .map(ExpectationResult::into_values)
 }
 
@@ -3129,6 +3302,7 @@ fn run_expectation_values_reported(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ExpectationResult> {
     require_unitary_circuit(&kind, circuit, "expectation values require")?;
 
@@ -3176,16 +3350,16 @@ fn run_expectation_values_reported(
                     }),
                 ))
             } else if kind.is_auto() {
-                if circuit.num_qubits > max_statevector_qubits() {
-                    if let Some(result) = tensor_route_over_mps(circuit, observables) {
+                if circuit.num_qubits > limits.statevector_qubits.value {
+                    if let Some(result) = tensor_route_over_mps(circuit, observables, limits) {
                         return result;
                     }
-                    return expectation_values_native(&kind, circuit, observables, seed);
+                    return expectation_values_native(&kind, circuit, observables, seed, limits);
                 }
-                if let Some(result) = tensor_route_expectations(circuit, observables) {
+                if let Some(result) = tensor_route_expectations(circuit, observables, limits) {
                     return result;
                 }
-                expectation_values_statevector(&kind, circuit, observables, seed)
+                expectation_values_statevector(&kind, circuit, observables, seed, limits)
             } else {
                 Err(PrismError::IncompatibleBackend {
                     backend: format!("{kind:?}"),
@@ -3194,27 +3368,30 @@ fn run_expectation_values_reported(
             }
         }
         BackendKind::Statevector => {
-            expectation_values_statevector(&kind, circuit, observables, seed)
+            expectation_values_statevector(&kind, circuit, observables, seed, limits)
         }
         #[cfg(feature = "gpu")]
         BackendKind::StatevectorGpu { .. } => {
-            expectation_values_statevector(&kind, circuit, observables, seed)
+            expectation_values_statevector(&kind, circuit, observables, seed, limits)
         }
         // The scalar network prunes each observable to its light cone, which
         // the backend's stored network cannot: it no longer knows its gates.
         BackendKind::TensorNetwork => {
-            validate_explicit_backend(&kind, circuit)?;
+            validate_explicit_backend(&kind, circuit, limits)?;
             for observable in observables {
                 validate_observable(observable, circuit.num_qubits)?;
             }
-            let values =
-                crate::backend::tensornetwork::expectations_zero_state(circuit, observables)?;
+            let values = crate::backend::tensornetwork::expectations_zero_state(
+                circuit,
+                observables,
+                limits,
+            )?;
             Ok(analytic_expectations(
                 values,
                 RunMetadata::exact(ResolvedBackend::TensorNetwork),
             ))
         }
-        other => expectation_values_native(other, circuit, observables, seed),
+        other => expectation_values_native(other, circuit, observables, seed, limits),
     }
 }
 
@@ -3251,7 +3428,8 @@ pub fn run_observable_expectation(
     observable: &PauliObservable,
     seed: u64,
 ) -> Result<ObservableExpectation> {
-    run_observable_expectation_reported(BackendKind::Auto, circuit, observable, seed)
+    let limits = &ResolvedLimits::process_default();
+    run_observable_expectation_reported(BackendKind::Auto, circuit, observable, seed, limits)
 }
 
 fn run_observable_expectation_reported(
@@ -3259,6 +3437,7 @@ fn run_observable_expectation_reported(
     circuit: &Circuit,
     observable: &PauliObservable,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ObservableExpectation> {
     require_unitary_circuit(&kind, circuit, "expectation values require")?;
 
@@ -3269,15 +3448,15 @@ fn run_observable_expectation_reported(
         _ => {
             kind.is_auto()
                 && !circuit.is_clifford_only()
-                && circuit.num_qubits <= max_statevector_qubits()
+                && circuit.num_qubits <= limits.statevector_qubits.value
         }
     };
     if grouped_statevector {
-        return grouped_expectation_statevector(&kind, circuit, observable, seed);
+        return grouped_expectation_statevector(&kind, circuit, observable, seed, limits);
     }
 
     let result =
-        run_expectation_values_reported(kind, circuit, &observable_vecs(observable), seed)?;
+        run_expectation_values_reported(kind, circuit, &observable_vecs(observable), seed, limits)?;
     Ok(weighted_observable_result(
         observable,
         &result.values,
@@ -3335,6 +3514,7 @@ fn grouped_expectation_statevector(
     circuit: &Circuit,
     observable: &PauliObservable,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ObservableExpectation> {
     let terms = observable.terms();
     // Validate before the 2^n simulation so bad observables fail cheaply. The
@@ -3345,7 +3525,7 @@ fn grouped_expectation_statevector(
     }
 
     let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
-    let mut backend = build_statevector(&accel, seed);
+    let mut backend = build_statevector(&accel, seed, limits);
     let expanded = expand_for_backend(&backend, circuit);
     let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
@@ -3609,18 +3789,24 @@ fn stateless_route(kind: &BackendKind, diagnostic: Diagnostic, route: &str) -> P
 /// Price a diagnostic's output against the dense export cap before the circuit
 /// runs: a reduced density matrix holds `4^k` entries, which depends on `k`
 /// and the backend's name alone, both known once the plan is built.
-fn check_diagnostic_width(backend: &dyn Backend, diagnostic: Diagnostic, k: usize) -> Result<()> {
+fn check_diagnostic_width(
+    backend: &dyn Backend,
+    diagnostic: Diagnostic,
+    k: usize,
+    limits: &ResolvedLimits,
+) -> Result<()> {
     match diagnostic {
         Diagnostic::ReducedDensityMatrix => {
-            crate::backend::reduced_density::reduced_density_side(backend.name(), k)?;
+            crate::backend::reduced_density::reduced_density_side(backend.name(), k, limits)?;
             Ok(())
         }
         Diagnostic::StateVector => {
-            if k > crate::backend::schmidt::export_cap() {
+            if k > limits.export_cap() {
                 return Err(crate::backend::schmidt::export_cap_exceeded(
                     backend.name(),
                     "a dense statevector".to_string(),
                     k,
+                    limits,
                 ));
             }
             Ok(())
@@ -3645,18 +3831,19 @@ fn diagnostic_backend(
     seed: u64,
     diagnostic: Diagnostic,
     subsystem_len: usize,
+    limits: &ResolvedLimits,
 ) -> Result<Box<dyn Backend>> {
     if let Some(state) = initial_state {
-        let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
-        check_diagnostic_width(&*backend, diagnostic, subsystem_len)?;
+        let mut backend = backend_from_initial_state(kind, circuit, state, seed, limits)?;
+        check_diagnostic_width(&*backend, diagnostic, subsystem_len, limits)?;
         apply_fused_without_saves(&mut *backend, circuit, "state diagnostics")?;
         return Ok(backend);
     }
     if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit)?;
+        validate_explicit_backend(kind, circuit, limits)?;
     }
     let (_, has_partial_independence) = analyze_independence(circuit);
-    let mut plan = match resolve(kind, circuit, has_partial_independence) {
+    let mut plan = match resolve(kind, circuit, has_partial_independence, limits) {
         ExecutionPlan::Backend(plan) => plan,
         ExecutionPlan::StabilizerRank => {
             return Err(stateless_route(kind, diagnostic, "stabilizer-rank"));
@@ -3673,12 +3860,12 @@ fn diagnostic_backend(
     };
     if kind.is_auto()
         && !plan_answers(&plan, diagnostic)
-        && circuit.num_qubits <= max_statevector_qubits()
+        && circuit.num_qubits <= limits.statevector_qubits.value
     {
-        plan = plan_for_family(kind, Family::Statevector, circuit.num_qubits);
+        plan = plan_for_family(kind, Family::Statevector, circuit.num_qubits, limits);
     }
-    let mut backend: Box<dyn Backend> = plan.build(seed);
-    check_diagnostic_width(&*backend, diagnostic, subsystem_len)?;
+    let mut backend: Box<dyn Backend> = plan.build(seed, limits);
+    check_diagnostic_width(&*backend, diagnostic, subsystem_len, limits)?;
     execute(&mut *backend, circuit, &SimOptions::classical_only())?;
     Ok(backend)
 }
@@ -3696,6 +3883,7 @@ const TENSOR_ROUTE_MIN_QUBITS: usize = 18;
 fn tensor_route_expectations(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
+    limits: &ResolvedLimits,
 ) -> Option<Result<ExpectationResult>> {
     if circuit.num_qubits < TENSOR_ROUTE_MIN_QUBITS || observables.is_empty() {
         return None;
@@ -3713,7 +3901,7 @@ fn tensor_route_expectations(
         Ok(planned) => planned,
         Err(e) => return Some(Err(e)),
     };
-    Some(planned.contract().map(|values| {
+    Some(planned.contract(limits).map(|values| {
         analytic_expectations(values, RunMetadata::exact(ResolvedBackend::TensorNetwork))
     }))
 }
@@ -3738,18 +3926,22 @@ const TENSOR_ELEMENT_MPS_COST: f64 = 3.0;
 fn tensor_route_over_mps(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
+    limits: &ResolvedLimits,
 ) -> Option<Result<ExpectationResult>> {
     if observables.is_empty() {
         return None;
     }
-    let mps_cost = mps_apply_cost(circuit, AUTO_MPS_BOND_DIM);
+    let mps_cost = mps_apply_cost(circuit, limits.auto_mps_bond_dim.value);
     if mps_cost < TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE * observables.len() as f64 {
         return None;
     }
     let (_, has_partial_independence) = analyze_independence(circuit);
-    let ExecutionPlan::Backend(plan) =
-        resolve(&BackendKind::Auto, circuit, has_partial_independence)
-    else {
+    let ExecutionPlan::Backend(plan) = resolve(
+        &BackendKind::Auto,
+        circuit,
+        has_partial_independence,
+        limits,
+    ) else {
         return None;
     };
     if !matches!(plan, BackendPlan::Mps { .. }) {
@@ -3771,7 +3963,7 @@ fn tensor_route_over_mps(
     if planned.total_elements() as f64 * TENSOR_ELEMENT_MPS_COST >= mps_cost {
         return None;
     }
-    Some(planned.contract().map(|values| {
+    Some(planned.contract(limits).map(|values| {
         analytic_expectations(values, RunMetadata::exact(ResolvedBackend::TensorNetwork))
     }))
 }
@@ -3787,9 +3979,10 @@ fn expectation_values_native(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ExpectationResult> {
     if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit)?;
+        validate_explicit_backend(kind, circuit, limits)?;
     }
     // Before the run, matching the statevector path, so a typo in an observable
     // does not cost a 40-qubit simulation first.
@@ -3798,7 +3991,8 @@ fn expectation_values_native(
     }
 
     let (_, has_partial_independence) = analyze_independence(circuit);
-    let ExecutionPlan::Backend(plan) = resolve(kind, circuit, has_partial_independence) else {
+    let ExecutionPlan::Backend(plan) = resolve(kind, circuit, has_partial_independence, limits)
+    else {
         return Err(PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),
             reason: "expectation values need a backend that holds a state; the stabilizer-rank \
@@ -3807,7 +4001,7 @@ fn expectation_values_native(
         });
     };
 
-    let mut backend = plan.build(seed);
+    let mut backend = plan.build(seed, limits);
     if !backend.supports_pauli_expectation() {
         return Err(PrismError::BackendUnsupported {
             backend: backend.name().to_string(),
@@ -3824,6 +4018,7 @@ fn expectation_values_statevector(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ExpectationResult> {
     // Validate before the 2^n simulation so bad observables fail cheaply. The
     // mask reduction shifts by qubit index, so it follows the `init` that
@@ -3833,7 +4028,7 @@ fn expectation_values_statevector(
     }
 
     let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
-    let mut backend = build_statevector(&accel, seed);
+    let mut backend = build_statevector(&accel, seed, limits);
     let expanded = expand_for_backend(&backend, circuit);
     let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
@@ -3863,6 +4058,7 @@ fn run_shots_distributed(
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
     use crate::backend::distributed_statevector::DistributedStatevectorBackend;
 
@@ -3871,7 +4067,7 @@ fn run_shots_distributed(
         // No measurements means every shot is all false, but init must still
         // run so invalid rank counts and local qubit floor violations surface as
         // errors instead of fabricated output.
-        let mut backend = DistributedStatevectorBackend::new(context, seed);
+        let mut backend = DistributedStatevectorBackend::with_limits(context, seed, limits);
         backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
         return Ok(ShotsResult::from_shots(
             vec![vec![false; circuit.num_classical_bits]; num_shots],
@@ -3882,7 +4078,7 @@ fn run_shots_distributed(
 
     if circuit.has_terminal_measurements_only() {
         let stripped = circuit.without_measurements();
-        let mut backend = DistributedStatevectorBackend::new(context, seed);
+        let mut backend = DistributedStatevectorBackend::with_limits(context, seed, limits);
         execute(&mut backend, &stripped, &SimOptions::classical_only())?;
         let samples = backend.sample_basis_states(num_shots, seed)?;
         return Ok(ShotsResult::from_shots(
@@ -3892,7 +4088,7 @@ fn run_shots_distributed(
         .with_metadata(backend_metadata(&backend)));
     }
 
-    let probe = DistributedStatevectorBackend::new(context.clone(), seed);
+    let probe = DistributedStatevectorBackend::with_limits(context.clone(), seed, limits);
     let expanded = expand_for_backend(&probe, circuit);
     let fused = fuse_for_backend(&probe, &expanded);
     let opts = SimOptions::classical_only();
@@ -3900,7 +4096,8 @@ fn run_shots_distributed(
     let mut metadata = RunMetadata::exact(ResolvedBackend::Distributed);
     for i in 0..num_shots {
         let shot_seed = mix_seed(seed, i);
-        let mut backend = DistributedStatevectorBackend::new(context.clone(), shot_seed);
+        let mut backend =
+            DistributedStatevectorBackend::with_limits(context.clone(), shot_seed, limits);
         let result = execute_circuit(&mut backend, &fused, &opts)?;
         metadata.weaken_with(&result.metadata);
         shots.push(result.classical_bits);
@@ -3914,13 +4111,14 @@ pub(crate) fn run_shots_with(
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
     // The distributed backend runs every rank in lockstep, so shot execution
     // must not route through shortcuts that reshape the collective call
     // sequence. Dispatch directly.
     #[cfg(feature = "distributed")]
     if let BackendKind::StatevectorDistributed { context } = &kind {
-        return run_shots_distributed(context.clone(), circuit, num_shots, seed);
+        return run_shots_distributed(context.clone(), circuit, num_shots, seed, limits);
     }
 
     // Once per shots call, not per shot: a guard that cannot depend on a
@@ -3930,9 +4128,16 @@ pub(crate) fn run_shots_with(
     let circuit = folded.as_ref();
 
     let bits = circuit.num_classical_bits;
-    let source = prepare_shot_source(&kind, circuit, num_shots, seed)?;
+    let source = prepare_shot_source(&kind, circuit, num_shots, seed, limits)?;
     let Some(metadata) = source.metadata() else {
-        return run_shots_per_shot(kind, circuit, num_shots, seed, ShotRows::Exchangeable);
+        return run_shots_per_shot(
+            kind,
+            circuit,
+            num_shots,
+            seed,
+            ShotRows::Exchangeable,
+            limits,
+        );
     };
     let result = match source {
         ShotSource::Compiled {
@@ -3997,10 +4202,11 @@ fn run_shots_per_shot(
     num_shots: usize,
     seed: u64,
     rows: ShotRows,
+    limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
     // Pre-compute seed-independent analysis to avoid redundant work.
     if !kind.is_auto() {
-        validate_explicit_backend(&kind, circuit)?;
+        validate_explicit_backend(&kind, circuit, limits)?;
     }
 
     let (decompose, has_partial_independence) = analyze_independence(circuit);
@@ -4021,9 +4227,9 @@ fn run_shots_per_shot(
         return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
 
-    if has_temporal_clifford_opportunity(&kind, circuit) {
+    if has_temporal_clifford_opportunity(&kind, circuit, limits) {
         if decompose.is_none()
-            && let Some(tc) = plan_temporal_clifford(&kind, circuit)
+            && let Some(tc) = plan_temporal_clifford(&kind, circuit, limits)
         {
             let route = ResolvedBackend::Statevector;
             let states = [(route, circuit.num_qubits)];
@@ -4044,12 +4250,15 @@ fn run_shots_per_shot(
         // full-pipeline route; the prefix spans blocks that decomposition
         // would otherwise split. Its blocks are partitioned and planned once.
         let opts = SimOptions::classical_only();
-        let route = resolve_backend(&kind, circuit, has_partial_independence).resolved();
-        let plan = plan_probability_route(&kind, circuit);
+        let route = resolve_backend(&kind, circuit, has_partial_independence, limits).resolved();
+        let plan = plan_probability_route(&kind, circuit, limits);
         let blocks = match &plan {
-            ProbabilityRoute::Decomposed(components) => {
-                Some(PreparedBlocks::new(&kind, components.clone(), circuit))
-            }
+            ProbabilityRoute::Decomposed(components) => Some(PreparedBlocks::new(
+                &kind,
+                components.clone(),
+                circuit,
+                limits,
+            )),
             _ => None,
         };
         let states = [(route, circuit.num_qubits)];
@@ -4062,8 +4271,8 @@ fn run_shots_per_shot(
             &states,
             |shot_seed| {
                 let outcome = match &blocks {
-                    Some(blocks) => blocks.run(&kind, circuit, shot_seed, &opts)?,
-                    None => run_route(&kind, circuit, shot_seed, opts, &plan)?,
+                    Some(blocks) => blocks.run(&kind, circuit, shot_seed, &opts, limits)?,
+                    None => run_route(&kind, circuit, shot_seed, opts, &plan, limits)?,
                 };
                 Ok((outcome.classical_bits, outcome.metadata))
             },
@@ -4078,16 +4287,16 @@ fn run_shots_per_shot(
             .iter()
             .map(|(sub, _, _)| {
                 if !kind.is_auto() {
-                    validate_explicit_backend(&kind, sub)?;
+                    validate_explicit_backend(&kind, sub, limits)?;
                 }
-                Ok(resolve_backend(&kind, sub, false))
+                Ok(resolve_backend(&kind, sub, false, limits))
             })
             .collect::<Result<_>>()?;
         let fused_blocks: Vec<std::borrow::Cow<'_, Circuit>> = partitions
             .iter()
             .zip(&block_plans)
             .map(|((sub, _, _), plan)| {
-                let probe = plan.build(seed);
+                let probe = plan.build(seed, limits);
                 let expanded = expand_for_backend(&*probe, sub);
                 std::borrow::Cow::Owned(fuse_for_backend(&*probe, &expanded).into_owned())
             })
@@ -4114,30 +4323,32 @@ fn run_shots_per_shot(
                     shot_seed,
                     &opts,
                     circuit,
+                    limits,
                 )?;
                 Ok((result.classical_bits, result.metadata))
             },
         )
     } else {
-        let plan = resolve_backend(&kind, circuit, has_partial_independence);
-        let probe = plan.build(seed);
+        let plan = resolve_backend(&kind, circuit, has_partial_independence, limits);
+        let probe = plan.build(seed, limits);
         let expanded = expand_for_backend(&*probe, circuit);
         let fused = fuse_for_backend(&*probe, &expanded);
 
         let route = plan.resolved();
         let states = [(route, circuit.num_qubits)];
-        if plan.is_host_statevector() && circuit.num_qubits < max_statevector_qubits() {
+        if plan.is_host_statevector() && circuit.num_qubits < limits.statevector_qubits.value {
             #[cfg(feature = "parallel")]
             let parallel = shots_split_across_workers(&kind, &states)
                 && circuit.num_qubits >= branching::MIN_QUBITS_FOR_PARALLEL_SPLITS;
             #[cfg(not(feature = "parallel"))]
             let parallel = false;
-            let limits = branching::BranchLimits::for_width(circuit.num_qubits, parallel);
+            let branch_limits =
+                branching::BranchLimits::for_width(circuit.num_qubits, parallel, limits);
             return branching::branch_shots(
                 &fused,
                 num_shots,
                 seed,
-                &limits,
+                &branch_limits,
                 rows == ShotRows::Exchangeable,
             );
         }
@@ -4149,7 +4360,7 @@ fn run_shots_per_shot(
             &kind,
             &states,
             |shot_seed| {
-                let mut backend = plan.build(shot_seed);
+                let mut backend = plan.build(shot_seed, limits);
                 let outcome = execute_circuit(&mut *backend, &fused, &opts)?;
                 Ok((outcome.classical_bits, outcome.metadata))
             },
@@ -4236,10 +4447,11 @@ fn general_noise_plan(
     kind: &BackendKind,
     circuit: &Circuit,
     noise_model: &NoiseModel,
+    limits: &ResolvedLimits,
 ) -> BackendPlan {
     let family = if !circuit.has_entangling_gates() && !noise_model.has_two_qubit_kraus() {
         Family::ProductState
-    } else if circuit.num_qubits > max_statevector_qubits() {
+    } else if circuit.num_qubits > limits.statevector_qubits.value {
         if circuit.is_sparse_friendly() && circuit.num_qubits <= MAX_SPARSE_INDEX_QUBITS {
             Family::Sparse
         } else {
@@ -4248,7 +4460,7 @@ fn general_noise_plan(
     } else {
         Family::Statevector
     };
-    plan_for_family(kind, family, circuit.num_qubits)
+    plan_for_family(kind, family, circuit.num_qubits, limits)
 }
 
 /// Execute a noisy circuit for multiple shots with explicit backend selection.
@@ -4269,6 +4481,7 @@ pub(crate) fn run_shots_with_noise(
     noise_model: &noise::NoiseModel,
     num_shots: usize,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
     noise_model.validate_for(circuit)?;
 
@@ -4287,7 +4500,7 @@ pub(crate) fn run_shots_with_noise(
     }
 
     if kind.is_density_matrix() {
-        let probs = exact_noisy_probabilities(&kind, circuit, noise_model, None, seed)?;
+        let probs = exact_noisy_probabilities(&kind, circuit, noise_model, None, seed, limits)?;
         return Ok(ShotsResult::from_shots(
             sample_exact_noisy_shots(&probs, circuit, noise_model, num_shots, seed),
             circuit.num_classical_bits,
@@ -4335,7 +4548,7 @@ pub(crate) fn run_shots_with_noise(
     }
 
     if !kind.is_auto() {
-        validate_explicit_backend(&kind, circuit)?;
+        validate_explicit_backend(&kind, circuit, limits)?;
     }
 
     if noise_model.has_only_pauli_channels() {
@@ -4373,9 +4586,9 @@ pub(crate) fn run_shots_with_noise(
     }
 
     let plan = if kind.is_auto() && !noise_model.has_only_pauli_channels() {
-        general_noise_plan(&kind, circuit, noise_model)
+        general_noise_plan(&kind, circuit, noise_model, limits)
     } else {
-        resolve_backend(&kind, circuit, false)
+        resolve_backend(&kind, circuit, false, limits)
     };
     // Noise events are indexed per instruction, so trajectories apply the
     // stream raw and the Pauli-rotation lowering pass cannot run. The
@@ -4386,7 +4599,7 @@ pub(crate) fn run_shots_with_noise(
     });
     if has_pauli_rot
         && !matches!(plan, BackendPlan::Statevector { .. })
-        && !plan.build(seed).supports_pauli_rotation()
+        && !plan.build(seed, limits).supports_pauli_rotation()
     {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{:?}", plan.resolved()),
@@ -4402,7 +4615,7 @@ pub(crate) fn run_shots_with_noise(
     // matrix, which only the host statevector answers. Without this the model
     // clears every routing gate and fails part way through the first shot, on a
     // backend an Auto route may have picked for the caller.
-    if noise_model.has_two_qubit_kraus() && !plan.build(seed).supports_two_qubit_kraus() {
+    if noise_model.has_two_qubit_kraus() && !plan.build(seed, limits).supports_two_qubit_kraus() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{:?}", plan.resolved()),
             reason: "a two-qubit Kraus channel needs the pair's reduced density matrix \
@@ -4416,11 +4629,12 @@ pub(crate) fn run_shots_with_noise(
     }
     let host_statevector = matches!(plan, BackendPlan::Statevector { .. }) && !plan.is_gpu();
     let dense_tensor_network = matches!(plan, BackendPlan::TensorNetwork { .. })
-        && crate::backend::tensor_probability_len("tensor network", circuit.num_qubits).is_ok();
+        && crate::backend::tensor_probability_len("tensor network", circuit.num_qubits, limits)
+            .is_ok();
     if (host_statevector || dense_tensor_network)
         && let Some(groups) = trajectory::PauliGroups::sample(circuit, noise_model, num_shots, seed)
     {
-        let build = |s| plan.build(s);
+        let build = |s| plan.build(s, limits);
         return trajectory::run_pauli_groups(
             &groups,
             circuit,
@@ -4428,11 +4642,12 @@ pub(crate) fn run_shots_with_noise(
             seed,
             dense_tensor_network.then_some(&build as trajectory::GroupBackendFactory<'_>),
             plan.resolved(),
+            limits,
         );
     }
     // A checkpoint, a group state and a shot state at once.
     if host_statevector
-        && circuit.num_qubits + 1 < max_statevector_qubits()
+        && circuit.num_qubits + 1 < limits.statevector_qubits.value
         && let Some(groups) =
             trajectory::PauliGroups::sample_replayed(circuit, noise_model, num_shots, seed)
     {
@@ -4442,11 +4657,12 @@ pub(crate) fn run_shots_with_noise(
             noise_model,
             seed,
             plan.resolved(),
+            limits,
         );
     }
     let route = plan.resolved();
     trajectory::run_trajectories(
-        |s| plan.build(s),
+        |s| plan.build(s, limits),
         circuit,
         noise_model,
         num_shots,

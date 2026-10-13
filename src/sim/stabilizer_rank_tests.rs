@@ -1,5 +1,6 @@
 use super::*;
 use crate::circuit::SmallVec;
+use crate::limits::ResolvedLimits;
 
 #[test]
 fn test_pure_clifford() {
@@ -80,11 +81,24 @@ fn shots_with_t_bypass_statevector_qubit_cap_terminal() {
     assert_eq!(result.shots.len(), 32);
     assert!(result.shots.iter().all(|shot| shot.len() == 1));
 
-    let public_result =
-        crate::sim::run_shots_with(crate::sim::BackendKind::StabilizerRank, &c, 8, 42).unwrap();
+    let public_result = crate::sim::run_shots_with(
+        crate::sim::BackendKind::StabilizerRank,
+        &c,
+        8,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(public_result.shots.len(), 8);
 
-    let auto_result = crate::sim::run_shots_with(crate::sim::BackendKind::Auto, &c, 8, 42).unwrap();
+    let auto_result = crate::sim::run_shots_with(
+        crate::sim::BackendKind::Auto,
+        &c,
+        8,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(auto_result.shots.len(), 8);
 }
 
@@ -165,7 +179,13 @@ fn test_multi_t_with_separating_clifford() {
     c.add_gate(Gate::H, &[0]);
 
     let result = run_stabilizer_rank(&c, 42).unwrap();
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &c, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &c,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
     for (i, (&sr, &sv)) in result.probabilities.iter().zip(sv_probs.iter()).enumerate() {
         assert!(
@@ -238,7 +258,13 @@ fn test_two_t_multi_qubit_bisect_stages() {
             c.add_gate(gate.clone(), targets);
         }
         let result = run_stabilizer_rank(&c, 42).unwrap();
-        let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &c, 42).unwrap();
+        let sv = crate::sim::run_with(
+            crate::sim::BackendKind::Statevector,
+            &c,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
         let sv_probs = sv.probabilities.unwrap().to_vec();
         let max_diff = result
             .probabilities
@@ -272,7 +298,13 @@ fn test_two_t_multi_qubit_entangled_matches_statevector() {
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[1]);
     let result = run_stabilizer_rank(&c, 42).unwrap();
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &c, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &c,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
     for (i, (&sr, &sv)) in result.probabilities.iter().zip(sv_probs.iter()).enumerate() {
         assert!(
@@ -299,7 +331,13 @@ fn test_multi_qubit_multi_t_post_cliffords_matches_statevector() {
     c.add_gate(Gate::Swap, &[0, 2]);
 
     let sr = run_stabilizer_rank(&c, 42).unwrap();
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &c, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &c,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
     for (i, (sr_p, sv_p)) in sr.probabilities.iter().zip(sv_probs.iter()).enumerate() {
         assert!(
@@ -320,7 +358,13 @@ fn test_matches_statevector() {
     c.add_gate(Gate::Cx, &[2, 1]);
 
     let sr = run_stabilizer_rank(&c, 42).unwrap();
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &c, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &c,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
 
     for (i, (sr_p, sv_p)) in sr.probabilities.iter().zip(sv_probs.iter()).enumerate() {
@@ -657,7 +701,13 @@ fn phased(gate: Gate, angle: f64) -> Gate {
 
 fn assert_matches_statevector(circuit: &Circuit, tol: f64) -> StabRankResult {
     let sr = run_stabilizer_rank(circuit, 42).unwrap();
-    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, circuit, 42).unwrap();
+    let sv = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv.probabilities.unwrap().to_vec();
     for (i, (sr_p, sv_p)) in sr.probabilities.iter().zip(sv_probs.iter()).enumerate() {
         assert!(

@@ -3,6 +3,7 @@ use crate::backend::factored::FactoredBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::{Circuit, ClassicalCondition, Instruction, smallvec};
 use crate::gates::Gate;
+use crate::limits::ResolvedLimits;
 use crate::sim;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
@@ -313,7 +314,13 @@ fn test_immediate_full_merge() {
 fn test_backend_kind_factored() {
     use crate::sim::BackendKind;
     let circuit = crate::circuits::independent_bell_pairs(4);
-    let result = sim::run_with(BackendKind::Factored, &circuit, 42).unwrap();
+    let result = sim::run_with(
+        BackendKind::Factored,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-10);
 }

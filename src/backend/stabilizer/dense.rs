@@ -9,6 +9,7 @@ use crate::backend::{
     NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, reserve_dense_output,
 };
 use crate::error::Result;
+use crate::limits::ResolvedLimits;
 
 /// Support of the stabilizer state in rows `n..2n` of `xz`, as its lowest basis
 /// state and the X-parts of the `k` generators that span it: the support is the
@@ -86,8 +87,9 @@ pub(crate) fn dense_probabilities(
     nw: usize,
     stride: usize,
     backend: &str,
+    limits: &ResolvedLimits,
 ) -> Result<Vec<f64>> {
-    let dim = dense_probability_len(backend, n)?;
+    let dim = dense_probability_len(backend, n, limits)?;
     let mut probs = Vec::new();
     reserve_dense_output(&mut probs, dim, backend, "probabilities")?;
 
@@ -120,6 +122,7 @@ pub(crate) fn dense_probabilities(
 ///
 /// Fails with `backend` and `operation` when the output exceeds the export cap
 /// or cannot be allocated.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dense_statevector(
     xz: &[u64],
     phase: &[bool],
@@ -128,8 +131,9 @@ pub(crate) fn dense_statevector(
     stride: usize,
     backend: &str,
     operation: &str,
+    limits: &ResolvedLimits,
 ) -> Result<Vec<Complex64>> {
-    let dim = dense_statevector_len(backend, operation, n)?;
+    let dim = dense_statevector_len(backend, operation, n, limits)?;
     let mut state = Vec::new();
     reserve_dense_output(&mut state, dim, backend, operation)?;
     let mut visited_gen = Vec::new();

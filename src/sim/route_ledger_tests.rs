@@ -643,11 +643,20 @@ fn run_direct_families_match_the_unfused_statevector() {
         (clifford(6), ResolvedBackend::Stabilizer),
     ];
     for (circuit, backend) in cases {
-        let route = plan_probability_route(&BackendKind::Auto, &circuit);
+        let route = plan_probability_route(
+            &BackendKind::Auto,
+            &circuit,
+            &ResolvedLimits::process_default(),
+        );
         assert_eq!(probability_route_key(&route), "ProbabilityRoute::Direct");
         let (_, partial) = analyze_independence(&circuit);
         assert_eq!(
-            execution_plan_key(&resolve(&BackendKind::Auto, &circuit, partial)),
+            execution_plan_key(&resolve(
+                &BackendKind::Auto,
+                &circuit,
+                partial,
+                &ResolvedLimits::process_default()
+            )),
             "ExecutionPlan::Backend"
         );
         let (probs, metadata) = run_probs(&circuit, BackendKind::Auto);
@@ -706,7 +715,11 @@ fn run_decomposed_matches_the_unfused_statevector() {
         circuit.add_gate(Gate::Cx, &[q, q + 1]);
     }
     circuit.add_gate(Gate::T, &[5]);
-    let route = plan_probability_route(&BackendKind::Auto, &circuit);
+    let route = plan_probability_route(
+        &BackendKind::Auto,
+        &circuit,
+        &ResolvedLimits::process_default(),
+    );
     assert_eq!(
         probability_route_key(&route),
         "ProbabilityRoute::Decomposed"
@@ -733,7 +746,11 @@ fn bell_pairs(n: usize) -> Circuit {
 )]
 fn run_factored_stabilizer_matches_the_unfused_statevector() {
     let circuit = bell_pairs(8);
-    let route = plan_probability_route(&BackendKind::Auto, &circuit);
+    let route = plan_probability_route(
+        &BackendKind::Auto,
+        &circuit,
+        &ResolvedLimits::process_default(),
+    );
     assert_eq!(
         probability_route_key(&route),
         "ProbabilityRoute::FactoredStabilizer"
@@ -756,7 +773,11 @@ fn run_temporal_clifford_matches_the_unfused_statevector() {
     for q in 0..n {
         circuit.add_gate(Gate::Rx(0.3 + 0.05 * q as f64), &[q]);
     }
-    let route = plan_probability_route(&BackendKind::Auto, &circuit);
+    let route = plan_probability_route(
+        &BackendKind::Auto,
+        &circuit,
+        &ResolvedLimits::process_default(),
+    );
     assert_eq!(
         probability_route_key(&route),
         "ProbabilityRoute::TemporalClifford"
@@ -770,7 +791,12 @@ fn run_stabilizer_rank_matches_the_unfused_statevector() {
     let circuit = clifford_t(5, 2);
     let (_, partial) = analyze_independence(&circuit);
     assert_eq!(
-        execution_plan_key(&resolve(&BackendKind::StabilizerRank, &circuit, partial)),
+        execution_plan_key(&resolve(
+            &BackendKind::StabilizerRank,
+            &circuit,
+            partial,
+            &ResolvedLimits::process_default()
+        )),
         "ExecutionPlan::StabilizerRank"
     );
     let (probs, metadata) = run_probs(&circuit, BackendKind::StabilizerRank);
@@ -796,7 +822,12 @@ fn run_declines_the_pauli_engines_cleanly() {
     ];
     let mut seen = Vec::new();
     for kind in kinds {
-        seen.push(execution_plan_key(&resolve(&kind, &circuit, false)));
+        seen.push(execution_plan_key(&resolve(
+            &kind,
+            &circuit,
+            false,
+            &ResolvedLimits::process_default(),
+        )));
         let err = simulate(&circuit).backend(kind.clone()).seed(SEED).run();
         assert!(
             matches!(err, Err(PrismError::IncompatibleBackend { .. })),
@@ -983,7 +1014,16 @@ fn probabilities_of_matches_the_unfused_statevector() {
 // ---------------------------------------------------------------------------
 
 fn source_key(kind: &BackendKind, circuit: &Circuit, shots: usize) -> &'static str {
-    shot_source_key(&prepare_shot_source(kind, circuit, shots, SEED).unwrap())
+    shot_source_key(
+        &prepare_shot_source(
+            kind,
+            circuit,
+            shots,
+            SEED,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap(),
+    )
 }
 
 #[test]
@@ -1490,7 +1530,9 @@ fn auto_tensor_route_matches_the_unfused_statevector() {
     let circuit = dense(n);
     let state = unfused_state(&circuit);
     let obs = observables(n);
-    assert!(tensor_route_expectations(&circuit, &obs).is_some());
+    assert!(
+        tensor_route_expectations(&circuit, &obs, &ResolvedLimits::process_default()).is_some()
+    );
 
     let result = simulate(&circuit)
         .seed(SEED)
@@ -1599,7 +1641,12 @@ fn pauli_path_matches_the_density_matrix() {
         max_terms: 0,
     };
     assert_eq!(
-        execution_plan_key(&resolve(&kind, &circuit, false)),
+        execution_plan_key(&resolve(
+            &kind,
+            &circuit,
+            false,
+            &ResolvedLimits::process_default()
+        )),
         "ExecutionPlan::PauliPath"
     );
     let path = simulate(&circuit)
@@ -1858,7 +1905,7 @@ fn gradients_match_finite_differences() {
 // ---------------------------------------------------------------------------
 
 fn prepared_keys(kind: &BackendKind, template: &Circuit) -> (&'static str, &'static str) {
-    let route = prepared_route(kind, template).expect("a direct route");
+    let route = prepared_route(kind, template, None).expect("a direct route");
     (
         prepared_values_key(&route.values),
         prepared_observable_key(&route.observable),

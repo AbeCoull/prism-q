@@ -143,6 +143,7 @@ pub(crate) fn kernel_source() -> String {
             "{{DB_MAX_GROUPS}}",
             &cpu_k::MAX_DIAG_BATCH_GROUPS.to_string(),
         )
+        .replace("{{QFT_TILE_Q}}", &QFT_TILE_Q.to_string())
 }
 
 fn grid_for(count: u64) -> u32 {
@@ -1505,6 +1506,239 @@ pub(crate) fn launch_apply_diagonal_batch(
     Ok(())
 }
 
+/// Most DIF stages one `qft_dif_pass` block runs: its shared-memory tile holds
+/// `2^QFT_TILE_Q` amplitudes, 32 KB.
+const QFT_TILE_Q: usize = 11;
+
+/// Log2 of the fewest consecutive amplitudes a gathered row carries above the field's
+/// lowest pass: 64 bytes, so a strided row read fills whole sectors.
+const QFT_MIN_ROW_LOG: usize = 2;
+
+const QFT_BLOCK_SIZE: u32 = 256;
+
+/// One `qft_dif_pass`: DIF stages `lo..lo + bits` of the field, in field bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QftPass {
+    lo: usize,
+    bits: usize,
+}
+
+/// DIF passes for a `num`-qubit field at `start`, top stage first: the stages above the
+/// lowest pass split evenly into passes of at most `QFT_TILE_Q - QFT_MIN_ROW_LOG`.
+fn qft_pass_plan(start: usize, num: usize) -> Vec<QftPass> {
+    let low = num.min(QFT_TILE_Q - start.min(QFT_MIN_ROW_LOG));
+    let passes = (num - low).div_ceil(QFT_TILE_Q - QFT_MIN_ROW_LOG);
+    let mut plan = Vec::with_capacity(passes + 1);
+    let mut top = num;
+    for left in (1..=passes).rev() {
+        let bits = (top - low).div_ceil(left);
+        plan.push(QftPass {
+            lo: top - bits,
+            bits,
+        });
+        top -= bits;
+    }
+    plan.push(QftPass { lo: 0, bits: low });
+    plan
+}
+
+/// Split of the `lo + bits` phase bits over the low, mid and high tables of a pass.
+fn qft_phase_split(pass: QftPass) -> [usize; 3] {
+    let total = pass.lo + pass.bits;
+    let low = total.div_ceil(3);
+    let mid = (total - low).div_ceil(2);
+    [low, mid, total - low - mid]
+}
+
+/// Apply a [`Gate::QftBlock`](crate::gates::Gate::QftBlock) on qubits
+/// `start..start + num` as tiled DIF passes, in the flag forms of the CPU
+/// `apply_qft_block`: field bit reversals before or after the network as the flags
+/// require, conjugate twiddles for `inverse`.
+///
+/// The per-stride twiddles and every pass's phase tables go up in one staged upload, so
+/// a block costs one stream drain.
+pub(crate) fn launch_apply_qft_block(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    start: usize,
+    num: usize,
+    inverse: bool,
+    swaps: bool,
+    big_endian: bool,
+) -> Result<()> {
+    let n = state.num_qubits();
+    if num == 0 {
+        return Ok(());
+    }
+    if start + num > n {
+        return Err(PrismError::InvalidQubit {
+            index: start + num - 1,
+            register_size: n,
+        });
+    }
+    let reverse_input = big_endian != (inverse && !swaps);
+    let reverse_output = big_endian != (swaps || inverse);
+    let plan = qft_pass_plan(start, num);
+    let twiddle_bits = plan.iter().map(|p| p.bits).max().unwrap_or(0);
+
+    let sign = if inverse { -1.0 } else { 1.0 };
+    let unit = |total_bits: usize| sign * std::f64::consts::TAU / (1u64 << total_bits) as f64;
+    let mut phase_offsets = Vec::with_capacity(plan.len());
+    let mut f64_len = 2 << twiddle_bits;
+    for &pass in &plan {
+        phase_offsets.push(f64_len);
+        if pass.lo > 0 {
+            f64_len += qft_phase_split(pass).iter().map(|b| 2 << b).sum::<usize>();
+        }
+    }
+
+    let device = ctx.device();
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let staged = super::stage_blob(
+        &mut scratch.blob,
+        device,
+        std::iter::empty(),
+        f64_len,
+        |dst| {
+            let (twiddles, phases) = dst.split_at_mut(2 << twiddle_bits);
+            for u in 0..twiddle_bits {
+                let s = 1usize << u;
+                for k in 0..s {
+                    let w = Complex64::from_polar(1.0, k as f64 * unit(u + 1));
+                    twiddles[2 * (s + k)] = w.re;
+                    twiddles[2 * (s + k) + 1] = w.im;
+                }
+            }
+            let mut at = 0;
+            for &pass in plan.iter().filter(|p| p.lo > 0) {
+                let [low_bits, mid_bits, high_bits] = qft_phase_split(pass);
+                let step = unit(pass.lo + pass.bits);
+                let scale = std::f64::consts::FRAC_1_SQRT_2.powi(pass.bits as i32);
+                for (bits, shift, magnitude) in [
+                    (low_bits, 0, scale),
+                    (mid_bits, low_bits, 1.0),
+                    (high_bits, low_bits + mid_bits, 1.0),
+                ] {
+                    for x in 0..1usize << bits {
+                        let w = Complex64::from_polar(magnitude, (x << shift) as f64 * step);
+                        phases[at] = w.re;
+                        phases[at + 1] = w.im;
+                        at += 2;
+                    }
+                }
+            }
+        },
+    )?;
+
+    if reverse_input {
+        launch_qft_bit_reverse(ctx, state, start, num)?;
+    }
+    let (stream, func) = stream_and_fn(ctx, "qft_dif_pass")?;
+    let dim: u64 = 1u64 << n;
+    let start_i = start as i32;
+    for (&pass, &offset) in plan.iter().zip(&phase_offsets) {
+        let abs_lo = start + pass.lo;
+        let row_log = abs_lo.min(QFT_TILE_Q - pass.bits);
+        let groups = super::require_u32(
+            "qft_dif_pass",
+            "groups",
+            (dim >> (pass.bits + row_log)) as usize,
+        )?;
+        let cfg = linear_cfg(QFT_BLOCK_SIZE, groups);
+        let [low_bits, mid_bits, _] = qft_phase_split(pass);
+        let phases: u64 = if pass.lo > 0 {
+            staged.f64s + (offset * size_of::<f64>()) as u64
+        } else {
+            0
+        };
+        let abs_lo_i = abs_lo as i32;
+        let bits_i = pass.bits as i32;
+        let row_log_i = row_log as i32;
+        let low_bits_i = low_bits as i32;
+        let mid_bits_i = mid_bits as i32;
+        let scale = std::f64::consts::FRAC_1_SQRT_2.powi(pass.bits as i32);
+        let mut builder = stream.launch_builder(&func);
+        let buffer = state.buffer_mut().raw_mut();
+        builder
+            .arg(buffer)
+            .arg(&abs_lo_i)
+            .arg(&bits_i)
+            .arg(&row_log_i)
+            .arg(&start_i)
+            .arg(&staged.f64s)
+            .arg(&phases)
+            .arg(&low_bits_i)
+            .arg(&mid_bits_i)
+            .arg(&scale);
+        // SAFETY: signature matches; the groups tile the state, each block's
+        // `2^(bits + row_log)` amplitudes fit its `2^QFT_TILE_Q` shared tile, and every
+        // twiddle and phase index stays inside the staged tables by construction of
+        // their lengths. The scratch guard holds the upload.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| driver_err("qft_dif_pass", e))?;
+        }
+        device.count_launch(1);
+    }
+    if reverse_output {
+        launch_qft_bit_reverse(ctx, state, start, num)?;
+    }
+    Ok(())
+}
+
+/// Reverse the `num` index bits at `start`, tiled through shared memory when the field
+/// starts at bit 0 and spans the 32 x 32 tile.
+fn launch_qft_bit_reverse(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    start: usize,
+    num: usize,
+) -> Result<()> {
+    if num < 2 {
+        return Ok(());
+    }
+    let dim: u64 = 1u64 << state.num_qubits();
+    let num_i = num as i32;
+    if start == 0 && num >= 10 {
+        let (stream, func) = stream_and_fn(ctx, "qft_bit_reverse_tiled")?;
+        let blocks = super::require_u32("qft_bit_reverse_tiled", "blocks", (dim >> 10) as usize)?;
+        let cfg = LaunchConfig {
+            grid_dim: (blocks, 1, 1),
+            block_dim: (32, 8, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut builder = stream.launch_builder(&func);
+        let buffer = state.buffer_mut().raw_mut();
+        builder.arg(buffer).arg(&num_i);
+        // SAFETY: signature matches; one block per 1024-amplitude tile index, and only
+        // the block of the smaller middle of each reversed pair writes, so no two
+        // blocks touch one amplitude.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| driver_err("qft_bit_reverse_tiled", e))?;
+        }
+    } else {
+        let (stream, func) = stream_and_fn(ctx, "qft_bit_reverse")?;
+        let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
+        let start_i = start as i32;
+        let mut builder = stream.launch_builder(&func);
+        let buffer = state.buffer_mut().raw_mut();
+        builder.arg(buffer).arg(&dim).arg(&start_i).arg(&num_i);
+        // SAFETY: signature matches; the grid covers dim and only the lower index of
+        // each reversed pair swaps.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| driver_err("qft_bit_reverse", e))?;
+        }
+    }
+    ctx.device().count_launch(1);
+    Ok(())
+}
+
 /// Matches the `TILE_Q` / `TILE_SIZE` in the PTX source: a tile spans `2^TILE_Q`
 /// amplitudes over a chosen set of `TILE_Q` qubits.
 const MULTI_FUSED_TILE_Q: usize = 10;
@@ -1655,7 +1889,7 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
 
 #[cfg(test)]
 mod tests {
-    use super::{Route2q, route_2q};
+    use super::{QftPass, Route2q, qft_pass_plan, route_2q};
     use crate::gates::Gate;
     use num_complex::Complex64;
 
@@ -1696,5 +1930,18 @@ mod tests {
         let mut repeated = Gate::Swap.matrix_4x4();
         repeated[0] = [z, o, z, z];
         assert_eq!(route_2q(&repeated), Route2q::Dense);
+    }
+
+    #[test]
+    fn qft_pass_plan_splits_high_stages_evenly_above_the_tile() {
+        let pass = |lo, bits| QftPass { lo, bits };
+        assert_eq!(qft_pass_plan(0, 10), [pass(0, 10)]);
+        assert_eq!(qft_pass_plan(0, 20), [pass(11, 9), pass(0, 11)]);
+        assert_eq!(
+            qft_pass_plan(0, 28),
+            [pass(19, 9), pass(11, 8), pass(0, 11)]
+        );
+        assert_eq!(qft_pass_plan(1, 12), [pass(10, 2), pass(0, 10)]);
+        assert_eq!(qft_pass_plan(5, 17), [pass(9, 8), pass(0, 9)]);
     }
 }

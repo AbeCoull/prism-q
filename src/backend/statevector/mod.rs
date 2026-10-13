@@ -13,9 +13,9 @@
 //! # Gate support
 //!
 //! The full gate set, including MCU, every fused or batched variant, a native
-//! `Gate::QftBlock` kernel on the CPU path for blocks starting at qubit 0, and native
-//! `Gate::PauliRot` and `Gate::Unitary` kernels on the CPU path. The device
-//! path declines `Gate::Unitary` by name.
+//! `Gate::QftBlock` kernel (on the CPU path for blocks starting at qubit 0, on the
+//! device for any range), and native `Gate::PauliRot` and `Gate::Unitary` kernels on
+//! the CPU path. The device path declines `Gate::Unitary` by name.
 //!
 //! # When to prefer this backend
 //!
@@ -66,8 +66,6 @@ use std::sync::Arc;
 use crate::backend::{Backend, dense_statevector_len, statevector_probability_len};
 use crate::backend::{reduced_density, schmidt, simd};
 use crate::circuit::Instruction;
-#[cfg(feature = "gpu")]
-use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::error::Result;
 use crate::gates::Gate;
 use crate::limits::{LimitKnob, ResolvedLimits};
@@ -398,33 +396,15 @@ impl StatevectorBackend {
                 inverse,
                 swaps,
                 big_endian,
-            } => {
-                let h = Gate::H.matrix_2x2();
-                for step in qft_textbook_steps(
-                    *start as usize,
-                    *num as usize,
-                    *inverse,
-                    *swaps,
-                    *big_endian,
-                ) {
-                    match step {
-                        QftTextbookStep::Hadamard(q) => k::launch_apply_gate_1q(&ctx, gpu, q, h)?,
-                        QftTextbookStep::CPhase {
-                            control,
-                            target,
-                            theta,
-                        } => k::launch_apply_cu_phase(
-                            &ctx,
-                            gpu,
-                            control,
-                            target,
-                            Complex64::from_polar(1.0, theta),
-                        )?,
-                        QftTextbookStep::Swap(a, b) => k::launch_apply_swap(&ctx, gpu, a, b)?,
-                    }
-                }
-                Ok(())
-            }
+            } => k::launch_apply_qft_block(
+                &ctx,
+                gpu,
+                *start as usize,
+                *num as usize,
+                *inverse,
+                *swaps,
+                *big_endian,
+            ),
             Gate::PauliRot(data) => {
                 launch_pauli_rotation_gpu(&ctx, gpu, data.theta, targets, &data.axes)
             }
@@ -885,17 +865,7 @@ impl Backend for StatevectorBackend {
     }
 
     fn supports_qft_block(&self) -> bool {
-        if !qft_block_enabled() {
-            return false;
-        }
-        #[cfg(feature = "gpu")]
-        {
-            self.gpu_context.is_none()
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            true
-        }
+        qft_block_enabled()
     }
 
     fn supports_pauli_rotation(&self) -> bool {

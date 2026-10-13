@@ -738,14 +738,77 @@ fn batch_phase_16q_matches_cpu() {
 
 #[test]
 fn qft_block_native_and_expanded_match_cpu() {
-    // Native: the raw `Gate::QftBlock` instruction, CPU FFT path vs the GPU
-    // textbook-step decomposition. Expanded: both backends run the textbook
-    // gate list produced by `expand_qft_blocks`.
+    // Native: the raw `Gate::QftBlock` instruction, CPU FFT path vs the device DIF
+    // passes. Expanded: both backends run the textbook gate list produced by
+    // `expand_qft_blocks`.
     let Some(f) = Fixture::try_new() else { return };
     let circuit = prism_q::circuits::qft_circuit(16);
     f.compare_eps(16, &circuit.instructions, 1e-10);
     let expanded = prism_q::circuit::expand_qft_blocks(&circuit);
     f.compare_eps(16, &expanded.instructions, 1e-10);
+}
+
+/// DIF passes the device runs for a `num`-qubit field at `start`: one tile of up to
+/// 11 stages (fewer by the low spectator bits, at most two), then passes of at most 9.
+#[cfg(feature = "bench-internal")]
+fn device_qft_passes(start: usize, num: usize) -> u64 {
+    let low = num.min(11 - start.min(2));
+    1 + (num - low).div_ceil(9) as u64
+}
+
+#[test]
+fn qft_block_all_flag_forms_and_offsets_match_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    for n in [10, 14, 17, 20] {
+        for (start, num) in [(0, n), (0, n - 3), (2, n - 2), (5, n - 7)] {
+            for form in 0..8 {
+                let (inverse, swaps, big_endian) = (form & 1 != 0, form & 2 != 0, form & 4 != 0);
+                let block = g(
+                    Gate::QftBlock {
+                        start: start as u8,
+                        num: num as u8,
+                        inverse,
+                        swaps,
+                        big_endian,
+                    },
+                    &(start..start + num).collect::<Vec<_>>(),
+                );
+                let mut cpu = StatevectorBackend::new(42);
+                cpu.init(n, 0).unwrap();
+                let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+                gpu.init(n, 0).unwrap();
+                for inst in lopsided_state(n) {
+                    cpu.apply(&inst).unwrap();
+                    gpu.apply(&inst).unwrap();
+                }
+                #[cfg(feature = "bench-internal")]
+                let before = f.ctx.pass_census();
+                gpu.apply(&block).unwrap();
+                #[cfg(feature = "bench-internal")]
+                {
+                    let census = f.ctx.pass_census() - before;
+                    let reversals = u64::from(big_endian != (inverse && !swaps))
+                        + u64::from(big_endian != (swaps || inverse));
+                    let passes = device_qft_passes(start, num) + reversals;
+                    assert_eq!(
+                        (census.launches, census.passes, census.drains),
+                        (passes, passes, 1),
+                        "census n={n} start={start} num={num} form={form}"
+                    );
+                }
+                cpu.apply(&block).unwrap();
+                let cpu_sv = cpu.export_statevector().unwrap();
+                let gpu_sv = gpu.export_statevector().unwrap();
+                for (i, (c, d)) in cpu_sv.iter().zip(&gpu_sv).enumerate() {
+                    assert!(
+                        (c - d).norm() < 1e-10,
+                        "n={n} start={start} num={num} form={form} index {i}: \
+                         cpu={c:?}, gpu={d:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

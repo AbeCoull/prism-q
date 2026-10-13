@@ -72,8 +72,8 @@ its stages. The density matrix keeps the batching passes.
 
 ## QFT recognition
 
-Before this pipeline runs, a backend with a native `QftBlock` kernel (the CPU
-statevector) has `recognize_qft_blocks` (`src/circuit/qft_recognition.rs`) fold each
+Before this pipeline runs, a backend with a native `QftBlock` kernel (the statevector,
+on the host or the device) has `recognize_qft_blocks` (`src/circuit/qft_recognition.rs`) fold each
 expanded QFT back into one block, so a QFT parsed from OpenQASM runs as the FFT rather
 than as `n^2 / 2` controlled phases. It matches every sequence `qft_textbook_steps`
 emits: forward or inverse, with or without the bit-reversal swaps, and in either label

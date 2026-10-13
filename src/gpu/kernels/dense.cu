@@ -12,6 +12,7 @@
 #define PARAM_QUBITS    {{PARAM_QUBITS}}
 #define BR_MAX_GROUPS   {{BR_MAX_GROUPS}}
 #define DB_MAX_GROUPS   {{DB_MAX_GROUPS}}
+#define QFT_TILE_Q      {{QFT_TILE_Q}}
 
 // The fused 2q matrix travels in kernel parameter space: a pageable host to device
 // copy synchronizes the stream before it starts, so uploading 32 doubles per gate
@@ -318,6 +319,122 @@ extern "C" __global__ void apply_monomial_2q(
     for (int row = 0; row < 4; ++row) {
         unsigned long long i = idx | ((row & 2) ? b0 : 0ULL) | ((row & 1) ? b1 : 0ULL);
         state[i] = cmul(make_double2(scale.v[2 * row], scale.v[2 * row + 1]), in[row]);
+    }
+}
+
+// ============================================================================
+// QftBlock: DIF FFT passes over the field of `num` qubits starting at `start`
+// ============================================================================
+//
+// A field index is x = (high | r << lo | L) for the stages lo .. lo + bits of one pass,
+// where L < 2^lo. A block gathers 2^bits rows of 2^row_log consecutive amplitudes each,
+// row r at stride 2^(start + lo), and runs the pass's stages in shared memory on the
+// plain per-stride twiddles. The L-dependent part of every twiddle collects into one
+// phase exp(2 pi i L rev(r) / 2^(lo + bits)) on output row r, read as the product of the
+// three staged tables at `phases` (low table scaled by 2^(-bits/2)). With lo = 0, L is
+// zero and only the scale applies.
+
+__device__ __forceinline__ double2 qft_phase(
+    const double2 * __restrict__ low, unsigned long long x, int low_bits, int mid_bits)
+{
+    const double2 *mid = low + (1 << low_bits);
+    const double2 *high = mid + (1 << mid_bits);
+    double2 p = cmul(__ldg(&low[x & ((1ULL << low_bits) - 1ULL)]),
+                     __ldg(&mid[(x >> low_bits) & ((1ULL << mid_bits) - 1ULL)]));
+    return cmul(p, __ldg(&high[x >> (low_bits + mid_bits)]));
+}
+
+extern "C" __global__ void qft_dif_pass(
+    double2 *state, int abs_lo, int bits, int row_log, int start,
+    const double2 * __restrict__ twiddles,
+    const double2 * __restrict__ phases, int low_bits, int mid_bits, double scale)
+{
+    __shared__ double2 qft_tile[1 << QFT_TILE_Q];
+    const int size = 1 << (bits + row_log);
+    const int row_mask = (1 << row_log) - 1;
+    const int col_blocks_log = abs_lo - row_log;
+    unsigned long long g = blockIdx.x;
+    unsigned long long col0 = (g & ((1ULL << col_blocks_log) - 1ULL)) << row_log;
+    unsigned long long base = ((g >> col_blocks_log) << (abs_lo + bits)) + col0;
+
+    for (int t = threadIdx.x; t < size; t += blockDim.x) {
+        qft_tile[t] = state[base + ((unsigned long long)(t >> row_log) << abs_lo) + (t & row_mask)];
+    }
+    __syncthreads();
+
+    for (int u = bits - 1; u >= 0; --u) {
+        const int sh = u + row_log;
+        const int low_mask = (1 << sh) - 1;
+        const int k_mask = (1 << u) - 1;
+        for (int p = threadIdx.x; p < (size >> 1); p += blockDim.x) {
+            int t0 = ((p & ~low_mask) << 1) | (p & low_mask);
+            int t1 = t0 | (1 << sh);
+            double2 w = __ldg(&twiddles[(1 << u) + ((t0 >> row_log) & k_mask)]);
+            double2 a = qft_tile[t0];
+            double2 b = qft_tile[t1];
+            qft_tile[t0] = make_double2(a.x + b.x, a.y + b.y);
+            qft_tile[t1] = cmul(make_double2(a.x - b.x, a.y - b.y), w);
+        }
+        __syncthreads();
+    }
+
+    for (int t = threadIdx.x; t < size; t += blockDim.x) {
+        int r = t >> row_log;
+        double2 v = qft_tile[t];
+        if (phases) {
+            unsigned long long l = (col0 + (t & row_mask)) >> start;
+            unsigned long long rev = __brev((unsigned int)r) >> (32 - bits);
+            v = cmul(v, qft_phase(phases, l * rev, low_bits, mid_bits));
+        } else {
+            v.x *= scale;
+            v.y *= scale;
+        }
+        state[base + ((unsigned long long)r << abs_lo) + (t & row_mask)] = v;
+    }
+}
+
+// Reverse the `num` field bits at `start` of every index: one thread per index, the
+// lower of each pair swaps.
+extern "C" __global__ void qft_bit_reverse(
+    double2 *state, unsigned long long dim, int start, int num)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= dim) return;
+    unsigned long long x = (i >> start) & ((1ULL << num) - 1ULL);
+    unsigned long long xr = __brevll(x) >> (64 - num);
+    if (x >= xr) return;
+    unsigned long long j = i ^ ((x ^ xr) << start);
+    double2 tmp = state[i];
+    state[i] = state[j];
+    state[j] = tmp;
+}
+
+// Field at bit 0, num >= 10: x = (a << (num - 5)) | (m << 5) | c reverses to
+// (rev5(c), rev(m), rev5(a)). A 32 x 8 block loads the 32 x 32 tiles of m and rev(m)
+// with coalesced rows and writes each into the other transposed, so stores stay
+// coalesced too. The block of the larger middle exits.
+extern "C" __global__ void qft_bit_reverse_tiled(double2 *state, int num)
+{
+    __shared__ double2 tile_a[32][33];
+    __shared__ double2 tile_b[32][33];
+    const int mid_bits = num - 10;
+    unsigned long long m = (unsigned long long)blockIdx.x & ((1ULL << mid_bits) - 1ULL);
+    unsigned long long mr = mid_bits ? (__brevll(m) >> (64 - mid_bits)) : 0ULL;
+    if (m > mr) return;
+    unsigned long long hb = ((unsigned long long)blockIdx.x >> mid_bits) << num;
+    const int c = threadIdx.x;
+    for (int a = threadIdx.y; a < 32; a += blockDim.y) {
+        unsigned long long row = hb | ((unsigned long long)a << (num - 5));
+        tile_a[a][c] = state[row | (m << 5) | c];
+        tile_b[a][c] = state[row | (mr << 5) | c];
+    }
+    __syncthreads();
+    const int rc = __brev((unsigned int)c) >> 27;
+    for (int a = threadIdx.y; a < 32; a += blockDim.y) {
+        const int ra = __brev((unsigned int)a) >> 27;
+        unsigned long long row = hb | ((unsigned long long)a << (num - 5));
+        state[row | (mr << 5) | c] = tile_a[rc][ra];
+        state[row | (m << 5) | c] = tile_b[rc][ra];
     }
 }
 

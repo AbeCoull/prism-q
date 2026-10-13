@@ -113,7 +113,10 @@ pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
 
 pub(super) const MAX_AUTO_T_COUNT_SHOTS: usize = 40;
 
+#[cfg(not(prism_lowered_thresholds))]
 pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 25;
+#[cfg(prism_lowered_thresholds)]
+pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 6;
 
 pub(super) const MIN_QUBITS_FOR_SPD_AUTO: usize = 12;
 
@@ -123,7 +126,10 @@ pub(super) const MIN_QUBITS_FOR_SPD_AUTO: usize = 12;
 /// stays on it.
 pub(super) const AUTO_SPD_AMPLITUDES_PER_TERM: usize = 64;
 
+#[cfg(not(prism_lowered_thresholds))]
 pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 24;
+#[cfg(prism_lowered_thresholds)]
+pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 6;
 
 pub(super) const MIN_BLOCK_FOR_FACTORED_STAB: usize = 2;
 

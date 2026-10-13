@@ -704,8 +704,10 @@ pub(crate) fn pauli_masks(
 /// kernels': a sandwich is a single lightweight O(N) reduction, so fan-out only
 /// pays off past 2^16 elements. Below that (and for a multi-term Hamiltonian's
 /// many small reductions) the sequential path is faster.
-#[cfg(feature = "parallel")]
+#[cfg(all(feature = "parallel", not(prism_lowered_thresholds)))]
 const SANDWICH_MIN_PAR_QUBITS: usize = 16;
+#[cfg(all(feature = "parallel", prism_lowered_thresholds))]
+const SANDWICH_MIN_PAR_QUBITS: usize = 8;
 
 /// Complex Pauli sandwich `⟨λ|P|φ⟩`, where `P` acts as
 /// `P|j⟩ = i^{#Y}·(-1)^{popcount(j & Zmask)}·|j ⊕ Xmask⟩`. Returns the raw

@@ -2580,7 +2580,10 @@ const FRAME_BATCH_SIZE: usize = 256;
 /// circuits carry a higher cutoff: the frame walks one word per qubit per gate,
 /// so its per-gate cost grows with the register while the map's does not.
 const FRAME_DEPTH_RATIO: f64 = 3.0;
+#[cfg(not(prism_lowered_thresholds))]
 const WIDE_FRAME_QUBITS: usize = 200;
+#[cfg(prism_lowered_thresholds)]
+const WIDE_FRAME_QUBITS: usize = 8;
 const WIDE_FRAME_DEPTH_RATIO: f64 = 5.0;
 
 /// True when [`run_shots_noisy`] takes the Pauli frame sampler rather than the

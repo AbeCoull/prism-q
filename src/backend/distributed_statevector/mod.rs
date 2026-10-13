@@ -537,10 +537,23 @@ pub struct DistributedStatevectorBackend {
 }
 
 impl DistributedStatevectorBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(context: Arc<DistributedContext>, seed: u64) -> Self {
+        Self::with_limits(
+            context,
+            seed,
+            &crate::limits::ResolvedLimits::process_default(),
+        )
+    }
+
+    pub(crate) fn with_limits(
+        context: Arc<DistributedContext>,
+        seed: u64,
+        limits: &crate::limits::ResolvedLimits,
+    ) -> Self {
         Self {
             context,
-            inner: StatevectorBackend::new(seed),
+            inner: StatevectorBackend::with_limits(seed, limits),
             num_qubits: 0,
             global_qubits: 0,
             recv: Vec::new(),
@@ -1989,7 +2002,11 @@ impl DistributedStatevectorBackend {
     }
 }
 
-impl crate::backend::sealed::Sealed for DistributedStatevectorBackend {}
+impl crate::backend::sealed::Sealed for DistributedStatevectorBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.inner.limits
+    }
+}
 
 impl Backend for DistributedStatevectorBackend {
     fn name(&self) -> &'static str {
@@ -2125,7 +2142,7 @@ impl Backend for DistributedStatevectorBackend {
         if self.global_qubits == 0 {
             return Ok(local);
         }
-        dense_probability_len(BACKEND_NAME, self.num_qubits)?;
+        dense_probability_len(BACKEND_NAME, self.num_qubits, &self.inner.limits)?;
         let gathered = self.context.comm().allgather_f64(&local);
         Ok(self.unpermuted(gathered))
     }
@@ -2139,7 +2156,12 @@ impl Backend for DistributedStatevectorBackend {
         if self.global_qubits == 0 {
             return Ok(local);
         }
-        dense_statevector_len(BACKEND_NAME, "statevector export", self.num_qubits)?;
+        dense_statevector_len(
+            BACKEND_NAME,
+            "statevector export",
+            self.num_qubits,
+            &self.inner.limits,
+        )?;
         let gathered = self.context.comm().allgather_c64(&local);
         Ok(self.unpermuted(gathered))
     }

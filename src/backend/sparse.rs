@@ -55,6 +55,7 @@ use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::{Gate, diag_entries_phase, is_antidiagonal_2x2, is_diagonal_2x2};
 use crate::hash::FxHashMap;
+use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::PauliTerm;
 
 /// Squared magnitude at or below which an entry is roundoff dust: a unit amplitude
@@ -80,13 +81,19 @@ pub struct SparseBackend {
     /// Whether the threshold has exceeded the default since the last `init`,
     /// so lowering it mid-run cannot hide weight already discarded.
     raised: bool,
-    /// [`crate::backend::max_sparse_entries`] read once at construction, so the
-    /// per-gate growth check is a field compare rather than an atomic load.
+    /// `limits.sparse_entries()` read once at construction, so the per-gate
+    /// growth check is a field compare.
     entry_cap: usize,
+    limits: ResolvedLimits,
 }
 
 impl SparseBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64) -> Self {
+        Self::with_limits(seed, &ResolvedLimits::process_default())
+    }
+
+    pub(crate) fn with_limits(seed: u64, limits: &ResolvedLimits) -> Self {
         Self {
             num_qubits: 0,
             state: FxHashMap::default(),
@@ -96,7 +103,8 @@ impl SparseBackend {
             epsilon: DEFAULT_EPSILON,
             pruned_weight: 0.0,
             raised: false,
-            entry_cap: crate::backend::max_sparse_entries(),
+            entry_cap: limits.sparse_entries(),
+            limits: *limits,
         }
     }
 
@@ -173,14 +181,15 @@ impl SparseBackend {
 
     #[cold]
     fn entry_growth_error(&self, projected: usize) -> crate::error::PrismError {
-        crate::error::PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
-            backend: "sparse".to_string(),
-            operation: format!("a gate on a state of {} entries", self.state.len()),
-            resource: crate::error::ResourceKind::Entries,
-            required: projected as u128,
-            limit: self.entry_cap as u128,
-            env_var: Some("PRISM_MAX_SPARSE_QUBITS"),
-        }))
+        crate::limits::resource_limit_error(
+            "sparse",
+            format!("a gate on a state of {} entries", self.state.len()),
+            crate::error::ResourceKind::Entries,
+            projected as u128,
+            self.entry_cap as u128,
+            crate::limits::LimitKnob::SparseQubits,
+            self.limits.sparse_qubits.source,
+        )
     }
 
     #[inline(always)]
@@ -649,7 +658,11 @@ impl SparseBackend {
     }
 }
 
-impl crate::backend::sealed::Sealed for SparseBackend {}
+impl crate::backend::sealed::Sealed for SparseBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
 
 impl Backend for SparseBackend {
     fn name(&self) -> &'static str {
@@ -688,6 +701,8 @@ impl Backend for SparseBackend {
                     required: num_qubits as u128,
                     limit: MAX_SPARSE_INDEX_QUBITS as u128,
                     env_var: None,
+                    knob: None,
+                    limit_source: crate::limits::LimitSource::Detected,
                 },
             )));
         }
@@ -772,7 +787,8 @@ impl Backend for SparseBackend {
     /// does not depend on map iteration order. Scaled to trace one.
     fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
         schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
-        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let dim =
+            reduced_density::reduced_density_side(self.name(), subsystem.len(), &self.limits)?;
         let named = subsystem.iter().fold(0usize, |mask, &q| mask | (1 << q));
         let mut entries: Vec<(usize, usize, Complex64)> = self
             .state
@@ -823,6 +839,7 @@ impl Backend for SparseBackend {
             self.num_qubits(),
             || self.export_statevector(),
             other,
+            &self.limits,
         )
     }
 
@@ -831,7 +848,7 @@ impl Backend for SparseBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        let dim = dense_probability_len(self.name(), self.num_qubits)?;
+        let dim = dense_probability_len(self.name(), self.num_qubits, &self.limits)?;
         let mut probs = Vec::new();
         reserve_dense_output(&mut probs, dim, self.name(), "probabilities")?;
         probs.resize(dim, 0.0f64);
@@ -945,7 +962,12 @@ impl Backend for SparseBackend {
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
+        let dim = dense_statevector_len(
+            self.name(),
+            "statevector export",
+            self.num_qubits,
+            &self.limits,
+        )?;
         let mut sv = Vec::new();
         reserve_dense_output(&mut sv, dim, self.name(), "statevector export")?;
         sv.resize(dim, Complex64::new(0.0, 0.0));

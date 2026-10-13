@@ -5,6 +5,8 @@
 
 use thiserror::Error;
 
+use crate::limits::{LimitKnob, LimitSource};
+
 /// Top-level error type for PRISM-Q operations.
 #[derive(Debug, Error, Clone, PartialEq)]
 #[non_exhaustive]
@@ -67,13 +69,16 @@ pub enum PrismError {
     ResourceLimit(Box<ResourceLimit>),
 }
 
-/// Payload of [`PrismError::ResourceLimit`]. `limit` is the cap detected on this
-/// machine or set through `env_var`, when a variable overrides it.
+/// Payload of [`PrismError::ResourceLimit`]. `limit` is the cap `knob` names, resolved
+/// from the layer `limit_source` names. `env_var` is the variable that overrides it,
+/// `None` when [`Limits`](crate::Limits) set the cap, since a request or process
+/// default outranks the environment.
 #[derive(Debug, Error, Clone, PartialEq)]
 #[error(
     "backend `{backend}`: {operation} needs {required} {resource}, exceeding the cap of \
-     {limit} on this machine{}",
-    override_hint(.env_var)
+     {limit} {}{}",
+    origin(.limit_source, .env_var),
+    override_hint(.knob, .env_var)
 )]
 #[non_exhaustive]
 pub struct ResourceLimit {
@@ -83,6 +88,10 @@ pub struct ResourceLimit {
     pub required: u128,
     pub limit: u128,
     pub env_var: Option<&'static str>,
+    /// The [`Limits`](crate::Limits) cap the allocation ran into; `None` for a bound
+    /// no limit moves, such as free device memory or the address width.
+    pub knob: Option<LimitKnob>,
+    pub limit_source: LimitSource,
 }
 
 /// Unit of a [`PrismError::ResourceLimit`].
@@ -122,8 +131,28 @@ fn loop_hint(construct: &str) -> &'static str {
     }
 }
 
-fn override_hint(env_var: &Option<&'static str>) -> String {
-    env_var.map_or_else(String::new, |var| format!(" (set {var} to override)"))
+fn origin(source: &LimitSource, env_var: &Option<&'static str>) -> String {
+    match (source, env_var) {
+        (LimitSource::Env, Some(var)) => format!("set by {var}"),
+        (LimitSource::ProcessDefault, _) => "set by the process default limits".to_string(),
+        (LimitSource::Request, _) => "set by this request's limits".to_string(),
+        _ => "on this machine".to_string(),
+    }
+}
+
+fn override_hint(knob: &Option<LimitKnob>, env_var: &Option<&'static str>) -> String {
+    let setter = knob.map(|knob| match knob {
+        LimitKnob::DensityMatrixQubits => {
+            "Limits::max_density_matrix_qubits and max_statevector_qubits".to_string()
+        }
+        _ => format!("Limits::{}", knob.name()),
+    });
+    match (setter, env_var) {
+        (Some(setter), Some(var)) => format!(" (override with {setter} or {var})"),
+        (Some(setter), None) => format!(" (override with {setter})"),
+        (None, Some(var)) => format!(" (set {var} to override)"),
+        (None, None) => String::new(),
+    }
 }
 
 pub type Result<T> = std::result::Result<T, PrismError>;

@@ -17,6 +17,7 @@ use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 
 use super::shots::{build_cdf, sample_from_cdf};
+use crate::limits::ResolvedLimits;
 
 #[cfg(not(prism_lowered_thresholds))]
 const MAX_DENSE_COUNT_BINS: usize = 1 << 20;
@@ -450,6 +451,7 @@ pub(super) fn sample_counts_from_probs(
     num_classical_bits: usize,
     num_shots: usize,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> HashMap<Vec<u64>, u64> {
     sample_counts_from_probs_capped(
         probs,
@@ -457,7 +459,7 @@ pub(super) fn sample_counts_from_probs(
         num_classical_bits,
         num_shots,
         seed,
-        crate::backend::max_dense_outcome_bits(),
+        limits.dense_outcome_bits,
     )
 }
 
@@ -538,6 +540,7 @@ pub(super) fn sample_counts_from_state(
     num_classical_bits: usize,
     num_shots: usize,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> HashMap<Vec<u64>, u64> {
     if num_shots == 0 {
         return HashMap::new();
@@ -561,7 +564,7 @@ pub(super) fn sample_counts_from_state(
         state,
         |amp| amp.norm_sqr() * norm_sq,
         &map,
-        crate::backend::max_dense_outcome_bits(),
+        limits.dense_outcome_bits,
     ) {
         sample_counts_from_outcome_distribution(&probs, &map, num_classical_bits, num_shots, seed)
     } else {

@@ -11,6 +11,7 @@ mod distributed;
 mod error;
 mod gate;
 mod gpu;
+mod limits;
 mod noise;
 mod numpy_util;
 mod parameter;
@@ -27,6 +28,7 @@ use circuit::{PyCircuit, PyCircuitBuilder, PyClassicalCondition, PySaveSpec};
 use error::PrismError;
 use gate::PyGate;
 use gpu::{PyGpuContext, PyGpuInfo};
+use limits::PyLimits;
 use noise::{
     PyDeviceCalibration, PyDriftDistribution, PyErrorChainComplex, PyGateFilter, PyGateTimes,
     PyNoiseBuilder, PyNoiseChannel, PyNoiseModel,
@@ -102,6 +104,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDynamicProgramBuilder>()?;
     m.add_class::<PyProgramSimulation>()?;
     m.add_class::<PyThreadPool>()?;
+    m.add_class::<PyLimits>()?;
 
     m.add_function(wrap_pyfunction!(circuit::parse_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(circuit::parse_qasm_parametric, m)?)?;
@@ -112,6 +115,8 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sim::run_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_batch, m)?)?;
     m.add_function(wrap_pyfunction!(gpu::gpu_info, m)?)?;
+    m.add_function(wrap_pyfunction!(limits::set_default_limits, m)?)?;
+    m.add_function(wrap_pyfunction!(limits::default_limits, m)?)?;
     m.add_function(wrap_pyfunction!(noise::noisy_marginals_analytical, m)?)?;
 
     circuit::register_circuits(m)?;

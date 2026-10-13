@@ -62,6 +62,7 @@ pub mod gates;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod hash;
+mod limits;
 pub mod qec;
 pub mod sim;
 #[cfg(feature = "parallel")]
@@ -97,6 +98,7 @@ pub use error::{PrismError, ResourceKind, ResourceLimit, Result};
 pub use gates::{
     BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData, UnitaryData,
 };
+pub use limits::{LimitKnob, LimitSource, Limits, default_limits, set_default_limits};
 pub use qec::{
     BpMethod, BpOsdDecoder, BpOsdOptions, DetectorErrorModel, ErrorMechanism, MatchingDecoder,
     OsdMethod, QecBasis, QecCircuitNoise, QecCompiledRows, QecMeasurementRow, QecNoise,

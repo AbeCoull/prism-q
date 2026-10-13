@@ -15,6 +15,7 @@ use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
 use crate::gates::Gate;
+use crate::limits::ResolvedLimits;
 use crate::sim::compiled::{
     PackedShots, batch_propagate_backward, compile_measurements, xor_words,
 };
@@ -2968,8 +2969,9 @@ pub fn run_shots_noisy(
     noise.validate_for(circuit)?;
     noise.ensure_only_pauli_channels()?;
     if !circuit.is_clifford_only() {
+        let limits = ResolvedLimits::process_default();
         return run_shots_noisy_brute_with(
-            |s| Box::new(StabilizerBackend::new(s)),
+            |s| Box::new(StabilizerBackend::with_limits(s, &limits)),
             circuit,
             noise,
             num_shots,
@@ -2978,8 +2980,9 @@ pub fn run_shots_noisy(
     }
 
     if !super::supports_compiled_measurement_sampling(circuit) {
+        let limits = ResolvedLimits::process_default();
         return run_shots_noisy_brute_with(
-            |s| Box::new(StabilizerBackend::new(s)),
+            |s| Box::new(StabilizerBackend::with_limits(s, &limits)),
             circuit,
             noise,
             num_shots,
@@ -3033,8 +3036,9 @@ pub(crate) fn run_shots_noisy_with_gpu(
 ) -> Result<ShotsResult> {
     noise.ensure_only_pauli_channels()?;
     if !circuit.is_clifford_only() {
+        let limits = ResolvedLimits::process_default();
         return run_shots_noisy_brute_with(
-            |s| Box::new(StabilizerBackend::new(s)),
+            |s| Box::new(StabilizerBackend::with_limits(s, &limits)),
             circuit,
             noise,
             num_shots,
@@ -3043,8 +3047,9 @@ pub(crate) fn run_shots_noisy_with_gpu(
     }
 
     if !super::supports_compiled_measurement_sampling(circuit) {
+        let limits = ResolvedLimits::process_default();
         return run_shots_noisy_brute_with(
-            |s| Box::new(StabilizerBackend::new(s)),
+            |s| Box::new(StabilizerBackend::with_limits(s, &limits)),
             circuit,
             noise,
             num_shots,
@@ -3310,6 +3315,7 @@ pub(crate) fn evolve_density_matrix(
     noise: Option<&NoiseModel>,
     initial_state: Option<super::StartState<'_>>,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<DensityMatrixBackend> {
     use super::dispatch::{Accel, Family, accel_for, build_density_matrix};
 
@@ -3318,8 +3324,8 @@ pub(crate) fn evolve_density_matrix(
         crate::backend::check_state_allocation(
             "density_matrix",
             circuit.num_qubits,
-            crate::backend::max_density_matrix_qubits(),
-            crate::backend::DM_QUBIT_CAP_ENV,
+            limits.density_matrix_qubits,
+            crate::limits::LimitKnob::DensityMatrixQubits,
         )?;
     }
     if !circuit.has_terminal_measurements_under_reset_channel() {
@@ -3337,7 +3343,7 @@ pub(crate) fn evolve_density_matrix(
         noise.ensure_memoryless("density_matrix")?;
     }
 
-    let mut dm = build_density_matrix(&accel, seed);
+    let mut dm = build_density_matrix(&accel, seed, limits);
     match initial_state {
         Some(state) => {
             crate::sim::check_initial_state_len(state, circuit.num_qubits)?;
@@ -3460,13 +3466,14 @@ pub(crate) fn density_matrix_probabilities(
     noise: &NoiseModel,
     initial_state: Option<super::StartState<'_>>,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Vec<f64>> {
     let noise = if circuit.has_terminal_measurements_under_reset_channel() {
         settle_measured_qubits(circuit, noise)?
     } else {
         std::borrow::Cow::Borrowed(noise)
     };
-    evolve_density_matrix(kind, circuit, Some(&noise), initial_state, seed)?.probabilities()
+    evolve_density_matrix(kind, circuit, Some(&noise), initial_state, seed, limits)?.probabilities()
 }
 
 /// `noise` without the events that fire after the last measurement of every
@@ -3552,6 +3559,7 @@ pub(crate) fn dm_noisy_marginals(
         Some(noise),
         None,
         seed,
+        &ResolvedLimits::process_default(),
     )?;
     let mut result = vec![0.5f64; circuit.num_classical_bits];
     for inst in &circuit.instructions {
@@ -3586,6 +3594,7 @@ pub fn density_matrix_expectation_values(
         noise,
         None,
         seed,
+        &ResolvedLimits::process_default(),
     )
 }
 
@@ -3599,6 +3608,7 @@ pub(crate) fn dm_expectation_values(
     noise: Option<&NoiseModel>,
     initial_state: Option<super::StartState<'_>>,
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Vec<f64>> {
     if circuit
         .instructions
@@ -3613,7 +3623,7 @@ pub(crate) fn dm_expectation_values(
                 .into(),
         });
     }
-    let dm = evolve_density_matrix(kind, circuit, noise, initial_state, seed)?;
+    let dm = evolve_density_matrix(kind, circuit, noise, initial_state, seed, limits)?;
     let masks = observables
         .iter()
         .map(|obs| crate::sim::pauli_masks(obs, circuit.num_qubits))

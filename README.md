@@ -212,8 +212,10 @@ to Sparse when the state never holds more than 128 basis states and to MPS with 
 dimension 256 otherwise; partially independent circuits go to Factored, and the rest run
 on Statevector. Before that tree, a Clifford+T circuit with few T gates can take the
 stabilizer-rank sampler for shots and Pauli propagation for marginals.
-The budget is half the machine's physical memory, read once and cached;
-`PRISM_MAX_SV_QUBITS` overrides it. Density Matrix and Distributed Statevector are never
+The budget is half the machine's physical memory, read once and cached.
+`Limits` overrides it or any single cap, per request with `.limits(...)` or for the
+process with `set_default_limits`, and the `PRISM_MAX_*` variables set the same caps
+from the environment. Density Matrix and Distributed Statevector are never
 selected automatically; name them.
 
 To choose a backend yourself, call `.backend(BackendKind::Stabilizer)` (or

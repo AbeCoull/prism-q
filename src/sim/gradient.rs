@@ -19,11 +19,12 @@ use std::borrow::Cow;
 use num_complex::Complex64;
 
 use crate::backend::statevector::StatevectorBackend;
-use crate::backend::{Backend, max_statevector_qubits, reserve_dense_output};
+use crate::backend::{Backend, reserve_dense_output};
 use crate::circuit::parameter::{ParamLink, Parameters, angle_mut, angle_of};
 use crate::circuit::{Circuit, Instruction, PreparedCircuit, SmallVec, smallvec};
 use crate::error::{PrismError, Result};
 use crate::gates::{Gate, GeneratorKind, is_diagonal_2x2, pauli_rot_masks};
+use crate::limits::{Limits, ResolvedLimits};
 
 use super::noise::NoiseModel;
 use super::unified_pauli::PauliTerm;
@@ -69,6 +70,23 @@ pub fn run_expectation_gradient(
     params: &Parameters,
     seed: u64,
 ) -> Result<ExpectationGradient> {
+    expectation_gradient_within(
+        circuit,
+        hamiltonian,
+        params,
+        seed,
+        &ResolvedLimits::process_default(),
+    )
+}
+
+/// [`run_expectation_gradient`] under `limits`.
+pub(super) fn expectation_gradient_within(
+    circuit: &Circuit,
+    hamiltonian: &[(f64, Vec<PauliTerm>)],
+    params: &Parameters,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<ExpectationGradient> {
     if super::has_nonunitary_or_classical_ops(circuit) {
         return Err(PrismError::IncompatibleBackend {
             backend: "Statevector".into(),
@@ -94,17 +112,17 @@ pub fn run_expectation_gradient(
 
     params.validate(circuit)?;
 
-    if circuit.num_qubits > max_statevector_qubits() {
-        return Err(PrismError::ResourceLimit(Box::new(
-            crate::error::ResourceLimit {
-                backend: "Statevector".into(),
-                operation: "adjoint gradients, which hold two statevectors,".to_string(),
-                resource: crate::error::ResourceKind::Qubits,
-                required: circuit.num_qubits as u128,
-                limit: max_statevector_qubits() as u128,
-                env_var: Some("PRISM_MAX_SV_QUBITS"),
-            },
-        )));
+    let cap = limits.statevector_qubits;
+    if circuit.num_qubits > cap.value {
+        return Err(crate::limits::resource_limit_error(
+            "Statevector",
+            "adjoint gradients, which hold two statevectors,",
+            crate::error::ResourceKind::Qubits,
+            circuit.num_qubits as u128,
+            cap.value as u128,
+            crate::limits::LimitKnob::StatevectorQubits,
+            cap.source,
+        ));
     }
 
     // Validate and reduce observables before the 2^n simulation.
@@ -127,7 +145,7 @@ pub fn run_expectation_gradient(
     // rebuilds every intermediate state by inverting `circuit.instructions` one
     // entry at a time, so its 1:1 gate-to-generator view of the trainable gates
     // survives whatever shape the fused stream takes.
-    let mut phi = StatevectorBackend::new(seed);
+    let mut phi = StatevectorBackend::with_limits(seed, limits);
     phi.init(circuit.num_qubits, circuit.num_classical_bits)?;
     let forward = kept_subcircuit(circuit, &kept);
     let expanded = super::expand_for_backend(&phi, &forward);
@@ -156,7 +174,7 @@ pub fn run_expectation_gradient(
         return Ok(ExpectationGradient { value, gradient });
     };
 
-    let mut lambda = StatevectorBackend::new(seed);
+    let mut lambda = StatevectorBackend::with_limits(seed, limits);
     lambda.init_from_state(lambda_state, circuit.num_classical_bits)?;
 
     // The sweep is the in-cone tail from the earliest trainable gate. Sweep
@@ -732,6 +750,7 @@ pub fn run_expectation_gradient_shift(
         None,
         None,
         seed,
+        None,
     )
 }
 
@@ -754,6 +773,7 @@ pub fn run_expectation_gradient_shift(
 /// must be a density-matrix kind, which the caller checks. The channels do not
 /// depend on the shifted angle, so `⟨H⟩` stays a degree-1 trigonometric
 /// polynomial in it and the shift is still exact.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn shift_gradient(
     kind: &BackendKind,
     circuit: &Circuit,
@@ -762,6 +782,7 @@ pub(crate) fn shift_gradient(
     noise: Option<&NoiseModel>,
     initial_state: Option<super::StartState<'_>>,
     seed: u64,
+    request: Option<&Limits>,
 ) -> Result<ExpectationGradient> {
     params.validate(circuit)?;
     // Below the fusion floor there is no plan to replay, and the prepared copy
@@ -770,8 +791,9 @@ pub(crate) fn shift_gradient(
         && noise.is_none()
         && circuit.num_qubits >= crate::circuit::fusion::MIN_QUBITS_FOR_FUSION
     {
-        return prepared_shift_gradient(kind, circuit, hamiltonian, params, seed);
+        return prepared_shift_gradient(kind, circuit, hamiltonian, params, seed, request);
     }
+    let limits = &ResolvedLimits::resolve(request);
     if initial_state.is_some() || noise.is_some() {
         super::require_unitary_circuit(kind, circuit, "expectation values require")?;
     }
@@ -797,13 +819,19 @@ pub(crate) fn shift_gradient(
                 Some(noise),
                 initial_state,
                 seed,
+                limits,
             )?,
-            (None, Some(state)) => {
-                super::expectation_values_from_initial_state(kind, c, state, &observables, seed)?
-                    .into_values()
-            }
+            (None, Some(state)) => super::expectation_values_from_initial_state(
+                kind,
+                c,
+                state,
+                &observables,
+                seed,
+                limits,
+            )?
+            .into_values(),
             (None, None) => {
-                super::run_expectation_values_with(kind.clone(), c, &observables, seed)?
+                super::run_expectation_values_with(kind.clone(), c, &observables, seed, limits)?
             }
         };
         Ok(hamiltonian
@@ -866,6 +894,7 @@ fn prepared_shift_gradient(
     hamiltonian: &[(f64, Vec<PauliTerm>)],
     params: &Parameters,
     seed: u64,
+    request: Option<&Limits>,
 ) -> Result<ExpectationGradient> {
     // One slot per linked instruction rather than per parameter slot, since a
     // shift moves one gate even where its slot drives several.
@@ -897,7 +926,8 @@ fn prepared_shift_gradient(
             .sum())
     };
 
-    let mut prepared = PreparedCircuit::with_backend(circuit.clone(), site_params, kind.clone())?;
+    let mut prepared =
+        PreparedCircuit::with_limits(circuit.clone(), site_params, kind.clone(), request.copied())?;
     let value = energy(&mut prepared, &base)?;
     let mut gradient = vec![0.0; params.num_slots()];
     if params.is_empty() {
@@ -1098,6 +1128,7 @@ mod tests {
                         c,
                         &observables,
                         42,
+                        &ResolvedLimits::process_default(),
                     )
                     .unwrap(),
                 )

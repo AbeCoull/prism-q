@@ -7,6 +7,7 @@ use num_complex::Complex64;
 
 use crate::backend::dense_statevector_len;
 use crate::error::Result;
+use crate::limits::ResolvedLimits;
 
 /// `i^p`, the coefficient a signed Pauli carries in the `i^p X^x Z^z` form
 /// used here.
@@ -111,8 +112,12 @@ pub(crate) fn subsystem_rank(xz: &[u64], n: usize, nw: usize, subsystem: &[usize
 /// Priced as an `r`-qubit statevector against the dense export cap. The
 /// marginal on the same cut is priced at `2k` qubits for `r <= k`, so a cut
 /// whose marginal this backend would build has a spectrum it will also build.
-pub(crate) fn flat_spectrum(backend: &str, rank: usize) -> Result<Vec<f64>> {
-    let count = dense_statevector_len(backend, "Schmidt values", rank)?;
+pub(crate) fn flat_spectrum(
+    backend: &str,
+    rank: usize,
+    limits: &ResolvedLimits,
+) -> Result<Vec<f64>> {
+    let count = dense_statevector_len(backend, "Schmidt values", rank, limits)?;
     Ok(vec![(count as f64).sqrt().recip(); count])
 }
 

@@ -2,6 +2,7 @@ use super::*;
 use crate::circuit::{ClassicalCondition, Instruction, smallvec};
 use crate::circuits;
 use crate::gates::Gate;
+use crate::limits::ResolvedLimits;
 use crate::sim::BackendKind;
 
 #[test]
@@ -100,7 +101,14 @@ fn run_shots_deferred_reset_preserves_bell_correlation() {
     c.add_reset(1);
     c.add_measure(0, 1);
 
-    let result = crate::sim::run_shots_with(BackendKind::Stabilizer, &c, 1024, 42).unwrap();
+    let result = crate::sim::run_shots_with(
+        BackendKind::Stabilizer,
+        &c,
+        1024,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(result.num_classical_bits, 2);
     let mut saw_zero = false;
     let mut saw_one = false;
@@ -240,7 +248,14 @@ fn random_clifford_marginals() {
     let mut c = circuits::clifford_heavy_circuit(n, 10, 42);
     c.measure_all();
     let compiled = run_shots_compiled(&c, 50_000, 42).unwrap();
-    let reference = crate::sim::run_shots_with(BackendKind::Stabilizer, &c, 50_000, 42).unwrap();
+    let reference = crate::sim::run_shots_with(
+        BackendKind::Stabilizer,
+        &c,
+        50_000,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
 
     for q in 0..n {
         let compiled_ones: usize = compiled.shots.iter().filter(|s| s[q]).count();
@@ -264,7 +279,14 @@ fn lut_grouped_sampling_50q() {
     assert!(sampler.lut.is_some(), "rank >= 8 should build LUT");
 
     let compiled = run_shots_compiled(&c, 5_000, 42).unwrap();
-    let reference = crate::sim::run_shots_with(BackendKind::Stabilizer, &c, 5_000, 42).unwrap();
+    let reference = crate::sim::run_shots_with(
+        BackendKind::Stabilizer,
+        &c,
+        5_000,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
 
     for q in 0..n {
         let compiled_ones: usize = compiled.shots.iter().filter(|s| s[q]).count();
@@ -404,7 +426,14 @@ fn forward_clifford_50q_marginals() {
     c.measure_all();
 
     let mut forward = compile_forward(&c, 42).unwrap();
-    let reference = crate::sim::run_shots_with(BackendKind::Stabilizer, &c, 5_000, 42).unwrap();
+    let reference = crate::sim::run_shots_with(
+        BackendKind::Stabilizer,
+        &c,
+        5_000,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
 
     let fwd_shots = forward.sample_bulk(5_000);
 
@@ -1015,7 +1044,14 @@ fn bts_meas_major_marginals_match_stabilizer() {
     let mut sampler = compile_forward(&c, 42).unwrap();
     let packed = sampler.sample_bulk_packed(5_000);
 
-    let reference = crate::sim::run_shots_with(BackendKind::Stabilizer, &c, 5_000, 42).unwrap();
+    let reference = crate::sim::run_shots_with(
+        BackendKind::Stabilizer,
+        &c,
+        5_000,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
 
     for q in 0..50 {
         let bts_ones: usize = (0..5_000).filter(|&s| packed.get_bit(s, q)).count();
@@ -1576,10 +1612,23 @@ fn rank_zero_counts_without_measurements() {
 #[test]
 fn rank_zero_run_counts_match_shot_counts() {
     let c = deterministic_circuit(|q| q);
-    let counts = crate::sim::run_counts_with(BackendKind::Auto, &c, 5000, 42)
-        .unwrap()
-        .0;
-    let shots = crate::sim::run_shots_with(BackendKind::Auto, &c, 5000, 42).unwrap();
+    let counts = crate::sim::run_counts_with(
+        BackendKind::Auto,
+        &c,
+        5000,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
+    let shots = crate::sim::run_shots_with(
+        BackendKind::Auto,
+        &c,
+        5000,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(counts.len(), 1);
     assert_eq!(counts, shots.counts());
 }

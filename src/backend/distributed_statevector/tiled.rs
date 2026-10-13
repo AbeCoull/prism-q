@@ -278,12 +278,13 @@ impl TiledStatevector {
                 ),
             });
         }
-        let cap = crate::backend::memory::max_statevector_qubits();
+        let limits = crate::limits::ResolvedLimits::process_default();
+        let cap = limits.statevector_qubits.value;
         if w + 1 > cap {
             return Err(PrismError::InvalidParameter {
                 message: format!(
-                    "window pair of {} qubits exceeds the statevector cap of {cap} on this \
-                     machine (set PRISM_MAX_SV_QUBITS to override)",
+                    "window pair of {} qubits exceeds the statevector cap of {cap} (override \
+                     with Limits::max_statevector_qubits or PRISM_MAX_SV_QUBITS)",
                     w + 1
                 ),
             });
@@ -310,7 +311,7 @@ impl TiledStatevector {
             .open(&path)
             .map_err(|e| storage_error(&path, "create tile file", &e))?;
 
-        let mut inner = StatevectorBackend::new(seed);
+        let mut inner = StatevectorBackend::with_limits(seed, &limits);
         inner.init(w, 0)?;
         let mut state = Self {
             num_qubits,
@@ -922,7 +923,12 @@ impl TiledStatevector {
     /// Assemble the full statevector in tile order, folding the deferred
     /// norm. Carries the same dense output cap as every gathering query.
     pub fn export_statevector(&mut self) -> Result<Vec<Complex64>> {
-        let len = dense_statevector_len(BACKEND_NAME, "statevector export", self.num_qubits)?;
+        let len = dense_statevector_len(
+            BACKEND_NAME,
+            "statevector export",
+            self.num_qubits,
+            &self.inner.limits,
+        )?;
         let mut out = Vec::with_capacity(len);
         for tile in 0..self.tile_count() {
             self.read_window_tile(tile)?;

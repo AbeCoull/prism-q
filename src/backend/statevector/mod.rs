@@ -51,6 +51,8 @@
 //! (`negate_slice`, `swap_slices`, `norm_sqr_sum`, `zero_slice`).
 
 pub(crate) mod kernels;
+#[cfg(any(test, feature = "bench-internal"))]
+pub(crate) mod sweeps;
 #[cfg(test)]
 mod tests;
 

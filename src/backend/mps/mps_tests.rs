@@ -390,6 +390,63 @@ fn svd_faer_recovers_the_vectors_divide_and_conquer_loses() {
     );
 }
 
+// A 128 by 128 product of rank 64 with a graded spectrum, the shape of a SWAP
+// through a saturated bond. faer's divide-and-conquer returns finite factors
+// that reconstruct it only to 1e-8, which an exact-bond chain carries into its
+// amplitudes.
+#[cfg(feature = "parallel")]
+#[test]
+fn svd_faer_rejects_an_inaccurate_divide_and_conquer() {
+    use rand::SeedableRng;
+    let (n, rank) = (128usize, 64usize);
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let mut entry =
+        |scale: f64| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5) * scale;
+    let left: Vec<Complex64> = (0..n * rank).map(|_| entry(1.0)).collect();
+    let right: Vec<Complex64> = (0..rank * n)
+        .map(|i| entry(0.85f64.powi((i % rank) as i32)))
+        .collect();
+    let mut a = vec![ZERO; n * n];
+    for c in 0..n {
+        for p in 0..rank {
+            let weight = right[c * rank + p];
+            for r in 0..n {
+                a[c * n + r] += left[p * n + r] * weight;
+            }
+        }
+    }
+    let relative_error = |u: &dyn Fn(usize, usize) -> Complex64,
+                          s: &[f64],
+                          vt: &dyn Fn(usize, usize) -> Complex64| {
+        let mut err = 0.0f64;
+        for c in 0..n {
+            for r in 0..n {
+                let x: Complex64 = (0..n).map(|k| u(r, k) * s[k] * vt(k, c)).sum();
+                err += (x - a[c * n + r]).norm_sqr();
+            }
+        }
+        err.sqrt() / l2_norm(&a)
+    };
+
+    let raw = faer::MatRef::from_column_major_slice(&a, n, n)
+        .thin_svd()
+        .unwrap();
+    let raw_s: Vec<f64> = (0..n).map(|k| raw.S()[k].re).collect();
+    let raw_error = relative_error(&|r, k| raw.U()[(r, k)], &raw_s, &|k, c| {
+        raw.V()[(c, k)].conj()
+    });
+    assert!(
+        raw_error > 1e-10,
+        "faer's divide-and-conquer no longer fails on this input ({raw_error:e})"
+    );
+
+    let res = svd_faer(&a, n, n);
+    let error = relative_error(&|r, k| res.u[k * res.u_rows + r], &res.s, &|k, c| {
+        res.vt[k * res.vt_cols + c]
+    });
+    assert!(error < 1e-13, "relative reconstruction error {error:e}");
+}
+
 #[test]
 fn test_svd_wide_matrix() {
     let a = vec![

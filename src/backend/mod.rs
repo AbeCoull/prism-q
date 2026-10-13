@@ -635,8 +635,8 @@ pub trait Backend: sealed::Sealed {
     }
 
     /// Whether this backend has a native `Gate::QftBlock` kernel, on which `sim` folds
-    /// expanded QFTs into blocks. Only the CPU statevector does; others receive the
-    /// textbook gates.
+    /// expanded QFTs into blocks. Only the statevector does, on the host or the device;
+    /// others receive the textbook gates.
     fn supports_qft_block(&self) -> bool {
         false
     }

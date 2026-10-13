@@ -108,8 +108,9 @@ NVRTC from PyPI. See [Python Bindings](python.md#gpu-backends).
 
 Every `Gate` variant runs on the device, though not each through a kernel of its own.
 The one- and two-qubit gates with a fixed matrix share one dense matrix launcher,
-`QftBlock` expands on the host into Hadamards and controlled phases, and `PauliRot`
-lowers to a CNOT ladder around a parity-phase kernel. Batched variants (`BatchPhase`,
+`QftBlock` runs as shared memory DIF passes (`qft_dif_pass`, up to 11 stages each)
+plus a bit reversal pass where the flags need one, and `PauliRot` lowers to a CNOT
+ladder around a parity-phase kernel. Batched variants (`BatchPhase`,
 `BatchRzz`, `DiagonalBatch`, `MultiFused { all_diagonal: true }`) use LUT kernels that
 consume the same host table builders as the CPU path.
 Non-diagonal `MultiFused` uses a shared memory tiled kernel (`apply_multi_fused_tiled`,

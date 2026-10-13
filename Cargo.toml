@@ -33,6 +33,9 @@ mpi = { version = "0.8", optional = true }
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(prism_lowered_thresholds)"] }
+
 [features]
 default = ["parallel"]
 parallel = ["rayon", "faer"]
@@ -149,6 +152,10 @@ required-features = ["gpu"]
 [[example]]
 name = "gpu_pass_census"
 required-features = ["gpu", "bench-internal"]
+
+[[example]]
+name = "sweep_census"
+required-features = ["bench-internal"]
 
 [[bench]]
 name = "qec_t_strategies"

@@ -18,7 +18,10 @@ use rayon::prelude::*;
 
 use super::shots::{build_cdf, sample_from_cdf};
 
+#[cfg(not(prism_lowered_thresholds))]
 const MAX_DENSE_COUNT_BINS: usize = 1 << 20;
+#[cfg(prism_lowered_thresholds)]
+const MAX_DENSE_COUNT_BINS: usize = 1 << 4;
 
 #[derive(Clone)]
 struct CompactMeasurementMap {

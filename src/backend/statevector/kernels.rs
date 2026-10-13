@@ -32,7 +32,7 @@ use crate::backend::{MIN_PAR_ITERS, chunk_min_len};
 
 /// Largest qubit target whose full period (2^(t+1) elements) fits within `tile_size`.
 #[inline(always)]
-const fn max_target_for_tile(tile_size: usize) -> usize {
+pub(crate) const fn max_target_for_tile(tile_size: usize) -> usize {
     tile_size.ilog2() as usize - 1
 }
 
@@ -52,19 +52,19 @@ pub(crate) fn multi_gate_max_l2_target() -> usize {
 /// cut to leave the pool its tile count (see [`cache::parallel_tile_len`]).
 #[cfg(feature = "parallel")]
 #[inline(always)]
-fn multi_gate_l2_tile_par(state_len: usize) -> usize {
+pub(crate) fn multi_gate_l2_tile_par(state_len: usize) -> usize {
     cache::parallel_tile_len(state_len, multi_gate_l2_tile(), MIN_PAR_ELEMS)
 }
 
 /// The in-place tile a `Multi2q` tiered pass over a `num_qubits` state runs with: the
 /// subcube tile, so a batch that sits below it lands in one tier and keeps its order.
 #[inline(always)]
-fn multi_2q_small_tile(num_qubits: usize) -> usize {
+pub(crate) fn multi_2q_small_tile(num_qubits: usize) -> usize {
     1 << multi_2q_tile_bits_for(num_qubits)
 }
 
 const MULTI_GATE_L3_TILE: usize = 131_072;
-const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
+pub(crate) const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
 
 /// Length of the longest prefix of `gates` that
 /// [`StatevectorBackend::apply_multi_2q`] applies in list order on a
@@ -106,7 +106,7 @@ pub(crate) fn multi_2q_ordered_prefix(
 /// setting of the `high` qubits, and `low + high.len() == tile_bits`.
 /// Gathered into one buffer, run `c` occupies `[c << low, (c + 1) << low)`, so
 /// a low qubit keeps its bit and the `j`th high qubit becomes bit `low + j`.
-struct SubcubePlan {
+pub(crate) struct SubcubePlan {
     tile_bits: usize,
     low: usize,
     high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>,
@@ -127,7 +127,7 @@ impl SubcubePlan {
 /// the in-place tiles (every qubit below the tile bits, or the state is one
 /// tile) or cannot be tiled at all (more than [`multi_2q_high_budget`]
 /// distinct qubits at or above [`multi_2q_low_bits`]).
-fn subcube_plan(
+pub(crate) fn subcube_plan(
     gates: &[(usize, usize, [[Complex64; 4]; 4])],
     num_qubits: usize,
 ) -> Option<SubcubePlan> {
@@ -182,7 +182,7 @@ fn subcube_plan(
 /// [`subcube_plan`] over `qubits`, the qubits a batch needs inside the tile (the X and
 /// Y qubits of a `MultiPauliRot` batch, the targets of a `MultiFused` one), with the
 /// same `None` cases.
-fn qubit_subcube_plan(
+pub(crate) fn qubit_subcube_plan(
     qubits: impl Iterator<Item = usize> + Clone,
     num_qubits: usize,
 ) -> Option<SubcubePlan> {
@@ -244,7 +244,7 @@ fn prepare_2q(
 /// Prepare the gates whose high qubit fits the L2 tile (up to `max_l2_target`) or the
 /// L3 tile, by tier. Gates above the L3 tile are left out.
 #[inline(always)]
-fn split_multi_2q_tiers(
+pub(crate) fn split_multi_2q_tiers(
     gates: &[(usize, usize, [[Complex64; 4]; 4])],
     max_l2_target: usize,
     small_gates: &mut SmallVec<[(usize, usize, simd::PreparedGate2q); 2]>,
@@ -476,6 +476,8 @@ fn apply_multi_1q_subcubes(
     plan: &SubcubePlan,
     gates: &[(usize, simd::PreparedGate1q)],
 ) {
+    #[cfg(test)]
+    super::sweeps::tick();
     let num_qubits = state.len().trailing_zeros() as usize;
     let rest = plan.rest(num_qubits);
     let subcubes = 1usize << (num_qubits - plan.tile_bits);
@@ -502,7 +504,7 @@ fn apply_multi_1q_subcubes(
 /// fixed at the L2 budget, so each lane's run shrinks as `2^-k` while the
 /// stream count grows; past three the tiles are too short to prefetch.
 #[cfg(feature = "parallel")]
-const MAX_SHARED_1Q_TARGETS: usize = 3;
+pub(crate) const MAX_SHARED_1Q_TARGETS: usize = 3;
 
 #[inline(always)]
 fn adjacent_2q_indices(offset: usize, stride: usize, q0_is_lo: bool) -> [usize; 4] {
@@ -755,7 +757,7 @@ const QFT_MIN_TILE_BITS: usize = 13;
 
 /// Most low qubits per tile: twice the tile budget, 512 KiB on the x86 cores measured.
 #[inline(always)]
-fn qft_max_tile_bits() -> usize {
+pub(crate) fn qft_max_tile_bits() -> usize {
     (2 * cache::tile_budget_bytes() / size_of::<Complex64>()).ilog2() as usize
 }
 
@@ -763,18 +765,22 @@ fn qft_max_tile_bits() -> usize {
 /// the pool its tile count ([`cache::min_parallel_tiles`]), and above the minimum one
 /// bit narrower where that leaves an even count of stages above the tile, which then
 /// all run as radix-4 pairs instead of paying a radix-2 pass.
-fn qft_tile_bits(n: usize, state_bits: usize) -> usize {
+pub(crate) fn qft_tile_bits(n: usize, state_bits: usize) -> usize {
     qft_tile_bits_for(n, qft_max_tile_bits(), qft_min_tiles_log2(n, state_bits))
 }
 
 /// Log2 of the tiles each `2^n` chunk of a `state_bits`-qubit state owes the pool.
-fn qft_min_tiles_log2(n: usize, state_bits: usize) -> usize {
+pub(crate) fn qft_min_tiles_log2(n: usize, state_bits: usize) -> usize {
     (cache::min_parallel_tiles().ilog2() as usize).saturating_sub(state_bits - n)
 }
 
 /// Tile width before the radix-4 pairing adjustment of [`qft_tile_bits_for`], which
 /// the gathered high-stage passes do not need.
-fn qft_widest_tile_bits_for(n: usize, max_tile_bits: usize, min_tiles_log2: usize) -> usize {
+pub(crate) fn qft_widest_tile_bits_for(
+    n: usize,
+    max_tile_bits: usize,
+    min_tiles_log2: usize,
+) -> usize {
     max_tile_bits
         .min(n.saturating_sub(min_tiles_log2))
         .max(QFT_MIN_TILE_BITS.min(n))
@@ -792,11 +798,11 @@ fn qft_tile_bits_for(n: usize, max_tile_bits: usize, min_tiles_log2: usize) -> u
 /// Smallest QFT the gathered high-stage passes run on, where a whole-register transform
 /// on an 8-thread host first leaves [`QFT_GATHER_MIN_STAGES`] stages above its tile.
 /// Provisional until swept.
-const QFT_GATHER_MIN_QUBITS: usize = 16;
+pub(crate) const QFT_GATHER_MIN_QUBITS: usize = 16;
 
 /// Fewest stages above the tile that take the gathered passes. From three, one gathered
 /// pass replaces at least two radix-2 or radix-4 passes; at two or fewer both take one.
-const QFT_GATHER_MIN_STAGES: usize = 3;
+pub(crate) const QFT_GATHER_MIN_STAGES: usize = 3;
 
 /// Fewest amplitudes per gathered row: four cache lines, so a strided row read is a
 /// burst rather than a lone line.
@@ -811,7 +817,7 @@ fn qft_gather_len() -> usize {
 
 /// Most stages one gathered pass runs: 9 on a 256 KiB tile budget.
 #[inline(always)]
-fn qft_gather_max_bits() -> usize {
+pub(crate) fn qft_gather_max_bits() -> usize {
     (qft_gather_len() / QFT_GATHER_MIN_ROW).ilog2() as usize
 }
 
@@ -1002,6 +1008,8 @@ fn apply_bit_reverse_permutation(state: &mut [Complex64], bits: usize) {
 
 /// Reverse the low `bits` index bits within every `2^bits` chunk of `state`.
 fn apply_bit_reverse_chunks(state: &mut [Complex64], bits: usize) {
+    #[cfg(test)]
+    super::sweeps::tick();
     let chunk = 1usize << bits;
     if state.len() == chunk {
         apply_bit_reverse_permutation(state, bits);
@@ -2453,6 +2461,8 @@ fn qft_gather_high_stages(state: &mut [Complex64], n: usize, tile_bits: usize, i
 }
 
 fn qft_gather_pass(state: &mut [Complex64], pass: QftGatherPass) {
+    #[cfg(test)]
+    super::sweeps::tick();
     let groups = state.len() >> (pass.bits + pass.row_len.ilog2() as usize);
     let len = pass.row_len << pass.bits;
 
@@ -2992,6 +3002,8 @@ pub(crate) fn apply_single_gate_par(
     target: usize,
     mat: &[[Complex64; 2]; 2],
 ) {
+    #[cfg(test)]
+    super::sweeps::tick();
     let half = 1usize << target;
     let block_size = half << 1;
     let prepared = simd::PreparedGate1q::new(mat);
@@ -3031,6 +3043,8 @@ pub(crate) fn apply_single_gate_par(
 /// join it where their tiles would not stay resident either.
 #[cfg(feature = "parallel")]
 fn apply_multi_1q_shared(state: &mut [Complex64], gates: &[(usize, [[Complex64; 2]; 2])]) {
+    #[cfg(test)]
+    super::sweeps::tick();
     let mut sorted: SmallVec<[(usize, [[Complex64; 2]; 2]); 4]> = gates.into();
     sorted.sort_unstable_by_key(|&(target, _)| target);
     let k = sorted.len();
@@ -3054,7 +3068,7 @@ fn apply_multi_1q_shared(state: &mut [Complex64], gates: &[(usize, [[Complex64; 
     }
 
     let run = 1usize << low_target;
-    let tile_len = (multi_gate_l2_tile() / lanes).max(1);
+    let tile_len = (multi_gate_l2_tile() / lanes).min(run);
     let tiles_per_run = run / tile_len;
     let blocks = (state.len() >> k) >> low_target;
 
@@ -3213,13 +3227,13 @@ pub(crate) fn par_apply_unitary(state: &mut [Complex64], targets: &[usize], mat:
         });
 }
 
-type TargetedGate1q = (usize, [[Complex64; 2]; 2]);
+pub(crate) type TargetedGate1q = (usize, [[Complex64; 2]; 2]);
 
 /// Sort `gates` into the L2 tile, L3 tile and untiled tiers by target. Both upper
 /// tiers run in ascending target order, so folding the L3 tier into the untiled one
 /// leaves every amplitude bitwise unchanged.
 #[inline(always)]
-fn split_multi_1q_tiers(
+pub(crate) fn split_multi_1q_tiers(
     gates: &[TargetedGate1q],
     max_l2_target: usize,
     medium_tiled: bool,
@@ -3244,7 +3258,7 @@ fn split_multi_1q_tiers(
 /// worker needs its own tile, and the concurrent tiles must fit the last-level cache.
 /// An unreported cache keeps the tier.
 #[cfg(feature = "parallel")]
-fn keep_l3_tier(state_len: usize) -> bool {
+pub(crate) fn keep_l3_tier(state_len: usize) -> bool {
     let Some(cache) = crate::backend::cache::last_level_cache() else {
         return true;
     };
@@ -3257,7 +3271,7 @@ fn keep_l3_tier(state_len: usize) -> bool {
 /// Sort diagonal `gates` into the L2 tile, L3 tile and untiled tiers by target, as
 /// `(target, d0, d1)` with the tiled tiers also carrying `is_phase_one(d0)`.
 #[inline(always)]
-fn split_multi_1q_diagonal_tiers(
+pub(crate) fn split_multi_1q_diagonal_tiers(
     gates: &[TargetedGate1q],
     max_l2_target: usize,
     small_gates: &mut SmallVec<[(usize, Complex64, Complex64, bool); 16]>,
@@ -3321,7 +3335,7 @@ fn tier_sweeps(
 /// How a `MultiFused` batch runs. Every route applies the targets inside the
 /// in-place tile first, in list order, then the rest by ascending target, so the
 /// routes agree bitwise.
-enum Multi1qRoute {
+pub(crate) enum Multi1qRoute {
     /// The tile tiers, then shared traversals of the targets above them.
     Tiered,
     /// One subcube gather over every target.
@@ -3335,7 +3349,7 @@ enum Multi1qRoute {
 /// The route for `gates` on a `num_qubits` state and its pass count. A gather route
 /// is taken only when it makes strictly fewer passes than the tiers, whose targets
 /// above `max_l2_target` share traversals `shared` at a time.
-fn multi_1q_route(
+pub(crate) fn multi_1q_route(
     gates: &[TargetedGate1q],
     num_qubits: usize,
     max_l2_target: usize,
@@ -3426,6 +3440,8 @@ fn apply_multi_1q_runs(
             continue;
         }
         for &(target, ref mat) in run {
+            #[cfg(test)]
+            super::sweeps::tick();
             simd::PreparedGate1q::new(mat).apply_full_sequential(state, target);
         }
     }
@@ -3484,6 +3500,8 @@ fn apply_multi_1q_par_routed(
     }
 
     if !small_gates.is_empty() {
+        #[cfg(test)]
+        super::sweeps::tick();
         state
             .par_chunks_mut(tile_size)
             .with_min_len(chunk_min_len(tile_size))
@@ -3495,6 +3513,8 @@ fn apply_multi_1q_par_routed(
     }
 
     if !medium_gates.is_empty() {
+        #[cfg(test)]
+        super::sweeps::tick();
         let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
         let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
         state
@@ -3530,12 +3550,16 @@ impl StatevectorBackend {
             return;
         }
 
+        #[cfg(test)]
+        super::sweeps::tick();
         let prepared = simd::PreparedGate1q::new(&mat);
         prepared.apply_full_sequential(&mut self.state, target);
     }
 
     #[inline(always)]
     pub(super) fn apply_diagonal_gate(&mut self, target: usize, d0: Complex64, d1: Complex64) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_diagonal_gate_par(target, d0, d1);
@@ -3569,6 +3593,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_cx(&mut self, control: usize, target: usize) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_cx_par(control, target);
@@ -3682,6 +3708,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_cz(&mut self, q0: usize, q1: usize) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_cz_par(q0, q1);
@@ -3740,6 +3768,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_rzz(&mut self, q0: usize, q1: usize, theta: f64) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_rzz_par(q0, q1, theta);
@@ -3790,6 +3820,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     fn apply_pauli_rot_masks(&mut self, xmask: usize, zmask: usize, num_y: u32, theta: f64) {
+        #[cfg(test)]
+        super::sweeps::tick();
         if xmask == 0 {
             let (s, c) = (theta / 2.0).sin_cos();
             self.apply_parity_phase(zmask, Complex64::new(c, -s), Complex64::new(c, s));
@@ -3910,6 +3942,8 @@ impl StatevectorBackend {
                     })
                 })
                 .collect();
+            #[cfg(test)]
+            super::sweeps::tick();
             let rest = plan.rest(self.num_qubits);
             let subcubes = 1usize << (self.num_qubits - plan.tile_bits);
             #[cfg(feature = "parallel")]
@@ -3947,6 +3981,8 @@ impl StatevectorBackend {
             .collect();
         let tile_len = 1usize << tile_bits;
 
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.state
@@ -3970,6 +4006,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_batch_rzz(&mut self, edges: &[(usize, usize, f64)]) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_batch_rzz_par(edges);
@@ -4044,6 +4082,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_cu(&mut self, control: usize, target: usize, mat: [[Complex64; 2]; 2]) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_cu_par(control, target, mat);
@@ -4133,6 +4173,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_unitary(&mut self, targets: &[usize], mat: &[Complex64]) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             par_apply_unitary(&mut self.state, targets, mat);
@@ -4148,6 +4190,8 @@ impl StatevectorBackend {
         target: usize,
         mat: [[Complex64; 2]; 2],
     ) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_mcu_par(controls, target, mat);
@@ -4213,6 +4257,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_cu_phase(&mut self, control: usize, target: usize, phase: Complex64) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_cu_phase_par(control, target, phase);
@@ -4276,6 +4322,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_mcu_phase(&mut self, controls: &[usize], target: usize, phase: Complex64) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_mcu_phase_par(controls, target, phase);
@@ -4337,6 +4385,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_swap(&mut self, q0: usize, q1: usize) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_swap_par(q0, q1);
@@ -4409,6 +4459,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(crate) fn apply_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+        #[cfg(test)]
+        super::sweeps::tick();
         if q0.max(q1) - q0.min(q1) == 1 {
             #[cfg(feature = "parallel")]
             if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
@@ -4526,6 +4578,8 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_batch_phase(&mut self, control: usize, phases: &[(usize, Complex64)]) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_batch_phase_par(control, phases);
@@ -4691,6 +4745,8 @@ impl StatevectorBackend {
             }
         };
 
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         let low_done_parallel =
             if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS && self.state.len() / tile_size >= 4 {
@@ -4728,6 +4784,8 @@ impl StatevectorBackend {
         let mut stages_left = high_stride_count;
 
         let run_radix2_stage = |state: &mut Vec<Complex64>, stage: usize| {
+            #[cfg(test)]
+            super::sweeps::tick();
             let stride = 1usize << stage;
             let block_size = stride << 1;
             let twiddle_step = fft_len / block_size;
@@ -4757,6 +4815,8 @@ impl StatevectorBackend {
         while stages_left > 0 {
             // Fuse pair (stage_top - 1, stage_top - 2): outer stride
             // = 2^(stage_top - 1), inner stride = 2^(stage_top - 2).
+            #[cfg(test)]
+            super::sweeps::tick();
             let inner_stride = 1usize << (stage_top - 2);
             fft_stage_pair_par(&mut self.state, inner_stride, twiddles_scaled, inv_sqrt2);
             stage_top -= 2;
@@ -4803,6 +4863,8 @@ impl StatevectorBackend {
         let norm_sq = self.pending_norm * self.pending_norm;
         let zero = Complex64::new(0.0, 0.0);
 
+        #[cfg(test)]
+        super::sweeps::tick();
         let mut prob_one = 0.0f64;
         for block in self.state.chunks(block_size) {
             for amp in &block[half..] {
@@ -4816,6 +4878,8 @@ impl StatevectorBackend {
 
         let inv_norm = measurement_inv_norm(outcome, prob_one);
 
+        #[cfg(test)]
+        super::sweeps::tick();
         for block in self.state.chunks_mut(block_size) {
             if outcome {
                 for amp in &mut block[..half] {
@@ -4835,6 +4899,8 @@ impl StatevectorBackend {
     /// one the caller read with [`Self::qubit_probability_one`]: the collapse
     /// half of a measurement, for a caller that chose the outcome itself.
     pub(crate) fn collapse_qubit(&mut self, qubit: usize, outcome: bool, prob_one: f64) {
+        #[cfg(test)]
+        super::sweeps::tick();
         let half = 1usize << qubit;
         let block_size = half << 1;
 
@@ -4872,6 +4938,8 @@ impl StatevectorBackend {
     /// onto that outcome and fold it down to `|0>`, as [`Self::apply_reset`]
     /// does after its own draw.
     pub(crate) fn reset_qubit_from(&mut self, qubit: usize, outcome: bool, prob_one: f64) {
+        #[cfg(test)]
+        super::sweeps::tick();
         let inv_norm = measurement_inv_norm(outcome, prob_one);
 
         #[cfg(feature = "parallel")]
@@ -4896,6 +4964,8 @@ impl StatevectorBackend {
             return self.qubit_probability_one_par(qubit);
         }
 
+        #[cfg(test)]
+        super::sweeps::tick();
         let half = 1usize << qubit;
         let block_size = half << 1;
         let norm_sq = self.pending_norm * self.pending_norm;
@@ -4909,6 +4979,8 @@ impl StatevectorBackend {
 
     #[cfg(feature = "parallel")]
     fn qubit_probability_one_par(&self, qubit: usize) -> f64 {
+        #[cfg(test)]
+        super::sweeps::tick();
         let half = 1usize << qubit;
         let block_size = half << 1;
         let norm_sq = self.pending_norm * self.pending_norm;
@@ -5120,6 +5192,8 @@ impl StatevectorBackend {
         }
 
         if !small_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             let tile_size = multi_gate_l2_tile();
             for tile in self.state.chunks_mut(tile_size) {
                 for &(target, ref prepared) in &small_gates {
@@ -5129,6 +5203,8 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
             let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
             for tile in self.state.chunks_mut(tile_size) {
@@ -5175,6 +5251,8 @@ impl StatevectorBackend {
         );
 
         if !small_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             let tile_size = multi_gate_l2_tile();
             for tile in self.state.chunks_mut(tile_size) {
                 for &(target, d0, d1, skip_lo) in &small_gates {
@@ -5184,6 +5262,8 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
             let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
             for tile in self.state.chunks_mut(tile_size) {
@@ -5194,6 +5274,8 @@ impl StatevectorBackend {
         }
 
         for (target, d0, d1) in large_gates {
+            #[cfg(test)]
+            super::sweeps::tick();
             let skip_lo = is_phase_one(d0);
             simd::apply_diagonal_sequential(&mut self.state, target, d0, d1, skip_lo);
         }
@@ -5215,6 +5297,8 @@ impl StatevectorBackend {
         );
 
         if !small_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             self.state
                 .par_chunks_mut(tile_size)
                 .with_min_len(chunk_min_len(tile_size))
@@ -5226,6 +5310,8 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
             let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
             self.state
@@ -5239,6 +5325,8 @@ impl StatevectorBackend {
         }
 
         for (target, d0, d1) in large_gates {
+            #[cfg(test)]
+            super::sweeps::tick();
             let skip_lo = is_phase_one(d0);
             let block_size = 1usize << (target + 1);
             let num_blocks = self.state.len() / block_size;
@@ -5258,6 +5346,8 @@ impl StatevectorBackend {
         gates: &[(usize, usize, [[Complex64; 4]; 4])],
         plan: &SubcubePlan,
     ) {
+        #[cfg(test)]
+        super::sweeps::tick();
         let prepared = prepare_2q(gates);
         let rest = plan.rest(self.num_qubits);
         let state = self.state.as_mut_ptr();
@@ -5274,6 +5364,8 @@ impl StatevectorBackend {
         gates: &[(usize, usize, [[Complex64; 4]; 4])],
         plan: &SubcubePlan,
     ) {
+        #[cfg(test)]
+        super::sweeps::tick();
         let prepared = prepare_2q(gates);
         let rest = plan.rest(self.num_qubits);
         let ptr = SendPtr(self.state.as_mut_ptr());
@@ -5335,6 +5427,8 @@ impl StatevectorBackend {
         );
 
         if !small_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             let tile_qubits = tile_size.trailing_zeros() as usize;
             for tile in self.state.chunks_mut(tile_size) {
                 let n = tile.len().trailing_zeros() as usize;
@@ -5345,6 +5439,8 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             let tile_size = MULTI_GATE_L3_TILE;
             let tile_qubits = tile_size.trailing_zeros() as usize;
             for tile in self.state.chunks_mut(tile_size) {
@@ -5385,6 +5481,8 @@ impl StatevectorBackend {
         );
 
         if !small_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             let tile_qubits = tile_size.trailing_zeros() as usize;
             self.state
                 .par_chunks_mut(tile_size)
@@ -5398,6 +5496,8 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
+            #[cfg(test)]
+            super::sweeps::tick();
             let tile_size = MULTI_GATE_L3_TILE;
             let tile_qubits = tile_size.trailing_zeros() as usize;
             self.state
@@ -5449,6 +5549,8 @@ impl StatevectorBackend {
     }
 
     pub(super) fn apply_diagonal_batch(&mut self, entries: &[DiagEntry]) {
+        #[cfg(test)]
+        super::sweeps::tick();
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_diagonal_batch_par(entries);
@@ -6240,6 +6342,38 @@ mod multi_1q_tier_tests {
             assert!(
                 route.iter().zip(&routes[0]).all(|(a, b)| a == b),
                 "the routes must agree bitwise, or results depend on the thread count"
+            );
+        }
+    }
+
+    // A shared traversal whose lowest target sits below the per-lane tile: the run
+    // under that target is shorter than the tile, as on the parallel route once the
+    // pool cuts the L2 tile below a quarter of the budget.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn shared_traversal_handles_runs_shorter_than_the_lane_tile() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        for (num_qubits, targets) in [
+            (10usize, vec![6usize, 7]),
+            (10, vec![9, 6, 8]),
+            (15, vec![12, 13]),
+            (15, vec![12, 13, 14]),
+        ] {
+            let start = random_state(num_qubits, &mut rng);
+            let gates: Vec<TargetedGate1q> = targets
+                .iter()
+                .map(|&target| (target, random_unitary(&mut rng)))
+                .collect();
+            let mut expected = start.clone();
+            for (target, mat) in &gates {
+                apply_scalar(&mut expected, *target, mat);
+            }
+            let mut state = start;
+            apply_multi_1q_shared(&mut state, &gates);
+            assert_matches(
+                &state,
+                &expected,
+                &format!("{num_qubits}q targets {targets:?}"),
             );
         }
     }

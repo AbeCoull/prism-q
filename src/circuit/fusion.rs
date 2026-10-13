@@ -19,41 +19,42 @@ use super::fusion_rzz::{fuse_batch_rzz, fuse_rzz};
 use super::plan::{Place, Tracer};
 
 // Under miri the fusion floors drop to the reduced parallel threshold (see
-// `PARALLEL_THRESHOLD_QUBITS` in `backend/mod.rs`), so the fused kernel forms
-// appear at sizes the interpreter can execute. Native values are unchanged.
+// `PARALLEL_THRESHOLD_QUBITS` in `backend/mod.rs`), and the `prism_lowered_thresholds`
+// test cfg drops them to the same value, so the fused kernel forms appear at small
+// widths. Native values are unchanged.
 
 /// Floor for the 1q fusion, reorder, and batching passes. Below it gate execution takes
 /// nanoseconds and cloning the instruction stream costs more than fusion saves.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 pub(crate) const MIN_QUBITS_FOR_FUSION: usize = 10;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 pub(crate) const MIN_QUBITS_FOR_FUSION: usize = 8;
 
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 14;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 8;
 
 /// Floor for the diagonal batch passes (BatchRzz, BatchPhase, DiagonalBatch), whose LUT
 /// setup needs a large state to amortize.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 16;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 8;
 
 /// Floor for batching the 1q runs left after `fuse_controlled_phases` (the H gates in
 /// QFT). At 16q the 1 MB state sits in L3 and tiling costs more than it saves.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 18;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 8;
 
 /// Floor for absorbing 1q gates into a 2q gate. The generic 4×4 kernel does ~4x the
 /// FLOPs of CX/CZ plus SIMD 1q kernels; the saved memory passes win from 12q on QV and
 /// random sweeps.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_2Q_FUSION: usize = 12;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_2Q_FUSION: usize = 8;
 
 /// A/B kill switch: setting `PRISM_NO_REORDER` disables `reorder_fused2q_into_tiles`. Read
@@ -74,9 +75,9 @@ const MIN_MULTI_2Q_BATCH: usize = 2;
 /// splits the state into `2^(n - 13)` tiles at the widths just past the parallel
 /// threshold, so at 15 qubits it would feed half of an eight-thread pool where the
 /// per-rotation pass feeds all of it.
-#[cfg(not(miri))]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_PAULI_ROT_BATCH: usize = 16;
-#[cfg(miri)]
+#[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_PAULI_ROT_BATCH: usize = 8;
 
 #[inline]
@@ -1634,6 +1635,30 @@ pub(super) fn fuse_at_width<'a>(
     });
     gated(pass_db, n, MIN_QUBITS_FOR_POST_PHASE_BATCH, |c| {
         batch_post_phase_1q(c, t)
+    })
+}
+
+/// The [`fuse_at_width`] stream as it leaves `fuse_same_pair_2q_blocks`, before the
+/// batching passes group it into tiles: the input a pass planner would stage.
+#[cfg(any(test, feature = "bench-internal"))]
+pub(crate) fn fuse_before_batching(circuit: &Circuit, n: usize) -> Cow<'_, Circuit> {
+    let t = &mut Tracer::off();
+    let pass_r = fuse_region_bodies(circuit, n);
+    let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
+    let pass0r = apply_pass(pass0, t, fuse_rzz);
+    let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
+        apply_pass(c, t, fuse_batch_rzz)
+    });
+    if n < MIN_QUBITS_FOR_FUSION {
+        return pass0b;
+    }
+    let pass1 = apply_pass(pass0b, t, fuse_single_qubit_gates);
+    let pass1r = reorder_1q_gates(pass1, t);
+    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
+    let pass1f = apply_pass(pass1c, t, fuse_single_qubit_gates);
+    let pass_2q = gated(pass1f, n, MIN_QUBITS_FOR_2Q_FUSION, |c| fuse_2q_gates(c, t));
+    gated(pass_2q, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
+        fuse_same_pair_2q_blocks(c, t)
     })
 }
 

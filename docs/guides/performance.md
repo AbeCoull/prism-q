@@ -69,19 +69,33 @@ naming the variable and behaves as if the variable were unset: a typo never
 fails a run and never passes silently. Flags are presence-only: setting the
 variable to anything switches the path off.
 
+### Limits (also settable in code)
+
+Each cap below is a `Limits` field as well as a variable. `Simulate::limits` (Python
+`Simulation.limits`) sets it for one request and `set_default_limits` for every later
+call in the process; a request value beats the process default, which beats the
+variable. `memory_budget_bytes` sets the budget every cap derives from, half of physical
+memory by default, and a layer that sets it discards the per-cap values below it.
+`auto_mps_bond_dim` (default 256) has no variable.
+
+| `Limits` field | Variable | Default | Effect |
+|----------------|----------|---------|--------|
+| `max_statevector_qubits` | `PRISM_MAX_SV_QUBITS` | detected | Statevector qubit cap; see [Backends](../architecture/backends.md#memory-budget) for every cap |
+| `max_density_matrix_qubits` | `PRISM_MAX_DM_QUBITS` | `floor(cap_sv / 2)` | Density-matrix qubit cap, bounded by the statevector cap |
+| `max_probability_qubits` | `PRISM_MAX_PROB_QUBITS` | detected | Dense probability output cap |
+| `max_export_qubits` | `PRISM_MAX_EXPORT_QUBITS` | detected | Dense statevector export cap |
+| `max_sparse_qubits` | `PRISM_MAX_SPARSE_QUBITS` | detected | Sparse amplitude map holds at most `2^q` entries |
+| `max_factored_merge_qubits` | `PRISM_MAX_FACTORED_MERGE_QUBITS` | detected | Factored merged-block width |
+| `max_mps_workspace_qubits` | `PRISM_MAX_MPS_WORKSPACE_QUBITS` | detected | MPS contraction workspace, at most `2^q` amplitudes |
+| `max_tn_peak_qubits` | `PRISM_MAX_TN_PEAK_QUBITS` | detected | Largest planned tensor-network intermediate, `2^q` elements |
+| `max_tn_slices` | `PRISM_MAX_TN_SLICES` | `1024` | Independent slices a tensor-network contraction may sum over to fit the peak cap (minimum 1; `1` leaves slicing off) |
+| `max_stabilizer_cluster_qubits` | `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | detected | Factored stabilizer merged-cluster width |
+
+### Tuning (environment only)
+
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `PRISM_MAX_SV_QUBITS` | detected | Statevector qubit cap; see [Backends](../architecture/backends.md#memory-budget) for every cap |
-| `PRISM_MAX_DM_QUBITS` | `floor(cap_sv / 2)` | Density-matrix qubit cap, bounded by the statevector cap |
-| `PRISM_MAX_PROB_QUBITS` | detected | Dense probability output cap |
-| `PRISM_MAX_EXPORT_QUBITS` | detected | Dense statevector export cap |
 | `PRISM_MAX_DENSE_OUTCOME_BITS` | detected | Measured-bit cap for dense terminal sampling |
-| `PRISM_MAX_SPARSE_QUBITS` | detected | Sparse amplitude map holds at most `2^q` entries |
-| `PRISM_MAX_FACTORED_MERGE_QUBITS` | detected | Factored merged-block width |
-| `PRISM_MAX_MPS_WORKSPACE_QUBITS` | detected | MPS contraction workspace, at most `2^q` amplitudes |
-| `PRISM_MAX_TN_PEAK_QUBITS` | detected | Largest planned tensor-network intermediate, `2^q` elements |
-| `PRISM_MAX_TN_SLICES` | `1024` | Independent slices a tensor-network contraction may sum over to fit the peak cap (minimum 1; `1` leaves slicing off) |
-| `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | detected | Factored stabilizer merged-cluster width |
 | `PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB` | `256` | Soft cap on cached QFT twiddle tables; `0` disables the cache |
 | `PRISM_GPU_MIN_QUBITS` | `14` | Auto GPU crossover qubit count (`gpu` feature) |
 | `PRISM_STABILIZER_GPU_MIN_QUBITS` | `100000` | Stabilizer GPU crossover qubit count |

@@ -99,7 +99,7 @@ also has no OpenQASM spelling: exporting a circuit that holds one raises
 `simulate(...).shots(n)`, `.sample_counts(n)`, and `.expectation_values(...)`
 answer from a dense `2^n` vector unless the backend carries its own path. The
 dense route is capped by system memory (roughly 29 qubits on a 16 GiB host; see
-`PRISM_MAX_SV_QUBITS`). Backends marked `Native` below answer without it and are
+`Limits::max_statevector_qubits` or `PRISM_MAX_SV_QUBITS`). Backends marked `Native` below answer without it and are
 bounded only by their own representation.
 
 | Backend | Shots and counts | Expectation values |
@@ -218,6 +218,9 @@ input and answers anyway.
 
 Backend width and memory caps are separate and live with the terminals that raise
 them; see [Shot and observable queries above the dense cap](#shot-and-observable-queries-above-the-dense-cap).
+A cap overrun raises `PrismError::ResourceLimit`, whose `knob` names the `Limits` field
+that raises the cap and whose `limit_source` says whether detection, the environment,
+the process default, or the request set it.
 
 ## Not yet supported
 

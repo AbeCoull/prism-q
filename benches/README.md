@@ -395,12 +395,8 @@ and both left it intact.
 
 Rebuilding from one directory does not address this, now that the directory is known not
 to matter for a fixed commit. To remove the term, put both implementations in the same
-binary behind a switch read once at startup, and run that one binary twice:
-
-```rust
-static SCATTER: OnceLock<bool> = OnceLock::new();
-if *SCATTER.get_or_init(|| std::env::var("PRISM_TRANSPOSE_SCATTER").is_ok()) { .. }
-```
+binary behind a switch read once at startup, and measure that one binary with the
+interleaved runner below.
 
 One binary means one layout, so the term cancels exactly rather than approximately, and
 the branch is paid on both sides. It costs one build rather than two. Use it whenever the
@@ -419,6 +415,59 @@ directory.
 
 `bench_ab.sh` needs only git, awk, and cargo. It deliberately avoids `jq` and
 `bc`, neither of which is present on the reference host.
+
+## Switchable changes: interleaved same-binary A/B
+
+A change that can be turned off at one coarse point (a fusion pass, a routing decision,
+a kernel choice) can be gated from a single binary holding both implementations.
+`scripts/bench_interleave.sh` builds the working tree once and runs the two variants
+from that one executable, so there is one fat-LTO build instead of two and no copied
+binary for a slow lane to land in.
+
+Wire the switch at the branch point, behind `bench-internal`, and remove it once the
+numbers are in:
+
+```rust
+#[cfg(feature = "bench-internal")]
+if crate::bench_variant_b() {
+    return old_path(..);
+}
+```
+
+`bench_variant_b()` reads `PRISM_BENCH_VARIANT` once per process, so branch on it where
+a circuit or a pass is chosen, never inside a gate kernel's loop. Bench code can call
+`prism_q::bench_variant_b()` too.
+
+```bash
+./scripts/bench_interleave.sh -f '^statevector/random_d10/(12|16|20)$' -c '^mps/random_d10/16$'
+./scripts/bench_interleave.sh -f '^sparse/' --light                     # triage
+./scripts/bench_interleave.sh --build-only /tmp/circuits-switch         # then --exe
+```
+
+Each round runs four short Criterion invocations, one process each, in the order
+A B B A (B A A B in even rounds), and takes `(B1 + B2) / (A1 + A2) - 1` per row from
+each invocation's fastest sample per iteration. The fastest sample is the estimate
+least touched by other work: on the reference host it read a third to half the
+round-to-round spread of the mean. A round whose two invocations of one variant disagree
+by more than the threshold on the median row is dropped as disturbed and replaced, up to
+half as many rounds again; that test never compares A with B, so it cannot bias the
+change. A row reports the median over 16 undisturbed rounds with a 95% interval from the
+order statistics. The verdict follows `bench_ab.sh`: FAIL when a row's interval lies
+wholly above the threshold, RERUN when it straddles the threshold, when a `--control`
+row reads off zero, or when fewer than six rounds were undisturbed, with the same exit
+codes.
+
+Two same-code runs of six `circuits` rows took 17 minutes each and held every interval
+within -3.6% to +2.9%, the widest on the 180 us row. A 94 us busy wait injected into
+`statevector/random_d10/16` (7.9% of its 1.19 ms) read +9.4% with an interval of +5.7%
+to +11.0% and failed the gate, while the five rows it did not reach and a control row
+read flat. The same filter through `bench_ab.sh` costs two builds of about 7 minutes
+each before its passes.
+
+Use `bench_ab.sh` for anything a switch cannot express: a change spread across many
+sites, a data layout change, a dependency or toolchain bump, or a comparison against
+another commit. A queue step `ix NAME DIR [options]` runs the interleaved runner from
+`bench_queue.sh`, building its one binary in the build phase.
 
 ## Knob sweeps on other hardware
 

@@ -6,6 +6,7 @@ use crate::circuit::builder::CircuitBuilder;
 use crate::distributed::DistributedContext;
 use crate::distributed::loopback::{run_ranks, run_ranks_max_gather};
 use crate::error::PrismError;
+use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::PauliTerm;
 use crate::sim::{ResolvedBackend, run_on, run_on_state, simulate};
 use num_complex::Complex64;
@@ -1459,9 +1460,15 @@ fn loopback_shots(
 ) -> (Vec<Vec<Vec<bool>>>, usize) {
     run_ranks_max_gather(size, |ctx| {
         let kind = crate::sim::BackendKind::StatevectorDistributed { context: ctx };
-        crate::sim::run_shots_with(kind, circuit, num_shots, SEED)
-            .expect("distributed shots")
-            .shots
+        crate::sim::run_shots_with(
+            kind,
+            circuit,
+            num_shots,
+            SEED,
+            &ResolvedLimits::process_default(),
+        )
+        .expect("distributed shots")
+        .shots
     })
 }
 
@@ -1669,7 +1676,15 @@ fn noisy_shots_rejected_on_distributed_kind() {
     let kind = crate::sim::BackendKind::StatevectorDistributed {
         context: DistributedContext::serial(),
     };
-    let err = crate::sim::run_shots_with_noise(kind, &circuit, &noise, 10, SEED).unwrap_err();
+    let err = crate::sim::run_shots_with_noise(
+        kind,
+        &circuit,
+        &noise,
+        10,
+        SEED,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         crate::error::PrismError::IncompatibleBackend { .. }
@@ -1706,7 +1721,8 @@ fn shots_without_measurements_still_validate_configuration() {
     let circuit = Circuit::new(4, 0);
     let failed = run_ranks(3, |ctx| {
         let kind = crate::sim::BackendKind::StatevectorDistributed { context: ctx };
-        crate::sim::run_shots_with(kind, &circuit, 8, SEED).is_err()
+        crate::sim::run_shots_with(kind, &circuit, 8, SEED, &ResolvedLimits::process_default())
+            .is_err()
     });
     assert!(
         failed.iter().all(|&f| f),

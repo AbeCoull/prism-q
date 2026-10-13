@@ -447,6 +447,55 @@ def test_prism_error_resource_fields_are_none_outside_resource_limits():
     error = excinfo.value
     assert error.kind != "resource_limit"
     assert (error.resource, error.required, error.limit, error.env_var) == (None,) * 4
+    assert (error.knob, error.limit_source) == (None, None)
+
+
+def test_a_request_limit_names_its_knob_and_source():
+    from prism_q import BackendKind, Limits
+
+    request = (
+        simulate(circuits.ghz(6))
+        .backend(BackendKind.statevector())
+        .limits(Limits(max_statevector_qubits=4))
+    )
+    with pytest.raises(prism_q.PrismError) as excinfo:
+        request.run()
+    error = excinfo.value
+    assert error.kind == "resource_limit"
+    assert (error.required, error.limit) == (6, 4)
+    assert error.knob == "max_statevector_qubits"
+    assert error.limit_source == "request"
+    assert error.env_var is None
+    assert "set by this request's limits" in str(error)
+
+
+def test_set_default_limits_applies_without_a_restart():
+    from prism_q import BackendKind, Limits, default_limits, set_default_limits
+
+    def run():
+        return simulate(circuits.ghz(6)).backend(BackendKind.statevector()).seed(42).run()
+
+    run()
+    try:
+        set_default_limits(Limits(max_statevector_qubits=4))
+        assert default_limits() == Limits(max_statevector_qubits=4)
+        with pytest.raises(prism_q.PrismError) as excinfo:
+            run()
+        assert excinfo.value.limit_source == "process_default"
+        assert excinfo.value.knob == "max_statevector_qubits"
+    finally:
+        set_default_limits(Limits())
+    assert default_limits() == Limits()
+    run()
+
+
+def test_limits_reports_the_fields_it_sets():
+    from prism_q import Limits
+
+    limits = Limits(memory_budget_bytes=1 << 30, auto_mps_bond_dim=64)
+    assert limits.memory_budget_bytes == 1 << 30
+    assert limits.max_statevector_qubits is None
+    assert repr(limits) == "Limits(memory_budget_bytes=1073741824, auto_mps_bond_dim=64)"
 
 
 def test_circuit_depth_counts_layers():

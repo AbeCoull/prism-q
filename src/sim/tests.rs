@@ -27,7 +27,7 @@ fn make_clifford_circuit() -> Circuit {
 fn probability_route_precedence_is_pinned() {
     let ghz = make_clifford_circuit();
     assert!(matches!(
-        plan_probability_route(&BackendKind::Auto, &ghz),
+        plan_probability_route(&BackendKind::Auto, &ghz, &ResolvedLimits::process_default()),
         ProbabilityRoute::Direct { .. }
     ));
 
@@ -38,7 +38,11 @@ fn probability_route_precedence_is_pinned() {
     }
     clifford_t.add_gate(Gate::T, &[1]);
     assert!(matches!(
-        plan_probability_route(&BackendKind::Auto, &clifford_t),
+        plan_probability_route(
+            &BackendKind::Auto,
+            &clifford_t,
+            &ResolvedLimits::process_default()
+        ),
         ProbabilityRoute::Direct { .. }
     ));
 
@@ -47,18 +51,22 @@ fn probability_route_precedence_is_pinned() {
     general.add_gate(Gate::Rx(0.3), &[1]);
     general.add_gate(Gate::Cx, &[0, 1]);
     assert!(matches!(
-        plan_probability_route(&BackendKind::Auto, &general),
+        plan_probability_route(
+            &BackendKind::Auto,
+            &general,
+            &ResolvedLimits::process_default()
+        ),
         ProbabilityRoute::Direct { .. }
     ));
 
     let candidate_is_direct = |c: &Circuit| {
         matches!(
-            plan_probability_route(&BackendKind::Auto, c),
+            plan_probability_route(&BackendKind::Auto, c, &ResolvedLimits::process_default()),
             ProbabilityRoute::Direct { .. }
         )
     };
     for circuit in [&ghz, &clifford_t, &general] {
-        if auto_terminal_statevector_candidate(circuit) {
+        if auto_terminal_statevector_candidate(circuit, &ResolvedLimits::process_default()) {
             assert!(candidate_is_direct(circuit));
         }
     }
@@ -68,12 +76,20 @@ fn probability_route_precedence_is_pinned() {
 fn factored_stabilizer_route_starts_at_24_qubits_with_pair_blocks() {
     let at_floor = crate::circuits::local_clifford_blocks(12, 2, 20, 42);
     assert!(matches!(
-        plan_probability_route(&BackendKind::Auto, &at_floor),
+        plan_probability_route(
+            &BackendKind::Auto,
+            &at_floor,
+            &ResolvedLimits::process_default()
+        ),
         ProbabilityRoute::FactoredStabilizer
     ));
     let below_floor = crate::circuits::local_clifford_blocks(11, 2, 20, 42);
     assert!(matches!(
-        plan_probability_route(&BackendKind::Auto, &below_floor),
+        plan_probability_route(
+            &BackendKind::Auto,
+            &below_floor,
+            &ResolvedLimits::process_default()
+        ),
         ProbabilityRoute::Decomposed(_)
     ));
     let mut singles = Circuit::new(24, 0);
@@ -81,7 +97,11 @@ fn factored_stabilizer_route_starts_at_24_qubits_with_pair_blocks() {
         singles.add_gate(Gate::H, &[q]);
     }
     assert!(matches!(
-        plan_probability_route(&BackendKind::Auto, &singles),
+        plan_probability_route(
+            &BackendKind::Auto,
+            &singles,
+            &ResolvedLimits::process_default()
+        ),
         ProbabilityRoute::Decomposed(_)
     ));
 }
@@ -97,11 +117,17 @@ fn only_the_product_state_takes_the_native_sampler_past_decomposition() {
         product.add_gate(Gate::Ry(0.3 + 0.1 * q as f64), &[q]);
     }
     assert!(matches!(
-        plan_probability_route(&BackendKind::Auto, &product),
+        plan_probability_route(
+            &BackendKind::Auto,
+            &product,
+            &ResolvedLimits::process_default()
+        ),
         ProbabilityRoute::Decomposed(_)
     ));
     for kind in [BackendKind::Auto, BackendKind::ProductState] {
-        let backend = try_native_terminal_backend(&kind, &product, 42).unwrap();
+        let backend =
+            try_native_terminal_backend(&kind, &product, 42, &ResolvedLimits::process_default())
+                .unwrap();
         assert_eq!(
             backend.map(|b| b.name()),
             Some("productstate"),
@@ -115,7 +141,11 @@ fn only_the_product_state_takes_the_native_sampler_past_decomposition() {
         blocks.add_gate(Gate::Cx, &[2 * pair, 2 * pair + 1]);
     }
     assert!(matches!(
-        plan_probability_route(&BackendKind::Sparse, &blocks),
+        plan_probability_route(
+            &BackendKind::Sparse,
+            &blocks,
+            &ResolvedLimits::process_default()
+        ),
         ProbabilityRoute::Decomposed(_)
     ));
     for kind in [
@@ -124,7 +154,7 @@ fn only_the_product_state_takes_the_native_sampler_past_decomposition() {
         BackendKind::Mps { max_bond_dim: 32 },
     ] {
         assert!(
-            try_native_terminal_backend(&kind, &blocks, 42)
+            try_native_terminal_backend(&kind, &blocks, 42, &ResolvedLimits::process_default())
                 .unwrap()
                 .is_none(),
             "{kind:?} left the decomposed route"
@@ -171,7 +201,11 @@ impl ProbabilityFailureBackend {
     }
 }
 
-impl crate::backend::sealed::Sealed for ProbabilityFailureBackend {}
+impl crate::backend::sealed::Sealed for ProbabilityFailureBackend {
+    fn limits(&self) -> ResolvedLimits {
+        ResolvedLimits::process_default()
+    }
+}
 
 impl Backend for ProbabilityFailureBackend {
     fn name(&self) -> &'static str {
@@ -251,29 +285,59 @@ fn test_circuit_has_entangling_gates() {
 #[test]
 fn test_auto_selects_product() {
     let circuit = make_product_circuit();
-    let backend = resolve_backend(&BackendKind::Auto, &circuit, false).build(42);
+    let backend = resolve_backend(
+        &BackendKind::Auto,
+        &circuit,
+        false,
+        &ResolvedLimits::process_default(),
+    )
+    .build(42, &ResolvedLimits::process_default());
     assert_eq!(backend.name(), "productstate");
 }
 
 #[test]
 fn test_auto_selects_stabilizer() {
     let circuit = make_clifford_circuit();
-    let backend = resolve_backend(&BackendKind::Auto, &circuit, false).build(42);
+    let backend = resolve_backend(
+        &BackendKind::Auto,
+        &circuit,
+        false,
+        &ResolvedLimits::process_default(),
+    )
+    .build(42, &ResolvedLimits::process_default());
     assert_eq!(backend.name(), "stabilizer");
 }
 
 #[test]
 fn test_auto_selects_statevector() {
     let circuit = make_general_circuit();
-    let backend = resolve_backend(&BackendKind::Auto, &circuit, false).build(42);
+    let backend = resolve_backend(
+        &BackendKind::Auto,
+        &circuit,
+        false,
+        &ResolvedLimits::process_default(),
+    )
+    .build(42, &ResolvedLimits::process_default());
     assert_eq!(backend.name(), "statevector");
 }
 
 #[test]
 fn test_run_with_auto_matches_explicit() {
     let circuit = make_general_circuit();
-    let auto_result = run_with(BackendKind::Auto, &circuit, 42).unwrap();
-    let sv_result = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+    let auto_result = run_with(
+        BackendKind::Auto,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let sv_result = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let auto_probs = auto_result.probabilities.unwrap().to_vec();
     let sv_probs = sv_result.probabilities.unwrap().to_vec();
     for (a, b) in auto_probs.iter().zip(sv_probs.iter()) {
@@ -284,10 +348,42 @@ fn test_run_with_auto_matches_explicit() {
 #[test]
 fn test_run_with_explicit_backends() {
     let circuit = make_clifford_circuit();
-    assert!(run_with(BackendKind::Statevector, &circuit, 42).is_ok());
-    assert!(run_with(BackendKind::Stabilizer, &circuit, 42).is_ok());
-    assert!(run_with(BackendKind::Sparse, &circuit, 42).is_ok());
-    assert!(run_with(BackendKind::Mps { max_bond_dim: 64 }, &circuit, 42).is_ok());
+    assert!(
+        run_with(
+            BackendKind::Statevector,
+            &circuit,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .is_ok()
+    );
+    assert!(
+        run_with(
+            BackendKind::Stabilizer,
+            &circuit,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .is_ok()
+    );
+    assert!(
+        run_with(
+            BackendKind::Sparse,
+            &circuit,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .is_ok()
+    );
+    assert!(
+        run_with(
+            BackendKind::Mps { max_bond_dim: 64 },
+            &circuit,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -322,7 +418,12 @@ fn test_empty_circuit_is_clifford_and_no_entangling() {
 #[test]
 fn test_validate_stabilizer_rejects_non_clifford() {
     let circuit = make_general_circuit(); // has T gate
-    let result = run_with(BackendKind::Stabilizer, &circuit, 42);
+    let result = run_with(
+        BackendKind::Stabilizer,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    );
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(matches!(
@@ -334,7 +435,12 @@ fn test_validate_stabilizer_rejects_non_clifford() {
 #[test]
 fn test_validate_product_rejects_entangling() {
     let circuit = make_clifford_circuit(); // has CX
-    let result = run_with(BackendKind::ProductState, &circuit, 42);
+    let result = run_with(
+        BackendKind::ProductState,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    );
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(matches!(
@@ -346,10 +452,26 @@ fn test_validate_product_rejects_entangling() {
 #[test]
 fn test_validate_passes_for_compatible() {
     let clifford = make_clifford_circuit();
-    assert!(run_with(BackendKind::Stabilizer, &clifford, 42).is_ok());
+    assert!(
+        run_with(
+            BackendKind::Stabilizer,
+            &clifford,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .is_ok()
+    );
 
     let product = make_product_circuit();
-    assert!(run_with(BackendKind::ProductState, &product, 42).is_ok());
+    assert!(
+        run_with(
+            BackendKind::ProductState,
+            &product,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -358,7 +480,13 @@ fn test_auto_moderate_qubit_count_uses_statevector() {
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_gate(Gate::T, &[0]);
     circuit.add_gate(Gate::Cx, &[0, 1]);
-    let backend = resolve_backend(&BackendKind::Auto, &circuit, false).build(42);
+    let backend = resolve_backend(
+        &BackendKind::Auto,
+        &circuit,
+        false,
+        &ResolvedLimits::process_default(),
+    )
+    .build(42, &ResolvedLimits::process_default());
     assert_eq!(backend.name(), "statevector");
 }
 
@@ -368,14 +496,26 @@ fn test_auto_selects_factored_with_partial_independence() {
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_gate(Gate::T, &[0]);
     circuit.add_gate(Gate::Cx, &[0, 1]);
-    let backend = resolve_backend(&BackendKind::Auto, &circuit, true).build(42);
+    let backend = resolve_backend(
+        &BackendKind::Auto,
+        &circuit,
+        true,
+        &ResolvedLimits::process_default(),
+    )
+    .build(42, &ResolvedLimits::process_default());
     assert_eq!(backend.name(), "factored");
 }
 
 #[test]
 fn test_auto_ignores_partial_independence_when_no_entangling() {
     let circuit = make_product_circuit();
-    let backend = resolve_backend(&BackendKind::Auto, &circuit, true).build(42);
+    let backend = resolve_backend(
+        &BackendKind::Auto,
+        &circuit,
+        true,
+        &ResolvedLimits::process_default(),
+    )
+    .build(42, &ResolvedLimits::process_default());
     assert_eq!(backend.name(), "productstate");
 }
 
@@ -389,6 +529,7 @@ fn test_classical_only_skips_probabilities() {
         &circuit,
         42,
         SimOptions::classical_only(),
+        &ResolvedLimits::process_default(),
     )
     .unwrap();
     assert!(result.probabilities.is_none());
@@ -403,6 +544,7 @@ fn test_default_options_include_probabilities() {
         &circuit,
         42,
         SimOptions::default(),
+        &ResolvedLimits::process_default(),
     )
     .unwrap();
     assert!(result.probabilities.is_some());
@@ -517,7 +659,13 @@ fn test_temporal_clifford_skipped_when_prefix_too_short() {
 #[test]
 fn test_decomposed_random_blocks_matches_monolithic() {
     let circuit = crate::circuits::independent_random_blocks(10, 2, 5, 0xDEAD_BEEF);
-    let decomposed = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+    let decomposed = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let mut sv = StatevectorBackend::new(42);
     let monolithic = run_on(&mut sv, &circuit).unwrap();
     let d_probs = decomposed.probabilities.unwrap().to_vec();
@@ -554,12 +702,24 @@ fn test_per_block_clifford_dispatch() {
     let parts = c.partition_subcircuits(&components);
     let sub_a = &parts[0].0;
     assert!(sub_a.is_clifford_only());
-    let backend_a = resolve_backend(&BackendKind::Auto, sub_a, false).build(42);
+    let backend_a = resolve_backend(
+        &BackendKind::Auto,
+        sub_a,
+        false,
+        &ResolvedLimits::process_default(),
+    )
+    .build(42, &ResolvedLimits::process_default());
     assert_eq!(backend_a.name(), "stabilizer");
 
     let sub_b = &parts[1].0;
     assert!(!sub_b.is_clifford_only());
-    let backend_b = resolve_backend(&BackendKind::Auto, sub_b, false).build(43);
+    let backend_b = resolve_backend(
+        &BackendKind::Auto,
+        sub_b,
+        false,
+        &ResolvedLimits::process_default(),
+    )
+    .build(43, &ResolvedLimits::process_default());
     assert_eq!(backend_b.name(), "statevector");
 
     // End-to-end: auto (decomposed) must match monolithic statevector
@@ -603,7 +763,13 @@ fn test_measurement_normalization_statevector() {
         c[1] = measure q[1];
     "#;
     let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
-    let result = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+    let result = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     let sum: f64 = probs.iter().sum();
     assert!(
@@ -624,7 +790,13 @@ fn test_measurement_normalization_mps() {
         c[1] = measure q[1];
     "#;
     let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
-    let result = run_with(BackendKind::Mps { max_bond_dim: 64 }, &circuit, 42).unwrap();
+    let result = run_with(
+        BackendKind::Mps { max_bond_dim: 64 },
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     let sum: f64 = probs.iter().sum();
     assert!(
@@ -645,7 +817,13 @@ fn test_measurement_normalization_sparse() {
         c[1] = measure q[1];
     "#;
     let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
-    let result = run_with(BackendKind::Sparse, &circuit, 42).unwrap();
+    let result = run_with(
+        BackendKind::Sparse,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     let sum: f64 = probs.iter().sum();
     assert!(
@@ -665,7 +843,13 @@ fn test_conditional_gate_execution() {
         if (c[0]) x q[1];
     "#;
     let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
-    let result = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+    let result = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     // q[0] measured as 1, so if-gate fires, q[1] flipped to |1⟩
     // Final state: |11⟩ = index 3
     let probs = result.probabilities.unwrap().to_vec();
@@ -777,9 +961,15 @@ fn test_shots_counts_sum() {
 #[test]
 fn test_run_counts_factored_stabilizer() {
     let circuit = make_bell_with_measure();
-    let counts = run_counts_with(BackendKind::FactoredStabilizer, &circuit, 128, 42)
-        .unwrap()
-        .0;
+    let counts = run_counts_with(
+        BackendKind::FactoredStabilizer,
+        &circuit,
+        128,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
     let total: u64 = counts.values().sum();
     let bell_total = counts.get(&vec![0u64]).copied().unwrap_or(0)
         + counts.get(&vec![3u64]).copied().unwrap_or(0);
@@ -799,14 +989,27 @@ fn test_compiled_counts_follow_the_measurement_map() {
     let allowed = [vec![0b1000u64], vec![0b1010u64]];
 
     for kind in [BackendKind::Auto, BackendKind::Stabilizer] {
-        let (counts, _) = run_counts_with(kind.clone(), &circuit, 256, 42).unwrap();
+        let (counts, _) = run_counts_with(
+            kind.clone(),
+            &circuit,
+            256,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
         assert_eq!(counts.values().sum::<u64>(), 256);
         for key in counts.keys() {
             assert!(allowed.contains(key), "{kind:?}: unexpected key {key:?}");
         }
-        let shot_counts = run_shots_with(kind.clone(), &circuit, 256, 42)
-            .unwrap()
-            .counts();
+        let shot_counts = run_shots_with(
+            kind.clone(),
+            &circuit,
+            256,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap()
+        .counts();
         let mut got: Vec<_> = counts.keys().collect();
         let mut want: Vec<_> = shot_counts.keys().collect();
         got.sort();
@@ -818,7 +1021,14 @@ fn test_compiled_counts_follow_the_measurement_map() {
     overwrite.add_gate(Gate::X, &[1]);
     overwrite.add_measure(0, 0);
     overwrite.add_measure(1, 0);
-    let (counts, _) = run_counts_with(BackendKind::Stabilizer, &overwrite, 64, 42).unwrap();
+    let (counts, _) = run_counts_with(
+        BackendKind::Stabilizer,
+        &overwrite,
+        64,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(
         counts.get(&vec![1u64]),
         Some(&64),
@@ -908,7 +1118,13 @@ fn test_export_norm_after_measurement() {
         BackendKind::Mps { max_bond_dim: 64 },
     ] {
         let label = format!("{backend_kind:?}/post-measure");
-        let mut backend = resolve_backend(&backend_kind, &circuit, false).build(42);
+        let mut backend = resolve_backend(
+            &backend_kind,
+            &circuit,
+            false,
+            &ResolvedLimits::process_default(),
+        )
+        .build(42, &ResolvedLimits::process_default());
         run_on(backend.as_mut(), &circuit).unwrap();
         let state = backend.export_statevector().unwrap();
         assert_unit_norm(&state, &label);
@@ -924,7 +1140,9 @@ fn test_export_norm_qft() {
         (BackendKind::Mps { max_bond_dim: 128 }, "mps/qft8"),
         (BackendKind::TensorNetwork, "tn/qft8"),
     ] {
-        let mut backend = resolve_backend(&kind, &circuit, false).build(42);
+        let mut backend =
+            resolve_backend(&kind, &circuit, false, &ResolvedLimits::process_default())
+                .build(42, &ResolvedLimits::process_default());
         run_on(backend.as_mut(), &circuit).unwrap();
         let state = backend.export_statevector().unwrap();
         assert_unit_norm(&state, label);
@@ -1081,7 +1299,7 @@ fn coupled_reset_shots_replay_per_shot_off_the_mixture() {
 
     let terminal = |kind: &BackendKind, circuit: &Circuit| {
         !matches!(
-            prepare_shot_source(kind, circuit, 64, 42).unwrap(),
+            prepare_shot_source(kind, circuit, 64, 42, &ResolvedLimits::process_default()).unwrap(),
             ShotSource::PerShot
         )
     };
@@ -1096,7 +1314,14 @@ fn coupled_reset_shots_replay_per_shot_off_the_mixture() {
         assert!(!terminal(&kind, &coupled), "{kind:?}: coupled reset");
     }
     assert!(matches!(
-        prepare_shot_source(&BackendKind::Statevector, &local, 64, 42).unwrap(),
+        prepare_shot_source(
+            &BackendKind::Statevector,
+            &local,
+            64,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .unwrap(),
         ShotSource::TerminalStatevector { .. }
     ));
     assert!(terminal(&BackendKind::DensityMatrix, &coupled));
@@ -1170,12 +1395,20 @@ fn test_terminal_statevector_sampling_matches_probability_path() {
         &stripped,
         42,
         SimOptions::default(),
+        &ResolvedLimits::process_default(),
     )
     .unwrap();
     let probs = reference.probabilities.unwrap();
     let expected = shots::sample_shots(&probs, &c.measurement_map(), c.num_classical_bits, 256, 42);
 
-    let actual = run_shots_with(BackendKind::Statevector, &c, 256, 42).unwrap();
+    let actual = run_shots_with(
+        BackendKind::Statevector,
+        &c,
+        256,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(actual.shots, expected);
 }
 
@@ -1197,6 +1430,7 @@ fn test_terminal_statevector_counts_match_probability_path_all_measured() {
         &stripped,
         7,
         SimOptions::default(),
+        &ResolvedLimits::process_default(),
     )
     .unwrap();
     let probs = reference.probabilities.unwrap();
@@ -1204,9 +1438,15 @@ fn test_terminal_statevector_counts_match_probability_path_all_measured() {
         shots::sample_shots(&probs, &c.measurement_map(), c.num_classical_bits, 512, 7);
     let expected = ShotsResult::from_shots(expected_shots, c.num_classical_bits).counts();
 
-    let actual = run_counts_with(BackendKind::Statevector, &c, 512, 7)
-        .unwrap()
-        .0;
+    let actual = run_counts_with(
+        BackendKind::Statevector,
+        &c,
+        512,
+        7,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
     assert_eq!(actual, expected);
 }
 
@@ -1217,14 +1457,27 @@ fn test_terminal_statevector_duplicate_classical_bit_uses_last_measurement() {
     c.add_measure(0, 0);
     c.add_measure(1, 0);
 
-    let shots = run_shots_with(BackendKind::Statevector, &c, 16, 42).unwrap();
+    let shots = run_shots_with(
+        BackendKind::Statevector,
+        &c,
+        16,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     for shot in &shots.shots {
         assert_eq!(shot, &vec![false]);
     }
 
-    let counts = run_counts_with(BackendKind::Statevector, &c, 16, 42)
-        .unwrap()
-        .0;
+    let counts = run_counts_with(
+        BackendKind::Statevector,
+        &c,
+        16,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
     assert_eq!(counts.get(&vec![0]), Some(&16));
 }
 
@@ -1234,9 +1487,15 @@ fn test_terminal_statevector_counts_wide_classical_register() {
     c.add_gate(Gate::X, &[0]);
     c.add_measure(0, 70);
 
-    let counts = run_counts_with(BackendKind::Statevector, &c, 10, 11)
-        .unwrap()
-        .0;
+    let counts = run_counts_with(
+        BackendKind::Statevector,
+        &c,
+        10,
+        11,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
     let mut expected = vec![0u64; 2];
     expected[1] = 1u64 << 6;
     assert_eq!(counts.get(&expected), Some(&10));
@@ -1253,9 +1512,15 @@ fn test_terminal_statevector_subset_counts_sum_to_shots() {
     c.add_measure(1, 4);
     c.add_measure(4, 0);
 
-    let counts = run_counts_with(BackendKind::Statevector, &c, 1024, 42)
-        .unwrap()
-        .0;
+    let counts = run_counts_with(
+        BackendKind::Statevector,
+        &c,
+        1024,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .0;
     assert_eq!(counts.values().sum::<u64>(), 1024);
     assert!(counts.keys().all(|key| key[0] & !0b1_0001 == 0));
 }
@@ -1286,7 +1551,14 @@ fn test_branched_shots_keep_the_measured_correlation() {
     let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
     assert!(!circuit.has_terminal_measurements_only());
 
-    let result = run_shots_with(BackendKind::Statevector, &circuit, 200, 42).unwrap();
+    let result = run_shots_with(
+        BackendKind::Statevector,
+        &circuit,
+        200,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert!(result.shots.iter().all(|shot| shot[0] != shot[1]));
     assert!(result.shots.iter().any(|shot| shot[0]));
     assert!(result.shots.iter().any(|shot| !shot[0]));
@@ -1300,19 +1572,30 @@ fn temporal_prefix_block_shots_match_seeded_runs() {
     let kind = BackendKind::Auto;
     for block_size in [6usize, 8] {
         let circuit = crate::circuits::clifford_prefix_measured_blocks(2, block_size, 4, 7);
-        assert!(has_temporal_clifford_opportunity(&kind, &circuit));
+        assert!(has_temporal_clifford_opportunity(
+            &kind,
+            &circuit,
+            &ResolvedLimits::process_default()
+        ));
         let (Some((components, _)), _) = analyze_independence(&circuit) else {
             panic!("{block_size}: the blocks must decompose");
         };
         for (sub, _, _) in circuit.partition_subcircuits(&components) {
             assert!(matches!(
-                plan_probability_route(&kind, &sub),
+                plan_probability_route(&kind, &sub, &ResolvedLimits::process_default()),
                 ProbabilityRoute::TemporalClifford { .. }
             ));
         }
 
         let shots = 40;
-        let result = run_shots_with(kind.clone(), &circuit, shots, 42).unwrap();
+        let result = run_shots_with(
+            kind.clone(),
+            &circuit,
+            shots,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
         let mut metadata = None;
         for i in 0..shots {
             let single = run_with_internal(
@@ -1320,6 +1603,7 @@ fn temporal_prefix_block_shots_match_seeded_runs() {
                 &circuit,
                 mix_seed(42, i),
                 SimOptions::classical_only(),
+                &ResolvedLimits::process_default(),
             )
             .unwrap();
             assert_eq!(result.shots[i], single.classical_bits, "shot {i}");
@@ -1373,8 +1657,22 @@ fn branched_shots_match_across_auto_and_the_explicit_statevector() {
             circuit.add_measure(q, q);
         }
 
-        let auto = run_shots_with(BackendKind::Auto, &circuit, shots, 42).unwrap();
-        let explicit = run_shots_with(BackendKind::Statevector, &circuit, shots, 42).unwrap();
+        let auto = run_shots_with(
+            BackendKind::Auto,
+            &circuit,
+            shots,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
+        let explicit = run_shots_with(
+            BackendKind::Statevector,
+            &circuit,
+            shots,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
         assert_eq!(auto.metadata.backend, ResolvedBackend::Statevector);
         assert_eq!(auto.shots, explicit.shots, "{n}q");
         if shots >= 1_000 {
@@ -1415,8 +1713,22 @@ fn adjacent_run_seeds_draw_unrelated_shots() {
     assert!(!circuit.has_terminal_measurements_only());
 
     let shots = 200;
-    let a = run_shots_with(BackendKind::Statevector, &circuit, shots, 42).unwrap();
-    let b = run_shots_with(BackendKind::Statevector, &circuit, shots, 43).unwrap();
+    let a = run_shots_with(
+        BackendKind::Statevector,
+        &circuit,
+        shots,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let b = run_shots_with(
+        BackendKind::Statevector,
+        &circuit,
+        shots,
+        43,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     for shift in 1..=4 {
         let aligned = (0..shots - shift)
             .filter(|&i| a.shots[i + shift] == b.shots[i] || a.shots[i] == b.shots[i + shift])
@@ -1450,7 +1762,14 @@ fn test_shots_decomposed_cached() {
     let comps = circuit.independent_subsystems();
     assert!(comps.len() > 1, "circuit should decompose");
 
-    let result = run_shots_with(BackendKind::Statevector, &circuit, 10, 42).unwrap();
+    let result = run_shots_with(
+        BackendKind::Statevector,
+        &circuit,
+        10,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(result.shots.len(), 10);
     for shot in &result.shots {
         assert_eq!(shot.len(), 8);
@@ -1471,7 +1790,14 @@ fn test_shots_temporal_clifford_fallback() {
     c.add_gate(Gate::X, &[1]);
     c.add_measure(1, 1);
 
-    let result = run_shots_with(BackendKind::Auto, &c, 10, 42).unwrap();
+    let result = run_shots_with(
+        BackendKind::Auto,
+        &c,
+        10,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(result.shots.len(), 10);
     for shot in &result.shots {
         assert_eq!(shot.len(), 4);
@@ -1481,13 +1807,25 @@ fn test_shots_temporal_clifford_fallback() {
 #[test]
 fn test_stabilizer_rank_dispatch() {
     let circuit = make_general_circuit();
-    let result = run_with(BackendKind::StabilizerRank, &circuit, 42).unwrap();
+    let result = run_with(
+        BackendKind::StabilizerRank,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     assert_eq!(probs.len(), 8);
     let total: f64 = probs.iter().sum();
     assert!((total - 1.0).abs() < 1e-10);
 
-    let sv_result = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+    let sv_result = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = sv_result.probabilities.unwrap().to_vec();
     for (i, (sr, sv)) in probs.iter().zip(sv_probs.iter()).enumerate() {
         assert!(
@@ -1512,7 +1850,13 @@ fn rz_quarter_pi_spelling_routes_like_t() {
         c.add_gate(gate, &[1]);
         c
     };
-    let reference = run_with(BackendKind::Statevector, &spell(Gate::T), 42).unwrap();
+    let reference = run_with(
+        BackendKind::Statevector,
+        &spell(Gate::T),
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let sv_probs = reference.probabilities.unwrap().to_vec();
 
     for circuit in [
@@ -1524,7 +1868,13 @@ fn rz_quarter_pi_spelling_routes_like_t() {
         assert!(circuit.is_clifford_plus_t());
         assert!(circuit.has_t_gates());
         assert_eq!(circuit.t_count(), 1);
-        let rank = run_with(BackendKind::StabilizerRank, &circuit, 42).unwrap();
+        let rank = run_with(
+            BackendKind::StabilizerRank,
+            &circuit,
+            42,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
         assert_eq!(rank.metadata.backend, ResolvedBackend::StabilizerRank);
         let probs = rank.probabilities.unwrap().to_vec();
         for (i, (a, s)) in probs.iter().zip(&sv_probs).enumerate() {
@@ -1539,7 +1889,11 @@ fn rz_quarter_pi_spelling_routes_like_t() {
     assert!(!off_grid.is_clifford_plus_t());
     assert!(!off_grid.has_t_gates());
     assert!(matches!(
-        plan_probability_route(&BackendKind::Auto, &off_grid),
+        plan_probability_route(
+            &BackendKind::Auto,
+            &off_grid,
+            &ResolvedLimits::process_default()
+        ),
         ProbabilityRoute::Direct { .. }
     ));
 }
@@ -1547,7 +1901,12 @@ fn rz_quarter_pi_spelling_routes_like_t() {
 #[test]
 fn test_stabilizer_rank_rejects_no_t() {
     let circuit = make_clifford_circuit();
-    let result = run_with(BackendKind::StabilizerRank, &circuit, 42);
+    let result = run_with(
+        BackendKind::StabilizerRank,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    );
     assert!(result.is_err());
 }
 
@@ -1557,8 +1916,20 @@ fn test_auto_clifford_plus_t_probabilities() {
     assert!(circuit.is_clifford_plus_t());
     assert!(circuit.has_t_gates());
 
-    let auto_result = run_with(BackendKind::Auto, &circuit, 42).unwrap();
-    let sv_result = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+    let auto_result = run_with(
+        BackendKind::Auto,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let sv_result = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
 
     let auto_probs = auto_result.probabilities.unwrap().to_vec();
     let sv_probs = sv_result.probabilities.unwrap().to_vec();
@@ -1579,7 +1950,14 @@ fn test_auto_clifford_plus_t_shots() {
     c.add_measure(0, 0);
     c.add_measure(1, 1);
 
-    let result = run_shots_with(BackendKind::Auto, &c, 100, 42).unwrap();
+    let result = run_shots_with(
+        BackendKind::Auto,
+        &c,
+        100,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(result.shots.len(), 100);
     for shot in &result.shots {
         assert_eq!(shot.len(), 2);
@@ -1600,8 +1978,20 @@ fn test_decomposed_mixed_clifford_and_t() {
     let subs = c.independent_subsystems();
     assert_eq!(subs.len(), 2);
 
-    let auto_result = run_with(BackendKind::Auto, &c, 42).unwrap();
-    let sv_result = run_with(BackendKind::Statevector, &c, 42).unwrap();
+    let auto_result = run_with(
+        BackendKind::Auto,
+        &c,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+    let sv_result = run_with(
+        BackendKind::Statevector,
+        &c,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
 
     let auto_probs = auto_result.probabilities.unwrap().to_vec();
     let sv_probs = sv_result.probabilities.unwrap().to_vec();
@@ -1619,7 +2009,15 @@ fn test_run_shots_with_noise_clifford_uses_compiled() {
     let mut circuit = crate::circuits::ghz_circuit(n);
     circuit.measure_all();
     let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
-    let result = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 100, 42).unwrap();
+    let result = run_shots_with_noise(
+        BackendKind::Auto,
+        &circuit,
+        &noise,
+        100,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(result.shots.len(), 100);
     assert!(result.shots[0].len() == n);
 }
@@ -1633,7 +2031,15 @@ fn test_run_shots_with_noise_statevector_brute() {
     circuit.add_measure(0, 0);
     circuit.add_measure(1, 1);
     let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
-    let result = run_shots_with_noise(BackendKind::Statevector, &circuit, &noise, 50, 42).unwrap();
+    let result = run_shots_with_noise(
+        BackendKind::Statevector,
+        &circuit,
+        &noise,
+        50,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(result.shots.len(), 50);
     assert_eq!(result.shots[0].len(), 3);
 }
@@ -1647,7 +2053,15 @@ fn test_run_shots_with_noise_auto_non_clifford() {
     circuit.add_measure(0, 0);
     circuit.add_measure(1, 1);
     let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.001);
-    let result = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 100, 42).unwrap();
+    let result = run_shots_with_noise(
+        BackendKind::Auto,
+        &circuit,
+        &noise,
+        100,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     assert_eq!(result.shots.len(), 100);
 }
 
@@ -1659,7 +2073,14 @@ fn test_run_shots_with_stabilizer_gpu_falls_back_for_reset_circuits() {
     circuit.add_reset(0);
     circuit.add_measure(0, 0);
 
-    let cpu = run_shots_with(BackendKind::Stabilizer, &circuit, 8, 42).unwrap();
+    let cpu = run_shots_with(
+        BackendKind::Stabilizer,
+        &circuit,
+        8,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let gpu = run_shots_with(
         BackendKind::StabilizerGpu {
             context: crate::gpu::GpuContext::stub_for_tests(),
@@ -1667,6 +2088,7 @@ fn test_run_shots_with_stabilizer_gpu_falls_back_for_reset_circuits() {
         &circuit,
         8,
         42,
+        &ResolvedLimits::process_default(),
     )
     .unwrap();
 
@@ -1686,7 +2108,14 @@ fn test_run_shots_with_stabilizer_gpu_falls_back_for_conditionals() {
     });
     circuit.add_measure(1, 1);
 
-    let cpu = run_shots_with(BackendKind::Stabilizer, &circuit, 256, 42).unwrap();
+    let cpu = run_shots_with(
+        BackendKind::Stabilizer,
+        &circuit,
+        256,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let gpu = run_shots_with(
         BackendKind::StabilizerGpu {
             context: crate::gpu::GpuContext::stub_for_tests(),
@@ -1694,6 +2123,7 @@ fn test_run_shots_with_stabilizer_gpu_falls_back_for_conditionals() {
         &circuit,
         256,
         42,
+        &ResolvedLimits::process_default(),
     )
     .unwrap();
 
@@ -1708,7 +2138,15 @@ fn test_run_shots_with_noise_stabilizer_gpu_matches_stabilizer() {
     circuit.measure_all();
     let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
 
-    let cpu = run_shots_with_noise(BackendKind::Stabilizer, &circuit, &noise, 128, 42).unwrap();
+    let cpu = run_shots_with_noise(
+        BackendKind::Stabilizer,
+        &circuit,
+        &noise,
+        128,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let gpu = run_shots_with_noise(
         BackendKind::StabilizerGpu {
             context: crate::gpu::GpuContext::stub_for_tests(),
@@ -1717,6 +2155,7 @@ fn test_run_shots_with_noise_stabilizer_gpu_matches_stabilizer() {
         &noise,
         128,
         42,
+        &ResolvedLimits::process_default(),
     )
     .unwrap();
 
@@ -1790,7 +2229,13 @@ fn test_run_marginals_clifford_t_spd_path() {
         assert!((p0 + p1 - 1.0).abs() < 1e-10);
     }
 
-    let m_sv = run_marginals_with(BackendKind::Statevector, &c, 42).unwrap();
+    let m_sv = run_marginals_with(
+        BackendKind::Statevector,
+        &c,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     for i in 0..14 {
         assert!(
             (m_spd[i].0 - m_sv[i].0).abs() < 1e-6,
@@ -1855,7 +2300,13 @@ fn test_simulate_builder_marginals_matches_run_marginals() {
 fn test_validate_factored_stabilizer_rejects_non_clifford() {
     let circuit = make_general_circuit();
     assert!(matches!(
-        run_with(BackendKind::FactoredStabilizer, &circuit, 42).unwrap_err(),
+        run_with(
+            BackendKind::FactoredStabilizer,
+            &circuit,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
     ));
 }
@@ -1864,7 +2315,13 @@ fn test_validate_factored_stabilizer_rejects_non_clifford() {
 fn test_validate_stabilizer_rank_rejects_no_t_gates() {
     let circuit = make_clifford_circuit();
     assert!(matches!(
-        run_with(BackendKind::StabilizerRank, &circuit, 42).unwrap_err(),
+        run_with(
+            BackendKind::StabilizerRank,
+            &circuit,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
     ));
 }
@@ -1875,7 +2332,8 @@ fn test_validate_factored_stabilizer_accepts_clifford() {
         run_with(
             BackendKind::FactoredStabilizer,
             &make_clifford_circuit(),
-            42
+            42,
+            &ResolvedLimits::process_default()
         )
         .is_ok()
     );
@@ -1901,7 +2359,8 @@ fn test_pauli_backends_reject_mid_circuit_measurements() {
             BackendKind::StochasticPauli { num_samples: 100 },
             &circuit,
             10,
-            42
+            42,
+            &ResolvedLimits::process_default()
         )
         .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
@@ -1917,6 +2376,7 @@ fn test_pauli_backends_reject_mid_circuit_measurements() {
             &circuit,
             10,
             42,
+            &ResolvedLimits::process_default(),
         )
         .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
@@ -2051,7 +2511,15 @@ fn test_noise_rejects_stabilizer_rank() {
     let circuit = make_general_circuit();
     let nm = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
     assert!(matches!(
-        run_shots_with_noise(BackendKind::StabilizerRank, &circuit, &nm, 10, 42).unwrap_err(),
+        run_shots_with_noise(
+            BackendKind::StabilizerRank,
+            &circuit,
+            &nm,
+            10,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
     ));
 }
@@ -2068,6 +2536,7 @@ fn test_noise_rejects_pauli_backends() {
             &nm,
             10,
             42,
+            &ResolvedLimits::process_default(),
         )
         .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
@@ -2084,6 +2553,7 @@ fn test_noise_rejects_pauli_backends() {
             &nm,
             10,
             42,
+            &ResolvedLimits::process_default(),
         )
         .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
@@ -2104,7 +2574,15 @@ fn test_noise_stabilizer_rejects_non_pauli_noise() {
         },
         readout: vec![None; circuit.num_classical_bits],
     };
-    let err = run_shots_with_noise(BackendKind::Stabilizer, &circuit, &nm, 10, 42).unwrap_err();
+    let err = run_shots_with_noise(
+        BackendKind::Stabilizer,
+        &circuit,
+        &nm,
+        10,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap_err();
     match err {
         crate::error::PrismError::IncompatibleBackend { reason, .. } => {
             assert!(reason.contains("Statevector"));
@@ -2119,7 +2597,14 @@ fn test_noise_stabilizer_rejects_non_pauli_noise() {
 fn test_noise_auto_general_noise_avoids_stabilizer_dispatch() {
     let circuit = make_clifford_circuit();
     let nm = noise::NoiseModel::with_amplitude_damping(&circuit, 0.1);
-    let result = run_shots_with_noise(BackendKind::Auto, &circuit, &nm, 16, 42);
+    let result = run_shots_with_noise(
+        BackendKind::Auto,
+        &circuit,
+        &nm,
+        16,
+        42,
+        &ResolvedLimits::process_default(),
+    );
     assert!(result.is_ok());
 }
 
@@ -2147,6 +2632,7 @@ fn test_noise_stabilizer_gpu_rejects_non_pauli_noise() {
             &nm,
             10,
             42,
+            &ResolvedLimits::process_default(),
         )
         .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
@@ -2158,7 +2644,15 @@ fn test_noise_stabilizer_rejects_non_clifford() {
     let circuit = make_general_circuit();
     let nm = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
     assert!(matches!(
-        run_shots_with_noise(BackendKind::Stabilizer, &circuit, &nm, 10, 42).unwrap_err(),
+        run_shots_with_noise(
+            BackendKind::Stabilizer,
+            &circuit,
+            &nm,
+            10,
+            42,
+            &ResolvedLimits::process_default()
+        )
+        .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
     ));
 }
@@ -2177,6 +2671,7 @@ fn test_noise_stabilizer_gpu_rejects_non_clifford() {
             &nm,
             10,
             42,
+            &ResolvedLimits::process_default(),
         )
         .unwrap_err(),
         crate::error::PrismError::IncompatibleBackend { .. }
@@ -2187,7 +2682,7 @@ fn test_noise_stabilizer_gpu_rejects_non_clifford() {
 
 fn assert_probs_match(kind: BackendKind, circuit: &Circuit, expected: &[f64], tol: f64) {
     let label = format!("{kind:?}");
-    let result = run_with(kind, circuit, 42).unwrap();
+    let result = run_with(kind, circuit, 42, &ResolvedLimits::process_default()).unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     assert_eq!(probs.len(), expected.len(), "{label}: length mismatch");
     for (i, (a, b)) in probs.iter().zip(expected.iter()).enumerate() {
@@ -2201,11 +2696,16 @@ fn assert_probs_match(kind: BackendKind, circuit: &Circuit, expected: &[f64], to
 #[test]
 fn test_smoke_all_backends_clifford() {
     let circuit = make_clifford_circuit();
-    let sv_probs = run_with(BackendKind::Statevector, &circuit, 42)
-        .unwrap()
-        .probabilities
-        .unwrap()
-        .to_vec();
+    let sv_probs = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .probabilities
+    .unwrap()
+    .to_vec();
 
     for kind in [
         BackendKind::Stabilizer,
@@ -2222,11 +2722,16 @@ fn test_smoke_all_backends_clifford() {
 #[test]
 fn test_smoke_all_backends_general() {
     let circuit = make_general_circuit();
-    let sv_probs = run_with(BackendKind::Statevector, &circuit, 42)
-        .unwrap()
-        .probabilities
-        .unwrap()
-        .to_vec();
+    let sv_probs = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .probabilities
+    .unwrap()
+    .to_vec();
 
     for kind in [
         BackendKind::Sparse,
@@ -2241,11 +2746,16 @@ fn test_smoke_all_backends_general() {
 #[test]
 fn test_smoke_product_state() {
     let circuit = make_product_circuit();
-    let sv_probs = run_with(BackendKind::Statevector, &circuit, 42)
-        .unwrap()
-        .probabilities
-        .unwrap()
-        .to_vec();
+    let sv_probs = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .probabilities
+    .unwrap()
+    .to_vec();
     assert_probs_match(BackendKind::ProductState, &circuit, &sv_probs, 1e-8);
 }
 
@@ -2258,11 +2768,16 @@ fn test_smoke_stabilizer_rank() {
     circuit.add_gate(Gate::H, &[2]);
     circuit.add_gate(Gate::T, &[2]);
 
-    let sv_probs = run_with(BackendKind::Statevector, &circuit, 42)
-        .unwrap()
-        .probabilities
-        .unwrap()
-        .to_vec();
+    let sv_probs = run_with(
+        BackendKind::Statevector,
+        &circuit,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .probabilities
+    .unwrap()
+    .to_vec();
     assert_probs_match(BackendKind::StabilizerRank, &circuit, &sv_probs, 1e-6);
 }
 
@@ -2272,24 +2787,24 @@ fn test_smoke_stabilizer_rank() {
 #[test]
 fn prepared_expectations_answer_from_the_held_backend() {
     let ansatz = crate::circuits::hardware_efficient_ansatz(12, 2, 42);
-    let route = prepared_route(&BackendKind::Auto, &ansatz).expect("direct route");
+    let route = prepared_route(&BackendKind::Auto, &ansatz, None).expect("direct route");
     assert!(matches!(route.values, PreparedValues::Held));
     assert!(matches!(route.observable, PreparedObservable::Grouped));
 
     let wide = crate::circuits::hardware_efficient_ansatz(TENSOR_ROUTE_MIN_QUBITS, 1, 42);
-    let route = prepared_route(&BackendKind::Auto, &wide).expect("direct route");
+    let route = prepared_route(&BackendKind::Auto, &wide, None).expect("direct route");
     assert!(matches!(route.values, PreparedValues::TensorFirst));
     assert!(matches!(route.observable, PreparedObservable::Grouped));
 
     let kind = BackendKind::Mps { max_bond_dim: 64 };
-    let route = prepared_route(&kind, &ansatz).expect("direct route");
+    let route = prepared_route(&kind, &ansatz, None).expect("direct route");
     assert!(matches!(route.values, PreparedValues::Held));
     assert!(matches!(route.observable, PreparedObservable::Held));
 
     let mut measured = Circuit::new(12, 1);
     measured.instructions = ansatz.instructions.clone();
     measured.add_measure(0, 0);
-    let route = prepared_route(&BackendKind::Auto, &measured).expect("direct route");
+    let route = prepared_route(&BackendKind::Auto, &measured, None).expect("direct route");
     assert!(matches!(route.values, PreparedValues::Simulate));
     assert!(matches!(route.observable, PreparedObservable::Simulate));
 }

@@ -32,8 +32,9 @@ pins the contract across backends against the density-matrix oracle.
 ## Memory budget
 
 A circuit that does not fit in memory is an error. No backend hands the work to another
-when its state would not fit: it returns `PrismError::IncompatibleBackend` naming
-itself, the qubit count, the cap, and the environment variable that overrides it.
+when its state would not fit: it returns `PrismError::ResourceLimit` naming itself, the
+requirement, the cap, the layer that set the cap, and the `Limits` field and environment
+variable that override it.
 Choosing a different backend is the caller's decision, and `BackendKind::Auto` makes it
 from circuit structure before any backend is constructed.
 
@@ -41,18 +42,25 @@ The check lives in `Backend::init`, which every execution path passes through be
 reserving its state, so a caller driving a backend through `run_on` gets the same guard
 as one going through `simulate`.
 
-| Cap | Variable | Default |
+| Cap | `Limits` field and variable | Default |
 |-----|----------|---------|
-| Statevector state | `PRISM_MAX_SV_QUBITS` | Largest `2^n` `Complex64` state fitting half of detected physical memory |
-| Density-matrix state | `PRISM_MAX_DM_QUBITS`, bounded by `PRISM_MAX_SV_QUBITS` | `floor(cap_sv / 2)`, since a density matrix of `n` qubits is a `2n`-qubit statevector |
-| Dense probability output | `PRISM_MAX_PROB_QUBITS` | Same budget over `f64` |
-| Dense statevector export | `PRISM_MAX_EXPORT_QUBITS` | Same budget over `Complex64` |
-| Dense outcome sampling | `PRISM_MAX_DENSE_OUTCOME_BITS` | Same budget over two `f64` per outcome |
-| Sparse entry count | `PRISM_MAX_SPARSE_QUBITS` (the map holds at most `2^q` entries) | Same budget at 64 bytes per entry across the double-buffered maps |
-| Factored merged-block width | `PRISM_MAX_FACTORED_MERGE_QUBITS` | Same budget over `Complex64` |
-| MPS gate workspace | `PRISM_MAX_MPS_WORKSPACE_QUBITS` (at most `2^q` amplitudes of live contraction buffers) | Same budget over `Complex64` |
-| Tensor-network peak intermediate | `PRISM_MAX_TN_PEAK_QUBITS` (at most `2^q` elements in the largest planned intermediate, summed over the slices running at once) | Same budget over `Complex64` |
-| Factored stabilizer merged-cluster width | `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | Widest joint tableau fitting the same budget, counted as `2n + 1` rows of `2 * ceil(n / 64)` words and halved to cover the peak while both source tableaux are still live |
+| Statevector state | `max_statevector_qubits`, `PRISM_MAX_SV_QUBITS` | Largest `2^n` `Complex64` state fitting half of detected physical memory |
+| Density-matrix state | `max_density_matrix_qubits`, `PRISM_MAX_DM_QUBITS`, bounded by `PRISM_MAX_SV_QUBITS` | `floor(cap_sv / 2)`, since a density matrix of `n` qubits is a `2n`-qubit statevector |
+| Dense probability output | `max_probability_qubits`, `PRISM_MAX_PROB_QUBITS` | Same budget over `f64` |
+| Dense statevector export | `max_export_qubits`, `PRISM_MAX_EXPORT_QUBITS` | Same budget over `Complex64` |
+| Dense outcome sampling | environment only, `PRISM_MAX_DENSE_OUTCOME_BITS` | Same budget over two `f64` per outcome |
+| Sparse entry count | `max_sparse_qubits`, `PRISM_MAX_SPARSE_QUBITS` (the map holds at most `2^q` entries) | Same budget at 64 bytes per entry across the double-buffered maps |
+| Factored merged-block width | `max_factored_merge_qubits`, `PRISM_MAX_FACTORED_MERGE_QUBITS` | Same budget over `Complex64` |
+| MPS gate workspace | `max_mps_workspace_qubits`, `PRISM_MAX_MPS_WORKSPACE_QUBITS` (at most `2^q` amplitudes of live contraction buffers) | Same budget over `Complex64` |
+| Tensor-network peak intermediate | `max_tn_peak_qubits`, `PRISM_MAX_TN_PEAK_QUBITS` (at most `2^q` elements in the largest planned intermediate, summed over the slices running at once) | Same budget over `Complex64` |
+| Factored stabilizer merged-cluster width | `max_stabilizer_cluster_qubits`, `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | Widest joint tableau fitting the same budget, counted as `2n + 1` rows of `2 * ceil(n / 64)` words and halved to cover the peak while both source tableaux are still live |
+
+Each cap resolves through four layers, highest first: the request's `Limits`
+(`Simulate::limits`), the process default (`set_default_limits`), the environment, and
+detection. A layer that sets `memory_budget_bytes` re-derives every cap above from its
+budget and discards the per-cap values of the layers below it, so a wide
+`PRISM_MAX_SV_QUBITS` cannot lift a cap past a tenant budget. The caps resolve once per
+request and travel with the backend; no gate kernel reads them.
 
 The five growth caps are independent of `PRISM_MAX_SV_QUBITS`: the sparse,
 factored, MPS, tensor network, and factored stabilizer backends exist to run above the

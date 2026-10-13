@@ -370,6 +370,32 @@ fn batched_pauli_rotation_angles_rebind_through_the_plan() {
     }
 }
 
+// Past the last-level cache fusion stages the stream rather than batching it; a
+// binding replays the staged structure. 22 qubits clears the floor on caches up to
+// 32 MB.
+#[test]
+fn staged_templates_rebind_to_the_unfused_state() {
+    for (name, template) in [
+        ("hea/22", circuits::hardware_efficient_ansatz(22, 3, SEED)),
+        ("qaoa/22", circuits::qaoa_circuit(22, 2, SEED)),
+        ("trotter/22", trotter_layer(22)),
+    ] {
+        let params = Parameters::all_rotations(&template);
+        let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+        assert!(
+            prepared.reuses_fusion_plan(),
+            "{name}: no fusion plan captured"
+        );
+        for point in 0..3 {
+            let values = angles(params.num_slots(), 3000 + point);
+            let independent = params.bind(&template, &values).unwrap();
+            let expected = statevector(&independent);
+            let got = statevector(prepared.bind_fused(&values).unwrap());
+            assert_states_match(&got, &expected, &format!("{name} point {point}"));
+        }
+    }
+}
+
 #[test]
 fn plan_is_captured_for_the_ansatz_bench_shapes() {
     for (name, template) in ansatz_cases() {

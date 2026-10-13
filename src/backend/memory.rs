@@ -1,182 +1,49 @@
-//! Memory caps for dense state allocation and dense outputs, derived from
-//! detected physical memory with a per-cap environment variable override.
+//! Memory detection and the `PRISM_MAX_*` environment layer that resource limits
+//! resolve over, plus the width checks backends apply against a resolved cap.
 
 use std::mem::size_of;
-
-use num_complex::Complex64;
+use std::sync::OnceLock;
 
 use crate::error::{PrismError, ResourceKind, Result};
+use crate::limits::{Limit, LimitKnob, LimitSource, Limits, ResolvedLimits, resource_limit_error};
 
 const MEMORY_BUDGET_DIVISOR: u64 = 2;
 
-pub(crate) fn max_statevector_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        configured_or_detected_dense_qubits(
-            "PRISM_MAX_SV_QUBITS",
-            size_of::<Complex64>(),
-            "statevector qubit cap",
-        )
-    })
+/// Default memory budget: half of detected physical memory, `None` when detection
+/// fails.
+pub(crate) fn detected_budget_bytes() -> Option<u64> {
+    static CACHED: OnceLock<Option<u64>> = OnceLock::new();
+    *CACHED.get_or_init(|| detect_physical_memory_bytes().map(|b| b / MEMORY_BUDGET_DIVISOR))
 }
 
-/// Environment advice for the density-matrix cap. Both variables bind: the
-/// backend allocates its `4^n` state as a `2n`-qubit statevector, so
-/// `PRISM_MAX_DM_QUBITS` raises the cap only as far as half the statevector
-/// cap, and going past that needs `PRISM_MAX_SV_QUBITS` raised with it.
-pub(crate) const DM_QUBIT_CAP_ENV: &str = "PRISM_MAX_DM_QUBITS and PRISM_MAX_SV_QUBITS";
-
-/// Qubit cap for the exact density-matrix backend. Its state is `4^n`
-/// `Complex64` entries, the element count of a `2n`-qubit statevector, so the
-/// cap is `floor(cap_sv / 2)`: 14 on a 16 GiB host, 15 on 32 GiB.
-/// `PRISM_MAX_DM_QUBITS` moves it within that bound; see [`DM_QUBIT_CAP_ENV`].
-/// This is the only density-matrix cap, so dispatch-time validation and the
-/// backend's own `init` guard cannot disagree about where the ceiling is.
-pub(crate) fn max_density_matrix_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let budget = max_statevector_qubits() / 2;
-        env_qubit_override("PRISM_MAX_DM_QUBITS").map_or(budget, |n| n.min(budget))
-    })
+/// The `PRISM_MAX_*` variables, read once per process. A value that is not a count
+/// warns and is ignored, so detection applies rather than a typo silently lifting a
+/// cap.
+pub(crate) struct EnvLimits {
+    pub(crate) limits: Limits,
+    /// `PRISM_MAX_DENSE_OUTCOME_BITS`, the one environment cap with no [`Limits`]
+    /// field.
+    pub(crate) dense_outcome_bits: Option<usize>,
 }
 
-/// Read a qubit-cap override from `env_var`: `None` when unset, and when the
-/// value is not a count, with a warning, so detection applies rather than a
-/// typo silently re-enabling it.
-fn env_qubit_override(env_var: &str) -> Option<usize> {
-    crate::env_knobs::usize_override(env_var, 0)
-}
-
-pub(crate) fn max_dense_probability_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        configured_or_detected_dense_qubits(
-            "PRISM_MAX_PROB_QUBITS",
-            size_of::<f64>(),
-            "dense probability cap",
-        )
-    })
-}
-
-pub(crate) fn max_dense_statevector_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        configured_or_detected_dense_qubits(
-            "PRISM_MAX_EXPORT_QUBITS",
-            size_of::<Complex64>(),
-            "dense statevector export cap",
-        )
-    })
-}
-
-pub(crate) fn max_tensor_probability_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        configured_or_detected_dense_qubits(
-            "PRISM_MAX_PROB_QUBITS",
-            size_of::<Complex64>() + size_of::<f64>(),
-            "tensor-network dense probability cap",
-        )
-    })
-}
-
-/// Measured-bit cap for the dense terminal-sampling path, which materializes
-/// one outcome distribution plus one CDF (two f64 per outcome). Above the cap
-/// the samplers stream with sorted thresholds instead.
-pub(crate) fn max_dense_outcome_bits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        configured_or_detected_dense_qubits(
-            "PRISM_MAX_DENSE_OUTCOME_BITS",
-            2 * size_of::<f64>(),
-            "dense outcome sampling cap",
-        )
-    })
-}
-
-/// Entry cap for the sparse backend's amplitude map.
-///
-/// Derived from the memory budget at 64 bytes per entry, the worst-case peak
-/// across the double-buffered maps (24 payload bytes, table slot overhead, and
-/// load-factor headroom on both buffers). `PRISM_MAX_SPARSE_QUBITS` overrides
-/// the cap as a power of two: the map may hold at most `2^q` entries.
-pub(crate) fn max_sparse_entries() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let q =
-            configured_or_detected_dense_qubits("PRISM_MAX_SPARSE_QUBITS", 64, "sparse entry cap");
-        if q >= usize::BITS as usize - 1 {
-            usize::MAX
-        } else {
-            1usize << q
-        }
-    })
-}
-
-/// Merged-block qubit cap for the factored backend, checked at merge time.
-///
-/// Defaults to the detected-memory dense budget, independent of the
-/// statevector override: lowering `PRISM_MAX_SV_QUBITS` to steer routing must
-/// not shrink the block a factored run may legitimately hold.
-pub(crate) fn max_factored_merge_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        configured_or_detected_dense_qubits(
-            "PRISM_MAX_FACTORED_MERGE_QUBITS",
-            size_of::<Complex64>(),
-            "factored merge cap",
-        )
-    })
-}
-
-/// Words a stabilizer tableau of `n` qubits occupies: `2n + 1` rows of
-/// `2 * ceil(n / 64)` words each.
-fn stabilizer_tableau_words(n: u128) -> u128 {
-    (2 * n + 1) * 2 * n.div_ceil(64)
-}
-
-/// Merged-cluster qubit cap for the factored stabilizer backend, checked at
-/// merge time.
-///
-/// Separate from [`max_factored_merge_qubits`] because a stabilizer merge
-/// allocates `O(n^2 / 64)` words rather than `2^n` amplitudes; a dense cap would
-/// hold clusters far below the 128-qubit and wider Clifford circuits dispatch
-/// sends here. `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` overrides it.
-pub(crate) fn max_stabilizer_cluster_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        if let Some(n) = env_qubit_override("PRISM_MAX_STABILIZER_CLUSTER_QUBITS") {
-            return n;
-        }
-        match detect_physical_memory_bytes() {
-            Some(bytes) => {
-                // The old pair is still live when the joint tableau allocates,
-                // and is strictly smaller than it, so peak is under twice the
-                // merged size.
-                let budget_words = u128::from(bytes / MEMORY_BUDGET_DIVISOR) / 8 / 2;
-                let mut n: u128 = 1;
-                while stabilizer_tableau_words(2 * n) <= budget_words
-                    && 2 * n < u128::from(u32::MAX)
-                {
-                    n *= 2;
-                }
-                let mut step = n / 2;
-                while step > 0 {
-                    if stabilizer_tableau_words(n + step) <= budget_words {
-                        n += step;
-                    }
-                    step /= 2;
-                }
-                usize::try_from(n).unwrap_or(usize::MAX)
-            }
-            None => {
-                eprintln!(
-                    "warning: could not detect system memory; stabilizer cluster cap is \
-                     disabled. Large merges may abort on allocation. Set \
-                     PRISM_MAX_STABILIZER_CLUSTER_QUBITS to suppress."
-                );
-                usize::MAX
-            }
+pub(crate) fn env_limits() -> &'static EnvLimits {
+    static CACHED: OnceLock<EnvLimits> = OnceLock::new();
+    CACHED.get_or_init(|| {
+        let qubits = |var| crate::env_knobs::usize_override(var, 0);
+        let mut limits = Limits::new();
+        limits.max_statevector_qubits = qubits("PRISM_MAX_SV_QUBITS");
+        limits.max_density_matrix_qubits = qubits("PRISM_MAX_DM_QUBITS");
+        limits.max_probability_qubits = qubits("PRISM_MAX_PROB_QUBITS");
+        limits.max_export_qubits = qubits("PRISM_MAX_EXPORT_QUBITS");
+        limits.max_sparse_qubits = qubits("PRISM_MAX_SPARSE_QUBITS");
+        limits.max_factored_merge_qubits = qubits("PRISM_MAX_FACTORED_MERGE_QUBITS");
+        limits.max_stabilizer_cluster_qubits = qubits("PRISM_MAX_STABILIZER_CLUSTER_QUBITS");
+        limits.max_mps_workspace_qubits = qubits("PRISM_MAX_MPS_WORKSPACE_QUBITS");
+        limits.max_tn_peak_qubits = qubits("PRISM_MAX_TN_PEAK_QUBITS");
+        limits.max_tn_slices = crate::env_knobs::usize_override("PRISM_MAX_TN_SLICES", 1);
+        EnvLimits {
+            limits,
+            dense_outcome_bits: qubits("PRISM_MAX_DENSE_OUTCOME_BITS"),
         }
     })
 }
@@ -184,41 +51,16 @@ pub(crate) fn max_stabilizer_cluster_qubits() -> usize {
 /// Error for a stabilizer cluster merge of `total_n` qubits over the cluster
 /// budget, raised before the joint tableau allocates.
 #[cold]
-pub(crate) fn stabilizer_cluster_error(total_n: usize, cap: usize) -> PrismError {
-    PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
-        backend: "factored-stabilizer".to_string(),
-        operation: "the joint tableau of merged clusters".to_string(),
-        resource: ResourceKind::Qubits,
-        required: total_n as u128,
-        limit: cap as u128,
-        env_var: Some("PRISM_MAX_STABILIZER_CLUSTER_QUBITS"),
-    }))
-}
-
-/// Workspace cap for MPS gate application, as `2^q` amplitudes of live
-/// contraction buffers. Independent of the statevector override for the same
-/// reason as the factored merge cap: MPS exists to run above that cap.
-fn max_mps_workspace_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        configured_or_detected_dense_qubits(
-            "PRISM_MAX_MPS_WORKSPACE_QUBITS",
-            size_of::<Complex64>(),
-            "MPS workspace cap",
-        )
-    })
-}
-
-/// MPS workspace cap in amplitudes: `2^q` from the budget above, or
-/// `u128::MAX` when detection is disabled. Read once per backend at
-/// construction so the per-gate check is a field compare, not an atomic load.
-pub(crate) fn mps_workspace_cap_elements() -> u128 {
-    let cap = max_mps_workspace_qubits();
-    if cap >= u128::BITS as usize {
-        u128::MAX
-    } else {
-        1u128 << cap
-    }
+pub(crate) fn stabilizer_cluster_error(total_n: usize, cap: Limit) -> PrismError {
+    resource_limit_error(
+        "factored-stabilizer",
+        "the joint tableau of merged clusters",
+        ResourceKind::Qubits,
+        total_n as u128,
+        cap.value as u128,
+        LimitKnob::StabilizerClusterQubits,
+        cap.source,
+    )
 }
 
 /// Error for a dense transient workspace of `elements` amplitudes over the
@@ -226,51 +68,21 @@ pub(crate) fn mps_workspace_cap_elements() -> u128 {
 /// [`check_state_allocation`] rejection, for scratch whose natural unit is
 /// amplitudes rather than circuit qubits.
 #[cold]
-pub(crate) fn workspace_allocation_error(backend: &str, what: &str, elements: u128) -> PrismError {
-    let cap = max_mps_workspace_qubits();
-    PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
-        backend: backend.to_string(),
-        operation: what.to_string(),
-        resource: ResourceKind::Amplitudes,
-        required: elements,
-        limit: 1u128 << cap,
-        env_var: Some("PRISM_MAX_MPS_WORKSPACE_QUBITS"),
-    }))
-}
-
-fn configured_or_detected_dense_qubits(
-    env_var: &str,
-    bytes_per_basis_state: usize,
-    warning_label: &str,
-) -> usize {
-    if let Some(n) = env_qubit_override(env_var) {
-        return n;
-    }
-    match detect_physical_memory_bytes().and_then(|bytes| {
-        max_dense_qubits_for_budget(bytes / MEMORY_BUDGET_DIVISOR, bytes_per_basis_state)
-    }) {
-        Some(n) => n,
-        None => {
-            eprintln!(
-                "warning: could not detect system memory; {warning_label} is disabled. \
-                 Large outputs may abort on allocation. Set {env_var} to suppress."
-            );
-            usize::MAX
-        }
-    }
-}
-
-fn max_dense_qubits_for_budget(budget_bytes: u64, bytes_per_basis_state: usize) -> Option<usize> {
-    let bytes_per_basis_state = u64::try_from(bytes_per_basis_state).ok()?;
-    if bytes_per_basis_state == 0 {
-        return None;
-    }
-    let max_elements = budget_bytes / bytes_per_basis_state;
-    if max_elements == 0 {
-        return None;
-    }
-    let max_qubits = (u64::BITS - 1 - max_elements.leading_zeros()) as usize;
-    Some(max_qubits.min(usize::BITS as usize - 1))
+pub(crate) fn workspace_allocation_error(
+    backend: &str,
+    what: &str,
+    elements: u128,
+    limits: &ResolvedLimits,
+) -> PrismError {
+    resource_limit_error(
+        backend,
+        what,
+        ResourceKind::Amplitudes,
+        elements,
+        limits.mps_workspace_elements(),
+        LimitKnob::MpsWorkspaceQubits,
+        limits.mps_workspace_qubits.source,
+    )
 }
 
 /// Reject a dense state that would exceed `cap` before the backend reserves it.
@@ -283,8 +95,8 @@ fn max_dense_qubits_for_budget(budget_bytes: u64, bytes_per_basis_state: usize) 
 pub(crate) fn check_state_allocation(
     backend: &str,
     num_qubits: usize,
-    cap: usize,
-    env_var: &'static str,
+    cap: Limit,
+    knob: LimitKnob,
 ) -> Result<()> {
     if num_qubits >= usize::BITS as usize {
         return Err(PrismError::ResourceLimit(Box::new(
@@ -295,20 +107,21 @@ pub(crate) fn check_state_allocation(
                 required: num_qubits as u128,
                 limit: usize::BITS as u128 - 1,
                 env_var: None,
+                knob: None,
+                limit_source: LimitSource::Detected,
             },
         )));
     }
-    if num_qubits > cap {
-        return Err(PrismError::ResourceLimit(Box::new(
-            crate::error::ResourceLimit {
-                backend: backend.to_string(),
-                operation: "the circuit".to_string(),
-                resource: ResourceKind::Qubits,
-                required: num_qubits as u128,
-                limit: cap as u128,
-                env_var: Some(env_var),
-            },
-        )));
+    if num_qubits > cap.value {
+        return Err(resource_limit_error(
+            backend,
+            "the circuit",
+            ResourceKind::Qubits,
+            num_qubits as u128,
+            cap.value as u128,
+            knob,
+            cap.source,
+        ));
     }
     Ok(())
 }
@@ -320,28 +133,36 @@ pub(crate) fn check_state_allocation(
 /// probability query as "no dense terminal" and reports as `None`: a wide
 /// register on these backends is the normal case, and `run` still answers
 /// with the classical bits.
-pub(crate) fn dense_probability_len(backend: &str, num_qubits: usize) -> Result<usize> {
+pub(crate) fn dense_probability_len(
+    backend: &str,
+    num_qubits: usize,
+    limits: &ResolvedLimits,
+) -> Result<usize> {
     dense_output_len(
         backend,
         "probabilities",
         num_qubits,
         size_of::<f64>(),
-        max_dense_probability_qubits(),
+        limits.probability_qubits.value,
     )
 }
 
 /// Width check for the statevector's dense probability terminal.
 ///
-/// The register already fits the state, so a width past `PRISM_MAX_PROB_QUBITS`
-/// is a cap to name rather than a terminal that does not exist: raises
-/// `IncompatibleBackend`, which the dispatch layer's `None` arm does not absorb.
-pub(crate) fn statevector_probability_len(backend: &str, num_qubits: usize) -> Result<usize> {
+/// The register already fits the state, so a width past the probability cap is a
+/// cap to name rather than a terminal that does not exist: raises `ResourceLimit`,
+/// which the dispatch layer's `None` arm does not absorb.
+pub(crate) fn statevector_probability_len(
+    backend: &str,
+    num_qubits: usize,
+    limits: &ResolvedLimits,
+) -> Result<usize> {
     capped_output_len(
         backend,
         "probabilities",
         num_qubits,
-        max_dense_probability_qubits(),
-        "PRISM_MAX_PROB_QUBITS",
+        limits.probability_qubits,
+        LimitKnob::ProbabilityQubits,
     )
 }
 
@@ -351,25 +172,30 @@ pub(crate) fn dense_statevector_len(
     backend: &str,
     operation: &str,
     num_qubits: usize,
+    limits: &ResolvedLimits,
 ) -> Result<usize> {
     capped_output_len(
         backend,
         operation,
         num_qubits,
-        max_dense_statevector_qubits(),
-        "PRISM_MAX_EXPORT_QUBITS",
+        limits.export_qubits,
+        LimitKnob::ExportQubits,
     )
 }
 
 /// Width check for the tensor-network dense probability terminal, raising
-/// `IncompatibleBackend` for the same reason as [`statevector_probability_len`].
-pub(crate) fn tensor_probability_len(backend: &str, num_qubits: usize) -> Result<usize> {
+/// `ResourceLimit` for the same reason as [`statevector_probability_len`].
+pub(crate) fn tensor_probability_len(
+    backend: &str,
+    num_qubits: usize,
+    limits: &ResolvedLimits,
+) -> Result<usize> {
     capped_output_len(
         backend,
         "probabilities",
         num_qubits,
-        max_tensor_probability_qubits(),
-        "PRISM_MAX_PROB_QUBITS",
+        limits.tensor_probability_qubits,
+        LimitKnob::ProbabilityQubits,
     )
 }
 
@@ -377,50 +203,22 @@ fn capped_output_len(
     backend: &str,
     operation: &str,
     num_qubits: usize,
-    cap: usize,
-    env_var: &'static str,
+    cap: Limit,
+    knob: LimitKnob,
 ) -> Result<usize> {
-    let cap = cap.min(usize::BITS as usize - 1);
-    if num_qubits > cap {
-        return Err(PrismError::ResourceLimit(Box::new(
-            crate::error::ResourceLimit {
-                backend: backend.to_string(),
-                operation: operation.to_string(),
-                resource: ResourceKind::Qubits,
-                required: num_qubits as u128,
-                limit: cap as u128,
-                env_var: Some(env_var),
-            },
-        )));
+    let max = cap.value.min(usize::BITS as usize - 1);
+    if num_qubits > max {
+        return Err(resource_limit_error(
+            backend,
+            operation,
+            ResourceKind::Qubits,
+            num_qubits as u128,
+            max as u128,
+            knob,
+            cap.source,
+        ));
     }
     Ok(1usize << num_qubits)
-}
-
-/// Peak-intermediate cap for tensor-network contraction, as `2^q` `Complex64`
-/// elements. Independent of the statevector override for the same reason as
-/// the MPS workspace cap: the backend exists to run above that cap.
-fn max_tensor_peak_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        configured_or_detected_dense_qubits(
-            "PRISM_MAX_TN_PEAK_QUBITS",
-            size_of::<Complex64>(),
-            "tensor-network peak cap",
-        )
-    })
-}
-
-/// Tensor-network peak budget in `Complex64` elements, `usize::MAX` when
-/// detection is disabled. The slicing search compares candidate peaks against
-/// this, so it reads the cap as a count rather than through
-/// [`tensor_peak_error`].
-pub(crate) fn tensor_peak_cap_elements() -> usize {
-    let cap = max_tensor_peak_qubits();
-    if cap >= usize::BITS as usize {
-        usize::MAX
-    } else {
-        1usize << cap
-    }
 }
 
 /// Rejection for a contraction whose peak of `peak` elements is still over
@@ -431,15 +229,17 @@ pub(crate) fn tensor_peak_error(
     operation: &str,
     peak: usize,
     cap: usize,
+    source: LimitSource,
 ) -> PrismError {
-    PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
-        backend: backend.to_string(),
-        operation: format!("the peak intermediate of {operation}"),
-        resource: ResourceKind::Elements,
-        required: peak as u128,
-        limit: cap as u128,
-        env_var: Some("PRISM_MAX_TN_PEAK_QUBITS"),
-    }))
+    resource_limit_error(
+        backend,
+        format!("the peak intermediate of {operation}"),
+        ResourceKind::Elements,
+        peak as u128,
+        cap as u128,
+        LimitKnob::TnPeakQubits,
+        source,
+    )
 }
 
 fn dense_output_len(
@@ -577,14 +377,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dense_budget_counts_fit_elements() {
-        assert_eq!(max_dense_qubits_for_budget(8, 8), Some(0));
-        assert_eq!(max_dense_qubits_for_budget(16, 8), Some(1));
-        assert_eq!(max_dense_qubits_for_budget(31, 8), Some(1));
-        assert_eq!(max_dense_qubits_for_budget(32, 8), Some(2));
-    }
-
-    #[test]
     fn dense_output_rejects_unaddressable_shift() {
         let err = dense_output_len("test", "probabilities", usize::BITS as usize, 8, usize::MAX)
             .unwrap_err();
@@ -598,18 +390,32 @@ mod tests {
 
     #[test]
     fn capped_output_past_the_cap_names_it() {
-        let err =
-            capped_output_len("test", "probabilities", 5, 4, "PRISM_MAX_PROB_QUBITS").unwrap_err();
+        let cap = Limit {
+            value: 4,
+            source: LimitSource::Env,
+        };
+        let err = capped_output_len(
+            "test",
+            "probabilities",
+            5,
+            cap,
+            LimitKnob::ProbabilityQubits,
+        )
+        .unwrap_err();
         match err {
             PrismError::ResourceLimit(data) => {
                 let crate::error::ResourceLimit {
                     required,
                     limit,
                     env_var,
+                    knob,
+                    limit_source,
                     ..
                 } = crate::error::ResourceLimit::clone(&data);
                 assert_eq!((required, limit), (5, 4));
                 assert_eq!(env_var, Some("PRISM_MAX_PROB_QUBITS"));
+                assert_eq!(knob, Some(LimitKnob::ProbabilityQubits));
+                assert_eq!(limit_source, LimitSource::Env);
             }
             other => panic!("unexpected error: {other:?}"),
         }

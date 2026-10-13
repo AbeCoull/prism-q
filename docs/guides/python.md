@@ -333,8 +333,26 @@ caller can branch on the failure without matching its message. A run over a memo
 cap raises kind `"resource_limit"` with the numbers attached: `resource` names the
 unit (`"qubits"`, `"amplitudes"`, `"entries"`, `"elements"` or
 `"bytes of device memory"`), `required` and `limit` are integers in that unit, and
-`env_var` names the variable that overrides the cap, or is `None`. On every other
-kind those four attributes are `None`.
+`env_var` names the variable that overrides the cap, or is `None`. `knob` names the
+`Limits` field that overrides it, and `limit_source` says which layer set it:
+`"detected"`, `"env"`, `"process_default"` or `"request"`. On every other kind those
+six attributes are `None`.
+
+Caps derive from a memory budget of half of physical memory. `Limits` sets the budget
+or any single cap, for one request with `Simulation.limits()` or for every later call
+in the process with `set_default_limits()`. A request value beats the process
+default, which beats the `PRISM_MAX_*` environment variables, and the default takes
+effect on the next call without a restart:
+
+```python
+from prism_q import Limits, set_default_limits
+
+tenant = Limits(memory_budget_bytes=4 << 30)
+outcome = simulate(circuits.ghz(20)).limits(tenant).seed(42).run()
+
+set_default_limits(Limits(max_statevector_qubits=26))
+set_default_limits(Limits())  # back to the environment and detection
+```
 
 ### Distributions too wide to write down
 
@@ -1389,6 +1407,7 @@ the crate root. The manifest gives the reason for each function left out.
 | `circuits::w_state_circuit` | `circuits.w_state` |
 | `compile_measurements` | `CompiledSampler` |
 | `compile_noisy` | `CompiledSampler` |
+| `default_limits` | `default_limits` |
 | `density_matrix_expectation_values` | `Simulation.density_matrix_expectation_values` |
 | `gpu::is_available` | `GpuContext.is_available` |
 | `noisy_marginals_analytical` | `noisy_marginals_analytical` |
@@ -1406,6 +1425,7 @@ the crate root. The manifest gives the reason for each function left out.
 | `run_spd_with` | `BackendKind.deterministic_pauli_budget` |
 | `run_spp` | `BackendKind.stochastic_pauli` |
 | `run_stabilizer_rank` | `BackendKind.stabilizer_rank` |
+| `set_default_limits` | `set_default_limits` |
 | `sim::calibration::presets::neutral_atom` | `DeviceCalibration.neutral_atom` |
 | `sim::calibration::presets::superconducting_transmon` | `DeviceCalibration.superconducting_transmon` |
 | `sim::calibration::presets::trapped_ion` | `DeviceCalibration.trapped_ion` |

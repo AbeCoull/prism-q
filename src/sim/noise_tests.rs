@@ -1365,6 +1365,7 @@ fn deferred_density_matrix_walk_matches_one_sweep_per_map() {
             Some(&noise),
             None,
             42,
+            &ResolvedLimits::process_default(),
         )
         .unwrap()
         .density_matrix()
@@ -1416,8 +1417,15 @@ fn assert_walk_matches_native(circuit: &Circuit, noise: &NoiseModel, label: &str
     use crate::PauliTerm;
 
     let n = circuit.num_qubits;
-    let folded =
-        evolve_density_matrix(&BackendKind::DensityMatrix, circuit, Some(noise), None, 42).unwrap();
+    let folded = evolve_density_matrix(
+        &BackendKind::DensityMatrix,
+        circuit,
+        Some(noise),
+        None,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
     let reference = native_density_matrix_walk(circuit, noise);
     let (a, b) = (
         folded.density_matrix().unwrap(),

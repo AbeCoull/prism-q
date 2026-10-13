@@ -9,11 +9,12 @@ use super::{
     expand_for_backend, fuse_for_backend, mix_seed, resolve, run_counts_with, run_shots_with,
     validate_explicit_backend,
 };
+use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
-use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::Instruction;
 use crate::circuit::dynamic::{Action, BasicBlock, ClassicalValue, DynamicProgram, Terminator};
 use crate::error::{PrismError, Result};
+use crate::limits::ResolvedLimits;
 
 /// Blocks a shot may run before [`SimulateProgram::shots`] stops it, unless
 /// [`SimulateProgram::max_steps`] sets another bound.
@@ -89,10 +90,11 @@ impl SimulateProgram<'_, Seeded> {
     /// raises.
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
         let seed = self.seed.seed;
+        let limits = &ResolvedLimits::process_default();
         if let Some(circuit) = self.program.static_circuit() {
-            return run_shots_with(self.kind, circuit, num_shots, seed);
+            return run_shots_with(self.kind, circuit, num_shots, seed, limits);
         }
-        let prepared = Prepared::new(self.program, &self.kind, seed, self.max_steps)?;
+        let prepared = Prepared::new(self.program, &self.kind, seed, self.max_steps, limits)?;
         prepared.run(&self.kind, num_shots, seed)
     }
 
@@ -104,8 +106,13 @@ impl SimulateProgram<'_, Seeded> {
     pub fn sample_counts(self, num_shots: usize) -> Result<CountsResult> {
         let num_classical_bits = self.program.num_classical_bits();
         if let Some(circuit) = self.program.static_circuit() {
-            let (counts, metadata) =
-                run_counts_with(self.kind, circuit, num_shots, self.seed.seed)?;
+            let (counts, metadata) = run_counts_with(
+                self.kind,
+                circuit,
+                num_shots,
+                self.seed.seed,
+                &ResolvedLimits::process_default(),
+            )?;
             return Ok(CountsResult {
                 counts,
                 num_classical_bits,
@@ -133,6 +140,7 @@ pub(super) struct Prepared<'p> {
     blocks: Vec<PreparedBlock<'p>>,
     initial: Vec<ClassicalValue>,
     max_steps: u64,
+    pub(super) limits: ResolvedLimits,
 }
 
 impl<'p> Prepared<'p> {
@@ -141,12 +149,13 @@ impl<'p> Prepared<'p> {
         kind: &BackendKind,
         seed: u64,
         max_steps: u64,
+        limits: &ResolvedLimits,
     ) -> Result<Self> {
         let summary = program.summary_circuit();
         if !kind.is_auto() {
-            validate_explicit_backend(kind, &summary)?;
+            validate_explicit_backend(kind, &summary, limits)?;
         }
-        let plan = match resolve(kind, &summary, false) {
+        let plan = match resolve(kind, &summary, false, limits) {
             #[cfg(feature = "distributed")]
             ExecutionPlan::Backend(BackendPlan::Distributed(_)) => {
                 return Err(decline(
@@ -162,7 +171,7 @@ impl<'p> Prepared<'p> {
                 ));
             }
         };
-        let probe = plan.build(seed);
+        let probe = plan.build(seed, limits);
         let blocks = program
             .blocks()
             .iter()
@@ -185,20 +194,21 @@ impl<'p> Prepared<'p> {
                 .map(|variable| variable.initial)
                 .collect(),
             max_steps,
+            limits: *limits,
         })
     }
 
     fn run(&self, kind: &BackendKind, num_shots: usize, seed: u64) -> Result<ShotsResult> {
         let num_qubits = self.program.num_qubits();
-        if self.plan.is_host_statevector() && num_qubits < max_statevector_qubits() {
+        if self.plan.is_host_statevector() && num_qubits < self.limits.statevector_qubits.value {
             #[cfg(feature = "parallel")]
             let parallel =
                 super::shots_split_across_workers(kind, &[(self.plan.resolved(), num_qubits)])
                     && num_qubits >= branching::MIN_QUBITS_FOR_PARALLEL_SPLITS;
             #[cfg(not(feature = "parallel"))]
             let parallel = false;
-            let limits = BranchLimits::for_width(num_qubits, parallel);
-            return branching::branch_program_shots(self, num_shots, seed, &limits);
+            let branch_limits = BranchLimits::for_width(num_qubits, parallel, &self.limits);
+            return branching::branch_program_shots(self, num_shots, seed, &branch_limits);
         }
         self.run_per_shot(kind, num_shots, seed)
     }
@@ -208,14 +218,14 @@ impl<'p> Prepared<'p> {
         let shot = |state: &mut ShotState, i: usize| -> Result<(Vec<bool>, RunMetadata)> {
             let shot_seed = mix_seed(seed, i);
             if reuse {
-                let backend = state
-                    .statevector
-                    .get_or_insert_with(|| StatevectorBackend::new(shot_seed));
+                let backend = state.statevector.get_or_insert_with(|| {
+                    StatevectorBackend::with_limits(shot_seed, &self.limits)
+                });
                 backend.rng = rand_chacha::ChaCha8Rng::seed_from_u64(shot_seed);
                 let bits = self.run_shot(backend, &mut state.vars)?;
                 return Ok((bits, backend_metadata(backend)));
             }
-            let mut backend = self.plan.build(shot_seed);
+            let mut backend = self.plan.build(shot_seed, &self.limits);
             let bits = self.run_shot(&mut *backend, &mut state.vars)?;
             Ok((bits, backend_metadata(&*backend)))
         };
@@ -474,7 +484,14 @@ mod tests {
         );
         b.end().unwrap();
         let program = b.build().unwrap();
-        let prepared = Prepared::new(&program, &BackendKind::Statevector, 3, 100).unwrap();
+        let prepared = Prepared::new(
+            &program,
+            &BackendKind::Statevector,
+            3,
+            100,
+            &ResolvedLimits::process_default(),
+        )
+        .unwrap();
         let reused = prepared
             .run_per_shot(&BackendKind::Statevector, 64, 3)
             .unwrap();

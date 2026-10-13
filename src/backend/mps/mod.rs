@@ -53,6 +53,7 @@ use crate::backend::{
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::Gate;
+use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 #[cfg(feature = "parallel")]
@@ -293,10 +294,10 @@ pub struct MpsBackend {
     /// high-water mark so the decision costs a compare per gate rather than a
     /// scan of the chain.
     bond_high_water: usize,
-    /// [`crate::backend::mps_workspace_cap_elements`] read once at
-    /// construction, so the per-gate check is a field compare rather than an
-    /// atomic load.
+    /// `limits.mps_workspace_elements()` read once at construction, so the
+    /// per-gate check is a field compare.
     workspace_cap: u128,
+    limits: ResolvedLimits,
     /// Grow-only scratch for [`Self::apply_adjacent_two_qubit`], held across
     /// calls so the four contraction buffers cost no allocation per gate.
     /// Every element of each call's window is written by assignment before
@@ -344,6 +345,7 @@ impl Clone for MpsBackend {
             #[cfg(test)]
             qr_discarded: self.qr_discarded,
             workspace_cap: self.workspace_cap,
+            limits: self.limits,
             scratch_theta: Vec::new(),
             scratch_right_t: Vec::new(),
             scratch_theta_prime: Vec::new(),
@@ -355,7 +357,12 @@ impl Clone for MpsBackend {
 }
 
 impl MpsBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64, max_bond_dim: usize) -> Self {
+        Self::with_limits(seed, max_bond_dim, &ResolvedLimits::process_default())
+    }
+
+    pub(crate) fn with_limits(seed: u64, max_bond_dim: usize, limits: &ResolvedLimits) -> Self {
         Self {
             num_qubits: 0,
             max_bond_dim,
@@ -372,7 +379,8 @@ impl MpsBackend {
             center_steps: 0,
             #[cfg(test)]
             qr_discarded: 0.0,
-            workspace_cap: crate::backend::mps_workspace_cap_elements(),
+            workspace_cap: limits.mps_workspace_elements(),
+            limits: *limits,
             scratch_theta: Vec::new(),
             scratch_right_t: Vec::new(),
             scratch_theta_prime: Vec::new(),
@@ -1118,6 +1126,7 @@ impl MpsBackend {
                 "mps",
                 "two-qubit gate application",
                 workspace,
+                &self.limits,
             ));
         }
 
@@ -1838,6 +1847,7 @@ impl MpsBackend {
                 "mps",
                 "multi-qubit gate matrix",
                 u128::MAX,
+                &self.limits,
             ));
         }
         let elements = 2u128 << (2 * n);
@@ -1846,6 +1856,7 @@ impl MpsBackend {
                 "mps",
                 "multi-qubit gate matrix",
                 elements,
+                &self.limits,
             ));
         }
         Ok(())
@@ -1869,6 +1880,7 @@ impl MpsBackend {
                 "mps",
                 "multi-qubit gate application",
                 workspace,
+                &self.limits,
             ));
         }
         if !self.cut_block(gate, dim, start_site, n) {
@@ -2421,7 +2433,7 @@ impl MpsBackend {
     fn schmidt_values_by_reduced_density(&mut self, sites: &[usize]) -> Result<Vec<f64>> {
         let what = "Schmidt values across a cut that is not contiguous in chain order";
         let k = sites.len();
-        schmidt::check_schmidt_side(self.name(), what, k)?;
+        schmidt::check_schmidt_side(self.name(), what, k, &self.limits)?;
         let (first, last) = (sites[0], sites[k - 1]);
         let chi = self.sites[first..=last]
             .iter()
@@ -2434,6 +2446,7 @@ impl MpsBackend {
                 self.name(),
                 what,
                 workspace,
+                &self.limits,
             ));
         }
         let end = self.sites.len() - 1;
@@ -2843,7 +2856,11 @@ fn pair_entry(instruction: &Instruction, k: usize) -> (usize, usize) {
     }
 }
 
-impl crate::backend::sealed::Sealed for MpsBackend {}
+impl crate::backend::sealed::Sealed for MpsBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
 
 impl Backend for MpsBackend {
     fn name(&self) -> &'static str {
@@ -2959,7 +2976,8 @@ impl Backend for MpsBackend {
     fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
         schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
         let k = subsystem.len();
-        let dim = crate::backend::reduced_density::reduced_density_side(self.name(), k)?;
+        let dim =
+            crate::backend::reduced_density::reduced_density_side(self.name(), k, &self.limits)?;
 
         let mut order: Vec<usize> = (0..k).collect();
         order.sort_by_key(|&i| self.site_for_logical(subsystem[i]));
@@ -2978,6 +2996,7 @@ impl Backend for MpsBackend {
                 self.name(),
                 "a reduced density matrix over the span these qubits occupy",
                 workspace,
+                &self.limits,
             ));
         }
 
@@ -3064,6 +3083,7 @@ impl Backend for MpsBackend {
             self.num_qubits(),
             || self.export_statevector(),
             other,
+            &self.limits,
         )
     }
 
@@ -3072,7 +3092,7 @@ impl Backend for MpsBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        let dim = dense_probability_len(self.name(), self.num_qubits)?;
+        let dim = dense_probability_len(self.name(), self.num_qubits, &self.limits)?;
         let mut probs = Vec::new();
         reserve_dense_output(&mut probs, dim, self.name(), "probabilities")?;
         probs.resize(dim, 0.0);
@@ -3243,7 +3263,12 @@ impl Backend for MpsBackend {
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
+        let dim = dense_statevector_len(
+            self.name(),
+            "statevector export",
+            self.num_qubits,
+            &self.limits,
+        )?;
         let mut state = Vec::new();
         reserve_dense_output(&mut state, dim, self.name(), "statevector export")?;
         state.resize(dim, ZERO);

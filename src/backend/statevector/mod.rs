@@ -68,6 +68,7 @@ use crate::backend::{reduced_density, schmidt, simd};
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::Gate;
+use crate::limits::{LimitKnob, ResolvedLimits};
 use crate::sim::unified_pauli::PauliTerm;
 
 #[cfg(feature = "gpu")]
@@ -179,6 +180,8 @@ fn check_device_budget(context: &GpuContext, num_qubits: usize) -> crate::error:
                 required: needed as u128,
                 limit: free as u128,
                 env_var: None,
+                knob: None,
+                limit_source: crate::limits::LimitSource::Detected,
             },
         )));
     }
@@ -248,6 +251,7 @@ pub struct StatevectorBackend {
     pub(crate) rng: ChaCha8Rng,
     pub(crate) pending_norm: f64,
     pub(crate) batch_tables: kernels::BatchTableScratch,
+    pub(crate) limits: ResolvedLimits,
     #[cfg(feature = "gpu")]
     gpu_context: Option<Arc<GpuContext>>,
     #[cfg(feature = "gpu")]
@@ -267,7 +271,12 @@ fn qft_block_enabled() -> bool {
 }
 
 impl StatevectorBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64) -> Self {
+        Self::with_limits(seed, &ResolvedLimits::process_default())
+    }
+
+    pub(crate) fn with_limits(seed: u64, limits: &ResolvedLimits) -> Self {
         Self {
             num_qubits: 0,
             state: Vec::new(),
@@ -275,6 +284,7 @@ impl StatevectorBackend {
             rng: ChaCha8Rng::seed_from_u64(seed),
             pending_norm: 1.0,
             batch_tables: kernels::BatchTableScratch::default(),
+            limits: *limits,
             #[cfg(feature = "gpu")]
             gpu_context: None,
             #[cfg(feature = "gpu")]
@@ -827,7 +837,11 @@ impl StatevectorBackend {
     }
 }
 
-impl crate::backend::sealed::Sealed for StatevectorBackend {}
+impl crate::backend::sealed::Sealed for StatevectorBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
 
 impl Backend for StatevectorBackend {
     fn name(&self) -> &'static str {
@@ -897,8 +911,8 @@ impl Backend for StatevectorBackend {
         crate::backend::check_state_allocation(
             "statevector",
             num_qubits,
-            crate::backend::max_statevector_qubits(),
-            "PRISM_MAX_SV_QUBITS",
+            self.limits.statevector_qubits,
+            LimitKnob::StatevectorQubits,
         )?;
 
         let dim = 1usize << num_qubits;
@@ -997,7 +1011,7 @@ impl Backend for StatevectorBackend {
         if let Some(gpu) = self.gpu_state.as_ref() {
             return gpu.probabilities();
         }
-        statevector_probability_len(self.name(), self.num_qubits)?;
+        statevector_probability_len(self.name(), self.num_qubits, &self.limits)?;
         Ok(self.host_probability_vector())
     }
 
@@ -1010,7 +1024,12 @@ impl Backend for StatevectorBackend {
         if let Some(gpu) = self.gpu_state.as_ref() {
             return gpu.export_statevector();
         }
-        dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
+        dense_statevector_len(
+            self.name(),
+            "statevector export",
+            self.num_qubits,
+            &self.limits,
+        )?;
         if self.pending_norm == 1.0 {
             return Ok(self.state.clone());
         }
@@ -1083,9 +1102,21 @@ impl Backend for StatevectorBackend {
         #[cfg(feature = "gpu")]
         if let Some(gpu) = self.gpu_state.as_ref() {
             let state = gpu.export_statevector()?;
-            return schmidt::dense_schmidt_values(self.name(), &state, self.num_qubits, subsystem);
+            return schmidt::dense_schmidt_values(
+                self.name(),
+                &state,
+                self.num_qubits,
+                subsystem,
+                &self.limits,
+            );
         }
-        schmidt::dense_schmidt_values(self.name(), &self.state, self.num_qubits, subsystem)
+        schmidt::dense_schmidt_values(
+            self.name(),
+            &self.state,
+            self.num_qubits,
+            subsystem,
+            &self.limits,
+        )
     }
 
     /// Partial trace over the complement at `2^(n + k)` multiply-adds, scaled
@@ -1093,7 +1124,8 @@ impl Backend for StatevectorBackend {
     /// device-resident state is read back first.
     fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
         schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
-        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let dim =
+            reduced_density::reduced_density_side(self.name(), subsystem.len(), &self.limits)?;
         #[cfg(feature = "gpu")]
         let readback = self
             .gpu_state

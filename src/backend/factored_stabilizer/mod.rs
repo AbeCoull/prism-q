@@ -46,6 +46,7 @@ use crate::backend::{
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
+use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use std::borrow::Cow;
 
@@ -402,7 +403,7 @@ impl SubTableau {
         (Cow::Owned(xz), Cow::Owned(phase))
     }
 
-    fn compute_probabilities(&self) -> Result<Vec<f64>> {
+    fn compute_probabilities(&self, limits: &ResolvedLimits) -> Result<Vec<f64>> {
         dense::dense_probabilities(
             &self.xz,
             &self.phase,
@@ -410,10 +411,11 @@ impl SubTableau {
             self.num_words,
             self.stride(),
             "factored-stabilizer",
+            limits,
         )
     }
 
-    fn compute_statevector(&self) -> Result<Vec<Complex64>> {
+    fn compute_statevector(&self, limits: &ResolvedLimits) -> Result<Vec<Complex64>> {
         dense::dense_statevector(
             &self.xz,
             &self.phase,
@@ -422,6 +424,7 @@ impl SubTableau {
             self.stride(),
             "factored-stabilizer",
             "statevector",
+            limits,
         )
     }
 }
@@ -433,10 +436,9 @@ pub struct FactoredStabilizerBackend {
     subs: Vec<Option<SubTableau>>,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
-    /// Merged-cluster qubit cap from
-    /// [`crate::backend::max_stabilizer_cluster_qubits`], read once at
+    /// Merged-cluster qubit cap is `limits.stabilizer_cluster_qubits`, fixed at
     /// construction so the per-merge check is a field compare.
-    cluster_cap: usize,
+    limits: ResolvedLimits,
 }
 
 impl kernels::BatchTarget for SubTableau {
@@ -461,10 +463,15 @@ impl kernels::BatchTarget for SubTableau {
 }
 
 impl FactoredStabilizerBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64) -> Self {
+        Self::with_limits(seed, &ResolvedLimits::process_default())
+    }
+
+    pub(crate) fn with_limits(seed: u64, limits: &ResolvedLimits) -> Self {
         Self {
             num_qubits: 0,
-            cluster_cap: crate::backend::max_stabilizer_cluster_qubits(),
+            limits: *limits,
             qubit_to_sub: Vec::new(),
             subs: Vec::new(),
             classical_bits: Vec::new(),
@@ -486,10 +493,10 @@ impl FactoredStabilizerBackend {
     ) -> Result<()> {
         let n = num_qubits;
         rowops::check_imported_rows(n, &words, &phases)?;
-        if n > self.cluster_cap {
+        if n > self.limits.stabilizer_cluster_qubits.value {
             return Err(crate::backend::stabilizer_cluster_error(
                 n,
-                self.cluster_cap,
+                self.limits.stabilizer_cluster_qubits,
             ));
         }
         let num_words = n.div_ceil(64);
@@ -568,10 +575,10 @@ impl FactoredStabilizerBackend {
     fn merge_subs(&mut self, dst_idx: usize, src_idx: usize) -> Result<()> {
         let total_n =
             self.subs[dst_idx].as_ref().unwrap().n + self.subs[src_idx].as_ref().unwrap().n;
-        if total_n > self.cluster_cap {
+        if total_n > self.limits.stabilizer_cluster_qubits.value {
             return Err(crate::backend::stabilizer_cluster_error(
                 total_n,
-                self.cluster_cap,
+                self.limits.stabilizer_cluster_qubits,
             ));
         }
 
@@ -782,7 +789,11 @@ impl FactoredStabilizerBackend {
     }
 }
 
-impl crate::backend::sealed::Sealed for FactoredStabilizerBackend {}
+impl crate::backend::sealed::Sealed for FactoredStabilizerBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
 
 impl Backend for FactoredStabilizerBackend {
     fn name(&self) -> &'static str {
@@ -911,17 +922,17 @@ impl Backend for FactoredStabilizerBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        dense_probability_len(self.name(), self.num_qubits)?;
+        dense_probability_len(self.name(), self.num_qubits, &self.limits)?;
         let active: Vec<&SubTableau> = self.subs.iter().filter_map(|s| s.as_ref()).collect();
 
         if active.len() == 1 && active[0].n == self.num_qubits {
-            return active[0].compute_probabilities();
+            return active[0].compute_probabilities(&self.limits);
         }
 
         let blocks: Vec<(Vec<f64>, Vec<usize>)> = active
             .iter()
             .map(|sub| {
-                let probs = sub.compute_probabilities()?;
+                let probs = sub.compute_probabilities(&self.limits)?;
                 let qubits: Vec<usize> = sub.qubits.to_vec();
                 Ok((probs, qubits))
             })
@@ -945,7 +956,7 @@ impl Backend for FactoredStabilizerBackend {
 
         let mut blocks = Vec::with_capacity(active.len());
         for sub in active {
-            let probs = sub.compute_probabilities().ok()?;
+            let probs = sub.compute_probabilities(&self.limits).ok()?;
             let mask = sub.qubits.iter().fold(0u64, |m, &q| m | 1 << q);
             blocks.push(crate::sim::FactoredBlock { probs, mask });
         }
@@ -1047,7 +1058,7 @@ impl Backend for FactoredStabilizerBackend {
     /// stabilizer backend, priced against the dense export cap.
     fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
         schmidt::validate_subsystem(subsystem, self.num_qubits)?;
-        diagnostics::flat_spectrum(self.name(), self.cut_rank(subsystem))
+        diagnostics::flat_spectrum(self.name(), self.cut_rank(subsystem), &self.limits)
     }
 
     /// The cut's rank times `ln 2`, at any width. Clusters are unentangled, so
@@ -1062,7 +1073,8 @@ impl Backend for FactoredStabilizerBackend {
     /// its sub-tableau's generators inside the subsystem define.
     fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
         schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
-        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let dim =
+            reduced_density::reduced_density_side(self.name(), subsystem.len(), &self.limits)?;
         let mut rho = vec![Complex64::new(1.0, 0.0); dim * dim];
         for (index, sub) in self.subs.iter().enumerate() {
             let Some(sub) = sub else { continue };
@@ -1107,16 +1119,21 @@ impl Backend for FactoredStabilizerBackend {
     /// merge and split passes preserve the partition, so the product covers the
     /// whole register.
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        let dim = dense_statevector_len(self.name(), "statevector", self.num_qubits)?;
+        let dim = dense_statevector_len(self.name(), "statevector", self.num_qubits, &self.limits)?;
         let active: Vec<&SubTableau> = self.subs.iter().filter_map(|s| s.as_ref()).collect();
 
         if active.len() == 1 && active[0].n == self.num_qubits {
-            return active[0].compute_statevector();
+            return active[0].compute_statevector(&self.limits);
         }
 
         let blocks: Vec<(Vec<Complex64>, &[usize])> = active
             .iter()
-            .map(|sub| Ok((sub.compute_statevector()?, sub.qubits.as_slice())))
+            .map(|sub| {
+                Ok((
+                    sub.compute_statevector(&self.limits)?,
+                    sub.qubits.as_slice(),
+                ))
+            })
             .collect::<Result<Vec<_>>>()?;
 
         let mut joint = Vec::new();

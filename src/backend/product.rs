@@ -43,6 +43,7 @@ use crate::backend::{
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::{DiagEntry, Gate};
+use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 /// Per-qubit O(n) backend for non-entangling circuits.
@@ -51,15 +52,22 @@ pub struct ProductStateBackend {
     qubits: Vec<[Complex64; 2]>,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
+    limits: ResolvedLimits,
 }
 
 impl ProductStateBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64) -> Self {
+        Self::with_limits(seed, &ResolvedLimits::process_default())
+    }
+
+    pub(crate) fn with_limits(seed: u64, limits: &ResolvedLimits) -> Self {
         Self {
             num_qubits: 0,
             qubits: Vec::new(),
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
+            limits: *limits,
         }
     }
 
@@ -122,7 +130,11 @@ impl ProductStateBackend {
     }
 }
 
-impl crate::backend::sealed::Sealed for ProductStateBackend {}
+impl crate::backend::sealed::Sealed for ProductStateBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
 
 impl Backend for ProductStateBackend {
     fn name(&self) -> &'static str {
@@ -237,6 +249,7 @@ impl Backend for ProductStateBackend {
             self.num_qubits(),
             || self.export_statevector(),
             other,
+            &self.limits,
         )
     }
 
@@ -245,8 +258,11 @@ impl Backend for ProductStateBackend {
     /// scaled to trace one.
     fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
         crate::backend::schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
-        let side =
-            crate::backend::reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let side = crate::backend::reduced_density::reduced_density_side(
+            self.name(),
+            subsystem.len(),
+            &self.limits,
+        )?;
         let mut rho = vec![Complex64::new(1.0, 0.0)];
         let mut dim = 1usize;
         for &qubit in subsystem {
@@ -275,7 +291,7 @@ impl Backend for ProductStateBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        let dim = dense_probability_len(self.name(), self.num_qubits)?;
+        let dim = dense_probability_len(self.name(), self.num_qubits, &self.limits)?;
 
         #[cfg(feature = "parallel")]
         if self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
@@ -404,7 +420,12 @@ impl Backend for ProductStateBackend {
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
+        let dim = dense_statevector_len(
+            self.name(),
+            "statevector export",
+            self.num_qubits,
+            &self.limits,
+        )?;
 
         #[cfg(feature = "parallel")]
         if self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {

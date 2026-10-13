@@ -309,7 +309,7 @@ fn the_stabilizer_answers_the_entropy_and_the_flat_spectrum() {
 // spectrum rather than declining.
 #[test]
 fn a_wide_stabilizer_cut_answers_the_entropy_without_the_spectrum() {
-    let width = crate::backend::schmidt::export_cap() + 2;
+    let width = crate::limits::ResolvedLimits::process_default().export_cap() + 2;
     let mut circuit = Circuit::new(2 * width, 0);
     for q in 0..width {
         circuit.add_gate(Gate::H, &[q]);

@@ -52,6 +52,7 @@ use crate::backend::{reduced_density, schmidt, simd};
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::{DiagEntry, Gate, is_diagonal_2x2};
+use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 #[cfg(feature = "parallel")]
@@ -106,16 +107,23 @@ pub struct FactoredBackend {
     substates: Vec<Option<SubState>>,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
+    limits: ResolvedLimits,
 }
 
 impl FactoredBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64) -> Self {
+        Self::with_limits(seed, &ResolvedLimits::process_default())
+    }
+
+    pub(crate) fn with_limits(seed: u64, limits: &ResolvedLimits) -> Self {
         Self {
             num_qubits: 0,
             qubit_to_substate: Vec::new(),
             substates: Vec::new(),
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
+            limits: *limits,
         }
     }
 
@@ -149,7 +157,7 @@ impl FactoredBackend {
     /// The transient peak also holds both source blocks, but they are bounded
     /// by prior merges through this same gate, so the merged width carries the
     /// contract.
-    fn check_merge_allocation(total_n: usize) -> Result<()> {
+    fn check_merge_allocation(&self, total_n: usize) -> Result<()> {
         if total_n >= usize::BITS as usize {
             return Err(crate::error::PrismError::ResourceLimit(Box::new(
                 crate::error::ResourceLimit {
@@ -159,21 +167,22 @@ impl FactoredBackend {
                     required: total_n as u128,
                     limit: usize::BITS as u128 - 1,
                     env_var: None,
+                    knob: None,
+                    limit_source: crate::limits::LimitSource::Detected,
                 },
             )));
         }
-        let cap = crate::backend::max_factored_merge_qubits();
-        if total_n > cap {
-            return Err(crate::error::PrismError::ResourceLimit(Box::new(
-                crate::error::ResourceLimit {
-                    backend: "factored".to_string(),
-                    operation: "the dense block of merged sub-states".to_string(),
-                    resource: crate::error::ResourceKind::Qubits,
-                    required: total_n as u128,
-                    limit: cap as u128,
-                    env_var: Some("PRISM_MAX_FACTORED_MERGE_QUBITS"),
-                },
-            )));
+        let cap = self.limits.factored_merge_qubits;
+        if total_n > cap.value {
+            return Err(crate::limits::resource_limit_error(
+                "factored",
+                "the dense block of merged sub-states",
+                crate::error::ResourceKind::Qubits,
+                total_n as u128,
+                cap.value as u128,
+                crate::limits::LimitKnob::FactoredMergeQubits,
+                cap.source,
+            ));
         }
         Ok(())
     }
@@ -188,7 +197,7 @@ impl FactoredBackend {
         let dst_n = self.substates[dst_idx].as_ref().unwrap().qubits.len();
         let src_n = self.substates[src_idx].as_ref().unwrap().qubits.len();
         let total_n = dst_n + src_n;
-        Self::check_merge_allocation(total_n)?;
+        self.check_merge_allocation(total_n)?;
 
         // A sub-state a split shrank keeps its capacity, so a qubit merging
         // back in grows it in place instead of allocating the product.
@@ -683,7 +692,11 @@ impl FactoredBackend {
     }
 }
 
-impl crate::backend::sealed::Sealed for FactoredBackend {}
+impl crate::backend::sealed::Sealed for FactoredBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
 
 impl Backend for FactoredBackend {
     fn name(&self) -> &'static str {
@@ -793,7 +806,8 @@ impl Backend for FactoredBackend {
     /// and column index that block's qubits occupy, then scaled to trace one.
     fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
         schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
-        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let dim =
+            reduced_density::reduced_density_side(self.name(), subsystem.len(), &self.limits)?;
         let mut rho = vec![Complex64::new(1.0, 0.0); dim * dim];
         for (ss_idx, sub) in self.substates.iter().enumerate() {
             let Some(sub) = sub else { continue };
@@ -862,7 +876,12 @@ impl Backend for FactoredBackend {
     /// that block's qubits. Sub-states stay normalized through measurement, so no
     /// pending norm is carried.
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
+        let dim = dense_statevector_len(
+            self.name(),
+            "statevector export",
+            self.num_qubits,
+            &self.limits,
+        )?;
 
         let active: SmallVec<[&SubState; 16]> = self
             .substates
@@ -894,7 +913,7 @@ impl Backend for FactoredBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        dense_probability_len(self.name(), self.num_qubits)?;
+        dense_probability_len(self.name(), self.num_qubits, &self.limits)?;
         let active: SmallVec<[&SubState; 16]> = self
             .substates
             .iter()

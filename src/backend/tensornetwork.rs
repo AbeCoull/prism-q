@@ -109,11 +109,12 @@ use smallvec::SmallVec;
 
 use crate::backend::{
     Backend, BasisSamples, NORM_CLAMP_MIN, dense_statevector_len, reserve_dense_output, simd,
-    tensor_peak_cap_elements, tensor_peak_error, tensor_probability_len,
+    tensor_peak_error, tensor_probability_len,
 };
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
+use crate::limits::{LimitSource, ResolvedLimits};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 #[cfg(feature = "parallel")]
@@ -943,41 +944,20 @@ fn greedy_contract(
 #[derive(Clone, Copy)]
 struct ContractionLimits {
     peak_cap: usize,
+    peak_source: LimitSource,
     slice_budget: usize,
     tolerance: Option<f64>,
 }
 
 impl ContractionLimits {
-    fn from_env() -> Self {
+    fn new(limits: &ResolvedLimits, tolerance: Option<f64>) -> Self {
         Self {
-            peak_cap: tensor_peak_cap_elements(),
-            slice_budget: max_slices(),
-            tolerance: None,
-        }
-    }
-
-    fn with_tolerance(tolerance: Option<f64>) -> Self {
-        Self {
+            peak_cap: limits.tn_peak_elements(),
+            peak_source: limits.tn_peak_qubits.source,
+            slice_budget: limits.tn_slices.value,
             tolerance,
-            ..Self::from_env()
         }
     }
-}
-
-/// Independent contractions a sliced run may sum over before the peak cap is
-/// reported unreachable.
-///
-/// Slicing trades a multiplicative time factor for a divided peak, so the
-/// budget is the worst-case slowdown a caller takes in place of a rejection.
-const DEFAULT_SLICE_BUDGET: usize = 1 << 10;
-
-/// Slice budget from `PRISM_MAX_TN_SLICES`, cached for the process. A budget
-/// of 1 turns slicing off, so a plan over the cap is rejected.
-fn max_slices() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        crate::env_knobs::usize_knob("PRISM_MAX_TN_SLICES", DEFAULT_SLICE_BUDGET, 1)
-    })
 }
 
 /// Legs fixed for a sliced contraction, in the order they were chosen.
@@ -1326,6 +1306,7 @@ fn slice_to_fit(
             operation,
             plan.peak,
             limits.peak_cap,
+            limits.peak_source,
         ));
     };
     LAST_SLICE_COUNT.with(|count| count.set(slice.count));
@@ -1980,8 +1961,12 @@ impl ScalarExpectationNetwork {
 const FUSED_PLAN_TOTAL: usize = 1 << 18;
 
 /// Contract `<0| U^dag P U |0>` without materializing a full statevector.
-pub(crate) fn expectation_zero_state(circuit: &Circuit, pauli_terms: &[PauliTerm]) -> Result<f64> {
-    contract_scalar(circuit, pauli_terms, ContractionLimits::from_env())
+pub(crate) fn expectation_zero_state(
+    circuit: &Circuit,
+    pauli_terms: &[PauliTerm],
+    limits: &ResolvedLimits,
+) -> Result<f64> {
+    contract_scalar(circuit, pauli_terms, ContractionLimits::new(limits, None))
 }
 
 /// Contract the observable's network, or the fused circuit's when its plan is
@@ -2012,11 +1997,12 @@ fn contract_scalar(
 pub(crate) fn expectations_zero_state(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
+    limits: &ResolvedLimits,
 ) -> Result<Vec<f64>> {
     let circuit = crate::circuit::expand_qft_blocks(circuit);
     observables
         .iter()
-        .map(|observable| expectation_zero_state(&circuit, observable))
+        .map(|observable| expectation_zero_state(&circuit, observable, limits))
         .collect()
 }
 
@@ -2040,10 +2026,11 @@ impl BoundedExpectations {
         self.planned.iter().map(|(_, plan)| plan.total).sum()
     }
 
-    pub(crate) fn contract(self) -> Result<Vec<f64>> {
+    pub(crate) fn contract(self, limits: &ResolvedLimits) -> Result<Vec<f64>> {
+        let limits = ContractionLimits::new(limits, None);
         self.planned
             .into_iter()
-            .map(|(network, plan)| network.contract_on(&plan, ContractionLimits::from_env()))
+            .map(|(network, plan)| network.contract_on(&plan, limits))
             .collect()
     }
 }
@@ -2079,7 +2066,7 @@ pub(crate) fn plan_bounded_expectations(
 /// Bench-visible wrapper over [`expectation_zero_state`]; not stable API.
 #[cfg(feature = "bench-internal")]
 pub fn scalar_expectation(circuit: &Circuit, pauli_terms: &[PauliTerm]) -> Result<f64> {
-    expectation_zero_state(circuit, pauli_terms)
+    expectation_zero_state(circuit, pauli_terms, &ResolvedLimits::process_default())
 }
 
 /// [`scalar_expectation`] with the peak cap, slice budget and truncation
@@ -2098,6 +2085,7 @@ pub fn scalar_expectation_capped(
         pauli_terms,
         ContractionLimits {
             peak_cap,
+            peak_source: LimitSource::Request,
             slice_budget,
             tolerance,
         },
@@ -2252,11 +2240,13 @@ pub struct TensorNetworkBackend {
     rng: ChaCha8Rng,
     tolerance: Option<f64>,
     truncation_discarded: std::cell::Cell<f64>,
+    limits: ResolvedLimits,
 }
 
 impl TensorNetworkBackend {
+    /// Backend under the process default [`Limits`](crate::Limits).
     pub fn new(seed: u64) -> Self {
-        Self::build(seed, None)
+        Self::with_limits(seed, None, &ResolvedLimits::process_default())
     }
 
     /// A backend whose contractions may truncate an intermediate bond when
@@ -2273,10 +2263,13 @@ impl TensorNetworkBackend {
             tolerance.is_finite() && tolerance >= 0.0,
             "tensor-network tolerance must be a finite fraction at or above zero, got {tolerance}"
         );
-        Self::build(seed, Some(tolerance))
+        Self::with_limits(seed, Some(tolerance), &ResolvedLimits::process_default())
     }
 
-    fn build(seed: u64, tolerance: Option<f64>) -> Self {
+    /// A backend under `limits`, truncating up to `tolerance` per cut when set.
+    /// The tolerance is checked as [`Self::with_tolerance`] checks it, by the
+    /// caller.
+    pub(crate) fn with_limits(seed: u64, tolerance: Option<f64>, limits: &ResolvedLimits) -> Self {
         Self {
             num_qubits: 0,
             tensors: Vec::new(),
@@ -2286,6 +2279,7 @@ impl TensorNetworkBackend {
             rng: ChaCha8Rng::seed_from_u64(seed),
             tolerance,
             truncation_discarded: std::cell::Cell::new(0.0),
+            limits: *limits,
         }
     }
 
@@ -2302,8 +2296,8 @@ impl TensorNetworkBackend {
     }
 
     /// Limits every terminal of this backend contracts under.
-    fn limits(&self) -> ContractionLimits {
-        ContractionLimits::with_tolerance(self.tolerance)
+    fn contraction_limits(&self) -> ContractionLimits {
+        ContractionLimits::new(&self.limits, self.tolerance)
     }
 
     /// Add what the contraction just finished discarded to the running total.
@@ -2571,9 +2565,20 @@ impl TensorNetworkBackend {
         let rho = match plan {
             Some(slot) => {
                 let plan = cached_plan(&network, slot);
-                contract_within(&mut network, plan, self.limits(), self.name(), operation)?
+                contract_within(
+                    &mut network,
+                    plan,
+                    self.contraction_limits(),
+                    self.name(),
+                    operation,
+                )?
             }
-            None => greedy_contract(&mut network, self.limits(), self.name(), operation)?,
+            None => greedy_contract(
+                &mut network,
+                self.contraction_limits(),
+                self.name(),
+                operation,
+            )?,
         };
         self.book_truncation();
 
@@ -2616,7 +2621,7 @@ impl TensorNetworkBackend {
 
         let result = greedy_contract(
             &mut network,
-            self.limits(),
+            self.contraction_limits(),
             self.name(),
             "pauli expectation",
         )?;
@@ -2628,10 +2633,15 @@ impl TensorNetworkBackend {
     /// Contract the full network and return the amplitude vector in
     /// computational basis order.
     fn contract_to_statevector(&self) -> Result<Vec<Complex64>> {
-        dense_statevector_len(self.name(), "contraction", self.num_qubits)?;
+        dense_statevector_len(self.name(), "contraction", self.num_qubits, &self.limits)?;
 
         let mut tensors = self.tensors.clone();
-        let result = greedy_contract(&mut tensors, self.limits(), self.name(), "contraction")?;
+        let result = greedy_contract(
+            &mut tensors,
+            self.contraction_limits(),
+            self.name(),
+            "contraction",
+        )?;
         self.book_truncation();
 
         // The result tensor's legs should be exactly the output_legs.
@@ -2673,7 +2683,11 @@ impl TensorNetworkBackend {
     }
 }
 
-impl crate::backend::sealed::Sealed for TensorNetworkBackend {}
+impl crate::backend::sealed::Sealed for TensorNetworkBackend {
+    fn limits(&self) -> crate::limits::ResolvedLimits {
+        self.limits
+    }
+}
 
 impl Backend for TensorNetworkBackend {
     fn name(&self) -> &'static str {
@@ -2777,7 +2791,7 @@ impl Backend for TensorNetworkBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        tensor_probability_len(self.name(), self.num_qubits)?;
+        tensor_probability_len(self.name(), self.num_qubits, &self.limits)?;
         let amplitudes = self.contract_to_statevector()?;
         let mut probs = vec![0.0_f64; amplitudes.len()];
         #[cfg(feature = "parallel")]
@@ -2809,7 +2823,7 @@ impl Backend for TensorNetworkBackend {
             return Ok(BasisSamples::new(num_shots, n));
         }
 
-        if tensor_probability_len(self.name(), n).is_ok() {
+        if tensor_probability_len(self.name(), n, &self.limits).is_ok() {
             use rand::RngExt;
 
             let mut samples = BasisSamples::new(num_shots, n);
@@ -3180,7 +3194,8 @@ mod tests {
 
         let expected =
             crate::sim::run_expectation_values(&circuit, &[terms.to_vec()], 42).unwrap()[0];
-        let actual = expectation_zero_state(&circuit, &terms).unwrap();
+        let actual =
+            expectation_zero_state(&circuit, &terms, &ResolvedLimits::process_default()).unwrap();
         assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
     }
 
@@ -3194,7 +3209,8 @@ mod tests {
 
         let expected =
             crate::sim::run_expectation_values(&circuit, &[local.to_vec()], 42).unwrap()[0];
-        let actual = expectation_zero_state(&circuit, &local).unwrap();
+        let actual =
+            expectation_zero_state(&circuit, &local, &ResolvedLimits::process_default()).unwrap();
         assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
 
         let pruned = ScalarExpectationNetwork::for_observable(&circuit, &local).unwrap();
@@ -3219,7 +3235,8 @@ mod tests {
 
         let expected =
             crate::sim::run_expectation_values(&circuit, &[terms.to_vec()], 42).unwrap()[0];
-        let actual = expectation_zero_state(&circuit, &terms).unwrap();
+        let actual =
+            expectation_zero_state(&circuit, &terms, &ResolvedLimits::process_default()).unwrap();
         assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
     }
 
@@ -3239,7 +3256,8 @@ mod tests {
         let expected =
             crate::sim::run_expectation_values(&circuit, std::slice::from_ref(&terms), 42).unwrap()
                 [0];
-        let actual = expectation_zero_state(&circuit, &terms).unwrap();
+        let actual =
+            expectation_zero_state(&circuit, &terms, &ResolvedLimits::process_default()).unwrap();
         assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
     }
 
@@ -3321,12 +3339,14 @@ mod tests {
     fn test_slices_sum_to_the_unsliced_contraction() {
         let circuit = crate::circuits::hardware_efficient_ansatz(12, 4, 42);
         let terms = [PauliTerm::z(0), PauliTerm::z(6)];
-        let exact = expectation_zero_state(&circuit, &terms).unwrap();
+        let exact =
+            expectation_zero_state(&circuit, &terms, &ResolvedLimits::process_default()).unwrap();
 
         let network = scalar_network(&circuit, &terms);
         let plan = plan_with_restarts(&network.tensors);
         let limits = ContractionLimits {
             peak_cap: 1 << 8,
+            peak_source: LimitSource::Request,
             slice_budget: 1 << 10,
             tolerance: None,
         };
@@ -3362,6 +3382,7 @@ mod tests {
 
         let limits = ContractionLimits {
             peak_cap: 1 << 8,
+            peak_source: LimitSource::Request,
             slice_budget: 2,
             tolerance: None,
         };
@@ -3467,7 +3488,8 @@ mod tests {
     fn test_noisy_plans_execute_to_the_same_scalar() {
         let circuit = crate::circuits::hardware_efficient_ansatz(8, 3, 42);
         let terms = [PauliTerm::z(0), PauliTerm::x(4)];
-        let expected = expectation_zero_state(&circuit, &terms).unwrap();
+        let expected =
+            expectation_zero_state(&circuit, &terms, &ResolvedLimits::process_default()).unwrap();
 
         for seed in 0..5u64 {
             let mut network = scalar_network(&circuit, &terms);
@@ -3760,7 +3782,8 @@ mod tests {
 
         let expected =
             crate::sim::run_expectation_values(&circuit, &[terms.to_vec()], 42).unwrap()[0];
-        let actual = expectation_zero_state(&circuit, &terms).unwrap();
+        let actual =
+            expectation_zero_state(&circuit, &terms, &ResolvedLimits::process_default()).unwrap();
         assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
     }
 }

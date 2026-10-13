@@ -1327,7 +1327,7 @@ fn fuse_controlled_phases_returns_borrowed_without_batchable_chain() {
 #[test]
 fn qaoa_20q_fuses_to_6_instructions() {
     let circuit = crate::circuits::qaoa_circuit(20, 3, 0xDEAD_BEEF);
-    let fused = fuse_circuit(&circuit, true);
+    let fused = fuse_unstaged(&circuit, 20);
     assert_eq!(fused.instructions.len(), 6);
 
     let batch_rzz_count = fused
@@ -1450,7 +1450,7 @@ fn test_recognition_extends_clifford_prefix() {
 }
 
 fn fused_rotation_counts(circuit: &Circuit) -> Vec<(&'static str, usize)> {
-    fuse_circuit(circuit, true)
+    fuse_unstaged(circuit, circuit.num_qubits)
         .instructions
         .iter()
         .filter_map(|inst| match inst {

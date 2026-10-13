@@ -264,11 +264,13 @@ impl<'c> Simulate<'c, Seeded> {
                 (ResultSpec::Probability(targets), _) => {
                     let targets = resolve(targets, num_qubits);
                     crate::backend::schmidt::validate_qubit_set(&targets, num_qubits)?;
-                    if targets.len() > crate::backend::schmidt::export_cap() {
+                    let limits = self.resolved_limits();
+                    if targets.len() > limits.export_cap() {
                         return Err(crate::backend::schmidt::export_cap_exceeded(
                             &format!("{:?}", self.kind),
                             "a probability histogram".to_string(),
                             targets.len(),
+                            &limits,
                         ));
                     }
                     let source = unrotated.as_ref().unwrap_or(&record);
@@ -313,6 +315,7 @@ impl<'c> Simulate<'c, Seeded> {
             noise_model: extended.as_ref(),
             initial_state: self.initial_state,
             require_exact: self.require_exact,
+            limits: self.limits,
         }
         .shots(shots)?;
         // The appended readout sits at the end of the record, so trimming in
@@ -345,6 +348,7 @@ impl<'c> Simulate<'c, Seeded> {
             noise_model: self.noise_model,
             initial_state: self.initial_state,
             require_exact: self.require_exact,
+            limits: self.limits,
         }
     }
 }

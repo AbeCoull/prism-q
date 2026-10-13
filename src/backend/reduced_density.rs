@@ -10,17 +10,23 @@ use super::statevector::insert_zero_bit;
 #[cfg(feature = "parallel")]
 use super::{MIN_PAR_ITERS, PARALLEL_THRESHOLD_QUBITS};
 use crate::error::Result;
+use crate::limits::ResolvedLimits;
 
 /// Side `2^k` of the reduced density matrix over `k` qubits, once its `4^k`
 /// entries are priced as a `2k`-qubit statevector against the dense export
 /// cap.
-pub(crate) fn reduced_density_side(backend: &str, k: usize) -> Result<usize> {
+pub(crate) fn reduced_density_side(
+    backend: &str,
+    k: usize,
+    limits: &ResolvedLimits,
+) -> Result<usize> {
     let width = 2 * k;
-    if width > super::schmidt::export_cap() {
+    if width > limits.export_cap() {
         return Err(super::schmidt::export_cap_exceeded(
             backend,
             format!("a reduced density matrix on {k} qubits"),
             width,
+            limits,
         ));
     }
     Ok(1usize << k)

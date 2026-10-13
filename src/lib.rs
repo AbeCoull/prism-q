@@ -62,6 +62,7 @@ pub mod gates;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod hash;
+mod limits;
 pub mod qec;
 pub mod sim;
 #[cfg(feature = "parallel")]
@@ -79,7 +80,8 @@ pub use backend::stabilizer::StabilizerBackend;
 pub use backend::statevector::StatevectorBackend;
 #[cfg(feature = "bench-internal")]
 pub use backend::statevector::sweeps::{
-    SweepCount, SweepKind, SweepProfile, sweep_lower_bound, sweep_profile_for,
+    SweepCount, SweepKind, SweepProfile, stage_planning_time, sweep_lower_bound, sweep_profile_for,
+    sweep_profile_unstaged,
 };
 pub use backend::tensornetwork::TensorNetworkBackend;
 pub use circuit::builder::CircuitBuilder;
@@ -96,6 +98,7 @@ pub use error::{PrismError, ResourceKind, ResourceLimit, Result};
 pub use gates::{
     BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData, UnitaryData,
 };
+pub use limits::{LimitKnob, LimitSource, Limits, default_limits, set_default_limits};
 pub use qec::{
     BpMethod, BpOsdDecoder, BpOsdOptions, DetectorErrorModel, ErrorMechanism, MatchingDecoder,
     OsdMethod, QecBasis, QecCircuitNoise, QecCompiledRows, QecMeasurementRow, QecNoise,

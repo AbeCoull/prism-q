@@ -14,6 +14,7 @@ use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 use crate::gates::Gate;
+use crate::limits::ResolvedLimits;
 use crate::sim::ShotsResult;
 use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError};
 use crate::sim::unified_pauli::PauliAxis;
@@ -1249,6 +1250,7 @@ fn run_built_group(
 /// pass reads the amplitudes, so no `2^n` table is built. At the statevector
 /// cap, where a second state would not fit, every group starts from |0...0⟩ and
 /// runs raw instead.
+#[allow(clippy::too_many_arguments)]
 fn run_statevector_chunk(
     groups: &PauliGroups,
     chunk: &[usize],
@@ -1257,16 +1259,17 @@ fn run_statevector_chunk(
     meas_map: &[(usize, usize)],
     readout: &[Option<ReadoutError>],
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Vec<GroupRun>> {
-    let checkpointed = circuit.num_qubits < crate::backend::max_statevector_qubits();
-    let mut checkpoint = StatevectorBackend::new(seed);
+    let checkpointed = circuit.num_qubits < limits.statevector_qubits.value;
+    let mut checkpoint = StatevectorBackend::with_limits(seed, limits);
     if checkpointed {
         checkpoint.init(circuit.num_qubits, circuit.num_classical_bits)?;
     }
     let fused_tails =
         checkpointed && circuit.num_qubits >= crate::circuit::fusion::MIN_QUBITS_FOR_FUSION;
     let mut tails: BTreeMap<usize, Circuit> = BTreeMap::new();
-    let mut backend = StatevectorBackend::new(seed);
+    let mut backend = StatevectorBackend::with_limits(seed, limits);
     let mut at = 0usize;
     let mut ordinal = 0usize;
     let mut runs = Vec::with_capacity(chunk.len());
@@ -1468,6 +1471,7 @@ pub(crate) fn run_pauli_groups(
     seed: u64,
     build: Option<GroupBackendFactory<'_>>,
     route: crate::sim::ResolvedBackend,
+    limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
     let meas_map = circuit.measurement_map();
     let readout = written_readout(circuit, &noise.readout);
@@ -1479,7 +1483,9 @@ pub(crate) fn run_pauli_groups(
         let mut order: Vec<usize> = (0..groups.num_groups()).collect();
         order.sort_by_key(|&group| groups.starts[group]);
         let run = |chunk: &[usize]| {
-            run_statevector_chunk(groups, chunk, circuit, noise, &meas_map, &readout, seed)
+            run_statevector_chunk(
+                groups, chunk, circuit, noise, &meas_map, &readout, seed, limits,
+            )
         };
         #[cfg(feature = "parallel")]
         if split {
@@ -1528,12 +1534,13 @@ pub(crate) fn run_replayed_groups(
     noise: &NoiseModel,
     seed: u64,
     route: crate::sim::ResolvedBackend,
+    limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
     let readout = written_readout(circuit, &noise.readout);
     let mut order: Vec<usize> = (0..groups.num_groups()).collect();
     order.sort_by_key(|&group| groups.starts[group]);
     let run = |segments: Vec<Segment>| {
-        run_replayed_chunk(groups, &segments, circuit, noise, &readout, seed)
+        run_replayed_chunk(groups, &segments, circuit, noise, &readout, seed, limits)
     };
     let num_shots = groups.members.len();
     #[cfg(feature = "parallel")]
@@ -1597,11 +1604,12 @@ fn run_replayed_chunk(
     noise: &NoiseModel,
     readout: &[Option<ReadoutError>],
     seed: u64,
+    limits: &ResolvedLimits,
 ) -> Result<Vec<ShotRun>> {
-    let mut checkpoint = StatevectorBackend::new(seed);
+    let mut checkpoint = StatevectorBackend::with_limits(seed, limits);
     checkpoint.init(circuit.num_qubits, circuit.num_classical_bits)?;
-    let mut state = StatevectorBackend::new(seed);
-    let mut backend = StatevectorBackend::new(seed);
+    let mut state = StatevectorBackend::with_limits(seed, limits);
+    let mut backend = StatevectorBackend::with_limits(seed, limits);
     let mut at = 0usize;
     let mut ordinal = 0usize;
     let mut runs = Vec::new();
@@ -1829,7 +1837,7 @@ mod tests {
     #[cfg(feature = "parallel")]
     #[test]
     fn parallel_trajectory_replicas_stay_within_a_single_state_cap() {
-        let cap = crate::backend::max_statevector_qubits();
+        let cap = ResolvedLimits::process_default().statevector_qubits.value;
         let statevector = crate::sim::ResolvedBackend::Statevector;
         let replica_cap = (1..)
             .find(|&n| !crate::sim::state_splits_across_workers(statevector, n))
@@ -2088,6 +2096,7 @@ mod tests {
             noise,
             num_shots,
             seed,
+            &ResolvedLimits::process_default(),
         )
         .unwrap()
     }
@@ -2152,7 +2161,8 @@ mod tests {
                 &noise,
                 seed,
                 None,
-                crate::sim::ResolvedBackend::Statevector
+                crate::sim::ResolvedBackend::Statevector,
+                &ResolvedLimits::process_default()
             )
             .unwrap()
             .shots
@@ -2164,6 +2174,7 @@ mod tests {
             &quantum_only,
             None,
             seed,
+            &ResolvedLimits::process_default(),
         )
         .unwrap();
         let dim = 1usize << n;
@@ -2234,6 +2245,7 @@ mod tests {
             &noise,
             shots,
             seed,
+            &ResolvedLimits::process_default(),
         )
         .unwrap();
         assert_eq!(
@@ -2343,6 +2355,7 @@ mod tests {
             &noise,
             300,
             seed,
+            &ResolvedLimits::process_default(),
         )
         .unwrap();
         assert_eq!(
@@ -2473,6 +2486,7 @@ mod tests {
                 seed,
                 None,
                 crate::sim::ResolvedBackend::Statevector,
+                &ResolvedLimits::process_default(),
             )
             .unwrap();
             for (&shot, &basis) in members.iter().zip(&outcomes) {
@@ -2561,6 +2575,7 @@ mod tests {
                     seed,
                     None,
                     crate::sim::ResolvedBackend::Statevector,
+                    &ResolvedLimits::process_default(),
                 )
                 .unwrap();
                 assert_eq!(grouped.shots, reference, "{n} qubits, p {p}");
@@ -2571,7 +2586,14 @@ mod tests {
                 let readout = written_readout(&circuit, &noise.readout);
                 let run = |chunk: &[usize]| {
                     run_statevector_chunk(
-                        &groups, chunk, &circuit, &noise, &meas_map, &readout, seed,
+                        &groups,
+                        chunk,
+                        &circuit,
+                        &noise,
+                        &meas_map,
+                        &readout,
+                        seed,
+                        &ResolvedLimits::process_default(),
                     )
                     .unwrap()
                 };
@@ -2677,8 +2699,16 @@ mod tests {
                 order.sort_by_key(|&group| groups.starts[group]);
                 let readout = written_readout(&circuit, &noise.readout);
                 let run = |segments: Vec<Segment>| {
-                    run_replayed_chunk(&groups, &segments, &circuit, &noise, &readout, seed)
-                        .unwrap()
+                    run_replayed_chunk(
+                        &groups,
+                        &segments,
+                        &circuit,
+                        &noise,
+                        &readout,
+                        seed,
+                        &ResolvedLimits::process_default(),
+                    )
+                    .unwrap()
                 };
                 #[cfg(feature = "parallel")]
                 for parts in [2, 3, 7] {

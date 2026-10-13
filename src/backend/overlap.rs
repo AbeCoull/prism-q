@@ -6,6 +6,7 @@ use num_complex::Complex64;
 
 use super::{Backend, NORM_CLAMP_MIN, dense_statevector_len};
 use crate::error::{PrismError, Result};
+use crate::limits::ResolvedLimits;
 
 /// Reject two states of different widths: an inner product across registers
 /// of different sizes is not defined.
@@ -56,9 +57,10 @@ pub(crate) fn export_overlap_sq(
     num_qubits: usize,
     export: impl FnOnce() -> Result<Vec<Complex64>>,
     right: &dyn Backend,
+    limits: &ResolvedLimits,
 ) -> Result<f64> {
     require_equal_width(num_qubits, right.num_qubits())?;
-    dense_statevector_len(name, "state overlap", num_qubits)?;
+    dense_statevector_len(name, "state overlap", num_qubits, limits)?;
     let a = export()?;
     let b = right.export_statevector()?;
     Ok(dense_overlap_sq(&a, &b))

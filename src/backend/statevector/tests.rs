@@ -1973,33 +1973,43 @@ fn multi_1q_sweeps_counts_the_route_passes() {
 #[test]
 fn diagonal_mixed_batches_avoid_the_per_amplitude_fallback() {
     use crate::backend::statevector::kernels::build_diagonal_batch_tables;
-    use crate::circuit::fusion::fuse_circuit;
+    use crate::circuit::fusion::{fuse_circuit, fuse_unstaged};
     use crate::circuits::diagonal_mixed_circuit;
 
-    for (n, expected_batches) in [(16usize, 4usize), (20, 5), (22, 5), (26, 5)] {
-        let circuit = diagonal_mixed_circuit(n, 6, 0xDEAD_BEEF);
-        let fused = fuse_circuit(&circuit, true);
-        let batches: Vec<_> = fused
+    let batches = |fused: &Circuit| -> Vec<crate::gates::DiagonalBatchData> {
+        fused
             .instructions
             .iter()
             .filter_map(|inst| match inst {
                 Instruction::Gate {
                     gate: Gate::DiagonalBatch(data),
                     ..
-                } => Some(data),
+                } => Some((**data).clone()),
                 _ => None,
             })
-            .collect();
+            .collect()
+    };
+    for (n, expected_batches) in [(16usize, 4usize), (20, 5), (22, 5), (26, 5)] {
+        let circuit = diagonal_mixed_circuit(n, 6, 0xDEAD_BEEF);
+        let unstaged = batches(&fuse_unstaged(&circuit, n));
         assert_eq!(
-            batches.len(),
+            unstaged.len(),
             expected_batches,
             "diag_mixed_l6/{n} no longer emits the batches this test counts"
         );
-        let fallbacks = batches
-            .iter()
-            .filter(|data| build_diagonal_batch_tables(&data.entries).is_none())
-            .count();
-        assert_eq!(fallbacks, 0, "diag_mixed_l6/{n} fell back to per-amplitude");
+        for (form, list) in [
+            ("unstaged", unstaged),
+            ("fused", batches(&fuse_circuit(&circuit, true))),
+        ] {
+            let fallbacks = list
+                .iter()
+                .filter(|data| build_diagonal_batch_tables(&data.entries).is_none())
+                .count();
+            assert_eq!(
+                fallbacks, 0,
+                "diag_mixed_l6/{n} {form} fell back to per-amplitude"
+            );
+        }
     }
 }
 

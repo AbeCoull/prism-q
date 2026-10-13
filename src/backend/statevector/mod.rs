@@ -438,10 +438,10 @@ impl StatevectorBackend {
                     k::launch_apply_multi_fused_nondiag(&ctx, gpu, &data.gates)
                 }
             }
-            Gate::Fused2q(mat) => k::launch_apply_fused_2q(&ctx, gpu, targets[0], targets[1], mat),
+            Gate::Fused2q(mat) => k::launch_apply_matrix_2q(&ctx, gpu, targets[0], targets[1], mat),
             Gate::Multi2q(data) => {
-                for &(q0, q1, mat) in &data.gates {
-                    k::launch_apply_fused_2q(&ctx, gpu, q0, q1, &mat)?;
+                for (q0, q1, mat) in &data.gates {
+                    k::launch_apply_matrix_2q(&ctx, gpu, *q0, *q1, mat)?;
                 }
                 Ok(())
             }

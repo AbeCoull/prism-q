@@ -51,8 +51,8 @@ fn fuse_for(backend: &StatevectorBackend, circuit: &Circuit) -> Circuit {
 fn main() {
     let ctx = GpuContext::new(0).expect("no usable GPU");
     println!(
-        "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7}",
-        "circuit", "n", "gates", "fused", "launches", "passes", "drains"
+        "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>8}",
+        "circuit", "n", "gates", "fused", "launches", "passes", "drains", "dense2q"
     );
     for name in CIRCUITS {
         for n in SIZES {
@@ -69,14 +69,15 @@ fn main() {
             ctx.synchronize().unwrap();
             let census = ctx.pass_census() - before;
             println!(
-                "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7}",
+                "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>8}",
                 name,
                 n,
                 circuit.instructions.len(),
                 fused.instructions.len(),
                 census.launches,
                 census.passes,
-                census.drains
+                census.drains,
+                census.dense_2q
             );
         }
     }

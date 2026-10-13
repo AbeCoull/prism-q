@@ -394,6 +394,145 @@ fn fused_2q_asymmetric_matrix() {
     f.compare(n, &insts);
 }
 
+/// A state with distinct magnitudes and phases on every qubit, so a misrouted
+/// permutation or phase shows in the amplitudes.
+fn lopsided_state(n: usize) -> Vec<Instruction> {
+    (0..n)
+        .flat_map(|q| {
+            [
+                g(Gate::Ry(0.3 + 0.17 * q as f64), &[q]),
+                g(Gate::Rz(0.5 - 0.11 * q as f64), &[q]),
+            ]
+        })
+        .collect()
+}
+
+fn mixed_2q_members() -> Vec<([[Complex64; 4]; 4], bool)> {
+    let z = Complex64::new(0.0, 0.0);
+    let o = Complex64::new(1.0, 0.0);
+    let p = |theta: f64| Complex64::from_polar(1.0, theta);
+    let cx_low = [[o, z, z, z], [z, z, z, o], [z, z, o, z], [z, o, z, z]];
+    let cphase = [[o, z, z, z], [z, o, z, z], [z, z, o, z], [z, z, z, p(0.7)]];
+    let diagonal = [
+        [p(0.1), z, z, z],
+        [z, p(-0.4), z, z],
+        [z, z, p(1.3), z],
+        [z, z, z, p(2.2)],
+    ];
+    let phased_cx = [
+        [p(0.2), z, z, z],
+        [z, p(0.2), z, z],
+        [z, z, z, p(-0.9)],
+        [z, z, p(-0.9), z],
+    ];
+    let anti_controlled_x = [[z, o, z, z], [o, z, z, z], [z, z, o, z], [z, z, z, o]];
+    let near_cx = [
+        [o, z, z, z],
+        [z, o, z, z],
+        [z, z, Complex64::new(0.0, 1e-300), o],
+        [z, z, o, z],
+    ];
+    vec![
+        (Gate::Cx.matrix_4x4(), false),
+        (cx_low, false),
+        (Gate::Swap.matrix_4x4(), false),
+        (Gate::Cz.matrix_4x4(), false),
+        (cphase, false),
+        (diagonal, false),
+        (phased_cx, false),
+        (anti_controlled_x, false),
+        (sample_4x4(), true),
+        (near_cx, true),
+    ]
+}
+
+impl Fixture {
+    /// Compare as `compare`, and under `bench-internal` check that exactly
+    /// `expected_dense` of the launches went to the dense 4x4 kernel.
+    fn compare_dense_2q(&self, n: usize, instructions: &[Instruction], expected_dense: u64) {
+        #[cfg(feature = "bench-internal")]
+        let before = self.ctx.pass_census();
+        self.compare(n, instructions);
+        #[cfg(feature = "bench-internal")]
+        assert_eq!(
+            (self.ctx.pass_census() - before).dense_2q,
+            expected_dense,
+            "dense 2q launches"
+        );
+        #[cfg(not(feature = "bench-internal"))]
+        let _ = expected_dense;
+    }
+}
+
+#[test]
+fn multi2q_routes_structured_members_off_the_dense_kernel() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 12;
+    let pairs = [
+        (0, 1),
+        (1, 0),
+        (11, 3),
+        (3, 11),
+        (10, 11),
+        (11, 10),
+        (5, 9),
+        (9, 2),
+    ];
+    let members = mixed_2q_members();
+    let mut gates = Vec::new();
+    let mut dense = 0;
+    for (i, (pair, member)) in pairs.iter().cycle().zip(&members).enumerate() {
+        let (q0, q1) = if i % 2 == 0 { *pair } else { (pair.1, pair.0) };
+        gates.push((q0, q1, member.0));
+        dense += u64::from(member.1);
+    }
+    let mut insts = lopsided_state(n);
+    insts.push(g(
+        Gate::Multi2q(Box::new(Multi2qData::new(gates))),
+        &(0..n).collect::<Vec<_>>(),
+    ));
+    f.compare_dense_2q(n, &insts, dense);
+}
+
+#[test]
+fn fused_2q_routes_structured_matrices_off_the_dense_kernel() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 14;
+    let mut insts = lopsided_state(n);
+    let mut dense = 0;
+    for (i, (mat, is_dense)) in mixed_2q_members().into_iter().enumerate() {
+        let targets = [[13, 12], [2, 13], [12, 0], [7, 4], [4, 7]][i % 5];
+        insts.push(g(Gate::Fused2q(Box::new(mat)), &targets));
+        dense += u64::from(is_dense);
+    }
+    f.compare_dense_2q(n, &insts, dense);
+}
+
+#[test]
+fn fused_random_circuit_keeps_monomial_members_off_the_dense_kernel() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 16;
+    let circuit = prism_q::circuits::random_circuit(n, 10, common::SEED);
+    let fused = prism_q::circuit::fusion::fuse_circuit_for_width(&circuit, true, n);
+    let mut members = 0;
+    let mut dense = 0;
+    for inst in &fused.instructions {
+        if let Instruction::Gate {
+            gate: Gate::Multi2q(data),
+            ..
+        } = inst
+        {
+            for (_, _, mat) in data.gates() {
+                members += 1;
+                let nonzero = mat.iter().flatten().filter(|v| v.norm() != 0.0).count();
+                dense += u64::from(nonzero != 4);
+            }
+        }
+    }
+    assert!(members > dense, "no structured Multi2q member to route");
+    f.compare_dense_2q(n, &fused.instructions, dense);
+}
+
 #[test]
 fn multi_fused_mixed_gates() {
     let Some(f) = Fixture::try_new() else { return };

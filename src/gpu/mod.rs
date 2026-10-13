@@ -270,6 +270,8 @@ pub struct GpuPassCensus {
     pub passes: u64,
     /// Host copies, each of which waits for every queued kernel to finish.
     pub drains: u64,
+    /// Launches of the dense 4x4 kernel, a subset of `launches`.
+    pub dense_2q: u64,
 }
 
 #[cfg(feature = "bench-internal")]
@@ -281,6 +283,7 @@ impl std::ops::Sub for GpuPassCensus {
             launches: self.launches - earlier.launches,
             passes: self.passes - earlier.passes,
             drains: self.drains - earlier.drains,
+            dense_2q: self.dense_2q - earlier.dense_2q,
         }
     }
 }

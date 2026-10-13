@@ -5,10 +5,14 @@
 # A queue file is bash, sourced, and describes steps with two commands:
 #
 #   ab   NAME DIR [bench_ab.sh options]   an A/B of the checkout at DIR
+#   ix   NAME DIR [bench_interleave.sh options]
+#                                         an interleaved A/B of the checkout at DIR,
+#                                         both variants from its one binary
 #   run  NAME DIR -- COMMAND [ARGS]       any other measurement, run in DIR
 #
 #   ab   fstab   /work/pq-dispatch -r 315b43e -f '^auto/crossover/auto/fstab_' --light
 #   ab   spd     /work/pq-spd      -r dea250c -f '^auto/crossover/(auto|statevector)/spd_wide_'
+#   ix   fuse    /work/pq-fuse     -f '^statevector/qft_textbook/20$' -c '^mps/random_d10/16$'
 #   run  sweep   /work/pq-pairs    -- python sweep.py
 #
 # The queue runs in three phases.
@@ -18,10 +22,13 @@
 #      bench_ab.sh --build-only, into a cache keyed on the commit, the features,
 #      the bench target, and the toolchain. Steps that share a reference share
 #      one build of it, and a later queue reuses whatever is cached. A step whose
-#      checkout has uncommitted changes is keyed on those changes as well.
+#      checkout has uncommitted changes is keyed on those changes as well. An
+#      interleaved step builds only its checkout, by default with
+#      "parallel bench-internal".
 #   3. Measure. Each step runs in turn with no build in between. An A/B runs
 #      against its cached binaries with --wait-idle, so it starts once the host
-#      settles rather than failing on a busy one.
+#      settles rather than failing on a busy one; an interleaved step runs its
+#      one binary through bench_interleave.sh --exe the same way.
 #
 # Progress goes to a status file, one START and one END line per step with its
 # exit code, then ALLDONE. Each step logs in full to its own file; nothing is
@@ -45,9 +52,9 @@
 #                   PrismBenchQueue); a second queue needs its own while one runs
 #
 # Exit status: 0 when every step exited 0, otherwise 1. A step's own exit code
-# is in the status file; bench_ab.sh uses 1 for FAIL, 2 for a host too busy to
-# start, 3 for RERUN, and 4 for a binary that failed its smoke test, whose lane
-# and row the status file's summary names.
+# is in the status file; bench_ab.sh and bench_interleave.sh use 1 for FAIL, 2 for
+# a host too busy to start, 3 for RERUN, and 4 for a binary that failed its smoke
+# test, whose lane and row the status file's summary names.
 
 set -uo pipefail
 
@@ -55,6 +62,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BENCH_AB="$SCRIPT_DIR/bench_ab.sh"
+BENCH_IX="$SCRIPT_DIR/bench_interleave.sh"
 
 SCHEDULE=""
 DRY_RUN=""
@@ -154,6 +162,13 @@ ab() {
     STEP_ARGS+=("$(join_args "$@")")
 }
 
+ix() {
+    local name="$1" dir="$2"
+    shift 2
+    STEP_KIND+=(ix); STEP_NAME+=("$name"); STEP_DIR+=("$(cd "$dir" && pwd)")
+    STEP_ARGS+=("$(join_args "$@")")
+}
+
 run() {
     local name="$1" dir="$2"
     shift 2
@@ -170,10 +185,12 @@ if (( ${#STEP_NAME[@]} == 0 )); then
     exit 1
 fi
 
-# The options of an A/B step that decide which binary it needs.
+# The options of an A/B step that decide which binary it needs. An interleaved
+# step, kind ix in $2, defaults to the features its switch needs.
 step_build_options() {
     split_args "$1"
     REF_ARG="HEAD"; FEATURES_ARG="parallel"; BENCH_ARG="circuits"
+    [[ "${2:-}" == ix ]] && FEATURES_ARG="parallel bench-internal"
     local i
     for (( i = 0; i < ${#SPLIT[@]}; i++ )); do
         case "${SPLIT[i]}" in
@@ -202,12 +219,13 @@ REF_EXE_OF=()
 REF_SHA_OF=()
 for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
     NEW_EXE_OF+=(""); REF_EXE_OF+=(""); REF_SHA_OF+=("")
-    [[ "${STEP_KIND[s]}" == ab ]] || continue
-    step_build_options "${STEP_ARGS[s]}"
+    [[ "${STEP_KIND[s]}" == ab || "${STEP_KIND[s]}" == ix ]] || continue
+    step_build_options "${STEP_ARGS[s]}" "${STEP_KIND[s]}"
     dir="${STEP_DIR[s]}"
     new_sha="$(git -C "$dir" rev-parse --short=10 HEAD)"
-    ref_sha="$(git -C "$dir" rev-parse --short=10 "$REF_ARG")" || { echo "Error: step ${STEP_NAME[s]}: unknown ref $REF_ARG" >&2; exit 1; }
     NEW_EXE_OF[s]="$(cache_path "$dir" "$new_sha" worktree)"
+    [[ "${STEP_KIND[s]}" == ix ]] && continue
+    ref_sha="$(git -C "$dir" rev-parse --short=10 "$REF_ARG")" || { echo "Error: step ${STEP_NAME[s]}: unknown ref $REF_ARG" >&2; exit 1; }
     REF_EXE_OF[s]="$(cache_path "$dir" "$ref_sha" ref)"
     REF_SHA_OF[s]="$ref_sha"
 done
@@ -219,6 +237,10 @@ for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
         hit_ref="build"; [[ -f "${REF_EXE_OF[s]}" ]] && hit_ref="cached"
         printf '  %-3d ab   %-20s %s (new %s, ref %s %s)\n' "$((s + 1))" "${STEP_NAME[s]}" \
             "${STEP_DIR[s]}" "$hit_new" "${REF_SHA_OF[s]}" "$hit_ref"
+    elif [[ "${STEP_KIND[s]}" == ix ]]; then
+        hit_new="build"; [[ -f "${NEW_EXE_OF[s]}" ]] && hit_new="cached"
+        printf '  %-3d ix   %-20s %s (one binary, %s)
+' "$((s + 1))" "${STEP_NAME[s]}"             "${STEP_DIR[s]}" "$hit_new"
     else
         split_args "${STEP_ARGS[s]}"
         printf '  %-3d run  %-20s %s: %s\n' "$((s + 1))" "${STEP_NAME[s]}" "${STEP_DIR[s]}" "${SPLIT[*]}"
@@ -246,12 +268,13 @@ build_into() {
 mark "START build"
 build_failed=0
 for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
-    [[ "${STEP_KIND[s]}" == ab ]] || continue
-    step_build_options "${STEP_ARGS[s]}"
+    [[ "${STEP_KIND[s]}" == ab || "${STEP_KIND[s]}" == ix ]] || continue
+    step_build_options "${STEP_ARGS[s]}" "${STEP_KIND[s]}"
     name="${STEP_NAME[s]}"
     if ! build_into "${STEP_DIR[s]}" "${NEW_EXE_OF[s]}" "$FEATURES_ARG" "$BENCH_ARG" "$OUT_DIR/$name-build-new.log"; then
         mark "BUILD-FAILED $name new"; build_failed=1; continue
     fi
+    [[ "${STEP_KIND[s]}" == ix ]] && continue
     ref_dir="$REF_ROOT/prism-q-ref-${REF_SHA_OF[s]}"
     if [[ ! -f "${REF_EXE_OF[s]}" ]]; then
         if [[ ! -e "$ref_dir/.git" ]]; then
@@ -280,6 +303,12 @@ for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
         bash "$BENCH_AB" --project-dir "${STEP_DIR[s]}" "${SPLIT[@]}" \
             --new-exe "${NEW_EXE_OF[s]}" --ref-exe "${REF_EXE_OF[s]}" \
             --wait-idle "$WAIT_IDLE" --out "$OUT_DIR/$name.md" > "$OUT_DIR/$name.log" 2>&1
+        status=$?
+    elif [[ "${STEP_KIND[s]}" == ix ]]; then
+        if [[ ! -f "${NEW_EXE_OF[s]}" ]]; then
+            mark "END $name exit=build-failed"; any_failed=1; continue
+        fi
+        bash "$BENCH_IX" --project-dir "${STEP_DIR[s]}" "${SPLIT[@]}"             --exe "${NEW_EXE_OF[s]}" --wait-idle "$WAIT_IDLE" --out "$OUT_DIR/$name.md"             > "$OUT_DIR/$name.log" 2>&1
         status=$?
     else
         ( cd "${STEP_DIR[s]}" && "${SPLIT[@]}" ) > "$OUT_DIR/$name.log" 2>&1

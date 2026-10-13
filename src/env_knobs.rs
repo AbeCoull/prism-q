@@ -15,6 +15,13 @@ pub(crate) fn usize_override(var: &str, min: usize) -> Option<usize> {
     parse_usize_override(var, std::env::var(var).ok(), min)
 }
 
+/// `PRISM_BENCH_VARIANT=b`, read once: branch on it coarsely, never in a gate inner loop.
+#[cfg(feature = "bench-internal")]
+pub fn bench_variant_b() -> bool {
+    static VARIANT_B: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VARIANT_B.get_or_init(|| std::env::var_os("PRISM_BENCH_VARIANT").is_some_and(|v| v == "b"))
+}
+
 pub(crate) fn parse_usize_knob(
     var: &str,
     raw: Option<String>,

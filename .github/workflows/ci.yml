@@ -98,8 +98,7 @@ jobs:
   # fusion floors) switch on above the widths the correctness corpora reach.
   # `prism_lowered_thresholds` drops those crossovers so the route ledger and the
   # differential binaries drive every route at small widths. The cfg changes
-  # constants only. `layered_mixed_14q` stays out until the MPS amplitude error near
-  # 4e-7 on an exact bond is fixed.
+  # constants only.
   check-lowered-thresholds:
     name: Test (lowered route thresholds)
     runs-on: ubuntu-latest
@@ -120,7 +119,7 @@ jobs:
           --lib --test degenerate_inputs --test conformance_matrix --test backend_matrix
           --test measurement_matrix --test golden_small_circuits --test backend_equivalence
           --test differential_wide --test sampling_contract
-          -E 'test(route_ledger) | (kind(test) - test(=layered_mixed_14q))'
+          -E 'test(route_ledger) | kind(test)'
 
   check-no-default-features:
     name: Lint & Test (no default features)

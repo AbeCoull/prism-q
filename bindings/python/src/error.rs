@@ -41,6 +41,17 @@ fn error_kind(err: &prism_q::PrismError) -> &'static str {
     }
 }
 
+fn limit_source_name(source: prism_q::LimitSource) -> &'static str {
+    use prism_q::LimitSource as S;
+    match source {
+        S::Detected => "detected",
+        S::Env => "env",
+        S::ProcessDefault => "process_default",
+        S::Request => "request",
+        _ => "other",
+    }
+}
+
 impl From<PyPrismError> for PyErr {
     fn from(err: PyPrismError) -> PyErr {
         let kind = error_kind(&err.0);
@@ -54,8 +65,17 @@ impl From<PyPrismError> for PyErr {
                 let _ = value.setattr("required", data.required);
                 let _ = value.setattr("limit", data.limit);
                 let _ = value.setattr("env_var", data.env_var);
+                let _ = value.setattr("knob", data.knob.map(prism_q::LimitKnob::name));
+                let _ = value.setattr("limit_source", limit_source_name(data.limit_source));
             } else {
-                for name in ["resource", "required", "limit", "env_var"] {
+                for name in [
+                    "resource",
+                    "required",
+                    "limit",
+                    "env_var",
+                    "knob",
+                    "limit_source",
+                ] {
                     let _ = value.setattr(name, py.None());
                 }
             }

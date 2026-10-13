@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use num_complex::Complex64;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
-    BackendKind, BondReport, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel,
+    BackendKind, BondReport, Circuit, CountsResult, Exactness, Limits, MarginalsResult, NoiseModel,
     ObservableExpectation, ParamLink, Parameters, PauliAxis, PauliObservable, PauliTerm, Placement,
-    Probabilities, ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue,
-    ShotsResult, simulate as core_simulate,
+    Probabilities, ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue, Seeded,
+    ShotsResult, Simulate, simulate as core_simulate,
 };
 use pyo3::exceptions::{PyIndexError, PyNotImplementedError};
 use pyo3::prelude::*;
@@ -21,6 +21,7 @@ use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
 use crate::codec;
 use crate::error::{PyPrismResult, invalid};
+use crate::limits::PyLimits;
 use crate::noise::PyNoiseModel;
 use crate::numpy_util::{bool_matrix, complex_array, complex_matrix, f64_array};
 use crate::pickle::{Reduced, reduce};
@@ -38,6 +39,7 @@ pub struct PySimulation {
     initial_state: Option<Vec<Complex64>>,
     initial_density_matrix: Option<Vec<Complex64>>,
     require_exact: bool,
+    limits: Option<Limits>,
 }
 
 #[pymethods]
@@ -62,6 +64,14 @@ impl PySimulation {
     /// when an approximate answer is worse than no answer.
     fn require_exact(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf.require_exact = true;
+        slf
+    }
+
+    /// Resolve this request's caps against `limits` before the process default and the
+    /// environment. A run past a cap raises `PrismError` with `limit_source` of
+    /// `"request"`.
+    fn limits<'py>(mut slf: PyRefMut<'py, Self>, limits: &PyLimits) -> PyRefMut<'py, Self> {
+        slf.limits = Some(limits.0);
         slf
     }
 
@@ -142,94 +152,23 @@ impl PySimulation {
 
     /// Run once and return classical bits plus the probability distribution.
     fn run(&self, py: Python<'_>) -> PyPrismResult<PyRunOutcome> {
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
-        let outcome: RunOutcome = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).run()
-        })?;
+        let outcome: RunOutcome = py.detach(|| self.core(owned_noise.as_ref()).run())?;
         Ok(PyRunOutcome::from_outcome(outcome))
     }
 
     /// Sample `num_shots` measurement records.
     fn shots(&self, py: Python<'_>, num_shots: usize) -> PyPrismResult<PyShotsResult> {
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
-        let result: ShotsResult = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).shots(num_shots)
-        })?;
+        let result: ShotsResult = py.detach(|| self.core(owned_noise.as_ref()).shots(num_shots))?;
         Ok(PyShotsResult { inner: result })
     }
 
     /// Sample `num_shots` shots and return a frequency histogram.
     fn sample_counts(&self, py: Python<'_>, num_shots: usize) -> PyPrismResult<PyCountsResult> {
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
-        let result: CountsResult = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).sample_counts(num_shots)
-        })?;
+        let result: CountsResult =
+            py.detach(|| self.core(owned_noise.as_ref()).sample_counts(num_shots))?;
         Ok(PyCountsResult {
             counts: result.counts,
             num_classical_bits: result.num_classical_bits,
@@ -240,32 +179,8 @@ impl PySimulation {
     /// Per-qubit marginal probabilities `(p0, p1)` with the route that produced
     /// them. The result indexes and iterates as the list of pairs.
     fn marginals(&self, py: Python<'_>) -> PyPrismResult<PyMarginalsResult> {
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
-        let result: MarginalsResult = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).marginals()
-        })?;
+        let result: MarginalsResult = py.detach(|| self.core(owned_noise.as_ref()).marginals())?;
         Ok(PyMarginalsResult {
             marginals: result.marginals,
             metadata: PyRunMetadata::new(result.metadata),
@@ -279,32 +194,8 @@ impl PySimulation {
     /// state declines rather than answering from a statevector the caller did
     /// not ask for. An attached noise model declines for the same reason.
     fn state_vector<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray1<Complex64>>> {
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
-        let amps: Vec<Complex64> = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).state_vector()
-        })?;
+        let amps: Vec<Complex64> = py.detach(|| self.core(owned_noise.as_ref()).state_vector())?;
         Ok(complex_array(py, amps))
     }
 
@@ -334,29 +225,7 @@ impl PySimulation {
             .collect();
         let num_slots = links.iter().map(|l| l.slot + 1).max().unwrap_or(0);
         let params = Parameters::from_links(links, num_slots);
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
-        let result = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            // Carried so the core rejects it rather than ignoring it here.
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).expectation_gradient(&terms, &params)
-        })?;
+        let result = py.detach(|| self.core(None).expectation_gradient(&terms, &params))?;
         Ok((result.value, f64_array(py, result.gradient)))
     }
 
@@ -382,31 +251,10 @@ impl PySimulation {
             .collect();
         let num_slots = links.iter().map(|l| l.slot + 1).max().unwrap_or(0);
         let params = Parameters::from_links(links, num_slots);
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).expectation_gradient_shift(&terms, &params)
+            self.core(owned_noise.as_ref())
+                .expectation_gradient_shift(&terms, &params)
         })?;
         Ok((result.value, f64_array(py, result.gradient)))
     }
@@ -425,31 +273,10 @@ impl PySimulation {
         observables: Vec<Vec<(usize, String)>>,
     ) -> PyPrismResult<Vec<f64>> {
         let observables = parse_observables(observables)?;
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
         let values = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).expectation_values(&observables)
+            self.core(owned_noise.as_ref())
+                .expectation_values(&observables)
         })?;
         Ok(values)
     }
@@ -467,32 +294,8 @@ impl PySimulation {
         py: Python<'py>,
         qubits: Vec<usize>,
     ) -> PyPrismResult<Bound<'py, PyArray1<f64>>> {
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
-        let values = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).probabilities_of(&qubits)
-        })?;
+        let values = py.detach(|| self.core(owned_noise.as_ref()).probabilities_of(&qubits))?;
         Ok(f64_array(py, values))
     }
 
@@ -509,31 +312,10 @@ impl PySimulation {
         py: Python<'_>,
         qubits: Vec<usize>,
     ) -> PyPrismResult<PyReducedDensityMatrix> {
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
         let reduced: ReducedDensityMatrix = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).reduced_density_matrix(&qubits)
+            self.core(owned_noise.as_ref())
+                .reduced_density_matrix(&qubits)
         })?;
         Ok(PyReducedDensityMatrix {
             purity: reduced.purity(),
@@ -556,31 +338,10 @@ impl PySimulation {
         py: Python<'_>,
         subsystem: Vec<usize>,
     ) -> PyPrismResult<PyEntropyResult> {
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).entanglement_entropy(&subsystem)
+            self.core(owned_noise.as_ref())
+                .entanglement_entropy(&subsystem)
         })?;
         Ok(PyEntropyResult {
             subsystem: result.subsystem,
@@ -603,31 +364,10 @@ impl PySimulation {
         hamiltonian: Hamiltonian<'_>,
     ) -> PyPrismResult<PyObservableVariance> {
         let observable = hamiltonian.observable()?;
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).observable_variance(&observable)
+            self.core(owned_noise.as_ref())
+                .observable_variance(&observable)
         })?;
         Ok(PyObservableVariance {
             variance: result.variance,
@@ -647,31 +387,10 @@ impl PySimulation {
         observables: Vec<Vec<(usize, String)>>,
     ) -> PyPrismResult<PyExpectationResult> {
         let observables = parse_observables(observables)?;
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).expectation_values_reported(&observables)
+            self.core(owned_noise.as_ref())
+                .expectation_values_reported(&observables)
         })?;
         Ok(PyExpectationResult {
             values: result.values,
@@ -694,42 +413,8 @@ impl PySimulation {
         let left_noise = self.owned_noise(py);
         let right_noise = other.owned_noise(py);
         let result = py.detach(|| {
-            let mut left = core_simulate(&self.circuit);
-            if self.require_exact {
-                left = left.require_exact();
-            }
-            if let Some(k) = &self.kind {
-                left = left.backend(k.clone());
-            }
-            if let Some(nm) = &left_noise {
-                left = left.noise(nm);
-            }
-            if let Some(amplitudes) = self.initial_state.as_deref() {
-                left = left.initial_state(amplitudes);
-            }
-            if let Some(rho) = self.initial_density_matrix.as_deref() {
-                left = left.initial_density_matrix(rho);
-            }
-
-            let mut right = core_simulate(&other.circuit);
-            if other.require_exact {
-                right = right.require_exact();
-            }
-            if let Some(k) = &other.kind {
-                right = right.backend(k.clone());
-            }
-            if let Some(nm) = &right_noise {
-                right = right.noise(nm);
-            }
-            if let Some(amplitudes) = other.initial_state.as_deref() {
-                right = right.initial_state(amplitudes);
-            }
-            if let Some(rho) = other.initial_density_matrix.as_deref() {
-                right = right.initial_density_matrix(rho);
-            }
-
-            left.seed(self.seed.unwrap_or(DEFAULT_SEED))
-                .overlap(right.seed(other.seed.unwrap_or(DEFAULT_SEED)))
+            self.core(left_noise.as_ref())
+                .overlap(other.core(right_noise.as_ref()))
         })?;
         Ok(PyOverlapResult {
             fidelity: result.fidelity,
@@ -755,31 +440,10 @@ impl PySimulation {
         hamiltonian: Hamiltonian<'_>,
     ) -> PyPrismResult<PyObservableExpectation> {
         let observable = hamiltonian.observable()?;
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let kind = self.kind.clone();
-        let require_exact = self.require_exact;
-        let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let start = self.initial_state.as_deref();
-        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
-            let mut sim = core_simulate(circuit);
-            if require_exact {
-                sim = sim.require_exact();
-            }
-            if let Some(k) = &kind {
-                sim = sim.backend(k.clone());
-            }
-            if let Some(nm) = &owned_noise {
-                sim = sim.noise(nm);
-            }
-            if let Some(amplitudes) = start {
-                sim = sim.initial_state(amplitudes);
-            }
-            if let Some(rho) = mixed {
-                sim = sim.initial_density_matrix(rho);
-            }
-            sim.seed(seed).observable_expectation(&observable)
+            self.core(owned_noise.as_ref())
+                .observable_expectation(&observable)
         })?;
         Ok(PyObservableExpectation::from_result(result))
     }
@@ -952,6 +616,31 @@ pub(crate) fn parse_axis(axis: &str) -> PyPrismResult<PauliAxis> {
 }
 
 impl PySimulation {
+    /// Rebuild the core request from the stored options, with `noise` the copy
+    /// `owned_noise` took.
+    fn core<'a>(&'a self, noise: Option<&'a NoiseModel>) -> Simulate<'a, Seeded> {
+        let mut sim = core_simulate(&self.circuit);
+        if self.require_exact {
+            sim = sim.require_exact();
+        }
+        if let Some(kind) = &self.kind {
+            sim = sim.backend(kind.clone());
+        }
+        if let Some(model) = noise {
+            sim = sim.noise(model);
+        }
+        if let Some(amplitudes) = self.initial_state.as_deref() {
+            sim = sim.initial_state(amplitudes);
+        }
+        if let Some(rho) = self.initial_density_matrix.as_deref() {
+            sim = sim.initial_density_matrix(rho);
+        }
+        if let Some(limits) = self.limits {
+            sim = sim.limits(limits);
+        }
+        sim.seed(self.seed.unwrap_or(DEFAULT_SEED))
+    }
+
     /// Borrow the attached noise model and produce an owned copy, so the GIL can
     /// be released during the run without holding a `PyRef`.
     fn owned_noise(&self, py: Python<'_>) -> Option<NoiseModel> {
@@ -971,6 +660,7 @@ pub fn simulate(circuit: &PyCircuit) -> PySimulation {
         initial_state: None,
         initial_density_matrix: None,
         require_exact: false,
+        limits: None,
     }
 }
 

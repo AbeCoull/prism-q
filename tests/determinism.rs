@@ -172,6 +172,28 @@ fn unitary_amplitudes_bitwise_equal_across_thread_counts() {
     }
 }
 
+// Past the last-level cache fusion stages the stream by tile geometry, which reads the
+// hardware and never the pool.
+#[cfg(not(miri))]
+#[test]
+fn staged_amplitudes_bitwise_equal_across_thread_counts() {
+    for n in [20, 22] {
+        for (name, circuit) in [
+            ("dense", representative_dense_circuit(n)),
+            (
+                "hea",
+                prism_q::circuits::hardware_efficient_ansatz(n, 5, SEED),
+            ),
+            ("qaoa", prism_q::circuits::qaoa_circuit(n, 3, SEED)),
+            ("qv", prism_q::circuits::quantum_volume_circuit(n, 6, SEED)),
+        ] {
+            let base = amplitudes_with_threads(&circuit, 1);
+            let wide = amplitudes_with_threads(&circuit, THREADS_HI);
+            assert_bitwise_equal(&base, &wide, &format!("{name} {n}q"));
+        }
+    }
+}
+
 #[test]
 fn qft_amplitudes_bitwise_equal_across_thread_counts() {
     for &n in QFT_SIZES {

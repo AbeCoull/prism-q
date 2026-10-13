@@ -87,6 +87,8 @@ enum Guard {
     /// read off it. Absorption into a 4x4 downstream leaves it with no payload
     /// of its own, so no site can carry this check.
     Fuses1q(Range<u32>, bool),
+    /// A 1q block whose diagonality decided how the stage planner ordered it.
+    Diag1q(Range<u32>, bool),
     /// A 2q block whose diagonality decided whether a same-pair run collapsed.
     Diag4q(Range<u32>, bool),
 }
@@ -103,6 +105,10 @@ pub(super) struct FusionPlan {
 
 /// Provenance of one instruction: an ordered recipe per payload it carries.
 type Prov = Vec<Vec<Step>>;
+
+/// Entry index naming the single payload of an instruction rather than one entry of a
+/// batch.
+pub(super) const WHOLE: u32 = u32::MAX;
 
 /// Where a source's matrix sits inside the payload being built.
 #[derive(Clone, Copy, Debug)]
@@ -255,6 +261,61 @@ impl Tracer {
         match self.output[at].as_mut_slice() {
             [payload] => payload.extend(steps),
             _ => self.bailed = true,
+        }
+    }
+
+    /// Emit an instruction carrying one payload per entry, each the ordered product of
+    /// its `(instruction, entry, place)` sources. An entry of [`WHOLE`] names the
+    /// single payload of its instruction, any other index one entry of a batch.
+    pub(super) fn emit_entries(&mut self, entries: &[Vec<(u32, u32, Place)>]) {
+        if !self.on {
+            return;
+        }
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let mut steps = Vec::new();
+            for &(i, e, place) in entry {
+                let prov = &self.input[i as usize];
+                let payload = if e == WHOLE {
+                    (prov.len() == 1).then(|| &prov[0])
+                } else {
+                    prov.get(e as usize)
+                };
+                match payload {
+                    Some(payload) => steps.extend(payload.iter().map(|&s| place.apply(s))),
+                    None => self.bailed = true,
+                }
+            }
+            out.push(steps);
+        }
+        self.output.push(out);
+    }
+
+    /// Bail unless payload `entry` of input instruction `i` is the 4x4 of one template
+    /// gate. An `Rzz` that `fuse_rzz` built carries its angle as a widened 1q step,
+    /// which names the angle but not the matrix, so it cannot fold into a product.
+    pub(super) fn require_gate_4x4(&mut self, i: usize, entry: u32) {
+        if !self.on {
+            return;
+        }
+        let prov = &self.input[i];
+        let payload = if entry == WHOLE {
+            prov.first().filter(|_| prov.len() == 1)
+        } else {
+            prov.get(entry as usize)
+        };
+        if !matches!(payload.map(Vec::as_slice), Some([Step::M2 { .. }])) {
+            self.bailed = true;
+        }
+    }
+
+    /// Record the diagonality a pass read off the 1q payload of input instruction `i`.
+    pub(super) fn guard_diag_2x2(&mut self, i: usize, diagonal: bool) {
+        if !self.on {
+            return;
+        }
+        if let Some(range) = self.resolve(&[(i, Place::Plain)]) {
+            self.guards.push(Guard::Diag1q(range, diagonal));
         }
     }
 
@@ -435,6 +496,10 @@ impl FusionPlan {
                     !is_identity(&mat)
                         && is_diagonal_2x2(&mat) == *diagonal
                         && (!could_be_named(&mat) || Gate::recognize_matrix(&mat).is_none())
+                }
+                Guard::Diag1q(range, diagonal) => {
+                    let mat = product_2x2(&self.guard_steps, bound, range.clone());
+                    is_diagonal_2x2(&mat) == *diagonal
                 }
                 Guard::Diag4q(range, diagonal) => {
                     let mat = product_4x4(&self.guard_steps, bound, range.clone());

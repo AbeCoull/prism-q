@@ -133,6 +133,35 @@ pub fn sweep_profile_for(circuit: &Circuit, threads: usize) -> SweepProfile {
     sweep_profile(&fused.instructions, circuit.num_qubits, threads)
 }
 
+/// [`sweep_profile_for`] on the stream the batching passes build at every width, as
+/// fusion ran before the stage planner.
+#[cfg(feature = "bench-internal")]
+pub fn sweep_profile_unstaged(circuit: &Circuit, threads: usize) -> SweepProfile {
+    let backend = StatevectorBackend::new(0);
+    let expanded = crate::sim::expand_for_backend(&backend, circuit);
+    let n = backend.fusion_state_qubits(circuit.num_qubits);
+    let fused = crate::circuit::fusion::fuse_unstaged(&expanded, n);
+    sweep_profile(&fused.instructions, circuit.num_qubits, threads)
+}
+
+/// Fastest of `reps` runs of the stage planner over `circuit` as fused before
+/// batching, whatever its width.
+#[cfg(feature = "bench-internal")]
+pub fn stage_planning_time(circuit: &Circuit, reps: usize) -> std::time::Duration {
+    let backend = StatevectorBackend::new(0);
+    let expanded = crate::sim::expand_for_backend(&backend, circuit);
+    let n = backend.fusion_state_qubits(circuit.num_qubits);
+    let stream = crate::circuit::fusion::fuse_before_batching(&expanded, n).into_owned();
+    (0..reps.max(1))
+        .map(|_| {
+            let start = std::time::Instant::now();
+            std::hint::black_box(crate::circuit::fusion::plan_stages_for(&stream));
+            start.elapsed()
+        })
+        .min()
+        .expect("at least one rep")
+}
+
 /// Fewest passes any `Multi2q`-geometry tile schedule of `circuit` (as fused before batching)
 /// needs: per run of tileable gates, the larger of the high-qubit cover and the worst
 /// dependency chain's greedy segmentation, plus opaque instructions at their passes.

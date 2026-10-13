@@ -79,7 +79,8 @@ pub use backend::stabilizer::StabilizerBackend;
 pub use backend::statevector::StatevectorBackend;
 #[cfg(feature = "bench-internal")]
 pub use backend::statevector::sweeps::{
-    SweepCount, SweepKind, SweepProfile, sweep_lower_bound, sweep_profile_for,
+    SweepCount, SweepKind, SweepProfile, stage_planning_time, sweep_lower_bound, sweep_profile_for,
+    sweep_profile_unstaged,
 };
 pub use backend::tensornetwork::TensorNetworkBackend;
 pub use circuit::builder::CircuitBuilder;

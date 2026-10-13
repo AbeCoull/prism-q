@@ -1,5 +1,6 @@
 //! Gate fusion pipeline: self-inverse cancellation, 1q and 2q matrix fusion, and batching
-//! into the tiled and diagonal gate families, each pass gated on a qubit-count floor.
+//! into the tiled and diagonal gate families, each pass gated on a qubit-count floor; past
+//! the last-level cache a stage planner schedules the batches instead.
 //! Fused matrices multiply on the left, so gates G1, G2, G3 fuse to G3 · G2 · G1.
 
 use std::borrow::Cow;
@@ -15,6 +16,7 @@ use crate::gates::{
 
 use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases};
 use super::fusion_rzz::{fuse_batch_rzz, fuse_rzz};
+use super::fusion_stage::{plan_stages, stages_at};
 
 use super::plan::{Place, Tracer};
 
@@ -226,7 +228,7 @@ pub(super) fn is_identity(mat: &[[Complex64; 2]; 2]) -> bool {
 }
 
 #[inline]
-fn gate_1q_matrix(gate: &Gate) -> [[Complex64; 2]; 2] {
+pub(super) fn gate_1q_matrix(gate: &Gate) -> [[Complex64; 2]; 2] {
     match gate {
         Gate::Fused(m) => **m,
         _ => gate.matrix_2x2(),
@@ -1450,7 +1452,7 @@ impl DiagRun {
 /// emit: a diagonal `Fused2q`, `Cu`, `Multi2q` or `MultiFused`, and every `BatchPhase`
 /// and `BatchRzz`. A gate on no qubit of the run is emitted ahead of it, so the run
 /// keeps growing past it. A run closes before its components outgrow the kernel tables.
-fn fuse_diagonal_batch<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
+pub(super) fn fuse_diagonal_batch<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
     let circuit = input.as_ref();
     let insts = &circuit.instructions;
     let diag_count = insts
@@ -1613,6 +1615,15 @@ pub(super) fn fuse_at_width<'a>(
     let pass_2qb = gated(pass_2q, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
         fuse_same_pair_2q_blocks(c, t)
     });
+    if stages_at(n, circuit.num_qubits) {
+        return plan_stages(pass_2qb, t);
+    }
+    batch_passes(pass_2qb, n, t)
+}
+
+/// The batching passes that group a fused stream into tiled and diagonal batches, each
+/// gated on its own floor. [`plan_stages`] replaces them past the last-level cache.
+fn batch_passes<'a>(pass_2qb: Cow<'a, Circuit>, n: usize, t: &mut Tracer) -> Cow<'a, Circuit> {
     let pass2 = gated(pass_2qb, n, MIN_QUBITS_FOR_MULTI_FUSION, |c| {
         fuse_multi_1q_gates(c, t)
     });
@@ -1638,8 +1649,40 @@ pub(super) fn fuse_at_width<'a>(
     })
 }
 
+/// [`fuse_at_width`] with the batching passes at every width, never the stage planner:
+/// the stream the planner replaces.
+#[cfg(any(test, feature = "bench-internal"))]
+pub(crate) fn fuse_unstaged(circuit: &Circuit, n: usize) -> Cow<'_, Circuit> {
+    let stream = fuse_before_batching(circuit, n);
+    if n < MIN_QUBITS_FOR_FUSION {
+        return stream;
+    }
+    batch_passes(stream, n, &mut Tracer::off())
+}
+
+/// [`plan_stages`] on `stream`, a [`fuse_before_batching`] output, at any width.
+#[cfg(feature = "bench-internal")]
+pub(crate) fn plan_stages_for(stream: &Circuit) -> Cow<'_, Circuit> {
+    plan_stages(Cow::Borrowed(stream), &mut Tracer::off())
+}
+
+/// [`fuse_at_width`] with the stage planner at every width from the fusion floor, on
+/// tiles of `geometry`.
+#[cfg(test)]
+pub(crate) fn fuse_staged(
+    circuit: &Circuit,
+    geometry: super::fusion_stage::TileGeometry,
+) -> Cow<'_, Circuit> {
+    let n = circuit.num_qubits;
+    let stream = fuse_before_batching(circuit, n);
+    if n < MIN_QUBITS_FOR_FUSION {
+        return stream;
+    }
+    super::fusion_stage::plan_with(stream, geometry, &mut Tracer::off())
+}
+
 /// The [`fuse_at_width`] stream as it leaves `fuse_same_pair_2q_blocks`, before the
-/// batching passes group it into tiles: the input a pass planner would stage.
+/// batching passes group it into tiles: the input the stage planner schedules.
 #[cfg(any(test, feature = "bench-internal"))]
 pub(crate) fn fuse_before_batching(circuit: &Circuit, n: usize) -> Cow<'_, Circuit> {
     let t = &mut Tracer::off();

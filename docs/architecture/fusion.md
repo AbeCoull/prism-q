@@ -21,7 +21,10 @@ flowchart TD
     P1c --> P1f["fuse_single_qubit_gates re-fuse (>=10q)"]
     P1f --> P2q["fuse_2q_gates (>=12q): CX/CZ + adjacent 1q to Fused2q"]
     P2q --> P2qb["fuse_same_pair_2q_blocks (>=12q)"]
-    P2qb --> P2["fuse_multi_1q_gates (>=14q) to MultiFused"]
+    P2qb --> S{"state past the last-level cache?"}
+    S -- yes --> PS["plan_stages: tile and diagonal stages"]
+    PS --> OUT
+    S -- no --> P2["fuse_multi_1q_gates (>=14q) to MultiFused"]
     P2 --> P2qr["reorder_fused2q_into_tiles (>=12q)"]
     P2qr --> Pm2q["fuse_multi_2q_gates (>=12q) to Multi2q"]
     Pm2q --> Ppr["fuse_pauli_rot_batches (>=16q) to MultiPauliRot"]
@@ -42,6 +45,30 @@ flowchart TD
 | `MIN_QUBITS_FOR_2Q_FUSION` | 12 | Benchmarked QV and random sweeps show memory-pass reduction wins from 12q |
 | `MIN_QUBITS_FOR_MULTI_2Q_FUSION` | 12 | Same as 2q fusion |
 | `MIN_QUBITS_FOR_PAULI_ROT_BATCH` | 16 | At 15q a parallel subcube pass has tiles for half of an eight-thread pool |
+| Stage floor | derived, 20 on an 8 MB L3 | First width whose statevector outgrows the last-level cache; 20 when the OS reports none, never below 16 |
+
+## Stage planner
+
+Once the statevector outgrows the last-level cache every pass is a sweep of main memory,
+and `plan_stages` (`src/circuit/fusion_stage.rs`) replaces the batching passes from
+`fuse_multi_1q_gates` on. It splits the stream at measurements, resets, conditionals,
+regions, barriers, saves and gates no batch carries, then schedules each segment as a
+sequence of stages over the dependency frontier. A stage is one gathered tile: the low
+`multi_2q_low_bits` qubits plus up to the `Multi2q` high budget of others. Its high
+qubits grow greedily from the frontier, each step adding the qubits that let the stage
+take the most moving gates per qubit added, ties to the gate with the longest dependency
+chain behind it. Gates commute when every qubit they share is acted on diagonally by
+both, so diagonal gates never block each other.
+
+Each stage leaves as one existing batch: a `Multi2q` with every 1q gate folded into a
+2q entry on its qubit, a `MultiFused` when it holds no 2q gate, or a `MultiPauliRot`,
+whose Z letters cost no tile slot. Diagonal gates ride in a tile when a later gate needs
+them; the rest wait for a diagonal stage (`BatchRzz` or `DiagonalBatch`), taken when no
+tile moves anything or when clearing them first doubles what the next tile moves. The
+schedule reads only the stream and the tile geometry, which comes from the hardware and
+never from the Rayon pool, so results stay bitwise equal across thread counts. The
+planner records provenance like the passes it replaces, so a `PreparedCircuit` replays
+its stages. The density matrix keeps the batching passes.
 
 ## QFT recognition
 

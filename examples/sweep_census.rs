@@ -1,8 +1,10 @@
 //! Static census of statevector passes against the tile-schedule lower bound.
 //!
-//! Counts the full-state passes each fused bench circuit makes, the gates applied
-//! inside cache tiles, and the fewest passes a tile schedule of the same stream needs.
-//! Nothing is simulated, so it runs at widths no state vector here fits.
+//! Counts the full-state passes each fused bench circuit makes with the batching passes
+//! and with the stage planner that replaces them past the last-level cache, the gates
+//! applied inside cache tiles, the fewest passes a tile schedule of the same stream
+//! needs, and the planner's own time. Nothing is simulated, so it runs at widths no
+//! state vector here fits.
 //!
 //! ```text
 //! cargo run --release --features bench-internal --example sweep_census
@@ -11,7 +13,9 @@
 use prism_q::circuit::Circuit;
 use prism_q::circuits;
 use prism_q::gates::Gate;
-use prism_q::{SweepKind, sweep_lower_bound, sweep_profile_for};
+use prism_q::{
+    SweepKind, stage_planning_time, sweep_lower_bound, sweep_profile_for, sweep_profile_unstaged,
+};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -90,14 +94,16 @@ fn main() {
     ];
     println!("threads {threads}");
     println!(
-        "{:<20} {:>3} {:>7} {:>6} {:>6} {:>9}  passes/tile_apps by kind",
-        "circuit", "n", "passes", "bound", "ratio", "tile_apps"
+        "{:<20} {:>3} {:>8} {:>7} {:>6} {:>7} {:>8} {:>9}  passes/tile_apps by kind, staged",
+        "circuit", "n", "unstaged", "staged", "bound", "removed", "plan_us", "tile_apps"
     );
     for name in families {
         for n in (16..=30).step_by(2) {
             let circuit = build(name, n);
+            let unstaged = sweep_profile_unstaged(&circuit, threads);
             let profile = sweep_profile_for(&circuit, threads);
             let bound = sweep_lower_bound(&circuit, threads);
+            let plan = stage_planning_time(&circuit, 20);
             let kinds: Vec<String> = SweepKind::ALL
                 .into_iter()
                 .filter(|&kind| profile.count(kind).instructions > 0)
@@ -107,12 +113,15 @@ fn main() {
                 })
                 .collect();
             println!(
-                "{:<20} {:>3} {:>7} {:>6} {:>6.2} {:>9}  {}",
+                "{:<20} {:>3} {:>8} {:>7} {:>6} {:>7} {:>8.1} {:>4}/{:<4}  {}",
                 name,
                 n,
+                unstaged.passes(),
                 profile.passes(),
                 bound,
-                profile.passes() as f64 / bound as f64,
+                unstaged.passes() as i64 - profile.passes() as i64,
+                plan.as_secs_f64() * 1e6,
+                unstaged.tile_apps(),
                 profile.tile_apps(),
                 kinds.join(" ")
             );

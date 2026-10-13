@@ -539,7 +539,9 @@ fn fusion_same_pair_reversed_targets_20q() {
 
 #[test]
 fn fusion_same_pair_keeps_diagonal_batch_paths() {
-    let qaoa = circuits::qaoa_circuit(20, 3, 42);
+    // 18 qubits stays under the stage planner, which replaces these batching passes
+    // once the state outgrows the last-level cache.
+    let qaoa = circuits::qaoa_circuit(18, 3, 42);
     let qaoa_fused = prism_q::circuit::fusion::fuse_circuit(&qaoa, true);
     let batch_rzz = qaoa_fused
         .instructions
@@ -557,7 +559,7 @@ fn fusion_same_pair_keeps_diagonal_batch_paths() {
     assert_eq!(batch_rzz, 3, "qaoa should keep BatchRzz fusion");
 
     // QFT emits one QftBlock. Expanded QFT still exercises BatchPhase.
-    let qft = circuits::qft_circuit(20);
+    let qft = circuits::qft_circuit(18);
     let qft_fused = prism_q::circuit::fusion::fuse_circuit(&qft, true);
     let qft_block = qft_fused
         .instructions
@@ -594,7 +596,7 @@ fn fusion_same_pair_keeps_diagonal_batch_paths() {
         "expanded qft should still hit BatchPhase fusion"
     );
 
-    let mut diagonal = Circuit::new(20, 0);
+    let mut diagonal = Circuit::new(18, 0);
     diagonal.add_gate(Gate::Rzz(0.1), &[0, 1]);
     diagonal.add_gate(Gate::Rz(0.2), &[0]);
     let diagonal_fused = prism_q::circuit::fusion::fuse_circuit(&diagonal, true);
@@ -894,8 +896,11 @@ fn fusion_lone_controlled_phases_re_root_on_their_target() {
         for q in 0..n - 1 {
             c.add_gate(Gate::H, &[q]);
         }
-        let fused = prism_q::circuit::fusion::fuse_circuit(&c, true);
-        assert!(count_gates(&fused, |g| matches!(g, Gate::BatchPhase(_))) >= 2);
+        // At 20 qubits the stage planner, not the phase batching, may take the chains.
+        if n < 20 {
+            let fused = prism_q::circuit::fusion::fuse_circuit(&c, true);
+            assert!(count_gates(&fused, |g| matches!(g, Gate::BatchPhase(_))) >= 2);
+        }
         assert_fusion_preserves_state(&c);
     }
 }

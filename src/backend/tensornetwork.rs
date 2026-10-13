@@ -2063,7 +2063,7 @@ pub(crate) fn plan_bounded_expectations(
     Some(Ok(BoundedExpectations { planned }))
 }
 
-/// Bench-visible wrapper over [`expectation_zero_state`]; not stable API.
+/// Bench-visible wrapper over `expectation_zero_state`; not stable API.
 #[cfg(feature = "bench-internal")]
 pub fn scalar_expectation(circuit: &Circuit, pauli_terms: &[PauliTerm]) -> Result<f64> {
     expectation_zero_state(circuit, pauli_terms, &ResolvedLimits::process_default())

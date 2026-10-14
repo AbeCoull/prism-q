@@ -309,11 +309,23 @@ impl Schedule {
     }
 }
 
+fn single_batch_kind(actions: &[Action]) -> bool {
+    let mut batched = actions
+        .iter()
+        .filter(|action| !matches!(action, Action::Opaque(_)));
+    let Some(first) = batched.next() else {
+        return true;
+    };
+    matches!(first, Action::One(..) | Action::Two(..) | Action::Pauli(..))
+        && batched.all(|action| std::mem::discriminant(action) == std::mem::discriminant(first))
+}
+
 pub(crate) fn enabled(n: usize) -> bool {
     crate::circuit::fusion_stage::stages_at(n, n)
 }
 
 impl super::StatevectorBackend {
+    #[cfg(test)]
     pub(super) fn apply_schedule(
         &mut self,
         instructions: &[Instruction],
@@ -329,21 +341,45 @@ impl super::StatevectorBackend {
         self.apply_schedule_for(instructions, Some(n))
     }
 
+    /// Schedule `instructions`, or apply them natively when they lower to one batch kind:
+    /// the staged stream already runs that kind on the kernel each stage would use.
+    pub(super) fn apply_mixed_schedule(
+        &mut self,
+        instructions: &[Instruction],
+    ) -> crate::error::Result<()> {
+        use crate::backend::Backend;
+        let actions = actions(instructions, None);
+        if single_batch_kind(&actions) {
+            for instruction in instructions {
+                self.apply(instruction)?;
+            }
+            return Ok(());
+        }
+        self.run_schedule(instructions, &actions)
+    }
+
     fn apply_schedule_for(
         &mut self,
         instructions: &[Instruction],
         density_width: Option<usize>,
     ) -> crate::error::Result<()> {
+        self.run_schedule(instructions, &actions(instructions, density_width))
+    }
+
+    fn run_schedule(
+        &mut self,
+        instructions: &[Instruction],
+        actions: &[Action],
+    ) -> crate::error::Result<()> {
         use crate::backend::Backend;
-        let actions = actions(instructions, density_width);
         let mut schedule = std::mem::take(&mut self.schedule);
-        schedule.update(&actions, self.num_qubits);
+        schedule.update(actions, self.num_qubits);
         let result = (|| {
             for stage in &schedule.stages {
                 if let Action::Opaque(i) = actions[stage[0]] {
                     self.apply(&instructions[i])?;
                 } else {
-                    self.apply_mixed_stage(&actions, stage);
+                    self.apply_mixed_stage(actions, stage);
                 }
             }
             Ok(())
@@ -580,6 +616,24 @@ mod tests {
             circuit.add_gate(gate, &[q]);
         }
         compare(&circuit);
+    }
+
+    #[test]
+    fn single_batch_kind_ignores_opaque_boundaries() {
+        let two = Action::Two(0, 1, Gate::Cz.matrix_4x4());
+        let one = Action::One(2, Gate::H.matrix_2x2());
+        let diagonal = Action::Diagonal(0, 1, [Complex64::new(1.0, 0.0); 4]);
+        assert!(single_batch_kind(&[]));
+        assert!(single_batch_kind(&[
+            two.clone(),
+            Action::Opaque(1),
+            two.clone()
+        ]));
+        assert!(single_batch_kind(&[one.clone(), one.clone()]));
+        assert!(!single_batch_kind(&[two.clone(), one]));
+        assert!(!single_batch_kind(&[two, diagonal.clone()]));
+        assert!(!single_batch_kind(&[diagonal.clone(), diagonal]));
+        assert!(!single_batch_kind(&[Action::Cx(0, 1)]));
     }
 
     #[test]

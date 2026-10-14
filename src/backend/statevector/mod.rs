@@ -936,7 +936,7 @@ impl Backend for StatevectorBackend {
             return self.apply_tiled_gpu(instructions);
         }
         if !self.is_gpu_resident() && schedule::enabled(self.num_qubits) {
-            return self.apply_schedule(instructions);
+            return self.apply_mixed_schedule(instructions);
         }
         for instruction in instructions {
             self.apply(instruction)?;

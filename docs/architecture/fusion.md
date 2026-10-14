@@ -111,6 +111,12 @@ stages gather once, execute their operations in order, and scatter once. Control
 and swap keep their permutation operations. Measurements, resets, conditionals,
 regions, barriers and QFT blocks end a stage. No schedule enters the gate enum.
 
+A statevector slice whose operations all lower to one batch kind (dense 1q, dense 2q
+or Pauli rotations) skips the schedule and applies its staged instructions directly.
+The stage planner already batched that stream for the same kernel, and regrouping it
+only moves stage boundaries: on `statevector/random_d10/24` it left one 2q gate as a
+pass of its own. The density matrix keeps its doubled schedule for every slice.
+
 The backend retains only stage indices and operation shapes across applications.
 Every application reloads its numerical payloads from the current instruction slice.
 A changed state width, gate family or dependency mask rebuilds the schedule. Scheduling

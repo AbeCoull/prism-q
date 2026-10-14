@@ -14,7 +14,8 @@ use prism_q::circuit::Circuit;
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::{
-    SweepKind, stage_planning_time, sweep_lower_bound, sweep_profile_for, sweep_profile_unstaged,
+    SweepKind, scheduled_sweep_count, stage_planning_time, sweep_lower_bound, sweep_profile_for,
+    sweep_profile_unstaged,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -102,6 +103,7 @@ fn main() {
             let circuit = build(name, n);
             let unstaged = sweep_profile_unstaged(&circuit, threads);
             let profile = sweep_profile_for(&circuit, threads);
+            let scheduled = scheduled_sweep_count(&circuit, threads, false);
             let bound = sweep_lower_bound(&circuit, threads);
             let plan = stage_planning_time(&circuit, 20);
             let kinds: Vec<String> = SweepKind::ALL
@@ -113,7 +115,7 @@ fn main() {
                 })
                 .collect();
             println!(
-                "{:<20} {:>3} {:>8} {:>7} {:>6} {:>7} {:>8.1} {:>4}/{:<4}  {}",
+                "{:<20} {:>3} {:>8} {:>7} {:>6} {:>7} {:>8.1} {:>4}/{:<4}  mixed_forced={scheduled} {}",
                 name,
                 n,
                 unstaged.passes(),
@@ -124,6 +126,17 @@ fn main() {
                 unstaged.tile_apps(),
                 profile.tile_apps(),
                 kinds.join(" ")
+            );
+        }
+    }
+    for n in [10, 12] {
+        for (name, circuit) in [
+            ("random_d10", circuits::random_circuit(n, 10, SEED)),
+            ("qaoa_l6", circuits::qaoa_circuit(n, 6, SEED)),
+        ] {
+            println!(
+                "density_matrix/{name}/{n} scheduled={}",
+                scheduled_sweep_count(&circuit, threads, true)
             );
         }
     }

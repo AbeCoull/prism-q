@@ -41,7 +41,7 @@ fn stage_floor() -> usize {
 
 /// Whether fusion stages a `circuit_qubits` stream for an `n`-qubit buffer. A density
 /// matrix sweeps a buffer twice the circuit width and keeps the batching passes.
-pub(super) fn stages_at(n: usize, circuit_qubits: usize) -> bool {
+pub(crate) fn stages_at(n: usize, circuit_qubits: usize) -> bool {
     n == circuit_qubits && n <= u64::BITS as usize && n >= stage_floor()
 }
 

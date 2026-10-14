@@ -51,6 +51,7 @@
 //! (`negate_slice`, `swap_slices`, `norm_sqr_sum`, `zero_slice`).
 
 pub(crate) mod kernels;
+pub(crate) mod schedule;
 #[cfg(any(test, feature = "bench-internal"))]
 pub(crate) mod sweeps;
 #[cfg(test)]
@@ -252,6 +253,7 @@ pub struct StatevectorBackend {
     pub(crate) pending_norm: f64,
     pub(crate) batch_tables: kernels::BatchTableScratch,
     pub(crate) limits: ResolvedLimits,
+    schedule: schedule::Schedule,
     #[cfg(feature = "gpu")]
     gpu_context: Option<Arc<GpuContext>>,
     #[cfg(feature = "gpu")]
@@ -285,6 +287,7 @@ impl StatevectorBackend {
             pending_norm: 1.0,
             batch_tables: kernels::BatchTableScratch::default(),
             limits: *limits,
+            schedule: schedule::Schedule::default(),
             #[cfg(feature = "gpu")]
             gpu_context: None,
             #[cfg(feature = "gpu")]
@@ -923,14 +926,17 @@ impl Backend for StatevectorBackend {
         }
     }
 
-    #[cfg(feature = "gpu")]
     fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
+        #[cfg(feature = "gpu")]
         if self
             .gpu_state
             .as_ref()
             .is_some_and(|gpu| crate::gpu::tiles::enabled(gpu.num_qubits()))
         {
             return self.apply_tiled_gpu(instructions);
+        }
+        if !self.is_gpu_resident() && schedule::enabled(self.num_qubits) {
+            return self.apply_schedule(instructions);
         }
         for instruction in instructions {
             self.apply(instruction)?;

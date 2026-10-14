@@ -1769,6 +1769,27 @@ impl Backend for DensityMatrixBackend {
         Ok(())
     }
 
+    fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
+        use crate::backend::statevector::schedule;
+        if self.sv.is_gpu_resident() || !schedule::enabled(2 * self.num_qubits) {
+            for inst in instructions {
+                self.apply(inst)?;
+            }
+            return Ok(());
+        }
+        let mut start = 0;
+        for (i, inst) in instructions.iter().enumerate() {
+            if !schedule::supported(inst) {
+                self.sv
+                    .apply_doubled_schedule(&instructions[start..i], self.num_qubits)?;
+                self.apply(inst)?;
+                start = i + 1;
+            }
+        }
+        self.sv
+            .apply_doubled_schedule(&instructions[start..], self.num_qubits)
+    }
+
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
         match instruction {
             Instruction::Gate { gate, targets } => self.apply_unitary(gate, targets),

@@ -97,6 +97,33 @@ GTX 1080 Ti, whose FP64 rate makes the 4x4 compute bound.
 The lowering runs after binding and reads only the bound stream, so a `PreparedCircuit`
 captures and replays its plan under the profile of the backend it holds.
 
+## Mixed CPU tiles
+
+Past the last-level cache floor, the CPU statevector lowers the fused instruction
+slice into a private schedule. Each stage admits operations whose moving qubits fit
+one cache tile and whose dependencies are satisfied. Diagonal qubits and Pauli Z
+letters outside the tile are constant within a subcube and consume no tile slots.
+The planner examines at most four times the state width in skipped operations per
+scan and candidate seeds per growth step.
+
+Homogeneous stages use the existing 1q, 2q, Pauli or diagonal batch kernels. Mixed
+stages gather once, execute their operations in order, and scatter once. Controlled X
+and swap keep their permutation operations. Measurements, resets, conditionals,
+regions, barriers and QFT blocks end a stage. No schedule enters the gate enum.
+
+The backend retains only stage indices and operation shapes across applications.
+Every application reloads its numerical payloads from the current instruction slice.
+A changed state width, gate family or dependency mask rebuilds the schedule. Scheduling
+uses state width and cache geometry, independent of the Rayon pool width.
+
+The density matrix schedules a doubled stream over its `2n`-qubit buffer: ket gates
+on `q+n` and conjugated bra gates on `q`. Dependencies within each register retain
+circuit order while commuting work from the other register can share a tile. An
+unsupported operation ends the segment and runs through the density matrix backend.
+The device execution path keeps its own fusion profile and kernels. The static
+density-matrix census accepts only supported gate streams; unsupported kernels have
+their own ket, bra and conjugation passes and are excluded from that count.
+
 ## QFT recognition
 
 Before this pipeline runs, a backend with a native `QftBlock` kernel (the statevector,

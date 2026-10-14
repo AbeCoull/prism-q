@@ -133,6 +133,73 @@ pub fn sweep_profile_for(circuit: &Circuit, threads: usize) -> SweepProfile {
     sweep_profile(&fused.instructions, circuit.num_qubits, threads)
 }
 
+/// Count passes with private CPU scheduling forced at any width; `density_matrix` doubles the stream.
+///
+/// # Panics
+/// Panics when a density-matrix stream contains operations outside the private schedule.
+#[cfg(any(test, feature = "bench-internal"))]
+pub fn scheduled_sweep_count(circuit: &Circuit, threads: usize, density_matrix: bool) -> usize {
+    use super::schedule::{self, Action, Schedule};
+    let width = circuit.num_qubits * if density_matrix { 2 } else { 1 };
+    let backend: Box<dyn Backend> = if density_matrix {
+        Box::new(crate::backend::density_matrix::DensityMatrixBackend::new(0))
+    } else {
+        Box::new(StatevectorBackend::new(0))
+    };
+    let expanded = crate::sim::expand_for_backend(&*backend, circuit);
+    let fused = crate::circuit::fusion::fuse_circuit_for_width(&expanded, true, width);
+    let actions = schedule::actions(
+        &fused.instructions,
+        density_matrix.then_some(circuit.num_qubits),
+    );
+    assert!(
+        !density_matrix
+            || actions
+                .iter()
+                .all(|action| !matches!(action, Action::Opaque(_))),
+        "density-matrix census requires a supported gate stream"
+    );
+    let mut plan = Schedule::default();
+    plan.update(&actions, width);
+    let mut profiler = Profiler::new(width, threads);
+    plan.stages
+        .iter()
+        .map(|stage| {
+            if let Action::Opaque(i) = actions[stage[0]] {
+                return profiler.passes_of(&fused.instructions[i]);
+            }
+            if stage.iter().all(|&i| matches!(actions[i], Action::Two(..))) {
+                let gates: Vec<_> = stage
+                    .iter()
+                    .map(|&i| match actions[i] {
+                        Action::Two(a, b, m) => (a, b, m),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                return profiler.multi_2q(&gates).0;
+            }
+            if stage.iter().all(|&i| matches!(actions[i], Action::One(..))) {
+                let gates = crate::backend::statevector::schedule::one_gates(&actions, stage);
+                return profiler.multi_1q(&gates).0;
+            }
+            if stage
+                .iter()
+                .all(|&i| matches!(actions[i], Action::Pauli(..)))
+            {
+                let gates: Vec<_> = stage
+                    .iter()
+                    .map(|&i| match actions[i] {
+                        Action::Pauli(x, z, t) => (x, z, t),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                return profiler.multi_pauli_rot(&gates).0;
+            }
+            1
+        })
+        .sum()
+}
+
 /// [`sweep_profile_for`] on the stream the batching passes build at every width, as
 /// fusion ran before the stage planner.
 #[cfg(feature = "bench-internal")]
@@ -652,6 +719,11 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn tick() {
     PASS_TICKS.with(|ticks| ticks.set(ticks.get() + 1));
+}
+
+#[cfg(test)]
+pub(super) fn take_ticks() -> usize {
+    PASS_TICKS.with(|ticks| ticks.replace(0))
 }
 
 #[cfg(test)]

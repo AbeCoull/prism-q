@@ -185,6 +185,7 @@ The plan cannot assume the decisions that read a matrix rather than the gate seq
 | A 1q run matching a named gate | `Gate::recognize_matrix` | `Guard::Fuses1q` |
 | Whether a 1q block is diagonal | `reorder_1q_gates`, commuting it past a control | `Guard::Fuses1q` |
 | Whether a 2q block is diagonal | `PairRun::should_fuse` | `Guard::Diag4q` |
+| Whether a pair is a controlled phase | `fuse_controlled_phases` | `Guard::Phase2q` |
 
 Each guard is re-tested per binding, and a binding that flips one falls back to running
 the pipeline, so the stream matches an independently fused circuit either way. The 1q
@@ -192,8 +193,14 @@ diagonality guard has to live on the run rather than on a payload site: the bloc
 often absorbed into a `Fused2q` and keeps no 2x2 of its own, while the reorder it
 steered has already happened.
 
-`DiagonalBatch` and `BatchPhase` have no recipe, so a template reaching either declines
-capture and re-fuses per binding.
+`DiagonalBatch` records one recipe per phase or parity entry. A diagonal pair is
+decomposed after rebuilding its complete matrix product, since its factors need not
+be diagonal individually. `BatchPhase` retains source products through repeated-pair
+merging, batch splitting and changes of control qubit. The stage planner carries this
+provenance through its nested diagonal passes.
+
+A rewritten `CX Rz CX` records an `Rzz` matrix derived from the source angle, so both
+standalone parity batches and later pair fusion replay the same operation.
 
 A gate the passes leave untouched still needs a site when it carries an angle. `PauliRot`
 holds its angle in a boxed payload rather than in the enum slot, and replay patches it

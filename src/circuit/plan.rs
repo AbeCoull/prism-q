@@ -9,7 +9,9 @@ use num_complex::Complex64;
 use super::fusion::is_identity;
 use super::parameter::angle_of;
 use super::{Circuit, Instruction};
-use crate::gates::{Gate, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4};
+use crate::gates::{
+    DiagEntry, Gate, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4,
+};
 
 /// One factor of a fused payload, naming a template instruction and how its
 /// matrix enters the product.
@@ -17,7 +19,7 @@ use crate::gates::{Gate, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2
 /// Embedding and SWAP conjugation are both multiplicative, so a nested recipe
 /// splices into an enclosing one by rewriting each step's placement flag rather
 /// than by materializing the inner product.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Step {
     /// The 2x2 matrix of the template gate.
     M1 { src: u32 },
@@ -25,6 +27,21 @@ enum Step {
     E1 { src: u32, high: bool },
     /// The 4x4 matrix of the template gate, conjugated by SWAP when `swapped`.
     M2 { src: u32, swapped: bool },
+    /// The Rzz matrix with a template Rz's angle.
+    Rzz { src: u32 },
+    /// One diagonal factor of a complete pair product.
+    Project {
+        steps: Box<[Step]>,
+        part: DiagPart,
+        high: Option<bool>,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DiagPart {
+    First,
+    Second,
+    Phase,
 }
 
 impl Step {
@@ -33,6 +50,15 @@ impl Step {
     fn embed(self, high: bool) -> Step {
         match self {
             Step::M1 { src } => Step::E1 { src, high },
+            Step::Project {
+                steps,
+                part,
+                high: None,
+            } if !matches!(part, DiagPart::Phase) => Step::Project {
+                steps,
+                part,
+                high: Some(high),
+            },
             other => other,
         }
     }
@@ -49,6 +75,16 @@ impl Step {
                 src,
                 swapped: !swapped,
             },
+            Step::Project {
+                steps,
+                part,
+                high: Some(high),
+            } => Step::Project {
+                steps,
+                part,
+                high: Some(!high),
+            },
+            other => other,
         }
     }
 }
@@ -64,6 +100,8 @@ enum Recipe {
     Mat4(Range<u32>, bool),
     /// The angle of a template gate, carried through unfused.
     Angle(u32),
+    Phase(Range<u32>),
+    Parity(Range<u32>),
 }
 
 /// Where a rebuilt payload is written back into the skeleton.
@@ -91,6 +129,7 @@ enum Guard {
     Diag1q(Range<u32>, bool),
     /// A 2q block whose diagonality decided whether a same-pair run collapsed.
     Diag4q(Range<u32>, bool),
+    Phase2q(Range<u32>),
 }
 
 /// The fused block structure of a template, with a recipe per angle-derived
@@ -215,7 +254,122 @@ impl Tracer {
             self.bailed = true;
             return;
         }
-        into.extend(prov[0].iter().map(|&s| place.apply(s)));
+        into.extend(prov[0].iter().cloned().map(|s| place.apply(s)));
+    }
+
+    pub(super) fn rzz(&mut self, i: usize) {
+        if !self.on {
+            return;
+        }
+        let [payload] = self.input[i].as_slice() else {
+            self.bail();
+            return;
+        };
+        let [Step::M1 { src }] = payload.as_slice() else {
+            self.bail();
+            return;
+        };
+        self.output.push(vec![vec![Step::Rzz { src: *src }]]);
+    }
+
+    pub(super) fn diagonal_batch(&mut self, srcs: &[usize], source: &[Instruction]) {
+        if !self.on {
+            return;
+        }
+        let mut entries = Vec::new();
+        for &src in srcs {
+            let Instruction::Gate { gate, .. } = &source[src] else {
+                unreachable!("diagonal source is a gate");
+            };
+            let prov = self.input[src].clone();
+            match gate {
+                Gate::BatchRzz(_) | Gate::BatchPhase(_) | Gate::MultiFused(_) => {
+                    entries.extend(prov);
+                }
+                Gate::Fused2q(_) | Gate::Multi2q(_) => {
+                    for payload in prov {
+                        self.guard_payload_diag(&payload);
+                        for part in [DiagPart::First, DiagPart::Second, DiagPart::Phase] {
+                            entries.push(vec![Step::Project {
+                                steps: payload.clone().into_boxed_slice(),
+                                part,
+                                high: None,
+                            }]);
+                        }
+                    }
+                }
+                Gate::Cu(_) if gate.controlled_phase().is_none() => {
+                    let [payload] = prov.as_slice() else {
+                        self.bail();
+                        continue;
+                    };
+                    self.guard_payload_diag(payload);
+                    for part in [DiagPart::First, DiagPart::Phase] {
+                        entries.push(vec![Step::Project {
+                            steps: payload.clone().into_boxed_slice(),
+                            part,
+                            high: None,
+                        }]);
+                    }
+                }
+                _ => entries.extend(prov),
+            }
+        }
+        self.output.push(entries);
+    }
+
+    fn guard_payload_diag(&mut self, payload: &[Step]) {
+        let start = self.guard_steps.len() as u32;
+        self.guard_steps.extend_from_slice(payload);
+        self.guards
+            .push(Guard::Diag4q(start..self.guard_steps.len() as u32, true));
+    }
+
+    pub(super) fn guard_phase(&mut self, src: usize) {
+        if self.on
+            && let Some(range) = self.resolve(&[(src, Place::Plain)])
+        {
+            self.guards.push(Guard::Phase2q(range));
+        }
+    }
+
+    pub(super) fn subpass(&mut self, sources: &[(u32, u32, Place)]) -> Self {
+        if !self.on {
+            return Self::off();
+        }
+        let mut child = Self::off();
+        child.on = true;
+        for &(i, entry, place) in sources {
+            let prov = &self.input[i as usize];
+            if entry == WHOLE {
+                child.input.push(prov.clone());
+            } else if let Some(payload) = prov.get(entry as usize) {
+                child.input.push(vec![
+                    payload.iter().cloned().map(|s| place.apply(s)).collect(),
+                ]);
+            } else {
+                child.bailed = true;
+                child.input.push(Vec::new());
+            }
+        }
+        child
+    }
+
+    pub(super) fn finish_subpass(&mut self, child: Self) {
+        if !self.on {
+            return;
+        }
+        self.bailed |= child.bailed;
+        let offset = self.guard_steps.len() as u32;
+        self.guard_steps.extend(child.guard_steps);
+        self.guards
+            .extend(child.guards.into_iter().map(|guard| match guard {
+                Guard::Fuses1q(r, d) => Guard::Fuses1q(r.start + offset..r.end + offset, d),
+                Guard::Diag1q(r, d) => Guard::Diag1q(r.start + offset..r.end + offset, d),
+                Guard::Diag4q(r, d) => Guard::Diag4q(r.start + offset..r.end + offset, d),
+                Guard::Phase2q(r) => Guard::Phase2q(r.start + offset..r.end + offset),
+            }));
+        self.output.extend(child.input);
     }
 
     /// Emit an instruction whose single payload is the ordered product of the
@@ -282,7 +436,7 @@ impl Tracer {
                     prov.get(e as usize)
                 };
                 match payload {
-                    Some(payload) => steps.extend(payload.iter().map(|&s| place.apply(s))),
+                    Some(payload) => steps.extend(payload.iter().cloned().map(|s| place.apply(s))),
                     None => self.bailed = true,
                 }
             }
@@ -291,9 +445,7 @@ impl Tracer {
         self.output.push(out);
     }
 
-    /// Bail unless payload `entry` of input instruction `i` is the 4x4 of one template
-    /// gate. An `Rzz` that `fuse_rzz` built carries its angle as a widened 1q step,
-    /// which names the angle but not the matrix, so it cannot fold into a product.
+    /// Bail unless the payload names a pair gate or a rewritten `Rzz` angle.
     pub(super) fn require_gate_4x4(&mut self, i: usize, entry: u32) {
         if !self.on {
             return;
@@ -304,7 +456,10 @@ impl Tracer {
         } else {
             prov.get(entry as usize)
         };
-        if !matches!(payload.map(Vec::as_slice), Some([Step::M2 { .. }])) {
+        if !matches!(
+            payload.map(Vec::as_slice),
+            Some([Step::M2 { .. } | Step::Rzz { .. }])
+        ) {
             self.bailed = true;
         }
     }
@@ -345,7 +500,7 @@ impl Tracer {
                 self.bailed = true;
                 return None;
             }
-            let placed: Vec<Step> = prov[0].iter().map(|&s| place.apply(s)).collect();
+            let placed: Vec<Step> = prov[0].iter().cloned().map(|s| place.apply(s)).collect();
             self.guard_steps.extend(placed);
         }
         Some(start..self.guard_steps.len() as u32)
@@ -507,6 +662,10 @@ impl FusionPlan {
                     let mat = product_4x4(&self.guard_steps, bound, range.clone());
                     is_diagonal_4x4(&mat) == *diagonal
                 }
+                Guard::Phase2q(range) => {
+                    let mat = product_4x4(&self.guard_steps, bound, range.clone());
+                    is_phase_pair(&mat)
+                }
             };
             if !holds {
                 return false;
@@ -527,6 +686,17 @@ impl FusionPlan {
                         return false;
                     }
                 }
+                Recipe::Phase(range) | Recipe::Parity(range) => {
+                    let mat = product_4x4(&self.steps, bound, range.clone());
+                    if !write_diagonal_pair(
+                        inst,
+                        site.entry as usize,
+                        mat,
+                        matches!(site.recipe, Recipe::Parity(_)),
+                    ) {
+                        return false;
+                    }
+                }
                 Recipe::Angle(src) => {
                     let theta = angle_of(&bound.instructions[*src as usize]);
                     if !write_angle(inst, site.entry as usize, theta) {
@@ -540,11 +710,14 @@ impl FusionPlan {
 }
 
 fn product_2x2(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64; 2]; 2] {
-    let factor = |step: &Step| {
-        let Step::M1 { src } = step else {
-            unreachable!("2x2 recipe holds only M1 steps")
-        };
-        gate_2x2(bound, *src)
+    let factor = |step: &Step| match step {
+        Step::M1 { src } => gate_2x2(bound, *src),
+        Step::Project {
+            steps,
+            part,
+            high: None,
+        } => projected_1q(steps, *part, bound),
+        _ => unreachable!("2x2 recipe holds 1q steps"),
     };
     let steps = &pool[range.start as usize..range.end as usize];
     let Some((first, rest)) = steps.split_first() else {
@@ -573,6 +746,26 @@ fn product_4x4(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64
             let m = gate_4x4(bound, *src);
             if *swapped { swap_order(&m) } else { m }
         }
+        Step::Rzz { src } => Gate::Rzz(angle_of(&bound.instructions[*src as usize])).matrix_4x4(),
+        Step::Project {
+            steps,
+            part: DiagPart::Phase,
+            ..
+        } => {
+            let m = product_4x4(steps, bound, 0..steps.len() as u32);
+            let phase = m[3][3] * m[0][0] / (m[2][2] * m[1][1]);
+            let mut out = kron_2x2(&id, &id);
+            out[3][3] = phase;
+            out
+        }
+        Step::Project { steps, part, high } => {
+            let m = projected_1q(steps, *part, bound);
+            if high == &Some(true) {
+                kron_2x2(&id, &m)
+            } else {
+                kron_2x2(&m, &id)
+            }
+        }
     };
     let steps = &pool[range.start as usize..range.end as usize];
     let Some((first, rest)) = steps.split_first() else {
@@ -583,6 +776,17 @@ fn product_4x4(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64
         acc = mat_mul_4x4(&factor(step), &acc);
     }
     acc
+}
+
+fn projected_1q(steps: &[Step], part: DiagPart, bound: &Circuit) -> [[Complex64; 2]; 2] {
+    let m = product_4x4(steps, bound, 0..steps.len() as u32);
+    let zero = Complex64::new(0.0, 0.0);
+    let (d0, d1) = match part {
+        DiagPart::First => (m[0][0], m[2][2]),
+        DiagPart::Second => (Complex64::new(1.0, 0.0), m[1][1] / m[0][0]),
+        DiagPart::Phase => unreachable!("phase projection is two-qubit"),
+    };
+    [[d0, zero], [zero, d1]]
 }
 
 fn swap_order(mat: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
@@ -669,7 +873,8 @@ fn record_sites(
             let [single] = prov.as_slice() else {
                 return false;
             };
-            let [Step::M1 { src } | Step::M2 { src, .. }] = single.as_slice() else {
+            let [Step::M1 { src } | Step::M2 { src, .. } | Step::Rzz { src }] = single.as_slice()
+            else {
                 return false;
             };
             sites.push(Site {
@@ -684,7 +889,7 @@ fn record_sites(
                 return false;
             }
             for (entry, p) in prov.iter().enumerate() {
-                let [Step::M2 { src, .. }] = p.as_slice() else {
+                let [Step::M2 { src, .. } | Step::Rzz { src }] = p.as_slice() else {
                     return false;
                 };
                 sites.push(Site {
@@ -700,7 +905,8 @@ fn record_sites(
                 return false;
             }
             for (entry, p) in prov.iter().enumerate() {
-                let [Step::M1 { src } | Step::M2 { src, .. }] = p.as_slice() else {
+                let [Step::M1 { src } | Step::M2 { src, .. } | Step::Rzz { src }] = p.as_slice()
+                else {
                     return false;
                 };
                 sites.push(Site {
@@ -711,9 +917,55 @@ fn record_sites(
             }
             true
         }
-        // Batch payloads built from angles the passes already folded away, with
-        // no recipe to rebuild them.
-        Gate::DiagonalBatch(_) | Gate::BatchPhase(_) => false,
+        Gate::DiagonalBatch(data) => {
+            if prov.len() != data.entries.len() {
+                return false;
+            }
+            for (entry, (p, diagonal)) in prov.iter().zip(&data.entries).enumerate() {
+                let start = steps.len() as u32;
+                steps.extend_from_slice(p);
+                let range = start..steps.len() as u32;
+                let recipe = match diagonal {
+                    DiagEntry::Phase1q { .. } => Recipe::Mat2(range, true),
+                    DiagEntry::Phase2q { .. } => Recipe::Phase(range),
+                    DiagEntry::Parity2q { .. } => Recipe::Parity(range),
+                };
+                sites.push(Site {
+                    instruction: index,
+                    entry: entry as u32,
+                    recipe,
+                });
+            }
+            true
+        }
+        Gate::BatchPhase(data) => {
+            if prov.len() != data.phases.len() {
+                return false;
+            }
+            for (entry, p) in prov.iter().enumerate() {
+                let start = steps.len() as u32;
+                steps.extend_from_slice(p);
+                sites.push(Site {
+                    instruction: index,
+                    entry: entry as u32,
+                    recipe: Recipe::Phase(start..steps.len() as u32),
+                });
+            }
+            true
+        }
+        Gate::Cu(_) if gate.controlled_phase().is_some() => {
+            let [payload] = prov.as_slice() else {
+                return false;
+            };
+            let start = steps.len() as u32;
+            steps.extend_from_slice(payload);
+            sites.push(Site {
+                instruction: index,
+                entry: 0,
+                recipe: Recipe::Phase(start..steps.len() as u32),
+            });
+            true
+        }
         // No angle, so a binding leaves these untouched. Listed rather than
         // wildcarded so a new angle-carrying variant fails to compile here.
         Gate::Id
@@ -764,6 +1016,17 @@ fn write_2x2(
     let Instruction::Gate { gate, .. } = inst else {
         return false;
     };
+    if let Gate::DiagonalBatch(data) = gate {
+        if !is_diagonal_2x2(&mat) {
+            return false;
+        }
+        let DiagEntry::Phase1q { d0, d1, .. } = &mut data.entries[entry] else {
+            return false;
+        };
+        *d0 = mat[0][0];
+        *d1 = mat[1][1];
+        return true;
+    }
     if !matrix_2x2_still_fuses(&mat, diagonal) {
         return false;
     }
@@ -781,6 +1044,49 @@ fn write_2x2(
         },
         _ => false,
     }
+}
+
+fn is_phase_pair(mat: &[[Complex64; 4]; 4]) -> bool {
+    let one = Complex64::new(1.0, 0.0);
+    is_diagonal_4x4(mat)
+        && (0..3).all(|i| (mat[i][i] - one).norm() < crate::gates::IDENTITY_EPS)
+        && (mat[3][3].norm() - 1.0).abs() < crate::gates::IDENTITY_EPS
+}
+
+fn write_diagonal_pair(
+    inst: &mut Instruction,
+    entry: usize,
+    mat: [[Complex64; 4]; 4],
+    parity: bool,
+) -> bool {
+    if !is_diagonal_4x4(&mat) {
+        return false;
+    }
+    let equal = |a: Complex64, b: Complex64| (a - b).norm() < crate::gates::IDENTITY_EPS;
+    if parity {
+        if !equal(mat[0][0], mat[3][3]) || !equal(mat[1][1], mat[2][2]) {
+            return false;
+        }
+    } else if !is_phase_pair(&mat) {
+        return false;
+    }
+    let Instruction::Gate { gate, .. } = inst else {
+        return false;
+    };
+    match gate {
+        Gate::DiagonalBatch(data) => match &mut data.entries[entry] {
+            DiagEntry::Phase2q { phase, .. } if !parity => *phase = mat[3][3],
+            DiagEntry::Parity2q { same, diff, .. } if parity => {
+                *same = mat[0][0];
+                *diff = mat[1][1];
+            }
+            _ => return false,
+        },
+        Gate::BatchPhase(data) if !parity => data.phases[entry].1 = mat[3][3],
+        Gate::Cu(m) if !parity => m[1][1] = mat[3][3],
+        _ => return false,
+    }
+    true
 }
 
 fn write_4x4(
@@ -841,3 +1147,7 @@ pub(super) fn write_angle(inst: &mut Instruction, entry: usize, theta: f64) -> b
         _ => false,
     }
 }
+
+#[cfg(test)]
+#[path = "plan_tests.rs"]
+mod tests;

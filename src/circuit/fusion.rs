@@ -1485,12 +1485,18 @@ impl DiagRun {
 
     /// Emit the run as one `DiagonalBatch`, or as its source instruction when it holds
     /// one, and start a new run. Returns whether a batch was emitted.
-    fn flush(&mut self, source: &[Instruction], output: &mut Vec<Instruction>) -> bool {
+    fn flush(
+        &mut self,
+        source: &[Instruction],
+        output: &mut Vec<Instruction>,
+        t: &mut Tracer,
+    ) -> bool {
         if self.srcs.is_empty() {
             return false;
         }
         let batched = self.srcs.len() >= 2;
         if batched {
+            t.diagonal_batch(&self.srcs, source);
             let targets: SmallVec<[usize; 4]> =
                 (0..self.used.len()).filter(|&q| self.used[q]).collect();
             output.push(Instruction::Gate {
@@ -1501,6 +1507,7 @@ impl DiagRun {
             });
         } else {
             output.push(source[self.srcs[0]].clone());
+            t.keep(self.srcs[0]);
             self.entries.clear();
         }
         self.srcs.clear();
@@ -1530,30 +1537,34 @@ pub(super) fn fuse_diagonal_batch<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -
     let mut output: Vec<Instruction> = Vec::with_capacity(insts.len());
     let mut run = DiagRun::new(circuit.num_qubits);
     let mut changed = false;
+    t.begin();
 
     for (i, inst) in insts.iter().enumerate() {
         if let Instruction::Gate { gate, targets } = inst {
             if gate.is_diag_batchable() {
                 if !run.admit(gate, targets, i) {
-                    changed |= run.flush(insts, &mut output);
+                    changed |= run.flush(insts, &mut output, t);
                     run.admit(gate, targets, i);
                 }
                 continue;
             }
             if !run.srcs.is_empty() && targets.iter().all(|&q| !run.used[q]) {
                 output.push(inst.clone());
+                t.keep(i);
                 continue;
             }
         }
-        changed |= run.flush(insts, &mut output);
+        changed |= run.flush(insts, &mut output, t);
         output.push(inst.clone());
+        t.keep(i);
     }
-    changed |= run.flush(insts, &mut output);
+    changed |= run.flush(insts, &mut output, t);
 
     if !changed {
+        t.discard();
         return input;
     }
-    t.bail();
+    t.commit();
     Cow::Owned(circuit.with_instructions(output))
 }
 

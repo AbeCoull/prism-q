@@ -3,6 +3,7 @@
 //! The pass pipeline lives in [`crate::circuit::fusion`].
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use num_complex::Complex64;
 
@@ -13,6 +14,11 @@ use super::fusion::push_unique;
 use super::plan::{Place, Tracer};
 
 const MIN_BATCH_PHASES: usize = 2;
+
+struct PhaseTrace<'a> {
+    tracer: &'a mut Tracer,
+    sources: HashMap<(usize, usize), Vec<(usize, Place)>>,
+}
 
 type PhaseVec = SmallVec<[(usize, Complex64); 8]>;
 type TargetUserVec = SmallVec<[usize; 8]>;
@@ -35,16 +41,17 @@ fn emit_phase_chain(
     phases: PhaseVec,
     output: &mut Vec<Instruction>,
     changed: &mut bool,
+    trace: &mut PhaseTrace<'_>,
 ) {
     // Every entry is diagonal on the same control, so a chain longer than the
     // kernel group tables hold splits into consecutive batches.
     if phases.len() > BatchPhaseData::MAX_PHASES {
         for chunk in phases.chunks(BatchPhaseData::MAX_PHASES) {
-            emit_phase_batch(control, PhaseVec::from_slice(chunk), output, changed);
+            emit_phase_batch(control, PhaseVec::from_slice(chunk), output, changed, trace);
         }
         return;
     }
-    emit_phase_batch(control, phases, output, changed);
+    emit_phase_batch(control, phases, output, changed, trace);
 }
 
 fn emit_phase_batch(
@@ -52,7 +59,26 @@ fn emit_phase_batch(
     phases: PhaseVec,
     output: &mut Vec<Instruction>,
     changed: &mut bool,
+    trace: &mut PhaseTrace<'_>,
 ) {
+    if trace.tracer.on {
+        let entries: Vec<_> = phases
+            .iter()
+            .map(|&(target, _)| {
+                trace
+                    .sources
+                    .remove(&(control.min(target), control.max(target)))
+                    .expect("pending phase provenance")
+            })
+            .collect();
+        if phases.len() >= MIN_BATCH_PHASES {
+            trace.tracer.batch(&entries);
+        } else {
+            for entry in entries {
+                trace.tracer.merge(&entry);
+            }
+        }
+    }
     if phases.len() >= MIN_BATCH_PHASES {
         output.push(Instruction::Gate {
             gate: Gate::BatchPhase(Box::new(BatchPhaseData { phases })),
@@ -78,10 +104,11 @@ fn flush_phase_control(
     target_users: &mut [TargetUserVec],
     output: &mut Vec<Instruction>,
     changed: &mut bool,
+    trace: &mut PhaseTrace<'_>,
 ) {
     if let Some([(target, _)]) = pending[control].as_deref() {
         let target = *target;
-        if flush_lone_phases_on(target, pending, target_users, output, changed) {
+        if flush_lone_phases_on(target, pending, target_users, output, changed, trace) {
             return;
         }
     }
@@ -91,7 +118,7 @@ fn flush_phase_control(
     for &(target, _) in &phases {
         remove_target_user(target_users, target, control);
     }
-    emit_phase_chain(control, phases, output, changed);
+    emit_phase_chain(control, phases, output, changed, trace);
 }
 
 /// Emit every pending single-phase chain on `target` as one batch rooted on `target`,
@@ -103,6 +130,7 @@ fn flush_lone_phases_on(
     target_users: &mut [TargetUserVec],
     output: &mut Vec<Instruction>,
     changed: &mut bool,
+    trace: &mut PhaseTrace<'_>,
 ) -> bool {
     let is_lone =
         |chain: &Option<PhaseVec>| matches!(chain.as_deref(), Some([(t, _)]) if *t == target);
@@ -122,7 +150,7 @@ fn flush_lone_phases_on(
         re_rooted.push((*user, phases[0].1));
         false
     });
-    emit_phase_chain(target, re_rooted, output, changed);
+    emit_phase_chain(target, re_rooted, output, changed, trace);
     true
 }
 
@@ -154,6 +182,7 @@ fn flush_phase_target_conflicts(
     target_users: &mut [TargetUserVec],
     output: &mut Vec<Instruction>,
     changed: &mut bool,
+    trace: &mut PhaseTrace<'_>,
 ) {
     let controls = std::mem::take(&mut target_users[target]);
     if controls.is_empty() {
@@ -179,7 +208,7 @@ fn flush_phase_target_conflicts(
     }
 
     if !re_rooted.is_empty() {
-        emit_phase_chain(target, re_rooted, output, changed);
+        emit_phase_chain(target, re_rooted, output, changed, trace);
     }
 }
 
@@ -190,15 +219,16 @@ fn flush_phase_qubits_in_use(
     target_users: &mut [TargetUserVec],
     output: &mut Vec<Instruction>,
     changed: &mut bool,
+    trace: &mut PhaseTrace<'_>,
 ) {
     for &q in qs {
-        flush_phase_control(q, pending, target_users, output, changed);
+        flush_phase_control(q, pending, target_users, output, changed, trace);
     }
     if diagonal_only {
         return;
     }
     for &q in qs {
-        flush_phase_target_conflicts(q, pending, target_users, output, changed);
+        flush_phase_target_conflicts(q, pending, target_users, output, changed, trace);
     }
 }
 
@@ -213,8 +243,13 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
     let mut pending: PendingPhaseVec = (0..n).map(|_| None).collect();
     let mut target_users: Vec<TargetUserVec> = (0..n).map(|_| SmallVec::new()).collect();
     let mut changed = false;
+    t.begin();
+    let mut trace = PhaseTrace {
+        tracer: t,
+        sources: HashMap::new(),
+    };
 
-    for inst in &circuit.instructions {
+    for (i, inst) in circuit.instructions.iter().enumerate() {
         match inst {
             Instruction::Gate { gate, targets } => {
                 if let Some(phase) = gate.controlled_phase()
@@ -222,6 +257,7 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
                 {
                     let control = targets[0];
                     let target = targets[1];
+                    trace.tracer.guard_phase(i);
                     // Incoming cphase on target, its action depends on
                     // the current diagonal-frame phase of `target`, so
                     // any pending control chain on `target` must flush first.
@@ -232,7 +268,15 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
                         &mut target_users,
                         &mut output,
                         &mut changed,
+                        &mut trace,
                     );
+                    if trace.tracer.on {
+                        trace
+                            .sources
+                            .entry((control.min(target), control.max(target)))
+                            .or_default()
+                            .push((i, Place::Plain));
+                    }
                     push_pending_phase(control, target, phase, &mut pending, &mut target_users);
                     continue;
                 }
@@ -244,8 +288,10 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
                     &mut target_users,
                     &mut output,
                     &mut changed,
+                    &mut trace,
                 );
                 output.push(inst.clone());
+                trace.tracer.keep(i);
             }
             Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 flush_phase_qubits_in_use(
@@ -255,8 +301,10 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
                     &mut target_users,
                     &mut output,
                     &mut changed,
+                    &mut trace,
                 );
                 output.push(inst.clone());
+                trace.tracer.keep(i);
             }
             Instruction::Barrier { qubits } | Instruction::Save { qubits, .. } => {
                 flush_phase_qubits_in_use(
@@ -266,8 +314,10 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
                     &mut target_users,
                     &mut output,
                     &mut changed,
+                    &mut trace,
                 );
                 output.push(inst.clone());
+                trace.tracer.keep(i);
             }
             Instruction::Region(region) => {
                 flush_phase_qubits_in_use(
@@ -277,8 +327,10 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
                     &mut target_users,
                     &mut output,
                     &mut changed,
+                    &mut trace,
                 );
                 output.push(inst.clone());
+                trace.tracer.keep(i);
             }
             Instruction::Conditional { targets, .. } => {
                 flush_phase_qubits_in_use(
@@ -288,8 +340,10 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
                     &mut target_users,
                     &mut output,
                     &mut changed,
+                    &mut trace,
                 );
                 output.push(inst.clone());
+                trace.tracer.keep(i);
             }
         }
     }
@@ -301,13 +355,15 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
             &mut target_users,
             &mut output,
             &mut changed,
+            &mut trace,
         );
     }
 
     if changed {
-        t.bail();
+        trace.tracer.commit();
         Cow::Owned(circuit.with_instructions(output))
     } else {
+        trace.tracer.discard();
         circuit
     }
 }

@@ -1173,6 +1173,35 @@ fn fusion_multi_1q_high_targets_match_unfused() {
     }
 }
 
+#[test]
+fn fusion_qaoa_batch_boundaries_match_unfused() {
+    for n in [13, 14, 15, 16, 17] {
+        assert_fusion_preserves_state(&circuits::qaoa_circuit(n, 3, 42));
+    }
+}
+
+#[test]
+fn fusion_controlled_rotation_layers_match_unfused() {
+    for n in [4, 12, 16] {
+        let circuit = circuits::controlled_rotation_circuit(n, 3, 42);
+        assert_eq!(
+            circuit
+                .instructions
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    Instruction::Gate {
+                        gate: Gate::Cu(_),
+                        ..
+                    }
+                ))
+                .count(),
+            3 * n / 2
+        );
+        assert_fusion_preserves_state(&circuit);
+    }
+}
+
 // Weight-2 PauliRot must absorb neighbouring 1q gates into Fused2q.
 #[test]
 fn parser_built_rxx_absorbs_neighbouring_1q_gates() {

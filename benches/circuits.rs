@@ -663,7 +663,7 @@ fn bench_statevector_qaoa(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qaoa_l3");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 12, 16, 20] {
+    for &n in &[4, 8, 12, 14, 15, 16, 17, 20] {
         let circuit = circuits::qaoa_circuit(n, 3, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
@@ -672,6 +672,21 @@ fn bench_statevector_qaoa(c: &mut Criterion) {
         });
     }
 
+    group.finish();
+}
+
+fn bench_statevector_controlled_rotation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/controlled_rotation_l5");
+    configure_group(&mut group);
+
+    for &n in &[10, 12, 14, 16, 18, 20] {
+        let circuit = circuits::controlled_rotation_circuit(n, 5, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
     group.finish();
 }
 
@@ -5414,6 +5429,7 @@ criterion_group! {
     bench_statevector_qpe,
     bench_statevector_hea,
     bench_statevector_qaoa,
+    bench_statevector_controlled_rotation,
     bench_statevector_qaoa_ring_matching,
     bench_statevector_trotter,
     bench_statevector_diag_mixed,

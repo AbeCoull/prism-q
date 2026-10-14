@@ -140,4 +140,20 @@ fn main() {
             );
         }
     }
+    for n in 12..=20 {
+        for (name, circuit) in [
+            ("qaoa_l3", circuits::qaoa_circuit(n, 3, SEED)),
+            (
+                "controlled_rotation_l5",
+                circuits::controlled_rotation_circuit(n, 5, SEED),
+            ),
+        ] {
+            let profile = sweep_profile_for(&circuit, threads);
+            println!(
+                "boundary/{name}/{n} passes={} tile_apps={}",
+                profile.passes(),
+                profile.tile_apps()
+            );
+        }
+    }
 }

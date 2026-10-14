@@ -296,6 +296,34 @@ pub fn qaoa_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
     c
 }
 
+/// Alternate local rotations with controlled Rx/Ry gates on offset ring matchings.
+///
+/// # Panics
+/// Panics if `n < 2`.
+pub fn controlled_rotation_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
+    assert!(n >= 2);
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    for layer in 0..layers {
+        for q in 0..n {
+            c.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            c.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+        }
+        for pair in 0..n / 2 {
+            let control = (2 * pair + layer % 2) % n;
+            let target = (control + 1) % n;
+            let angle = rng.random::<f64>() * std::f64::consts::TAU;
+            let rotation = if (pair + layer) % 2 == 0 {
+                Gate::Rx(angle)
+            } else {
+                Gate::Ry(angle)
+            };
+            c.add_gate(Gate::cu(rotation.matrix_2x2()), &[control, target]);
+        }
+    }
+    c
+}
+
 /// Disjoint `k`-qubit blocks under `Rx` layers, with an `Rzz` ring inside each
 /// block and no gate between blocks.
 ///

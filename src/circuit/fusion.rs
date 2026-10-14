@@ -268,21 +268,23 @@ fn flush(pending: &mut Option<PendingFusion>, output: &mut Vec<Instruction>, t: 
     if let Some(p) = pending.take() {
         if !is_identity(&p.matrix) {
             let gate = match Gate::recognize_matrix(&p.matrix) {
-                // A run collapsing to a named gate drops the stored angles, so
-                // a rebinding cannot rebuild it.
                 Some(named) => {
-                    t.bail();
+                    if !t.sources_are_constant(&p.srcs) {
+                        t.bail();
+                    }
                     named
                 }
-                None => Gate::Fused(Box::new(p.matrix)),
+                None => {
+                    t.guard_1q(&p.srcs, is_diagonal_2x2(&p.matrix));
+                    Gate::Fused(Box::new(p.matrix))
+                }
             };
             output.push(Instruction::Gate {
                 gate,
                 targets: smallvec![p.target],
             });
-            t.guard_1q(&p.srcs, is_diagonal_2x2(&p.matrix));
             t.merge(&p.srcs);
-        } else {
+        } else if !t.sources_are_constant(&p.srcs) {
             t.bail();
         }
     }

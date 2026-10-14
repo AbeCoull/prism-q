@@ -45,6 +45,15 @@ enum DiagPart {
 }
 
 impl Step {
+    fn is_constant(&self, sources: &[bool]) -> bool {
+        match self {
+            Self::M1 { src } | Self::E1 { src, .. } | Self::M2 { src, .. } | Self::Rzz { src } => {
+                sources[*src as usize]
+            }
+            Self::Project { steps, .. } => steps.iter().all(|step| step.is_constant(sources)),
+        }
+    }
+
     /// Widen a 1q step onto a pair, as the high factor or the low one. A step
     /// already at pair width is unaffected.
     fn embed(self, high: bool) -> Step {
@@ -181,6 +190,7 @@ impl Place {
 pub(crate) struct Tracer {
     pub(super) on: bool,
     bailed: bool,
+    constant_sources: Vec<bool>,
     /// Provenance of the stream entering the current pass.
     input: Vec<Prov>,
     /// Provenance of the stream the current pass is building.
@@ -198,6 +208,7 @@ impl Tracer {
         Self {
             on: false,
             bailed: false,
+            constant_sources: Vec::new(),
             input: Vec::new(),
             output: Vec::new(),
             guard_steps: Vec::new(),
@@ -217,6 +228,11 @@ impl Tracer {
         Self {
             on: true,
             bailed: false,
+            constant_sources: circuit
+                .instructions
+                .iter()
+                .map(|inst| matches!(inst, Instruction::Gate { gate, .. } if gate.pauli_generator().is_none()))
+                .collect(),
             input,
             output: Vec::new(),
             guard_steps: Vec::new(),
@@ -229,6 +245,20 @@ impl Tracer {
         if self.on {
             self.bailed = true;
         }
+    }
+
+    pub(super) fn sources_are_constant(&self, sources: &[(usize, Place)]) -> bool {
+        self.on
+            && !sources.is_empty()
+            && sources.iter().all(|&(i, _)| {
+                let [payload] = self.input[i].as_slice() else {
+                    return false;
+                };
+                !payload.is_empty()
+                    && payload
+                        .iter()
+                        .all(|step| step.is_constant(&self.constant_sources))
+            })
     }
 
     /// Begin a pass. Output provenance accumulates until [`commit`](Self::commit).
@@ -339,6 +369,7 @@ impl Tracer {
         }
         let mut child = Self::off();
         child.on = true;
+        child.constant_sources.clone_from(&self.constant_sources);
         for &(i, entry, place) in sources {
             let prov = &self.input[i as usize];
             if entry == WHOLE {
@@ -623,7 +654,14 @@ impl FusionPlan {
         let mut steps = Vec::new();
         let mut sites = Vec::new();
         for (i, (inst, prov)) in fused.instructions.iter().zip(&tracer.input).enumerate() {
-            if !record_sites(i as u32, inst, prov, &mut steps, &mut sites) {
+            if !record_sites(
+                i as u32,
+                inst,
+                prov,
+                &tracer.constant_sources,
+                &mut steps,
+                &mut sites,
+            ) {
                 return (fused, None);
             }
         }
@@ -814,6 +852,7 @@ fn record_sites(
     index: u32,
     inst: &Instruction,
     prov: &Prov,
+    constant_sources: &[bool],
     steps: &mut Vec<Step>,
     sites: &mut Vec<Site>,
 ) -> bool {
@@ -822,6 +861,12 @@ fn record_sites(
     };
 
     let mut push_mat = |entry: usize, recipe_steps: &[Step], four: bool, diagonal: bool| {
+        if recipe_steps
+            .iter()
+            .all(|step| step.is_constant(constant_sources))
+        {
+            return;
+        }
         let start = steps.len() as u32;
         steps.extend_from_slice(recipe_steps);
         let range = start..steps.len() as u32;

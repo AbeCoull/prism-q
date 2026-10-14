@@ -11,7 +11,14 @@ fn finish(fused: &Circuit, tracer: Tracer) -> FusionPlan {
     let mut steps = Vec::new();
     let mut sites = Vec::new();
     for (i, (inst, prov)) in fused.instructions.iter().zip(&tracer.input).enumerate() {
-        assert!(record_sites(i as u32, inst, prov, &mut steps, &mut sites));
+        assert!(record_sites(
+            i as u32,
+            inst,
+            prov,
+            &tracer.constant_sources,
+            &mut steps,
+            &mut sites
+        ));
     }
     FusionPlan {
         steps,
@@ -230,5 +237,55 @@ fn rewritten_rzz_replays_as_a_pair_matrix() {
         *angle_mut(&mut bound.instructions[1]) = theta;
         assert!(plan.replay(&bound, &mut fused));
         assert_states(&fused, &bound);
+    }
+}
+
+#[test]
+fn constant_named_and_identity_runs_preserve_replay() {
+    let mut template = Circuit::new(4, 0);
+    template.add_gate(Gate::H, &[0]);
+    template.add_gate(Gate::H, &[0]);
+    template.add_gate(Gate::T, &[1]);
+    template.add_gate(Gate::T, &[1]);
+    template.add_gate(Gate::Rz(0.23), &[2]);
+    template.add_gate(Gate::Rz(0.41), &[2]);
+    let (mut fused, plan) = FusionPlan::capture(&template, 16, FusionProfile::Host);
+    let plan = plan.expect("constant collapses retain a plan");
+    let parameters = Parameters::all_rotations(&template);
+    for values in [[0.31, 0.47], [-0.27, 0.61]] {
+        let bound = parameters.bind(&template, &values).unwrap();
+        assert!(plan.replay(&bound, &mut fused));
+        assert_states(&fused, &bound);
+    }
+}
+
+#[test]
+fn parameter_dependent_named_and_identity_runs_decline_capture() {
+    for angle in [0.0, std::f64::consts::FRAC_PI_4] {
+        let mut template = Circuit::new(4, 0);
+        template.add_gate(Gate::P(angle), &[0]);
+        template.add_gate(Gate::P(angle), &[0]);
+        let (_, plan) = FusionPlan::capture(&template, 16, FusionProfile::Host);
+        assert!(plan.is_none());
+    }
+}
+
+#[test]
+fn diagonal_mixed_benchmark_bindings_replay_without_fusion() {
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    let seed = 0xDEAD_BEEFu64;
+    let template = crate::circuits::diagonal_mixed_circuit(16, 6, seed);
+    let parameters = Parameters::all_rotations(&template);
+    let (mut fused, plan) = FusionPlan::capture(&template, 16, FusionProfile::Host);
+    let plan = plan.expect("mixed diagonal fixture captures a plan");
+    for k in 0..100 {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(k));
+        let values: Vec<_> = (0..parameters.num_slots())
+            .map(|_| rng.random::<f64>() * std::f64::consts::TAU)
+            .collect();
+        let bound = parameters.bind(&template, &values).unwrap();
+        assert!(plan.replay(&bound, &mut fused), "binding {k} fell back");
     }
 }

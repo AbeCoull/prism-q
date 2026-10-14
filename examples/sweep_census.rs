@@ -156,4 +156,18 @@ fn main() {
             );
         }
     }
+    for (name, circuit) in [
+        (
+            "qft_expanded",
+            prism_q::circuit::expand_qft_blocks(&circuits::qft_circuit(16)).into_owned(),
+        ),
+        ("qpe_t_gate", circuits::phase_estimation_circuit(16)),
+    ] {
+        let profile = sweep_profile_for(&circuit, threads);
+        println!(
+            "boundary/{name}/16 passes={} tile_apps={}",
+            profile.passes(),
+            profile.tile_apps()
+        );
+    }
 }

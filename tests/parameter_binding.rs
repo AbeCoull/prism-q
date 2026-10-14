@@ -220,6 +220,9 @@ fn bound_fusion_matches_independent_fusion() {
     for (name, template) in ansatz_cases() {
         let params = Parameters::all_rotations(&template);
         let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+        if matches!(name, "qaoa/16" | "qaoa/17") {
+            assert!(prepared.reuses_fusion_plan(), "{name}");
+        }
         for point in 0..8 {
             let values = angles(params.num_slots(), 1000 + point);
             let independent = params.bind(&template, &values).unwrap();

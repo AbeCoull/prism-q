@@ -1771,8 +1771,6 @@ fn batch_passes<'a>(pass_2qb: Cow<'a, Circuit>, n: usize, t: &mut Tracer) -> Cow
         fuse_diagonal_batch(c, t)
     });
     let rebatch_host = n == pass_db.num_qubits;
-    #[cfg(feature = "bench-internal")]
-    let rebatch_host = rebatch_host && crate::bench_variant_b();
     let floor = if rebatch_host {
         MIN_QUBITS_FOR_DIAG_BATCH
     } else {

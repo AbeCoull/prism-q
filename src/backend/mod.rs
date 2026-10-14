@@ -634,6 +634,16 @@ pub trait Backend: sealed::Sealed {
         num_qubits
     }
 
+    /// Fusion pipeline for an `n`-qubit circuit on this backend. The statevector picks
+    /// [`FusionProfile::Device`](crate::circuit::fusion::FusionProfile::Device) on a GPU
+    /// that schedules its own tiles; every other backend keeps the host pipeline. Hidden
+    /// with `circuit::fusion`.
+    #[doc(hidden)]
+    fn fusion_profile(&self, num_qubits: usize) -> crate::circuit::fusion::FusionProfile {
+        let _ = num_qubits;
+        crate::circuit::fusion::FusionProfile::Host
+    }
+
     /// Whether this backend has a native `Gate::QftBlock` kernel, on which `sim` folds
     /// expanded QFTs into blocks. Only the statevector does, on the host or the device;
     /// others receive the textbook gates.

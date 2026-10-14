@@ -7,6 +7,7 @@
 pub(crate) mod device;
 pub(crate) mod kernels;
 pub(crate) mod memory;
+pub(crate) mod tiles;
 
 use std::sync::Arc;
 
@@ -272,6 +273,8 @@ pub struct GpuPassCensus {
     pub drains: u64,
     /// Launches of the dense 4x4 kernel, a subset of `launches`.
     pub dense_2q: u64,
+    /// Launches of the mixed shared-memory tile kernel, a subset of `launches`.
+    pub tiles: u64,
 }
 
 #[cfg(feature = "bench-internal")]
@@ -284,6 +287,7 @@ impl std::ops::Sub for GpuPassCensus {
             passes: self.passes - earlier.passes,
             drains: self.drains - earlier.drains,
             dense_2q: self.dense_2q - earlier.dense_2q,
+            tiles: self.tiles - earlier.tiles,
         }
     }
 }

@@ -354,12 +354,47 @@ impl StatevectorBackend {
 
     #[cfg(feature = "gpu")]
     fn dispatch_gate_gpu(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
-        use crate::gpu::kernels::dense as k;
-
         let gpu = self
             .gpu_state
             .as_mut()
             .expect("dispatch_gate_gpu called without gpu_state");
+        Self::dispatch_gate_on_device(gpu, gate, targets)
+    }
+
+    /// Apply one device instruction run, lowering its gates through
+    /// [`crate::gpu::tiles`]; measurements, resets, conditionals, regions and saves
+    /// flush the lowered window and apply in place.
+    #[cfg(feature = "gpu")]
+    fn apply_tiled_gpu(&mut self, instructions: &[Instruction]) -> Result<()> {
+        let mut window = crate::gpu::tiles::Window::default();
+        for instruction in instructions {
+            match instruction {
+                Instruction::Gate { gate, targets } => {
+                    window.push(gate, targets, self.num_qubits)?
+                }
+                Instruction::Barrier { .. } => {}
+                _ => {
+                    self.flush_window(&mut window)?;
+                    self.apply(instruction)?;
+                }
+            }
+        }
+        self.flush_window(&mut window)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn flush_window(&mut self, window: &mut crate::gpu::tiles::Window<'_>) -> Result<()> {
+        let gpu = self
+            .gpu_state
+            .as_mut()
+            .expect("flush_window called without gpu_state");
+        window.flush(gpu, Self::dispatch_gate_on_device)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn dispatch_gate_on_device(gpu: &mut GpuState, gate: &Gate, targets: &[usize]) -> Result<()> {
+        use crate::gpu::kernels::dense as k;
+
         let ctx = gpu.context().clone();
 
         match gate {
@@ -877,6 +912,30 @@ impl Backend for StatevectorBackend {
         {
             true
         }
+    }
+
+    #[cfg(feature = "gpu")]
+    fn fusion_profile(&self, num_qubits: usize) -> crate::circuit::fusion::FusionProfile {
+        if self.gpu_context.is_some() && crate::gpu::tiles::enabled(num_qubits) {
+            crate::circuit::fusion::FusionProfile::Device
+        } else {
+            crate::circuit::fusion::FusionProfile::Host
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
+        if self
+            .gpu_state
+            .as_ref()
+            .is_some_and(|gpu| crate::gpu::tiles::enabled(gpu.num_qubits()))
+        {
+            return self.apply_tiled_gpu(instructions);
+        }
+        for instruction in instructions {
+            self.apply(instruction)?;
+        }
+        Ok(())
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {

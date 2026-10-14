@@ -1363,6 +1363,7 @@ pub fn prism_q::circuits::clifford_heavy_circuit(usize, usize, u64) -> prism_q::
 pub fn prism_q::circuits::clifford_prefix_measured_blocks(usize, usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::clifford_random_pairs(usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::clifford_t_circuit(usize, usize, f64, u64) -> prism_q::circuit::Circuit
+pub fn prism_q::circuits::controlled_rotation_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::cz_chain_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::diagonal_mixed_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::disjoint_block_layers_circuit(usize, usize, usize, u64) -> prism_q::circuit::Circuit

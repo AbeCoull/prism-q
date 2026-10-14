@@ -1077,7 +1077,11 @@ fn reorder_exposes_cz_cancellation() {
 #[test]
 fn same_pair_2q_block_fuses_w_state_pairs() {
     let circuit = crate::circuits::w_state_circuit(20);
-    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit), &mut Tracer::off());
+    let pass_2q = fuse_2q_gates(
+        Cow::Borrowed(&circuit),
+        &mut Tracer::off(),
+        circuit.num_qubits,
+    );
     let before = count_fused_2q(&pass_2q);
     let fused = fuse_same_pair_2q_blocks(pass_2q, &mut Tracer::off());
     let after = count_fused_2q(&fused);
@@ -1092,7 +1096,11 @@ fn same_pair_2q_block_fuses_w_state_pairs() {
 #[test]
 fn same_pair_2q_block_fuses_qv_blocks() {
     let circuit = crate::circuits::quantum_volume_circuit(20, 1, 42);
-    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit), &mut Tracer::off());
+    let pass_2q = fuse_2q_gates(
+        Cow::Borrowed(&circuit),
+        &mut Tracer::off(),
+        circuit.num_qubits,
+    );
     let before = count_fused_2q(&pass_2q);
     let fused = fuse_same_pair_2q_blocks(pass_2q, &mut Tracer::off());
     let after = count_fused_2q(&fused);
@@ -1112,7 +1120,11 @@ fn same_pair_2q_block_accepts_reversed_targets() {
     circuit.add_gate(Gate::Ry(0.7), &[1]);
     circuit.add_gate(Gate::Cx, &[1, 0]);
 
-    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit), &mut Tracer::off());
+    let pass_2q = fuse_2q_gates(
+        Cow::Borrowed(&circuit),
+        &mut Tracer::off(),
+        circuit.num_qubits,
+    );
     let before = count_fused_2q(&pass_2q);
     let fused = fuse_same_pair_2q_blocks(pass_2q, &mut Tracer::off());
     let after = count_fused_2q(&fused);
@@ -1136,7 +1148,11 @@ fn same_pair_2q_block_leaves_diagonal_runs() {
     circuit.add_gate(Gate::T, &[1]);
     circuit.add_gate(Gate::Cz, &[1, 0]);
 
-    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit), &mut Tracer::off());
+    let pass_2q = fuse_2q_gates(
+        Cow::Borrowed(&circuit),
+        &mut Tracer::off(),
+        circuit.num_qubits,
+    );
     let before = count_fused_2q(&pass_2q);
     let fused = fuse_same_pair_2q_blocks(pass_2q, &mut Tracer::off());
     let after = count_fused_2q(&fused);
@@ -1172,7 +1188,7 @@ fn trailing_1q_folds_back_into_its_fused2q_on_either_target() {
     c.add_gate(Gate::Ry(0.4), &[0]);
     c.add_gate(Gate::Ry(0.9), &[3]);
 
-    let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off());
+    let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off(), c.num_qubits);
     assert_eq!(fused.instructions.len(), 2);
     assert_eq!(count_fused_2q(&fused), 2);
     assert_same_state(&c, &fused);
@@ -1186,7 +1202,7 @@ fn trailing_1q_does_not_fold_past_a_later_gate_on_its_qubit() {
     c.add_gate(Gate::Cx, &[0, 2]);
     c.add_gate(Gate::Ry(0.4), &[0]);
 
-    let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off());
+    let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off(), c.num_qubits);
     assert!(matches!(
         fused.instructions.last(),
         Some(Instruction::Gate { gate: Gate::Fused(_), targets }) if targets.as_slice() == [0]
@@ -1202,7 +1218,7 @@ fn trailing_1q_keeps_a_diagonal_fused2q_diagonal() {
     c.add_gate(Gate::T, &[1]);
     c.add_gate(Gate::Ry(0.4), &[0]);
 
-    let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off());
+    let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off(), c.num_qubits);
     assert_eq!(fused.instructions.len(), 2, "T folds, Ry stays out");
     let Instruction::Gate {
         gate: Gate::Fused2q(m),
@@ -1212,6 +1228,74 @@ fn trailing_1q_keeps_a_diagonal_fused2q_diagonal() {
         panic!("expected a Fused2q first");
     };
     assert!(is_diagonal_4x4(m));
+    assert_same_state(&c, &fused);
+}
+
+#[test]
+fn controlled_2q_absorption_preserves_target_order_and_phase() {
+    #[cfg(not(feature = "bench-internal"))]
+    let enabled = true;
+    #[cfg(feature = "bench-internal")]
+    let enabled = crate::bench_variant_b();
+    let mut general = mat_mul_2x2(&Gate::Rz(0.47).matrix_2x2(), &Gate::Ry(0.29).matrix_2x2());
+    for row in &mut general {
+        for value in row {
+            *value *= Complex64::from_polar(1.0, 0.63);
+        }
+    }
+    for mat in [
+        Gate::Rx(0.37).matrix_2x2(),
+        Gate::Ry(0.51).matrix_2x2(),
+        Gate::H.matrix_2x2(),
+        general,
+    ] {
+        for targets in [[0, 11], [11, 0], [3, 4], [4, 3]] {
+            let mut c = Circuit::new(12, 0);
+            c.add_gate(Gate::Ry(0.31), &[targets[0]]);
+            c.add_gate(Gate::Rx(0.23), &[targets[1]]);
+            c.add_gate(Gate::cu(mat), &targets);
+            c.add_gate(Gate::Rz(0.17), &[targets[0]]);
+            c.add_gate(Gate::Ry(0.71), &[targets[1]]);
+            let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off(), 12);
+            assert_eq!(count_fused_2q(&fused), usize::from(enabled));
+            assert_same_state(&c, &fused);
+        }
+    }
+}
+
+#[test]
+fn controlled_2q_absorption_keeps_diagonal_gates() {
+    for gate in [Gate::cphase(0.37), Gate::cu(Gate::Rz(0.53).matrix_2x2())] {
+        let mut c = Circuit::new(12, 0);
+        c.add_gate(Gate::Ry(0.31), &[0]);
+        c.add_gate(Gate::Rx(0.23), &[11]);
+        c.add_gate(gate, &[0, 11]);
+        let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off(), 12);
+        assert_eq!(count_fused_2q(&fused), 0);
+        assert!(fused.instructions.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::Cu(_),
+                ..
+            }
+        )));
+    }
+}
+
+#[test]
+fn controlled_2q_absorption_preserves_other_widths_and_device() {
+    for (qubits, width) in [(8, 16), (64, 64), (65, 65)] {
+        let mut c = Circuit::new(qubits, 0);
+        c.add_gate(Gate::Ry(0.31), &[0]);
+        c.add_gate(Gate::cu(Gate::Rx(0.23).matrix_2x2()), &[0, 1]);
+        let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off(), width);
+        assert_eq!(count_fused_2q(&fused), 0);
+    }
+    let mut c = Circuit::new(12, 0);
+    c.add_gate(Gate::Ry(0.31), &[0]);
+    c.add_gate(Gate::cu(Gate::Rx(0.23).matrix_2x2()), &[0, 11]);
+    let fused = fuse_circuit_for_profile(&c, true, 12, FusionProfile::Device);
+    assert_eq!(count_fused_2q(&fused), 0);
     assert_same_state(&c, &fused);
 }
 
@@ -1251,7 +1335,7 @@ fn fuse_2q_returns_borrowed_without_absorbable_1q() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Cz, &[1, 2]);
     assert!(matches!(
-        fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off()),
+        fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off(), c.num_qubits),
         Cow::Borrowed(_)
     ));
 }

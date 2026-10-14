@@ -235,10 +235,6 @@ fn bound_fusion_matches_independent_fusion() {
 
 #[test]
 fn controlled_2q_replay_preserves_reversed_targets_and_global_phase() {
-    #[cfg(not(feature = "bench-internal"))]
-    let enabled = true;
-    #[cfg(feature = "bench-internal")]
-    let enabled = prism_q::bench_variant_b();
     let mut template = Circuit::new(12, 0);
     let mut matrix = Gate::Ry(0.41).matrix_2x2();
     for row in &mut matrix {
@@ -261,16 +257,13 @@ fn controlled_2q_replay_preserves_reversed_targets_and_global_phase() {
         let independent = params.bind(&template, &values).unwrap();
         let expected = fuse_circuit(&independent, true).into_owned();
         let got = prepared.bind_fused(&values).unwrap();
-        assert_eq!(
-            got.instructions.iter().any(|inst| matches!(
-                inst,
-                Instruction::Gate {
-                    gate: Gate::Fused2q(_) | Gate::Multi2q(_),
-                    ..
-                }
-            )),
-            enabled
-        );
+        assert!(got.instructions.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::Fused2q(_) | Gate::Multi2q(_),
+                ..
+            }
+        )));
         assert_streams_match(got, &expected, &format!("controlled point {point}"));
         assert_states_match(
             &statevector(got),

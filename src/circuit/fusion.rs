@@ -607,8 +607,6 @@ pub(crate) fn fuse_2q_gates<'a>(
     let controlled = state_qubits == circuit.num_qubits
         && state_qubits <= u64::BITS as usize
         && !stages_at(state_qubits, circuit.num_qubits);
-    #[cfg(feature = "bench-internal")]
-    let controlled = controlled && crate::bench_variant_b();
     fuse_2q_gates_where(circuit, t, controlled, |_| true)
 }
 

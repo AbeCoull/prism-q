@@ -1233,10 +1233,6 @@ fn trailing_1q_keeps_a_diagonal_fused2q_diagonal() {
 
 #[test]
 fn controlled_2q_absorption_preserves_target_order_and_phase() {
-    #[cfg(not(feature = "bench-internal"))]
-    let enabled = true;
-    #[cfg(feature = "bench-internal")]
-    let enabled = crate::bench_variant_b();
     let mut general = mat_mul_2x2(&Gate::Rz(0.47).matrix_2x2(), &Gate::Ry(0.29).matrix_2x2());
     for row in &mut general {
         for value in row {
@@ -1257,7 +1253,7 @@ fn controlled_2q_absorption_preserves_target_order_and_phase() {
             c.add_gate(Gate::Rz(0.17), &[targets[0]]);
             c.add_gate(Gate::Ry(0.71), &[targets[1]]);
             let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off(), 12);
-            assert_eq!(count_fused_2q(&fused), usize::from(enabled));
+            assert_eq!(count_fused_2q(&fused), 1);
             assert_same_state(&c, &fused);
         }
     }

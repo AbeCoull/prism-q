@@ -327,6 +327,8 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "apply_diagonal_batch",
     "apply_multi_fused_tiled",
     "apply_mixed_tile",
+    #[cfg(feature = "bench-internal")]
+    "apply_mixed_tile_baseline",
     // Stabilizer tableau kernels.
     "stab_set_initial_tableau",
     "stab_apply_word_grouped",

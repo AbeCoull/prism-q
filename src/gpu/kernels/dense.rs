@@ -99,7 +99,7 @@ const KERNEL_SOURCE_TEMPLATE: &str = include_str!("dense.cu");
 /// Substitute the host constants into [`KERNEL_SOURCE_TEMPLATE`]. A new placeholder in
 /// the template needs a matching `.replace` here.
 pub(crate) fn kernel_source() -> String {
-    KERNEL_SOURCE_TEMPLATE
+    let source = KERNEL_SOURCE_TEMPLATE
         .replace("{{TILE_Q}}", &MULTI_FUSED_TILE_Q.to_string())
         .replace("{{TILE_SIZE}}", &MULTI_FUSED_TILE_SIZE.to_string())
         .replace("{{PAULI_GROUP_MASKS}}", &PAULI_GROUP_MASKS.to_string())
@@ -148,7 +148,10 @@ pub(crate) fn kernel_source() -> String {
         .replace("{{MIX_TILE_Q}}", &MIXED_TILE_Q.to_string())
         .replace("{{MIX_BLOCK_LOG}}", &MIXED_BLOCK_LOG.to_string())
         .replace("{{MIX_MAX_OPS}}", &MIXED_MAX_OPS.to_string())
-        .replace("{{MIX_MAX_COEFS}}", &MIXED_MAX_COEFS.to_string())
+        .replace("{{MIX_MAX_COEFS}}", &MIXED_MAX_COEFS.to_string());
+    #[cfg(feature = "bench-internal")]
+    let source = source + include_str!("mixed_tile_baseline.cu");
+    source
 }
 
 fn grid_for(count: u64) -> u32 {
@@ -1889,7 +1892,14 @@ pub(crate) fn launch_apply_mixed_tile<'a: 'b, 'b>(
         arg.num_ops += 1;
     }
     let num_tiles = 1u32 << (n - MIXED_TILE_Q);
-    let (stream, func) = stream_and_fn(ctx, "apply_mixed_tile")?;
+    let kernel = "apply_mixed_tile";
+    #[cfg(feature = "bench-internal")]
+    let kernel = if crate::bench_variant_b() {
+        kernel
+    } else {
+        "apply_mixed_tile_baseline"
+    };
+    let (stream, func) = stream_and_fn(ctx, kernel)?;
     let cfg = linear_cfg(1 << MIXED_BLOCK_LOG, num_tiles);
     let mut builder = stream.launch_builder(&func);
     let buffer = state.buffer_mut().raw_mut();

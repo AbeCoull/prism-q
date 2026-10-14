@@ -712,8 +712,8 @@ jobs:
       # never reach their GPU arms.
       - name: Clippy Python bindings GPU paths
         run: cargo clippy -p prism-q-py --all-targets --features gpu -- -D warnings -D clippy::undocumented_unsafe_blocks
-      - name: KERNEL_NAMES consistency (device-free)
-        run: cargo nextest run --features "parallel gpu" -E 'test(kernel_names_match_source_entry_points)'
+      - name: KERNEL_NAMES consistency and tile planner (device-free)
+        run: cargo nextest run --features "parallel gpu" -E 'test(kernel_names_match_source_entry_points) | test(/gpu::tiles::/)'
 
   test-macos-arm:
     name: Test macOS ARM64

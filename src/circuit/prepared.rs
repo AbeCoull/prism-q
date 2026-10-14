@@ -2,7 +2,7 @@
 //! structure implies.
 
 use super::Circuit;
-use super::fusion::fuse_circuit_for_width;
+use super::fusion::{FusionProfile, fuse_circuit_for_profile};
 use super::parameter::Parameters;
 use super::plan::FusionPlan;
 use crate::error::Result;
@@ -86,8 +86,11 @@ impl PreparedCircuit {
     ) -> Result<Self> {
         params.validate(&template)?;
         let route = prepared_route(&kind, &template, limits.as_ref());
-        let (skeleton, plan) =
-            FusionPlan::capture(&template, fusion_state_qubits(route.as_ref(), &template));
+        let (skeleton, plan) = FusionPlan::capture(
+            &template,
+            fusion_state_qubits(route.as_ref(), &template),
+            fusion_profile(route.as_ref()),
+        );
         Ok(Self::assemble(
             template, params, kind, limits, route, plan, skeleton,
         ))
@@ -166,7 +169,8 @@ impl PreparedCircuit {
             self.fused_off_plan = true;
         }
         let width = fusion_state_qubits(self.route.as_ref(), &self.template);
-        self.fused = fuse_circuit_for_width(&self.bound, true, width).into_owned();
+        let profile = fusion_profile(self.route.as_ref());
+        self.fused = fuse_circuit_for_profile(&self.bound, true, width, profile).into_owned();
         Ok(&self.fused)
     }
 
@@ -391,6 +395,10 @@ impl PreparedCircuit {
 /// backend is held.
 fn fusion_state_qubits(route: Option<&PreparedRoute>, template: &Circuit) -> usize {
     route.map_or(template.num_qubits, PreparedRoute::fusion_state_qubits)
+}
+
+fn fusion_profile(route: Option<&PreparedRoute>) -> FusionProfile {
+    route.map_or(FusionProfile::Host, PreparedRoute::fusion_profile)
 }
 
 /// The `Simulate` request a binding falls back to when no route was settled.

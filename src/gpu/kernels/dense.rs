@@ -14,8 +14,9 @@ use num_complex::Complex64;
 use crate::backend::statevector::kernels as cpu_k;
 use crate::error::{PrismError, Result};
 
+use super::super::tiles::{Geometry, TileOp};
 use super::super::{GpuContext, GpuState};
-use super::{check_pair, check_qubit, driver_err, linear_cfg, stream_and_fn};
+use super::{check_pair, check_qubit, driver_err, launch_limit_err, linear_cfg, stream_and_fn};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -144,6 +145,10 @@ pub(crate) fn kernel_source() -> String {
             &cpu_k::MAX_DIAG_BATCH_GROUPS.to_string(),
         )
         .replace("{{QFT_TILE_Q}}", &QFT_TILE_Q.to_string())
+        .replace("{{MIX_TILE_Q}}", &MIXED_TILE_Q.to_string())
+        .replace("{{MIX_BLOCK_LOG}}", &MIXED_BLOCK_LOG.to_string())
+        .replace("{{MIX_MAX_OPS}}", &MIXED_MAX_OPS.to_string())
+        .replace("{{MIX_MAX_COEFS}}", &MIXED_MAX_COEFS.to_string())
 }
 
 fn grid_for(count: u64) -> u32 {
@@ -590,7 +595,7 @@ pub(crate) fn launch_apply_mcu_phase(
 /// Kernel route for a 4x4 matrix in the `apply_fused_2q` basis, where `q0` is the high
 /// bit. Structural zeros and ones only, no tolerance.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Route2q {
+pub(crate) enum Route2q {
     /// `CX` with the high basis bit (`q0`) as control when `control_high`.
     Cx {
         control_high: bool,
@@ -606,7 +611,7 @@ enum Route2q {
     Dense,
 }
 
-fn route_2q(matrix: &[[Complex64; 4]; 4]) -> Route2q {
+pub(crate) fn route_2q(matrix: &[[Complex64; 4]; 4]) -> Route2q {
     let zero = Complex64::new(0.0, 0.0);
     let one = Complex64::new(1.0, 0.0);
     let mut src = [0u8; 4];
@@ -1759,6 +1764,148 @@ const MULTI_FUSED_TILE_MIN_GATES: usize = 3;
 
 /// Widest register the GPU statevector admits, from the `GpuState::new` bound.
 const MAX_GPU_QUBITS: usize = usize::BITS as usize - 4;
+
+/// Qubits one `apply_mixed_tile` block holds in shared memory: `2^11` amplitudes, 32 KB.
+const MIXED_TILE_Q: usize = 11;
+const MIXED_BLOCK_LOG: usize = 8;
+/// Ops and parameter doubles one `apply_mixed_tile` launch carries; with the qubit list
+/// they fill Pascal's 4 KB of kernel parameters.
+const MIXED_MAX_OPS: usize = 128;
+const MIXED_MAX_COEFS: usize = 440;
+
+/// Tiles of `apply_mixed_tile`: the `QFT_MIN_ROW_LOG` lowest qubits in every tile, so a
+/// gathered row fills whole sectors as in `qft_dif_pass`, and up to nine others.
+pub(crate) const MIXED_TILE_GEOMETRY: Geometry = Geometry {
+    anchor: (1 << QFT_MIN_ROW_LOG) - 1,
+    budget: (MIXED_TILE_Q - QFT_MIN_ROW_LOG) as u32,
+    max_ops: MIXED_MAX_OPS,
+    max_coefs: MIXED_MAX_COEFS,
+};
+
+/// One tile's ops as a by-value kernel parameter; mirrors `struct MixedOps`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MixedOpsArg {
+    c: [f64; MIXED_MAX_COEFS],
+    op: [u32; MIXED_MAX_OPS],
+    q: [u8; 16],
+    num_ops: i32,
+}
+
+// SAFETY: plain `repr(C)` arrays and an i32 with the layout the kernel declares.
+unsafe impl cudarc::driver::DeviceRepr for MixedOpsArg {}
+
+const MIX_MAT1: u32 = 0;
+const MIX_DIAG1: u32 = 1;
+const MIX_ANTI1: u32 = 2;
+const MIX_CX: u32 = 3;
+const MIX_SWAP: u32 = 4;
+const MIX_DIAG2: u32 = 5;
+const MIX_FORM_REAL: u32 = 1;
+const MIX_FORM_RX: u32 = 2;
+
+/// Apply `ops` in order as one `apply_mixed_tile` pass over the tile on `qubits`, which
+/// the lowest qubits outside it fill up to `MIXED_TILE_Q`.
+///
+/// The ops come from [`plan`](crate::gpu::tiles::plan) under [`MIXED_TILE_GEOMETRY`],
+/// so each touches only tile qubits and together they fit the launch budget.
+pub(crate) fn launch_apply_mixed_tile<'a: 'b, 'b>(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    qubits: u64,
+    ops: impl Iterator<Item = &'b TileOp<'a>>,
+) -> Result<()> {
+    let n = state.num_qubits();
+    if n < MIXED_TILE_Q {
+        return Err(launch_limit_err(
+            "apply_mixed_tile",
+            "num_qubits",
+            n,
+            "tile width",
+        ));
+    }
+    let mut tile = qubits;
+    for q in 0..n {
+        if tile.count_ones() as usize == MIXED_TILE_Q {
+            break;
+        }
+        tile |= 1 << q;
+    }
+    let mut arg = MixedOpsArg {
+        c: [0.0; MIXED_MAX_COEFS],
+        op: [0; MIXED_MAX_OPS],
+        q: [0; 16],
+        num_ops: 0,
+    };
+    let mut position = [0u32; 64];
+    for (slot, q) in (0..n).filter(|&q| tile >> q & 1 == 1).enumerate() {
+        arg.q[slot] = q as u8;
+        position[q] = slot as u32;
+    }
+    let one = Complex64::new(1.0, 0.0);
+    let mut coefs = 0usize;
+    for op in ops {
+        let at = coefs;
+        let mut put = |v: Complex64| {
+            arg.c[coefs] = v.re;
+            arg.c[coefs + 1] = v.im;
+            coefs += 2;
+        };
+        let (kind, a, b, flag) = match *op {
+            TileOp::Mat1 { q, m } => {
+                m.iter().flatten().copied().for_each(&mut put);
+                let form = if m.iter().flatten().all(|v| v.im == 0.0) {
+                    MIX_FORM_REAL
+                } else if [m[0][0], m[1][1]].iter().all(|v| v.im == 0.0)
+                    && [m[0][1], m[1][0]].iter().all(|v| v.re == 0.0)
+                {
+                    MIX_FORM_RX
+                } else {
+                    0
+                };
+                (MIX_MAT1, position[q], form, false)
+            }
+            TileOp::Diag1 { q, d } => {
+                d.iter().copied().for_each(&mut put);
+                (MIX_DIAG1, position[q], 0, d[0] == one)
+            }
+            TileOp::Anti1 { q, d } => {
+                d.iter().copied().for_each(&mut put);
+                (MIX_ANTI1, position[q], 0, d[0] == one && d[1] == one)
+            }
+            TileOp::Cx { control, target } => (MIX_CX, position[control], position[target], false),
+            TileOp::Swap { a, b } => (MIX_SWAP, position[a], position[b], false),
+            TileOp::Diag2 { a, b, d } => {
+                d.iter().copied().for_each(&mut put);
+                let flag = d[..3].iter().all(|&v| v == one);
+                (MIX_DIAG2, position[a], position[b], flag)
+            }
+            TileOp::Dense2q { .. } | TileOp::Gate { .. } => {
+                unreachable!("the planner keeps {op:?} out of tiles")
+            }
+        };
+        arg.op[arg.num_ops as usize] =
+            kind | a << 3 | b << 7 | u32::from(flag) << 11 | (at as u32) << 12;
+        arg.num_ops += 1;
+    }
+    let num_tiles = 1u32 << (n - MIXED_TILE_Q);
+    let (stream, func) = stream_and_fn(ctx, "apply_mixed_tile")?;
+    let cfg = linear_cfg(1 << MIXED_BLOCK_LOG, num_tiles);
+    let mut builder = stream.launch_builder(&func);
+    let buffer = state.buffer_mut().raw_mut();
+    builder.arg(buffer).arg(&arg);
+    // SAFETY: signature matches; num_tiles blocks of the 2^MIXED_TILE_Q amplitudes over
+    // MIXED_TILE_Q distinct qubits below n cover the state once, every op position names
+    // a tile qubit, and the op list rides in parameter space with num_ops entries filled.
+    unsafe {
+        builder
+            .launch(cfg)
+            .map_err(|e| driver_err("apply_mixed_tile", e))?;
+    }
+    ctx.device().count_launch(1);
+    ctx.device().count_tile();
+    Ok(())
+}
 
 /// Apply a non-diagonal `MultiFused` as a sequence of shared-memory tiled passes.
 ///

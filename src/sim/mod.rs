@@ -1433,10 +1433,11 @@ pub(crate) fn fuse_for_backend<'a>(
     backend: &dyn Backend,
     circuit: &'a Circuit,
 ) -> std::borrow::Cow<'a, Circuit> {
-    crate::circuit::fusion::fuse_circuit_for_width(
+    crate::circuit::fusion::fuse_circuit_for_profile(
         circuit,
         backend.supports_fused_gates(),
         backend.fusion_state_qubits(circuit.num_qubits),
+        backend.fusion_profile(circuit.num_qubits),
     )
 }
 
@@ -1777,6 +1778,7 @@ pub(crate) struct PreparedRoute {
     limits: ResolvedLimits,
     supports_fused: bool,
     fusion_state_qubits: usize,
+    fusion_profile: crate::circuit::fusion::FusionProfile,
     /// Backend held across points. `init` reuses its state buffer when the
     /// width matches, so a sweep pays one `2^n` allocation rather than one per
     /// point. Rebuilt when the seed changes, since the seed feeds its RNG.
@@ -1821,6 +1823,10 @@ impl PreparedRoute {
     /// here matches the one a direct run applies.
     pub(crate) fn fusion_state_qubits(&self) -> usize {
         self.fusion_state_qubits
+    }
+
+    pub(crate) fn fusion_profile(&self) -> crate::circuit::fusion::FusionProfile {
+        self.fusion_profile
     }
 
     /// Apply `circuit` verbatim, with no further fusion.
@@ -1959,6 +1965,7 @@ pub(crate) fn prepared_route(
     Some(PreparedRoute {
         supports_fused: probe.supports_fused_gates(),
         fusion_state_qubits: probe.fusion_state_qubits(template.num_qubits),
+        fusion_profile: probe.fusion_profile(template.num_qubits),
         plan,
         limits: *limits,
         held: None,

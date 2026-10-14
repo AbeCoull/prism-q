@@ -456,9 +456,11 @@ impl FusionPlan {
     pub(super) fn capture(
         template: &Circuit,
         state_qubits: usize,
+        profile: super::fusion::FusionProfile,
     ) -> (Circuit, Option<FusionPlan>) {
         let mut tracer = Tracer::tracking(template);
-        let fused = super::fusion::fuse_at_width(template, state_qubits, &mut tracer).into_owned();
+        let fused =
+            super::fusion::fuse_at_width(template, state_qubits, profile, &mut tracer).into_owned();
         if tracer.bailed || tracer.input.len() != fused.instructions.len() {
             return (fused, None);
         }

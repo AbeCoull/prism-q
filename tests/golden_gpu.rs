@@ -3208,3 +3208,210 @@ fn gpu_marginals_match_cpu_statevector() {
         );
     }
 }
+
+/// Device counters of one lowered run, read under `bench-internal`.
+struct LoweredCensus {
+    passes: u64,
+    drains: u64,
+    dense_2q: u64,
+    tiles: u64,
+}
+
+/// Run `circuit` fused under the device profile through `apply_instructions`, the
+/// lowered tile route, against the host statevector applying the circuit gate by gate.
+/// Returns the device counters of the run under `bench-internal`.
+fn compare_lowered(f: &Fixture, circuit: &prism_q::circuit::Circuit) -> Option<LoweredCensus> {
+    use prism_q::circuit::fusion::{FusionProfile, fuse_circuit_for_profile};
+    let n = circuit.num_qubits;
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    let fused = fuse_circuit_for_profile(circuit, true, n, gpu.fusion_profile(n));
+    if n >= 18 {
+        assert_eq!(gpu.fusion_profile(n), FusionProfile::Device);
+    }
+    let mut cpu = StatevectorBackend::new(42);
+    cpu.init(n, circuit.num_classical_bits).unwrap();
+    for inst in &circuit.instructions {
+        cpu.apply(inst).unwrap();
+    }
+    gpu.init(n, circuit.num_classical_bits).unwrap();
+    #[cfg(feature = "bench-internal")]
+    let before = f.ctx.pass_census();
+    gpu.apply_instructions(&fused.instructions).unwrap();
+    #[cfg(feature = "bench-internal")]
+    let census = {
+        let c = f.ctx.pass_census() - before;
+        Some(LoweredCensus {
+            passes: c.passes,
+            drains: c.drains,
+            dense_2q: c.dense_2q,
+            tiles: c.tiles,
+        })
+    };
+    #[cfg(not(feature = "bench-internal"))]
+    let census = None;
+    assert_eq!(cpu.classical_results(), gpu.classical_results());
+    let want = cpu.export_statevector().unwrap();
+    let got = gpu.export_statevector().unwrap();
+    for (i, (c, g)) in want.iter().zip(&got).enumerate() {
+        assert!(
+            (c - g).norm() < 1e-10,
+            "amplitude {i}: cpu={c:?}, gpu={g:?}"
+        );
+    }
+    census
+}
+
+/// A gate on each of the two highest qubits and across them, so a tile has to gather
+/// the top of the register.
+fn top_qubit_gates(circuit: &mut prism_q::circuit::Circuit) {
+    let n = circuit.num_qubits;
+    circuit.add_gate(Gate::H, &[n - 1]);
+    circuit.add_gate(Gate::T, &[n - 2]);
+    circuit.add_gate(Gate::Cx, &[n - 1, 0]);
+    circuit.add_gate(Gate::Swap, &[n - 2, 1]);
+    circuit.add_gate(Gate::Rzz(0.37), &[n - 1, n - 2]);
+    circuit.add_gate(Gate::Ry(0.81), &[n - 2]);
+}
+
+#[test]
+fn mixed_tiles_match_cpu_on_hea_qaoa_and_random_shapes() {
+    let Some(f) = Fixture::try_new() else { return };
+    for n in [16, 18, 21] {
+        let shapes = [
+            prism_q::circuits::hardware_efficient_ansatz(n, 4, common::SEED),
+            prism_q::circuits::qaoa_circuit(n, 3, common::SEED),
+            prism_q::circuits::random_circuit(n, 8, common::SEED),
+        ];
+        for mut circuit in shapes {
+            top_qubit_gates(&mut circuit);
+            let gates = circuit.instructions.len() as u64;
+            let census = compare_lowered(&f, &circuit);
+            if let Some(census) = census {
+                if n >= 18 {
+                    assert!(census.tiles > 0, "n={n}: no tile pass ran");
+                    assert!(
+                        census.passes * 4 <= gates,
+                        "n={n}: {} passes for {gates} gates",
+                        census.passes
+                    );
+                } else {
+                    assert_eq!(census.tiles, 0, "n={n}: tiles below the lowering floor");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_tiles_leave_dense_qv_pairs_on_their_own_kernel() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 18;
+    let depth = 6;
+    let mut circuit = prism_q::circuits::quantum_volume_circuit(n, depth, common::SEED);
+    top_qubit_gates(&mut circuit);
+    let fused = prism_q::circuit::fusion::fuse_circuit_for_profile(
+        &circuit,
+        true,
+        n,
+        prism_q::circuit::fusion::FusionProfile::Device,
+    );
+    let dense = fused
+        .instructions
+        .iter()
+        .filter(|inst| match inst {
+            Instruction::Gate {
+                gate: Gate::Fused2q(m),
+                ..
+            } => m.iter().flatten().filter(|v| v.norm() != 0.0).count() > 4,
+            _ => false,
+        })
+        .count() as u64;
+    assert!(
+        dense * 4 >= (depth * n / 2) as u64 * 3,
+        "{dense} dense pairs"
+    );
+    if let Some(census) = compare_lowered(&f, &circuit) {
+        assert_eq!(census.dense_2q, dense);
+        assert!(census.tiles > 0);
+    }
+}
+
+#[test]
+fn mixed_tiles_split_at_measurements_and_match_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 19;
+    let mut circuit = prism_q::circuits::hardware_efficient_ansatz(n, 2, common::SEED);
+    circuit.num_classical_bits = 2;
+    circuit.add_measure(n - 1, 0);
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Rx(0.2 + 0.05 * q as f64), &[q]);
+        circuit.add_gate(Gate::Cz, &[q, q + 1]);
+    }
+    circuit.add_measure(3, 1);
+    circuit.add_gate(Gate::H, &[n - 1]);
+    circuit.add_gate(Gate::Cx, &[n - 1, 2]);
+    if let Some(census) = compare_lowered(&f, &circuit) {
+        assert!(census.tiles >= 2);
+        assert!(census.drains >= 2);
+    }
+}
+
+#[test]
+fn prepared_device_runs_replay_the_lowered_stream() {
+    use prism_q::circuit::{Parameters, SaveSpec, SavedValue};
+    use prism_q::{BackendKind, Placement, PreparedCircuit, simulate};
+    let Some(f) = Fixture::try_new() else { return };
+    let kind = BackendKind::StatevectorGpu {
+        context: f.ctx.clone(),
+    };
+    for (label, mut template) in [
+        (
+            "hea/18",
+            prism_q::circuits::hardware_efficient_ansatz(18, 3, common::SEED),
+        ),
+        (
+            "qaoa/19",
+            prism_q::circuits::qaoa_circuit(19, 2, common::SEED),
+        ),
+    ] {
+        let params = Parameters::all_rotations(&template);
+        template.add_save(SaveSpec::StateVector, "psi");
+        let mut prepared =
+            PreparedCircuit::with_backend(template.clone(), params.clone(), kind.clone()).unwrap();
+        for point in 0..3 {
+            let values: Vec<f64> = (0..params.num_slots())
+                .map(|k| match point {
+                    2 => 0.0,
+                    _ => 0.3 + 0.71 * (k + 5 * point) as f64,
+                })
+                .collect();
+            let what = format!("{label} point {point}");
+            let bound = params.bind(&template, &values).unwrap();
+            let host = simulate(&bound)
+                .backend(BackendKind::Statevector)
+                .seed(common::SEED)
+                .run()
+                .unwrap();
+            #[cfg(feature = "bench-internal")]
+            let before = f.ctx.pass_census();
+            let device = prepared.run(&values, common::SEED).unwrap();
+            #[cfg(feature = "bench-internal")]
+            assert!(
+                (f.ctx.pass_census() - before).tiles > 0,
+                "{what}: no tile pass ran"
+            );
+            assert_eq!(device.metadata.placement, Placement::Device, "{what}");
+            let (SavedValue::StateVector(want), SavedValue::StateVector(got)) =
+                (&host.saves[0].value, &device.saves[0].value)
+            else {
+                panic!("{what}: expected statevector saves");
+            };
+            for (i, (c, g)) in want.iter().zip(got).enumerate() {
+                assert!(
+                    (c - g).norm() < 1e-10,
+                    "{what}: amplitude {i} cpu={c:?} gpu={g:?}"
+                );
+            }
+        }
+    }
+}

@@ -27,7 +27,7 @@ use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
-use prism_q::circuit::fusion::fuse_circuit_for_width;
+use prism_q::circuit::fusion::fuse_circuit_for_profile;
 use prism_q::circuit::{
     Circuit, Instruction, expand_pauli_rotations, expand_qft_blocks, recognize_qft_blocks, smallvec,
 };
@@ -291,10 +291,11 @@ fn fuse_for(backend: &StatevectorBackend, circuit: &Circuit) -> Circuit {
     } else {
         expand_pauli_rotations(&blocks)
     };
-    fuse_circuit_for_width(
+    fuse_circuit_for_profile(
         &rotations,
         backend.supports_fused_gates(),
         backend.fusion_state_qubits(circuit.num_qubits),
+        backend.fusion_profile(circuit.num_qubits),
     )
     .into_owned()
 }

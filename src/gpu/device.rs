@@ -37,6 +37,7 @@ struct PassCounters {
     passes: AtomicU64,
     drains: AtomicU64,
     dense_2q: AtomicU64,
+    tiles: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -183,6 +184,14 @@ impl GpuDevice {
         self.census.dense_2q.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record one launch of the mixed tile kernel, on top of its `count_launch`.
+    /// Compiles to nothing without `bench-internal`.
+    #[inline(always)]
+    pub(crate) fn count_tile(&self) {
+        #[cfg(feature = "bench-internal")]
+        self.census.tiles.fetch_add(1, Ordering::Relaxed);
+    }
+
     #[cfg(feature = "bench-internal")]
     pub(crate) fn census(&self) -> crate::gpu::GpuPassCensus {
         crate::gpu::GpuPassCensus {
@@ -190,6 +199,7 @@ impl GpuDevice {
             passes: self.census.passes.load(Ordering::Relaxed),
             drains: self.census.drains.load(Ordering::Relaxed),
             dense_2q: self.census.dense_2q.load(Ordering::Relaxed),
+            tiles: self.census.tiles.load(Ordering::Relaxed),
         }
     }
 

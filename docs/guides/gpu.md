@@ -98,6 +98,7 @@ NVRTC from PyPI. See [Python Bindings](python.md#gpu-backends).
 | `mod.rs` | `GpuContext`, `GpuState` public entry points |
 | `device.rs` | `GpuDevice`: cudarc wrapper, compiles the kernel image at device construction |
 | `memory.rs` | `GpuBuffer`: device `Complex64` storage |
+| `tiles.rs` | Lowering of a fused stream to mixed tile ops and the tile planner |
 | `kernels/mod.rs` | `KERNEL_NAMES`, `LauncherScratch`, composed `kernel_source()` concatenating dense, stabilizer, BTS and density |
 | `kernels/dense.rs` | Rust launchers for every `Gate` variant; CUDA C source in `kernels/dense.cu` |
 | `kernels/stabilizer.rs` | Launchers for tableau init, 11 Clifford gates, `rowmul_words`; source in `kernels/stabilizer.cu` |
@@ -122,6 +123,18 @@ falls back to per gate launches. `Multi2q` launches once per sub-gate. A sub-gat
 `Fused2q` whose matrix is exactly a CX, swap, CZ or controlled phase runs on that gate's
 kernel, and one with a single nonzero per row (a permutation with phases, or a diagonal)
 on `apply_monomial_2q`; only the rest pay the dense 4x4 multiply.
+
+From 18 qubits the statevector fuses for the device (`FusionProfile::Device`, see
+[Fusion Pipeline](../architecture/fusion.md#device-profile)) and `apply_instructions`
+lowers the stream to tiles. One `apply_mixed_tile` block gathers the `2^11` amplitudes of
+11 qubits into 32 KB of shared memory, the two lowest qubits plus up to nine the planner
+picks, applies every op the tile holds, and writes them back: one pass for a run of 1q
+matrices, diagonals, CX, swap, CZ, controlled phases and `Rzz`. A real 1q matrix and
+one shaped like `Rx` take half the multiplies of a general one. Dense 4x4 blocks, `Mcu`,
+`QftBlock` and the rest keep their kernels. On a GTX 1080 Ti a five-layer hardware
+efficient ansatz at 24 qubits drops from 115 dense passes to 7 tile passes and a random
+depth-10 circuit from 73 passes to 7. The tiles are FP64 bound on that card rather than
+memory bound, so a dense 1q gate still costs about half a sweep.
 
 The CUDA C source lives in `.cu` files beside the Rust launchers and reaches
 `KERNEL_SOURCE_TEMPLATE` through `include_str!`. `kernels/dense.cu` carries placeholders

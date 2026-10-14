@@ -12,7 +12,10 @@ flowchart TD
     IN[Input Circuit] --> PR["fuse_region_bodies (always): each guarded body through this same pipeline"]
     PR --> P0["cancel_self_inverse_pairs (always)"]
     P0 --> P0r["fuse_rzz (always): CX&middot;Rz&middot;CX to Rzz"]
-    P0r --> P0b["fuse_batch_rzz (>=16q): N&times;Rzz to BatchRzz"]
+    P0r --> D{"FusionProfile::Device?"}
+    D -- yes --> PD["1q fusion and reorder (>=10q), same-pair 2q runs (>=12q)"]
+    PD --> OUT
+    D -- no --> P0b["fuse_batch_rzz (>=16q): N&times;Rzz to BatchRzz"]
     P0b --> G{"qubits >= MIN_QUBITS_FOR_FUSION (10)?"}
     G -- no --> OUT[Output Circuit]
     G -- yes --> P1["fuse_single_qubit_gates (>=10q)"]
@@ -69,6 +72,30 @@ schedule reads only the stream and the tile geometry, which comes from the hardw
 never from the Rayon pool, so results stay bitwise equal across thread counts. The
 planner records provenance like the passes it replaces, so a `PreparedCircuit` replays
 its stages. The density matrix keeps the batching passes.
+
+## Device profile
+
+`Backend::fusion_profile` picks the pipeline. The statevector picks
+`FusionProfile::Device` when a GPU is attached and the state reaches
+`gpu::tiles::MIN_QUBITS` (18); every other backend, and the device below that width,
+keeps the host pipeline above. The device profile stops after the 1q passes and fuses
+2q gates only in runs of at least two on one pair with a moving gate among them (quantum
+volume blocks), where the run's leading 1q gates fold in as well. A lone CX keeps its
+neighbours as 1q gates. Neither the batching passes nor the stage planner run.
+
+The device then lowers each run of gates between measurements, resets, conditionals,
+regions and saves itself (`src/gpu/tiles.rs`): 1q matrices, diagonals and
+antidiagonals, CX, swap and two-qubit diagonals become ops of `apply_mixed_tile`, and a
+planner built like the stage planner schedules them into shared-memory tiles of 11
+qubits, each one pass. A dense 4x4 and every other gate launch on their own kernels.
+The stage planner's tiles would not serve the device: its `Multi2q` folds every 1q gate
+into a dense 4x4 entry, which the device launches one entry at a time, so a
+five-layer ansatz at 24 qubits ran 115 dense passes from either stream. A dense 4x4
+also stays out of the mixed tile, where it ran 7% slower than on its own kernel on a
+GTX 1080 Ti, whose FP64 rate makes the 4x4 compute bound.
+
+The lowering runs after binding and reads only the bound stream, so a `PreparedCircuit`
+captures and replays its plan under the profile of the backend it holds.
 
 ## QFT recognition
 

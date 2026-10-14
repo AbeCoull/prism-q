@@ -10,7 +10,7 @@ use std::borrow::Cow;
 
 use prism_q::StatevectorBackend;
 use prism_q::backend::Backend;
-use prism_q::circuit::fusion::fuse_circuit_for_width;
+use prism_q::circuit::fusion::fuse_circuit_for_profile;
 use prism_q::circuit::{Circuit, expand_pauli_rotations, expand_qft_blocks, recognize_qft_blocks};
 use prism_q::circuits;
 use prism_q::gpu::GpuContext;
@@ -40,10 +40,11 @@ fn fuse_for(backend: &StatevectorBackend, circuit: &Circuit) -> Circuit {
     } else {
         expand_pauli_rotations(&blocks)
     };
-    fuse_circuit_for_width(
+    fuse_circuit_for_profile(
         &rotations,
         backend.supports_fused_gates(),
         backend.fusion_state_qubits(circuit.num_qubits),
+        backend.fusion_profile(circuit.num_qubits),
     )
     .into_owned()
 }
@@ -51,8 +52,8 @@ fn fuse_for(backend: &StatevectorBackend, circuit: &Circuit) -> Circuit {
 fn main() {
     let ctx = GpuContext::new(0).expect("no usable GPU");
     println!(
-        "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>8}",
-        "circuit", "n", "gates", "fused", "launches", "passes", "drains", "dense2q"
+        "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>8} {:>6}",
+        "circuit", "n", "gates", "fused", "launches", "passes", "drains", "dense2q", "tiles"
     );
     for name in CIRCUITS {
         for n in SIZES {
@@ -69,7 +70,7 @@ fn main() {
             ctx.synchronize().unwrap();
             let census = ctx.pass_census() - before;
             println!(
-                "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>8}",
+                "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>8} {:>6}",
                 name,
                 n,
                 circuit.instructions.len(),
@@ -77,7 +78,8 @@ fn main() {
                 census.launches,
                 census.passes,
                 census.drains,
-                census.dense_2q
+                census.dense_2q,
+                census.tiles
             );
         }
     }

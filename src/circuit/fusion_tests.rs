@@ -1634,3 +1634,82 @@ fn diagonal_entries_reproduce_each_batchable_gate() {
         }
     }
 }
+
+fn device_fuse(circuit: &Circuit) -> Circuit {
+    fuse_circuit_for_profile(circuit, true, circuit.num_qubits, FusionProfile::Device).into_owned()
+}
+
+fn gate_names(circuit: &Circuit) -> Vec<&'static str> {
+    circuit
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Gate { gate, .. } => Some(gate.name()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn device_profile_keeps_lone_cx_bare_and_batches_nothing() {
+    let circuit = crate::circuits::hardware_efficient_ansatz(18, 3, 42);
+    let fused = device_fuse(&circuit);
+    let names = gate_names(&fused);
+    assert_eq!(names.iter().filter(|&&n| n == "cx").count(), 3 * 17);
+    assert!(
+        names.iter().all(|&n| n == "cx" || n == "fused"),
+        "unexpected gates {names:?}"
+    );
+    let want = final_state(&circuit);
+    for (g, w) in final_state(&fused).iter().zip(&want) {
+        assert!((g - w).norm() < 1e-10);
+    }
+}
+
+#[test]
+fn device_profile_fuses_same_pair_runs_with_their_leading_1q_gates() {
+    let n = 14;
+    let depth = 3;
+    let circuit = crate::circuits::quantum_volume_circuit(n, depth, 42);
+    let fused = device_fuse(&circuit);
+    let names = gate_names(&fused);
+    assert!(
+        names.iter().all(|&n| n == "fused_2q"),
+        "every quantum volume gate folds into its pair block: {names:?}"
+    );
+    assert!(names.len() <= depth * n / 2);
+    let want = final_state(&circuit);
+    for (g, w) in final_state(&fused).iter().zip(&want) {
+        assert!((g - w).norm() < 1e-10);
+    }
+}
+
+#[test]
+fn device_profile_plan_replays_like_independent_fusion() {
+    use crate::circuit::Parameters;
+    use crate::circuit::plan::FusionPlan;
+    for template in [
+        crate::circuits::hardware_efficient_ansatz(18, 2, 42),
+        crate::circuits::qaoa_circuit(18, 2, 42),
+        crate::circuits::quantum_volume_circuit(14, 3, 42),
+    ] {
+        let n = template.num_qubits;
+        let params = Parameters::all_rotations(&template);
+        let (skeleton, plan) = FusionPlan::capture(&template, n, FusionProfile::Device);
+        let plan = plan.expect("the device passes record a plan");
+        for point in 0..3 {
+            let values: Vec<f64> = (0..params.num_slots())
+                .map(|k| 0.2 + 0.37 * (k + 7 * point) as f64)
+                .collect();
+            let bound = params.bind(&template, &values).unwrap();
+            let mut replayed = skeleton.clone();
+            assert!(plan.replay(&bound, &mut replayed));
+            let expected = device_fuse(&bound);
+            assert_eq!(gate_names(&replayed), gate_names(&expected));
+            let want = final_state(&expected);
+            for (g, w) in final_state(&replayed).iter().zip(&want) {
+                assert!((g - w).norm() < 1e-10);
+            }
+        }
+    }
+}

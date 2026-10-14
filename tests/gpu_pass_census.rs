@@ -60,6 +60,7 @@ fn each_gate_kernel_is_one_launch_and_one_pass() {
             passes: gates,
             drains: 0,
             dense_2q: 0,
+            tiles: 0,
         }
     );
 }
@@ -86,6 +87,7 @@ fn staged_tables_and_measurement_readbacks_drain_the_stream() {
             passes: 4,
             drains: 2,
             dense_2q: 0,
+            tiles: 0,
         }
     );
 }
@@ -108,6 +110,7 @@ fn recognized_qft_runs_as_tiled_passes_with_one_drain() {
             passes: 3,
             drains: 1,
             dense_2q: 0,
+            tiles: 0,
         }
     );
 }

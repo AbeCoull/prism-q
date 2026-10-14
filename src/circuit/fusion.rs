@@ -19,6 +19,7 @@ use super::fusion_rzz::{fuse_batch_rzz, fuse_rzz};
 use super::fusion_stage::{plan_stages, stages_at};
 
 use super::plan::{Place, Tracer};
+use crate::sim::unified_pauli::PauliAxis;
 
 // Under miri the fusion floors drop to the reduced parallel threshold (see
 // `PARALLEL_THRESHOLD_QUBITS` in `backend/mod.rs`), and the `prism_lowered_thresholds`
@@ -598,6 +599,16 @@ fn has_multi_1q_run(circuit: &Circuit) -> bool {
 /// folds back into the last `Fused2q` on its qubit instead, unless that would turn a
 /// diagonal block dense. Returns the input when nothing is absorbed.
 pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
+    fuse_2q_gates_where(circuit, t, |_| true)
+}
+
+/// [`fuse_2q_gates`] absorbing only into the 2q gates at the indices `absorbs` accepts;
+/// a 1q run pending before any other 2q gate is emitted in front of it.
+fn fuse_2q_gates_where<'a>(
+    circuit: Cow<'a, Circuit>,
+    t: &mut Tracer,
+    absorbs: impl Fn(usize) -> bool,
+) -> Cow<'a, Circuit> {
     let identity_2x2 = Gate::Id.matrix_2x2();
     let n = circuit.num_qubits;
     let mut pending_1q: Vec<Option<[[Complex64; 2]; 2]>> = vec![None; n];
@@ -618,7 +629,7 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
             Instruction::Gate {
                 gate: gate @ (Gate::Cx | Gate::Cz | Gate::Fused2q(_) | Gate::PauliRot(_)),
                 targets,
-            } if gate.num_qubits() == 2 => {
+            } if gate.num_qubits() == 2 && absorbs(i) => {
                 let q0 = targets[0];
                 let q1 = targets[1];
                 let pre0 = pending_1q[q0].take();
@@ -881,6 +892,59 @@ fn flush_pair_run(
             t.keep(src);
         }
     }
+}
+
+/// Per instruction, whether it is a 2q gate in a contiguous run on one pair that holds
+/// at least two 2q gates, one of them not diagonal, with only 1q gates on the pair between
+/// them: the runs `fuse_same_pair_2q_blocks` fuses. Reads gate kinds only, never a
+/// matrix, so a binding cannot change the answer.
+fn same_pair_run_members(circuit: &Circuit) -> Vec<bool> {
+    let mut members = vec![false; circuit.instructions.len()];
+    let mut run: Option<(usize, usize, SmallVec<[usize; 4]>, bool)> = None;
+    let mut flush = |run: &mut Option<(usize, usize, SmallVec<[usize; 4]>, bool)>| {
+        if let Some((_, _, gates, moving)) = run.take()
+            && gates.len() >= 2
+            && moving
+        {
+            for i in gates {
+                members[i] = true;
+            }
+        }
+    };
+    for (i, inst) in circuit.instructions.iter().enumerate() {
+        match inst {
+            Instruction::Gate {
+                gate: gate @ (Gate::Cx | Gate::Cz | Gate::Fused2q(_) | Gate::PauliRot(_)),
+                targets,
+            } if gate.num_qubits() == 2 => {
+                let moving = match gate {
+                    Gate::Cz => false,
+                    Gate::PauliRot(data) => data.axes().iter().any(|a| !matches!(a, PauliAxis::Z)),
+                    _ => true,
+                };
+                match &mut run {
+                    Some((q0, q1, gates, run_moving))
+                        if same_unordered_pair(*q0, *q1, targets[0], targets[1]) =>
+                    {
+                        gates.push(i);
+                        *run_moving |= moving;
+                    }
+                    _ => {
+                        flush(&mut run);
+                        run = Some((targets[0], targets[1], smallvec![i], moving));
+                    }
+                }
+            }
+            Instruction::Gate { gate, targets }
+                if gate.num_qubits() == 1
+                    && run
+                        .as_ref()
+                        .is_some_and(|(q0, q1, ..)| targets[0] == *q0 || targets[0] == *q1) => {}
+            _ => flush(&mut run),
+        }
+    }
+    flush(&mut run);
+    members
 }
 
 /// Fuse contiguous same-pair `Fused2q` runs into one larger `Fused2q`.
@@ -1529,7 +1593,11 @@ where
 /// run unfused. Nothing moves across the boundary, and the recursive call handles nesting.
 /// The tracer is untouched: regions carry no provenance, so the input mapping still
 /// describes the output.
-fn fuse_region_bodies<'a>(circuit: &'a Circuit, n: usize) -> Cow<'a, Circuit> {
+fn fuse_region_bodies<'a>(
+    circuit: &'a Circuit,
+    n: usize,
+    profile: FusionProfile,
+) -> Cow<'a, Circuit> {
     let insts = &circuit.instructions;
     let mut out: Option<Vec<Instruction>> = None;
 
@@ -1537,7 +1605,7 @@ fn fuse_region_bodies<'a>(circuit: &'a Circuit, n: usize) -> Cow<'a, Circuit> {
         let fused_region = match inst {
             Instruction::Region(region) => {
                 let body = circuit.with_instructions(region.body().to_vec());
-                match fuse_at_width(&body, n, &mut Tracer::off()) {
+                match fuse_at_width(&body, n, profile, &mut Tracer::off()) {
                     Cow::Owned(fused) => Some(Instruction::Region(Box::new(GuardedRegion::new(
                         region.condition().clone(),
                         fused.instructions,
@@ -1583,21 +1651,47 @@ pub fn fuse_circuit_for_width<'a>(
     supports_fused: bool,
     state_qubits: usize,
 ) -> Cow<'a, Circuit> {
+    fuse_circuit_for_profile(circuit, supports_fused, state_qubits, FusionProfile::Host)
+}
+
+/// Which pass pipeline fusion runs, chosen per backend by
+/// [`Backend::fusion_profile`](crate::backend::Backend::fusion_profile).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FusionProfile {
+    /// The full pipeline, batching into the tiled and diagonal gate families.
+    #[default]
+    Host,
+    /// Cancellation, `Rzz` recognition, 1q fusion, and 2q fusion of same-pair runs only,
+    /// leaving every other gate for a device lowering that schedules its own tiles.
+    Device,
+}
+
+/// [`fuse_circuit_for_width`] under `profile`.
+pub fn fuse_circuit_for_profile<'a>(
+    circuit: &'a Circuit,
+    supports_fused: bool,
+    state_qubits: usize,
+    profile: FusionProfile,
+) -> Cow<'a, Circuit> {
     if !supports_fused {
         return Cow::Borrowed(circuit);
     }
-    fuse_at_width(circuit, state_qubits, &mut Tracer::off())
+    fuse_at_width(circuit, state_qubits, profile, &mut Tracer::off())
 }
 
 /// The pass pipeline with every floor gated at `n` qubits, recording provenance into `t`.
 pub(super) fn fuse_at_width<'a>(
     circuit: &'a Circuit,
     n: usize,
+    profile: FusionProfile,
     t: &mut Tracer,
 ) -> Cow<'a, Circuit> {
-    let pass_r = fuse_region_bodies(circuit, n);
+    let pass_r = fuse_region_bodies(circuit, n, profile);
     let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
     let pass0r = apply_pass(pass0, t, fuse_rzz);
+    if profile == FusionProfile::Device {
+        return device_passes(pass0r, n, t);
+    }
     let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
         apply_pass(c, t, fuse_batch_rzz)
     });
@@ -1619,6 +1713,26 @@ pub(super) fn fuse_at_width<'a>(
         return plan_stages(pass_2qb, t);
     }
     batch_passes(pass_2qb, n, t)
+}
+
+/// The [`FusionProfile::Device`] passes after `fuse_rzz`. A 1q gate joins a 2q gate only
+/// inside a same-pair run that fuses to a dense 4x4 anyway, so a lone CX stays a
+/// permutation and its neighbours stay 1q gates the device can tile.
+fn device_passes<'a>(stream: Cow<'a, Circuit>, n: usize, t: &mut Tracer) -> Cow<'a, Circuit> {
+    if n < MIN_QUBITS_FOR_FUSION {
+        return stream;
+    }
+    let pass1 = apply_pass(stream, t, fuse_single_qubit_gates);
+    let pass1r = reorder_1q_gates(pass1, t);
+    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
+    let pass1f = apply_pass(pass1c, t, fuse_single_qubit_gates);
+    let pass_2q = gated(pass1f, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
+        let runs = same_pair_run_members(&c);
+        fuse_2q_gates_where(c, t, |i| runs[i])
+    });
+    gated(pass_2q, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
+        fuse_same_pair_2q_blocks(c, t)
+    })
 }
 
 /// The batching passes that group a fused stream into tiled and diagonal batches, each
@@ -1686,7 +1800,7 @@ pub(crate) fn fuse_staged(
 #[cfg(any(test, feature = "bench-internal"))]
 pub(crate) fn fuse_before_batching(circuit: &Circuit, n: usize) -> Cow<'_, Circuit> {
     let t = &mut Tracer::off();
-    let pass_r = fuse_region_bodies(circuit, n);
+    let pass_r = fuse_region_bodies(circuit, n, FusionProfile::Host);
     let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
     let pass0r = apply_pass(pass0, t, fuse_rzz);
     let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {

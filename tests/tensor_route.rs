@@ -141,12 +141,19 @@ fn a_measured_circuit_keeps_its_marginals_off_the_tensor_path() {
 fn above_the_cap_a_bond_heavy_chain_takes_the_tensor_path() {
     let circuit = su4_brickwork(64, 6);
     let observables = [vec![PauliTerm::z(32)], vec![PauliTerm::z(5)]];
+    let plan = simulate(&circuit)
+        .require_exact()
+        .plan(prism_q::Query::Expectation(&observables))
+        .unwrap();
+    assert!(plan.would_fail.is_none());
     let auto = simulate(&circuit)
+        .require_exact()
         .backend(BackendKind::Auto)
         .seed(42)
         .expectation_values_reported(&observables)
         .unwrap();
     assert_eq!(auto.metadata.backend, ResolvedBackend::TensorNetwork);
+    assert_eq!(plan.rule, auto.metadata.reason);
 
     let mps = simulate(&circuit)
         .backend(BackendKind::Mps { max_bond_dim: 256 })
@@ -161,12 +168,19 @@ fn above_the_cap_a_bond_heavy_chain_takes_the_tensor_path() {
 #[test]
 fn above_the_cap_marginals_of_a_bond_heavy_chain_take_the_tensor_path() {
     let circuit = su4_brickwork(64, 6);
+    let plan = simulate(&circuit)
+        .require_exact()
+        .plan(prism_q::Query::Marginals)
+        .unwrap();
+    assert!(plan.would_fail.is_none());
     let auto = simulate(&circuit)
+        .require_exact()
         .backend(BackendKind::Auto)
         .seed(42)
         .marginals()
         .unwrap();
     assert_eq!(auto.metadata.backend, ResolvedBackend::TensorNetwork);
+    assert_eq!(plan.rule, auto.metadata.reason);
     assert_eq!(auto.marginals.len(), 64);
 }
 

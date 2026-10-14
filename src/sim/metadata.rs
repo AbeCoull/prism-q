@@ -129,6 +129,7 @@ impl BondReport {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RunMetadata {
+    pub reason: super::RouteRule,
     pub backend: ResolvedBackend,
     /// Which sampler ran, when `backend` is a label several share. `None`
     /// when the backend is the whole answer, which is every backend other than
@@ -154,6 +155,7 @@ impl RunMetadata {
     ) -> Self {
         Self {
             backend,
+            reason: super::RouteRule::Default,
             engine: None,
             exactness,
             placement,
@@ -174,6 +176,11 @@ impl RunMetadata {
             },
             Placement::Host,
         )
+    }
+
+    pub(crate) fn with_reason(mut self, reason: super::RouteRule) -> Self {
+        self.reason = reason;
+        self
     }
 
     pub(crate) fn with_shots(mut self, shots: usize) -> Self {

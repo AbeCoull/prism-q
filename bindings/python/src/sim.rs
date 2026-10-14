@@ -150,6 +150,18 @@ impl PySimulation {
         Ok(slf)
     }
 
+    /// Inspect a terminal without consuming the request or executing its circuit.
+    fn plan(
+        &self,
+        py: Python<'_>,
+        query: &crate::plan::PyQuery,
+    ) -> PyPrismResult<crate::plan::PyPlan> {
+        let owned_noise = self.owned_noise(py);
+        Ok(crate::plan::PyPlan(py.detach(|| {
+            self.core(owned_noise.as_ref()).plan(query.as_query())
+        })?))
+    }
+
     /// Run once and return classical bits plus the probability distribution.
     fn run(&self, py: Python<'_>) -> PyPrismResult<PyRunOutcome> {
         let owned_noise = self.owned_noise(py);
@@ -541,7 +553,7 @@ impl Hamiltonian<'_> {
 
     /// Terms for the gradient terminals, which take a term list as given rather
     /// than merged into canonical form.
-    fn terms(&self) -> PyPrismResult<Cow<'_, WeightedStrings>> {
+    pub(crate) fn terms(&self) -> PyPrismResult<Cow<'_, WeightedStrings>> {
         match self {
             Self::Held(held) => Ok(Cow::Borrowed(held.get().0.terms())),
             Self::Terms(terms) => Ok(Cow::Owned(parse_terms(terms)?)),
@@ -555,7 +567,7 @@ impl Hamiltonian<'_> {
 /// takes, and every such argument accepts one in its place. The
 /// qubit-wise-commuting grouping is computed on first use and kept.
 #[pyclass(name = "PauliObservable", module = "prism_q", frozen)]
-pub struct PyPauliObservable(PauliObservable);
+pub struct PyPauliObservable(pub(crate) PauliObservable);
 
 #[pymethods]
 impl PyPauliObservable {
@@ -733,6 +745,11 @@ impl PyRunMetadata {
 
 #[pymethods]
 impl PyRunMetadata {
+    #[getter]
+    fn reason(&self) -> String {
+        crate::plan::rule_name(self.inner.reason)
+    }
+
     /// Engine name after automatic dispatch, for example `"Mps"`.
     #[getter]
     fn backend(&self) -> String {

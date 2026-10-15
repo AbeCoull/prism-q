@@ -122,7 +122,10 @@ each applying its sub-gates in shared memory. A pass with fewer than three sub-g
 falls back to per gate launches. `Multi2q` launches once per sub-gate. A sub-gate or
 `Fused2q` whose matrix is exactly a CX, swap, CZ or controlled phase runs on that gate's
 kernel, and one with a single nonzero per row (a permutation with phases, or a diagonal)
-on `apply_monomial_2q`; only the rest pay the dense 4x4 multiply.
+on `apply_monomial_2q`; only the rest pay the dense 4x4 multiply. That multiply takes
+three real multiply-adds per complex product (the Gauss form), so on a card with reduced
+FP64 rate such as the GTX 1080 Ti it costs about one sweep of the state instead of one
+and a half.
 
 From 18 qubits the statevector fuses for the device (`FusionProfile::Device`, see
 [Fusion Pipeline](../architecture/fusion.md#device-profile)) and `apply_instructions`

@@ -3280,6 +3280,7 @@ fn mixed_tiles_match_cpu_on_hea_qaoa_and_random_shapes() {
         let shapes = [
             prism_q::circuits::hardware_efficient_ansatz(n, 4, common::SEED),
             prism_q::circuits::qaoa_circuit(n, 3, common::SEED),
+            prism_q::circuits::diagonal_mixed_circuit(n, 6, common::SEED),
             prism_q::circuits::random_circuit(n, 8, common::SEED),
         ];
         for mut circuit in shapes {
@@ -3298,6 +3299,56 @@ fn mixed_tiles_match_cpu_on_hea_qaoa_and_random_shapes() {
                     assert_eq!(census.tiles, 0, "n={n}: tiles below the lowering floor");
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn mixed_tiles_preserve_separated_diagonal_runs() {
+    let Some(f) = Fixture::try_new() else { return };
+    for n in [18, 21] {
+        let mut circuit = prism_q::circuit::Circuit::new(n, 0);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for run in 0..4 {
+            for k in 0..6 {
+                let (a, b) = if k % 2 == 0 { (0, n - 1) } else { (n - 1, 0) };
+                let angle = 0.17 * (1 + run * 6 + k) as f64;
+                circuit.add_gate(Gate::Rz(-angle), &[a]);
+                circuit.add_gate(Gate::P(angle), &[b]);
+                circuit.add_gate(Gate::Rzz(angle), &[a, b]);
+                circuit.add_gate(Gate::cphase(-angle), &[b, a]);
+                let mut diagonal = [[Complex64::new(0.0, 0.0); 4]; 4];
+                for (row, values) in diagonal.iter_mut().enumerate() {
+                    values[row] = Complex64::from_polar(1.0, angle * (row + 1) as f64);
+                }
+                circuit.add_gate(Gate::Fused2q(Box::new(diagonal)), &[a, b]);
+            }
+            circuit.add_gate(Gate::H, &[n - 1]);
+            circuit.add_gate(Gate::Y, &[0]);
+            circuit.add_gate(Gate::Cx, &[n - 1, 0]);
+            circuit.add_gate(Gate::Swap, &[0, n - 2]);
+        }
+        let mut cpu = StatevectorBackend::new(42);
+        cpu.init(n, 0).unwrap();
+        for inst in &circuit.instructions {
+            cpu.apply(inst).unwrap();
+        }
+        let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+        gpu.init(n, 0).unwrap();
+        #[cfg(feature = "bench-internal")]
+        let before = f.ctx.pass_census();
+        gpu.apply_instructions(&circuit.instructions).unwrap();
+        #[cfg(feature = "bench-internal")]
+        assert!((f.ctx.pass_census() - before).tiles > 0);
+        let want = cpu.export_statevector().unwrap();
+        let got = gpu.export_statevector().unwrap();
+        for (i, (c, g)) in want.iter().zip(&got).enumerate() {
+            assert!(
+                (c - g).norm() < 1e-10,
+                "amplitude {i}: cpu={c:?}, gpu={g:?}"
+            );
         }
     }
 }

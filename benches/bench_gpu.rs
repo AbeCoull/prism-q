@@ -265,7 +265,7 @@ fn throughput_sizes() -> &'static [usize] {
     }
 }
 
-const THROUGHPUT_CIRCUITS: [&str; 4] = ["qft", "hea_l5", "qv", "random_d10"];
+const THROUGHPUT_CIRCUITS: [&str; 5] = ["qft", "hea_l5", "qv", "random_d10", "diag_mixed_l6"];
 
 /// The circuit rows of `gpu/throughput`; `examples/gpu_pass_census.rs` counts the same
 /// set.
@@ -275,6 +275,7 @@ fn throughput_circuit(name: &str, n: usize) -> Circuit {
         "hea_l5" => circuits::hardware_efficient_ansatz(n, 5, SEED),
         "qv" => circuits::quantum_volume_circuit(n, n, SEED),
         "random_d10" => circuits::random_circuit(n, 10, SEED),
+        "diag_mixed_l6" => circuits::diagonal_mixed_circuit(n, 6, SEED),
         _ => unreachable!("unknown throughput circuit {name}"),
     }
 }
@@ -329,7 +330,12 @@ fn bench_gpu_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("gpu/throughput");
 
     for name in THROUGHPUT_CIRCUITS {
-        for &n in throughput_sizes() {
+        let sizes: &[usize] = if name == "diag_mixed_l6" && !is_fast() {
+            &[20, 24]
+        } else {
+            throughput_sizes()
+        };
+        for &n in sizes {
             let Some(mut backend) = resident_backend(&ctx, n) else {
                 continue;
             };

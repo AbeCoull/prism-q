@@ -17,7 +17,7 @@ use prism_q::gpu::GpuContext;
 
 const SEED: u64 = 0xDEAD_BEEF;
 const SIZES: [usize; 5] = [20, 22, 24, 26, 28];
-const CIRCUITS: [&str; 4] = ["qft", "hea_l5", "qv", "random_d10"];
+const CIRCUITS: [&str; 5] = ["qft", "hea_l5", "qv", "random_d10", "diag_mixed_l6"];
 
 fn build(name: &str, n: usize) -> Circuit {
     match name {
@@ -25,6 +25,7 @@ fn build(name: &str, n: usize) -> Circuit {
         "hea_l5" => circuits::hardware_efficient_ansatz(n, 5, SEED),
         "qv" => circuits::quantum_volume_circuit(n, n, SEED),
         "random_d10" => circuits::random_circuit(n, 10, SEED),
+        "diag_mixed_l6" => circuits::diagonal_mixed_circuit(n, 6, SEED),
         _ => unreachable!("unknown circuit {name}"),
     }
 }
@@ -56,7 +57,12 @@ fn main() {
         "circuit", "n", "gates", "fused", "launches", "passes", "drains", "dense2q", "tiles"
     );
     for name in CIRCUITS {
-        for n in SIZES {
+        let sizes: &[usize] = if name == "diag_mixed_l6" {
+            &[20, 24]
+        } else {
+            &SIZES
+        };
+        for &n in sizes {
             let circuit = build(name, n);
             if !ctx.fits_statevector_with_scratch(n).unwrap_or(false) {
                 println!("{name:<12} {n:>3} skipped: does not fit free VRAM");

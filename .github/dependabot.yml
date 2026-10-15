@@ -1,0 +1,12 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/setup-rust
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

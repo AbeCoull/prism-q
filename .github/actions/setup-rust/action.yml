@@ -1,0 +1,54 @@
+name: Set up Rust
+description: >-
+  Install the toolchain that rust-toolchain.toml pins, restore the cargo cache (saved
+  from main only), and optionally install cargo-nextest.
+
+inputs:
+  components:
+    description: Extra rustup components, comma separated
+    default: ''
+  targets:
+    description: Extra rustup targets, comma separated
+    default: ''
+  root:
+    description: Checkout directory holding rust-toolchain.toml
+    default: '.'
+  cache:
+    description: Restore and save the cargo cache
+    default: 'true'
+  cache-key:
+    description: Extra key for Swatinem/rust-cache
+    default: ''
+  cache-shared-key:
+    description: Key shared across jobs, replacing the per-job key
+    default: ''
+  cache-workspaces:
+    description: Workspaces for Swatinem/rust-cache
+    default: '. -> target'
+  nextest:
+    description: Install cargo-nextest
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      run: echo "toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' '${{ inputs.root }}/rust-toolchain.toml')" >> "$GITHUB_OUTPUT"
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.pin.outputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+    # A pull request can restore main's caches but not another pull request's, so a cache
+    # saved from one only crowds main's out of the repository quota.
+    - if: inputs.cache == 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-bin: false
+        key: ${{ inputs.cache-key }}
+        shared-key: ${{ inputs.cache-shared-key }}
+        workspaces: ${{ inputs.cache-workspaces }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    - if: inputs.nextest == 'true'
+      uses: taiki-e/install-action@cargo-nextest

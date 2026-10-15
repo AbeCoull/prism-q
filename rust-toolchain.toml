@@ -1,4 +1,5 @@
 [toolchain]
-# Mirrors the dtolnay/rust-toolchain@<version> steps in .github/workflows. Update together.
+# CI reads this channel through .github/actions/setup-rust; the release and wheel
+# workflows read it too.
 channel = "1.99.0"
 components = ["rustfmt", "clippy", "rust-analyzer"]

@@ -192,7 +192,13 @@ impl Participant {
                 if n >= 18
                     && !matches!(
                         class,
-                        DiagonalMixed | Random | Clifford | CliffordT | Rotations
+                        DiagonalMixed
+                            | Random
+                            | Clifford
+                            | CliffordT
+                            | Rotations
+                            | Qft
+                            | QftTextbook
                     ) =>
             {
                 Some(
@@ -214,6 +220,9 @@ impl Participant {
             {
                 Some("long-range pairs push the exact bond toward 2^9, 0.7 to 14 s")
             }
+            Participant::TensorNetwork if n >= 18 && matches!(class, Qft | QftTextbook) => Some(
+                "the all-to-all phase ladder contracts in 97 to 143 s; 14 qubits keeps the class",
+            ),
             Participant::DensityMatrix if n > 10 => Some("4^n amplitudes, 4 GiB at 14 qubits"),
             Participant::DensityMatrix if !matches!(class, QuantumVolume | Qaoa | Rotations) => {
                 Some(

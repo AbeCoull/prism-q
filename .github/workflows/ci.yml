@@ -24,8 +24,9 @@ env:
   CI_DIST_FEATURES: parallel distributed
   # Mirrors `rust-version` in Cargo.toml and `msrv` in clippy.toml. Update all three together.
   CI_MSRV: 1.88.0
-  # Miri and ThreadSanitizer run on this nightly. A floating nightly renames their caches
-  # daily and can break the jobs with no change here.
+  # Miri and ThreadSanitizer run on this nightly, which also keys their caches: Miri
+  # rebuilds its sysroot per toolchain, and dependencies cached under another one no
+  # longer link against it.
   CI_NIGHTLY: nightly-2026-10-14
   # Doc surface. cudarc's build script with the pinned cuda-12040 feature does not
   # probe for a toolkit, so the gpu and distributed docs build on a bare runner.
@@ -255,6 +256,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          key: ${{ env.CI_NIGHTLY }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # `rust-toolchain.toml` pins stable and would override the installed nightly.
       - name: Miri over the partitioning kernels
@@ -281,6 +283,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          key: ${{ env.CI_NIGHTLY }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Runner kernels hand out 32 bits of mmap randomness, outside the range the
       # TSan shadow mapping tolerates.

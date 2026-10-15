@@ -151,7 +151,7 @@ All seeded with `0xDEAD_BEEF` for reproducibility.
   `sparse/densify` rows sweep k at 20 qubits against a dense arm on the same
   workload, tracing the load-factor crossover. The entry count and the routing
   (the register must not split to the decomposed path) are pinned in
-  `tests/bench_fixture_routing.rs`.
+  `tests/integration/bench_fixture_routing.rs`.
 
 ## Running benchmarks
 

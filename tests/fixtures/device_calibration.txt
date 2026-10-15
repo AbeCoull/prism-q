@@ -1,4 +1,4 @@
-# Four-qubit calibration used by tests/device_calibration.rs.
+# Four-qubit calibration used by tests/integration/device_calibration.rs.
 # Times in seconds, rates as probabilities.
 qubit 0 t1=120e-6 t2=80e-6 p01=0.02 p10=0.03
 qubit 1 t1=95e-6 t2=110e-6 p01=0.01 p10=0.025

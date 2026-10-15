@@ -104,11 +104,11 @@ split, which `only_the_product_state_takes_the_native_sampler_past_decomposition
 
 MPS records each bit against the logical qubit currently hosted at a site rather
 than the site index, so a layout permuted by SWAP routing needs no
-canonicalization pass. `tests/native_sampling.rs` pins that case; the exact
+canonicalization pass. `tests/integration/native_sampling.rs` pins that case; the exact
 check that the conditional decomposition reproduces the dense vector to 1e-12
 lives in `mps_conditional_path_probabilities_match_the_dense_vector`
 (`src/backend/mps/mps_tests.rs`), and the corpus-wide comparison is the query matrix in
-`tests/conformance_matrix.rs`.
+`tests/integration/conformance_matrix.rs`.
 
 The tensor network answers below its dense ceiling from one contraction of
 the full distribution, and past it samples qubit by qubit: each bit draws
@@ -313,7 +313,7 @@ correlators, histograms). Cross-engine tests pin every engine to the analytic
 marginals from `noisy_marginals_analytical` and to each other's correlator
 statistics: `pauli_engines_share_observable_statistics` (`src/sim/noise_tests.rs`),
 `trajectory_pauli_matches_brute_force` (`src/sim/trajectory.rs`), and the
-channel-level analytic checks in `tests/trajectory_correctness.rs`.
+channel-level analytic checks in `tests/integration/trajectory_correctness.rs`.
 
 GPU reductions (`gpu` feature): with a context attached via `with_gpu`, the
 noisy compiled sampler can sample, apply noise, and reduce counts or marginals
@@ -381,7 +381,7 @@ leakage ones, and a firing that names a leaked qubit is dropped, as a trajectory
 skips it. The leaked qubit's own record is forced to 1 after the frame flips
 land. The result matches trajectory leakage in distribution on a
 Clifford program (`erasure_heralds_agree_with_trajectory_leakage_in_distribution`,
-`tests/qec_leakage.rs`). The flag of a measured alias cannot change before its
+`tests/integration/qec_leakage.rs`). The flag of a measured alias cannot change before its
 record is read, since the lowering admits no gate on it and freezes its leakage
 targets, so the record reads the flag at measurement. `LEAK` targets add herald
 columns, `QecSampleResult::heralds`. Forcing a bit is not a linear flip, so these

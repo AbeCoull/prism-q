@@ -801,7 +801,7 @@ fn test_rzz_gate() {
 }
 
 // Equivalence to the basis-change ladder is checked numerically in
-// `tests/pauli_rot_correctness.rs`; this pins the parsed shape.
+// `tests/integration/pauli_rot_correctness.rs`; this pins the parsed shape.
 #[test]
 fn test_rxx_gate() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\nrxx(pi/4) q[0], q[1];";
@@ -1008,7 +1008,7 @@ fn test_ionq_native_gate_matrices() {
     // dialect, so a quarter turn of `gpi` is the Y-like antidiagonal and an
     // omitted third `ms` angle is a quarter turn. That family under Braket's
     // reading in radians, and the rest of the gate set, are pinned against
-    // independent references in tests/gate_matrix.rs.
+    // independent references in tests/integration/gate_matrix.rs.
     let qasm = "OPENQASM 3.0;
 qubit[2] q;
 gpi(0.25) q[0];
@@ -1050,7 +1050,7 @@ ms(0.0, 0.0) q[0], q[1];";
 fn test_ecr_gate() {
     // `ecr` resolves to a matrix gate rather than a lowering, so `inv @` and
     // `pow @` invert and repeat the matrix instead of an expanded body. Its
-    // unitary is pinned in tests/gate_matrix.rs.
+    // unitary is pinned in tests/integration/gate_matrix.rs.
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\necr q[0], q[1];";
     let c = parse(qasm).unwrap();
     assert_eq!(c.instructions.len(), 1);

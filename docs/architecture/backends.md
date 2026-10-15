@@ -26,8 +26,9 @@ A backend holding a single pure state cannot represent the resulting mixture, so
 one trajectory of the channel: sample the measurement outcome, collapse onto it, and
 apply X when the outcome is 1. Averaged over shots that reproduces the channel, and a
 reset consumes one draw from the backend's RNG stream. The density-matrix backend holds
-the mixture and applies the channel directly, with no draw. `tests/reset_channel.rs`
-pins the contract across backends against the density-matrix oracle.
+the mixture and applies the channel directly, with no draw.
+`tests/integration/reset_channel.rs` pins the contract across backends against the
+density-matrix oracle.
 
 ## Memory budget
 

@@ -116,7 +116,7 @@ const LEDGER: &[Entry] = &[
         "src/backend/distributed_statevector/tests.rs",
         "loopback_simulate_starts_the_distributed_backend_from_a_state"),
     elsewhere("run", "ResolvedBackend::Other", CleanError,
-        "tests/result_metadata.rs", "every_terminal_stamps_metadata"),
+        "tests/integration/result_metadata.rs", "every_terminal_stamps_metadata"),
     elsewhere("run", "auto_over_statevector_cap", ClosedForm,
         "tests/statevector_cap_oversize.rs", "require_exact_accepts_a_wide_basis_preserving_circuit"),
     here("run_batch", "run_batch_split", Sv, "run_batch_split_matches_the_unfused_statevector"),
@@ -167,7 +167,7 @@ const LEDGER: &[Entry] = &[
     here("expectation_values", "exact_mixture", ClosedForm, "noisy_run_reads_the_exact_mixture"),
     here("expectation_values", "initial_state", Sv, "initial_state_terminals_match_the_unfused_statevector"),
     elsewhere("expectation_values", "tensor_route_over_mps", UntruncatedMps,
-        "tests/tensor_route.rs", "above_the_cap_a_bond_heavy_chain_takes_the_tensor_path"),
+        "tests/integration/tensor_route.rs", "above_the_cap_a_bond_heavy_chain_takes_the_tensor_path"),
 
     here("observable_expectation", "grouped_pair_masks", Sv, "grouped_observable_routes_match_the_unfused_statevector"),
     here("observable_expectation", "grouped_dedicated_pass", Sv, "grouped_observable_routes_match_the_unfused_statevector"),
@@ -327,16 +327,16 @@ const OTHER_SOURCES: &[(&str, &str)] = &[
         include_str!("../backend/distributed_statevector/tests.rs"),
     ),
     (
-        "tests/result_metadata.rs",
-        include_str!("../../tests/result_metadata.rs"),
+        "tests/integration/result_metadata.rs",
+        include_str!("../../tests/integration/result_metadata.rs"),
     ),
     (
         "tests/statevector_cap_oversize.rs",
         include_str!("../../tests/statevector_cap_oversize.rs"),
     ),
     (
-        "tests/tensor_route.rs",
-        include_str!("../../tests/tensor_route.rs"),
+        "tests/integration/tensor_route.rs",
+        include_str!("../../tests/integration/tensor_route.rs"),
     ),
 ];
 

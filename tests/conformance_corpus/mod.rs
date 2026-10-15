@@ -29,9 +29,9 @@
 //!    behavior only. When an anchor is present, its class is the correct one
 //!    and the failure message says so.
 //! 3. Closed-form goldens. Every family names a test in
-//!    `tests/golden_small_circuits.rs` that pins its motif against hand-computed
-//!    values ([`Family::golden_anchor`]). Non-Clifford unitary families have no
-//!    independent anchor among the backends, so they run under
+//!    `tests/integration/golden_small_circuits.rs` that pins its motif against
+//!    hand-computed values ([`Family::golden_anchor`]). Non-Clifford unitary families
+//!    have no independent anchor among the backends, so they run under
 //!    [`AnchorPolicy::ConsensusOnly`], which requires a minimum number of
 //!    compared participants instead.
 //!
@@ -62,7 +62,7 @@
 //! [`Eligibility::Skip`] with a named [`SkipReason`], for probabilities and for
 //! amplitudes separately. Nothing is skipped by catching an error: a participant
 //! the matrix declares eligible that fails to run is a failure. [`skip_ledger`]
-//! reports which rules fired, and `tests/conformance_matrix.rs` pins that set.
+//! reports which rules fired, and `tests/integration/conformance_matrix.rs` pins that set.
 
 #![allow(dead_code)]
 
@@ -229,7 +229,7 @@ impl Family {
         }
     }
 
-    /// Test in `tests/golden_small_circuits.rs` that pins this family's motif
+    /// Test in `tests/integration/golden_small_circuits.rs` that pins this family's motif
     /// against hand-computed values.
     pub const fn golden_anchor(self) -> &'static str {
         match self {
@@ -1487,7 +1487,8 @@ fn report_split(case: &GeneratedCase, classes: &[Class], seed: u64) -> String {
         [] => writeln!(
             out,
             "  verdict: no independent anchor participated, so no class is presumed correct; \
-             the closed-form anchor for this motif is `{}` in tests/golden_small_circuits.rs",
+             the closed-form anchor for this motif is `{}` in \
+             tests/integration/golden_small_circuits.rs",
             case.family.golden_anchor()
         )
         .unwrap(),
@@ -1960,7 +1961,7 @@ fn report_branch_split(
             [] => writeln!(
                 out,
                 "  verdict: no class reproduces the channel, so the density-matrix oracle itself \
-                 is suspect; check `{}` in tests/golden_small_circuits.rs first",
+                 is suspect; check `{}` in tests/integration/golden_small_circuits.rs first",
                 case.family.golden_anchor()
             )
             .unwrap(),
@@ -1989,7 +1990,7 @@ fn report_branch_split(
         _ => writeln!(
             out,
             "  verdict: no single class holds an independent anchor; the closed-form anchor for \
-             this motif is `{}` in tests/golden_small_circuits.rs",
+             this motif is `{}` in tests/integration/golden_small_circuits.rs",
             case.family.golden_anchor()
         )
         .unwrap(),

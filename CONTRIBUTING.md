@@ -54,6 +54,13 @@ libclang for its bindgen step; without them, name the features instead, for exam
 Use `cargo test --all-features` when `cargo-nextest` is not installed. Keep doctests on
 `cargo test --doc` until nextest doctest support is no longer experimental.
 
+Integration tests are modules of one binary, `tests/integration/main.rs`: add a file
+there and declare it with `mod`, then select it with a filter such as
+`cargo nextest run --features parallel -E 'test(/^backend_matrix::/)'`. A file that sets
+an environment variable, builds the global Rayon pool, or calls `set_default_limits`
+stays its own `tests/<name>.rs` binary, because `cargo test` runs every test of a binary
+in one process.
+
 The GPU golden tests (`--test golden_gpu --test golden_gpu_density_matrix` under
 `--features "parallel gpu"`) skip when no CUDA device is present, so a green run on a
 host without a card means untested, and no CI job opens a device. Before merging a
@@ -84,9 +91,10 @@ cargo +nightly fuzz run qasm_parse corpus/qasm_parse seeds/qasm_parse -- -dict=q
 ```
 
 On Windows MSVC the AddressSanitizer runtime (`clang_rt.asan_dynamic-x86_64.dll`, in the
-MSVC `bin\Hostx64\x64` directory) must be on `PATH`. `tests/fuzz_replay.rs` replays
-`fuzz/seeds/` and a seeded sweep through the same checks on stable, and the `Fuzz`
-workflow runs each target weekly and uploads any crash input.
+MSVC `bin\Hostx64\x64` directory) must be on `PATH`.
+`tests/integration/fuzz_replay.rs` replays `fuzz/seeds/` and a seeded sweep through the
+same checks on stable, and the `Fuzz` workflow runs each target weekly and uploads any
+crash input.
 
 ## Documentation site
 

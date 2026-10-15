@@ -395,8 +395,8 @@ more than two detectors is rejected with a pointer to `decompose_graphlike`.
 Mechanisms flipping no detector cannot enter the graph; their probability mass
 is a floor under the logical error rate of any decoder over the model.
 Mechanisms sharing one detector set collapse to the most probable of them, and
-the enumeration tests in `tests/qec_decoder.rs` measure the mass of single faults this
-misroutes.
+the enumeration tests in `tests/integration/qec_decoder.rs` measure the mass of single
+faults this misroutes.
 
 `decode_packed` maps a `PackedShots` of detector samples (either layout) to
 shot-major predicted observable flips, one bit per observable per shot. Per
@@ -619,8 +619,8 @@ observables without a reroute evaluate on their original support. The path
 rejects `EXP_VAL` ops, postselection, and resets (resets relabel qubits,
 making stabilizer indices ambiguous).
 
-Routing and placement are pinned by `tests/qec_exp_val.rs`;
-`tests/qec_e2e_d3.rs` checks distance-3 repetition-code fixtures against
+Routing and placement are pinned by `tests/integration/qec_exp_val.rs`;
+`tests/integration/qec_e2e_d3.rs` checks distance-3 repetition-code fixtures against
 closed-form expectations on the compiled, analytical, and reference paths.
 
 ## Result shape

@@ -1626,7 +1626,7 @@ fn bench_mps_hotspots(c: &mut Criterion) {
 
     // The same shape at bond: the row above peaks at bond one, so it cannot
     // reach the walk a measurement leaves behind. Shape pinned in
-    // `tests/bench_fixture_routing.rs`.
+    // `tests/integration/bench_fixture_routing.rs`.
     let meas_brickwork = mps_measured_brickwork_circuit(16, 3);
     group.bench_function("measure_brickwork_16q_r3", |b| {
         b.iter(|| run_mps_apply_only(&meas_brickwork, 64));
@@ -1650,7 +1650,7 @@ fn bench_mps_hotspots(c: &mut Criterion) {
 // The chi ladder: the one MPS group whose bond growth reaches the caps
 // (uncapped peaks 512 at 18q and 1024 at 20q against corpus peaks of 4
 // elsewhere), so these rows price the cap itself rather than allocation
-// and traversal. Shape pinned in `tests/bench_fixture_routing.rs`.
+// and traversal. Shape pinned in `tests/integration/bench_fixture_routing.rs`.
 fn bench_mps_brickwork(c: &mut Criterion) {
     let mut group = c.benchmark_group("mps/brickwork_d24");
     configure_group(&mut group);
@@ -1678,7 +1678,7 @@ fn bench_mps_brickwork(c: &mut Criterion) {
     // The walk on its own: at 12 qubits the peak bond clears the rank at which
     // a threshold cut takes the orthogonality center, and stays under the cap,
     // so every cut pays the walk for an error the cap never makes. Shape pinned
-    // in `tests/bench_fixture_routing.rs`.
+    // in `tests/integration/bench_fixture_routing.rs`.
     let circuit = circuits::brickwork_circuit(12, 24, SEED);
     group.bench_with_input(BenchmarkId::new("b256", 12), &circuit, |b, circ| {
         b.iter(|| run_mps_apply_only(circ, 256));
@@ -1690,7 +1690,7 @@ fn bench_mps_brickwork(c: &mut Criterion) {
 // The routed family: per-layer random matchings keep the entangling gates
 // non-adjacent at real bond, so this row prices SWAP routing where the
 // other MPS rows cannot reach it. Shape pinned in
-// `tests/bench_fixture_routing.rs`.
+// `tests/integration/bench_fixture_routing.rs`.
 fn bench_mps_matched(c: &mut Criterion) {
     let mut group = c.benchmark_group("mps/matched_d12");
     configure_group(&mut group);
@@ -3694,7 +3694,7 @@ fn bench_factored_noise_kraus(c: &mut Criterion) {
 /// is `n / 2` components, so a routed run would decompose and measure the sim
 /// layer instead of either backend. Driving the backend directly also fixes
 /// the engine per row by construction, which is what
-/// `tests/bench_fixture_routing.rs` pins for the dispatched rows.
+/// `tests/integration/bench_fixture_routing.rs` pins for the dispatched rows.
 ///
 /// The statevector arm controls for confinement, not for lane noise: the diff
 /// cannot reach it, so a move there is layout or host drift rather than an

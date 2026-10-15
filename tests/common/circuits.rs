@@ -508,7 +508,7 @@ pub fn measurement_cases() -> [CircuitCase; 6] {
 
 // Frontend basis and Pauli-product measurements, each on an eigenstate so the
 // recorded bit is forced. Every case has a closed-form anchor in
-// `tests/golden_small_circuits.rs`; the matrix only checks agreement.
+// `tests/integration/golden_small_circuits.rs`; the matrix only checks agreement.
 
 pub fn measure_x_basis_on_plus() -> Circuit {
     CircuitBuilder::new_with_classical(1, 1)

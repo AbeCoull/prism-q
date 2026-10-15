@@ -1613,6 +1613,11 @@ fn temporal_prefix_block_shots_match_seeded_runs() {
         }
         let mut expected = metadata.unwrap();
         expected.shots = Some(shots);
+        expected.reason = RouteRule::PerShot;
+        assert_eq!(
+            simulate(&circuit).plan(Query::Shots(shots)).unwrap().rule,
+            result.metadata.reason
+        );
         assert_eq!(format!("{:?}", result.metadata), format!("{expected:?}"));
     }
 }

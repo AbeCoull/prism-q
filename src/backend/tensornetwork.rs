@@ -1925,17 +1925,32 @@ impl ScalarExpectationNetwork {
         Ok(())
     }
 
-    fn contract_on(mut self, plan: &ContractionPlan, limits: ContractionLimits) -> Result<f64> {
+    fn contract_on(self, plan: &ContractionPlan, limits: ContractionLimits) -> Result<f64> {
+        self.contract_prepared(plan, None, limits)
+    }
+
+    fn contract_prepared(
+        mut self,
+        plan: &ContractionPlan,
+        slice: Option<&SlicePlan>,
+        limits: ContractionLimits,
+    ) -> Result<f64> {
         if self.tensors.is_empty() {
             return Ok(1.0);
         }
-        let result = contract_within(
-            &mut self.tensors,
-            plan,
-            limits,
-            "tensor_network_scalar",
-            "scalar expectation",
-        )?;
+        let result = if let Some(slice) = slice {
+            LAST_DISCARDED.with(|weight| weight.set(0.0));
+            LAST_SLICE_COUNT.with(|count| count.set(slice.count));
+            contract_slices(&self.tensors, plan, slice, limits.peak_cap)
+        } else {
+            contract_within(
+                &mut self.tensors,
+                plan,
+                limits,
+                "tensor_network_scalar",
+                "scalar expectation",
+            )?
+        };
         if result.data.len() != 1 || !result.legs.is_empty() {
             return Err(PrismError::InvalidParameter {
                 message: format!(
@@ -1976,9 +1991,24 @@ fn contract_scalar(
     pauli_terms: &[PauliTerm],
     limits: ContractionLimits,
 ) -> Result<f64> {
+    let (network, plan) = plan_scalar(circuit, pauli_terms)?;
+    network.contract_on(&plan, limits)
+}
+
+fn plan_scalar(
+    circuit: &Circuit,
+    pauli_terms: &[PauliTerm],
+) -> Result<(ScalarExpectationNetwork, ContractionPlan)> {
     let network = ScalarExpectationNetwork::for_observable(circuit, pauli_terms)?;
     if network.tensors.is_empty() {
-        return Ok(1.0);
+        return Ok((
+            network,
+            ContractionPlan {
+                pairs: Vec::new(),
+                peak: 1,
+                total: 0,
+            },
+        ));
     }
     let plan = plan_with_restarts(&network.tensors);
     if plan.total >= FUSED_PLAN_TOTAL
@@ -1987,23 +2017,10 @@ fn contract_scalar(
         let fused_network = ScalarExpectationNetwork::for_observable(&fused, pauli_terms)?;
         let fused_plan = plan_with_restarts(&fused_network.tensors);
         if (fused_plan.peak, fused_plan.total) < (plan.peak, plan.total) {
-            return fused_network.contract_on(&fused_plan, limits);
+            return Ok((fused_network, fused_plan));
         }
     }
-    network.contract_on(&plan, limits)
-}
-
-/// [`expectation_zero_state`] for every observable, after QFT blocks expand.
-pub(crate) fn expectations_zero_state(
-    circuit: &Circuit,
-    observables: &[Vec<PauliTerm>],
-    limits: &ResolvedLimits,
-) -> Result<Vec<f64>> {
-    let circuit = crate::circuit::expand_qft_blocks(circuit);
-    observables
-        .iter()
-        .map(|observable| expectation_zero_state(&circuit, observable, limits))
-        .collect()
+    Ok((network, plan))
 }
 
 /// Largest greedy-tree intermediate, in elements, under which the `Auto`
@@ -2013,24 +2030,51 @@ pub(crate) fn expectations_zero_state(
 /// decides costs 1 to 22 ms.
 pub(crate) const AUTO_EXPECTATION_PEAK_BOUND: usize = 1 << 12;
 
-/// Scalar networks for a set of observables, each planned on a greedy tree that
-/// stays under a peak bound. The plan the dry run produced is the plan
-/// contracted, so nothing is planned twice.
+/// Scalar networks with carried contraction trees and optional slice plans.
 pub(crate) struct BoundedExpectations {
-    planned: Vec<(ScalarExpectationNetwork, ContractionPlan)>,
+    planned: Vec<(ScalarExpectationNetwork, ContractionPlan, Option<SlicePlan>)>,
+    failure: Option<PrismError>,
 }
 
 impl BoundedExpectations {
     /// Sum of every planned intermediate's element count across the observables.
     pub(crate) fn total_elements(&self) -> usize {
-        self.planned.iter().map(|(_, plan)| plan.total).sum()
+        self.planned.iter().map(|(_, plan, _)| plan.total).sum()
+    }
+
+    pub(crate) fn with_limits(mut self, limits: &ResolvedLimits) -> Self {
+        let limits = ContractionLimits::new(limits, None);
+        for (network, plan, slice) in &mut self.planned {
+            if plan.peak > limits.peak_cap {
+                let metas: Vec<_> = network.tensors.iter().map(TensorMeta::of).collect();
+                *slice = choose_slices(&metas, plan, limits);
+                if slice.is_none() {
+                    self.failure = Some(tensor_peak_error(
+                        "tensor_network_scalar",
+                        "scalar expectation",
+                        plan.peak,
+                        limits.peak_cap,
+                        limits.peak_source,
+                    ));
+                    break;
+                }
+            }
+        }
+        self
+    }
+
+    pub(crate) fn failure(&self) -> Option<&PrismError> {
+        self.failure.as_ref()
     }
 
     pub(crate) fn contract(self, limits: &ResolvedLimits) -> Result<Vec<f64>> {
+        if let Some(error) = self.failure {
+            return Err(error);
+        }
         let limits = ContractionLimits::new(limits, None);
         self.planned
             .into_iter()
-            .map(|(network, plan)| network.contract_on(&plan, limits))
+            .map(|(network, plan, slice)| network.contract_prepared(&plan, slice.as_ref(), limits))
             .collect()
     }
 }
@@ -2058,9 +2102,32 @@ pub(crate) fn plan_bounded_expectations(
             .map(|t| Some(TensorMeta::of(t)))
             .collect();
         let plan = plan_pairs(slots, None, bound)?;
-        planned.push((network, plan));
+        planned.push((network, plan, None));
     }
-    Some(Ok(BoundedExpectations { planned }))
+    Some(Ok(BoundedExpectations {
+        planned,
+        failure: None,
+    }))
+}
+
+pub(crate) fn plan_expectations(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    limits: &ResolvedLimits,
+) -> Result<BoundedExpectations> {
+    let circuit = crate::circuit::expand_qft_blocks(circuit);
+    let planned = observables
+        .iter()
+        .map(|observable| {
+            let (network, plan) = plan_scalar(&circuit, observable)?;
+            Ok((network, plan, None))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(BoundedExpectations {
+        planned,
+        failure: None,
+    }
+    .with_limits(limits))
 }
 
 /// Bench-visible wrapper over `expectation_zero_state`; not stable API.

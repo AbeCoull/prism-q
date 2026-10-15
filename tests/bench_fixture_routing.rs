@@ -660,7 +660,12 @@ fn fstab_crossover_rows_straddle_the_floor() {
             "{label}: from the floor up Auto must run one factored-stabilizer backend"
         );
         let mut backend = prism_q::FactoredStabilizerBackend::new(42);
-        let direct = sim::run_on(&mut backend, &circuit).unwrap();
+        let mut direct = sim::run_on(&mut backend, &circuit).unwrap();
+        assert_eq!(
+            auto.metadata.reason,
+            prism_q::RouteRule::LargeCliffordBlocks
+        );
+        direct.metadata.reason = auto.metadata.reason;
         assert_eq!(
             format!("{:?}", auto.metadata),
             format!("{:?}", direct.metadata),

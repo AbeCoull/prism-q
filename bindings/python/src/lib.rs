@@ -16,6 +16,7 @@ mod noise;
 mod numpy_util;
 mod parameter;
 mod pickle;
+mod plan;
 mod program;
 mod qec;
 mod sampler;
@@ -105,6 +106,8 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyProgramSimulation>()?;
     m.add_class::<PyThreadPool>()?;
     m.add_class::<PyLimits>()?;
+    m.add_class::<plan::PyPlan>()?;
+    m.add_class::<plan::PyQuery>()?;
 
     m.add_function(wrap_pyfunction!(circuit::parse_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(circuit::parse_qasm_parametric, m)?)?;

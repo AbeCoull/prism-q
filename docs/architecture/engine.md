@@ -334,3 +334,23 @@ The `BackendKind` variants outside feature gates. `AutoGpu`, `StatevectorGpu`,
 | `StochasticPauli { num_samples }` | SPP | Explicit |
 | `DeterministicPauli { truncation }` | SPD | Explicit |
 | `PauliPath { epsilon, max_terms }` | Noisy Heisenberg Pauli sum | Explicit |
+
+
+## Query route inspection
+
+`Simulate::plan(Query)` shares the shot, noisy-trajectory, marginal, expectation and
+diagnostic decisions in `sim::route` with terminal execution. Decisions hold backend
+plans and bounded tensor contraction plans; execution consumes those objects.
+Backend sampling capabilities are available before constructing a backend.
+
+The report separates a selected route from runtime alternatives. Bounded SPD work
+can decline at execution, and soft GPU initialization can lose device residency.
+`Plan::fallbacks` declares those possibilities and `RunMetadata::reason` records a
+fallback actually taken. `would_fail` reports predictable failures, while malformed
+query inputs return an error. Query-specific exactness checks allow exact marginal
+and expectation routes even when the full-state dispatch tree would choose MPS.
+
+Gradient queries carry their Hamiltonian and parameter links. Parameter-shift plans
+reuse the prepared-family decision when execution does, and report each evaluation
+in baseline, plus, minus order. They do not turn deterministic differences between
+shifted evaluations into runtime fallbacks.

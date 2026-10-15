@@ -209,6 +209,16 @@ impl PreparedCircuit {
         observables: &[Vec<PauliTerm>],
         seed: u64,
     ) -> Result<Vec<f64>> {
+        self.expectation_values_checked(values, observables, seed, false)
+    }
+
+    pub(crate) fn expectation_values_checked(
+        &mut self,
+        values: &[f64],
+        observables: &[Vec<PauliTerm>],
+        seed: u64,
+        require_exact: bool,
+    ) -> Result<Vec<f64>> {
         let fused = self.bind_for_route(values)?;
         let Self {
             kind,
@@ -219,15 +229,16 @@ impl PreparedCircuit {
             ..
         } = self;
         let applied = if fused { &*fused_circuit } else { &*bound };
-        if let Some(result) = route
-            .as_mut()
-            .and_then(|route| route.expectation_values(bound, applied, observables, seed))
-        {
+        if let Some(result) = route.as_mut().and_then(|route| {
+            route.expectation_values(bound, applied, observables, seed, require_exact)
+        }) {
             return result;
         }
-        request(bound, kind, *limits)
-            .seed(seed)
-            .expectation_values(observables)
+        let mut simulation = request(bound, kind, *limits).seed(seed);
+        if require_exact {
+            simulation = simulation.require_exact();
+        }
+        simulation.expectation_values(observables)
     }
 
     /// Bind `values` and compute `⟨H⟩` for a weighted Pauli observable, as

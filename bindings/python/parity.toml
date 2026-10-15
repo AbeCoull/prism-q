@@ -19,7 +19,7 @@ types = [
   # Entry points and builders
   "Simulate", "SimulateProgram", "CircuitBuilder", "Circuit", "BackendKind",
   "Parameters", "PreparedCircuit", "PauliObservable", "CompiledSampler",
-  "DynamicProgram", "DynamicProgramBuilder", "ThreadPool", "Limits",
+  "DynamicProgram", "DynamicProgramBuilder", "ThreadPool", "Limits", "Query", "Plan",
   # Results
   "RunOutcome", "ShotsResult", "CountsResult", "MarginalsResult", "ExpectationResult",
   "ObservableExpectation", "ObservableVariance", "OverlapResult", "EntropyResult",
@@ -654,3 +654,27 @@ exclude = [
 "Limits::max_tn_slices" = "Limits.max_tn_slices"
 "Limits::memory_budget_bytes" = "Limits.memory_budget_bytes"
 "Limits::new" = "Limits"
+
+"Simulate::plan" = "Simulation.plan"
+"RunMetadata::reason" = "RunMetadata.reason"
+"Query::Run" = "Query.run"
+"Query::Shots" = "Query.shots"
+"Query::Counts" = "Query.counts"
+"Query::Marginals" = "Query.marginals"
+"Query::Expectation" = "Query.expectation"
+"Query::Observable" = "Query.observable"
+"Query::StateVector" = "Query.state_vector"
+"Query::ReducedDensityMatrix" = "Query.reduced_density_matrix"
+"Query::Entropy" = "Query.entropy"
+"Query::Gradient" = "Query.gradient"
+"Query::GradientShift" = "Query.gradient_shift"
+"Plan::backend" = "Plan.backend"
+"Plan::engine" = "Plan.engine"
+"Plan::placement" = "Plan.placement"
+"Plan::rule" = "Plan.rule"
+"Plan::peak_memory" = "Plan.peak_memory"
+"Plan::exactness" = "Plan.exactness"
+"Plan::alternatives" = "Plan.alternatives"
+"Plan::fallbacks" = "Plan.fallbacks"
+"Plan::would_fail" = "Plan.would_fail"
+"Plan::evaluations" = "Plan.evaluations"

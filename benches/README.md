@@ -644,9 +644,14 @@ promised. `sparse/walk_k12` replaces it.
 ## Reproducibility checklist
 
 - [ ] Fixed RNG seed (`0xDEAD_BEEF` for circuit generation, `42` for simulation)
-- [ ] Criterion settings: 5s warm-up, 5s measurement, 30 samples (`PRISM_BENCH_SAMPLES`)
+- [ ] Criterion windows match the tier: the `bench_ab.sh` full tier runs 1s warm-up, 3s
+  measurement, and 30 samples (`PRISM_BENCH_SAMPLES`); `--light` runs 0.5s, 1.5s, and
+  10 samples; `bench-fast` pins 0.2s, 1s, and 10 samples; a bare `cargo bench` takes
+  Criterion's 3s and 5s defaults at 30 samples. Groups that pin their own settings
+  keep them
 - [ ] Gating comparisons run through `scripts/bench_ab.sh`, with the control column reported
-- [ ] Document CPU model, OS, Rust version, RUSTFLAGS (`bench_ab.sh` records these in its table)
+- [ ] Document CPU model, OS, Rust version, and RUSTFLAGS. `bench_ab.sh` records the first
+  three and the bench profile in its table; note RUSTFLAGS by hand when set
 - [ ] Disable CPU frequency scaling if possible (`performance` governor on Linux)
 - [ ] Close background applications
 - [ ] Consider CPU pinning (`taskset` on Linux) for reduced variance

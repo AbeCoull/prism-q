@@ -60,6 +60,7 @@ exclude = [
 "circuits::clifford_prefix_measured_blocks" = { rust_only = "benchmark workload" }
 "circuits::clifford_random_pairs" = "circuits.clifford_random_pairs"
 "circuits::clifford_t_circuit" = "circuits.clifford_t"
+"circuits::controlled_rotation_circuit" = { rust_only = "benchmark workload" }
 "circuits::cz_chain_circuit" = "circuits.cz_chain"
 "circuits::diagonal_mixed_circuit" = { rust_only = "benchmark workload" }
 "circuits::disjoint_block_layers_circuit" = { rust_only = "benchmark workload" }

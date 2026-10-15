@@ -234,6 +234,46 @@ fn bound_fusion_matches_independent_fusion() {
 }
 
 #[test]
+fn controlled_2q_replay_preserves_reversed_targets_and_global_phase() {
+    let mut template = Circuit::new(12, 0);
+    let mut matrix = Gate::Ry(0.41).matrix_2x2();
+    for row in &mut matrix {
+        for value in row {
+            *value *= Complex64::from_polar(1.0, 0.73);
+        }
+    }
+    for [control, target] in [[0, 11], [11, 0], [3, 7]] {
+        template.add_gate(Gate::Rx(0.31), &[control]);
+        template.add_gate(Gate::Ry(0.23), &[target]);
+        template.add_gate(Gate::cu(matrix), &[control, target]);
+        template.add_gate(Gate::Rz(0.17), &[control]);
+        template.add_gate(Gate::Rx(0.51), &[target]);
+    }
+    let params = Parameters::all_rotations(&template);
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    assert!(prepared.reuses_fusion_plan());
+    for point in 0..8 {
+        let values = angles(params.num_slots(), 4200 + point);
+        let independent = params.bind(&template, &values).unwrap();
+        let expected = fuse_circuit(&independent, true).into_owned();
+        let got = prepared.bind_fused(&values).unwrap();
+        assert!(got.instructions.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::Fused2q(_) | Gate::Multi2q(_),
+                ..
+            }
+        )));
+        assert_streams_match(got, &expected, &format!("controlled point {point}"));
+        assert_states_match(
+            &statevector(got),
+            &statevector(&independent),
+            "controlled replay",
+        );
+    }
+}
+
+#[test]
 fn n_bindings_match_n_independent_circuits_on_statevector() {
     for (name, template) in [
         ("hea/6", circuits::hardware_efficient_ansatz(6, 3, SEED)),

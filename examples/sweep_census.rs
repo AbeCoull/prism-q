@@ -140,4 +140,34 @@ fn main() {
             );
         }
     }
+    for n in 12..=20 {
+        for (name, circuit) in [
+            ("qaoa_l3", circuits::qaoa_circuit(n, 3, SEED)),
+            (
+                "controlled_rotation_l5",
+                circuits::controlled_rotation_circuit(n, 5, SEED),
+            ),
+        ] {
+            let profile = sweep_profile_for(&circuit, threads);
+            println!(
+                "boundary/{name}/{n} passes={} tile_apps={}",
+                profile.passes(),
+                profile.tile_apps()
+            );
+        }
+    }
+    for (name, circuit) in [
+        (
+            "qft_expanded",
+            prism_q::circuit::expand_qft_blocks(&circuits::qft_circuit(16)).into_owned(),
+        ),
+        ("qpe_t_gate", circuits::phase_estimation_circuit(16)),
+    ] {
+        let profile = sweep_profile_for(&circuit, threads);
+        println!(
+            "boundary/{name}/16 passes={} tile_apps={}",
+            profile.passes(),
+            profile.tile_apps()
+        );
+    }
 }

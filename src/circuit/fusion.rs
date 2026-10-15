@@ -45,8 +45,7 @@ const MIN_QUBITS_FOR_DIAG_BATCH: usize = 16;
 #[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 8;
 
-/// Floor for batching the 1q runs left after `fuse_controlled_phases` (the H gates in
-/// QFT). At 16q the 1 MB state sits in L3 and tiling costs more than it saves.
+/// Floor for re-batching 1q runs on buffers wider than the circuit register.
 #[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 18;
 #[cfg(any(miri, prism_lowered_thresholds))]
@@ -1771,9 +1770,13 @@ fn batch_passes<'a>(pass_2qb: Cow<'a, Circuit>, n: usize, t: &mut Tracer) -> Cow
     let pass_db = gated(pass_cp, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
         fuse_diagonal_batch(c, t)
     });
-    gated(pass_db, n, MIN_QUBITS_FOR_POST_PHASE_BATCH, |c| {
-        batch_post_phase_1q(c, t)
-    })
+    let rebatch_host = n == pass_db.num_qubits;
+    let floor = if rebatch_host {
+        MIN_QUBITS_FOR_DIAG_BATCH
+    } else {
+        MIN_QUBITS_FOR_POST_PHASE_BATCH
+    };
+    gated(pass_db, n, floor, |c| batch_post_phase_1q(c, t))
 }
 
 /// [`fuse_at_width`] with the batching passes at every width, never the stage planner:

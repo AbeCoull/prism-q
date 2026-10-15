@@ -197,8 +197,19 @@ fn ansatz_cases() -> Vec<(&'static str, Circuit)> {
         ("hea/16", circuits::hardware_efficient_ansatz(16, 2, SEED)),
         ("hea/20", circuits::hardware_efficient_ansatz(20, 2, SEED)),
         ("qaoa/12", circuits::qaoa_circuit(12, 2, SEED)),
+        ("qaoa/14", circuits::qaoa_circuit(14, 2, SEED)),
+        ("qaoa/15", circuits::qaoa_circuit(15, 2, SEED)),
         ("qaoa/16", circuits::qaoa_circuit(16, 2, SEED)),
+        ("qaoa/17", circuits::qaoa_circuit(17, 2, SEED)),
         ("qaoa/20", circuits::qaoa_circuit(20, 2, SEED)),
+        (
+            "controlled_rotation/12",
+            circuits::controlled_rotation_circuit(12, 2, SEED),
+        ),
+        (
+            "controlled_rotation/16",
+            circuits::controlled_rotation_circuit(16, 2, SEED),
+        ),
         ("qv/12", circuits::quantum_volume_circuit(12, 3, SEED)),
         ("qv/16", circuits::quantum_volume_circuit(16, 2, SEED)),
     ]
@@ -209,6 +220,9 @@ fn bound_fusion_matches_independent_fusion() {
     for (name, template) in ansatz_cases() {
         let params = Parameters::all_rotations(&template);
         let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+        if matches!(name, "qaoa/16" | "qaoa/17") {
+            assert!(prepared.reuses_fusion_plan(), "{name}");
+        }
         for point in 0..8 {
             let values = angles(params.num_slots(), 1000 + point);
             let independent = params.bind(&template, &values).unwrap();

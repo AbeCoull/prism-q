@@ -1173,6 +1173,69 @@ fn fusion_multi_1q_high_targets_match_unfused() {
     }
 }
 
+#[test]
+fn fusion_qaoa_batch_boundaries_match_unfused() {
+    for n in [13, 14, 15, 16, 17] {
+        assert_fusion_preserves_state(&circuits::qaoa_circuit(n, 3, 42));
+    }
+}
+
+#[test]
+fn fusion_expanded_qft_below_staging_matches_unfused() {
+    let mut circuit = Circuit::new(16, 0);
+    for q in 0..16 {
+        circuit.add_gate(Gate::Ry(0.17 + 0.03 * q as f64), &[q]);
+        circuit.add_gate(Gate::Rz(0.23 + 0.07 * q as f64), &[q]);
+    }
+    circuit.instructions.extend(
+        prism_q::circuit::expand_qft_blocks(&circuits::qft_circuit(16))
+            .into_owned()
+            .instructions,
+    );
+    let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+    assert!(!fused.instructions.iter().any(|inst| matches!(
+        inst,
+        Instruction::Gate {
+            gate: Gate::QftBlock { .. },
+            ..
+        }
+    )));
+    assert!(fused.instructions.iter().any(|inst| matches!(
+        inst,
+        Instruction::Gate {
+            gate: Gate::BatchPhase(_) | Gate::DiagonalBatch(_),
+            ..
+        }
+    )));
+    assert_state_close(
+        &run_unfused_state(&fused),
+        &run_unfused_state(&circuit),
+        EPS,
+    );
+}
+
+#[test]
+fn fusion_controlled_rotation_layers_match_unfused() {
+    for n in [4, 12, 16] {
+        let circuit = circuits::controlled_rotation_circuit(n, 3, 42);
+        assert_eq!(
+            circuit
+                .instructions
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    Instruction::Gate {
+                        gate: Gate::Cu(_),
+                        ..
+                    }
+                ))
+                .count(),
+            3 * n / 2
+        );
+        assert_fusion_preserves_state(&circuit);
+    }
+}
+
 // Weight-2 PauliRot must absorb neighbouring 1q gates into Fused2q.
 #[test]
 fn parser_built_rxx_absorbs_neighbouring_1q_gates() {

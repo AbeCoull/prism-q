@@ -5,6 +5,52 @@ use crate::gates::PauliRotData;
 use crate::sim::unified_pauli::PauliAxis;
 const EPS: f64 = 1e-12;
 
+#[test]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
+fn qaoa_batches_each_mixer_without_staging() {
+    for n in [16, 17] {
+        let circuit = crate::circuits::qaoa_circuit(n, 3, 42);
+        let fused = fuse_unstaged(&circuit, n);
+        assert_eq!(fused.instructions.len(), 6);
+        assert_eq!(
+            fused
+                .instructions
+                .iter()
+                .filter(|inst| matches!(
+                    inst,
+                    Instruction::Gate {
+                        gate: Gate::MultiFused(_),
+                        ..
+                    }
+                ))
+                .count(),
+            3
+        );
+    }
+}
+
+#[test]
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
+fn qaoa_doubled_buffer_keeps_post_phase_floor() {
+    let circuit = crate::circuits::qaoa_circuit(8, 3, 42);
+    let fused = fuse_unstaged(&circuit, 16);
+    assert_eq!(fused.instructions.len(), 20);
+    assert_eq!(
+        fused
+            .instructions
+            .iter()
+            .filter(|inst| matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::MultiFused(_),
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+}
+
 fn assert_mat_close(actual: &[[Complex64; 2]; 2], expected: &[[Complex64; 2]; 2]) {
     for i in 0..2 {
         for j in 0..2 {

@@ -19,9 +19,10 @@
 #define MIX_MAX_COEFS   {{MIX_MAX_COEFS}}
 
 // The fused 2q matrix travels in kernel parameter space: a pageable host to device
-// copy synchronizes the stream before it starts, so uploading 32 doubles per gate
-// serialized the host against every queued kernel. Layout mirrors `FusedMatArg`.
-struct FusedMat { double v[32]; };
+// copy synchronizes the stream before it starts, so uploading the matrix per gate
+// serialized the host against every queued kernel. Entry m = a + ib is stored as
+// (a, b - a, a + b), row-major. Layout mirrors `FusedMatArg`.
+struct FusedMat { double v[48]; };
 struct MonoScale { double v[8]; };
 struct QubitList { int q[PARAM_QUBITS]; };
 struct DiagList { double d[4 * PARAM_QUBITS]; int t[PARAM_QUBITS]; };
@@ -262,9 +263,17 @@ extern "C" __global__ void apply_mcu_phase(
 }
 
 // ============================================================================
-// Fused 2q: generic 4x4 matrix. mat is row-major 16 Complex64 = 32 f64.
+// Fused 2q: generic 4x4 matrix.
 // Launch over pair_count = 2^(n-2) threads; each processes one 4-element group.
 // ============================================================================
+//
+// Each complex product m * x is three multiply-adds in the Gauss form,
+// re = a (x + y) - y (a + b) and im = a (x + y) + x (b - a), accumulated per row in
+// three independent chains against x + y, x and y. The row costs 12 FMAs and two adds
+// where `acc += a*x - b*y` compiles to a multiply, an FMA and an add per component,
+// so the group issues 60 FP64 operations instead of 96. The multiply is FP64-issue
+// bound on reduced-rate parts (2.33 ms at 24 qubits on a GTX 1080 Ti, against 1.53 ms
+// for a pure 4-load 4-store sweep) and lands on the sweep floor in this form.
 
 extern "C" __global__ void apply_fused_2q(
     double2 *state, unsigned long long pair_count, int q0, int q1,
@@ -274,30 +283,28 @@ extern "C" __global__ void apply_fused_2q(
     if (k >= pair_count) return;
     unsigned long long idx = expand_2q(k, q0, q1);
 
-    // Basis ordering matches the CPU PreparedGate2q::apply_full in src/backend/simd.rs:
-    //   basis index b = (q0_bit << 1) | q1_bit   i.e. q1 is LSB of the 4-element basis.
-    //   b=0 → (q0=0, q1=0); b=1 → (q0=0, q1=1); b=2 → (q0=1, q1=0); b=3 → (q0=1, q1=1).
-    unsigned long long i00 = idx;
-    unsigned long long i01 = idx | (1ULL << q1);
-    unsigned long long i10 = idx | (1ULL << q0);
-    unsigned long long i11 = idx | (1ULL << q0) | (1ULL << q1);
-
-    double2 in[4] = {state[i00], state[i01], state[i10], state[i11]};
-    unsigned long long indices[4] = {i00, i01, i10, i11};
+    // Basis b = (q0_bit << 1) | q1_bit, as the CPU PreparedGate2q::apply_full.
+    unsigned long long indices[4] = {
+        idx, idx | (1ULL << q1), idx | (1ULL << q0), idx | (1ULL << q0) | (1ULL << q1)};
+    double2 in[4];
+    double sum[4];
+    #pragma unroll
+    for (int col = 0; col < 4; ++col) {
+        in[col] = state[indices[col]];
+        sum[col] = in[col].x + in[col].y;
+    }
 
     #pragma unroll
     for (int row = 0; row < 4; ++row) {
-        double rr = 0.0, ri = 0.0;
+        double k1 = 0.0, k2 = 0.0, k3 = 0.0;
         #pragma unroll
         for (int col = 0; col < 4; ++col) {
-            // mat row-major: 32 f64s, row r col c → mat.v[2*(r*4+c)]=re, mat.v[2*(r*4+c)+1]=im
-            double mr = mat.v[2*(row*4 + col)];
-            double mi = mat.v[2*(row*4 + col) + 1];
-            rr += mr*in[col].x - mi*in[col].y;
-            ri += mr*in[col].y + mi*in[col].x;
+            const double *e = &mat.v[3 * (row * 4 + col)];
+            k1 = fma(e[0], sum[col], k1);
+            k2 = fma(e[1], in[col].x, k2);
+            k3 = fma(e[2], in[col].y, k3);
         }
-        state[indices[row]].x = rr;
-        state[indices[row]].y = ri;
+        state[indices[row]] = make_double2(k1 - k3, k1 + k2);
     }
 }
 

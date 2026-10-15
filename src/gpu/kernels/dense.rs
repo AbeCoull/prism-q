@@ -20,12 +20,12 @@ use super::{check_pair, check_qubit, driver_err, launch_limit_err, linear_cfg, s
 
 const BLOCK_SIZE: u32 = 256;
 
-/// The fused 2q matrix as a by-value kernel parameter, row-major re/im pairs. Mirrors
-/// `struct FusedMat` in the CUDA template byte for byte.
+/// The fused 2q matrix as a by-value kernel parameter, `(re, im - re, re + im)` per
+/// entry, row-major. Mirrors `struct FusedMat` in the CUDA template byte for byte.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FusedMatArg {
-    v: [f64; 32],
+    v: [f64; 48],
 }
 
 // SAFETY: a plain `repr(C)` array of f64 with the layout the kernel declares.
@@ -732,7 +732,7 @@ fn launch_apply_monomial_2q(
     Ok(())
 }
 
-/// The matrix is flattened row-major into a by-value kernel parameter.
+/// The matrix rides in Gauss form as a by-value kernel parameter.
 pub(crate) fn launch_apply_fused_2q(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -745,16 +745,15 @@ pub(crate) fn launch_apply_fused_2q(
     let pair_count: u64 = 1u64 << (n - 2);
     let (stream, func) = stream_and_fn(ctx, "apply_fused_2q")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
-    let mut mat = FusedMatArg { v: [0.0; 32] };
+    let mut mat = FusedMatArg { v: [0.0; 48] };
     for (slot, entry) in mat
         .v
-        .as_chunks_mut::<2>()
+        .as_chunks_mut::<3>()
         .0
         .iter_mut()
         .zip(matrix.iter().flatten())
     {
-        slot[0] = entry.re;
-        slot[1] = entry.im;
+        *slot = [entry.re, entry.im - entry.re, entry.re + entry.im];
     }
     let q0_i = q0 as i32;
     let q1_i = q1 as i32;

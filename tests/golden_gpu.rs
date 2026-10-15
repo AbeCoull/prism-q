@@ -508,6 +508,84 @@ fn fused_2q_routes_structured_matrices_off_the_dense_kernel() {
     f.compare_dense_2q(n, &insts, dense);
 }
 
+/// `(A x B) CX (C x D)` for random `Rz Ry Rz` one-qubit factors: dense, complex, and
+/// with no structural zero for `route_2q` to find.
+fn random_dense_4x4(rng: &mut rand_chacha::ChaCha8Rng) -> [[Complex64; 4]; 4] {
+    use rand::RngExt;
+    let mut one_qubit = || {
+        let [a, b, c]: [f64; 3] =
+            std::array::from_fn(|_| rng.random::<f64>() * std::f64::consts::TAU);
+        let rz = |t: f64| Gate::Rz(t).matrix_2x2();
+        mul_2x2(&rz(a), &mul_2x2(&Gate::Ry(b).matrix_2x2(), &rz(c)))
+    };
+    let kron = |hi: [[Complex64; 2]; 2], lo: [[Complex64; 2]; 2]| {
+        let mut m = [[Complex64::new(0.0, 0.0); 4]; 4];
+        for (r, row) in m.iter_mut().enumerate() {
+            for (c, entry) in row.iter_mut().enumerate() {
+                *entry = hi[r >> 1][c >> 1] * lo[r & 1][c & 1];
+            }
+        }
+        m
+    };
+    let outer = kron(one_qubit(), one_qubit());
+    let inner = kron(one_qubit(), one_qubit());
+    let m = mul_4x4(&outer, &mul_4x4(&Gate::Cx.matrix_4x4(), &inner));
+    assert!(m.iter().flatten().all(|v| v.norm() > 1e-9));
+    m
+}
+
+fn mul_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
+    std::array::from_fn(|r| std::array::from_fn(|c| a[r][0] * b[0][c] + a[r][1] * b[1][c]))
+}
+
+fn mul_4x4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
+    std::array::from_fn(|r| std::array::from_fn(|c| (0..4).map(|k| a[r][k] * b[k][c]).sum()))
+}
+
+#[test]
+fn dense_2q_every_ordered_pair_matches_cpu() {
+    use rand::SeedableRng;
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 12;
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(common::SEED);
+    let mut insts = lopsided_state(n);
+    let mut dense = 0;
+    for q0 in 0..n {
+        for q1 in (0..n).filter(|&q1| q1 != q0) {
+            insts.push(g(
+                Gate::Fused2q(Box::new(random_dense_4x4(&mut rng))),
+                &[q0, q1],
+            ));
+            dense += 1;
+        }
+    }
+    f.compare_dense_2q(n, &insts, dense);
+}
+
+#[test]
+fn dense_2q_quantum_volume_matches_cpu_at_tile_width() {
+    use prism_q::circuit::fusion::{FusionProfile, fuse_circuit_for_profile};
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 18;
+    let circuit = prism_q::circuits::quantum_volume_circuit(n, 6, common::SEED);
+    let fused = fuse_circuit_for_profile(&circuit, true, n, FusionProfile::Device);
+    let dense = fused
+        .instructions
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::Fused2q(_),
+                    ..
+                }
+            )
+        })
+        .count() as u64;
+    assert_eq!(dense, 6 * n as u64 / 2, "every pair fuses to one dense 4x4");
+    f.compare_dense_2q(n, &fused.instructions, dense);
+}
+
 #[test]
 fn fused_random_circuit_keeps_monomial_members_off_the_dense_kernel() {
     let Some(f) = Fixture::try_new() else { return };

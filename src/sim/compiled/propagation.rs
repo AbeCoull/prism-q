@@ -1540,10 +1540,12 @@ pub(super) fn colmajor_forward_sim(
 #[cfg(all(target_arch = "x86_64", any(kani, test)))]
 mod rowmul_spec {
     use super::rowmul_avx2;
+    use std::arch::x86_64::__m256i;
 
     /// Aaronson-Gottesman `g`: the phase exponent, in units of `i`, that the bit-`b`
     /// letters contribute to the Hermitian product of the source and destination rows.
-    fn ag_phase(x1: u64, z1: u64, x2: u64, z2: u64, b: u32) -> i64 {
+    #[cfg(test)]
+    pub(super) fn ag_phase(x1: u64, z1: u64, x2: u64, z2: u64, b: u32) -> i64 {
         let bit = |w: u64| ((w >> b) & 1) as i64;
         let (x2, z2) = (bit(x2), bit(z2));
         match (bit(x1), bit(z1)) {
@@ -1554,15 +1556,53 @@ mod rowmul_spec {
         }
     }
 
+    /// Bits where the source letter times the destination letter carries phase `+i`
+    /// (the cyclic pairs XY, YZ, ZX), and bits where it carries any phase.
+    pub(super) fn phase_masks(x1: u64, z1: u64, x2: u64, z2: u64) -> (u64, u64) {
+        let (xa, ya, za) = (x1 & !z1, x1 & z1, !x1 & z1);
+        let (xb, yb, zb) = (x2 & !z2, x2 & z2, !x2 & z2);
+        let plus = (xa & yb) | (ya & zb) | (za & xb);
+        let minus = (ya & xb) | (za & yb) | (xa & zb);
+        (plus, plus | minus)
+    }
+
+    /// `_mm256_testz_si256` without the vector reduction Kani cannot model.
+    pub(super) fn testz_model(a: __m256i, b: __m256i) -> i32 {
+        // SAFETY: `__m256i` and `[u64; 4]` have the same size and every bit pattern is
+        // valid for both.
+        let (a, b) = unsafe {
+            (
+                std::mem::transmute::<__m256i, [u64; 4]>(a),
+                std::mem::transmute::<__m256i, [u64; 4]>(b),
+            )
+        };
+        ((a[0] & b[0]) | (a[1] & b[1]) | (a[2] & b[2]) | (a[3] & b[3]) == 0) as i32
+    }
+
+    // Chunks of four words are summed before they reach `sum`, as `rowmul_avx2` sums
+    // them, so the solver compares adder trees of the same shape.
     fn reference(src: &[u64], dst: &mut [u64], nw: usize, initial_sum: u64) -> u64 {
-        let mut sum = initial_sum;
-        for w in 0..nw {
+        let mut word = |w: usize| {
             let (x1, z1, x2, z2) = (src[w], src[nw + w], dst[w], dst[nw + w]);
-            for b in 0..64 {
-                sum = sum.wrapping_add(ag_phase(x1, z1, x2, z2, b) as u64);
-            }
             dst[w] = x1 ^ x2;
             dst[nw + w] = z1 ^ z2;
+            let (plus, nonzero) = phase_masks(x1, z1, x2, z2);
+            (plus.count_ones() as u64, nonzero.count_ones() as u64)
+        };
+        let mut sum = initial_sum;
+        let tail = nw / 4 * 4;
+        for chunk in (0..tail).step_by(4) {
+            let (mut plus, mut nonzero) = (0, 0);
+            for w in chunk..chunk + 4 {
+                let (p, n) = word(w);
+                plus += p;
+                nonzero += n;
+            }
+            sum = sum.wrapping_add(2 * plus).wrapping_sub(nonzero);
+        }
+        for w in tail..nw {
+            let (p, n) = word(w);
+            sum = sum.wrapping_add(2 * p).wrapping_sub(n);
         }
         sum
     }
@@ -1578,7 +1618,9 @@ mod rowmul_spec {
         let got = unsafe { rowmul_avx2(src.as_ptr(), simd.as_mut_ptr(), nw, initial_sum) };
         let want = reference(&src, &mut spec, nw, initial_sum);
         assert_eq!(got, want);
-        assert_eq!(simd, spec);
+        for k in 0..N {
+            assert_eq!(simd[k], spec[k]);
+        }
     }
 
     #[cfg(kani)]
@@ -1586,7 +1628,8 @@ mod rowmul_spec {
         macro_rules! rowmul_avx2_matches_spec {
             ($($name:ident: $nw:literal),* $(,)?) => {$(
                 #[kani::proof]
-                #[kani::unwind(65)]
+                #[kani::unwind(20)]
+                #[kani::stub(core::arch::x86_64::_mm256_testz_si256, super::testz_model)]
                 fn $name() {
                     super::check::<{ 2 * $nw }>(kani::any(), kani::any(), kani::any());
                 }
@@ -1908,6 +1951,48 @@ mod tests {
                 ref_phase[..2 * n],
                 "tableau signs differ at n={n}"
             );
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn rowmul_phase_masks_match_the_ag_phase_rule() {
+        for letters in 0..16u64 {
+            let bit = |k: u32| (letters >> k) & 1;
+            let (x1, z1, x2, z2) = (bit(0), bit(1), bit(2), bit(3));
+            let (plus, nonzero) = super::rowmul_spec::phase_masks(x1, z1, x2, z2);
+            let phase = 2 * (plus & 1) as i64 - (nonzero & 1) as i64;
+            assert_eq!(phase, super::rowmul_spec::ag_phase(x1, z1, x2, z2, 0));
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn testz_model_matches_the_intrinsic() {
+        use rand::{RngExt, SeedableRng};
+        use std::arch::x86_64::{__m256i, _mm256_testz_si256};
+
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+        for _ in 0..256 {
+            let a: [u64; 4] = rng.random();
+            let mut b: [u64; 4] = rng.random();
+            if rng.random_bool(0.5) {
+                b = a.map(|w| !w);
+            }
+            // SAFETY: `[u64; 4]` and `__m256i` have the same size and every bit pattern
+            // is valid for both; AVX2 implies the AVX the intrinsic needs.
+            let (va, vb) = unsafe {
+                (
+                    std::mem::transmute::<[u64; 4], __m256i>(a),
+                    std::mem::transmute::<[u64; 4], __m256i>(b),
+                )
+            };
+            // SAFETY: AVX2 detected
+            let real = unsafe { _mm256_testz_si256(va, vb) };
+            assert_eq!(super::rowmul_spec::testz_model(va, vb), real);
         }
     }
 

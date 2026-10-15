@@ -264,10 +264,12 @@ jobs:
   # Kani checks the `#[kani::proof]` harnesses for every input at the row widths each
   # one names, which covers each chunk and tail shape of a SIMD loop. The crate's
   # toolchain only installs the driver; `cargo kani setup` fetches the verifier's own.
+  # Harnesses run four at a time under a per-harness timeout, so one the solver cannot
+  # close reports as a timeout instead of holding the job to its limit.
   kani:
     name: Kani
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -278,7 +280,9 @@ jobs:
           cargo install --locked kani-verifier --version "$KANI_VERSION"
           cargo kani setup
       - name: Prove the kernel harnesses
-        run: cargo kani --no-default-features
+        run: >-
+          cargo kani --no-default-features -Z stubbing -Z unstable-options
+          --harness-timeout 8m --jobs 4 --output-format terse
 
   # ThreadSanitizer runs the parallel kernels on real threads and reports data races
   # the SAFETY comments only argue away. -Zbuild-std instruments std so its

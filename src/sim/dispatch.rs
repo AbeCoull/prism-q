@@ -835,6 +835,23 @@ pub(super) fn same_plan(a: &BackendPlan, b: &BackendPlan) -> bool {
 }
 
 impl BackendPlan {
+    pub(super) fn supports_native_sampling(&self) -> bool {
+        match self {
+            Self::ProductState
+            | Self::Sparse
+            | Self::TensorNetwork { .. }
+            | Self::Factored
+            | Self::Mps { .. } => true,
+            #[cfg(feature = "distributed")]
+            Self::Distributed(_) => true,
+            _ => false,
+        }
+    }
+
+    pub(super) fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
     /// Engine this plan builds, for a shot request that runs the plan zero
     /// times and so has no backend to read provenance off.
     pub(super) fn resolved(&self) -> ResolvedBackend {

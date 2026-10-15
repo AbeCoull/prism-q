@@ -2,6 +2,18 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [Unreleased]
+
+### Features
+
+- Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.
+- Report the route decision through `RunMetadata.reason`.
+
+### Compatibility
+
+- `require_exact()` accepts exact marginal and expectation routes even when full-state
+  dispatch would select an approximate backend. Route failures can use different error text.
+
 ## [0.35.0] - 2026-10-12
 
 ### Bug Fixes

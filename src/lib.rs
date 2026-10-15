@@ -138,11 +138,12 @@ pub use sim::unified_pauli::{
 };
 pub use sim::{
     BackendKind, BondReport, CountsResult, Engine, EntropyResult, Exactness, ExpectationResult,
-    FactoredBlock, MarginalsResult, ObservableExpectation, ObservableVariance, OverlapResult,
-    PauliObservable, Placement, Probabilities, ReducedDensityMatrix, ResolvedBackend, RunMetadata,
-    RunOutcome, Seeded, ShotsResult, Simulate, SimulateProgram, Unseeded, bitstring,
-    run_expectation_values, run_observable_expectation, run_on, run_on_state, run_qasm, simulate,
-    simulate_program,
+    FactoredBlock, MarginalsResult, MemoryEstimate, MemoryEstimateKind, ObservableExpectation,
+    ObservableVariance, OverlapResult, PauliObservable, Placement, Plan, PlanFallback,
+    PlannedExactness, Probabilities, Query, ReducedDensityMatrix, RejectReason, ResolvedBackend,
+    RouteRule, RunMetadata, RunOutcome, Seeded, ShotsResult, Simulate, SimulateProgram, Unseeded,
+    bitstring, run_expectation_values, run_observable_expectation, run_on, run_on_state, run_qasm,
+    simulate, simulate_program,
 };
 #[cfg(feature = "parallel")]
 pub use threading::ThreadPool;

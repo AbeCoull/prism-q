@@ -1531,7 +1531,7 @@ fn auto_tensor_route_matches_the_unfused_statevector() {
     let state = unfused_state(&circuit);
     let obs = observables(n);
     assert!(
-        tensor_route_expectations(&circuit, &obs, &ResolvedLimits::process_default()).is_some()
+        decide_tensor_expectations(&circuit, &obs, &ResolvedLimits::process_default()).is_some()
     );
 
     let result = simulate(&circuit)

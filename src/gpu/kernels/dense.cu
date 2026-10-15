@@ -1091,7 +1091,8 @@ extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
     }
 
     bool elementwise = true;
-    for (int i = 0; i < ops.num_ops; ++i) {
+    const int num_ops = ops.num_ops;
+    for (int i = 0; i < num_ops; ++i) {
         const unsigned int w = ops.op[i];
         const int kind = w & 7;
         const int a = (w >> 3) & 15;
@@ -1101,6 +1102,34 @@ extern "C" __global__ void apply_mixed_tile(double2 *state, MixedOps ops)
         const bool diagonal = kind == MIX_DIAG1 || kind == MIX_DIAG2;
         if (!(diagonal && elementwise)) __syncthreads();
         elementwise = diagonal;
+
+        if (diagonal && i + 1 < num_ops
+            && ((ops.op[i + 1] & 7) == MIX_DIAG1 || (ops.op[i + 1] & 7) == MIX_DIAG2)) {
+            int end = i + 2;
+            while (end < num_ops && ((ops.op[end] & 7) == MIX_DIAG1 || (ops.op[end] & 7) == MIX_DIAG2)) ++end;
+            for (int m = 0; m < MIX_PER_THREAD; ++m) {
+                const int e = tid + m * MIX_BLOCK;
+                double2 value = tile[e];
+                for (int j = i; j < end; ++j) {
+                    const unsigned int dw = ops.op[j];
+                    const int dk = dw & 7;
+                    const int da = (dw >> 3) & 15;
+                    const int db = (dw >> 7) & 15;
+                    const bool df = (dw >> 11) & 1;
+                    const double *dc = ops.c + (dw >> 12);
+                    if (dk == MIX_DIAG1) {
+                        const int s = (e >> da) & 1;
+                        if (s || !df) value = cmul(value, make_double2(dc[2 * s], dc[2 * s + 1]));
+                    } else {
+                        const int s = (((e >> da) & 1) << 1) | ((e >> db) & 1);
+                        if (s == 3 || !df) value = cmul(value, make_double2(dc[2 * s], dc[2 * s + 1]));
+                    }
+                }
+                tile[e] = value;
+            }
+            i = end - 1;
+            continue;
+        }
 
         if (kind == MIX_MAT1) {
             const double m00r = c[0], m00i = c[1], m01r = c[2], m01i = c[3];

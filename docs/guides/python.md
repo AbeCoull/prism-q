@@ -1452,3 +1452,53 @@ except prism_q.PrismError as exc:
 
 The package ships type stubs (`prism_q/_prism_q.pyi`) and a `py.typed` marker,
 so mypy and Pyright see the full surface.
+
+
+## Inspect a terminal before execution
+
+`Simulation.plan(Query)` keeps the simulation request available for execution and
+reports the route selected for that terminal. A query can change the route: an
+expectation may use an exact scalar tensor contraction where a full-state run would
+choose a bounded MPS.
+
+```python
+from prism_q import CircuitBuilder, Query, simulate
+
+circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure(0, 0).measure(1, 1).build()
+request = simulate(circuit).seed(42)
+plan = request.plan(Query.counts(1000))
+assert plan.would_fail is None
+result = request.sample_counts(1000)
+assert result.metadata.reason == plan.rule
+```
+
+`Plan.backend`, `engine`, `placement`, and `rule` describe the selected route.
+`RunMetadata.reason` gives its snake_case decision name after execution. A bounded
+SPD attempt or soft GPU initialization can take a runtime fallback, declared in
+`Plan.fallbacks`; the result names that fallback when it happens. Each fallback
+can carry its own `would_fail`, which does not imply failure of the primary route.
+
+`Plan.exactness` is `"exact"`, `"approximate"`, or `"estimated"`.
+`bound_reported` says whether an approximate route reports a bound, and `samples`
+gives an estimator's sample count. A possible fallback is not a guaranteed failure:
+`require_exact()` rejects an approximate fallback only if execution needs it.
+
+`would_fail` is a `PrismError` instance for a predictable resource or capability
+failure. Malformed query inputs raise `PrismError` directly. `alternatives` lists
+explicit backend selections rejected by the same validation used during execution.
+It does not rank accepted backends by performance.
+
+`peak_memory` contains `bytes` and `kind`. Known bounds cover the state and terminal
+buffer payload, excluding circuit/fusion storage, allocator overhead and process
+memory. Other routes return `{"bytes": None, "kind": "unknown"}`; state size alone
+is not reported as a peak bound. Route inspection may perform bounded sparse-support
+or tensor-contraction planning probes, but does not execute the requested terminal.
+
+Query constructors are `run()`, `shots(n)`, `counts(n)`, `marginals()`,
+`expectation(observables)`, `observable(hamiltonian)`, `state_vector()`,
+`reduced_density_matrix(qubits)`, and `entropy(qubits)`. The gradient constructors,
+`gradient(hamiltonian, parameters)` and `gradient_shift(hamiltonian, parameters)`,
+take the same Hamiltonian and `(instruction, slot)` links as the execution terminals.
+A shift plan's `evaluations` contains its baseline, followed by plus/minus evaluations
+in link order. Its top-level backend names the baseline; child reports preserve any
+different route chosen for another evaluation, including prepared backend reuse.

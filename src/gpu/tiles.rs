@@ -697,6 +697,123 @@ mod tests {
     };
 
     #[test]
+    #[ignore = "deterministic schedule census"]
+    fn diagonal_run_census() {
+        use crate::circuit::fusion::{FusionProfile, fuse_circuit_for_profile};
+        let seed = 0xDEAD_BEEF;
+        for n in [18, 20, 24] {
+            for (name, circuit) in [
+                (
+                    "hea_l5",
+                    crate::circuits::hardware_efficient_ansatz(n, 5, seed),
+                ),
+                ("qaoa_l3", crate::circuits::qaoa_circuit(n, 3, seed)),
+                (
+                    "diag_mixed_l6",
+                    crate::circuits::diagonal_mixed_circuit(n, 6, seed),
+                ),
+                ("random_d10", crate::circuits::random_circuit(n, 10, seed)),
+                ("qv", crate::circuits::quantum_volume_circuit(n, n, seed)),
+            ] {
+                let fused = fuse_circuit_for_profile(&circuit, true, n, FusionProfile::Device);
+                let mut ops = Vec::new();
+                for inst in &fused.instructions {
+                    if let Instruction::Gate { gate, targets } = inst {
+                        lower(&mut ops, gate, targets);
+                    }
+                }
+                let mut schedule = Plan::default();
+                plan(&ops, n, &k::MIXED_TILE_GEOMETRY, &mut schedule);
+                let (mut diagonal_ops, mut runs, mut combined, mut longest) = (0, 0, 0, 0);
+                for step in &schedule.steps {
+                    if let Step::Tile { ops: range, .. } = step {
+                        let mut len = 0;
+                        for i in schedule.order[range.clone()].iter().map(Some).chain([None]) {
+                            if i.is_some_and(|&i| {
+                                matches!(
+                                    ops[i as usize],
+                                    TileOp::Diag1 { .. } | TileOp::Diag2 { .. }
+                                )
+                            }) {
+                                len += 1;
+                                diagonal_ops += 1;
+                            } else if len > 0 {
+                                runs += 1;
+                                combined += usize::from(len > 1);
+                                longest = longest.max(len);
+                                len = 0;
+                            }
+                        }
+                    }
+                }
+                println!(
+                    "{name}/{n}: launches={} diagonal_ops={diagonal_ops} runs={runs} combined_runs={combined} longest={longest} shared_access_upper_bound={}->{}",
+                    schedule.steps.len(),
+                    2 * diagonal_ops,
+                    2 * runs,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn separated_diagonal_runs_survive_planning() {
+        for n in [18, 21] {
+            let mut ops = Vec::new();
+            for q in 0..n {
+                push_1q(&mut ops, q, Gate::H.matrix_2x2());
+            }
+            for _ in 0..4 {
+                for k in 0..6 {
+                    let (a, b) = if k % 2 == 0 { (0, n - 1) } else { (n - 1, 0) };
+                    ops.extend([
+                        TileOp::Diag1 { q: a, d: [ONE; 2] },
+                        TileOp::Diag1 { q: b, d: [ONE; 2] },
+                        TileOp::Diag2 { a, b, d: [ONE; 4] },
+                        TileOp::Diag2 {
+                            a: b,
+                            b: a,
+                            d: [ONE; 4],
+                        },
+                        TileOp::Diag2 { a, b, d: [ONE; 4] },
+                    ]);
+                }
+                push_1q(&mut ops, n - 1, Gate::H.matrix_2x2());
+                push_1q(&mut ops, 0, Gate::Y.matrix_2x2());
+                ops.push(TileOp::Cx {
+                    control: n - 1,
+                    target: 0,
+                });
+                ops.push(TileOp::Swap { a: 0, b: n - 2 });
+            }
+            let mut schedule = Plan::default();
+            plan(&ops, n, &k::MIXED_TILE_GEOMETRY, &mut schedule);
+            let (mut combined, mut longest) = (0, 0);
+            for step in &schedule.steps {
+                if let Step::Tile { ops: range, .. } = step {
+                    let mut len = 0;
+                    for i in schedule.order[range.clone()].iter().map(Some).chain([None]) {
+                        if i.is_some_and(|&i| {
+                            matches!(ops[i as usize], TileOp::Diag1 { .. } | TileOp::Diag2 { .. })
+                        }) {
+                            len += 1;
+                        } else {
+                            combined += usize::from(len > 1);
+                            longest = longest.max(len);
+                            len = 0;
+                        }
+                    }
+                }
+            }
+            assert!(combined >= 4 && longest >= 20);
+            println!(
+                "separated/{n}: launches={} combined_runs={combined} longest={longest}",
+                schedule.steps.len()
+            );
+        }
+    }
+
+    #[test]
     fn plan_matches_in_order_application_on_random_windows() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let dense = {

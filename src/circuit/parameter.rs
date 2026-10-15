@@ -175,10 +175,18 @@ impl Parameters {
     /// # Errors
     /// Returns [`PrismError::InvalidParameter`] when a link points past the end
     /// of the instruction stream, at a non-gate instruction, or at a gate
-    /// carrying no angle.
+    /// carrying no angle, or references a slot outside the declared value vector.
     pub fn validate(&self, circuit: &Circuit) -> Result<()> {
         let n = circuit.instructions.len();
         for link in &self.links {
+            if link.slot >= self.num_slots {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "parameter link references slot {} but the parameter set declares {} slots",
+                        link.slot, self.num_slots
+                    ),
+                });
+            }
             if link.instruction >= n {
                 return Err(PrismError::InvalidParameter {
                     message: format!(

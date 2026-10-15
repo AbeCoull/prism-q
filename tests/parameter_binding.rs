@@ -1317,3 +1317,23 @@ fn prepared_density_matrix_expectations_match_a_direct_run() {
         }
     }
 }
+
+#[test]
+fn diagonal_mixed_bindings_reuse_the_captured_plan() {
+    let template = circuits::diagonal_mixed_circuit(16, 6, 0xDEAD_BEEF);
+    let params = Parameters::all_rotations(&template);
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    assert!(prepared.reuses_fusion_plan());
+    for seed in [42, 43, 44] {
+        let values = angles(params.num_slots(), seed);
+        let independent = params.bind(&template, &values).unwrap();
+        let expected = fuse_circuit(&independent, true);
+        let actual = prepared.bind_fused(&values).unwrap();
+        assert_streams_match(actual, &expected, "diagonal mixed replay");
+        assert_states_match(
+            &statevector(actual),
+            &statevector(&independent),
+            "diagonal mixed replay",
+        );
+    }
+}

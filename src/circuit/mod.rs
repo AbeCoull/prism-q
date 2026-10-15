@@ -15,7 +15,7 @@ pub mod dynamic;
 pub mod fusion;
 mod fusion_phase;
 mod fusion_rzz;
-mod fusion_stage;
+pub(crate) mod fusion_stage;
 pub mod openqasm;
 pub mod parameter;
 pub(crate) mod plan;

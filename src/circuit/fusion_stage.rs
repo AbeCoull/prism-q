@@ -41,7 +41,7 @@ fn stage_floor() -> usize {
 
 /// Whether fusion stages a `circuit_qubits` stream for an `n`-qubit buffer. A density
 /// matrix sweeps a buffer twice the circuit width and keeps the batching passes.
-pub(super) fn stages_at(n: usize, circuit_qubits: usize) -> bool {
+pub(crate) fn stages_at(n: usize, circuit_qubits: usize) -> bool {
     n == circuit_qubits && n <= u64::BITS as usize && n >= stage_floor()
 }
 
@@ -825,8 +825,7 @@ impl<'a> Planner<'a> {
         t.emit_entries(&entries);
     }
 
-    /// A run of `Rzz` edges becomes `BatchRzz` chunks; any other mix goes through the
-    /// diagonal batch passes, which build payloads a binding cannot replay.
+    /// A run of `Rzz` edges becomes `BatchRzz` chunks; other mixes use the diagonal passes.
     fn emit_diagonal(&mut self, ops: &[Op], t: &mut Tracer) {
         let is_rzz = |op: &Op| op.entry != WHOLE || matches!(self.gate(op).0, Gate::Rzz(_));
         if ops.iter().all(is_rzz) {
@@ -863,7 +862,14 @@ impl<'a> Planner<'a> {
             }
             return;
         }
-        t.bail();
+        let sources: Vec<Source> = if t.on {
+            ops.iter()
+                .map(|op| (op.src, op.entry, Place::Plain))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut trace = t.subpass(&sources);
         let mut run: Vec<Instruction> = Vec::with_capacity(ops.len());
         for op in ops {
             if op.entry == WHOLE {
@@ -878,10 +884,13 @@ impl<'a> Planner<'a> {
         }
         let mut circuit = Circuit::new(self.n, 0);
         circuit.instructions = run;
-        let off = &mut Tracer::off();
-        let rzz = fuse_batch_rzz(&circuit, off).into_owned();
-        let batched = fuse_diagonal_batch(fuse_controlled_phases(Cow::Owned(rzz), off), off);
+        let rzz = fuse_batch_rzz(&circuit, &mut trace).into_owned();
+        let batched = fuse_diagonal_batch(
+            fuse_controlled_phases(Cow::Owned(rzz), &mut trace),
+            &mut trace,
+        );
         self.out.extend(batched.into_owned().instructions);
+        t.finish_subpass(trace);
     }
 }
 

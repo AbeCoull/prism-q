@@ -97,6 +97,39 @@ GTX 1080 Ti, whose FP64 rate makes the 4x4 compute bound.
 The lowering runs after binding and reads only the bound stream, so a `PreparedCircuit`
 captures and replays its plan under the profile of the backend it holds.
 
+## Mixed CPU tiles
+
+Past the last-level cache floor, the CPU statevector lowers the fused instruction
+slice into a private schedule. Each stage admits operations whose moving qubits fit
+one cache tile and whose dependencies are satisfied. Diagonal qubits and Pauli Z
+letters outside the tile are constant within a subcube and consume no tile slots.
+The planner examines at most four times the state width in skipped operations per
+scan and candidate seeds per growth step.
+
+Homogeneous stages use the existing 1q, 2q, Pauli or diagonal batch kernels. Mixed
+stages gather once, execute their operations in order, and scatter once. Controlled X
+and swap keep their permutation operations. Measurements, resets, conditionals,
+regions, barriers and QFT blocks end a stage. No schedule enters the gate enum.
+
+A statevector slice whose operations all lower to one batch kind (dense 1q, dense 2q
+or Pauli rotations) skips the schedule and applies its staged instructions directly.
+The stage planner already batched that stream for the same kernel, and regrouping it
+only moves stage boundaries: on `statevector/random_d10/24` it left one 2q gate as a
+pass of its own. The density matrix keeps its doubled schedule for every slice.
+
+The backend retains only stage indices and operation shapes across applications.
+Every application reloads its numerical payloads from the current instruction slice.
+A changed state width, gate family or dependency mask rebuilds the schedule. Scheduling
+uses state width and cache geometry, independent of the Rayon pool width.
+
+The density matrix schedules a doubled stream over its `2n`-qubit buffer: ket gates
+on `q+n` and conjugated bra gates on `q`. Dependencies within each register retain
+circuit order while commuting work from the other register can share a tile. An
+unsupported operation ends the segment and runs through the density matrix backend.
+The device execution path keeps its own fusion profile and kernels. The static
+density-matrix census accepts only supported gate streams; unsupported kernels have
+their own ket, bra and conjugation passes and are excluded from that count.
+
 ## QFT recognition
 
 Before this pipeline runs, a backend with a native `QftBlock` kernel (the statevector,
@@ -185,6 +218,7 @@ The plan cannot assume the decisions that read a matrix rather than the gate seq
 | A 1q run matching a named gate | `Gate::recognize_matrix` | `Guard::Fuses1q` |
 | Whether a 1q block is diagonal | `reorder_1q_gates`, commuting it past a control | `Guard::Fuses1q` |
 | Whether a 2q block is diagonal | `PairRun::should_fuse` | `Guard::Diag4q` |
+| Whether a pair is a controlled phase | `fuse_controlled_phases` | `Guard::Phase2q` |
 
 Each guard is re-tested per binding, and a binding that flips one falls back to running
 the pipeline, so the stream matches an independently fused circuit either way. The 1q
@@ -192,8 +226,14 @@ diagonality guard has to live on the run rather than on a payload site: the bloc
 often absorbed into a `Fused2q` and keeps no 2x2 of its own, while the reorder it
 steered has already happened.
 
-`DiagonalBatch` and `BatchPhase` have no recipe, so a template reaching either declines
-capture and re-fuses per binding.
+`DiagonalBatch` records one recipe per phase or parity entry. A diagonal pair is
+decomposed after rebuilding its complete matrix product, since its factors need not
+be diagonal individually. `BatchPhase` retains source products through repeated-pair
+merging, batch splitting and changes of control qubit. The stage planner carries this
+provenance through its nested diagonal passes.
+
+A rewritten `CX Rz CX` records an `Rzz` matrix derived from the source angle, so both
+standalone parity batches and later pair fusion replay the same operation.
 
 A gate the passes leave untouched still needs a site when it carries an angle. `PauliRot`
 holds its angle in a boxed payload rather than in the enum slot, and replay patches it

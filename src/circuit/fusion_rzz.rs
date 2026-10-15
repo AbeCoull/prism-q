@@ -72,10 +72,8 @@ pub(super) fn fuse_rzz<'a>(circuit: &'a Circuit, t: &mut Tracer) -> Cow<'a, Circ
         Some(new_insts) => {
             t.begin();
             for (slot, &src) in kept.iter().enumerate() {
-                // The rewritten Rzz carries the inner Rz angle, a 1q payload
-                // widened onto the pair the surrounding CX gates named.
                 match merged[slot] {
-                    Some(rz) => t.merge(&[(rz, Place::Low)]),
+                    Some(rz) => t.rzz(rz),
                     None => t.keep(src),
                 }
             }

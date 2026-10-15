@@ -474,7 +474,7 @@ fn bench_parameter_sweep(c: &mut Criterion) {
     // Quantum volume carries a far higher guard-to-site ratio than the ansatz
     // shapes, so it is the row that shows what replay costs rather than what it
     // saves.
-    let shapes: [(&str, usize); 8] = [
+    let shapes: [(&str, usize); 9] = [
         ("hea", 12),
         ("hea", 16),
         ("hea", 20),
@@ -483,12 +483,14 @@ fn bench_parameter_sweep(c: &mut Criterion) {
         ("qaoa", 20),
         ("qv", 12),
         ("qv", 20),
+        ("diag_mixed", 16),
     ];
 
     for (tag, n) in shapes {
         let build = move || match tag {
             "qaoa" => circuits::qaoa_circuit(n, 3, SEED),
             "qv" => circuits::quantum_volume_circuit(n, 5, SEED),
+            "diag_mixed" => circuits::diagonal_mixed_circuit(n, 6, SEED),
             _ => circuits::hardware_efficient_ansatz(n, 5, SEED),
         };
         let template = build();

@@ -4,6 +4,9 @@
 //! is enabled, a Rayon-parallelized variant dispatched above
 //! `PARALLEL_THRESHOLD_QUBITS`.
 
+#[path = "mixed.rs"]
+mod mixed;
+
 use num_complex::Complex64;
 use rand::RngExt;
 use smallvec::SmallVec;

@@ -690,6 +690,33 @@ impl FactoredBackend {
         }
         Ok(masks)
     }
+
+    /// Schmidt spectrum of each sub-state the cut at `subsystem` splits, one
+    /// thin SVD over that block's own amplitudes. A block wholly on one side
+    /// is a product factor across the cut and contributes no spectrum.
+    fn straddling_spectra(&self, subsystem: &[usize]) -> Result<Vec<Vec<f64>>> {
+        let mut inside = vec![false; self.num_qubits];
+        for &q in subsystem {
+            inside[q] = true;
+        }
+        let mut spectra = Vec::new();
+        for sub in self.substates.iter().flatten() {
+            let local: SmallVec<[usize; 8]> = (0..sub.qubits.len())
+                .filter(|&i| inside[sub.qubits[i]])
+                .collect();
+            if local.is_empty() || local.len() == sub.qubits.len() {
+                continue;
+            }
+            spectra.push(schmidt::dense_schmidt_values(
+                self.name(),
+                &sub.state,
+                sub.qubits.len(),
+                &local,
+                &self.limits,
+            )?);
+        }
+        Ok(spectra)
+    }
 }
 
 impl crate::backend::sealed::Sealed for FactoredBackend {
@@ -828,6 +855,39 @@ impl Backend for FactoredBackend {
         }
         reduced_density::normalize_trace(&mut rho, dim);
         Ok(rho)
+    }
+
+    /// Sorted Kronecker product of the spectra of the blocks the cut splits,
+    /// a single `1` when it splits none. The product is priced against the
+    /// dense export cap, past which only [`Backend::entanglement_entropy`]
+    /// answers.
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        let spectra = self.straddling_spectra(subsystem)?;
+        let width = spectra
+            .iter()
+            .map(|s| s.len().next_power_of_two().trailing_zeros() as usize)
+            .sum();
+        dense_statevector_len(self.name(), "Schmidt values", width, &self.limits)?;
+        let mut values = vec![1.0];
+        for spectrum in &spectra {
+            values = values
+                .iter()
+                .flat_map(|&a| spectrum.iter().map(move |&b| a * b))
+                .collect();
+        }
+        Ok(schmidt::finish_schmidt_values(values))
+    }
+
+    /// Sum of the split blocks' entropies, so the product spectrum is never
+    /// built and the export cap bounds only each block's own SVD.
+    fn entanglement_entropy(&mut self, subsystem: &[usize]) -> Result<f64> {
+        schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        Ok(self
+            .straddling_spectra(subsystem)?
+            .iter()
+            .map(|s| schmidt::entropy_of_schmidt_values(s))
+            .sum())
     }
 
     /// Apply a Kraus branch to one qubit without boxing a `Gate::Fused`.

@@ -1089,3 +1089,84 @@ fn native_sampler_matches_the_dense_factored_sampler_shot_for_shot() {
         assert_eq!(native, dense, "{shots} shots");
     }
 }
+
+// ---- Schmidt values and entropy across a cut ----
+
+// Three blocks on interleaved qubits: {0, 2, 4}, {1, 5} and {3, 6}.
+fn three_interleaved_blocks() -> Circuit {
+    let mut c = Circuit::new(7, 0);
+    c.add_gate(Gate::Ry(0.7), &[0]);
+    c.add_gate(Gate::Ry(1.1), &[2]);
+    c.add_gate(Gate::Cx, &[0, 2]);
+    c.add_gate(Gate::Ry(0.4), &[4]);
+    c.add_gate(Gate::Cx, &[2, 4]);
+    c.add_gate(Gate::Rz(0.3), &[0]);
+    c.add_gate(Gate::Cx, &[4, 0]);
+    c.add_gate(Gate::Ry(0.9), &[1]);
+    c.add_gate(Gate::Cx, &[1, 5]);
+    c.add_gate(Gate::Rx(0.6), &[5]);
+    c.add_gate(Gate::H, &[3]);
+    c.add_gate(Gate::Cx, &[3, 6]);
+    c.add_gate(Gate::Ry(0.5), &[6]);
+    c
+}
+
+#[test]
+fn a_cut_splitting_two_blocks_matches_the_statevector() {
+    let circuit = three_interleaved_blocks();
+    let mut fac = FactoredBackend::new(42);
+    sim::run_on(&mut fac, &circuit).unwrap();
+    assert_eq!(group_widths(&fac), [3, 2, 2]);
+    let mut sv = StatevectorBackend::new(42);
+    sim::run_on(&mut sv, &circuit).unwrap();
+
+    // Splits {0 | 2, 4} and {1 | 5}; {3, 6} lies wholly inside.
+    let subsystem = [6, 0, 3, 1];
+    let expected = sv.schmidt_values(&subsystem).unwrap();
+    let values = fac.schmidt_values(&subsystem).unwrap();
+    assert_eq!(values.len(), 4, "{values:?}");
+    assert_eq!(
+        values.len(),
+        expected.len(),
+        "{values:?} against {expected:?}"
+    );
+    for (a, e) in values.iter().zip(&expected) {
+        assert!((a - e).abs() < 1e-12, "{values:?} against {expected:?}");
+    }
+    let entropy = fac.entanglement_entropy(&subsystem).unwrap();
+    let expected = sv.entanglement_entropy(&subsystem).unwrap();
+    assert!(entropy > 0.0);
+    assert!(
+        (entropy - expected).abs() < 1e-12,
+        "{entropy} against {expected}"
+    );
+}
+
+#[test]
+fn a_cut_splitting_no_block_has_the_single_value_one() {
+    let mut fac = FactoredBackend::new(42);
+    sim::run_on(&mut fac, &three_interleaved_blocks()).unwrap();
+    for subsystem in [&[0, 2, 4][..], &[1, 3, 5, 6]] {
+        assert_eq!(fac.schmidt_values(subsystem).unwrap(), [1.0]);
+        assert_eq!(fac.entanglement_entropy(subsystem).unwrap(), 0.0);
+    }
+}
+
+// Each Bell pair fits a three-qubit export cap, and the 16 values of four
+// split pairs do not, so only the entropy answers.
+#[test]
+fn past_the_export_cap_only_the_entropy_answers() {
+    let limits = ResolvedLimits::resolve(Some(&crate::limits::Limits::new().max_export_qubits(3)));
+    let mut fac = FactoredBackend::with_limits(42, &limits);
+    sim::run_on(&mut fac, &crate::circuits::independent_bell_pairs(4)).unwrap();
+    let subsystem = [0, 2, 4, 6];
+    assert!(matches!(
+        fac.schmidt_values(&subsystem),
+        Err(crate::error::PrismError::ResourceLimit(_))
+    ));
+    let entropy = fac.entanglement_entropy(&subsystem).unwrap();
+    assert!(
+        (entropy - 4.0 * std::f64::consts::LN_2).abs() < 1e-12,
+        "{entropy}"
+    );
+}

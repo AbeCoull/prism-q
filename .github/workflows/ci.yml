@@ -5,9 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# A push to main is never cancelled: each one owes its bench reference build, which
+# the next pull request's gate restores.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,12 +24,19 @@ env:
   CI_DIST_FEATURES: parallel distributed
   # Mirrors `rust-version` in Cargo.toml and `msrv` in clippy.toml. Update all three together.
   CI_MSRV: 1.88.0
+  # Miri and ThreadSanitizer run on this nightly. A floating nightly renames their caches
+  # daily and can break the jobs with no change here.
+  CI_NIGHTLY: nightly-2026-10-14
   # Doc surface. cudarc's build script with the pinned cuda-12040 feature does not
   # probe for a toolkit, so the gpu and distributed docs build on a bare runner.
   # distributed-mpi stays out: mpi-sys fails in its build script when no MPI library
   # is installed.
   CI_DOC_FEATURES: parallel,gpu,distributed
   CI_BENCH_FEATURES: parallel,bench-fast
+  # cargo-public-api reads rustdoc JSON, whose format moves with nightly; both pins move
+  # together, and the snapshot is regenerated with the same pair.
+  API_NIGHTLY: nightly-2026-08-10
+  API_TOOL_VERSION: 0.52.0
   REGRESSION_THRESHOLD: ${{ vars.REGRESSION_THRESHOLD || '5.0' }}
 
 jobs:
@@ -33,19 +45,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-      - uses: taiki-e/install-action@cargo-nextest
+          nextest: true
 
       - name: Formatting
         run: cargo fmt --all -- --check
 
       - name: Correctness tooling tests
         run: python3 -m unittest discover -s scripts -p 'test_correctness_tools.py'
+
+      # A new public Rust item needs a decision in bindings/python/parity.toml. The
+      # wheel jobs run this too, but only after a full extension build.
+      - name: Python parity manifest
+        run: pipx run pytest -q bindings/python/tests/test_parity.py -k "not resolves"
 
       - name: Clippy
         run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
@@ -75,12 +89,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
         with:
-          cache-bin: false
-          key: ci-release
-      - uses: taiki-e/install-action@cargo-nextest
+          cache-key: ci-release
+          nextest: true
 
       # `[profile.test]` keeps debug assertions on, so a wrong answer that only a
       # `debug_assert!` notices never reaches a test. This lane runs the unit
@@ -106,12 +118,10 @@ jobs:
       RUSTFLAGS: --cfg prism_lowered_thresholds
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
         with:
-          cache-bin: false
-          key: lowered-thresholds
-      - uses: taiki-e/install-action@cargo-nextest
+          cache-key: lowered-thresholds
+          nextest: true
 
       - name: Route ledger and differential binaries
         run: >-
@@ -126,13 +136,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-      - uses: taiki-e/install-action@cargo-nextest
+          nextest: true
 
       - name: Clippy
         run: cargo clippy --all-targets --no-default-features -- -D warnings -D clippy::undocumented_unsafe_blocks
@@ -151,13 +158,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-      - uses: taiki-e/install-action@cargo-nextest
+          nextest: true
 
       - name: Clippy
         run: cargo clippy --all-targets --features "$CI_DIST_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
@@ -184,12 +188,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
 
       # mpi-sys runs bindgen over mpi.h, so it needs libclang beside the MPI headers.
       - name: Install Open MPI and libclang
@@ -247,16 +248,17 @@ jobs:
       PRISM_MAX_DENSE_OUTCOME_BITS: "26"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.CI_NIGHTLY }}
           components: miri
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-      # The runner's default toolchain stays stable; the explicit +nightly is what
-      # routes cargo at the toolchain the action installed.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # `rust-toolchain.toml` pins stable and would override the installed nightly.
       - name: Miri over the partitioning kernels
-        run: cargo +nightly miri test --features parallel --test determinism
+        run: cargo +"$CI_NIGHTLY" miri test --features parallel --test determinism
 
   # ThreadSanitizer runs the parallel kernels on real threads and reports data races
   # the SAFETY comments only argue away. -Zbuild-std instruments std so its
@@ -272,21 +274,22 @@ jobs:
       TSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/tsan-suppressions.txt
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.CI_NIGHTLY }}
           components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Runner kernels hand out 32 bits of mmap randomness, outside the range the
       # TSan shadow mapping tolerates.
       - name: Lower ASLR entropy for TSan
         run: sudo sysctl -w vm.mmap_rnd_bits=28
-      # The runner's default toolchain stays stable; the explicit +nightly is what
-      # routes cargo at the toolchain the action installed.
+      # `rust-toolchain.toml` pins stable and would override the installed nightly.
       - name: ThreadSanitizer over the parallel kernels
         run: >-
-          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
+          cargo +"$CI_NIGHTLY" test -Zbuild-std --target x86_64-unknown-linux-gnu
           --features parallel --test determinism --test backend_equivalence
 
   # `rust-version` is published to crates.io, and every other job runs on the toolchain
@@ -309,6 +312,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `rust-toolchain.toml` pins the development toolchain and would override the
       # installed floor.
@@ -347,10 +351,6 @@ jobs:
       - name: Verify that only a valid second run clears a FAIL
         run: bash scripts/bench_ci_test.sh
 
-  # Every bench row once in Criterion's test mode. Many wide paths run only in a
-  # bench fixture, so a panic there would otherwise surface in the middle of a
-  # timed run. The script builds under `ci-release` rather than the fat-LTO bench
-  # profile and lists the rows it leaves out, each with its reason.
   # Compares the public API against the last release, at the release type the
   # conventional commits since it imply before the pre-1.0 clamp, with the PR
   # title standing in for the squash subject it becomes. A break therefore passes
@@ -367,10 +367,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.99.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
+      - uses: ./.github/actions/setup-rust
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks
@@ -416,18 +413,19 @@ jobs:
           path: head
           fetch-depth: 1
 
-      - uses: dtolnay/rust-toolchain@1.99.0
+      # Shared with the gate's head build, which restores what this job saves.
+      - uses: ./head/.github/actions/setup-rust
+        with:
+          root: head
+          cache-shared-key: bench
+          cache-workspaces: head -> target
+
       # `actions/cache` rejects a comma in a key, and the feature list carries
       # one, so the key takes a slug of it rather than the list itself.
       - id: toolchain
         run: |
           echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
           echo "features=${CI_BENCH_FEATURES//,/-}" >> "$GITHUB_OUTPUT"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-          workspaces: head -> target
 
       - name: Build the reference bench binary
         working-directory: head
@@ -497,8 +495,12 @@ jobs:
             echo "No Rust source or manifest change. Nothing to measure." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./head/.github/actions/setup-rust
         if: steps.scope.outputs.run == 'true'
+        with:
+          root: head
+          cache-shared-key: bench
+          cache-workspaces: head -> target
 
       - id: toolchain
         if: steps.scope.outputs.run == 'true'
@@ -508,8 +510,8 @@ jobs:
 
       # A hit means the base commit went through Benchmark Reference Build, so
       # its binary was compiled at this same path and the reference build below
-      # is skipped entirely. A miss falls back to the worktree, which still
-      # gates correctly, just slower and carrying the package-path term.
+      # is skipped entirely. A miss falls back to the worktree, built cold, which
+      # still gates correctly, just slower and carrying the package-path term.
       - name: Restore the reference bench binary
         id: refexe
         if: steps.scope.outputs.run == 'true'
@@ -522,23 +524,6 @@ jobs:
         if: steps.scope.outputs.run == 'true' && steps.refexe.outputs.cache-hit != 'true'
         working-directory: head
         run: git worktree add --detach "$PRISM_BENCH_REF_DIR" "$PRISM_BENCH_REF"
-
-      - uses: Swatinem/rust-cache@v2
-        if: steps.scope.outputs.run == 'true'
-        with:
-          cache-bin: false
-          key: head
-          workspaces: head -> target
-
-      # Only when the reference has to be compiled. Restoring this workspace on
-      # a cache hit would also re-save it empty at job end, making the next miss
-      # more expensive than it needs to be.
-      - uses: Swatinem/rust-cache@v2
-        if: steps.scope.outputs.run == 'true' && steps.refexe.outputs.cache-hit != 'true'
-        with:
-          cache-bin: false
-          key: ref
-          workspaces: bench-ref -> target
 
       - name: Benchmark regression gate
         if: steps.scope.outputs.run == 'true'
@@ -573,33 +558,27 @@ jobs:
             head/bench_results/ci-ab.md
             head/bench_results/ci-ab-confirm.md
 
+  # The instrumented suite is the longest Linux job, and the badge it feeds is read
+  # from main only, so it runs on pushes to main rather than on every pull request.
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
+          nextest: true
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@cargo-nextest
       - name: Generate coverage
         run: cargo llvm-cov nextest --features "$CI_FEATURES" --lcov --output-path lcov.info
       - name: Summarize source gaps
-        env:
-          COVERAGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          args=()
-          if [[ -n "$COVERAGE_BASE" ]]; then args+=(--base "$COVERAGE_BASE"); fi
-          python scripts/coverage_report.py lcov.info "${args[@]}" > coverage-summary.md
+          python scripts/coverage_report.py lcov.info > coverage-summary.md
           cat coverage-summary.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
@@ -618,7 +597,7 @@ jobs:
           echo "percentage=$COVERAGE" >> "$GITHUB_OUTPUT"
           echo "### Coverage: ${COVERAGE}%" >> "$GITHUB_STEP_SUMMARY"
       - name: Update coverage badge
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main'
         uses: schneegans/dynamic-badges-action@v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
@@ -630,56 +609,22 @@ jobs:
           minColorRange: 50
           maxColorRange: 90
 
-  check-aarch64:
-    name: Cross-compile aarch64
-    runs-on: ubuntu-latest
+  # Native aarch64 Linux. The full suite runs the NEON kernels against their scalar
+  # references, and the no-default-features lint reaches the cfg-gated code a macOS
+  # host does not compile.
+  test-linux-arm:
+    name: Test Linux ARM64
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
-          targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-      - name: Install cross-compilation toolchain
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-      - name: Check (no default features)
-        run: cargo check --target aarch64-unknown-linux-gnu --no-default-features
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      - name: Check (CI features)
-        run: cargo check --target aarch64-unknown-linux-gnu --features "$CI_FEATURES"
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-
-  # Execute the NEON fallbacks under emulation. check-aarch64 above only compiles,
-  # so without this the NEON kernels are never run against their scalar reference on
-  # Linux. Scoped to the SIMD-relevant tests to bound QEMU wall-clock.
-  test-aarch64-qemu:
-    name: Test aarch64 (QEMU)
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
-        with:
-          targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-      - name: SIMD kernel unit tests (NEON vs scalar)
-        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib backend::simd::tests
-      - name: word_ops unit tests (NEON vs scalar)
-        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib backend::word_ops::tests
-      - name: Batched diagonal phase reference (NEON path)
-        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib backend::statevector::tests::batch_phase_matches_independent_reference
-      - name: Compiled sampler stream (NEON vs scalar lanes)
-        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib sim::compiled::bts::tests::vector_and_scalar_paths_draw_one_stream
-      - name: Cross-backend correctness matrix
-        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --test backend_matrix
+          components: clippy
+          nextest: true
+      - name: Clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings -D clippy::undocumented_unsafe_blocks
+      - name: Tests
+        run: cargo nextest run --features "$CI_FEATURES"
 
   # Compile-check the GPU paths with no CUDA toolkit and no device, the setup the
   # wheel jobs build in: cudarc loads the driver and NVRTC at run time, so neither
@@ -694,13 +639,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-      - uses: taiki-e/install-action@cargo-nextest
+          nextest: true
       - name: Compile-check GPU dispatch + golden_gpu coverage
         run: cargo check --all-targets --features "parallel gpu"
       # The only build where all three feature-gated dispatch arms compile together.
@@ -720,13 +662,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-      - uses: taiki-e/install-action@cargo-nextest
+          nextest: true
       - name: Clippy
         run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
       - name: Tests
@@ -745,13 +684,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: ./.github/actions/setup-rust
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-bin: false
-      - uses: taiki-e/install-action@cargo-nextest
+          nextest: true
       - name: Clippy
         run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
       - name: Tests
@@ -772,3 +708,59 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  # Same surface as the docs build: rustdoc never links, so gpu and distributed build on
+  # a bare runner.
+  public-api:
+    name: Public API snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.API_NIGHTLY }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-public-api
+        run: cargo install cargo-public-api --locked --version "$API_TOOL_VERSION"
+      - name: Compare against docs/architecture/public-api.txt
+        run: |
+          cargo +"$API_NIGHTLY" public-api --features "$CI_DOC_FEATURES" -sss > /tmp/public-api.txt
+          if ! diff -u docs/architecture/public-api.txt /tmp/public-api.txt; then
+            echo "::error::The public API changed. If intended, regenerate the snapshot with"
+            echo "::error::cargo +$API_NIGHTLY public-api --features \"$CI_DOC_FEATURES\" -sss > docs/architecture/public-api.txt"
+            exit 1
+          fi
+
+  # The one check branch protection requires, so a job added here gates merges without
+  # a settings change. A skipped job passes; the benchmark gate stays advisory because
+  # shared runners cannot hold its threshold.
+  ci-result:
+    name: CI result
+    if: always()
+    needs:
+      - check
+      - check-release-profile
+      - check-lowered-thresholds
+      - check-no-default-features
+      - check-distributed
+      - mpi-linux
+      - miri
+      - tsan
+      - msrv
+      - release-bump-level
+      - bench-gate-confirmation
+      - semver
+      - coverage
+      - test-linux-arm
+      - gpu-check
+      - test-macos-arm
+      - test-windows
+      - security
+      - public-api
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail when a required job failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

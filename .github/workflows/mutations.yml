@@ -21,12 +21,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@1.99.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
         with:
-          cache-bin: false
-          key: mutation-checks
-      - uses: taiki-e/install-action@cargo-nextest
+          cache-key: mutation-checks
+          nextest: true
       - name: Correctness tooling tests
         run: python -m unittest discover -s scripts -p 'test_correctness_tools.py'
       - name: Check phase signs, target order, and parameter replay

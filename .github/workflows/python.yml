@@ -46,10 +46,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - id: toolchain
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
 
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           command: build
           target: ${{ matrix.platform.target }}
@@ -111,7 +116,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           command: sdist
           args: --manifest-path bindings/python/Cargo.toml --out dist
@@ -125,10 +130,19 @@ jobs:
     needs: sdist
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: rust-toolchain.toml
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - id: toolchain
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: actions/download-artifact@v8
         with:
           name: sdist
@@ -170,6 +184,6 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist

@@ -12,8 +12,6 @@ from pathlib import Path
 
 import pytest
 
-import prism_q
-
 REPO = Path(__file__).resolve().parents[3]
 SNAPSHOT = REPO / "docs" / "architecture" / "public-api.txt"
 MANIFEST = REPO / "bindings" / "python" / "parity.toml"
@@ -101,6 +99,9 @@ def tracked_items():
 
 
 def resolve(dotted):
+    # Imported here so the manifest checks run without a built extension.
+    import prism_q
+
     target = prism_q
     for part in dotted.split("."):
         target = getattr(target, part)

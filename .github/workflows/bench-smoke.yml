@@ -28,10 +28,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
         with:
-          cache-bin: false
-          key: bench-smoke
+          cache-key: bench-smoke
       - name: Run every bench row once
         run: bash scripts/bench_smoke.sh

@@ -510,7 +510,7 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let mut model = NoiseModel {
-            after_gate: vec![Vec::new(); circuit.instructions.len()],
+            after_gate: vec![Vec::new(); circuit.noise_slot_count()],
             readout: vec![None; circuit.num_classical_bits],
         };
         for (index, spec) in std::mem::take(&mut self.noise_specs) {

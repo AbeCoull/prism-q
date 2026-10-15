@@ -188,9 +188,11 @@ print(simulate(coin.build()).seed(3).shots(1000).counts())   # {'00': 507, '11':
 The else region reads the condition again after the first has run, so a `body` that
 measures into a bit the condition reads cannot take an `else_body` and raises
 `PrismError`. A body cannot widen the circuit, which rules out `measure_pauli_product`
-and `measure_all` inside one. Regions nest. A noise model carrying quantum events
-rejects a circuit that holds a region, because its event slots index top-level
-instructions; readout error alone is accepted.
+and `measure_all` inside one. Regions nest. A noise model built for a circuit with a
+region carries slots for the body's gates, and their events fire only on the shots that
+take the branch. `NoiseModel.empty(circuit)` sizes the model to those slots too: index
+`i` below the instruction count is top-level instruction `i`, and the body slots follow
+in region order.
 
 ## Exporting and drawing circuits
 

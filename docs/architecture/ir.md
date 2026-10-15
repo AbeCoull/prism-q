@@ -77,8 +77,10 @@ binomially at each measurement until only measurements remain, then drawing each
 branch's readout from its state. Routes requiring a unitary circuit (adjoint
 gradients, exact expectation values, Pauli propagation, stabilizer-rank
 probabilities) reject a region for the same reason they reject a bare
-conditional. Noise models index one event slot per instruction, so they reject a
-region rather than leave its body noiseless.
+conditional. A noise model keeps one event slot per top-level instruction and
+appends a slot for every guarded body instruction and every conditional's gate
+after them; a body slot fires only on the shots its instruction runs. Only routes
+holding one state per shot serve such a model.
 
 `Circuit::fold_static_guards` runs once per shots or counts call and resolves the
 guards that cannot depend on a measurement. A condition reading only bits no preceding

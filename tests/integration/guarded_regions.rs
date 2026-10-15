@@ -776,7 +776,7 @@ fn the_compiled_sampler_rejects_a_region() {
 }
 
 #[test]
-fn a_noise_model_rejects_a_region() {
+fn a_noise_model_gives_a_region_body_its_own_slots() {
     use prism_q::sim::noise::NoiseModel;
 
     let mut circuit = CircuitBuilder::new_with_classical(2, 1);
@@ -788,13 +788,10 @@ fn a_noise_model_rejects_a_region() {
         });
     let circuit = circuit.build();
     let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-    let err = noise
+    assert_eq!(noise.after_gate.len(), circuit.instructions.len() + 2);
+    noise
         .validate_for(&circuit)
-        .expect_err("noise slots are per instruction");
-    assert!(
-        matches!(&err, PrismError::IncompatibleBackend { reason, .. } if reason.contains("noise slots")),
-        "{err:?}"
-    );
+        .expect("body slots follow the top level");
 }
 
 // ---- Static-guard folding (the sampling reachability refinement) ----

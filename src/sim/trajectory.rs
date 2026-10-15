@@ -16,7 +16,9 @@ use crate::error::Result;
 use crate::gates::Gate;
 use crate::limits::ResolvedLimits;
 use crate::sim::ShotsResult;
-use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError};
+use crate::sim::noise::{
+    NoiseChannel, NoiseEvent, NoiseModel, ReadoutError, SlotWalk, walk_noise_slots,
+};
 use crate::sim::unified_pauli::PauliAxis;
 
 #[cfg(feature = "parallel")]
@@ -133,22 +135,87 @@ pub(crate) fn prepare_thermal_rates(noise: &NoiseModel) -> Vec<(f64, f64)> {
         .after_gate
         .iter()
         .flatten()
-        .filter_map(|event| {
-            let NoiseChannel::ThermalRelaxation {
-                t1, t2, gate_time, ..
-            } = &event.channel
-            else {
-                return None;
-            };
-            if *t1 <= 0.0 || *t2 <= 0.0 || *gate_time <= 0.0 {
-                None
-            } else {
-                Some(crate::sim::noise::thermal_relaxation_rates(
-                    *t1, *t2, *gate_time,
-                ))
-            }
-        })
+        .filter_map(thermal_rates_of)
         .collect()
+}
+
+/// The rates [`prepare_thermal_rates`] holds for `event`, `None` for any other
+/// channel and for a thermal channel that acts as the identity.
+fn thermal_rates_of(event: &NoiseEvent) -> Option<(f64, f64)> {
+    let NoiseChannel::ThermalRelaxation {
+        t1, t2, gate_time, ..
+    } = &event.channel
+    else {
+        return None;
+    };
+    if *t1 <= 0.0 || *t2 <= 0.0 || *gate_time <= 0.0 {
+        None
+    } else {
+        Some(crate::sim::noise::thermal_relaxation_rates(
+            *t1, *t2, *gate_time,
+        ))
+    }
+}
+
+/// A trajectory over a model with guarded slots. Thermal rates are computed
+/// per event, since a skipped body would leave a shared rate iterator behind.
+struct TrajectoryWalk<'a> {
+    backend: &'a mut dyn Backend,
+    rng: &'a mut ChaCha8Rng,
+}
+
+impl SlotWalk for TrajectoryWalk<'_> {
+    fn classical(&self) -> &[bool] {
+        self.backend.classical_results()
+    }
+
+    fn apply(&mut self, instruction: &Instruction) -> Result<()> {
+        self.backend.apply(instruction)
+    }
+
+    fn fire(&mut self, events: &[NoiseEvent]) -> Result<()> {
+        for event in events {
+            let rates = thermal_rates_of(event);
+            apply_noise_event(self.backend, event, &mut rates.as_slice().iter(), self.rng)?;
+        }
+        Ok(())
+    }
+}
+
+/// [`TrajectoryWalk`] on the per-shot memory path.
+struct MemoryWalk<'a> {
+    backend: &'a mut dyn Backend,
+    memory: &'a mut ShotMemory,
+    leakage: bool,
+    rng: &'a mut ChaCha8Rng,
+}
+
+impl SlotWalk for MemoryWalk<'_> {
+    fn classical(&self) -> &[bool] {
+        self.backend.classical_results()
+    }
+
+    fn apply(&mut self, instruction: &Instruction) -> Result<()> {
+        if self.leakage {
+            apply_leaky_instruction(self.backend, instruction, self.memory, self.rng)
+        } else {
+            self.backend.apply(instruction)
+        }
+    }
+
+    fn fire(&mut self, events: &[NoiseEvent]) -> Result<()> {
+        for event in events {
+            let rates = thermal_rates_of(event);
+            apply_memory_event(
+                self.backend,
+                event,
+                &mut rates.as_slice().iter(),
+                self.memory,
+                self.rng,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Unravel thermal relaxation as the amplitude-damping and phase-damping
@@ -690,16 +757,26 @@ fn run_memory_shot(
 ) -> Result<(Vec<bool>, Vec<bool>)> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
     let mut memory = ShotMemory::new(circuit.num_qubits, spec, rng);
-    let mut thermal_rates = thermal_rates.iter();
-    for (instr, events) in circuit.instructions.iter().zip(&noise.after_gate) {
-        if spec.leakage {
-            apply_leaky_instruction(backend, instr, &mut memory, rng)?;
-        } else {
-            backend.apply(instr)?;
+    if noise.after_gate.len() == circuit.instructions.len() {
+        let mut thermal_rates = thermal_rates.iter();
+        for (instr, events) in circuit.instructions.iter().zip(&noise.after_gate) {
+            if spec.leakage {
+                apply_leaky_instruction(backend, instr, &mut memory, rng)?;
+            } else {
+                backend.apply(instr)?;
+            }
+            for event in events {
+                apply_memory_event(backend, event, &mut thermal_rates, &mut memory, rng)?;
+            }
         }
-        for event in events {
-            apply_memory_event(backend, event, &mut thermal_rates, &mut memory, rng)?;
-        }
+    } else {
+        let mut walk = MemoryWalk {
+            backend: &mut *backend,
+            memory: &mut memory,
+            leakage: spec.leakage,
+            rng: &mut *rng,
+        };
+        walk_noise_slots(circuit, noise, 0, &mut walk)?;
     }
     let mut results = backend.classical_results().to_vec();
     apply_readout_errors(&mut results, readout, rng);
@@ -800,14 +877,22 @@ fn finish_trajectory(
     thermal_rates: &mut std::slice::Iter<'_, (f64, f64)>,
     rng: &mut ChaCha8Rng,
 ) -> Result<Vec<bool>> {
-    for (instr, events) in circuit.instructions[from..]
-        .iter()
-        .zip(&noise.after_gate[from..])
-    {
-        backend.apply(instr)?;
-        for event in events {
-            apply_noise_event(backend, event, thermal_rates, rng)?;
+    if noise.after_gate.len() == circuit.instructions.len() {
+        for (instr, events) in circuit.instructions[from..]
+            .iter()
+            .zip(&noise.after_gate[from..])
+        {
+            backend.apply(instr)?;
+            for event in events {
+                apply_noise_event(backend, event, thermal_rates, rng)?;
+            }
         }
+    } else {
+        let mut walk = TrajectoryWalk {
+            backend: &mut *backend,
+            rng: &mut *rng,
+        };
+        walk_noise_slots(circuit, noise, from, &mut walk)?;
     }
 
     let mut results = backend.classical_results().to_vec();

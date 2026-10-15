@@ -302,9 +302,12 @@ impl<'c> Simulate<'c, Seeded> {
         }
         let extended = self.noise_model.map(|model| {
             let mut model = model.clone();
+            // The rotations join the top level, ahead of any guarded body slots.
+            let at = self.circuit.instructions.len().min(model.after_gate.len());
+            let added = circuit.instructions.len() - self.circuit.instructions.len();
             model
                 .after_gate
-                .resize(circuit.instructions.len(), Vec::new());
+                .splice(at..at, std::iter::repeat_n(Vec::new(), added));
             model.readout.resize(circuit.num_classical_bits, None);
             model
         });

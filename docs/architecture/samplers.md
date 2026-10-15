@@ -284,13 +284,23 @@ target outside the register reaches kernels that index amplitudes without one.
 The analytic `noisy_marginals_analytical` is the exception, having no per-shot
 state to allocate.
 
-A guarded region (`Instruction::Region`) is rejected whenever the model carries
-at least one quantum event: slots are indexed per top-level instruction, so a
-region body has none and would run noiselessly. A readout-only model has
-nothing to lose there and is accepted. Reaching noise inside a region body
-needs the event stream keyed by something other than a top-level index, which
-the compiled sampler, the error chain complex, and the density-matrix evolution
-all walk today.
+Slots `0..n` follow the `n` top-level instructions and fire every shot, a
+guarded instruction's included. The slots of guarded bodies come after them:
+each region in order lays out its body's slots and then its nested guards', and
+a conditional takes one slot for its gate. Top-level indices therefore mean what
+they meant before guards had slots, and a circuit without guards has exactly
+`n`. A body slot fires only on the shots its instruction runs, so the untaken
+branch adds no noise, as a hand-lowered circuit would have it. The built-in
+constructors and every gate rule of `NoiseBuilder` put a guarded gate's noise in
+its body slot; the rules that read a schedule decline a circuit holding a
+region, whose duration depends on the branch.
+
+Trajectories and the stabilizer replay walk the guards per shot. The compiled
+noisy sampler and the error chain complex fix their maps before a shot, so they
+reject a model whose body slots carry an event, and the density matrix rejects
+any guard before reading a slot. A model of exactly `n` slots is still accepted
+where it was before: on a circuit whose guards are all conditionals (which then
+carry no gate noise) and, readout only, on a circuit with a region.
 
 Custom Kraus sets must be trace preserving, `sum_k Kdagger_k K_k = I` to 1e-9.
 The exact route applies a declared set literally while the trajectory route

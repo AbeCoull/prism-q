@@ -1537,6 +1537,77 @@ pub(super) fn colmajor_forward_sim(
     Ok((xz, phase_vec, nw))
 }
 
+#[cfg(all(target_arch = "x86_64", any(kani, test)))]
+mod rowmul_spec {
+    use super::rowmul_avx2;
+
+    /// Aaronson-Gottesman `g`: the phase exponent, in units of `i`, that the bit-`b`
+    /// letters contribute to the Hermitian product of the source and destination rows.
+    fn ag_phase(x1: u64, z1: u64, x2: u64, z2: u64, b: u32) -> i64 {
+        let bit = |w: u64| ((w >> b) & 1) as i64;
+        let (x2, z2) = (bit(x2), bit(z2));
+        match (bit(x1), bit(z1)) {
+            (0, 0) => 0,
+            (1, 1) => z2 - x2,
+            (1, 0) => z2 * (2 * x2 - 1),
+            _ => x2 * (1 - 2 * z2),
+        }
+    }
+
+    fn reference(src: &[u64], dst: &mut [u64], nw: usize, initial_sum: u64) -> u64 {
+        let mut sum = initial_sum;
+        for w in 0..nw {
+            let (x1, z1, x2, z2) = (src[w], src[nw + w], dst[w], dst[nw + w]);
+            for b in 0..64 {
+                sum = sum.wrapping_add(ag_phase(x1, z1, x2, z2, b) as u64);
+            }
+            dst[w] = x1 ^ x2;
+            dst[nw + w] = z1 ^ z2;
+        }
+        sum
+    }
+
+    /// Check `rowmul_avx2` on rows of `N / 2` words against the bitwise phase rule.
+    /// Callers establish AVX2 before calling, except under Kani, which runs no CPU.
+    pub(super) fn check<const N: usize>(src: [u64; N], dst: [u64; N], initial_sum: u64) {
+        let nw = N / 2;
+        let mut simd = dst;
+        let mut spec = dst;
+        // SAFETY: `src` and `simd` each hold exactly `2 * nw` words in the `[x | z]`
+        // layout; AVX2 is established by the caller.
+        let got = unsafe { rowmul_avx2(src.as_ptr(), simd.as_mut_ptr(), nw, initial_sum) };
+        let want = reference(&src, &mut spec, nw, initial_sum);
+        assert_eq!(got, want);
+        assert_eq!(simd, spec);
+    }
+
+    #[cfg(kani)]
+    mod proofs {
+        macro_rules! rowmul_avx2_matches_spec {
+            ($($name:ident: $nw:literal),* $(,)?) => {$(
+                #[kani::proof]
+                #[kani::unwind(65)]
+                fn $name() {
+                    super::check::<{ 2 * $nw }>(kani::any(), kani::any(), kani::any());
+                }
+            )*};
+        }
+
+        rowmul_avx2_matches_spec!(
+            rowmul_avx2_nw0: 0,
+            rowmul_avx2_nw1: 1,
+            rowmul_avx2_nw2: 2,
+            rowmul_avx2_nw3: 3,
+            rowmul_avx2_nw4: 4,
+            rowmul_avx2_nw5: 5,
+            rowmul_avx2_nw6: 6,
+            rowmul_avx2_nw7: 7,
+            rowmul_avx2_nw8: 8,
+            rowmul_avx2_nw9: 9,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1838,5 +1909,38 @@ mod tests {
                 "tableau signs differ at n={n}"
             );
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn rowmul_avx2_matches_bitwise_phase_rule() {
+        use rand::{RngExt, SeedableRng};
+
+        fn run<const N: usize>(rng: &mut rand_chacha::ChaCha8Rng) {
+            for _ in 0..64 {
+                let src: [u64; N] = rng.random();
+                let mut dst: [u64; N] = rng.random();
+                if rng.random_bool(0.25) {
+                    dst = src;
+                }
+                if rng.random_bool(0.25) {
+                    dst[..N / 2].fill(0);
+                }
+                super::rowmul_spec::check(src, dst, rng.random());
+            }
+        }
+
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+        run::<0>(&mut rng);
+        run::<2>(&mut rng);
+        run::<6>(&mut rng);
+        run::<8>(&mut rng);
+        run::<10>(&mut rng);
+        run::<14>(&mut rng);
+        run::<16>(&mut rng);
+        run::<18>(&mut rng);
     }
 }

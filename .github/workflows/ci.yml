@@ -34,6 +34,9 @@ env:
   # is installed.
   CI_DOC_FEATURES: parallel,gpu,distributed
   CI_BENCH_FEATURES: parallel,bench-fast
+  # Kani builds the crate with the nightly its release bundles, so this pin moves the
+  # verifier and its compiler together.
+  KANI_VERSION: 0.68.0
   # cargo-public-api reads rustdoc JSON, whose format moves with nightly; both pins move
   # together, and the snapshot is regenerated with the same pair.
   API_NIGHTLY: nightly-2026-08-10
@@ -257,6 +260,25 @@ jobs:
       # `rust-toolchain.toml` pins stable and would override the installed nightly.
       - name: Miri over the partitioning kernels
         run: cargo +"$CI_NIGHTLY" miri test --features parallel --test determinism
+
+  # Kani checks the `#[kani::proof]` harnesses for every input at the row widths each
+  # one names, which covers each chunk and tail shape of a SIMD loop. The crate's
+  # toolchain only installs the driver; `cargo kani setup` fetches the verifier's own.
+  kani:
+    name: Kani
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache: 'false'
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version "$KANI_VERSION"
+          cargo kani setup
+      - name: Prove the kernel harnesses
+        run: cargo kani --no-default-features
 
   # ThreadSanitizer runs the parallel kernels on real threads and reports data races
   # the SAFETY comments only argue away. -Zbuild-std instruments std so its
@@ -746,6 +768,7 @@ jobs:
       - check-distributed
       - mpi-linux
       - miri
+      - kani
       - tsan
       - msrv
       - release-bump-level

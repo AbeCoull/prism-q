@@ -134,10 +134,6 @@ pub const DM_MAX_QUBITS: usize = 12;
 /// and the harness stops comparing it.
 pub const SR_MAX_T_COUNT: usize = 8;
 
-/// T-count above which the `Auto` stabilizer-rank route switches to sparsified,
-/// statistical estimates. Mirrors `MAX_AUTO_T_COUNT_EXACT` in `sim/dispatch.rs`.
-pub const SR_STATISTICAL_T_COUNT: usize = 18;
-
 /// Minimum compared participants for a case with no independent anchor.
 pub const MIN_CONSENSUS_PARTICIPANTS: usize = 5;
 
@@ -876,12 +872,6 @@ pub enum SkipReason {
     StabilizerRankNonUnitary,
     /// The exact stabilizer-rank expansion costs `2^t` branches.
     StabilizerRankExpansionCost,
-    /// Above `MAX_AUTO_T_COUNT_EXACT` the stabilizer-rank route sparsifies and
-    /// returns statistical estimates instead of exact probabilities. Reachable
-    /// only when the size-derived stabilizer-rank budget admits a T count that
-    /// large, which needs far more qubits than a differential corpus can
-    /// compare against a dense reference.
-    StabilizerRankStatistical,
     /// A dense state on this block needs more bond dimension than the harness
     /// gives the MPS participant, so its output would be truncated.
     MpsTruncation,
@@ -917,13 +907,12 @@ pub enum SkipReason {
 }
 
 impl SkipReason {
-    pub const ALL: [SkipReason; 17] = [
+    pub const ALL: [SkipReason; 16] = [
         SkipReason::NonClifford,
         SkipReason::EntanglingGates,
         SkipReason::StabilizerRankNoTGates,
         SkipReason::StabilizerRankNonUnitary,
         SkipReason::StabilizerRankExpansionCost,
-        SkipReason::StabilizerRankStatistical,
         SkipReason::MpsTruncation,
         SkipReason::TensorNetworkOutputLimit,
         SkipReason::DensityMatrixQubitCap,
@@ -944,7 +933,6 @@ impl SkipReason {
             SkipReason::StabilizerRankNoTGates => "stabilizer_rank_no_t_gates",
             SkipReason::StabilizerRankNonUnitary => "stabilizer_rank_non_unitary",
             SkipReason::StabilizerRankExpansionCost => "stabilizer_rank_expansion_cost",
-            SkipReason::StabilizerRankStatistical => "stabilizer_rank_statistical",
             SkipReason::MpsTruncation => "mps_truncation",
             SkipReason::TensorNetworkOutputLimit => "tensor_network_output_limit",
             SkipReason::DensityMatrixQubitCap => "density_matrix_qubit_cap",
@@ -1097,9 +1085,6 @@ fn stabilizer_rank_rules(profile: &CaseProfile) -> Eligibility {
     }
     if !profile.clifford_plus_t || profile.t_count == 0 {
         return Eligibility::Skip(SkipReason::StabilizerRankNoTGates);
-    }
-    if profile.t_count > SR_STATISTICAL_T_COUNT {
-        return Eligibility::Skip(SkipReason::StabilizerRankStatistical);
     }
     if profile.t_count > SR_MAX_T_COUNT {
         return Eligibility::Skip(SkipReason::StabilizerRankExpansionCost);

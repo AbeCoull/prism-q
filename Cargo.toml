@@ -34,7 +34,7 @@ mpi = { version = "0.8", optional = true }
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(prism_lowered_thresholds)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(prism_lowered_thresholds)", "cfg(kani)"] }
 
 [features]
 default = ["parallel"]

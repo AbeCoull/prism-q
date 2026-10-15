@@ -751,6 +751,7 @@ pub fn run_expectation_gradient_shift(
         None,
         seed,
         None,
+        false,
     )
 }
 
@@ -783,6 +784,7 @@ pub(crate) fn shift_gradient(
     initial_state: Option<super::StartState<'_>>,
     seed: u64,
     request: Option<&Limits>,
+    require_exact: bool,
 ) -> Result<ExpectationGradient> {
     params.validate(circuit)?;
     // Below the fusion floor there is no plan to replay, and the prepared copy
@@ -791,7 +793,15 @@ pub(crate) fn shift_gradient(
         && noise.is_none()
         && circuit.num_qubits >= crate::circuit::fusion::MIN_QUBITS_FOR_FUSION
     {
-        return prepared_shift_gradient(kind, circuit, hamiltonian, params, seed, request);
+        return prepared_shift_gradient(
+            kind,
+            circuit,
+            hamiltonian,
+            params,
+            seed,
+            request,
+            require_exact,
+        );
     }
     let limits = &ResolvedLimits::resolve(request);
     if initial_state.is_some() || noise.is_some() {
@@ -801,6 +811,31 @@ pub(crate) fn shift_gradient(
     let observables: Vec<Vec<PauliTerm>> =
         hamiltonian.iter().map(|(_, terms)| terms.clone()).collect();
     let evaluate = |c: &Circuit| -> Result<f64> {
+        if require_exact {
+            let mut simulation = super::simulate(c)
+                .backend(kind.clone())
+                .seed(seed)
+                .require_exact();
+            if let Some(request) = request {
+                simulation = simulation.limits(*request);
+            }
+            if let Some(noise) = noise {
+                simulation = simulation.noise(noise);
+            }
+            if let Some(state) = initial_state {
+                simulation = match state {
+                    super::StartState::Amplitudes(a) => simulation.initial_state(a),
+                    super::StartState::DensityMatrix(rho) => simulation.initial_density_matrix(rho),
+                };
+            }
+            let values = simulation.expectation_values(&observables)?;
+            return Ok(hamiltonian
+                .iter()
+                .zip(values)
+                .map(|((coefficient, _), value)| coefficient * value)
+                .sum());
+        }
+
         if let BackendKind::PauliPath { epsilon, max_terms } = kind {
             let per_term =
                 super::pauli_path_expectations(c, noise, &observables, *epsilon, *max_terms)?
@@ -895,6 +930,7 @@ fn prepared_shift_gradient(
     params: &Parameters,
     seed: u64,
     request: Option<&Limits>,
+    require_exact: bool,
 ) -> Result<ExpectationGradient> {
     // One slot per linked instruction rather than per parameter slot, since a
     // shift moves one gate even where its slot drives several.
@@ -918,7 +954,8 @@ fn prepared_shift_gradient(
     let observables: Vec<Vec<PauliTerm>> =
         hamiltonian.iter().map(|(_, terms)| terms.clone()).collect();
     let energy = |prepared: &mut PreparedCircuit, values: &[f64]| -> Result<f64> {
-        let per_term = prepared.expectation_values(values, &observables, seed)?;
+        let per_term =
+            prepared.expectation_values_checked(values, &observables, seed, require_exact)?;
         Ok(hamiltonian
             .iter()
             .zip(per_term)

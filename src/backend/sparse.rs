@@ -69,6 +69,24 @@ const DEFAULT_EPSILON: f64 = 1e-28;
 /// qubit index must stay below `usize::BITS`.
 pub(crate) const MAX_SPARSE_INDEX_QUBITS: usize = usize::BITS as usize;
 
+pub(crate) fn check_index_width(num_qubits: usize) -> Result<()> {
+    if num_qubits > MAX_SPARSE_INDEX_QUBITS {
+        return Err(crate::error::PrismError::ResourceLimit(Box::new(
+            crate::error::ResourceLimit {
+                backend: "sparse".to_string(),
+                operation: "the basis index of the circuit".to_string(),
+                resource: crate::error::ResourceKind::Qubits,
+                required: num_qubits as u128,
+                limit: MAX_SPARSE_INDEX_QUBITS as u128,
+                env_var: None,
+                knob: None,
+                limit_source: crate::limits::LimitSource::Detected,
+            },
+        )));
+    }
+    Ok(())
+}
+
 /// Sparse state-vector backend, O(k) where k is the number of non-zero amplitudes.
 pub struct SparseBackend {
     num_qubits: usize,
@@ -692,20 +710,7 @@ impl Backend for SparseBackend {
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
-        if num_qubits > MAX_SPARSE_INDEX_QUBITS {
-            return Err(crate::error::PrismError::ResourceLimit(Box::new(
-                crate::error::ResourceLimit {
-                    backend: "sparse".to_string(),
-                    operation: "the basis index of the circuit".to_string(),
-                    resource: crate::error::ResourceKind::Qubits,
-                    required: num_qubits as u128,
-                    limit: MAX_SPARSE_INDEX_QUBITS as u128,
-                    env_var: None,
-                    knob: None,
-                    limit_source: crate::limits::LimitSource::Detected,
-                },
-            )));
-        }
+        check_index_width(num_qubits)?;
         self.num_qubits = num_qubits;
         self.state.clear();
         self.state.insert(0, Complex64::new(1.0, 0.0));

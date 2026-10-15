@@ -2589,7 +2589,7 @@ const WIDE_FRAME_DEPTH_RATIO: f64 = 5.0;
 /// True when [`run_shots_noisy`] takes the Pauli frame sampler rather than the
 /// compiled one. Both answer from the same distribution and stamp the same
 /// resolved backend, so a result carries nothing that separates them.
-fn use_frame_sampler(circuit: &Circuit) -> bool {
+pub(super) fn use_frame_sampler(circuit: &Circuit) -> bool {
     let n = circuit.num_qubits;
     let gate_count = circuit
         .instructions
@@ -2948,7 +2948,8 @@ fn run_shots_noisy_frame(
     Ok(
         ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
             crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer)
-                .with_engine(crate::sim::Engine::FrameSampler),
+                .with_engine(crate::sim::Engine::FrameSampler)
+                .with_reason(crate::sim::RouteRule::CompiledCliffordSampler),
         ),
     )
 }
@@ -3011,7 +3012,8 @@ fn finish_noisy_compiled_run(
     Ok(
         ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
             crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer)
-                .with_engine(crate::sim::Engine::NoisyCompiledSampler),
+                .with_engine(crate::sim::Engine::NoisyCompiledSampler)
+                .with_reason(crate::sim::RouteRule::CompiledCliffordSampler),
         ),
     )
 }
@@ -3299,6 +3301,38 @@ pub(crate) fn apply_noise_event_dm(dm: &mut DensityMatrixBackend, event: &NoiseE
     }
 }
 
+pub(super) fn validate_mixture_inputs(
+    circuit: &Circuit,
+    noise: Option<&NoiseModel>,
+    initial_state: Option<super::StartState<'_>>,
+) -> Result<()> {
+    if !circuit.has_terminal_measurements_under_reset_channel() {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: "density_matrix".into(),
+            reason: "the mixture holds every measurement branch at once, so mid-circuit \
+                     measurement and classical conditioning cannot be replayed from it; move the \
+                     measurements to the end of the circuit, or run trajectories on a backend \
+                     with a per-shot pure state"
+                .into(),
+        });
+    }
+    if let Some(noise) = noise {
+        noise.validate_for(circuit)?;
+        noise.ensure_memoryless("density_matrix")?;
+    }
+
+    if let Some(state) = initial_state {
+        super::check_initial_state_len(state, circuit.num_qubits)?;
+        match state {
+            super::StartState::Amplitudes(a) => crate::backend::validate_initial_amplitudes(a)?,
+            super::StartState::DensityMatrix(rho) => {
+                crate::backend::validate_initial_density_matrix(rho)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Evolve a density-matrix backend through `circuit` and optional `noise`,
 /// starting from `initial_state` when one is given and |0...0> otherwise.
 ///
@@ -3328,20 +3362,7 @@ pub(crate) fn evolve_density_matrix(
             crate::limits::LimitKnob::DensityMatrixQubits,
         )?;
     }
-    if !circuit.has_terminal_measurements_under_reset_channel() {
-        return Err(crate::error::PrismError::IncompatibleBackend {
-            backend: "density_matrix".into(),
-            reason: "the mixture holds every measurement branch at once, so mid-circuit \
-                     measurement and classical conditioning cannot be replayed from it; move the \
-                     measurements to the end of the circuit, or run trajectories on a backend \
-                     with a per-shot pure state"
-                .into(),
-        });
-    }
-    if let Some(noise) = noise {
-        noise.validate_for(circuit)?;
-        noise.ensure_memoryless("density_matrix")?;
-    }
+    validate_mixture_inputs(circuit, noise, None)?;
 
     let mut dm = build_density_matrix(&accel, seed, limits);
     match initial_state {

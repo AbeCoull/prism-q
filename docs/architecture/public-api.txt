@@ -2390,9 +2390,19 @@ pub prism_q::sim::Engine::NoisyCompiledSampler
 pub prism_q::sim::Exactness::Approximate
 pub prism_q::sim::Exactness::Approximate::fidelity_lower_bound: core::option::Option<f64>
 pub prism_q::sim::Exactness::Exact
+#[non_exhaustive] pub enum prism_q::sim::MemoryEstimateKind
+pub prism_q::sim::MemoryEstimateKind::Exact
+pub prism_q::sim::MemoryEstimateKind::Unknown
+pub prism_q::sim::MemoryEstimateKind::UpperBound
 #[non_exhaustive] pub enum prism_q::sim::Placement
 pub prism_q::sim::Placement::Device
 pub prism_q::sim::Placement::Host
+#[non_exhaustive] pub enum prism_q::sim::PlannedExactness
+pub prism_q::sim::PlannedExactness::Approximate
+pub prism_q::sim::PlannedExactness::Approximate::bound_reported: bool
+pub prism_q::sim::PlannedExactness::Estimated
+pub prism_q::sim::PlannedExactness::Estimated::samples: usize
+pub prism_q::sim::PlannedExactness::Exact
 #[non_exhaustive] pub enum prism_q::sim::Probabilities
 pub prism_q::sim::Probabilities::Dense(alloc::vec::Vec<f64>)
 pub prism_q::sim::Probabilities::Factored
@@ -2406,6 +2416,22 @@ pub fn prism_q::Probabilities::len(&self) -> usize
 pub fn prism_q::Probabilities::marginals(&self) -> alloc::vec::Vec<(f64, f64)>
 pub fn prism_q::Probabilities::subset_marginal(&self, &[usize]) -> alloc::vec::Vec<f64>
 pub fn prism_q::Probabilities::to_vec(&self) -> alloc::vec::Vec<f64>
+#[non_exhaustive] pub enum prism_q::sim::Query<'a>
+pub prism_q::sim::Query::Counts(usize)
+pub prism_q::sim::Query::Entropy(&'a [usize])
+pub prism_q::sim::Query::Expectation(&'a [alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>])
+pub prism_q::sim::Query::Gradient
+pub prism_q::sim::Query::Gradient::hamiltonian: &'a [(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)]
+pub prism_q::sim::Query::Gradient::parameters: &'a prism_q::circuit::parameter::Parameters
+pub prism_q::sim::Query::GradientShift
+pub prism_q::sim::Query::GradientShift::hamiltonian: &'a [(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)]
+pub prism_q::sim::Query::GradientShift::parameters: &'a prism_q::circuit::parameter::Parameters
+pub prism_q::sim::Query::Marginals
+pub prism_q::sim::Query::Observable(&'a prism_q::PauliObservable)
+pub prism_q::sim::Query::ReducedDensityMatrix(&'a [usize])
+pub prism_q::sim::Query::Run
+pub prism_q::sim::Query::Shots(usize)
+pub prism_q::sim::Query::StateVector
 #[non_exhaustive] pub enum prism_q::sim::ResolvedBackend
 pub prism_q::sim::ResolvedBackend::CompiledStabilizer
 pub prism_q::sim::ResolvedBackend::Decomposed
@@ -2432,6 +2458,32 @@ pub prism_q::sim::ResultValue::Probability(alloc::vec::Vec<f64>)
 pub prism_q::sim::ResultValue::Sample(alloc::vec::Vec<alloc::vec::Vec<f64>>)
 pub prism_q::sim::ResultValue::StateVector(alloc::vec::Vec<num_complex::Complex64>)
 pub prism_q::sim::ResultValue::Variance(alloc::vec::Vec<f64>)
+#[non_exhaustive] pub enum prism_q::sim::RouteRule
+pub prism_q::sim::RouteRule::CliffordOnly
+pub prism_q::sim::RouteRule::CliffordRegister
+pub prism_q::sim::RouteRule::CompiledCliffordSampler
+pub prism_q::sim::RouteRule::Default
+pub prism_q::sim::RouteRule::DeviceInitializationFallback
+pub prism_q::sim::RouteRule::DiagnosticReroute
+pub prism_q::sim::RouteRule::ExactMixture
+pub prism_q::sim::RouteRule::ExplicitBackend
+pub prism_q::sim::RouteRule::IndependentBlocks
+pub prism_q::sim::RouteRule::LargeCliffordBlocks
+pub prism_q::sim::RouteRule::NativeSampling
+pub prism_q::sim::RouteRule::NoEntanglingGates
+pub prism_q::sim::RouteRule::OverStatevectorCapMps
+pub prism_q::sim::RouteRule::OverStatevectorCapSparse
+pub prism_q::sim::RouteRule::ParameterShift
+pub prism_q::sim::RouteRule::PartialIndependence
+pub prism_q::sim::RouteRule::PerShot
+pub prism_q::sim::RouteRule::PreparedBackend
+pub prism_q::sim::RouteRule::SpdBudgetFallback
+pub prism_q::sim::RouteRule::SpdExact
+pub prism_q::sim::RouteRule::StartState
+pub prism_q::sim::RouteRule::TemporalCliffordPrefix
+pub prism_q::sim::RouteRule::TensorExpectation
+pub prism_q::sim::RouteRule::TensorOverMps
+pub prism_q::sim::RouteRule::TerminalStatevector
 pub struct prism_q::sim::BondReport
 pub prism_q::sim::BondReport::cap: usize
 pub prism_q::sim::BondReport::peak: usize
@@ -2462,6 +2514,9 @@ pub prism_q::sim::MarginalsResult::marginals: alloc::vec::Vec<(f64, f64)>
 pub prism_q::sim::MarginalsResult::metadata: prism_q::RunMetadata
 impl prism_q::sim::MarginalsResult
 pub fn prism_q::sim::MarginalsResult::into_vec(self) -> alloc::vec::Vec<(f64, f64)>
+pub struct prism_q::sim::MemoryEstimate
+pub prism_q::sim::MemoryEstimate::bytes: core::option::Option<u128>
+pub prism_q::sim::MemoryEstimate::kind: prism_q::MemoryEstimateKind
 pub struct prism_q::sim::ObservableExpectation
 pub prism_q::sim::ObservableExpectation::group_variances: core::option::Option<alloc::vec::Vec<f64>>
 pub prism_q::sim::ObservableExpectation::mean: f64
@@ -2498,6 +2553,23 @@ pub fn prism_q::PauliObservable::neg(self) -> prism_q::PauliObservable
 impl core::ops::arith::Sub for prism_q::PauliObservable
 pub type prism_q::PauliObservable::Output = prism_q::PauliObservable
 pub fn prism_q::PauliObservable::sub(self, prism_q::PauliObservable) -> prism_q::PauliObservable
+pub struct prism_q::sim::Plan
+pub prism_q::sim::Plan::alternatives: alloc::vec::Vec<(prism_q::ResolvedBackend, prism_q::RejectReason)>
+pub prism_q::sim::Plan::backend: prism_q::ResolvedBackend
+pub prism_q::sim::Plan::engine: core::option::Option<prism_q::Engine>
+pub prism_q::sim::Plan::evaluations: alloc::vec::Vec<prism_q::Plan>
+pub prism_q::sim::Plan::exactness: prism_q::PlannedExactness
+pub prism_q::sim::Plan::fallbacks: alloc::vec::Vec<prism_q::PlanFallback>
+pub prism_q::sim::Plan::peak_memory: prism_q::MemoryEstimate
+pub prism_q::sim::Plan::placement: prism_q::Placement
+pub prism_q::sim::Plan::rule: prism_q::RouteRule
+pub prism_q::sim::Plan::would_fail: core::option::Option<prism_q::error::PrismError>
+pub struct prism_q::sim::PlanFallback
+pub prism_q::sim::PlanFallback::backend: prism_q::ResolvedBackend
+pub prism_q::sim::PlanFallback::exactness: prism_q::PlannedExactness
+pub prism_q::sim::PlanFallback::placement: prism_q::Placement
+pub prism_q::sim::PlanFallback::rule: prism_q::RouteRule
+pub prism_q::sim::PlanFallback::would_fail: core::option::Option<prism_q::error::PrismError>
 pub struct prism_q::sim::ProbabilitiesIter<'a>
 impl core::iter::traits::exact_size::ExactSizeIterator for prism_q::sim::ProbabilitiesIter<'_>
 impl core::iter::traits::iterator::Iterator for prism_q::sim::ProbabilitiesIter<'_>
@@ -2510,12 +2582,15 @@ pub prism_q::sim::ReducedDensityMatrix::metadata: prism_q::RunMetadata
 pub prism_q::sim::ReducedDensityMatrix::qubits: alloc::vec::Vec<usize>
 impl prism_q::sim::ReducedDensityMatrix
 pub fn prism_q::sim::ReducedDensityMatrix::purity(&self) -> f64
+pub struct prism_q::sim::RejectReason
+pub prism_q::sim::RejectReason::error: prism_q::error::PrismError
 #[non_exhaustive] pub struct prism_q::sim::RunMetadata
 pub prism_q::sim::RunMetadata::backend: prism_q::ResolvedBackend
 pub prism_q::sim::RunMetadata::bond: core::option::Option<prism_q::BondReport>
 pub prism_q::sim::RunMetadata::engine: core::option::Option<prism_q::Engine>
 pub prism_q::sim::RunMetadata::exactness: prism_q::Exactness
 pub prism_q::sim::RunMetadata::placement: prism_q::Placement
+pub prism_q::sim::RunMetadata::reason: prism_q::RouteRule
 pub prism_q::sim::RunMetadata::shots: core::option::Option<usize>
 impl prism_q::RunMetadata
 pub fn prism_q::RunMetadata::fidelity_lower_bound(&self) -> core::option::Option<f64>
@@ -2568,6 +2643,8 @@ pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::shots(self, usize) -> p
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
 impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
+impl<SeedState> prism_q::sim::Simulate<'_, SeedState>
+pub fn prism_q::sim::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
 pub struct prism_q::sim::SimulateProgram<'p, SeedState>
 impl prism_q::SimulateProgram<'_, prism_q::sim::Seeded>
 pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
@@ -2755,6 +2832,10 @@ pub prism_q::LimitSource::Detected
 pub prism_q::LimitSource::Env
 pub prism_q::LimitSource::ProcessDefault
 pub prism_q::LimitSource::Request
+#[non_exhaustive] pub enum prism_q::MemoryEstimateKind
+pub prism_q::MemoryEstimateKind::Exact
+pub prism_q::MemoryEstimateKind::Unknown
+pub prism_q::MemoryEstimateKind::UpperBound
 #[non_exhaustive] pub enum prism_q::NoiseChannel
 pub prism_q::NoiseChannel::AmplitudeDamping
 pub prism_q::NoiseChannel::AmplitudeDamping::gamma: f64
@@ -2811,6 +2892,12 @@ pub fn prism_q::sim::unified_pauli::PauliAxis::from(prism_q::qec::QecBasis) -> S
 #[non_exhaustive] pub enum prism_q::Placement
 pub prism_q::Placement::Device
 pub prism_q::Placement::Host
+#[non_exhaustive] pub enum prism_q::PlannedExactness
+pub prism_q::PlannedExactness::Approximate
+pub prism_q::PlannedExactness::Approximate::bound_reported: bool
+pub prism_q::PlannedExactness::Estimated
+pub prism_q::PlannedExactness::Estimated::samples: usize
+pub prism_q::PlannedExactness::Exact
 #[non_exhaustive] pub enum prism_q::PrismError
 pub prism_q::PrismError::BackendUnsupported
 pub prism_q::PrismError::BackendUnsupported::backend: alloc::string::String
@@ -2925,6 +3012,22 @@ pub prism_q::QecTStrategy::Reference
 pub prism_q::QecTStrategy::Spd
 impl prism_q::QecTStrategy
 pub fn prism_q::QecTStrategy::label(self) -> &'static str
+#[non_exhaustive] pub enum prism_q::Query<'a>
+pub prism_q::Query::Counts(usize)
+pub prism_q::Query::Entropy(&'a [usize])
+pub prism_q::Query::Expectation(&'a [alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>])
+pub prism_q::Query::Gradient
+pub prism_q::Query::Gradient::hamiltonian: &'a [(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)]
+pub prism_q::Query::Gradient::parameters: &'a prism_q::circuit::parameter::Parameters
+pub prism_q::Query::GradientShift
+pub prism_q::Query::GradientShift::hamiltonian: &'a [(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)]
+pub prism_q::Query::GradientShift::parameters: &'a prism_q::circuit::parameter::Parameters
+pub prism_q::Query::Marginals
+pub prism_q::Query::Observable(&'a prism_q::PauliObservable)
+pub prism_q::Query::ReducedDensityMatrix(&'a [usize])
+pub prism_q::Query::Run
+pub prism_q::Query::Shots(usize)
+pub prism_q::Query::StateVector
 #[non_exhaustive] pub enum prism_q::ResolvedBackend
 pub prism_q::ResolvedBackend::CompiledStabilizer
 pub prism_q::ResolvedBackend::Decomposed
@@ -2951,6 +3054,32 @@ pub prism_q::ResourceKind::Entries
 pub prism_q::ResourceKind::Qubits
 impl core::fmt::Display for prism_q::error::ResourceKind
 pub fn prism_q::error::ResourceKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum prism_q::RouteRule
+pub prism_q::RouteRule::CliffordOnly
+pub prism_q::RouteRule::CliffordRegister
+pub prism_q::RouteRule::CompiledCliffordSampler
+pub prism_q::RouteRule::Default
+pub prism_q::RouteRule::DeviceInitializationFallback
+pub prism_q::RouteRule::DiagnosticReroute
+pub prism_q::RouteRule::ExactMixture
+pub prism_q::RouteRule::ExplicitBackend
+pub prism_q::RouteRule::IndependentBlocks
+pub prism_q::RouteRule::LargeCliffordBlocks
+pub prism_q::RouteRule::NativeSampling
+pub prism_q::RouteRule::NoEntanglingGates
+pub prism_q::RouteRule::OverStatevectorCapMps
+pub prism_q::RouteRule::OverStatevectorCapSparse
+pub prism_q::RouteRule::ParameterShift
+pub prism_q::RouteRule::PartialIndependence
+pub prism_q::RouteRule::PerShot
+pub prism_q::RouteRule::PreparedBackend
+pub prism_q::RouteRule::SpdBudgetFallback
+pub prism_q::RouteRule::SpdExact
+pub prism_q::RouteRule::StartState
+pub prism_q::RouteRule::TemporalCliffordPrefix
+pub prism_q::RouteRule::TensorExpectation
+pub prism_q::RouteRule::TensorOverMps
+pub prism_q::RouteRule::TerminalStatevector
 #[non_exhaustive] pub enum prism_q::SaveSpec
 pub prism_q::SaveSpec::DensityMatrix
 pub prism_q::SaveSpec::Probabilities
@@ -3502,6 +3631,9 @@ impl prism_q::gates::McuData
 pub fn prism_q::gates::McuData::mat(&self) -> &[[num_complex::Complex64; 2]; 2]
 pub fn prism_q::gates::McuData::new([[num_complex::Complex64; 2]; 2], u8) -> Self
 pub fn prism_q::gates::McuData::num_controls(&self) -> u8
+pub struct prism_q::MemoryEstimate
+pub prism_q::MemoryEstimate::bytes: core::option::Option<u128>
+pub prism_q::MemoryEstimate::kind: prism_q::MemoryEstimateKind
 pub struct prism_q::MpsBackend
 impl prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::current_max_bond_dim(&self) -> usize
@@ -3718,6 +3850,23 @@ pub fn prism_q::sim::unified_pauli::PauliTerm::new(usize, prism_q::sim::unified_
 pub fn prism_q::sim::unified_pauli::PauliTerm::x(usize) -> Self
 pub fn prism_q::sim::unified_pauli::PauliTerm::y(usize) -> Self
 pub fn prism_q::sim::unified_pauli::PauliTerm::z(usize) -> Self
+pub struct prism_q::Plan
+pub prism_q::Plan::alternatives: alloc::vec::Vec<(prism_q::ResolvedBackend, prism_q::RejectReason)>
+pub prism_q::Plan::backend: prism_q::ResolvedBackend
+pub prism_q::Plan::engine: core::option::Option<prism_q::Engine>
+pub prism_q::Plan::evaluations: alloc::vec::Vec<prism_q::Plan>
+pub prism_q::Plan::exactness: prism_q::PlannedExactness
+pub prism_q::Plan::fallbacks: alloc::vec::Vec<prism_q::PlanFallback>
+pub prism_q::Plan::peak_memory: prism_q::MemoryEstimate
+pub prism_q::Plan::placement: prism_q::Placement
+pub prism_q::Plan::rule: prism_q::RouteRule
+pub prism_q::Plan::would_fail: core::option::Option<prism_q::error::PrismError>
+pub struct prism_q::PlanFallback
+pub prism_q::PlanFallback::backend: prism_q::ResolvedBackend
+pub prism_q::PlanFallback::exactness: prism_q::PlannedExactness
+pub prism_q::PlanFallback::placement: prism_q::Placement
+pub prism_q::PlanFallback::rule: prism_q::RouteRule
+pub prism_q::PlanFallback::would_fail: core::option::Option<prism_q::error::PrismError>
 pub struct prism_q::PreparedCircuit
 impl prism_q::circuit::prepared::PreparedCircuit
 pub fn prism_q::circuit::prepared::PreparedCircuit::bind(&mut self, &[f64]) -> prism_q::error::Result<&prism_q::circuit::Circuit>
@@ -3911,6 +4060,8 @@ pub prism_q::ReducedDensityMatrix::metadata: prism_q::RunMetadata
 pub prism_q::ReducedDensityMatrix::qubits: alloc::vec::Vec<usize>
 impl prism_q::sim::ReducedDensityMatrix
 pub fn prism_q::sim::ReducedDensityMatrix::purity(&self) -> f64
+pub struct prism_q::RejectReason
+pub prism_q::RejectReason::error: prism_q::error::PrismError
 #[non_exhaustive] pub struct prism_q::ResourceLimit
 pub prism_q::ResourceLimit::backend: alloc::string::String
 pub prism_q::ResourceLimit::env_var: core::option::Option<&'static str>
@@ -3926,6 +4077,7 @@ pub prism_q::RunMetadata::bond: core::option::Option<prism_q::BondReport>
 pub prism_q::RunMetadata::engine: core::option::Option<prism_q::Engine>
 pub prism_q::RunMetadata::exactness: prism_q::Exactness
 pub prism_q::RunMetadata::placement: prism_q::Placement
+pub prism_q::RunMetadata::reason: prism_q::RouteRule
 pub prism_q::RunMetadata::shots: core::option::Option<usize>
 impl prism_q::RunMetadata
 pub fn prism_q::RunMetadata::fidelity_lower_bound(&self) -> core::option::Option<f64>
@@ -3992,6 +4144,8 @@ pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::shots(self, usize) -> p
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
 impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
+impl<SeedState> prism_q::sim::Simulate<'_, SeedState>
+pub fn prism_q::sim::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
 pub struct prism_q::SimulateProgram<'p, SeedState>
 impl prism_q::SimulateProgram<'_, prism_q::sim::Seeded>
 pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>

@@ -396,3 +396,197 @@ unsafe fn rowmul_words_neon(
         sum
     }
 }
+
+#[cfg(all(target_arch = "x86_64", any(kani, test)))]
+mod rowmul_words_spec {
+    pub(super) type Kernel = unsafe fn(&mut [u64], &mut [u64], &[u64], &[u64], u64) -> u64;
+
+    #[repr(align(32))]
+    struct Aligned<const N: usize>([u64; N]);
+
+    fn phase_masks(x1: u64, z1: u64, x2: u64, z2: u64) -> (u64, u64) {
+        let nonzero = ((x1 ^ x2) | (z1 ^ z2)) & (x1 | z1) & (x2 | z2);
+        let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
+        (pos, nonzero)
+    }
+
+    fn nibble_popcount(w: u64) -> u64 {
+        w.to_le_bytes().iter().fold(0, |acc, b| {
+            acc + u64::from((b & 15).count_ones() + (b >> 4).count_ones())
+        })
+    }
+
+    // `rowmul_words_scalar` with its popcounts regrouped the way the AVX2 kernels add
+    // them: per nibble, per 64-bit lane across chunks, then lanes 0+2 and 1+3. The
+    // solver then compares adder trees of one shape instead of proving popcount
+    // identities.
+    fn reference<const N: usize>(
+        src: &[[u64; N]; 2],
+        dst: &mut [[u64; N]; 2],
+        initial_sum: u64,
+    ) -> u64 {
+        let mut word = |w: usize| {
+            let (x1, z1, x2, z2) = (src[0][w], src[1][w], dst[0][w], dst[1][w]);
+            dst[0][w] = x1 ^ x2;
+            dst[1][w] = z1 ^ z2;
+            phase_masks(x1, z1, x2, z2)
+        };
+        let chunks = N / 4;
+        let (mut lanes_pos, mut lanes_nz) = ([0u64; 4], [0u64; 4]);
+        for chunk in 0..chunks {
+            for lane in 0..4 {
+                let (pos, nonzero) = word(4 * chunk + lane);
+                lanes_pos[lane] += nibble_popcount(pos);
+                lanes_nz[lane] += nibble_popcount(nonzero);
+            }
+        }
+        let total = |l: [u64; 4]| (l[0] + l[2]).wrapping_add(l[1] + l[3]);
+        let mut sum = initial_sum
+            .wrapping_add(2u64.wrapping_mul(total(lanes_pos)))
+            .wrapping_sub(total(lanes_nz));
+        for w in 4 * chunks..N {
+            let (pos, nonzero) = word(w);
+            sum = sum.wrapping_add(2 * pos.count_ones() as u64);
+            sum = sum.wrapping_sub(nonzero.count_ones() as u64);
+        }
+        sum
+    }
+
+    /// Check an AVX2 rowmul kernel against the regrouped reference on `[x, z]` rows of
+    /// `N` words. The destination rows are 32-byte aligned so the non-temporal kernel
+    /// takes its streaming path. Callers establish AVX2 before calling, except under
+    /// Kani, which runs no CPU.
+    pub(super) fn check<const N: usize>(
+        kernel: Kernel,
+        src: [[u64; N]; 2],
+        dst: [[u64; N]; 2],
+        initial_sum: u64,
+    ) {
+        let mut want = dst;
+        let want_sum = reference(&src, &mut want, initial_sum);
+        let (mut got_x, mut got_z) = (Aligned(dst[0]), Aligned(dst[1]));
+        // SAFETY: all four rows hold exactly `N` words; AVX2 is established by the caller.
+        let got_sum = unsafe { kernel(&mut got_x.0, &mut got_z.0, &src[0], &src[1], initial_sum) };
+        assert_eq!(got_sum, want_sum);
+        for (got, want) in [(&got_x.0, &want[0]), (&got_z.0, &want[1])] {
+            for (g, w) in got.iter().zip(want) {
+                assert_eq!(g, w);
+            }
+        }
+    }
+
+    /// Check that the regrouping leaves `rowmul_words_scalar`'s result unchanged.
+    #[cfg(test)]
+    pub(super) fn check_reference<const N: usize>(
+        src: [[u64; N]; 2],
+        dst: [[u64; N]; 2],
+        initial_sum: u64,
+    ) {
+        let mut want = dst;
+        let want_sum = reference(&src, &mut want, initial_sum);
+        let [mut x, mut z] = dst;
+        let sum = super::rowmul_words_scalar(&mut x, &mut z, &src[0], &src[1], initial_sum);
+        assert_eq!(sum, want_sum);
+        assert_eq!([x, z], want);
+    }
+
+    #[cfg(kani)]
+    mod proofs {
+        macro_rules! rowmul_words_matches_reference {
+            ($kernel:ident => $($name:ident: $nw:literal),* $(,)?) => {$(
+                #[kani::proof]
+                #[kani::unwind(33)]
+                #[kani::stub(
+                    core::arch::x86_64::_mm256_shuffle_epi8,
+                    crate::backend::avx2_model::shuffle_epi8
+                )]
+                #[kani::stub(
+                    core::arch::x86_64::_mm256_sad_epu8,
+                    crate::backend::avx2_model::sad_epu8
+                )]
+                #[kani::stub(
+                    core::arch::x86_64::_mm256_testz_si256,
+                    crate::backend::avx2_model::testz_si256
+                )]
+                #[kani::stub(core::arch::x86_64::_mm_sfence, crate::backend::avx2_model::sfence)]
+                #[kani::stub(
+                    core::arch::x86_64::_mm256_stream_si256,
+                    crate::backend::avx2_model::stream_si256
+                )]
+                fn $name() {
+                    super::check::<$nw>(
+                        super::super::$kernel,
+                        kani::any(),
+                        kani::any(),
+                        kani::any(),
+                    );
+                }
+            )*};
+        }
+
+        rowmul_words_matches_reference!(
+            rowmul_words_avx2 =>
+            rowmul_words_avx2_nw0: 0,
+            rowmul_words_avx2_nw3: 3,
+            rowmul_words_avx2_nw4: 4,
+            rowmul_words_avx2_nw5: 5,
+            rowmul_words_avx2_nw7: 7,
+            rowmul_words_avx2_nw8: 8,
+        );
+
+        rowmul_words_matches_reference!(
+            rowmul_words_avx2_nt =>
+            rowmul_words_avx2_nt_nw16: 16,
+            rowmul_words_avx2_nt_nw19: 19,
+        );
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::rowmul_words_spec::{Kernel, check, check_reference};
+    use super::{rowmul_words_avx2, rowmul_words_avx2_nt};
+    use rand::{RngExt, SeedableRng};
+
+    #[test]
+    fn rowmul_words_avx2_matches_scalar() {
+        fn run<const N: usize>(rng: &mut rand_chacha::ChaCha8Rng, kernel: Kernel) {
+            for _ in 0..64 {
+                let mut src: [[u64; N]; 2] = rng.random();
+                let mut dst: [[u64; N]; 2] = rng.random();
+                if rng.random_bool(0.25) {
+                    dst = src;
+                }
+                if N > 0 && rng.random_bool(0.25) {
+                    let start = rng.random_range(0..N);
+                    let end = (start + 4).min(N);
+                    for row in src.iter_mut().chain(&mut dst) {
+                        row[start..end].fill(0);
+                    }
+                }
+                let initial_sum = rng.random();
+                check_reference(src, dst, initial_sum);
+                if is_x86_feature_detected!("avx2") {
+                    check(kernel, src, dst, initial_sum);
+                }
+            }
+        }
+
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+        let avx2: Kernel = rowmul_words_avx2;
+        let nt: Kernel = rowmul_words_avx2_nt;
+        run::<0>(&mut rng, avx2);
+        run::<3>(&mut rng, avx2);
+        run::<4>(&mut rng, avx2);
+        run::<5>(&mut rng, avx2);
+        run::<7>(&mut rng, avx2);
+        run::<8>(&mut rng, avx2);
+        run::<9>(&mut rng, avx2);
+        run::<13>(&mut rng, avx2);
+        run::<16>(&mut rng, nt);
+        run::<17>(&mut rng, nt);
+        run::<19>(&mut rng, nt);
+        run::<24>(&mut rng, nt);
+        run::<35>(&mut rng, nt);
+    }
+}

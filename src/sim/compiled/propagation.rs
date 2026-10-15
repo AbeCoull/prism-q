@@ -1540,7 +1540,6 @@ pub(super) fn colmajor_forward_sim(
 #[cfg(all(target_arch = "x86_64", any(kani, test)))]
 mod rowmul_spec {
     use super::rowmul_avx2;
-    use std::arch::x86_64::__m256i;
 
     /// Aaronson-Gottesman `g`: the phase exponent, in units of `i`, that the bit-`b`
     /// letters contribute to the Hermitian product of the source and destination rows.
@@ -1564,19 +1563,6 @@ mod rowmul_spec {
         let plus = (xa & yb) | (ya & zb) | (za & xb);
         let minus = (ya & xb) | (za & yb) | (xa & zb);
         (plus, plus | minus)
-    }
-
-    /// `_mm256_testz_si256` without the vector reduction Kani cannot model.
-    pub(super) fn testz_model(a: __m256i, b: __m256i) -> i32 {
-        // SAFETY: `__m256i` and `[u64; 4]` have the same size and every bit pattern is
-        // valid for both.
-        let (a, b) = unsafe {
-            (
-                std::mem::transmute::<__m256i, [u64; 4]>(a),
-                std::mem::transmute::<__m256i, [u64; 4]>(b),
-            )
-        };
-        ((a[0] & b[0]) | (a[1] & b[1]) | (a[2] & b[2]) | (a[3] & b[3]) == 0) as i32
     }
 
     // Chunks of four words are summed before they reach `sum`, as `rowmul_avx2` sums
@@ -1629,7 +1615,10 @@ mod rowmul_spec {
             ($($name:ident: $nw:literal),* $(,)?) => {$(
                 #[kani::proof]
                 #[kani::unwind(20)]
-                #[kani::stub(core::arch::x86_64::_mm256_testz_si256, super::testz_model)]
+                #[kani::stub(
+                    core::arch::x86_64::_mm256_testz_si256,
+                    crate::backend::avx2_model::testz_si256
+                )]
                 fn $name() {
                     super::check::<{ 2 * $nw }>(kani::any(), kani::any(), kani::any());
                 }
@@ -1963,36 +1952,6 @@ mod tests {
             let (plus, nonzero) = super::rowmul_spec::phase_masks(x1, z1, x2, z2);
             let phase = 2 * (plus & 1) as i64 - (nonzero & 1) as i64;
             assert_eq!(phase, super::rowmul_spec::ag_phase(x1, z1, x2, z2, 0));
-        }
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn testz_model_matches_the_intrinsic() {
-        use rand::{RngExt, SeedableRng};
-        use std::arch::x86_64::{__m256i, _mm256_testz_si256};
-
-        if !is_x86_feature_detected!("avx2") {
-            return;
-        }
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-        for _ in 0..256 {
-            let a: [u64; 4] = rng.random();
-            let mut b: [u64; 4] = rng.random();
-            if rng.random_bool(0.5) {
-                b = a.map(|w| !w);
-            }
-            // SAFETY: `[u64; 4]` and `__m256i` have the same size and every bit pattern
-            // is valid for both; AVX2 implies the AVX the intrinsic needs.
-            let (va, vb) = unsafe {
-                (
-                    std::mem::transmute::<[u64; 4], __m256i>(a),
-                    std::mem::transmute::<[u64; 4], __m256i>(b),
-                )
-            };
-            // SAFETY: AVX2 detected
-            let real = unsafe { _mm256_testz_si256(va, vb) };
-            assert_eq!(super::rowmul_spec::testz_model(va, vb), real);
         }
     }
 

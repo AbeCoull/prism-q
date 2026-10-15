@@ -219,7 +219,8 @@ jobs:
   # at cfg(miri)-reduced sizes, and rejects undefined behavior in the SendPtr
   # partitioning paths (aliasing, provenance, data races) that no native test can see.
   # SIMD dispatch resolves to the scalar fallbacks under the interpreter, so the vector
-  # intrinsics stay out of reach; the sanitizer job below covers native execution.
+  # intrinsics stay out of reach here; `miri-avx2` below interprets them, and the
+  # sanitizer job covers native execution.
   # Interpreting the full suite is not viable, hence the single-target scope.
   miri:
     name: Miri
@@ -259,6 +260,39 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # `rust-toolchain.toml` pins stable and would override the installed nightly.
       - name: Miri over the partitioning kernels
+        run: cargo +"$CI_NIGHTLY" miri test --features parallel --test determinism
+
+  # The same target with AVX2, FMA, and BMI2 enabled at compile time. Feature detection
+  # then answers from the target features instead of CPUID, which the interpreter does
+  # not model, so dispatch takes the vector kernels and Miri checks their pointer
+  # arithmetic and lane accesses.
+  miri-avx2:
+    name: Miri (AVX2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MIRIFLAGS: >-
+        -Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation
+        -Zmiri-deterministic-floats
+      RUSTFLAGS: -C target-feature=+avx2,+fma,+bmi2
+      RAYON_NUM_THREADS: "2"
+      PRISM_MAX_SV_QUBITS: "26"
+      PRISM_MAX_DM_QUBITS: "13"
+      PRISM_MAX_PROB_QUBITS: "26"
+      PRISM_MAX_EXPORT_QUBITS: "26"
+      PRISM_MAX_DENSE_OUTCOME_BITS: "26"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.CI_NIGHTLY }}
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: ${{ env.CI_NIGHTLY }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Miri over the AVX2 kernels
         run: cargo +"$CI_NIGHTLY" miri test --features parallel --test determinism
 
   # Kani checks the `#[kani::proof]` harnesses for every input at the row widths each
@@ -774,6 +808,7 @@ jobs:
       - check-distributed
       - mpi-linux
       - miri
+      - miri-avx2
       - kani
       - tsan
       - msrv

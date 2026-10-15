@@ -1,0 +1,2426 @@
+//! Cross-backend correctness for the density-matrix backend: on unitary
+//! circuits it must reproduce the statevector probabilities exactly, and a
+//! pure state must stay pure (`Tr(rho^2) == 1`).
+
+use crate::common;
+
+use common::{
+    DM_EPS, SEED, all_pauli_masks, amplitude_damping, assert_fused_matches_unfused,
+    assert_probs_close, count_gates, depolarizing_2q_kraus,
+};
+use num_complex::Complex64;
+use prism_q::backend::Backend;
+use prism_q::backend::density_matrix::DensityMatrixBackend;
+use prism_q::backend::statevector::StatevectorBackend;
+use prism_q::circuit::Circuit;
+use prism_q::gates::Gate;
+use prism_q::{circuits, sim};
+
+fn dm_backend(circuit: &Circuit, seed: u64) -> DensityMatrixBackend {
+    let mut backend = DensityMatrixBackend::new(seed);
+    sim::run_on(&mut backend, circuit).unwrap();
+    backend
+}
+
+fn c(re: f64, im: f64) -> Complex64 {
+    Complex64::new(re, im)
+}
+
+fn dm_after_channel(
+    prep: &[(Gate, usize)],
+    kraus: &[[[Complex64; 2]; 2]],
+) -> ([[Complex64; 2]; 2], f64) {
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(1, 0).unwrap();
+    for (gate, q) in prep {
+        backend
+            .apply(&prism_q::circuit::Instruction::Gate {
+                gate: gate.clone(),
+                targets: [*q].into_iter().collect(),
+            })
+            .unwrap();
+    }
+    backend.apply_1q_kraus(0, kraus);
+    let rho = backend.reduced_density_matrix_1q(0).unwrap();
+    let trace = rho[0][0].re + rho[1][1].re;
+    (rho, trace)
+}
+
+fn phase_damping(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
+    let s = (1.0 - gamma).sqrt();
+    let g = gamma.sqrt();
+    vec![
+        [[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(s, 0.0)]],
+        [[c(0.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(g, 0.0)]],
+    ]
+}
+
+fn statevector_probs(circuit: &Circuit) -> Vec<f64> {
+    let mut backend = StatevectorBackend::new(SEED);
+    sim::run_on(&mut backend, circuit).unwrap();
+    backend.probabilities().unwrap()
+}
+
+fn run_dm(circuit: &Circuit) -> DensityMatrixBackend {
+    let mut backend = DensityMatrixBackend::new(SEED);
+    sim::run_on(&mut backend, circuit).unwrap();
+    backend
+}
+
+fn dm_probs(circuit: &Circuit) -> Vec<f64> {
+    run_dm(circuit).probabilities().unwrap()
+}
+
+fn assert_matches_statevector(circuit: &Circuit, label: &str) {
+    assert_probs_close(
+        &dm_probs(circuit),
+        &statevector_probs(circuit),
+        DM_EPS,
+        label,
+    );
+}
+
+#[test]
+fn dm_all_single_gates_match_statevector() {
+    let gates = [
+        Gate::Id,
+        Gate::X,
+        Gate::Y,
+        Gate::Z,
+        Gate::H,
+        Gate::S,
+        Gate::Sdg,
+        Gate::T,
+        Gate::Tdg,
+        Gate::SX,
+        Gate::SXdg,
+        Gate::Rx(0.7),
+        Gate::Ry(1.1),
+        Gate::Rz(0.3),
+        Gate::P(0.5),
+    ];
+    for gate in gates {
+        // The Hadamard sandwich converts phase-only differences into population,
+        // so the probability comparison is sensitive to a mishandled conjugation.
+        let mut c = Circuit::new(1, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(gate.clone(), &[0]);
+        c.add_gate(Gate::H, &[0]);
+        assert_matches_statevector(&c, &format!("single_gate {gate:?}"));
+    }
+}
+
+#[test]
+fn dm_two_qubit_gates_match_statevector() {
+    for gate in [Gate::Cx, Gate::Cz, Gate::Swap, Gate::Rzz(0.9)] {
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Ry(0.6), &[1]);
+        c.add_gate(gate.clone(), &[0, 1]);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::H, &[1]);
+        assert_matches_statevector(&c, &format!("two_qubit_gate {gate:?}"));
+    }
+}
+
+#[test]
+fn dm_bell_matches_statevector() {
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    assert_matches_statevector(&c, "bell");
+}
+
+#[test]
+fn dm_ghz4_matches_statevector() {
+    let c = circuits::ghz_circuit(4);
+    assert_matches_statevector(&c, "ghz4");
+}
+
+#[test]
+fn dm_complex_circuit_matches_statevector() {
+    let mut c = Circuit::new(3, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Rx(0.5), &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Ry(1.3), &[2]);
+    c.add_gate(Gate::Cz, &[1, 2]);
+    c.add_gate(Gate::Swap, &[0, 2]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::Rz(0.9), &[1]);
+    c.add_gate(Gate::Cx, &[2, 0]);
+    assert_matches_statevector(&c, "complex");
+}
+
+#[test]
+fn dm_qft_matches_statevector() {
+    let c = circuits::qft_circuit(5);
+    assert_matches_statevector(&c, "qft5");
+}
+
+#[test]
+fn dm_random_layers_match_statevector() {
+    let c = circuits::random_circuit(6, 10, SEED);
+    assert_matches_statevector(&c, "random6");
+}
+
+#[test]
+fn dm_pure_state_stays_pure() {
+    let c = circuits::random_circuit(5, 8, SEED);
+    let backend = run_dm(&c);
+    assert!(
+        (backend.purity() - 1.0).abs() < 1e-12,
+        "purity of a unitary-evolved state must be 1, got {}",
+        backend.purity()
+    );
+}
+
+#[test]
+fn dm_probabilities_sum_to_one() {
+    let c = circuits::random_circuit(5, 8, SEED);
+    let total: f64 = dm_probs(&c).iter().sum();
+    assert!(
+        (total - 1.0).abs() < 1e-12,
+        "probabilities must sum to 1, got {total}"
+    );
+}
+
+fn depolarizing(p: f64) -> Vec<[[Complex64; 2]; 2]> {
+    let pp = (p / 3.0).sqrt();
+    let pi = (1.0 - p).sqrt();
+    vec![
+        [[c(pi, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(pi, 0.0)]],
+        [[c(0.0, 0.0), c(pp, 0.0)], [c(pp, 0.0), c(0.0, 0.0)]],
+        [[c(0.0, 0.0), c(0.0, -pp)], [c(0.0, pp), c(0.0, 0.0)]],
+        [[c(pp, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(-pp, 0.0)]],
+    ]
+}
+
+#[test]
+fn dm_explicit_dispatch_matches_statevector() {
+    use prism_q::BackendKind;
+    let c = circuits::random_circuit(4, 8, SEED);
+    let outcome = sim::simulate(&c)
+        .backend(BackendKind::DensityMatrix)
+        .seed(SEED)
+        .run()
+        .unwrap();
+    let probs = outcome.probabilities.unwrap().to_vec();
+    assert_probs_close(&probs, &statevector_probs(&c), DM_EPS, "explicit dispatch");
+}
+
+const NOISY_N: usize = 4;
+const NOISY_SEEDS: u64 = 64;
+const DEPOLARIZING_P: f64 = 0.02;
+
+/// Entangled non-Clifford circuit with terminal measurements, the shape the
+/// exact noisy route accepts.
+fn noisy_circuit(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, n);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::T, &[q]);
+        c.add_gate(Gate::Ry(0.3 + 0.1 * q as f64), &[q]);
+    }
+    c.measure_all();
+    c
+}
+
+fn dm_noisy_probs(circuit: &Circuit, noise: &prism_q::NoiseModel, seed: u64) -> Vec<f64> {
+    sim::simulate(circuit)
+        .backend(prism_q::BackendKind::DensityMatrix)
+        .noise(noise)
+        .seed(seed)
+        .run()
+        .unwrap()
+        .probabilities
+        .unwrap()
+        .to_vec()
+}
+
+/// Classical-bit pattern as a basis-state index, which is the same number only
+/// because `noisy_circuit` measures qubit `q` into bit `q`.
+fn outcome_index(shot: &[bool]) -> usize {
+    shot.iter()
+        .enumerate()
+        .filter(|&(_, &b)| b)
+        .fold(0usize, |acc, (bit, _)| acc | (1 << bit))
+}
+
+fn histogram(shots: &[Vec<bool>], num_outcomes: usize) -> Vec<u64> {
+    let mut counts = vec![0u64; num_outcomes];
+    for shot in shots {
+        counts[outcome_index(shot)] += 1;
+    }
+    counts
+}
+
+fn assert_within_5_sigma(counts: &[u64], exact: &[f64], total: f64, label: &str) {
+    for (idx, &count) in counts.iter().enumerate() {
+        let p = exact[idx];
+        let sigma = (p * (1.0 - p) / total).sqrt();
+        let observed = count as f64 / total;
+        assert!(
+            (observed - p).abs() <= 5.0 * sigma,
+            "{label}: outcome {idx} exact {p}, sampled {observed}, tolerance {}",
+            5.0 * sigma
+        );
+    }
+}
+
+#[test]
+fn dm_exact_noisy_distribution_is_seed_independent_and_matches_the_trajectory_mean() {
+    use prism_q::{BackendKind, NoiseModel};
+    let circuit = noisy_circuit(NOISY_N);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+
+    let exact = dm_noisy_probs(&circuit, &noise, SEED);
+    for offset in 0..NOISY_SEEDS {
+        let repeat = dm_noisy_probs(&circuit, &noise, SEED + offset);
+        assert_probs_close(&repeat, &exact, DM_EPS, "exact noisy distribution per seed");
+    }
+
+    let shots_per_seed = 250;
+    let mut counts = vec![0u64; 1 << NOISY_N];
+    for offset in 0..NOISY_SEEDS {
+        let result = sim::simulate(&circuit)
+            .backend(BackendKind::Statevector)
+            .noise(&noise)
+            .seed(SEED + offset)
+            .shots(shots_per_seed)
+            .unwrap();
+        for (idx, count) in histogram(&result.shots, counts.len()).iter().enumerate() {
+            counts[idx] += count;
+        }
+    }
+    let total = (NOISY_SEEDS * shots_per_seed as u64) as f64;
+    assert_within_5_sigma(&counts, &exact, total, "trajectory mean vs exact mixture");
+}
+
+#[test]
+fn dm_noisy_shots_and_counts_sample_the_exact_distribution() {
+    use prism_q::{BackendKind, NoiseModel};
+    let circuit = noisy_circuit(NOISY_N);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let exact = dm_noisy_probs(&circuit, &noise, SEED);
+
+    let num_shots = 20_000;
+    let shots = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(num_shots)
+        .unwrap();
+    assert_eq!(shots.num_shots(), num_shots);
+    assert_within_5_sigma(
+        &histogram(&shots.shots, exact.len()),
+        &exact,
+        num_shots as f64,
+        "density-matrix shots",
+    );
+
+    // Both terminals draw from the one evolution with the same seed, so unlike
+    // the noiseless route the histograms must agree exactly, not just in
+    // distribution.
+    let counts = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .sample_counts(num_shots)
+        .unwrap();
+    assert_eq!(counts.counts, shots.counts());
+    assert_eq!(counts.counts.values().sum::<u64>(), num_shots as u64);
+}
+
+#[test]
+fn dm_noisy_marginals_agree_with_the_exact_distribution() {
+    use prism_q::{BackendKind, NoiseModel};
+    let circuit = noisy_circuit(NOISY_N);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let exact = dm_noisy_probs(&circuit, &noise, SEED);
+
+    let marginals = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .marginals()
+        .unwrap()
+        .into_vec();
+
+    for (qubit, &(p0, p1)) in marginals.iter().enumerate() {
+        let want: f64 = exact
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| (idx >> qubit) & 1 == 1)
+            .map(|(_, p)| p)
+            .sum();
+        assert!(
+            (p1 - want).abs() < DM_EPS && (p0 + p1 - 1.0).abs() < DM_EPS,
+            "qubit {qubit}: marginal ({p0}, {p1}) against exact P(1) = {want}"
+        );
+    }
+}
+
+#[test]
+fn dm_expectation_values_agree_with_the_free_function() {
+    use prism_q::{BackendKind, NoiseModel, PauliAxis, PauliTerm};
+    let mut circuit = Circuit::new(NOISY_N, 0);
+    for q in 0..NOISY_N {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..NOISY_N - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let observables: Vec<Vec<PauliTerm>> = (0..NOISY_N)
+        .flat_map(|q| {
+            [PauliAxis::X, PauliAxis::Y, PauliAxis::Z]
+                .into_iter()
+                .map(move |axis| vec![PauliTerm::new(q, axis)])
+        })
+        .chain([vec![PauliTerm::z(0), PauliTerm::x(NOISY_N - 1)]])
+        .collect();
+
+    let builder = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+    let direct =
+        prism_q::density_matrix_expectation_values(&circuit, &observables, None, SEED).unwrap();
+    assert_probs_close(&builder, &direct, DM_EPS, "noiseless expectation values");
+
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let builder_noisy = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+    let direct_noisy =
+        prism_q::density_matrix_expectation_values(&circuit, &observables, Some(&noise), SEED)
+            .unwrap();
+    assert_probs_close(
+        &builder_noisy,
+        &direct_noisy,
+        DM_EPS,
+        "noisy expectation values",
+    );
+}
+
+#[test]
+fn dm_noisy_terminals_reject_branching_circuits_naming_the_mixture() {
+    use prism_q::{BackendKind, NoiseModel};
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::X, &[1]);
+    circuit.add_measure(1, 1);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+
+    let err = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(16)
+        .unwrap_err();
+    match err {
+        prism_q::PrismError::IncompatibleBackend { backend, reason } => {
+            assert_eq!(backend, "density_matrix");
+            assert!(
+                reason.contains("every measurement branch at once"),
+                "the rejection must name the mixture, got {reason}"
+            );
+        }
+        other => panic!("expected a named rejection, got {other:?}"),
+    }
+}
+
+// A terminal measurement dephases the measured qubit, so reading the mixture
+// before it would report <X> = 1 for `h; measure` where the measured state has 0.
+#[test]
+fn dm_expectation_values_reject_a_measured_circuit() {
+    use prism_q::{NoiseModel, PauliTerm};
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+
+    for model in [None, Some(&noise)] {
+        let err = prism_q::density_matrix_expectation_values(
+            &circuit,
+            &[vec![PauliTerm::x(0)]],
+            model,
+            SEED,
+        )
+        .unwrap_err();
+        match err {
+            prism_q::PrismError::IncompatibleBackend { backend, reason } => {
+                assert_eq!(backend, "density_matrix");
+                assert!(
+                    reason.contains("remove the measurements"),
+                    "the rejection must name the fix, got {reason}"
+                );
+            }
+            other => panic!("expected a measurement rejection, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn dm_expectation_values_read_x_and_y_on_a_unitary_circuit() {
+    use prism_q::{NoiseModel, PauliTerm};
+    let observables = [
+        vec![PauliTerm::x(0)],
+        vec![PauliTerm::y(0)],
+        vec![PauliTerm::z(0)],
+    ];
+    let mut plus = Circuit::new(1, 0);
+    plus.add_gate(Gate::H, &[0]);
+    let mut plus_i = plus.clone();
+    plus_i.add_gate(Gate::S, &[0]);
+    let shrink = 1.0 - 4.0 * DEPOLARIZING_P / 3.0;
+
+    for (circuit, ideal, gates) in [(&plus, [1.0, 0.0, 0.0], 1), (&plus_i, [0.0, 1.0, 0.0], 2)] {
+        let noise = NoiseModel::uniform_depolarizing(circuit, DEPOLARIZING_P);
+        let exact =
+            prism_q::density_matrix_expectation_values(circuit, &observables, None, SEED).unwrap();
+        let noisy =
+            prism_q::density_matrix_expectation_values(circuit, &observables, Some(&noise), SEED)
+                .unwrap();
+        let damped: Vec<f64> = ideal.iter().map(|v| v * shrink.powi(gates)).collect();
+        assert_probs_close(&exact, &ideal, DM_EPS, "noiseless Bloch vector");
+        assert_probs_close(&noisy, &damped, DM_EPS, "depolarized Bloch vector");
+    }
+}
+
+// Without a noise model there is no mixture to read, so the backend runs a
+// branching circuit the way the statevector does: one sampled branch per run.
+#[test]
+fn dm_noiseless_terminals_follow_one_branch_of_a_conditioned_circuit() {
+    use prism_q::BackendKind;
+    use prism_q::circuit::{ClassicalCondition, Instruction, SmallVec};
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    let targets: SmallVec<[usize; 4]> = [1usize].into_iter().collect();
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets,
+    });
+    circuit.add_measure(1, 1);
+
+    for seed in 0..8 {
+        let outcome = sim::simulate(&circuit)
+            .backend(BackendKind::DensityMatrix)
+            .seed(seed)
+            .run()
+            .unwrap();
+        let branch = if outcome.classical_bits[0] { 3 } else { 0 };
+        let probs = outcome.probabilities.unwrap().to_vec();
+        assert!(
+            (probs[branch] - 1.0).abs() < DM_EPS,
+            "seed {seed}: {probs:?}"
+        );
+    }
+
+    let counts = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(SEED)
+        .sample_counts(64)
+        .unwrap()
+        .counts;
+    assert_eq!(counts.len(), 2, "{counts:?}");
+    assert_eq!(counts.values().sum::<u64>(), 64);
+}
+
+// Idle damping lands on qubit 0 once before its measurement and once after it,
+// in the slot of the measurement of qubit 1. A shot has recorded qubit 0 by
+// then, so only the first event reaches the distribution: P(q0 = 1) = 1/2.
+#[test]
+fn dm_noise_after_the_last_measurement_leaves_the_record_alone() {
+    use prism_q::{BackendKind, NoiseBuilder, NoiseChannel, NoiseEvent, NoiseModel};
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::X, &[0]);
+    for _ in 0..3 {
+        circuit.add_gate(Gate::X, &[1]);
+    }
+    circuit.measure_all();
+    let damping = NoiseChannel::AmplitudeDamping { gamma: 0.5 };
+    let noise = NoiseBuilder::new()
+        .on_idle_qubits(damping.clone())
+        .build(&circuit)
+        .unwrap();
+    let after_q0 = NoiseEvent {
+        channel: damping,
+        qubits: [0].into_iter().collect(),
+    };
+    assert_eq!(noise.after_gate[5], vec![after_q0]);
+
+    let probs = dm_noisy_probs(&circuit, &noise, SEED);
+    assert_probs_close(&probs, &[0.0, 0.0, 0.5, 0.5], DM_EPS, "recorded bits");
+
+    let mut twice = Circuit::new(1, 2);
+    twice.add_measure(0, 0);
+    twice.add_measure(0, 1);
+    let between = NoiseModel {
+        after_gate: vec![vec![NoiseEvent::pauli(0, 0.5, 0.0, 0.0)], vec![]],
+        readout: vec![None; 2],
+    };
+    let err = sim::simulate(&twice)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&between)
+        .seed(SEED)
+        .shots(16)
+        .unwrap_err();
+    assert!(
+        matches!(err, prism_q::PrismError::IncompatibleBackend { .. }),
+        "a channel between two measurements of one qubit must be rejected, got {err:?}"
+    );
+}
+
+#[test]
+fn noisy_exact_terminals_without_a_mixture_name_the_density_matrix() {
+    use prism_q::{BackendKind, NoiseModel, PauliTerm};
+    let circuit = noisy_circuit(3);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let unitary = {
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c
+    };
+    let unitary_noise = NoiseModel::uniform_depolarizing(&unitary, DEPOLARIZING_P);
+
+    let cases: Vec<(&str, prism_q::PrismError)> = vec![
+        (
+            "run",
+            sim::simulate(&circuit)
+                .backend(BackendKind::Statevector)
+                .noise(&noise)
+                .seed(SEED)
+                .run()
+                .unwrap_err(),
+        ),
+        (
+            "marginals",
+            sim::simulate(&circuit)
+                .backend(BackendKind::Statevector)
+                .noise(&noise)
+                .seed(SEED)
+                .marginals()
+                .unwrap_err(),
+        ),
+        (
+            "expectation_values",
+            sim::simulate(&unitary)
+                .backend(BackendKind::Statevector)
+                .noise(&unitary_noise)
+                .seed(SEED)
+                .expectation_values(&[vec![PauliTerm::z(0)]])
+                .unwrap_err(),
+        ),
+    ];
+
+    for (terminal, err) in cases {
+        match err {
+            prism_q::PrismError::IncompatibleBackend { reason, .. } => assert!(
+                reason.contains("density-matrix backend"),
+                "{terminal}: the rejection must name the exact route, got {reason}"
+            ),
+            other => panic!("{terminal}: expected a named rejection, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn noisy_expectation_gradient_is_rejected_naming_the_adjoint() {
+    use prism_q::{NoiseModel, PauliTerm};
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::Ry(0.4), &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+
+    let err = sim::simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .expectation_gradient(
+            &[(1.0, vec![PauliTerm::z(0)])],
+            &prism_q::Parameters::new(0),
+        )
+        .unwrap_err();
+    match err {
+        prism_q::PrismError::IncompatibleBackend { reason, .. } => assert!(
+            reason.contains("adjoint"),
+            "the rejection must name the adjoint method, got {reason}"
+        ),
+        other => panic!("expected a named rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn dm_noisy_readout_error_flips_sampled_bits() {
+    use prism_q::{BackendKind, NoiseModel};
+    // The exact distribution describes the state, not the classical outcome, so
+    // readout error has to reach the draw rather than the evolution.
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::Id, &[0]);
+    circuit.add_gate(Gate::Id, &[1]);
+    circuit.measure_all();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.with_readout_error(0.3, 0.0);
+
+    let shots = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(20_000)
+        .unwrap();
+    let ones = shots.shots.iter().filter(|s| s[0]).count() as f64 / 20_000.0;
+    assert!(
+        (ones - 0.3).abs() < 0.02,
+        "readout p01 = 0.3 should flip about 30% of zero outcomes, got {ones}"
+    );
+}
+
+// Same masking as the trajectory path: the exact draw leaves an unmeasured bit
+// unwritten, and readout error has nothing to act on there.
+#[test]
+fn dm_noisy_readout_error_skips_unmeasured_bits() {
+    use prism_q::{BackendKind, NoiseModel};
+    let mut circuit = Circuit::new(1, 3);
+    circuit.add_measure(0, 0);
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.with_readout_error(1.0, 0.0);
+
+    let shots = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(500)
+        .unwrap();
+    for shot in &shots.shots {
+        assert_eq!(shot, &vec![true, false, false]);
+    }
+}
+
+// marginals reads the mixture and sample_counts reads the record, so a model
+// carrying readout is rejected here rather than answered with a quantity that
+// is neither. Dropping readout leaves the two terminals agreeing, which is what
+// makes readout the whole of the disagreement.
+#[test]
+fn dm_marginals_reject_readout_and_otherwise_match_the_draw() {
+    use prism_q::{BackendKind, NoiseModel, PrismError};
+    // Distinct, non-half marginals, so the comparison below fails on a swapped
+    // index or a symmetric readout fold rather than passing on 0.5 either way.
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::Ry(0.8), &[0]);
+    circuit.add_gate(Gate::Ry(2.0), &[1]);
+    circuit.measure_all();
+
+    let mut with_readout = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    with_readout.with_readout_error(0.3, 0.0);
+    match sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&with_readout)
+        .seed(SEED)
+        .marginals()
+    {
+        Err(PrismError::InvalidParameter { message }) => {
+            assert!(
+                message.contains("sample_counts"),
+                "the rejection must name the terminal that applies it, got {message}"
+            );
+        }
+        other => panic!("expected a rejection naming the terminal that applies it: {other:?}"),
+    }
+
+    let clean = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let marginals = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&clean)
+        .seed(SEED)
+        .marginals()
+        .unwrap();
+    let shots = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&clean)
+        .seed(SEED)
+        .shots(100_000)
+        .unwrap();
+    assert!(
+        (marginals.marginals[0].1 - marginals.marginals[1].1).abs() > 0.3,
+        "the fixture has to separate the two qubits: {:?}",
+        marginals.marginals
+    );
+    for bit in 0..2 {
+        let drawn = shots.shots.iter().filter(|s| s[bit]).count() as f64 / 100_000.0;
+        assert!(
+            (marginals.marginals[bit].1 - drawn).abs() < 0.01,
+            "bit {bit}: marginal {:?} against draw {drawn}",
+            marginals.marginals[bit]
+        );
+    }
+}
+
+// run pairs the mixture's distribution with one draw from the record, and only
+// the draw would carry readout, so the model is rejected the way marginals
+// rejects it. Sampling terminals return the record alone and keep accepting it.
+#[test]
+fn dm_run_rejects_readout_and_the_sampling_terminals_keep_it() {
+    use prism_q::{BackendKind, NoiseModel, PrismError};
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::Ry(0.8), &[0]);
+    circuit.add_gate(Gate::Ry(2.0), &[1]);
+    circuit.measure_all();
+
+    let mut with_readout = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    with_readout.with_readout_error(0.3, 0.0);
+    let noisy = || {
+        sim::simulate(&circuit)
+            .backend(BackendKind::DensityMatrix)
+            .noise(&with_readout)
+            .seed(SEED)
+    };
+    match noisy().run() {
+        Err(PrismError::InvalidParameter { message }) => assert!(
+            message.contains("sample_counts"),
+            "the rejection must name a terminal that applies it, got {message}"
+        ),
+        other => panic!("expected run to reject readout error: {other:?}"),
+    }
+    assert!(
+        noisy().marginals().is_err(),
+        "marginals and run accept the same models"
+    );
+    let shots = noisy().shots(200).unwrap();
+    assert_eq!(shots.shots.len(), 200);
+    assert_eq!(noisy().sample_counts(200).unwrap().num_classical_bits, 2);
+
+    let clean = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let outcome = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&clean)
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(outcome.classical_bits.len(), 2);
+    assert!((outcome.probabilities.unwrap().to_vec().iter().sum::<f64>() - 1.0).abs() < DM_EPS);
+
+    let mut inert = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    inert.with_readout_error(0.0, 0.0);
+    assert!(
+        sim::simulate(&circuit)
+            .backend(BackendKind::DensityMatrix)
+            .noise(&inert)
+            .seed(SEED)
+            .run()
+            .is_ok(),
+        "a zero-rate readout entry changes no draw and is not rejected"
+    );
+}
+
+#[test]
+fn dm_amplitude_damping_analytic() {
+    let gamma = 0.3;
+    // Excited state relaxes: rho11 -> 1 - gamma, rho00 -> gamma.
+    let (rho, tr) = dm_after_channel(&[(Gate::X, 0)], &amplitude_damping(gamma));
+    assert!((tr - 1.0).abs() < DM_EPS, "trace preserved: {tr}");
+    assert!((rho[0][0].re - gamma).abs() < DM_EPS, "ground pop: {rho:?}");
+    assert!(
+        (rho[1][1].re - (1.0 - gamma)).abs() < DM_EPS,
+        "excited pop: {rho:?}"
+    );
+    // Coherence of |+> decays as sqrt(1-gamma).
+    let (rho, tr) = dm_after_channel(&[(Gate::H, 0)], &amplitude_damping(gamma));
+    assert!((tr - 1.0).abs() < DM_EPS, "trace preserved: {tr}");
+    assert!(
+        (rho[0][1].re - 0.5 * (1.0 - gamma).sqrt()).abs() < DM_EPS,
+        "coherence: {rho:?}"
+    );
+}
+
+#[test]
+fn dm_phase_damping_analytic() {
+    let gamma = 0.4;
+    // Populations preserved, off-diagonal decays as sqrt(1-gamma).
+    let (rho, tr) = dm_after_channel(&[(Gate::H, 0)], &phase_damping(gamma));
+    assert!((tr - 1.0).abs() < DM_EPS, "trace preserved: {tr}");
+    assert!(
+        (rho[0][0].re - 0.5).abs() < DM_EPS,
+        "pop0 preserved: {rho:?}"
+    );
+    assert!(
+        (rho[1][1].re - 0.5).abs() < DM_EPS,
+        "pop1 preserved: {rho:?}"
+    );
+    assert!(
+        (rho[0][1].re - 0.5 * (1.0 - gamma).sqrt()).abs() < DM_EPS,
+        "coherence: {rho:?}"
+    );
+    assert!(
+        rho[0][1].im.abs() < DM_EPS,
+        "no imaginary coherence: {rho:?}"
+    );
+}
+
+#[test]
+fn dm_depolarizing_fixed_point() {
+    // Depolarizing with p = 3/4 maps any single-qubit state to I/2.
+    for prep in [vec![(Gate::X, 0)], vec![(Gate::H, 0)], vec![(Gate::T, 0)]] {
+        let (rho, tr) = dm_after_channel(&prep, &depolarizing(0.75));
+        assert!((tr - 1.0).abs() < DM_EPS, "trace preserved: {tr}");
+        assert!(
+            (rho[0][0].re - 0.5).abs() < DM_EPS,
+            "maximally mixed pop0: {rho:?}"
+        );
+        assert!(
+            (rho[1][1].re - 0.5).abs() < DM_EPS,
+            "maximally mixed pop1: {rho:?}"
+        );
+        assert!(rho[0][1].norm() < DM_EPS, "no coherence: {rho:?}");
+    }
+}
+
+#[test]
+fn dm_custom_kraus_matches_amplitude_damping() {
+    let gamma = 0.25;
+    let (rho, _) = dm_after_channel(&[(Gate::X, 0)], &amplitude_damping(gamma));
+    assert!(
+        (rho[1][1].re - (1.0 - gamma)).abs() < DM_EPS,
+        "custom == AD: {rho:?}"
+    );
+}
+
+#[test]
+fn dm_two_qubit_depolarizing_bell_analytic() {
+    // A Bell pair under symmetric two-qubit depolarizing with parameter p:
+    // rho' = (1 - p - p/15)|Phi+><Phi+| + (4p/15) I.
+    let p = 0.3;
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    let mut backend = DensityMatrixBackend::new(SEED);
+    sim::run_on(&mut backend, &c).unwrap();
+    backend.apply_2q_depolarizing(0, 1, p);
+
+    let probs = backend.probabilities().unwrap();
+    let diag_bell = (1.0 - p - p / 15.0) * 0.5 + 4.0 * p / 15.0;
+    let off_bell = 4.0 * p / 15.0;
+    assert!((probs[0] - diag_bell).abs() < DM_EPS, "p00: {probs:?}");
+    assert!((probs[3] - diag_bell).abs() < DM_EPS, "p11: {probs:?}");
+    assert!((probs[1] - off_bell).abs() < DM_EPS, "p01: {probs:?}");
+    assert!((probs[2] - off_bell).abs() < DM_EPS, "p10: {probs:?}");
+    let total: f64 = probs.iter().sum();
+    assert!((total - 1.0).abs() < DM_EPS, "trace preserved: {total}");
+}
+
+#[test]
+fn dm_fused_route_matches_unfused_across_fusion_widths() {
+    // The floors are gated on buffer width, and this backend's buffer at `n` is
+    // a `2n`-qubit statevector, so each one is reached at half the circuit width
+    // a statevector needs: 5 for one-qubit fusion, 6 for the two-qubit and
+    // Multi2q passes, 7 for MultiFused, 8 for the diagonal batches. 4 is below
+    // all of them and is the in-group control. The payload assertions are what
+    // keep the widths meaningful: a reorder that dropped 6q to Fused2q-only
+    // would still match probabilities, and Multi2q ordering is the reason this
+    // test exists. A trailing 1q layer folds back into the last Fused2q on each
+    // qubit, so the tail sits behind a SWAP layer to stay a MultiFused.
+    for (n, want_multi2q, want_multifused) in [(4usize, 0, 0), (5, 0, 0), (6, 1, 0), (8, 1, 1)] {
+        let mut circuit = circuits::random_circuit(n, 4, SEED);
+        for q in (0..n - 1).step_by(2) {
+            circuit.add_gate(Gate::Swap, &[q, q + 1]);
+        }
+        for q in 0..n {
+            circuit.add_gate(Gate::Rx(0.3 + 0.1 * q as f64), &[q]);
+        }
+        let fused = dm_fused(&circuit);
+        assert!(
+            count_gates(&fused, |g| matches!(g, Gate::Multi2q(_))) >= want_multi2q,
+            "expected {want_multi2q} Multi2q at {n}q, got {}",
+            count_gates(&fused, |g| matches!(g, Gate::Multi2q(_)))
+        );
+        assert!(
+            count_gates(&fused, |g| matches!(g, Gate::MultiFused(_))) >= want_multifused,
+            "expected {want_multifused} MultiFused at {n}q"
+        );
+        if n == 4 {
+            assert_eq!(
+                fused.instructions.len(),
+                circuit.instructions.len(),
+                "4q must fuse nothing, it is the control"
+            );
+        }
+        assert_fused_matches_unfused(
+            || DensityMatrixBackend::new(SEED),
+            &circuit,
+            DM_EPS,
+            &format!("density matrix fused vs unfused at {n}q"),
+        );
+    }
+}
+
+/// `circuit` fused the way `sim` fuses it for this backend, at the `2n` buffer
+/// width rather than the circuit width.
+fn dm_fused(circuit: &Circuit) -> Circuit {
+    prism_q::circuit::fusion::fuse_circuit_for_width(circuit, true, 2 * circuit.num_qubits)
+        .into_owned()
+}
+
+/// Probabilities after `instructions`, read in the Z, X, and Y bases.
+///
+/// A diagonal sandwich scales `<r|rho|c>` by `f(r) * conj(f(c))`, which is 1 on
+/// every diagonal entry, so a Z readout is blind to this arm however wrong it
+/// is. The two rotated readouts are what make its off-diagonal work visible.
+fn dm_probs_in_three_bases(n: usize, instructions: &[prism_q::circuit::Instruction]) -> Vec<f64> {
+    use prism_q::circuit::Instruction;
+
+    let mut out = Vec::new();
+    for basis in [&[][..], &[Gate::H][..], &[Gate::Sdg, Gate::H][..]] {
+        let mut backend = DensityMatrixBackend::new(SEED);
+        backend.init(n, 0).unwrap();
+        backend.apply_instructions(instructions).unwrap();
+        for gate in basis {
+            for q in 0..n {
+                backend
+                    .apply(&Instruction::Gate {
+                        gate: gate.clone(),
+                        targets: [q].into_iter().collect(),
+                    })
+                    .unwrap();
+            }
+        }
+        out.extend(backend.probabilities().unwrap());
+    }
+    out
+}
+
+#[test]
+fn dm_batched_diagonal_layer_matches_the_per_gate_route() {
+    // 8 qubits is where the diagonal batch floor lands for this backend. Both
+    // fixtures are seeded, and both fuse to a batch the per-gate stream has to
+    // reproduce entry for entry.
+    const N: usize = 8;
+    for (label, circuit, want_batch_rzz, want_diagonal_batch) in [
+        ("qaoa", circuits::qaoa_circuit(N, 3, SEED), 1, 0),
+        (
+            "diagonal mixed",
+            circuits::diagonal_mixed_circuit(N, 3, SEED),
+            0,
+            1,
+        ),
+    ] {
+        let fused = dm_fused(&circuit);
+        assert!(
+            count_gates(&fused, |g| matches!(g, Gate::BatchRzz(_))) >= want_batch_rzz,
+            "{label}: expected a BatchRzz at {N}q"
+        );
+        assert!(
+            count_gates(&fused, |g| matches!(g, Gate::DiagonalBatch(_))) >= want_diagonal_batch,
+            "{label}: expected a DiagonalBatch at {N}q"
+        );
+        assert_probs_close(
+            &dm_probs_in_three_bases(N, &fused.instructions),
+            &dm_probs_in_three_bases(N, &circuit.instructions),
+            DM_EPS,
+            &format!("{label} batched diagonal layer vs the per-gate route"),
+        );
+    }
+}
+
+#[test]
+fn dm_multi_entry_batch_phase_matches_the_per_gate_route() {
+    // No circuit here fuses to a BatchPhase, the controlled-phase runs that
+    // would being claimed by QftBlock first, so the payload is built directly.
+    // Targets carry the shared control alone, which is where the sandwich reads
+    // it from. The preparation has to leave real coherences behind: on a
+    // computational basis state a diagonal gate is a global phase and no
+    // readout can see it.
+    use prism_q::circuit::Instruction;
+    use prism_q::gates::BatchPhaseData;
+
+    const N: usize = 5;
+    let control = 1usize;
+    let phases: Vec<(usize, f64)> = vec![(0, 0.37), (2, 1.94), (4, -0.83)];
+
+    let mut prep = Circuit::new(N, 0);
+    for q in 0..N {
+        prep.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..N - 1 {
+        prep.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..N {
+        prep.add_gate(Gate::Ry(0.3 + 0.2 * q as f64), &[q]);
+    }
+
+    let mut per_gate = prep.clone();
+    for &(target, theta) in &phases {
+        per_gate.add_gate(Gate::cphase(theta), &[control, target]);
+    }
+
+    prep.instructions.push(Instruction::Gate {
+        gate: Gate::BatchPhase(Box::new(BatchPhaseData::new(
+            phases
+                .iter()
+                .map(|&(target, theta)| (target, Complex64::from_polar(1.0, theta))),
+        ))),
+        targets: [control].into_iter().collect(),
+    });
+
+    assert_probs_close(
+        &dm_probs_in_three_bases(N, &prep.instructions),
+        &dm_probs_in_three_bases(N, &per_gate.instructions),
+        DM_EPS,
+        "multi-entry batch phase vs the per-gate route",
+    );
+}
+
+#[test]
+#[should_panic(expected = "distinct targets")]
+fn dm_two_qubit_channel_on_a_repeated_qubit_panics() {
+    // The block traversal needs four distinct bit positions. NoiseModel rejects
+    // this before it reaches a backend, so the panic covers only direct callers
+    // of the public kernel.
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(4, 0).unwrap();
+    backend.apply_2q_depolarizing(2, 2, 0.02);
+}
+
+#[test]
+#[should_panic(expected = "inside the 4-qubit register")]
+fn dm_two_qubit_channel_outside_the_register_panics() {
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(4, 0).unwrap();
+    backend.apply_2q_depolarizing(0, 4, 0.02);
+}
+
+#[test]
+fn dm_bare_fused_2q_matches_its_unfused_pair() {
+    // A Fused2q that no Multi2q batch absorbs takes conjugate_gate rather than
+    // the buffer-conjugation fallback. Built directly, since random_circuit's
+    // brick layers batch every 2q run into Multi2q.
+    let mat = Gate::Cx.matrix_4x4();
+    let mut fused = Circuit::new(3, 0);
+    fused.add_gate(Gate::H, &[0]);
+    fused.add_gate(Gate::Ry(0.7), &[1]);
+    fused.add_gate(Gate::Fused2q(Box::new(mat)), &[0, 1]);
+    fused.add_gate(Gate::H, &[2]);
+
+    let mut plain = Circuit::new(3, 0);
+    plain.add_gate(Gate::H, &[0]);
+    plain.add_gate(Gate::Ry(0.7), &[1]);
+    plain.add_gate(Gate::Cx, &[0, 1]);
+    plain.add_gate(Gate::H, &[2]);
+
+    assert_probs_close(&dm_probs(&fused), &dm_probs(&plain), DM_EPS, "bare Fused2q");
+}
+
+#[test]
+fn dm_two_qubit_depolarizing_matches_kraus_sum() {
+    // The closed form and the 16-operator Kraus sum are separate kernels,
+    // compared here by full tomography. A pair selects the Kraus sweep's block
+    // width, 4 when min(q0,q1) >= 2 and 1 otherwise, and n selects the arm:
+    // 2n < 15 is serial. The pairs are each width on each arm. p = 15/16 is the
+    // edge where alpha goes to zero.
+    for (n, pairs) in [
+        (3usize, &[(0usize, 1usize), (1, 2)][..]),
+        (5, &[(2, 3)][..]),
+        (PAR_N, &[(0, PAR_N - 1), (2, 5)][..]),
+    ] {
+        let circuit = circuits::random_circuit(n, 4, SEED);
+        let masks = all_pauli_masks(n);
+        for &(q0, q1) in pairs {
+            for p in [0.02, 0.3, 15.0 / 16.0, 1.0] {
+                let mut closed = run_dm(&circuit);
+                closed.apply_2q_depolarizing(q0, q1, p);
+                let mut kraus = run_dm(&circuit);
+                kraus.apply_2q_kraus(q0, q1, &depolarizing_2q_kraus(p));
+
+                let got = closed.expectations_pauli(&masks);
+                let want = kraus.expectations_pauli(&masks);
+                for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+                    assert!(
+                        (a - b).abs() < DM_EPS,
+                        "n={n} pair=({q0},{q1}) p={p} pauli {:?}: closed {a}, kraus {b}",
+                        masks[k]
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn diag_2q_kraus(scale: f64, entries: [Complex64; 4]) -> [[Complex64; 4]; 4] {
+    let mut m = [[c(0.0, 0.0); 4]; 4];
+    for (t, row) in m.iter_mut().enumerate() {
+        row[t] = c(scale, 0.0) * entries[t];
+    }
+    m
+}
+
+fn mat4_mul(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
+    let mut out = [[c(0.0, 0.0); 4]; 4];
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, entry) in row.iter_mut().enumerate() {
+            for k in 0..4 {
+                *entry += a[i][k] * b[k][j];
+            }
+        }
+    }
+    out
+}
+
+// (H (x) I) K (H (x) I) per operator, H on the high `t` bit (q0). H is real and
+// self-inverse, so the conjugated channel equals the original sandwiched in H.
+fn h_conjugated_on_q0(kraus: &[[[Complex64; 4]; 4]]) -> Vec<[[Complex64; 4]; 4]> {
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let mut hi = [[c(0.0, 0.0); 4]; 4];
+    for (t, row) in hi.iter_mut().enumerate() {
+        for (tp, entry) in row.iter_mut().enumerate() {
+            if t & 1 == tp & 1 {
+                let sign = if t & 2 != 0 && tp & 2 != 0 { -h } else { h };
+                *entry = c(sign, 0.0);
+            }
+        }
+    }
+    kraus
+        .iter()
+        .map(|k| mat4_mul(&mat4_mul(&hi, k), &hi))
+        .collect()
+}
+
+fn apply_h(backend: &mut DensityMatrixBackend, q: usize) {
+    backend
+        .apply(&prism_q::circuit::Instruction::Gate {
+            gate: Gate::H,
+            targets: [q].into_iter().collect(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn dm_diagonal_2q_kraus_matches_the_conjugated_dense_route() {
+    // An all-diagonal set takes the one-multiply contiguous pass; conjugating
+    // every operator by H on q0 fills the superoperator and forces the dense
+    // sweep, and sum_k K rho K^dag = H (sum_k K' (H rho H) K'^dag) H relates
+    // the two routes exactly. The distinct-phase set has pairwise-distinct
+    // off-diagonal slot factors, so a swapped or transposed bit in the
+    // diagonal key changes some expectation; the zz pair alone is symmetric
+    // under a q0/q1 key swap. The conjugated sets carry order-p off-diagonals,
+    // pinning that near-diagonal sets stay on the dense sweep.
+    let one = c(1.0, 0.0);
+    let phase = |t: f64| c(t.cos(), t.sin());
+    for (n, pairs) in [
+        (3usize, &[(0usize, 1usize), (1, 2)][..]),
+        (5, &[(2, 3)][..]),
+        (PAR_N, &[(0, PAR_N - 1), (2, 5)][..]),
+    ] {
+        let circuit = circuits::random_circuit(n, 4, SEED);
+        let masks = all_pauli_masks(n);
+        for &(q0, q1) in pairs {
+            for p in [0.02f64, 0.3] {
+                let sets = [
+                    vec![
+                        diag_2q_kraus((1.0 - p).sqrt(), [one, one, one, one]),
+                        diag_2q_kraus(p.sqrt(), [one, -one, -one, one]),
+                    ],
+                    vec![
+                        diag_2q_kraus((1.0 - p).sqrt(), [one, one, one, one]),
+                        diag_2q_kraus(p.sqrt(), [phase(0.0), phase(0.1), phase(0.4), phase(1.0)]),
+                    ],
+                ];
+                for (which, set) in sets.iter().enumerate() {
+                    let mut direct = run_dm(&circuit);
+                    direct.apply_2q_kraus(q0, q1, set);
+
+                    let mut conjugated = run_dm(&circuit);
+                    apply_h(&mut conjugated, q0);
+                    conjugated.apply_2q_kraus(q0, q1, &h_conjugated_on_q0(set));
+                    apply_h(&mut conjugated, q0);
+
+                    let got = direct.expectations_pauli(&masks);
+                    let want = conjugated.expectations_pauli(&masks);
+                    for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+                        assert!(
+                            (a - b).abs() < DM_EPS,
+                            "n={n} pair=({q0},{q1}) p={p} set {which} pauli {:?}: \
+                             diagonal {a}, dense {b}",
+                            masks[k]
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "distinct targets")]
+fn dm_diagonal_2q_kraus_on_a_repeated_qubit_panics() {
+    // The diagonal dispatch stays behind block_layout's assert, so a repeated
+    // target panics rather than scaling the wrong entries.
+    let one = c(1.0, 0.0);
+    let set = vec![
+        diag_2q_kraus((1.0f64 - 0.02).sqrt(), [one, one, one, one]),
+        diag_2q_kraus(0.02f64.sqrt(), [one, -one, -one, one]),
+    ];
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(4, 0).unwrap();
+    backend.apply_2q_kraus(2, 2, &set);
+}
+
+#[test]
+fn dm_measure_basis_state_deterministic() {
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(Gate::X, &[0]);
+    c.add_measure(0, 0);
+    c.add_measure(1, 1);
+    let backend = dm_backend(&c, 42);
+    assert_eq!(backend.classical_results(), &[true, false]);
+    let probs = backend.probabilities().unwrap();
+    assert!(
+        (probs[1] - 1.0).abs() < DM_EPS,
+        "collapsed onto |01>: {probs:?}"
+    );
+}
+
+#[test]
+fn dm_reset_returns_qubit_to_zero() {
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::X, &[0]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_reset(0);
+    let backend = dm_backend(&c, 42);
+    let rdm0 = backend.reduced_density_matrix_1q(0).unwrap();
+    assert!(
+        (rdm0[0][0].re - 1.0).abs() < DM_EPS,
+        "reset qubit population: {rdm0:?}"
+    );
+    assert!(
+        rdm0[1][1].re.abs() < DM_EPS,
+        "reset qubit excited population: {rdm0:?}"
+    );
+    let total: f64 = backend.probabilities().unwrap().iter().sum();
+    assert!((total - 1.0).abs() < DM_EPS, "trace preserved: {total}");
+}
+
+#[test]
+fn dm_reset_from_superposition_gives_maximally_mixed_partial_trace() {
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_reset(0);
+    let backend = dm_backend(&c, 42);
+    let rdm1 = backend.reduced_density_matrix_1q(1).unwrap();
+    assert!((rdm1[0][0].re - 0.5).abs() < DM_EPS, "rdm1={rdm1:?}");
+    assert!((rdm1[1][1].re - 0.5).abs() < DM_EPS, "rdm1={rdm1:?}");
+    assert!(
+        rdm1[0][1].norm() < DM_EPS,
+        "off-diagonal coherence: {rdm1:?}"
+    );
+}
+
+#[test]
+fn dm_conditional_applies_on_measured_one() {
+    use prism_q::circuit::{ClassicalCondition, Instruction, SmallVec};
+    let mut c = Circuit::new(2, 1);
+    c.add_gate(Gate::X, &[0]);
+    c.add_measure(0, 0);
+    let targets: SmallVec<[usize; 4]> = [1usize].into_iter().collect();
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets,
+    });
+    let backend = dm_backend(&c, 42);
+    let probs = backend.probabilities().unwrap();
+    assert!(
+        (probs[3] - 1.0).abs() < DM_EPS,
+        "both qubits flipped: {probs:?}"
+    );
+}
+
+#[test]
+fn dm_measurement_marginals_match_statevector() {
+    // Measuring a Bell pair yields 00 or 11 with probability 0.5 each; 01 and
+    // 10 never occur.
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_measure(0, 0);
+    c.add_measure(1, 1);
+    let shots = 4000usize;
+    let mut counts = [0usize; 4];
+    for seed in 0..shots {
+        let backend = dm_backend(&c, seed as u64);
+        let bits = backend.classical_results();
+        let idx = usize::from(bits[0]) | (usize::from(bits[1]) << 1);
+        counts[idx] += 1;
+    }
+    assert_eq!(counts[1], 0, "01 forbidden by correlation");
+    assert_eq!(counts[2], 0, "10 forbidden by correlation");
+    let p00 = counts[0] as f64 / shots as f64;
+    assert!((p00 - 0.5).abs() < 0.05, "p00={p00}");
+}
+
+#[test]
+fn dm_reduced_density_matrix_matches_statevector() {
+    let c = circuits::random_circuit(4, 8, SEED);
+    let dm = run_dm(&c);
+    let mut sv = StatevectorBackend::new(SEED);
+    sim::run_on(&mut sv, &c).unwrap();
+    for q in 0..4 {
+        let a = dm.reduced_density_matrix_1q(q).unwrap();
+        let b = sv.reduced_density_matrix_1q(q).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (a[i][j] - b[i][j]).norm() < 1e-12,
+                    "rdm[{q}][{i}][{j}] mismatch: dm={}, sv={}",
+                    a[i][j],
+                    b[i][j]
+                );
+            }
+        }
+    }
+}
+
+// The override against the boxed `Gate::Fused` route it replaces, at both sides
+// of the crossover the one-qubit path selects on: below the parallel threshold
+// the embedded `2n`-qubit statevector takes two passes, at or above it one block
+// superoperator pass. The second matrix is a non-unitary jump branch, so this is
+// not restricted to `rho -> U rho U^dagger`.
+#[test]
+fn dm_apply_1q_matrix_matches_fused_gate_route() {
+    let dense = [[c(0.6, 0.0), c(0.8, 0.0)], [c(0.8, 0.0), c(-0.6, 0.0)]];
+    let jump = [[c(0.0, 0.0), c(1.3, 0.0)], [c(0.0, 0.0), c(0.0, 0.0)]];
+
+    // 4 qubits embeds an 8-qubit statevector (two-pass path); 8 embeds a
+    // 16-qubit one, which is the block-superoperator path.
+    for n in [4usize, 8] {
+        for (label, matrix) in [("dense", dense), ("jump", jump)] {
+            for target in [0usize, n - 1] {
+                let circuit = circuits::random_circuit(n, 6, SEED);
+
+                let mut direct = dm_backend(&circuit, SEED);
+                direct.apply_1q_matrix(target, &matrix).unwrap();
+
+                let mut boxed = dm_backend(&circuit, SEED);
+                boxed
+                    .apply(&prism_q::circuit::Instruction::Gate {
+                        gate: prism_q::gates::Gate::Fused(Box::new(matrix)),
+                        targets: [target].into_iter().collect(),
+                    })
+                    .unwrap();
+
+                let a = direct.probabilities().unwrap();
+                let b = boxed.probabilities().unwrap();
+                assert_probs_close(&a, &b, 1e-12, &format!("{label} on q{target} of {n}"));
+
+                for q in 0..n {
+                    let ra = direct.reduced_density_matrix_1q(q).unwrap();
+                    let rb = boxed.reduced_density_matrix_1q(q).unwrap();
+                    for i in 0..2 {
+                        for j in 0..2 {
+                            assert!(
+                                (ra[i][j] - rb[i][j]).norm() < 1e-12,
+                                "{label} on q{target} of {n}: rdm[{q}][{i}][{j}] \
+                                 direct={} boxed={}",
+                                ra[i][j],
+                                rb[i][j]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// `project`, `apply_reset`, and `apply_2q_depolarizing` walk the `4^n` buffer in
+// row-major runs whose stride is the qubit's row bit, and parallelize above the
+// embedded statevector's threshold (`2n >= 15`, so n >= 8). At n = 8 the top two
+// qubits leave fewer than four row blocks, which is the arm that splits inside a
+// block. Each case checks the low qubit and the top qubit.
+const PAR_N: usize = 8;
+
+fn pure_reference_state(circuit: &Circuit) -> Vec<Complex64> {
+    let mut backend = StatevectorBackend::new(SEED);
+    sim::run_on(&mut backend, circuit).unwrap();
+    backend.export_statevector().unwrap()
+}
+
+/// `run_dm` with a classical bit, which the shared circuit fixtures do not
+/// declare because they carry no measurement.
+fn run_dm_with_bit(circuit: &Circuit) -> DensityMatrixBackend {
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(circuit.num_qubits, 1).unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    backend
+}
+
+#[test]
+fn dm_measure_collapse_matches_scalar_reference_at_every_target() {
+    let circuit = circuits::random_circuit(PAR_N, 4, SEED);
+    let state = pure_reference_state(&circuit);
+
+    for target in [0usize, PAR_N - 2, PAR_N - 1] {
+        let bit = 1usize << target;
+        let mut backend = run_dm_with_bit(&circuit);
+        backend
+            .apply(&prism_q::circuit::Instruction::Measure {
+                qubit: target,
+                classical_bit: 0,
+            })
+            .unwrap();
+        let outcome = backend.classical_results()[0];
+
+        let kept: f64 = state
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| (i & bit != 0) == outcome)
+            .map(|(_, a)| a.norm_sqr())
+            .sum();
+        let expected: Vec<f64> = state
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if (i & bit != 0) == outcome {
+                    a.norm_sqr() / kept
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        assert_probs_close(
+            &backend.probabilities().unwrap(),
+            &expected,
+            DM_EPS,
+            &format!("collapse on q{target}"),
+        );
+
+        // A projected pure state is still pure, which the diagonal alone cannot
+        // show: it fails if the off-diagonal runs are scaled or zeroed wrongly.
+        assert!(
+            (backend.purity() - 1.0).abs() < DM_EPS,
+            "collapse on q{target} left purity {}",
+            backend.purity()
+        );
+        let rdm = backend.reduced_density_matrix_1q(target).unwrap();
+        let population = if outcome { rdm[1][1].re } else { rdm[0][0].re };
+        assert!(
+            (population - 1.0).abs() < DM_EPS,
+            "collapse on q{target} population {population}"
+        );
+    }
+}
+
+#[test]
+fn dm_reset_matches_scalar_reference_at_every_target() {
+    let circuit = circuits::random_circuit(PAR_N, 4, SEED);
+    let state = pure_reference_state(&circuit);
+
+    for target in [0usize, PAR_N - 2, PAR_N - 1] {
+        let bit = 1usize << target;
+        let mut backend = run_dm(&circuit);
+        backend.reset(target).unwrap();
+
+        // Reset traces the qubit out and reinserts |0>, so the two diagonal
+        // entries of each row pair merge into the one with the bit clear.
+        let expected: Vec<f64> = state
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if i & bit != 0 {
+                    0.0
+                } else {
+                    a.norm_sqr() + state[i | bit].norm_sqr()
+                }
+            })
+            .collect();
+        assert_probs_close(
+            &backend.probabilities().unwrap(),
+            &expected,
+            DM_EPS,
+            &format!("reset on q{target}"),
+        );
+
+        let rdm = backend.reduced_density_matrix_1q(target).unwrap();
+        assert!(
+            (rdm[0][0].re - 1.0).abs() < DM_EPS && rdm[0][1].norm() < DM_EPS,
+            "reset on q{target} left rdm {rdm:?}"
+        );
+
+        // Tracing one qubit out cannot change any other qubit's reduced state.
+        let mut sv = StatevectorBackend::new(SEED);
+        sim::run_on(&mut sv, &circuit).unwrap();
+        for q in (0..PAR_N).filter(|&q| q != target) {
+            let a = backend.reduced_density_matrix_1q(q).unwrap();
+            let b = sv.reduced_density_matrix_1q(q).unwrap();
+            for i in 0..2 {
+                for j in 0..2 {
+                    assert!(
+                        (a[i][j] - b[i][j]).norm() < DM_EPS,
+                        "reset on q{target}: rdm[{q}][{i}][{j}] dm={} sv={}",
+                        a[i][j],
+                        b[i][j]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dm_two_qubit_depolarizing_matches_analytic_above_parallel_threshold() {
+    // The Pauli twirl gives rho -> (1-lambda) rho + lambda (I/4) (x) tr_{q0,q1} rho
+    // with lambda = 16p/15, so each reduced state mixes toward I/2 by lambda and
+    // qubits outside the pair are untouched.
+    let p = 0.3;
+    let lambda = 16.0 * p / 15.0;
+    let circuit = circuits::random_circuit(PAR_N, 4, SEED);
+
+    for (q0, q1) in [(0usize, 1usize), (0, PAR_N - 1)] {
+        let mut sv = StatevectorBackend::new(SEED);
+        sim::run_on(&mut sv, &circuit).unwrap();
+
+        let mut backend = run_dm(&circuit);
+        backend.apply_2q_depolarizing(q0, q1, p);
+
+        for q in 0..PAR_N {
+            let before = sv.reduced_density_matrix_1q(q).unwrap();
+            let after = backend.reduced_density_matrix_1q(q).unwrap();
+            for i in 0..2 {
+                for j in 0..2 {
+                    let mixed = if i == j { c(0.5, 0.0) } else { c(0.0, 0.0) };
+                    let expected = if q == q0 || q == q1 {
+                        before[i][j] * (1.0 - lambda) + mixed * lambda
+                    } else {
+                        before[i][j]
+                    };
+                    assert!(
+                        (after[i][j] - expected).norm() < DM_EPS,
+                        "depolarizing({q0},{q1}): rdm[{q}][{i}][{j}] expected {expected}, \
+                         got {}",
+                        after[i][j]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dm_purity_matches_analytic_above_parallel_reduce_threshold() {
+    // 4^8 entries clears the reduction's parallel threshold. One qubit fully
+    // depolarized against seven in |0> gives rho = (I/2) (x) |0><0|^7, purity 1/2.
+    let n = 8usize;
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(n, 0).unwrap();
+    assert!(
+        (backend.purity() - 1.0).abs() < DM_EPS,
+        "pure |0...0> purity {}",
+        backend.purity()
+    );
+
+    backend.apply_1q_kraus(0, &depolarizing(0.75));
+    assert!(
+        (backend.purity() - 0.5).abs() < DM_EPS,
+        "one maximally mixed qubit gives purity 1/2, got {}",
+        backend.purity()
+    );
+}
+
+fn assert_rdm_close(a: &DensityMatrixBackend, b: &StatevectorBackend, n: usize, label: &str) {
+    for q in 0..n {
+        let x = a.reduced_density_matrix_1q(q).unwrap();
+        let y = b.reduced_density_matrix_1q(q).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (x[i][j] - y[i][j]).norm() < DM_EPS,
+                    "{label}: rdm[{q}][{i}][{j}] dm={} sv={}",
+                    x[i][j],
+                    y[i][j]
+                );
+            }
+        }
+    }
+}
+
+// `QftBlock` holds its qubit range in the variant, so the ket-register offset
+// the sandwich applies to `targets` has to reach `start` too. The QFT of a basis
+// state is uniform over the register under either bit-order convention, which an
+// identity-acting block cannot produce.
+#[test]
+fn dm_qft_block_through_apply_evolves_the_state() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_gate(
+        Gate::QftBlock {
+            start: 0,
+            num: 2,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+        &[0, 1],
+    );
+
+    let mut dm = DensityMatrixBackend::new(SEED);
+    dm.init(2, 0).unwrap();
+    dm.apply_instructions(&circuit.instructions).unwrap();
+
+    assert_probs_close(
+        &dm.probabilities().unwrap(),
+        &[0.25; 4],
+        DM_EPS,
+        "qft block of a basis state",
+    );
+    assert!(
+        (dm.purity() - 1.0).abs() < DM_EPS,
+        "qft block keeps the state pure, purity {}",
+        dm.purity()
+    );
+
+    let mut sv = StatevectorBackend::new(SEED);
+    sim::run_on(&mut sv, &circuit).unwrap();
+    assert_rdm_close(&dm, &sv, 2, "qft block");
+}
+
+// `BatchPhase` keeps its control in `targets[0]` and its targets in the payload,
+// so only the control picks up the ket-register offset. On the uniform two-qubit
+// superposition a cphase(pi/2) from q0 to q1 sends the amplitude 1/2 at index 3
+// to i/2. The result is symmetric in the pair, so both reduced states are
+// [[1/2, (1-i)/4], [(1+i)/4, 1/2]].
+#[test]
+fn dm_batch_phase_through_apply_matches_the_unfused_cphase() {
+    let phase = c(0.0, 1.0);
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+
+    let mut dm = DensityMatrixBackend::new(SEED);
+    dm.init(2, 0).unwrap();
+    dm.apply_instructions(&circuit.instructions).unwrap();
+    dm.apply(&prism_q::circuit::Instruction::Gate {
+        gate: Gate::BatchPhase(Box::new(prism_q::gates::BatchPhaseData::new([(
+            1usize, phase,
+        )]))),
+        targets: [0usize].into_iter().collect(),
+    })
+    .unwrap();
+
+    let expected = [[c(0.5, 0.0), c(0.25, -0.25)], [c(0.25, 0.25), c(0.5, 0.0)]];
+    for q in 0..2 {
+        let rdm = dm.reduced_density_matrix_1q(q).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (rdm[i][j] - expected[i][j]).norm() < DM_EPS,
+                    "batch phase: rdm[{q}][{i}][{j}] expected {} got {}",
+                    expected[i][j],
+                    rdm[i][j]
+                );
+            }
+        }
+    }
+
+    circuit.add_gate(
+        Gate::cu([[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), phase]]),
+        &[0, 1],
+    );
+    let mut sv = StatevectorBackend::new(SEED);
+    sim::run_on(&mut sv, &circuit).unwrap();
+    assert_rdm_close(&dm, &sv, 2, "batch phase");
+}
+
+// A 1q gate and the 1q channel that follows it compose into one superoperator
+// sweep on the noisy density-matrix route. The composed map is order sensitive,
+// so comparing every 1q Pauli expectation against sequential application pins
+// the order as well as the value: the three expectations fix each reduced
+// density matrix completely.
+#[test]
+fn fused_gate_and_channel_matches_sequential_application() {
+    use prism_q::sim::noise::{NoiseModel, density_matrix_expectation_values};
+    use prism_q::sim::unified_pauli::PauliTerm;
+
+    let gamma = 0.17;
+    let n = 4;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::Ry(0.63 + q as f64), &[q]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::S, &[q]);
+    }
+
+    let noise = NoiseModel::with_amplitude_damping(&circuit, gamma);
+    let observables: Vec<Vec<PauliTerm>> = (0..n)
+        .flat_map(|q| {
+            [
+                vec![PauliTerm::x(q)],
+                vec![PauliTerm::y(q)],
+                vec![PauliTerm::z(q)],
+            ]
+        })
+        .collect();
+    let fused =
+        density_matrix_expectation_values(&circuit, &observables, Some(&noise), SEED).unwrap();
+
+    // Sequential reference: gate, then the channel, as two separate sweeps.
+    let damping = [
+        [c(1.0, 0.0), c(0.0, 0.0)],
+        [c(0.0, 0.0), c((1.0 - gamma).sqrt(), 0.0)],
+    ];
+    let jump = [
+        [c(0.0, 0.0), c(gamma.sqrt(), 0.0)],
+        [c(0.0, 0.0), c(0.0, 0.0)],
+    ];
+    let mut reference = DensityMatrixBackend::new(SEED);
+    reference.init(n, 0).unwrap();
+    for instr in &circuit.instructions {
+        reference.apply(instr).unwrap();
+        if let prism_q::circuit::Instruction::Gate { targets, .. } = instr {
+            for &q in targets.iter() {
+                reference.apply_1q_kraus(q, &[damping, jump]);
+            }
+        }
+    }
+
+    for q in 0..n {
+        let rdm = reference.reduced_density_matrix_1q(q).unwrap();
+        let expected = [
+            (rdm[0][1] + rdm[1][0]).re,
+            (Complex64::new(0.0, 1.0) * (rdm[0][1] - rdm[1][0])).re,
+            (rdm[0][0] - rdm[1][1]).re,
+        ];
+        for (k, label) in ["X", "Y", "Z"].iter().enumerate() {
+            let got = fused[3 * q + k];
+            assert!(
+                (got - expected[k]).abs() < DM_EPS,
+                "qubit {q} <{label}>: fused {got} vs sequential {}",
+                expected[k]
+            );
+        }
+    }
+}
+
+// The batched bra pass must preserve list order: CX(0,1) and CX(1,2) do not
+// commute, and the rotation prep keeps every pair state generic so a reorder
+// changes the distribution. Eight qubits put the doubled register above the
+// parallel threshold with four cache tiles, so the tiled parallel arm runs a
+// real multi-tile split.
+#[test]
+fn dm_multi_2q_batched_bra_preserves_gate_order() {
+    use prism_q::circuit::Instruction;
+    use prism_q::gates::Multi2qData;
+
+    let n = 8;
+    let cx = Gate::Cx.matrix_4x4();
+    let swap = Gate::Swap.matrix_4x4();
+    let gates = vec![
+        (0usize, 1usize, cx),
+        (1, 2, cx),
+        (0, 1, swap),
+        (2, 3, cx),
+        (1, 2, cx),
+    ];
+
+    let mut prep = Circuit::new(n, 0);
+    for q in 0..n {
+        prep.add_gate(Gate::Rx(0.3 + 0.2 * q as f64), &[q]);
+        prep.add_gate(Gate::Ry(0.1 + 0.15 * q as f64), &[q]);
+    }
+
+    let mut batched = DensityMatrixBackend::new(SEED);
+    batched.init(n, 0).unwrap();
+    for inst in &prep.instructions {
+        batched.apply(inst).unwrap();
+    }
+    batched
+        .apply(&Instruction::Gate {
+            gate: Gate::Multi2q(Box::new(Multi2qData::new(gates.clone()))),
+            targets: prism_q::circuit::smallvec![0, 1, 2, 3],
+        })
+        .unwrap();
+
+    let mut single = DensityMatrixBackend::new(SEED);
+    single.init(n, 0).unwrap();
+    for inst in &prep.instructions {
+        single.apply(inst).unwrap();
+    }
+    for &(q0, q1, mat) in &gates {
+        single
+            .apply(&Instruction::Gate {
+                gate: Gate::Fused2q(Box::new(mat)),
+                targets: prism_q::circuit::smallvec![q0, q1],
+            })
+            .unwrap();
+    }
+
+    assert_probs_close(
+        &batched.probabilities().unwrap(),
+        &single.probabilities().unwrap(),
+        DM_EPS,
+        "batched bra Multi2q vs per-constituent",
+    );
+}
+
+/// Widths around the doubled register's parallel threshold (`2n >= 15`): 7
+/// stays below it, 8 crosses it, and 12 puts ket targets in every tier of the
+/// tiled kernels.
+const BATCH_WIDTHS: [usize; 5] = [7, 8, 9, 10, 12];
+
+fn random_unitary_2x2(rng: &mut rand_chacha::ChaCha8Rng) -> [[Complex64; 2]; 2] {
+    use rand::RngExt;
+    let tau = std::f64::consts::TAU;
+    let (theta, a, b, g) = (
+        rng.random::<f64>() * tau,
+        rng.random::<f64>() * tau,
+        rng.random::<f64>() * tau,
+        rng.random::<f64>() * tau,
+    );
+    let (s, co) = theta.sin_cos();
+    let e = |phase: f64| Complex64::from_polar(1.0, phase);
+    [
+        [e(g) * co, -e(g + b) * s],
+        [e(g + a) * s, e(g + a + b) * co],
+    ]
+}
+
+fn apply_gate(backend: &mut DensityMatrixBackend, gate: Gate, targets: &[usize]) {
+    backend
+        .apply(&prism_q::circuit::Instruction::Gate {
+            gate,
+            targets: targets.iter().copied().collect(),
+        })
+        .unwrap();
+}
+
+/// A mixed state with complex coherences on every qubit: rotation layers around
+/// a CX chain, with amplitude damping on every third qubit in between.
+fn mixed_dm(n: usize) -> DensityMatrixBackend {
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(n, 0).unwrap();
+    for q in 0..n {
+        apply_gate(&mut backend, Gate::Ry(0.3 + 0.2 * q as f64), &[q]);
+        apply_gate(&mut backend, Gate::Rz(0.1 + 0.15 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        apply_gate(&mut backend, Gate::Cx, &[q, q + 1]);
+    }
+    for q in (0..n).step_by(3) {
+        backend.apply_1q_kraus(q, &amplitude_damping(0.25));
+    }
+    for q in 0..n {
+        apply_gate(&mut backend, Gate::Rx(0.4 + 0.1 * q as f64), &[q]);
+    }
+    backend
+}
+
+/// The full buffer and each qubit's `<X>`, `<Y>`, `<Z>` after `evolve` runs on
+/// [`mixed_dm`]. The backend drops before the caller builds the next one.
+fn evolved_mixture(
+    n: usize,
+    evolve: impl FnOnce(&mut DensityMatrixBackend),
+) -> (Vec<Complex64>, Vec<[f64; 3]>) {
+    let mut backend = mixed_dm(n);
+    evolve(&mut backend);
+    let bloch = (0..n)
+        .map(|q| {
+            let rdm = backend.reduced_density_matrix_1q(q).unwrap();
+            [
+                (rdm[0][1] + rdm[1][0]).re,
+                (Complex64::new(0.0, 1.0) * (rdm[0][1] - rdm[1][0])).re,
+                (rdm[0][0] - rdm[1][1]).re,
+            ]
+        })
+        .collect();
+    (backend.density_matrix().unwrap(), bloch)
+}
+
+fn assert_mixtures_close(
+    got: &(Vec<Complex64>, Vec<[f64; 3]>),
+    want: &(Vec<Complex64>, Vec<[f64; 3]>),
+    label: &str,
+) {
+    let worst = got
+        .0
+        .iter()
+        .zip(&want.0)
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0, f64::max);
+    assert!(worst < DM_EPS, "{label}: max entry deviation {worst:e}");
+    for (q, (a, b)) in got.1.iter().zip(&want.1).enumerate() {
+        for (k, basis) in ["X", "Y", "Z"].iter().enumerate() {
+            assert!(
+                (a[k] - b[k]).abs() < DM_EPS,
+                "{label}: qubit {q} <{basis}> {} vs {}",
+                a[k],
+                b[k]
+            );
+        }
+    }
+}
+
+// The batched route runs the ket constituents and their bra conjugates through
+// the statevector tiled kernel; the reference applies each constituent as its
+// own one-qubit sandwich. The batches cover every qubit, the two edge qubits
+// alone, whose doubled targets one subcube gathers, an all-diagonal batch,
+// which takes the diagonal sandwich, and qubits 0 and 1, whose doubled targets
+// all sit in one tile.
+#[test]
+fn dm_multi_fused_batch_matches_per_constituent() {
+    use prism_q::gates::MultiFusedData;
+    use rand::SeedableRng;
+
+    for n in BATCH_WIDTHS {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(SEED + n as u64);
+        let full: Vec<_> = (0..n).map(|q| (q, random_unitary_2x2(&mut rng))).collect();
+        let edges: Vec<_> = [n - 1, 0]
+            .into_iter()
+            .map(|q| (q, random_unitary_2x2(&mut rng)))
+            .collect();
+        let zero = Complex64::new(0.0, 0.0);
+        let diagonal: Vec<_> = [0, n / 2, n - 1]
+            .into_iter()
+            .map(|q| {
+                let m = random_unitary_2x2(&mut rng);
+                (
+                    q,
+                    [
+                        [m[0][0] / m[0][0].norm(), zero],
+                        [zero, m[1][1] / m[1][1].norm()],
+                    ],
+                )
+            })
+            .collect();
+        let low_pair: Vec<_> = (0..2).map(|q| (q, random_unitary_2x2(&mut rng))).collect();
+        let batches = [full, edges, diagonal, low_pair];
+        assert!(MultiFusedData::new(batches[2].clone()).all_diagonal());
+
+        let batched = evolved_mixture(n, |backend| {
+            for gates in &batches {
+                let targets: Vec<usize> = gates.iter().map(|&(q, _)| q).collect();
+                let data = MultiFusedData::new(gates.clone());
+                apply_gate(backend, Gate::MultiFused(Box::new(data)), &targets);
+            }
+        });
+        let reference = evolved_mixture(n, |backend| {
+            for &(q, m) in batches.iter().flatten() {
+                apply_gate(backend, Gate::Fused(Box::new(m)), &[q]);
+            }
+        });
+        assert_mixtures_close(&batched, &reference, &format!("MultiFused at {n}q"));
+    }
+}
+
+fn kron_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Complex64; 4]; 4] {
+    let mut out = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (r, row) in out.iter_mut().enumerate() {
+        for (col, entry) in row.iter_mut().enumerate() {
+            *entry = a[r >> 1][col >> 1] * b[r & 1][col & 1];
+        }
+    }
+    out
+}
+
+fn mul_4x4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
+    let mut out = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (r, row) in out.iter_mut().enumerate() {
+        for (col, entry) in row.iter_mut().enumerate() {
+            *entry = (0..4).map(|k| a[r][k] * b[k][col]).sum();
+        }
+    }
+    out
+}
+
+/// `(A x B) CX (C x D)` for random one-qubit `A..D`: entangling, complex, and
+/// non-commuting with its neighbours on a shared qubit.
+fn random_unitary_4x4(rng: &mut rand_chacha::ChaCha8Rng) -> [[Complex64; 4]; 4] {
+    let outer = kron_2x2(&random_unitary_2x2(rng), &random_unitary_2x2(rng));
+    let inner = kron_2x2(&random_unitary_2x2(rng), &random_unitary_2x2(rng));
+    mul_4x4(&outer, &mul_4x4(&Gate::Cx.matrix_4x4(), &inner))
+}
+
+// The ket half lands on qubits `n..2n`, so a batch fusion sized for the circuit
+// indices can outgrow one subcube there and must be cut into runs that keep
+// list order; batching the whole list through the tiered pass reorders
+// non-commuting constituents. The chain overlaps on every qubit, wraps from
+// `n - 1` back to 0, and is long enough at 12 qubits to need several runs.
+#[test]
+fn dm_multi_2q_batch_matches_per_constituent() {
+    use prism_q::gates::Multi2qData;
+    use rand::SeedableRng;
+
+    for n in BATCH_WIDTHS {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(SEED + n as u64);
+        let mut chain: Vec<(usize, usize)> = (0..n - 1).map(|q| (q, q + 1)).collect();
+        chain.push((n - 1, 0));
+        chain.extend((1..n).rev().map(|q| (q, q - 1)));
+        let edges = vec![(0, n - 1), (n - 1, 1), (1, 0), (0, n - 1)];
+        let batches: Vec<Vec<_>> = [chain, edges]
+            .into_iter()
+            .map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(q0, q1)| (q0, q1, random_unitary_4x4(&mut rng)))
+                    .collect()
+            })
+            .collect();
+
+        let batched = evolved_mixture(n, |backend| {
+            for gates in &batches {
+                let mut targets: Vec<usize> = gates.iter().flat_map(|&(a, b, _)| [a, b]).collect();
+                targets.sort_unstable();
+                targets.dedup();
+                let data = Multi2qData::new(gates.clone());
+                apply_gate(backend, Gate::Multi2q(Box::new(data)), &targets);
+            }
+        });
+        let reference = evolved_mixture(n, |backend| {
+            for &(q0, q1, m) in batches.iter().flatten() {
+                apply_gate(backend, Gate::Fused2q(Box::new(m)), &[q0, q1]);
+            }
+        });
+        assert_mixtures_close(&batched, &reference, &format!("Multi2q at {n}q"));
+    }
+}
+
+// The fused circuit carries `MultiFused` and `Multi2q` from the doubled-width
+// floors on; applied to a mixed state it must leave the same buffer as the
+// unfused instructions.
+#[test]
+fn dm_fused_circuit_matches_unfused_on_a_mixed_state() {
+    for n in [8usize, 10] {
+        for (name, circuit) in [
+            ("qaoa", circuits::qaoa_circuit(n, 3, SEED)),
+            ("random", circuits::random_circuit(n, 8, SEED)),
+        ] {
+            let fused = dm_fused(&circuit);
+            assert!(
+                count_gates(&fused, |g| matches!(
+                    g,
+                    Gate::MultiFused(_) | Gate::Multi2q(_)
+                )) > 0,
+                "{name} at {n}q fused no batch"
+            );
+            let got = evolved_mixture(n, |backend| {
+                backend.apply_instructions(&fused.instructions).unwrap()
+            });
+            let want = evolved_mixture(n, |backend| {
+                backend.apply_instructions(&circuit.instructions).unwrap()
+            });
+            assert_mixtures_close(&got, &want, &format!("{name} fused at {n}q"));
+        }
+    }
+}
+
+// `Rzz` is diagonal, so it leaves probabilities untouched and the cross-backend
+// probability matrix above cannot see it at all. These two pin it instead: the
+// first against the general channel route over full Pauli tomography, the
+// second against the statevector with H layers making the phase observable.
+#[test]
+fn dm_rzz_sandwich_matches_channel_route() {
+    const N: usize = 5;
+    let base = circuits::random_circuit(N, 4, SEED);
+    let masks = all_pauli_masks(N);
+
+    for &(q0, q1) in &[(0usize, 1usize), (2, 3), (1, 2), (0, N - 1)] {
+        for theta in [0.0, 0.3, 1.0, std::f64::consts::PI, -2.4] {
+            for mixed in [false, true] {
+                let prepare = || {
+                    let mut backend = run_dm(&base);
+                    if mixed {
+                        backend.apply_1q_kraus(N - 2, &amplitude_damping(0.3));
+                    }
+                    backend
+                };
+
+                let mut sandwich = prepare();
+                sandwich
+                    .apply(&prism_q::circuit::Instruction::Gate {
+                        gate: Gate::Rzz(theta),
+                        targets: [q0, q1].into_iter().collect(),
+                    })
+                    .unwrap();
+
+                let mut channel = prepare();
+                channel.apply_2q_kraus(q0, q1, &[Gate::Rzz(theta).matrix_4x4()]);
+
+                let got = sandwich.expectations_pauli(&masks);
+                let want = channel.expectations_pauli(&masks);
+                for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+                    assert!(
+                        (a - b).abs() < DM_EPS,
+                        "pair=({q0},{q1}) theta={theta} mixed={mixed} pauli {:?}: sandwich {a}, channel {b}",
+                        masks[k]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dm_rzz_phase_shows_in_probabilities_under_basis_change() {
+    // PAR_N puts the buffer at 2n = 16 qubits, so the sweep takes its rayon arm;
+    // the tomography test above stays small and covers the scalar one.
+    const N: usize = PAR_N;
+    for &(q0, q1) in &[(0usize, 1usize), (1, 2), (0, N - 1)] {
+        let mut circuit = Circuit::new(N, 0);
+        for q in 0..N {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        circuit.add_gate(Gate::Rzz(0.9), &[q0, q1]);
+        for q in 0..N {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        assert_matches_statevector(&circuit, &format!("rzz sandwich ({q0}, {q1})"));
+    }
+}
+
+// Probabilities cannot see a global conjugation of rho: a density matrix has a
+// real diagonal, so `conj(rho)` and `rho` give identical probabilities at every
+// width and for every circuit. The channel-route comparison above shares
+// `diag_slot` with the code under test, so it cannot pin the ket and bra sides
+// to their own registers either. Full Pauli tomography against the statevector
+// is independent of both: `conj(Y) = -Y`, so every Y-bearing string flips sign
+// under a conjugation and the comparison fails.
+#[test]
+fn dm_rzz_sandwich_matches_statevector_over_full_tomography() {
+    use prism_q::{BackendKind, PauliTerm};
+
+    const N: usize = 4;
+    let mut circuit = Circuit::new(N, 0);
+    for q in 0..N {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.add_gate(Gate::T, &[1]);
+    circuit.add_gate(Gate::Rzz(0.7), &[0, 1]);
+    circuit.add_gate(Gate::Rzz(-1.3), &[1, N - 1]);
+    circuit.add_gate(Gate::Ry(0.4), &[2]);
+
+    let masks: Vec<(usize, usize, u32)> = all_pauli_masks(N)
+        .into_iter()
+        .filter(|&(x, z, _)| x != 0 || z != 0)
+        .collect();
+    let observables: Vec<Vec<PauliTerm>> = masks
+        .iter()
+        .map(|&(x, z, _)| {
+            (0..N)
+                .filter_map(|q| match ((x >> q) & 1 == 1, (z >> q) & 1 == 1) {
+                    (true, true) => Some(PauliTerm::y(q)),
+                    (true, false) => Some(PauliTerm::x(q)),
+                    (false, true) => Some(PauliTerm::z(q)),
+                    (false, false) => None,
+                })
+                .collect()
+        })
+        .collect();
+
+    let got = dm_backend(&circuit, SEED).expectations_pauli(&masks);
+    let want = sim::simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+
+    let sensitive = masks
+        .iter()
+        .zip(&want)
+        .filter(|((x, z, _), v)| (x & z) != 0 && v.abs() > 0.1)
+        .count();
+    assert!(
+        sensitive > 0,
+        "fixture is vacuous: no Y-bearing string has a reference value clear of zero"
+    );
+    for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (a - b).abs() < DM_EPS,
+            "pauli {:?}: density matrix {a}, statevector {b}",
+            masks[k]
+        );
+    }
+}
+
+/// The register of `noisy_circuit` evolved in two halves, so a mixture
+/// exported between them can be re-imported and the continuation compared
+/// against the uninterrupted run. No measurements: the halves are applied to
+/// held backends as well as through `simulate`.
+fn first_half(c: &mut Circuit) {
+    for q in 0..NOISY_N {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..NOISY_N - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+}
+
+fn second_half(c: &mut Circuit) {
+    for q in 0..NOISY_N {
+        c.add_gate(Gate::T, &[q]);
+        c.add_gate(Gate::Ry(0.3 + 0.1 * q as f64), &[q]);
+    }
+    c.add_gate(Gate::Cx, &[NOISY_N - 1, 0]);
+}
+
+fn split_run() -> (Circuit, Circuit, Circuit) {
+    let mut first = Circuit::new(NOISY_N, 0);
+    first_half(&mut first);
+    let mut second = Circuit::new(NOISY_N, 0);
+    second_half(&mut second);
+    let mut whole = Circuit::new(NOISY_N, 0);
+    first_half(&mut whole);
+    second_half(&mut whole);
+    (first, second, whole)
+}
+
+fn assert_same_mixture(want: &[Complex64], got: &[Complex64], label: &str) {
+    assert_eq!(want.len(), got.len(), "{label}: buffer length");
+    for (i, (w, g)) in want.iter().zip(got).enumerate() {
+        assert!(
+            (w - g).norm() < DM_EPS,
+            "{label}: entry {i} want {w:?} got {g:?}"
+        );
+    }
+}
+
+#[test]
+fn dm_import_of_an_exported_mixture_continues_the_run() {
+    let (first, second, _) = split_run();
+    let mut uninterrupted = DensityMatrixBackend::new(SEED);
+    uninterrupted.init(NOISY_N, 0).unwrap();
+    uninterrupted
+        .apply_instructions(&first.instructions)
+        .unwrap();
+    uninterrupted.apply_2q_depolarizing(0, 1, DEPOLARIZING_P);
+    uninterrupted.apply_2q_depolarizing(2, 3, DEPOLARIZING_P);
+    let exported = uninterrupted.density_matrix().unwrap();
+
+    let mut resumed = DensityMatrixBackend::new(SEED);
+    assert!(resumed.supports_initial_density_matrix());
+    resumed
+        .init_from_density_matrix(exported.clone(), 0)
+        .unwrap();
+    assert_eq!(resumed.num_qubits(), NOISY_N);
+    assert!(
+        resumed.purity() < 1.0 - DEPOLARIZING_P,
+        "the fixture must be a mixture: purity {}",
+        resumed.purity()
+    );
+    assert_same_mixture(
+        &exported,
+        &resumed.density_matrix().unwrap(),
+        "import round trip",
+    );
+
+    for backend in [&mut uninterrupted, &mut resumed] {
+        backend.apply_instructions(&second.instructions).unwrap();
+        backend.apply_2q_depolarizing(1, 2, DEPOLARIZING_P);
+    }
+    assert_same_mixture(
+        &uninterrupted.density_matrix().unwrap(),
+        &resumed.density_matrix().unwrap(),
+        "continued evolution",
+    );
+}
+
+#[test]
+fn simulate_continues_a_noisy_run_from_an_imported_mixture() {
+    use prism_q::{BackendKind, NoiseModel, PauliTerm};
+    let (first, second, whole) = split_run();
+    let all: Vec<usize> = (0..NOISY_N).collect();
+    let noise_first = NoiseModel::uniform_depolarizing(&first, DEPOLARIZING_P);
+    let noise_second = NoiseModel::uniform_depolarizing(&second, DEPOLARIZING_P);
+    let noise_whole = NoiseModel::uniform_depolarizing(&whole, DEPOLARIZING_P);
+
+    let rho = sim::simulate(&first)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise_first)
+        .seed(SEED)
+        .reduced_density_matrix(&all)
+        .unwrap()
+        .data;
+
+    let resumed = sim::simulate(&second)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise_second)
+        .initial_density_matrix(&rho)
+        .seed(SEED)
+        .run()
+        .unwrap()
+        .probabilities
+        .unwrap()
+        .to_vec();
+    let exact = dm_noisy_probs(&whole, &noise_whole, SEED);
+    assert_probs_close(&resumed, &exact, DM_EPS, "resumed noisy distribution");
+
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(1), PauliTerm::z(3)],
+        vec![PauliTerm::y(2), PauliTerm::x(0)],
+    ];
+    let from_import = sim::simulate(&second)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise_second)
+        .initial_density_matrix(&rho)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+    let uninterrupted = sim::simulate(&whole)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise_whole)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+    for (i, (a, b)) in from_import.iter().zip(&uninterrupted).enumerate() {
+        assert!((a - b).abs() < DM_EPS, "observable {i}: {a} vs {b}");
+    }
+}
+
+fn import_error(rho: Vec<Complex64>) -> String {
+    match DensityMatrixBackend::new(SEED).init_from_density_matrix(rho, 0) {
+        Err(prism_q::PrismError::InvalidParameter { message }) => message,
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
+#[test]
+fn dm_import_rejects_a_non_hermitian_mixture() {
+    // Entry (0, 1) must be the conjugate of entry (1, 0); here they are equal.
+    let rho = vec![c(0.5, 0.0), c(0.25, 0.1), c(0.25, 0.1), c(0.5, 0.0)];
+    let message = import_error(rho);
+    assert!(message.contains("Hermitian"), "{message}");
+}
+
+#[test]
+fn dm_import_rejects_a_mixture_without_unit_trace() {
+    let rho = vec![c(0.6, 0.0), c(0.0, 0.0), c(0.0, 0.0), c(0.6, 0.0)];
+    let message = import_error(rho);
+    assert!(message.contains("trace"), "{message}");
+}
+
+#[test]
+fn dm_import_rejects_a_buffer_that_is_not_a_square_power_of_two() {
+    for len in [3usize, 8] {
+        let mut rho = vec![c(0.0, 0.0); len];
+        rho[0] = c(1.0, 0.0);
+        let message = import_error(rho);
+        assert!(message.contains("4^n"), "{message}");
+    }
+}

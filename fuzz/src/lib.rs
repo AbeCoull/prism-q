@@ -1,5 +1,5 @@
 //! Input decoders and checks shared by the fuzz targets and the replay test in
-//! `tests/fuzz_replay.rs`, which includes this file by path.
+//! `tests/integration/fuzz_replay.rs`, which includes this file by path.
 
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 

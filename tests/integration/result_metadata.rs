@@ -1,0 +1,603 @@
+//! Provenance contract: every terminal stamps a result, dispatch onto an
+//! approximate backend says so, and `require_exact` rejects that route instead.
+
+use crate::common;
+
+use common::SEED;
+use prism_q::circuits::brickwork_circuit;
+use prism_q::{
+    BackendKind, Circuit, CircuitBuilder, Engine, Exactness, Gate, NoiseModel, PauliTerm,
+    Placement, PrismError, ResolvedBackend, SpdTruncation, run_shots_compiled, simulate,
+};
+
+fn bell() -> Circuit {
+    CircuitBuilder::new_with_classical(2, 2)
+        .h(0)
+        .cx(0, 1)
+        .measure(0, 0)
+        .measure(1, 1)
+        .build()
+}
+
+/// Brickwork entangling layers with T gates between them. One CX ladder from a
+/// product state leaves every bond at rank 2, which a small cap does not
+/// truncate; the offset second layer is what pushes the chain past it.
+fn entangling_brickwork(num_qubits: usize, layers: usize) -> Circuit {
+    let mut circuit = Circuit::new(num_qubits, 0);
+    for q in 0..num_qubits {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for layer in 0..layers {
+        for q in (layer % 2..num_qubits.saturating_sub(1)).step_by(2) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for q in 0..num_qubits {
+            circuit.add_gate(Gate::T, &[q]);
+            circuit.add_gate(Gate::H, &[q]);
+        }
+    }
+    circuit
+}
+
+#[test]
+fn small_circuit_reports_an_exact_backend() {
+    let outcome = simulate(&bell()).seed(SEED).run().unwrap();
+    assert!(outcome.metadata.is_exact(), "{:?}", outcome.metadata);
+    assert_eq!(outcome.metadata.fidelity_lower_bound(), None);
+}
+
+// The flag marks the route and the bound reports the run, so a bond the
+// circuit never fills reports approximate at fidelity 1.
+#[test]
+fn mps_reports_a_fidelity_bound() {
+    let mut circuit = Circuit::new(6, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    for q in 0..5 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+
+    let roomy = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 64 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(
+        roomy.metadata.fidelity_lower_bound(),
+        Some(1.0),
+        "a GHZ chain needs bond 2, so bond 64 discards nothing"
+    );
+
+    let clamped = simulate(&entangling_brickwork(10, 6))
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    let bound = clamped.metadata.fidelity_lower_bound().unwrap();
+    assert!(
+        bound < 1.0,
+        "bond 2 on a ladder with T gates on every layer must discard weight, got {bound}"
+    );
+}
+
+// The exactness label marks the route, so it reads the same at a cap the chain
+// fills and at one it never reaches. The bond report is what tells the two
+// apart: eleven brickwork layers on 20 qubits carry the inner cuts past a bond
+// of 32 and nowhere near 4096.
+#[test]
+fn mps_reports_peak_bond_and_cap_saturation() {
+    let circuit = brickwork_circuit(20, 11, SEED);
+    let observables = vec![vec![PauliTerm::z(0)]];
+
+    let clamped = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 32 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    let bond = clamped.metadata.bond.expect("an MPS run reports its bond");
+    assert!(bond.saturated(), "{bond:?}");
+    assert_eq!(bond.peak, 32);
+    assert_eq!(bond.cap, 32);
+
+    let roomy = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 4096 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    let bond = roomy.metadata.bond.expect("an MPS run reports its bond");
+    assert!(!bond.saturated(), "{bond:?}");
+    assert_eq!(bond.cap, 4096);
+    assert!(bond.peak > 32 && bond.peak < 4096, "{bond:?}");
+
+    let expectations = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 4096 })
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert_eq!(expectations.metadata.bond, Some(bond));
+
+    let statevector = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(statevector.metadata.bond, None);
+}
+
+#[test]
+fn require_exact_leaves_an_exact_route_alone() {
+    let outcome = simulate(&bell()).seed(SEED).require_exact().run().unwrap();
+    assert!(outcome.metadata.is_exact());
+}
+
+// A sampled estimate carries a standard error; an evaluated one reports
+// exactness instead of an interval of width zero.
+#[test]
+fn sampled_expectations_carry_a_standard_error() {
+    // T branching is what gives the estimator variance, and it only fires when
+    // the propagated Pauli anticommutes with Z, so the observable has to reach
+    // the T through a basis change.
+    let circuit = entangling_brickwork(4, 2);
+    let observables = vec![vec![PauliTerm::z(0)]];
+
+    let sampled = simulate(&circuit)
+        .backend(BackendKind::StochasticPauli { num_samples: 4000 })
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    let errors = sampled
+        .std_errors
+        .clone()
+        .expect("sampled route reports an error");
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0] > 0.0, "got {}", errors[0]);
+    assert_eq!(sampled.metadata.shots, Some(4000));
+    assert!(!sampled.metadata.is_exact());
+
+    let analytic = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert!(analytic.std_errors.is_none());
+    assert!(analytic.metadata.is_exact());
+
+    let half_width = errors[0] * 5.0;
+    assert!(
+        (sampled.values[0] - analytic.values[0]).abs() <= half_width.max(0.05),
+        "sampled {} vs analytic {}",
+        sampled.values[0],
+        analytic.values[0]
+    );
+}
+
+// Placement is readable off the result. Without a device it is `Host`
+// everywhere, stated rather than left to a guess about whether a run landed on
+// the device.
+#[test]
+fn placement_is_reported() {
+    let outcome = simulate(&bell()).seed(SEED).run().unwrap();
+    #[cfg(not(feature = "gpu"))]
+    assert_eq!(outcome.metadata.placement, Placement::Host);
+    #[cfg(feature = "gpu")]
+    assert!(matches!(
+        outcome.metadata.placement,
+        Placement::Host | Placement::Device
+    ));
+}
+
+// The placeholder `from_shots` installs must never reach a caller. Every public
+// terminal is walked here; a route that forgets to stamp fails this and nothing
+// else.
+#[test]
+fn every_terminal_stamps_metadata() {
+    let measured = bell();
+    let mut unitary = Circuit::new(2, 0);
+    unitary.add_gate(Gate::H, &[0]);
+    unitary.add_gate(Gate::Cx, &[0, 1]);
+
+    let kinds = [
+        BackendKind::Auto,
+        BackendKind::Statevector,
+        BackendKind::Stabilizer,
+        BackendKind::Sparse,
+        BackendKind::Mps { max_bond_dim: 16 },
+        BackendKind::Factored,
+        BackendKind::TensorNetwork,
+        BackendKind::DensityMatrix,
+    ];
+
+    for kind in kinds {
+        let label = format!("{kind:?}");
+        let run = simulate(&measured)
+            .backend(kind.clone())
+            .seed(SEED)
+            .run()
+            .unwrap();
+        assert_ne!(
+            run.metadata.backend,
+            ResolvedBackend::Other("unstamped"),
+            "run on {label}"
+        );
+
+        let shots = simulate(&measured)
+            .backend(kind.clone())
+            .seed(SEED)
+            .shots(8)
+            .unwrap();
+        assert_ne!(
+            shots.metadata.backend,
+            ResolvedBackend::Other("unstamped"),
+            "shots on {label}"
+        );
+        assert_eq!(shots.metadata.shots, Some(8), "shots on {label}");
+        assert_ne!(
+            simulate(&measured)
+                .backend(kind.clone())
+                .seed(SEED)
+                .shots(0)
+                .unwrap()
+                .metadata
+                .backend,
+            ResolvedBackend::Other("unstamped"),
+            "zero shots on {label}"
+        );
+
+        let counts = simulate(&measured)
+            .backend(kind.clone())
+            .seed(SEED)
+            .sample_counts(8)
+            .unwrap();
+        assert_ne!(
+            counts.metadata.backend,
+            ResolvedBackend::Other("unstamped"),
+            "counts on {label}"
+        );
+
+        let marginals = simulate(&measured)
+            .backend(kind.clone())
+            .seed(SEED)
+            .marginals()
+            .unwrap();
+        assert_ne!(
+            marginals.metadata.backend,
+            ResolvedBackend::Other("unstamped"),
+            "marginals on {label}"
+        );
+
+        let expectations = simulate(&unitary)
+            .backend(kind.clone())
+            .seed(SEED)
+            .expectation_values_reported(&[vec![PauliTerm::z(0)]])
+            .unwrap();
+        assert_ne!(
+            expectations.metadata.backend,
+            ResolvedBackend::Other("unstamped"),
+            "expectations on {label}"
+        );
+    }
+}
+
+// A zero-shot request runs nothing, so there is no backend to read provenance
+// off and the route has to supply it.
+#[test]
+fn zero_shots_still_names_the_route() {
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_measure(1, 1);
+
+    for kind in [BackendKind::Auto, BackendKind::Statevector] {
+        let shots = simulate(&circuit)
+            .backend(kind.clone())
+            .seed(SEED)
+            .shots(0)
+            .unwrap();
+        assert!(shots.shots.is_empty());
+        assert_ne!(
+            shots.metadata.backend,
+            ResolvedBackend::Other("unstamped"),
+            "zero shots on {kind:?}"
+        );
+    }
+}
+
+// A chain that filled a bond keeps the route's claim even at a cap it never
+// reached, which is what separates the carve-out from a general reading of
+// realized truncation. One brickwork layer is not enough to get there: a CX
+// with both legs on |+> is the identity, so the first layer leaves a product.
+#[test]
+fn a_chain_that_filled_a_bond_is_not_reported_exact() {
+    let outcome = simulate(&entangling_brickwork(6, 2))
+        .backend(BackendKind::Mps { max_bond_dim: 64 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert!(!outcome.metadata.is_exact(), "{:?}", outcome.metadata);
+    assert_eq!(outcome.metadata.fidelity_lower_bound(), Some(1.0));
+
+    let product = simulate(&entangling_brickwork(6, 1))
+        .backend(BackendKind::Mps { max_bond_dim: 64 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert!(product.metadata.is_exact(), "{:?}", product.metadata);
+}
+
+// Mid-circuit measurement forces the per-shot route, where each shot evolves
+// its own state and the ensemble keeps the weakest claim. The pair left open on
+// qubits 1 and 2 is what makes the claim approximate: a chain whose bonds are
+// all 1 discarded nothing and says so.
+#[test]
+fn per_shot_route_stamps_metadata() {
+    let mut circuit = Circuit::new(3, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::T, &[1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+
+    let shots = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 8 })
+        .seed(SEED)
+        .shots(8)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::Mps);
+    assert!(matches!(
+        shots.metadata.exactness,
+        Exactness::Approximate { .. }
+    ));
+}
+
+/// A GHZ ladder on three qubits, all measured, with `pad` Z gates on the last
+/// qubit. No Z-basis outcome sees the pad; it only raises the gate count per
+/// qubit past the ratio of 3 that sends a noisy model to the frame sampler.
+fn ghz_ladder(pad: usize) -> Circuit {
+    let mut circuit = Circuit::new(3, 3);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    for _ in 0..pad {
+        circuit.add_gate(Gate::Z, &[2]);
+    }
+    circuit.measure_all();
+    circuit
+}
+
+// Three samplers resolve to `CompiledStabilizer`, and the noisy entry point
+// picks between two of them at run time. Each test below drives one route
+// through the public terminal by the condition that selects it and reads the
+// route off the result, so a stamp removed upstream fails the one assertion
+// that reads it and no other.
+#[test]
+fn noiseless_shots_name_the_compiled_sampler() {
+    let circuit = ghz_ladder(0);
+    let shots = simulate(&circuit).seed(SEED).shots(8).unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert_eq!(shots.metadata.engine, Some(Engine::CompiledSampler));
+
+    let direct = run_shots_compiled(&circuit, 8, SEED).unwrap();
+    assert_eq!(direct.metadata.engine, Some(Engine::CompiledSampler));
+}
+
+#[test]
+fn a_single_noiseless_shot_names_the_compiled_sampler() {
+    let circuit = ghz_ladder(0);
+    let shots = simulate(&circuit).seed(SEED).shots(1).unwrap();
+    assert_eq!(shots.metadata.engine, Some(Engine::CompiledSampler));
+}
+
+#[test]
+fn fewer_noisy_shots_on_a_shallow_circuit_name_the_frame_sampler() {
+    let circuit = ghz_ladder(0);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+    let shots = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(999)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert_eq!(shots.metadata.engine, Some(Engine::FrameSampler));
+}
+
+#[test]
+fn fewer_noisy_shots_on_a_deep_circuit_name_the_noisy_compiled_sampler() {
+    let circuit = ghz_ladder(7);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+    let shots = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(999)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert_eq!(shots.metadata.engine, Some(Engine::NoisyCompiledSampler));
+}
+
+// A backend that is the whole answer leaves the finer field empty.
+#[test]
+fn a_single_engine_backend_leaves_engine_empty() {
+    let outcome = simulate(&bell()).seed(SEED).run().unwrap();
+    assert_eq!(outcome.metadata.engine, None);
+}
+
+// Truncation-enabled SPD marks the route approximate even when the run
+// discarded nothing; epsilon 0 cannot discard and stays exact.
+#[test]
+fn spd_exactness_marks_the_route_not_the_run() {
+    let circuit = entangling_brickwork(3, 1);
+    let observables = vec![vec![PauliTerm::z(0)]];
+
+    let exact_route = simulate(&circuit)
+        .backend(BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Threshold {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
+        })
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert!(exact_route.metadata.is_exact());
+
+    // A threshold far below every coefficient discards nothing, and the
+    // route still reports approximate.
+    let approx_route = simulate(&circuit)
+        .backend(BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Threshold {
+                epsilon: 1e-300,
+                max_terms: 1 << 16,
+            },
+        })
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert!(!approx_route.metadata.is_exact());
+    assert!(
+        (approx_route.values[0] - exact_route.values[0]).abs() < 1e-12,
+        "nothing was discarded, so the values must agree"
+    );
+}
+
+// A zero threshold drops nothing whatever the term budget, so the route is exact
+// and `require_exact` has to accept what the metadata reports.
+#[test]
+fn require_exact_accepts_a_zero_threshold_pauli_route() {
+    let circuit = entangling_brickwork(3, 1);
+    let observables = vec![vec![PauliTerm::z(0)]];
+    let threshold = |epsilon| BackendKind::DeterministicPauli {
+        truncation: SpdTruncation::Threshold {
+            epsilon,
+            max_terms: 1 << 16,
+        },
+    };
+
+    let unrestricted = simulate(&circuit)
+        .backend(threshold(0.0))
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert!(unrestricted.metadata.is_exact());
+    let gated = simulate(&circuit)
+        .backend(threshold(0.0))
+        .seed(SEED)
+        .require_exact()
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert_eq!(gated.values, unrestricted.values);
+
+    let err = simulate(&circuit)
+        .backend(threshold(1e-12))
+        .seed(SEED)
+        .require_exact()
+        .expectation_values_reported(&observables)
+        .unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { backend, .. } if backend == "DeterministicPauli"),
+        "{err:?}"
+    );
+
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let path = BackendKind::PauliPath {
+        epsilon: 0.0,
+        max_terms: 1 << 16,
+    };
+    let gated = simulate(&circuit)
+        .backend(path)
+        .noise(&noise)
+        .seed(SEED)
+        .require_exact()
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert!(gated.metadata.is_exact());
+}
+
+/// Every qubit superposed before a CX ladder, so no sparse map holds it and the
+/// family tree puts it on an MPS; `t_count` T gates follow, then `measure_all`.
+fn wide_clifford_t_chain(num_qubits: usize, t_count: usize) -> Circuit {
+    let mut circuit = Circuit::new(num_qubits, 0);
+    for q in 0..num_qubits {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 1..num_qubits {
+        circuit.add_gate(Gate::Cx, &[q - 1, q]);
+    }
+    for q in 0..t_count {
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    circuit.measure_all();
+    circuit
+}
+
+// The shot terminals sample a Clifford+T circuit with few T gates through the
+// stabilizer-rank expansion before the family tree, so `require_exact` has to
+// predict that route rather than the MPS a probability query takes.
+#[test]
+fn require_exact_predicts_the_stabilizer_rank_shot_route() {
+    let circuit = wide_clifford_t_chain(60, 8);
+    let unrestricted = simulate(&circuit).seed(SEED).shots(32).unwrap();
+    assert_eq!(
+        unrestricted.metadata.backend,
+        ResolvedBackend::StabilizerRank
+    );
+    assert!(unrestricted.metadata.is_exact());
+
+    let shots = simulate(&circuit)
+        .seed(SEED)
+        .require_exact()
+        .shots(32)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::StabilizerRank);
+    let counts = simulate(&circuit)
+        .seed(SEED)
+        .require_exact()
+        .sample_counts(32)
+        .unwrap();
+    assert_eq!(counts.metadata.backend, ResolvedBackend::StabilizerRank);
+
+    let mut mid_circuit = Circuit::new(60, 61);
+    mid_circuit.add_gate(Gate::H, &[0]);
+    mid_circuit.add_measure(0, 60);
+    mid_circuit
+        .instructions
+        .extend(wide_clifford_t_chain(60, 1).instructions);
+    let shots = simulate(&mid_circuit)
+        .seed(SEED)
+        .require_exact()
+        .shots(2)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::StabilizerRank);
+
+    let err = simulate(&circuit)
+        .seed(SEED)
+        .require_exact()
+        .marginals()
+        .unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps"),
+        "{err:?}"
+    );
+}
+
+// Past the shot T ceiling the sampler falls through to the family tree, and a noise
+// model sends trajectories there too, so both stay rejected.
+#[test]
+fn require_exact_rejects_shots_the_family_tree_takes() {
+    let is_mps = |err: &PrismError| matches!(err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps");
+    let deep = wide_clifford_t_chain(60, 45);
+    let err = simulate(&deep)
+        .seed(SEED)
+        .require_exact()
+        .shots(8)
+        .unwrap_err();
+    assert!(is_mps(&err), "{err:?}");
+
+    let circuit = wide_clifford_t_chain(60, 8);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let err = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .require_exact()
+        .sample_counts(8)
+        .unwrap_err();
+    assert!(is_mps(&err), "{err:?}");
+}

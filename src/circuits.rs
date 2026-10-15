@@ -628,7 +628,7 @@ pub fn cz_chain_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
 /// time a CZ crosses it (once per two layers) until it saturates at
 /// `2^min(c, n - c)` for the cut after qubit `c - 1`. The `mps/brickwork_d24`
 /// bench rows rely on that growth to reach their bond caps;
-/// `tests/bench_fixture_routing.rs` pins it through the instruction stream.
+/// `tests/integration/bench_fixture_routing.rs` pins it through the instruction stream.
 pub fn brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);
@@ -652,7 +652,7 @@ pub fn brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
 /// Pair distances average about `n / 3` and change every layer, so SWAP routing
 /// cannot park pairs adjacent and entanglement grows across every cut. At odd `n`
 /// one qubit sits out each layer.
-/// `tests/bench_fixture_routing.rs` pins both properties.
+/// `tests/integration/bench_fixture_routing.rs` pins both properties.
 pub fn matched_brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);
@@ -683,7 +683,7 @@ pub fn matched_brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
 /// whole walk while the keys spread over all `n` bits. The brick Cx layers
 /// keep the interaction graph connected at `depth >= 2`, which keeps the
 /// decomposed route from claiming the register.
-/// `tests/bench_fixture_routing.rs` pins both properties.
+/// `tests/integration/bench_fixture_routing.rs` pins both properties.
 ///
 /// # Panics
 /// Panics if `k > n` or `n < 2`.

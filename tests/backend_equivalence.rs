@@ -2,8 +2,8 @@
 //! parallel crossover at 16q and 20q, `export_statevector`, and subsystem
 //! decomposition against a monolithic run. A comparison catches a divergence
 //! but cannot say which side is wrong, so nothing here is an authority: the
-//! closed-form values live in `tests/golden_small_circuits.rs`, and
-//! `tests/conformance_matrix.rs` runs the same comparison over a generated
+//! closed-form values live in `tests/integration/golden_small_circuits.rs`, and
+//! `tests/integration/conformance_matrix.rs` runs the same comparison over a generated
 //! corpus with an explicit blame rule.
 
 mod common;

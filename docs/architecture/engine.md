@@ -89,8 +89,8 @@ conditioning is rejected on this route, with or without a noise model: the outco
 later gate would be conditioned on was never fixed. The rejection sits on the evolution
 itself, so `density_matrix_expectation_values` refuses the same circuits the `Simulate`
 terminals do, and those circuits stay on trajectory averaging. The same property keeps
-the density matrix out of the branching families of `tests/conformance_matrix.rs`,
-where it serves as the mixture oracle.
+the density matrix out of the branching families of
+`tests/integration/conformance_matrix.rs`, where it serves as the mixture oracle.
 
 `expectation_gradient` rejects a noise model on every backend, because the adjoint method
 backpropagates through a pure state. `expectation_gradient_shift` accepts one on the

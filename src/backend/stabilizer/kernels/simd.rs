@@ -410,16 +410,25 @@ mod rowmul_words_spec {
         (pos, nonzero)
     }
 
-    fn nibble_popcount(w: u64) -> u64 {
-        w.to_le_bytes().iter().fold(0, |acc, b| {
-            acc + u64::from((b & 15).count_ones() + (b >> 4).count_ones())
-        })
+    const NIBBLE_COUNT: [u8; 16] = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
+
+    // One word's popcount the way the kernel forms it: a table count per nibble added
+    // as bytes, then the eight bytes summed as `_mm256_sad_epu8` sums them against zero.
+    pub(super) fn lane_popcount(w: u64) -> u64 {
+        w.to_le_bytes()
+            .iter()
+            .map(|&b| {
+                let count = NIBBLE_COUNT[usize::from(b & 15)]
+                    .wrapping_add(NIBBLE_COUNT[usize::from(b >> 4)]);
+                u64::from(count.abs_diff(0))
+            })
+            .sum()
     }
 
     // `rowmul_words_scalar` with its popcounts regrouped the way the AVX2 kernels add
-    // them: per nibble, per 64-bit lane across chunks, then lanes 0+2 and 1+3. The
-    // solver then compares adder trees of one shape instead of proving popcount
-    // identities.
+    // them: per nibble through the table, per 64-bit lane across chunks, then lanes 0+2
+    // and 1+3, skipping all-zero chunks as the kernels do. The solver then compares
+    // adder trees of one shape instead of proving popcount identities.
     fn reference<const N: usize>(
         src: &[[u64; N]; 2],
         dst: &mut [[u64; N]; 2],
@@ -429,23 +438,32 @@ mod rowmul_words_spec {
             let (x1, z1, x2, z2) = (src[0][w], src[1][w], dst[0][w], dst[1][w]);
             dst[0][w] = x1 ^ x2;
             dst[1][w] = z1 ^ z2;
-            phase_masks(x1, z1, x2, z2)
+            ((x1 | z1) | (x2 | z2), phase_masks(x1, z1, x2, z2))
         };
         let chunks = N / 4;
         let (mut lanes_pos, mut lanes_nz) = ([0u64; 4], [0u64; 4]);
         for chunk in 0..chunks {
-            for lane in 0..4 {
-                let (pos, nonzero) = word(4 * chunk + lane);
-                lanes_pos[lane] += nibble_popcount(pos);
-                lanes_nz[lane] += nibble_popcount(nonzero);
+            let words: [_; 4] = std::array::from_fn(|lane| word(4 * chunk + lane));
+            if words.iter().fold(0, |any, &(or, _)| any | or) == 0 {
+                continue;
+            }
+            for (lane, &(_, (pos, nonzero))) in words.iter().enumerate() {
+                lanes_pos[lane] = lanes_pos[lane].wrapping_add(lane_popcount(pos));
+                lanes_nz[lane] = lanes_nz[lane].wrapping_add(lane_popcount(nonzero));
             }
         }
-        let total = |l: [u64; 4]| (l[0] + l[2]).wrapping_add(l[1] + l[3]);
+        let total = |l: [u64; 4]| {
+            l[0].wrapping_add(l[2])
+                .wrapping_add(l[1].wrapping_add(l[3]))
+        };
         let mut sum = initial_sum
             .wrapping_add(2u64.wrapping_mul(total(lanes_pos)))
             .wrapping_sub(total(lanes_nz));
         for w in 4 * chunks..N {
-            let (pos, nonzero) = word(w);
+            let (or, (pos, nonzero)) = word(w);
+            if or == 0 {
+                continue;
+            }
             sum = sum.wrapping_add(2 * pos.count_ones() as u64);
             sum = sum.wrapping_sub(nonzero.count_ones() as u64);
         }
@@ -536,17 +554,28 @@ mod rowmul_words_spec {
 
         rowmul_words_matches_reference!(
             rowmul_words_avx2_nt =>
-            rowmul_words_avx2_nt_nw16: 16,
-            rowmul_words_avx2_nt_nw19: 19,
+            rowmul_words_avx2_nt_nw4: 4,
+            rowmul_words_avx2_nt_nw9: 9,
         );
     }
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
-    use super::rowmul_words_spec::{Kernel, check, check_reference};
+    use super::rowmul_words_spec::{Kernel, check, check_reference, lane_popcount};
     use super::{rowmul_words_avx2, rowmul_words_avx2_nt};
     use rand::{RngExt, SeedableRng};
+
+    #[test]
+    fn lane_popcount_matches_count_ones() {
+        for shift in (0..64).step_by(8) {
+            for b in 0..=255u64 {
+                let w = b << shift;
+                assert_eq!(lane_popcount(w), u64::from(w.count_ones()));
+                assert_eq!(lane_popcount(!w), u64::from((!w).count_ones()));
+            }
+        }
+    }
 
     #[test]
     fn rowmul_words_avx2_matches_scalar() {

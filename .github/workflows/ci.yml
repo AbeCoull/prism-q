@@ -300,12 +300,21 @@ jobs:
   # a harness swap the intrinsics Kani cannot execute for the models in
   # `src/backend/avx2_model.rs`. The crate's toolchain only installs the driver;
   # `cargo kani setup` fetches the verifier's own.
-  # Harnesses run four at a time under a per-harness timeout, so one the solver cannot
-  # close reports as a timeout instead of holding the job to its limit.
+  # Each harness runs under a per-harness timeout, so one the solver cannot close reports
+  # as a timeout instead of holding the job to its limit. The word kernels' harnesses
+  # run on their own runners with fewer solver jobs: three of them at once lost the
+  # runner, and the sampler logs memory so a repeat names the harness.
   kani:
-    name: Kani
+    name: Kani (${{ matrix.group.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - { name: propagation, harness: 'rowmul_spec::', jobs: 4 }
+          - { name: words, harness: 'rowmul_words_avx2_nw', jobs: 2 }
+          - { name: words-nt, harness: 'rowmul_words_avx2_nt_', jobs: 1 }
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -316,9 +325,14 @@ jobs:
           cargo install --locked kani-verifier --version "$KANI_VERSION"
           cargo kani setup
       - name: Prove the kernel harnesses
-        run: >-
-          cargo kani --no-default-features -Z stubbing -Z unstable-options
-          --harness-timeout 8m --jobs 4 --output-format terse
+        run: |
+          (while sleep 30; do
+            echo "mem: $(free -m | awk 'NR==2 {print $3 "/" $2 " MB"}')" \
+              "cbmc: $(ps -C cbmc -o rss= | awk '{s += $1} END {print int(s / 1024) " MB"}')"
+          done) &
+          cargo kani --no-default-features -Z stubbing -Z unstable-options \
+            --harness "${{ matrix.group.harness }}" --harness-timeout 8m \
+            --jobs ${{ matrix.group.jobs }} --output-format terse
 
   # ThreadSanitizer runs the parallel kernels on real threads and reports data races
   # the SAFETY comments only argue away. -Zbuild-std instruments std so its

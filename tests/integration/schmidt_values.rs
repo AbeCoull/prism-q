@@ -6,7 +6,7 @@
 use crate::common;
 
 use common::circuits::{CircuitCase, exact_small_cases, product_separable_cases};
-use common::{MPS_EPS, PRODUCT_EPS, SEED, SV_EPS};
+use common::{FACTORED_EPS, MPS_EPS, PRODUCT_EPS, SEED, SV_EPS};
 use prism_q::PrismError;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
@@ -78,23 +78,19 @@ fn tensor_network_declines_schmidt_values() {
     assert_declines(&mut TensorNetworkBackend::new(SEED), "Schmidt values");
 }
 
-#[test]
-fn factored_declines_schmidt_values() {
-    assert_declines(&mut FactoredBackend::new(SEED), "Schmidt values");
-}
-
 // The same four rejections on every backend that answers, on a circuit all
-// three can run.
+// four can run.
 #[test]
 fn a_subsystem_is_a_proper_non_empty_set_of_distinct_qubits() {
     let mut circuit = Circuit::new(4, 0);
     for q in 0..4 {
         circuit.add_gate(Gate::Ry(0.5 * q as f64 + 0.2), &[q]);
     }
-    let backends: [Box<dyn Backend>; 3] = [
+    let backends: [Box<dyn Backend>; 4] = [
         Box::new(StatevectorBackend::new(SEED)),
         Box::new(MpsBackend::new(SEED, 64)),
         Box::new(ProductStateBackend::new(SEED)),
+        Box::new(FactoredBackend::new(SEED)),
     ];
     for mut backend in backends {
         sim::run_on(backend.as_mut(), &circuit).unwrap();
@@ -191,6 +187,7 @@ fn the_terminal_matches_the_statevector_on_the_small_corpus() {
         &[
             (BackendKind::Statevector, SV_EPS),
             (BackendKind::Mps { max_bond_dim: 64 }, MPS_EPS),
+            (BackendKind::Factored, FACTORED_EPS),
         ],
         &exact_small_cases(),
     );
@@ -216,7 +213,6 @@ fn the_terminal_names_the_backend_that_declines() {
             "tensornetwork",
             "Schmidt values",
         ),
-        (BackendKind::Factored, "factored", "Schmidt values"),
         (
             BackendKind::DensityMatrix,
             "density_matrix",

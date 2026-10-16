@@ -263,16 +263,15 @@ export.
 
 Under `BackendKind::Auto` the route is the dispatcher's choice, not the caller's, so a
 resolved backend that cannot answer is replaced by the statevector while the circuit fits
-its cap. A partially independent circuit routed to the factored backend and one routed to
-the sparse map both read their entropy that way, and the same circuits decline when the
-backend is named explicitly. A Clifford circuit keeps its tableau, which answers the
-entropy and the marginal without expanding anything.
+its cap. A partially independent circuit keeps the factored backend, which answers the
+entropy and the marginal block by block, and a Clifford circuit keeps its tableau, which
+answers both without expanding anything.
 
 | Backend | Reduced density matrix | Entanglement entropy | State overlap |
 | --- | --- | --- | --- |
 | Statevector (host or device) | Partial trace over the complement | One thin SVD of the reshaped amplitudes, with the Schmidt spectrum | Dense dot product |
 | Sparse | Grouped over the traced index | Declines | Lookup join over the nonzeros against another sparse map, at any width |
-| Factored | Kronecker of the per-block traces | Declines | Dense export |
+| Factored | Kronecker of the per-block traces | One thin SVD per block the cut splits, summed; the Schmidt spectrum is their sorted Kronecker product | Dense export |
 | Product state | Kronecker of the per-qubit factors | `0`, with the single Schmidt value `1` | Product of the per-qubit inner products against another product state, at any width |
 | Density matrix | Partial trace of the mixture | Declines: a mixture has no Schmidt decomposition | Declines: the fidelity of two mixtures is not an inner product |
 | MPS | One environment sweep over the span the named sites occupy, keeping those open and tracing the rest | One SVD at the cut, or the eigenvalues of the reduced density matrix when the subsystem is not contiguous in chain order | Chain contraction against another chain in the same site order, at any width |
@@ -285,7 +284,9 @@ Schmidt values come back descending with their squares summing to one whatever n
 representation carried. A stabilizer cut of rank `r` has `2^r` equal weights, so its
 tableau reads the rank off one elimination and builds the list from it; past the dense
 export cap those values no longer fit while the rank still does, and the entropy comes
-back alone with `EntropyResult::schmidt_values` at `None`. The reduced density matrix is
+back alone with `EntropyResult::schmidt_values` at `None`. The factored backend does the
+same past that cap, where the product of its blocks' spectra no longer fits while their
+summed entropy still does. The reduced density matrix is
 row major with side `2^k` and trace one, and its `4^k` entries are priced as a
 `2k`-qubit statevector against the dense export cap. A noise model sends the marginal and
 the entropy to the density matrix, which answers the marginal of the exact mixture and

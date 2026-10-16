@@ -429,10 +429,9 @@ fn the_overlap_terminal_rejects_a_non_unitary_circuit() {
 }
 
 // Auto picks the factored backend for a partially independent circuit, which
-// holds no spectrum. The route was the dispatcher's choice, so it falls back
-// to the statevector.
+// answers the entropy from the one block the cut splits.
 #[test]
-fn auto_falls_back_to_the_statevector_when_its_route_cannot_answer() {
+fn auto_answers_the_entropy_on_the_factored_route() {
     let mut split = Circuit::new(10, 0);
     terminal_candidate_matrix_tests::rx_cx_chain(&mut split, 0..8);
     terminal_candidate_matrix_tests::rx_cx_chain(&mut split, 8..10);
@@ -440,6 +439,16 @@ fn auto_falls_back_to_the_statevector_when_its_route_cannot_answer() {
         .seed(42)
         .entanglement_entropy(&[8])
         .unwrap();
-    assert_eq!(result.metadata.backend, ResolvedBackend::Statevector);
-    assert!(result.entropy > 0.0, "entropy {}", result.entropy);
+    assert_eq!(result.metadata.backend, ResolvedBackend::Factored);
+    let expected = simulate(&split)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .entanglement_entropy(&[8])
+        .unwrap()
+        .entropy;
+    assert!(
+        (result.entropy - expected).abs() < 1e-12,
+        "entropy {} against {expected}",
+        result.entropy
+    );
 }

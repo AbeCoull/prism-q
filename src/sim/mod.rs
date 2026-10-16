@@ -194,7 +194,8 @@ pub struct EntropyResult {
     /// Schmidt values across the cut, descending, with squares summing to 1.
     /// `None` where the backend holds the entropy without the spectrum that
     /// stands behind it, as a stabilizer cut past the export cap does: its
-    /// `2^r` equal values do not fit.
+    /// `2^r` equal values do not fit. A factored cut past that cap does the
+    /// same, holding each block's spectrum but not their product.
     pub schmidt_values: Option<Vec<f64>>,
     pub metadata: RunMetadata,
 }
@@ -994,7 +995,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// normalized.
     ///
     /// A backend that holds the entropy without the spectrum behind it, a
-    /// stabilizer cut past the export cap, answers with
+    /// stabilizer or factored cut past the export cap, answers with
     /// [`EntropyResult::schmidt_values`] set to `None`.
     /// An explicitly selected backend that holds neither reports
     /// `BackendUnsupported` naming itself; under [`BackendKind::Auto`] such a
@@ -3657,6 +3658,7 @@ fn plan_answers(plan: &BackendPlan, diagnostic: Diagnostic) -> bool {
         Diagnostic::Entropy => matches!(
             plan,
             BackendPlan::Statevector { .. }
+                | BackendPlan::Factored
                 | BackendPlan::Mps { .. }
                 | BackendPlan::ProductState
                 | BackendPlan::Stabilizer { .. }

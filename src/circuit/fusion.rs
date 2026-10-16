@@ -1719,7 +1719,7 @@ pub(super) fn fuse_at_width<'a>(
     if profile == FusionProfile::Device {
         return device_passes(pass0r, n, t);
     }
-    let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
+    let pass0b = gated(pass0r, n, diag_batch_floor(), |c| {
         apply_pass(c, t, fuse_batch_rzz)
     });
 
@@ -1781,19 +1781,35 @@ fn batch_passes<'a>(pass_2qb: Cow<'a, Circuit>, n: usize, t: &mut Tracer) -> Cow
     let pass_pr = gated(pass_m2q, n, MIN_QUBITS_FOR_PAULI_ROT_BATCH, |c| {
         fuse_pauli_rot_batches(c, t)
     });
-    let pass_cp = gated(pass_pr, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
+    let pass_cp = gated(pass_pr, n, diag_batch_floor(), |c| {
         fuse_controlled_phases(c, t)
     });
-    let pass_db = gated(pass_cp, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
+    let pass_db = gated(pass_cp, n, diag_batch_floor(), |c| {
         fuse_diagonal_batch(c, t)
     });
     let rebatch_host = n == pass_db.num_qubits;
     let floor = if rebatch_host {
-        MIN_QUBITS_FOR_DIAG_BATCH
+        rebatch_host_floor()
     } else {
         MIN_QUBITS_FOR_POST_PHASE_BATCH
     };
     gated(pass_db, n, floor, |c| batch_post_phase_1q(c, t))
+}
+
+fn diag_batch_floor() -> usize {
+    #[cfg(feature = "bench-internal")]
+    if crate::bench_variant_b() {
+        return MIN_QUBITS_FOR_MULTI_FUSION;
+    }
+    MIN_QUBITS_FOR_DIAG_BATCH
+}
+
+fn rebatch_host_floor() -> usize {
+    #[cfg(feature = "bench-internal")]
+    if !crate::bench_variant_b() {
+        return MIN_QUBITS_FOR_DIAG_BATCH;
+    }
+    MIN_QUBITS_FOR_MULTI_FUSION
 }
 
 /// [`fuse_at_width`] with the batching passes at every width, never the stage planner:
@@ -1836,7 +1852,7 @@ pub(crate) fn fuse_before_batching(circuit: &Circuit, n: usize) -> Cow<'_, Circu
     let pass_r = fuse_region_bodies(circuit, n, FusionProfile::Host);
     let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
     let pass0r = apply_pass(pass0, t, fuse_rzz);
-    let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
+    let pass0b = gated(pass0r, n, diag_batch_floor(), |c| {
         apply_pass(c, t, fuse_batch_rzz)
     });
     if n < MIN_QUBITS_FOR_FUSION {

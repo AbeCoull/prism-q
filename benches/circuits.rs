@@ -443,7 +443,7 @@ fn bench_statevector_qft(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qft_like");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 12, 16] {
+    for &n in &[4, 8, 12, 14, 16] {
         let circuit = qft_like_circuit(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
@@ -644,7 +644,7 @@ fn bench_statevector_qpe(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qpe_t_gate");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 12, 16, 20, 22] {
+    for &n in &[4, 8, 12, 14, 16, 20, 22] {
         let circuit = circuits::phase_estimation_circuit(n);
         let label = format!("{}q", n);
         group.bench_with_input(BenchmarkId::from_parameter(label), &circuit, |b, circ| {
@@ -783,7 +783,7 @@ fn bench_statevector_diag_mixed(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/diag_mixed_l6");
     configure_group(&mut group);
 
-    for &n in &[16, 20, 22] {
+    for &n in &[14, 15, 16, 20, 22] {
         let circuit = circuits::diagonal_mixed_circuit(n, 6, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {

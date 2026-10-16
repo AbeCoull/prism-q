@@ -1182,6 +1182,14 @@ fn fusion_qaoa_batch_boundaries_match_unfused() {
 }
 
 #[test]
+fn fusion_rebatch_below_diagonal_batching_matches_unfused() {
+    for n in [14, 15] {
+        assert_fusion_preserves_state(&circuits::diagonal_mixed_circuit(n, 6, 42));
+        assert_fusion_preserves_state(&circuits::phase_estimation_circuit(n));
+    }
+}
+
+#[test]
 fn fusion_expanded_qft_below_staging_matches_unfused() {
     let mut circuit = Circuit::new(16, 0);
     for q in 0..16 {

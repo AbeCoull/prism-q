@@ -773,23 +773,21 @@ impl WeightedPauliSum {
     /// coefficient is exactly zero is not inserted, so `Rz(0)` and `P(0)` leave
     /// the term count alone.
     fn branch_z_rotation(&mut self, qubit: usize, sin: f64, cos: f64) {
-        let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
-
-        for (pauli, coeff) in old_terms {
+        let mut flips = std::mem::take(&mut self.scratch);
+        flips.clear();
+        self.terms.retain(|pauli, coeff| {
             if !pauli.has_x_or_y(qubit) {
-                self.insert(pauli, coeff);
-                continue;
-            }
-
-            if cos != 0.0 {
-                self.insert(pauli.clone(), coeff * cos);
+                return true;
             }
             if sin != 0.0 {
-                let mut pauli_flip = pauli;
+                let mut pauli_flip = pauli.clone();
                 flip_bit(&mut pauli_flip.z, qubit);
-                self.insert(pauli_flip, Complex64::new(coeff.im * sin, -coeff.re * sin));
+                flips.push((pauli_flip, Complex64::new(coeff.im * sin, -coeff.re * sin)));
             }
-        }
+            *coeff *= cos;
+            cos != 0.0
+        });
+        self.merge_flips(flips);
     }
 
     /// Two-qubit analogue of [`branch_z_rotation`](Self::branch_z_rotation)
@@ -798,24 +796,31 @@ impl WeightedPauliSum {
     /// flip branch right-multiplies by `Z_a Z_b`, a pure z-bit flip on both
     /// qubits in the ordered `X^x Z^z` letter convention.
     fn branch_zz_rotation(&mut self, a: usize, b: usize, sin: f64, cos: f64) {
-        let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
-
-        for (pauli, coeff) in old_terms {
+        let mut flips = std::mem::take(&mut self.scratch);
+        flips.clear();
+        self.terms.retain(|pauli, coeff| {
             if pauli.has_x_or_y(a) == pauli.has_x_or_y(b) {
-                self.insert(pauli, coeff);
-                continue;
-            }
-
-            if cos != 0.0 {
-                self.insert(pauli.clone(), coeff * cos);
+                return true;
             }
             if sin != 0.0 {
-                let mut pauli_flip = pauli;
+                let mut pauli_flip = pauli.clone();
                 flip_bit(&mut pauli_flip.z, a);
                 flip_bit(&mut pauli_flip.z, b);
-                self.insert(pauli_flip, Complex64::new(coeff.im * sin, -coeff.re * sin));
+                flips.push((pauli_flip, Complex64::new(coeff.im * sin, -coeff.re * sin)));
             }
+            *coeff *= cos;
+            cos != 0.0
+        });
+        self.merge_flips(flips);
+    }
+
+    /// Accumulate the flip branches of a rotation after the in-place cos scaling,
+    /// so a flip landing on a surviving key adds to its already scaled coefficient.
+    fn merge_flips(&mut self, mut flips: Vec<(PauliVec, Complex64)>) {
+        for (pauli, coeff) in flips.drain(..) {
+            self.insert(pauli, coeff);
         }
+        self.scratch = flips;
     }
 
     /// Backward-apply one gate: a single discriminant match, so the Clifford

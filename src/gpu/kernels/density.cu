@@ -166,6 +166,35 @@ extern "C" __global__ void dm_kraus_2q_dense(
     }
 }
 
+// Entry m = a + ib of `s` stored as (a, b - a, a + b), row-major, as `apply_fused_2q`.
+extern "C" __global__ void dm_kraus_2q_dense_gauss(
+    double2 * __restrict__ state, unsigned long long groups, int q0, int q1, int n,
+    const double * __restrict__ s)
+{
+    unsigned long long m = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= groups) return;
+    unsigned long long base = dm_block_base(m, q0, q1, n);
+    unsigned long long idx[16];
+    double2 v[16];
+    double sum[16];
+    for (int k = 0; k < 16; ++k) {
+        idx[k] = base | dm_block_offset(k, q0, q1, n);
+        v[k] = state[idx[k]];
+        sum[k] = v[k].x + v[k].y;
+    }
+    for (int row = 0; row < 16; ++row) {
+        double k1 = 0.0, k2 = 0.0, k3 = 0.0;
+        #pragma unroll
+        for (int col = 0; col < 16; ++col) {
+            const double *e = &s[3 * (row * 16 + col)];
+            k1 = fma(e[0], sum[col], k1);
+            k2 = fma(e[1], v[col].x, k2);
+            k3 = fma(e[2], v[col].y, k3);
+        }
+        state[idx[row]] = make_double2(k1 - k3, k1 + k2);
+    }
+}
+
 // Symmetric two-qubit depolarizing on each block: B -> alpha B + beta Tr(B) I.
 extern "C" __global__ void dm_depolarizing_2q(
     double2 *state, unsigned long long groups, int q0, int q1, int n, double alpha, double beta)

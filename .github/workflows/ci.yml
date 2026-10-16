@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets a branch run the full gate before a pull request exists.
+  workflow_dispatch:
 
 # A push to main is never cancelled: each one owes its bench reference build, which
 # the next pull request's gate restores.

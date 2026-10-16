@@ -43,10 +43,6 @@ const EXPECTED_DORMANT: &[(SkipReason, &str)] = &[
         "the Clifford+T family caps its T budget below the expansion bound",
     ),
     (
-        SkipReason::StabilizerRankStatistical,
-        "the sparsified route needs a stabilizer-rank budget that only tens of qubits admit",
-    ),
-    (
         SkipReason::TensorNetworkOutputLimit,
         "the widest case is 9 qubits, far below the dense-output bound",
     ),

@@ -6,7 +6,7 @@
 cargo build                           # core (no parallelism)
 cargo build --features parallel       # Rayon parallelism plus faer SVD
 cargo build --features "parallel gpu" # add the optional CUDA statevector backend
-cargo build --all-features            # everything
+cargo build --all-features            # everything; needs MPI and libclang, see below
 ```
 
 The `gpu` feature builds without a CUDA toolkit. Running it needs a CUDA capable device,
@@ -39,20 +39,28 @@ cargo add prism-q --git https://github.com/AbeCoull/prism-q --features parallel
 ## Test and lint
 
 ```bash
-cargo nextest run --all-features
-cargo test --doc --all-features
+cargo nextest run --features "parallel gpu distributed"
+cargo test --doc --features "parallel gpu distributed"
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks
+cargo clippy --all-targets --features "parallel gpu distributed" -- -D warnings -D clippy::undocumented_unsafe_blocks
 cargo doc --no-deps --features "parallel gpu distributed"
 ```
 
-`--all-features` includes `distributed-mpi`, which needs a system MPI installation and
-libclang for its bindgen step; without them, name the features instead, for example
-`--features "parallel gpu distributed"`. The doc build covers the `gpu` and
-`distributed` surfaces without a CUDA toolkit.
+These run on any host: the `gpu` and `distributed` features build without a CUDA toolkit
+or MPI.
 
-Use `cargo test --all-features` when `cargo-nextest` is not installed. Keep doctests on
-`cargo test --doc` until nextest doctest support is no longer experimental.
+`--all-features` adds `distributed-mpi`, which needs a system MPI installation and
+libclang for its bindgen step. Run it when a change touches the MPI surface or the
+`Cargo.toml` feature wiring. On Windows, dot-source `scripts/mpi-env.ps1` first
+(`. scripts\mpi-env.ps1`) to load MSVC, MS-MPI, and libclang into the PowerShell session:
+
+```bash
+cargo nextest run --all-features
+cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks
+```
+
+Use `cargo test` with the same features when `cargo-nextest` is not installed. Keep
+doctests on `cargo test --doc` until nextest doctest support is no longer experimental.
 
 Integration tests are modules of one binary, `tests/integration/main.rs`: add a file
 there and declare it with `mod`, then select it with a filter such as

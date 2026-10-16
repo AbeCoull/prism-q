@@ -62,6 +62,10 @@ pub(crate) fn testz_si256(a: __m256i, b: __m256i) -> i32 {
 #[cfg(kani)]
 pub(crate) fn sfence() {}
 
+/// # Safety
+///
+/// `mem_addr` must be valid for a 32-byte write and 32-byte aligned, as for
+/// `_mm256_stream_si256`.
 pub(crate) unsafe fn stream_si256(mem_addr: *mut __m256i, a: __m256i) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe { mem_addr.write(a) }

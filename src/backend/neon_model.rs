@@ -86,7 +86,7 @@ mod tests {
         let mut cases: Vec<[u8; 16]> = (0..=255u8)
             .map(|c| std::array::from_fn(|i| c.wrapping_add(i as u8)))
             .collect();
-        cases.extend((0..256).map(|_| rng.random()));
+        cases.extend((0..256).map(|_| rng.random::<[u8; 16]>()));
         cases.push([0; 16]);
         cases.push([0xff; 16]);
         cases.push(std::array::from_fn(|i| if i % 2 == 0 { 0xff } else { 0 }));

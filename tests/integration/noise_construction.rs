@@ -833,11 +833,10 @@ fn two_qubit_kraus_rejects_a_non_trace_preserving_set() {
     assert!(!channel.is_exactly_samplable());
 }
 
-// A guarded region leaves its body without event slots, so a model carrying
-// quantum events is still rejected. A readout-only model has nothing to lose
-// there and is accepted.
+// A gate rule reaches a region body through the slots after the top level:
+// the body's X lands in slot 3, after the three top-level instructions.
 #[test]
-fn guarded_regions_reject_quantum_events_but_not_readout_error() {
+fn gate_rules_reach_a_region_body_and_readout_needs_no_slots() {
     let mut circuit = Circuit::new(2, 2);
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_measure(0, 0);
@@ -858,12 +857,13 @@ fn guarded_regions_reject_quantum_events_but_not_readout_error() {
     let with_events = NoiseBuilder::new()
         .after_gates(GateFilter::all(), NoiseChannel::Depolarizing { p: 0.01 })
         .build(&circuit)
-        .unwrap_err();
-    assert!(
-        matches!(&with_events, PrismError::IncompatibleBackend { reason, .. }
-            if reason.contains("guarded region")),
-        "{with_events:?}"
-    );
+        .unwrap();
+    let targets: Vec<Vec<usize>> = with_events
+        .after_gate
+        .iter()
+        .map(|slot| slot.iter().map(|event| event.qubits[0]).collect())
+        .collect();
+    assert_eq!(targets, vec![vec![0], vec![], vec![], vec![1], vec![]]);
 
     let readout_only = NoiseBuilder::new()
         .uniform_readout_error(0.05, 0.05)

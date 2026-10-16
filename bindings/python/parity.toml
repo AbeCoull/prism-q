@@ -244,6 +244,7 @@ exclude = [
 "Circuit::measure_all" = "CircuitBuilder.measure_all"
 "Circuit::measurement_map" = "Circuit.measurement_map"
 "Circuit::new" = "Circuit"
+"Circuit::noise_slot_count" = { rust_only = "NoiseModel.empty sizes its slots with it" }
 "Circuit::num_classical_bits" = "Circuit.num_classical_bits"
 "Circuit::num_qubits" = "Circuit.num_qubits"
 "Circuit::save_count" = "Circuit.save_count"

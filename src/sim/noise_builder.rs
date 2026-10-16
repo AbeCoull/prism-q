@@ -136,6 +136,20 @@ enum Rule {
     },
 }
 
+impl Rule {
+    /// Whether the rule reads the layered schedule, whose tables cover the
+    /// top-level instructions only.
+    fn reads_schedule(&self) -> bool {
+        matches!(
+            self,
+            Rule::Idle { .. }
+                | Rule::BeforeMeasure { .. }
+                | Rule::ScheduledIdle { .. }
+                | Rule::Detuning { .. }
+        )
+    }
+}
+
 /// A zero-mean Gaussian over one quasi-static offset per qubit, drawn once per
 /// shot: a detuning in radians per second, or a fractional over-rotation.
 ///
@@ -294,9 +308,12 @@ impl DriftDistribution {
 ///
 /// Each method appends a rule; [`NoiseBuilder::build`] walks a circuit once and
 /// evaluates the rules in registration order at every instruction, so the event
-/// order inside a slot is the order the rules were declared. Rules match
-/// [`Instruction::Gate`] only: a [`Instruction::Conditional`] carries noise that
-/// would fire whether or not its gate ran, so it is left alone.
+/// order inside a slot is the order the rules were declared. Gate rules reach
+/// guarded gates too, a conditional's and a region body's, through the slots
+/// [`NoiseModel::after_gate`] gives them, so their events fire only on the shots
+/// the gate runs. Rules that read the schedule (idle, scheduled idle, detuning,
+/// before measurements) decline a circuit holding a region, whose duration
+/// depends on the branch taken.
 ///
 /// # Examples
 ///
@@ -515,14 +532,31 @@ impl NoiseBuilder {
     /// cover the register, a drift covariance that is not positive
     /// semidefinite, and everything [`NoiseModel::validate_for`] rejects.
     pub fn build(&self, circuit: &Circuit) -> Result<NoiseModel> {
-        let mut after_gate: Vec<Vec<NoiseEvent>> = vec![Vec::new(); circuit.instructions.len()];
-        let context = BuildContext::new(self, circuit)?;
-
-        for (idx, instr) in circuit.instructions.iter().enumerate() {
-            for (rule_index, rule) in self.rules.iter().enumerate() {
-                emit(rule, rule_index, idx, instr, &context, &mut after_gate);
-            }
+        if self.rules.iter().any(Rule::reads_schedule)
+            && circuit
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, Instruction::Region(_)))
+        {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "NoiseBuilder".into(),
+                reason: "idle, scheduled idle, detuning and before-measurement rules read a \
+                         static schedule, and a guarded region's duration depends on the \
+                         branch it takes"
+                    .into(),
+            });
         }
+        let mut after_gate: Vec<Vec<NoiseEvent>> = vec![Vec::new(); circuit.noise_slot_count()];
+        let context = BuildContext::new(self, circuit)?;
+        let top_level = circuit.instructions.len();
+
+        circuit.for_each_noise_slot(|idx, instr| {
+            for (rule_index, rule) in self.rules.iter().enumerate() {
+                if idx < top_level || !rule.reads_schedule() {
+                    emit(rule, rule_index, idx, instr, &context, &mut after_gate);
+                }
+            }
+        });
 
         let mut readout = vec![self.uniform_readout.clone(); circuit.num_classical_bits];
         for (bit, error) in &self.readout {

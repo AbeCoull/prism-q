@@ -1258,6 +1258,7 @@ pub fn prism_q::circuit::Circuit::is_sparse_friendly(&self) -> bool
 pub fn prism_q::circuit::Circuit::measure_all(&mut self)
 pub fn prism_q::circuit::Circuit::measurement_map(&self) -> alloc::vec::Vec<(usize, usize)>
 pub fn prism_q::circuit::Circuit::new(usize, usize) -> Self
+pub fn prism_q::circuit::Circuit::noise_slot_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::save_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::t_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::without_measurements(&self) -> prism_q::circuit::Circuit
@@ -3149,6 +3150,7 @@ pub fn prism_q::circuit::Circuit::is_sparse_friendly(&self) -> bool
 pub fn prism_q::circuit::Circuit::measure_all(&mut self)
 pub fn prism_q::circuit::Circuit::measurement_map(&self) -> alloc::vec::Vec<(usize, usize)>
 pub fn prism_q::circuit::Circuit::new(usize, usize) -> Self
+pub fn prism_q::circuit::Circuit::noise_slot_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::save_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::t_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::without_measurements(&self) -> prism_q::circuit::Circuit

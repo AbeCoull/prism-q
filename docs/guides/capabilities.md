@@ -215,6 +215,8 @@ input and answers anyway.
 | Save points are returned by `run` alone | `IncompatibleBackend` naming the terminal and the number of save points. A shot loop runs the circuit many times and a marginal reduces it, so neither has a place to put one record per point |
 | A save needs a route that holds a state | `IncompatibleBackend` naming the save and the route. The compiled samplers reorder measurements, the stabilizer-rank engine carries a weighted sum of branches, and the Pauli-propagation engines carry no state vector at all |
 | A save has no OpenQASM spelling | `ExportUnsupported` naming the save and its label. The subset has no save syntax to export into |
+| Noise inside a guarded body needs one state per shot | `IncompatibleBackend` from the density matrix (any guard), the compiled noisy sampler (`compiled noisy sampler`) and `ErrorChainComplex` (`error chain complex`). Trajectories and the stabilizer replay fire a body's events on the shots that take the branch |
+| Schedule rules need a static schedule | `IncompatibleBackend` from `NoiseBuilder::build` when an idle, scheduled idle, detuning or before-measurement rule meets a circuit holding a region, whose duration depends on the branch |
 
 Backend width and memory caps are separate and live with the terminals that raise
 them; see [Shot and observable queries above the dense cap](#shot-and-observable-queries-above-the-dense-cap).

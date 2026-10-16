@@ -487,7 +487,7 @@ impl PyNoiseModel {
         let c = circuit.inner();
         Self {
             inner: NoiseModel {
-                after_gate: vec![Vec::new(); c.instructions.len()],
+                after_gate: vec![Vec::new(); c.noise_slot_count()],
                 readout: vec![None; c.num_classical_bits],
             },
         }

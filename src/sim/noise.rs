@@ -420,8 +420,16 @@ impl ReadoutError {
 /// ```
 #[derive(Debug, Clone)]
 pub struct NoiseModel {
-    /// Events fired after each instruction, indexed by instruction position;
-    /// length must equal the circuit's instruction count.
+    /// Events fired after each instruction. Slot `i < n` follows top-level
+    /// instruction `i` and fires every shot, a guarded one's included. Guarded
+    /// bodies follow from `n`: each region in order places its body's slots,
+    /// then its nested guards' slots, and a conditional takes one slot for its
+    /// gate. A body slot fires only when its instruction runs.
+    ///
+    /// A circuit without guards therefore has `n` slots. A model of exactly `n`
+    /// slots is also accepted on a circuit whose guards are all conditional
+    /// gates, which then run without gate noise, and on one with a region when
+    /// it carries no quantum event.
     pub after_gate: Vec<Vec<NoiseEvent>>,
     /// Per-classical-bit readout error; `None` means ideal readout. Either empty,
     /// for no readout error at all, or one entry per classical bit. A bit no
@@ -431,56 +439,28 @@ pub struct NoiseModel {
 
 impl NoiseModel {
     /// Depolarizing noise with total probability `p` (not per branch) on
-    /// every target of every gate, ideal readout.
+    /// every target of every gate, guarded gates included, ideal readout.
     pub fn uniform_depolarizing(circuit: &Circuit, p: f64) -> Self {
-        let px = p / 3.0;
-        let py = p / 3.0;
-        let pz = p / 3.0;
-
-        let mut after_gate = Vec::with_capacity(circuit.instructions.len());
-        for instr in &circuit.instructions {
-            match instr {
-                Instruction::Gate { targets, .. } => {
-                    let ops: Vec<NoiseEvent> = targets
-                        .iter()
-                        .map(|&q| NoiseEvent::pauli(q, px, py, pz))
-                        .collect();
-                    after_gate.push(ops);
-                }
-                _ => {
-                    after_gate.push(Vec::new());
-                }
-            }
-        }
-
-        Self {
-            after_gate,
-            readout: vec![None; circuit.num_classical_bits],
-        }
+        let pp = p / 3.0;
+        Self::per_gate_target(circuit, |q| NoiseEvent::pauli(q, pp, pp, pp))
     }
 
     /// Amplitude damping with rate `gamma` on every target of every gate,
-    /// ideal readout.
+    /// guarded gates included, ideal readout.
     pub fn with_amplitude_damping(circuit: &Circuit, gamma: f64) -> Self {
-        let mut after_gate = Vec::with_capacity(circuit.instructions.len());
-        for instr in &circuit.instructions {
-            match instr {
-                Instruction::Gate { targets, .. } => {
-                    let ops: Vec<NoiseEvent> = targets
-                        .iter()
-                        .map(|&q| NoiseEvent {
-                            channel: NoiseChannel::AmplitudeDamping { gamma },
-                            qubits: smallvec![q],
-                        })
-                        .collect();
-                    after_gate.push(ops);
-                }
-                _ => {
-                    after_gate.push(Vec::new());
-                }
-            }
-        }
+        Self::per_gate_target(circuit, |q| NoiseEvent {
+            channel: NoiseChannel::AmplitudeDamping { gamma },
+            qubits: smallvec![q],
+        })
+    }
 
+    fn per_gate_target(circuit: &Circuit, event: impl Fn(usize) -> NoiseEvent) -> Self {
+        let mut after_gate = vec![Vec::new(); circuit.noise_slot_count()];
+        circuit.for_each_noise_slot(|slot, instr| {
+            if let Instruction::Gate { targets, .. } = instr {
+                after_gate[slot] = targets.iter().map(|&q| event(q)).collect();
+            }
+        });
         Self {
             after_gate,
             readout: vec![None; circuit.num_classical_bits],
@@ -602,6 +582,23 @@ impl NoiseModel {
             || self.readout.iter().any(|r| r.is_some())
     }
 
+    /// Return an error naming `engine` when a guarded body slot of `circuit`
+    /// carries an event. Such an event fires only on the shots whose condition
+    /// holds, which a route without one state per shot cannot decide.
+    pub(crate) fn ensure_no_guarded_events(&self, circuit: &Circuit, engine: &str) -> Result<()> {
+        let guarded = self.after_gate.get(circuit.instructions.len()..);
+        if guarded.is_some_and(|slots| slots.iter().any(|events| !events.is_empty())) {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: engine.into(),
+                reason: "noise inside a guarded body fires only on the shots its condition \
+                         holds, which this route cannot decide; sample through \
+                         `run_shots_noisy` or a trajectory backend"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Return an error if any channel falls outside the error chain complex,
     /// which holds one column per single-qubit Pauli error.
     pub(crate) fn ensure_chain_complex_channels(&self) -> Result<()> {
@@ -636,22 +633,34 @@ impl NoiseModel {
     }
 
     /// Validate as [`NoiseModel::validate`] does, plus the checks that need the
-    /// circuit: one event slot per instruction, a readout table that is empty
-    /// or holds one entry per classical bit, and every target qubit inside the
-    /// register.
+    /// circuit: the slot count [`NoiseModel::after_gate`] lays out, a readout
+    /// table that is empty or holds one entry per classical bit, and every
+    /// target qubit inside the register.
     ///
     /// Every noisy entry point calls this before allocating state. Qubit bounds
     /// cannot be checked without the circuit, and an out-of-range target reaches
     /// kernels that index amplitudes without one.
     pub fn validate_for(&self, circuit: &Circuit) -> Result<()> {
-        if self.after_gate.len() != circuit.instructions.len() {
-            return Err(crate::error::PrismError::InvalidParameter {
-                message: format!(
-                    "noise model carries {} event slots for {} instructions",
-                    self.after_gate.len(),
-                    circuit.instructions.len()
-                ),
-            });
+        let slots = circuit.noise_slot_count();
+        let top_level = circuit.instructions.len();
+        let legacy = self.after_gate.len() == top_level
+            && (self.after_gate.iter().all(Vec::is_empty)
+                || !circuit
+                    .instructions
+                    .iter()
+                    .any(|inst| matches!(inst, Instruction::Region(_))));
+        if self.after_gate.len() != slots && !legacy {
+            let carried = self.after_gate.len();
+            let message = if slots == top_level {
+                format!("noise model carries {carried} event slots for {top_level} instructions")
+            } else {
+                format!(
+                    "noise model carries {carried} event slots for {top_level} instructions \
+                     and {} guarded body slots",
+                    slots - top_level
+                )
+            };
+            return Err(crate::error::PrismError::InvalidParameter { message });
         }
         if !self.readout.is_empty() && self.readout.len() != circuit.num_classical_bits {
             return Err(crate::error::PrismError::InvalidParameter {
@@ -663,25 +672,6 @@ impl NoiseModel {
             });
         }
         self.validate()?;
-
-        // One event slot per top-level instruction, so a region's body has no
-        // slots to carry noise and would run noiselessly without this. A model
-        // carrying no quantum events has nothing to lose there, so readout-only
-        // noise stays legal on a circuit with regions.
-        if self.after_gate.iter().any(|events| !events.is_empty())
-            && let Some(index) = circuit
-                .instructions
-                .iter()
-                .position(|inst| matches!(inst, Instruction::Region(_)))
-        {
-            return Err(crate::error::PrismError::IncompatibleBackend {
-                backend: "NoiseModel".to_string(),
-                reason: format!(
-                    "noise events are indexed per instruction, which leaves the body of the \
-                         guarded region at instruction {index} without noise slots"
-                ),
-            });
-        }
 
         for (instr_idx, events) in self.after_gate.iter().enumerate() {
             for (event_idx, event) in events.iter().enumerate() {
@@ -2223,6 +2213,7 @@ pub fn compile_noisy(
 ) -> Result<NoisyCompiledSampler> {
     noise.validate_for(circuit)?;
     noise.ensure_only_pauli_channels()?;
+    noise.ensure_no_guarded_events(circuit, "compiled noisy sampler")?;
     if circuit.num_qubits >= 4 {
         let blocks = circuit.independent_subsystems();
         if blocks.len() > 1 {
@@ -3067,6 +3058,135 @@ pub(crate) fn run_shots_noisy_with_gpu(
     finish_noisy_compiled_run(sampler, circuit, num_shots)
 }
 
+/// One shot's pass over a circuit and its noise slots, driven by
+/// [`walk_noise_slots`].
+pub(crate) trait SlotWalk {
+    fn classical(&self) -> &[bool];
+    /// Apply an instruction other than a region, whose body the walk descends
+    /// into itself.
+    fn apply(&mut self, instruction: &Instruction) -> Result<()>;
+    fn fire(&mut self, events: &[NoiseEvent]) -> Result<()>;
+}
+
+/// Run `circuit.instructions[from..]` in execution order under a model laying
+/// out guarded slots, firing each slot after its instruction and a guarded
+/// body's slots only when the body runs. See [`NoiseModel::after_gate`].
+pub(crate) fn walk_noise_slots(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    from: usize,
+    walk: &mut impl SlotWalk,
+) -> Result<()> {
+    let nested = circuit.instructions.len() + circuit.guarded_noise_slots_before(from);
+    walk_slot_list(
+        &circuit.instructions[from..],
+        from,
+        nested,
+        &noise.after_gate,
+        walk,
+    )
+}
+
+fn walk_slot_list(
+    list: &[Instruction],
+    base: usize,
+    mut nested: usize,
+    slots: &[Vec<NoiseEvent>],
+    walk: &mut impl SlotWalk,
+) -> Result<()> {
+    for (offset, instruction) in list.iter().enumerate() {
+        match instruction {
+            Instruction::Region(region) => {
+                if region.condition().evaluate(walk.classical()) {
+                    walk_region_body(region, nested, slots, walk)?;
+                }
+                nested += region.noise_slots();
+            }
+            Instruction::Conditional { condition, .. } => {
+                let taken = condition.evaluate(walk.classical());
+                walk.apply(instruction)?;
+                if taken {
+                    walk.fire(&slots[nested])?;
+                }
+                nested += 1;
+            }
+            _ => walk.apply(instruction)?,
+        }
+        walk.fire(&slots[base + offset])?;
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn walk_region_body(
+    region: &crate::circuit::GuardedRegion,
+    base: usize,
+    slots: &[Vec<NoiseEvent>],
+    walk: &mut impl SlotWalk,
+) -> Result<()> {
+    walk_slot_list(region.body(), base, base + region.body().len(), slots, walk)
+}
+
+struct FrameWalk<'a> {
+    backend: &'a mut dyn Backend,
+    rng: &'a mut ChaCha8Rng,
+}
+
+impl SlotWalk for FrameWalk<'_> {
+    fn classical(&self) -> &[bool] {
+        self.backend.classical_results()
+    }
+
+    fn apply(&mut self, instruction: &Instruction) -> Result<()> {
+        self.backend.apply(instruction)
+    }
+
+    fn fire(&mut self, events: &[NoiseEvent]) -> Result<()> {
+        for event in events {
+            apply_frame_event(self.backend, event, self.rng)?;
+        }
+        Ok(())
+    }
+}
+
+/// Draw one Pauli event and apply the letters it fires.
+#[inline]
+fn apply_frame_event(
+    backend: &mut dyn Backend,
+    event: &NoiseEvent,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    if let Some((q0, q1, p)) = event.pauli_pair() {
+        let r: f64 = rand::RngExt::random(rng);
+        if r < p {
+            let (l0, l1) = pair_branch(r / p);
+            apply_pauli_letter(backend, q0, l0)?;
+            apply_pauli_letter(backend, q1, l1)?;
+        }
+        return Ok(());
+    }
+    let (px, py, pz) = event.pauli_probs();
+    let q = event.qubit();
+    let r: f64 = rand::RngExt::random(rng);
+    if r < px {
+        backend.apply(&Instruction::Gate {
+            gate: Gate::X,
+            targets: SmallVec::from_elem(q, 1),
+        })?;
+    } else if r < px + py {
+        backend.apply(&Instruction::Gate {
+            gate: Gate::Y,
+            targets: SmallVec::from_elem(q, 1),
+        })?;
+    } else if r < px + py + pz {
+        backend.apply(&Instruction::Gate {
+            gate: Gate::Z,
+            targets: SmallVec::from_elem(q, 1),
+        })?;
+    }
+    Ok(())
+}
+
 pub(crate) fn run_shots_noisy_brute_with(
     backend_factory: impl Fn(u64) -> Box<dyn Backend>,
     circuit: &Circuit,
@@ -3084,40 +3204,19 @@ pub(crate) fn run_shots_noisy_brute_with(
         let mut backend = backend_factory(shot_seed);
         backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
 
-        for (idx, instr) in circuit.instructions.iter().enumerate() {
-            backend.apply(instr)?;
-
-            let noise_events = &noise.after_gate[idx];
-            for event in noise_events {
-                if let Some((q0, q1, p)) = event.pauli_pair() {
-                    let r: f64 = rand::RngExt::random(&mut rng);
-                    if r < p {
-                        let (l0, l1) = pair_branch(r / p);
-                        apply_pauli_letter(backend.as_mut(), q0, l0)?;
-                        apply_pauli_letter(backend.as_mut(), q1, l1)?;
-                    }
-                    continue;
-                }
-                let (px, py, pz) = event.pauli_probs();
-                let q = event.qubit();
-                let r: f64 = rand::RngExt::random(&mut rng);
-                if r < px {
-                    backend.apply(&Instruction::Gate {
-                        gate: Gate::X,
-                        targets: SmallVec::from_elem(q, 1),
-                    })?;
-                } else if r < px + py {
-                    backend.apply(&Instruction::Gate {
-                        gate: Gate::Y,
-                        targets: SmallVec::from_elem(q, 1),
-                    })?;
-                } else if r < px + py + pz {
-                    backend.apply(&Instruction::Gate {
-                        gate: Gate::Z,
-                        targets: SmallVec::from_elem(q, 1),
-                    })?;
+        if noise.after_gate.len() == circuit.instructions.len() {
+            for (instr, events) in circuit.instructions.iter().zip(&noise.after_gate) {
+                backend.apply(instr)?;
+                for event in events {
+                    apply_frame_event(backend.as_mut(), event, &mut rng)?;
                 }
             }
+        } else {
+            let mut walk = FrameWalk {
+                backend: backend.as_mut(),
+                rng: &mut rng,
+            };
+            walk_noise_slots(circuit, noise, 0, &mut walk)?;
         }
 
         let shot_metadata = crate::sim::backend_metadata(backend.as_ref());

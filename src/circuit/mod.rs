@@ -403,6 +403,25 @@ impl Circuit {
         c
     }
 
+    /// Length of [`NoiseModel::after_gate`](crate::sim::noise::NoiseModel::after_gate)
+    /// for this circuit: one slot per top-level instruction, then the slots of
+    /// guarded bodies.
+    pub fn noise_slot_count(&self) -> usize {
+        self.instructions.len() + guarded_noise_slots(&self.instructions)
+    }
+
+    /// Visit every instruction with its noise slot in the layout
+    /// [`Circuit::noise_slot_count`] counts.
+    pub(crate) fn for_each_noise_slot(&self, mut visit: impl FnMut(usize, &Instruction)) {
+        visit_noise_slots(&self.instructions, 0, self.instructions.len(), &mut visit);
+    }
+
+    /// Noise slots the guards in `instructions[..from]` take, which puts the
+    /// first guarded body at or after `from` at `instructions.len()` plus this.
+    pub(crate) fn guarded_noise_slots_before(&self, from: usize) -> usize {
+        guarded_noise_slots(&self.instructions[..from])
+    }
+
     pub fn has_resets(&self) -> bool {
         any_instruction(&self.instructions, &mut |i| {
             matches!(i, Instruction::Reset { .. })
@@ -1202,6 +1221,7 @@ pub struct GuardedRegion {
     condition: ClassicalCondition,
     body: Vec<Instruction>,
     qubits: SmallVec<[usize; 4]>,
+    noise_slots: usize,
 }
 
 impl GuardedRegion {
@@ -1212,10 +1232,12 @@ impl GuardedRegion {
         collect_region_qubits(&body, &mut qubits);
         qubits.sort_unstable();
         qubits.dedup();
+        let noise_slots = body.len() + guarded_noise_slots(&body);
         Self {
             condition,
             body,
             qubits,
+            noise_slots,
         }
     }
 
@@ -1230,6 +1252,13 @@ impl GuardedRegion {
     /// Sorted union of every qubit the body touches, nested regions included.
     pub fn qubits(&self) -> &[usize] {
         &self.qubits
+    }
+
+    /// Noise slots the body takes after the top-level ones: one per body
+    /// instruction plus those of the guards inside it. See
+    /// [`NoiseModel::after_gate`](crate::sim::noise::NoiseModel::after_gate).
+    pub(crate) fn noise_slots(&self) -> usize {
+        self.noise_slots
     }
 
     /// Nesting depth, counting this region as 1.
@@ -1537,6 +1566,49 @@ fn remap_instruction(
                 .map(|inner| remap_instruction(inner, qubit, cbit))
                 .collect(),
         ))),
+    }
+}
+
+/// Noise slots the guards in `instructions` take beyond the list's own: a
+/// region's subtree, and one taken-only slot per conditional gate.
+fn guarded_noise_slots(instructions: &[Instruction]) -> usize {
+    instructions
+        .iter()
+        .map(|inst| match inst {
+            Instruction::Region(region) => region.noise_slots(),
+            Instruction::Conditional { .. } => 1,
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Visit each instruction of `list` with its noise slot, `list` itself at
+/// `base` onward and the bodies of its guards from `nested` onward. A
+/// conditional's taken-only slot is visited with its gate as a bare
+/// [`Instruction::Gate`].
+fn visit_noise_slots(
+    list: &[Instruction],
+    base: usize,
+    mut nested: usize,
+    visit: &mut impl FnMut(usize, &Instruction),
+) {
+    for (offset, inst) in list.iter().enumerate() {
+        visit(base + offset, inst);
+        match inst {
+            Instruction::Region(region) => {
+                visit_noise_slots(region.body(), nested, nested + region.body().len(), visit);
+                nested += region.noise_slots();
+            }
+            Instruction::Conditional { gate, targets, .. } => {
+                let bare = Instruction::Gate {
+                    gate: gate.clone(),
+                    targets: targets.clone(),
+                };
+                visit(nested, &bare);
+                nested += 1;
+            }
+            _ => {}
+        }
     }
 }
 

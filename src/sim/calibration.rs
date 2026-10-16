@@ -477,7 +477,7 @@ impl DeviceCalibration {
 
     /// Lower the table onto `circuit`.
     ///
-    /// After each gate, every target gets a
+    /// After each gate, a guarded one included, every target gets a
     /// [`NoiseChannel::ThermalRelaxation`] with its own `t1` and `t2` over the
     /// family's duration, relaxing to the ground state; then a nonzero family
     /// error adds one [`NoiseChannel::Depolarizing`] on a one-qubit target or one
@@ -498,22 +498,27 @@ impl DeviceCalibration {
                 self.qubits.len()
             )));
         }
-        let mut after_gate: Vec<Vec<NoiseEvent>> = vec![Vec::new(); circuit.instructions.len()];
+        let mut after_gate: Vec<Vec<NoiseEvent>> = vec![Vec::new(); circuit.noise_slot_count()];
         let mut readout = vec![None; circuit.num_classical_bits];
+        let mut failure = None;
 
-        for (idx, instr) in circuit.instructions.iter().enumerate() {
+        circuit.for_each_noise_slot(|idx, instr| {
+            if failure.is_some() {
+                return;
+            }
             match instr {
                 Instruction::Gate { gate, targets } => {
                     let family = match targets.len() {
-                        0 => continue,
+                        0 => return,
                         1 => &self.gate1q,
                         2 => self.gate2q_on(targets[0], targets[1]),
                         arity => {
-                            return Err(invalid(format!(
+                            failure = Some(invalid(format!(
                                 "gate `{}` at instruction {idx} acts on {arity} qubits and the \
                                  calibration has no family past two",
                                 gate.name()
                             )));
+                            return;
                         }
                     };
                     let slot = &mut after_gate[idx];
@@ -557,6 +562,9 @@ impl DeviceCalibration {
                 }
                 _ => {}
             }
+        });
+        if let Some(err) = failure {
+            return Err(err);
         }
 
         let model = NoiseModel {

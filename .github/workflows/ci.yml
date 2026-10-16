@@ -219,7 +219,8 @@ jobs:
   # at cfg(miri)-reduced sizes, and rejects undefined behavior in the SendPtr
   # partitioning paths (aliasing, provenance, data races) that no native test can see.
   # SIMD dispatch resolves to the scalar fallbacks under the interpreter, so the vector
-  # intrinsics stay out of reach; the sanitizer job below covers native execution.
+  # intrinsics stay out of reach here; `miri-avx2` below interprets them, and the
+  # sanitizer job covers native execution.
   # Interpreting the full suite is not viable, hence the single-target scope.
   miri:
     name: Miri
@@ -261,15 +262,58 @@ jobs:
       - name: Miri over the partitioning kernels
         run: cargo +"$CI_NIGHTLY" miri test --features parallel --test determinism
 
+  # The same target with AVX2, FMA, and BMI2 enabled at compile time. Feature detection
+  # then answers from the target features instead of CPUID, which the interpreter does
+  # not model, so dispatch takes the vector kernels and Miri checks their pointer
+  # arithmetic and lane accesses.
+  miri-avx2:
+    name: Miri (AVX2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MIRIFLAGS: >-
+        -Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation
+        -Zmiri-deterministic-floats
+      RUSTFLAGS: -C target-feature=+avx2,+fma,+bmi2
+      RAYON_NUM_THREADS: "2"
+      PRISM_MAX_SV_QUBITS: "26"
+      PRISM_MAX_DM_QUBITS: "13"
+      PRISM_MAX_PROB_QUBITS: "26"
+      PRISM_MAX_EXPORT_QUBITS: "26"
+      PRISM_MAX_DENSE_OUTCOME_BITS: "26"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.CI_NIGHTLY }}
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: ${{ env.CI_NIGHTLY }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Miri over the AVX2 kernels
+        run: cargo +"$CI_NIGHTLY" miri test --features parallel --test determinism
+
   # Kani checks the `#[kani::proof]` harnesses for every input at the row widths each
-  # one names, which covers each chunk and tail shape of a SIMD loop. The crate's
-  # toolchain only installs the driver; `cargo kani setup` fetches the verifier's own.
-  # Harnesses run four at a time under a per-harness timeout, so one the solver cannot
-  # close reports as a timeout instead of holding the job to its limit.
+  # one names, which covers each chunk and tail shape of a SIMD loop. `-Z stubbing` lets
+  # a harness swap the intrinsics Kani cannot execute for the models in
+  # `src/backend/avx2_model.rs`. The crate's toolchain only installs the driver;
+  # `cargo kani setup` fetches the verifier's own.
+  # Each harness runs under a per-harness timeout, so one the solver cannot close reports
+  # as a timeout instead of holding the job to its limit. A word kernel harness over one
+  # chunk peaks near 11 GB of the runner's 16 GB, so those run one at a time on their
+  # own runner, and the sampler logs memory so an overrun names the harness.
   kani:
-    name: Kani
+    name: Kani (${{ matrix.group.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - { name: propagation, harness: 'rowmul_spec::', jobs: 4 }
+          - { name: words, harness: 'rowmul_words_avx2_', jobs: 1 }
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -280,9 +324,14 @@ jobs:
           cargo install --locked kani-verifier --version "$KANI_VERSION"
           cargo kani setup
       - name: Prove the kernel harnesses
-        run: >-
-          cargo kani --no-default-features -Z stubbing -Z unstable-options
-          --harness-timeout 8m --jobs 4 --output-format terse
+        run: |
+          (while sleep 30; do
+            echo "mem: $(free -m | awk 'NR==2 {print $3 "/" $2 " MB"}')" \
+              "cbmc: $(ps -C cbmc -o rss= | awk '{s += $1} END {print int(s / 1024) " MB"}')"
+          done) &
+          cargo kani --no-default-features -Z stubbing -Z unstable-options \
+            --harness "${{ matrix.group.harness }}" --harness-timeout 8m \
+            --jobs ${{ matrix.group.jobs }} --output-format terse
 
   # ThreadSanitizer runs the parallel kernels on real threads and reports data races
   # the SAFETY comments only argue away. -Zbuild-std instruments std so its
@@ -772,6 +821,7 @@ jobs:
       - check-distributed
       - mpi-linux
       - miri
+      - miri-avx2
       - kani
       - tsan
       - msrv

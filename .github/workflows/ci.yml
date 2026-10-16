@@ -335,11 +335,12 @@ jobs:
             --harness "${{ matrix.group.harness }}" --harness-timeout 8m \
             --jobs ${{ matrix.group.jobs }} --output-format terse
 
-  # The NEON counterpart of the job above, on a native aarch64 runner: the kernel is
-  # compiled only for that target, and the harness stubs its intrinsics with the models
-  # in `src/backend/neon_model.rs`. One chunk of the NEON word kernel is two words, so
-  # its harnesses stop at one chunk plus a tail and share one runner; a harness that
-  # outgrows 12 GB in the sampler moves to its own matrix leg.
+  # The NEON counterpart of the job above, on a native aarch64 runner: the kernels are
+  # compiled only for that target, and the harnesses stub their intrinsics with the
+  # models in `src/backend/neon_model.rs`. One chunk of the NEON word kernel is two
+  # words, so its harnesses stop at one chunk plus a tail and share one runner; a
+  # harness that outgrows 12 GB in the sampler moves to its own matrix leg. The
+  # statevector leg checks one radix-4 butterfly for memory safety alone.
   kani-neon:
     name: Kani NEON (${{ matrix.group.name }})
     runs-on: ubuntu-24.04-arm
@@ -349,6 +350,7 @@ jobs:
       matrix:
         group:
           - { name: words, harness: 'rowmul_words_neon_', jobs: 1 }
+          - { name: statevector, harness: 'radix4_butterfly_neon_', jobs: 1 }
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust

@@ -2041,6 +2041,34 @@ unsafe fn radix4_butterfly_neon(
     }
 }
 
+// Memory safety only: at stride one the butterfly touches the four amplitudes of an
+// eight-double group and nothing outside it, for every input value.
+#[cfg(all(target_arch = "aarch64", kani))]
+mod radix4_butterfly_neon_proofs {
+    use num_complex::Complex64;
+
+    fn any_complex() -> Complex64 {
+        Complex64::new(kani::any(), kani::any())
+    }
+
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn radix4_butterfly_neon_stays_in_bounds() {
+        let mut group: [f64; 8] = kani::any();
+        // SAFETY: the group holds four complex amplitudes at stride one, the shape the
+        // kernel reads and writes; NEON is baseline on aarch64.
+        unsafe {
+            super::radix4_butterfly_neon(
+                group.as_mut_ptr(),
+                1,
+                any_complex(),
+                any_complex(),
+                any_complex(),
+            )
+        }
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 #[cfg_attr(not(feature = "parallel"), allow(dead_code))]

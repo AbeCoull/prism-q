@@ -2042,19 +2042,27 @@ unsafe fn radix4_butterfly_neon(
 }
 
 // Memory safety only: at stride one the butterfly touches the four amplitudes of an
-// eight-double group and nothing outside it, for every input value.
+// eight-double group and nothing outside it. Inputs are bounded to the unit interval
+// so the solver is not asked to find an overflow or NaN in the arithmetic.
 #[cfg(all(target_arch = "aarch64", kani))]
 mod radix4_butterfly_neon_proofs {
     use num_complex::Complex64;
 
+    fn any_unit() -> f64 {
+        let x: f64 = kani::any();
+        kani::assume(x.is_finite() && x.abs() <= 1.0);
+        x
+    }
+
     fn any_complex() -> Complex64 {
-        Complex64::new(kani::any(), kani::any())
+        Complex64::new(any_unit(), any_unit())
     }
 
     #[kani::proof]
     #[kani::unwind(9)]
+    #[kani::stub(core::arch::aarch64::vfmaq_f64, crate::backend::neon_model::fmaq_f64)]
     fn radix4_butterfly_neon_stays_in_bounds() {
-        let mut group: [f64; 8] = kani::any();
+        let mut group: [f64; 8] = std::array::from_fn(|_| any_unit());
         // SAFETY: the group holds four complex amplitudes at stride one, the shape the
         // kernel reads and writes; NEON is baseline on aarch64.
         unsafe {

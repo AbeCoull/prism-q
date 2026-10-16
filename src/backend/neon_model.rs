@@ -2,7 +2,7 @@
 //! stdarch lowers each one to an LLVM intrinsic; every model keeps the signature of the
 //! intrinsic it replaces.
 
-use std::arch::aarch64::{uint8x16_t, uint16x8_t, uint32x4_t, uint64x2_t};
+use std::arch::aarch64::{float64x2_t, uint8x16_t, uint16x8_t, uint32x4_t, uint64x2_t};
 
 fn bytes(v: uint8x16_t) -> [u8; 16] {
     // SAFETY: both types are 16 bytes and every bit pattern is valid in each.
@@ -15,6 +15,11 @@ fn halves(v: uint16x8_t) -> [u16; 8] {
 }
 
 fn quads(v: uint32x4_t) -> [u32; 4] {
+    // SAFETY: both types are 16 bytes and every bit pattern is valid in each.
+    unsafe { std::mem::transmute(v) }
+}
+
+fn lanes(v: float64x2_t) -> [f64; 2] {
     // SAFETY: both types are 16 bytes and every bit pattern is valid in each.
     unsafe { std::mem::transmute(v) }
 }
@@ -35,6 +40,11 @@ fn from_quads(v: [u32; 4]) -> uint32x4_t {
 }
 
 fn from_words(v: [u64; 2]) -> uint64x2_t {
+    // SAFETY: both types are 16 bytes and every bit pattern is valid in each.
+    unsafe { std::mem::transmute(v) }
+}
+
+fn from_lanes(v: [f64; 2]) -> float64x2_t {
     // SAFETY: both types are 16 bytes and every bit pattern is valid in each.
     unsafe { std::mem::transmute(v) }
 }
@@ -69,6 +79,12 @@ pub(crate) fn paddlq_u32(a: uint32x4_t) -> uint64x2_t {
     from_words(pairwise_widen(quads(a)))
 }
 
+/// `a + b * c` per lane with a single rounding, the operand order of `vfmaq_f64`.
+pub(crate) fn fmaq_f64(a: float64x2_t, b: float64x2_t, c: float64x2_t) -> float64x2_t {
+    let (a, b, c) = (lanes(a), lanes(b), lanes(c));
+    from_lanes(std::array::from_fn(|i| b[i].mul_add(c[i], a[i])))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,10 +112,51 @@ mod tests {
             let halves_in = from_halves(halves(paddlq_u8(a)).map(|h| h.wrapping_mul(0x1fff)));
             let quads_in =
                 from_quads(quads(paddlq_u16(halves_in)).map(|q| q.wrapping_mul(0x1fff_ffff)));
-            assert_eq!(bytes(cntq_u8(a)), bytes(vcntq_u8(a)));
-            assert_eq!(halves(paddlq_u8(a)), halves(vpaddlq_u8(a)));
-            assert_eq!(quads(paddlq_u16(halves_in)), quads(vpaddlq_u16(halves_in)));
-            assert_eq!(words(paddlq_u32(quads_in)), words(vpaddlq_u32(quads_in)));
+            // SAFETY: NEON is baseline on aarch64.
+            let (cnt, paddl8, paddl16, paddl32) = unsafe {
+                (
+                    vcntq_u8(a),
+                    vpaddlq_u8(a),
+                    vpaddlq_u16(halves_in),
+                    vpaddlq_u32(quads_in),
+                )
+            };
+            assert_eq!(bytes(cntq_u8(a)), bytes(cnt));
+            assert_eq!(halves(paddlq_u8(a)), halves(paddl8));
+            assert_eq!(quads(paddlq_u16(halves_in)), quads(paddl16));
+            assert_eq!(words(paddlq_u32(quads_in)), words(paddl32));
+        }
+
+        let edges = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::INFINITY,
+        ];
+        let mut floats: Vec<[f64; 6]> = (0..256)
+            .map(|_| std::array::from_fn(|_| rng.random_range(-2.0..2.0)))
+            .collect();
+        floats.extend(
+            edges
+                .iter()
+                .flat_map(|&e| edges.map(|f| [e, f, e, -f, f, e])),
+        );
+        for [a0, a1, b0, b1, c0, c1] in floats {
+            let (a, b, c) = (
+                from_lanes([a0, a1]),
+                from_lanes([b0, b1]),
+                from_lanes([c0, c1]),
+            );
+            // SAFETY: NEON is baseline on aarch64.
+            let fma = unsafe { vfmaq_f64(a, b, c) };
+            for (modeled, native) in lanes(fmaq_f64(a, b, c)).into_iter().zip(lanes(fma)) {
+                assert!(
+                    modeled.to_bits() == native.to_bits() || (modeled.is_nan() && native.is_nan())
+                );
+            }
         }
     }
 }

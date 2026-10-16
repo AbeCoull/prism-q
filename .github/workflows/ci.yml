@@ -333,6 +333,39 @@ jobs:
             --harness "${{ matrix.group.harness }}" --harness-timeout 8m \
             --jobs ${{ matrix.group.jobs }} --output-format terse
 
+  # The NEON counterpart of the job above, on a native aarch64 runner: the kernel is
+  # compiled only for that target, and the harness stubs its intrinsics with the models
+  # in `src/backend/neon_model.rs`. One chunk of the NEON word kernel is two words, so
+  # its harnesses stop at one chunk plus a tail and share one runner; a harness that
+  # outgrows 12 GB in the sampler moves to its own matrix leg.
+  kani-neon:
+    name: Kani NEON (${{ matrix.group.name }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - { name: words, harness: 'rowmul_words_neon_', jobs: 1 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache: 'false'
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version "$KANI_VERSION"
+          cargo kani setup
+      - name: Prove the kernel harnesses
+        run: |
+          (while sleep 30; do
+            echo "mem: $(free -m | awk 'NR==2 {print $3 "/" $2 " MB"}')" \
+              "cbmc: $(ps -C cbmc -o rss= | awk '{s += $1} END {print int(s / 1024) " MB"}')"
+          done) &
+          cargo kani --no-default-features -Z stubbing -Z unstable-options \
+            --harness "${{ matrix.group.harness }}" --harness-timeout 8m \
+            --jobs ${{ matrix.group.jobs }} --output-format terse
+
   # ThreadSanitizer runs the parallel kernels on real threads and reports data races
   # the SAFETY comments only argue away. -Zbuild-std instruments std so its
   # synchronization is visible to the tool; the explicit --target keeps RUSTFLAGS away
@@ -823,6 +856,7 @@ jobs:
       - miri
       - miri-avx2
       - kani
+      - kani-neon
       - tsan
       - msrv
       - release-bump-level

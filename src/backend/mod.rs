@@ -50,6 +50,8 @@ pub mod factored;
 pub mod factored_stabilizer;
 pub(crate) mod memory;
 pub mod mps;
+#[cfg(all(target_arch = "aarch64", any(kani, test)))]
+pub(crate) mod neon_model;
 pub(crate) mod overlap;
 pub mod product;
 pub(crate) mod reduced_density;

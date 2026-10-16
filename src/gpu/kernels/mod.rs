@@ -354,6 +354,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "dm_diagonal_sandwich",
     "dm_kraus_2q_diagonal",
     "dm_kraus_2q_dense",
+    "dm_kraus_2q_dense_gauss",
     "dm_depolarizing_2q",
     "dm_outer_product",
     "dm_pauli_expect",

@@ -302,8 +302,9 @@ jobs:
   # `cargo kani setup` fetches the verifier's own.
   # Each harness runs under a per-harness timeout, so one the solver cannot close reports
   # as a timeout instead of holding the job to its limit. A word kernel harness over one
-  # chunk peaks near 11 GB of the runner's 16 GB, so those run one at a time on their
-  # own runner, and the sampler logs memory so an overrun names the harness.
+  # chunk peaks near 13 GB of the runner's 16 GB in CBMC, and memory a finished harness
+  # held is not all back before the next starts, so each heavy one gets a fresh runner.
+  # The sampler logs memory so an overrun names the harness.
   kani:
     name: Kani (${{ matrix.group.name }})
     runs-on: ubuntu-latest
@@ -312,8 +313,10 @@ jobs:
       fail-fast: false
       matrix:
         group:
-          - { name: propagation, harness: 'rowmul_spec::', jobs: 4 }
-          - { name: words, harness: 'rowmul_words_avx2_', jobs: 1 }
+          - { name: propagation, harnesses: 'rowmul_spec::', jobs: 4 }
+          - { name: words-tail, harnesses: 'rowmul_words_avx2_nw0 rowmul_words_avx2_nw3', jobs: 1 }
+          - { name: words-chunk, harnesses: 'rowmul_words_avx2_nw5', jobs: 1 }
+          - { name: words-nt, harnesses: 'rowmul_words_avx2_nt_nw4', jobs: 1 }
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -329,8 +332,10 @@ jobs:
             echo "mem: $(free -m | awk 'NR==2 {print $3 "/" $2 " MB"}')" \
               "cbmc: $(ps -C cbmc -o rss= | awk '{s += $1} END {print int(s / 1024) " MB"}')"
           done) &
+          harnesses=()
+          for h in ${{ matrix.group.harnesses }}; do harnesses+=(--harness "$h"); done
           cargo kani --no-default-features -Z stubbing -Z unstable-options \
-            --harness "${{ matrix.group.harness }}" --harness-timeout 8m \
+            "${harnesses[@]}" --harness-timeout 8m \
             --jobs ${{ matrix.group.jobs }} --output-format terse
 
   # ThreadSanitizer runs the parallel kernels on real threads and reports data races

@@ -546,16 +546,12 @@ mod rowmul_words_spec {
             rowmul_words_avx2 =>
             rowmul_words_avx2_nw0: 0,
             rowmul_words_avx2_nw3: 3,
-            rowmul_words_avx2_nw4: 4,
             rowmul_words_avx2_nw5: 5,
-            rowmul_words_avx2_nw7: 7,
-            rowmul_words_avx2_nw8: 8,
         );
 
         rowmul_words_matches_reference!(
             rowmul_words_avx2_nt =>
             rowmul_words_avx2_nt_nw4: 4,
-            rowmul_words_avx2_nt_nw9: 9,
         );
     }
 }

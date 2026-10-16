@@ -301,9 +301,9 @@ jobs:
   # `src/backend/avx2_model.rs`. The crate's toolchain only installs the driver;
   # `cargo kani setup` fetches the verifier's own.
   # Each harness runs under a per-harness timeout, so one the solver cannot close reports
-  # as a timeout instead of holding the job to its limit. The word kernels' harnesses
-  # run on their own runners with fewer solver jobs: three of them at once lost the
-  # runner, and the sampler logs memory so a repeat names the harness.
+  # as a timeout instead of holding the job to its limit. A word kernel harness over one
+  # chunk peaks near 11 GB of the runner's 16 GB, so those run one at a time on their
+  # own runner, and the sampler logs memory so an overrun names the harness.
   kani:
     name: Kani (${{ matrix.group.name }})
     runs-on: ubuntu-latest
@@ -313,8 +313,7 @@ jobs:
       matrix:
         group:
           - { name: propagation, harness: 'rowmul_spec::', jobs: 4 }
-          - { name: words, harness: 'rowmul_words_avx2_nw', jobs: 2 }
-          - { name: words-nt, harness: 'rowmul_words_avx2_nt_', jobs: 1 }
+          - { name: words, harness: 'rowmul_words_avx2_', jobs: 1 }
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust

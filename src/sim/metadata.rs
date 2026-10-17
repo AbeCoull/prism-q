@@ -260,13 +260,23 @@ impl RunMetadata {
     /// of the parts and placement is `Device` only when every part was, so the
     /// merged result never claims more than the block that claimed least. A part
     /// that reports no bound poisons the product, since an unquantified
-    /// truncation bounds nothing.
+    /// truncation bounds nothing. Every block runs under one backend kind and one
+    /// set of limits, so the bond report is the peak over blocks against their
+    /// shared cap.
     pub(crate) fn decomposed(parts: impl IntoIterator<Item = RunMetadata>) -> Self {
         let mut exact = true;
         let mut bound = Some(1.0f64);
         let mut all_device = true;
+        let mut bond: Option<BondReport> = None;
         for part in parts {
             all_device &= part.placement == Placement::Device;
+            bond = match (bond, part.bond) {
+                (Some(a), Some(b)) => Some(BondReport {
+                    peak: a.peak.max(b.peak),
+                    cap: a.cap,
+                }),
+                (a, b) => a.or(b),
+            };
             if let Exactness::Approximate {
                 fidelity_lower_bound,
             } = part.exactness
@@ -290,6 +300,8 @@ impl RunMetadata {
         } else {
             Placement::Host
         };
-        Self::new(ResolvedBackend::Decomposed, exactness, placement)
+        let mut metadata = Self::new(ResolvedBackend::Decomposed, exactness, placement);
+        metadata.bond = bond;
+        metadata
     }
 }

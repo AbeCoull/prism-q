@@ -28,12 +28,16 @@
 #   3. Measure. Each step runs in turn with no build in between. An A/B runs
 #      against its cached binaries with --wait-idle, so it starts once the host
 #      settles rather than failing on a busy one; an interleaved step runs its
-#      one binary through bench_interleave.sh --exe the same way.
+#      one binary through bench_interleave.sh --exe the same way. The phase
+#      holds the MEASURING marker (see bench_lock.sh): written before the first
+#      step, removed at ALLDONE or on any other exit, and refused while another
+#      live process holds it.
 #
 # Progress goes to a status file, one START and one END line per step with its
 # exit code, then ALLDONE. Each step logs in full to its own file; nothing is
 # piped through tail, since a buffered pipe makes a live step and a dead one
-# look the same.
+# look the same. A SIGINT or SIGTERM to the queue's pid ends the running step,
+# removes the marker, and writes STOPPED to the status file.
 #
 # Usage:
 #   scripts/bench_queue.sh [options] QUEUE_FILE
@@ -50,11 +54,13 @@
 #   --wait-idle S   seconds each A/B waits for an idle host (default 3600)
 #   --task-name N   scheduled task name for --schedule on Windows (default
 #                   PrismBenchQueue); a second queue needs its own while one runs
+#   --force-lock    measure even while a live process holds the MEASURING marker
 #
-# Exit status: 0 when every step exited 0, otherwise 1. A step's own exit code
-# is in the status file; bench_ab.sh and bench_interleave.sh use 1 for FAIL, 2 for
-# a host too busy to start, 3 for RERUN, and 4 for a binary that failed its smoke
-# test, whose lane and row the status file's summary names.
+# Exit status: 0 when every step exited 0, otherwise 1, including a queue that
+# stopped at LOCKED because another measurement holds the marker. A step's own
+# exit code is in the status file; bench_ab.sh and bench_interleave.sh use 1 for
+# FAIL, 2 for a host too busy to start, 3 for RERUN, and 4 for a binary that
+# failed its smoke test, whose lane and row the status file's summary names.
 
 set -uo pipefail
 
@@ -63,6 +69,8 @@ SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BENCH_AB="$SCRIPT_DIR/bench_ab.sh"
 BENCH_IX="$SCRIPT_DIR/bench_interleave.sh"
+# shellcheck source=scripts/bench_lock.sh
+source "$SCRIPT_DIR/bench_lock.sh"
 
 SCHEDULE=""
 DRY_RUN=""
@@ -71,6 +79,7 @@ CACHE_DIR=""
 REF_ROOT=""
 WAIT_IDLE=3600
 TASK_NAME="PrismBenchQueue"
+FORCE_LOCK=""
 QUEUE_FILE=""
 
 while [[ $# -gt 0 ]]; do
@@ -82,6 +91,7 @@ while [[ $# -gt 0 ]]; do
         --ref-root)  REF_ROOT="$2"; shift 2 ;;
         --wait-idle) WAIT_IDLE="$2"; shift 2 ;;
         --task-name) TASK_NAME="$2"; shift 2 ;;
+        --force-lock) FORCE_LOCK=1; shift ;;
         -h|--help)   awk 'NR > 1 && !/^#/ { exit } NR > 1' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*)          echo "Unknown option: $1" >&2; exit 1 ;;
         *)           QUEUE_FILE="$1"; shift ;;
@@ -109,7 +119,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # --- Detach ---
 
 if [[ -n "$SCHEDULE" ]]; then
-    args=(--out "$OUT_DIR" --cache "$CACHE_DIR" --ref-root "$REF_ROOT" --wait-idle "$WAIT_IDLE" "$QUEUE_FILE")
+    args=(--out "$OUT_DIR" --cache "$CACHE_DIR" --ref-root "$REF_ROOT" --wait-idle "$WAIT_IDLE"
+          --task-name "$TASK_NAME" ${FORCE_LOCK:+--force-lock} "$QUEUE_FILE")
     if command -v schtasks >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
         task="$TASK_NAME"
         runner="$OUT_DIR/run.sh"
@@ -253,6 +264,37 @@ echo "  cache: $CACHE_DIR"
 : > "$STATUS"
 mark() { echo "$1 $(date '+%Y-%m-%d %H:%M:%S')" >> "$STATUS"; }
 
+# A step runs in the background under wait so a signal reaches the queue at
+# once instead of after the step; the handler ends the step and the EXIT trap
+# removes the marker. A foreground build still finishes before a signal lands.
+CHILD=""
+run_step() {
+    local log="$1"
+    shift
+    "$@" > "$log" 2>&1 &
+    CHILD=$!
+    wait "$CHILD"
+    local status=$?
+    CHILD=""
+    return "$status"
+}
+
+run_in() {
+    cd "$1" && shift && "$@"
+}
+
+stop() {
+    if [[ -n "$CHILD" ]]; then
+        kill -TERM "$CHILD" 2>/dev/null
+        wait "$CHILD" 2>/dev/null
+    fi
+    mark "STOPPED by SIG$1"
+    exit "$2"
+}
+trap 'stop INT 130' INT
+trap 'stop TERM 143' TERM
+trap bench_lock_release EXIT
+
 # --- Build ---
 
 # Build the checkout at $1 into $2 unless it is cached. A reference commit gets
@@ -291,6 +333,13 @@ mark "END build failed=$build_failed"
 
 # --- Measure ---
 
+# Every step inherits PRISM_BENCH_LOCK_HELD from here, so none writes a marker
+# of its own.
+if ! bench_lock_acquire "$PROJECT_DIR" bench_queue.sh "$TASK_NAME" "$OUT_DIR" "$FORCE_LOCK"; then
+    mark "LOCKED"
+    exit 1
+fi
+
 any_failed=0
 for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
     name="${STEP_NAME[s]}"
@@ -300,23 +349,25 @@ for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
         if [[ ! -f "${NEW_EXE_OF[s]}" || ! -f "${REF_EXE_OF[s]}" ]]; then
             mark "END $name exit=build-failed"; any_failed=1; continue
         fi
-        bash "$BENCH_AB" --project-dir "${STEP_DIR[s]}" "${SPLIT[@]}" \
+        run_step "$OUT_DIR/$name.log" bash "$BENCH_AB" --project-dir "${STEP_DIR[s]}" "${SPLIT[@]}" \
             --new-exe "${NEW_EXE_OF[s]}" --ref-exe "${REF_EXE_OF[s]}" \
-            --wait-idle "$WAIT_IDLE" --out "$OUT_DIR/$name.md" > "$OUT_DIR/$name.log" 2>&1
+            --wait-idle "$WAIT_IDLE" --out "$OUT_DIR/$name.md"
         status=$?
     elif [[ "${STEP_KIND[s]}" == ix ]]; then
         if [[ ! -f "${NEW_EXE_OF[s]}" ]]; then
             mark "END $name exit=build-failed"; any_failed=1; continue
         fi
-        bash "$BENCH_IX" --project-dir "${STEP_DIR[s]}" "${SPLIT[@]}"             --exe "${NEW_EXE_OF[s]}" --wait-idle "$WAIT_IDLE" --out "$OUT_DIR/$name.md"             > "$OUT_DIR/$name.log" 2>&1
+        run_step "$OUT_DIR/$name.log" bash "$BENCH_IX" --project-dir "${STEP_DIR[s]}" "${SPLIT[@]}" \
+            --exe "${NEW_EXE_OF[s]}" --wait-idle "$WAIT_IDLE" --out "$OUT_DIR/$name.md"
         status=$?
     else
-        ( cd "${STEP_DIR[s]}" && "${SPLIT[@]}" ) > "$OUT_DIR/$name.log" 2>&1
+        run_step "$OUT_DIR/$name.log" run_in "${STEP_DIR[s]}" "${SPLIT[@]}"
         status=$?
     fi
     (( status == 0 )) || any_failed=1
     mark "END $name exit=$status"
 done
+bench_lock_release
 mark "ALLDONE"
 
 # One line per step for whoever reads the status file first.

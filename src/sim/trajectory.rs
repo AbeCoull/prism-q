@@ -37,32 +37,264 @@ pub(crate) fn noise_rng(shot_seed: u64) -> ChaCha8Rng {
     rng
 }
 
-/// Draw one branch of a single-qubit Pauli channel, `None` for the identity.
-fn draw_pauli(px: f64, py: f64, pz: f64, rng: &mut ChaCha8Rng) -> Option<PauliOp> {
-    let r: f64 = rand::RngExt::random(rng);
-    if r < px {
-        Some(PauliOp::X)
-    } else if r < px + py {
-        Some(PauliOp::Y)
-    } else if r < px + py + pz {
-        Some(PauliOp::Z)
-    } else {
-        None
+/// A [`NoiseModel`]'s events lowered once per run, slot for slot in the
+/// [`NoiseModel::after_gate`] layout, so a shot loop reads each channel's
+/// constants instead of deriving them per event.
+///
+/// Each constant is the expression its draw would otherwise evaluate, in the same
+/// order, so a seeded run draws the same bits.
+pub(crate) struct PreparedNoise {
+    events: Vec<PreparedEvent>,
+    /// Slot `s` holds `events[offsets[s]..offsets[s + 1]]`.
+    offsets: Vec<usize>,
+}
+
+impl PreparedNoise {
+    pub(crate) fn new(noise: &NoiseModel) -> Self {
+        let mut events = Vec::with_capacity(noise.after_gate.iter().map(Vec::len).sum());
+        let mut offsets = Vec::with_capacity(noise.after_gate.len() + 1);
+        offsets.push(0);
+        for slot in &noise.after_gate {
+            events.extend(slot.iter().map(PreparedEvent::new));
+            offsets.push(events.len());
+        }
+        Self { events, offsets }
+    }
+
+    pub(crate) fn num_slots(&self) -> usize {
+        self.offsets.len() - 1
+    }
+
+    #[inline]
+    pub(crate) fn slot(&self, slot: usize) -> &[PreparedEvent] {
+        &self.events[self.offsets[slot]..self.offsets[slot + 1]]
+    }
+
+    /// Slots `from..` in order.
+    #[inline]
+    pub(crate) fn slots_from(&self, from: usize) -> impl Iterator<Item = &[PreparedEvent]> {
+        self.offsets[from..]
+            .windows(2)
+            .map(|bounds| &self.events[bounds[0]..bounds[1]])
+    }
+
+    /// Every event of slots `..slot`, in slot order.
+    fn events_before(&self, slot: usize) -> &[PreparedEvent] {
+        &self.events[..self.offsets[slot]]
     }
 }
 
-fn apply_pauli(
-    backend: &mut dyn Backend,
-    qubit: usize,
-    px: f64,
-    py: f64,
-    pz: f64,
-    rng: &mut ChaCha8Rng,
-) -> Result<()> {
-    match draw_pauli(px, py, pz, rng) {
-        Some(op) => apply_pauli_op(backend, qubit, op),
-        None => Ok(()),
+pub(crate) struct PreparedEvent {
+    pub(crate) channel: PreparedChannel,
+    /// Targets in the order the channel indexes them. A one-qubit event repeats
+    /// its target, so a leak check over both entries reads that one qubit.
+    pub(crate) qubits: [usize; 2],
+}
+
+impl PreparedEvent {
+    fn new(event: &NoiseEvent) -> Self {
+        let q0 = event.qubits[0];
+        Self {
+            channel: PreparedChannel::new(&event.channel),
+            qubits: [q0, event.qubits.get(1).copied().unwrap_or(q0)],
+        }
     }
+}
+
+/// A [`NoiseChannel`] with what its draws read precomputed.
+pub(crate) enum PreparedChannel {
+    /// Thermal relaxation over a nonpositive time or lifetime, which draws
+    /// nothing.
+    Identity,
+    /// Pauli and depolarizing channels.
+    Pauli(PauliThresholds),
+    AmplitudeDamping(Damping),
+    PhaseDamping(Damping),
+    Thermal(Box<ThermalBranches>),
+    /// Two-qubit depolarizing at total rate `p`, each of its 15 branches `p / 15`
+    /// wide.
+    PauliPair {
+        p: f64,
+        branch_width: f64,
+    },
+    Custom(Box<[Kraus1q]>),
+    Kraus2q(Box<[Kraus2q]>),
+    Leakage(f64),
+    Seepage(f64),
+    LeakageTransport(f64),
+    QuasiStatic {
+        axis: PauliAxis,
+        weights: Box<[(usize, f64)]>,
+    },
+}
+
+impl PreparedChannel {
+    fn new(channel: &NoiseChannel) -> Self {
+        match channel {
+            NoiseChannel::Pauli { px, py, pz } => Self::Pauli(PauliThresholds::new(*px, *py, *pz)),
+            NoiseChannel::Depolarizing { p } => {
+                let pp = p / 3.0;
+                Self::Pauli(PauliThresholds::new(pp, pp, pp))
+            }
+            NoiseChannel::AmplitudeDamping { gamma } => {
+                Self::AmplitudeDamping(Damping::new(*gamma))
+            }
+            NoiseChannel::PhaseDamping { gamma } => Self::PhaseDamping(Damping::new(*gamma)),
+            NoiseChannel::ThermalRelaxation {
+                t1,
+                t2,
+                gate_time,
+                excited_population,
+            } => {
+                if *t1 <= 0.0 || *t2 <= 0.0 || *gate_time <= 0.0 {
+                    return Self::Identity;
+                }
+                let (gad, gpd) = crate::sim::noise::thermal_relaxation_rates(*t1, *t2, *gate_time);
+                Self::Thermal(Box::new(ThermalBranches::new(
+                    gad,
+                    gpd,
+                    *excited_population,
+                )))
+            }
+            NoiseChannel::TwoQubitDepolarizing { p } => Self::PauliPair {
+                p: *p,
+                branch_width: p / 15.0,
+            },
+            NoiseChannel::Custom { kraus } => Self::Custom(
+                kraus
+                    .iter()
+                    .map(|op| Kraus1q {
+                        op: *op,
+                        effect: kdagger_k(op),
+                    })
+                    .collect(),
+            ),
+            NoiseChannel::Kraus2q { kraus } => Self::Kraus2q(
+                kraus
+                    .iter()
+                    .map(|op| Kraus2q {
+                        op: *op,
+                        effect: kdagger_k_2q(op),
+                    })
+                    .collect(),
+            ),
+            NoiseChannel::Leakage { p } => Self::Leakage(*p),
+            NoiseChannel::Seepage { p } => Self::Seepage(*p),
+            NoiseChannel::LeakageTransport { p } => Self::LeakageTransport(*p),
+            NoiseChannel::QuasiStatic { axis, weights } => Self::QuasiStatic {
+                axis: *axis,
+                weights: weights.as_slice().into(),
+            },
+        }
+    }
+}
+
+/// Cumulative branch bounds of a single-qubit Pauli channel: `X` below `x`,
+/// `Y` below `xy`, `Z` below `xyz`.
+#[derive(Clone, Copy)]
+pub(crate) struct PauliThresholds {
+    x: f64,
+    xy: f64,
+    xyz: f64,
+}
+
+impl PauliThresholds {
+    fn new(px: f64, py: f64, pz: f64) -> Self {
+        Self {
+            x: px,
+            xy: px + py,
+            xyz: px + py + pz,
+        }
+    }
+
+    /// Draw one branch, `None` for the identity.
+    #[inline]
+    fn draw(self, rng: &mut ChaCha8Rng) -> Option<PauliOp> {
+        let r: f64 = rand::RngExt::random(rng);
+        if r < self.x {
+            Some(PauliOp::X)
+        } else if r < self.xy {
+            Some(PauliOp::Y)
+        } else if r < self.xyz {
+            Some(PauliOp::Z)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub(crate) fn apply(
+        self,
+        backend: &mut dyn Backend,
+        qubit: usize,
+        rng: &mut ChaCha8Rng,
+    ) -> Result<()> {
+        match self.draw(rng) {
+            Some(op) => apply_pauli_op(backend, qubit, op),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Amplitude or phase damping at rate `gamma`, with the no-jump factor
+/// `keep = sqrt(1 - gamma)`.
+#[derive(Clone, Copy)]
+pub(crate) struct Damping {
+    gamma: f64,
+    keep: f64,
+}
+
+impl Damping {
+    fn new(gamma: f64) -> Self {
+        Self {
+            gamma,
+            keep: (1.0 - gamma).sqrt(),
+        }
+    }
+}
+
+/// The state-independent factors of [`apply_thermal_relaxation`]'s five branch
+/// weights and operators.
+pub(crate) struct ThermalBranches {
+    relax: f64,
+    dephase: f64,
+    excite: f64,
+    excited: f64,
+    decay_keep: f64,
+    dephase_keep: f64,
+    hot: [f64; 2],
+    cold_scale: f64,
+    cold_keep: f64,
+}
+
+impl ThermalBranches {
+    fn new(gad: f64, gpd: f64, excited: f64) -> Self {
+        let cold = 1.0 - excited;
+        Self {
+            relax: cold * gad,
+            dephase: ((cold * (1.0 - gad)) + excited) * gpd,
+            excite: excited * gad,
+            excited,
+            decay_keep: 1.0 - gad,
+            dephase_keep: 1.0 - gpd,
+            hot: [(1.0 - gad).sqrt(), (1.0 - gpd).sqrt()],
+            cold_scale: cold.sqrt(),
+            cold_keep: ((1.0 - gad) * (1.0 - gpd)).sqrt(),
+        }
+    }
+}
+
+/// A one-qubit Kraus operator with its effect `Kdagger K`.
+pub(crate) struct Kraus1q {
+    op: [[Complex64; 2]; 2],
+    effect: [[Complex64; 2]; 2],
+}
+
+/// A two-qubit Kraus operator, indexed as [`NoiseChannel::Kraus2q`] is, with its
+/// effect `Kdagger K`.
+pub(crate) struct Kraus2q {
+    op: [[Complex64; 4]; 4],
+    effect: [[Complex64; 4]; 4],
 }
 
 /// Minimum p_jump for applying the jump branch instead of the no-jump
@@ -79,7 +311,7 @@ const JUMP_EPSILON: f64 = 1e-12;
 fn apply_diagonal_kraus_2op(
     backend: &mut dyn Backend,
     qubit: usize,
-    gamma: f64,
+    Damping { gamma, keep }: Damping,
     jump_moves_population: bool,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
@@ -105,7 +337,7 @@ fn apply_diagonal_kraus_2op(
         let inv = 1.0 / denom.sqrt();
         let mat = [
             [Complex64::new(inv, 0.0), zero],
-            [zero, Complex64::new((1.0 - gamma).sqrt() * inv, 0.0)],
+            [zero, Complex64::new(keep * inv, 0.0)],
         ];
         backend.apply_1q_matrix(qubit, &mat)?;
     }
@@ -115,52 +347,25 @@ fn apply_diagonal_kraus_2op(
 fn apply_amplitude_damping(
     backend: &mut dyn Backend,
     qubit: usize,
-    gamma: f64,
+    damping: Damping,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    apply_diagonal_kraus_2op(backend, qubit, gamma, true, rng)
+    apply_diagonal_kraus_2op(backend, qubit, damping, true, rng)
 }
 
 fn apply_phase_damping(
     backend: &mut dyn Backend,
     qubit: usize,
-    gamma: f64,
+    damping: Damping,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    apply_diagonal_kraus_2op(backend, qubit, gamma, false, rng)
+    apply_diagonal_kraus_2op(backend, qubit, damping, false, rng)
 }
 
-pub(crate) fn prepare_thermal_rates(noise: &NoiseModel) -> Vec<(f64, f64)> {
-    noise
-        .after_gate
-        .iter()
-        .flatten()
-        .filter_map(thermal_rates_of)
-        .collect()
-}
-
-/// The rates [`prepare_thermal_rates`] holds for `event`, `None` for any other
-/// channel and for a thermal channel that acts as the identity.
-fn thermal_rates_of(event: &NoiseEvent) -> Option<(f64, f64)> {
-    let NoiseChannel::ThermalRelaxation {
-        t1, t2, gate_time, ..
-    } = &event.channel
-    else {
-        return None;
-    };
-    if *t1 <= 0.0 || *t2 <= 0.0 || *gate_time <= 0.0 {
-        None
-    } else {
-        Some(crate::sim::noise::thermal_relaxation_rates(
-            *t1, *t2, *gate_time,
-        ))
-    }
-}
-
-/// A trajectory over a model with guarded slots. Thermal rates are computed
-/// per event, since a skipped body would leave a shared rate iterator behind.
+/// A trajectory over a model with guarded slots.
 struct TrajectoryWalk<'a> {
     backend: &'a mut dyn Backend,
+    noise: &'a PreparedNoise,
     rng: &'a mut ChaCha8Rng,
 }
 
@@ -173,10 +378,9 @@ impl SlotWalk for TrajectoryWalk<'_> {
         self.backend.apply(instruction)
     }
 
-    fn fire(&mut self, events: &[NoiseEvent]) -> Result<()> {
-        for event in events {
-            let rates = thermal_rates_of(event);
-            apply_noise_event(self.backend, event, &mut rates.as_slice().iter(), self.rng)?;
+    fn fire(&mut self, slot: usize) -> Result<()> {
+        for event in self.noise.slot(slot) {
+            apply_noise_event(self.backend, event, self.rng)?;
         }
         Ok(())
     }
@@ -185,6 +389,7 @@ impl SlotWalk for TrajectoryWalk<'_> {
 /// [`TrajectoryWalk`] on the per-shot memory path.
 struct MemoryWalk<'a> {
     backend: &'a mut dyn Backend,
+    noise: &'a PreparedNoise,
     memory: &'a mut ShotMemory,
     leakage: bool,
     rng: &'a mut ChaCha8Rng,
@@ -203,16 +408,9 @@ impl SlotWalk for MemoryWalk<'_> {
         }
     }
 
-    fn fire(&mut self, events: &[NoiseEvent]) -> Result<()> {
-        for event in events {
-            let rates = thermal_rates_of(event);
-            apply_memory_event(
-                self.backend,
-                event,
-                &mut rates.as_slice().iter(),
-                self.memory,
-                self.rng,
-            )?;
+    fn fire(&mut self, slot: usize) -> Result<()> {
+        for event in self.noise.slot(slot) {
+            apply_memory_event(self.backend, event, self.memory, self.rng)?;
         }
         Ok(())
     }
@@ -234,19 +432,16 @@ impl SlotWalk for MemoryWalk<'_> {
 fn apply_thermal_relaxation(
     backend: &mut dyn Backend,
     qubit: usize,
-    gad: f64,
-    gpd: f64,
-    excited: f64,
+    branches: &ThermalBranches,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     let p1 = backend.qubit_probability(qubit)?;
     let p0 = 1.0 - p1;
-    let cold = 1.0 - excited;
 
-    let p_relax = cold * gad * p1;
-    let p_dephase = ((cold * (1.0 - gad)) + excited) * gpd * p1;
-    let p_excite = excited * gad * p0;
-    let p_hold_hot = excited * ((1.0 - gad) * p0 + (1.0 - gpd) * p1);
+    let p_relax = branches.relax * p1;
+    let p_dephase = branches.dephase * p1;
+    let p_excite = branches.excite * p0;
+    let p_hold_hot = branches.excited * (branches.decay_keep * p0 + branches.dephase_keep * p1);
 
     let zero = Complex64::new(0.0, 0.0);
     let r: f64 = rand::RngExt::random(rng);
@@ -263,18 +458,18 @@ fn apply_thermal_relaxation(
         if p_hold_hot <= JUMP_EPSILON {
             return Ok(());
         }
-        let inv = (excited / p_hold_hot).sqrt();
+        let inv = (branches.excited / p_hold_hot).sqrt();
         [
-            [Complex64::new((1.0 - gad).sqrt() * inv, 0.0), zero],
-            [zero, Complex64::new((1.0 - gpd).sqrt() * inv, 0.0)],
+            [Complex64::new(branches.hot[0] * inv, 0.0), zero],
+            [zero, Complex64::new(branches.hot[1] * inv, 0.0)],
         ]
     } else {
         let denom = 1.0 - p_relax - p_dephase - p_excite - p_hold_hot;
         if denom <= JUMP_EPSILON {
             return Ok(());
         }
-        let inv = cold.sqrt() / denom.sqrt();
-        let keep = ((1.0 - gad) * (1.0 - gpd)).sqrt() * inv;
+        let inv = branches.cold_scale / denom.sqrt();
+        let keep = branches.cold_keep * inv;
         [
             [Complex64::new(inv, 0.0), zero],
             [zero, Complex64::new(keep, 0.0)],
@@ -285,23 +480,24 @@ fn apply_thermal_relaxation(
 
 /// Draw one branch of symmetric two-qubit depolarizing as an index into
 /// [`TWO_QUBIT_PAULIS`], `None` for `I (x) I`. Each of the 15 non-identity
-/// products has probability `p/15`.
-fn draw_two_qubit_depolarizing(p: f64, rng: &mut ChaCha8Rng) -> Option<usize> {
+/// products has probability `branch_width = p/15`.
+#[inline]
+fn draw_two_qubit_depolarizing(p: f64, branch_width: f64, rng: &mut ChaCha8Rng) -> Option<usize> {
     let r: f64 = rand::RngExt::random(rng);
     if r >= p {
         return None;
     }
-    Some(((r / (p / 15.0)) as usize).min(14))
+    Some(((r / branch_width) as usize).min(14))
 }
 
 fn apply_two_qubit_depolarizing(
     backend: &mut dyn Backend,
-    q0: usize,
-    q1: usize,
+    [q0, q1]: [usize; 2],
     p: f64,
+    branch_width: f64,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    let Some(idx) = draw_two_qubit_depolarizing(p, rng) else {
+    let Some(idx) = draw_two_qubit_depolarizing(p, branch_width, rng) else {
         return Ok(());
     };
     let (pauli0, pauli1) = TWO_QUBIT_PAULIS[idx];
@@ -364,8 +560,7 @@ fn kdagger_k(k: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
 }
 
 #[inline]
-fn kraus_probability(k: &[[Complex64; 2]; 2], rho: &[[Complex64; 2]; 2]) -> f64 {
-    let effect = kdagger_k(k);
+fn effect_probability(effect: &[[Complex64; 2]; 2], rho: &[[Complex64; 2]; 2]) -> f64 {
     let p = effect[0][0] * rho[0][0]
         + effect[0][1] * rho[1][0]
         + effect[1][0] * rho[0][1]
@@ -381,7 +576,7 @@ fn kraus_probability(k: &[[Complex64; 2]; 2], rho: &[[Complex64; 2]; 2]) -> f64 
 fn apply_custom_kraus(
     backend: &mut dyn Backend,
     qubit: usize,
-    kraus: &[[[Complex64; 2]; 2]],
+    kraus: &[Kraus1q],
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     let rho = backend.reduced_density_matrix_1q(qubit)?;
@@ -389,7 +584,7 @@ fn apply_custom_kraus(
     let mut cumulative: smallvec::SmallVec<[f64; 8]> = smallvec::SmallVec::new();
     let mut total = 0.0;
     for k in kraus {
-        let pk = kraus_probability(k, &rho);
+        let pk = effect_probability(&k.effect, &rho);
         total += pk;
         cumulative.push(total);
     }
@@ -413,7 +608,7 @@ fn apply_custom_kraus(
     }
     let inv = 1.0 / pk.sqrt();
     let inv_c = Complex64::new(inv, 0.0);
-    let k = kraus[chosen];
+    let k = kraus[chosen].op;
     let normalized = [
         [k[0][0] * inv_c, k[0][1] * inv_c],
         [k[1][0] * inv_c, k[1][1] * inv_c],
@@ -432,9 +627,8 @@ fn apply_custom_kraus(
 /// branch from an approximation.
 fn apply_custom_kraus_2q(
     backend: &mut dyn Backend,
-    q0: usize,
-    q1: usize,
-    kraus: &[[[Complex64; 4]; 4]],
+    [q0, q1]: [usize; 2],
+    kraus: &[Kraus2q],
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     let rho = backend.reduced_density_matrix_2q(q0, q1)?;
@@ -442,7 +636,7 @@ fn apply_custom_kraus_2q(
     let mut cumulative: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
     let mut total = 0.0;
     for k in kraus {
-        total += kraus_probability_2q(k, &rho);
+        total += effect_probability_2q(&k.effect, &rho);
         cumulative.push(total);
     }
 
@@ -465,7 +659,7 @@ fn apply_custom_kraus_2q(
     }
 
     let inv = Complex64::new(1.0 / pk.sqrt(), 0.0);
-    let mut normalized = kraus[chosen];
+    let mut normalized = kraus[chosen].op;
     for row in normalized.iter_mut() {
         for entry in row.iter_mut() {
             *entry *= inv;
@@ -477,16 +671,27 @@ fn apply_custom_kraus_2q(
     })
 }
 
-/// `Tr(Kdagger K rho) = sum_{i,j,r} conj(K[r][i]) K[r][j] rho[j][i]`.
-fn kraus_probability_2q(k: &[[Complex64; 4]; 4], rho: &[[Complex64; 4]; 4]) -> f64 {
+/// `Kdagger K`, entry `[i][j] = sum_r conj(K[r][i]) K[r][j]`.
+fn kdagger_k_2q(k: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
+    let mut effect = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (i, effect_row) in effect.iter_mut().enumerate() {
+        for (j, entry) in effect_row.iter_mut().enumerate() {
+            for row in k.iter() {
+                *entry += row[i].conj() * row[j];
+            }
+        }
+    }
+    effect
+}
+
+/// `Tr(E rho) = sum_{i,j} E[i][j] rho[j][i]` for a branch effect `E`, clamped
+/// at zero.
+#[inline]
+fn effect_probability_2q(effect: &[[Complex64; 4]; 4], rho: &[[Complex64; 4]; 4]) -> f64 {
     let mut p = Complex64::new(0.0, 0.0);
     for i in 0..4 {
         for j in 0..4 {
-            let mut effect = Complex64::new(0.0, 0.0);
-            for row in k.iter() {
-                effect += row[i].conj() * row[j];
-            }
-            p += effect * rho[j][i];
+            p += effect[i][j] * rho[j][i];
         }
     }
     p.re.max(0.0)
@@ -494,49 +699,31 @@ fn kraus_probability_2q(k: &[[Complex64; 4]; 4], rho: &[[Complex64; 4]; 4]) -> f
 
 fn apply_noise_event(
     backend: &mut dyn Backend,
-    event: &NoiseEvent,
-    thermal_rates: &mut std::slice::Iter<'_, (f64, f64)>,
+    event: &PreparedEvent,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
+    let qubit = event.qubits[0];
     match &event.channel {
-        NoiseChannel::Pauli { px, py, pz } => {
-            apply_pauli(backend, event.qubits[0], *px, *py, *pz, rng)
+        PreparedChannel::Identity => Ok(()),
+        PreparedChannel::Pauli(thresholds) => thresholds.apply(backend, qubit, rng),
+        PreparedChannel::AmplitudeDamping(damping) => {
+            apply_amplitude_damping(backend, qubit, *damping, rng)
         }
-        NoiseChannel::Depolarizing { p } => {
-            let pp = p / 3.0;
-            apply_pauli(backend, event.qubits[0], pp, pp, pp, rng)
+        PreparedChannel::PhaseDamping(damping) => {
+            apply_phase_damping(backend, qubit, *damping, rng)
         }
-        NoiseChannel::AmplitudeDamping { gamma } => {
-            apply_amplitude_damping(backend, event.qubits[0], *gamma, rng)
+        PreparedChannel::Thermal(branches) => {
+            apply_thermal_relaxation(backend, qubit, branches, rng)
         }
-        NoiseChannel::PhaseDamping { gamma } => {
-            apply_phase_damping(backend, event.qubits[0], *gamma, rng)
+        PreparedChannel::PauliPair { p, branch_width } => {
+            apply_two_qubit_depolarizing(backend, event.qubits, *p, *branch_width, rng)
         }
-        NoiseChannel::ThermalRelaxation {
-            t1,
-            t2,
-            gate_time,
-            excited_population,
-        } => {
-            if *t1 <= 0.0 || *t2 <= 0.0 || *gate_time <= 0.0 {
-                return Ok(());
-            }
-            let &(gad, gpd) = thermal_rates
-                .next()
-                .expect("thermal event has prepared rates");
-            apply_thermal_relaxation(backend, event.qubits[0], gad, gpd, *excited_population, rng)
-        }
-        NoiseChannel::TwoQubitDepolarizing { p } => {
-            apply_two_qubit_depolarizing(backend, event.qubits[0], event.qubits[1], *p, rng)
-        }
-        NoiseChannel::Custom { kraus } => apply_custom_kraus(backend, event.qubits[0], kraus, rng),
-        NoiseChannel::Kraus2q { kraus } => {
-            apply_custom_kraus_2q(backend, event.qubits[0], event.qubits[1], kraus, rng)
-        }
-        NoiseChannel::Leakage { .. }
-        | NoiseChannel::Seepage { .. }
-        | NoiseChannel::LeakageTransport { .. }
-        | NoiseChannel::QuasiStatic { .. } => {
+        PreparedChannel::Custom(kraus) => apply_custom_kraus(backend, qubit, kraus, rng),
+        PreparedChannel::Kraus2q(kraus) => apply_custom_kraus_2q(backend, event.qubits, kraus, rng),
+        PreparedChannel::Leakage(_)
+        | PreparedChannel::Seepage(_)
+        | PreparedChannel::LeakageTransport(_)
+        | PreparedChannel::QuasiStatic { .. } => {
             unreachable!("channels with per-shot memory run through apply_memory_event")
         }
     }
@@ -677,23 +864,21 @@ fn apply_leaky_instruction(
 }
 
 /// Apply one event on the memory path. A channel without memory of its own
-/// skips an event naming a leaked qubit, and a skipped thermal event still
-/// advances `thermal_rates` so later ones keep their prepared rates.
+/// skips an event naming a leaked qubit.
 fn apply_memory_event(
     backend: &mut dyn Backend,
-    event: &NoiseEvent,
-    thermal_rates: &mut std::slice::Iter<'_, (f64, f64)>,
+    event: &PreparedEvent,
     memory: &mut ShotMemory,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     let qubit = event.qubits[0];
     match &event.channel {
-        NoiseChannel::Leakage { p } => {
+        PreparedChannel::Leakage(p) => {
             if !memory.is_leaked(qubit) && rand::RngExt::random::<f64>(rng) < *p {
                 leak(backend, qubit, memory)?;
             }
         }
-        NoiseChannel::Seepage { p } => {
+        PreparedChannel::Seepage(p) => {
             if memory.is_leaked(qubit) && rand::RngExt::random::<f64>(rng) < *p {
                 memory.leaked[qubit] = false;
                 if rand::RngExt::random::<bool>(rng) {
@@ -701,7 +886,7 @@ fn apply_memory_event(
                 }
             }
         }
-        NoiseChannel::LeakageTransport { p } => {
+        PreparedChannel::LeakageTransport(p) => {
             let other = event.qubits[1];
             if memory.is_leaked(qubit) != memory.is_leaked(other)
                 && rand::RngExt::random::<f64>(rng) < *p
@@ -714,7 +899,7 @@ fn apply_memory_event(
                 leak(backend, target, memory)?;
             }
         }
-        NoiseChannel::QuasiStatic { axis, weights } => {
+        PreparedChannel::QuasiStatic { axis, weights } => {
             if !memory.is_leaked(qubit) {
                 let angle: f64 = weights
                     .iter()
@@ -731,15 +916,8 @@ fn apply_memory_event(
                 })?;
             }
         }
-        NoiseChannel::ThermalRelaxation {
-            t1, t2, gate_time, ..
-        } if memory.is_leaked(qubit) => {
-            if *t1 > 0.0 && *t2 > 0.0 && *gate_time > 0.0 {
-                thermal_rates.next();
-            }
-        }
         _ if memory.any_leaked(&event.qubits) => {}
-        _ => apply_noise_event(backend, event, thermal_rates, rng)?,
+        _ => apply_noise_event(backend, event, rng)?,
     }
     Ok(())
 }
@@ -749,34 +927,33 @@ fn apply_memory_event(
 fn run_memory_shot(
     backend: &mut dyn Backend,
     circuit: &Circuit,
-    noise: &NoiseModel,
+    noise: &PreparedNoise,
     readout: &[Option<ReadoutError>],
-    thermal_rates: &[(f64, f64)],
     spec: MemorySpec,
     rng: &mut ChaCha8Rng,
 ) -> Result<(Vec<bool>, Vec<bool>)> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
     let mut memory = ShotMemory::new(circuit.num_qubits, spec, rng);
-    if noise.after_gate.len() == circuit.instructions.len() {
-        let mut thermal_rates = thermal_rates.iter();
-        for (instr, events) in circuit.instructions.iter().zip(&noise.after_gate) {
+    if noise.num_slots() == circuit.instructions.len() {
+        for (instr, events) in circuit.instructions.iter().zip(noise.slots_from(0)) {
             if spec.leakage {
                 apply_leaky_instruction(backend, instr, &mut memory, rng)?;
             } else {
                 backend.apply(instr)?;
             }
             for event in events {
-                apply_memory_event(backend, event, &mut thermal_rates, &mut memory, rng)?;
+                apply_memory_event(backend, event, &mut memory, rng)?;
             }
         }
     } else {
         let mut walk = MemoryWalk {
             backend: &mut *backend,
+            noise,
             memory: &mut memory,
             leakage: spec.leakage,
             rng: &mut *rng,
         };
-        walk_noise_slots(circuit, noise, 0, &mut walk)?;
+        walk_noise_slots(circuit, 0, &mut walk)?;
     }
     let mut results = backend.classical_results().to_vec();
     apply_readout_errors(&mut results, readout, rng);
@@ -788,18 +965,17 @@ fn run_memory_shot(
 fn run_shot(
     backend: &mut dyn Backend,
     circuit: &Circuit,
-    noise: &NoiseModel,
+    noise: &PreparedNoise,
     readout: &[Option<ReadoutError>],
-    thermal_rates: &[(f64, f64)],
     memory: Option<MemorySpec>,
     rng: &mut ChaCha8Rng,
 ) -> Result<(Vec<bool>, Vec<bool>)> {
     match memory {
         None => Ok((
-            run_trajectory_shot(backend, circuit, noise, readout, thermal_rates, rng)?,
+            run_trajectory_shot(backend, circuit, noise, readout, rng)?,
             Vec::new(),
         )),
-        Some(spec) => run_memory_shot(backend, circuit, noise, readout, thermal_rates, spec, rng),
+        Some(spec) => run_memory_shot(backend, circuit, noise, readout, spec, rng),
     }
 }
 
@@ -843,56 +1019,46 @@ pub(crate) fn apply_readout_errors(
     }
 }
 
-/// `readout` and `thermal_rates` come from [`written_readout`] and
-/// [`prepare_thermal_rates`] for this `circuit` and `noise`.
+/// `readout` comes from [`written_readout`] for this `circuit`.
 pub(crate) fn run_trajectory_shot(
     backend: &mut dyn Backend,
     circuit: &Circuit,
-    noise: &NoiseModel,
+    noise: &PreparedNoise,
     readout: &[Option<ReadoutError>],
-    thermal_rates: &[(f64, f64)],
     rng: &mut ChaCha8Rng,
 ) -> Result<Vec<bool>> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
-    finish_trajectory(
-        backend,
-        circuit,
-        noise,
-        0,
-        readout,
-        &mut thermal_rates.iter(),
-        rng,
-    )
+    finish_trajectory(backend, circuit, noise, 0, readout, rng)
 }
 
 /// Run a trajectory from instruction `from` on a `backend` holding its state
-/// before `from`, with `rng` and `thermal_rates` advanced past the events before
-/// it, and return its record.
+/// before `from`, with `rng` advanced past the events before it, and return its
+/// record.
 fn finish_trajectory(
     backend: &mut dyn Backend,
     circuit: &Circuit,
-    noise: &NoiseModel,
+    noise: &PreparedNoise,
     from: usize,
     readout: &[Option<ReadoutError>],
-    thermal_rates: &mut std::slice::Iter<'_, (f64, f64)>,
     rng: &mut ChaCha8Rng,
 ) -> Result<Vec<bool>> {
-    if noise.after_gate.len() == circuit.instructions.len() {
+    if noise.num_slots() == circuit.instructions.len() {
         for (instr, events) in circuit.instructions[from..]
             .iter()
-            .zip(&noise.after_gate[from..])
+            .zip(noise.slots_from(from))
         {
             backend.apply(instr)?;
             for event in events {
-                apply_noise_event(backend, event, thermal_rates, rng)?;
+                apply_noise_event(backend, event, rng)?;
             }
         }
     } else {
         let mut walk = TrajectoryWalk {
             backend: &mut *backend,
+            noise,
             rng: &mut *rng,
         };
-        walk_noise_slots(circuit, noise, from, &mut walk)?;
+        walk_noise_slots(circuit, from, &mut walk)?;
     }
 
     let mut results = backend.classical_results().to_vec();
@@ -917,7 +1083,7 @@ pub(crate) fn run_trajectories(
     force_serial: bool,
     route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
-    let thermal_rates = prepare_thermal_rates(noise);
+    let prepared = PreparedNoise::new(noise);
     #[cfg(not(feature = "parallel"))]
     let _ = force_serial;
     #[cfg(feature = "parallel")]
@@ -930,7 +1096,7 @@ pub(crate) fn run_trajectories(
                 &backend_factory,
                 circuit,
                 noise,
-                &thermal_rates,
+                &prepared,
                 num_shots,
                 seed,
                 route,
@@ -950,9 +1116,8 @@ pub(crate) fn run_trajectories(
         let (result, shot_leaked) = run_shot(
             backend.as_mut(),
             circuit,
-            noise,
+            &prepared,
             &readout,
-            &thermal_rates,
             memory,
             &mut rng,
         )?;
@@ -989,7 +1154,7 @@ fn run_trajectories_par(
     backend_factory: &(impl Fn(u64) -> Box<dyn Backend> + Sync),
     circuit: &Circuit,
     noise: &NoiseModel,
-    thermal_rates: &[(f64, f64)],
+    prepared: &PreparedNoise,
     num_shots: usize,
     seed: u64,
     route: crate::sim::ResolvedBackend,
@@ -1006,9 +1171,8 @@ fn run_trajectories_par(
             let (bits, leaked) = run_shot(
                 backend.as_mut(),
                 circuit,
-                noise,
+                prepared,
                 &readout,
-                thermal_rates,
                 memory,
                 &mut rng,
             )?;
@@ -1067,6 +1231,8 @@ pub(crate) struct PauliGroups {
     lasts: Vec<usize>,
     /// Shot indices ordered by group, ascending within each group.
     members: Vec<usize>,
+    /// The model the patterns were drawn from.
+    prepared: PreparedNoise,
     /// Group `g` owns `members[offsets[g]..offsets[g + 1]]`.
     offsets: Vec<usize>,
 }
@@ -1097,13 +1263,15 @@ fn pauli_group_prefix(circuit: &Circuit, noise: &NoiseModel) -> Option<usize> {
         .then_some(prefix)
 }
 
-fn draw_frame_branch(event: &NoiseEvent, rng: &mut ChaCha8Rng) -> Option<[PauliOp; 2]> {
-    if let Some(p) = event.channel.pauli_pair_rate() {
-        let (a, b) = TWO_QUBIT_PAULIS[draw_two_qubit_depolarizing(p, rng)?];
-        return Some([a, b]);
+fn draw_frame_branch(event: &PreparedEvent, rng: &mut ChaCha8Rng) -> Option<[PauliOp; 2]> {
+    match &event.channel {
+        PreparedChannel::PauliPair { p, branch_width } => {
+            let (a, b) = TWO_QUBIT_PAULIS[draw_two_qubit_depolarizing(*p, *branch_width, rng)?];
+            Some([a, b])
+        }
+        PreparedChannel::Pauli(thresholds) => thresholds.draw(rng).map(|op| [op, PauliOp::I]),
+        _ => unreachable!("grouped patterns draw Pauli-frame channels only"),
     }
-    let (px, py, pz) = event.pauli_probs();
-    draw_pauli(px, py, pz, rng).map(|op| [op, PauliOp::I])
 }
 
 impl PauliGroups {
@@ -1150,6 +1318,7 @@ impl PauliGroups {
     }
 
     fn group(prefix: usize, noise: &NoiseModel, num_shots: usize, seed: u64) -> Option<Self> {
+        let prepared = PreparedNoise::new(noise);
         let mut index: HashMap<Vec<Insertion>, usize> = HashMap::new();
         let mut starts = Vec::new();
         let mut lasts = Vec::new();
@@ -1161,7 +1330,7 @@ impl PauliGroups {
             let mut start = prefix;
             let mut last = prefix;
             let mut event = 0usize;
-            for (instruction, events) in noise.after_gate[..prefix].iter().enumerate() {
+            for (instruction, events) in prepared.slots_from(0).take(prefix).enumerate() {
                 for noise_event in events {
                     if let Some(letters) = draw_frame_branch(noise_event, &mut rng) {
                         if pattern.is_empty() {
@@ -1213,6 +1382,7 @@ impl PauliGroups {
             lasts,
             members,
             offsets,
+            prepared,
         })
     }
 
@@ -1724,16 +1894,15 @@ fn run_replayed_chunk(
             backend.copy_state_from(&state);
             backend.rng = ChaCha8Rng::seed_from_u64(shot_seed);
             let mut rng = noise_rng(shot_seed);
-            for event in noise.after_gate[..groups.prefix].iter().flatten() {
+            for event in groups.prepared.events_before(groups.prefix) {
                 draw_frame_branch(event, &mut rng);
             }
             let bits = finish_trajectory(
                 &mut backend,
                 circuit,
-                noise,
+                &groups.prepared,
                 groups.prefix,
                 readout,
-                &mut [].iter(),
                 &mut rng,
             )?;
             runs.push((shot, bits, crate::sim::backend_metadata(&backend)));
@@ -1895,14 +2064,8 @@ mod tests {
                 }]],
                 readout: Vec::new(),
             };
-            let rates = prepare_thermal_rates(&noise);
-            apply_noise_event(
-                &mut backend,
-                &noise.after_gate[0][0],
-                &mut rates.iter(),
-                &mut rng,
-            )
-            .unwrap();
+            let prepared = PreparedNoise::new(&noise);
+            apply_noise_event(&mut backend, &prepared.slot(0)[0], &mut rng).unwrap();
             let mut expected = noise_rng(42);
             for _ in 0..draws {
                 let _: f64 = rand::RngExt::random(&mut expected);
@@ -2830,5 +2993,312 @@ mod tests {
         assert!(PauliGroups::sample_replayed(&terminal, &noise, shots, seed).is_none());
         let damping = NoiseModel::with_amplitude_damping(&terminal, 0.01);
         assert!(PauliGroups::sample_replayed(&terminal, &damping, shots, seed).is_none());
+    }
+
+    fn every_channel(memory: bool) -> Vec<NoiseChannel> {
+        let r = |x: f64| Complex64::new(x, 0.0);
+        let zero = r(0.0);
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let (c, s) = (0.7f64.sqrt(), 0.3f64.sqrt());
+        let thermal = |t1, t2, gate_time, excited_population| NoiseChannel::ThermalRelaxation {
+            t1,
+            t2,
+            gate_time,
+            excited_population,
+        };
+        // Damping in a Hadamard-rotated frame: effects with off-diagonal terms,
+        // so branch weights read the coherence.
+        let custom = vec![
+            [[r(half), r(half)], [r(c * half), r(-c * half)]],
+            [[r(s * half), r(-s * half)], [zero, zero]],
+        ];
+        let mut a0 = [[zero; 4]; 4];
+        for (t, row) in a0.iter_mut().enumerate().take(3) {
+            row[t] = r(1.0);
+        }
+        a0[3][3] = r(c);
+        let mut a1 = [[zero; 4]; 4];
+        a1[0][3] = r(s);
+        let times_h_on_high = |a: [[Complex64; 4]; 4]| {
+            let h = [[half, half], [half, -half]];
+            let mut k = [[zero; 4]; 4];
+            for (t, row) in k.iter_mut().enumerate() {
+                for (u, entry) in row.iter_mut().enumerate() {
+                    for m in (u & 1..4).step_by(2) {
+                        *entry += a[t][m] * h[m >> 1][u >> 1];
+                    }
+                }
+            }
+            k
+        };
+        let mut channels = vec![
+            NoiseChannel::Pauli {
+                px: 0.02,
+                py: 0.05,
+                pz: 0.03,
+            },
+            NoiseChannel::Depolarizing { p: 0.12 },
+            NoiseChannel::AmplitudeDamping { gamma: 0.2 },
+            NoiseChannel::PhaseDamping { gamma: 0.15 },
+            thermal(40.0, 55.0, 6.0, 0.0),
+            thermal(30.0, 50.0, 4.0, 0.25),
+            thermal(30.0, 50.0, 0.0, 0.25),
+            NoiseChannel::TwoQubitDepolarizing { p: 0.2 },
+            NoiseChannel::Custom { kraus: custom },
+            NoiseChannel::Kraus2q {
+                kraus: vec![times_h_on_high(a0), times_h_on_high(a1)],
+            },
+        ];
+        if memory {
+            channels.extend([
+                NoiseChannel::Leakage { p: 0.1 },
+                NoiseChannel::Seepage { p: 0.3 },
+                NoiseChannel::LeakageTransport { p: 0.4 },
+                NoiseChannel::QuasiStatic {
+                    axis: PauliAxis::Z,
+                    weights: vec![(0, 0.3), (1, 0.1)],
+                },
+                NoiseChannel::QuasiStatic {
+                    axis: PauliAxis::X,
+                    weights: vec![(1, 0.2)],
+                },
+            ]);
+        }
+        channels
+    }
+
+    fn pauli_channels(scale: f64) -> Vec<NoiseChannel> {
+        vec![
+            NoiseChannel::Pauli {
+                px: 0.02 * scale,
+                py: 0.05 * scale,
+                pz: 0.03 * scale,
+            },
+            NoiseChannel::Depolarizing { p: 0.12 * scale },
+            NoiseChannel::TwoQubitDepolarizing { p: 0.2 * scale },
+        ]
+    }
+
+    fn cycled_model(circuit: &Circuit, slots: usize, channels: &[NoiseChannel]) -> NoiseModel {
+        let n = circuit.num_qubits;
+        let mut after_gate = vec![Vec::new(); slots];
+        let mut next = 0usize;
+        for (slot, events) in after_gate.iter_mut().enumerate() {
+            for _ in 0..2 {
+                let channel = channels[next % channels.len()].clone();
+                let q = (slot + next) % n;
+                let qubits = if channel.num_qubits() == 2 {
+                    smallvec![q, (q + 1) % n]
+                } else {
+                    smallvec![q]
+                };
+                events.push(NoiseEvent { channel, qubits });
+                next += 1;
+            }
+        }
+        let mut readout = vec![None; circuit.num_classical_bits];
+        readout[1] = Some(ReadoutError {
+            p01: 0.05,
+            p10: 0.08,
+        });
+        NoiseModel {
+            after_gate,
+            readout,
+        }
+    }
+
+    fn push_region(circuit: &mut Circuit, body: Vec<Instruction>) {
+        let condition = crate::circuit::ClassicalCondition::BitIsOne(0);
+        circuit
+            .instructions
+            .push(crate::circuit::guarded(condition, body).unwrap());
+    }
+
+    fn one_gate(gate: Gate, qubit: usize) -> Instruction {
+        Instruction::Gate {
+            gate,
+            targets: smallvec![qubit],
+        }
+    }
+
+    fn mixed_circuit(regions: bool) -> Circuit {
+        let mut circuit = Circuit::new(3, 3);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Ry(0.73), &[1]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::Rx(0.41), &[2]);
+        circuit.add_gate(Gate::Cz, &[1, 2]);
+        circuit.add_measure(0, 0);
+        if regions {
+            push_region(
+                &mut circuit,
+                vec![one_gate(Gate::X, 1), one_gate(Gate::Ry(0.2), 2)],
+            );
+        }
+        circuit.add_gate(Gate::Cx, &[2, 0]);
+        circuit.add_gate(Gate::Ry(1.1), &[0]);
+        circuit.add_gate(Gate::H, &[2]);
+        circuit.add_measure(1, 1);
+        circuit.add_measure(2, 2);
+        circuit
+    }
+
+    fn clifford_circuit(regions: bool) -> Circuit {
+        let mut circuit = Circuit::new(3, 3);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::S, &[2]);
+        circuit.add_gate(Gate::H, &[2]);
+        circuit.add_measure(0, 0);
+        circuit.add_gate(Gate::Cx, &[1, 2]);
+        circuit.add_gate(Gate::H, &[1]);
+        if regions {
+            push_region(
+                &mut circuit,
+                vec![one_gate(Gate::X, 2), one_gate(Gate::H, 1)],
+            );
+        }
+        circuit.add_measure(1, 1);
+        circuit.add_measure(2, 2);
+        circuit
+    }
+
+    fn fingerprint(result: &ShotsResult) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for bits in result.shots.iter().chain(result.leaked.iter().flatten()) {
+            for &bit in bits {
+                hash = (hash ^ u64::from(bit)).wrapping_mul(0x0100_0000_01b3);
+            }
+            hash = (hash ^ 2).wrapping_mul(0x0100_0000_01b3);
+        }
+        hash
+    }
+
+    // Golden records from the per-event channel match, on every trajectory loop:
+    // flat and guarded slot layouts, with and without per-shot memory, on each
+    // backend that runs dense Kraus channels, then the Pauli frame replay and
+    // both grouped Pauli routes.
+    #[test]
+    fn every_channel_keeps_its_seeded_records() {
+        use crate::backend::factored::FactoredBackend;
+        use crate::backend::mps::MpsBackend;
+        use crate::backend::sparse::SparseBackend;
+        use crate::sim::ResolvedBackend;
+
+        type Factory = fn(u64) -> Box<dyn Backend>;
+        let backends: [(Factory, ResolvedBackend); 4] = [
+            (
+                |s| Box::new(StatevectorBackend::new(s)),
+                ResolvedBackend::Statevector,
+            ),
+            (|s| Box::new(MpsBackend::new(s, 16)), ResolvedBackend::Mps),
+            (
+                |s| Box::new(FactoredBackend::new(s)),
+                ResolvedBackend::Factored,
+            ),
+            (|s| Box::new(SparseBackend::new(s)), ResolvedBackend::Sparse),
+        ];
+        let shots = 96;
+        let seed = 0xDEAD_BEEF;
+        let slots = |circuit: &Circuit, regions: bool| {
+            if regions {
+                circuit.noise_slot_count()
+            } else {
+                circuit.instructions.len()
+            }
+        };
+        let mut prints = Vec::new();
+        for regions in [false, true] {
+            let circuit = mixed_circuit(regions);
+            for memory in [false, true] {
+                let noise =
+                    cycled_model(&circuit, slots(&circuit, regions), &every_channel(memory));
+                noise.validate_for(&circuit).unwrap();
+                for (factory, route) in backends {
+                    let run = |force_serial| {
+                        run_trajectories(
+                            factory,
+                            &circuit,
+                            &noise,
+                            shots,
+                            seed,
+                            force_serial,
+                            route,
+                        )
+                        .unwrap()
+                    };
+                    let serial = run(true);
+                    assert_eq!(run(false).shots, serial.shots);
+                    prints.push(fingerprint(&serial));
+                }
+            }
+        }
+
+        for regions in [false, true] {
+            let circuit = clifford_circuit(regions);
+            let noise = cycled_model(&circuit, slots(&circuit, regions), &pauli_channels(1.0));
+            noise.validate_for(&circuit).unwrap();
+            let brute = crate::sim::noise::run_shots_noisy_brute_with(
+                |s| Box::new(crate::backend::stabilizer::StabilizerBackend::new(s)),
+                &circuit,
+                &noise,
+                shots,
+                seed,
+            )
+            .unwrap();
+            prints.push(fingerprint(&brute));
+        }
+
+        let limits = ResolvedLimits::process_default();
+        let terminal = grouped_circuit(4);
+        let mut noise = cycled_model(&terminal, terminal.instructions.len(), &pauli_channels(0.1));
+        let first_measure = terminal.num_qubits * 4 + terminal.num_qubits - 1;
+        for events in &mut noise.after_gate[first_measure..] {
+            events.clear();
+        }
+        let groups = PauliGroups::sample(&terminal, &noise, shots, seed).unwrap();
+        let grouped = run_pauli_groups(
+            &groups,
+            &terminal,
+            &noise,
+            seed,
+            None,
+            ResolvedBackend::Statevector,
+            &limits,
+        )
+        .unwrap();
+        prints.push(fingerprint(&grouped));
+
+        let mid = clifford_circuit(false);
+        let noise = cycled_model(&mid, mid.instructions.len(), &pauli_channels(0.1));
+        let groups = PauliGroups::sample_replayed(&mid, &noise, shots, seed).unwrap();
+        let replayed = run_replayed_groups(
+            &groups,
+            &mid,
+            &noise,
+            seed,
+            ResolvedBackend::Statevector,
+            &limits,
+        )
+        .unwrap();
+        prints.push(fingerprint(&replayed));
+
+        let [flat, flat_memory, guarded, guarded_memory] = [
+            2165866839194561914,
+            2435124084252643758,
+            2039674417054972793,
+            16645300680079721348,
+        ];
+        let mut expected = Vec::new();
+        for print in [flat, flat_memory, guarded, guarded_memory] {
+            expected.extend([print; 4]);
+        }
+        expected.extend([
+            11151965011361772201,
+            448741705247321696,
+            4716965702601468798,
+            3930197763577050471,
+        ]);
+        assert_eq!(prints, expected);
     }
 }

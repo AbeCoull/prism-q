@@ -4248,7 +4248,7 @@ pub(crate) fn run_shots_with_noise(
                     context.clone(),
                 );
             }
-            return noise::run_shots_noisy(circuit, noise_model, num_shots, seed);
+            return noise::run_validated_shots_noisy(circuit, noise_model, num_shots, seed);
         }
         NoisyRoute::Trajectory(plan) => plan,
     };

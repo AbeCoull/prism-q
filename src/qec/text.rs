@@ -129,6 +129,25 @@ impl QecProgram {
                     }
                     w.push('\n');
                 }
+                QecOp::CorrelatedError { branches } => {
+                    for (i, branch) in branches.iter().enumerate() {
+                        let name = if i == 0 { "E" } else { "ELSE_CORRELATED_ERROR" };
+                        write!(w, "{name}({})", branch.probability).expect("String write");
+                        for term in &branch.terms {
+                            w.push(' ');
+                            write_product(w, std::slice::from_ref(term));
+                        }
+                        w.push('\n');
+                    }
+                }
+                QecOp::HeraldedErase { probability, qubit } => {
+                    writeln!(w, "HERALDED_ERASE({probability}) {qubit}").expect("String write");
+                    records += 1;
+                }
+                QecOp::Pad { value } => {
+                    writeln!(w, "MPAD {}", u8::from(*value)).expect("String write");
+                    records += 1;
+                }
                 QecOp::Tick => w.push_str("TICK\n"),
                 QecOp::Feedforward { .. } => {
                     return Err(PrismError::InvalidParameter {
@@ -156,6 +175,8 @@ fn gate_name(gate: &Gate) -> Result<&'static str> {
         Gate::Sdg => "S_DAG",
         Gate::T => "T",
         Gate::Tdg => "T_DAG",
+        Gate::SX => "SQRT_X",
+        Gate::SXdg => "SQRT_X_DAG",
         Gate::Cx => "CX",
         Gate::Cz => "CZ",
         _ => {
@@ -176,6 +197,11 @@ fn max_qubit(op: &QecOp) -> Option<usize> {
         QecOp::MeasurePauliProduct { terms } | QecOp::ExpectationValue { terms, .. } => {
             terms.iter().map(|term| term.qubit).max()
         }
+        QecOp::CorrelatedError { branches } => branches
+            .iter()
+            .flat_map(|branch| branch.terms.iter().map(|term| term.qubit))
+            .max(),
+        QecOp::HeraldedErase { qubit, .. } => Some(*qubit),
         _ => None,
     }
 }

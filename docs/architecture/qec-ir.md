@@ -117,14 +117,34 @@ subset: `H`, `S`, `S_DAG`, `T`, `T_DAG`,
 `OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, the Pauli-noise instructions
 (`X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1`, `DEPOLARIZE2`, `PAULI_CHANNEL_1`,
 `PAULI_CHANNEL_2`), `TICK`,
-`QUBIT_COORDS`, `SHIFT_COORDS`, and flattened `REPEAT` blocks. The parser
+`QUBIT_COORDS`, `SHIFT_COORDS`, flattened `REPEAT` blocks, and the instructions
+below, which lower onto the same ops. The parser
 resolves `rec[-k]` references while building the program. Numeric arguments on
 basis measurements, such as `M(0.001)`, lower to pre-measurement Pauli flips
-that affect the measurement record.
+that affect the measurement record. Inverted (`!`) targets are rejected.
+
+| Instruction | Lowering |
+| --- | --- |
+| `SQRT_X` / `SQRT_X_DAG` | `Gate::SX` / `Gate::SXdg`, the `+pi/2` and `-pi/2` X rotations. |
+| `SQRT_Y` / `SQRT_Y_DAG` | `S_DAG`, `SQRT_X` (or `SQRT_X_DAG`), `S` on the qubit. |
+| `SQRT_Z` / `SQRT_Z_DAG` | `S` / `S_DAG`. |
+| `C_XYZ` | `S_DAG`, `H`: the X -> Y -> Z -> X axis cycle. |
+| `C_ZYX` | `H`, `S`: the inverse cycle, X -> Z -> Y -> X. |
+| `CY a b` | `S_DAG b`, `CX a b`, `S b`. |
+| `SWAP a b` | `CX a b`, `CX b a`, `CX a b`. |
+| `ISWAP a b` / `ISWAP_DAG a b` | `S a`, `S b` (`S_DAG` for the dagger), `CZ a b`, then the three `CX` of a swap. |
+| `CXSWAP a b` | `CX b a`, `CX a b` (a `CX a b` followed by a swap). |
+| `SWAPCX a b` | `CX a b`, `CX b a` (a swap followed by `CX a b`). |
+| `MXX` / `MYY` / `MZZ a b ...` | A `MeasurePauliProduct` over each pair, one record per pair; no measurement-error argument. |
+| `MPAD v ...` | A `Pad` op per value, each one constant record. |
+| `E(p)` / `CORRELATED_ERROR(p) P ...` | A `CorrelatedError` with one branch: the Pauli product fires with probability `p`. |
+| `ELSE_CORRELATED_ERROR(p) P ...` | Appends a branch to the chain it directly follows, fired only when no earlier branch fired. |
+| `HERALDED_ERASE(p) q ...` | A `HeraldedErase` op per target: one record, 1 when the qubit is erased, with a uniformly random Pauli applied on erasure. |
 
 `QecProgram::to_text` writes the same subset back, and parsing its output
 reproduces the op list. Consecutive gates, measurements, resets, and `MPP`
-products of one kind share a line, so `MR` comes back as `M` followed by `R`.
+products of one kind share a line, so `MR` comes back as `M` followed by `R`,
+`MZZ` as `MPP`, `SWAP` as three `CX`, and `SQRT_Y` as `S_DAG`, `SQRT_X`, `S`.
 Record references print as `rec[-k]`, which the parser resolves to absolute
 indices, so a program built with lookbacks reads back with absolute references
 to the same records. A leading `QUBIT_COORDS` line keeps the register width

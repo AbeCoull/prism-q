@@ -9,8 +9,8 @@ use num_complex::Complex64;
 use prism_q::circuit::GuardedRegion;
 use prism_q::{
     Circuit, ClassicalCondition, Gate, Instruction, McuData, NoiseChannel, NoiseEvent, NoiseModel,
-    Parameters, PauliAxis, PauliObservable, PauliTerm, QecBasis, QecNoise, QecOp, QecOptions,
-    QecPauli, QecProgram, QecRecordRef, ReadoutError, SaveSpec,
+    Parameters, PauliAxis, PauliObservable, PauliTerm, QecBasis, QecCorrelatedBranch, QecNoise,
+    QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef, ReadoutError, SaveSpec,
 };
 use smallvec::SmallVec;
 
@@ -1207,6 +1207,23 @@ fn write_ops(w: &mut Writer, ops: &[QecOp]) -> PyPrismResult<()> {
                 w.usizes(targets);
             }
             QecOp::Tick => w.u8(10),
+            QecOp::CorrelatedError { branches } => {
+                w.u8(11);
+                w.usize(branches.len());
+                for branch in branches {
+                    w.f64(branch.probability);
+                    write_paulis(w, &branch.terms);
+                }
+            }
+            QecOp::HeraldedErase { probability, qubit } => {
+                w.u8(12);
+                w.f64(*probability);
+                w.usize(*qubit);
+            }
+            QecOp::Pad { value } => {
+                w.u8(13);
+                w.bool(*value);
+            }
             other => {
                 return Err(invalid(format!("QEC op {other:?} has no pickle encoding")));
             }
@@ -1262,6 +1279,22 @@ fn read_ops(r: &mut Reader<'_>) -> PyPrismResult<Vec<QecOp>> {
                 targets: r.usizes()?,
             },
             10 => QecOp::Tick,
+            11 => {
+                let len = r.len(1)?;
+                let mut branches = Vec::with_capacity(len);
+                for _ in 0..len {
+                    branches.push(QecCorrelatedBranch {
+                        probability: r.f64()?,
+                        terms: read_paulis(r)?,
+                    });
+                }
+                QecOp::CorrelatedError { branches }
+            }
+            12 => QecOp::HeraldedErase {
+                probability: r.f64()?,
+                qubit: r.usize()?,
+            },
+            13 => QecOp::Pad { value: r.bool()? },
             other => return Err(bad_tag("QEC op", other)),
         });
     }

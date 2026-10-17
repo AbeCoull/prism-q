@@ -67,6 +67,7 @@ mod qec_observable_reroute;
 mod qec_pauli_channels;
 mod qec_seeded_records;
 mod qec_t_correctness;
+mod qec_text_instructions;
 mod qec_text_roundtrip;
 mod qft_expansion_regression;
 mod qft_recognition;

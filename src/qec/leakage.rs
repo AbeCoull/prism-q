@@ -14,7 +14,9 @@ use rand_chacha::ChaCha8Rng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use super::noise::{Frame, QecDeferredChannel, QecDeferredNoiseEvent, QecDeferredProgram};
+use super::noise::{
+    Frame, QecDeferredChannel, QecDeferredNoiseEvent, QecDeferredProgram, QecProductTable,
+};
 use super::{QecNoise, QecProgram};
 use crate::error::{PrismError, Result};
 use crate::sim::compiled::rng::Xoshiro256PlusPlus;
@@ -219,6 +221,7 @@ impl QecLeakageSampler {
                         event,
                         shots,
                         &deferred.pair_tables,
+                        &deferred.product_tables,
                         &mut rng,
                         |alias, shot| flag(&leak, words, alias, shot),
                         |alias, shot, letter| {
@@ -315,11 +318,13 @@ fn for_each_firing(
 
 /// Draw one Pauli annotation, calling `flip(alias, shot, letter)` with letter 1, 2, 3
 /// for X, Y, Z. A firing that names a qubit `leaked` in that shot is dropped, as the
-/// trajectory engines skip an event naming a leaked qubit.
+/// trajectory engines skip an event naming a leaked qubit; a product branch drops only
+/// its letters on leaked qubits.
 fn apply_pauli_event(
     event: &QecDeferredNoiseEvent,
     shots: usize,
     pair_tables: &[[f64; 15]],
+    product_tables: &[QecProductTable],
     rng: &mut Xoshiro256PlusPlus,
     leaked: impl Fn(usize, usize) -> bool,
     mut flip: impl FnMut(usize, usize, usize),
@@ -372,6 +377,25 @@ fn apply_pauli_event(
                     }
                 });
             }
+        }
+        QecDeferredChannel::Products { p, table } => {
+            let product = &product_tables[table as usize];
+            for_each_firing(p, shots, rng, |shot, rng| {
+                let mut r = rng.next_f64() * p;
+                let branch = product
+                    .rates
+                    .iter()
+                    .position(|&rate| {
+                        r -= rate;
+                        r < 0.0
+                    })
+                    .unwrap_or(product.rates.len() - 1);
+                for (&alias, &letter) in event.targets.iter().zip(product.branch_letters(branch)) {
+                    if letter != 0 && !leaked(alias, shot) {
+                        flip(alias, shot, letter as usize);
+                    }
+                }
+            });
         }
     }
 }

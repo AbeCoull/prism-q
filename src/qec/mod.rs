@@ -107,6 +107,14 @@ impl QecPauli {
     }
 }
 
+/// One branch of a [`QecOp::CorrelatedError`] chain.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QecCorrelatedBranch {
+    /// Probability that the branch fires, given that no earlier branch of its chain did.
+    pub probability: f64,
+    pub terms: Vec<QecPauli>,
+}
+
 /// Reference to a previous measurement record.
 ///
 /// A lookback counts back from the records that precede the referencing op, so
@@ -334,8 +342,42 @@ pub enum QecOp {
         channel: QecNoise,
         targets: Vec<usize>,
     },
+    /// Correlated Pauli-product error, `E`/`CORRELATED_ERROR` with its
+    /// `ELSE_CORRELATED_ERROR` chain: branch `i` fires with its probability only when no
+    /// earlier branch fired, so at most one branch's terms are applied.
+    CorrelatedError { branches: Vec<QecCorrelatedBranch> },
+    /// Heralded erasure: with probability `probability`, apply a uniformly random Pauli
+    /// (identity included) to `qubit` and record 1; otherwise record 0. Produces one
+    /// record.
+    HeraldedErase { probability: f64, qubit: usize },
+    /// Constant measurement record holding `value`. Produces one record.
+    Pad { value: bool },
     /// Scheduling separator with no semantic effect, kept for the text format.
     Tick,
+}
+
+impl QecOp {
+    /// True for a noise op that can fire: a Pauli annotation, correlated error, or
+    /// heralded erasure with a nonzero probability.
+    pub(crate) fn is_active_noise(&self) -> bool {
+        match self {
+            Self::Noise { channel, .. } => channel.probability() > 0.0,
+            Self::CorrelatedError { branches } => branches.iter().any(|b| b.probability > 0.0),
+            Self::HeraldedErase { probability, .. } => *probability > 0.0,
+            _ => false,
+        }
+    }
+
+    /// True for the ops that append one measurement record.
+    pub(crate) fn produces_record(&self) -> bool {
+        matches!(
+            self,
+            Self::Measure { .. }
+                | Self::MeasurePauliProduct { .. }
+                | Self::HeraldedErase { .. }
+                | Self::Pad { .. }
+        )
+    }
 }
 
 /// Packed Pauli row for one QEC measurement record.
@@ -654,12 +696,10 @@ impl QecProgram {
 
     pub fn push_op(&mut self, op: QecOp) -> Result<()> {
         self.validate_op(&op, self.num_measurements)?;
-        match op {
-            QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => {
-                self.num_measurements += 1;
-            }
-            QecOp::Detector { .. } => self.num_detectors += 1,
-            _ => {}
+        if op.produces_record() {
+            self.num_measurements += 1;
+        } else if matches!(op, QecOp::Detector { .. }) {
+            self.num_detectors += 1;
         }
         self.ops.push(op);
         Ok(())
@@ -774,10 +814,7 @@ impl QecProgram {
     ) -> Result<()> {
         let mut next_measurement = 0;
         for op in &self.ops {
-            if matches!(
-                op,
-                QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. }
-            ) {
+            if op.produces_record() {
                 next_measurement += 1;
                 continue;
             }
@@ -912,10 +949,52 @@ impl QecProgram {
             QecOp::Noise { channel, targets } => {
                 validate_noise(channel, targets, self.num_qubits)?;
             }
-            QecOp::Tick => {}
+            QecOp::CorrelatedError { branches } => {
+                if branches.is_empty() {
+                    return Err(PrismError::InvalidParameter {
+                        message: "correlated error requires at least one branch".to_string(),
+                    });
+                }
+                if branches.len() > MAX_CORRELATED_BRANCHES {
+                    return Err(PrismError::InvalidParameter {
+                        message: format!(
+                            "correlated error chain admits at most {MAX_CORRELATED_BRANCHES} \
+                             branches"
+                        ),
+                    });
+                }
+                for branch in branches {
+                    validate_probability(branch.probability, "correlated error")?;
+                    if branch.terms.is_empty() {
+                        return Err(PrismError::InvalidParameter {
+                            message: "correlated error branch requires at least one Pauli term"
+                                .to_string(),
+                        });
+                    }
+                    validate_pauli_terms(&branch.terms, self.num_qubits)?;
+                }
+            }
+            QecOp::HeraldedErase { probability, qubit } => {
+                validate_probability(*probability, "heralded erasure")?;
+                validate_qubit(*qubit, self.num_qubits)?;
+            }
+            QecOp::Pad { .. } | QecOp::Tick => {}
         }
         Ok(())
     }
+}
+
+/// Branches a correlated error chain may hold: the compiled sampler packs a firing's
+/// branch into 16 bits.
+const MAX_CORRELATED_BRANCHES: usize = u16::MAX as usize;
+
+fn validate_probability(p: f64, label: &str) -> Result<()> {
+    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return Err(PrismError::InvalidParameter {
+            message: format!("{label} probability must be finite and in [0, 1]"),
+        });
+    }
+    Ok(())
 }
 
 fn qec_op_name(op: &QecOp) -> &'static str {
@@ -930,6 +1009,9 @@ fn qec_op_name(op: &QecOp) -> &'static str {
         QecOp::Postselect { .. } => "POSTSELECT",
         QecOp::Feedforward { .. } => "FEEDFORWARD",
         QecOp::Noise { .. } => "noise",
+        QecOp::CorrelatedError { .. } => "E",
+        QecOp::HeraldedErase { .. } => "HERALDED_ERASE",
+        QecOp::Pad { .. } => "MPAD",
         QecOp::Tick => "TICK",
     }
 }
@@ -986,12 +1068,22 @@ pub fn compile_qec_program_rows(program: &QecProgram) -> Result<QecCompiledRows>
                         .to_string(),
                 });
             }
+            QecOp::HeraldedErase { .. } | QecOp::Pad { .. } => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "QEC row compiler".to_string(),
+                    reason: format!(
+                        "QEC row compilation has no row representation for `{}`; \
+                         use `run_qec_program`",
+                        qec_op_name(op)
+                    ),
+                });
+            }
             QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }
             | QecOp::Postselect { .. }
             | QecOp::Tick => {}
-            QecOp::Noise { channel, .. } if channel.probability() == 0.0 => {}
-            QecOp::Noise { .. } => {
+            QecOp::Noise { .. } | QecOp::CorrelatedError { .. } if !op.is_active_noise() => {}
+            QecOp::Noise { .. } | QecOp::CorrelatedError { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC row compiler".to_string(),
                     reason: "QEC row compilation does not support active noise annotations yet"
@@ -1125,6 +1217,16 @@ pub(crate) fn validate_qec_exp_val_placement(program: &QecProgram) -> Result<()>
                     return Err(terminal_violation(channel.name()));
                 }
             }
+            QecOp::CorrelatedError { .. } if op.is_active_noise() => {
+                if seen_exp_val {
+                    return Err(terminal_violation("E"));
+                }
+            }
+            QecOp::HeraldedErase { .. } | QecOp::Pad { .. } => {
+                if seen_exp_val {
+                    return Err(terminal_violation(qec_op_name(op)));
+                }
+            }
             QecOp::Feedforward { .. } => {
                 if seen_exp_val {
                     return Err(terminal_violation("FEEDFORWARD"));
@@ -1136,6 +1238,7 @@ pub(crate) fn validate_qec_exp_val_placement(program: &QecProgram) -> Result<()>
             | QecOp::ObservableInclude { .. }
             | QecOp::Postselect { .. }
             | QecOp::Noise { .. }
+            | QecOp::CorrelatedError { .. }
             | QecOp::Tick => {}
         }
     }
@@ -1160,14 +1263,17 @@ pub(super) fn append_mpp_parity_rotations<S: GateSink>(
     append_parity_rotations(sink, &qec_terms_to_pauli(terms), scratch);
 }
 
-/// Qubit count of a lowered program, including the `MPP` scratch qubit at index
-/// `program.num_qubits()` when the program measures any Pauli product.
+/// Qubit count of a lowered program, including the scratch qubit at index
+/// `program.num_qubits()` when the program measures any Pauli product, heralds an
+/// erasure, or pads a record.
 pub(super) fn qec_lowered_num_qubits(program: &QecProgram) -> usize {
-    let has_mpp = program
-        .ops()
-        .iter()
-        .any(|op| matches!(op, QecOp::MeasurePauliProduct { .. }));
-    program.num_qubits() + usize::from(has_mpp)
+    let needs_scratch = program.ops().iter().any(|op| {
+        matches!(
+            op,
+            QecOp::MeasurePauliProduct { .. } | QecOp::HeraldedErase { .. } | QecOp::Pad { .. }
+        )
+    });
+    program.num_qubits() + usize::from(needs_scratch)
 }
 
 pub(super) fn qec_non_clifford_error(gate: &Gate) -> PrismError {

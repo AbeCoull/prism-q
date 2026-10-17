@@ -206,9 +206,21 @@ def test_feedforward_corrects_on_the_reference_path():
     assert not measurements[:, 1].any()
 
 
-def test_feedforward_needs_the_reference_path():
+def test_feedforward_pauli_body_runs_compiled():
+    measurements = _corrected_bell_pair().run().measurements
+    assert 0 < measurements[:, 0].sum() < 256
+    assert not measurements[:, 1].any()
+
+
+def test_feedforward_non_pauli_body_needs_the_reference_path():
+    qp = QecProgram(2)
+    record = qp.measure_z(0)
+    body = QecProgram(2)
+    body.push_gate(prism_q.Gate.h(), [1])
+    qp.feedforward([QecRecordRef.absolute(record)], True, body)
+    qp.measure_z(1)
     with pytest.raises(prism_q.PrismError, match="run_qec_program_reference"):
-        _corrected_bell_pair().run()
+        qp.run()
 
 
 def test_feedforward_body_takes_gates_and_resets_only():

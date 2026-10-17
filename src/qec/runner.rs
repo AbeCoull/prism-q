@@ -5,7 +5,8 @@
 #[cfg(feature = "bench-internal")]
 use super::noise::QecCompiledNoiseSampler;
 use super::noise::{
-    QecParityNoise, compile_qec_noisy_sampler, lower_qec_program_to_deferred_circuit,
+    QecParityNoise, compile_qec_noisy_sampler, feedforward_body_letter, feedforward_body_rejection,
+    lower_qec_program_to_deferred_circuit,
 };
 #[cfg(test)]
 use super::noise::{compile_qec_parity_noise, compile_qec_parity_noise_windows};
@@ -36,6 +37,14 @@ use rayon::prelude::*;
 /// and measurements, `MPP`, detectors, observables, and postselection. Active Pauli noise
 /// compiles into packed sensitivity rows XORed onto the noiseless records.
 ///
+/// A `FEEDFORWARD` whose body holds only Pauli gates (`X`, `Y`, `Z`, `I`) samples here
+/// too. Its Pauli flips a fixed set of later records, so once noise lands, each
+/// correction in op order XORs that set into the shots where its predicate holds; a
+/// predicate reads records that earlier corrections flipped. Detectors, observables,
+/// and postselection read the corrected records. A body with any other gate or a
+/// reset is rejected, and [`run_qec_program_reference`] runs it; a feed-forward in a
+/// program with leakage annotations is rejected outright.
+///
 /// Programs with `EXP_VAL` ops are routed instead, with estimates in
 /// [`QecSampleResult::expectation_values`]:
 /// - With active noise, a program with no measurement records or postselection that fits
@@ -53,9 +62,10 @@ use rayon::prelude::*;
 ///   rejected, because it also leaves the qubit in the Z frame.
 /// - [`QecOptions::chunk_size`] bounds the per-batch shot count; with
 ///   `keep_measurements: false` peak memory stays at one chunk of records.
-/// - With `keep_measurements: false`, no postselection, and detectors and observables
-///   fixed in the noiseless circuit, detector and observable bits are sampled without
-///   measurement records, matching the record path bit for bit at the same seed.
+/// - With `keep_measurements: false`, no postselection or feed-forward, and detectors
+///   and observables fixed in the noiseless circuit, detector and observable bits are
+///   sampled without measurement records, matching the record path bit for bit at the
+///   same seed.
 ///
 /// Noise draws in fixed units of 8192 shots, each from its own stream of the seed, so
 /// seeded noise depends on neither `chunk_size` nor the thread count. Noiseless records
@@ -103,7 +113,7 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
             super::t_sampler::QecTStrategy::Auto,
         );
     }
-    let has_noise = validate_qec_compiled_program(program)?;
+    let (has_noise, has_feedforward) = validate_qec_compiled_program(program)?;
     let chunk_size = qec_runner_chunk_size(program.options())?;
     if program.has_leakage() {
         return run_qec_program_leaky(program, chunk_size);
@@ -117,7 +127,7 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
         return qec_result_from_measurements(program, measurements);
     }
 
-    if qec_records_unobserved(program) {
+    if !has_feedforward && qec_records_unobserved(program) {
         let (projection, deferred) = qec_join(
             || {
                 Ok(QecParityProjection::new(
@@ -140,7 +150,7 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
             );
         }
     }
-    if has_noise {
+    if has_noise || has_feedforward {
         let mut sampler = compile_qec_noisy_sampler(program)?;
         let shots = program.options().shots;
         if chunk_size >= shots {
@@ -335,7 +345,7 @@ pub struct QecProfiledCounts {
 /// Compile a native QEC program into a staged sampler for benchmarks.
 #[cfg(feature = "bench-internal")]
 pub fn compile_qec_profiled_sampler(program: &QecProgram) -> Result<QecProfiledSampler> {
-    let has_noise = validate_qec_compiled_program(program)?;
+    let (has_noise, has_feedforward) = validate_qec_compiled_program(program)?;
     qec_runner_chunk_size(program.options())?;
 
     let detector_rows = program.detector_rows()?;
@@ -344,7 +354,7 @@ pub fn compile_qec_profiled_sampler(program: &QecProgram) -> Result<QecProfiledS
     let num_measurements = program.num_measurements();
     let sampler = if num_measurements == 0 {
         QecProfiledMeasurementSampler::Empty
-    } else if has_noise {
+    } else if has_noise || has_feedforward {
         QecProfiledMeasurementSampler::Noisy(compile_qec_noisy_sampler(program)?)
     } else {
         let circuit = lower_qec_program_to_clifford_circuit(program)?;
@@ -384,7 +394,7 @@ impl QecProfiledSampler {
         self.postselection_rows.len()
     }
 
-    /// Whether active Pauli-noise rows were compiled.
+    /// Whether active Pauli-noise or feed-forward rows were compiled.
     pub fn has_noise(&self) -> bool {
         matches!(self.sampler, QecProfiledMeasurementSampler::Noisy(_))
     }
@@ -408,7 +418,8 @@ impl QecProfiledSampler {
         }
     }
 
-    /// Apply compiled Pauli-noise rows; a noiseless sampler returns `measurements` as is.
+    /// Apply compiled Pauli-noise and feed-forward rows; a sampler without either returns
+    /// `measurements` as is.
     pub fn apply_noise_to_measurements(
         &mut self,
         measurements: PackedShots,
@@ -667,7 +678,7 @@ fn build_feedforward_regions(program: &QecProgram, num_qubits: usize) -> Result<
     let mut next_record = 0usize;
     for op in program.ops() {
         match op {
-            QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => next_record += 1,
+            _ if op.produces_record() => next_record += 1,
             QecOp::Feedforward {
                 records,
                 expected,
@@ -727,17 +738,6 @@ fn feedforward_region(
             message: "feed-forward body is empty".to_string(),
         }
     })
-}
-
-/// The compiled sampler's map is fixed before sampling starts, so a
-/// record-conditioned branch cannot route through it.
-fn qec_feedforward_rejection() -> PrismError {
-    PrismError::IncompatibleBackend {
-        backend: "QEC compiled runner".to_string(),
-        reason: "the compiled QEC sampler evaluates a static affine map, which `FEEDFORWARD` \
-                 makes depend on the sample; `run_qec_program_reference` executes such programs"
-            .to_string(),
-    }
 }
 
 fn qec_result_from_measurements(
@@ -1384,8 +1384,11 @@ fn add_qec_logical_error_counts(observables: &PackedShots, counts: &mut [u64]) {
     }
 }
 
-fn validate_qec_compiled_program(program: &QecProgram) -> Result<bool> {
+/// Whether the program carries active noise and Pauli feed-forward, rejecting what the
+/// packed path cannot run.
+fn validate_qec_compiled_program(program: &QecProgram) -> Result<(bool, bool)> {
     let mut has_noise = false;
+    let mut has_feedforward = false;
     for op in program.ops() {
         match op {
             QecOp::Gate { gate, .. } if !gate.is_clifford() => {
@@ -1403,13 +1406,24 @@ fn validate_qec_compiled_program(program: &QecProgram) -> Result<bool> {
             QecOp::Noise { .. } | QecOp::CorrelatedError { .. } | QecOp::HeraldedErase { .. } => {
                 has_noise |= op.is_active_noise();
             }
-            QecOp::Feedforward { .. } => {
-                return Err(qec_feedforward_rejection());
+            QecOp::Feedforward { body, .. } => {
+                if let Some(inner) = body.iter().find(|op| feedforward_body_letter(op).is_none()) {
+                    return Err(feedforward_body_rejection(inner));
+                }
+                has_feedforward = true;
             }
             _ => {}
         }
     }
-    Ok(has_noise)
+    if has_feedforward && program.has_leakage() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "QEC compiled runner".to_string(),
+            reason: "the leakage sampler has no feed-forward stage, and no runner executes \
+                     `FEEDFORWARD` alongside leakage annotations"
+                .to_string(),
+        });
+    }
+    Ok((has_noise, has_feedforward))
 }
 
 fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit> {
@@ -1453,7 +1467,10 @@ fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit
                 scratch_needs_reset = true;
             }
             QecOp::ExpectationValue { .. } | QecOp::Feedforward { .. } => {
-                unreachable!("validate_qec_compiled_program rejects EXP_VAL and feedforward")
+                unreachable!(
+                    "validate_qec_compiled_program rejects EXP_VAL, and feed-forward programs \
+                     take the deferred record sampler"
+                )
             }
             QecOp::Noise { .. }
             | QecOp::CorrelatedError { .. }

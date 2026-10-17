@@ -98,6 +98,7 @@ CPU twin.
 | `qec_clifford_runner` | Packed native Clifford QEC execution |
 | `qec_noisy_runner` | Packed native QEC execution with Pauli-noise rows |
 | `qec_noisy_runner_split` | Parse, compile, sample, noise, detector, postselection, logical count, and total QEC timings |
+| `qec_feedforward_runner` | Packed native QEC execution of a repetition memory whose Pauli feed-forward corrections land as record flips |
 
 ### Decoder benchmarks (qec_decoder)
 

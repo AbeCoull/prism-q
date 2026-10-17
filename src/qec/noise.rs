@@ -158,6 +158,19 @@ pub(super) struct QecDeferredProgram {
     /// Leakage annotations in program order, which only
     /// [`QecLeakageSampler`](super::leakage::QecLeakageSampler) reads.
     pub(super) leak_events: Vec<QecDeferredLeakEvent>,
+    /// Pauli feed-forward corrections in program order, empty unless the lowering
+    /// admitted them.
+    pub(super) feedforwards: Vec<QecDeferredFeedforward>,
+}
+
+/// A feed-forward whose body is a Pauli product: the Pauli lands on the live aliases at
+/// `position` in the shots where the parity over `condition` XOR `invert` is one.
+pub(super) struct QecDeferredFeedforward {
+    position: usize,
+    condition: Vec<usize>,
+    invert: bool,
+    /// `(alias, letter)` with letter 1 X, 2 Y, 3 Z.
+    paulis: Vec<(u32, u8)>,
 }
 
 impl QecDeferredProgram {
@@ -185,7 +198,26 @@ impl QecDeferredProgram {
 pub(super) struct QecCompiledNoiseSampler {
     noiseless: CompiledSampler,
     noise: Option<QecRecordNoise>,
+    feedforward: Option<QecFeedforwardFlips>,
     num_measurements: usize,
+}
+
+/// Record flips of a program's Pauli feed-forward corrections, applied in op order
+/// once noise has landed.
+///
+/// A Pauli fired at a position flips the same later records whatever shot it fires
+/// in, so correction `k` XORs `parity(condition) ^ invert` into each record of
+/// `flips`. Every condition record precedes the correction and every flipped record
+/// follows it, so applying corrections in op order lets a condition read records an
+/// earlier correction flipped.
+pub(super) struct QecFeedforwardFlips {
+    corrections: Vec<QecFeedforwardCorrection>,
+}
+
+struct QecFeedforwardCorrection {
+    condition: Vec<usize>,
+    invert: bool,
+    flips: Vec<usize>,
 }
 
 /// Kept events of a program whose records are sampled, applied per unit as a Pauli
@@ -492,8 +524,8 @@ impl QecCompiledNoiseSampler {
         self.noiseless.try_sample_bulk_packed(num_shots)
     }
 
-    /// Apply noise to `measurements`, which hold shots from `first_shot` of a
-    /// `total_shots`-shot run.
+    /// Apply noise, then feed-forward corrections, to `measurements`, which hold shots
+    /// from `first_shot` of a `total_shots`-shot run.
     pub(super) fn apply_noise_to_measurements(
         &self,
         measurements: PackedShots,
@@ -510,16 +542,21 @@ impl QecCompiledNoiseSampler {
                 ),
             });
         }
-        let Some(noise) = &self.noise else {
+        if self.noise.is_none() && self.feedforward.is_none() {
             return Ok(measurements);
-        };
+        }
         if num_shots == 0 || self.num_measurements == 0 {
             return Ok(measurements);
         }
 
         debug_assert!(first_shot + num_shots <= total_shots);
         let mut data = measurements.into_meas_major_data();
-        noise.apply(&mut data, num_shots, first_shot, total_shots);
+        if let Some(noise) = &self.noise {
+            noise.apply(&mut data, num_shots, first_shot, total_shots);
+        }
+        if let Some(feedforward) = &self.feedforward {
+            feedforward.apply(&mut data, num_shots);
+        }
         Ok(PackedShots::from_meas_major(
             data,
             num_shots,
@@ -535,16 +572,8 @@ impl QecRecordNoise {
         if events.is_empty() {
             return Ok(None);
         }
+        let (aliases_by_last_use, record_of_alias) = record_walk_order(&deferred);
         let gate_count = deferred.gates.len();
-        let num_aliases = deferred.num_aliases;
-        let mut aliases_by_last_use: Vec<u32> = (0..num_aliases as u32)
-            .filter(|&alias| deferred.last_use[alias as usize].is_some())
-            .collect();
-        aliases_by_last_use.sort_by_key(|&alias| deferred.last_use[alias as usize]);
-        let mut record_of_alias = vec![u32::MAX; num_aliases];
-        for (record, &alias) in deferred.measurement_qubits.iter().enumerate() {
-            record_of_alias[alias] = record as u32;
-        }
         Ok(Some(Self {
             deferred,
             events,
@@ -741,6 +770,222 @@ impl QecRecordNoise {
             }
         }
     }
+}
+
+/// Aliases a forward walk meets, ascending by [`QecDeferredProgram::last_use`], and the
+/// record each alias holds (`u32::MAX` for none).
+fn record_walk_order(deferred: &QecDeferredProgram) -> (Vec<u32>, Vec<u32>) {
+    let num_aliases = deferred.num_aliases;
+    let mut aliases_by_last_use: Vec<u32> = (0..num_aliases as u32)
+        .filter(|&alias| deferred.last_use[alias as usize].is_some())
+        .collect();
+    aliases_by_last_use.sort_by_key(|&alias| deferred.last_use[alias as usize]);
+    let mut record_of_alias = vec![u32::MAX; num_aliases];
+    for (record, &alias) in deferred.measurement_qubits.iter().enumerate() {
+        record_of_alias[alias] = record as u32;
+    }
+    (aliases_by_last_use, record_of_alias)
+}
+
+/// Walk `frame` forward over the deferred gates from `start`. At each position,
+/// `inject(position, frame)` lands that position's Paulis, every alias whose last use
+/// it is leaves the frame (calling `land(record, x_row)` when it holds a record, whose
+/// flip is that X row), and then the gate there pushes the frame on. A walk may start
+/// past 0 only when nothing is injected before `start`, since the frame is then empty.
+#[inline(always)]
+fn walk_record_frame(
+    deferred: &QecDeferredProgram,
+    aliases_by_last_use: &[u32],
+    record_of_alias: &[u32],
+    frame: &mut Frame,
+    start: usize,
+    mut inject: impl FnMut(usize, &mut Frame),
+    mut land: impl FnMut(usize, &[u64]),
+) {
+    let gate_count = deferred.gates.len();
+    let mut next_alias = aliases_by_last_use
+        .partition_point(|&alias| deferred.last_use[alias as usize] < Some(start));
+    let mut slots = [0usize; 2];
+    for position in start..=gate_count {
+        inject(position, frame);
+        while next_alias < aliases_by_last_use.len() {
+            let alias = aliases_by_last_use[next_alias] as usize;
+            if deferred.last_use[alias] != Some(position) {
+                break;
+            }
+            next_alias += 1;
+            if let Some(slot) = frame.release(alias) {
+                let record = record_of_alias[alias];
+                if record != u32::MAX {
+                    land(record as usize, frame.x_row(slot));
+                }
+                frame.clear(slot);
+            }
+        }
+        if position < gate_count {
+            let gate = &deferred.gates[position];
+            let targets = gate.targets();
+            for (slot, &alias) in slots.iter_mut().zip(targets) {
+                *slot = frame.slot(alias as usize);
+            }
+            frame.gate(&gate.gate, &slots[..targets.len()]);
+        }
+    }
+}
+
+/// Words of every record row the feed-forward pass holds at once: 256 words (2 KB) per
+/// row keep a block of a few hundred records in L2 while each correction reads its
+/// condition rows and flips its targets.
+const QEC_FEEDFORWARD_BLOCK_WORDS: usize = 256;
+
+/// Row words a feed-forward pass touches from which its blocks run on the pool.
+#[cfg(feature = "parallel")]
+const QEC_PARALLEL_FEEDFORWARD_WORDS: usize = 1 << 18;
+
+impl QecFeedforwardFlips {
+    /// `None` when no correction of the program can flip a record.
+    fn compile(deferred: &QecDeferredProgram) -> Option<Self> {
+        if deferred.feedforwards.is_empty() {
+            return None;
+        }
+        let (aliases_by_last_use, record_of_alias) = record_walk_order(deferred);
+        let batch_flips = |batch: &[QecDeferredFeedforward]| {
+            feedforward_batch_flips(deferred, &aliases_by_last_use, &record_of_alias, batch)
+        };
+        #[cfg(feature = "parallel")]
+        let batches: Vec<Vec<Vec<usize>>> = deferred
+            .feedforwards
+            .par_chunks(64)
+            .map(batch_flips)
+            .collect();
+        #[cfg(not(feature = "parallel"))]
+        let batches: Vec<Vec<Vec<usize>>> =
+            deferred.feedforwards.chunks(64).map(batch_flips).collect();
+        let flips = batches.into_iter().flatten();
+
+        let corrections: Vec<QecFeedforwardCorrection> = deferred
+            .feedforwards
+            .iter()
+            .zip(flips)
+            .filter(|(_, flips)| !flips.is_empty())
+            .map(|(feedforward, flips)| QecFeedforwardCorrection {
+                condition: feedforward.condition.clone(),
+                invert: feedforward.invert,
+                flips,
+            })
+            .collect();
+        (!corrections.is_empty()).then_some(Self { corrections })
+    }
+
+    /// Apply every correction to measurement-major `data` of `num_shots` shots, a block
+    /// of row words at a time.
+    fn apply(&self, data: &mut [u64], num_shots: usize) {
+        let s_words = num_shots.div_ceil(64);
+        let tail = match num_shots % 64 {
+            0 => u64::MAX,
+            bits => (1u64 << bits) - 1,
+        };
+        let num_blocks = s_words.div_ceil(QEC_FEEDFORWARD_BLOCK_WORDS);
+        let num_records = data.len() / s_words;
+        let mut blocks: Vec<Vec<&mut [u64]>> = (0..num_blocks)
+            .map(|_| Vec::with_capacity(num_records))
+            .collect();
+        for row in data.chunks_exact_mut(s_words) {
+            for (block, words) in blocks
+                .iter_mut()
+                .zip(row.chunks_mut(QEC_FEEDFORWARD_BLOCK_WORDS))
+            {
+                block.push(words);
+            }
+        }
+        let apply_block = |(index, rows): (usize, &mut Vec<&mut [u64]>)| {
+            self.apply_block(
+                rows,
+                if index + 1 == num_blocks {
+                    tail
+                } else {
+                    u64::MAX
+                },
+            );
+        };
+        #[cfg(feature = "parallel")]
+        if num_blocks > 1 {
+            let touched_rows: usize = self
+                .corrections
+                .iter()
+                .map(|correction| correction.condition.len() + correction.flips.len())
+                .sum();
+            if touched_rows * s_words >= QEC_PARALLEL_FEEDFORWARD_WORDS {
+                blocks.par_iter_mut().enumerate().for_each(apply_block);
+                return;
+            }
+        }
+        blocks.iter_mut().enumerate().for_each(apply_block);
+    }
+
+    /// Apply every correction to one block of record rows, `tail` masking the block's
+    /// last word.
+    #[inline(always)]
+    fn apply_block(&self, rows: &mut [&mut [u64]], tail: u64) {
+        let words = rows[0].len();
+        let mut fire = [0u64; QEC_FEEDFORWARD_BLOCK_WORDS];
+        let fire = &mut fire[..words];
+        for correction in &self.corrections {
+            fire.fill(if correction.invert { u64::MAX } else { 0 });
+            for &record in &correction.condition {
+                xor_words(fire, rows[record]);
+            }
+            fire[words - 1] &= tail;
+            if fire.iter().all(|&word| word == 0) {
+                continue;
+            }
+            for &record in &correction.flips {
+                xor_words(rows[record], fire);
+            }
+        }
+    }
+}
+
+/// The records each correction of `batch` (at most 64, positions ascending) flips: one
+/// forward frame walk from the first correction, with correction `k` of the batch
+/// injected as a fault in lane `k`.
+fn feedforward_batch_flips(
+    deferred: &QecDeferredProgram,
+    aliases_by_last_use: &[u32],
+    record_of_alias: &[u32],
+    batch: &[QecDeferredFeedforward],
+) -> Vec<Vec<usize>> {
+    debug_assert!(!batch.is_empty() && batch.len() <= 64);
+    let mut flips = vec![Vec::new(); batch.len()];
+    let mut frame = Frame::new(1, deferred.num_aliases);
+    let mut next = 0usize;
+    walk_record_frame(
+        deferred,
+        aliases_by_last_use,
+        record_of_alias,
+        &mut frame,
+        batch[0].position,
+        |position, frame| {
+            while next < batch.len() && batch[next].position == position {
+                for &(alias, letter) in &batch[next].paulis {
+                    let slot = frame.slot(alias as usize);
+                    frame.flip(slot, next, letter as usize);
+                }
+                next += 1;
+            }
+        },
+        |record, x_row| {
+            let mut lanes = x_row[0];
+            while lanes != 0 {
+                flips[lanes.trailing_zeros() as usize].push(record);
+                lanes &= lanes - 1;
+            }
+        },
+    );
+    for record_list in &mut flips {
+        record_list.sort_unstable();
+    }
+    flips
 }
 
 /// Pauli frame of one unit's shots: a packed X row and Z row per live alias, one bit
@@ -1149,15 +1394,48 @@ pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompi
             "QEC record-noise sampler",
         ));
     }
-    let deferred = lower_qec_program_to_deferred_circuit(program)?;
+    let deferred = lower_qec_program_to_deferred_circuit_inner(program, false, true)?;
     let noiseless = compile_measurements(&deferred.to_circuit(), program.options().seed)?;
     let num_measurements = deferred.measurement_qubits.len();
+    let feedforward = QecFeedforwardFlips::compile(&deferred);
     let noise = QecRecordNoise::compile(deferred, program.options().seed)?;
     Ok(QecCompiledNoiseSampler {
         noiseless,
         noise,
+        feedforward,
         num_measurements,
     })
+}
+
+/// Frame letter (1 X, 2 Y, 3 Z, 0 identity) of a feed-forward body op the record path
+/// applies as flips, `None` for any other op.
+pub(super) fn feedforward_body_letter(op: &QecOp) -> Option<u8> {
+    match op {
+        QecOp::Gate { gate, .. } => match gate {
+            Gate::Id => Some(0),
+            Gate::X => Some(1),
+            Gate::Y => Some(2),
+            Gate::Z => Some(3),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Rejection of a feed-forward body op that is not a Pauli gate.
+pub(super) fn feedforward_body_rejection(op: &QecOp) -> PrismError {
+    let name = match op {
+        QecOp::Gate { gate, .. } => gate.name(),
+        other => super::qec_op_name(other),
+    };
+    PrismError::IncompatibleBackend {
+        backend: "QEC compiled runner".to_string(),
+        reason: format!(
+            "the compiled QEC sampler applies a `FEEDFORWARD` body as record flips, which is \
+             exact for Pauli gates (`X`, `Y`, `Z`, `I`) only, got `{name}`; \
+             `run_qec_program_reference` executes any body"
+        ),
+    }
 }
 
 /// Lower a measurement-free QEC program into a circuit plus the matching
@@ -1324,7 +1602,7 @@ fn pauli_channel_2_kraus(rates: &[f64; 15]) -> Vec<[[Complex64; 4]; 4]> {
 pub(super) fn lower_qec_program_to_deferred_circuit(
     program: &QecProgram,
 ) -> Result<QecDeferredProgram> {
-    lower_qec_program_to_deferred_circuit_inner(program, false)
+    lower_qec_program_to_deferred_circuit_inner(program, false, false)
 }
 
 /// Variant of [`lower_qec_program_to_deferred_circuit`] that admits non-Clifford
@@ -1333,12 +1611,16 @@ pub(super) fn lower_qec_program_to_deferred_circuit(
 pub(super) fn lower_qec_program_to_deferred_circuit_allowing_non_clifford(
     program: &QecProgram,
 ) -> Result<QecDeferredProgram> {
-    lower_qec_program_to_deferred_circuit_inner(program, true)
+    lower_qec_program_to_deferred_circuit_inner(program, true, false)
 }
 
+/// The deferred lowering. `allow_feedforward` admits Pauli feed-forward bodies into
+/// [`QecDeferredProgram::feedforwards`] for the record sampler; every other consumer
+/// rejects `FEEDFORWARD`.
 fn lower_qec_program_to_deferred_circuit_inner(
     program: &QecProgram,
     allow_non_clifford: bool,
+    allow_feedforward: bool,
 ) -> Result<QecDeferredProgram> {
     let base_qubits = qec_lowered_num_qubits(program);
     let scratch_qubit = program.num_qubits();
@@ -1355,6 +1637,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
     let mut pair_tables = Vec::new();
     let mut product_tables = Vec::new();
     let mut leak_events = Vec::new();
+    let mut feedforwards = Vec::new();
 
     for op in program.ops() {
         match op {
@@ -1529,12 +1812,45 @@ fn lower_qec_program_to_deferred_circuit_inner(
                 measured_aliases[scratch_alias] = true;
                 next_record += 1;
             }
+            QecOp::Feedforward {
+                records,
+                expected,
+                body,
+            } if allow_feedforward => {
+                let position = gates.len();
+                let mut paulis = Vec::with_capacity(body.len());
+                for inner in body {
+                    let (Some(letter), QecOp::Gate { targets, .. }) =
+                        (feedforward_body_letter(inner), inner)
+                    else {
+                        return Err(feedforward_body_rejection(inner));
+                    };
+                    if letter == 0 {
+                        continue;
+                    }
+                    if let Some(alias) =
+                        qec_deferred_noise_target(targets[0], &aliases, &measured_aliases)?
+                    {
+                        last_use[alias] = Some(position);
+                        paulis.push((alias as u32, letter));
+                    }
+                }
+                if !paulis.is_empty() {
+                    feedforwards.push(QecDeferredFeedforward {
+                        position,
+                        condition: super::resolve_records(records, next_record)?,
+                        invert: !*expected,
+                        paulis,
+                    });
+                }
+            }
             QecOp::Feedforward { .. } => {
                 return Err(PrismError::IncompatibleBackend {
-                    backend: "QEC deferred sampler".to_string(),
-                    reason: "deferred measurement sampling evaluates a static map from random \
-                             bits to outcomes, which `FEEDFORWARD` makes depend on the sample; \
-                             `run_qec_program_reference` executes such programs"
+                    backend: "QEC deferred lowering".to_string(),
+                    reason: "the deferred circuit holds one static map from random bits to \
+                             records, which `FEEDFORWARD` makes depend on the sample; only the \
+                             record sampler behind `run_qec_program` applies Pauli bodies on \
+                             top of it, and `run_qec_program_reference` executes any body"
                         .to_string(),
                 });
             }
@@ -1571,6 +1887,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
         pair_tables,
         product_tables,
         leak_events,
+        feedforwards,
     })
 }
 

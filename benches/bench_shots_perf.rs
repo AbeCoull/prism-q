@@ -1171,6 +1171,89 @@ fn bench_qec_erasure_runner(c: &mut Criterion) {
     group.finish();
 }
 
+// Distance-d repetition memory with d rounds whose corrections keep the checks in the
+// code space: after each round, check `Z_q Z_{q+1}` reading 1 applies `X` on data
+// qubits `0..=q`, the pure error that anticommutes with that check alone. Every later
+// check of the same pair then reads the change since the last round, so each detector
+// is one record, and each correction's predicate reads a record earlier corrections
+// flipped.
+fn qec_corrected_repetition_program(
+    n_data: usize,
+    rounds: usize,
+    shots: usize,
+    noise_rate: f64,
+) -> QecProgram {
+    let options = QecOptions {
+        shots,
+        seed: SEED,
+        chunk_size: Some(10_000),
+        keep_measurements: false,
+    };
+    let mut program = QecProgram::with_options(n_data, options);
+    let data: Vec<usize> = (0..n_data).collect();
+    for _ in 0..rounds {
+        program
+            .noise(QecNoise::Depolarize1(noise_rate), &data)
+            .unwrap();
+        let records: Vec<usize> = (0..n_data - 1)
+            .map(|q| {
+                program
+                    .measure_pauli_product(&[QecPauli::z(q), QecPauli::z(q + 1)])
+                    .unwrap()
+            })
+            .collect();
+        for &record in &records {
+            program.detector(&[QecRecordRef::absolute(record)]).unwrap();
+        }
+        for (q, &record) in records.iter().enumerate() {
+            let body = (0..=q)
+                .map(|target| QecOp::Gate {
+                    gate: Gate::X,
+                    targets: vec![target],
+                })
+                .collect();
+            program
+                .feedforward(&[QecRecordRef::absolute(record)], true, body)
+                .unwrap();
+        }
+    }
+    let readout: Vec<usize> = (0..n_data).map(|q| program.measure_z(q).unwrap()).collect();
+    for pair in readout.windows(2) {
+        program
+            .detector(&[
+                QecRecordRef::absolute(pair[0]),
+                QecRecordRef::absolute(pair[1]),
+            ])
+            .unwrap();
+    }
+    program
+        .observable_include(0, &[QecRecordRef::absolute(readout[0])])
+        .unwrap();
+    program
+}
+
+/// [`qec_corrected_repetition_program`] at 100k shots on the compiled record path,
+/// which applies each round's corrections as record flips.
+fn bench_qec_feedforward_runner(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_feedforward_runner");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    for &distance in &[5usize, 15] {
+        let program = qec_corrected_repetition_program(distance, distance, 100_000, 0.001);
+        group.bench_with_input(
+            BenchmarkId::new("rep_p001_drop", distance),
+            &program,
+            |b, program| {
+                b.iter(|| run_qec_program(program).unwrap());
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -1191,6 +1274,7 @@ criterion_group! {
     bench_analytical_marginals,
     bench_chunked_high_shots,
     bench_qec_workflow,
-    bench_qec_erasure_runner
+    bench_qec_erasure_runner,
+    bench_qec_feedforward_runner
 }
 criterion_main!(benches);

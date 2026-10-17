@@ -1251,10 +1251,12 @@ rates = [d.logical_error_rate(res.detectors, res.observables) for d in (matching
 
 `feedforward(records, expected, body)` applies the gates and resets of `body`, a
 second `QecProgram` holding the correction, only in shots where the parity over
-`records` equals `expected`: an adaptive correction keyed on a syndrome. The compiled
-sampler behind `run()` evaluates one affine map for every shot, which a feed-forward
-breaks, so a program carrying one runs through `run_reference()`, the per-shot
-statevector path. It costs `O(shots * 2^n)` and suits small programs.
+`records` equals `expected`: an adaptive correction keyed on a syndrome. When `body`
+holds only Pauli gates (`X`, `Y`, `Z`, identity), `run()` samples it on the compiled
+path, where the correction becomes a fixed set of record flips. Any other body breaks
+the one affine map that sampler evaluates for every shot, so such a program runs
+through `run_reference()`, the per-shot statevector path. It costs `O(shots * 2^n)`
+and suits small programs.
 
 ```python
 from prism_q import Gate, QecProgram, QecRecordRef
@@ -1268,6 +1270,7 @@ fix = QecProgram(2)
 fix.push_gate(Gate.x(), [1])
 prog.feedforward([QecRecordRef.absolute(flag)], True, fix)
 prog.measure_z(1)
+assert not prog.run().measurements[:, 1].any()
 assert not prog.run_reference().measurements[:, 1].any()
 ```
 

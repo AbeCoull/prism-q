@@ -75,6 +75,7 @@ pub(super) fn terminal_statevector_candidate(
 /// Width from which an `Auto` expectation terminal tries the scalar tensor
 /// path first. Below it the statevector run takes a few milliseconds and the
 /// bounded dry run that decides the route would cost as much as the run.
+/// Bracketed by `expectation/pauli_sum` (`16` against `18` and `20`).
 #[cfg(not(prism_lowered_thresholds))]
 pub(super) const TENSOR_ROUTE_MIN_QUBITS: usize = 18;
 #[cfg(prism_lowered_thresholds)]
@@ -114,10 +115,12 @@ pub(super) fn decide_tensor_expectations(
 /// running MPS. About 2 ms of MPS time, the most one observable's dry run took
 /// across the calibration circuits (0.1 to 1.9 ms), so a declined or losing
 /// plan costs at most about the MPS run it tried to replace.
+/// Bracketed by `auto/expectation_above_cap` (`hea_l2/64` and `su4_brick_d4/64` against `su4_brick_d6/64`).
 const TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE: f64 = 1.5e5;
 
 /// [`mps_apply_cost`] units one planned tensor-network element costs: about
 /// 40 ns per element contracted against 15 ns per unit.
+/// No bench row brackets this yet.
 const TENSOR_ELEMENT_MPS_COST: f64 = 3.0;
 
 /// The scalar tensor route for an `Auto` expectation above the statevector cap,

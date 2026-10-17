@@ -86,5 +86,6 @@ mod state_vector_terminal;
 mod subset_probabilities;
 mod tensor_route;
 mod tensornetwork_correctness;
+mod threshold_bench_rows;
 mod trajectory_correctness;
 mod trotter_builder;

@@ -125,6 +125,11 @@ fan out.
 | `distributed/sample_indices` | 4096 terminal shots of a 20 qubit uniform state at two and four ranks with relabeling off: the per-rank cumulative distribution, owner draws, and the index gather |
 | `distributed/cyclic_wall/ranks{2,4}` | Three layers of a seeded Rx or Ry on every qubit and a nearest neighbour CX ring at 20 and 22 qubits across two and four ranks with relabeling on: the cyclic scan whose working set exceeds the local positions, so eviction choice sets the exchange count |
 
+### Instruction counts (iai)
+
+Eight single-thread rows under callgrind, one kernel each, for the deterministic CI
+gate described under [Instruction-count gate](#instruction-count-gate). Linux only.
+
 ### Python binding timings
 
 `bindings/python/benches/energy_sweep.py` times the `prepared/hea_l2_energy` sweep
@@ -627,6 +632,58 @@ base or nothing; a miss falls back to building the reference in a worktree.
 
 `PRISM_BENCH_REF=HEAD` on a clean tree builds both binaries from the same code,
 so every row is a control row and the report is this host's noise floor.
+
+## Instruction-count gate
+
+The `iai` target (`benches/iai.rs`) counts instructions under callgrind instead of
+timing anything: eight rows, one kernel each, every one on a single Rayon thread with
+the tile budget pinned to 256 KB. A count depends on the binary and its input, not on
+the host's load, so the `instruction-counts` CI job holds the 5% threshold on a shared
+runner where the wall-clock gate above cannot. It is not bit-exact: hash seeds, heap
+addresses, and path lengths vary per process, and two builds of the same source on CI
+differed by at most 0.13% on `fuse_circuit_qaoa_l3` and under 0.03% on the other rows.
+
+| Row | Kernel |
+|-----|--------|
+| `statevector_random_d10/q12` | Fused 1q and 2q statevector kernels below the parallel floor |
+| `statevector_qft_textbook/q14` | QFT block and controlled-phase path |
+| `statevector_qv/q12` | SU(4) layers through 2q fusion |
+| `stabilizer_clifford_shots/q32_1k` | Tableau replay over 1000 measured shots |
+| `compiled_sampler/q100_1k` | Compiled frame sampler at 100 qubits |
+| `density_matrix_random_d10/q8` | Density-matrix superoperator kernels |
+| `mps_random_d10/q12` | MPS contraction and truncation at bond 64 |
+| `fuse_circuit_qaoa_l3/qaoa_q16` | The fusion pipeline alone, no simulation |
+
+It catches a change in the work a row does: a kernel that executes more per amplitude, a
+fusion pass that emits a longer circuit, code-size growth that costs a hot loop its
+inlined shape. It cannot see memory bandwidth or cache misses (the cache simulation is
+off), SIMD throughput (a four-wide FMA and a scalar multiply are one instruction each),
+or threading. A change that trades instructions for bandwidth, or moves work between
+threads, reads here as a plain count change and needs the wall-clock A/B to judge, as
+does anything above the parallel floor, which these rows stay below on purpose.
+
+Pull requests build the base commit in a worktree with its own target directory (in a
+shared one cargo reads the base binary as fresh for the head), record it with
+`--save-baseline`, then count the head against it and fail when any row's `Ir` grows
+past `REGRESSION_THRESHOLD`. The table lands in the job summary and the callgrind
+profiles upload as the `instruction-counts` artifact. A push to `main` records counts
+without a comparison. The job skips on pull requests that change no Rust source or
+manifest, and records without comparing when the base lacks the target or pins another
+`iai-callgrind` version, since the one installed runner must match the crate exactly.
+
+Locally, on Linux (valgrind does not run on Windows or macOS):
+
+```bash
+sudo apt-get install valgrind
+cargo install --locked iai-callgrind-runner --version 0.16.1   # the Cargo.toml pin
+
+# Record main, then count a branch against it
+git checkout main && cargo bench --bench iai --features parallel -- --save-baseline=main
+git checkout my-branch && cargo bench --bench iai --features parallel -- --baseline=main --callgrind-limits='ir=5%'
+```
+
+Profiles land under `target/iai/`; `callgrind_annotate` on a `callgrind.out` file there
+names the functions behind a changed count.
 
 ## Regression detection
 

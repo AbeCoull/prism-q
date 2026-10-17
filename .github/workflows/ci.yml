@@ -6,6 +6,10 @@ on:
   pull_request:
   # Lets a branch run the full gate before a pull request exists.
   workflow_dispatch:
+    inputs:
+      instruction-counts-base:
+        description: Ref the instruction-count job compares against
+        default: main
 
 # A push to main is never cancelled: each one owes its bench reference build, which
 # the next pull request's gate restores.
@@ -849,6 +853,110 @@ jobs:
             exit 1
           fi
 
+  # Callgrind instruction counts for the eight single-thread rows in benches/iai.rs,
+  # one kernel each. A count is byte-identical run to run, so a shared runner holds
+  # the threshold the wall-clock gate cannot. A pull request builds its base commit
+  # in a worktree and compares; a dispatch compares against the ref its input names,
+  # main by default; a push to main only records. benches/README.md says what the
+  # counts do and do not catch.
+  instruction-counts:
+    name: Instruction counts
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      IAI_CALLGRIND_HOME: ${{ github.workspace }}/iai-home
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pull requests skip when nothing measured changed, like the wall-clock gate.
+      # The base needs the same bench target and crate pin, or there is nothing the
+      # one installed runner can compare against.
+      - name: Resolve the base commit
+        id: base
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) ref="${{ github.event.pull_request.base.sha }}" ;;
+            workflow_dispatch) ref="${{ inputs.instruction-counts-base }}" ;;
+            *) ref="" ;;
+          esac
+          run=true
+          compare=false
+          sha=""
+          if [[ -n "$ref" ]]; then
+            git fetch --no-tags --depth=1 origin "$ref"
+            sha="$(git rev-parse FETCH_HEAD)"
+            changed="$(git diff --name-only "$sha" HEAD)"
+            if [[ "$GITHUB_EVENT_NAME" == pull_request ]] &&
+               ! grep -Eq '^(src/.*\.rs$|benches/.*\.rs$|Cargo\.(toml|lock)$)' <<< "$changed"; then
+              run=false
+              echo "No Rust source or manifest change. Nothing to count." >> "$GITHUB_STEP_SUMMARY"
+            fi
+            pin='^iai-callgrind = "=.*"$'
+            if [[ "$(git show "$sha:Cargo.toml" | grep -E "$pin")" == "$(grep -E "$pin" Cargo.toml)" ]] &&
+               git cat-file -e "$sha:benches/iai.rs" 2>/dev/null; then
+              compare=true
+            else
+              echo "Base $sha has no matching iai bench target; counts recorded without a comparison." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "compare=$compare" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-rust
+        if: steps.base.outputs.run == 'true'
+        with:
+          cache-key: iai
+
+      - name: Install valgrind
+        if: steps.base.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      # The runner must match the crate version pinned in Cargo.toml exactly.
+      - name: Install the iai-callgrind runner
+        if: steps.base.outputs.run == 'true'
+        run: |
+          version="$(sed -n 's/^iai-callgrind = "=\(.*\)"$/\1/p' Cargo.toml)"
+          cargo install --locked iai-callgrind-runner --version "$version"
+
+      # Its own target directory. Cargo keys the crate artifact on the path relative
+      # to the workspace root, so in a shared one the head build reads the base
+      # binary as fresh and never compiles.
+      - name: Record the base counts
+        if: steps.base.outputs.run == 'true' && steps.base.outputs.compare == 'true'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/base-target
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" "${{ steps.base.outputs.sha }}"
+          cd "$RUNNER_TEMP/base"
+          cargo bench --bench iai --features "$CI_FEATURES" -- --save-baseline=base
+
+      # The runner exits 3 when a row's Ir grows past the limit.
+      - name: Count the head and compare
+        if: steps.base.outputs.run == 'true'
+        run: |
+          args=(--save-summary=json)
+          if [[ "${{ steps.base.outputs.compare }}" == true ]]; then
+            args+=(--baseline=base "--callgrind-limits=ir=${REGRESSION_THRESHOLD}%")
+          fi
+          set +e
+          cargo bench --bench iai --features "$CI_FEATURES" -- "${args[@]}"
+          status=$?
+          {
+            echo "## Instruction counts"
+            echo ""
+            python3 scripts/iai_summary.py "$IAI_CALLGRIND_HOME" --threshold "$REGRESSION_THRESHOLD"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Upload the callgrind profiles
+        if: always() && steps.base.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: instruction-counts
+          if-no-files-found: ignore
+          path: iai-home
+
   # The one check branch protection requires, so a job added here gates merges without
   # a settings change. A skipped job passes; the benchmark gate stays advisory because
   # shared runners cannot hold its threshold.
@@ -878,6 +986,7 @@ jobs:
       - test-windows
       - security
       - public-api
+      - instruction-counts
     runs-on: ubuntu-latest
     steps:
       - name: Fail when a required job failed or was cancelled

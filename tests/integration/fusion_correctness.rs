@@ -1182,7 +1182,7 @@ fn fusion_qaoa_batch_boundaries_match_unfused() {
 }
 
 #[test]
-fn fusion_rebatch_below_diagonal_batching_matches_unfused() {
+fn fusion_diagonal_batches_at_fourteen_match_unfused() {
     for n in [14, 15] {
         assert_fusion_preserves_state(&circuits::diagonal_mixed_circuit(n, 6, 42));
         assert_fusion_preserves_state(&circuits::phase_estimation_circuit(n));

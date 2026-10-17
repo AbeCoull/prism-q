@@ -15,7 +15,7 @@ flowchart TD
     P0r --> D{"FusionProfile::Device?"}
     D -- yes --> PD["1q fusion and reorder (>=10q), same-pair 2q runs (>=12q)"]
     PD --> OUT
-    D -- no --> P0b["fuse_batch_rzz (>=16q): N&times;Rzz to BatchRzz"]
+    D -- no --> P0b["fuse_batch_rzz (>=14q): N&times;Rzz to BatchRzz"]
     P0b --> G{"qubits >= MIN_QUBITS_FOR_FUSION (10)?"}
     G -- no --> OUT[Output Circuit]
     G -- yes --> P1["fuse_single_qubit_gates (>=10q)"]
@@ -31,8 +31,8 @@ flowchart TD
     P2 --> P2qr["reorder_fused2q_into_tiles (>=12q)"]
     P2qr --> Pm2q["fuse_multi_2q_gates (>=12q) to Multi2q"]
     Pm2q --> Ppr["fuse_pauli_rot_batches (>=16q) to MultiPauliRot"]
-    Ppr --> Pcp["fuse_controlled_phases (>=16q) to BatchPhase"]
-    Pcp --> Pdb["fuse_diagonal_batch (>=16q) to DiagonalBatch"]
+    Ppr --> Pcp["fuse_controlled_phases (>=14q) to BatchPhase"]
+    Pcp --> Pdb["fuse_diagonal_batch (>=14q) to DiagonalBatch"]
     Pdb --> Ppp["batch_post_phase_1q (>=18q)"]
     Ppp --> OUT
 ```
@@ -43,7 +43,7 @@ flowchart TD
 |----------|-------|-----------|
 | `MIN_QUBITS_FOR_FUSION` | 10 | Below this, clone cost exceeds simulation savings |
 | `MIN_QUBITS_FOR_MULTI_FUSION` | 14 | MultiFused tiling overhead vs benefit |
-| `MIN_QUBITS_FOR_DIAG_BATCH` | 16 | Diagonal batch, cphase, and Rzz batching |
+| `MIN_QUBITS_FOR_DIAG_BATCH` | 14 | Diagonal batch, cphase, and Rzz batching, and the 1q rebatch on a buffer as wide as the circuit |
 | `MIN_QUBITS_FOR_POST_PHASE_BATCH` | 18 | Post-phase 1q re-batching |
 | `MIN_QUBITS_FOR_2Q_FUSION` | 12 | Benchmarked QV and random sweeps show memory-pass reduction wins from 12q |
 | `MIN_QUBITS_FOR_MULTI_2Q_FUSION` | 12 | Same as 2q fusion |

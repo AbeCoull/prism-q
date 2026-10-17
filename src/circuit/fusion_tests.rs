@@ -30,8 +30,8 @@ fn qaoa_batches_each_mixer_without_staging() {
 }
 
 #[test]
-#[cfg(not(any(miri, prism_lowered_thresholds, feature = "bench-internal")))]
-fn rebatch_reaches_tiled_widths_below_diagonal_batching() {
+#[cfg(not(any(miri, prism_lowered_thresholds)))]
+fn diagonal_batches_collapse_passes_from_fourteen_qubits() {
     let multi_fused = |c: &Circuit| {
         c.instructions
             .iter()
@@ -46,7 +46,7 @@ fn rebatch_reaches_tiled_widths_below_diagonal_batching() {
             })
             .count()
     };
-    for (n, qaoa, diag_mixed) in [(14, (66, 3), (60, 9)), (15, (71, 3), (70, 10))] {
+    for (n, qaoa, diag_mixed) in [(14, (6, 3), (6, 1)), (15, (6, 3), (8, 1))] {
         let circuit = crate::circuits::qaoa_circuit(n, 3, 42);
         let fused = fuse_unstaged(&circuit, n);
         assert_eq!(

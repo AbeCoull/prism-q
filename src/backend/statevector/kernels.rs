@@ -263,6 +263,27 @@ pub(crate) fn split_multi_2q_tiers(
     }
 }
 
+/// Whether [`StatevectorBackend::apply_multi_2q`] applies `gates` in their stored order
+/// on a `num_qubits` state. The subcube pass keeps any order; the tiered pass runs tier
+/// by tier, which keeps it only when no entry precedes one from a lower tier.
+#[cfg(any(feature = "distributed", test))]
+pub(crate) fn multi_2q_keeps_order(
+    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+    num_qubits: usize,
+) -> bool {
+    if gates.len() <= 1 || subcube_plan(gates, num_qubits).is_some() {
+        return true;
+    }
+    let max_small = max_target_for_tile(multi_2q_small_tile(num_qubits));
+    let tier = |&(q0, q1, _): &(usize, usize, [[Complex64; 4]; 4])| {
+        let q = q0.max(q1);
+        usize::from(q > max_small) + usize::from(q > MULTI_GATE_MAX_L3_TARGET)
+    };
+    gates
+        .windows(2)
+        .all(|pair| tier(&pair[0]) <= tier(&pair[1]))
+}
+
 thread_local! {
     /// The gathered tile, one per thread and kept between batches: a fresh
     /// allocation per subcube paid more in page faults than the sweeps it

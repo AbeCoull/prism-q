@@ -127,7 +127,7 @@ pub(super) const MIN_QUBITS_FOR_SPD_AUTO: usize = 12;
 pub(super) const AUTO_SPD_AMPLITUDES_PER_TERM: usize = 64;
 
 #[cfg(not(prism_lowered_thresholds))]
-pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 24;
+pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 16;
 #[cfg(prism_lowered_thresholds)]
 pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 6;
 
@@ -164,7 +164,7 @@ pub(super) fn auto_spd_work_budget(circuit: &Circuit) -> usize {
 ///
 /// `Auto` resolves per call from circuit shape. Two routes run before the
 /// family tree: circuits that decompose into independent blocks run per block
-/// (Clifford-only circuits at 24 qubits and above with a block of 2 or more use
+/// (Clifford-only circuits at 16 qubits and above with a block of 2 or more use
 /// FactoredStabilizer), and shot paths sample Clifford+T circuits whose T
 /// count fits the size-derived stabilizer-rank budget through the StabilizerRank
 /// expansion, to 40 T gates. A probability

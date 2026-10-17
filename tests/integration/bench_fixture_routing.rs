@@ -598,8 +598,8 @@ fn factored_sampling_rows_draw_from_two_sub_states() {
 }
 
 // The `fstab_*` rows of `auto/crossover` bracket the factored-stabilizer floor,
-// so they owe a route on each side of it: per-block tableaux under 24 qubits,
-// one factored-stabilizer backend from 24 up. Above the floor the `auto` arm
+// so they owe a route on each side of it: per-block tableaux under 16 qubits,
+// one factored-stabilizer backend from 16 up. Above the floor the `auto` arm
 // must also return what the `factored` arm's `run_on` returns, or the pair
 // prices two different answers rather than the routing work between them.
 #[test]
@@ -637,6 +637,12 @@ fn fstab_crossover_rows_straddle_the_floor() {
         (32, 2),
         (48, 2),
         (80, 2),
+        (4, 2),
+        (6, 2),
+        (3, 4),
+        (2, 6),
+        (2, 4),
+        (7, 2),
     ];
     let mut below = 0;
     for (blocks, block_size) in grid {
@@ -645,7 +651,7 @@ fn fstab_crossover_rows_straddle_the_floor() {
         let circuit = circuits::local_clifford_blocks(blocks, block_size, 200, SEED);
         let auto = sim::simulate(&circuit).seed(42).run().unwrap();
 
-        if n < 24 {
+        if n < 16 {
             below += 1;
             assert_eq!(
                 auto.metadata.backend,

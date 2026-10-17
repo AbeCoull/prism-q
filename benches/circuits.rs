@@ -2467,7 +2467,7 @@ fn bench_auto_expectation_above_cap(c: &mut Criterion) {
 
 /// `Auto` beside the backend it passes over, at the sizes where a routing
 /// constant switches. Each set brackets one constant so the boundary can be
-/// read off the two arms either side of it: the factored-stabilizer floor (24
+/// read off the two arms either side of it: the factored-stabilizer floor (16
 /// qubits with a largest block of 2), the exact stabilizer-rank budget (`n`
 /// less twice `ceil(log2 n)`, which is 10 at 20 qubits), and the Pauli
 /// marginals floor (12 qubits).
@@ -2486,11 +2486,10 @@ fn bench_auto_crossover(c: &mut Criterion) {
     // size through `run_on`, which brackets the floor from below and, above
     // it, runs what `auto` runs. Depth 200 rather than 10 because at depth 10
     // these rows sit near 500 us, where two arms running the same route read
-    // 14% to 48% apart on the reference host. The grid runs 16 to 160 qubits
+    // 14% to 48% apart on the reference host. The grid runs 8 to 160 qubits
     // at blocks of 2 to 16, so each constant's crossover reads along one axis
-    // with the other held. Blocks of 2, 4 and 8 reach under the 24-qubit floor,
-    // where `auto` takes the decomposed route, and blocks of 3 and 6 straddle
-    // it. At 64 qubits and below every arm also builds the per-block
+    // with the other held. Blocks of 2, 4 and 6 reach under the 16-qubit floor,
+    // where `auto` takes the decomposed route. At 64 qubits and below every arm also builds the per-block
     // probabilities, as a run returns them there.
     for &(blocks, block_size) in &[
         (2usize, 16usize),
@@ -2525,6 +2524,12 @@ fn bench_auto_crossover(c: &mut Criterion) {
         (32, 2),
         (48, 2),
         (80, 2),
+        (4, 2),
+        (6, 2),
+        (3, 4),
+        (2, 6),
+        (2, 4),
+        (7, 2),
     ] {
         let n = blocks * block_size;
         let circuit = circuits::local_clifford_blocks(blocks, block_size, 200, SEED);

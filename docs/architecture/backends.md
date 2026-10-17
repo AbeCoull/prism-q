@@ -136,6 +136,8 @@ Chain of rank-3 tensors with adaptive bond dimension (default max 256). O(n·χ�
 
 Hybrid SVD dispatch: faer (bidiag+D&C) for matrices with m×n ≥ 256, hand-rolled Jacobi for small matrices.
 
+Once any bond reaches 16, a truncating cut first moves the chain's orthogonality center to the cut, so the discarded singular weight is the state's 2-norm error rather than a value the ungauged environment amplifies. Below that width a cut runs ungauged and treats drops under four machine epsilons of the largest value as rounding.
+
 ## Product State
 
 Per-qubit `[Complex64; 2]` storage. O(n) memory, O(1) per single-qubit gate. Rejects entangling gates. Selected automatically for circuits with no 2q gates.
@@ -350,8 +352,9 @@ strict bound on the infidelity is the square of the summed square roots, which
 matches the sum only when a single SVD truncates.
 
 The decomposed route runs one backend per independent block and merges: its
-exactness is the weakest of the parts, its fidelity bound is the product, and its
-placement is `Device` only when every block was. Per-shot routes evolve one state
+exactness is the weakest of the parts, its fidelity bound is the product, its bond
+report is the peak over the MPS blocks against their shared cap, and its placement
+is `Device` only when every block was. Per-shot routes evolve one state
 per shot and keep the weakest claim across them, with the bound a minimum rather
 than a product.
 

@@ -4,7 +4,7 @@
 use crate::common;
 
 use common::SEED;
-use prism_q::circuits::brickwork_circuit;
+use prism_q::circuits::{brickwork_circuit, independent_random_blocks};
 use prism_q::{
     BackendKind, Circuit, CircuitBuilder, Engine, Exactness, Gate, NoiseModel, PauliTerm,
     Placement, PrismError, ResolvedBackend, SpdTruncation, run_shots_compiled, simulate,
@@ -121,6 +121,32 @@ fn mps_reports_peak_bond_and_cap_saturation() {
         .run()
         .unwrap();
     assert_eq!(statevector.metadata.bond, None);
+}
+
+#[test]
+fn decomposed_mps_reports_peak_bond_over_blocks() {
+    let circuit = independent_random_blocks(2, 10, 12, SEED);
+
+    let clamped = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(clamped.metadata.backend, ResolvedBackend::Decomposed);
+    let bond = clamped.metadata.bond.expect("MPS blocks report their bond");
+    assert!(bond.saturated(), "{bond:?}");
+    assert_eq!(bond.cap, 2);
+
+    let roomy = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 4096 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(roomy.metadata.backend, ResolvedBackend::Decomposed);
+    let bond = roomy.metadata.bond.expect("MPS blocks report their bond");
+    assert!(!bond.saturated(), "{bond:?}");
+    assert_eq!(bond.cap, 4096);
+    assert!(bond.peak > 2, "{bond:?}");
 }
 
 #[test]

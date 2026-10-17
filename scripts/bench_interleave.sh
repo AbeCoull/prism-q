@@ -26,6 +26,12 @@
 #   6. Report each row's median paired change across the undisturbed rounds with
 #      a distribution-free 95% confidence interval for that median (order
 #      statistics of the rounds), for the filter rows and the control rows.
+#   7. From the sixth undisturbed round on, compute the verdicts after each round
+#      and stop early once every one is settled: each target interval lies wholly
+#      on one side of the threshold, each control median lies inside half the
+#      threshold, and no control interval reaches past the threshold. An effect
+#      ten times the gate settles in six rounds; --no-early-stop runs the full
+#      count regardless.
 #
 # Verdicts, per row:
 #   target rows   FAIL when the interval lies wholly above the threshold,
@@ -35,9 +41,15 @@
 #                 wholly above the threshold (the change reached further than
 #                 intended); off zero when it lies wholly outside half the
 #                 threshold either way; wide when it reaches past the threshold
-#                 either way.
-# The run is RERUN when a control is off zero or wide, when a target row is
-# undecided and nothing failed, or when fewer than six rounds were undisturbed.
+#                 either way. A wide control is resolved by effect size, and
+#                 forces no rerun, when every target row's |change| is at least
+#                 WIDE_CONTROL_EFFECT_RATIO times the control's half-width (half
+#                 the span of its interval): noise on that scale cannot carry a
+#                 target across the gate. Off zero is a lane effect and is never
+#                 resolved this way.
+# The run is RERUN when a control is off zero or wide and unresolved, when a
+# target row is undecided and nothing failed, or when fewer than six rounds were
+# undisturbed.
 #
 # Usage:
 #   scripts/bench_interleave.sh -f '^statevector/qft_textbook/(16|20)$' -c '^mps/random_d10/16$'
@@ -59,10 +71,12 @@
 #                   either script is what the other expects.
 #   --build-dir     with --build-only, build this checkout instead
 #   --project-dir   checkout the run reports on and writes bench_results/ into
-#   --rounds        A B B A rounds (default 16, light 6, floor 6). Six is the
-#                   fewest whose extreme order statistics still give 95%. Sixteen
-#                   held a same-code run of six circuits rows to within about 2%
-#                   (3.7% on a 190 us row) in 17 minutes on the reference host.
+#   --rounds        A B B A rounds (default 16, light 6, floor 6), the ceiling when
+#                   the verdicts do not settle earlier. Six is the fewest whose
+#                   extreme order statistics still give 95%. Sixteen held a
+#                   same-code run of six circuits rows to within about 2% (3.7% on
+#                   a 190 us row) in 17 minutes on the reference host.
+#   --no-early-stop run every round even once the verdicts have settled
 #   --samples       Criterion samples per row (default 10, the floor)
 #   --window        Criterion measurement window in seconds (default 1, light 0.5),
 #                   after a warm-up of half the window. Groups that pin their own
@@ -121,6 +135,10 @@ FROM_TSV=""
 THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
 MAX_HOST_LOAD=10
 WAIT_IDLE=0
+NO_EARLY_STOP=""
+# A wide control is resolved when every target |change| is at least this many
+# control half-widths.
+WIDE_CONTROL_EFFECT_RATIO=3
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -143,6 +161,7 @@ while [[ $# -gt 0 ]]; do
         --threshold|-t) THRESHOLD="$2"; shift 2 ;;
         --max-host-load) MAX_HOST_LOAD="$2"; shift 2 ;;
         --wait-idle)    WAIT_IDLE="$2"; shift 2 ;;
+        --no-early-stop) NO_EARLY_STOP=1; shift ;;
         -h|--help)      awk 'NR > 1 && !/^#/ { exit } NR > 1' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -399,107 +418,19 @@ run_round() {
     done
 }
 
-# --- Measure ---
+# The disturbed rounds as one line of `round:spread` words.
+disturbed_text() {
+    disturbed_rounds | awk '{ printf "%s%s:%s", (NR > 1 ? " " : ""), $1, $2 }'
+}
 
-LOADED_ROUNDS=""
-STARTED="$(date +%s)"
-if [[ -z "$FROM_TSV" ]]; then
-    echo "=== PRISM-Q interleaved same-binary A/B ==="
-    echo "  bench:     $BENCH"
-    echo "  filter:    $FILTER"
-    [[ -n "$CONTROL_FILTER" ]] && echo "  control:   $CONTROL_FILTER"
-    echo "  features:  $FEATURES"
-    echo "  tier:      $TIER, $ROUNDS rounds, $SAMPLES samples, ${WARM_UP}s + ${WINDOW}s windows"
-    echo "  threshold: ${THRESHOLD}%"
-    echo ""
-
-    if [[ -n "$EXE" ]]; then
-        [[ -f "$EXE" ]] || { echo "Error: --exe '$EXE' does not exist." >&2; exit 1; }
-        RUN_EXE="$EXE"
-        PROVENANCE="supplied via \`--exe\`, not built here"
-    else
-        RUN_EXE="$WORKDIR/exe"
-        bash "$SCRIPT_DIR/bench_ab.sh" --build-only "$RUN_EXE" --bench "$BENCH" --features "$FEATURES"
-        PROVENANCE="built from the working tree"
-    fi
-    COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]] && COMMIT="$COMMIT with uncommitted changes"
-
-    echo ">>> smoke test: every row once per variant in Criterion's test mode"
-    smoke_test a
-    smoke_test b
-    echo ""
-
-    preflight
-    echo ">>> warmup: one discarded invocation per variant"
-    warm_start="$(date +%s)"
-    run_slot 0 1 a
-    run_slot 0 2 b
-    : > "$RAW"
-    per_slot=$(( ($(date +%s) - warm_start + 1) / 2 ))
-    printf '>>> projected: about %d min for %d rounds\n\n' $(( (per_slot * 4 + 2) * ROUNDS / 60 + 1 )) "$ROUNDS"
-
-    for (( round = 1; round <= ROUNDS; round++ )); do
-        run_round "$round"
-    done
-    while (( round <= ROUNDS + ROUNDS / 2 )); do
-        disturbed="$(disturbed_rounds | wc -l | tr -d '[:space:]')"
-        (( round - 1 - disturbed < ROUNDS )) || break
-        echo ">>> $disturbed round(s) disturbed so far; running a replacement"
-        run_round "$round"
-        round=$(( round + 1 ))
-    done
-    ROUNDS_RUN=$(( round - 1 ))
-    WALL="$(( ($(date +%s) - STARTED) / 60 )) min $(( ($(date +%s) - STARTED) % 60 )) s"
-else
-    [[ -f "$FROM_TSV" ]] || { echo "Error: --from-tsv '$FROM_TSV' does not exist." >&2; exit 1; }
-    awk -F'\t' 'NF >= 6' "$FROM_TSV" > "$RAW"
-    LOADED_ROUNDS="$(awk -F'\t' '$1 == "#loaded" { print $2 }' "$FROM_TSV")"
-    PROVENANCE="from tsv"; COMMIT="from tsv"; WALL="from tsv"
-    ROUNDS="$(awk -F'\t' '$1 > m { m = $1 } END { print m + 0 }' "$RAW")"
-    ROUNDS_RUN="$ROUNDS"
-fi
-DISTURBED="$(disturbed_rounds | awk '{ printf "%s%s:%s", (NR > 1 ? " " : ""), $1, $2 }')"
-
-# --- Report ---
-
-if [[ -z "$OUT" ]]; then
-    OUT="$PROJECT_DIR/bench_results/ix-$(date +%Y-%m-%d_%H%M%S).md"
-fi
-mkdir -p "$(dirname "$OUT")"
-if [[ -z "$FROM_TSV" ]]; then
-    cp "$RAW" "${OUT%.md}.tsv"
-    [[ -z "$LOADED_ROUNDS" ]] || printf '#loaded\t%s\n' "$LOADED_ROUNDS" >> "${OUT%.md}.tsv"
-fi
-
-set +e
-{
-    echo "## Interleaved same-binary A/B: \`$BENCH\`"
-    echo ""
-    echo "| Setting | Value |"
-    echo "| --- | --- |"
-    echo "| Filter | \`${FILTER:-from tsv}\` |"
-    [[ -n "$CONTROL_FILTER" ]] && echo "| Control filter | \`$CONTROL_FILTER\` |"
-    echo "| Binary | $PROVENANCE, commit $COMMIT |"
-    echo "| Variants | a and b of \`PRISM_BENCH_VARIANT\`, one process per invocation |"
-    echo "| Features | \`$FEATURES\` |"
-    echo "| Tier | $TIER |"
-    echo "| Rounds | $ROUNDS_RUN run for $ROUNDS undisturbed, A B B A then B A A B, after one discarded invocation per variant |"
-    echo "| Criterion | $SAMPLES samples, ${WARM_UP}s warm-up, ${WINDOW}s measurement (groups that pin their own keep it) |"
-    echo "| Estimate | \`$ESTIMATE\` of each invocation; median paired change across rounds, 95% interval from order statistics |"
-    if (( MAX_HOST_LOAD > 0 )); then
-        echo "| Host load guard | ${MAX_HOST_LOAD}% of all CPUs, read before each round |"
-    else
-        echo "| Host load guard | off |"
-    fi
-    echo "| CPU | $(host_cpu) |"
-    echo "| OS | $(uname -srm) |"
-    echo "| Toolchain | $(rustc --version 2>/dev/null || echo unknown) |"
-    echo "| Wall time | $WALL |"
-    echo "| Threshold | ${THRESHOLD}% |"
-    echo ""
-    awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" -v loaded="$LOADED_ROUNDS" \
-        -v light="${LIGHT:-0}" -v col="$EST_COL" -v disturbed="$DISTURBED" '
+# Per-row medians, intervals, and verdicts from the raw table, with the rounds
+# named in `disturbed` left out. `report` prints the markdown table and the
+# verdict and exits with the run's status; `decide` prints `stop` when every
+# verdict is settled under the early-stop rule and `go` otherwise.
+analyze() {
+    awk -v mode="$1" -v disturbed="$2" -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" \
+        -v loaded="$LOADED_ROUNDS" -v light="${LIGHT:-0}" -v col="$EST_COL" \
+        -v wide_ratio="$WIDE_CONTROL_EFFECT_RATIO" '
 BEGIN {
     FS = "\t"; SEP = "\x1f"
     nd = split(disturbed, dl, " ")
@@ -519,6 +450,7 @@ BEGIN {
     if (round > rounds) { rounds = round }
 }
 
+function abs(v) { return v < 0 ? -v : v }
 function fmt(ns) {
     if (ns >= 1000000000) { return sprintf("%.3f s", ns / 1000000000) }
     if (ns >= 1000000)    { return sprintf("%.2f ms", ns / 1000000) }
@@ -555,9 +487,7 @@ function coverage(m, k,    i, c, tail) {
 }
 
 END {
-    print "| Benchmark | A | B | Change | 95% interval | Rounds | Verdict |"
-    print "| --- | ---: | ---: | ---: | :---: | ---: | --- |"
-    compared = 0; ctl_rows = 0
+    targets = 0
     for (i = 1; i <= n; i++) {
         id = order[i]
         m = 0
@@ -569,13 +499,37 @@ END {
         }
         if (m < 6) { short_rows = short_rows "\n- `" id "` (" m " complete rounds)"; continue }
         sort_n(x, m)
-        med = median_of(x, m)
         k = ci_rank(m)
         if (k < 1) { k = 1 }
-        lo = x[k]; hi = x[m + 1 - k]
+        done[id] = m; med[id] = median_of(x, m); lo[id] = x[k]; hi[id] = x[m + 1 - k]
         cov = coverage(m, k)
         if (cov < min_cov || min_cov == 0) { min_cov = cov }
+        if (kind[id] != "control") {
+            if (targets == 0 || abs(med[id]) < min_effect) { min_effect = abs(med[id]) }
+            targets++
+        }
+    }
 
+    if (mode == "decide") {
+        settled = (targets > 0 && short_rows == "")
+        for (i = 1; i <= n && settled; i++) {
+            id = order[i]
+            if (kind[id] == "control") {
+                settled = abs(med[id]) < threshold / 2 && hi[id] <= threshold && lo[id] >= -threshold
+            } else {
+                settled = lo[id] > threshold || hi[id] <= threshold
+            }
+        }
+        print (settled ? "stop" : "go")
+        exit 0
+    }
+
+    print "| Benchmark | A | B | Change | 95% interval | Rounds | Verdict |"
+    print "| --- | ---: | ---: | ---: | :---: | ---: | --- |"
+    compared = 0; ctl_rows = 0; wide_rows = 0
+    for (i = 1; i <= n; i++) {
+        id = order[i]
+        if (!(id in done)) { continue }
         na = vals[id SEP "a"]; nb = vals[id SEP "b"]
         for (j = 1; j <= na; j++) { va[j] = all[id SEP "a" SEP j] }
         for (j = 1; j <= nb; j++) { vb[j] = all[id SEP "b" SEP j] }
@@ -584,32 +538,37 @@ END {
 
         if (kind[id] == "control") {
             ctl_rows++
-            if (lo > threshold) {
+            if (lo[id] > threshold) {
                 verdict = "control moved"; regressed[++regressions] = id
-            } else if (lo > threshold / 2 || hi < -threshold / 2) {
+            } else if (lo[id] > threshold / 2 || hi[id] < -threshold / 2) {
                 verdict = "control off zero"; off[++offs] = id
-            } else if (hi > threshold || lo < -threshold) {
-                verdict = "control wide"; off[++offs] = id
+            } else if (hi[id] > threshold || lo[id] < -threshold) {
+                wide_rows++
+                if (targets > 0 && min_effect >= wide_ratio * (hi[id] - lo[id]) / 2) {
+                    verdict = "control wide, resolved by effect size"
+                } else {
+                    verdict = "control wide"; off[++offs] = id
+                }
             } else {
                 verdict = "control"
             }
         } else {
             compared++
-            if (lo > threshold) {
+            if (lo[id] > threshold) {
                 verdict = "regressed"; regressed[++regressions] = id
-            } else if (hi > threshold) {
+            } else if (hi[id] > threshold) {
                 verdict = "undecided"; undecided[++undecideds] = id
-            } else if (lo > 0) {
+            } else if (lo[id] > 0) {
                 verdict = "slower"
-            } else if (hi < 0) {
+            } else if (hi[id] < 0) {
                 verdict = "faster"
             } else {
                 verdict = "flat"
             }
-            if (hi - lo > widest) { widest = hi - lo }
+            if (hi[id] - lo[id] > widest) { widest = hi[id] - lo[id] }
         }
         printf "| `%s` | %s | %s | %s | %s to %s | %d | %s |\n",
-            id, fmt(abs_a), fmt(abs_b), pct(med), pct(lo), pct(hi), m, verdict
+            id, fmt(abs_a), fmt(abs_b), pct(med[id]), pct(lo[id]), pct(hi[id]), done[id], verdict
     }
 
     print ""
@@ -617,6 +576,10 @@ END {
     printf "rounds of (B1 + B2) / (A1 + A2) - 1; the interval covers it with at least %.1f%%.\n", min_cov
     printf "%d filter row(s) and %d control row(s); widest filter interval %.1f points.\n",
         compared, ctl_rows, widest
+    if (wide_rows > 0) {
+        printf "A wide control forces a rerun only when some filter row has |change| under %gx the\n", wide_ratio
+        printf "control half-width; the smallest filter |change| here is %.1f points.\n", min_effect
+    }
     if (nd > 0) {
         printf "Dropped as disturbed (same-variant spread on the median row): %s.\n", dropped_text
     }
@@ -665,6 +628,122 @@ END {
     exit 0
 }
 ' "$RAW"
+}
+
+# --- Measure ---
+
+LOADED_ROUNDS=""
+STOPPED_EARLY=""
+STARTED="$(date +%s)"
+if [[ -z "$FROM_TSV" ]]; then
+    echo "=== PRISM-Q interleaved same-binary A/B ==="
+    echo "  bench:     $BENCH"
+    echo "  filter:    $FILTER"
+    [[ -n "$CONTROL_FILTER" ]] && echo "  control:   $CONTROL_FILTER"
+    echo "  features:  $FEATURES"
+    echo "  tier:      $TIER, $ROUNDS rounds, $SAMPLES samples, ${WARM_UP}s + ${WINDOW}s windows"
+    echo "  threshold: ${THRESHOLD}%"
+    echo ""
+
+    if [[ -n "$EXE" ]]; then
+        [[ -f "$EXE" ]] || { echo "Error: --exe '$EXE' does not exist." >&2; exit 1; }
+        RUN_EXE="$EXE"
+        PROVENANCE="supplied via \`--exe\`, not built here"
+    else
+        RUN_EXE="$WORKDIR/exe"
+        bash "$SCRIPT_DIR/bench_ab.sh" --build-only "$RUN_EXE" --bench "$BENCH" --features "$FEATURES"
+        PROVENANCE="built from the working tree"
+    fi
+    COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]] && COMMIT="$COMMIT with uncommitted changes"
+
+    echo ">>> smoke test: every row once per variant in Criterion's test mode"
+    smoke_test a
+    smoke_test b
+    echo ""
+
+    preflight
+    echo ">>> warmup: one discarded invocation per variant"
+    warm_start="$(date +%s)"
+    run_slot 0 1 a
+    run_slot 0 2 b
+    : > "$RAW"
+    per_slot=$(( ($(date +%s) - warm_start + 1) / 2 ))
+    printf '>>> projected: about %d min for %d rounds\n\n' $(( (per_slot * 4 + 2) * ROUNDS / 60 + 1 )) "$ROUNDS"
+
+    round=1
+    while :; do
+        run_round "$round"
+        disturbed="$(disturbed_text)"
+        undisturbed=$(( round - $(wc -w <<< "$disturbed") ))
+        (( undisturbed < ROUNDS && round < ROUNDS + ROUNDS / 2 )) || break
+        if [[ -z "$NO_EARLY_STOP" ]] && (( undisturbed >= 6 )) && [[ "$(analyze decide "$disturbed")" == stop ]]; then
+            STOPPED_EARLY="$undisturbed"
+            echo ">>> every verdict settled after $undisturbed undisturbed round(s); stopping early"
+            break
+        fi
+        (( round < ROUNDS )) || echo ">>> $(( round - undisturbed )) round(s) disturbed so far; running a replacement"
+        round=$(( round + 1 ))
+    done
+    ROUNDS_RUN="$round"
+    WALL="$(( ($(date +%s) - STARTED) / 60 )) min $(( ($(date +%s) - STARTED) % 60 )) s"
+else
+    [[ -f "$FROM_TSV" ]] || { echo "Error: --from-tsv '$FROM_TSV' does not exist." >&2; exit 1; }
+    awk -F'\t' 'NF >= 6' "$FROM_TSV" > "$RAW"
+    LOADED_ROUNDS="$(awk -F'\t' '$1 == "#loaded" { print $2 }' "$FROM_TSV")"
+    PROVENANCE="from tsv"; COMMIT="from tsv"; WALL="from tsv"
+    ROUNDS="$(awk -F'\t' '$1 > m { m = $1 } END { print m + 0 }' "$RAW")"
+    ROUNDS_RUN="$ROUNDS"
+fi
+DISTURBED="$(disturbed_text)"
+
+# --- Report ---
+
+if [[ -z "$OUT" ]]; then
+    OUT="$PROJECT_DIR/bench_results/ix-$(date +%Y-%m-%d_%H%M%S).md"
+fi
+mkdir -p "$(dirname "$OUT")"
+if [[ -z "$FROM_TSV" ]]; then
+    cp "$RAW" "${OUT%.md}.tsv"
+    [[ -z "$LOADED_ROUNDS" ]] || printf '#loaded\t%s\n' "$LOADED_ROUNDS" >> "${OUT%.md}.tsv"
+fi
+
+set +e
+{
+    echo "## Interleaved same-binary A/B: \`$BENCH\`"
+    echo ""
+    echo "| Setting | Value |"
+    echo "| --- | --- |"
+    echo "| Filter | \`${FILTER:-from tsv}\` |"
+    [[ -n "$CONTROL_FILTER" ]] && echo "| Control filter | \`$CONTROL_FILTER\` |"
+    echo "| Binary | $PROVENANCE, commit $COMMIT |"
+    echo "| Variants | a and b of \`PRISM_BENCH_VARIANT\`, one process per invocation |"
+    echo "| Features | \`$FEATURES\` |"
+    echo "| Tier | $TIER |"
+    echo "| Rounds | $ROUNDS_RUN run toward $ROUNDS undisturbed, A B B A then B A A B, after one discarded invocation per variant |"
+    if [[ -n "$FROM_TSV" ]]; then
+        echo "| Early stop | from tsv |"
+    elif [[ -n "$NO_EARLY_STOP" ]]; then
+        echo "| Early stop | off (\`--no-early-stop\`) |"
+    elif [[ -n "$STOPPED_EARLY" ]]; then
+        echo "| Early stop | Stopped after $STOPPED_EARLY undisturbed rounds, every verdict settled |"
+    else
+        echo "| Early stop | not taken |"
+    fi
+    echo "| Criterion | $SAMPLES samples, ${WARM_UP}s warm-up, ${WINDOW}s measurement (groups that pin their own keep it) |"
+    echo "| Estimate | \`$ESTIMATE\` of each invocation; median paired change across rounds, 95% interval from order statistics |"
+    if (( MAX_HOST_LOAD > 0 )); then
+        echo "| Host load guard | ${MAX_HOST_LOAD}% of all CPUs, read before each round |"
+    else
+        echo "| Host load guard | off |"
+    fi
+    echo "| CPU | $(host_cpu) |"
+    echo "| OS | $(uname -srm) |"
+    echo "| Toolchain | $(rustc --version 2>/dev/null || echo unknown) |"
+    echo "| Wall time | $WALL |"
+    echo "| Threshold | ${THRESHOLD}% |"
+    echo ""
+    analyze report "$DISTURBED"
 } > "$OUT"
 STATUS=$?
 set -e

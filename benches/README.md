@@ -612,8 +612,10 @@ so every row is a control row and the report is this host's noise floor.
 The `iai` target (`benches/iai.rs`) counts instructions under callgrind instead of
 timing anything: eight rows, one kernel each, every one on a single Rayon thread with
 the tile budget pinned to 256 KB. A count depends on the binary and its input alone, so
-two runs of the same code agree to the instruction, and the `instruction-counts` CI job
-holds the 5% threshold on a shared runner where the wall-clock gate above cannot.
+two runs of the same code agree to within about a hundred instructions out of millions
+(the working directory and environment leak in as string lengths), and the
+`instruction-counts` CI job holds the 5% threshold on a shared runner where the
+wall-clock gate above cannot.
 
 | Row | Kernel |
 |-----|--------|
@@ -634,9 +636,10 @@ or threading. A change that trades instructions for bandwidth, or moves work bet
 threads, reads here as a plain count change and needs the wall-clock A/B to judge, as
 does anything above the parallel floor, which these rows stay below on purpose.
 
-Pull requests build the base commit in a worktree sharing the target directory, record
-it with `--save-baseline`, then count the head against it and fail when any row's `Ir`
-grows past `REGRESSION_THRESHOLD`. The table lands in the job summary and the callgrind
+Pull requests build the base commit in a worktree with its own target directory (in a
+shared one cargo reads the base binary as fresh for the head), record it with
+`--save-baseline`, then count the head against it and fail when any row's `Ir` grows
+past `REGRESSION_THRESHOLD`. The table lands in the job summary and the callgrind
 profiles upload as the `instruction-counts` artifact. A push to `main` records counts
 without a comparison. The job skips on pull requests that change no Rust source or
 manifest, and records without comparing when the base lacks the target or pins another

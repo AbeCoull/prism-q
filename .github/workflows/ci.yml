@@ -919,11 +919,13 @@ jobs:
           version="$(sed -n 's/^iai-callgrind = "=\(.*\)"$/\1/p' Cargo.toml)"
           cargo install --locked iai-callgrind-runner --version "$version"
 
-      # Same target directory, so only the crate itself compiles twice.
+      # Its own target directory. Cargo keys the crate artifact on the path relative
+      # to the workspace root, so in a shared one the head build reads the base
+      # binary as fresh and never compiles.
       - name: Record the base counts
         if: steps.base.outputs.run == 'true' && steps.base.outputs.compare == 'true'
         env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          CARGO_TARGET_DIR: ${{ runner.temp }}/base-target
         run: |
           git worktree add --detach "$RUNNER_TEMP/base" "${{ steps.base.outputs.sha }}"
           cd "$RUNNER_TEMP/base"
@@ -984,6 +986,7 @@ jobs:
       - test-windows
       - security
       - public-api
+      - instruction-counts
     runs-on: ubuntu-latest
     steps:
       - name: Fail when a required job failed or was cancelled

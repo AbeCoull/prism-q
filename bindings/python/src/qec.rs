@@ -409,7 +409,8 @@ impl PyQecProgram {
 
     /// Apply the operations of `body` only in shots where the parity over
     /// `records` equals `expected`. `body` admits gates and resets only, so the
-    /// measurement record keeps one layout across shots.
+    /// measurement record keeps one layout across shots. `run` samples a body of
+    /// Pauli gates; any other body needs `run_reference`.
     fn feedforward(
         &mut self,
         records: Vec<PyRecordRef>,
@@ -458,8 +459,8 @@ impl PyQecProgram {
     }
 
     /// Sample through the per-shot statevector reference path, the route that
-    /// executes `feedforward`. Costs `O(shots * 2^n)`, so it suits small
-    /// programs rather than bulk sampling.
+    /// executes a `feedforward` body with non-Pauli gates or resets. Costs
+    /// `O(shots * 2^n)`, so it suits small programs rather than bulk sampling.
     fn run_reference(&self, py: Python<'_>) -> PyPrismResult<PyQecSampleResult> {
         let program = &self.inner;
         let result = py.detach(|| run_qec_program_reference(program))?;

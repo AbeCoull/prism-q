@@ -102,12 +102,26 @@ record space absolutely, so a measurement whose execution depended on a record
 would make every later index depend on the shot.
 
 The compiled QEC sampler evaluates a static affine map from random bits to
-outcomes, which a record-conditioned branch makes depend on the sample. It
-rejects by name and points at `run_qec_program_reference`, as do the deferred
-lowering and the density-matrix estimator. The detector-error-model derivation
-inherits the deferred lowering's rejection rather than carrying its own. The op
-is built through `QecProgram::feedforward`; the native text format does not
-spell it.
+outcomes, which a record-conditioned branch makes depend on the sample, except
+when the body is a Pauli product. A Pauli fired at a fixed point flips the same
+later records whichever shot it fires in, exactly as a noise fault there would,
+and it can reach only records produced after it. `run_qec_program` therefore
+samples the program without its feed-forwards, applies noise, and then walks the
+feed-forwards in op order: each one XORs its precomputed flip set into the shots
+where its predicate holds, reading records that earlier corrections already
+flipped. The flip sets come from the same forward Pauli frame walk the record
+noise uses, with up to 64 corrections carried as lanes of one walk. A Pauli on a
+qubit measured since its last reset flips nothing and is dropped, as noise there
+is.
+
+A body holding any other gate or a reset is rejected by name and pointed at
+`run_qec_program_reference`, as is a feed-forward in a program with leakage
+annotations. A feed-forward program also skips the record-free parity route,
+since its predicates read records. The deferred lowering's other consumers and
+the density-matrix estimator reject the op outright; the detector-error-model
+derivation inherits the deferred lowering's rejection rather than carrying its
+own. The op is built through `QecProgram::feedforward`; the native text format
+does not spell it.
 
 ## Parsing
 

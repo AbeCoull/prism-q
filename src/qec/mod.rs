@@ -332,6 +332,10 @@ pub enum QecOp {
     /// record space is a static address space that detectors and observables
     /// index, so a measurement whose execution depends on a record would make
     /// those indices depend on the shot.
+    ///
+    /// [`run_qec_program`] samples a body of Pauli gates (`X`, `Y`, `Z`, `I`) on the
+    /// compiled path as record flips. Any other body needs
+    /// [`run_qec_program_reference`].
     Feedforward {
         records: Vec<QecRecordRef>,
         expected: bool,

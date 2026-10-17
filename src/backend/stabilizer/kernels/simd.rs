@@ -556,6 +556,198 @@ mod rowmul_words_spec {
     }
 }
 
+#[cfg(all(target_arch = "aarch64", any(kani, test)))]
+mod rowmul_words_neon_spec {
+    pub(super) type Kernel = unsafe fn(&mut [u64], &mut [u64], &[u64], &[u64], u64) -> u64;
+
+    fn phase_masks(x1: u64, z1: u64, x2: u64, z2: u64) -> (u64, u64) {
+        let nonzero = ((x1 ^ x2) | (z1 ^ z2)) & (x1 | z1) & (x2 | z2);
+        let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
+        (pos, nonzero)
+    }
+
+    // One word's popcount the way the kernel forms it: `vcntq_u8` per byte, then three
+    // pairwise widening adds (`vpaddlq_u8`, `vpaddlq_u16`, `vpaddlq_u32`) up to the lane.
+    pub(super) fn lane_popcount(w: u64) -> u64 {
+        let bytes = w.to_le_bytes().map(|b| b.count_ones() as u8);
+        let halves: [u16; 4] =
+            std::array::from_fn(|i| u16::from(bytes[2 * i]) + u16::from(bytes[2 * i + 1]));
+        let quads: [u32; 2] =
+            std::array::from_fn(|i| u32::from(halves[2 * i]) + u32::from(halves[2 * i + 1]));
+        u64::from(quads[0]) + u64::from(quads[1])
+    }
+
+    // `rowmul_words_scalar` with its popcounts regrouped the way the NEON kernel adds
+    // them: per byte through `vcntq_u8`, per 64-bit lane across chunks, then lane 0 plus
+    // lane 1, skipping all-zero chunks as the kernel does. The solver then compares
+    // adder trees of one shape instead of proving popcount identities.
+    fn reference<const N: usize>(
+        src: &[[u64; N]; 2],
+        dst: &mut [[u64; N]; 2],
+        initial_sum: u64,
+    ) -> u64 {
+        let mut word = |w: usize| {
+            let (x1, z1, x2, z2) = (src[0][w], src[1][w], dst[0][w], dst[1][w]);
+            dst[0][w] = x1 ^ x2;
+            dst[1][w] = z1 ^ z2;
+            ((x1 | z1) | (x2 | z2), phase_masks(x1, z1, x2, z2))
+        };
+        let chunks = N / 2;
+        let (mut lanes_pos, mut lanes_nz) = ([0u64; 2], [0u64; 2]);
+        for chunk in 0..chunks {
+            let words: [_; 2] = std::array::from_fn(|lane| word(2 * chunk + lane));
+            if words[0].0 | words[1].0 == 0 {
+                continue;
+            }
+            for (lane, &(_, (pos, nonzero))) in words.iter().enumerate() {
+                lanes_pos[lane] = lanes_pos[lane].wrapping_add(lane_popcount(pos));
+                lanes_nz[lane] = lanes_nz[lane].wrapping_add(lane_popcount(nonzero));
+            }
+        }
+        let total = |l: [u64; 2]| l[0].wrapping_add(l[1]);
+        let mut sum = initial_sum
+            .wrapping_add(2u64.wrapping_mul(total(lanes_pos)))
+            .wrapping_sub(total(lanes_nz));
+        for w in 2 * chunks..N {
+            let (or, (pos, nonzero)) = word(w);
+            if or == 0 {
+                continue;
+            }
+            sum = sum.wrapping_add(2 * pos.count_ones() as u64);
+            sum = sum.wrapping_sub(nonzero.count_ones() as u64);
+        }
+        sum
+    }
+
+    /// Check the NEON rowmul kernel against the regrouped reference on `[x, z]` rows of
+    /// `N` words.
+    pub(super) fn check<const N: usize>(
+        kernel: Kernel,
+        src: [[u64; N]; 2],
+        dst: [[u64; N]; 2],
+        initial_sum: u64,
+    ) {
+        let mut want = dst;
+        let want_sum = reference(&src, &mut want, initial_sum);
+        let [mut got_x, mut got_z] = dst;
+        // SAFETY: all four rows hold exactly `N` words; NEON is baseline on aarch64.
+        let got_sum = unsafe { kernel(&mut got_x, &mut got_z, &src[0], &src[1], initial_sum) };
+        assert_eq!(got_sum, want_sum);
+        for (got, want) in [(&got_x, &want[0]), (&got_z, &want[1])] {
+            for (g, w) in got.iter().zip(want) {
+                assert_eq!(g, w);
+            }
+        }
+    }
+
+    /// Check that the regrouping leaves `rowmul_words_scalar`'s result unchanged.
+    #[cfg(test)]
+    pub(super) fn check_reference<const N: usize>(
+        src: [[u64; N]; 2],
+        dst: [[u64; N]; 2],
+        initial_sum: u64,
+    ) {
+        let mut want = dst;
+        let want_sum = reference(&src, &mut want, initial_sum);
+        let [mut x, mut z] = dst;
+        let sum = super::rowmul_words_scalar(&mut x, &mut z, &src[0], &src[1], initial_sum);
+        assert_eq!(sum, want_sum);
+        assert_eq!([x, z], want);
+    }
+
+    #[cfg(kani)]
+    mod proofs {
+        macro_rules! rowmul_words_matches_reference {
+            ($($name:ident: $nw:literal),* $(,)?) => {$(
+                #[kani::proof]
+                #[kani::unwind(17)]
+                #[kani::stub(core::arch::aarch64::vcntq_u8, crate::backend::neon_model::cntq_u8)]
+                #[kani::stub(
+                    core::arch::aarch64::vpaddlq_u8,
+                    crate::backend::neon_model::paddlq_u8
+                )]
+                #[kani::stub(
+                    core::arch::aarch64::vpaddlq_u16,
+                    crate::backend::neon_model::paddlq_u16
+                )]
+                #[kani::stub(
+                    core::arch::aarch64::vpaddlq_u32,
+                    crate::backend::neon_model::paddlq_u32
+                )]
+                fn $name() {
+                    super::check::<$nw>(
+                        super::super::rowmul_words_neon,
+                        kani::any(),
+                        kani::any(),
+                        kani::any(),
+                    );
+                }
+            )*};
+        }
+
+        rowmul_words_matches_reference!(
+            rowmul_words_neon_nw0: 0,
+            rowmul_words_neon_nw1: 1,
+            rowmul_words_neon_nw3: 3,
+        );
+    }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod neon_tests {
+    use super::rowmul_words_neon;
+    use super::rowmul_words_neon_spec::{Kernel, check, check_reference, lane_popcount};
+    use rand::{RngExt, SeedableRng};
+
+    #[test]
+    fn lane_popcount_matches_count_ones() {
+        for shift in (0..64).step_by(8) {
+            for b in 0..=255u64 {
+                let w = b << shift;
+                assert_eq!(lane_popcount(w), u64::from(w.count_ones()));
+                assert_eq!(lane_popcount(!w), u64::from((!w).count_ones()));
+            }
+        }
+    }
+
+    #[test]
+    fn rowmul_words_neon_matches_scalar() {
+        fn run<const N: usize>(rng: &mut rand_chacha::ChaCha8Rng, kernel: Kernel) {
+            for _ in 0..64 {
+                let mut src: [[u64; N]; 2] = rng.random();
+                let mut dst: [[u64; N]; 2] = rng.random();
+                if rng.random_bool(0.25) {
+                    dst = src;
+                }
+                if N > 0 && rng.random_bool(0.25) {
+                    let start = rng.random_range(0..N);
+                    let end = (start + 2).min(N);
+                    for row in src.iter_mut().chain(&mut dst) {
+                        row[start..end].fill(0);
+                    }
+                }
+                let initial_sum = rng.random();
+                check_reference(src, dst, initial_sum);
+                check(kernel, src, dst, initial_sum);
+            }
+        }
+
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+        let neon: Kernel = rowmul_words_neon;
+        run::<0>(&mut rng, neon);
+        run::<1>(&mut rng, neon);
+        run::<2>(&mut rng, neon);
+        run::<3>(&mut rng, neon);
+        run::<4>(&mut rng, neon);
+        run::<5>(&mut rng, neon);
+        run::<8>(&mut rng, neon);
+        run::<9>(&mut rng, neon);
+        run::<16>(&mut rng, neon);
+        run::<17>(&mut rng, neon);
+        run::<35>(&mut rng, neon);
+    }
+}
+
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::rowmul_words_spec::{Kernel, check, check_reference, lane_popcount};

@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets a branch run the full gate before a pull request exists.
+  workflow_dispatch:
 
 # A push to main is never cancelled: each one owes its bench reference build, which
 # the next pull request's gate restores.
@@ -336,6 +338,41 @@ jobs:
           for h in ${{ matrix.group.harnesses }}; do harnesses+=(--harness "$h"); done
           cargo kani --no-default-features -Z stubbing -Z unstable-options \
             "${harnesses[@]}" --harness-timeout 8m \
+            --jobs ${{ matrix.group.jobs }} --output-format terse
+
+  # The NEON counterpart of the job above, on a native aarch64 runner: the kernels are
+  # compiled only for that target, and the harnesses stub their intrinsics with the
+  # models in `src/backend/neon_model.rs`. One chunk of the NEON word kernel is two
+  # words, so its harnesses stop at one chunk plus a tail and share one runner; a
+  # harness that outgrows 12 GB in the sampler moves to its own matrix leg. The
+  # statevector leg checks one radix-4 butterfly for memory safety alone.
+  kani-neon:
+    name: Kani NEON (${{ matrix.group.name }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - { name: words, harness: 'rowmul_words_neon_', jobs: 1 }
+          - { name: statevector, harness: 'radix4_butterfly_neon_', jobs: 1 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache: 'false'
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version "$KANI_VERSION"
+          cargo kani setup
+      - name: Prove the kernel harnesses
+        run: |
+          (while sleep 30; do
+            echo "mem: $(free -m | awk 'NR==2 {print $3 "/" $2 " MB"}')" \
+              "cbmc: $(ps -C cbmc -o rss= | awk '{s += $1} END {print int(s / 1024) " MB"}')"
+          done) &
+          cargo kani --no-default-features -Z stubbing -Z unstable-options \
+            --harness "${{ matrix.group.harness }}" --harness-timeout 8m \
             --jobs ${{ matrix.group.jobs }} --output-format terse
 
   # ThreadSanitizer runs the parallel kernels on real threads and reports data races
@@ -828,6 +865,7 @@ jobs:
       - miri
       - miri-avx2
       - kani
+      - kani-neon
       - tsan
       - msrv
       - release-bump-level

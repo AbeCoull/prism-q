@@ -19,6 +19,7 @@ use crate::limits::ResolvedLimits;
 use crate::sim::compiled::{
     PackedShots, batch_propagate_backward, compile_measurements, xor_words,
 };
+use crate::sim::trajectory::{PreparedChannel, PreparedEvent, PreparedNoise};
 use crate::sim::unified_pauli::PauliAxis;
 use crate::sim::{BackendKind, ShotsResult};
 
@@ -2212,6 +2213,15 @@ pub fn compile_noisy(
     seed: u64,
 ) -> Result<NoisyCompiledSampler> {
     noise.validate_for(circuit)?;
+    compile_validated_noisy(circuit, noise, seed)
+}
+
+/// [`compile_noisy`] for a model already checked by [`NoiseModel::validate_for`].
+fn compile_validated_noisy(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    seed: u64,
+) -> Result<NoisyCompiledSampler> {
     noise.ensure_only_pauli_channels()?;
     noise.ensure_no_guarded_events(circuit, "compiled noisy sampler")?;
     if circuit.num_qubits >= 4 {
@@ -2959,6 +2969,16 @@ pub fn run_shots_noisy(
     seed: u64,
 ) -> Result<ShotsResult> {
     noise.validate_for(circuit)?;
+    run_validated_shots_noisy(circuit, noise, num_shots, seed)
+}
+
+/// [`run_shots_noisy`] for a model already checked by [`NoiseModel::validate_for`].
+pub(crate) fn run_validated_shots_noisy(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
     noise.ensure_only_pauli_channels()?;
     if !circuit.is_clifford_only() {
         let limits = ResolvedLimits::process_default();
@@ -3015,7 +3035,7 @@ fn run_shots_noisy_compiled(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
-    let sampler = compile_noisy(circuit, noise, seed)?;
+    let sampler = compile_validated_noisy(circuit, noise, seed)?;
     finish_noisy_compiled_run(sampler, circuit, num_shots)
 }
 
@@ -3054,7 +3074,7 @@ pub(crate) fn run_shots_noisy_with_gpu(
         return run_shots_noisy_frame(circuit, noise, num_shots, seed);
     }
 
-    let sampler = compile_noisy(circuit, noise, seed)?.with_gpu(context);
+    let sampler = compile_validated_noisy(circuit, noise, seed)?.with_gpu(context);
     finish_noisy_compiled_run(sampler, circuit, num_shots)
 }
 
@@ -3065,7 +3085,8 @@ pub(crate) trait SlotWalk {
     /// Apply an instruction other than a region, whose body the walk descends
     /// into itself.
     fn apply(&mut self, instruction: &Instruction) -> Result<()>;
-    fn fire(&mut self, events: &[NoiseEvent]) -> Result<()>;
+    /// Fire the events of [`NoiseModel::after_gate`] slot `slot`.
+    fn fire(&mut self, slot: usize) -> Result<()>;
 }
 
 /// Run `circuit.instructions[from..]` in execution order under a model laying
@@ -3073,32 +3094,24 @@ pub(crate) trait SlotWalk {
 /// body's slots only when the body runs. See [`NoiseModel::after_gate`].
 pub(crate) fn walk_noise_slots(
     circuit: &Circuit,
-    noise: &NoiseModel,
     from: usize,
     walk: &mut impl SlotWalk,
 ) -> Result<()> {
     let nested = circuit.instructions.len() + circuit.guarded_noise_slots_before(from);
-    walk_slot_list(
-        &circuit.instructions[from..],
-        from,
-        nested,
-        &noise.after_gate,
-        walk,
-    )
+    walk_slot_list(&circuit.instructions[from..], from, nested, walk)
 }
 
 fn walk_slot_list(
     list: &[Instruction],
     base: usize,
     mut nested: usize,
-    slots: &[Vec<NoiseEvent>],
     walk: &mut impl SlotWalk,
 ) -> Result<()> {
     for (offset, instruction) in list.iter().enumerate() {
         match instruction {
             Instruction::Region(region) => {
                 if region.condition().evaluate(walk.classical()) {
-                    walk_region_body(region, nested, slots, walk)?;
+                    walk_region_body(region, nested, walk)?;
                 }
                 nested += region.noise_slots();
             }
@@ -3106,13 +3119,13 @@ fn walk_slot_list(
                 let taken = condition.evaluate(walk.classical());
                 walk.apply(instruction)?;
                 if taken {
-                    walk.fire(&slots[nested])?;
+                    walk.fire(nested)?;
                 }
                 nested += 1;
             }
             _ => walk.apply(instruction)?,
         }
-        walk.fire(&slots[base + offset])?;
+        walk.fire(base + offset)?;
     }
     Ok(())
 }
@@ -3121,14 +3134,14 @@ fn walk_slot_list(
 fn walk_region_body(
     region: &crate::circuit::GuardedRegion,
     base: usize,
-    slots: &[Vec<NoiseEvent>],
     walk: &mut impl SlotWalk,
 ) -> Result<()> {
-    walk_slot_list(region.body(), base, base + region.body().len(), slots, walk)
+    walk_slot_list(region.body(), base, base + region.body().len(), walk)
 }
 
 struct FrameWalk<'a> {
     backend: &'a mut dyn Backend,
+    noise: &'a PreparedNoise,
     rng: &'a mut ChaCha8Rng,
 }
 
@@ -3141,8 +3154,8 @@ impl SlotWalk for FrameWalk<'_> {
         self.backend.apply(instruction)
     }
 
-    fn fire(&mut self, events: &[NoiseEvent]) -> Result<()> {
-        for event in events {
+    fn fire(&mut self, slot: usize) -> Result<()> {
+        for event in self.noise.slot(slot) {
             apply_frame_event(self.backend, event, self.rng)?;
         }
         Ok(())
@@ -3153,38 +3166,22 @@ impl SlotWalk for FrameWalk<'_> {
 #[inline]
 fn apply_frame_event(
     backend: &mut dyn Backend,
-    event: &NoiseEvent,
+    event: &PreparedEvent,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    if let Some((q0, q1, p)) = event.pauli_pair() {
-        let r: f64 = rand::RngExt::random(rng);
-        if r < p {
-            let (l0, l1) = pair_branch(r / p);
-            apply_pauli_letter(backend, q0, l0)?;
-            apply_pauli_letter(backend, q1, l1)?;
+    match &event.channel {
+        PreparedChannel::PauliPair { p, .. } => {
+            let r: f64 = rand::RngExt::random(rng);
+            if r < *p {
+                let (l0, l1) = pair_branch(r / p);
+                apply_pauli_letter(backend, event.qubits[0], l0)?;
+                apply_pauli_letter(backend, event.qubits[1], l1)?;
+            }
+            Ok(())
         }
-        return Ok(());
+        PreparedChannel::Pauli(thresholds) => thresholds.apply(backend, event.qubits[0], rng),
+        _ => unreachable!("frame replay runs Pauli-frame channels only"),
     }
-    let (px, py, pz) = event.pauli_probs();
-    let q = event.qubit();
-    let r: f64 = rand::RngExt::random(rng);
-    if r < px {
-        backend.apply(&Instruction::Gate {
-            gate: Gate::X,
-            targets: SmallVec::from_elem(q, 1),
-        })?;
-    } else if r < px + py {
-        backend.apply(&Instruction::Gate {
-            gate: Gate::Y,
-            targets: SmallVec::from_elem(q, 1),
-        })?;
-    } else if r < px + py + pz {
-        backend.apply(&Instruction::Gate {
-            gate: Gate::Z,
-            targets: SmallVec::from_elem(q, 1),
-        })?;
-    }
-    Ok(())
 }
 
 pub(crate) fn run_shots_noisy_brute_with(
@@ -3197,6 +3194,7 @@ pub(crate) fn run_shots_noisy_brute_with(
     let mut shots = Vec::with_capacity(num_shots);
     let mut metadata = crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::Stabilizer);
     let readout = crate::sim::trajectory::written_readout(circuit, &noise.readout);
+    let prepared = PreparedNoise::new(noise);
 
     for i in 0..num_shots {
         let shot_seed = crate::sim::mix_seed(seed, i);
@@ -3204,8 +3202,8 @@ pub(crate) fn run_shots_noisy_brute_with(
         let mut backend = backend_factory(shot_seed);
         backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
 
-        if noise.after_gate.len() == circuit.instructions.len() {
-            for (instr, events) in circuit.instructions.iter().zip(&noise.after_gate) {
+        if prepared.num_slots() == circuit.instructions.len() {
+            for (instr, events) in circuit.instructions.iter().zip(prepared.slots_from(0)) {
                 backend.apply(instr)?;
                 for event in events {
                     apply_frame_event(backend.as_mut(), event, &mut rng)?;
@@ -3214,9 +3212,10 @@ pub(crate) fn run_shots_noisy_brute_with(
         } else {
             let mut walk = FrameWalk {
                 backend: backend.as_mut(),
+                noise: &prepared,
                 rng: &mut rng,
             };
-            walk_noise_slots(circuit, noise, 0, &mut walk)?;
+            walk_noise_slots(circuit, 0, &mut walk)?;
         }
 
         let shot_metadata = crate::sim::backend_metadata(backend.as_ref());

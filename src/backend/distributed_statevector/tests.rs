@@ -1691,24 +1691,224 @@ fn noisy_shots_rejected_on_distributed_kind() {
     ));
 }
 
-#[test]
-fn reduced_density_matrix_is_declined_on_every_rank() {
-    relax_min_local_qubits();
-    let circuit = crate::circuits::ghz_circuit(4);
-    let declined = run_ranks(2, |ctx| {
-        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
-        run_on(&mut backend, &circuit).expect("distributed run");
-        let name = backend.name().to_string();
-        (name, backend.reduced_density_matrix(&[0, 2]).unwrap_err())
-    });
-    for (name, err) in declined {
-        assert_eq!(
-            err,
-            PrismError::BackendUnsupported {
-                backend: name,
-                operation: "reduced density matrix".to_string(),
-            }
+/// Statevector reference for `circuit` with its instructions applied unfused.
+fn reference_backend(circuit: &Circuit) -> StatevectorBackend {
+    let mut backend = StatevectorBackend::new(SEED);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .expect("init");
+    backend
+        .apply_instructions(&circuit.instructions)
+        .expect("apply");
+    backend
+}
+
+fn assert_rdm_close(expected: &[Complex64], actual: &[Complex64], context: &str) {
+    assert_eq!(expected.len(), actual.len(), "{context}: length");
+    for (i, (e, a)) in expected.iter().zip(actual).enumerate() {
+        assert!(
+            (e - a).norm() < 1e-12,
+            "{context}: entry {i} expected {e}, got {a}"
         );
+    }
+}
+
+/// Kept sets read off the qubit map the run left behind, so each names the
+/// physical layout it covers: all local, all on rank bits, mixed, and wider
+/// than the local positions. No set lists its qubits in ascending order.
+fn rdm_cases(backend: &DistributedStatevectorBackend) -> Vec<(&'static str, Vec<usize>)> {
+    let local = backend.local_qubits();
+    let n = backend.num_qubits;
+    let on_rank: Vec<usize> = (0..n)
+        .rev()
+        .filter(|&q| backend.qubit_map[q] >= local)
+        .collect();
+    let in_slice: Vec<usize> = (0..n)
+        .rev()
+        .filter(|&q| backend.qubit_map[q] < local)
+        .collect();
+    vec![
+        ("all local", vec![in_slice[1], in_slice[2], in_slice[0]]),
+        ("all on rank bits", on_rank.clone()),
+        ("mixed", vec![in_slice[1], on_rank[0], in_slice[0]]),
+        ("wider than the slice", (0..=local).rev().collect()),
+    ]
+}
+
+// Kept qubits on rank bits are relabeled local before the rank-local fold;
+// with relabeling off the map comes back to the identity afterwards.
+#[test]
+fn reduced_density_matrix_matches_the_statevector_across_rank_counts() {
+    relax_min_local_qubits();
+    let n = 6;
+    let circuit = crate::circuits::random_circuit(n, 6, SEED);
+    let mut reference = reference_backend(&circuit);
+
+    for &relabel in &[true, false] {
+        for size in [2usize, 4] {
+            let per_rank = run_ranks(size, |ctx| {
+                let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                backend.set_relabel(relabel);
+                backend
+                    .init(circuit.num_qubits, circuit.num_classical_bits)
+                    .expect("init");
+                backend
+                    .apply_instructions(&circuit.instructions)
+                    .expect("apply");
+                let local = backend.local_qubits();
+                let mut out = Vec::new();
+                for (name, kept) in rdm_cases(&backend) {
+                    let rho = backend
+                        .reduced_density_matrix(&kept)
+                        .expect("distributed reduced density matrix");
+                    if relabel && kept.len() <= local {
+                        assert!(
+                            kept.iter().all(|&q| backend.qubit_map[q] < local),
+                            "{name}: kept qubits must sit local after the call"
+                        );
+                    }
+                    if !relabel {
+                        assert!(backend.map_identity, "{name}: map must be the identity");
+                    }
+                    out.push((name, kept, rho));
+                }
+                out
+            });
+            for (name, kept, rho) in &per_rank[0] {
+                let expected = reference.reduced_density_matrix(kept).expect("reference");
+                assert_rdm_close(
+                    &expected,
+                    rho,
+                    &format!("size {size} relabel {relabel} {name} {kept:?}"),
+                );
+            }
+            for other in &per_rank[1..] {
+                assert_eq!(other, &per_rank[0], "ranks must agree bit for bit");
+            }
+        }
+    }
+
+    let kept = [4usize, 1, 5];
+    let expected = reference.reduced_density_matrix(&kept).expect("reference");
+    for rho in run_ranks(4, |ctx| {
+        crate::simulate(&circuit)
+            .distributed(ctx)
+            .seed(SEED)
+            .reduced_density_matrix(&kept)
+            .expect("distributed reduced density matrix")
+            .data
+    }) {
+        assert_rdm_close(&expected, &rho, "simulate");
+    }
+}
+
+// A qubit on a rank bit splits its coherence sum across the partner pair; a
+// small exchange chunk covers the tiled exchange.
+#[test]
+fn reduced_density_matrix_1q_matches_the_statevector_across_rank_counts() {
+    relax_min_local_qubits();
+    let n = 6;
+    let circuit = crate::circuits::random_circuit(n, 6, SEED);
+    let reference = reference_backend(&circuit);
+    let expected: Vec<_> = (0..n)
+        .map(|q| reference.reduced_density_matrix_1q(q).expect("reference"))
+        .collect();
+
+    for &relabel in &[true, false] {
+        for size in [2usize, 4] {
+            for chunk in [usize::MAX, 3] {
+                let per_rank = run_ranks(size, |ctx| {
+                    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                    backend.set_relabel(relabel);
+                    backend.set_exchange_chunk(chunk);
+                    backend
+                        .init(circuit.num_qubits, circuit.num_classical_bits)
+                        .expect("init");
+                    backend
+                        .apply_instructions(&circuit.instructions)
+                        .expect("apply");
+                    let map = backend.qubit_map.clone();
+                    let rhos: Vec<_> = (0..n)
+                        .map(|q| backend.reduced_density_matrix_1q(q).expect("distributed"))
+                        .collect();
+                    assert_eq!(backend.qubit_map, map, "a &self read must not relabel");
+                    rhos
+                });
+                for rhos in &per_rank {
+                    for (q, (e, a)) in expected.iter().zip(rhos).enumerate() {
+                        assert_rdm_close(
+                            e.as_flattened(),
+                            a.as_flattened(),
+                            &format!("size {size} relabel {relabel} chunk {chunk} qubit {q}"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The relabel a reduced density matrix makes must be visible to every later
+// gate and measurement through the qubit map.
+#[test]
+fn gates_and_measurements_after_a_reduced_density_matrix_follow_the_statevector() {
+    relax_min_local_qubits();
+    let n = 6;
+    let prefix = crate::circuits::random_circuit(n, 4, SEED);
+    let mut b = CircuitBuilder::new_with_classical(n, 3);
+    b.h(5).ry(0.7, 4).cx(5, 0).rx(1.3, 1).measure(5, 0);
+    b.ry(0.4, 0).cx(4, 2).h(3).measure(0, 1).cx(1, 5).ry(0.9, 4);
+    b.measure(4, 2).h(2).cx(3, 4);
+    let suffix = b.build();
+
+    let mut reference = StatevectorBackend::new(SEED);
+    reference.init(n, suffix.num_classical_bits).expect("init");
+    for circuit in [&prefix, &suffix] {
+        reference
+            .apply_instructions(&circuit.instructions)
+            .expect("apply");
+    }
+    let expected_probs = reference.probabilities().expect("probabilities");
+    let expected_bits = reference.classical_results().to_vec();
+
+    for &relabel in &[true, false] {
+        for size in [2usize, 4] {
+            let per_rank = run_ranks(size, |ctx| {
+                let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                backend.set_relabel(relabel);
+                backend.init(n, suffix.num_classical_bits).expect("init");
+                backend
+                    .apply_instructions(&prefix.instructions)
+                    .expect("prefix");
+                let local = backend.local_qubits();
+                let mut kept: Vec<usize> =
+                    (0..n).filter(|&q| backend.qubit_map[q] >= local).collect();
+                kept.push((0..n).find(|&q| backend.qubit_map[q] < local).unwrap());
+                let before = backend.qubit_map.clone();
+                backend.reduced_density_matrix(&kept).expect("rdm");
+                if relabel {
+                    assert_ne!(backend.qubit_map, before, "the call must relabel");
+                } else {
+                    assert!(backend.map_identity);
+                }
+                backend
+                    .apply_instructions(&suffix.instructions)
+                    .expect("suffix");
+                (
+                    backend.probabilities().expect("probabilities"),
+                    backend.classical_results().to_vec(),
+                )
+            });
+            for (probs, bits) in &per_rank {
+                assert_eq!(bits, &expected_bits, "size {size} relabel {relabel}");
+                for (i, (e, a)) in expected_probs.iter().zip(probs).enumerate() {
+                    assert!(
+                        (e - a).abs() < TOL,
+                        "size {size} relabel {relabel}: prob[{i}] expected {e}, got {a}"
+                    );
+                }
+            }
+        }
     }
 }
 

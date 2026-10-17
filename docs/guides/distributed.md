@@ -82,6 +82,11 @@ and bounds the transfer buffers; by default each exchange is one message.
 - Per-qubit probabilities, Pauli expectation values, and multi-shot terminal sampling
   answer from rank-local sums plus one reduction, at any register width, without
   gathering the dense state.
+- Reduced density matrices, summed from rank-local partial traces. Kept qubits on rank
+  bits are relabeled into local positions first, one half-slice exchange each, and
+  stay there with relabeling on; with `PRISM_DIST_RELABEL=0` the layout is restored
+  afterwards. A subsystem wider than the local slice reads the gathered state.
+  Entanglement entropy needs a global SVD and declines.
 - `probabilities()` and `export_statevector()` gather and so carry the dense output
   cap; a register past the cap is rejected before the run.
 - A caller-supplied `initial_state`: every rank receives the full vector and keeps its

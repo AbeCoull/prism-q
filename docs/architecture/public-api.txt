@@ -981,6 +981,7 @@ pub fn prism_q::circuit::builder::CircuitBuilder::sx(&mut self, usize) -> &mut S
 pub fn prism_q::circuit::builder::CircuitBuilder::sxdg(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::t(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::tdg(&mut self, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::trotter(&mut self, &prism_q::PauliObservable, f64, usize, prism_q::TrotterOrder) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::u(&mut self, f64, f64, f64, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::x(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::y(&mut self, usize) -> &mut Self
@@ -1232,6 +1233,10 @@ pub prism_q::circuit::SaveSpec::StateVector
 pub prism_q::circuit::SavedValue::DensityMatrix(alloc::vec::Vec<num_complex::Complex64>)
 pub prism_q::circuit::SavedValue::Probabilities(alloc::vec::Vec<f64>)
 pub prism_q::circuit::SavedValue::StateVector(alloc::vec::Vec<num_complex::Complex64>)
+pub enum prism_q::circuit::TrotterOrder
+pub prism_q::circuit::TrotterOrder::First
+pub prism_q::circuit::TrotterOrder::Second
+pub prism_q::circuit::TrotterOrder::Suzuki(usize)
 pub struct prism_q::circuit::Circuit
 pub prism_q::circuit::Circuit::instructions: alloc::vec::Vec<prism_q::circuit::Instruction>
 pub prism_q::circuit::Circuit::num_classical_bits: usize
@@ -1262,6 +1267,8 @@ pub fn prism_q::circuit::Circuit::noise_slot_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::save_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::t_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::without_measurements(&self) -> prism_q::circuit::Circuit
+impl prism_q::circuit::Circuit
+pub fn prism_q::circuit::Circuit::add_trotter(&mut self, &prism_q::PauliObservable, f64, usize, prism_q::TrotterOrder)
 impl prism_q::circuit::Circuit
 pub fn prism_q::circuit::Circuit::draw(&self, &prism_q::TextOptions) -> alloc::string::String
 pub fn prism_q::circuit::Circuit::heatmap(&self, &prism_q::TextOptions) -> alloc::string::String
@@ -3099,6 +3106,10 @@ pub prism_q::SpdTruncation::Budget::max_terms: usize
 pub prism_q::SpdTruncation::Threshold
 pub prism_q::SpdTruncation::Threshold::epsilon: f64
 pub prism_q::SpdTruncation::Threshold::max_terms: usize
+pub enum prism_q::TrotterOrder
+pub prism_q::TrotterOrder::First
+pub prism_q::TrotterOrder::Second
+pub prism_q::TrotterOrder::Suzuki(usize)
 pub struct prism_q::BatchPhaseData
 impl prism_q::gates::BatchPhaseData
 pub const prism_q::gates::BatchPhaseData::MAX_PHASES: usize
@@ -3154,6 +3165,8 @@ pub fn prism_q::circuit::Circuit::noise_slot_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::save_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::t_count(&self) -> usize
 pub fn prism_q::circuit::Circuit::without_measurements(&self) -> prism_q::circuit::Circuit
+impl prism_q::circuit::Circuit
+pub fn prism_q::circuit::Circuit::add_trotter(&mut self, &prism_q::PauliObservable, f64, usize, prism_q::TrotterOrder)
 impl prism_q::circuit::Circuit
 pub fn prism_q::circuit::Circuit::draw(&self, &prism_q::TextOptions) -> alloc::string::String
 pub fn prism_q::circuit::Circuit::heatmap(&self, &prism_q::TextOptions) -> alloc::string::String
@@ -3214,6 +3227,7 @@ pub fn prism_q::circuit::builder::CircuitBuilder::sx(&mut self, usize) -> &mut S
 pub fn prism_q::circuit::builder::CircuitBuilder::sxdg(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::t(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::tdg(&mut self, usize) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::trotter(&mut self, &prism_q::PauliObservable, f64, usize, prism_q::TrotterOrder) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::u(&mut self, f64, f64, f64, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::x(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::y(&mut self, usize) -> &mut Self

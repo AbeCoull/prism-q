@@ -19,7 +19,7 @@ use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{
     BackendKind, ClassicalCondition, DynamicProgram, DynamicProgramBuilder, Instruction,
-    MpsBackend, Parameters, PauliAxis, PauliObservable, PauliTerm, PreparedCircuit,
+    MpsBackend, Parameters, PauliAxis, PauliObservable, PauliTerm, PreparedCircuit, TrotterOrder,
     run_expectation_gradient, run_expectation_gradient_shift, run_expectation_values,
     run_observable_expectation,
 };
@@ -768,6 +768,27 @@ fn bench_statevector_trotter(c: &mut Criterion) {
             });
         });
         group.bench_with_input(BenchmarkId::new("ladder", n), &ladder, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// One second-order step of the Heisenberg chain through the product-formula
+// builder. The `XX` and `YY` couplings reach `PauliRot`, `ZZ` lowers to `Rzz`
+// and the fields to named rotations, so the row prices the mixed stream the
+// builder emits under the default pipeline rather than one kernel.
+fn bench_statevector_trotter_builder(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/trotter_builder");
+    configure_group(&mut group);
+
+    for &n in &[16, 20] {
+        let mut circuit = Circuit::new(n, 0);
+        circuit.add_trotter(&heisenberg_hamiltonian(n), 0.1, 1, TrotterOrder::Second);
+        group.bench_with_input(BenchmarkId::new("heisenberg", n), &circuit, |b, circ| {
             b.iter(|| {
                 run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
@@ -5432,6 +5453,7 @@ criterion_group! {
     bench_statevector_controlled_rotation,
     bench_statevector_qaoa_ring_matching,
     bench_statevector_trotter,
+    bench_statevector_trotter_builder,
     bench_statevector_diag_mixed,
     bench_statevector_hardware_basis,
     bench_pauli_path_noisy_expectation,

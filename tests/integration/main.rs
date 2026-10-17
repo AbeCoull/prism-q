@@ -86,3 +86,4 @@ mod subset_probabilities;
 mod tensor_route;
 mod tensornetwork_correctness;
 mod trajectory_correctness;
+mod trotter_builder;

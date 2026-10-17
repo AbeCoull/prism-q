@@ -2,8 +2,8 @@
 
 use prism_q::circuit::{openqasm, qasm_export};
 use prism_q::{
-    Circuit, CircuitBuilder, ClassicalCondition, Gate, Instruction, PauliTerm, SaveSpec,
-    SvgOptions, TextOptions, circuits,
+    Circuit, CircuitBuilder, ClassicalCondition, Gate, Instruction, PauliObservable, PauliTerm,
+    SaveSpec, SvgOptions, TextOptions, TrotterOrder, circuits,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -13,7 +13,7 @@ use crate::error::{PyPrismResult, invalid};
 use crate::gate::PyGate;
 use crate::parameter::PyParameters;
 use crate::pickle::{Reduced, ReducedMember, reduce, reduce_member};
-use crate::sim::{parse_axis, parse_pauli_string};
+use crate::sim::{Hamiltonian, parse_axis, parse_pauli_string};
 
 /// A quantum circuit. Construct via [`CircuitBuilder`], [`parse_qasm`], or one
 /// of the reusable circuit generators under `prism_q.circuits`.
@@ -80,6 +80,32 @@ fn check_pauli_factors(
         )));
     }
     Ok(terms)
+}
+
+/// Bounds-check the Hamiltonian's qubits and read the integer `order` a Python
+/// caller passes: 1, 2, or an even `2k` for the Suzuki formula of that order.
+fn check_trotter(
+    num_qubits: usize,
+    hamiltonian: &PauliObservable,
+    steps: usize,
+    order: usize,
+) -> PyPrismResult<TrotterOrder> {
+    if steps == 0 {
+        return Err(invalid("trotter expansion needs at least one step"));
+    }
+    for (_, string) in hamiltonian.terms() {
+        for term in string {
+            check_qubit(num_qubits, term.qubit, "hamiltonian qubit")?;
+        }
+    }
+    match order {
+        1 => Ok(TrotterOrder::First),
+        2 => Ok(TrotterOrder::Second),
+        even if even & 1 == 0 => Ok(TrotterOrder::Suzuki(even / 2)),
+        _ => Err(invalid(format!(
+            "trotter order must be 1, 2, or an even number, got {order}"
+        ))),
+    }
 }
 
 fn check_distinct(qubits: &[usize]) -> PyPrismResult<()> {
@@ -424,6 +450,27 @@ impl PyCircuit {
     ) -> PyPrismResult<()> {
         let terms = check_pauli_factors(self.0.num_qubits, factors)?;
         self.0.add_pauli_rotation(theta, &terms);
+        Ok(())
+    }
+
+    /// Append `steps` product-formula steps approximating `exp(-i H t)` for
+    /// `hamiltonian = sum c P`, each term as the rotation `exp(-i c P dt)` with
+    /// `dt = t / steps` through `add_pauli_rotation`. `order` is 1 (Lie-Trotter),
+    /// 2 (symmetric), or an even `2k` (Suzuki, costing `5^(k - 1)` second-order
+    /// substeps). Identity terms are dropped as a global phase. `hamiltonian`
+    /// takes the `Simulation.observable_expectation` term shape or a
+    /// `PauliObservable`.
+    #[pyo3(signature = (hamiltonian, t, steps=1, order=2))]
+    fn add_trotter(
+        &mut self,
+        hamiltonian: Hamiltonian<'_>,
+        t: f64,
+        steps: usize,
+        order: usize,
+    ) -> PyPrismResult<()> {
+        let observable = hamiltonian.observable()?;
+        let order = check_trotter(self.0.num_qubits, &observable, steps, order)?;
+        self.0.add_trotter(&observable, t, steps, order);
         Ok(())
     }
 
@@ -786,6 +833,22 @@ impl PyCircuitBuilder {
     ) -> PyPrismResult<PyRefMut<'_, Self>> {
         let terms = check_pauli_factors(slf.inner.circuit().num_qubits, factors)?;
         slf.inner.pauli_rotation(theta, &terms);
+        Ok(slf)
+    }
+
+    /// Append a product-formula approximation of `exp(-i H t)` as
+    /// `Circuit.add_trotter` does, with the same `steps` and integer `order`.
+    #[pyo3(signature = (hamiltonian, t, steps=1, order=2))]
+    fn trotter<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        hamiltonian: Hamiltonian<'py>,
+        t: f64,
+        steps: usize,
+        order: usize,
+    ) -> PyPrismResult<PyRefMut<'py, Self>> {
+        let observable = hamiltonian.observable()?;
+        let order = check_trotter(slf.inner.circuit().num_qubits, &observable, steps, order)?;
+        slf.inner.trotter(&observable, t, steps, order);
         Ok(slf)
     }
 

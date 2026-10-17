@@ -588,7 +588,11 @@ fn dropped_records_match_kept_projection_for_new_ops() {
             .parity_rows(&program.detector_rows().unwrap())
             .unwrap();
         assert_eq!(kept.detectors.to_shots(), projected.to_shots(), "{text}");
-        assert_eq!(dropped.detectors.to_shots(), kept.detectors.to_shots(), "{text}");
+        assert_eq!(
+            dropped.detectors.to_shots(),
+            kept.detectors.to_shots(),
+            "{text}"
+        );
         assert_eq!(
             dropped.observables.to_shots(),
             kept.observables.to_shots(),

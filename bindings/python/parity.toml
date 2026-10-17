@@ -18,7 +18,7 @@
 types = [
   # Entry points and builders
   "Simulate", "SimulateProgram", "CircuitBuilder", "Circuit", "BackendKind",
-  "Parameters", "PreparedCircuit", "PauliObservable", "CompiledSampler",
+  "Parameters", "PreparedCircuit", "PauliObservable", "TrotterOrder", "CompiledSampler",
   "DynamicProgram", "DynamicProgramBuilder", "ThreadPool", "Limits", "Query", "Plan",
   # Results
   "RunOutcome", "ShotsResult", "CountsResult", "MarginalsResult", "ExpectationResult",
@@ -197,6 +197,7 @@ exclude = [
 "CircuitBuilder::param" = "CircuitBuilder.param"
 "CircuitBuilder::parameters" = "CircuitBuilder.parameters"
 "CircuitBuilder::pauli_rotation" = "CircuitBuilder.pauli_rotation"
+"CircuitBuilder::trotter" = "CircuitBuilder.trotter"
 "CircuitBuilder::reset" = "CircuitBuilder.reset"
 "CircuitBuilder::run" = { rust_only = "Python runs through simulate(builder.build())" }
 "CircuitBuilder::run_shots" = { rust_only = "Python runs through simulate(builder.build())" }
@@ -224,6 +225,7 @@ exclude = [
 "Circuit::add_gate" = "Circuit.add_gate"
 "Circuit::add_measure" = "Circuit.add_measure"
 "Circuit::add_pauli_rotation" = "Circuit.add_pauli_rotation"
+"Circuit::add_trotter" = "Circuit.add_trotter"
 "Circuit::add_reset" = "Circuit.add_reset"
 "Circuit::add_save" = "Circuit.add_save"
 "Circuit::add_unitary" = { rust_only = "Python builds the gate with Gate.unitary and appends it with add_gate" }
@@ -318,6 +320,11 @@ exclude = [
 "PauliObservable::split_identity" = { rust_only = "helper of the variance terminals" }
 "PauliObservable::square" = { rust_only = "helper of the variance terminals; Simulation.observable_variance applies it" }
 "PauliObservable::terms" = "PauliObservable.terms"
+
+# TrotterOrder: Python passes the integer order to Circuit.add_trotter and CircuitBuilder.trotter
+"TrotterOrder::First" = { rust_only = "Python passes order=1" }
+"TrotterOrder::Second" = { rust_only = "Python passes order=2" }
+"TrotterOrder::Suzuki" = { rust_only = "Python passes the even order 2k" }
 "CompiledSampler::exact_counts" = "CompiledSampler.exact_counts"
 "CompiledSampler::num_measurements" = "CompiledSampler.num_measurements"
 "CompiledSampler::parity_report" = { rust_only = "diagnostic text of the parity structure" }

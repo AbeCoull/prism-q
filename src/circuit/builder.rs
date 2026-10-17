@@ -17,10 +17,11 @@ use num_complex::Complex64;
 use super::openqasm::Parser;
 use super::parameter::Parameters;
 use super::{
-    Circuit, ClassicalCondition, Instruction, SmallVec, append_axis_to_z_rotation,
+    Circuit, ClassicalCondition, Instruction, SmallVec, TrotterOrder, append_axis_to_z_rotation,
     append_parity_rotations, guarded,
 };
 use crate::gates::Gate;
+use crate::sim::PauliObservable;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 /// Fluent builder for quantum circuits.
@@ -123,6 +124,23 @@ impl CircuitBuilder {
     /// Panics if `factors` is empty or names a qubit twice.
     pub fn pauli_rotation(&mut self, theta: f64, factors: &[PauliTerm]) -> &mut Self {
         self.circuit.add_pauli_rotation(theta, factors);
+        self
+    }
+
+    /// Append a product-formula approximation of `exp(-i H t)` as
+    /// [`Circuit::add_trotter`] does.
+    ///
+    /// # Panics
+    /// Panics if `steps` is zero, if `order` is `Suzuki(0)`, or if a term names
+    /// a qubit out of bounds.
+    pub fn trotter(
+        &mut self,
+        hamiltonian: &PauliObservable,
+        t: f64,
+        steps: usize,
+        order: TrotterOrder,
+    ) -> &mut Self {
+        self.circuit.add_trotter(hamiltonian, t, steps, order);
         self
     }
 

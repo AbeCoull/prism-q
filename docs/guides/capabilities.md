@@ -94,6 +94,35 @@ route that cannot serve the matrix says so rather than dropping it. The gate
 also has no OpenQASM spelling: exporting a circuit that holds one raises
 `ExportUnsupported`.
 
+## Hamiltonian evolution
+
+`Circuit::add_trotter` and `CircuitBuilder::trotter` append a product-formula
+approximation of `exp(-i H t)` for a `PauliObservable` `H = sum c_j P_j`:
+`steps` steps of length `dt = t / steps`, each term as the rotation
+`exp(-i c_j P_j dt)` through `add_pauli_rotation`, so weight-1 strings and `ZZ`
+land as named rotations and the rest as native `PauliRot`, which fusion batches
+at 16 qubits and above. `TrotterOrder::First` is the Lie-Trotter formula,
+`Second` the symmetric one, and `Suzuki(k)` the recursive formula of order `2k`
+at `5^(k - 1)` second-order substeps per step. Identity terms are dropped: they
+contribute a global phase no result sees.
+
+```rust
+# use prism_q::{CircuitBuilder, PauliObservable, PauliTerm, TrotterOrder, simulate};
+let ising = PauliObservable::from_terms([
+    (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+    (0.5, vec![PauliTerm::x(0)]),
+    (0.5, vec![PauliTerm::x(1)]),
+])?;
+let evolved = CircuitBuilder::new(2)
+    .h(0)
+    .h(1)
+    .trotter(&ising, 1.0, 8, TrotterOrder::Second)
+    .build();
+let energy = simulate(&evolved).seed(42).observable_expectation(&ising)?.mean;
+assert!((energy - 1.0).abs() < 1e-2); // <H> is conserved up to the Trotter error
+# Ok::<(), prism_q::PrismError>(())
+```
+
 ## Shot and observable queries above the dense cap
 
 `simulate(...).shots(n)`, `.sample_counts(n)`, and `.expectation_values(...)`

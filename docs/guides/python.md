@@ -85,6 +85,7 @@ circuit = (
 | Two-qubit rotations | `rxx(theta, q0, q1)`, `ryy(theta, q0, q1)`, `rzz(theta, q0, q1)` |
 | Three qubit | `ccx(control0, control1, target)`, `cswap(control, q0, q1)` |
 | Multi-qubit rotation | `pauli_rotation(theta, factors)` |
+| Hamiltonian evolution | `trotter(hamiltonian, t, steps=1, order=2)` |
 | Arbitrary unitary | `cu(matrix, control, target)`, `mcu(matrix, controls, target)`, `gate(gate, targets)` |
 | Non-unitary | `measure(qubit, bit)`, `measure_all()`, `measure_in_basis(qubit, axis, bit)`, `measure_pauli_product(factors, bit)`, `reset(qubit)`, `barrier(qubits)` |
 | Classical control | `conditional(condition, gate, targets)`, `guarded(condition, body, else_body=None)` |
@@ -98,6 +99,24 @@ keep firing on them. `Circuit.add_pauli_rotation` is the imperative spelling.
 
 ```python
 builder.pauli_rotation(0.4, [(0, "X"), (1, "Y"), (3, "Z")]).param(0)
+```
+
+`trotter(hamiltonian, t, steps=1, order=2)` appends a product-formula
+approximation of `exp(-i H t)`: `steps` steps of length `t / steps`, each term
+`c P` of the Hamiltonian as the rotation `exp(-i c P dt)` through
+`pauli_rotation`. `order` is 1 for the Lie-Trotter formula, 2 for the symmetric
+one, or an even `2k` for the Suzuki formula of that order, which costs
+`5 ** (k - 1)` second-order substeps. The Hamiltonian is the term list the
+expectation terminals take or a `PauliObservable`; identity terms are dropped as
+a global phase. `Circuit.add_trotter` is the imperative spelling.
+
+```python
+from prism_q import CircuitBuilder, PauliObservable, simulate
+
+ising = PauliObservable([(1.0, [(0, "Z"), (1, "Z")]), (0.5, [(0, "X")]), (0.5, [(1, "X")])])
+evolved = CircuitBuilder(2).h(0).h(1).trotter(ising, 1.0, steps=8, order=2).build()
+energy = simulate(evolved).seed(42).observable_expectation(ising).mean
+assert abs(energy - 1.0) < 1e-2  # <H> is conserved up to the Trotter error
 ```
 
 The standard gates lower as the OpenQASM parser lowers the same names, so a builder

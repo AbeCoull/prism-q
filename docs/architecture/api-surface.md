@@ -100,7 +100,7 @@ and splits it across cores where `run_batch` would.
 `SpdTruncation`
 
 **Types:**
-`Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `SvgOptions`,
+`Circuit`, `CircuitBuilder`, `TrotterOrder`, `Instruction`, `ClassicalCondition`, `SvgOptions`,
 `TextOptions`, `Gate`, `GeneratorKind`, `BackendKind`, `RunOutcome`, `CountsResult`,
 `MarginalsResult`, `ReducedDensityMatrix`, `EntropyResult`, `Probabilities`,
 `FactoredBlock`, `ShotsResult`, `PrismError`, `ResourceLimit`, `ResourceKind`, `Result`,

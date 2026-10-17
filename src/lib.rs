@@ -88,7 +88,7 @@ pub use circuit::builder::CircuitBuilder;
 pub use circuit::dynamic::{DynamicProgram, DynamicProgramBuilder};
 pub use circuit::{
     Circuit, ClassicalCondition, Instruction, ParamLink, Parameters, PreparedCircuit, SaveRecord,
-    SaveSpec, SavedValue, SvgOptions, TextOptions,
+    SaveSpec, SavedValue, SvgOptions, TextOptions, TrotterOrder,
 };
 #[cfg(feature = "distributed-mpi")]
 pub use distributed::MpiComm;

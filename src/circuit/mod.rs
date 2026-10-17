@@ -24,10 +24,12 @@ pub(crate) mod qasm;
 pub mod qasm_export;
 mod qft_recognition;
 pub(crate) mod synthesis;
+mod trotter;
 
 pub use parameter::{ParamLink, Parameters};
 pub use prepared::PreparedCircuit;
 pub use qft_recognition::recognize_qft_blocks;
+pub use trotter::TrotterOrder;
 
 use crate::gates::{Gate, PauliRotData};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};

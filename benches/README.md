@@ -452,11 +452,18 @@ least touched by other work: on the reference host it read a third to half the
 round-to-round spread of the mean. A round whose two invocations of one variant disagree
 by more than the threshold on the median row is dropped as disturbed and replaced, up to
 half as many rounds again; that test never compares A with B, so it cannot bias the
-change. A row reports the median over 16 undisturbed rounds with a 95% interval from the
-order statistics. The verdict follows `bench_ab.sh`: FAIL when a row's interval lies
-wholly above the threshold, RERUN when it straddles the threshold, when a `--control`
-row reads off zero, or when fewer than six rounds were undisturbed, with the same exit
-codes.
+change. A row reports the median over the undisturbed rounds, 16 at most, with a 95%
+interval from the order statistics. From the sixth undisturbed round on, the verdicts
+are computed after every round and the run stops once all of them are settled: each
+filter interval wholly on one side of the threshold, each control median inside half the
+threshold, and no control interval reaching past it. An effect ten times the gate settles
+in six rounds; `--no-early-stop` runs the full count. The verdict follows `bench_ab.sh`:
+FAIL when a row's interval lies wholly above the threshold, RERUN when it straddles the
+threshold, when a `--control` row reads off zero, or when fewer than six rounds were
+undisturbed, with the same exit codes. A control whose interval reaches past the
+threshold reads wide, and forces a RERUN only when some filter row's |change| is under
+three times the control's half-width: noise on that scale cannot carry a smaller effect
+across the gate, and a 45% effect with a one-point interval stands on its own.
 
 Two same-code runs of six `circuits` rows took 17 minutes each and held every interval
 within -3.6% to +2.9%, the widest on the 180 us row. A 94 us busy wait injected into

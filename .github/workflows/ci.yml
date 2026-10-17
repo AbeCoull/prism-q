@@ -6,6 +6,10 @@ on:
   pull_request:
   # Lets a branch run the full gate before a pull request exists.
   workflow_dispatch:
+    inputs:
+      instruction-counts-base:
+        description: Ref the instruction-count job compares against
+        default: main
 
 # A push to main is never cancelled: each one owes its bench reference build, which
 # the next pull request's gate restores.
@@ -852,8 +856,9 @@ jobs:
   # Callgrind instruction counts for the eight single-thread rows in benches/iai.rs,
   # one kernel each. A count is byte-identical run to run, so a shared runner holds
   # the threshold the wall-clock gate cannot. A pull request builds its base commit
-  # in a worktree and compares; a dispatch compares against main; a push to main
-  # only records. benches/README.md says what the counts do and do not catch.
+  # in a worktree and compares; a dispatch compares against the ref its input names,
+  # main by default; a push to main only records. benches/README.md says what the
+  # counts do and do not catch.
   instruction-counts:
     name: Instruction counts
     runs-on: ubuntu-latest
@@ -871,7 +876,7 @@ jobs:
         run: |
           case "$GITHUB_EVENT_NAME" in
             pull_request) ref="${{ github.event.pull_request.base.sha }}" ;;
-            workflow_dispatch) ref="main" ;;
+            workflow_dispatch) ref="${{ inputs.instruction-counts-base }}" ;;
             *) ref="" ;;
           esac
           run=true

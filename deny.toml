@@ -8,7 +8,7 @@ ignore = [
     # custom_derive: unmaintained, transitive dep from optional mpi via conv.
     { id = "RUSTSEC-2025-0058", reason = "transitive dep from optional mpi, revisit when mpi removes conv/custom_derive" },
     # proc-macro-error2 and bincode 1: unmaintained, transitive dev deps from iai-callgrind
-    # (its proc macros and the bench-to-runner handshake). Neither reaches the library.
+    # (its proc macros and the handshake between bench and runner). Neither reaches the library.
     { id = "RUSTSEC-2026-0173", reason = "transitive dev dep from iai-callgrind-macros, revisit on its next release" },
     { id = "RUSTSEC-2025-0141", reason = "transitive dev dep from iai-callgrind, revisit on its next release" },
 ]

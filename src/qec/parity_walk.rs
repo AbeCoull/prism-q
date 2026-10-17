@@ -5,8 +5,8 @@
 
 use super::noise::{
     QecDeferredChannel, QecDeferredNoiseEvent, QecDeferredProgram, QecNoiseDraw, QecParityNoise,
-    QecParityNoiseEvent, QecRecordEvent, append_qec_pauli_noise_effect, qec_pair_branch_flips,
-    qec_single_noise_rates,
+    QecParityNoiseEvent, QecProductTable, QecRecordEvent, append_qec_pauli_noise_effect,
+    qec_pair_branch_flips, qec_single_noise_rates,
 };
 use super::runner::QecParityProjection;
 use crate::error::{PrismError, Result};
@@ -62,6 +62,7 @@ pub(super) fn compile_parity_noise(
             walk.branch_offsets,
             walk.outputs,
             deferred.pair_tables.clone(),
+            deferred.product_tables.clone(),
         ),
     )))
 }
@@ -97,6 +98,7 @@ pub(super) fn compile_fault_sites(
         walk,
         order,
         pair_tables: deferred.pair_tables.clone(),
+        product_tables: deferred.product_tables.clone(),
     })
 }
 
@@ -130,6 +132,8 @@ pub(super) fn compile_record_events(deferred: &QecDeferredProgram) -> Result<Vec
                     event.targets[2 * offset] as u32,
                     event.targets[2 * offset + 1] as u32,
                 ]
+            } else if matches!(event.channel, QecDeferredChannel::Products { .. }) {
+                [index, u32::MAX]
             } else {
                 [event.targets[offset] as u32, u32::MAX]
             };
@@ -149,14 +153,18 @@ pub(super) struct FaultSites {
     /// Indices into `walk.events` in program order.
     order: Vec<u32>,
     pair_tables: Vec<[f64; 15]>,
+    product_tables: Vec<QecProductTable>,
 }
 
 impl FaultSites {
     /// Every site's firing branches, as `(probability, outputs ascending)`.
     pub(super) fn sites(&self) -> impl Iterator<Item = impl Iterator<Item = (f64, &[u32])>> {
         self.order.iter().map(move |&at| {
-            self.walk
-                .branches(&self.walk.events[at as usize], &self.pair_tables)
+            self.walk.branches(
+                &self.walk.events[at as usize],
+                &self.pair_tables,
+                &self.product_tables,
+            )
         })
     }
 }
@@ -192,9 +200,10 @@ impl ParityWalk {
         &'a self,
         event: &WalkEvent,
         pair_tables: &'a [[f64; 15]],
+        product_tables: &'a [QecProductTable],
     ) -> impl Iterator<Item = (f64, &'a [u32])> {
         let draw = event.kept.draw;
-        let count = branch_count(draw);
+        let count = branch_count(draw, product_tables);
         let rates = event.kept.rates;
         let first = event.first_branch;
         (0..count).filter_map(move |branch| {
@@ -202,6 +211,9 @@ impl ParityWalk {
                 QecNoiseDraw::Single { .. } => rates[branch],
                 QecNoiseDraw::Pair { .. } => rates[0] / 15.0,
                 QecNoiseDraw::PairTable { table, .. } => pair_tables[table as usize][branch],
+                QecNoiseDraw::Products { table, .. } => {
+                    product_tables[table as usize].rates[branch]
+                }
             };
             let range = self.branch_offsets[first + branch] as usize
                 ..self.branch_offsets[first + branch + 1] as usize;
@@ -276,21 +288,24 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
         spills.push(result.spill);
     }
 
+    let product_tables = &plan.deferred.product_tables;
     let pieces: Vec<NoisePiece> = if spills.iter().all(|spill| spill.keys.is_empty()) {
-        owns.into_iter().map(|own| merge_window(own, &[])).collect()
+        owns.into_iter()
+            .map(|own| merge_window(own, &[], product_tables))
+            .collect()
     } else {
         #[cfg(feature = "parallel")]
         {
             owns.into_par_iter()
                 .enumerate()
-                .map(|(window, own)| merge_window(own, &spills[window + 1..]))
+                .map(|(window, own)| merge_window(own, &spills[window + 1..], product_tables))
                 .collect()
         }
         #[cfg(not(feature = "parallel"))]
         {
             owns.into_iter()
                 .enumerate()
-                .map(|(window, own)| merge_window(own, &spills[window + 1..]))
+                .map(|(window, own)| merge_window(own, &spills[window + 1..], product_tables))
                 .collect()
         }
     };
@@ -474,12 +489,15 @@ fn default_window_count(gate_count: usize) -> usize {
     }
 }
 
-/// Events the sink is offered for one deferred event: one per target, or per pair.
+/// Events the sink is offered for one deferred event: one per target, per pair, or one
+/// for a product event.
 fn candidate_count(event: &QecDeferredNoiseEvent) -> usize {
-    if event.channel.is_pair() {
-        event.targets.len() / 2
-    } else {
-        event.targets.len()
+    match event.channel {
+        QecDeferredChannel::Single(_) => event.targets.len(),
+        QecDeferredChannel::Depolarize2(_) | QecDeferredChannel::PairTable { .. } => {
+            event.targets.len() / 2
+        }
+        QecDeferredChannel::Products { .. } => 1,
     }
 }
 
@@ -901,7 +919,7 @@ struct OwnFlips {
 /// Detector flips one window saw on earlier windows' events, keyed by
 /// `(candidate, branch)` ascending, outputs in `outputs[offsets[i]..offsets[i + 1]]`.
 struct SpillFlips {
-    keys: Vec<(u32, u8)>,
+    keys: Vec<(u32, u16)>,
     offsets: Vec<u32>,
     outputs: Vec<u32>,
 }
@@ -952,7 +970,7 @@ impl WindowVisitor {
         &mut self,
         rows: &WindowRows<'_>,
         candidate: u32,
-        branch: u8,
+        branch: u16,
         words: impl Iterator<Item = u64>,
     ) {
         let start = self.spill.outputs.len();
@@ -1028,7 +1046,57 @@ impl WindowVisitor {
                 append_qec_pauli_noise_effect(branch, sample % 4, &x1[..det], &z1[..det]);
             }
             for (branch, flips) in branch_flips.chunks_exact(det).enumerate() {
-                self.push_spill(rows, candidate, branch as u8, flips.iter().copied());
+                self.push_spill(rows, candidate, branch as u16, flips.iter().copied());
+            }
+        }
+        self.branch_flips = branch_flips;
+    }
+
+    /// One product event: every branch's flips are the XOR of its letters' effects on
+    /// the targets' rows.
+    fn products(
+        &mut self,
+        rows: &WindowRows<'_>,
+        slots: &[usize],
+        candidate: u32,
+        p: f64,
+        table: u32,
+        tables: &[QecProductTable],
+    ) {
+        let product = &tables[table as usize];
+        let words = if self.position >= self.lo {
+            rows.words
+        } else {
+            rows.det_words
+        };
+        if words == 0 {
+            return;
+        }
+        let mut branch_flips = std::mem::take(&mut self.branch_flips);
+        branch_flips.clear();
+        branch_flips.resize(product.rates.len() * words, 0);
+        let mut any = false;
+        for (branch, flips) in branch_flips.chunks_exact_mut(words).enumerate() {
+            for (&slot, &letter) in slots.iter().zip(product.branch_letters(branch)) {
+                let (x, z) = rows.row(slot);
+                append_qec_pauli_noise_effect(flips, letter as usize, &x[..words], &z[..words]);
+            }
+            any |= flips.iter().any(|&w| w != 0);
+        }
+        if self.position >= self.lo {
+            if any {
+                self.own.events.push(KeptEvent {
+                    candidate,
+                    draw: QecNoiseDraw::products(p, table),
+                    rates: [p, 0.0, 0.0],
+                });
+                for flips in branch_flips.chunks_exact(words) {
+                    self.push_branch(rows, flips.iter().copied());
+                }
+            }
+        } else {
+            for (branch, flips) in branch_flips.chunks_exact(words).enumerate() {
+                self.push_spill(rows, candidate, branch as u16, flips.iter().copied());
             }
         }
         self.branch_flips = branch_flips;
@@ -1081,6 +1149,11 @@ impl WalkVisitor for WindowVisitor {
                 }
                 return;
             }
+            QecDeferredChannel::Products { p, table } => {
+                let tables = &rows.plan.deferred.product_tables;
+                self.products(rows, slots, candidate, p, table, tables);
+                return;
+            }
         };
         for (offset, pair) in slots.as_chunks::<2>().0.iter().enumerate() {
             self.pair(
@@ -1101,15 +1174,20 @@ struct NoisePiece {
     outputs: Vec<u32>,
 }
 
-fn branch_count(draw: QecNoiseDraw) -> usize {
+fn branch_count(draw: QecNoiseDraw, product_tables: &[QecProductTable]) -> usize {
     match draw {
         QecNoiseDraw::Single { .. } => 3,
         QecNoiseDraw::Pair { .. } | QecNoiseDraw::PairTable { .. } => 15,
+        QecNoiseDraw::Products { table, .. } => product_tables[table as usize].rates.len(),
     }
 }
 
 /// Merge the flips later windows saw on `own`'s events into them.
-fn merge_window(own: OwnFlips, later: &[SpillFlips]) -> NoisePiece {
+fn merge_window(
+    own: OwnFlips,
+    later: &[SpillFlips],
+    product_tables: &[QecProductTable],
+) -> NoisePiece {
     let sources: Vec<&SpillFlips> = later
         .iter()
         .filter(|spill| !spill.keys.is_empty())
@@ -1121,7 +1199,7 @@ fn merge_window(own: OwnFlips, later: &[SpillFlips]) -> NoisePiece {
             .iter()
             .map(|&kept| {
                 let first = branch;
-                branch += branch_count(kept.draw);
+                branch += branch_count(kept.draw, product_tables);
                 (kept, first)
             })
             .collect();
@@ -1139,14 +1217,14 @@ fn merge_window(own: OwnFlips, later: &[SpillFlips]) -> NoisePiece {
     let mut cursors = vec![0usize; sources.len()];
     let mut branch = 0usize;
     for &kept in &own.events {
-        let branches = branch_count(kept.draw);
+        let branches = branch_count(kept.draw, product_tables);
         piece.events.push((kept, piece.branch_offsets.len() - 1));
         for b in 0..branches {
             let start = piece.outputs.len();
             let own_range =
                 own.branch_offsets[branch] as usize..own.branch_offsets[branch + 1] as usize;
             piece.outputs.extend_from_slice(&own.outputs[own_range]);
-            let key = (kept.candidate, b as u8);
+            let key = (kept.candidate, b as u16);
             let mut spilled = false;
             for (source, cursor) in sources.iter().zip(cursors.iter_mut()) {
                 while *cursor < source.keys.len() && source.keys[*cursor] < key {

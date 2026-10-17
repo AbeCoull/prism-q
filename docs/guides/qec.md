@@ -206,9 +206,12 @@ programs. `program.to_text()` writes a program back in the same text format, so 
 program built in code can be saved and parsed again.
 
 ```admonish info title="What QEC programs support"
-Clifford gates, basis resets and measurements, `MPP` Pauli-product measurements,
+Clifford gates (including the `SQRT_*`, `C_XYZ` / `C_ZYX`, `CY`, `SWAP`, `ISWAP`,
+`CXSWAP`, and `SWAPCX` spellings), basis resets and measurements, `MPP` and
+`MXX` / `MYY` / `MZZ` Pauli-product measurements, `MPAD` constant records,
 detectors, observables, postselection, `X_ERROR` / `Y_ERROR` / `Z_ERROR` /
 `DEPOLARIZE1` / `DEPOLARIZE2` / `PAULI_CHANNEL_1` / `PAULI_CHANNEL_2` noise,
+`E` / `CORRELATED_ERROR` chains with `ELSE_CORRELATED_ERROR`, `HERALDED_ERASE`,
 `LEAK` / `SEEP` / `LEAK_TRANSPORT` leakage, and terminal `EXP_VAL` final-state
 expectation estimates.
 A noiseless `EXP_VAL` uses the analytical T strategies, with any detector records

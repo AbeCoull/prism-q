@@ -1727,6 +1727,8 @@ pub fn prism_q::qec::QecNoise::is_leakage(&self) -> bool
 pub fn prism_q::qec::QecNoise::name(&self) -> &'static str
 pub fn prism_q::qec::QecNoise::probability(&self) -> f64
 #[non_exhaustive] pub enum prism_q::qec::QecOp
+pub prism_q::qec::QecOp::CorrelatedError
+pub prism_q::qec::QecOp::CorrelatedError::branches: alloc::vec::Vec<prism_q::qec::QecCorrelatedBranch>
 pub prism_q::qec::QecOp::Detector
 pub prism_q::qec::QecOp::Detector::coords: alloc::vec::Vec<f64>
 pub prism_q::qec::QecOp::Detector::records: alloc::vec::Vec<prism_q::qec::QecRecordRef>
@@ -1740,6 +1742,9 @@ pub prism_q::qec::QecOp::Feedforward::records: alloc::vec::Vec<prism_q::qec::Qec
 pub prism_q::qec::QecOp::Gate
 pub prism_q::qec::QecOp::Gate::gate: prism_q::gates::Gate
 pub prism_q::qec::QecOp::Gate::targets: alloc::vec::Vec<usize>
+pub prism_q::qec::QecOp::HeraldedErase
+pub prism_q::qec::QecOp::HeraldedErase::probability: f64
+pub prism_q::qec::QecOp::HeraldedErase::qubit: usize
 pub prism_q::qec::QecOp::Measure
 pub prism_q::qec::QecOp::Measure::basis: prism_q::qec::QecBasis
 pub prism_q::qec::QecOp::Measure::qubit: usize
@@ -1751,6 +1756,8 @@ pub prism_q::qec::QecOp::Noise::targets: alloc::vec::Vec<usize>
 pub prism_q::qec::QecOp::ObservableInclude
 pub prism_q::qec::QecOp::ObservableInclude::observable: usize
 pub prism_q::qec::QecOp::ObservableInclude::records: alloc::vec::Vec<prism_q::qec::QecRecordRef>
+pub prism_q::qec::QecOp::Pad
+pub prism_q::qec::QecOp::Pad::value: bool
 pub prism_q::qec::QecOp::Postselect
 pub prism_q::qec::QecOp::Postselect::expected: bool
 pub prism_q::qec::QecOp::Postselect::records: alloc::vec::Vec<prism_q::qec::QecRecordRef>
@@ -1834,6 +1841,9 @@ pub fn prism_q::qec::QecCompiledRows::postselection_expected(&self) -> &[bool]
 pub fn prism_q::qec::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
 pub fn prism_q::qec::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
 pub fn prism_q::qec::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
+pub struct prism_q::qec::QecCorrelatedBranch
+pub prism_q::qec::QecCorrelatedBranch::probability: f64
+pub prism_q::qec::QecCorrelatedBranch::terms: alloc::vec::Vec<prism_q::qec::QecPauli>
 pub struct prism_q::qec::QecMeasurementRow
 impl prism_q::qec::QecMeasurementRow
 pub fn prism_q::qec::QecMeasurementRow::from_terms(usize, &[prism_q::qec::QecPauli]) -> prism_q::error::Result<Self>
@@ -2977,6 +2987,8 @@ pub fn prism_q::qec::QecNoise::is_leakage(&self) -> bool
 pub fn prism_q::qec::QecNoise::name(&self) -> &'static str
 pub fn prism_q::qec::QecNoise::probability(&self) -> f64
 #[non_exhaustive] pub enum prism_q::QecOp
+pub prism_q::QecOp::CorrelatedError
+pub prism_q::QecOp::CorrelatedError::branches: alloc::vec::Vec<prism_q::qec::QecCorrelatedBranch>
 pub prism_q::QecOp::Detector
 pub prism_q::QecOp::Detector::coords: alloc::vec::Vec<f64>
 pub prism_q::QecOp::Detector::records: alloc::vec::Vec<prism_q::qec::QecRecordRef>
@@ -2990,6 +3002,9 @@ pub prism_q::QecOp::Feedforward::records: alloc::vec::Vec<prism_q::qec::QecRecor
 pub prism_q::QecOp::Gate
 pub prism_q::QecOp::Gate::gate: prism_q::gates::Gate
 pub prism_q::QecOp::Gate::targets: alloc::vec::Vec<usize>
+pub prism_q::QecOp::HeraldedErase
+pub prism_q::QecOp::HeraldedErase::probability: f64
+pub prism_q::QecOp::HeraldedErase::qubit: usize
 pub prism_q::QecOp::Measure
 pub prism_q::QecOp::Measure::basis: prism_q::qec::QecBasis
 pub prism_q::QecOp::Measure::qubit: usize
@@ -3001,6 +3016,8 @@ pub prism_q::QecOp::Noise::targets: alloc::vec::Vec<usize>
 pub prism_q::QecOp::ObservableInclude
 pub prism_q::QecOp::ObservableInclude::observable: usize
 pub prism_q::QecOp::ObservableInclude::records: alloc::vec::Vec<prism_q::qec::QecRecordRef>
+pub prism_q::QecOp::Pad
+pub prism_q::QecOp::Pad::value: bool
 pub prism_q::QecOp::Postselect
 pub prism_q::QecOp::Postselect::expected: bool
 pub prism_q::QecOp::Postselect::records: alloc::vec::Vec<prism_q::qec::QecRecordRef>
@@ -3967,6 +3984,9 @@ pub fn prism_q::qec::QecCompiledRows::postselection_expected(&self) -> &[bool]
 pub fn prism_q::qec::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
 pub fn prism_q::qec::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
 pub fn prism_q::qec::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
+pub struct prism_q::QecCorrelatedBranch
+pub prism_q::QecCorrelatedBranch::probability: f64
+pub prism_q::QecCorrelatedBranch::terms: alloc::vec::Vec<prism_q::qec::QecPauli>
 pub struct prism_q::QecMeasurementRow
 impl prism_q::qec::QecMeasurementRow
 pub fn prism_q::qec::QecMeasurementRow::from_terms(usize, &[prism_q::qec::QecPauli]) -> prism_q::error::Result<Self>

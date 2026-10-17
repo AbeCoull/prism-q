@@ -31,6 +31,9 @@ most 1, and target pairing for `DEPOLARIZE2` and `PAULI_CHANNEL_2`.
 | `Postselect` | `records`, `expected` | The shot is accepted only when the parity over `records` matches `expected`. |
 | `Feedforward` | `records`, `expected`, `body` | The body runs only when the parity over `records` matches `expected`. See the [QEC IR reference](./qec-ir.md) for what a body admits. |
 | `Noise` | `channel`, `targets` | Pauli-noise annotation. Zero probability is inactive. |
+| `CorrelatedError` | `branches` | Mutually exclusive Pauli products: branch `i` fires with its probability only when no earlier branch fired. The text chain `E` / `ELSE_CORRELATED_ERROR` is one op. |
+| `HeraldedErase` | `probability`, `qubit` | One record: 1 with the given probability, in which case a uniformly random Pauli (identity included) hits the qubit; 0 otherwise. |
+| `Pad` | `value` | One constant record. |
 | `Tick` | | Scheduling separator with no semantic effect. |
 
 Record references are `QecRecordRef::Absolute` indices or

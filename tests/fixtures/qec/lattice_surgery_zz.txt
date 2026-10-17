@@ -1,0 +1,32 @@
+# Two Z-type repetition patches (qubits 0 1 and 3 4) merged through qubit 2 to measure
+# the logical ZZ with pair measurements, then split. The padded record keeps the merge
+# round the same width as a check round, and the heralded erasure on the merge qubit
+# feeds a detector so an erased merge can be flagged.
+QUBIT_COORDS(0, 0) 0
+QUBIT_COORDS(1, 0) 1
+QUBIT_COORDS(2, 0) 2
+QUBIT_COORDS(3, 0) 3
+QUBIT_COORDS(4, 0) 4
+R 0 1 2 3 4
+TICK
+MZZ 0 1 3 4
+DETECTOR(0, 0) rec[-2]
+DETECTOR(1, 0) rec[-1]
+TICK
+HERALDED_ERASE(0.001) 2
+DETECTOR(2, 0) rec[-1]
+MZZ 1 2 2 3
+OBSERVABLE_INCLUDE(0) rec[-2] rec[-1]
+MX 2
+MPAD 0
+TICK
+SWAP 0 1 3 4
+X_ERROR(0.001) 0 1 3 4
+MZZ 0 1 3 4
+DETECTOR(0, 1) rec[-2] rec[-9]
+DETECTOR(1, 1) rec[-1] rec[-8]
+TICK
+M 0 1 3 4
+DETECTOR(0, 2) rec[-4] rec[-3] rec[-6]
+DETECTOR(1, 2) rec[-2] rec[-1] rec[-5]
+OBSERVABLE_INCLUDE(1) rec[-4]

@@ -2,8 +2,8 @@
 //! instructions, `rec[-k]` record references, and flattened `REPEAT` blocks.
 
 use super::{
-    QEC_PROBABILITY_SUM_TOLERANCE, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram,
-    QecRecordRef,
+    QEC_PROBABILITY_SUM_TOLERANCE, QecBasis, QecCorrelatedBranch, QecNoise, QecOp, QecOptions,
+    QecPauli, QecProgram, QecRecordRef,
 };
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -12,16 +12,21 @@ const MAX_QEC_EXPANDED_LINES: usize = 1_000_000;
 
 /// Parse a native measurement-record QEC program from text.
 ///
-/// Recognized instructions: `I`, `X`, `Y`, `Z`, `H`, `S`, `S_DAG`, `T`, `T_DAG`, `CX`,
-/// `CZ`, `R`/`RX`/`RY`, `M`/`MX`/`MY`, `MR`/`MRX`/`MRY`, `MPP`, `DETECTOR`,
-/// `OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, `X_ERROR`, `Y_ERROR`, `Z_ERROR`,
-/// `DEPOLARIZE1`, `DEPOLARIZE2`, `PAULI_CHANNEL_1`, `PAULI_CHANNEL_2`, `TICK`,
+/// Recognized instructions: `I`, `X`, `Y`, `Z`, `H`, `S`, `S_DAG`, `T`, `T_DAG`,
+/// `SQRT_X`, `SQRT_X_DAG`, `SQRT_Y`, `SQRT_Y_DAG`, `SQRT_Z`, `SQRT_Z_DAG`, `C_XYZ`,
+/// `C_ZYX`, `CX`, `CY`, `CZ`, `SWAP`, `ISWAP`, `ISWAP_DAG`, `CXSWAP`, `SWAPCX`,
+/// `R`/`RX`/`RY`, `M`/`MX`/`MY`, `MR`/`MRX`/`MRY`, `MPP`, `MXX`/`MYY`/`MZZ`, `MPAD`,
+/// `DETECTOR`, `OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, `X_ERROR`, `Y_ERROR`,
+/// `Z_ERROR`, `DEPOLARIZE1`, `DEPOLARIZE2`, `PAULI_CHANNEL_1`, `PAULI_CHANNEL_2`,
+/// `E`/`CORRELATED_ERROR`, `ELSE_CORRELATED_ERROR`, `HERALDED_ERASE`, `TICK`,
 /// `QUBIT_COORDS`, `SHIFT_COORDS` (ignored), flattened `REPEAT` blocks, and the leakage
 /// annotations `LEAK(p)`, `SEEP(p)`, and `LEAK_TRANSPORT(p)` (pairs) described on
 /// [`QecNoise`]. Comments use `#`.
 ///
-/// `M(p)` and `MR(p)` lower `p` into a Pauli flip before the measurement; `MPP` takes
-/// no measurement-error argument.
+/// `M(p)` and `MR(p)` lower `p` into a Pauli flip before the measurement; `MPP` and the
+/// pair measurements take no measurement-error argument. The square-root, axis-cycling,
+/// `CY`, and swap-family gates lower to `H`, `S`, `SQRT_X`, `CX`, and `CZ` sequences, so
+/// a `SQRT_Y` reads back as `S_DAG`, `SQRT_X`, `S` and a `SWAP` as three `CX`.
 pub fn parse_qec_program(input: &str) -> Result<QecProgram> {
     let lines = expand_repeats(input)?;
     let mut parser = QecTextParser::default();
@@ -43,10 +48,23 @@ impl QecTextParser {
     fn parse_line(&mut self, line_num: usize, line: &str) -> Result<()> {
         let (name, args, targets) = split_instruction(line, line_num)?;
         match name.as_str() {
-            "I" | "X" | "Y" | "Z" | "H" | "S" | "S_DAG" | "SDAG" | "T" | "T_DAG" | "TDG" => {
-                self.parse_single_qubit_gate(&name, &targets, line_num)
+            "I" | "X" | "Y" | "Z" | "H" | "S" | "S_DAG" | "SDAG" | "T" | "T_DAG" | "TDG"
+            | "SQRT_X" | "SQRT_X_DAG" | "SQRT_Y" | "SQRT_Y_DAG" | "SQRT_Z" | "SQRT_Z_DAG"
+            | "C_XYZ" | "C_ZYX" => self.parse_single_qubit_gate(&name, &targets, line_num),
+            "CX" | "CNOT" | "CZ" | "CY" | "SWAP" | "ISWAP" | "ISWAP_DAG" | "CXSWAP" | "SWAPCX" => {
+                self.parse_two_qubit_gate(&name, &targets, line_num)
             }
-            "CX" | "CNOT" | "CZ" => self.parse_two_qubit_gate(&name, &targets, line_num),
+            "MXX" | "MYY" | "MZZ" => {
+                self.parse_pair_measurement(&name, args.as_deref(), &targets, line_num)
+            }
+            "MPAD" => self.parse_pad(&targets, line_num),
+            "E" | "CORRELATED_ERROR" => {
+                self.parse_correlated_error(&name, args.as_deref(), &targets, line_num, false)
+            }
+            "ELSE_CORRELATED_ERROR" => {
+                self.parse_correlated_error(&name, args.as_deref(), &targets, line_num, true)
+            }
+            "HERALDED_ERASE" => self.parse_heralded_erase(args.as_deref(), &targets, line_num),
             "R" | "RZ" | "RX" | "RY" => {
                 self.parse_reset(measurement_basis(&name), &targets, line_num)
             }
@@ -92,26 +110,34 @@ impl QecTextParser {
         targets: &[String],
         line_num: usize,
     ) -> Result<()> {
-        let gate = match name {
-            "I" => Gate::Id,
-            "X" => Gate::X,
-            "Y" => Gate::Y,
-            "Z" => Gate::Z,
-            "H" => Gate::H,
-            "S" => Gate::S,
-            "S_DAG" | "SDAG" => Gate::Sdg,
-            "T" => Gate::T,
-            "T_DAG" | "TDG" => Gate::Tdg,
+        let gates: &[Gate] = match name {
+            "I" => &[Gate::Id],
+            "X" => &[Gate::X],
+            "Y" => &[Gate::Y],
+            "Z" => &[Gate::Z],
+            "H" => &[Gate::H],
+            "S" | "SQRT_Z" => &[Gate::S],
+            "S_DAG" | "SDAG" | "SQRT_Z_DAG" => &[Gate::Sdg],
+            "T" => &[Gate::T],
+            "T_DAG" | "TDG" => &[Gate::Tdg],
+            "SQRT_X" => &[Gate::SX],
+            "SQRT_X_DAG" => &[Gate::SXdg],
+            "SQRT_Y" => &[Gate::Sdg, Gate::SX, Gate::S],
+            "SQRT_Y_DAG" => &[Gate::Sdg, Gate::SXdg, Gate::S],
+            "C_XYZ" => &[Gate::Sdg, Gate::H],
+            "C_ZYX" => &[Gate::H, Gate::S],
             _ => unreachable!(),
         };
         let qubits = parse_qubit_targets(targets, line_num)?;
         require_non_empty_targets(&qubits, name, line_num)?;
         for qubit in qubits {
             self.note_qubit(qubit);
-            self.ops.push(QecOp::Gate {
-                gate: gate.clone(),
-                targets: vec![qubit],
-            });
+            for gate in gates {
+                self.ops.push(QecOp::Gate {
+                    gate: gate.clone(),
+                    targets: vec![qubit],
+                });
+            }
         }
         Ok(())
     }
@@ -122,22 +148,157 @@ impl QecTextParser {
         targets: &[String],
         line_num: usize,
     ) -> Result<()> {
-        let qubits = parse_qubit_targets(targets, line_num)?;
-        require_non_empty_targets(&qubits, name, line_num)?;
-        if qubits.len() % 2 != 0 {
+        let qubits = parse_qubit_pairs(targets, name, line_num)?;
+        for pair in qubits.as_chunks::<2>().0 {
+            let (a, b) = (pair[0], pair[1]);
+            self.note_qubit(a);
+            self.note_qubit(b);
+            let ops = &mut self.ops;
+            let mut push = |gate: Gate, targets: &[usize]| {
+                ops.push(QecOp::Gate {
+                    gate,
+                    targets: targets.to_vec(),
+                });
+            };
+            match name {
+                "CX" | "CNOT" => push(Gate::Cx, &[a, b]),
+                "CZ" => push(Gate::Cz, &[a, b]),
+                "CY" => {
+                    push(Gate::Sdg, &[b]);
+                    push(Gate::Cx, &[a, b]);
+                    push(Gate::S, &[b]);
+                }
+                "SWAP" => {
+                    push(Gate::Cx, &[a, b]);
+                    push(Gate::Cx, &[b, a]);
+                    push(Gate::Cx, &[a, b]);
+                }
+                "ISWAP" | "ISWAP_DAG" => {
+                    let phase = if name == "ISWAP" { Gate::S } else { Gate::Sdg };
+                    push(phase.clone(), &[a]);
+                    push(phase, &[b]);
+                    push(Gate::Cz, &[a, b]);
+                    push(Gate::Cx, &[a, b]);
+                    push(Gate::Cx, &[b, a]);
+                    push(Gate::Cx, &[a, b]);
+                }
+                "CXSWAP" => {
+                    push(Gate::Cx, &[b, a]);
+                    push(Gate::Cx, &[a, b]);
+                }
+                "SWAPCX" => {
+                    push(Gate::Cx, &[a, b]);
+                    push(Gate::Cx, &[b, a]);
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_pair_measurement(
+        &mut self,
+        name: &str,
+        args: Option<&str>,
+        targets: &[String],
+        line_num: usize,
+    ) -> Result<()> {
+        if !parse_f64_args(args, line_num)?.is_empty() {
             return Err(qec_parse_error(
                 line_num,
-                format!("`{name}` requires an even number of qubit targets"),
+                format!("`{name}` does not support measurement-error arguments yet"),
             ));
         }
-        let gate = if name == "CZ" { Gate::Cz } else { Gate::Cx };
+        let basis = measurement_basis(name);
+        let qubits = parse_qubit_pairs(targets, name, line_num)?;
         for pair in qubits.as_chunks::<2>().0 {
             self.note_qubit(pair[0]);
             self.note_qubit(pair[1]);
-            self.ops.push(QecOp::Gate {
-                gate: gate.clone(),
-                targets: pair.to_vec(),
+            self.ops.push(QecOp::MeasurePauliProduct {
+                terms: vec![QecPauli::new(basis, pair[0]), QecPauli::new(basis, pair[1])],
             });
+            self.measurement_count += 1;
+        }
+        Ok(())
+    }
+
+    fn parse_pad(&mut self, targets: &[String], line_num: usize) -> Result<()> {
+        if targets.is_empty() {
+            return Err(qec_parse_error(
+                line_num,
+                "`MPAD` requires at least one record value",
+            ));
+        }
+        for target in targets {
+            let value = match target.as_str() {
+                "0" => false,
+                "1" => true,
+                _ => {
+                    return Err(qec_parse_error(
+                        line_num,
+                        format!("`MPAD` record values must be 0 or 1, got `{target}`"),
+                    ));
+                }
+            };
+            self.ops.push(QecOp::Pad { value });
+            self.measurement_count += 1;
+        }
+        Ok(())
+    }
+
+    fn parse_correlated_error(
+        &mut self,
+        name: &str,
+        args: Option<&str>,
+        targets: &[String],
+        line_num: usize,
+        else_branch: bool,
+    ) -> Result<()> {
+        let probability = parse_probability_arg(args, name, line_num)?;
+        if targets.is_empty() {
+            return Err(qec_parse_error(
+                line_num,
+                format!("`{name}` requires at least one Pauli target"),
+            ));
+        }
+        let mut terms = Vec::with_capacity(targets.len());
+        for target in targets {
+            terms.append(&mut parse_pauli_product(target, line_num)?);
+        }
+        for term in &terms {
+            self.note_qubit(term.qubit);
+        }
+        let branch = QecCorrelatedBranch { probability, terms };
+        if else_branch {
+            let Some(QecOp::CorrelatedError { branches }) = self.ops.last_mut() else {
+                return Err(qec_parse_error(
+                    line_num,
+                    "`ELSE_CORRELATED_ERROR` must directly follow `CORRELATED_ERROR` or \
+                     another `ELSE_CORRELATED_ERROR`",
+                ));
+            };
+            branches.push(branch);
+        } else {
+            self.ops.push(QecOp::CorrelatedError {
+                branches: vec![branch],
+            });
+        }
+        Ok(())
+    }
+
+    fn parse_heralded_erase(
+        &mut self,
+        args: Option<&str>,
+        targets: &[String],
+        line_num: usize,
+    ) -> Result<()> {
+        let probability = parse_probability_arg(args, "HERALDED_ERASE", line_num)?;
+        let qubits = parse_qubit_targets(targets, line_num)?;
+        require_non_empty_targets(&qubits, "HERALDED_ERASE", line_num)?;
+        for qubit in qubits {
+            self.note_qubit(qubit);
+            self.ops.push(QecOp::HeraldedErase { probability, qubit });
+            self.measurement_count += 1;
         }
         Ok(())
     }
@@ -544,6 +705,17 @@ fn parse_single_f64_arg(args: Option<&str>, name: &str, line_num: usize) -> Resu
     Ok(values[0])
 }
 
+fn parse_probability_arg(args: Option<&str>, name: &str, line_num: usize) -> Result<f64> {
+    let p = parse_single_f64_arg(args, name, line_num)?;
+    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return Err(qec_parse_error(
+            line_num,
+            format!("`{name}` probability must be finite and in [0, 1]"),
+        ));
+    }
+    Ok(p)
+}
+
 fn parse_f64_array_arg<const N: usize>(
     args: Option<&str>,
     name: &str,
@@ -644,6 +816,18 @@ fn parse_qubit_targets(targets: &[String], line_num: usize) -> Result<Vec<usize>
         .iter()
         .map(|target| parse_qubit_target(target, line_num))
         .collect()
+}
+
+fn parse_qubit_pairs(targets: &[String], name: &str, line_num: usize) -> Result<Vec<usize>> {
+    let qubits = parse_qubit_targets(targets, line_num)?;
+    require_non_empty_targets(&qubits, name, line_num)?;
+    if qubits.len() % 2 != 0 {
+        return Err(qec_parse_error(
+            line_num,
+            format!("`{name}` requires an even number of qubit targets"),
+        ));
+    }
+    Ok(qubits)
 }
 
 fn parse_qubit_target(target: &str, line_num: usize) -> Result<usize> {

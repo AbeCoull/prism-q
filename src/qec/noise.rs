@@ -58,7 +58,8 @@ pub(super) struct QecDeferredNoiseEvent {
 }
 
 /// Noise channel of a deferred event, with `PAULI_CHANNEL_2` rates held in
-/// [`QecDeferredProgram::pair_tables`].
+/// [`QecDeferredProgram::pair_tables`] and correlated branches in
+/// [`QecDeferredProgram::product_tables`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum QecDeferredChannel {
     /// One-qubit channel with its X, Y, Z branch rates.
@@ -69,11 +70,34 @@ pub(super) enum QecDeferredChannel {
         p: f64,
         table: u32,
     },
+    /// Mutually exclusive Pauli products over all of the event's targets, of total rate
+    /// `p`, with branches in `product_tables[table]`.
+    Products {
+        p: f64,
+        table: u32,
+    },
 }
 
 impl QecDeferredChannel {
     pub(super) fn is_pair(self) -> bool {
-        !matches!(self, Self::Single(_))
+        matches!(self, Self::Depolarize2(_) | Self::PairTable { .. })
+    }
+}
+
+/// Branches of a correlated event: `rates[b]` is the absolute rate of branch `b`, which
+/// applies letter `letters[b * width + t]` (1 X, 2 Y, 3 Z, 0 none) to the event's
+/// target `t`.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct QecProductTable {
+    pub(super) rates: Vec<f64>,
+    letters: Vec<u8>,
+    width: usize,
+}
+
+impl QecProductTable {
+    #[inline]
+    pub(super) fn branch_letters(&self, branch: usize) -> &[u8] {
+        &self.letters[branch * self.width..(branch + 1) * self.width]
     }
 }
 
@@ -129,6 +153,8 @@ pub(super) struct QecDeferredProgram {
     pub(super) final_qubit_aliases: Vec<usize>,
     /// Branch rates of each `PAULI_CHANNEL_2` op, in [`qec_pair_branch_flips`] order.
     pub(super) pair_tables: Vec<[f64; 15]>,
+    /// Branches of each correlated event, in event order.
+    pub(super) product_tables: Vec<QecProductTable>,
     /// Leakage annotations in program order, which only
     /// [`QecLeakageSampler`](super::leakage::QecLeakageSampler) reads.
     pub(super) leak_events: Vec<QecDeferredLeakEvent>,
@@ -181,7 +207,9 @@ pub(super) struct QecRecordNoise {
 pub(super) struct QecRecordEvent {
     pub(super) draw: QecNoiseDraw,
     pub(super) position: u32,
-    /// Target aliases: one and `u32::MAX` for a single-qubit event, two for a pair.
+    /// Target aliases: one and `u32::MAX` for a single-qubit event, two for a pair. A
+    /// product event holds its deferred event index and `u32::MAX`, since its targets
+    /// live on that event.
     pub(super) targets: [u32; 2],
 }
 
@@ -194,6 +222,7 @@ pub(super) struct QecParityNoise {
     branch_offsets: Vec<u32>,
     outputs: Vec<u32>,
     pair_tables: Vec<[f64; 15]>,
+    product_tables: Vec<QecProductTable>,
     seed: u64,
 }
 
@@ -308,6 +337,7 @@ impl QecParityNoise {
             &self.events,
             |event| &event.draw,
             &self.pair_tables,
+            &self.product_tables,
             &mut rng,
             unit_shots,
             |_, event, shot, branch| {
@@ -335,12 +365,14 @@ impl QecParityNoise {
         branch_offsets: Vec<u32>,
         outputs: Vec<u32>,
         pair_tables: Vec<[f64; 15]>,
+        product_tables: Vec<QecProductTable>,
     ) -> Self {
         Self {
             events,
             branch_offsets,
             outputs,
             pair_tables,
+            product_tables,
             seed,
         }
     }
@@ -612,10 +644,11 @@ impl QecRecordNoise {
             &self.events,
             |event| &event.draw,
             &self.deferred.pair_tables,
+            &self.deferred.product_tables,
             &mut rng,
             unit_shots,
             |index, _, shot, branch| {
-                firings.push(((index as u64) << 32) | ((shot as u64) << 8) | branch as u64);
+                firings.push(((index as u64) << 32) | ((shot as u64) << 16) | branch as u64);
             },
         );
         let mut starts = vec![0u32; self.events.len() + 1];
@@ -651,17 +684,35 @@ impl QecRecordNoise {
                     QecNoiseDraw::Single { .. } => {
                         let slot = frame.slot(event.targets[0] as usize);
                         for &firing in fired {
-                            frame.flip(slot, (firing >> 8) as usize, (firing & 0xFF) as usize + 1);
+                            frame.flip(
+                                slot,
+                                (firing >> 16) as usize,
+                                (firing & 0xFFFF) as usize + 1,
+                            );
                         }
                     }
                     QecNoiseDraw::Pair { .. } | QecNoiseDraw::PairTable { .. } => {
                         let slot0 = frame.slot(event.targets[0] as usize);
                         let slot1 = frame.slot(event.targets[1] as usize);
                         for &firing in fired {
-                            let shot = (firing >> 8) as usize;
-                            let sample = (firing & 0xFF) as usize + 1;
+                            let shot = (firing >> 16) as usize;
+                            let sample = (firing & 0xFFFF) as usize + 1;
                             frame.flip(slot0, shot, sample / 4);
                             frame.flip(slot1, shot, sample % 4);
+                        }
+                    }
+                    QecNoiseDraw::Products { table, .. } => {
+                        let table = &deferred.product_tables[table as usize];
+                        let targets = &deferred.noise_events[event.targets[0] as usize].targets;
+                        for &firing in fired {
+                            let shot = (firing >> 16) as usize;
+                            let letters = table.branch_letters((firing & 0xFFFF) as usize);
+                            for (&alias, &letter) in targets.iter().zip(letters) {
+                                if letter != 0 {
+                                    let slot = frame.slot(alias);
+                                    frame.flip(slot, shot, letter as usize);
+                                }
+                            }
                         }
                     }
                 }
@@ -937,6 +988,13 @@ pub(super) enum QecNoiseDraw {
         ln_1mp: f64,
         table: u32,
     },
+    /// A product event drawing its branch from `product_tables[table]`, whose rates sum
+    /// to `p`.
+    Products {
+        p: f64,
+        ln_1mp: f64,
+        table: u32,
+    },
 }
 
 impl QecNoiseDraw {
@@ -970,11 +1028,19 @@ impl QecNoiseDraw {
         }
     }
 
+    pub(super) fn products(p: f64, table: u32) -> Self {
+        Self::Products {
+            p,
+            ln_1mp: (-p).ln_1p(),
+            table,
+        }
+    }
+
     /// Event rate of a pair draw.
     pub(super) fn pair_rate(&self) -> f64 {
         match *self {
             Self::Pair { p, .. } | Self::PairTable { p, .. } => p,
-            Self::Single { .. } => unreachable!("pair draws only"),
+            Self::Single { .. } | Self::Products { .. } => unreachable!("pair draws only"),
         }
     }
 
@@ -982,7 +1048,7 @@ impl QecNoiseDraw {
     fn rate(&self) -> f64 {
         match *self {
             Self::Single { rates, .. } => rates.p_event,
-            Self::Pair { p, .. } | Self::PairTable { p, .. } => p,
+            Self::Pair { p, .. } | Self::PairTable { p, .. } | Self::Products { p, .. } => p,
         }
     }
 }
@@ -1014,6 +1080,7 @@ fn draw_qec_unit<E>(
     events: &[E],
     draw: impl Fn(&E) -> &QecNoiseDraw,
     pair_tables: &[[f64; 15]],
+    product_tables: &[QecProductTable],
     rng: &mut Xoshiro256PlusPlus,
     unit_shots: usize,
     mut flip: impl FnMut(usize, &E, usize, usize),
@@ -1032,11 +1099,19 @@ fn draw_qec_unit<E>(
                     flip(index, event, shot, b)
                 })
             }
-            QecNoiseDraw::PairTable { p, ln_1mp, table } => draw_qec_pair_table_noise(
+            QecNoiseDraw::PairTable { p, ln_1mp, table } => draw_qec_table_noise(
                 unit_shots,
                 p,
                 ln_1mp,
                 &pair_tables[table as usize],
+                rng,
+                |shot, b| flip(index, event, shot, b),
+            ),
+            QecNoiseDraw::Products { p, ln_1mp, table } => draw_qec_table_noise(
+                unit_shots,
+                p,
+                ln_1mp,
+                &product_tables[table as usize].rates,
                 rng,
                 |shot, b| flip(index, event, shot, b),
             ),
@@ -1117,11 +1192,22 @@ pub(super) fn lower_qec_program_to_density_matrix(
                 after_gate.resize_with(circuit.instructions.len(), Vec::new);
                 push_density_matrix_noise_events(&mut after_gate[anchor], channel, targets);
             }
-            QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => {
+            QecOp::Measure { .. }
+            | QecOp::MeasurePauliProduct { .. }
+            | QecOp::HeraldedErase { .. }
+            | QecOp::Pad { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC density-matrix estimator".to_string(),
                     reason: "the density matrix holds no measurement records; \
                              `run_qec_program` routes measuring programs to the reference runner"
+                        .to_string(),
+                });
+            }
+            QecOp::CorrelatedError { .. } if op.is_active_noise() => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "QEC density-matrix estimator".to_string(),
+                    reason: "the density-matrix channel set has no correlated Pauli product; \
+                             `run_qec_program` routes such programs to the reference runner"
                         .to_string(),
                 });
             }
@@ -1134,6 +1220,7 @@ pub(super) fn lower_qec_program_to_density_matrix(
                 });
             }
             QecOp::Noise { .. }
+            | QecOp::CorrelatedError { .. }
             | QecOp::ExpectationValue { .. }
             | QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }
@@ -1266,6 +1353,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
     let mut deferred_measurements = Vec::with_capacity(program.num_measurements());
     let mut noise_events = Vec::new();
     let mut pair_tables = Vec::new();
+    let mut product_tables = Vec::new();
     let mut leak_events = Vec::new();
 
     for op in program.ops() {
@@ -1291,19 +1379,15 @@ fn lower_qec_program_to_deferred_circuit_inner(
                 next_record += 1;
             }
             QecOp::MeasurePauliProduct { terms } => {
-                let scratch_alias = if measured_aliases[aliases[scratch_qubit]] {
-                    qec_assign_fresh_alias(
-                        gates.len(),
-                        &mut aliases,
-                        &mut measured_aliases,
-                        &mut alias_positions,
-                        &mut last_use,
-                        &mut next_qubit,
-                        scratch_qubit,
-                    )
-                } else {
-                    aliases[scratch_qubit]
-                };
+                let scratch_alias = qec_scratch_alias(
+                    gates.len(),
+                    &mut aliases,
+                    &mut measured_aliases,
+                    &mut alias_positions,
+                    &mut last_use,
+                    &mut next_qubit,
+                    scratch_qubit,
+                );
 
                 let mut mapped_terms = Vec::with_capacity(terms.len());
                 for term in terms {
@@ -1368,6 +1452,83 @@ fn lower_qec_program_to_deferred_circuit_inner(
                     }
                 }
             }
+            QecOp::CorrelatedError { branches } => {
+                if op.is_active_noise() {
+                    let mut lowered = Vec::with_capacity(branches.len());
+                    let mut remaining = 1.0;
+                    for branch in branches {
+                        let mut letters = Vec::with_capacity(branch.terms.len());
+                        for term in &branch.terms {
+                            if let Some(alias) =
+                                qec_deferred_noise_target(term.qubit, &aliases, &measured_aliases)?
+                            {
+                                letters.push((alias, pauli_letter(term.basis)));
+                            }
+                        }
+                        lowered.push((remaining * branch.probability, letters));
+                        remaining *= 1.0 - branch.probability;
+                    }
+                    push_qec_deferred_product_event(
+                        &lowered,
+                        gates.len(),
+                        &mut noise_events,
+                        &mut product_tables,
+                        &mut last_use,
+                    );
+                }
+            }
+            QecOp::HeraldedErase { probability, qubit } => {
+                let scratch_alias = qec_scratch_alias(
+                    gates.len(),
+                    &mut aliases,
+                    &mut measured_aliases,
+                    &mut alias_positions,
+                    &mut last_use,
+                    &mut next_qubit,
+                    scratch_qubit,
+                );
+                if *probability > 0.0 {
+                    let target = qec_deferred_noise_target(*qubit, &aliases, &measured_aliases)?;
+                    let herald = (scratch_alias, 1u8);
+                    let lowered: Vec<(f64, Vec<(usize, u8)>)> = (0..4u8)
+                        .map(|letter| {
+                            let mut letters = vec![herald];
+                            if let (Some(alias), 1..=3) = (target, letter) {
+                                letters.push((alias, letter));
+                            }
+                            (probability / 4.0, letters)
+                        })
+                        .collect();
+                    push_qec_deferred_product_event(
+                        &lowered,
+                        gates.len(),
+                        &mut noise_events,
+                        &mut product_tables,
+                        &mut last_use,
+                    );
+                }
+                deferred_measurements.push((scratch_alias, next_record));
+                measured_aliases[scratch_alias] = true;
+                next_record += 1;
+            }
+            QecOp::Pad { value } => {
+                let scratch_alias = qec_scratch_alias(
+                    gates.len(),
+                    &mut aliases,
+                    &mut measured_aliases,
+                    &mut alias_positions,
+                    &mut last_use,
+                    &mut next_qubit,
+                    scratch_qubit,
+                );
+                if *value {
+                    gates.gate(Gate::X, &[scratch_alias]);
+                    last_use[scratch_alias] = Some(gates.len());
+                }
+                deferred_measurements.push((scratch_alias, next_record));
+                measured_aliases[scratch_alias] = true;
+                next_record += 1;
+            }
             QecOp::Feedforward { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC deferred sampler".to_string(),
@@ -1408,8 +1569,94 @@ fn lower_qec_program_to_deferred_circuit_inner(
         last_use,
         final_qubit_aliases,
         pair_tables,
+        product_tables,
         leak_events,
     })
+}
+
+/// Alias of the scratch qubit for the next scratch measurement: a fresh one once the
+/// current alias has been measured.
+fn qec_scratch_alias(
+    position: usize,
+    aliases: &mut [usize],
+    measured_aliases: &mut Vec<bool>,
+    alias_positions: &mut Vec<usize>,
+    last_use: &mut Vec<Option<usize>>,
+    next_qubit: &mut usize,
+    scratch_qubit: usize,
+) -> usize {
+    if measured_aliases[aliases[scratch_qubit]] {
+        qec_assign_fresh_alias(
+            position,
+            aliases,
+            measured_aliases,
+            alias_positions,
+            last_use,
+            next_qubit,
+            scratch_qubit,
+        )
+    } else {
+        aliases[scratch_qubit]
+    }
+}
+
+fn pauli_letter(basis: QecBasis) -> u8 {
+    match basis {
+        QecBasis::X => 1,
+        QecBasis::Y => 2,
+        QecBasis::Z => 3,
+    }
+}
+
+/// Lower mutually exclusive `(absolute rate, [(alias, letter)])` branches into one
+/// product event at `position`, or nothing when no branch can fire on a live alias.
+fn push_qec_deferred_product_event(
+    branches: &[(f64, Vec<(usize, u8)>)],
+    position: usize,
+    noise_events: &mut Vec<QecDeferredNoiseEvent>,
+    product_tables: &mut Vec<QecProductTable>,
+    last_use: &mut [Option<usize>],
+) {
+    let mut targets: Vec<usize> = Vec::new();
+    for (_, letters) in branches {
+        for &(alias, _) in letters {
+            if !targets.contains(&alias) {
+                targets.push(alias);
+            }
+        }
+    }
+    let p: f64 = branches.iter().map(|(rate, _)| rate).sum();
+    if targets.is_empty() || p == 0.0 {
+        return;
+    }
+    let width = targets.len();
+    let mut table = QecProductTable {
+        rates: Vec::with_capacity(branches.len()),
+        letters: vec![0; branches.len() * width],
+        width,
+    };
+    for (branch, (rate, letters)) in branches.iter().enumerate() {
+        table.rates.push(*rate);
+        for &(alias, letter) in letters {
+            let slot = targets
+                .iter()
+                .position(|&t| t == alias)
+                .expect("alias collected");
+            table.letters[branch * width + slot] = letter;
+        }
+    }
+    product_tables.push(table);
+    for &alias in &targets {
+        last_use[alias] = Some(position);
+    }
+    noise_events.push(QecDeferredNoiseEvent {
+        channel: QecDeferredChannel::Products {
+            p,
+            table: (product_tables.len() - 1) as u32,
+        },
+        targets,
+        position,
+    });
 }
 
 /// Write one zero into every page of `v`'s spare capacity, from the pool when there is
@@ -1449,6 +1696,7 @@ fn qec_deferred_gate_count(program: &QecProgram) -> usize {
             QecOp::MeasurePauliProduct { terms } => {
                 terms.iter().map(|term| 2 * rotation(term.basis) + 1).sum()
             }
+            QecOp::Pad { value: true } => 1,
             _ => 0,
         })
         .sum();
@@ -1697,14 +1945,14 @@ fn draw_qec_pair_noise(
     }
 }
 
-/// Draw one `PAULI_CHANNEL_2` event over `num_shots` shots, calling `flip(shot, branch)`
-/// per fault with a branch in `0..15` drawn from `rates`, which sum to `p`.
+/// Draw one `PAULI_CHANNEL_2` or product event over `num_shots` shots, calling
+/// `flip(shot, branch)` per fault with a branch drawn from `rates`, which sum to `p`.
 #[inline(always)]
-fn draw_qec_pair_table_noise(
+fn draw_qec_table_noise(
     num_shots: usize,
     p: f64,
     ln_1mp: f64,
-    rates: &[f64; 15],
+    rates: &[f64],
     rng: &mut Xoshiro256PlusPlus,
     mut flip: impl FnMut(usize, usize),
 ) {
@@ -1716,7 +1964,7 @@ fn draw_qec_pair_table_noise(
         for shot in 0..num_shots {
             let r = rng.next_f64();
             if r < p {
-                flip(shot, qec_pair_table_branch(rates, r));
+                flip(shot, qec_table_branch(rates, r));
             }
         }
         return;
@@ -1724,14 +1972,14 @@ fn draw_qec_pair_table_noise(
 
     let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
     while shot < num_shots {
-        flip(shot, qec_pair_table_branch(rates, rng.next_f64() * p));
+        flip(shot, qec_table_branch(rates, rng.next_f64() * p));
         shot += 1 + geometric_sample_xoshiro(rng, ln_1mp);
     }
 }
 
 /// Branch whose cumulative rate interval holds `r`, for `r` in `[0, p)`.
 #[inline(always)]
-fn qec_pair_table_branch(rates: &[f64; 15], r: f64) -> usize {
+fn qec_table_branch(rates: &[f64], r: f64) -> usize {
     let mut cumulative = 0.0;
     let mut last = 0;
     for (branch, &rate) in rates.iter().enumerate() {

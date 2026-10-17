@@ -91,10 +91,7 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
     super::validate_measured_qubit_reuse(program)?;
     if program.num_expectation_values() > 0 {
         super::validate_qec_exp_val_placement(program)?;
-        let has_active_noise = program
-            .ops()
-            .iter()
-            .any(|op| matches!(op, QecOp::Noise { channel, .. } if channel.probability() > 0.0));
+        let has_active_noise = program.ops().iter().any(QecOp::is_active_noise);
         if has_active_noise {
             return run_qec_program_noisy_exp_val(program);
         }
@@ -571,6 +568,35 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
                 }
                 QecOp::Noise { channel, targets } => {
                     apply_reference_noise(&mut backend, &mut noise_rng, channel, targets)?;
+                }
+                QecOp::CorrelatedError { branches } => {
+                    for branch in branches {
+                        if branch.probability > 0.0
+                            && noise_rng.random::<f64>() < branch.probability
+                        {
+                            for term in &branch.terms {
+                                apply_reference_pauli_index(
+                                    &mut backend,
+                                    pauli_index(term.basis),
+                                    term.qubit,
+                                )?;
+                            }
+                            break;
+                        }
+                    }
+                }
+                QecOp::HeraldedErase { probability, qubit } => {
+                    let erased = *probability > 0.0 && noise_rng.random::<f64>() < *probability;
+                    if erased {
+                        let pauli = noise_rng.random_range(0..4);
+                        apply_reference_pauli_index(&mut backend, pauli, *qubit)?;
+                    }
+                    set_shot_record(&mut measurement_data, m_words, shot, next_record, erased);
+                    next_record += 1;
+                }
+                QecOp::Pad { value } => {
+                    set_shot_record(&mut measurement_data, m_words, shot, next_record, *value);
+                    next_record += 1;
                 }
                 QecOp::Feedforward { .. } => {
                     backend.apply(&feedforward_regions[next_feedforward])?;
@@ -1374,8 +1400,8 @@ fn validate_qec_compiled_program(program: &QecProgram) -> Result<bool> {
                         .to_string(),
                 });
             }
-            QecOp::Noise { channel, .. } => {
-                has_noise |= channel.probability() > 0.0;
+            QecOp::Noise { .. } | QecOp::CorrelatedError { .. } | QecOp::HeraldedErase { .. } => {
+                has_noise |= op.is_active_noise();
             }
             QecOp::Feedforward { .. } => {
                 return Err(qec_feedforward_rejection());
@@ -1415,10 +1441,22 @@ fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit
                 circuit.add_reset(*qubit);
                 append_z_to_basis_rotation(&mut circuit, *basis, *qubit);
             }
+            QecOp::HeraldedErase { .. } | QecOp::Pad { .. } => {
+                if scratch_needs_reset {
+                    circuit.add_reset(scratch_qubit);
+                }
+                if matches!(op, QecOp::Pad { value: true }) {
+                    circuit.add_gate(Gate::X, &[scratch_qubit]);
+                }
+                circuit.add_measure(scratch_qubit, next_record);
+                next_record += 1;
+                scratch_needs_reset = true;
+            }
             QecOp::ExpectationValue { .. } | QecOp::Feedforward { .. } => {
                 unreachable!("validate_qec_compiled_program rejects EXP_VAL and feedforward")
             }
             QecOp::Noise { .. }
+            | QecOp::CorrelatedError { .. }
             | QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }
             | QecOp::Postselect { .. }
@@ -1609,6 +1647,14 @@ fn apply_reference_noise(
         }
     }
     Ok(())
+}
+
+fn pauli_index(basis: QecBasis) -> usize {
+    match basis {
+        QecBasis::X => 1,
+        QecBasis::Y => 2,
+        QecBasis::Z => 3,
+    }
 }
 
 fn apply_reference_pauli_index(

@@ -103,8 +103,8 @@ pub use gates::{
 pub use limits::{LimitKnob, LimitSource, Limits, default_limits, set_default_limits};
 pub use qec::{
     BpMethod, BpOsdDecoder, BpOsdOptions, DetectorErrorModel, ErrorMechanism, MatchingDecoder,
-    OsdMethod, QecBasis, QecCircuitNoise, QecCompiledRows, QecMeasurementRow, QecNoise,
-    QecObservableEstimate, QecObservableReroute, QecOp, QecOptions, QecPauli, QecProgram,
+    OsdMethod, QecBasis, QecCircuitNoise, QecCompiledRows, QecCorrelatedBranch, QecMeasurementRow,
+    QecNoise, QecObservableEstimate, QecObservableReroute, QecOp, QecOptions, QecPauli, QecProgram,
     QecRecordRef, QecSampleResult, QecTStrategy, UnionFindDecoder, compile_qec_program_rows,
     parse_qec_program, run_qec_program, run_qec_program_reference, run_qec_program_spd_rerouted,
     run_qec_program_with_strategy,

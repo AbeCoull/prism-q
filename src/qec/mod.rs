@@ -342,6 +342,8 @@ pub enum QecOp {
         channel: QecNoise,
         targets: Vec<usize>,
     },
+    /// Scheduling separator with no semantic effect, kept for the text format.
+    Tick,
     /// Correlated Pauli-product error, `E`/`CORRELATED_ERROR` with its
     /// `ELSE_CORRELATED_ERROR` chain: branch `i` fires with its probability only when no
     /// earlier branch fired, so at most one branch's terms are applied.
@@ -352,8 +354,6 @@ pub enum QecOp {
     HeraldedErase { probability: f64, qubit: usize },
     /// Constant measurement record holding `value`. Produces one record.
     Pad { value: bool },
-    /// Scheduling separator with no semantic effect, kept for the text format.
-    Tick,
 }
 
 impl QecOp {

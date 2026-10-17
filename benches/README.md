@@ -611,11 +611,11 @@ so every row is a control row and the report is this host's noise floor.
 
 The `iai` target (`benches/iai.rs`) counts instructions under callgrind instead of
 timing anything: eight rows, one kernel each, every one on a single Rayon thread with
-the tile budget pinned to 256 KB. A count depends on the binary and its input alone, so
-two runs of the same code agree to within about a hundred instructions out of millions
-(the working directory and environment leak in as string lengths), and the
-`instruction-counts` CI job holds the 5% threshold on a shared runner where the
-wall-clock gate above cannot.
+the tile budget pinned to 256 KB. A count depends on the binary and its input, not on
+the host's load, so the `instruction-counts` CI job holds the 5% threshold on a shared
+runner where the wall-clock gate above cannot. It is not bit-exact: hash seeds, heap
+addresses, and path lengths vary per process, and two builds of the same source on CI
+differed by at most 0.13% on `fuse_circuit_qaoa_l3` and under 0.03% on the other rows.
 
 | Row | Kernel |
 |-----|--------|

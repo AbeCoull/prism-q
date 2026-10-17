@@ -236,8 +236,33 @@ message naming the lane (`ref` or `new`), the row it was on, and the tail of its
 Without this, a reference binary that panicked on one row surfaced in the middle of a
 measured pass, after the warmups and the earlier passes had been paid for.
 
-Exit status: 0 PASS, 1 FAIL, 2 host too busy to start, 3 RERUN, 4 a binary failed the
-smoke test.
+Exit status: 0 PASS, 1 FAIL, 2 host too busy to start or another measurement holding the
+marker below, 3 RERUN, 4 a binary failed the smoke test.
+
+### One measurement at a time
+
+While a measurement runs, `bench_results/MEASURING` exists in the main checkout, whichever
+worktree started it. A session that sees the file must not run `cargo`, a test binary, or
+anything else that loads the host until the file is gone: ten queued runs in one week came
+back RERUN because a build in another session overlapped a measured pass. The file names
+its holder:
+
+```text
+pid: 1234
+by: bench_queue.sh
+task: PrismBenchQueue
+out: /c/work/prism-q/bench_results/queue-2026-10-17_101010
+started: 2026-10-17 10:10:10
+```
+
+`bench_queue.sh` writes it once every build has finished and removes it at `ALLDONE`.
+`bench_ab.sh` run on its own writes it before the host load check and removes it when the
+run ends. Both remove it on any exit, a `kill -INT` or `kill -TERM` of the script's pid
+included, and both refuse to start while a live process holds it: `LOCKED` in the queue's
+status file, exit 2 from `bench_ab.sh`. A marker whose pid is no longer running is stale,
+so the next run overwrites it and says so in its log. `--force-lock` measures regardless.
+A step the queue runs inherits `PRISM_BENCH_LOCK_HELD=1` and writes no marker of its own,
+and `PRISM_BENCH_LOCK` names another path for the file.
 
 ## Unattended queues
 
@@ -262,7 +287,8 @@ queue registers a scheduled task and starts it there. The task opens a console w
 and closing that window ends the queue. A second queue scheduled while one runs needs its own
 `--task-name`, and a first step that waits for the other's `ALLDONE`. Every step logs in full to its own
 file; the status file carries one START and END line per step, the verdicts, and
-`ALLDONE`.
+`ALLDONE`. A `kill -INT` or `kill -TERM` of the queue's pid ends the running step, removes
+the `MEASURING` marker, and writes `STOPPED` instead.
 
 ### Keeping an A/B affordable
 

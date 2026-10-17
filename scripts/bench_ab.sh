@@ -121,6 +121,11 @@
 #   --wait-idle     seconds to wait for the host to fall under --max-host-load
 #                   before giving up (default 0). A queued run passes a long wait
 #                   so it starts when the host settles instead of failing.
+#   --force-lock    measure even while a live process holds the MEASURING
+#                   marker. The marker (see bench_lock.sh) is written before the
+#                   host load check and removed on exit, so other sessions on
+#                   the host know not to run cargo; a run under bench_queue.sh
+#                   inherits the queue's marker through PRISM_BENCH_LOCK_HELD.
 #
 # Verdict guards:
 #   A run whose same-binary controls lean one way across most rows reads RERUN
@@ -145,8 +150,8 @@
 #   and earlier passes have been paid for. Runs started by this script for a
 #   confirmation or an escalation skip it, since the same binaries passed it.
 #
-# Exit status: 0 PASS, 1 FAIL, 2 host too busy to start, 3 RERUN, 4 a binary
-# failed the smoke test.
+# Exit status: 0 PASS, 1 FAIL, 2 host too busy to start or another measurement
+# holding the marker, 3 RERUN, 4 a binary failed the smoke test.
 #
 # Environment:
 #   REGRESSION_THRESHOLD   regression gate in percent (default: 5.0)
@@ -167,6 +172,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/bench_lock.sh
+source "$SCRIPT_DIR/bench_lock.sh"
 
 FILTER=""
 CONTROL_FILTER=""
@@ -190,6 +197,7 @@ MIN_ROWS=1
 THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
 MAX_HOST_LOAD=10
 WAIT_IDLE=0
+FORCE_LOCK=""
 CONFIRM=1
 ESCALATE=""
 # Set on the runs this script starts itself: "confirm" for the re-run of a FAIL,
@@ -217,6 +225,7 @@ while [[ $# -gt 0 ]]; do
         --project-dir) PROJECT_DIR="$(cd "$2" && pwd)"; shift 2 ;;
         --max-host-load) MAX_HOST_LOAD="$2"; shift 2 ;;
         --wait-idle)   WAIT_IDLE="$2"; shift 2 ;;
+        --force-lock)  FORCE_LOCK=1; shift ;;
         --no-confirm)  CONFIRM=""; shift ;;
         --escalate)    ESCALATE=1; shift ;;
         --min-rows)    MIN_ROWS="$2"; shift 2 ;;
@@ -291,13 +300,23 @@ if [[ -z "$REF_DIR" ]]; then
     KEEP_REF_DIR=false
 fi
 
+# The bench binary of the running segment, or a nested run, so a signal ends it
+# before the marker goes.
+CHILD_PID=""
 cleanup() {
+    if [[ -n "$CHILD_PID" ]]; then
+        kill -TERM "$CHILD_PID" 2>/dev/null || true
+        wait "$CHILD_PID" 2>/dev/null || true
+    fi
+    bench_lock_release
     if [[ "$KEEP_REF_DIR" == "false" && -d "$REF_DIR" ]]; then
         git worktree remove --force "$REF_DIR" 2>/dev/null || true
     fi
     rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Windows-native path for variables read by cargo and by the bench binary. MSYS
 # converts arguments but not arbitrary environment variables, so a POSIX path in
@@ -547,6 +566,7 @@ run_segment() {
     CRITERION_HOME="$(native_path "$home")" PRISM_BENCH_SAMPLES="$samples" \
         "$exe" --bench ${CRITERION_ARGS[@]+"${CRITERION_ARGS[@]}"} "$filter" > "$log" 2>&1 &
     pid=$!
+    CHILD_PID=$pid
 
     over=""
     shown=0
@@ -570,6 +590,7 @@ run_segment() {
 
     status=0
     wait "$pid" 2>/dev/null || status=$?
+    CHILD_PID=""
 
     if [[ -n "$over" ]]; then
         echo "" >&2
@@ -854,6 +875,11 @@ if [[ -z "$NESTED" ]]; then
     echo ""
 fi
 
+if [[ -z "$OUT" ]]; then
+    OUT="$PROJECT_DIR/bench_results/ab-$(date +%Y-%m-%d_%H%M%S).md"
+fi
+bench_lock_acquire "$PROJECT_DIR" bench_ab.sh "$FILTER" "$OUT" "$FORCE_LOCK" || exit 2
+
 echo "=== $TIER tier: two discarded warmup passes, then $PASS_COUNT adjacent passes ($PASS_ORDER) ==="
 echo ""
 preflight
@@ -893,9 +919,6 @@ for idx in $(seq 1 "$PASS_COUNT"); do
     awk -v p="$idx" 'BEGIN { OFS = "\t" } { print p, $1, $2, $3 }' "$WORKDIR/pass-$idx.tsv" >> "$MERGED"
 done
 
-if [[ -z "$OUT" ]]; then
-    OUT="$PROJECT_DIR/bench_results/ab-$(date +%Y-%m-%d_%H%M%S).md"
-fi
 mkdir -p "$(dirname "$OUT")"
 
 HIGH_QUBITS_STATE="off"
@@ -1212,7 +1235,10 @@ follow_up() {
         --filter "$filter" --out "$sub_out" --threshold "$THRESHOLD" \
         --max-host-load "$MAX_HOST_LOAD" --wait-idle "$WAIT_IDLE" \
         --slow-row-seconds "$SLOW_ROW_SECONDS" --slow-samples "$SLOW_SAMPLES" \
-        --warm-samples "$WARM_SAMPLES" --max-row-seconds "$MAX_ROW_SECONDS" "$@" || status=$?
+        --warm-samples "$WARM_SAMPLES" --max-row-seconds "$MAX_ROW_SECONDS" "$@" &
+    CHILD_PID=$!
+    wait "$CHILD_PID" || status=$?
+    CHILD_PID=""
     if [[ -f "$sub_out" ]]; then
         { echo ""; echo "## $title"; echo ""; sed '1{/^## /d}' "$sub_out"; } >> "$OUT"
     else

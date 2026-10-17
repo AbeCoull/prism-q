@@ -279,7 +279,7 @@ answers both without expanding anything.
 | MPS | One environment sweep over the span the named sites occupy, keeping those open and tracing the rest | One SVD at the cut, or the eigenvalues of the reduced density matrix when the subsystem is not contiguous in chain order | Chain contraction against another chain in the same site order, at any width |
 | Tensor network | Declines | Declines | Dense export |
 | Stabilizer, factored-stabilizer | Projector onto the generators supported inside the subsystem | Rank of the generators restricted to the cut, less the subsystem size, in units of `ln 2`, with the flat spectrum that rank stands for | Rank of the two tableaux merged, at any width while both hold their rows on the host, on the stabilizer; a device-resident tableau and the factored form take the dense export |
-| Distributed statevector | Declines | Declines | Dense export |
+| Distributed statevector | Rank-local partial trace once the kept qubits are relabeled into local positions, summed across ranks; a subsystem wider than the local slice reads the gathered state | Declines | Dense export |
 
 The entropy is the von Neumann entropy in nats, so a Bell pair reads `ln 2`, and the
 Schmidt values come back descending with their squares summing to one whatever norm the

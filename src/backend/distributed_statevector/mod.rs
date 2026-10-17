@@ -34,11 +34,14 @@
 //! reset channel, as [`Backend::reset`] specifies: sample the outcome, collapse
 //! onto it, and apply X when it is 1.
 //!
-//! Per-qubit probabilities and Pauli expectation values answer from rank-local
-//! sums plus one `Allreduce`, at any register width. `probabilities` and
-//! `export_statevector` are the only queries that gather, so they carry the
-//! dense output cap; `Simulate::run` rejects a beyond-cap register before the
-//! run rather than returning no distribution after it.
+//! Per-qubit probabilities, Pauli expectation values, and reduced density
+//! matrices answer from rank-local sums plus one reduction, at any register
+//! width. A reduced density matrix relabels its kept qubits into local
+//! positions first; one wider than the local slice reads the gathered state
+//! instead. `probabilities` and `export_statevector` are the other queries that
+//! gather, so they carry the dense output cap; `Simulate::run` rejects a
+//! beyond-cap register before the run rather than returning no distribution
+//! after it.
 //!
 //! # When to prefer this backend
 //!
@@ -125,10 +128,14 @@ use num_complex::Complex64;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+use crate::backend::reduced_density::{dense_reduced_density, normalize_trace};
 use crate::backend::simd;
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::SendPtr;
 use crate::backend::statevector::StatevectorBackend;
+use crate::backend::statevector::rdm_pair_sums;
+#[cfg(feature = "parallel")]
+use crate::backend::statevector::rdm_sum_add;
 use crate::backend::{
     Backend, BasisSamples, dense_probability_len, dense_statevector_len, measurement_inv_norm,
 };
@@ -385,6 +392,20 @@ fn half_norm_sqr(state: &[Complex64], qubit: usize, outcome: bool) -> f64 {
         .chunks(block)
         .map(|b| simd::norm_sqr_sum(select(b, half, outcome)))
         .sum()
+}
+
+/// `(sum |lo|^2, sum |hi|^2, sum hi * conj(lo))` over paired halves, parallel
+/// above `MIN_PAR_REDUCE_ELEMS`.
+fn pair_rdm_sums(lo: &[Complex64], hi: &[Complex64]) -> (f64, f64, Complex64) {
+    #[cfg(feature = "parallel")]
+    if lo.len() >= MIN_PAR_REDUCE_ELEMS {
+        return lo
+            .par_chunks(MIN_PAR_ELEMS)
+            .zip(hi.par_chunks(MIN_PAR_ELEMS))
+            .map(|(l, h)| rdm_pair_sums(l, h))
+            .reduce(|| (0.0, 0.0, Complex64::new(0.0, 0.0)), rdm_sum_add);
+    }
+    rdm_pair_sums(lo, hi)
 }
 
 /// Visit every circuit qubit an instruction touches: the instruction targets
@@ -2249,6 +2270,113 @@ impl Backend for DistributedStatevectorBackend {
             values.push(if norm == 0.0 { 0.0 } else { total / norm });
         }
         Ok(values)
+    }
+
+    /// Read in place, since `&self` cannot relabel. A local qubit folds the
+    /// rank's own slice. A qubit on a rank bit pairs each rank with the partner
+    /// across that bit: each keeps one half of its slice and sends the other, so
+    /// each of the pair sums the coherence over half the local indices for one
+    /// half-slice exchange, the volume a relabel would move. One gather of four
+    /// scalars per rank sums the parts in rank order.
+    ///
+    /// Collective: every rank must call it with the same qubit.
+    fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
+        let pos = self.physical_qubit(qubit);
+        let (p0, p1, r) = if pos < self.local_qubits() {
+            let rho = self.inner.reduced_density_matrix_1q(pos)?;
+            (rho[0][0].re, rho[1][1].re, rho[1][0])
+        } else {
+            let comm = self.context.comm();
+            let partner = self.context.rank() ^ (1usize << self.global_bit(pos));
+            let high = self.rank_bit_set(pos);
+            let state = self.inner.state.as_slice();
+            let half = state.len() / 2;
+            let (keep, send) = if high {
+                (&state[half..], &state[..half])
+            } else {
+                (&state[..half], &state[half..])
+            };
+            let chunk = self.exchange_chunk.min(half).max(1);
+            let mut recv = vec![Complex64::new(0.0, 0.0); chunk];
+            let mut sums = (0.0, 0.0, Complex64::new(0.0, 0.0));
+            let mut off = 0;
+            while off < half {
+                let count = (off + chunk).min(half) - off;
+                comm.sendrecv_c64(partner, &send[off..off + count], &mut recv[..count]);
+                let kept = &keep[off..off + count];
+                let (b0, b1, br) = if high {
+                    pair_rdm_sums(&recv[..count], kept)
+                } else {
+                    pair_rdm_sums(kept, &recv[..count])
+                };
+                sums = (sums.0 + b0, sums.1 + b1, sums.2 + br);
+                off += count;
+            }
+            let norm_sq = self.inner.pending_norm * self.inner.pending_norm;
+            (sums.0 * norm_sq, sums.1 * norm_sq, sums.2 * norm_sq)
+        };
+        let parts = self.context.comm().allgather_f64(&[p0, p1, r.re, r.im]);
+        let mut total = [0.0f64; 4];
+        for part in parts.as_chunks::<4>().0 {
+            for (t, &v) in total.iter_mut().zip(part) {
+                *t += v;
+            }
+        }
+        let r = Complex64::new(total[2], total[3]);
+        Ok([
+            [Complex64::new(total[0], 0.0), r.conj()],
+            [r, Complex64::new(total[1], 0.0)],
+        ])
+    }
+
+    /// Partial trace with every kept qubit in a local position: each rank folds
+    /// its slice into a partial `2^k x 2^k` block, which already traces the rank
+    /// bits it holds fixed, and the blocks are summed in rank order, so every
+    /// rank returns the same matrix.
+    ///
+    /// A kept qubit on a rank bit is relabeled into a local position first, one
+    /// half-slice exchange each, evicting the least recently used local qubit
+    /// outside the subsystem. With relabeling on, the map keeps that layout for
+    /// the gates that follow; with it off, the map is restored to the identity
+    /// before returning. A subsystem wider than the local positions cannot be
+    /// made local and reads the gathered state instead, under the dense export
+    /// cap.
+    ///
+    /// Collective: every rank must call it with an identical subsystem.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        crate::backend::schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let dim = crate::backend::reduced_density::reduced_density_side(
+            BACKEND_NAME,
+            subsystem.len(),
+            &self.inner.limits,
+        )?;
+        if subsystem.len() > self.local_qubits() {
+            let state = self.export_statevector()?;
+            let mut rho = dense_reduced_density(&state, self.num_qubits, subsystem);
+            normalize_trace(&mut rho, dim);
+            return Ok(rho);
+        }
+
+        self.tick += 1;
+        for &q in subsystem {
+            self.last_used[q] = self.tick;
+        }
+        self.make_local(subsystem);
+        let positions: SmallVec<[usize; 8]> =
+            subsystem.iter().map(|&q| self.qubit_map[q]).collect();
+        let block = dense_reduced_density(&self.inner.state, self.local_qubits(), &positions);
+        if !self.relabel {
+            self.restore_identity_map();
+        }
+
+        let gathered = self.context.comm().allgather_c64(&block);
+        let mut parts = gathered.chunks_exact(dim * dim);
+        let mut rho = parts.next().expect("rank 0 block").to_vec();
+        for part in parts {
+            add_shard(&mut rho, part);
+        }
+        normalize_trace(&mut rho, dim);
+        Ok(rho)
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {

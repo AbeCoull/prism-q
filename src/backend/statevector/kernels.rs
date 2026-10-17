@@ -2061,6 +2061,9 @@ mod radix4_butterfly_neon_proofs {
     #[kani::proof]
     #[kani::unwind(9)]
     #[kani::stub(core::arch::aarch64::vfmaq_f64, crate::backend::neon_model::fmaq_f64)]
+    #[kani::stub(core::arch::aarch64::vaddq_f64, crate::backend::neon_model::addq_f64)]
+    #[kani::stub(core::arch::aarch64::vsubq_f64, crate::backend::neon_model::subq_f64)]
+    #[kani::stub(core::arch::aarch64::vmulq_f64, crate::backend::neon_model::mulq_f64)]
     fn radix4_butterfly_neon_stays_in_bounds() {
         let mut group: [f64; 8] = std::array::from_fn(|_| any_unit());
         // SAFETY: the group holds four complex amplitudes at stride one, the shape the

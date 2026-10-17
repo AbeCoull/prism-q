@@ -1,6 +1,7 @@
 //! Plain-Rust models of the NEON intrinsics Kani cannot execute, for `#[kani::stub]`.
-//! stdarch lowers each one to an LLVM intrinsic; every model keeps the signature of the
-//! intrinsic it replaces.
+//! stdarch lowers each one to an LLVM intrinsic, or to a vector float op whose overflow
+//! check Kani leaves undecided; every model keeps the signature of the intrinsic it
+//! replaces.
 
 use std::arch::aarch64::{float64x2_t, uint8x16_t, uint16x8_t, uint32x4_t, uint64x2_t};
 
@@ -85,6 +86,23 @@ pub(crate) fn fmaq_f64(a: float64x2_t, b: float64x2_t, c: float64x2_t) -> float6
     from_lanes(std::array::from_fn(|i| b[i].mul_add(c[i], a[i])))
 }
 
+fn lanewise(a: float64x2_t, b: float64x2_t, op: impl Fn(f64, f64) -> f64) -> float64x2_t {
+    let (a, b) = (lanes(a), lanes(b));
+    from_lanes([op(a[0], b[0]), op(a[1], b[1])])
+}
+
+pub(crate) fn addq_f64(a: float64x2_t, b: float64x2_t) -> float64x2_t {
+    lanewise(a, b, |x, y| x + y)
+}
+
+pub(crate) fn subq_f64(a: float64x2_t, b: float64x2_t) -> float64x2_t {
+    lanewise(a, b, |x, y| x - y)
+}
+
+pub(crate) fn mulq_f64(a: float64x2_t, b: float64x2_t) -> float64x2_t {
+    lanewise(a, b, |x, y| x * y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,8 +169,24 @@ mod tests {
                 from_lanes([c0, c1]),
             );
             // SAFETY: NEON is baseline on aarch64.
-            let fma = unsafe { vfmaq_f64(a, b, c) };
-            for (modeled, native) in lanes(fmaq_f64(a, b, c)).into_iter().zip(lanes(fma)) {
+            let (fma, add, sub, mul) = unsafe {
+                (
+                    vfmaq_f64(a, b, c),
+                    vaddq_f64(a, b),
+                    vsubq_f64(a, b),
+                    vmulq_f64(b, c),
+                )
+            };
+            let pairs = [
+                (fmaq_f64(a, b, c), fma),
+                (addq_f64(a, b), add),
+                (subq_f64(a, b), sub),
+                (mulq_f64(b, c), mul),
+            ];
+            for (modeled, native) in pairs
+                .into_iter()
+                .flat_map(|(m, n)| lanes(m).into_iter().zip(lanes(n)))
+            {
                 assert!(
                     modeled.to_bits() == native.to_bits() || (modeled.is_nan() && native.is_nan())
                 );

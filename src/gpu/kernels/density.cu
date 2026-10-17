@@ -139,35 +139,10 @@ extern "C" __global__ void dm_kraus_2q_diagonal(
     state[i] = cmul(state[i], diag[slot]);
 }
 
-// Dense 16x16 block superoperator `s` (row-major, 256 complex entries), one
-// block of 16 amplitudes per thread.
+// Dense 16x16 block superoperator `s`, one block of 16 amplitudes per thread. Entry
+// m = a + ib is stored as (a, b - a, a + b), row-major, as `apply_fused_2q`, so each
+// complex multiply-add issues three FMAs.
 extern "C" __global__ void dm_kraus_2q_dense(
-    double2 * __restrict__ state, unsigned long long groups, int q0, int q1, int n,
-    const double2 * __restrict__ s)
-{
-    unsigned long long m = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (m >= groups) return;
-    unsigned long long base = dm_block_base(m, q0, q1, n);
-    unsigned long long idx[16];
-    double2 v[16];
-    for (int k = 0; k < 16; ++k) {
-        idx[k] = base | dm_block_offset(k, q0, q1, n);
-        v[k] = state[idx[k]];
-    }
-    for (int row = 0; row < 16; ++row) {
-        double re = 0.0, im = 0.0;
-        #pragma unroll
-        for (int col = 0; col < 16; ++col) {
-            double2 c = s[row * 16 + col];
-            re += c.x * v[col].x - c.y * v[col].y;
-            im += c.x * v[col].y + c.y * v[col].x;
-        }
-        state[idx[row]] = make_double2(re, im);
-    }
-}
-
-// Entry m = a + ib of `s` stored as (a, b - a, a + b), row-major, as `apply_fused_2q`.
-extern "C" __global__ void dm_kraus_2q_dense_gauss(
     double2 * __restrict__ state, unsigned long long groups, int q0, int q1, int n,
     const double * __restrict__ s)
 {

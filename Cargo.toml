@@ -32,6 +32,8 @@ mpi = { version = "0.8", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+# Pinned exactly: the `iai-callgrind-runner` binary the CI job installs must match.
+iai-callgrind = "=0.16.1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(prism_lowered_thresholds)", "cfg(kani)"] }
@@ -163,4 +165,8 @@ harness = false
 
 [[bench]]
 name = "qec_decoder"
+harness = false
+
+[[bench]]
+name = "iai"
 harness = false

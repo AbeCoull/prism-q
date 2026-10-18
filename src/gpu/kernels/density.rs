@@ -262,33 +262,20 @@ pub(crate) fn kraus_2q_dense(
     let groups = buffer_len(state, n) >> 4;
     let (q0_i, q1_i, n_i) = (q0 as i32, q1 as i32, n as i32);
     let device = ctx.device();
-    #[cfg(feature = "bench-internal")]
-    let gauss = crate::bench_variant_b();
-    #[cfg(not(feature = "bench-internal"))]
-    let gauss = false;
-    let name = if gauss {
-        "dm_kraus_2q_dense_gauss"
-    } else {
-        "dm_kraus_2q_dense"
-    };
-    let (stream, func) = stream_and_fn(ctx, name)?;
+    let (stream, func) = stream_and_fn(ctx, "dm_kraus_2q_dense")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(groups));
     let mut scratch = ctx.launcher_scratch();
-    let s_buf = if gauss {
-        super::stage_blob(
-            &mut scratch.blob,
-            device,
-            std::iter::empty(),
-            3 * 256,
-            |dst| {
-                for (slot, e) in dst.as_chunks_mut::<3>().0.iter_mut().zip(s.as_flattened()) {
-                    *slot = [e.re, e.im - e.re, e.re + e.im];
-                }
-            },
-        )?
-    } else {
-        super::stage_complex(&mut scratch.blob, device, s.as_flattened())?
-    };
+    let s_buf = super::stage_blob(
+        &mut scratch.blob,
+        device,
+        std::iter::empty(),
+        3 * 256,
+        |dst| {
+            for (slot, e) in dst.as_chunks_mut::<3>().0.iter_mut().zip(s.as_flattened()) {
+                *slot = [e.re, e.im - e.re, e.re + e.im];
+            }
+        },
+    )?;
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer_mut().raw_mut())
@@ -302,7 +289,9 @@ pub(crate) fn kraus_2q_dense(
     // block bases, so the 16 amplitudes one thread touches are disjoint from
     // every other thread's; the superoperator is held by the scratch guard.
     unsafe {
-        builder.launch(cfg).map_err(|e| driver_err(name, e))?;
+        builder
+            .launch(cfg)
+            .map_err(|e| driver_err("dm_kraus_2q_dense", e))?;
     }
     Ok(())
 }

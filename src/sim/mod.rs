@@ -2428,6 +2428,7 @@ fn run_batch_entry(
 /// own parallel floor: on a 4-core host a 200-circuit two-layer ansatz batch split
 /// one circuit per core took 18% of the unsplit time at 14 qubits and 53% at 16, and
 /// 10% more at 18. Under miri it follows the kernels' floor down.
+/// Bracketed by `batch/hea_l2_sweep` (`run_batch/16` and `run_batch/18` against `loop`).
 #[cfg(all(feature = "parallel", not(miri)))]
 const RUN_SPLIT_QUBITS: usize = 17;
 #[cfg(all(feature = "parallel", miri))]
@@ -2780,6 +2781,7 @@ impl ShotSource {
 /// Narrowest register `Auto` samples through the Clifford register rather than the
 /// statevector. At 12 qubits the statevector still wins, 0.8 against 1.3 ms for 1024
 /// shots; at 16 the register takes 1.5 ms against 3.3.
+/// No bench row brackets this yet.
 #[cfg(not(prism_lowered_thresholds))]
 const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 16;
 #[cfg(prism_lowered_thresholds)]
@@ -3604,6 +3606,7 @@ pub(crate) fn host_group_moments(
 /// 2000-string Jordan-Wigner fixture, sending every multi-term group through it
 /// cost about 3x this budget's reduction at n=16 and n=20, and about 0.6x at
 /// n=12.
+/// Bracketed by `expectation/pauli_sum_grouped` (`grouped/16`, `grouped/20`).
 const MAX_PAIR_MASKS_PER_GROUP: usize = 20;
 
 /// Values from a route that evaluates rather than samples, so there is no

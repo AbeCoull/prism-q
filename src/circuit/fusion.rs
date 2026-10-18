@@ -28,11 +28,13 @@ use crate::sim::unified_pauli::PauliAxis;
 
 /// Floor for the 1q fusion, reorder, and batching passes. Below it gate execution takes
 /// nanoseconds and cloning the instruction stream costs more than fusion saves.
+/// Bracketed by `auto/random_d10` and `auto/hea_l5` (`8` and `10` rows).
 #[cfg(not(any(miri, prism_lowered_thresholds)))]
 pub(crate) const MIN_QUBITS_FOR_FUSION: usize = 10;
 #[cfg(any(miri, prism_lowered_thresholds))]
 pub(crate) const MIN_QUBITS_FOR_FUSION: usize = 8;
 
+/// Bracketed by `auto/random_d10` and `statevector/qft_like` (`12` and `14` rows).
 #[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 14;
 #[cfg(any(miri, prism_lowered_thresholds))]
@@ -40,12 +42,14 @@ const MIN_QUBITS_FOR_MULTI_FUSION: usize = 8;
 
 /// Floor for the diagonal batch passes (BatchRzz, BatchPhase, DiagonalBatch), whose LUT
 /// setup needs a large state to amortize.
+/// Bracketed by `statevector/qaoa_l3` (`12` to `17` rows) and `statevector/qpe_t_gate` (`12q` to `16q`).
 #[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 16;
 #[cfg(any(miri, prism_lowered_thresholds))]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 8;
 
 /// Floor for re-batching 1q runs on buffers wider than the circuit register.
+/// Bracketed by `density_matrix/fused_layers` (`8`, `10`) and `density_matrix/prepared` (`qaoa/8`, `qaoa/10`).
 #[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 18;
 #[cfg(any(miri, prism_lowered_thresholds))]
@@ -54,6 +58,7 @@ const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 8;
 /// Floor for absorbing 1q gates into a 2q gate. The generic 4×4 kernel does ~4x the
 /// FLOPs of CX/CZ plus SIMD 1q kernels; the saved memory passes win from 12q on QV and
 /// random sweeps.
+/// Bracketed by `auto/random_d10` and `auto/hea_l5` (`10` and `12` rows).
 #[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_2Q_FUSION: usize = 12;
 #[cfg(any(miri, prism_lowered_thresholds))]
@@ -77,6 +82,7 @@ const MIN_MULTI_2Q_BATCH: usize = 2;
 /// splits the state into `2^(n - 13)` tiles at the widths just past the parallel
 /// threshold, so at 15 qubits it would feed half of an eight-thread pool where the
 /// per-rotation pass feeds all of it.
+/// Bracketed by `vqe` (`*/12` against `*/16` rows).
 #[cfg(not(any(miri, prism_lowered_thresholds)))]
 const MIN_QUBITS_FOR_PAULI_ROT_BATCH: usize = 16;
 #[cfg(any(miri, prism_lowered_thresholds))]

@@ -36,6 +36,7 @@ use super::{RunOutcome, try_backend_probabilities};
 /// the per-gate work (tensor reshapes, gauge moves, allocation) a small bond does
 /// not amortize. Fit on 85 circuits at 32 to 64 qubits: about 4 us per gate-cut
 /// against about 15 ns per unit of bond cubed.
+/// Bracketed by `auto/expectation_above_cap` (`hea_l2/64` against `su4_brick_d6/64`).
 const MPS_GATE_CUT_OVERHEAD: f64 = 256.0;
 
 /// Estimate the work an MPS capped at `max_bond` spends applying `circuit`, in
@@ -111,31 +112,38 @@ pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
     cost
 }
 
+/// No bench row brackets this yet.
 pub(super) const MAX_AUTO_T_COUNT_SHOTS: usize = 40;
 
+/// No bench row brackets this yet.
 #[cfg(not(prism_lowered_thresholds))]
 pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 25;
 #[cfg(prism_lowered_thresholds)]
 pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 6;
 
+/// Bracketed by `auto/crossover` (`spd_10q_8t`, `spd_12q_8t` and `spd_16q_8t` rows).
 pub(super) const MIN_QUBITS_FOR_SPD_AUTO: usize = 12;
 
 /// Statevector amplitude updates one SPD term step is priced at when `Auto`
 /// answers marginals. A term step measured 100 to 300 ns against about 1.4 ns
 /// per amplitude update; 64 leans toward the Pauli route so a circuit it wins
 /// stays on it.
+/// Bracketed by `auto/crossover` (`spd_wide_*` rows).
 pub(super) const AUTO_SPD_AMPLITUDES_PER_TERM: usize = 64;
 
+/// Bracketed by `auto/crossover` (`fstab_*` rows).
 #[cfg(not(prism_lowered_thresholds))]
 pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 16;
 #[cfg(prism_lowered_thresholds)]
 pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 6;
 
+/// No bench row brackets this yet.
 pub(super) const MIN_BLOCK_FOR_FACTORED_STAB: usize = 2;
 
 /// Entry bound under which `Auto` takes the sparse map over the MPS past the
 /// statevector cap. A sparse gate costs about 8 ns per entry and an MPS gate at
 /// bond 2 about 2 us, so on a circuit that barely entangles the two tie near 256.
+/// Bracketed by `auto/sparse_support_shots` (`wide_k6/64` against `wide_k12/64`).
 const AUTO_SPARSE_MAX_SUPPORT: usize = 128;
 
 #[inline]

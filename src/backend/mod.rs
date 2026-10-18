@@ -79,6 +79,7 @@ use crate::sim::{BondReport, Exactness, Placement, ResolvedBackend};
 /// On a four-core i7-6700K, one thread took 9% to 65% less time than Rayon on the
 /// `auto/qft_like`, `auto/random_d10` and `auto/hea_l5` rows at 14 qubits, and 56% to
 /// 100% more at 16.
+/// Bracketed by `auto/random_d10`, `auto/qft_like` and `auto/hea_l5` (`14` and `16` rows).
 ///
 /// Under miri the four parallelism floors here drop so the same kernels split
 /// across real worker threads at sizes the interpreter can execute; a 15-qubit

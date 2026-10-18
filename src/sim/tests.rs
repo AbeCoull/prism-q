@@ -73,8 +73,8 @@ fn probability_route_precedence_is_pinned() {
 }
 
 #[test]
-fn factored_stabilizer_route_starts_at_24_qubits_with_pair_blocks() {
-    let at_floor = crate::circuits::local_clifford_blocks(12, 2, 20, 42);
+fn factored_stabilizer_route_starts_at_16_qubits_with_pair_blocks() {
+    let at_floor = crate::circuits::local_clifford_blocks(8, 2, 20, 42);
     assert!(matches!(
         plan_probability_route(
             &BackendKind::Auto,
@@ -83,7 +83,7 @@ fn factored_stabilizer_route_starts_at_24_qubits_with_pair_blocks() {
         ),
         ProbabilityRoute::FactoredStabilizer
     ));
-    let below_floor = crate::circuits::local_clifford_blocks(11, 2, 20, 42);
+    let below_floor = crate::circuits::local_clifford_blocks(7, 2, 20, 42);
     assert!(matches!(
         plan_probability_route(
             &BackendKind::Auto,
@@ -92,8 +92,8 @@ fn factored_stabilizer_route_starts_at_24_qubits_with_pair_blocks() {
         ),
         ProbabilityRoute::Decomposed(_)
     ));
-    let mut singles = Circuit::new(24, 0);
-    for q in 0..24 {
+    let mut singles = Circuit::new(16, 0);
+    for q in 0..16 {
         singles.add_gate(Gate::H, &[q]);
     }
     assert!(matches!(

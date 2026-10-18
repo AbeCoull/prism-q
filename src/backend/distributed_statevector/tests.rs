@@ -1398,15 +1398,18 @@ fn steady_state_run(n: usize, mode: WallMode) -> ((u64, u64), Vec<Complex64>) {
 
 #[test]
 fn steady_state_overflowing_layers_do_not_relabel() {
-    // At 20 qubits every Rx layer fuses into one MultiFused that needs all 20
-    // qubits local against 19 local positions, so exactly one target stays on
-    // the rank bit whatever the map: one full slice exchange per layer, and a
-    // relabel would only add a half slice on top. Planned and per-gate relabel
-    // must therefore agree. (At 16 qubits the first two layers stay single Rx
-    // gates and both modes relabel twice per layer instead.)
+    // At 20 qubits the Rx layers fuse into batches that need all 20 qubits
+    // local against 19 local positions, so one target stays on the rank bit
+    // whatever the map: each batch costs whole slice exchanges, and a relabel
+    // would add a half slice on top. How many batches the layers form depends on
+    // the fusion stage floor, which the host's last-level cache sets, so the
+    // test pins the absence of a half slice rather than a count. Planned and
+    // per-gate relabel must agree. (At 16 qubits the first two layers stay
+    // single Rx gates and both modes relabel twice per layer instead.)
     let (per_gate, per_gate_state) = steady_state_run(20, WallMode::PerGate);
     let (planned, planned_state) = steady_state_run(20, WallMode::Planned);
-    assert_eq!(per_gate, (3, 3 << 19), "per-gate relabel");
+    assert!(per_gate.1 > 0, "per-gate relabel: {per_gate:?}");
+    assert_eq!(per_gate.1 % (1 << 19), 0, "per-gate relabel: {per_gate:?}");
     assert_eq!(planned, per_gate, "planned relabel");
     let (_, direct_state) = steady_state_run(20, WallMode::Direct);
     let (prefix, fused) = steady_state_circuits(20);

@@ -2331,3 +2331,17 @@ mod multi_pauli_rot {
         batch_matches_per_gate(20, &(6..20).collect::<Vec<_>>(), 40, 23);
     }
 }
+
+#[test]
+fn multi_2q_order_check_flags_a_batch_that_descends_a_tier() {
+    use super::kernels::multi_2q_keeps_order;
+    let mat = crate::gates::Gate::Cx.matrix_4x4();
+    let mut descending: Vec<(usize, usize, [[Complex64; 4]; 4])> =
+        (6..20).step_by(2).rev().map(|q| (q, q + 1, mat)).collect();
+    descending.push((0, 1, mat));
+    assert!(!multi_2q_keeps_order(&descending, 20));
+    let mut ascending = descending.clone();
+    ascending.reverse();
+    assert!(multi_2q_keeps_order(&ascending, 20));
+    assert!(multi_2q_keeps_order(&descending[..1], 20));
+}

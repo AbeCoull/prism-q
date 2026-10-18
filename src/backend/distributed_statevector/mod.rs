@@ -133,6 +133,7 @@ use crate::backend::simd;
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::SendPtr;
 use crate::backend::statevector::StatevectorBackend;
+use crate::backend::statevector::kernels::multi_2q_keeps_order;
 use crate::backend::statevector::rdm_pair_sums;
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::rdm_sum_add;
@@ -1998,6 +1999,16 @@ impl DistributedStatevectorBackend {
         }
         let (pgate, ptargets) = self.to_physical(gate, targets);
         if self.instruction_qubits_local(&pgate, &ptargets) {
+            // A remapped batch can straddle the tiers fusion kept it inside, and the
+            // tiered kernel would then reorder entries that do not commute.
+            if let Cow::Owned(Gate::Multi2q(data)) = &pgate
+                && !multi_2q_keeps_order(&data.gates, self.local_qubits())
+            {
+                for &(q0, q1, ref mat) in &data.gates {
+                    self.inner.apply_fused_2q(q0, q1, mat);
+                }
+                return Ok(());
+            }
             self.inner.dispatch_gate(pgate.as_ref(), &ptargets);
             return Ok(());
         }

@@ -1627,18 +1627,20 @@ const PARALLEL_TRANSPOSE_BLOCKS: usize = 512;
 /// full transpose.
 const SPARSE_TRANSPOSE_BITS: u32 = 64;
 
-/// Transpose measurement-major `data` one 64-shot block at a time. `out` arrives zeroed
-/// and holds `row_len` elements per shot, and `emit(block, shot, meas_word, word)` ORs
-/// `word` into the 64 measurements from `meas_word * 64` of shot `shot` within `block`,
-/// the slice of `out` that holds the block's shots. A word may arrive in several parts
-/// or not at all when zero. Shot padding past `num_shots` is never emitted.
+/// Transpose measurement-major `data` one 64-shot block at a time into `out`, which
+/// arrives zeroed and holds `row_len` elements per shot. Within `block`, the slice of
+/// `out` holding the block's shots, `set_bit(block, shot, measurement)` sets one bit and
+/// `write_word(block, shot, meas_word, word)` stores the 64 measurements from
+/// `meas_word * 64` of shot `shot` whole, over any bits set before. Shot padding past
+/// `num_shots` is never written.
 fn transpose_meas_major_blocks<T: Send>(
     data: &[u64],
     num_shots: usize,
     num_measurements: usize,
     out: &mut [T],
     row_len: usize,
-    emit: impl Fn(&mut [T], usize, usize, u64) + Sync,
+    set_bit: impl Fn(&mut [T], usize, usize) + Sync,
+    write_word: impl Fn(&mut [T], usize, usize, u64) + Sync,
 ) {
     if num_shots == 0 || row_len == 0 {
         return;
@@ -1653,7 +1655,7 @@ fn transpose_meas_major_blocks<T: Send>(
             let first = meas_word * 64;
             let rows = (num_measurements - first).min(64);
             // Scatter bit by bit while the block stays sparse. Past the budget the full
-            // transpose takes over; emits OR, so the bits already scattered are harmless.
+            // transpose takes over and rewrites every word the scatter touched.
             let mut budget = SPARSE_TRANSPOSE_BITS;
             let dense = (0..rows).any(|row| {
                 let mut bits = data[(first + row) * s_words + shot_word] & shot_mask;
@@ -1661,7 +1663,7 @@ fn transpose_meas_major_blocks<T: Send>(
                     if budget == 0 {
                         return true;
                     }
-                    emit(block, bits.trailing_zeros() as usize, meas_word, 1 << row);
+                    set_bit(block, bits.trailing_zeros() as usize, first + row);
                     budget -= 1;
                     bits &= bits - 1;
                 }
@@ -1676,7 +1678,7 @@ fn transpose_meas_major_blocks<T: Send>(
             matrix[rows..].fill(0);
             transpose_64x64_dispatch(&mut matrix);
             for (shot, &word) in matrix[..shots].iter().enumerate() {
-                emit(block, shot, meas_word, word);
+                write_word(block, shot, meas_word, word);
             }
         }
     };
@@ -2062,7 +2064,10 @@ impl PackedShots {
             self.num_measurements,
             &mut shot_major,
             m_words,
-            |block, shot, meas_word, word| block[shot * m_words + meas_word] |= word,
+            |block, shot, measurement| {
+                block[shot * m_words + measurement / 64] |= 1 << (measurement % 64);
+            },
+            |block, shot, meas_word, word| block[shot * m_words + meas_word] = word,
         );
         shot_major
     }
@@ -2113,15 +2118,13 @@ impl PackedShots {
                 self.num_measurements,
                 &mut bytes,
                 row_bytes,
+                |block, shot, measurement| {
+                    block[shot * row_bytes + measurement / 8] |= 1 << (measurement % 8);
+                },
                 |block, shot, meas_word, word| {
                     let start = shot * row_bytes + meas_word * 8;
                     let take = (row_bytes - meas_word * 8).min(8);
-                    for (byte, value) in block[start..start + take]
-                        .iter_mut()
-                        .zip(word.to_le_bytes())
-                    {
-                        *byte |= value;
-                    }
+                    block[start..start + take].copy_from_slice(&word.to_le_bytes()[..take]);
                 },
             ),
         }

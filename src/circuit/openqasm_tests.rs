@@ -1617,9 +1617,35 @@ fn test_expr_tau_constant() {
 }
 
 #[test]
-fn test_expr_e_constant() {
-    assert!((eval_expr("e", 0, None).unwrap() - std::f64::consts::E).abs() < 1e-12);
+fn test_expr_euler_constant() {
     assert!((eval_expr("euler", 0, None).unwrap() - std::f64::consts::E).abs() < 1e-12);
+    assert!(
+        eval_expr("e", 0, None).is_err(),
+        "OpenQASM 3 spells it `euler`"
+    );
+}
+
+#[test]
+fn a_declared_variable_shadows_a_constant_name() {
+    let qasm = "OPENQASM 3.0;
+qubit[1] q;
+float e = 0.5;
+float euler = 0.25;
+                rx(e) q[0];
+ry(euler) q[0];";
+    let c = parse(qasm).unwrap();
+    let angles: Vec<f64> = c
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Gate {
+                gate: Gate::Rx(theta) | Gate::Ry(theta),
+                ..
+            } => Some(*theta),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(angles, [0.5, 0.25]);
 }
 
 #[test]

@@ -4,6 +4,11 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **qasm:** Resolve a declared variable before a built-in constant of the same name, so
+  `float e = 0.5; rx(e) q;` applies `rx(0.5)`.
+
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.
@@ -16,6 +21,8 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Compatibility
 
+- OpenQASM expressions no longer accept `e` for Euler's number; OpenQASM 3 spells the
+  constant `euler`, the only spelling the guide documents.
 - `require_exact()` accepts exact marginal and expectation routes even when full-state
   dispatch would select an approximate backend. Route failures can use different error text.
 - QEC detectors and observables, and the logical errors counted from them, are now

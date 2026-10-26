@@ -1361,24 +1361,29 @@ fn draw_qec_unit<E>(
     unit_shots: usize,
     mut flip: impl FnMut(usize, &E, usize, usize),
 ) {
+    let mut misses = QecMissThresholds::new(unit_shots);
     for (index, event) in events.iter().enumerate() {
         match *draw(event) {
             QecNoiseDraw::Single {
                 rates,
                 conditional,
                 ln_1mp,
-            } => draw_qec_single_noise(unit_shots, rates, conditional, ln_1mp, rng, |shot, b| {
-                flip(index, event, shot, b)
-            }),
+            } => {
+                let skip = QecSkip::new(ln_1mp, misses.below(ln_1mp));
+                draw_qec_single_noise(unit_shots, rates, conditional, skip, rng, |shot, b| {
+                    flip(index, event, shot, b)
+                })
+            }
             QecNoiseDraw::Pair { p, ln_1mp } => {
-                draw_qec_pair_noise(unit_shots, p, ln_1mp, rng, |shot, b| {
+                let skip = QecSkip::new(ln_1mp, misses.below(ln_1mp));
+                draw_qec_pair_noise(unit_shots, p, skip, rng, |shot, b| {
                     flip(index, event, shot, b)
                 })
             }
             QecNoiseDraw::PairTable { p, ln_1mp, table } => draw_qec_table_noise(
                 unit_shots,
                 p,
-                ln_1mp,
+                QecSkip::new(ln_1mp, misses.below(ln_1mp)),
                 &pair_tables[table as usize],
                 rng,
                 |shot, b| flip(index, event, shot, b),
@@ -1386,12 +1391,74 @@ fn draw_qec_unit<E>(
             QecNoiseDraw::Products { p, ln_1mp, table } => draw_qec_table_noise(
                 unit_shots,
                 p,
-                ln_1mp,
+                QecSkip::new(ln_1mp, misses.below(ln_1mp)),
                 &product_tables[table as usize].rates,
                 rng,
                 |shot, b| flip(index, event, shot, b),
             ),
         }
+    }
+}
+
+/// The geometric skip between faults of one event, with the uniform draw below which
+/// the first skip lands past every shot.
+#[derive(Clone, Copy)]
+struct QecSkip {
+    ln_1mp: f64,
+    miss_below: f64,
+}
+
+impl QecSkip {
+    #[inline(always)]
+    fn new(ln_1mp: f64, miss_below: f64) -> Self {
+        Self { ln_1mp, miss_below }
+    }
+
+    /// The first fault's shot, consuming the same draw as
+    /// [`geometric_sample_xoshiro`], or `usize::MAX` without the logarithm when the
+    /// draw falls below `miss_below`.
+    #[inline(always)]
+    fn first(self, rng: &mut Xoshiro256PlusPlus) -> usize {
+        let u = 1.0 - rng.next_f64();
+        if u < self.miss_below {
+            return usize::MAX;
+        }
+        (u.ln() / self.ln_1mp) as usize
+    }
+
+    #[inline(always)]
+    fn next(self, rng: &mut Xoshiro256PlusPlus) -> usize {
+        geometric_sample_xoshiro(rng, self.ln_1mp)
+    }
+}
+
+/// `(1 - p)^shots` per rate, shaded down by a relative 1e-9 so a draw below it skips
+/// past every shot whatever the rounding of `ln`. Circuit noise uses a handful of
+/// rates, so a few slots cache the `exp` across a unit's events.
+struct QecMissThresholds {
+    shots: f64,
+    slots: [(f64, f64); 4],
+    next: usize,
+}
+
+impl QecMissThresholds {
+    fn new(shots: usize) -> Self {
+        Self {
+            shots: shots as f64,
+            slots: [(f64::NAN, 0.0); 4],
+            next: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn below(&mut self, ln_1mp: f64) -> f64 {
+        if let Some(&(_, threshold)) = self.slots.iter().find(|(key, _)| *key == ln_1mp) {
+            return threshold;
+        }
+        let threshold = (self.shots * ln_1mp).exp() * (1.0 - 1e-9);
+        self.slots[self.next % self.slots.len()] = (ln_1mp, threshold);
+        self.next += 1;
+        threshold
     }
 }
 
@@ -2237,7 +2304,7 @@ fn draw_qec_single_noise(
     num_shots: usize,
     rates: QecSingleNoiseRates,
     conditional: QecSingleNoiseRates,
-    ln_1mp: f64,
+    skip: QecSkip,
     rng: &mut Xoshiro256PlusPlus,
     mut flip: impl FnMut(usize, usize),
 ) {
@@ -2254,12 +2321,12 @@ fn draw_qec_single_noise(
         return;
     }
 
-    let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
+    let mut shot = skip.first(rng);
     while shot < num_shots {
         if let Some(branch) = conditional.branch(rng.next_f64()) {
             flip(shot, branch);
         }
-        shot += 1 + geometric_sample_xoshiro(rng, ln_1mp);
+        shot += 1 + skip.next(rng);
     }
 }
 
@@ -2269,7 +2336,7 @@ fn draw_qec_single_noise(
 fn draw_qec_pair_noise(
     num_shots: usize,
     p: f64,
-    ln_1mp: f64,
+    skip: QecSkip,
     rng: &mut Xoshiro256PlusPlus,
     mut flip: impl FnMut(usize, usize),
 ) {
@@ -2286,10 +2353,10 @@ fn draw_qec_pair_noise(
         return;
     }
 
-    let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
+    let mut shot = skip.first(rng);
     while shot < num_shots {
         flip(shot, qec_uniform_15(rng));
-        shot += 1 + geometric_sample_xoshiro(rng, ln_1mp);
+        shot += 1 + skip.next(rng);
     }
 }
 
@@ -2299,7 +2366,7 @@ fn draw_qec_pair_noise(
 fn draw_qec_table_noise(
     num_shots: usize,
     p: f64,
-    ln_1mp: f64,
+    skip: QecSkip,
     rates: &[f64],
     rng: &mut Xoshiro256PlusPlus,
     mut flip: impl FnMut(usize, usize),
@@ -2318,10 +2385,10 @@ fn draw_qec_table_noise(
         return;
     }
 
-    let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
+    let mut shot = skip.first(rng);
     while shot < num_shots {
         flip(shot, qec_table_branch(rates, rng.next_f64() * p));
-        shot += 1 + geometric_sample_xoshiro(rng, ln_1mp);
+        shot += 1 + skip.next(rng);
     }
 }
 

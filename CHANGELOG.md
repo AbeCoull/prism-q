@@ -4,6 +4,11 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **backend:** A `PRISM_TILE_KB` value too large to shift into bytes wrapped, then panicked
+  or set a tile below the 128 KB floor. Such values now saturate to the 2 MB ceiling.
+
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

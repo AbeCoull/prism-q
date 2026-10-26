@@ -4,6 +4,11 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **stabilizer:** The sparse bulk path skipped a save point silently where every other
+  stabilizer path fails. It now returns the same save error.
+
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

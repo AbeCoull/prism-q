@@ -43,7 +43,7 @@ pub(super) fn compile_parity_noise(
 ) -> Result<Option<(Vec<u64>, QecParityNoise)>> {
     let plan = WalkPlan::new(deferred, projection, windows)?;
     let walk = walk_outputs(&plan)?;
-    if !walk.fixed {
+    if walk.random.is_some() {
         return Ok(None);
     }
     let events = walk
@@ -69,14 +69,29 @@ pub(super) fn compile_parity_noise(
 
 /// Compile every fault site of the deferred circuit onto `projection`'s outputs for the
 /// detector error model: the branches that fire and the outputs each flips, sites in
-/// program order. A random output is no obstacle here: the model describes flips of
-/// the noiseless outcome.
+/// program order. Errors when an output is random without noise, since the model
+/// describes flips of a fixed noiseless outcome.
 pub(super) fn compile_fault_sites(
     deferred: &QecDeferredProgram,
     projection: &QecParityProjection,
 ) -> Result<FaultSites> {
     let plan = WalkPlan::new(deferred, projection, None)?;
     let walk = walk_outputs(&plan)?;
+    if let Some(output) = walk.random {
+        let num_detectors = projection.num_detectors();
+        let (kind, index) = if (output as usize) < num_detectors {
+            ("detector", output as usize)
+        } else {
+            ("observable", output as usize - num_detectors)
+        };
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "{kind} {index} is not deterministic without noise, so no error mechanism \
+                 can describe its flips; a detector error model needs every detector and \
+                 observable fixed in the noiseless program"
+            ),
+        });
+    }
     let mut position_of_candidate = vec![0u32; plan.candidates as usize];
     for (slot, &index) in plan.events_by_position.iter().enumerate() {
         let event = &deferred.noise_events[index as usize];
@@ -169,12 +184,13 @@ impl FaultSites {
     }
 }
 
-/// What a walk over the outputs produced: the noiseless pattern, whether every output
-/// is fixed, and the kept events in draw order (positions descending, program order
-/// within a position), branch `b` flipping `outputs[branch_offsets[b]..branch_offsets[b + 1]]`.
+/// What a walk over the outputs produced: the noiseless pattern, the lowest output that
+/// is random rather than fixed, and the kept events in draw order (positions descending,
+/// program order within a position), branch `b` flipping
+/// `outputs[branch_offsets[b]..branch_offsets[b + 1]]`.
 struct ParityWalk {
     pattern: Vec<u64>,
-    fixed: bool,
+    random: Option<u32>,
     events: Vec<WalkEvent>,
     branch_offsets: Vec<u32>,
     outputs: Vec<u32>,
@@ -229,7 +245,7 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
 
     let mut snapshots = Vec::new();
     let mut prepass_pattern = vec![0u64; projection.words];
-    let mut fixed = true;
+    let mut random = None;
     if window_count > 1 {
         let mut rows = WindowRows::new(plan, u32::MAX, true);
         let mut visitor = PrepassVisitor {
@@ -240,7 +256,7 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
         walk(plan, &mut rows, plan.gate_count, &mut visitor)?;
         snapshots = visitor.snapshots;
         rows.fold_observable_signs();
-        fixed &= rows.fixed;
+        random = rows.random;
         prepass_pattern = rows.pattern;
     }
 
@@ -261,7 +277,7 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
             own,
             spill,
             pattern: rows.pattern,
-            fixed: rows.fixed,
+            random: rows.random,
         })
     };
     #[cfg(feature = "parallel")]
@@ -280,7 +296,10 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
     let mut owns = Vec::with_capacity(window_count);
     let mut spills = Vec::with_capacity(window_count);
     for result in results {
-        fixed &= result.fixed;
+        random = match (random, result.random) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         for (word, &bits) in pattern.iter_mut().zip(&result.pattern) {
             *word ^= bits;
         }
@@ -331,7 +350,7 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
     }
     Ok(ParityWalk {
         pattern,
-        fixed,
+        random,
         events,
         branch_offsets,
         outputs,
@@ -523,7 +542,8 @@ struct WindowRows<'a> {
     free_columns: Vec<u32>,
     used: Vec<u64>,
     pattern: Vec<u64>,
-    fixed: bool,
+    /// Lowest output this walk found random.
+    random: Option<u32>,
     pending_seeds: usize,
     /// Whether this walk answers for the observables' pattern and randomness: the
     /// sequential pass, or the only window.
@@ -557,7 +577,7 @@ impl<'a> WindowRows<'a> {
             free_columns: Vec::new(),
             used: Vec::new(),
             pattern: vec![0; projection.words],
-            fixed: true,
+            random: None,
             pending_seeds,
             checks_observables,
         }
@@ -762,11 +782,14 @@ impl<'a> WindowRows<'a> {
         } else {
             0..self.det_words
         };
-        if self.x[row.clone()][owned_words]
-            .iter()
-            .any(|&word| word != 0)
-        {
-            self.fixed = false;
+        for (word_index, &word) in self.x[row.clone()][owned_words].iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let output =
+                    self.output_of_column[word_index * 64 + bits.trailing_zeros() as usize];
+                self.random = Some(self.random.map_or(output, |random| random.min(output)));
+                bits &= bits - 1;
+            }
         }
         self.x[row.clone()].fill(0);
         self.z[row].fill(0);
@@ -905,7 +928,7 @@ struct WindowResult {
     own: OwnFlips,
     spill: SpillFlips,
     pattern: Vec<u64>,
-    fixed: bool,
+    random: Option<u32>,
 }
 
 /// Kept events of one window, with each branch's outputs in

@@ -224,6 +224,84 @@ grammar, and [QEC program execution](../architecture/qec-programs.md) for the
 runner routing, the V1 reset requirement, and the `EXP_VAL` placement rules.
 ```
 
+### Detector reference
+
+A detector reports 1 when its records disagree with the noiseless reference run of
+the program, so a noiseless program never fires and a detector event always means
+noise flipped it. Observables and the logical error counts follow the same
+convention. The reference run takes 0 for every random measurement outcome,
+including the hidden collapse of a reset. A detector whose noiseless value is
+random still has its parity XORed with that run's value: it fires in about half
+the shots, and `detector_error_model` rejects the program. Postselection and
+heralds read the raw records, and programs with non-Clifford gates report raw
+parities.
+
+`QecOptions::detector_reference` selects the convention. Set it to
+`QecDetectorReference::Raw` (`detector_reference="raw"` in Python) to report the
+plain parity of each detector's records instead:
+
+```rust
+use prism_q::{QecDetectorReference, QecOptions, parse_qec_program, run_qec_program};
+
+let mut program = parse_qec_program(
+    "R 0
+     X 0
+     M 0
+     DETECTOR rec[-1]
+     OBSERVABLE_INCLUDE(0) rec[-1]",
+)?;
+assert_eq!(run_qec_program(&program)?.logical_error_rates(), vec![0.0]);
+
+program.set_options(QecOptions {
+    detector_reference: QecDetectorReference::Raw,
+    ..QecOptions::default()
+});
+assert_eq!(run_qec_program(&program)?.logical_error_rates(), vec![1.0]);
+# Ok::<(), prism_q::PrismError>(())
+```
+
+### Compiling once for repeated sampling
+
+`run_qec_program` compiles the program on every call. `QecProgram::compile_sampler`
+does that work once and returns a `QecCompiledSampler`, whose `sample` call costs
+only the sampling, so many small batches or a sweep over seeds pay for one compile:
+
+```rust
+use prism_q::parse_qec_program;
+
+let program = parse_qec_program(
+    "R 0 1 2
+     X_ERROR(0.01) 0 2
+     CX 0 1 2 1
+     M 0 1 2
+     DETECTOR rec[-2]
+     OBSERVABLE_INCLUDE(0) rec[-1]",
+)?;
+let mut sampler = program.compile_sampler()?;
+let first = sampler.sample(100, None)?;
+let seeded = sampler.sample(100, Some(7))?;
+# Ok::<(), prism_q::PrismError>(())
+```
+
+`sample(shots, Some(seed))` draws exactly the shots `run_qec_program` draws with
+that seed in the program's options. `sample(shots, None)` continues one stream:
+the first call uses the program's seed and each later call derives a fresh seed
+from the previous one, so two samplers compiled from the same program replay the
+same sequence. The sampler is `Send`, and `sample` takes `&mut self`; share one
+across threads behind a lock, or compile one per thread. Programs that need the
+per-shot or analytical runners (`EXP_VAL`, non-Clifford gates) return an error
+from `compile_sampler`.
+
+In Python, `QecProgram.compile_sampler()` returns a `QecCompiledSampler`.
+`sample(shots, *, seed=None, bit_packed=True, separate_observables=True)` returns
+a `(detectors, observables)` pair of `(shots, ceil(n / 8))` little-endian byte
+arrays, bool arrays with `bit_packed=False`, or one array whose columns are the
+detectors followed by the observables with `separate_observables=False`.
+`sample_result` returns a full `QecSampleResult`. Sampling releases the GIL, and
+calls on one sampler from several threads run one at a time. Measurement records
+are dropped by default; pass `compile_sampler(keep_measurements=True)` to read
+them from `sample_result`.
+
 ### Leakage as heralded erasure
 
 `LEAK(p) q ...` leaks each target with probability `p`, `SEEP(p) q ...` returns each
@@ -320,7 +398,10 @@ model also exposes `probabilities()`, `detector_matrix()`, and
 libraries accept directly. Matching decoders need at most two detectors per
 mechanism: `decompose_graphlike` returns that form, splitting each hypergraph
 mechanism across existing graphlike ones and erroring loudly when no split
-exists. `to_text` writes those splits as `^`-separated components.
+exists. `to_text` writes those splits as `^`-separated components. Every
+detector and observable must be deterministic in the noiseless program; one
+that is random without noise has no error mechanism to describe it, and
+`detector_error_model` names it in the error.
 
 `DetectorErrorModel::from_text` reads the same format, `repeat` blocks and
 `shift_detectors` included, so a model written by another tool can drive the

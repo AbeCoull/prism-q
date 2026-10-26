@@ -19,6 +19,7 @@
 
 mod bposd;
 pub(crate) mod camps_prefix;
+mod compiled;
 /// Treewidth-aware cut-selection heuristics, benchmark-only: the dispatcher follows a
 /// fixed SPD -> CAMPS -> tensor-network ladder and does not use them.
 #[cfg(feature = "bench-internal")]
@@ -33,12 +34,14 @@ mod noise;
 pub mod observable_reroute;
 mod parity_walk;
 mod parse;
+mod reference;
 mod result;
 mod runner;
 mod t_sampler;
 mod text;
 
 pub use bposd::{BpMethod, BpOsdDecoder, BpOsdOptions, OsdMethod};
+pub use compiled::QecCompiledSampler;
 pub use decoder::UnionFindDecoder;
 pub use dem::{DetectorErrorModel, ErrorMechanism};
 pub use generators::QecCircuitNoise;
@@ -578,6 +581,8 @@ pub struct QecOptions {
     /// When `false`, [`QecSampleResult::measurements`] keeps only its column count and
     /// holds zero shots; detectors and observables are always populated.
     pub keep_measurements: bool,
+    /// What reported detector and observable bits are measured against.
+    pub detector_reference: QecDetectorReference,
 }
 
 impl Default for QecOptions {
@@ -587,8 +592,27 @@ impl Default for QecOptions {
             seed: 42,
             chunk_size: None,
             keep_measurements: true,
+            detector_reference: QecDetectorReference::Noiseless,
         }
     }
+}
+
+/// Baseline that reported detector and observable bits are measured against.
+///
+/// The noiseless reference is one noiseless run of the program in which every
+/// measurement whose outcome is random takes outcome 0, including the collapse a reset
+/// performs. A detector or observable that is deterministic without noise then reports
+/// 1 exactly when noise flipped it; one that is random reports a uniform bit, as raw
+/// parity does. Programs with non-Clifford gates have no such run and report raw
+/// parity under either setting. Postselection and erasure heralds always read raw
+/// records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum QecDetectorReference {
+    /// The parity XOR its value in the noiseless reference run.
+    #[default]
+    Noiseless,
+    /// The parity of the measurement records the detector or observable names.
+    Raw,
 }
 
 /// Native QEC program expressed as measurement-record operations.

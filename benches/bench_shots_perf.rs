@@ -461,6 +461,7 @@ fn qec_repetition_program_with_postselection(
         seed: SEED,
         chunk_size: Some(10_000),
         keep_measurements: false,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(n_data, options);
     let checks = n_data.saturating_sub(1);
@@ -631,6 +632,7 @@ fn qec_surface_program(
         seed: SEED,
         chunk_size: Some(10_000),
         keep_measurements: false,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(num_qubits, options);
     let mut previous: Vec<usize> = Vec::new();
@@ -1188,6 +1190,7 @@ fn qec_corrected_repetition_program(
         seed: SEED,
         chunk_size: Some(10_000),
         keep_measurements: false,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(n_data, options);
     let data: Vec<usize> = (0..n_data).collect();

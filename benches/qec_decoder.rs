@@ -23,6 +23,7 @@ fn bench_options(shots: usize) -> QecOptions {
         seed: SEED,
         chunk_size: Some(4096),
         keep_measurements: false,
+        ..QecOptions::default()
     }
 }
 

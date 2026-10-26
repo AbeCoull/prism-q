@@ -1380,6 +1380,7 @@ fn y_tensor_y_on_a_bell_pair_measures_minus_one() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(2, options);
     program.push_gate(Gate::H, &[0]).unwrap();

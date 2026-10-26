@@ -709,9 +709,38 @@ impl CompiledSampler {
 
     /// Packed measurement flips, one row per random bit; every sample is the reference
     /// bits XOR a subset of these rows.
-    #[cfg(test)]
     pub(crate) fn flip_rows(&self) -> &[Vec<u64>] {
         &self.flip_rows
+    }
+
+    /// Restart the random-bit stream as a sampler compiled with `seed` starts it.
+    pub(crate) fn reseed(&mut self, seed: u64) {
+        self.rng = ChaCha8Rng::seed_from_u64(seed);
+    }
+
+    /// Replace the reference bits with `reference`, another point of the same affine
+    /// space of outcomes, so the samples no longer depend on the seed the reference was
+    /// drawn with.
+    pub(crate) fn rebase_reference(&mut self, reference: Vec<u64>) {
+        debug_assert_eq!(reference.len(), self.ref_bits_packed.len());
+        if reference == self.ref_bits_packed {
+            return;
+        }
+        if let Some(parity_blocks) = &mut self.parity_blocks {
+            for block in &mut parity_blocks.blocks {
+                block.ref_bits_packed.fill(0);
+                for (local, &measurement) in block.meas_indices.iter().enumerate() {
+                    if get_bit(&reference, measurement) {
+                        block.ref_bits_packed[local / 64] |= 1u64 << (local % 64);
+                    }
+                }
+            }
+        }
+        self.ref_bits_packed = reference;
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_bts_cache = None;
+        }
     }
 
     pub fn sample_bulk(&mut self, num_shots: usize) -> Vec<Vec<bool>> {
@@ -1590,6 +1619,82 @@ pub(crate) fn xor_mask_shot_major(
     }
 }
 
+/// 64x64 blocks from which a measurement-major transpose runs on the pool.
+#[cfg(feature = "parallel")]
+const PARALLEL_TRANSPOSE_BLOCKS: usize = 512;
+
+/// Set bits in a 64x64 block at or below which scattering them costs less than the
+/// full transpose.
+const SPARSE_TRANSPOSE_BITS: u32 = 64;
+
+/// Transpose measurement-major `data` one 64-shot block at a time into `out`, which
+/// arrives zeroed and holds `row_len` elements per shot. Within `block`, the slice of
+/// `out` holding the block's shots, `set_bit(block, shot, measurement)` sets one bit and
+/// `write_word(block, shot, meas_word, word)` stores the 64 measurements from
+/// `meas_word * 64` of shot `shot` whole, over any bits set before. Shot padding past
+/// `num_shots` is never written.
+fn transpose_meas_major_blocks<T: Send>(
+    data: &[u64],
+    num_shots: usize,
+    num_measurements: usize,
+    out: &mut [T],
+    row_len: usize,
+    set_bit: impl Fn(&mut [T], usize, usize) + Sync,
+    write_word: impl Fn(&mut [T], usize, usize, u64) + Sync,
+) {
+    if num_shots == 0 || row_len == 0 {
+        return;
+    }
+    let s_words = num_shots.div_ceil(64);
+    let m_words = num_measurements.div_ceil(64);
+    let transpose_block = |(shot_word, block): (usize, &mut [T])| {
+        let shots = block.len() / row_len;
+        let shot_mask = shot_tail_mask(shots);
+        let mut matrix = [0u64; 64];
+        for meas_word in 0..m_words {
+            let first = meas_word * 64;
+            let rows = (num_measurements - first).min(64);
+            // Scatter bit by bit while the block stays sparse. Past the budget the full
+            // transpose takes over and rewrites every word the scatter touched.
+            let mut budget = SPARSE_TRANSPOSE_BITS;
+            let dense = (0..rows).any(|row| {
+                let mut bits = data[(first + row) * s_words + shot_word] & shot_mask;
+                while bits != 0 {
+                    if budget == 0 {
+                        return true;
+                    }
+                    set_bit(block, bits.trailing_zeros() as usize, first + row);
+                    budget -= 1;
+                    bits &= bits - 1;
+                }
+                false
+            });
+            if !dense {
+                continue;
+            }
+            for (row, slot) in matrix[..rows].iter_mut().enumerate() {
+                *slot = data[(first + row) * s_words + shot_word] & shot_mask;
+            }
+            matrix[rows..].fill(0);
+            transpose_64x64_dispatch(&mut matrix);
+            for (shot, &word) in matrix[..shots].iter().enumerate() {
+                write_word(block, shot, meas_word, word);
+            }
+        }
+    };
+    #[cfg(feature = "parallel")]
+    if s_words * m_words >= PARALLEL_TRANSPOSE_BLOCKS {
+        use rayon::prelude::*;
+        out.par_chunks_mut(64 * row_len)
+            .enumerate()
+            .for_each(transpose_block);
+        return;
+    }
+    out.chunks_mut(64 * row_len)
+        .enumerate()
+        .for_each(transpose_block);
+}
+
 #[inline]
 pub(crate) fn measurement_tail_mask(num_measurements: usize) -> u64 {
     let tail = num_measurements % 64;
@@ -1946,39 +2051,108 @@ impl PackedShots {
         if self.layout == ShotLayout::ShotMajor {
             return self.data;
         }
+        self.meas_major_to_shot_major_words()
+    }
 
-        let mut shot_major = vec![0u64; self.num_shots * self.m_words];
-        for batch_start in (0..self.num_shots).step_by(64) {
-            let batch_end = (batch_start + 64).min(self.num_shots);
-            let batch_len = batch_end - batch_start;
-            let sw_base = batch_start / 64;
-            let bit_off = batch_start % 64;
-            let batch_mask = if batch_len == 64 {
-                u64::MAX
-            } else {
-                (1u64 << batch_len) - 1
-            };
+    fn meas_major_to_shot_major_words(&self) -> Vec<u64> {
+        debug_assert_eq!(self.layout, ShotLayout::MeasMajor);
+        let m_words = self.m_words;
+        let mut shot_major = vec![0u64; self.num_shots * m_words];
+        transpose_meas_major_blocks(
+            &self.data,
+            self.num_shots,
+            self.num_measurements,
+            &mut shot_major,
+            m_words,
+            |block, shot, measurement| {
+                block[shot * m_words + measurement / 64] |= 1 << (measurement % 64);
+            },
+            |block, shot, meas_word, word| block[shot * m_words + meas_word] = word,
+        );
+        shot_major
+    }
 
-            for m in 0..self.num_measurements {
-                let mword = m / 64;
-                let mbit = m % 64;
-                let meas_row = &self.data[m * self.s_words..(m + 1) * self.s_words];
-                let mut bits = meas_row[sw_base] >> bit_off;
-                if bit_off != 0 && sw_base + 1 < self.s_words {
-                    bits |= meas_row[sw_base + 1] << (64 - bit_off);
+    /// Copy of this matrix in [`ShotLayout::ShotMajor`].
+    pub fn to_shot_major(&self) -> PackedShots {
+        if self.layout == ShotLayout::ShotMajor {
+            return self.clone();
+        }
+        PackedShots {
+            data: self.meas_major_to_shot_major_words(),
+            layout: ShotLayout::ShotMajor,
+            ..*self
+        }
+    }
+
+    /// Copy of this matrix in [`ShotLayout::MeasMajor`].
+    pub fn to_meas_major(&self) -> PackedShots {
+        if self.layout == ShotLayout::MeasMajor {
+            return self.clone();
+        }
+        PackedShots {
+            data: self.clone().into_meas_major_data(),
+            layout: ShotLayout::MeasMajor,
+            ..*self
+        }
+    }
+
+    /// Shot rows of `ceil(num_measurements / 8)` bytes each: measurement `j` of a shot is
+    /// bit `j % 8` of byte `j / 8`, and the padding bits of the last byte are clear.
+    pub fn to_shot_major_bytes(&self) -> Vec<u8> {
+        let row_bytes = self.num_measurements.div_ceil(8);
+        let mut bytes = vec![0u8; self.num_shots * row_bytes];
+        if row_bytes == 0 {
+            return bytes;
+        }
+        match self.layout {
+            ShotLayout::ShotMajor => {
+                for (shot, row) in bytes.chunks_exact_mut(row_bytes).enumerate() {
+                    for (&word, out) in self.shot_words(shot).iter().zip(row.chunks_mut(8)) {
+                        out.copy_from_slice(&word.to_le_bytes()[..out.len()]);
+                    }
                 }
-                bits &= batch_mask;
+            }
+            ShotLayout::MeasMajor => transpose_meas_major_blocks(
+                &self.data,
+                self.num_shots,
+                self.num_measurements,
+                &mut bytes,
+                row_bytes,
+                |block, shot, measurement| {
+                    block[shot * row_bytes + measurement / 8] |= 1 << (measurement % 8);
+                },
+                |block, shot, meas_word, word| {
+                    let start = shot * row_bytes + meas_word * 8;
+                    let take = (row_bytes - meas_word * 8).min(8);
+                    block[start..start + take].copy_from_slice(&word.to_le_bytes()[..take]);
+                },
+            ),
+        }
+        bytes
+    }
 
-                while bits != 0 {
-                    let shot_in_batch = bits.trailing_zeros() as usize;
-                    let shot_base = (batch_start + shot_in_batch) * self.m_words;
-                    shot_major[shot_base + mword] |= 1u64 << mbit;
-                    bits &= bits - 1;
+    /// XOR `columns`, packed one bit per measurement, into every shot.
+    pub(crate) fn xor_columns(&mut self, columns: &[u64]) {
+        debug_assert_eq!(columns.len(), self.m_words);
+        if self.num_shots == 0 || columns.iter().all(|&word| word == 0) {
+            return;
+        }
+        match self.layout {
+            ShotLayout::ShotMajor => {
+                xor_mask_shot_major(&mut self.data, self.num_shots, self.m_words, columns)
+            }
+            ShotLayout::MeasMajor => {
+                let tail = shot_tail_mask(self.num_shots);
+                for (measurement, row) in self.data.chunks_exact_mut(self.s_words).enumerate() {
+                    if (columns[measurement / 64] >> (measurement % 64)) & 1 == 1 {
+                        for word in row.iter_mut() {
+                            *word = !*word;
+                        }
+                        row[self.s_words - 1] &= tail;
+                    }
                 }
             }
         }
-
-        shot_major
     }
 
     /// Measurement-major words: `num_measurements` rows of `s_words` each.

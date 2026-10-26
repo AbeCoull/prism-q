@@ -48,6 +48,7 @@ absolute indices while parsing.
 | `seed` | `42` | RNG seed for stochastic samplers and Pauli-noise dispatch. |
 | `chunk_size` | `None` | Per-batch shot bound for the compiled runner. `None` is equivalent to `Some(shots)`; `Some(0)` is rejected. No effect on the reference runner or on seeded noise. |
 | `keep_measurements` | `true` | When `false`, `QecSampleResult::measurements` is returned with zero shots (column count preserved). Detector and observable records are always populated. |
+| `detector_reference` | `Noiseless` | `Noiseless` XORs each detector and observable with its value in the noiseless reference run; `Raw` reports the plain record parity. See [Result shape](#result-shape). |
 
 ## Runner routing
 
@@ -77,7 +78,9 @@ placement rules pass, active noise sends the program to the density-matrix estim
 noiseless case runs the analytical Auto ladder described under
 [Expectation values](#expectation-values).
 
-Programs without `EXP_VAL` ops take the packed compiled path. Validation
+Programs without `EXP_VAL` ops take the packed compiled path, which is
+`QecProgram::compile_sampler` followed by one `QecCompiledSampler::sample` call at the
+program's shot count and seed. Validation
 rejects non-Clifford gates and reports whether active noise is present.
 Programs with no measurements return an empty record buffer without compiling
 a sampler. Noisy Clifford programs compile a noise-aware sampler; clean
@@ -660,5 +663,12 @@ row of packed record bits per shot, record `j` at bit `j % 64` of word
 `j / 64` of that row. The Clifford+T sampler emits measurement-major records
 instead, so consumers branch on `layout()` or read through `get_bit`.
 Detector, observable, and postselection parities are XORs of the referenced
-measurement records. Summary statistics are available as `survivor_rate`,
+measurement records. Under `QecDetectorReference::Noiseless`, detector and
+observable parities are then XORed with their values in the noiseless reference
+run, computed once at compile time: every random outcome, including the hidden
+collapse of a reset, takes 0. The compiled sampler is rebased onto that run's
+records, so samples depend only on the seed. A reset on a qubit entangled since its
+last measurement falls back to a forced-outcome stabilizer run for the reference.
+Postselection and heralds read raw records, and non-Clifford programs report raw
+parities under either setting. Summary statistics are available as `survivor_rate`,
 `logical_error_rates`, and their Wilson-interval variants.

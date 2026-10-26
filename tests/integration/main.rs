@@ -56,6 +56,7 @@ mod qasm_subset;
 mod qec_decoder;
 mod qec_dem_export;
 mod qec_dem_import;
+mod qec_detector_reference;
 mod qec_e2e_d3;
 mod qec_exp_val;
 mod qec_feedforward;

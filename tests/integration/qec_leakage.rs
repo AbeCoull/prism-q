@@ -19,6 +19,7 @@ fn program(text: &str, shots: usize, chunk_size: Option<usize>) -> QecProgram {
         seed: SEED,
         chunk_size,
         keep_measurements: true,
+        ..QecOptions::default()
     });
     program
 }

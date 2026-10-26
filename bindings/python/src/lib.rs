@@ -38,8 +38,8 @@ use parameter::{PyParameters, PyPreparedCircuit};
 use program::{PyDynamicProgram, PyDynamicProgramBuilder, PyProgramSimulation};
 use qec::{
     PyBpOsdDecoder, PyDetectorErrorModel, PyMatchingDecoder, PyQecBasis, PyQecCircuitNoise,
-    PyQecNoise, PyQecObservableEstimate, PyQecProgram, PyQecSampleResult, PyRecordRef,
-    PyUnionFindDecoder,
+    PyQecCompiledSampler, PyQecNoise, PyQecObservableEstimate, PyQecProgram, PyQecSampleResult,
+    PyRecordRef, PyUnionFindDecoder,
 };
 use sampler::PyCompiledSampler;
 use sim::{
@@ -94,6 +94,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQecNoise>()?;
     m.add_class::<PyQecProgram>()?;
     m.add_class::<PyQecSampleResult>()?;
+    m.add_class::<PyQecCompiledSampler>()?;
     m.add_class::<PyQecObservableEstimate>()?;
     m.add_class::<PyDetectorErrorModel>()?;
     m.add_class::<PyUnionFindDecoder>()?;

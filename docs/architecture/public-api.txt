@@ -1711,6 +1711,9 @@ pub prism_q::qec::QecBasis::Y
 pub prism_q::qec::QecBasis::Z
 impl core::convert::From<prism_q::qec::QecBasis> for prism_q::sim::unified_pauli::PauliAxis
 pub fn prism_q::sim::unified_pauli::PauliAxis::from(prism_q::qec::QecBasis) -> Self
+pub enum prism_q::qec::QecDetectorReference
+pub prism_q::qec::QecDetectorReference::Noiseless
+pub prism_q::qec::QecDetectorReference::Raw
 #[non_exhaustive] pub enum prism_q::qec::QecNoise
 pub prism_q::qec::QecNoise::Depolarize1(f64)
 pub prism_q::qec::QecNoise::Depolarize2(f64)
@@ -1841,6 +1844,12 @@ pub fn prism_q::qec::QecCompiledRows::postselection_expected(&self) -> &[bool]
 pub fn prism_q::qec::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
 pub fn prism_q::qec::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
 pub fn prism_q::qec::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
+pub struct prism_q::qec::QecCompiledSampler
+impl prism_q::QecCompiledSampler
+pub fn prism_q::QecCompiledSampler::num_detectors(&self) -> usize
+pub fn prism_q::QecCompiledSampler::num_measurements(&self) -> usize
+pub fn prism_q::QecCompiledSampler::num_observables(&self) -> usize
+pub fn prism_q::QecCompiledSampler::sample(&mut self, usize, core::option::Option<u64>) -> prism_q::error::Result<prism_q::QecSampleResult>
 pub struct prism_q::qec::QecCorrelatedBranch
 pub prism_q::qec::QecCorrelatedBranch::probability: f64
 pub prism_q::qec::QecCorrelatedBranch::terms: alloc::vec::Vec<prism_q::qec::QecPauli>
@@ -1863,6 +1872,7 @@ pub prism_q::qec::QecObservableReroute::observable: usize
 pub prism_q::qec::QecObservableReroute::stabilizers: alloc::vec::Vec<alloc::vec::Vec<usize>>
 pub struct prism_q::qec::QecOptions
 pub prism_q::qec::QecOptions::chunk_size: core::option::Option<usize>
+pub prism_q::qec::QecOptions::detector_reference: prism_q::qec::QecDetectorReference
 pub prism_q::qec::QecOptions::keep_measurements: bool
 pub prism_q::qec::QecOptions::seed: u64
 pub prism_q::qec::QecOptions::shots: usize
@@ -1881,6 +1891,8 @@ impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::color_memory(usize, usize, prism_q::qec::QecBasis, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::repetition_memory(usize, usize, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::surface_memory(usize, usize, prism_q::qec::QecBasis, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
+impl prism_q::qec::QecProgram
+pub fn prism_q::qec::QecProgram::compile_sampler(&self) -> prism_q::error::Result<prism_q::QecCompiledSampler>
 impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::detector(&mut self, &[prism_q::qec::QecRecordRef]) -> prism_q::error::Result<usize>
 pub fn prism_q::qec::QecProgram::detector_rows(&self) -> prism_q::error::Result<alloc::vec::Vec<alloc::vec::Vec<usize>>>
@@ -2100,6 +2112,9 @@ pub fn prism_q::sim::compiled::PackedShots::raw_data(&self) -> &[u64]
 pub fn prism_q::sim::compiled::PackedShots::raw_format_version(&self) -> u32
 pub fn prism_q::sim::compiled::PackedShots::s_words(&self) -> usize
 pub fn prism_q::sim::compiled::PackedShots::shot_words(&self, usize) -> &[u64]
+pub fn prism_q::sim::compiled::PackedShots::to_meas_major(&self) -> prism_q::sim::compiled::PackedShots
+pub fn prism_q::sim::compiled::PackedShots::to_shot_major(&self) -> prism_q::sim::compiled::PackedShots
+pub fn prism_q::sim::compiled::PackedShots::to_shot_major_bytes(&self) -> alloc::vec::Vec<u8>
 pub fn prism_q::sim::compiled::PackedShots::to_shots(&self) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
 pub fn prism_q::sim::compiled::PackedShots::try_from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
 pub fn prism_q::sim::compiled::PackedShots::try_from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
@@ -2971,6 +2986,9 @@ pub prism_q::QecBasis::Y
 pub prism_q::QecBasis::Z
 impl core::convert::From<prism_q::qec::QecBasis> for prism_q::sim::unified_pauli::PauliAxis
 pub fn prism_q::sim::unified_pauli::PauliAxis::from(prism_q::qec::QecBasis) -> Self
+pub enum prism_q::QecDetectorReference
+pub prism_q::QecDetectorReference::Noiseless
+pub prism_q::QecDetectorReference::Raw
 #[non_exhaustive] pub enum prism_q::QecNoise
 pub prism_q::QecNoise::Depolarize1(f64)
 pub prism_q::QecNoise::Depolarize2(f64)
@@ -3817,6 +3835,9 @@ pub fn prism_q::sim::compiled::PackedShots::raw_data(&self) -> &[u64]
 pub fn prism_q::sim::compiled::PackedShots::raw_format_version(&self) -> u32
 pub fn prism_q::sim::compiled::PackedShots::s_words(&self) -> usize
 pub fn prism_q::sim::compiled::PackedShots::shot_words(&self, usize) -> &[u64]
+pub fn prism_q::sim::compiled::PackedShots::to_meas_major(&self) -> prism_q::sim::compiled::PackedShots
+pub fn prism_q::sim::compiled::PackedShots::to_shot_major(&self) -> prism_q::sim::compiled::PackedShots
+pub fn prism_q::sim::compiled::PackedShots::to_shot_major_bytes(&self) -> alloc::vec::Vec<u8>
 pub fn prism_q::sim::compiled::PackedShots::to_shots(&self) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
 pub fn prism_q::sim::compiled::PackedShots::try_from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
 pub fn prism_q::sim::compiled::PackedShots::try_from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
@@ -3984,6 +4005,12 @@ pub fn prism_q::qec::QecCompiledRows::postselection_expected(&self) -> &[bool]
 pub fn prism_q::qec::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
 pub fn prism_q::qec::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
 pub fn prism_q::qec::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
+pub struct prism_q::QecCompiledSampler
+impl prism_q::QecCompiledSampler
+pub fn prism_q::QecCompiledSampler::num_detectors(&self) -> usize
+pub fn prism_q::QecCompiledSampler::num_measurements(&self) -> usize
+pub fn prism_q::QecCompiledSampler::num_observables(&self) -> usize
+pub fn prism_q::QecCompiledSampler::sample(&mut self, usize, core::option::Option<u64>) -> prism_q::error::Result<prism_q::QecSampleResult>
 pub struct prism_q::QecCorrelatedBranch
 pub prism_q::QecCorrelatedBranch::probability: f64
 pub prism_q::QecCorrelatedBranch::terms: alloc::vec::Vec<prism_q::qec::QecPauli>
@@ -4006,6 +4033,7 @@ pub prism_q::QecObservableReroute::observable: usize
 pub prism_q::QecObservableReroute::stabilizers: alloc::vec::Vec<alloc::vec::Vec<usize>>
 pub struct prism_q::QecOptions
 pub prism_q::QecOptions::chunk_size: core::option::Option<usize>
+pub prism_q::QecOptions::detector_reference: prism_q::qec::QecDetectorReference
 pub prism_q::QecOptions::keep_measurements: bool
 pub prism_q::QecOptions::seed: u64
 pub prism_q::QecOptions::shots: usize
@@ -4024,6 +4052,8 @@ impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::color_memory(usize, usize, prism_q::qec::QecBasis, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::repetition_memory(usize, usize, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::surface_memory(usize, usize, prism_q::qec::QecBasis, &prism_q::QecCircuitNoise) -> prism_q::error::Result<Self>
+impl prism_q::qec::QecProgram
+pub fn prism_q::qec::QecProgram::compile_sampler(&self) -> prism_q::error::Result<prism_q::QecCompiledSampler>
 impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::detector(&mut self, &[prism_q::qec::QecRecordRef]) -> prism_q::error::Result<usize>
 pub fn prism_q::qec::QecProgram::detector_rows(&self) -> prism_q::error::Result<alloc::vec::Vec<alloc::vec::Vec<usize>>>

@@ -130,6 +130,20 @@ impl QecLeakageSampler {
         self.num_heralds
     }
 
+    pub(super) fn noiseless(&self) -> &CompiledSampler {
+        &self.noiseless
+    }
+
+    pub(super) fn noiseless_mut(&mut self) -> &mut CompiledSampler {
+        &mut self.noiseless
+    }
+
+    /// Restart every stream as a sampler compiled with `seed` starts it.
+    pub(super) fn reseed(&mut self, seed: u64) {
+        self.noiseless.reseed(seed);
+        self.seed = seed;
+    }
+
     /// Sample shots `first_shot..first_shot + num_shots` of a `total_shots`-shot run:
     /// the measurement records and the herald columns, both measurement-major.
     pub(super) fn sample(

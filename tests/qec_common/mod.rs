@@ -19,6 +19,7 @@ pub fn qec_options(shots: usize, chunk_size: usize, keep_measurements: bool) -> 
         seed: SEED,
         chunk_size: Some(chunk_size),
         keep_measurements,
+        ..QecOptions::default()
     }
 }
 

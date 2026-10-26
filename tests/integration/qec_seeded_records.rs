@@ -184,6 +184,7 @@ fn qec_seeded_records_are_stable() {
             seed: SEED,
             chunk_size: fixture.chunk_size,
             keep_measurements: fixture.keep_measurements,
+            ..QecOptions::default()
         });
         let result = run_qec_program(&program).unwrap();
         let actual = [

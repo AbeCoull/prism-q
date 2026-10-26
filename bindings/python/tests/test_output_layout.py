@@ -83,7 +83,7 @@ def test_qec_records_cross_word_boundaries():
     n = 130
     flipped = {0, 63, 64, 65, 127, 129}
     program = _qec_flip_program(n, flipped, [])
-    program.set_options(shots=100, seed=3)
+    program.set_options(shots=100, seed=3, detector_reference="raw")
     result = program.run()
     expected = np.array([q in flipped for q in range(n)])
     for records in (result.detectors, result.measurements):
@@ -97,7 +97,7 @@ def test_qec_random_records_match_measurements():
     n = 70
     noisy = [1, 64, 69]
     program = _qec_flip_program(n, {2, 66}, noisy)
-    program.set_options(shots=1000, seed=9)
+    program.set_options(shots=1000, seed=9, detector_reference="raw")
     result = program.run()
     detectors = result.detectors
     measurements = result.measurements

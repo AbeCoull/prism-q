@@ -36,13 +36,19 @@ def test_detectors_and_observables_are_bool_arrays():
     assert det.dtype == np.bool_
     assert det.shape == (128, 2)
     assert obs.shape == (128, 1)
-    assert det[:, 0].all()
-    assert not det[:, 1].any()
-    assert obs[:, 0].all()
+    assert not det.any()
+    assert not obs.any()
     assert res.total_shots == 128
     assert res.accepted_shots == 128
-    assert res.logical_error_rates() == [1.0]
+    assert res.logical_error_rates() == [0.0]
     assert res.survivor_rate() == 1.0
+
+    qp.set_options(shots=128, seed=42, detector_reference="raw")
+    res = qp.run()
+    assert res.detectors[:, 0].all()
+    assert not res.detectors[:, 1].any()
+    assert res.observables[:, 0].all()
+    assert res.logical_error_rates() == [1.0]
 
 
 def test_noise_randomizes_detector():
@@ -512,3 +518,108 @@ def test_renamed_qec_types_keep_deprecated_aliases():
         with pytest.warns(DeprecationWarning, match=new):
             assert getattr(prism_q, old) is getattr(prism_q, new)
     assert isinstance(QecProgram(1).run(), prism_q.QecSampleResult)
+
+
+_FLIPPED_RECORD = "R 0\nX 0\nM 0\nDETECTOR rec[-1]\nOBSERVABLE_INCLUDE(0) rec[-1]\n"
+
+
+def test_a_noiselessly_flipped_record_reports_no_detection_event():
+    qp = QecProgram.from_text(_FLIPPED_RECORD)
+    qp.set_options(shots=1000)
+    res = qp.run()
+    assert not res.detectors.any()
+    assert not res.observables.any()
+    assert res.logical_error_rates() == [0.0]
+    detectors, observables = qp.compile_sampler().sample(1000, bit_packed=False)
+    assert not detectors.any() and not observables.any()
+
+
+def test_detector_reference_rejects_unknown_conventions():
+    with pytest.raises(prism_q.PrismError, match="detector_reference"):
+        QecProgram(1).set_options(shots=1, detector_reference="reference")
+
+
+def test_compiled_sampler_draws_what_run_draws_at_each_seed():
+    qp = _repetition_memory(5, 0.02, 777)
+    sampler = qp.compile_sampler()
+    assert (sampler.num_detectors, sampler.num_observables) == (
+        qp.num_detectors,
+        qp.num_observables,
+    )
+    assert sampler.num_measurements == qp.num_measurements
+    for seed in (42, 7, 1 << 40):
+        qp.set_options(shots=777, seed=seed, chunk_size=4096, keep_measurements=False)
+        expected = qp.run()
+        detectors, observables = sampler.sample(777, seed=seed, bit_packed=False)
+        assert np.array_equal(detectors, expected.detectors)
+        assert np.array_equal(observables, expected.observables)
+        result = sampler.sample_result(777, seed=seed)
+        assert np.array_equal(result.detectors, expected.detectors)
+        assert result.logical_errors == expected.logical_errors
+
+
+def test_compiled_sampler_streams_from_the_program_seed():
+    qp = _repetition_memory(3, 0.05, 300)
+    first, second = qp.compile_sampler(), qp.compile_sampler()
+    a = [first.sample(300, bit_packed=False)[0] for _ in range(3)]
+    b = [second.sample(300, bit_packed=False)[0] for _ in range(3)]
+    assert all(np.array_equal(x, y) for x, y in zip(a, b))
+    assert not np.array_equal(a[0], a[1])
+    qp.set_options(shots=300, seed=42, chunk_size=4096, keep_measurements=False)
+    assert np.array_equal(a[0], qp.run().detectors)
+
+
+def test_compiled_sampler_output_shapes():
+    qp = _repetition_memory(5, 0.05, 1)
+    sampler = qp.compile_sampler()
+    n_det, n_obs = sampler.num_detectors, sampler.num_observables
+    detectors, observables = sampler.sample(70, seed=3)
+    assert detectors.dtype == np.uint8 and detectors.shape == (70, (n_det + 7) // 8)
+    assert observables.shape == (70, (n_obs + 7) // 8)
+    bools = sampler.sample(70, seed=3, bit_packed=False, separate_observables=False)
+    assert bools.dtype == np.bool_ and bools.shape == (70, n_det + n_obs)
+    joined = sampler.sample(70, seed=3, separate_observables=False)
+    assert joined.shape == (70, (n_det + n_obs + 7) // 8)
+    unpacked = np.unpackbits(joined, axis=1, bitorder="little")[:, : n_det + n_obs]
+    assert np.array_equal(unpacked.astype(bool), bools)
+    assert np.array_equal(
+        np.unpackbits(detectors, axis=1, bitorder="little")[:, :n_det].astype(bool),
+        bools[:, :n_det],
+    )
+    assert np.array_equal(
+        np.packbits(bools[:, n_det:], axis=1, bitorder="little"), observables
+    )
+    assert sampler.sample(0, seed=3, bit_packed=False)[0].shape == (0, n_det)
+    assert "QecCompiledSampler" in repr(sampler)
+
+
+def test_compiled_sampler_keeps_measurements_on_request():
+    qp = _repetition_memory(3, 0.05, 50)
+    assert qp.compile_sampler().sample_result(50).measurements.shape == (0, qp.num_measurements)
+    kept = qp.compile_sampler(keep_measurements=True).sample_result(50)
+    assert kept.measurements.shape == (50, qp.num_measurements)
+
+
+def test_compiled_sampler_rejects_expectation_values():
+    with pytest.raises(prism_q.PrismError):
+        QecProgram.from_text("EXP_VAL Z0").compile_sampler()
+
+
+@pytest.mark.parametrize("n_meas", [1, 7, 8, 9, 63, 64, 65, 127, 129, 300])
+@pytest.mark.parametrize("shots", [1, 63, 64, 65, 300])
+def test_packed_export_matches_numpy_packbits(n_meas, shots):
+    qp = QecProgram(n_meas)
+    qp.set_options(shots=shots, seed=n_meas * 1000 + shots)
+    for q in range(n_meas):
+        qp.reset(QecBasis.Z, q)
+        qp.push_gate(prism_q.Gate.h(), [q])
+        qp.detector([QecRecordRef.absolute(qp.measure_z(q))])
+    res = qp.run()
+    bools = res.measurements
+    assert bools.shape == (shots, n_meas)
+    expected = np.packbits(bools, axis=1, bitorder="little")
+    assert np.array_equal(res.packed_measurements(), expected)
+    assert np.array_equal(
+        np.unpackbits(res.packed_detectors(), axis=1, bitorder="little")[:, :n_meas],
+        res.detectors.astype(np.uint8),
+    )

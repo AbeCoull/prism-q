@@ -8,11 +8,27 @@ All notable changes to PRISM-Q will be documented in this file.
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.
 - Report the route decision through `RunMetadata.reason`.
+- Compile a QEC program once with `QecProgram::compile_sampler` and sample it repeatedly
+  through `QecCompiledSampler`; Python's `QecCompiledSampler.sample` returns packed or
+  bool detector and observable arrays.
+- Export packed shot rows through a blocked 64x64 bit transpose
+  (`PackedShots::to_shot_major_bytes`), which the Python packed and bool accessors use.
 
 ### Compatibility
 
 - `require_exact()` accepts exact marginal and expectation routes even when full-state
   dispatch would select an approximate backend. Route failures can use different error text.
+- QEC detectors and observables, and the logical errors counted from them, are now
+  measured against the noiseless reference run by default: a detector that is
+  deterministic without noise reports 1 only when noise flips it. Set
+  `QecOptions::detector_reference` to `QecDetectorReference::Raw`
+  (`set_options(..., detector_reference="raw")` in Python) for the previous raw parity.
+  `QecOptions` gains the field, so struct literals need it or `..QecOptions::default()`.
+- `detector_error_model()` rejects a program whose detector or observable is random
+  without noise.
+- Seeded QEC samples of programs with random noiseless records can differ from earlier
+  releases: the sampler now draws around a reference point that does not depend on the
+  seed, so a compiled sampler reproduces `run_qec_program` at any seed.
 
 ## [0.35.0] - 2026-10-12
 

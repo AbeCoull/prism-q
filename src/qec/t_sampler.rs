@@ -468,8 +468,8 @@ fn accepted_shots_for_rate(total_shots: usize, accept_rate: f64) -> usize {
 
 fn build_qec_result_with_acceptance(
     program: &QecProgram,
-    means: Vec<f64>,
-    estimates: Vec<QecObservableEstimate>,
+    mut means: Vec<f64>,
+    mut estimates: Vec<QecObservableEstimate>,
     accept_rate: f64,
 ) -> Result<QecSampleResult> {
     if program.num_detectors() > 0 {
@@ -477,6 +477,14 @@ fn build_qec_result_with_acceptance(
             backend: "QEC analytical result".to_string(),
             reason: "analytical QEC T strategies do not emit detector records yet".to_string(),
         });
+    }
+    if let Some(reference) = super::reference::program_reference(program)? {
+        for (observable, (mean, estimate)) in means.iter_mut().zip(&mut estimates).enumerate() {
+            if reference.observable(observable) {
+                *mean = -*mean;
+                estimate.mean = -estimate.mean;
+            }
+        }
     }
 
     let total_shots = program.options().shots;

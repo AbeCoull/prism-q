@@ -25,8 +25,8 @@ types = [
   "ObservableExpectation", "ObservableVariance", "OverlapResult", "EntropyResult",
   "ReducedDensityMatrix", "RunMetadata", "BondReport", "ExpectationGradient",
   # QEC
-  "QecProgram", "QecSampleResult", "QecObservableEstimate", "QecOptions", "QecBasis",
-  "QecPauli", "QecRecordRef", "QecNoise", "QecCircuitNoise", "QecTStrategy",
+  "QecProgram", "QecCompiledSampler", "QecSampleResult", "QecObservableEstimate", "QecOptions",
+  "QecBasis", "QecPauli", "QecRecordRef", "QecNoise", "QecCircuitNoise", "QecTStrategy",
   "DetectorErrorModel", "ErrorMechanism", "UnionFindDecoder", "MatchingDecoder",
   "BpOsdDecoder", "BpOsdOptions", "BpMethod", "OsdMethod",
   # Noise construction
@@ -434,6 +434,7 @@ exclude = [
 
 # QEC programs and results
 "QecProgram::color_memory" = "QecProgram.color_memory"
+"QecProgram::compile_sampler" = "QecProgram.compile_sampler"
 "QecProgram::detector" = "QecProgram.detector"
 "QecProgram::detector_error_model" = "QecProgram.detector_error_model"
 "QecProgram::detector_rows" = { rust_only = "compiled row view" }
@@ -471,9 +472,14 @@ exclude = [
 "QecProgram::to_text" = "QecProgram.to_text"
 "QecProgram::with_options" = { rust_only = "Python constructs then calls set_options" }
 "QecOptions::chunk_size" = "QecProgram.set_options"
+"QecOptions::detector_reference" = "QecProgram.set_options"
 "QecOptions::keep_measurements" = "QecProgram.set_options"
 "QecOptions::seed" = "QecProgram.set_options"
 "QecOptions::shots" = "QecProgram.set_options"
+"QecCompiledSampler::num_detectors" = "QecCompiledSampler.num_detectors"
+"QecCompiledSampler::num_measurements" = "QecCompiledSampler.num_measurements"
+"QecCompiledSampler::num_observables" = "QecCompiledSampler.num_observables"
+"QecCompiledSampler::sample" = "QecCompiledSampler.sample_result"
 "QecSampleResult::accepted_shots" = "QecSampleResult.accepted_shots"
 "QecSampleResult::detectors" = "QecSampleResult.detectors"
 "QecSampleResult::discarded_shots" = "QecSampleResult.discarded_shots"

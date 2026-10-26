@@ -391,6 +391,10 @@ impl QecParityNoise {
         self.events.len()
     }
 
+    pub(super) fn reseed(&mut self, seed: u64) {
+        self.seed = seed;
+    }
+
     pub(super) fn from_parts(
         seed: u64,
         events: Vec<QecParityNoiseEvent>,
@@ -501,9 +505,24 @@ fn land_buckets(
 }
 
 impl QecCompiledNoiseSampler {
-    #[cfg(test)]
     pub(super) fn noiseless(&self) -> &CompiledSampler {
         &self.noiseless
+    }
+
+    pub(super) fn noiseless_mut(&mut self) -> &mut CompiledSampler {
+        &mut self.noiseless
+    }
+
+    pub(super) fn feedforward(&self) -> Option<&QecFeedforwardFlips> {
+        self.feedforward.as_ref()
+    }
+
+    /// Restart every stream as a sampler compiled with `seed` starts it.
+    pub(super) fn reseed(&mut self, seed: u64) {
+        self.noiseless.reseed(seed);
+        if let Some(noise) = &mut self.noise {
+            noise.seed = seed;
+        }
     }
 
     /// Sample shots `first_shot..first_shot + num_shots` of a `total_shots`-shot run.
@@ -875,6 +894,18 @@ impl QecFeedforwardFlips {
             })
             .collect();
         (!corrections.is_empty()).then_some(Self { corrections })
+    }
+
+    /// Each correction as `(condition, invert, flips)` in op order; `flips` is ascending
+    /// and never empty.
+    pub(super) fn corrections(&self) -> impl Iterator<Item = (&[usize], bool, &[usize])> + '_ {
+        self.corrections.iter().map(|correction| {
+            (
+                correction.condition.as_slice(),
+                correction.invert,
+                correction.flips.as_slice(),
+            )
+        })
     }
 
     /// Apply every correction to measurement-major `data` of `num_shots` shots, a block

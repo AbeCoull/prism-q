@@ -163,6 +163,13 @@ def test_qec_program_round_trip_keeps_options_and_ops():
     assert original.accepted_shots == replay.accepted_shots
 
 
+def test_qec_program_detector_reference_round_trips():
+    for reference, fires in (("noiseless", False), ("raw", True)):
+        qp = QecProgram.from_text("R 0\nX 0\nM 0\nDETECTOR rec[-1]\n")
+        qp.set_options(shots=16, detector_reference=reference)
+        assert _round_trip(qp).run().detectors.all() == fires
+
+
 def test_small_values_round_trip():
     for value in (
         Gate.h(),

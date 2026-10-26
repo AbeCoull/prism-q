@@ -1,16 +1,20 @@
 //! Native QEC programs: construction, sampling, and packed-shot output.
 
+use std::borrow::Cow;
+use std::sync::Mutex;
+
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
     BpMethod, BpOsdDecoder, BpOsdOptions, DetectorErrorModel, MatchingDecoder, OsdMethod,
-    PackedShots, PrismError, QecBasis, QecCircuitNoise, QecNoise, QecObservableEstimate,
-    QecOptions, QecPauli, QecProgram, QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder,
-    run_qec_program, run_qec_program_reference,
+    PackedShots, PrismError, QecBasis, QecCircuitNoise, QecCompiledSampler, QecDetectorReference,
+    QecNoise, QecObservableEstimate, QecOptions, QecPauli, QecProgram, QecRecordRef,
+    QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program, run_qec_program_reference,
 };
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 
 use crate::codec::{self, Kind, Reader, Writer};
-use crate::error::{PyPrismResult, invalid};
+use crate::error::{PyPrismError, PyPrismResult, invalid};
 use crate::gate::PyGate;
 use crate::numpy_util::{bool_matrix, f64_array, u8_matrix};
 use crate::pickle::{Reduced, ReducedMember, reduce, reduce_member};
@@ -299,20 +303,40 @@ impl PyQecProgram {
         })
     }
 
-    #[pyo3(signature = (shots, seed = 42, chunk_size = None, keep_measurements = true))]
+    /// `detector_reference` is `"noiseless"`, measuring detectors and observables
+    /// against the noiseless reference run, or `"raw"` for the parity of their records.
+    #[pyo3(signature = (
+        shots,
+        seed = 42,
+        chunk_size = None,
+        keep_measurements = true,
+        detector_reference = "noiseless",
+    ))]
     fn set_options(
         &mut self,
         shots: usize,
         seed: u64,
         chunk_size: Option<usize>,
         keep_measurements: bool,
-    ) {
+        detector_reference: &str,
+    ) -> PyPrismResult<()> {
+        let detector_reference = match detector_reference {
+            "noiseless" => QecDetectorReference::Noiseless,
+            "raw" => QecDetectorReference::Raw,
+            other => {
+                return Err(invalid(format!(
+                    "unknown detector_reference `{other}`; expected `noiseless` or `raw`"
+                )));
+            }
+        };
         self.inner.set_options(QecOptions {
             shots,
             seed,
             chunk_size,
             keep_measurements,
+            detector_reference,
         });
+        Ok(())
     }
 
     #[getter]
@@ -458,6 +482,34 @@ impl PyQecProgram {
         Ok(PyQecSampleResult { inner: result })
     }
 
+    /// Compile once for repeated sampling through the packed Clifford path, with the
+    /// program's seed, chunk size, and detector reference. Measurement records are
+    /// dropped unless `keep_measurements`, which only `sample_result` returns.
+    #[pyo3(signature = (*, keep_measurements = false))]
+    fn compile_sampler(
+        &self,
+        py: Python<'_>,
+        keep_measurements: bool,
+    ) -> PyPrismResult<PyQecCompiledSampler> {
+        let program = if self.inner.options().keep_measurements == keep_measurements {
+            Cow::Borrowed(&self.inner)
+        } else {
+            let mut program = self.inner.clone();
+            program.set_options(QecOptions {
+                keep_measurements,
+                ..program.options()
+            });
+            Cow::Owned(program)
+        };
+        let sampler = py.detach(|| program.compile_sampler())?;
+        Ok(PyQecCompiledSampler {
+            num_measurements: sampler.num_measurements(),
+            num_detectors: sampler.num_detectors(),
+            num_observables: sampler.num_observables(),
+            inner: Mutex::new(sampler),
+        })
+    }
+
     /// Sample through the per-shot statevector reference path, the route that
     /// executes a `feedforward` body with non-Pauli gates or resets. Costs
     /// `O(shots * 2^n)`, so it suits small programs rather than bulk sampling.
@@ -496,6 +548,113 @@ impl PyQecProgram {
             self.inner.num_observables()
         )
     }
+}
+
+/// A QEC program compiled once by `QecProgram.compile_sampler`, sampled any number of
+/// times without recompiling.
+///
+/// `seed=None` continues one stream that starts at the program's seed, so a fresh
+/// sampler replays it; an explicit seed draws what `run()` draws at that seed. Calls
+/// from several threads are serialized.
+#[pyclass(name = "QecCompiledSampler", module = "prism_q")]
+pub struct PyQecCompiledSampler {
+    // The sampler is `Send` but not `Sync`; the lock lets calls release the GIL.
+    inner: Mutex<QecCompiledSampler>,
+    num_measurements: usize,
+    num_detectors: usize,
+    num_observables: usize,
+}
+
+impl PyQecCompiledSampler {
+    /// Never held across a call into Python, so poisoning means a panic already
+    /// unwound through a method and the sampler state is not worth recovering.
+    fn locked(&self) -> std::sync::MutexGuard<'_, QecCompiledSampler> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[pymethods]
+impl PyQecCompiledSampler {
+    #[getter]
+    fn num_measurements(&self) -> usize {
+        self.num_measurements
+    }
+    #[getter]
+    fn num_detectors(&self) -> usize {
+        self.num_detectors
+    }
+    #[getter]
+    fn num_observables(&self) -> usize {
+        self.num_observables
+    }
+
+    /// Detector and observable samples of `shots` shots, every shot whether or not
+    /// postselection accepts it. Packed rows use the `QecSampleResult.packed_detectors()`
+    /// layout and plain rows are bool. Returns `(detectors, observables)`, or with
+    /// `separate_observables=False` one array whose columns are the detectors and then
+    /// the observables.
+    #[pyo3(signature = (shots, *, seed = None, bit_packed = true, separate_observables = true))]
+    fn sample<'py>(
+        &self,
+        py: Python<'py>,
+        shots: usize,
+        seed: Option<u64>,
+        bit_packed: bool,
+        separate_observables: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let result = py
+            .detach(|| self.locked().sample(shots, seed))
+            .map_err(PyPrismError::from)?;
+        let to_array = |packed: &PackedShots| -> PyPrismResult<Bound<'py, PyAny>> {
+            Ok(if bit_packed {
+                packed_to_bytes(py, packed)?.into_any()
+            } else {
+                packed_to_2d(py, packed)?.into_any()
+            })
+        };
+        if separate_observables {
+            let detectors = to_array(&result.detectors)?;
+            let observables = to_array(&result.observables)?;
+            return Ok(PyTuple::new(py, [detectors, observables])?.into_any());
+        }
+        let joined = py.detach(|| join_columns(result.detectors, &result.observables));
+        Ok(to_array(&joined)?)
+    }
+
+    /// Sample `shots` shots into a `QecSampleResult`, with postselection counts, logical
+    /// errors, heralds, and the measurement records the sampler was compiled to keep.
+    #[pyo3(signature = (shots, *, seed = None))]
+    fn sample_result(
+        &self,
+        py: Python<'_>,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> PyPrismResult<PyQecSampleResult> {
+        let result = py.detach(|| self.locked().sample(shots, seed))?;
+        Ok(PyQecSampleResult { inner: result })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "QecCompiledSampler(measurements={}, detectors={}, observables={})",
+            self.num_measurements, self.num_detectors, self.num_observables
+        )
+    }
+}
+
+/// The columns of `left` followed by those of `right`, over the same shots.
+fn join_columns(left: PackedShots, right: &PackedShots) -> PackedShots {
+    let shots = left.num_shots();
+    let columns = left.num_measurements() + right.num_measurements();
+    let mut data = match left.layout() {
+        ShotLayout::MeasMajor => left.into_data(),
+        _ => left.to_meas_major().into_data(),
+    };
+    match right.layout() {
+        ShotLayout::MeasMajor => data.extend_from_slice(right.raw_data()),
+        _ => data.extend_from_slice(right.to_meas_major().raw_data()),
+    }
+    PackedShots::from_meas_major(data, shots, columns)
 }
 
 /// Detector error model derived from a QEC program: independent error
@@ -1011,29 +1170,25 @@ pub(crate) fn packed_to_2d<'py>(
 ) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
     let n_shots = packed.num_shots();
     let n_meas = packed.num_measurements();
-    let mut flat = vec![false; n_shots * n_meas];
-    if n_meas > 0 {
-        match packed.layout() {
-            ShotLayout::ShotMajor => {
-                for (shot, row) in flat.chunks_exact_mut(n_meas).enumerate() {
-                    for (&word, bits) in packed.shot_words(shot).iter().zip(row.chunks_mut(64)) {
-                        unpack_word(word, bits);
-                    }
+    let flat = py.detach(|| {
+        let mut flat = vec![false; n_shots * n_meas];
+        if n_meas > 0 {
+            let converted;
+            let rows = match packed.layout() {
+                ShotLayout::ShotMajor => packed,
+                _ => {
+                    converted = packed.to_shot_major();
+                    &converted
                 }
-            }
-            _ => {
-                for (block, rows) in flat.chunks_mut(64 * n_meas).enumerate() {
-                    for meas in 0..n_meas {
-                        let mut word = packed.meas_words(meas)[block];
-                        for row in rows.chunks_exact_mut(n_meas) {
-                            row[meas] = word & 1 != 0;
-                            word >>= 1;
-                        }
-                    }
+            };
+            for (shot, row) in flat.chunks_exact_mut(n_meas).enumerate() {
+                for (&word, bits) in rows.shot_words(shot).iter().zip(row.chunks_mut(64)) {
+                    unpack_word(word, bits);
                 }
             }
         }
-    }
+        flat
+    });
     bool_matrix(py, n_shots, n_meas, flat)
 }
 
@@ -1043,36 +1198,13 @@ pub(crate) fn packed_to_bytes<'py>(
     py: Python<'py>,
     packed: &PackedShots,
 ) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {
-    let n_shots = packed.num_shots();
-    let n_meas = packed.num_measurements();
-    let row_bytes = n_meas.div_ceil(8);
-    let mut flat = vec![0u8; n_shots * row_bytes];
-    if row_bytes > 0 {
-        match packed.layout() {
-            ShotLayout::ShotMajor => {
-                let tail_mask = u8::MAX >> ((8 - n_meas % 8) % 8);
-                for (shot, row) in flat.chunks_exact_mut(row_bytes).enumerate() {
-                    for (&word, bytes) in packed.shot_words(shot).iter().zip(row.chunks_mut(8)) {
-                        bytes.copy_from_slice(&word.to_le_bytes()[..bytes.len()]);
-                    }
-                    row[row_bytes - 1] &= tail_mask;
-                }
-            }
-            _ => {
-                for (block, rows) in flat.chunks_mut(64 * row_bytes).enumerate() {
-                    for meas in 0..n_meas {
-                        let mut word = packed.meas_words(meas)[block];
-                        let bit = meas % 8;
-                        for row in rows.chunks_exact_mut(row_bytes) {
-                            row[meas / 8] |= ((word & 1) as u8) << bit;
-                            word >>= 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    u8_matrix(py, n_shots, row_bytes, flat)
+    let flat = py.detach(|| packed.to_shot_major_bytes());
+    u8_matrix(
+        py,
+        packed.num_shots(),
+        packed.num_measurements().div_ceil(8),
+        flat,
+    )
 }
 
 #[pymethods]

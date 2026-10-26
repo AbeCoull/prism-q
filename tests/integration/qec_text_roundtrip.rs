@@ -110,8 +110,10 @@ fn built_programs_resolve_to_the_same_rows() {
         program.postselection_rows().unwrap()
     );
     assert_eq!(
-        parsed.detector_error_model().unwrap(),
-        program.detector_error_model().unwrap()
+        parsed.detector_error_model().map_err(|err| err.to_string()),
+        program
+            .detector_error_model()
+            .map_err(|err| err.to_string())
     );
 }
 

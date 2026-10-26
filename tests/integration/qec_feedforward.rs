@@ -5,8 +5,8 @@
 use crate::qec_common;
 
 use prism_q::{
-    Gate, PackedShots, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef,
-    QecSampleResult, run_qec_program, run_qec_program_reference,
+    Gate, PackedShots, QecBasis, QecDetectorReference, QecNoise, QecOp, QecOptions, QecPauli,
+    QecProgram, QecRecordRef, QecSampleResult, run_qec_program, run_qec_program_reference,
 };
 
 // An unset `chunk_size` resolves to the shot count, so passing `shots` keeps
@@ -677,7 +677,13 @@ fn feedforward_body_carries_a_basis_reset() {
 // the static walk assigned them.
 #[test]
 fn detectors_stay_correct_across_a_feedforward() {
-    let mut program = QecProgram::with_options(2, options(32));
+    let mut program = QecProgram::with_options(
+        2,
+        QecOptions {
+            detector_reference: QecDetectorReference::Raw,
+            ..options(32)
+        },
+    );
     program.push_gate(Gate::X, &[0]).unwrap();
     program.measure_z(0).unwrap();
     program

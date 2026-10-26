@@ -9,8 +9,9 @@ use num_complex::Complex64;
 use prism_q::circuit::GuardedRegion;
 use prism_q::{
     Circuit, ClassicalCondition, Gate, Instruction, McuData, NoiseChannel, NoiseEvent, NoiseModel,
-    Parameters, PauliAxis, PauliObservable, PauliTerm, QecBasis, QecCorrelatedBranch, QecNoise,
-    QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef, ReadoutError, SaveSpec,
+    Parameters, PauliAxis, PauliObservable, PauliTerm, QecBasis, QecCorrelatedBranch,
+    QecDetectorReference, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef,
+    ReadoutError, SaveSpec,
 };
 use smallvec::SmallVec;
 
@@ -124,6 +125,10 @@ impl<'a> Reader<'a> {
             )));
         }
         Ok(Self { data, pos: 4 })
+    }
+
+    pub(crate) fn at_end(&self) -> bool {
+        self.pos == self.data.len()
     }
 
     pub(crate) fn finish(self) -> PyPrismResult<()> {
@@ -1316,6 +1321,7 @@ pub(crate) fn encode_qec_program(program: &QecProgram) -> PyPrismResult<Vec<u8>>
     }
     w.bool(options.keep_measurements);
     write_ops(&mut w, program.ops())?;
+    w.bool(options.detector_reference == QecDetectorReference::Raw);
     Ok(w.finish())
 }
 
@@ -1327,12 +1333,19 @@ pub(crate) fn decode_qec_program(data: &[u8]) -> PyPrismResult<QecProgram> {
     let chunk_size = if r.bool()? { Some(r.usize()?) } else { None };
     let keep_measurements = r.bool()?;
     let ops = read_ops(&mut r)?;
+    // Payloads written before the reference option existed end after the ops.
+    let detector_reference = if !r.at_end() && r.bool()? {
+        QecDetectorReference::Raw
+    } else {
+        QecDetectorReference::Noiseless
+    };
     r.finish()?;
     let options = QecOptions {
         shots,
         seed,
         chunk_size,
         keep_measurements,
+        detector_reference,
     };
     Ok(QecProgram::from_ops(num_qubits, options, ops)?)
 }

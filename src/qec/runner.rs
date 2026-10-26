@@ -4,13 +4,12 @@
 
 #[cfg(feature = "bench-internal")]
 use super::noise::QecCompiledNoiseSampler;
-use super::noise::{
-    QecParityNoise, compile_qec_noisy_sampler, feedforward_body_letter, feedforward_body_rejection,
-    lower_qec_program_to_deferred_circuit,
-};
+#[cfg(any(test, feature = "bench-internal"))]
+use super::noise::compile_qec_noisy_sampler;
+use super::noise::{QecParityNoise, feedforward_body_letter, feedforward_body_rejection};
 #[cfg(test)]
 use super::noise::{compile_qec_parity_noise, compile_qec_parity_noise_windows};
-use super::parity_walk::compile_parity_noise;
+use super::reference::QecReference;
 use super::{
     QecBasis, QecNoise, QecObservableEstimate, QecOp, QecOptions, QecPauli, QecProgram,
     QecRecordRef, QecSampleResult, append_basis_to_z_rotation, append_mpp_parity_rotations,
@@ -23,7 +22,9 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 #[cfg(feature = "bench-internal")]
 use crate::sim::compiled::CompiledDetectorSampler;
-use crate::sim::compiled::{PackedShots, ShotLayout, compile_detector_sampler};
+#[cfg(any(test, feature = "bench-internal"))]
+use crate::sim::compiled::compile_detector_sampler;
+use crate::sim::compiled::{PackedShots, ShotLayout};
 use crate::sim::unified_pauli::Welford;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -71,6 +72,11 @@ use rayon::prelude::*;
 /// seeded noise depends on neither `chunk_size` nor the thread count. Noiseless records
 /// that are random in the circuit still draw per chunk.
 ///
+/// Detector and observable bits, and the logical errors counted from them, are measured
+/// against [`QecOptions::detector_reference`], by default the noiseless reference run.
+/// Each call compiles the program; [`QecProgram::compile_sampler`] compiles once for
+/// repeated sampling and draws the same shots at the same seed.
+///
 /// # Examples
 ///
 /// One noiseless round of a three-qubit repetition-code memory. Every
@@ -113,104 +119,9 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
             super::t_sampler::QecTStrategy::Auto,
         );
     }
-    let (has_noise, has_feedforward) = validate_qec_compiled_program(program)?;
-    let chunk_size = qec_runner_chunk_size(program.options())?;
-    if program.has_leakage() {
-        return run_qec_program_leaky(program, chunk_size);
-    }
-    if program.num_measurements() == 0 {
-        let measurements = PackedShots::from_shot_major(
-            Vec::new(),
-            program.options().shots,
-            program.num_measurements(),
-        );
-        return qec_result_from_measurements(program, measurements);
-    }
-
-    if !has_feedforward && qec_records_unobserved(program) {
-        let (projection, deferred) = qec_join(
-            || {
-                Ok(QecParityProjection::new(
-                    program.num_measurements(),
-                    &program.detector_rows()?,
-                    &program.observable_rows()?,
-                ))
-            },
-            || lower_qec_program_to_deferred_circuit(program),
-        );
-        let (projection, deferred) = (projection?, deferred?);
-        if let Some((pattern, noise)) =
-            compile_parity_noise(&deferred, &projection, program.options().seed, None)?
-        {
-            return qec_result_from_parity_projection(
-                program,
-                &projection,
-                &pattern,
-                has_noise.then_some(noise),
-            );
-        }
-    }
-    if has_noise || has_feedforward {
-        let mut sampler = compile_qec_noisy_sampler(program)?;
-        let shots = program.options().shots;
-        if chunk_size >= shots {
-            let measurements = sampler.sample_measurements_packed(0, shots, shots)?;
-            return qec_result_from_measurements(program, measurements);
-        }
-        return qec_result_from_measurement_chunks(program, |first_shot, chunk| {
-            sampler.sample_measurements_packed(first_shot, chunk, shots)
-        });
-    }
-
-    let circuit = lower_qec_program_to_clifford_circuit(program)?;
-    let mut sampler = compile_detector_sampler(
-        &circuit,
-        program.detector_rows()?,
-        program.observable_rows()?,
-        program.options().seed,
-    )?;
-    if chunk_size >= program.options().shots {
-        let measurements = sampler.sample_measurements_packed(program.options().shots)?;
-        return qec_result_from_measurements(program, measurements);
-    }
-    qec_result_from_measurement_chunks(program, |_, chunk| {
-        sampler.sample_measurements_packed(chunk)
-    })
-}
-
-/// The packed path for a program carrying leakage annotations, which a linear map of
-/// record flips cannot express: [`QecLeakageSampler`](super::leakage::QecLeakageSampler)
-/// carries the flags, and its herald columns land in [`QecSampleResult::heralds`].
-fn run_qec_program_leaky(program: &QecProgram, chunk_size: usize) -> Result<QecSampleResult> {
-    let mut sampler = super::leakage::QecLeakageSampler::compile(program)?;
-    let shots = program.options().shots;
-    if chunk_size >= shots {
-        let (measurements, heralds) = sampler.sample(0, shots, shots)?;
-        return Ok(qec_result_from_measurements(program, measurements)?.with_heralds(heralds));
-    }
-    let num_heralds = sampler.num_heralds();
-    let mut herald_chunks: Vec<(usize, PackedShots)> = Vec::new();
-    let result = qec_result_from_measurement_chunks(program, |first_shot, chunk| {
-        let (measurements, heralds) = sampler.sample(first_shot, chunk, shots)?;
-        herald_chunks.push((first_shot, heralds));
-        Ok(measurements)
-    })?;
-    let s_words = shots.div_ceil(64);
-    let mut heralds = vec![0u64; num_heralds * s_words];
-    for (first_shot, chunk) in herald_chunks {
-        let chunk_words = chunk.num_shots().div_ceil(64);
-        for herald in 0..num_heralds {
-            super::leakage::land_bits(
-                &mut heralds[herald * s_words..(herald + 1) * s_words],
-                first_shot,
-                &chunk.raw_data()[herald * chunk_words..(herald + 1) * chunk_words],
-                0,
-                chunk.num_shots(),
-                |a, b| a | b,
-            );
-        }
-    }
-    Ok(result.with_heralds(PackedShots::from_meas_major(heralds, shots, num_heralds)))
+    program
+        .compile_sampler()?
+        .sample(program.options().shots, None)
 }
 
 /// Execution for `EXP_VAL` programs carrying active noise.
@@ -492,12 +403,15 @@ impl QecProfiledSampler {
     /// Build the regular QEC result from staged measurement records.
     pub fn result_from_measurements(&self, measurements: PackedShots) -> Result<QecSampleResult> {
         qec_result_from_measurement_rows(
+            QecResultShape {
+                num_measurements: self.num_measurements,
+                keep_measurements: self.keep_measurements,
+                detector_rows: &self.detector_rows,
+                observable_rows: &self.observable_rows,
+                postselection_rows: &self.postselection_rows,
+                reference: None,
+            },
             measurements.num_shots(),
-            self.num_measurements,
-            self.keep_measurements,
-            &self.detector_rows,
-            &self.observable_rows,
-            &self.postselection_rows,
             measurements,
         )
     }
@@ -740,6 +654,8 @@ fn feedforward_region(
     })
 }
 
+/// Build the result of the shots in `all_measurements`, measured against the program's
+/// reference run on the stabilizer tableau.
 fn qec_result_from_measurements(
     program: &QecProgram,
     all_measurements: PackedShots,
@@ -747,34 +663,57 @@ fn qec_result_from_measurements(
     let detector_rows = program.detector_rows()?;
     let observable_rows = program.observable_rows()?;
     let postselection_rows = program.postselection_rows()?;
+    let reference = super::reference::program_reference(program)?;
     qec_result_from_measurement_rows(
+        QecResultShape {
+            num_measurements: program.num_measurements(),
+            keep_measurements: program.options().keep_measurements,
+            detector_rows: &detector_rows,
+            observable_rows: &observable_rows,
+            postselection_rows: &postselection_rows,
+            reference: reference.as_ref(),
+        },
         program.options().shots,
-        program.num_measurements(),
-        program.options().keep_measurements,
-        &detector_rows,
-        &observable_rows,
-        &postselection_rows,
         all_measurements,
     )
 }
 
-fn qec_result_from_measurement_rows(
+/// What turns sampled measurement records into a [`QecSampleResult`].
+#[derive(Clone, Copy)]
+pub(super) struct QecResultShape<'a> {
+    pub(super) num_measurements: usize,
+    pub(super) keep_measurements: bool,
+    pub(super) detector_rows: &'a [Vec<usize>],
+    pub(super) observable_rows: &'a [Vec<usize>],
+    pub(super) postselection_rows: &'a [(Vec<usize>, bool)],
+    /// XORed into detectors and observables before logical errors are counted.
+    pub(super) reference: Option<&'a QecReference>,
+}
+
+pub(super) fn qec_result_from_measurement_rows(
+    shape: QecResultShape<'_>,
     shots: usize,
-    num_measurements: usize,
-    keep_measurements: bool,
-    detector_rows: &[Vec<usize>],
-    observable_rows: &[Vec<usize>],
-    postselection_rows: &[(Vec<usize>, bool)],
     all_measurements: PackedShots,
 ) -> Result<QecSampleResult> {
+    let QecResultShape {
+        num_measurements,
+        keep_measurements,
+        detector_rows,
+        observable_rows,
+        postselection_rows,
+        reference,
+    } = shape;
     validate_qec_measurement_shape(
         "QEC measurement sample",
         &all_measurements,
         shots,
         num_measurements,
     )?;
-    let detectors = parity_rows_or_empty(&all_measurements, detector_rows)?;
-    let observables = parity_rows_or_empty(&all_measurements, observable_rows)?;
+    let mut detectors = parity_rows_or_empty(&all_measurements, detector_rows)?;
+    let mut observables = parity_rows_or_empty(&all_measurements, observable_rows)?;
+    if let Some(reference) = reference {
+        reference.apply(&mut detectors, &mut observables);
+    }
     let counts = qec_count_postselection_and_logical(
         shots,
         postselection_rows,
@@ -868,26 +807,31 @@ fn qec_count_postselection_and_logical(
     })
 }
 
-fn qec_result_from_measurement_chunks<F>(
-    program: &QecProgram,
+/// Sample `shots` in chunks of `chunk_size` through `sample_chunk(first_shot, chunk)` and
+/// build one result from them, so peak memory holds one chunk of records.
+pub(super) fn qec_result_from_measurement_chunks<F>(
+    shape: QecResultShape<'_>,
+    shots: usize,
+    chunk_size: usize,
     mut sample_chunk: F,
 ) -> Result<QecSampleResult>
 where
     F: FnMut(usize, usize) -> Result<PackedShots>,
 {
-    let options = program.options();
-    let shots = options.shots;
-    let num_measurements = program.num_measurements();
-    let chunk_size = qec_runner_chunk_size(options)?;
-    let detector_rows = program.detector_rows()?;
-    let observable_rows = program.observable_rows()?;
-    let postselection_rows = program.postselection_rows()?;
+    let QecResultShape {
+        num_measurements,
+        keep_measurements,
+        detector_rows,
+        observable_rows,
+        postselection_rows,
+        reference,
+    } = shape;
     let postselection_only: Vec<Vec<usize>> = postselection_rows
         .iter()
         .map(|(row, _)| row.clone())
         .collect();
 
-    let mut measurement_data = if options.keep_measurements {
+    let mut measurement_data = if keep_measurements {
         Vec::with_capacity(shots.saturating_mul(num_measurements.div_ceil(64)))
     } else {
         Vec::new()
@@ -915,8 +859,11 @@ where
             });
         }
 
-        let detectors = parity_rows_or_empty(&measurements, &detector_rows)?;
-        let observables = parity_rows_or_empty(&measurements, &observable_rows)?;
+        let mut detectors = parity_rows_or_empty(&measurements, detector_rows)?;
+        let mut observables = parity_rows_or_empty(&measurements, observable_rows)?;
+        if let Some(reference) = reference {
+            reference.apply(&mut detectors, &mut observables);
+        }
 
         if postselection_rows.is_empty() {
             accepted_shots += this_chunk;
@@ -942,7 +889,7 @@ where
             }
         }
 
-        if options.keep_measurements {
+        if keep_measurements {
             measurement_data.extend(measurements.into_shot_major_data());
         }
         detector_data.extend(detectors.into_shot_major_data());
@@ -950,7 +897,7 @@ where
         sampled_shots += this_chunk;
     }
 
-    let measurements = if options.keep_measurements {
+    let measurements = if keep_measurements {
         PackedShots::from_shot_major(measurement_data, shots, num_measurements)
     } else {
         PackedShots::from_meas_major(Vec::new(), 0, num_measurements)
@@ -971,7 +918,7 @@ where
 }
 
 /// Whether no returned field or postselection reads the measurement records.
-fn qec_records_unobserved(program: &QecProgram) -> bool {
+pub(super) fn qec_records_unobserved(program: &QecProgram) -> bool {
     !program.options().keep_measurements
         && !program
             .ops()
@@ -1081,16 +1028,17 @@ impl QecParityProjection {
 const QEC_PARALLEL_INVERT_WORDS: usize = 1 << 18;
 
 /// Sample measurement-major detector and observable bits without measurement records,
-/// from the projected noiseless `pattern` plus projected noise. Noise lands on zeroed
-/// rows and the rows whose noiseless parity is one are inverted after, so rows that
-/// neither a fault nor a set parity reaches are never written.
-fn qec_result_from_parity_projection(
-    program: &QecProgram,
+/// from projected noise plus, for raw parity, the projected noiseless `pattern`. Noise
+/// lands on zeroed rows and the rows whose noiseless parity is one are inverted after,
+/// so rows that neither a fault nor a set parity reaches are never written. The pattern
+/// is the reference run's parity of every output, so a referenced result skips it.
+pub(super) fn qec_result_from_parity_projection(
+    shots: usize,
+    num_measurements: usize,
     projection: &QecParityProjection,
-    pattern: &[u64],
-    noise: Option<QecParityNoise>,
+    pattern: Option<&[u64]>,
+    noise: Option<&QecParityNoise>,
 ) -> Result<QecSampleResult> {
-    let shots = program.options().shots;
     let num_detectors = projection.num_detectors;
     let num_observables = projection.num_observables;
     let row_words = shots.div_ceil(64);
@@ -1104,7 +1052,7 @@ fn qec_result_from_parity_projection(
         Some(noise) => noise.sample_rows(num_rows, row_words, shots),
         None => vec![0u64; num_rows * row_words],
     };
-    if row_words > 0 {
+    if let Some(pattern) = pattern.filter(|_| row_words > 0) {
         let invert_row = |(output, row): (usize, &mut [u64])| {
             if (pattern[output / 64] >> (output % 64)) & 1 == 1 {
                 for word in row.iter_mut() {
@@ -1143,7 +1091,7 @@ fn qec_result_from_parity_projection(
     add_qec_logical_error_counts(&observables, &mut logical_errors);
     QecSampleResult::new_with_total_shots(
         shots,
-        PackedShots::from_meas_major(Vec::new(), 0, program.num_measurements()),
+        PackedShots::from_meas_major(Vec::new(), 0, num_measurements),
         detectors,
         observables,
         shots,
@@ -1154,7 +1102,7 @@ fn qec_result_from_parity_projection(
 
 /// Run two independent steps of the parity route side by side when a pool is available.
 #[cfg(feature = "parallel")]
-fn qec_join<A: Send, B: Send>(
+pub(super) fn qec_join<A: Send, B: Send>(
     a: impl FnOnce() -> A + Send,
     b: impl FnOnce() -> B + Send,
 ) -> (A, B) {
@@ -1162,11 +1110,11 @@ fn qec_join<A: Send, B: Send>(
 }
 
 #[cfg(not(feature = "parallel"))]
-fn qec_join<A, B>(a: impl FnOnce() -> A, b: impl FnOnce() -> B) -> (A, B) {
+pub(super) fn qec_join<A, B>(a: impl FnOnce() -> A, b: impl FnOnce() -> B) -> (A, B) {
     (a(), b())
 }
 
-fn qec_runner_chunk_size(options: QecOptions) -> Result<usize> {
+pub(super) fn qec_runner_chunk_size(options: QecOptions) -> Result<usize> {
     match options.chunk_size {
         Some(0) => Err(PrismError::InvalidParameter {
             message: "QEC chunk_size must be at least 1".to_string(),
@@ -1386,7 +1334,7 @@ fn add_qec_logical_error_counts(observables: &PackedShots, counts: &mut [u64]) {
 
 /// Whether the program carries active noise and Pauli feed-forward, rejecting what the
 /// packed path cannot run.
-fn validate_qec_compiled_program(program: &QecProgram) -> Result<(bool, bool)> {
+pub(super) fn validate_qec_compiled_program(program: &QecProgram) -> Result<(bool, bool)> {
     let mut has_noise = false;
     let mut has_feedforward = false;
     for op in program.ops() {
@@ -1426,7 +1374,7 @@ fn validate_qec_compiled_program(program: &QecProgram) -> Result<(bool, bool)> {
     Ok((has_noise, has_feedforward))
 }
 
-fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit> {
+pub(super) fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit> {
     let scratch_qubit = program.num_qubits();
     let mut circuit = Circuit::new(qec_lowered_num_qubits(program), program.num_measurements());
     let mut next_record = 0usize;

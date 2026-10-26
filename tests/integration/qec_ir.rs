@@ -4,9 +4,9 @@
 
 use prism_q::circuit::openqasm;
 use prism_q::{
-    Gate, PackedShots, PrismError, QecBasis, QecCircuitNoise, QecNoise, QecOp, QecOptions,
-    QecPauli, QecProgram, QecRecordRef, QecSampleResult, ShotLayout, compile_qec_program_rows,
-    parse_qec_program, run_qec_program, run_qec_program_reference,
+    Gate, PackedShots, PrismError, QecBasis, QecCircuitNoise, QecDetectorReference, QecNoise,
+    QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef, QecSampleResult, ShotLayout,
+    compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference,
 };
 
 use crate::qec_common;
@@ -221,6 +221,7 @@ fn qec_options_are_configurable() {
         seed: 7,
         chunk_size: Some(512),
         keep_measurements: false,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(3, options);
     assert_eq!(program.options(), options);
@@ -342,6 +343,7 @@ fn qec_reference_runner_executes_gates_and_postselection() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        detector_reference: QecDetectorReference::Raw,
     };
     let mut program = QecProgram::with_options(1, options);
     program.push_gate(Gate::X, &[0]).unwrap();
@@ -399,6 +401,7 @@ fn qec_basis_measurement_then_reset_agrees_across_runners() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(1, options);
     program.push_gate(Gate::H, &[0]).unwrap();
@@ -423,6 +426,7 @@ fn qec_compiled_runner_executes_clifford_programs_without_statevector_fallback()
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        detector_reference: QecDetectorReference::Raw,
     };
     let mut program = QecProgram::with_options(1, options);
     program.push_gate(Gate::X, &[0]).unwrap();
@@ -452,6 +456,7 @@ fn qec_compiled_runner_handles_mpp_and_reset_reuse() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(2, options);
     program.push_gate(Gate::H, &[0]).unwrap();
@@ -482,6 +487,7 @@ fn qec_compiled_runner_can_omit_raw_measurements() {
         seed: 42,
         chunk_size: None,
         keep_measurements: false,
+        detector_reference: QecDetectorReference::Raw,
     };
     let mut program = QecProgram::with_options(1, options);
     program.push_gate(Gate::X, &[0]).unwrap();
@@ -507,6 +513,7 @@ fn qec_compiled_runner_honors_chunk_size() {
         seed: 42,
         chunk_size: Some(2),
         keep_measurements: false,
+        detector_reference: QecDetectorReference::Raw,
     };
     let mut program = QecProgram::with_options(1, options);
     program.push_gate(Gate::X, &[0]).unwrap();
@@ -532,6 +539,7 @@ fn qec_compiled_runner_rejects_zero_chunk_size() {
         seed: 42,
         chunk_size: Some(0),
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(1, options);
     program.measure_z(0).unwrap();
@@ -547,6 +555,7 @@ fn qec_compiled_runner_rejects_zero_chunk_size_without_measurements() {
         seed: 42,
         chunk_size: Some(0),
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let program = QecProgram::with_options(1, options);
 
@@ -571,6 +580,7 @@ fn qec_compiled_runner_applies_deterministic_x_noise() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(1, options);
     program.noise(QecNoise::XError(1.0), &[0]).unwrap();
@@ -597,6 +607,7 @@ fn qec_compiled_runner_applies_basis_sensitive_z_noise() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(1, options);
     program.push_gate(Gate::H, &[0]).unwrap();
@@ -614,6 +625,7 @@ fn qec_compiled_runner_accepts_depolarizing_noise_channels() {
         seed: 42,
         chunk_size: Some(17),
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(2, options);
     program.noise(QecNoise::Depolarize1(0.0), &[0]).unwrap();
@@ -635,6 +647,7 @@ fn qec_compiled_runner_treats_zero_probability_noise_as_clean() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(1, options);
     program.noise(QecNoise::XError(0.0), &[0]).unwrap();
@@ -663,6 +676,7 @@ fn qec_reference_runner_does_not_consume_rng_for_zero_noise() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut baseline = QecProgram::with_options(1, options);
     baseline.noise(QecNoise::XError(0.5), &[0]).unwrap();
@@ -688,6 +702,7 @@ fn qec_compiled_runner_ignores_single_qubit_noise_after_measurement() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(1, options);
     program.measure_z(0).unwrap();
@@ -730,6 +745,7 @@ fn qec_reference_runner_measures_mpp_products() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(2, options);
     program.push_gate(Gate::H, &[0]).unwrap();
@@ -754,6 +770,7 @@ fn qec_reference_runner_can_omit_raw_measurements() {
         seed: 42,
         chunk_size: None,
         keep_measurements: false,
+        detector_reference: QecDetectorReference::Raw,
     };
     let mut program = QecProgram::with_options(1, options);
     program.push_gate(Gate::X, &[0]).unwrap();
@@ -779,6 +796,7 @@ fn qec_reference_runner_applies_pauli_noise() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(1, options);
     program.noise(QecNoise::XError(1.0), &[0]).unwrap();
@@ -808,6 +826,7 @@ fn qec_reference_runner_rejects_zero_chunk_size() {
         seed: 42,
         chunk_size: Some(0),
         keep_measurements: true,
+        ..QecOptions::default()
     };
     let mut program = QecProgram::with_options(1, options);
     program.measure_z(0).unwrap();
@@ -919,6 +938,7 @@ fn qec_text_parser_lowers_basis_measurement_error_args() {
         seed: 42,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     });
 
     let result = run_qec_program(&program).unwrap();
@@ -937,6 +957,7 @@ fn qec_text_parser_ingests_postselection() {
         seed: 42,
         chunk_size: None,
         keep_measurements: false,
+        ..QecOptions::default()
     });
     assert_eq!(accepted_program.postselection_rows().unwrap().len(), 1);
     let accepted = run_qec_program(&accepted_program).unwrap();
@@ -949,6 +970,7 @@ fn qec_text_parser_ingests_postselection() {
         seed: 42,
         chunk_size: None,
         keep_measurements: false,
+        ..QecOptions::default()
     });
     let rejected = run_qec_program(&rejected_program).unwrap();
     assert_eq!(rejected.accepted_shots, 0);
@@ -967,6 +989,7 @@ fn qec_text_parser_ingests_empty_and_multi_record_postselection() {
         seed: 42,
         chunk_size: None,
         keep_measurements: false,
+        ..QecOptions::default()
     });
     let result = run_qec_program(&program).unwrap();
     assert_eq!(result.accepted_shots, 4);
@@ -978,6 +1001,7 @@ fn qec_text_parser_ingests_empty_and_multi_record_postselection() {
         seed: 42,
         chunk_size: None,
         keep_measurements: false,
+        ..QecOptions::default()
     });
     let rejected = run_qec_program(&rejected_program).unwrap();
     assert_eq!(rejected.accepted_shots, 0);
@@ -1137,6 +1161,7 @@ fn assert_dropped_records_match_kept(program: &QecProgram, chunk_size: Option<us
         seed: 42,
         chunk_size,
         keep_measurements: false,
+        ..QecOptions::default()
     };
     let mut program = program.clone();
     program.set_options(options);
@@ -1187,6 +1212,7 @@ fn any_detector_fires(program: &QecProgram) -> bool {
         seed: 42,
         chunk_size: None,
         keep_measurements: false,
+        ..QecOptions::default()
     });
     let result = run_qec_program(&program).unwrap();
     result.detectors.to_shots().iter().flatten().any(|&bit| bit)
@@ -1374,12 +1400,29 @@ fn run_with(
     chunk_size: Option<usize>,
     keep_measurements: bool,
 ) -> QecSampleResult {
+    run_with_reference(
+        program,
+        shots,
+        chunk_size,
+        keep_measurements,
+        QecDetectorReference::Noiseless,
+    )
+}
+
+fn run_with_reference(
+    program: &QecProgram,
+    shots: usize,
+    chunk_size: Option<usize>,
+    keep_measurements: bool,
+    detector_reference: QecDetectorReference,
+) -> QecSampleResult {
     let mut program = program.clone();
     program.set_options(QecOptions {
         shots,
         seed: 42,
         chunk_size,
         keep_measurements,
+        detector_reference,
     });
     run_qec_program(&program).unwrap()
 }
@@ -1520,9 +1563,10 @@ fn qec_dropped_records_match_kept_when_noiseless_parities_are_one() {
             qubits - 3
         ));
         let program = parse_qec_program(&text).unwrap();
+        let raw = QecDetectorReference::Raw;
         for shots in [2_017, 20_000] {
-            let dropped = run_with(&program, shots, None, false);
-            let kept = run_with(&program, shots, None, true);
+            let dropped = run_with_reference(&program, shots, None, false, raw);
+            let kept = run_with_reference(&program, shots, None, true, raw);
             assert_same_parities(&dropped, &kept, &format!("p {p} shots {shots}"));
             let past_last_shot = u64::MAX << (shots % 64);
             for detector in 0..qubits {

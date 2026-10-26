@@ -21,6 +21,7 @@ fn with_shots(mut program: QecProgram, shots: usize) -> QecProgram {
         seed: qec_common::SEED,
         chunk_size: None,
         keep_measurements: false,
+        ..QecOptions::default()
     });
     program
 }

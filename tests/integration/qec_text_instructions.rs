@@ -4,8 +4,9 @@
 //! outcome on the compiled (stabilizer) and reference runners.
 
 use prism_q::{
-    Gate, PackedShots, QecBasis, QecOp, QecOptions, QecPauli, QecProgram, QecSampleResult,
-    compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference,
+    Gate, PackedShots, QecBasis, QecDetectorReference, QecOp, QecOptions, QecPauli, QecProgram,
+    QecSampleResult, compile_qec_program_rows, parse_qec_program, run_qec_program,
+    run_qec_program_reference,
 };
 
 const SEED: u64 = 42;
@@ -20,6 +21,7 @@ fn seeded(text: &str, shots: usize) -> QecProgram {
         seed: SEED,
         chunk_size: None,
         keep_measurements: true,
+        ..QecOptions::default()
     });
     program
 }
@@ -265,8 +267,14 @@ fn mpad_appends_constant_records() {
         &[false, false, false, true],
     );
 
-    // The noisy sampler keeps the padded record constant and the detector reads it.
-    let noisy = seeded("R 0\nX_ERROR(0.5) 0\nM 0\nMPAD 1\nDETECTOR rec[-1]", 4096);
+    // The noisy sampler keeps the padded record constant and the detector reads it, as
+    // raw parity shows; against the noiseless reference the constant never fires.
+    let mut noisy = seeded("R 0\nX_ERROR(0.5) 0\nM 0\nMPAD 1\nDETECTOR rec[-1]", 4096);
+    assert_eq!(rate(&run_qec_program(&noisy).unwrap().detectors, 0), 0.0);
+    noisy.set_options(QecOptions {
+        detector_reference: QecDetectorReference::Raw,
+        ..noisy.options()
+    });
     let result = run_qec_program(&noisy).unwrap();
     assert_eq!(rate(&result.measurements, 1), 1.0);
     assert_eq!(rate(&result.detectors, 0), 1.0);
@@ -575,30 +583,38 @@ fn dropped_records_match_kept_projection_for_new_ops() {
         LATTICE_SURGERY_ZZ,
         COLOR_CODE_MEMORY_XYZ,
     ] {
-        let mut program = seeded(text, shots);
-        let kept = run_qec_program(&program).unwrap();
-        program.set_options(QecOptions {
-            keep_measurements: false,
-            ..program.options()
-        });
-        let dropped = run_qec_program(&program).unwrap();
-        assert_eq!(dropped.measurements.num_shots(), 0);
-        let projected = kept
-            .measurements
-            .parity_rows(&program.detector_rows().unwrap())
-            .unwrap();
-        assert_eq!(kept.detectors.to_shots(), projected.to_shots(), "{text}");
-        assert_eq!(
-            dropped.detectors.to_shots(),
-            kept.detectors.to_shots(),
-            "{text}"
-        );
-        assert_eq!(
-            dropped.observables.to_shots(),
-            kept.observables.to_shots(),
-            "{text}"
-        );
-        assert_eq!(dropped.logical_errors, kept.logical_errors, "{text}");
+        for detector_reference in [QecDetectorReference::Raw, QecDetectorReference::Noiseless] {
+            let mut program = seeded(text, shots);
+            program.set_options(QecOptions {
+                detector_reference,
+                ..program.options()
+            });
+            let kept = run_qec_program(&program).unwrap();
+            program.set_options(QecOptions {
+                keep_measurements: false,
+                ..program.options()
+            });
+            let dropped = run_qec_program(&program).unwrap();
+            assert_eq!(dropped.measurements.num_shots(), 0);
+            if detector_reference == QecDetectorReference::Raw {
+                let projected = kept
+                    .measurements
+                    .parity_rows(&program.detector_rows().unwrap())
+                    .unwrap();
+                assert_eq!(kept.detectors.to_shots(), projected.to_shots(), "{text}");
+            }
+            assert_eq!(
+                dropped.detectors.to_shots(),
+                kept.detectors.to_shots(),
+                "{text}"
+            );
+            assert_eq!(
+                dropped.observables.to_shots(),
+                kept.observables.to_shots(),
+                "{text}"
+            );
+            assert_eq!(dropped.logical_errors, kept.logical_errors, "{text}");
+        }
     }
 }
 

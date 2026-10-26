@@ -1,7 +1,7 @@
 """Type stubs for the compiled ``prism_q._prism_q`` extension module."""
 
 from collections.abc import Callable, Iterator, Sequence
-from typing import Any, ClassVar, Literal, Optional, Self, TypeAlias, TypeVar, final
+from typing import Any, ClassVar, Literal, Optional, Self, TypeAlias, TypeVar, final, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -851,6 +851,7 @@ class QecProgram:
         seed: int = ...,
         chunk_size: Optional[int] = None,
         keep_measurements: bool = True,
+        detector_reference: Literal["noiseless", "raw"] = "noiseless",
     ) -> None: ...
     @property
     def num_qubits(self) -> int: ...
@@ -882,9 +883,38 @@ class QecProgram:
     @property
     def num_expectation_values(self) -> int: ...
     def run(self) -> "QecSampleResult": ...
+    def compile_sampler(self, *, keep_measurements: bool = False) -> "QecCompiledSampler": ...
     def run_reference(self) -> "QecSampleResult": ...
     def detector_error_model(self) -> "DetectorErrorModel": ...
     def __reduce__(self) -> tuple[Any, tuple[bytes]]: ...
+
+@final
+class QecCompiledSampler:
+    @property
+    def num_measurements(self) -> int: ...
+    @property
+    def num_detectors(self) -> int: ...
+    @property
+    def num_observables(self) -> int: ...
+    @overload
+    def sample(
+        self,
+        shots: int,
+        *,
+        seed: Optional[int] = None,
+        bit_packed: bool = True,
+        separate_observables: Literal[True] = True,
+    ) -> tuple[_ShotRows, _ShotRows]: ...
+    @overload
+    def sample(
+        self,
+        shots: int,
+        *,
+        seed: Optional[int] = None,
+        bit_packed: bool = True,
+        separate_observables: Literal[False],
+    ) -> _ShotRows: ...
+    def sample_result(self, shots: int, *, seed: Optional[int] = None) -> "QecSampleResult": ...
 
 @final
 class DetectorErrorModel:

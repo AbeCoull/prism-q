@@ -25,6 +25,7 @@ fn options(shots: usize) -> QecOptions {
         seed: TEST_SEED,
         chunk_size: Some(128),
         keep_measurements: false,
+        ..QecOptions::default()
     }
 }
 

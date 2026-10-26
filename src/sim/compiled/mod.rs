@@ -1627,11 +1627,11 @@ const PARALLEL_TRANSPOSE_BLOCKS: usize = 512;
 /// full transpose.
 const SPARSE_TRANSPOSE_BITS: u32 = 64;
 
-/// Transpose measurement-major `data` one 64-shot block at a time. `out` holds
-/// `row_len` elements per shot, and `emit(block, shot, meas_word, word)` writes the
-/// 64 measurements from `meas_word * 64` of shot `shot` within `block`, the slice of
-/// `out` that holds the block's shots. `out` arrives zeroed, so all-zero words may go
-/// unemitted. Shot padding past `num_shots` is never emitted.
+/// Transpose measurement-major `data` one 64-shot block at a time. `out` arrives zeroed
+/// and holds `row_len` elements per shot, and `emit(block, shot, meas_word, word)` ORs
+/// `word` into the 64 measurements from `meas_word * 64` of shot `shot` within `block`,
+/// the slice of `out` that holds the block's shots. A word may arrive in several parts
+/// or not at all when zero. Shot padding past `num_shots` is never emitted.
 fn transpose_meas_major_blocks<T: Send>(
     data: &[u64],
     num_shots: usize,
@@ -1647,35 +1647,31 @@ fn transpose_meas_major_blocks<T: Send>(
     let m_words = num_measurements.div_ceil(64);
     let transpose_block = |(shot_word, block): (usize, &mut [T])| {
         let shots = block.len() / row_len;
+        let shot_mask = shot_tail_mask(shots);
         let mut matrix = [0u64; 64];
         for meas_word in 0..m_words {
             let first = meas_word * 64;
             let rows = (num_measurements - first).min(64);
-            let mut ones = 0;
-            for (row, slot) in matrix[..rows].iter_mut().enumerate() {
-                *slot = data[(first + row) * s_words + shot_word];
-                ones += slot.count_ones();
-            }
-            if ones <= SPARSE_TRANSPOSE_BITS {
-                let mut transposed = [0u64; 64];
-                let mut touched = 0u64;
-                for (row, &word) in matrix[..rows].iter().enumerate() {
-                    let mut bits = word;
-                    while bits != 0 {
-                        let shot = bits.trailing_zeros() as usize;
-                        transposed[shot] |= 1 << row;
-                        touched |= 1 << shot;
-                        bits &= bits - 1;
+            // Scatter bit by bit while the block stays sparse. Past the budget the full
+            // transpose takes over; emits OR, so the bits already scattered are harmless.
+            let mut budget = SPARSE_TRANSPOSE_BITS;
+            let dense = (0..rows).any(|row| {
+                let mut bits = data[(first + row) * s_words + shot_word] & shot_mask;
+                while bits != 0 {
+                    if budget == 0 {
+                        return true;
                     }
+                    emit(block, bits.trailing_zeros() as usize, meas_word, 1 << row);
+                    budget -= 1;
+                    bits &= bits - 1;
                 }
-                while touched != 0 {
-                    let shot = touched.trailing_zeros() as usize;
-                    if shot < shots {
-                        emit(block, shot, meas_word, transposed[shot]);
-                    }
-                    touched &= touched - 1;
-                }
+                false
+            });
+            if !dense {
                 continue;
+            }
+            for (row, slot) in matrix[..rows].iter_mut().enumerate() {
+                *slot = data[(first + row) * s_words + shot_word] & shot_mask;
             }
             matrix[rows..].fill(0);
             transpose_64x64_dispatch(&mut matrix);
@@ -2066,7 +2062,7 @@ impl PackedShots {
             self.num_measurements,
             &mut shot_major,
             m_words,
-            |block, shot, meas_word, word| block[shot * m_words + meas_word] = word,
+            |block, shot, meas_word, word| block[shot * m_words + meas_word] |= word,
         );
         shot_major
     }
@@ -2120,7 +2116,12 @@ impl PackedShots {
                 |block, shot, meas_word, word| {
                     let start = shot * row_bytes + meas_word * 8;
                     let take = (row_bytes - meas_word * 8).min(8);
-                    block[start..start + take].copy_from_slice(&word.to_le_bytes()[..take]);
+                    for (byte, value) in block[start..start + take]
+                        .iter_mut()
+                        .zip(word.to_le_bytes())
+                    {
+                        *byte |= value;
+                    }
                 },
             ),
         }

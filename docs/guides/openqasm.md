@@ -555,7 +555,9 @@ hold. The backend it then runs on may still decline the circuit; those limits ar
   and `euler`, and the OpenQASM builtins (`arcsin`, `arccos`, `arctan`,
   `ceiling`, `cos`, `exp`, `floor`, `log`, `mod`, `popcount`, `pow`, `sin`,
   `sqrt`, `tan`). `**` is right associative and binds tighter than unary minus,
-  so `-2 ** 2` is `-4`.
+  so `-2 ** 2` is `-4`. Statements, conditions and expressions nest at most 256
+  levels, an operator chain such as `a + b + c` counting one level per operator,
+  and a deeper source fails with `PrismError::Parse`.
 
 ```qasm
 bit[2] c;

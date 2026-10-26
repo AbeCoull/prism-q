@@ -1,5 +1,8 @@
 use super::*;
-use crate::circuit::qasm::{expr as qasm_expr, lexer, stream::Stream};
+use crate::circuit::qasm::{
+    expr as qasm_expr, lexer,
+    stream::{MAX_NESTING, Stream},
+};
 
 fn eval_expr(source: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
     let tokens = lexer::tokenize(source)?;
@@ -3085,4 +3088,76 @@ fn shapes_the_line_reader_rejected_now_parse() {
         } => assert!((theta + 0.5).abs() < 1e-12),
         other => panic!("{other:?}"),
     }
+}
+
+fn nested_parens(depth: usize) -> String {
+    format!(
+        "OPENQASM 3.0;\nqubit[1] q;\nrx({}1{}) q[0];",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    )
+}
+
+fn nested_ifs(depth: usize) -> String {
+    format!(
+        "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\n{}x q[0];",
+        "if (c[0]) ".repeat(depth)
+    )
+}
+
+fn long_sum(terms: usize) -> String {
+    format!(
+        "OPENQASM 3.0;\nqubit[1] q;\nrx(0{}) q[0];",
+        " + 0.001".repeat(terms - 1)
+    )
+}
+
+fn assert_too_deep(result: Result<impl std::fmt::Debug>) {
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("nests deeper than"), "{err}");
+}
+
+#[test]
+fn deep_nesting_is_a_parse_error_not_a_stack_overflow() {
+    assert_too_deep(parse(&nested_parens(3_000)));
+    assert_too_deep(parse(&nested_ifs(3_000)));
+    assert_too_deep(parse(&long_sum(10_000)));
+    assert_too_deep(parse(&format!(
+        "OPENQASM 3.0;\nqubit[1] q;\nrx({}1) q[0];",
+        "-".repeat(3_000)
+    )));
+    assert_too_deep(parse(&format!(
+        "OPENQASM 3.0;\nqubit[1] q;\nrx(1{}) q[0];",
+        " ** 1".repeat(3_000)
+    )));
+    assert_too_deep(parse_dynamic(&nested_parens(3_000)));
+}
+
+// The deepest sources the limit admits parse and evaluate on a 1 MiB stack, the
+// default for a Windows main thread.
+#[test]
+fn nesting_just_inside_the_limit_fits_a_small_stack() {
+    let depth = MAX_NESTING - 8;
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let c = parse(&nested_parens(depth)).unwrap();
+            assert_eq!(c.gate_count(), 1);
+            let source = nested_ifs(depth);
+            let tokens = lexer::tokenize(&source).unwrap();
+            crate::circuit::qasm::parser::parse_program(&tokens).unwrap();
+            let c = parse(&long_sum(depth)).unwrap();
+            let Instruction::Gate {
+                gate: Gate::Rx(theta),
+                ..
+            } = &c.instructions[0]
+            else {
+                panic!("expected rx");
+            };
+            assert!((theta - 0.001 * (depth - 1) as f64).abs() < 1e-9);
+            parse_dynamic(&nested_parens(depth)).unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

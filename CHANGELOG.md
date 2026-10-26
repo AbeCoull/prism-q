@@ -4,6 +4,13 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **qasm:** Fail with `PrismError::Parse` on a source that nests statements, conditions
+  or expressions deeper than 256 levels, a long operator chain included. Thousands of
+  nested parentheses or `if` statements, or a ten-thousand-term sum, overflowed the
+  stack.
+
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

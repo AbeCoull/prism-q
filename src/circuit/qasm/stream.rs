@@ -3,6 +3,11 @@
 use super::lexer::{Kind, Token};
 use crate::error::{PrismError, Result};
 
+/// Nesting past which a parse fails rather than recursing further, so no source
+/// can exhaust the stack. Bounds statements, conditions, sub-expressions, and
+/// the depth of an expression tree.
+pub(crate) const MAX_NESTING: usize = 256;
+
 /// `'t` is the token slice, `'a` the source it was read from. They are
 /// separate so a tree outlives the slice it was parsed from.
 pub(crate) struct Stream<'t, 'a> {
@@ -11,6 +16,7 @@ pub(crate) struct Stream<'t, 'a> {
     /// Read the grammar `parse_dynamic` accepts: loops, and conditions and
     /// values over the full classical operator set.
     dynamic: bool,
+    depth: usize,
 }
 
 impl<'t, 'a> Stream<'t, 'a> {
@@ -19,6 +25,7 @@ impl<'t, 'a> Stream<'t, 'a> {
             tokens,
             at: 0,
             dynamic: false,
+            depth: 0,
         }
     }
 
@@ -27,6 +34,7 @@ impl<'t, 'a> Stream<'t, 'a> {
             tokens,
             at: 0,
             dynamic: true,
+            depth: 0,
         }
     }
 
@@ -97,6 +105,24 @@ impl<'t, 'a> Stream<'t, 'a> {
 
     pub(crate) fn expect_ident(&mut self) -> Result<&'a str> {
         Ok(self.expect(Kind::Ident)?.text)
+    }
+
+    /// Run `parse` one nesting level deeper, failing past [`MAX_NESTING`].
+    pub(crate) fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth == MAX_NESTING {
+            return Err(self.too_deep());
+        }
+        self.depth += 1;
+        let result = parse(self);
+        self.depth -= 1;
+        result
+    }
+
+    pub(crate) fn too_deep(&self) -> PrismError {
+        PrismError::Parse {
+            line: self.line(),
+            message: format!("the source nests deeper than {MAX_NESTING} levels"),
+        }
     }
 
     /// Error naming what the grammar wanted and what stood there instead.

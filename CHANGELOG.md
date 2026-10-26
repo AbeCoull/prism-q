@@ -8,6 +8,9 @@ All notable changes to PRISM-Q will be documented in this file.
 
 - **qasm:** Resolve a declared variable before a built-in constant of the same name, so
   `float e = 0.5; rx(e) q;` applies `rx(0.5)`.
+- **circuit:** Compare a register wider than 64 bits exactly in `ClassicalCondition`: a set
+  bit at position 64 or above makes it unequal to any value. `if (c == 1)` on a `bit[65]`
+  register panicked in debug builds and compared the wrong bits in release builds.
 
 ### Features
 

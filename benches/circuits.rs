@@ -1494,6 +1494,22 @@ fn bench_factored_stabilizer_measurement(c: &mut Criterion) {
             },
         );
     }
+
+    // One cluster over the whole register, then every qubit measured in turn.
+    // Most collapses are random and each lands on the cluster that is left, so
+    // the per-measurement cost on a wide cluster is what these rows price.
+    for &n in &[256, 512] {
+        let circuit = with_terminal_measurements(circuits::clifford_heavy_circuit(n, 10, SEED));
+        group.bench_with_input(
+            BenchmarkId::new("single_cluster_measure_all", n),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                });
+            },
+        );
+    }
     group.finish();
 }
 

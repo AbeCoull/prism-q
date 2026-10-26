@@ -975,3 +975,277 @@ fn shifted_bit_runs_match_the_bit_loop_across_word_boundaries() {
         assert_eq!(got, expected, "src_n={src_n} other_n={other_n}");
     }
 }
+
+fn row_bit(sub: &super::SubTableau, row: usize, axis: usize, q: usize) -> bool {
+    sub.xz[row * sub.stride() + axis + q / 64] >> (q % 64) & 1 != 0
+}
+
+fn symplectic(sub: &super::SubTableau, a: usize, b: usize) -> bool {
+    let nw = sub.num_words;
+    let (ra, rb) = (a * sub.stride(), b * sub.stride());
+    let mut parity = 0u32;
+    for w in 0..nw {
+        parity ^= (sub.xz[ra + w] & sub.xz[rb + nw + w]).count_ones()
+            ^ (sub.xz[ra + nw + w] & sub.xz[rb + w]).count_ones();
+    }
+    parity & 1 == 1
+}
+
+// The invariant `Destabs::Reduced` names: destabilizer q is the unit Pauli on
+// the axis opposite qubit q's pivot, stabilizer n + q is the only stabilizer
+// set at that pivot, and the rows form a symplectic basis.
+fn assert_reduced(sub: &super::SubTableau) {
+    assert_eq!(sub.destabs, super::Destabs::Reduced);
+    let n = sub.n;
+    let nw = sub.num_words;
+    for q in 0..n {
+        let other = if row_bit(sub, q, nw, q) { nw } else { 0 };
+        assert!(
+            sub.is_unit_row(q, other, q),
+            "destabilizer {q} is not a unit"
+        );
+        let pivot = nw - other;
+        for r in n..2 * n {
+            assert_eq!(
+                row_bit(sub, r, pivot, q),
+                r == n + q,
+                "pivot of qubit {q} set in stabilizer row {r}"
+            );
+        }
+    }
+    for i in 0..n {
+        for j in 0..n {
+            assert!(
+                !symplectic(sub, n + i, n + j),
+                "stabilizers {i} and {j} anticommute"
+            );
+            assert_eq!(
+                symplectic(sub, i, n + j),
+                i == j,
+                "destabilizer {i} against stabilizer {j}"
+            );
+        }
+    }
+}
+
+// Components of a cluster by a fresh reduction of a copy followed by a union
+// of every stabilizer row's support, the split check measurement used to run.
+fn reference_components(sub: &super::SubTableau) -> usize {
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    let n = sub.n;
+    let nw = sub.num_words;
+    let mut xz = sub.xz.clone();
+    let mut phase = sub.phase.clone();
+    crate::backend::stabilizer::kernels::rowops::materialize_destabilizers(
+        &mut xz, &mut phase, n, nw,
+    );
+    let mut parent: Vec<usize> = (0..n).collect();
+    for r in n..2 * n {
+        let mut first = None;
+        for q in 0..n {
+            let at = r * 2 * nw + q / 64;
+            if (xz[at] | xz[at + nw]) >> (q % 64) & 1 == 0 {
+                continue;
+            }
+            match first {
+                None => first = Some(q),
+                Some(f) => {
+                    let (a, b) = (find(&mut parent, f), find(&mut parent, q));
+                    parent[a] = b;
+                }
+            }
+        }
+    }
+    (0..n).filter(|&q| find(&mut parent, q) == q).count()
+}
+
+fn random_clifford_with_measurements(n: usize, steps: usize, seed: u64) -> Circuit {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    let one_q = [
+        Gate::H,
+        Gate::S,
+        Gate::Sdg,
+        Gate::SX,
+        Gate::SXdg,
+        Gate::X,
+        Gate::Y,
+        Gate::Z,
+    ];
+    let two_q = [Gate::Cx, Gate::Cz, Gate::Swap];
+    let mut c = Circuit::new(n, steps);
+    let mut bit = 0;
+    for _ in 0..steps {
+        let roll = rng.random_range(0..20);
+        let a = rng.random_range(0..n);
+        if roll < 8 {
+            c.add_gate(one_q[rng.random_range(0..one_q.len())].clone(), &[a]);
+        } else if roll < 15 {
+            let mut b = rng.random_range(0..n);
+            while b == a {
+                b = rng.random_range(0..n);
+            }
+            c.add_gate(two_q[rng.random_range(0..two_q.len())].clone(), &[a, b]);
+        } else if roll < 18 {
+            c.add_measure(a, bit);
+            bit += 1;
+        } else {
+            c.add_reset(a);
+        }
+    }
+    c
+}
+
+// Measurement keeps every cluster reduced, collapses to the dense tableau's
+// outcomes for the same seed, and leaves the measured cluster split into the
+// components a fresh reduction finds.
+#[test]
+fn measurement_keeps_clusters_reduced_and_matches_the_dense_tableau() {
+    use crate::circuit::Instruction;
+    for (n, steps) in [(6usize, 300usize), (12, 600), (70, 1500), (150, 3000)] {
+        for seed in 42..48u64 {
+            let circuit = random_clifford_with_measurements(n, steps, seed);
+            let mut mono = StabilizerBackend::new(seed);
+            mono.init(n, circuit.num_classical_bits).unwrap();
+            let mut fact = FactoredStabilizerBackend::new(seed);
+            fact.init(n, circuit.num_classical_bits).unwrap();
+            for inst in &circuit.instructions {
+                let measured = match inst {
+                    Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
+                        Some(*qubit)
+                    }
+                    _ => None,
+                };
+                let before: Vec<usize> = measured
+                    .map(|q| {
+                        fact.subs[fact.qubit_to_sub[q]]
+                            .as_ref()
+                            .unwrap()
+                            .qubits
+                            .to_vec()
+                    })
+                    .unwrap_or_default();
+                mono.apply(inst).unwrap();
+                fact.apply(inst).unwrap();
+                for &q in &before {
+                    let sub = fact.subs[fact.qubit_to_sub[q]].as_ref().unwrap();
+                    assert_reduced(sub);
+                    assert_eq!(
+                        reference_components(sub),
+                        1,
+                        "n={n} seed={seed}: the cluster of qubit {q} still factors"
+                    );
+                }
+            }
+            assert_eq!(
+                mono.classical_results(),
+                fact.classical_results(),
+                "n={n} seed={seed}"
+            );
+            if n <= 12 {
+                let (a, b) = (mono.probabilities().unwrap(), fact.probabilities().unwrap());
+                assert_probs_eq(&a, &b, 1e-12);
+            }
+            let observables: Vec<Vec<PauliTerm>> = (0..n.min(40))
+                .map(|q| vec![PauliTerm::z(q), PauliTerm::x((q + 1) % n)])
+                .chain((0..n.min(40)).map(|q| vec![PauliTerm::z(q)]))
+                .collect();
+            assert_eq!(
+                mono.pauli_expectations(&observables).unwrap(),
+                fact.pauli_expectations(&observables).unwrap(),
+                "n={n} seed={seed}"
+            );
+        }
+    }
+}
+
+// Measuring every qubit of one wide cluster, in either order and through the
+// bulk path, matches the dense tableau and ends with one cluster per qubit.
+#[test]
+fn measure_all_on_one_wide_cluster_matches_the_dense_tableau() {
+    for reverse in [false, true] {
+        let n = 200;
+        let mut circuit = crate::circuits::clifford_heavy_circuit(n, 8, 42);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            let q = if reverse { n - 1 - i } else { i };
+            circuit.add_measure(q, i);
+        }
+        let mut mono = StabilizerBackend::new(42);
+        mono.init(n, n).unwrap();
+        for inst in &circuit.instructions {
+            mono.apply(inst).unwrap();
+        }
+        let mut fact = FactoredStabilizerBackend::new(42);
+        fact.init(n, n).unwrap();
+        fact.apply_instructions(&circuit.instructions).unwrap();
+        assert_eq!(mono.classical_results(), fact.classical_results());
+        assert_eq!(fact.subs.iter().flatten().count(), n);
+    }
+}
+
+#[test]
+fn bit_runs_match_the_bit_loop_across_word_boundaries() {
+    use crate::backend::factored_stabilizer::{consecutive_runs, or_bit_run};
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for _ in 0..200 {
+        let n = rng.random_range(1..300usize);
+        let src: Vec<u64> = (0..n.div_ceil(64)).map(|_| rng.random()).collect();
+        let keep: Vec<usize> = (0..n).filter(|_| rng.random_bool(0.7)).collect();
+        let mut expected = vec![0u64; keep.len().div_ceil(64).max(1)];
+        for (to, &from) in keep.iter().enumerate() {
+            if src[from / 64] >> (from % 64) & 1 != 0 {
+                expected[to / 64] |= 1 << (to % 64);
+            }
+        }
+        let mut got = vec![0u64; expected.len()];
+        for &(start, len, to) in &consecutive_runs(&keep) {
+            or_bit_run(&src, start, len, &mut got, to);
+        }
+        assert_eq!(got, expected, "n={n}");
+    }
+}
+
+// A reduced tableau for the state stabilized by Y0 Z1 and X0 Y1, pivots Z on
+// qubit 0 and X on qubit 1. The qubit-0 stabilizer also carries X on qubit 0,
+// the pivot shape no reduction produces but pivot exchanges can, so measuring
+// qubit 0 moves its pivot inside its own row.
+#[test]
+fn measurement_moves_a_pivot_inside_its_own_row() {
+    let words = vec![1, 0, 0, 2, 1, 3, 3, 2, 0, 0];
+    let phases = vec![false; 5];
+    for order in [[0usize, 1], [1, 0]] {
+        for seed in 42..50u64 {
+            let mut mono = StabilizerBackend::new(seed);
+            mono.init_from_tableau(2, words.clone(), phases.clone(), 2)
+                .unwrap();
+            let mut fact = FactoredStabilizerBackend::new(seed);
+            fact.init_from_tableau(2, words.clone(), phases.clone(), 2)
+                .unwrap();
+            fact.subs[0].as_mut().unwrap().destabs = super::Destabs::Reduced;
+            assert_reduced(fact.subs[0].as_ref().unwrap());
+            for (bit, &q) in order.iter().enumerate() {
+                let mut c = Circuit::new(2, 2);
+                c.add_measure(q, bit);
+                mono.apply(&c.instructions[0]).unwrap();
+                fact.apply(&c.instructions[0]).unwrap();
+                for sub in fact.subs.iter().flatten() {
+                    assert_reduced(sub);
+                }
+            }
+            assert_eq!(mono.classical_results(), fact.classical_results());
+            assert_probs_eq(
+                &mono.probabilities().unwrap(),
+                &fact.probabilities().unwrap(),
+                1e-12,
+            );
+        }
+    }
+}

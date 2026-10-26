@@ -37,7 +37,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
-use crate::backend::stabilizer::kernels::{self, rowmul_words, rowops};
+use crate::backend::stabilizer::kernels::{self, rowops};
 use crate::backend::stabilizer::{dense, diagnostics};
 use crate::backend::{
     Backend, dense_probability_len, dense_statevector_len, reduced_density, reserve_dense_output,
@@ -51,10 +51,25 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use std::borrow::Cow;
 
 #[cfg(feature = "parallel")]
-use crate::backend::{MIN_ANTI_ROWS_FOR_PAR, MIN_QUBITS_FOR_PAR_GATES};
+use crate::backend::MIN_QUBITS_FOR_PAR_GATES;
 
 #[cfg(test)]
 mod tests;
+
+/// How far a sub-tableau's rows can be trusted beyond the stabilizer group.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Destabs {
+    /// Gates sweep only the stabilizer half, so destabilizer rows are stale.
+    Stale,
+    /// Destabilizer `i` anticommutes with stabilizer `i` and commutes with the
+    /// other stabilizers.
+    Live,
+    /// Live, with stabilizer row `n + q` the only stabilizer set at one of
+    /// qubit `q`'s two bits (its pivot) and destabilizer `q` the unit Pauli on
+    /// the other axis. Every generator then lies inside one entanglement
+    /// component.
+    Reduced,
+}
 
 struct SubTableau {
     n: usize,
@@ -62,9 +77,7 @@ struct SubTableau {
     xz: Vec<u64>,
     phase: Vec<bool>,
     qubits: SmallVec<[usize; 8]>,
-    /// Destabilizer rows are stale: gates sweep only the stabilizer half and
-    /// set this, and measurement materializes fresh destabilizers on demand.
-    lazy_destab: bool,
+    destabs: Destabs,
 }
 
 impl SubTableau {
@@ -83,7 +96,7 @@ impl SubTableau {
             xz,
             phase,
             qubits: SmallVec::from_elem(global_qubit, 1),
-            lazy_destab: false,
+            destabs: Destabs::Reduced,
         }
     }
 
@@ -94,6 +107,22 @@ impl SubTableau {
 
     fn local_qubit(&self, global: usize) -> usize {
         self.qubits.iter().position(|&q| q == global).unwrap()
+    }
+
+    #[inline(always)]
+    fn bit(&self, row: usize, axis: usize, q: usize) -> bool {
+        self.xz[row * self.stride() + axis + q / 64] >> (q % 64) & 1 != 0
+    }
+
+    /// Word offset of the axis holding qubit `q`'s pivot in a reduced
+    /// tableau: 0 for X, `num_words` for Z.
+    #[inline(always)]
+    fn pivot_axis(&self, q: usize) -> usize {
+        if self.bit(q, self.num_words, q) {
+            0
+        } else {
+            self.num_words
+        }
     }
 
     #[cfg(feature = "parallel")]
@@ -113,7 +142,7 @@ impl SubTableau {
     /// rebuild.
     #[inline(always)]
     fn gate_rows(&mut self) -> (&mut [u64], &mut [bool]) {
-        self.lazy_destab = true;
+        self.destabs = Destabs::Stale;
         let start = self.n * self.stride();
         (&mut self.xz[start..], &mut self.phase[self.n..])
     }
@@ -254,147 +283,120 @@ impl SubTableau {
         rowops::rowmul(&mut self.xz, &mut self.phase, self.num_words, h, i);
     }
 
-    fn copy_row(&mut self, dst: usize, src: usize) {
-        rowops::copy_row(&mut self.xz, &mut self.phase, self.num_words, dst, src);
-    }
-
     fn zero_row(&mut self, r: usize) {
         rowops::zero_row(&mut self.xz, &mut self.phase, self.num_words, r);
     }
 
-    fn measure(&mut self, local_q: usize, rng: &mut ChaCha8Rng) -> bool {
-        if self.lazy_destab {
-            rowops::materialize_destabilizers(
-                &mut self.xz,
-                &mut self.phase,
-                self.n,
-                self.num_words,
-            );
-            self.lazy_destab = false;
-        }
-        let n = self.n;
-        let word = local_q / 64;
-        let bit_mask = 1u64 << (local_q % 64);
+    fn set_unit_row(&mut self, row: usize, axis: usize, q: usize) {
+        self.zero_row(row);
+        let at = row * self.stride() + axis + q / 64;
+        self.xz[at] |= 1u64 << (q % 64);
+    }
+
+    fn swap_rows(&mut self, a: usize, b: usize) {
         let stride = self.stride();
-        let nw = self.num_words;
+        let (lo, hi) = (a.min(b), a.max(b));
+        let (head, tail) = self.xz.split_at_mut(hi * stride);
+        head[lo * stride..(lo + 1) * stride].swap_with_slice(&mut tail[..stride]);
+        self.phase.swap(a, b);
+    }
 
-        let mut p: Option<usize> = None;
-        for i in n..2 * n {
-            if self.xz[i * stride + word] & bit_mask != 0 {
-                p = Some(i);
-                break;
+    /// Multiply stabilizer row `pivot` into every other stabilizer row set at
+    /// bit (`axis`, `q`), leaving `pivot` the only one.
+    fn eliminate(&mut self, axis: usize, q: usize, pivot: usize) {
+        let at = axis + q / 64;
+        let mask = 1u64 << (q % 64);
+        for r in self.n..2 * self.n {
+            if r != pivot && self.xz[r * self.stride() + at] & mask != 0 {
+                self.rowmul(r, pivot);
             }
-        }
-
-        if let Some(p_row) = p {
-            let p_base = p_row * stride;
-            let p_data: SmallVec<[u64; 32]> =
-                SmallVec::from_slice(&self.xz[p_base..p_base + stride]);
-            let p_phase = self.phase[p_row];
-
-            let anti_rows: SmallVec<[usize; 16]> = (0..2 * n)
-                .filter(|&r| r != p_row && self.xz[r * stride + word] & bit_mask != 0)
-                .collect();
-
-            #[cfg(feature = "parallel")]
-            if n >= MIN_QUBITS_FOR_PAR_GATES && anti_rows.len() >= MIN_ANTI_ROWS_FOR_PAR {
-                use crate::backend::stabilizer::kernels::{SendBoolPtr, SendU64Ptr};
-                use rayon::prelude::*;
-
-                let xz_ptr = SendU64Ptr(self.xz.as_mut_ptr());
-                let phase_ptr = SendBoolPtr(self.phase.as_mut_ptr());
-
-                // SAFETY: Each row index in anti_rows is unique and none equals p_row.
-                // Row regions [r*stride .. (r+1)*stride] are non-overlapping.
-                // p_data is a separate copy.
-                anti_rows.par_iter().for_each(|&r| {
-                    // SAFETY: r is unique within anti_rows and identifies one
-                    // in-bounds row region of length stride.
-                    let row = unsafe {
-                        std::slice::from_raw_parts_mut(xz_ptr.ptr().add(r * stride), stride)
-                    };
-                    // SAFETY: r is unique within anti_rows, so this mutable
-                    // reference targets one distinct phase element.
-                    let phase = unsafe { &mut *phase_ptr.ptr().add(r) };
-                    let initial = if p_phase { 2u64 } else { 0 } + if *phase { 2u64 } else { 0 };
-                    let (rx, rz) = row.split_at_mut(nw);
-                    let sum = rowmul_words(
-                        rx,
-                        &mut rz[..nw],
-                        &p_data[..nw],
-                        &p_data[nw..2 * nw],
-                        initial,
-                    );
-                    *phase = (sum & 3) >= 2;
-                });
-            }
-
-            #[cfg(feature = "parallel")]
-            if n < MIN_QUBITS_FOR_PAR_GATES || anti_rows.len() < MIN_ANTI_ROWS_FOR_PAR {
-                for &r in &anti_rows {
-                    let base = r * stride;
-                    let row = &mut self.xz[base..base + stride];
-                    let phase = &mut self.phase[r];
-                    let initial = if p_phase { 2u64 } else { 0 } + if *phase { 2u64 } else { 0 };
-                    let (rx, rz) = row.split_at_mut(nw);
-                    let sum = rowmul_words(
-                        rx,
-                        &mut rz[..nw],
-                        &p_data[..nw],
-                        &p_data[nw..2 * nw],
-                        initial,
-                    );
-                    *phase = (sum & 3) >= 2;
-                }
-            }
-
-            #[cfg(not(feature = "parallel"))]
-            for &r in &anti_rows {
-                let base = r * stride;
-                let row = &mut self.xz[base..base + stride];
-                let phase = &mut self.phase[r];
-                let initial = if p_phase { 2u64 } else { 0 } + if *phase { 2u64 } else { 0 };
-                let (rx, rz) = row.split_at_mut(nw);
-                let sum = rowmul_words(
-                    rx,
-                    &mut rz[..nw],
-                    &p_data[..nw],
-                    &p_data[nw..2 * nw],
-                    initial,
-                );
-                *phase = (sum & 3) >= 2;
-            }
-
-            self.copy_row(p_row - n, p_row);
-            self.zero_row(p_row);
-            let outcome: bool = rng.random();
-            self.xz[p_row * stride + nw + word] |= bit_mask;
-            self.phase[p_row] = outcome;
-            outcome
-        } else {
-            let scratch = 2 * n;
-            self.zero_row(scratch);
-            for i in 0..n {
-                if self.xz[i * stride + word] & bit_mask != 0 {
-                    self.rowmul(scratch, i + n);
-                }
-            }
-            self.phase[scratch]
         }
     }
 
-    fn reset_qubit(&mut self, local_q: usize, rng: &mut ChaCha8Rng) -> Result<()> {
-        let outcome = self.measure(local_q, rng);
-        if outcome {
-            self.apply_x(local_q);
+    fn reduce(&mut self) {
+        rowops::materialize_destabilizers(&mut self.xz, &mut self.phase, self.n, self.num_words);
+        self.destabs = Destabs::Reduced;
+    }
+
+    /// Measure Z on `local_q`, leaving the tableau reduced with stabilizer row
+    /// `n + local_q` equal to ±Z there and destabilizer `local_q` equal to X.
+    ///
+    /// A tableau that is not reduced is reduced once. On a reduced one a
+    /// random outcome first moves the qubit's pivot to its X bit, with at most
+    /// two pivot exchanges, so that row is the only stabilizer anticommuting
+    /// with Z; the collapse then rewrites it and clears one bit in the others.
+    /// That is O(k · words) against the O(k² · words) of a reduction.
+    fn measure(&mut self, local_q: usize, rng: &mut ChaCha8Rng) -> bool {
+        if self.destabs != Destabs::Reduced {
+            self.reduce();
         }
-        Ok(())
+        let n = self.n;
+        let nw = self.num_words;
+        let stride = self.stride();
+        let word = local_q / 64;
+        let bit_mask = 1u64 << (local_q % 64);
+        let row_q = n + local_q;
+
+        let Some(first) = (n..2 * n).find(|&r| self.xz[r * stride + word] & bit_mask != 0) else {
+            debug_assert!(self.is_unit_row(row_q, nw, local_q));
+            return self.phase[row_q];
+        };
+
+        if self.pivot_axis(local_q) == 0 {
+            debug_assert_eq!(first, row_q);
+        } else if self.bit(row_q, 0, local_q) {
+            self.eliminate(0, local_q, row_q);
+        } else {
+            // Commuting reduced rows have a symmetric off-pivot pattern: row
+            // `first` set at X on `local_q` means row `row_q` is set at the
+            // off-pivot bit of qubit `d`. That bit becomes d's pivot, held by
+            // `row_q`, and X on `local_q` passes to row `first`.
+            let d = first - n;
+            let old_axis = self.pivot_axis(d);
+            let new_axis = nw - old_axis;
+            debug_assert!(self.bit(row_q, new_axis, d));
+            self.eliminate(0, local_q, first);
+            self.eliminate(new_axis, d, row_q);
+            self.swap_rows(first, row_q);
+            self.set_unit_row(d, old_axis, d);
+        }
+
+        let outcome: bool = rng.random();
+        let z_word = nw + word;
+        for r in n..2 * n {
+            let at = r * stride + z_word;
+            if r != row_q && self.xz[at] & bit_mask != 0 {
+                self.xz[at] &= !bit_mask;
+                self.phase[r] ^= outcome;
+            }
+        }
+        self.set_unit_row(row_q, nw, local_q);
+        self.phase[row_q] = outcome;
+        self.set_unit_row(local_q, 0, local_q);
+        outcome
+    }
+
+    fn is_unit_row(&self, row: usize, axis: usize, q: usize) -> bool {
+        let base = row * self.stride();
+        (0..self.stride()).all(|w| {
+            let expected = if w == axis + q / 64 {
+                1u64 << (q % 64)
+            } else {
+                0
+            };
+            self.xz[base + w] == expected
+        })
+    }
+
+    fn reset_qubit(&mut self, local_q: usize, rng: &mut ChaCha8Rng) {
+        self.measure(local_q, rng);
+        self.phase[self.n + local_q] = false;
     }
 
     /// Rows with current destabilizers for a read-only query: borrowed when
     /// they are live, a materialized copy when gates have left them stale.
     fn rows_with_destabilizers(&self) -> rowops::TableauRows<'_> {
-        if !self.lazy_destab {
+        if self.destabs != Destabs::Stale {
             return (Cow::Borrowed(&self.xz), Cow::Borrowed(&self.phase));
         }
         let mut xz = self.xz.clone();
@@ -447,7 +449,7 @@ impl kernels::BatchTarget for SubTableau {
     }
 
     fn batch_rows(&mut self) -> kernels::GateRows<'_> {
-        self.lazy_destab = true;
+        self.destabs = Destabs::Stale;
         kernels::GateRows {
             n: self.n,
             num_words: self.num_words,
@@ -511,7 +513,7 @@ impl FactoredStabilizerBackend {
             xz: words,
             phase: phases,
             qubits: (0..n).collect(),
-            lazy_destab: false,
+            destabs: Destabs::Live,
         }));
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
         Ok(())
@@ -649,7 +651,7 @@ impl FactoredStabilizerBackend {
         d.n = total_n;
         d.num_words = new_nw;
         d.qubits = merged_qubits;
-        d.lazy_destab = true;
+        d.destabs = Destabs::Stale;
 
         for &q in &src.qubits {
             self.qubit_to_sub[q] = dst_idx;
@@ -657,86 +659,80 @@ impl FactoredStabilizerBackend {
         Ok(())
     }
 
+    /// Factor a reduced cluster into its entanglement components.
+    ///
+    /// Reduced rows keep each generator inside one component, and commutation
+    /// makes the off-pivot pattern symmetric (row `c` is set on qubit `d`
+    /// exactly when row `d` is set on `c`). A search that ORs each reached
+    /// qubit's row support into a visited mask therefore finds every component
+    /// in O(k · words).
     fn try_split(&mut self, sub_idx: usize) -> bool {
-        let sub = self.subs[sub_idx].as_mut().unwrap();
+        let sub = self.subs[sub_idx].as_ref().unwrap();
         let k = sub.n;
         if k <= 1 {
             return false;
         }
-
-        // Stored generators can hide a product structure ({Z0, Z0Z1} spans
-        // both qubits yet generates {Z0, Z1}), so reduce first: afterward
-        // stabilizer row k+q holds the pivot at qubit q and the unit
-        // destabilizer at row q is its partner.
-        rowops::materialize_destabilizers(&mut sub.xz, &mut sub.phase, k, sub.num_words);
-        sub.lazy_destab = false;
-
-        let sub = self.subs[sub_idx].as_ref().unwrap();
-        let mut parent: Vec<usize> = (0..k).collect();
-        let mut uf_rank = vec![0u8; k];
-        let stride = sub.stride();
+        debug_assert_eq!(sub.destabs, Destabs::Reduced);
         let nw = sub.num_words;
+        let stride = sub.stride();
 
-        for r in k..2 * k {
-            let base = r * stride;
-            let mut first: Option<usize> = None;
-            for q in 0..k {
-                let w = q / 64;
-                let bit = 1u64 << (q % 64);
-                if (sub.xz[base + w] & bit) != 0 || (sub.xz[base + nw + w] & bit) != 0 {
-                    if let Some(f) = first {
-                        uf_union(&mut parent, &mut uf_rank, f, q);
-                    } else {
-                        first = Some(q);
+        let mut seen = vec![0u64; nw];
+        let mut qubit_component = vec![0usize; k];
+        let mut stack: Vec<usize> = Vec::new();
+        let mut num_components = 0usize;
+        for start in 0..k {
+            if seen[start / 64] >> (start % 64) & 1 != 0 {
+                continue;
+            }
+            seen[start / 64] |= 1u64 << (start % 64);
+            stack.push(start);
+            let mut size = 0;
+            while let Some(c) = stack.pop() {
+                qubit_component[c] = num_components;
+                size += 1;
+                let (row_x, row_z) = sub.xz[(k + c) * stride..(k + c + 1) * stride].split_at(nw);
+                for (w, seen_w) in seen.iter_mut().enumerate() {
+                    let mut fresh = (row_x[w] | row_z[w]) & !*seen_w;
+                    *seen_w |= fresh;
+                    while fresh != 0 {
+                        stack.push(w * 64 + fresh.trailing_zeros() as usize);
+                        fresh &= fresh - 1;
                     }
                 }
             }
-        }
-
-        let mut num_components = 0usize;
-        let mut comp_of_root = vec![usize::MAX; k];
-        let mut qubit_component = vec![0usize; k];
-        #[allow(clippy::needless_range_loop)]
-        for q in 0..k {
-            let r = uf_find(&mut parent, q);
-            if comp_of_root[r] == usize::MAX {
-                comp_of_root[r] = num_components;
-                num_components += 1;
+            if size == k {
+                return false;
             }
-            qubit_component[q] = comp_of_root[r];
-        }
-
-        if num_components <= 1 {
-            return false;
+            num_components += 1;
         }
 
         let sub = self.subs[sub_idx].take().unwrap();
         let mut comp_qubits: Vec<SmallVec<[usize; 8]>> = vec![SmallVec::new(); num_components];
-        #[allow(clippy::needless_range_loop)]
-        for q in 0..k {
-            comp_qubits[qubit_component[q]].push(q);
+        for (q, &c) in qubit_component.iter().enumerate() {
+            comp_qubits[c].push(q);
         }
 
-        #[allow(clippy::needless_range_loop)]
-        for c in 0..num_components {
-            let local_qs = &comp_qubits[c];
+        for local_qs in &comp_qubits {
             let cn = local_qs.len();
             let cnw = cn.div_ceil(64);
             let cstride = 2 * cnw;
-            let ctotal = 2 * cn + 1;
-            let mut cxz = vec![0u64; ctotal * cstride];
-            let mut cphase = vec![false; ctotal];
-            let mut cqubits: SmallVec<[usize; 8]> = SmallVec::with_capacity(cn);
-            for &lq in local_qs {
-                cqubits.push(sub.qubits[lq]);
-            }
+            let mut cxz = vec![0u64; (2 * cn + 1) * cstride];
+            let mut cphase = vec![false; 2 * cn + 1];
+            let runs = consecutive_runs(local_qs);
 
-            // The reduced basis ties destabilizer row lq and stabilizer row
-            // k+lq to qubit lq, so both land in lq's component and the pair
-            // moves to matching local rows ci and cn+ci.
+            // Destabilizer row lq and stabilizer row k + lq both belong to
+            // qubit lq, so the pair lands at local rows ci and cn + ci.
             for (ci, &lq) in local_qs.iter().enumerate() {
-                copy_component_row(&sub, lq, local_qs, &mut cxz, &mut cphase, cnw, ci);
-                copy_component_row(&sub, k + lq, local_qs, &mut cxz, &mut cphase, cnw, cn + ci);
+                for (src_row, dst_row) in [(lq, ci), (k + lq, cn + ci)] {
+                    let src = &sub.xz[src_row * stride..(src_row + 1) * stride];
+                    let dst = &mut cxz[dst_row * cstride..(dst_row + 1) * cstride];
+                    let (dst_x, dst_z) = dst.split_at_mut(cnw);
+                    for &(start, len, to) in &runs {
+                        or_bit_run(&src[..nw], start, len, dst_x, to);
+                        or_bit_run(&src[nw..], start, len, dst_z, to);
+                    }
+                    cphase[dst_row] = sub.phase[src_row];
+                }
             }
 
             let new_sub = SubTableau {
@@ -744,16 +740,15 @@ impl FactoredStabilizerBackend {
                 num_words: cnw,
                 xz: cxz,
                 phase: cphase,
-                qubits: cqubits,
-                lazy_destab: false,
+                qubits: local_qs.iter().map(|&lq| sub.qubits[lq]).collect(),
+                destabs: Destabs::Reduced,
             };
 
             let slot = self.find_free_slot();
-            let global_qs: SmallVec<[usize; 8]> = new_sub.qubits.clone();
-            self.subs[slot] = Some(new_sub);
-            for &gq in &global_qs {
+            for &gq in &new_sub.qubits {
                 self.qubit_to_sub[gq] = slot;
             }
+            self.subs[slot] = Some(new_sub);
         }
 
         true
@@ -887,7 +882,7 @@ impl Backend for FactoredStabilizerBackend {
                 let ss = self.qubit_to_sub[*qubit];
                 let sub = self.subs[ss].as_mut().unwrap();
                 let local_q = sub.local_qubit(*qubit);
-                sub.reset_qubit(local_q, &mut self.rng)?;
+                sub.reset_qubit(local_q, &mut self.rng);
                 self.try_split(ss);
             }
             Instruction::Barrier { .. } => {}
@@ -1106,7 +1101,7 @@ impl Backend for FactoredStabilizerBackend {
         let ss = self.qubit_to_sub[qubit];
         let sub = self.subs[ss].as_mut().unwrap();
         let local_q = sub.local_qubit(qubit);
-        sub.reset_qubit(local_q, &mut self.rng)?;
+        sub.reset_qubit(local_q, &mut self.rng);
         self.try_split(ss);
         Ok(())
     }
@@ -1219,54 +1214,38 @@ fn remap_row(
     }
 }
 
-/// Copy one row of a reduced parent tableau into a component tableau,
-/// remapping parent-local qubit columns to component-local columns. The row's
-/// support must lie inside `local_qs`; columns outside it are dropped.
-fn copy_component_row(
-    sub: &SubTableau,
-    src_row: usize,
-    local_qs: &[usize],
-    cxz: &mut [u64],
-    cphase: &mut [bool],
-    cnw: usize,
-    dst_row: usize,
-) {
-    let cstride = 2 * cnw;
-    let base = src_row * sub.stride();
-    for (new_local, &old_local) in local_qs.iter().enumerate() {
-        let ow = old_local / 64;
-        let ob = old_local % 64;
-        let nww = new_local / 64;
-        let nb = new_local % 64;
-        if sub.xz[base + ow] & (1u64 << ob) != 0 {
-            cxz[dst_row * cstride + nww] |= 1u64 << nb;
+/// Maximal stretches of consecutive values in sorted `positions`, as
+/// `(start, len, to)`: values `start..start + len` sit at indices `to..to + len`.
+fn consecutive_runs(positions: &[usize]) -> SmallVec<[(usize, usize, usize); 8]> {
+    let mut runs = SmallVec::new();
+    let mut to = 0;
+    while to < positions.len() {
+        let start = positions[to];
+        let mut len = 1;
+        while to + len < positions.len() && positions[to + len] == start + len {
+            len += 1;
         }
-        if sub.xz[base + sub.num_words + ow] & (1u64 << ob) != 0 {
-            cxz[dst_row * cstride + cnw + nww] |= 1u64 << nb;
-        }
+        runs.push((start, len, to));
+        to += len;
     }
-    cphase[dst_row] = sub.phase[src_row];
+    runs
 }
 
-fn uf_find(parent: &mut [usize], x: usize) -> usize {
-    if parent[x] != x {
-        parent[x] = uf_find(parent, parent[x]);
-    }
-    parent[x]
-}
-
-fn uf_union(parent: &mut [usize], rank: &mut [u8], x: usize, y: usize) {
-    let rx = uf_find(parent, x);
-    let ry = uf_find(parent, y);
-    if rx == ry {
-        return;
-    }
-    if rank[rx] < rank[ry] {
-        parent[rx] = ry;
-    } else if rank[rx] > rank[ry] {
-        parent[ry] = rx;
-    } else {
-        parent[ry] = rx;
-        rank[rx] += 1;
+/// OR bits `start..start + len` of `src` into `dst` at `to..to + len`, one
+/// destination word at a time.
+fn or_bit_run(src: &[u64], start: usize, len: usize, dst: &mut [u64], to: usize) {
+    let mut done = 0;
+    while done < len {
+        let at = to + done;
+        let take = (64 - at % 64).min(len - done);
+        let from = start + done;
+        let (w, off) = (from / 64, from % 64);
+        let mut chunk = src[w] >> off;
+        if off + take > 64 {
+            chunk |= src[w + 1] << (64 - off);
+        }
+        chunk &= u64::MAX >> (64 - take);
+        dst[at / 64] |= chunk << (at % 64);
+        done += take;
     }
 }

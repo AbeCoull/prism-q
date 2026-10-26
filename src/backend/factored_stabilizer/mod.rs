@@ -105,8 +105,10 @@ impl SubTableau {
         2 * self.num_words
     }
 
+    /// Position of `global` in the cluster's qubit list, which every merge
+    /// and split keeps sorted.
     fn local_qubit(&self, global: usize) -> usize {
-        self.qubits.iter().position(|&q| q == global).unwrap()
+        self.qubits.binary_search(&global).unwrap()
     }
 
     #[inline(always)]
@@ -757,18 +759,18 @@ impl FactoredStabilizerBackend {
     /// Ebits across the cut at `subsystem`, summed over the clusters it
     /// crosses. A cluster lying wholly on one side of the cut carries none.
     fn cut_rank(&self, subsystem: &[usize]) -> usize {
+        let mut local: Vec<Vec<usize>> = vec![Vec::new(); self.subs.len()];
+        for &q in subsystem {
+            let index = self.qubit_to_sub[q];
+            local[index].push(self.subs[index].as_ref().unwrap().local_qubit(q));
+        }
         let mut total = 0;
-        for (index, sub) in self.subs.iter().enumerate() {
+        for (sub, local) in self.subs.iter().zip(&local) {
             let Some(sub) = sub else { continue };
-            let local: Vec<usize> = subsystem
-                .iter()
-                .filter(|&&q| self.qubit_to_sub[q] == index)
-                .map(|&q| sub.local_qubit(q))
-                .collect();
             if local.is_empty() || local.len() == sub.n {
                 continue;
             }
-            total += diagnostics::subsystem_rank(&sub.xz, sub.n, sub.num_words, &local);
+            total += diagnostics::subsystem_rank(&sub.xz, sub.n, sub.num_words, local);
         }
         total
     }

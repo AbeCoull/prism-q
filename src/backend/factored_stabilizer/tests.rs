@@ -1249,3 +1249,36 @@ fn measurement_moves_a_pivot_inside_its_own_row() {
         }
     }
 }
+
+// A register split into many clusters by mid-circuit measurements, cut along
+// random subsystems: the per-cluster ranks sum to the dense tableau's.
+#[test]
+fn entanglement_entropy_matches_the_dense_tableau_across_many_clusters() {
+    use rand::{RngExt, SeedableRng};
+    let n = 90;
+    let circuit = random_clifford_with_measurements(n, 1500, 42);
+    let mut mono = StabilizerBackend::new(42);
+    mono.init(n, circuit.num_classical_bits).unwrap();
+    let mut fact = FactoredStabilizerBackend::new(42);
+    fact.init(n, circuit.num_classical_bits).unwrap();
+    for inst in &circuit.instructions {
+        mono.apply(inst).unwrap();
+        fact.apply(inst).unwrap();
+    }
+    assert!(fact.subs.iter().flatten().count() > 10);
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for _ in 0..50 {
+        let mut subsystem: Vec<usize> = (0..n).filter(|_| rng.random_bool(0.4)).collect();
+        if subsystem.is_empty() {
+            subsystem.push(0);
+        }
+        for i in (1..subsystem.len()).rev() {
+            subsystem.swap(i, rng.random_range(0..=i));
+        }
+        assert_eq!(
+            fact.entanglement_entropy(&subsystem).unwrap(),
+            mono.entanglement_entropy(&subsystem).unwrap(),
+            "subsystem {subsystem:?}"
+        );
+    }
+}

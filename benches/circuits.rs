@@ -1513,6 +1513,25 @@ fn bench_factored_stabilizer_measurement(c: &mut Criterion) {
     group.finish();
 }
 
+// Bell pairs cut between the two halves of the register: no pair straddles
+// the cut, so no cluster reaches the rank kernel and the rows price the work
+// of sorting the subsystem's qubits by cluster across thousands of clusters.
+fn bench_factored_stabilizer_cut_rank(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored_stabilizer/cut_rank");
+    configure_group(&mut group);
+
+    for &n in &[2000usize, 8000] {
+        let circuit = circuits::independent_bell_pairs(n / 2);
+        let mut backend = prism_q::FactoredStabilizerBackend::new(42);
+        sim::run_on(&mut backend, &circuit).unwrap();
+        let subsystem: Vec<usize> = (0..n / 2).collect();
+        group.bench_function(BenchmarkId::new("bell_pairs_half", n), |b| {
+            b.iter(|| black_box(backend.entanglement_entropy(&subsystem).unwrap()));
+        });
+    }
+    group.finish();
+}
+
 // ---- Sparse backend ----
 
 fn bench_sparse_scaling(c: &mut Criterion) {
@@ -5497,6 +5516,7 @@ criterion_group! {
     bench_factored_stabilizer_single_cluster,
     bench_factored_stabilizer_local,
     bench_factored_stabilizer_measurement,
+    bench_factored_stabilizer_cut_rank,
     // Sparse
     bench_sparse_scaling,
     bench_sparse_walk,

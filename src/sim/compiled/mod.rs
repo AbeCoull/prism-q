@@ -14,6 +14,7 @@ mod sign_truth_table_tests;
 mod tests;
 
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
@@ -149,11 +150,13 @@ fn gaussian_eliminate(rows: &mut [Vec<u64>], num_cols: usize) -> (usize, Vec<usi
 const LUT_GROUP_SIZE: usize = 8;
 const LUT_MIN_RANK: usize = 8;
 
+/// Largest flip table built. Past it, sampling XORs the flip rows each random byte selects
+/// straight from the rows, drawing the same bytes, so the shots do not change.
+const MAX_FLIP_LUT_BYTES: usize = 16 << 20;
+
 struct FlipLut {
     data: Vec<u64>,
     m_words: usize,
-    num_full_groups: usize,
-    remainder_size: usize,
 }
 
 impl FlipLut {
@@ -189,18 +192,62 @@ impl FlipLut {
             }
         }
 
-        Self {
-            data,
-            m_words,
-            num_full_groups,
-            remainder_size,
-        }
+        Self { data, m_words }
+    }
+
+    fn table_bytes(rank: usize, m_words: usize) -> usize {
+        rank.div_ceil(LUT_GROUP_SIZE) * (1 << LUT_GROUP_SIZE) * m_words * size_of::<u64>()
     }
 
     #[inline(always)]
     fn lookup(&self, group: usize, byte: usize) -> &[u64] {
         let offset = (group * (1 << LUT_GROUP_SIZE) + byte) * self.m_words;
         &self.data[offset..offset + self.m_words]
+    }
+}
+
+/// The flip rows in groups of `LUT_GROUP_SIZE`, each group XORed in by one random byte:
+/// through the table when it fits `MAX_FLIP_LUT_BYTES`, else row by row.
+#[derive(Clone, Copy)]
+struct FlipGroups<'a> {
+    table: Option<&'a FlipLut>,
+    rows: &'a [Vec<u64>],
+    num_full_groups: usize,
+    remainder_size: usize,
+}
+
+impl<'a> FlipGroups<'a> {
+    /// Build the table on the first call that needs it.
+    fn new(lut: &'a OnceLock<Option<FlipLut>>, rows: &'a [Vec<u64>], m_words: usize) -> Self {
+        let table = lut.get_or_init(|| {
+            (FlipLut::table_bytes(rows.len(), m_words) <= MAX_FLIP_LUT_BYTES)
+                .then(|| FlipLut::build(rows, m_words))
+        });
+        Self {
+            table: table.as_ref(),
+            rows,
+            num_full_groups: rows.len() / LUT_GROUP_SIZE,
+            remainder_size: rows.len() % LUT_GROUP_SIZE,
+        }
+    }
+
+    fn total_groups(&self) -> usize {
+        self.num_full_groups + usize::from(self.remainder_size > 0)
+    }
+
+    #[inline(always)]
+    fn xor_into(&self, dst: &mut [u64], group: usize, byte: usize) {
+        match self.table {
+            Some(table) => xor_words(dst, table.lookup(group, byte)),
+            None => {
+                let mut bits = byte;
+                while bits != 0 {
+                    let row = group * LUT_GROUP_SIZE + bits.trailing_zeros() as usize;
+                    xor_words(dst, &self.rows[row]);
+                    bits &= bits - 1;
+                }
+            }
+        }
     }
 }
 
@@ -215,7 +262,7 @@ pub struct CompiledSampler {
     rank: usize,
     num_measurements: usize,
     rng: ChaCha8Rng,
-    lut: Option<FlipLut>,
+    lut: OnceLock<Option<FlipLut>>,
     sparse: Option<SparseParity>,
     parity_blocks: Option<ParityBlocks>,
     #[cfg(feature = "gpu")]
@@ -427,19 +474,13 @@ impl CompiledSampler {
         parity_blocks: Option<ParityBlocks>,
         seed: u64,
     ) -> Self {
-        let lut = if rank >= LUT_MIN_RANK {
-            Some(FlipLut::build(&flip_rows, num_measurements.div_ceil(64)))
-        } else {
-            None
-        };
-
         Self {
             flip_rows,
             ref_bits_packed,
             rank,
             num_measurements,
             rng: ChaCha8Rng::seed_from_u64(seed),
-            lut,
+            lut: OnceLock::new(),
             sparse,
             parity_blocks,
             #[cfg(feature = "gpu")]
@@ -582,8 +623,9 @@ impl CompiledSampler {
             return m_words;
         }
 
-        if let Some(lut) = &self.lut {
-            let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
+        if self.rank >= LUT_MIN_RANK {
+            let lut = FlipGroups::new(&self.lut, &self.flip_rows, m_words);
+            let total_groups = lut.total_groups();
             let bytes_per_shot = total_groups;
             let total_bytes = num_shots * bytes_per_shot;
             rand_buf.resize(total_bytes, 0);
@@ -620,9 +662,8 @@ impl CompiledSampler {
                     for g in 0..total_groups {
                         for s in tile_start..tile_end {
                             let byte = rand_buf[s * bytes_per_shot + g] as usize;
-                            let entry = lut.lookup(g, byte);
                             let shot_base = s * m_words;
-                            xor_words(&mut dst[shot_base..shot_base + m_words], entry);
+                            lut.xor_into(&mut dst[shot_base..shot_base + m_words], g, byte);
                         }
                     }
                 }
@@ -649,9 +690,8 @@ impl CompiledSampler {
                                 for s in tile_start..tile_end {
                                     let gs = chunk_start + s;
                                     let byte = rand_buf[gs * bytes_per_shot + g] as usize;
-                                    let entry = lut.lookup(g, byte);
                                     let base = s * m_words;
-                                    xor_words(&mut chunk[base..base + m_words], entry);
+                                    lut.xor_into(&mut chunk[base..base + m_words], g, byte);
                                 }
                             }
                         }
@@ -832,7 +872,8 @@ impl CompiledSampler {
             return;
         }
 
-        if let Some(lut) = &self.lut {
+        if self.rank >= LUT_MIN_RANK {
+            let lut = FlipGroups::new(&self.lut, &self.flip_rows, accum.len());
             let mut rand_buf = 0u64;
             let mut rand_pos = 8usize;
 
@@ -844,8 +885,7 @@ impl CompiledSampler {
                 let byte = (rand_buf & 0xFF) as usize;
                 rand_buf >>= 8;
                 rand_pos += 1;
-                let entry = lut.lookup(g, byte);
-                xor_words(accum, entry);
+                lut.xor_into(accum, g, byte);
             }
             if lut.remainder_size > 0 {
                 if rand_pos >= 8 {
@@ -853,8 +893,7 @@ impl CompiledSampler {
                 }
                 let mask = (1u64 << lut.remainder_size) - 1;
                 let byte = (rand_buf & mask) as usize;
-                let entry = lut.lookup(lut.num_full_groups, byte);
-                xor_words(accum, entry);
+                lut.xor_into(accum, lut.num_full_groups, byte);
             }
         } else {
             for j in 0..self.rank {
@@ -1270,6 +1309,8 @@ impl CompiledSampler {
         let rank = self.rank;
         let num_outcomes = 1usize << rank;
         let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+        let lut =
+            (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
         let mut counts = HashMap::new();
         let mut remaining = total_shots;
 
@@ -1286,12 +1327,10 @@ impl CompiledSampler {
 
             if count > 0 {
                 let mut outcome = self.ref_bits_packed[..m_words].to_vec();
-                if let Some(lut) = &self.lut {
-                    let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
-                    for g in 0..total_groups {
+                if let Some(lut) = lut {
+                    for g in 0..lut.total_groups() {
                         let byte = (key >> (g * 8)) & 0xFF;
-                        let entry = lut.lookup(g, byte);
-                        xor_words(&mut outcome, entry);
+                        lut.xor_into(&mut outcome, g, byte);
                     }
                 } else {
                     for j in 0..rank {
@@ -1324,10 +1363,11 @@ impl CompiledSampler {
         let num_outcomes = 1usize << rank;
         let mut rank_counts = vec![0u64; num_outcomes];
         let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+        let lut =
+            (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
 
-        if let Some(lut) = &self.lut {
-            let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
-            let bytes_per_shot = total_groups;
+        if let Some(lut) = lut {
+            let bytes_per_shot = lut.total_groups();
             let remainder_mask: u8 = if lut.remainder_size > 0 {
                 (1u8 << lut.remainder_size) - 1
             } else {
@@ -1391,12 +1431,10 @@ impl CompiledSampler {
                 continue;
             }
             let mut outcome = self.ref_bits_packed[..m_words].to_vec();
-            if let Some(lut) = &self.lut {
-                let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
-                for g in 0..total_groups {
+            if let Some(lut) = lut {
+                for g in 0..lut.total_groups() {
                     let byte = (key >> (g * 8)) & 0xFF;
-                    let entry = lut.lookup(g, byte);
-                    xor_words(&mut outcome, entry);
+                    lut.xor_into(&mut outcome, g, byte);
                 }
             } else {
                 for j in 0..rank {

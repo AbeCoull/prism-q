@@ -4070,6 +4070,22 @@ fn bench_compiled_sampler(c: &mut Criterion) {
         });
     }
 
+    // Rank 4096 over 4096 measurements, where a flip table would take 64 MiB.
+    let mut hadamard_wide = Circuit::new(4096, 4096);
+    for q in 0..4096 {
+        hadamard_wide.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..4096 {
+        hadamard_wide.add_measure(q, q);
+    }
+    group.bench_function(BenchmarkId::new("compile", "hadamard_4096q"), |b| {
+        b.iter(|| prism_q::compile_measurements(&hadamard_wide, SEED).unwrap());
+    });
+    group.bench_function(BenchmarkId::new("single_shot", 4096), |b| {
+        let mut sampler = prism_q::compile_measurements(&hadamard_wide, SEED).unwrap();
+        b.iter(|| black_box(sampler.sample()));
+    });
+
     for &n in &[100, 500, 1000] {
         let mut circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
         circuit.num_classical_bits = n;

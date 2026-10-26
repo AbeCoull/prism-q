@@ -276,7 +276,10 @@ fn lut_grouped_sampling_50q() {
     c.measure_all();
     let sampler = compile_measurements(&c, 42).unwrap();
     assert!(sampler.rank() >= 40, "50q should have high rank for LUT");
-    assert!(sampler.lut.is_some(), "rank >= 8 should build LUT");
+    assert!(
+        sampler.lut.get().is_none(),
+        "compiling must not build the flip table"
+    );
 
     let compiled = run_shots_compiled(&c, 5_000, 42).unwrap();
     let reference = crate::sim::run_shots_with(
@@ -2465,4 +2468,83 @@ fn counts_match_a_bit_by_bit_histogram_past_the_parallel_floor() {
         assert_eq!(shot_major.counts(), expected, "{measurements} shot-major");
         assert_eq!(meas_major.counts(), expected, "{measurements} meas-major");
     }
+}
+
+/// Rank 10 over `measurements` qubits as one parity block: H on the first ten, then a CX
+/// chain through the register.
+fn rank_ten_chain(measurements: usize) -> Circuit {
+    let mut c = Circuit::new(measurements, measurements);
+    for q in 0..10 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..measurements - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..measurements {
+        c.add_measure(q, q);
+    }
+    c
+}
+
+#[test]
+fn flip_rows_without_the_table_sample_the_same_shots() {
+    let mut wide = circuits::clifford_heavy_circuit(130, 10, 42);
+    wide.measure_all();
+    let circuits = [wide, rank_ten_chain(65), rank_ten_chain(130)];
+    for (index, circuit) in circuits.iter().enumerate() {
+        let mut with_table = compile_measurements(circuit, 42).unwrap();
+        let mut without = compile_measurements(circuit, 42).unwrap();
+        assert!(with_table.rank() >= LUT_MIN_RANK, "circuit {index}");
+        assert!(with_table.lut.get().is_none(), "circuit {index}");
+        assert!(without.lut.set(None).is_ok(), "circuit {index}");
+        if index > 0 {
+            assert!(with_table.parity_blocks.is_none(), "circuit {index}");
+        }
+
+        for _ in 0..3 {
+            assert_eq!(with_table.sample(), without.sample(), "circuit {index}");
+        }
+        assert!(
+            matches!(with_table.lut.get(), Some(Some(_))),
+            "circuit {index}: sampling must build the table"
+        );
+        for shots in [1, 63, 65, 200, 1000] {
+            assert_eq!(
+                with_table.sample_bulk_words_shot_major(shots),
+                without.sample_bulk_words_shot_major(shots),
+                "circuit {index}, {shots} shots"
+            );
+        }
+        for shots in [5000, 10_000, 30_000] {
+            assert_eq!(
+                with_table.sample_counts(shots),
+                without.sample_counts(shots),
+                "circuit {index}, {shots} counted shots"
+            );
+        }
+    }
+}
+
+#[test]
+fn flip_table_is_skipped_past_the_size_cap() {
+    assert_eq!(FlipLut::table_bytes(4096, 64), 64 << 20);
+    assert!(FlipLut::table_bytes(4096, 64) > MAX_FLIP_LUT_BYTES);
+    assert!(FlipLut::table_bytes(2048, 32) <= MAX_FLIP_LUT_BYTES);
+
+    let flip_rows: Vec<Vec<u64>> = (0..4096)
+        .map(|row| {
+            let mut words = vec![0u64; 64];
+            words[row / 64] = 1 << (row % 64);
+            words
+        })
+        .collect();
+    let lut = OnceLock::new();
+    let groups = FlipGroups::new(&lut, &flip_rows, 64);
+    assert!(groups.table.is_none());
+    assert!(matches!(lut.get(), Some(None)));
+    let mut dst = vec![0u64; 64];
+    groups.xor_into(&mut dst, 3, 0b1000_0101);
+    let mut expected = vec![0u64; 64];
+    expected[0] = (1 << 24) | (1 << 26) | (1 << 31);
+    assert_eq!(dst, expected);
 }

@@ -2366,6 +2366,35 @@ mod multi_pauli_rot {
 }
 
 #[test]
+fn multi_2q_tiers_take_each_gate_once_at_every_tile_width() {
+    use crate::circuit::SmallVec;
+    use crate::gates::{MULTI_2Q_MAX_TILE_BITS, MULTI_2Q_MIN_TILE_BITS};
+    let mat = crate::gates::Gate::Cx.matrix_4x4();
+    let gates: Vec<(usize, usize, [[Complex64; 4]; 4])> = (1..22).map(|q| (0, q, mat)).collect();
+    for tile_bits in MULTI_2Q_MIN_TILE_BITS..=MULTI_2Q_MAX_TILE_BITS {
+        let max_small = kernels::max_target_for_tile(1 << tile_bits);
+        let mut small = SmallVec::new();
+        let mut medium = SmallVec::new();
+        let mut large = SmallVec::new();
+        kernels::split_multi_2q_tiers(&gates, max_small, &mut small, &mut medium, &mut large);
+        let mut seen: Vec<usize> = small
+            .iter()
+            .chain(&medium)
+            .map(|&(_, q1, _)| q1)
+            .chain(large.iter().map(|&&(_, q1, _)| q1))
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (1..22).collect::<Vec<_>>(), "tile bits {tile_bits}");
+        assert!(small.iter().all(|&(_, q1, _)| q1 <= max_small));
+        assert!(
+            large
+                .iter()
+                .all(|&&(_, q1, _)| q1 > max_small.max(kernels::MULTI_GATE_MAX_L3_TARGET))
+        );
+    }
+}
+
+#[test]
 fn multi_2q_order_check_flags_a_batch_that_descends_a_tier() {
     use super::kernels::multi_2q_keeps_order;
     let mat = crate::gates::Gate::Cx.matrix_4x4();

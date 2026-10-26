@@ -244,21 +244,38 @@ fn prepare_2q(
         .collect()
 }
 
-/// Prepare the gates whose high qubit fits the L2 tile (up to `max_l2_target`) or the
-/// L3 tile, by tier. Gates above the L3 tile are left out.
+/// The tier of the tiered `Multi2q` pass that takes a gate whose high qubit is `max_q`:
+/// 0 for the in-place tile (up to `max_l2_target`), 1 for the L3 tile, 2 for a full pass.
+/// The in-place tile can reach past the L3 one, and then takes the gates both would.
 #[inline(always)]
-pub(crate) fn split_multi_2q_tiers(
-    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+fn multi_2q_tier(max_q: usize, max_l2_target: usize) -> usize {
+    if max_q <= max_l2_target {
+        0
+    } else if max_q <= MULTI_GATE_MAX_L3_TARGET {
+        1
+    } else {
+        2
+    }
+}
+
+pub(crate) type TargetedGate2q = (usize, usize, [[Complex64; 4]; 4]);
+
+/// Sort `gates` into the in-place tile, L3 tile and untiled tiers of
+/// [`multi_2q_tier`], preparing the tiled ones, so each gate lands in exactly one.
+#[inline(always)]
+pub(crate) fn split_multi_2q_tiers<'a>(
+    gates: &'a [TargetedGate2q],
     max_l2_target: usize,
     small_gates: &mut SmallVec<[(usize, usize, simd::PreparedGate2q); 2]>,
     medium_gates: &mut SmallVec<[(usize, usize, simd::PreparedGate2q); 2]>,
+    large_gates: &mut SmallVec<[&'a TargetedGate2q; 4]>,
 ) {
-    for &(q0, q1, ref mat) in gates {
-        let max_q = q0.max(q1);
-        if max_q <= max_l2_target {
-            small_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
-        } else if max_q <= MULTI_GATE_MAX_L3_TARGET {
-            medium_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
+    for gate in gates {
+        let &(q0, q1, ref mat) = gate;
+        match multi_2q_tier(q0.max(q1), max_l2_target) {
+            0 => small_gates.push((q0, q1, simd::PreparedGate2q::new(mat))),
+            1 => medium_gates.push((q0, q1, simd::PreparedGate2q::new(mat))),
+            _ => large_gates.push(gate),
         }
     }
 }
@@ -275,10 +292,8 @@ pub(crate) fn multi_2q_keeps_order(
         return true;
     }
     let max_small = max_target_for_tile(multi_2q_small_tile(num_qubits));
-    let tier = |&(q0, q1, _): &(usize, usize, [[Complex64; 4]; 4])| {
-        let q = q0.max(q1);
-        usize::from(q > max_small) + usize::from(q > MULTI_GATE_MAX_L3_TARGET)
-    };
+    let tier =
+        |&(q0, q1, _): &(usize, usize, [[Complex64; 4]; 4])| multi_2q_tier(q0.max(q1), max_small);
     gates
         .windows(2)
         .all(|pair| tier(&pair[0]) <= tier(&pair[1]))
@@ -5486,11 +5501,13 @@ impl StatevectorBackend {
         let tile_size = multi_2q_small_tile(self.num_qubits);
         let mut small_gates = SmallVec::new();
         let mut medium_gates = SmallVec::new();
+        let mut large_gates = SmallVec::new();
         split_multi_2q_tiers(
             gates,
             max_target_for_tile(tile_size),
             &mut small_gates,
             &mut medium_gates,
+            &mut large_gates,
         );
 
         if !small_gates.is_empty() {
@@ -5518,16 +5535,14 @@ impl StatevectorBackend {
             }
         }
 
-        self.apply_multi_2q_untiled(gates);
+        self.apply_multi_2q_untiled(&large_gates);
     }
 
-    /// Apply, one full pass each, the gates whose high qubit is above the L3 tile.
+    /// Apply `gates`, the untiled tier of [`split_multi_2q_tiers`], one full pass each.
     #[inline(always)]
-    fn apply_multi_2q_untiled(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
-        for &(q0, q1, ref mat) in gates {
-            if q0.max(q1) > MULTI_GATE_MAX_L3_TARGET {
-                self.apply_fused_2q(q0, q1, mat);
-            }
+    fn apply_multi_2q_untiled(&mut self, gates: &[&TargetedGate2q]) {
+        for &&(q0, q1, ref mat) in gates {
+            self.apply_fused_2q(q0, q1, mat);
         }
     }
 
@@ -5540,11 +5555,13 @@ impl StatevectorBackend {
         let tile_size = multi_2q_small_tile(self.num_qubits);
         let mut small_gates = SmallVec::new();
         let mut medium_gates = SmallVec::new();
+        let mut large_gates = SmallVec::new();
         split_multi_2q_tiers(
             gates,
             max_target_for_tile(tile_size),
             &mut small_gates,
             &mut medium_gates,
+            &mut large_gates,
         );
 
         if !small_gates.is_empty() {
@@ -5578,7 +5595,7 @@ impl StatevectorBackend {
                 });
         }
 
-        self.apply_multi_2q_untiled(gates);
+        self.apply_multi_2q_untiled(&large_gates);
     }
 
     #[cfg(feature = "parallel")]

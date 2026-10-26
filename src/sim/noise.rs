@@ -2254,8 +2254,7 @@ fn scatter_to_global(local: &[u64], bm_list: &[usize], out: &mut [u64]) {
     }
 }
 
-/// True when every two-qubit event lands inside the subsystem block holding
-/// the gate it follows.
+/// True when both qubits of every two-qubit event sit in one subsystem block.
 ///
 /// The filtered compile sweeps one block at a time and holds only that
 /// block's propagated masks, so a pair reaching across blocks has nowhere to
@@ -2271,29 +2270,13 @@ fn pairs_stay_in_one_block(circuit: &Circuit, noise: &NoiseModel, blocks: &[Vec<
         }
     }
 
-    for (inst, events) in circuit.instructions.iter().zip(&noise.after_gate) {
-        let mut pairs = events
-            .iter()
-            .filter_map(NoiseEvent::pauli_pair)
-            .filter(|&(_, _, p)| p > 0.0)
-            .peekable();
-        if pairs.peek().is_none() {
-            continue;
-        }
-
-        let targets = match inst {
-            Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => targets,
-            _ => return false,
-        };
-        let Some(&first) = targets.first() else {
-            return false;
-        };
-        let block = qubit_to_block[first];
-        if !pairs.all(|(q0, q1, _)| qubit_to_block[q0] == block && qubit_to_block[q1] == block) {
-            return false;
-        }
-    }
-    true
+    noise
+        .after_gate
+        .iter()
+        .flatten()
+        .filter_map(NoiseEvent::pauli_pair)
+        .filter(|&(_, _, p)| p > 0.0)
+        .all(|(q0, q1, _)| qubit_to_block[q0] == qubit_to_block[q1])
 }
 
 fn compile_noisy_filtered(
@@ -2364,88 +2347,65 @@ fn compile_noisy_filtered(
         let mut z_packed: Vec<Vec<u64>> = vec![vec![0u64; bm_words]; bn];
         let mut sign_packed: Vec<u64> = vec![0u64; bm_words];
 
-        for (local_mi, &global_mi) in bm_list.iter().enumerate() {
-            let q = measurement_qubits[global_mi];
-            let local_q = qubit_to_local[q];
-            z_packed[local_q][local_mi / 64] |= 1u64 << (local_mi % 64);
-        }
-
-        let block_gates: Vec<(usize, &Gate, SmallVec<[usize; 4]>)> = circuit
-            .instructions
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, inst)| match inst {
-                Instruction::Gate { gate, targets } => {
-                    if targets.iter().all(|&t| qubit_to_block[t] == bi) {
-                        let local_targets: SmallVec<[usize; 4]> =
-                            targets.iter().map(|&t| qubit_to_local[t]).collect();
-                        Some((idx, gate, local_targets))
-                    } else {
-                        None
-                    }
-                }
-                Instruction::Conditional { gate, targets, .. } => {
-                    if targets.iter().all(|&t| qubit_to_block[t] == bi) {
-                        let local_targets: SmallVec<[usize; 4]> =
-                            targets.iter().map(|&t| qubit_to_local[t]).collect();
-                        Some((idx, gate, local_targets))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .collect();
-
-        for (instr_idx, gate, local_targets) in block_gates.iter().rev() {
-            let noise_ops = &noise.after_gate[*instr_idx];
-            if !noise_ops.is_empty() {
-                for event in noise_ops {
-                    if let Some((q0, q1, p)) = event.pauli_pair() {
-                        if p == 0.0 {
-                            continue;
-                        }
-                        let (l0, l1) = (qubit_to_local[q0], qubit_to_local[q1]);
-                        if !sensitive(&x_packed, &z_packed, l0)
-                            && !sensitive(&x_packed, &z_packed, l1)
-                        {
-                            continue;
-                        }
-                        scatter_to_global(&x_packed[l0], bm_list, &mut global_x_buf);
-                        scatter_to_global(&z_packed[l0], bm_list, &mut global_z_buf);
-                        scatter_to_global(&x_packed[l1], bm_list, &mut pair_x_buf);
-                        scatter_to_global(&z_packed[l1], bm_list, &mut pair_z_buf);
-                        events.push_pair(&global_x_buf, &global_z_buf, &pair_x_buf, &pair_z_buf, p);
+        // Gates never couple blocks, so an event reaches only the measurements
+        // of the block holding its own qubits, whichever instruction's slot
+        // carries it.
+        let mut local_mi = bm;
+        for (instr_idx, inst) in circuit.instructions.iter().enumerate().rev() {
+            for event in &noise.after_gate[instr_idx] {
+                if let Some((q0, q1, p)) = event.pauli_pair() {
+                    if p == 0.0 || qubit_to_block[q0] != bi {
                         continue;
                     }
-
-                    let (px, py, pz) = event.pauli_probs();
-                    let local_q = qubit_to_local[event.qubit()];
-
-                    if sensitive(&x_packed, &z_packed, local_q) {
-                        global_x_buf.fill(0);
-                        global_z_buf.fill(0);
-                        for (local_mi, &global_mi) in bm_list.iter().enumerate() {
-                            if (x_packed[local_q][local_mi / 64] >> (local_mi % 64)) & 1 != 0 {
-                                global_x_buf[global_mi / 64] |= 1u64 << (global_mi % 64);
-                            }
-                            if (z_packed[local_q][local_mi / 64] >> (local_mi % 64)) & 1 != 0 {
-                                global_z_buf[global_mi / 64] |= 1u64 << (global_mi % 64);
-                            }
-                        }
-                        events.push(&global_x_buf, &global_z_buf, px, py, pz);
+                    let (l0, l1) = (qubit_to_local[q0], qubit_to_local[q1]);
+                    if !sensitive(&x_packed, &z_packed, l0) && !sensitive(&x_packed, &z_packed, l1)
+                    {
+                        continue;
                     }
+                    scatter_to_global(&x_packed[l0], bm_list, &mut global_x_buf);
+                    scatter_to_global(&z_packed[l0], bm_list, &mut global_z_buf);
+                    scatter_to_global(&x_packed[l1], bm_list, &mut pair_x_buf);
+                    scatter_to_global(&z_packed[l1], bm_list, &mut pair_z_buf);
+                    events.push_pair(&global_x_buf, &global_z_buf, &pair_x_buf, &pair_z_buf, p);
+                    continue;
+                }
+
+                let q = event.qubit();
+                if qubit_to_block[q] != bi {
+                    continue;
+                }
+                let (px, py, pz) = event.pauli_probs();
+                let local_q = qubit_to_local[q];
+
+                if sensitive(&x_packed, &z_packed, local_q) {
+                    scatter_to_global(&x_packed[local_q], bm_list, &mut global_x_buf);
+                    scatter_to_global(&z_packed[local_q], bm_list, &mut global_z_buf);
+                    events.push(&global_x_buf, &global_z_buf, px, py, pz);
                 }
             }
 
-            batch_propagate_backward(
-                &mut x_packed,
-                &mut z_packed,
-                &mut sign_packed,
-                gate,
-                local_targets.as_slice(),
-                bm_words,
-            );
+            match inst {
+                Instruction::Gate { gate, targets }
+                | Instruction::Conditional { gate, targets, .. }
+                    if targets.iter().all(|&t| qubit_to_block[t] == bi) =>
+                {
+                    let local_targets: SmallVec<[usize; 4]> =
+                        targets.iter().map(|&t| qubit_to_local[t]).collect();
+                    batch_propagate_backward(
+                        &mut x_packed,
+                        &mut z_packed,
+                        &mut sign_packed,
+                        gate,
+                        local_targets.as_slice(),
+                        bm_words,
+                    );
+                }
+                Instruction::Measure { qubit, .. } if qubit_to_block[*qubit] == bi => {
+                    local_mi -= 1;
+                    z_packed[qubit_to_local[*qubit]][local_mi / 64] |= 1u64 << (local_mi % 64);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -2473,26 +2433,11 @@ fn compile_noisy_monolithic(
 
     let n = circuit.num_qubits;
 
-    let gate_indices: Vec<(usize, &Gate, &[usize])> = circuit
+    let num_measurements = circuit
         .instructions
         .iter()
-        .enumerate()
-        .filter_map(|(idx, inst)| match inst {
-            Instruction::Gate { gate, targets } => Some((idx, gate, targets.as_slice())),
-            Instruction::Conditional { gate, targets, .. } => Some((idx, gate, targets.as_slice())),
-            _ => None,
-        })
-        .collect();
-
-    let measurement_qubits: Vec<usize> = circuit
-        .instructions
-        .iter()
-        .filter_map(|inst| match inst {
-            Instruction::Measure { qubit, .. } => Some(*qubit),
-            _ => None,
-        })
-        .collect();
-    let num_measurements = measurement_qubits.len();
+        .filter(|inst| matches!(inst, Instruction::Measure { .. }))
+        .count();
     let m_words = num_measurements.div_ceil(64);
 
     if num_measurements == 0 {
@@ -2513,50 +2458,57 @@ fn compile_noisy_monolithic(
     let mut z_packed: Vec<Vec<u64>> = vec![vec![0u64; m_words]; n];
     let mut sign_packed: Vec<u64> = vec![0u64; m_words];
 
-    for (mi, &q) in measurement_qubits.iter().enumerate() {
-        z_packed[q][mi / 64] |= 1u64 << (mi % 64);
-    }
-
     let total_noise_events: usize = noise.after_gate.iter().map(|ops| ops.len()).sum();
     let mut events = FlatNoiseSensitivity::new(m_words, total_noise_events);
 
-    for &(instr_idx, gate, targets) in gate_indices.iter().rev() {
-        let noise_ops = &noise.after_gate[instr_idx];
-        if !noise_ops.is_empty() {
-            for event in noise_ops {
-                if let Some((q0, q1, p)) = event.pauli_pair() {
-                    if p == 0.0 {
-                        continue;
-                    }
-                    if sensitive(&x_packed, &z_packed, q0) || sensitive(&x_packed, &z_packed, q1) {
-                        events.push_pair(
-                            &x_packed[q0],
-                            &z_packed[q0],
-                            &x_packed[q1],
-                            &z_packed[q1],
-                            p,
-                        );
-                    }
+    // A measurement turns sensitive only once the backward sweep reaches it,
+    // so an event in a slot between two measurements reaches the later one
+    // alone.
+    let mut mi = num_measurements;
+    for (instr_idx, inst) in circuit.instructions.iter().enumerate().rev() {
+        for event in &noise.after_gate[instr_idx] {
+            if let Some((q0, q1, p)) = event.pauli_pair() {
+                if p == 0.0 {
                     continue;
                 }
-
-                let (px, py, pz) = event.pauli_probs();
-                let q = event.qubit();
-
-                if sensitive(&x_packed, &z_packed, q) {
-                    events.push(&x_packed[q], &z_packed[q], px, py, pz);
+                if sensitive(&x_packed, &z_packed, q0) || sensitive(&x_packed, &z_packed, q1) {
+                    events.push_pair(
+                        &x_packed[q0],
+                        &z_packed[q0],
+                        &x_packed[q1],
+                        &z_packed[q1],
+                        p,
+                    );
                 }
+                continue;
+            }
+
+            let (px, py, pz) = event.pauli_probs();
+            let q = event.qubit();
+
+            if sensitive(&x_packed, &z_packed, q) {
+                events.push(&x_packed[q], &z_packed[q], px, py, pz);
             }
         }
 
-        batch_propagate_backward(
-            &mut x_packed,
-            &mut z_packed,
-            &mut sign_packed,
-            gate,
-            targets,
-            m_words,
-        );
+        match inst {
+            Instruction::Gate { gate, targets }
+            | Instruction::Conditional { gate, targets, .. } => {
+                batch_propagate_backward(
+                    &mut x_packed,
+                    &mut z_packed,
+                    &mut sign_packed,
+                    gate,
+                    targets.as_slice(),
+                    m_words,
+                );
+            }
+            Instruction::Measure { qubit, .. } => {
+                mi -= 1;
+                z_packed[*qubit][mi / 64] |= 1u64 << (mi % 64);
+            }
+            _ => {}
+        }
     }
 
     let (z_lut, x_lut) = build_noise_luts(&events);
@@ -2810,76 +2762,6 @@ fn run_shots_noisy_frame(
                 Instruction::Gate { gate, targets }
                 | Instruction::Conditional { gate, targets, .. } => {
                     apply_gate_to_frame(gate, targets.as_slice(), &mut x_frame, &mut z_frame, bw);
-
-                    for event in &noise.after_gate[idx] {
-                        if let Some((q0, q1, p)) = event.pauli_pair() {
-                            if p == 0.0 {
-                                continue;
-                            }
-                            if p < 0.5 && batch_n >= 32 {
-                                let ln_1mp = (-p).ln_1p();
-                                let mut pos = geometric_sample(&mut rng, ln_1mp);
-                                while pos < batch_n {
-                                    let r: f64 = rand::RngExt::random(&mut rng);
-                                    let (l0, l1) = pair_branch(r);
-                                    flip_frame_letter(&mut x_frame, &mut z_frame, q0, pos, l0);
-                                    flip_frame_letter(&mut x_frame, &mut z_frame, q1, pos, l1);
-                                    pos += 1 + geometric_sample(&mut rng, ln_1mp);
-                                }
-                            } else {
-                                for s in 0..batch_n {
-                                    let r: f64 = rand::RngExt::random(&mut rng);
-                                    if r < p {
-                                        let (l0, l1) = pair_branch(r / p);
-                                        flip_frame_letter(&mut x_frame, &mut z_frame, q0, s, l0);
-                                        flip_frame_letter(&mut x_frame, &mut z_frame, q1, s, l1);
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-
-                        let (px, py, pz) = event.pauli_probs();
-                        let q = event.qubit();
-                        let p_event = px + py + pz;
-                        if p_event == 0.0 {
-                            continue;
-                        }
-
-                        let px_frac = px / p_event;
-                        let pxy_frac = (px + py) / p_event;
-
-                        if p_event < 0.5 && batch_n >= 32 {
-                            let ln_1mp = (-p_event).ln_1p();
-                            let mut pos = geometric_sample(&mut rng, ln_1mp);
-                            while pos < batch_n {
-                                let r: f64 = rand::RngExt::random(&mut rng);
-                                let bit = 1u64 << (pos % 64);
-                                let w = pos / 64;
-                                if r < px_frac {
-                                    x_frame[q][w] ^= bit;
-                                } else if r < pxy_frac {
-                                    x_frame[q][w] ^= bit;
-                                    z_frame[q][w] ^= bit;
-                                } else {
-                                    z_frame[q][w] ^= bit;
-                                }
-                                pos += 1 + geometric_sample(&mut rng, ln_1mp);
-                            }
-                        } else {
-                            for s in 0..batch_n {
-                                let r: f64 = rand::RngExt::random(&mut rng);
-                                if r < px {
-                                    x_frame[q][s / 64] ^= 1u64 << (s % 64);
-                                } else if r < px + py {
-                                    x_frame[q][s / 64] ^= 1u64 << (s % 64);
-                                    z_frame[q][s / 64] ^= 1u64 << (s % 64);
-                                } else if r < p_event {
-                                    z_frame[q][s / 64] ^= 1u64 << (s % 64);
-                                }
-                            }
-                        }
-                    }
                 }
                 Instruction::Measure {
                     qubit,
@@ -2932,6 +2814,76 @@ fn run_shots_noisy_frame(
                     meas_idx += 1;
                 }
                 _ => {}
+            }
+
+            for event in &noise.after_gate[idx] {
+                if let Some((q0, q1, p)) = event.pauli_pair() {
+                    if p == 0.0 {
+                        continue;
+                    }
+                    if p < 0.5 && batch_n >= 32 {
+                        let ln_1mp = (-p).ln_1p();
+                        let mut pos = geometric_sample(&mut rng, ln_1mp);
+                        while pos < batch_n {
+                            let r: f64 = rand::RngExt::random(&mut rng);
+                            let (l0, l1) = pair_branch(r);
+                            flip_frame_letter(&mut x_frame, &mut z_frame, q0, pos, l0);
+                            flip_frame_letter(&mut x_frame, &mut z_frame, q1, pos, l1);
+                            pos += 1 + geometric_sample(&mut rng, ln_1mp);
+                        }
+                    } else {
+                        for s in 0..batch_n {
+                            let r: f64 = rand::RngExt::random(&mut rng);
+                            if r < p {
+                                let (l0, l1) = pair_branch(r / p);
+                                flip_frame_letter(&mut x_frame, &mut z_frame, q0, s, l0);
+                                flip_frame_letter(&mut x_frame, &mut z_frame, q1, s, l1);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let (px, py, pz) = event.pauli_probs();
+                let q = event.qubit();
+                let p_event = px + py + pz;
+                if p_event == 0.0 {
+                    continue;
+                }
+
+                let px_frac = px / p_event;
+                let pxy_frac = (px + py) / p_event;
+
+                if p_event < 0.5 && batch_n >= 32 {
+                    let ln_1mp = (-p_event).ln_1p();
+                    let mut pos = geometric_sample(&mut rng, ln_1mp);
+                    while pos < batch_n {
+                        let r: f64 = rand::RngExt::random(&mut rng);
+                        let bit = 1u64 << (pos % 64);
+                        let w = pos / 64;
+                        if r < px_frac {
+                            x_frame[q][w] ^= bit;
+                        } else if r < pxy_frac {
+                            x_frame[q][w] ^= bit;
+                            z_frame[q][w] ^= bit;
+                        } else {
+                            z_frame[q][w] ^= bit;
+                        }
+                        pos += 1 + geometric_sample(&mut rng, ln_1mp);
+                    }
+                } else {
+                    for s in 0..batch_n {
+                        let r: f64 = rand::RngExt::random(&mut rng);
+                        if r < px {
+                            x_frame[q][s / 64] ^= 1u64 << (s % 64);
+                        } else if r < px + py {
+                            x_frame[q][s / 64] ^= 1u64 << (s % 64);
+                            z_frame[q][s / 64] ^= 1u64 << (s % 64);
+                        } else if r < p_event {
+                            z_frame[q][s / 64] ^= 1u64 << (s % 64);
+                        }
+                    }
+                }
             }
         }
     }

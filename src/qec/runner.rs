@@ -120,7 +120,7 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
         );
     }
     program
-        .compile_sampler()?
+        .compile_validated_sampler()?
         .sample(program.options().shots, None)
 }
 

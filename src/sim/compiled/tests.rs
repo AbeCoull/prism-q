@@ -2290,12 +2290,20 @@ fn live_forward_agrees_with_tableau_runs() {
 }
 
 /// A random `shots x measurements` matrix in both layouts, padding clear.
-fn random_packed_pair(shots: usize, measurements: usize, seed: u64) -> (PackedShots, PackedShots) {
+/// Each bit is set with probability `2^-(1 + thinning)`.
+fn random_packed_pair(
+    shots: usize,
+    measurements: usize,
+    thinning: u32,
+    seed: u64,
+) -> (PackedShots, PackedShots) {
     use rand::RngExt;
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let m_words = measurements.div_ceil(64);
     let tail = measurement_tail_mask(measurements);
-    let mut data: Vec<u64> = (0..shots * m_words).map(|_| rng.random()).collect();
+    let mut data: Vec<u64> = (0..shots * m_words)
+        .map(|_| (0..thinning).fold(rng.random::<u64>(), |word, _| word & rng.random::<u64>()))
+        .collect();
     for shot in 0..shots {
         data[shot * m_words + m_words - 1] &= tail;
     }
@@ -2329,34 +2337,37 @@ fn layout_conversions_match_a_bit_by_bit_transpose() {
     let mut seed = 0;
     for &shots in &sizes {
         for &measurements in &sizes {
-            seed += 1;
-            let (shot_major, meas_major) = random_packed_pair(shots, measurements, seed);
-            let expected = bytes_bit_by_bit(&shot_major);
-            assert_eq!(
-                meas_major.to_shot_major_bytes(),
-                expected,
-                "{shots}x{measurements}"
-            );
-            assert_eq!(
-                shot_major.to_shot_major_bytes(),
-                expected,
-                "{shots}x{measurements}"
-            );
-            assert_eq!(
-                meas_major.to_shot_major().raw_data(),
-                shot_major.raw_data(),
-                "{shots}x{measurements}"
-            );
-            assert_eq!(
-                meas_major.clone().into_shot_major_data(),
-                shot_major.raw_data(),
-                "{shots}x{measurements}"
-            );
-            assert_eq!(
-                shot_major.to_meas_major().raw_data(),
-                meas_major.raw_data(),
-                "{shots}x{measurements}"
-            );
+            for thinning in [0, 7] {
+                seed += 1;
+                let (shot_major, meas_major) =
+                    random_packed_pair(shots, measurements, thinning, seed);
+                let expected = bytes_bit_by_bit(&shot_major);
+                assert_eq!(
+                    meas_major.to_shot_major_bytes(),
+                    expected,
+                    "{shots}x{measurements} thinning {thinning}"
+                );
+                assert_eq!(
+                    shot_major.to_shot_major_bytes(),
+                    expected,
+                    "{shots}x{measurements} thinning {thinning}"
+                );
+                assert_eq!(
+                    meas_major.to_shot_major().raw_data(),
+                    shot_major.raw_data(),
+                    "{shots}x{measurements} thinning {thinning}"
+                );
+                assert_eq!(
+                    meas_major.clone().into_shot_major_data(),
+                    shot_major.raw_data(),
+                    "{shots}x{measurements} thinning {thinning}"
+                );
+                assert_eq!(
+                    shot_major.to_meas_major().raw_data(),
+                    meas_major.raw_data(),
+                    "{shots}x{measurements} thinning {thinning}"
+                );
+            }
         }
     }
 }
@@ -2380,7 +2391,7 @@ fn layout_conversions_handle_empty_matrices() {
 #[test]
 fn xor_columns_flips_the_masked_columns_of_every_shot() {
     for (shots, measurements) in [(1, 1), (65, 3), (130, 70)] {
-        let (shot_major, meas_major) = random_packed_pair(shots, measurements, 99);
+        let (shot_major, meas_major) = random_packed_pair(shots, measurements, 0, 99);
         let mut mask = vec![0u64; measurements.div_ceil(64)];
         for measurement in (0..measurements).step_by(3) {
             mask[measurement / 64] |= 1 << (measurement % 64);

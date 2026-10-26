@@ -76,24 +76,38 @@ impl QecProgram {
                     .to_string(),
             });
         }
+        self.compile_validated_sampler()
+    }
+
+    /// [`Self::compile_sampler`] for a program whose record reuse is already validated
+    /// and which carries no `EXP_VAL` ops.
+    pub(super) fn compile_validated_sampler(&self) -> Result<QecCompiledSampler> {
         let (has_noise, has_feedforward) = validate_qec_compiled_program(self)?;
         let options = self.options();
         qec_runner_chunk_size(options)?;
         let referenced = options.detector_reference == QecDetectorReference::Noiseless;
-        let detector_rows = self.detector_rows()?;
-        let observable_rows = self.observable_rows()?;
-
         let mut sampler = QecCompiledSampler {
             route: QecSamplerRoute::Empty,
             num_measurements: self.num_measurements(),
-            postselection_rows: self.postselection_rows()?,
-            detector_rows,
-            observable_rows,
+            postselection_rows: Vec::new(),
+            detector_rows: Vec::new(),
+            observable_rows: Vec::new(),
             chunk_size: options.chunk_size,
             keep_measurements: options.keep_measurements,
             reference: None,
             next_seed: options.seed,
         };
+        // Postselection rules out the parity route, so it builds its rows alongside the
+        // lowering and every other route builds them here.
+        let parity_route = !self.has_leakage()
+            && self.num_measurements() > 0
+            && !has_feedforward
+            && qec_records_unobserved(self);
+        if !parity_route {
+            sampler.detector_rows = self.detector_rows()?;
+            sampler.observable_rows = self.observable_rows()?;
+            sampler.postselection_rows = self.postselection_rows()?;
+        }
         if self.has_leakage() {
             let mut leaky = QecLeakageSampler::compile(self)?;
             let (uncorrected, reference) =
@@ -106,17 +120,23 @@ impl QecProgram {
         if self.num_measurements() == 0 {
             return Ok(sampler);
         }
-        if !has_feedforward && qec_records_unobserved(self) {
-            let (projection, deferred) = qec_join(
-                || {
-                    QecParityProjection::new(
+        if parity_route {
+            let (rows, deferred) = qec_join(
+                || -> Result<_> {
+                    let detector_rows = self.detector_rows()?;
+                    let observable_rows = self.observable_rows()?;
+                    let projection = QecParityProjection::new(
                         self.num_measurements(),
-                        &sampler.detector_rows,
-                        &sampler.observable_rows,
-                    )
+                        &detector_rows,
+                        &observable_rows,
+                    );
+                    Ok((detector_rows, observable_rows, projection))
                 },
                 || lower_qec_program_to_deferred_circuit(self),
             );
+            let (detector_rows, observable_rows, projection) = rows?;
+            sampler.detector_rows = detector_rows;
+            sampler.observable_rows = observable_rows;
             if let Some((pattern, noise)) =
                 compile_parity_noise(&deferred?, &projection, options.seed, None)?
             {

@@ -1623,6 +1623,10 @@ pub(crate) fn xor_mask_shot_major(
 #[cfg(feature = "parallel")]
 const PARALLEL_TRANSPOSE_BLOCKS: usize = 512;
 
+/// Set bits in a 64x64 block at or below which scattering them costs less than the
+/// full transpose.
+const SPARSE_TRANSPOSE_BITS: u32 = 64;
+
 /// Transpose measurement-major `data` one 64-shot block at a time. `out` holds
 /// `row_len` elements per shot, and `emit(block, shot, meas_word, word)` writes the
 /// 64 measurements from `meas_word * 64` of shot `shot` within `block`, the slice of
@@ -1646,11 +1650,25 @@ fn transpose_meas_major_blocks<T: Send>(
         for meas_word in 0..m_words {
             let first = meas_word * 64;
             let rows = (num_measurements - first).min(64);
+            let mut ones = 0;
             for (row, slot) in matrix[..rows].iter_mut().enumerate() {
                 *slot = data[(first + row) * s_words + shot_word];
+                ones += slot.count_ones();
             }
-            matrix[rows..].fill(0);
-            transpose_64x64_dispatch(&mut matrix);
+            if ones <= SPARSE_TRANSPOSE_BITS {
+                let mut transposed = [0u64; 64];
+                for (row, &word) in matrix[..rows].iter().enumerate() {
+                    let mut bits = word;
+                    while bits != 0 {
+                        transposed[bits.trailing_zeros() as usize] |= 1 << row;
+                        bits &= bits - 1;
+                    }
+                }
+                matrix = transposed;
+            } else {
+                matrix[rows..].fill(0);
+                transpose_64x64_dispatch(&mut matrix);
+            }
             for (shot, &word) in matrix[..shots].iter().enumerate() {
                 emit(block, shot, meas_word, word);
             }

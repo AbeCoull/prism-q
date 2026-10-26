@@ -86,7 +86,9 @@ pub(super) fn compile_fault_sites(
         };
         return Err(PrismError::InvalidParameter {
             message: format!(
-                "{kind} {index} is not deterministic without noise, so no error mechanism                  can describe its flips; a detector error model needs every detector and                  observable fixed in the noiseless program"
+                "{kind} {index} is not deterministic without noise, so no error mechanism \
+                 can describe its flips; a detector error model needs every detector and \
+                 observable fixed in the noiseless program"
             ),
         });
     }

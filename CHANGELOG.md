@@ -14,6 +14,9 @@ All notable changes to PRISM-Q will be documented in this file.
 - **qasm:** Store a static `int`, `uint` or `bool` the way a runtime variable of its type
   stores it: truncated toward zero and wrapped to the declared width. `int n = 7; n /= 2;`
   held 3.5, and `uint[8] u = 300;` held 300.
+- **qasm:** Carry a `gphase` inside a gate body on the gate's own first qubit, and lower a
+  controlled global phase to a phase gate on the controls. `ctrl @ g q[0], q[1]` on a gate
+  `g` whose body set a global phase failed with qubit 0 as both control and target.
 
 ### Features
 

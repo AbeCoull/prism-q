@@ -1587,6 +1587,9 @@ impl<'a> Parser<'a> {
             .zip(call_params.iter().copied())
             .collect();
         let mut sub = self.expansion_parser(bindings);
+        if let Some(&first) = call_qubits.first() {
+            sub.phase_qubit = first;
+        }
         for (&qubit_name, qubit) in def.qubits.iter().zip(call_qubits) {
             sub.aliases.insert(
                 qubit_name,
@@ -1964,6 +1967,7 @@ impl<'a> Parser<'a> {
             def_result: None,
             guard: None,
             dynamic: None,
+            phase_qubit: self.phase_qubit,
         };
         for (name, register) in &self.qregs {
             sub.qregs.insert(

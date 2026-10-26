@@ -523,6 +523,45 @@ fn a_controlled_global_phase_is_a_phase_gate() {
     );
 }
 
+// A `gphase` inside a gate body rides the gate's own first qubit, so a
+// control on the gate becomes a phase on the control rather than landing on
+// whatever qubit 0 is.
+#[test]
+fn a_controlled_gate_whose_body_sets_a_global_phase() {
+    for (modified, plain) in [
+        (
+            "gate g a { gphase(pi/2); }
+ctrl @ g q[0], q[1];",
+            "p(pi/2) q[0];",
+        ),
+        (
+            "gate g a { gphase(pi/2); }
+ctrl @ g q[1], q[0];",
+            "p(pi/2) q[1];",
+        ),
+        (
+            "gate g a { gphase(0.3); x a; }
+ctrl @ g q[0], q[1];",
+            "p(0.3) q[0];
+cx q[0], q[1];",
+        ),
+        (
+            "gate g a { gphase(0.4); }
+ctrl @ ctrl @ g q[0], q[1], q[2];",
+            "cp(0.4) q[0], q[1];",
+        ),
+        (
+            "gate g a { gphase(0.7); }
+negctrl @ g q[0], q[1];",
+            "x q[0];
+p(0.7) q[0];
+x q[0];",
+        ),
+    ] {
+        common::assert_unitary_close(&unitary(3, modified), &unitary(3, plain), SV_EPS, modified);
+    }
+}
+
 // `inv` and `pow` fold into the angle rather than needing an expansion.
 #[test]
 fn a_global_phase_folds_its_modifiers() {

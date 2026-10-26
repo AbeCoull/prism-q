@@ -408,6 +408,10 @@ pub(crate) struct Parser<'a> {
     /// Lowering into a control-flow graph, for [`parse_dynamic`]; `None` for
     /// every other entry point.
     dynamic: Option<Box<dynamic::DynamicState<'a>>>,
+    /// Qubit a bare `gphase` carries its phase on: qubit 0 at the top level, a
+    /// gate's first qubit inside its body, so a control on the gate never
+    /// lands on the carrier.
+    phase_qubit: usize,
 }
 
 /// Classical and array names in scope at some point, classical first.
@@ -511,6 +515,7 @@ impl<'a> Parser<'a> {
             def_result: None,
             guard: None,
             dynamic: None,
+            phase_qubit: 0,
         }
     }
 
@@ -608,8 +613,8 @@ impl<'a> Parser<'a> {
     /// A global phase is observable through a `state_vector` result and under a
     /// control, where `ctrl(e^(i theta) I)` is a phase gate on the control, so
     /// it is carried rather than dropped. With controls it becomes exactly that
-    /// phase; without, an identity scaled by the phase on the first qubit,
-    /// which is the same operator wherever it is placed.
+    /// phase; without, an identity scaled by the phase on `phase_qubit`, which
+    /// is the same operator wherever it is placed.
     fn resolve_global_phase(
         &self,
         params: &[f64],
@@ -646,7 +651,7 @@ impl<'a> Parser<'a> {
             let zero = Complex64::new(0.0, 0.0);
             return Ok(vec![Self::ig(
                 Gate::Fused(Box::new([[scale, zero], [zero, scale]])),
-                &[0],
+                &[self.phase_qubit],
             )]);
         }
 
@@ -1052,6 +1057,20 @@ impl<'a> Parser<'a> {
         let controlled = match &gate {
             g if g.num_qubits() == 1 => {
                 let mat = gate.matrix_2x2();
+                // `ctrl(e^(i theta) I)` acts on the controls alone, as a phase
+                // on the last of them under the rest; a bare `gphase` in a gate
+                // body lowers to exactly that identity.
+                if mat[0][1] == Complex64::ZERO
+                    && mat[1][0] == Complex64::ZERO
+                    && mat[0][0] == mat[1][1]
+                {
+                    let (&last, rest) = controls.split_last().expect("a control is present");
+                    let phase = Gate::P(mat[0][0].arg());
+                    return Ok(vec![match rest {
+                        [] => Self::ig(phase, &[last]),
+                        _ => Self::ig(Gate::mcu(phase.matrix_2x2(), rest.len() as u8), controls),
+                    }]);
+                }
                 vec![Self::ig(
                     Self::controlled_unitary(mat, widen(0)?),
                     &prefixed(&targets),

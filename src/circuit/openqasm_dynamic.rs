@@ -95,9 +95,9 @@ pub fn parse_dynamic(input: &str) -> Result<DynamicProgram> {
         loops: Vec::new(),
         repeat: 0,
     }));
-    if let Some(highest) = super::eval::highest_physical(&program) {
+    if let Some(width) = super::eval::physical_width(&program)? {
         parser.physical = true;
-        parser.total_qubits = highest + 1;
+        parser.total_qubits = width;
     }
     let tail = parser.execute(&program)?;
     parser.flush(tail);

@@ -14,19 +14,38 @@ use crate::circuit::qasm::ast::{
 use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Duration, Expr, Timed};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
-/// Highest `$k` the program names, `None` when it names none.
+/// Register width the highest `$k` the program names implies, `None` when it
+/// names none.
 ///
 /// Physical qubits declare no register, so the width comes from the tree
 /// before any of it runs.
-pub(super) fn highest_physical(block: &Block) -> Option<usize> {
-    let mut highest: Option<usize> = None;
+pub(super) fn physical_width(block: &Block) -> Result<Option<usize>> {
+    let mut highest: Option<(usize, usize)> = None;
     let mut note = |operand: &Operand| {
-        if let OperandName::Physical(index) = operand.name {
-            highest = Some(highest.map_or(index, |seen: usize| seen.max(index)));
+        if let OperandName::Physical(index) = operand.name
+            && highest.is_none_or(|(seen, _)| seen < index)
+        {
+            highest = Some((index, operand.line));
         }
     };
     walk_operands(block, &mut note);
-    highest
+    match highest {
+        None => Ok(None),
+        Some((index, line)) if index >= MAX_DECLARED_WIDTH => {
+            Err(too_wide(ast::RegisterKind::Qubit, line))
+        }
+        Some((index, _)) => Ok(Some(index + 1)),
+    }
+}
+
+fn too_wide(kind: ast::RegisterKind, line: usize) -> PrismError {
+    parse_error(
+        line,
+        format!(
+            "the program declares more than {MAX_DECLARED_WIDTH} {}s",
+            kind.name()
+        ),
+    )
 }
 
 fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
@@ -248,9 +267,9 @@ impl<'a> Parser<'a> {
     ) -> Result<(Circuit, Parameters, Vec<ResultSpec>, Option<NoiseModel>)> {
         let tokens = lexer::tokenize(self.input)?;
         let program = syntax::parse_program(&tokens)?;
-        if let Some(highest) = highest_physical(&program) {
+        if let Some(width) = physical_width(&program)? {
             self.physical = true;
-            self.total_qubits = highest + 1;
+            self.total_qubits = width;
         }
         let instructions = self.execute(&program)?;
         if self.verbatim_pending {
@@ -612,11 +631,17 @@ impl<'a> Parser<'a> {
             }
         };
         self.reject_redeclaration(name, line)?;
+        let grown = |total: usize| {
+            total
+                .checked_add(width)
+                .filter(|&total| total <= MAX_DECLARED_WIDTH)
+                .ok_or_else(|| too_wide(kind, line))
+        };
         match kind {
             ast::RegisterKind::Qubit => {
                 self.reject_mixed_addressing(line)?;
                 let offset = self.total_qubits;
-                self.total_qubits += width;
+                self.total_qubits = grown(offset)?;
                 self.qregs.insert(
                     name,
                     Register {
@@ -627,7 +652,7 @@ impl<'a> Parser<'a> {
             }
             ast::RegisterKind::Classical => {
                 let offset = self.total_cbits;
-                self.total_cbits += width;
+                self.total_cbits = grown(offset)?;
                 self.cregs.insert(
                     name,
                     Register {
@@ -1335,7 +1360,11 @@ impl<'a> Parser<'a> {
                 let mut at = first;
                 while (stride > 0 && at <= last) || (stride < 0 && at >= last) {
                     out.push(bound(at)?);
-                    at += stride;
+                    // A step past the integer range is past `last` too.
+                    let Some(next) = at.checked_add(stride) else {
+                        break;
+                    };
+                    at = next;
                 }
                 if out.is_empty() {
                     return Err(parse_error(
@@ -2243,7 +2272,10 @@ impl<'a> Parser<'a> {
                             format!("for loop iterates more than {MAX_FOR_ITERATIONS} times"),
                         ));
                     }
-                    at += stride;
+                    let Some(next) = at.checked_add(stride) else {
+                        break;
+                    };
+                    at = next;
                 }
                 Ok(values)
             }

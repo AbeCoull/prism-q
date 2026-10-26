@@ -62,6 +62,9 @@ c[0] = measure q[0]; // OQ3 measurement
 OpenQASM 2.0 syntax also works: `qreg q[3];` / `creg c[3];` declarations and
 `measure q[0] -> c[0];` measurement.
 
+A program declares at most 2^24 qubits and 2^24 classical bits, physical `$k` indices
+included; past that the parse fails with `PrismError::Parse`.
+
 `output bit[3] c;` declares the register and marks it as the program's result.
 Every classical bit is reported either way, so the marking costs nothing and
 changes nothing.

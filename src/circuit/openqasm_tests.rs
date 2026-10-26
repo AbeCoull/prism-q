@@ -3214,3 +3214,32 @@ for uint i in [0:3] { h2 q[0]; }";
     assert_eq!(parse_within(source, 37).unwrap().gate_count(), 16);
     assert_expands_past(parse_within(source, 36));
 }
+
+#[test]
+fn oversized_registers_are_parse_errors() {
+    let wide = |decls: &str| {
+        let err = parse(&format!("OPENQASM 3.0;\n{decls}")).unwrap_err();
+        assert!(err.to_string().contains("declares more than"), "{err}");
+    };
+    wide("qubit[9223372036854775807] a;\nqubit[9223372036854775807] b;");
+    wide("bit[9223372036854775807] a;\nbit[9223372036854775807] b;");
+    wide("bit[16777217] c;");
+    wide("qubit[16777216] a;\nqubit[1] b;");
+    wide("x $18446744073709551615;");
+    let err = parse_dynamic("OPENQASM 3.0;\nx $18446744073709551615;").unwrap_err();
+    assert!(err.to_string().contains("declares more than"), "{err}");
+}
+
+// A step that would carry the next index past the integer range carries it
+// past the end of the range too, so the walk stops there.
+#[test]
+fn a_range_step_past_the_integer_range_ends_the_range() {
+    let c = parse("OPENQASM 3.0;\nqubit[4] q;\nx q[1:9223372036854775807:3];").unwrap();
+    assert_eq!(c.gate_count(), 1);
+    let c = parse(
+        "OPENQASM 3.0;\nqubit[1] q;\n\
+         for int i in [1:9223372036854775807:9223372036854775807] { x q[0]; }",
+    )
+    .unwrap();
+    assert_eq!(c.gate_count(), 1);
+}

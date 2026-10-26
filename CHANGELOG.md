@@ -14,6 +14,9 @@ All notable changes to PRISM-Q will be documented in this file.
   one budget of 2^24 units shared across gate expansion. Twenty gate definitions that
   each call the previous one twice, or nested loops each under the per-loop bound,
   expanded without limit.
+- **qasm:** Reject a program that declares more than 2^24 qubits or classical bits, and
+  end a range whose step would pass the integer range. Register widths summed past
+  `usize`, and a slice or `for` step near `i64::MAX`, overflowed.
 
 ### Features
 

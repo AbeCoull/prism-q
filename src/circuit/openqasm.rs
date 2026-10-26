@@ -410,6 +410,9 @@ const MAX_GATE_EXPANSION_DEPTH: usize = 32;
 /// statement or loop pass that emits none. Gate calls and loops multiply, so
 /// each per-construct bound alone still admits an exponential program.
 const MAX_EXPANSION: usize = 1 << 24;
+/// Most qubits, and separately most classical bits, a program may declare,
+/// which bounds what a later run allocates for them.
+const MAX_DECLARED_WIDTH: usize = 1 << 24;
 const MAX_FOR_ITERATIONS: i64 = 1_000_000;
 
 /// Largest whole-number `pow(k)` exponent, which bounds both the repetition of

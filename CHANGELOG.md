@@ -4,6 +4,11 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **python:** Release the GIL while `run_qasm` parses and runs the circuit, as the other
+  run entry points already do, so other Python threads keep running.
+
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

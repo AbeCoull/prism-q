@@ -1303,6 +1303,39 @@ fn bench_qec_chunked_noise(c: &mut Criterion) {
     group.finish();
 }
 
+/// A 1M-shot distance-5 repetition memory postselected on all 20 check records, so
+/// counting the accepted shots and their logical errors is a large share of the run:
+/// once over the whole run unchunked, and once per chunk at 16384 shots, a whole number
+/// of noise units.
+fn bench_qec_postselection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_postselection");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    let mut base = qec_repetition_program(5, 5, 1_000_000, Some(0.001));
+    for record in 0..20 {
+        base.postselect(&[QecRecordRef::absolute(record)], false)
+            .unwrap();
+    }
+    for (chunk_label, chunk_size) in [("chunk_16384", Some(16_384)), ("unchunked", None)] {
+        let mut program = base.clone();
+        program.set_options(QecOptions {
+            chunk_size,
+            ..base.options()
+        });
+        group.bench_with_input(
+            BenchmarkId::new("rep_d5_p001_post20", chunk_label),
+            &program,
+            |b, program| {
+                b.iter(|| run_qec_program(program).unwrap());
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -1325,6 +1358,7 @@ criterion_group! {
     bench_qec_workflow,
     bench_qec_erasure_runner,
     bench_qec_feedforward_runner,
-    bench_qec_chunked_noise
+    bench_qec_chunked_noise,
+    bench_qec_postselection
 }
 criterion_main!(benches);

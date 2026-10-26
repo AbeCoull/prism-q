@@ -776,29 +776,16 @@ fn qec_count_postselection_and_logical(
     let mut accepted_shots = shots;
     let mut logical_errors = vec![0u64; observables.num_measurements()];
     if postselection_rows.is_empty() {
-        add_qec_logical_error_counts(observables, &mut logical_errors);
+        add_qec_logical_error_counts(observables, None, &mut logical_errors);
     } else {
-        accepted_shots = 0;
         let postselection_only: Vec<Vec<usize>> = postselection_rows
             .iter()
             .map(|(row, _)| row.clone())
             .collect();
         let postselection = all_measurements.parity_rows(&postselection_only)?;
-
-        for shot in 0..shots {
-            let accepted = postselection_rows
-                .iter()
-                .enumerate()
-                .all(|(row_idx, (_, expected))| postselection.get_bit(shot, row_idx) == *expected);
-            if accepted {
-                accepted_shots += 1;
-                for (observable, count) in logical_errors.iter_mut().enumerate() {
-                    if observables.get_bit(shot, observable) {
-                        *count += 1;
-                    }
-                }
-            }
-        }
+        let accepted = qec_postselection_accept_mask(&postselection, postselection_rows);
+        accepted_shots = qec_count_ones(&accepted);
+        add_qec_logical_error_counts(observables, Some(&accepted), &mut logical_errors);
     }
 
     Ok(QecProfiledCounts {
@@ -868,26 +855,12 @@ where
 
         if postselection_rows.is_empty() {
             accepted_shots += this_chunk;
-            add_qec_logical_error_counts(&observables, &mut logical_errors);
+            add_qec_logical_error_counts(&observables, None, &mut logical_errors);
         } else {
             let postselection = measurements.parity_rows(&postselection_only)?;
-            for shot in 0..this_chunk {
-                let accepted =
-                    postselection_rows
-                        .iter()
-                        .enumerate()
-                        .all(|(row_idx, (_, expected))| {
-                            postselection.get_bit(shot, row_idx) == *expected
-                        });
-                if accepted {
-                    accepted_shots += 1;
-                    for (observable, count) in logical_errors.iter_mut().enumerate() {
-                        if observables.get_bit(shot, observable) {
-                            *count += 1;
-                        }
-                    }
-                }
-            }
+            let accepted = qec_postselection_accept_mask(&postselection, postselection_rows);
+            accepted_shots += qec_count_ones(&accepted);
+            add_qec_logical_error_counts(&observables, Some(&accepted), &mut logical_errors);
         }
 
         if keep_measurements {
@@ -1089,7 +1062,7 @@ pub(super) fn qec_result_from_parity_projection(
     let observables =
         PackedShots::from_meas_major_clear_padding(observable_data, shots, num_observables);
     let mut logical_errors = vec![0u64; num_observables];
-    add_qec_logical_error_counts(&observables, &mut logical_errors);
+    add_qec_logical_error_counts(&observables, None, &mut logical_errors);
     QecSampleResult::new_with_total_shots(
         shots,
         PackedShots::from_meas_major(Vec::new(), 0, num_measurements),
@@ -1276,7 +1249,64 @@ impl QecPreparedParityRow {
     }
 }
 
-fn add_qec_logical_error_counts(observables: &PackedShots, counts: &mut [u64]) {
+/// Shots whose postselection parity row `i` reads `postselection_rows[i].1`, one bit per
+/// shot in `postselection.s_words()` words, padding clear.
+fn qec_postselection_accept_mask(
+    postselection: &PackedShots,
+    postselection_rows: &[(Vec<usize>, bool)],
+) -> Vec<u64> {
+    let num_shots = postselection.num_shots();
+    let s_words = num_shots.div_ceil(64);
+    let mut accepted = vec![0u64; s_words];
+    match postselection.layout() {
+        ShotLayout::MeasMajor => {
+            accepted.fill(u64::MAX);
+            for (row, (_, expected)) in postselection_rows.iter().enumerate() {
+                let invert = if *expected { 0 } else { u64::MAX };
+                for (accept, &word) in accepted.iter_mut().zip(postselection.meas_words(row)) {
+                    *accept &= word ^ invert;
+                }
+            }
+            if !num_shots.is_multiple_of(64) {
+                accepted[s_words - 1] &= (1u64 << (num_shots % 64)) - 1;
+            }
+        }
+        ShotLayout::ShotMajor => {
+            let mut expected_words = vec![0u64; postselection.m_words()];
+            for (row, (_, expected)) in postselection_rows.iter().enumerate() {
+                expected_words[row / 64] |= u64::from(*expected) << (row % 64);
+            }
+            let tail_mask = postselection.measurement_tail_mask();
+            let last = expected_words.len() - 1;
+            for shot in 0..num_shots {
+                let words = postselection.shot_words(shot);
+                let rejected =
+                    words
+                        .iter()
+                        .zip(&expected_words)
+                        .enumerate()
+                        .any(|(i, (&word, &expected))| {
+                            let valid = if i == last { tail_mask } else { u64::MAX };
+                            (word ^ expected) & valid != 0
+                        });
+                accepted[shot / 64] |= u64::from(!rejected) << (shot % 64);
+            }
+        }
+    }
+    accepted
+}
+
+fn qec_count_ones(words: &[u64]) -> usize {
+    words.iter().map(|word| word.count_ones() as usize).sum()
+}
+
+/// Add each observable's set bits to `counts`, over the shots set in `accepted` (one bit
+/// per shot, padding clear) or over every shot when it is `None`.
+fn add_qec_logical_error_counts(
+    observables: &PackedShots,
+    accepted: Option<&[u64]>,
+    counts: &mut [u64],
+) {
     debug_assert_eq!(observables.num_measurements(), counts.len());
     if counts.is_empty() || observables.num_shots() == 0 {
         return;
@@ -1295,11 +1325,17 @@ fn add_qec_logical_error_counts(observables: &PackedShots, counts: &mut [u64]) {
             for (observable, count) in counts.iter_mut().enumerate() {
                 let words = observables.meas_words(observable);
                 let mut total = 0u64;
-                for &word in &words[..full_words] {
-                    total += word.count_ones() as u64;
-                }
-                if tail_bits != 0 {
-                    total += (words[full_words] & tail_mask).count_ones() as u64;
+                if let Some(accepted) = accepted {
+                    for (&word, &accept) in words.iter().zip(accepted) {
+                        total += (word & accept).count_ones() as u64;
+                    }
+                } else {
+                    for &word in &words[..full_words] {
+                        total += word.count_ones() as u64;
+                    }
+                    if tail_bits != 0 {
+                        total += (words[full_words] & tail_mask).count_ones() as u64;
+                    }
                 }
                 *count += total;
             }
@@ -1313,7 +1349,7 @@ fn add_qec_logical_error_counts(observables: &PackedShots, counts: &mut [u64]) {
                 (1u64 << tail_bits) - 1
             };
 
-            for shot in 0..observables.num_shots() {
+            let mut add_shot = |shot: usize| {
                 let words = observables.shot_words(shot);
                 for (word_idx, &word) in words.iter().enumerate() {
                     let valid_word = if word_idx + 1 == words.len() {
@@ -1328,6 +1364,18 @@ fn add_qec_logical_error_counts(observables: &PackedShots, counts: &mut [u64]) {
                         bits &= bits - 1;
                     }
                 }
+            };
+            match accepted {
+                Some(accepted) => {
+                    for (word_idx, &accept) in accepted.iter().enumerate() {
+                        let mut bits = accept;
+                        while bits != 0 {
+                            add_shot(word_idx * 64 + bits.trailing_zeros() as usize);
+                            bits &= bits - 1;
+                        }
+                    }
+                }
+                None => (0..observables.num_shots()).for_each(add_shot),
             }
         }
     }

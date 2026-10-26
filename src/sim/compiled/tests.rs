@@ -919,6 +919,44 @@ fn detector_sampler_preserves_bell_measure_reset_correlation() {
     assert!(saw_one);
 }
 
+// Each record carries its own reference outcome even when a later
+// measurement writes the same classical bit.
+#[test]
+fn records_sharing_a_classical_bit_keep_their_own_outcomes() {
+    let mut c = Circuit::new(2, 1);
+    c.add_gate(Gate::X, &[0]);
+    c.add_measure(0, 0);
+    c.add_measure(1, 0);
+
+    for shots in [1, 65] {
+        let mut sampler = compile_measurements(&c, 42).unwrap();
+        let records = sampler.sample_bulk_packed(shots).to_shots();
+        assert!(records.iter().all(|r| r == &[true, false]), "{records:?}");
+        assert!(
+            sampler
+                .sample_bulk(shots)
+                .iter()
+                .all(|r| r == &[true, false])
+        );
+    }
+}
+
+#[test]
+fn a_measure_reset_loop_into_one_bit_keeps_each_record() {
+    let mut c = Circuit::new(1, 1);
+    c.add_gate(Gate::X, &[0]);
+    c.add_measure(0, 0);
+    c.add_reset(0);
+    c.add_measure(0, 0);
+
+    let mut sampler = compile_detector_sampler(&c, vec![vec![0], vec![1]], vec![], 42).unwrap();
+    let detectors = sampler.sample_detectors_packed(65).unwrap().to_shots();
+    assert!(
+        detectors.iter().all(|d| d == &[true, false]),
+        "{detectors:?}"
+    );
+}
+
 #[test]
 fn packed_shots_counts() {
     let mut c = circuits::ghz_circuit(4);

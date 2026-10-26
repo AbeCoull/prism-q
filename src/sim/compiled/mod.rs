@@ -3383,21 +3383,30 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
     } else {
         use crate::backend::Backend;
         use crate::backend::stabilizer::StabilizerBackend;
-        let mut stab = StabilizerBackend::new(seed);
-        stab.init(circuit.num_qubits, circuit.num_classical_bits)?;
-        stab.apply_instructions(&circuit.instructions)?;
-        let ref_classical = stab.classical_results().to_vec();
-        let classical_bit_order: Vec<usize> = measurement_rows.iter().map(|(_, c, _)| *c).collect();
-        classical_bit_order
+        // Two measurements may share a classical bit, so each reads into a
+        // private bit numbered by its record index.
+        let first_measure = circuit
+            .instructions
             .iter()
-            .map(|&cbit| {
-                if cbit < ref_classical.len() {
-                    ref_classical[cbit]
-                } else {
-                    false
-                }
+            .position(|inst| matches!(inst, Instruction::Measure { .. }))
+            .unwrap_or(circuit.instructions.len());
+        let records: Vec<Instruction> = circuit.instructions[first_measure..]
+            .iter()
+            .filter_map(|inst| match inst {
+                Instruction::Measure { qubit, .. } => Some(*qubit),
+                _ => None,
             })
-            .collect()
+            .enumerate()
+            .map(|(record, qubit)| Instruction::Measure {
+                qubit,
+                classical_bit: record,
+            })
+            .collect();
+        let mut stab = StabilizerBackend::new(seed);
+        stab.init(circuit.num_qubits, num_measurements)?;
+        stab.apply_instructions(&circuit.instructions[..first_measure])?;
+        stab.apply_instructions(&records)?;
+        stab.classical_results().to_vec()
     };
 
     let num_meas_words = num_measurements.div_ceil(64);

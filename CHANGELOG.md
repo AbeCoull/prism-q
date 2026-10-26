@@ -4,6 +4,13 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **sim:** Give each measurement record its own reference outcome in the compiled
+  sampler when two measurements write one classical bit. Packed records, `sample_bulk`
+  and detector rows read the last write for every record before, which broke
+  measure-reset loops into one bit through `compile_detector_sampler`.
+
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

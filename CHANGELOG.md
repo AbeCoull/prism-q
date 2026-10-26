@@ -8,6 +8,9 @@ All notable changes to PRISM-Q will be documented in this file.
 
 - **backend:** A `PRISM_TILE_KB` value too large to shift into bytes wrapped, then panicked
   or set a tile below the 128 KB floor. Such values now saturate to the 2 MB ceiling.
+- **gates:** `MultiFusedData::new` kept repeated targets, which the kernels reorder or
+  alias, so the batch returned wrong amplitudes. Entries on one target now fold into one
+  matrix in list order.
 
 ### Features
 

@@ -739,3 +739,14 @@ fn multi_fused_data_computes_its_diagonal_flag() {
     assert!(!MultiFusedData::new(vec![(0, t), (1, h)]).all_diagonal());
     assert_eq!(MultiFusedData::new(vec![(2, h)]).gates(), &[(2, h)]);
 }
+
+#[test]
+fn multi_fused_data_folds_repeated_targets_in_order() {
+    let h = Gate::H.matrix_2x2();
+    let t = Gate::T.matrix_2x2();
+    let x = Gate::X.matrix_2x2();
+    let data = MultiFusedData::new(vec![(0, h), (1, x), (0, t)]);
+    assert_eq!(data.gates(), &[(0, mat_mul_2x2(&t, &h)), (1, x)]);
+    assert!(!data.all_diagonal());
+    assert!(MultiFusedData::new(vec![(3, h), (3, h)]).all_diagonal());
+}

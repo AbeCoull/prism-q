@@ -3110,6 +3110,10 @@ fn apply_multi_1q_shared(state: &mut [Complex64], gates: &[(usize, [[Complex64; 
     super::sweeps::tick();
     let mut sorted: SmallVec<[(usize, [[Complex64; 2]; 2]); 4]> = gates.into();
     sorted.sort_unstable_by_key(|&(target, _)| target);
+    debug_assert!(
+        sorted.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "repeated target in a shared 1q pass"
+    );
     let k = sorted.len();
     let lanes = 1usize << k;
     let low_target = sorted[0].0;

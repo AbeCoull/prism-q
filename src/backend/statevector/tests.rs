@@ -402,6 +402,60 @@ fn test_mask_indices_bijection_1ctrl() {
     }
 }
 
+fn cu_against_reference(n: usize, pairs: &[(usize, usize)]) {
+    let mat = [
+        [Complex64::new(0.6, 0.1), Complex64::new(-0.2, 0.77)],
+        [Complex64::new(0.3, -0.5), Complex64::new(0.81, 0.05)],
+    ];
+    let mut prep = Circuit::new(n, 0);
+    for q in 0..n {
+        prep.add_gate(Gate::Ry(0.3 + 0.17 * q as f64), &[q]);
+        prep.add_gate(Gate::Rz(0.9 - 0.11 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        prep.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let start = run_manual_state(&prep);
+    for &(control, target) in pairs {
+        let mut circuit = prep.clone();
+        circuit.add_gate(Gate::cu(mat), &[control, target]);
+        let mut expected = start.clone();
+        for i in 0..expected.len() {
+            if i & (1 << control) != 0 && i & (1 << target) == 0 {
+                let j = i | (1 << target);
+                let (a, b) = (expected[i], expected[j]);
+                expected[i] = mat[0][0] * a + mat[0][1] * b;
+                expected[j] = mat[1][0] * a + mat[1][1] * b;
+            }
+        }
+        assert_state_close(&run_manual_state(&circuit), &expected, 1e-12);
+    }
+}
+
+#[test]
+fn cu_matches_the_reference_on_every_pair() {
+    let pairs: Vec<_> = (0..6)
+        .flat_map(|c| (0..6).filter(move |&t| t != c).map(move |t| (c, t)))
+        .collect();
+    cu_against_reference(6, &pairs);
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_cu_matches_the_reference_in_both_orientations() {
+    let pairs = [
+        (0, 15),
+        (15, 0),
+        (3, 9),
+        (9, 3),
+        (14, 15),
+        (15, 14),
+        (0, 1),
+        (1, 0),
+    ];
+    cu_against_reference(16, &pairs);
+}
+
 #[test]
 fn test_cu_control_less_than_target() {
     let rz_mat = Gate::Rz(0.7).matrix_2x2();

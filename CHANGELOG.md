@@ -10,6 +10,10 @@ All notable changes to PRISM-Q will be documented in this file.
   or expressions deeper than 256 levels, a long operator chain included. Thousands of
   nested parentheses or `if` statements, or a ten-thousand-term sum, overflowed the
   stack.
+- **qasm:** Charge every instruction, statement and loop pass a parse expands to against
+  one budget of 2^24 units shared across gate expansion. Twenty gate definitions that
+  each call the previous one twice, or nested loops each under the per-loop bound,
+  expanded without limit.
 
 ### Features
 

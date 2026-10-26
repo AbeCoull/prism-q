@@ -114,7 +114,9 @@ use crate::error::{PrismError, Result};
 use crate::gates::{Gate, spectral};
 use crate::sim::noise::{NoiseEvent, NoiseModel};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 fn parse_error(line: usize, message: impl Into<String>) -> PrismError {
     PrismError::Parse {
@@ -394,12 +396,20 @@ pub(crate) struct Parser<'a> {
     /// Lowering into a control-flow graph, for [`parse_dynamic`]; `None` for
     /// every other entry point.
     dynamic: Option<Box<dynamic::DynamicState<'a>>>,
+    /// Work left of [`MAX_EXPANSION`], shared with every expansion parser this
+    /// one spawns.
+    expansion_left: Rc<Cell<usize>>,
 }
 
 /// Classical and array names in scope at some point, classical first.
 type Scope<'a> = (Vec<&'a str>, Vec<&'a str>);
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
+
+/// Most units of work one parse may expand to: an instruction emitted, or a
+/// statement or loop pass that emits none. Gate calls and loops multiply, so
+/// each per-construct bound alone still admits an exponential program.
+const MAX_EXPANSION: usize = 1 << 24;
 const MAX_FOR_ITERATIONS: i64 = 1_000_000;
 
 /// Largest whole-number `pow(k)` exponent, which bounds both the repetition of
@@ -497,6 +507,7 @@ impl<'a> Parser<'a> {
             def_result: None,
             guard: None,
             dynamic: None,
+            expansion_left: Rc::new(Cell::new(MAX_EXPANSION)),
         }
     }
 

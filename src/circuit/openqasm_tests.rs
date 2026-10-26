@@ -3161,3 +3161,56 @@ fn nesting_just_inside_the_limit_fits_a_small_stack() {
         .join()
         .unwrap();
 }
+
+fn parse_within(source: &str, budget: usize) -> Result<Circuit> {
+    let parser = Parser::new_with(source, Dialect::Native);
+    parser.expansion_left.set(budget);
+    parser.parse().map(|(circuit, _)| circuit)
+}
+
+fn assert_expands_past(result: Result<Circuit>) {
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("expands past"), "{err}");
+}
+
+// Each gate calls the one before it twice, so twenty definitions expand to
+// 2^20 instructions though no single construct passes its own bound.
+#[test]
+fn doubling_gate_definitions_exhaust_the_expansion_budget() {
+    let mut source = String::from("OPENQASM 3.0;\nqubit[1] q;\ngate g0 a { x a; }\n");
+    for level in 1..=20 {
+        let prev = level - 1;
+        source.push_str(&format!("gate g{level} a {{ g{prev} a; g{prev} a; }}\n"));
+    }
+    source.push_str("g20 q[0];\n");
+    assert_expands_past(parse_within(&source, 1 << 12));
+
+    let small = source.replace("g20 q[0];", "g5 q[0];");
+    assert_eq!(parse_within(&small, 1 << 12).unwrap().gate_count(), 32);
+}
+
+#[test]
+fn nested_loops_exhaust_the_expansion_budget_even_when_empty() {
+    let empty = "OPENQASM 3.0;\nqubit[1] q;\n\
+                 for uint i in [0:999999] { for uint j in [0:999999] { } }";
+    assert_expands_past(parse_within(empty, 1 << 12));
+    let busy = "OPENQASM 3.0;\nqubit[1] q;\n\
+                for uint i in [0:999] { for uint j in [0:999] { x q[0]; } }";
+    assert_expands_past(parse_within(busy, 1 << 12));
+    let pow = "OPENQASM 3.0;\nqubit[1] q;\ngate g a { x a; h a; }\npow(1000000) @ g q[0];";
+    assert_expands_past(parse_within(pow, 1 << 12));
+}
+
+// Each `x` costs one unit and each call or loop pass one more for itself, and
+// nothing is charged again by the level that collects it: four passes of
+// 2 * (2 + 1) + 1 + 1 units, plus five top-level statements, make 37.
+#[test]
+fn the_expansion_budget_charges_work_once() {
+    let source = "OPENQASM 3.0;
+qubit[1] q;
+gate g a { x a; x a; }
+                  gate h2 a { g a; g a; }
+for uint i in [0:3] { h2 q[0]; }";
+    assert_eq!(parse_within(source, 37).unwrap().gate_count(), 16);
+    assert_expands_past(parse_within(source, 36));
+}

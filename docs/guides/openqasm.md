@@ -503,6 +503,10 @@ or carrying an instruction with no matrix; `inv @` on a body that is not a gate 
 and a whole-number `pow` past one million repetitions, which returns `Parse` naming the
 count instead.
 
+Gate calls, loops and repetitions multiply, so one parse also stops with `Parse` once it
+expands past 2^24 units of work: an emitted instruction, or a statement or loop pass that
+emits none.
+
 Every decline above happens at parse time, so a program that parses is one the IR can
 hold. The backend it then runs on may still decline the circuit; those limits are on the
 [Capabilities](capabilities.md) page, not here.

@@ -279,8 +279,16 @@ impl<'a> Parser<'a> {
         let mut instructions = Vec::with_capacity(block.len());
         for stmt in block {
             let base = instructions.len();
+            let left = self.expansion_left.get();
             self.pending_input_slot = None;
             self.exec_stmt(stmt, &mut instructions)?;
+            // Nested blocks charged what they emitted as they ran; this
+            // statement owes only what it added on top.
+            let nested = left - self.expansion_left.get();
+            self.charge(
+                (instructions.len() - base).saturating_sub(nested).max(1),
+                stmt.line,
+            )?;
             if let Some(slot) = self.pending_input_slot.take() {
                 for offset in 0..instructions.len() - base {
                     self.links.push(ParamLink {
@@ -306,6 +314,21 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(instructions)
+    }
+
+    fn charge(&self, units: usize, line: usize) -> Result<()> {
+        let left = self.expansion_left.get();
+        self.expansion_left.set(left.saturating_sub(units));
+        if units > left {
+            return Err(parse_error(
+                line,
+                format!(
+                    "the program expands past {MAX_EXPANSION} instructions and statements, \
+                     counting every gate call, loop pass and repetition"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt<'a>, out: &mut Vec<Instruction>) -> Result<()> {
@@ -1962,6 +1985,7 @@ impl<'a> Parser<'a> {
             def_result: None,
             guard: None,
             dynamic: None,
+            expansion_left: Rc::clone(&self.expansion_left),
         };
         for (name, register) in &self.qregs {
             sub.qregs.insert(
@@ -2162,6 +2186,10 @@ impl<'a> Parser<'a> {
         let mut result = Ok(());
         self.enter_static_loop();
         for value in values {
+            if let Err(error) = self.charge(1, line) {
+                result = Err(error);
+                break;
+            }
             // Each pass drops what the body declared, so a declaration binds
             // for one pass, while a write to an outer name carries on.
             self.param_vars

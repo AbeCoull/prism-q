@@ -4100,6 +4100,20 @@ fn bench_compiled_sampler(c: &mut Criterion) {
             b.iter(|| sampler.sample_bulk_packed(10_000));
         });
 
+        for layout in ["meas_major", "shot_major"] {
+            let id = format!("{layout}_{n}q_10k");
+            group.bench_function(BenchmarkId::new("packed_counts", id), |b| {
+                let mut sampler = prism_q::compile_forward(&circuit, SEED).unwrap();
+                let packed = sampler.sample_bulk_packed(10_000);
+                let packed = if layout == "meas_major" {
+                    packed.to_meas_major()
+                } else {
+                    packed.to_shot_major()
+                };
+                b.iter(|| black_box(packed.counts()));
+            });
+        }
+
         // Under 256 shots the bit-sliced sampler takes its scalar kernel on x86.
         let id_packed_small = format!("packed_{}q_200", n);
         group.bench_function(BenchmarkId::new("packed", &id_packed_small), |b| {

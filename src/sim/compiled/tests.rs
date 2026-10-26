@@ -2331,6 +2331,21 @@ fn bytes_bit_by_bit(packed: &PackedShots) -> Vec<u8> {
     bytes
 }
 
+/// Histogram keyed by shot rows built one bit at a time, the map `counts` must return.
+fn counts_bit_by_bit(packed: &PackedShots) -> std::collections::HashMap<Vec<u64>, u64> {
+    let mut counts = std::collections::HashMap::new();
+    for shot in 0..packed.num_shots() {
+        let mut key = vec![0u64; packed.m_words()];
+        for measurement in 0..packed.num_measurements() {
+            if packed.get_bit(shot, measurement) {
+                key[measurement / 64] |= 1 << (measurement % 64);
+            }
+        }
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    counts
+}
+
 #[test]
 fn layout_conversions_match_a_bit_by_bit_transpose() {
     let sizes = [1, 2, 7, 8, 9, 63, 64, 65, 127, 128, 129, 200, 300];
@@ -2385,6 +2400,7 @@ fn layout_conversions_handle_empty_matrices() {
             vec![0u8; shots * measurements.div_ceil(8)]
         );
         assert_eq!(packed.to_shot_major().num_shots(), shots);
+        assert_eq!(packed.counts(), counts_bit_by_bit(&packed));
     }
 }
 
@@ -2412,5 +2428,41 @@ fn xor_columns_flips_the_masked_columns_of_every_shot() {
                 bytes_bit_by_bit(&expected)
             });
         }
+    }
+}
+
+#[test]
+fn counts_match_a_bit_by_bit_histogram() {
+    let mut seed = 1000;
+    for &shots in &[1, 63, 64, 65, 200] {
+        for &measurements in &[1, 63, 64, 65, 130, 600] {
+            for thinning in [0, 7] {
+                seed += 1;
+                let (shot_major, meas_major) =
+                    random_packed_pair(shots, measurements, thinning, seed);
+                let expected = counts_bit_by_bit(&shot_major);
+                assert_eq!(
+                    shot_major.counts(),
+                    expected,
+                    "{shots}x{measurements} thinning {thinning}"
+                );
+                assert_eq!(
+                    meas_major.counts(),
+                    expected,
+                    "{shots}x{measurements} thinning {thinning}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn counts_match_a_bit_by_bit_histogram_past_the_parallel_floor() {
+    for (measurements, seed) in [(65, 7), (520, 8)] {
+        let (shot_major, meas_major) = random_packed_pair(70_000, measurements, 7, seed);
+        let expected = counts_bit_by_bit(&shot_major);
+        assert!(expected.len() < 70_000, "thinning must repeat outcomes");
+        assert_eq!(shot_major.counts(), expected, "{measurements} shot-major");
+        assert_eq!(meas_major.counts(), expected, "{measurements} meas-major");
     }
 }

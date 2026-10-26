@@ -386,7 +386,7 @@ impl<'a> Parser<'a> {
                         line,
                     );
                 }
-                self.declare_classical(*constant, ty, name, value.as_ref(), line)?;
+                self.declare_classical(*constant, ty, width.as_ref(), name, value.as_ref(), line)?;
                 Ok(())
             }
             StmtKind::Assign { target, op, value } => {
@@ -636,12 +636,13 @@ impl<'a> Parser<'a> {
         &mut self,
         constant: bool,
         ty: &str,
+        width: Option<&Expr<'a>>,
         name: &'a str,
         value: Option<&Expr<'a>>,
         line: usize,
     ) -> Result<()> {
         let kind = match ty {
-            "int" | "uint" => ClassicalType::Int,
+            "int" | "uint" => ClassicalType::Int(self.runtime_type(ty, width, line)?),
             "bool" => ClassicalType::Bool,
             "float" | "angle" => ClassicalType::Float,
             "duration" => ClassicalType::Duration,
@@ -748,7 +749,7 @@ impl<'a> Parser<'a> {
             None => folded,
             Some(op) => {
                 let current = self.fold_typed(kind, &Expr::Ident(target), line)?;
-                compound(op, current, folded, line)?
+                kind.store(compound(op, current, folded, line)?)
             }
         };
         self.bind_classical(target, kind, updated, false);
@@ -757,7 +758,8 @@ impl<'a> Parser<'a> {
 
     fn declare_array(&mut self, decl: &ast::ArrayDecl<'a>, line: usize) -> Result<()> {
         let kind = match decl.ty {
-            "int" | "uint" => ClassicalType::Int,
+            "int" => ClassicalType::Int(RuntimeType::Int { width: 64 }),
+            "uint" => ClassicalType::Int(RuntimeType::Uint { width: 64 }),
             "bool" => ClassicalType::Bool,
             "float" | "angle" => ClassicalType::Float,
             other => {
@@ -881,7 +883,7 @@ impl<'a> Parser<'a> {
         let folded = self.fold_typed(kind, &assign.value, line)?;
         let updated = match assign.op {
             None => folded,
-            Some(op) => compound(op, current, folded, line)?,
+            Some(op) => kind.store(compound(op, current, folded, line)?),
         };
         if let Some(array) = self.arrays.get_mut(assign.array) {
             array.values[at] = updated;
@@ -955,7 +957,7 @@ impl<'a> Parser<'a> {
             ClassicalType::Float | ClassicalType::Duration | ClassicalType::Stretch => {
                 self.value_of(value, line)
             }
-            ClassicalType::Int => Ok(self.integer_of(value, line)? as f64),
+            ClassicalType::Int(_) => Ok(kind.store(self.integer_of(value, line)? as f64)),
             ClassicalType::Bool => Ok(f64::from(self.integer_of(value, line)? != 0)),
         }
     }

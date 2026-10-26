@@ -103,6 +103,7 @@
 use num_complex::Complex64;
 
 use super::braket::{self, NoiseSpec, ResultSpec};
+use crate::circuit::dynamic::{ClassicalType as RuntimeType, ClassicalValue};
 use crate::circuit::qasm::ast::{self, DefParam};
 use crate::circuit::qasm::expr::Timed;
 use crate::circuit::synthesis;
@@ -302,11 +303,24 @@ struct Alias {
 /// Type of a classical variable, which decides how its value is read back.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClassicalType {
-    Int,
+    /// `int` or `uint`, with the width a stored value wraps to.
+    Int(RuntimeType),
     Bool,
     Float,
     Duration,
     Stretch,
+}
+
+impl ClassicalType {
+    /// `value` as this type holds it, by the conversion a runtime variable of
+    /// the type applies: truncation toward zero and wraparound for the integers.
+    fn store(self, value: f64) -> f64 {
+        match self {
+            ClassicalType::Int(integer) => integer.store(ClassicalValue::Float(value)).to_float(),
+            ClassicalType::Bool => f64::from(u8::from(value != 0.0)),
+            _ => value,
+        }
+    }
 }
 
 struct ClassicalDecl {

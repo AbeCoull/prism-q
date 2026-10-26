@@ -3112,3 +3112,35 @@ fn shapes_the_line_reader_rejected_now_parse() {
         other => panic!("{other:?}"),
     }
 }
+
+fn rx_angles(source: &str) -> Vec<f64> {
+    parse(source)
+        .unwrap()
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Gate {
+                gate: Gate::Rx(theta),
+                ..
+            } => Some(*theta),
+            _ => None,
+        })
+        .collect()
+}
+
+// A static integer stores what a runtime one of its type would: truncation
+// toward zero, then wraparound to the declared width.
+#[test]
+fn integer_assignments_truncate_and_wrap_to_the_declared_width() {
+    let angles = rx_angles(
+        "OPENQASM 3.0;\nqubit[1] q;\n\
+         int n = 7;\nn /= 2;\nrx(n) q[0];\n\
+         int m = -7;\nm /= 2;\nrx(m) q[0];\n\
+         uint[8] u = 300;\nrx(u) q[0];\n\
+         uint[8] v = 250;\nv += 10;\nrx(v) q[0];\n\
+         int[8] w = 127;\nw += 1;\nrx(w) q[0];\n\
+         uint[4] z = 3;\nz -= 4;\nrx(z) q[0];\n\
+         bool b = false;\nb += 2;\nrx(b) q[0];",
+    );
+    assert_eq!(angles, [3.0, -3.0, 44.0, 4.0, -128.0, 15.0, 1.0]);
+}

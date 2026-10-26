@@ -541,7 +541,12 @@ impl<'a> Parser<'a> {
 
     // ---------------------------------------------------------- declarations
 
-    fn runtime_type(&self, ty: &str, width: Option<&Expr>, line: usize) -> Result<RuntimeType> {
+    pub(super) fn runtime_type(
+        &self,
+        ty: &str,
+        width: Option<&Expr>,
+        line: usize,
+    ) -> Result<RuntimeType> {
         let bits = match width {
             None => 64,
             Some(width) => {
@@ -607,7 +612,7 @@ impl<'a> Parser<'a> {
         let kind = match runtime_type {
             RuntimeType::Bool => ClassicalType::Bool,
             RuntimeType::Float | RuntimeType::Angle => ClassicalType::Float,
-            _ => ClassicalType::Int,
+            integer => ClassicalType::Int(integer),
         };
         self.classical.insert(
             name,

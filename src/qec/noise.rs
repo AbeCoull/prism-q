@@ -233,6 +233,16 @@ pub(super) struct QecRecordNoise {
     record_of_alias: Vec<u32>,
     gate_count: usize,
     seed: u64,
+    cached_unit: Option<QecUnitFlips>,
+}
+
+/// Record flips of one noise unit, `words` per record in record order, kept while a
+/// chunked run's windows stop inside the unit so the next window lands the rest of it
+/// without drawing the unit again.
+struct QecUnitFlips {
+    unit: usize,
+    total_shots: usize,
+    rows: Vec<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -522,6 +532,7 @@ impl QecCompiledNoiseSampler {
         self.noiseless.reseed(seed);
         if let Some(noise) = &mut self.noise {
             noise.seed = seed;
+            noise.cached_unit = None;
         }
     }
 
@@ -546,7 +557,7 @@ impl QecCompiledNoiseSampler {
     /// Apply noise, then feed-forward corrections, to `measurements`, which hold shots
     /// from `first_shot` of a `total_shots`-shot run.
     pub(super) fn apply_noise_to_measurements(
-        &self,
+        &mut self,
         measurements: PackedShots,
         first_shot: usize,
         total_shots: usize,
@@ -570,7 +581,7 @@ impl QecCompiledNoiseSampler {
 
         debug_assert!(first_shot + num_shots <= total_shots);
         let mut data = measurements.into_meas_major_data();
-        if let Some(noise) = &self.noise {
+        if let Some(noise) = &mut self.noise {
             noise.apply(&mut data, num_shots, first_shot, total_shots);
         }
         if let Some(feedforward) = &self.feedforward {
@@ -600,14 +611,16 @@ impl QecRecordNoise {
             record_of_alias,
             gate_count,
             seed,
+            cached_unit: None,
         }))
     }
 
     /// XOR the noise of shots `first_shot..first_shot + num_shots` of a `total_shots`-shot
     /// run into measurement-major `data`, `num_shots.div_ceil(64)` words per record.
-    /// Units run on the pool when the window starts on a word boundary, so no two touch
-    /// one word.
-    fn apply(&self, data: &mut [u64], num_shots: usize, first_shot: usize, total_shots: usize) {
+    /// A unit the window covers only in part lands through [`Self::land_cached_unit`].
+    /// Whole units run on the pool when the window starts on a word boundary, so no two
+    /// touch one word.
+    fn apply(&mut self, data: &mut [u64], num_shots: usize, first_shot: usize, total_shots: usize) {
         let s_words = num_shots.div_ceil(64);
         let end_shot = first_shot + num_shots;
         let first_unit = first_shot / QEC_NOISE_UNIT_SHOTS;
@@ -630,11 +643,33 @@ impl QecRecordNoise {
                 );
             }
         };
+        let unit_end = |unit: usize| ((unit + 1) * QEC_NOISE_UNIT_SHOTS).min(total_shots);
+        let head_partial =
+            first_shot > first_unit * QEC_NOISE_UNIT_SHOTS || end_shot < unit_end(first_unit);
+        let tail_partial = last_unit > first_unit && end_shot < unit_end(last_unit);
+        if head_partial || tail_partial {
+            let cells = std::cell::Cell::from_mut(&mut *data).as_slice_of_cells();
+            let flip = |offset: usize, value: u64| cells[offset].set(cells[offset].get() ^ value);
+            let mut land_partial = |record: usize, row: &[u64], unit_first: usize, shots: usize| {
+                land(record, row, unit_first, shots, &flip)
+            };
+            if head_partial {
+                self.land_cached_unit(first_unit, total_shots, end_shot, &mut land_partial);
+            }
+            if tail_partial {
+                self.land_cached_unit(last_unit, total_shots, end_shot, &mut land_partial);
+            }
+        }
+        let whole =
+            first_unit + usize::from(head_partial)..last_unit + 1 - usize::from(tail_partial);
+        if whole.is_empty() {
+            return;
+        }
         #[cfg(feature = "parallel")]
-        if last_unit > first_unit
+        if whole.len() > 1
             && first_shot.is_multiple_of(64)
             && qec_noise_units_in_parallel(
-                last_unit + 1 - first_unit,
+                whole.len(),
                 num_shots,
                 self.events.iter().map(|event| &event.draw),
             )
@@ -649,7 +684,7 @@ impl QecRecordNoise {
                 // boundaries fall on word boundaries and no two units touch one word.
                 unsafe { data.xor_word(offset, value) }
             };
-            (first_unit..=last_unit).into_par_iter().for_each(|unit| {
+            whole.into_par_iter().for_each(|unit| {
                 self.apply_unit(
                     unit,
                     total_shots,
@@ -662,7 +697,7 @@ impl QecRecordNoise {
         }
         let cells = std::cell::Cell::from_mut(data).as_slice_of_cells();
         let flip = |offset: usize, value: u64| cells[offset].set(cells[offset].get() ^ value);
-        for unit in first_unit..=last_unit {
+        for unit in whole {
             self.apply_unit(
                 unit,
                 total_shots,
@@ -670,6 +705,42 @@ impl QecRecordNoise {
                     land(record, row, unit_first, unit_shots, &flip)
                 },
             );
+        }
+    }
+
+    /// Land unit `unit` of a `total_shots`-shot run from its cached record flips, drawing
+    /// them first when the cache holds another unit, and keep them while the window
+    /// ending at `end_shot` stops short of the unit's last shot. Windows that split a unit
+    /// then draw it once between them, as an unsplit run does.
+    fn land_cached_unit(
+        &mut self,
+        unit: usize,
+        total_shots: usize,
+        end_shot: usize,
+        land: &mut impl FnMut(usize, &[u64], usize, usize),
+    ) {
+        let unit_first = unit * QEC_NOISE_UNIT_SHOTS;
+        let unit_shots = (total_shots - unit_first).min(QEC_NOISE_UNIT_SHOTS);
+        let words = unit_shots.div_ceil(64);
+        let cached = match self.cached_unit.take() {
+            Some(cached) if cached.unit == unit && cached.total_shots == total_shots => cached,
+            _ => {
+                let mut rows = vec![0u64; self.deferred.measurement_qubits.len() * words];
+                self.apply_unit(unit, total_shots, &mut |record, row, _, _| {
+                    xor_words(&mut rows[record * words..(record + 1) * words], row)
+                });
+                QecUnitFlips {
+                    unit,
+                    total_shots,
+                    rows,
+                }
+            }
+        };
+        for (record, row) in cached.rows.chunks_exact(words).enumerate() {
+            land(record, row, unit_first, unit_shots);
+        }
+        if end_shot < unit_first + unit_shots {
+            self.cached_unit = Some(cached);
         }
     }
 

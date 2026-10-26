@@ -1257,6 +1257,52 @@ fn bench_qec_feedforward_runner(c: &mut Criterion) {
     group.finish();
 }
 
+/// 100k-shot repetition memories on the record and leakage samplers at chunk 64, where
+/// each window covers a sliver of one 8192-shot noise unit, against the unchunked run of
+/// the same program. Both draw the same shots at the same seed.
+fn bench_qec_chunked_noise(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_chunked_noise");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    let shots = 100_000;
+    let records = qec_repetition_program(15, 15, shots, Some(0.001));
+    let mut leaky_ops = Vec::new();
+    let leak_base = qec_repetition_program(5, 5, shots, Some(0.001));
+    for op in leak_base.ops() {
+        let round_noise = matches!(op, QecOp::Noise { .. });
+        leaky_ops.push(op.clone());
+        if round_noise {
+            leaky_ops.push(QecOp::Noise {
+                channel: QecNoise::Leak(0.001),
+                targets: (0..leak_base.num_qubits()).collect(),
+            });
+        }
+    }
+    let leaky =
+        QecProgram::from_ops(leak_base.num_qubits(), leak_base.options(), leaky_ops).unwrap();
+    for (label, base) in [("rep_d15_p001_keep", records), ("rep_d5_p001_leak", leaky)] {
+        for (chunk_label, chunk_size) in [("64", Some(64)), ("unchunked", None)] {
+            let mut program = base.clone();
+            program.set_options(QecOptions {
+                chunk_size,
+                keep_measurements: true,
+                ..base.options()
+            });
+            group.bench_with_input(
+                BenchmarkId::new(label, chunk_label),
+                &program,
+                |b, program| {
+                    b.iter(|| run_qec_program(program).unwrap());
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -1278,6 +1324,7 @@ criterion_group! {
     bench_chunked_high_shots,
     bench_qec_workflow,
     bench_qec_erasure_runner,
-    bench_qec_feedforward_runner
+    bench_qec_feedforward_runner,
+    bench_qec_chunked_noise
 }
 criterion_main!(benches);

@@ -62,7 +62,8 @@ use rayon::prelude::*;
 ///   defers measurements to terminal records. Reuse after a non-Z basis measurement is
 ///   rejected, because it also leaves the qubit in the Z frame.
 /// - [`QecOptions::chunk_size`] bounds the per-batch shot count; with
-///   `keep_measurements: false` peak memory stays at one chunk of records.
+///   `keep_measurements: false` peak memory stays at one chunk of records, plus the
+///   record flips of one 8192-shot noise unit while chunks split it.
 /// - With `keep_measurements: false`, no postselection or feed-forward, and detectors
 ///   and observables fixed in the noiseless circuit, detector and observable bits are
 ///   sampled without measurement records, matching the record path bit for bit at the

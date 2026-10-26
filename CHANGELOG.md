@@ -4,6 +4,11 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **qec:** Skip empty `REPEAT` blocks in QEC and detector error model text, which spun
+  once per repetition, so a huge count no longer hangs the parser.
+
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

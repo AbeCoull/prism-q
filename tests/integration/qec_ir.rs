@@ -1072,6 +1072,31 @@ fn qec_text_parser_caps_repeat_expansion() {
 }
 
 #[test]
+fn qec_text_parser_skips_empty_repeat_blocks() {
+    let program = parse_qec_program(
+        r#"
+        REPEAT 4000000000 {
+        }
+        REPEAT 4000000000 {
+            REPEAT 4000000000 {
+            }
+            REPEAT 0 {
+                M 0
+            }
+        }
+        REPEAT 2 {
+            REPEAT 4000000000 {
+            }
+            M 0
+        }
+        M 0
+        "#,
+    )
+    .unwrap();
+    assert_eq!(program.num_measurements(), 3);
+}
+
+#[test]
 fn qec_compiles_measurement_records_into_pauli_rows() {
     let mut program = QecProgram::new(3);
     let m0 = program.measure_z(0).unwrap();

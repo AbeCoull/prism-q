@@ -581,6 +581,9 @@ fn expand_repeat_block(
             let count = parse_repeat_header(line, *line_num)?;
             *index += 1;
             let body = expand_repeat_block(lines, index, true)?;
+            if body.is_empty() {
+                continue;
+            }
             let repeated_len = body.len().checked_mul(count).ok_or_else(|| {
                 qec_parse_error(
                     *line_num,

@@ -1630,7 +1630,8 @@ const SPARSE_TRANSPOSE_BITS: u32 = 64;
 /// Transpose measurement-major `data` one 64-shot block at a time. `out` holds
 /// `row_len` elements per shot, and `emit(block, shot, meas_word, word)` writes the
 /// 64 measurements from `meas_word * 64` of shot `shot` within `block`, the slice of
-/// `out` that holds the block's shots. Shot padding past `num_shots` is never emitted.
+/// `out` that holds the block's shots. `out` arrives zeroed, so all-zero words may go
+/// unemitted. Shot padding past `num_shots` is never emitted.
 fn transpose_meas_major_blocks<T: Send>(
     data: &[u64],
     num_shots: usize,
@@ -1657,18 +1658,27 @@ fn transpose_meas_major_blocks<T: Send>(
             }
             if ones <= SPARSE_TRANSPOSE_BITS {
                 let mut transposed = [0u64; 64];
+                let mut touched = 0u64;
                 for (row, &word) in matrix[..rows].iter().enumerate() {
                     let mut bits = word;
                     while bits != 0 {
-                        transposed[bits.trailing_zeros() as usize] |= 1 << row;
+                        let shot = bits.trailing_zeros() as usize;
+                        transposed[shot] |= 1 << row;
+                        touched |= 1 << shot;
                         bits &= bits - 1;
                     }
                 }
-                matrix = transposed;
-            } else {
-                matrix[rows..].fill(0);
-                transpose_64x64_dispatch(&mut matrix);
+                while touched != 0 {
+                    let shot = touched.trailing_zeros() as usize;
+                    if shot < shots {
+                        emit(block, shot, meas_word, transposed[shot]);
+                    }
+                    touched &= touched - 1;
+                }
+                continue;
             }
+            matrix[rows..].fill(0);
+            transpose_64x64_dispatch(&mut matrix);
             for (shot, &word) in matrix[..shots].iter().enumerate() {
                 emit(block, shot, meas_word, word);
             }

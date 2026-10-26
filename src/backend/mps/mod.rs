@@ -2242,17 +2242,23 @@ impl MpsBackend {
     }
 
     fn apply_reset(&mut self, qubit: usize) {
-        let prob = self.born_weights(qubit);
-        let outcome = usize::from(self.rng.random::<f64>() < prob[1].clamp(0.0, 1.0));
-        self.collapse_site_to_zero(qubit, outcome, prob[outcome].clamp(0.0, 1.0));
+        let weights = self.born_weights(qubit);
+        let outcome = self.draw_outcome(weights);
+        self.collapse_site_to_zero(qubit, outcome, weights[outcome]);
     }
 
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
-        let prob = self.born_weights(qubit);
-
-        let measured = usize::from(self.rng.random::<f64>() < prob[1].clamp(0.0, 1.0));
+        let weights = self.born_weights(qubit);
+        let measured = self.draw_outcome(weights);
         self.classical_bits[classical_bit] = measured == 1;
-        self.project_site_outcome(qubit, measured, prob[measured].clamp(0.0, 1.0));
+        self.project_site_outcome(qubit, measured, weights[measured]);
+    }
+
+    /// Draw an outcome from Born weights, which sum to the squared norm the
+    /// truncations so far have left rather than to one.
+    fn draw_outcome(&mut self, weights: [f64; 2]) -> usize {
+        let total = weights[0] + weights[1];
+        usize::from(self.rng.random::<f64>() * total < weights[1])
     }
 
     /// Unnormalized weight of each outcome at `site`, taken with the
@@ -2291,8 +2297,8 @@ impl MpsBackend {
 
     /// Take the Born weight from the caller, which read it off the center in
     /// [`Self::born_weights`], the convention [`Self::collapse_site_to_zero`]
-    /// already uses for reset. The write lands on the center, so the gauge
-    /// comes through it intact.
+    /// already uses for reset, and rescale the chain to unit norm. The write
+    /// lands on the center, so the gauge comes through it intact.
     fn project_site_outcome(&mut self, site: usize, outcome: usize, prob: f64) -> f64 {
         debug_assert_eq!(self.center, Some(site), "a projection off the center");
         if !self.cuts_can_lose_weight() {
@@ -2353,8 +2359,13 @@ impl MpsBackend {
     pub(crate) fn project_z_outcome(&mut self, qubit: usize, outcome: bool) -> f64 {
         let site = self.site_for_logical(qubit);
         let outcome = usize::from(outcome);
-        let prob = self.born_weights(site)[outcome].clamp(0.0, 1.0);
-        self.project_site_outcome(site, outcome, prob)
+        let weights = self.born_weights(site);
+        let kept = self.project_site_outcome(site, outcome, weights[outcome]);
+        if kept == 0.0 {
+            0.0
+        } else {
+            kept / (weights[0] + weights[1])
+        }
     }
 
     fn reduced_density_site(&self, site: usize) -> [[Complex64; 2]; 2] {
@@ -2392,6 +2403,7 @@ impl MpsBackend {
             }
         }
 
+        crate::backend::reduced_density::normalize_trace(rho.as_flattened_mut(), 2);
         rho
     }
 

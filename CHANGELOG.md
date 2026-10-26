@@ -10,6 +10,9 @@ All notable changes to PRISM-Q will be documented in this file.
   sampler when two measurements write one classical bit. Packed records, `sample_bulk`
   and detector rows read the last write for every record before, which broke
   measure-reset loops into one bit through `compile_detector_sampler`.
+- **sim:** `compile_forward` checked only for non-Clifford gates, so it compiled circuits
+  with resets, gates after a measurement, or classical conditionals that
+  `compile_measurements` rejects. It now runs the same checks and returns the same errors.
 
 ### Features
 

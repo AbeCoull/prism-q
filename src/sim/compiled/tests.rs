@@ -137,6 +137,46 @@ fn conditional_rejected() {
 }
 
 #[test]
+fn forward_compile_rejects_what_compile_measurements_rejects() {
+    let mut reset = Circuit::new(1, 1);
+    reset.add_gate(Gate::H, &[0]);
+    reset.add_reset(0);
+    reset.add_gate(Gate::H, &[0]);
+    reset.add_measure(0, 0);
+
+    let mut mid_measure = Circuit::new(1, 2);
+    mid_measure.add_gate(Gate::H, &[0]);
+    mid_measure.add_measure(0, 0);
+    mid_measure.add_gate(Gate::H, &[0]);
+    mid_measure.add_measure(0, 1);
+
+    let mut conditional = Circuit::new(2, 2);
+    conditional.add_gate(Gate::H, &[0]);
+    conditional.add_measure(0, 0);
+    conditional.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: smallvec![1],
+    });
+    conditional.add_measure(1, 1);
+
+    for (name, c) in [
+        ("reset", &reset),
+        ("mid-circuit measurement", &mid_measure),
+        ("conditional", &conditional),
+    ] {
+        let forward = compile_forward(c, 42).err().map(|e| e.to_string());
+        let measured = compile_measurements(c, 42).err().map(|e| e.to_string());
+        assert!(forward.is_some(), "{name}: compile_forward accepted it");
+        assert_eq!(forward, measured, "{name}");
+    }
+
+    let mut terminal = circuits::ghz_circuit(3);
+    terminal.measure_all();
+    assert!(compile_forward(&terminal, 42).is_ok());
+}
+
+#[test]
 fn no_measurements_rank_zero() {
     let c = circuits::ghz_circuit(5);
     let sampler = compile_measurements(&c, 42).unwrap();
@@ -1138,6 +1178,8 @@ fn marginal_probabilities_x_all_ones() {
     let mut c = Circuit::new(4, 4);
     for i in 0..4 {
         c.add_gate(Gate::X, &[i]);
+    }
+    for i in 0..4 {
         c.add_measure(i, i);
     }
     let sampler = compile_forward(&c, 42).unwrap();

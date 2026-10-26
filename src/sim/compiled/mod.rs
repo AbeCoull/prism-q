@@ -2747,6 +2747,30 @@ fn require_clifford(circuit: &Circuit) -> Result<()> {
     })
 }
 
+/// [`require_clifford`], then, once the circuit measures, no resets and terminal
+/// measurements with no classical conditionals.
+fn require_compilable(circuit: &Circuit) -> Result<()> {
+    require_clifford(circuit)?;
+
+    let has_measurements = circuit
+        .instructions
+        .iter()
+        .any(|inst| matches!(inst, Instruction::Measure { .. }));
+    if has_measurements && circuit.has_resets() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: "compiled measurement sampling does not support reset instructions".to_string(),
+        });
+    }
+    if has_measurements && !circuit.has_terminal_measurements_only() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: "compiled measurement sampling requires terminal measurements and does not support classical conditionals".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn finish_sampler(
     mut flip_rows: Vec<Vec<u64>>,
     rank: usize,
@@ -2773,7 +2797,7 @@ fn finish_sampler(
 
 /// Compile a Clifford circuit's measurements via forward stabilizer
 /// simulation; [`compile_measurements`] routes registers of 64 or more qubits
-/// here.
+/// here, and the same circuit requirements apply.
 ///
 /// # Examples
 ///
@@ -2792,7 +2816,11 @@ fn finish_sampler(
 /// assert_eq!(counts.values().sum::<u64>(), 1000);
 /// ```
 pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
-    require_clifford(circuit)?;
+    require_compilable(circuit)?;
+    compile_forward_unchecked(circuit, seed)
+}
+
+fn compile_forward_unchecked(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     let schedule = live_forward::LiveSchedule::plan(circuit);
     if schedule.peak_live * schedule.peak_live <= LIVE_FORWARD_DENSITY * circuit.num_qubits {
         return live_forward::compile_forward_live(circuit, seed, &schedule);
@@ -3311,24 +3339,7 @@ pub fn compile_detector_sampler(
 ///
 /// Requires terminal measurements with no resets or classical conditionals.
 pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
-    require_clifford(circuit)?;
-
-    let has_measurements = circuit
-        .instructions
-        .iter()
-        .any(|inst| matches!(inst, Instruction::Measure { .. }));
-    if has_measurements && circuit.has_resets() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: "compiled measurement sampling does not support reset instructions".to_string(),
-        });
-    }
-    if has_measurements && !circuit.has_terminal_measurements_only() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: "compiled measurement sampling requires terminal measurements and does not support classical conditionals".to_string(),
-        });
-    }
+    require_compilable(circuit)?;
 
     if circuit.num_qubits >= 4 {
         let blocks = circuit.independent_subsystems();
@@ -3341,7 +3352,7 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
     }
 
     if circuit.num_qubits >= 64 {
-        return compile_forward(circuit, seed);
+        return compile_forward_unchecked(circuit, seed);
     }
 
     let measurement_rows = build_measurement_rows(circuit);

@@ -145,7 +145,7 @@ fn analytical_marginals_fold_in_readout_error() {
     // Deterministic bits under a readout-only model, so the closed form is the
     // whole answer: bit 0 is measured 1 and reads 1 with probability 1 - p10,
     // bit 1 is measured 0 and reads 1 with probability p01.
-    let mut circuit = Circuit::new(2, 2);
+    let mut circuit = crate::circuit::Circuit::new(2, 2);
     circuit.add_gate(crate::gates::Gate::X, &[0]);
     circuit.measure_all();
     let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
@@ -312,4 +312,16 @@ fn analytical_marginals_count_flips_on_measurement_slots() {
     for (bit, p) in marginals.iter().enumerate() {
         assert!((p - 0.1).abs() < 1e-12, "bit {bit}: {p}");
     }
+}
+
+#[test]
+fn a_noise_model_built_before_the_measurements_is_an_error() {
+    let mut circuit = crate::circuit::Circuit::new(2, 2);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    circuit.add_gate(crate::gates::Gate::Cx, &[0, 1]);
+    let noise = crate::sim::noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    circuit.measure_all();
+
+    let err = noisy_marginals_analytical(&circuit, &noise, 42).unwrap_err();
+    assert!(err.to_string().contains("event slots"), "{err}");
 }

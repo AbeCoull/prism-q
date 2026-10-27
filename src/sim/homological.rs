@@ -170,6 +170,7 @@ impl ErrorChainComplex {
     /// Uses backward Pauli propagation (same as the compiled noisy sampler)
     /// to determine which measurements are sensitive to each error location.
     pub fn build(circuit: &Circuit, noise: &NoiseModel, _seed: u64) -> Result<Self> {
+        noise.validate_for(circuit)?;
         noise.ensure_no_guarded_events(circuit, "error chain complex")?;
         let m = circuit
             .instructions

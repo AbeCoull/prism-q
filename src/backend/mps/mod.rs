@@ -101,6 +101,9 @@ const MAX_SVD_SWEEPS: usize = 100;
 const JACOBI_REL_TOL: f64 = 1e-15;
 #[cfg(feature = "parallel")]
 const MIN_BOND_FOR_PAR: usize = 32;
+/// Largest `bond_left * bond_right` at which a single-site environment step keeps
+/// the four-index sum and its zero skip rather than two dense passes.
+const DENSE_ENV_MAX_BONDS: usize = 4;
 /// Shot count at or above which native sampling splits the shot loop across
 /// the Rayon pool; per-shot substreams keep the output identical either way.
 #[cfg(feature = "parallel")]
@@ -354,6 +357,14 @@ impl Clone for MpsBackend {
             scratch_absorb: Vec::new(),
         }
     }
+}
+
+fn identity_env(dim: usize) -> Vec<Complex64> {
+    let mut env = vec![ZERO; dim * dim];
+    for i in 0..dim {
+        env[i * dim + i] = ONE;
+    }
+    env
 }
 
 impl MpsBackend {
@@ -2037,39 +2048,21 @@ impl MpsBackend {
         out
     }
 
-    fn compute_left_env(&self, site: usize) -> Vec<Complex64> {
-        let mut env = vec![ONE];
-        let mut env_dim = 1usize;
+    /// Left environment of `site`, contracted from `from`; every site before
+    /// `from` must be a left isometry, so the sweep starts there at identity.
+    fn compute_left_env(&self, from: usize, site: usize) -> Vec<Complex64> {
+        let mut env_dim = self.sites[from].bond_left;
+        let mut env = identity_env(env_dim);
+        let mut tmp = Vec::new();
 
-        for s in 0..site {
+        for s in from..site {
             let t = &self.sites[s];
             let bl = t.bond_left;
             let br = t.bond_right;
             debug_assert_eq!(env_dim, bl);
 
-            #[cfg(feature = "parallel")]
-            if br >= MIN_BOND_FOR_PAR {
-                let mut new_env = vec![ZERO; br * br];
-                new_env.par_iter_mut().enumerate().for_each(|(idx, val)| {
-                    let gamma = idx / br;
-                    let gamma_p = idx % br;
-                    let mut sum = ZERO;
-                    for alpha in 0..bl {
-                        for alpha_p in 0..bl {
-                            let env_val = env[alpha * bl + alpha_p];
-                            if env_val == ZERO {
-                                continue;
-                            }
-                            for i in 0..2 {
-                                sum += env_val
-                                    * t.data[t.idx(alpha, i, gamma)]
-                                    * t.data[t.idx(alpha_p, i, gamma_p)].conj();
-                            }
-                        }
-                    }
-                    *val = sum;
-                });
-                env = new_env;
+            if bl * br > DENSE_ENV_MAX_BONDS {
+                env = self.contract_left_env(s, &env, &mut tmp);
                 env_dim = br;
                 continue;
             }
@@ -2100,19 +2093,67 @@ impl MpsBackend {
         env
     }
 
+    /// Absorb one site into a left environment, the mirror of
+    /// [`Self::contract_right_env`].
+    fn contract_left_env(
+        &self,
+        site: usize,
+        env: &[Complex64],
+        tmp: &mut Vec<Complex64>,
+    ) -> Vec<Complex64> {
+        let t = &self.sites[site];
+        let bl = t.bond_left;
+        let br = t.bond_right;
+
+        // tmp[α', i, γ] = Σ_α env[α, α'] · A[α, i, γ]
+        tmp.clear();
+        tmp.resize(bl * 2 * br, ZERO);
+        for alpha in 0..bl {
+            for alpha_p in 0..bl {
+                let e = env[alpha * bl + alpha_p];
+                if e == ZERO {
+                    continue;
+                }
+                for i in 0..2 {
+                    let src = t.idx(alpha, i, 0);
+                    let dst = (alpha_p * 2 + i) * br;
+                    for gamma in 0..br {
+                        tmp[dst + gamma] += e * t.data[src + gamma];
+                    }
+                }
+            }
+        }
+
+        // new_env[γ, γ'] = Σ_{α', i} tmp[α', i, γ] · conj(A[α', i, γ'])
+        let mut new_env = vec![ZERO; br * br];
+        for alpha_p in 0..bl {
+            for i in 0..2 {
+                let row = (alpha_p * 2 + i) * br;
+                let src = t.idx(alpha_p, i, 0);
+                for gamma in 0..br {
+                    let x = tmp[row + gamma];
+                    if x == ZERO {
+                        continue;
+                    }
+                    for gamma_p in 0..br {
+                        new_env[gamma * br + gamma_p] += x * t.data[src + gamma_p].conj();
+                    }
+                }
+            }
+        }
+        new_env
+    }
+
     /// Absorb one site into a right environment, in the two passes
     /// [`Self::inner_product`] uses: `O(χ³)` instead of the four-index sum's
     /// `O(χ⁴)`. `tmp` carries the intermediate across a sweep so the inner
     /// buffer is allocated once rather than per site.
     ///
-    /// [`Self::compute_right_env`] deliberately keeps the four-index form
-    /// instead of calling this. It serves the single-site reduced density
-    /// matrix, whose chains carry the zeros a projection leaves behind, and the
-    /// `env_val == ZERO` skip there beat dense `O(χ³)` arithmetic by 14% on
-    /// `mps/hotspots/measure_reset_32q_r3` (496 µs against 574 µs) while that
-    /// row still went through the environments. The sweep below runs on
-    /// unprojected chains where the environments are dense and the asymptotics
-    /// decide instead. Measure both before unifying them.
+    /// [`Self::compute_right_env`] calls this only past
+    /// [`DENSE_ENV_MAX_BONDS`]. Below it the chains a projection leaves behind
+    /// carry zeros, and the four-index form's `env_val == ZERO` skip beat dense
+    /// `O(χ³)` arithmetic by 14% on `mps/hotspots/measure_reset_32q_r3` (496 µs
+    /// against 574 µs) while that row still went through the environments.
     fn contract_right_env(
         &self,
         site: usize,
@@ -2160,39 +2201,21 @@ impl MpsBackend {
         new_env
     }
 
-    fn compute_right_env(&self, site: usize) -> Vec<Complex64> {
-        let mut env = vec![ONE];
-        let mut env_dim = 1usize;
+    /// Right environment of `site`, contracted from `to`; every site after `to`
+    /// must be a right isometry, so the sweep starts there at identity.
+    fn compute_right_env(&self, site: usize, to: usize) -> Vec<Complex64> {
+        let mut env_dim = self.sites[to].bond_right;
+        let mut env = identity_env(env_dim);
+        let mut tmp = Vec::new();
 
-        for s in (site + 1..self.num_qubits).rev() {
+        for s in (site + 1..=to).rev() {
             let t = &self.sites[s];
             let bl = t.bond_left;
             let br = t.bond_right;
             debug_assert_eq!(env_dim, br);
 
-            #[cfg(feature = "parallel")]
-            if bl >= MIN_BOND_FOR_PAR {
-                let mut new_env = vec![ZERO; bl * bl];
-                new_env.par_iter_mut().enumerate().for_each(|(idx, val)| {
-                    let alpha = idx / bl;
-                    let alpha_p = idx % bl;
-                    let mut sum = ZERO;
-                    for beta in 0..br {
-                        for beta_p in 0..br {
-                            let env_val = env[beta * br + beta_p];
-                            if env_val == ZERO {
-                                continue;
-                            }
-                            for i in 0..2 {
-                                sum += t.data[t.idx(alpha, i, beta)]
-                                    * t.data[t.idx(alpha_p, i, beta_p)].conj()
-                                    * env_val;
-                            }
-                        }
-                    }
-                    *val = sum;
-                });
-                env = new_env;
+            if bl * br > DENSE_ENV_MAX_BONDS {
+                env = self.contract_right_env(s, &env, &mut tmp);
                 env_dim = bl;
                 continue;
             }
@@ -2368,13 +2391,38 @@ impl MpsBackend {
         }
     }
 
+    /// Sites left of a recorded center are left isometries and sites right of
+    /// it right isometries, so each environment starts at the center or at the
+    /// site itself instead of at the chain end, and the center's own site needs
+    /// neither.
     fn reduced_density_site(&self, site: usize) -> [[Complex64; 2]; 2] {
-        let l_env = self.compute_left_env(site);
-        let r_env = self.compute_right_env(site);
         let t = &self.sites[site];
         let bl = t.bond_left;
         let br = t.bond_right;
         let mut rho = [[ZERO; 2]; 2];
+
+        if self.center == Some(site) {
+            for alpha in 0..bl {
+                for beta in 0..br {
+                    let a = [t.data[t.idx(alpha, 0, beta)], t.data[t.idx(alpha, 1, beta)]];
+                    for (row, rho_row) in rho.iter_mut().enumerate() {
+                        for (col, rho_cell) in rho_row.iter_mut().enumerate() {
+                            *rho_cell += a[row] * a[col].conj();
+                        }
+                    }
+                }
+            }
+            crate::backend::reduced_density::normalize_trace(rho.as_flattened_mut(), 2);
+            return rho;
+        }
+
+        let (from, to) = match self.center {
+            Some(c) if c < site => (c, site),
+            Some(c) => (site, c),
+            None => (0, self.num_qubits - 1),
+        };
+        let l_env = self.compute_left_env(from, site);
+        let r_env = self.compute_right_env(site, to);
 
         for (row, rho_row) in rho.iter_mut().enumerate() {
             for (col, rho_cell) in rho_row.iter_mut().enumerate() {

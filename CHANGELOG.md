@@ -4,16 +4,6 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
-### Bug Fixes
-
-- **noise:** Fire noise attached after a measurement or barrier in the Clifford frame
-  sampler, the compiled noisy sampler and `noisy_marginals_analytical`.
-  `NoiseBuilder::before_measurements` on a terminal `measure_all` flipped only the first
-  bit there, and seeded shots change for models that carry such events.
-- **noise:** Keep each single-qubit event on its own qubit in the per-subsystem noisy
-  compile. A crosstalk event on a spectator in another subsystem landed on an unrelated
-  qubit.
-
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

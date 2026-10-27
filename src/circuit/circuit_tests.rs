@@ -385,3 +385,56 @@ fn add_barrier_panics_on_out_of_bounds() {
     let mut c = Circuit::new(4, 0);
     c.add_barrier(&[0, 7]);
 }
+
+#[test]
+fn a_register_condition_wider_than_64_bits_compares_exactly() {
+    for size in [65, 70] {
+        let equals_one = ClassicalCondition::RegisterEquals {
+            offset: 1,
+            size,
+            value: 1,
+        };
+        let mut bits = vec![false; size + 1];
+        bits[1] = true;
+        assert!(equals_one.evaluate(&bits));
+        bits[size] = true;
+        assert!(
+            !equals_one.evaluate(&bits),
+            "a set bit {size} above the value"
+        );
+        bits[1] = false;
+        bits[size] = false;
+        assert!(!equals_one.evaluate(&bits));
+        assert!(
+            ClassicalCondition::RegisterNotEquals {
+                offset: 1,
+                size,
+                value: 1,
+            }
+            .evaluate(&bits)
+        );
+    }
+}
+
+#[test]
+fn a_qasm_comparison_on_a_65_bit_register_runs() {
+    let run = |high_bit: bool| {
+        let source = format!(
+            "OPENQASM 3.0;\nqubit[2] q;\nbit[65] c;\nx q[0];\nc[0] = measure q[0];\n{}\
+             if (c == 1) x q[1];\nc[1] = measure q[1];",
+            if high_bit {
+                "c[64] = measure q[0];\n"
+            } else {
+                ""
+            }
+        );
+        let circuit = crate::circuit::openqasm::parse(&source).unwrap();
+        crate::sim::simulate(&circuit)
+            .seed(42)
+            .shots(4)
+            .unwrap()
+            .shots
+    };
+    assert!(run(false).iter().all(|shot| shot[1]));
+    assert!(run(true).iter().all(|shot| !shot[1]));
+}

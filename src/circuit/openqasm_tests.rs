@@ -1617,9 +1617,35 @@ fn test_expr_tau_constant() {
 }
 
 #[test]
-fn test_expr_e_constant() {
-    assert!((eval_expr("e", 0, None).unwrap() - std::f64::consts::E).abs() < 1e-12);
+fn test_expr_euler_constant() {
     assert!((eval_expr("euler", 0, None).unwrap() - std::f64::consts::E).abs() < 1e-12);
+    assert!(
+        eval_expr("e", 0, None).is_err(),
+        "OpenQASM 3 spells it `euler`"
+    );
+}
+
+#[test]
+fn a_declared_variable_shadows_a_constant_name() {
+    let qasm = "OPENQASM 3.0;
+qubit[1] q;
+float e = 0.5;
+gate g(euler) a { ry(euler) a; }
+                rx(e) q[0];
+g(0.25) q[0];";
+    let c = parse(qasm).unwrap();
+    let angles: Vec<f64> = c
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Gate {
+                gate: Gate::Rx(theta) | Gate::Ry(theta),
+                ..
+            } => Some(*theta),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(angles, [0.5, 0.25]);
 }
 
 #[test]
@@ -3084,5 +3110,67 @@ fn shapes_the_line_reader_rejected_now_parse() {
             ..
         } => assert!((theta + 0.5).abs() < 1e-12),
         other => panic!("{other:?}"),
+    }
+}
+
+fn rx_angles(source: &str) -> Vec<f64> {
+    parse(source)
+        .unwrap()
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Gate {
+                gate: Gate::Rx(theta),
+                ..
+            } => Some(*theta),
+            _ => None,
+        })
+        .collect()
+}
+
+// A static integer stores what a runtime one of its type would: truncation
+// toward zero, then wraparound to the declared width.
+#[test]
+fn integer_assignments_truncate_and_wrap_to_the_declared_width() {
+    let angles = rx_angles(
+        "OPENQASM 3.0;\nqubit[1] q;\n\
+         int n = 7;\nn /= 2;\nrx(n) q[0];\n\
+         int m = -7;\nm /= 2;\nrx(m) q[0];\n\
+         uint[8] u = 300;\nrx(u) q[0];\n\
+         uint[8] v = 250;\nv += 10;\nrx(v) q[0];\n\
+         int[8] w = 127;\nw += 1;\nrx(w) q[0];\n\
+         uint[4] z = 3;\nz -= 4;\nrx(z) q[0];\n\
+         bool b = false;\nb += 2;\nrx(b) q[0];",
+    );
+    assert_eq!(angles, [3.0, -3.0, 44.0, 4.0, -128.0, 15.0, 1.0]);
+}
+
+#[test]
+fn an_unsigned_integer_wraps_below_zero_and_back() {
+    let angles = rx_angles(
+        "OPENQASM 3.0;\nqubit[1] q;\n\
+         uint x = 0;\nx -= 1;\nx += 1;\nrx(x) q[0];\n\
+         uint[64] y = 0;\ny -= 1;\ny += 1;\nrx(y) q[0];\n\
+         uint[64] z = 0;\nz -= 2;\nz += 3;\nrx(z) q[0];\n\
+         uint[64] w = 0;\nw -= 1;\nuint[64] v = w;\nv += 1;\nrx(v) q[0];",
+    );
+    assert_eq!(angles, [0.0, 0.0, 1.0, 0.0]);
+}
+
+#[test]
+fn built_in_names_cannot_be_redeclared_at_the_top_level() {
+    for decl in [
+        "int true = 5;",
+        "bool false = true;",
+        "float pi = 3;",
+        "float \u{3c0} = 3;",
+        "float tau = 1;",
+        "const float euler = 1;",
+        "uint[8] true;",
+    ] {
+        let err = parse(&format!("OPENQASM 3.0;\nqubit[1] q;\n{decl}\nrx(1) q[0];"))
+            .expect_err(decl)
+            .to_string();
+        assert!(err.contains("built-in"), "{decl}: {err}");
     }
 }

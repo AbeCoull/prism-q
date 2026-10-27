@@ -121,6 +121,26 @@ fn number_of(
     }
 }
 
+/// `compound` on integers, exact before the declared width wraps the result.
+fn compound_int(op: AssignOp, current: i128, folded: i128, line: usize) -> Result<i128> {
+    Ok(match op {
+        AssignOp::Add => current.wrapping_add(folded),
+        AssignOp::Sub => current.wrapping_sub(folded),
+        AssignOp::Mul => current.wrapping_mul(folded),
+        AssignOp::Div if folded == 0 => {
+            return Err(parse_error(
+                line,
+                "division by zero in a compound assignment",
+            ));
+        }
+        AssignOp::Rem if folded == 0 => {
+            return Err(parse_error(line, "modulo by zero in a compound assignment"));
+        }
+        AssignOp::Div => current / folded,
+        AssignOp::Rem => current % folded,
+    })
+}
+
 fn compound(op: AssignOp, current: f64, folded: f64, line: usize) -> Result<f64> {
     Ok(match op {
         AssignOp::Add => current + folded,
@@ -386,7 +406,7 @@ impl<'a> Parser<'a> {
                         line,
                     );
                 }
-                self.declare_classical(*constant, ty, name, value.as_ref(), line)?;
+                self.declare_classical(*constant, ty, width.as_ref(), name, value.as_ref(), line)?;
                 Ok(())
             }
             StmtKind::Assign { target, op, value } => {
@@ -636,12 +656,13 @@ impl<'a> Parser<'a> {
         &mut self,
         constant: bool,
         ty: &str,
+        width: Option<&Expr<'a>>,
         name: &'a str,
         value: Option<&Expr<'a>>,
         line: usize,
     ) -> Result<()> {
         let kind = match ty {
-            "int" | "uint" => ClassicalType::Int,
+            "int" | "uint" => ClassicalType::Int(self.runtime_type(ty, width, line)?),
             "bool" => ClassicalType::Bool,
             "float" | "angle" => ClassicalType::Float,
             "duration" => ClassicalType::Duration,
@@ -664,6 +685,8 @@ impl<'a> Parser<'a> {
             if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
                 let zero = Timed::Duration(Duration::default());
                 self.bind_duration(name, kind, zero, constant);
+            } else if let ClassicalType::Int(integer) = kind {
+                self.bind_int(name, integer, 0, constant);
             } else {
                 self.bind_classical(name, kind, 0.0, constant);
             }
@@ -672,6 +695,11 @@ impl<'a> Parser<'a> {
         if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
             let folded = self.duration_of(value, line)?;
             self.bind_duration(name, kind, folded, constant);
+            return Ok(());
+        }
+        if let ClassicalType::Int(integer) = kind {
+            let folded = self.int_of(value, line)?;
+            self.bind_int(name, integer, folded, constant);
             return Ok(());
         }
         let folded = self.fold_typed(kind, value, line)?;
@@ -687,7 +715,14 @@ impl<'a> Parser<'a> {
         } else {
             value
         };
-        self.classical.insert(name, ClassicalDecl { ty, constant });
+        self.classical.insert(
+            name,
+            ClassicalDecl {
+                ty,
+                constant,
+                int: 0,
+            },
+        );
         self.durations.insert(name, value);
     }
 
@@ -732,7 +767,7 @@ impl<'a> Parser<'a> {
                 format!("`{target}` is not a declared classical variable"),
             ));
         };
-        let (kind, constant) = (decl.ty, decl.constant);
+        let (kind, constant, current) = (decl.ty, decl.constant, decl.int);
         if constant {
             return Err(parse_error(
                 line,
@@ -743,12 +778,21 @@ impl<'a> Parser<'a> {
         if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
             return self.assign_duration(target, kind, op, value, line);
         }
+        if let ClassicalType::Int(integer) = kind {
+            let folded = self.int_of(value, line)?;
+            let updated = match op {
+                None => folded,
+                Some(op) => compound_int(op, current, folded, line)?,
+            };
+            self.bind_int(target, integer, updated, false);
+            return Ok(());
+        }
         let folded = self.fold_typed(kind, value, line)?;
         let updated = match op {
             None => folded,
             Some(op) => {
                 let current = self.fold_typed(kind, &Expr::Ident(target), line)?;
-                compound(op, current, folded, line)?
+                kind.store(compound(op, current, folded, line)?)
             }
         };
         self.bind_classical(target, kind, updated, false);
@@ -757,7 +801,8 @@ impl<'a> Parser<'a> {
 
     fn declare_array(&mut self, decl: &ast::ArrayDecl<'a>, line: usize) -> Result<()> {
         let kind = match decl.ty {
-            "int" | "uint" => ClassicalType::Int,
+            "int" => ClassicalType::Int(RuntimeType::Int { width: 64 }),
+            "uint" => ClassicalType::Int(RuntimeType::Uint { width: 64 }),
             "bool" => ClassicalType::Bool,
             "float" | "angle" => ClassicalType::Float,
             other => {
@@ -881,7 +926,7 @@ impl<'a> Parser<'a> {
         let folded = self.fold_typed(kind, &assign.value, line)?;
         let updated = match assign.op {
             None => folded,
-            Some(op) => compound(op, current, folded, line)?,
+            Some(op) => kind.store(compound(op, current, folded, line)?),
         };
         if let Some(array) = self.arrays.get_mut(assign.array) {
             array.values[at] = updated;
@@ -955,8 +1000,10 @@ impl<'a> Parser<'a> {
             ClassicalType::Float | ClassicalType::Duration | ClassicalType::Stretch => {
                 self.value_of(value, line)
             }
-            ClassicalType::Int => Ok(self.integer_of(value, line)? as f64),
-            ClassicalType::Bool => Ok(f64::from(self.integer_of(value, line)? != 0)),
+            ClassicalType::Int(integer) => Ok(integer
+                .store(ClassicalValue::Int(self.int_of(value, line)?))
+                .to_float()),
+            ClassicalType::Bool => Ok(f64::from(self.int_of(value, line)? != 0)),
         }
     }
 
@@ -1338,6 +1385,26 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// An integer initializer or assignment: an integer variable read exactly,
+    /// anything else folded and required to be whole.
+    fn int_of(&self, expr: &Expr, line: usize) -> Result<i128> {
+        if let Expr::Ident(name) = expr
+            && let Some(decl) = self.classical.get(name)
+            && matches!(decl.ty, ClassicalType::Int(_))
+            && self.param_vars.as_ref().and_then(|vars| vars.get(name)) == Some(&(decl.int as f64))
+        {
+            return Ok(decl.int);
+        }
+        let value = self.value_of(expr, line)?;
+        if !value.is_finite() || value.fract() != 0.0 {
+            return Err(parse_error(
+                line,
+                format!("expected an integer, got {value}"),
+            ));
+        }
+        Ok(value as i128)
+    }
+
     pub(super) fn integer_of(&self, expr: &Expr, line: usize) -> Result<i64> {
         let value = self.value_of(expr, line)?;
         if !value.is_finite() || value.fract() != 0.0 {
@@ -1585,6 +1652,9 @@ impl<'a> Parser<'a> {
             .zip(call_params.iter().copied())
             .collect();
         let mut sub = self.expansion_parser(bindings);
+        if let Some(&first) = call_qubits.first() {
+            sub.phase_qubit = first;
+        }
         for (&qubit_name, qubit) in def.qubits.iter().zip(call_qubits) {
             sub.aliases.insert(
                 qubit_name,
@@ -1962,6 +2032,7 @@ impl<'a> Parser<'a> {
             def_result: None,
             guard: None,
             dynamic: None,
+            phase_qubit: self.phase_qubit,
         };
         for (name, register) in &self.qregs {
             sub.qregs.insert(

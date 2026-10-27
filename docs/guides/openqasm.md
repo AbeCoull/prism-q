@@ -555,7 +555,8 @@ hold. The backend it then runs on may still decline the circuit; those limits ar
   and `euler`, and the OpenQASM builtins (`arcsin`, `arccos`, `arctan`,
   `ceiling`, `cos`, `exp`, `floor`, `log`, `mod`, `popcount`, `pow`, `sin`,
   `sqrt`, `tan`). `**` is right associative and binds tighter than unary minus,
-  so `-2 ** 2` is `-4`.
+  so `-2 ** 2` is `-4`. The constants, `true` and `false` cannot be redeclared
+  in the global scope; a gate or `def` parameter may shadow a constant.
 
 ```qasm
 bit[2] c;

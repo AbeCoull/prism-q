@@ -2,34 +2,107 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
-## [Unreleased]
+## [0.36.0] - 2026-10-27
+
+### Bug Fixes
+
+- **qasm:** Bound nesting, expansion work and declared widths (#528)([1c05767](https://github.com/AbeCoull/prism-q/commit/1c0576785adab84c5276b11f4c014c1a42ea2662))
+- **noise:** Validate the model before building the error chain complex (#538)([72d0fc5](https://github.com/AbeCoull/prism-q/commit/72d0fc59a92b16900ac19bf087fb44403801f3ad))
+- **statevector:** Fold repeated targets and split Multi2q tiers (#529)([f80478c](https://github.com/AbeCoull/prism-q/commit/f80478c1197e39185fa2d1571b7ca5ea643edad6))
+- **qec:** Skip empty REPEAT blocks and accept instruction tags (#530)([d1c4b50](https://github.com/AbeCoull/prism-q/commit/d1c4b501c1270b1aff95791143eae86a40bbb1b2))
+- **stabilizer:** Reject a save point on the sparse bulk path (#531)([6f25ec4](https://github.com/AbeCoull/prism-q/commit/6f25ec4d0378856fa3f3179ec545a3f4b697fbda))
+- **qasm:** Fix shadowing, int wrap, wide conditions and ctrl gphase (#527)([5f9e2e9](https://github.com/AbeCoull/prism-q/commit/5f9e2e9ca741890f1b37bf409356876e161336fe))
+- **mps:** Normalize measurement weights after truncation (#526)([32df922](https://github.com/AbeCoull/prism-q/commit/32df9224da9a194ddc0f8840fc3481fa5b2a1fd3))
+- **sim:** Keep per-record reference bits, validate compile_forward (#525)([bf4afcf](https://github.com/AbeCoull/prism-q/commit/bf4afcf0d56b5a91e81343ca8361cb4af73b48da))
+- **noise:** Fire noise on measurement and barrier slots (#524)([17a9a90](https://github.com/AbeCoull/prism-q/commit/17a9a90867e981396cf41427e55b7545a66f6bb8))
+- **python:** Release the GIL in run_qasm (#532)([14c8e48](https://github.com/AbeCoull/prism-q/commit/14c8e487d5a9fb8a08880e38b9ab83f057433b90))
+- **distributed:** Keep batched 2q order through a relabeled map (#515)([43fc7a6](https://github.com/AbeCoull/prism-q/commit/43fc7a67f50812fe4cb1adf40da317ee3ad59f84))
+- **mps:** Report the bond on the decomposed route (#513)([384ed87](https://github.com/AbeCoull/prism-q/commit/384ed8766b9d3bf9f4ba5f4306848bec8b412384))
+- **qec:** Keep QecOp::Tick at its discriminant and format a test (#506)([538f8e2](https://github.com/AbeCoull/prism-q/commit/538f8e2418d6a384b60b7218f36bc1638a3334ca))
+- Dropped MultiFused targets and inaccurate faer SVDs (#476)([e5fd0b2](https://github.com/AbeCoull/prism-q/commit/e5fd0b20c92a1919ad3da09ec8db1ff9d655c455))
+- Identity terms on the tensor route and tiny noise rates (#471)([73fd2fc](https://github.com/AbeCoull/prism-q/commit/73fd2fc7c18a7b663617e9a3237277d07b7c5b44))
+
+### CI
+
+- **bench:** Wait for the runner to settle before the gate measures (#516)([76b1340](https://github.com/AbeCoull/prism-q/commit/76b13404c1e8c81cfff0e0e7665ecbe3f54e8fc5))
+- Gate instruction counts under callgrind with iai-callgrind (#508)([4ff648b](https://github.com/AbeCoull/prism-q/commit/4ff648bfbece15e69630eef0726db1fea2616a8f))
+- **kani:** Give each heavy word harness its own runner (#502)([6f0fe01](https://github.com/AbeCoull/prism-q/commit/6f0fe01c6232853ed904a182ff1b9d06ea098d7f))
+- Key nightly caches on the pinned toolchain (#492)([b37f8af](https://github.com/AbeCoull/prism-q/commit/b37f8af95cc74a06420810f4fc55134fd8e453c6))
+- Share setup, gate on one result job, trim cache use (#491)([a72456c](https://github.com/AbeCoull/prism-q/commit/a72456cd1e0dfce539fb8b0dbd08315a0585f094))
+- Run layered_mixed_14q in the lowered threshold lane (#482)([4d5fbc0](https://github.com/AbeCoull/prism-q/commit/4d5fbc0025282a1b4f2e374494ce8023a6665dfb))
+
+### Documentation
+
+- **dispatch:** Name the bench rows that bracket each threshold (#519)([440d516](https://github.com/AbeCoull/prism-q/commit/440d516b1aa5713c74747bb2b01a6c23defd46e4))
 
 ### Features
 
-- Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.
-- Report the route decision through `RunMetadata.reason`.
-- Compile a QEC program once with `QecProgram::compile_sampler` and sample it repeatedly
-  through `QecCompiledSampler`; Python's `QecCompiledSampler.sample` returns packed or
-  bool detector and observable arrays.
-- Export packed shot rows through a blocked 64x64 bit transpose
-  (`PackedShots::to_shot_major_bytes`), which the Python packed and bool accessors use.
+- **qec:** Measure detectors against the noiseless reference run (#523) (**BREAKING**)([078daa0](https://github.com/AbeCoull/prism-q/commit/078daa0926f7cd3fbc9a39db13a84504042eb55a))
+- **qec:** Sample Pauli feed-forward on the compiled path (#511)([cc0a689](https://github.com/AbeCoull/prism-q/commit/cc0a6897fbf2dede5a8ca0bb557bb40dba747118))
+- **distributed:** Answer reduced density matrices on the sharded state (#512)([0b7e6f0](https://github.com/AbeCoull/prism-q/commit/0b7e6f082e96b02767fcd6d11ad4354a0bb57315))
+- **qec:** Cover the remaining QEC text instructions (#505)([8229d04](https://github.com/AbeCoull/prism-q/commit/8229d040c58c846e08d06ba67e1138fad866033e))
+- **circuit:** Add a Trotter and Suzuki product-formula builder (#503)([d07cc03](https://github.com/AbeCoull/prism-q/commit/d07cc03c7c3a4ec5ca7c877b4b288c3c8be280b8))
+- **noise:** Give guarded bodies their own noise slots (#499)([a4e1fe7](https://github.com/AbeCoull/prism-q/commit/a4e1fe709812e9afdd3966bca299015a79ebd31a))
+- **backend:** Answer Schmidt values and entropy on the factored backend (#496)([831cc9d](https://github.com/AbeCoull/prism-q/commit/831cc9d07eb071d350b07e9add84b23cfc70f0b8))
+- **sim:** Expose terminal execution plans (#484)([51aae99](https://github.com/AbeCoull/prism-q/commit/51aae99e3070b25177497c14af4a9f882bc1145a))
+- **limits:** Set memory caps per request or per process (#480)([a2c1f74](https://github.com/AbeCoull/prism-q/commit/a2c1f749e6e8d86f611a14a42bd22c0de327df5f))
 
-### Compatibility
+### Miscellaneous
 
-- `require_exact()` accepts exact marginal and expectation routes even when full-state
-  dispatch would select an approximate backend. Route failures can use different error text.
-- QEC detectors and observables, and the logical errors counted from them, are now
-  measured against the noiseless reference run by default: a detector that is
-  deterministic without noise reports 1 only when noise flips it. Set
-  `QecOptions::detector_reference` to `QecDetectorReference::Raw`
-  (`set_options(..., detector_reference="raw")` in Python) for the previous raw parity.
-  `QecOptions` gains the field, so struct literals need it or `..QecOptions::default()`.
-- `detector_error_model()` rejects a program whose detector or observable is random
-  without noise.
-- Seeded QEC samples of programs with random noiseless records can differ from earlier
-  releases: the sampler now draws around a reference point that does not depend on the
-  seed, so a compiled sampler reproduces `run_qec_program` at any seed.
+- **deps:** Bump pypa/gh-action-pypi-publish (#522)([0f490dc](https://github.com/AbeCoull/prism-q/commit/0f490dcacf83b9e7e11b8d1d30de900a4e37e8ba))
+- **deps:** Bump dtolnay/rust-toolchain (#520)([5ddfc8b](https://github.com/AbeCoull/prism-q/commit/5ddfc8b5690dbbc29cfd8e980fae37874036d1ac))
+- Fold a dead conformance skip and correct contributor docs (#497)([224aa6d](https://github.com/AbeCoull/prism-q/commit/224aa6d31a9aa13fd381684e82fe025086c1749c))
 
+### Performance
+
+- **stabilizer:** Keep factored clusters reduced through measurement (#533)([454ab22](https://github.com/AbeCoull/prism-q/commit/454ab22990a7e2d75dec4c12932d62d93b12dacc))
+- **qec:** Draw split noise units once and postselect on words (#534)([635f508](https://github.com/AbeCoull/prism-q/commit/635f50800e94850389dea477673c71b11799e0a4))
+- **sim:** Count packed shots in blocks and build flip tables lazily (#535)([172124a](https://github.com/AbeCoull/prism-q/commit/172124aa5c57c47369f6db1a63e7ce9c13cf936c))
+- **qasm:** Share definitions with expansion parsers (#536)([4004b27](https://github.com/AbeCoull/prism-q/commit/4004b27d02b790ef1bf6c48bd43919bbbc76e7c6))
+- **statevector:** Sweep Cu with a low control over contiguous slices (#537)([51cbfbe](https://github.com/AbeCoull/prism-q/commit/51cbfbeca88d733edeeddbb4ed9a0257e3e66967))
+- **fusion:** Batch diagonals from fourteen qubits in default builds (#521)([bafc9dc](https://github.com/AbeCoull/prism-q/commit/bafc9dcb44714bdb2f378ad20798b26e02afce8a))
+- **gpu:** Issue the dense 2q Kraus multiply in Gauss form by default (#518)([5d8fb3e](https://github.com/AbeCoull/prism-q/commit/5d8fb3eed18c6cf8b7e601eed7c423df04a7f7f3))
+- **dispatch:** Run one factored stabilizer from 16 qubits (#514)([54c3112](https://github.com/AbeCoull/prism-q/commit/54c31127b088c2eaf6fa13e9e11e438301c4197b))
+- **noise:** Lower the noise model once per trajectory run (#510)([a65e341](https://github.com/AbeCoull/prism-q/commit/a65e3410f7915c88ac544f58fae1c95a8b6b7fdb))
+- **fusion:** Batch diagonals and rebatch from fourteen qubits (#501)([dd017e0](https://github.com/AbeCoull/prism-q/commit/dd017e0aedfe0e67ff0ff75ba6e17028cac618a0))
+- **gpu:** Issue the dense 2q Kraus multiply in Gauss form (#500)([6202216](https://github.com/AbeCoull/prism-q/commit/620221625adc8b3cb660e335ee7ec12753938c32))
+- **sim:** Branch SPD rotations in place instead of rebuilding the map (#498)([0075b29](https://github.com/AbeCoull/prism-q/commit/0075b29dc02183ac61317644809ac9a38eea6803))
+- **gpu:** Issue the dense 4x4 multiply in Gauss form (#489)([f7bd82a](https://github.com/AbeCoull/prism-q/commit/f7bd82a0cd9fe19780aab64af04212b4383870c6))
+- **fusion:** Absorb rotations around controlled matrices (#488)([6d1dfe8](https://github.com/AbeCoull/prism-q/commit/6d1dfe819474c8e739dc26773e0e4b607d051fbe))
+- **fusion:** Rebatch one-qubit layers from sixteen qubits (#487)([6cae038](https://github.com/AbeCoull/prism-q/commit/6cae038d4a7651f5bc5ce8e2c9ed830da6b84523))
+- **backend:** Execute mixed CPU tile schedules (#486)([bb81e14](https://github.com/AbeCoull/prism-q/commit/bb81e14d3cd66eded703da1f199275796fdef367))
+- **gpu:** Apply consecutive tile diagonals in one register pass (#485)([e174295](https://github.com/AbeCoull/prism-q/commit/e1742951c061fa41fd5899bd781c169d1a79041b))
+- **gpu:** Apply fused gate runs as mixed shared-memory tiles (#483)([a866a9d](https://github.com/AbeCoull/prism-q/commit/a866a9d1d29a17fb705c2b17f2a7c34138c367f3))
+- **gpu:** Run QftBlock as shared-memory DIF passes on the device (#478)([7d03da2](https://github.com/AbeCoull/prism-q/commit/7d03da2cd65274a67ca8d26350d61f504e7f6ce4))
+- **fusion:** Stage tiled batches past the last-level cache (#479)([019069a](https://github.com/AbeCoull/prism-q/commit/019069a5525197297d47b970bf6fe2ee719848bc))
+- **gpu:** Route exact permutation and diagonal 2q matrices (#477)([f6aff4d](https://github.com/AbeCoull/prism-q/commit/f6aff4d9b41eb20f43206fa4d75c1a447a8c17f4))
+
+### Refactor
+
+- **test:** Move large inline test modules into sibling files (#517)([252cc2b](https://github.com/AbeCoull/prism-q/commit/252cc2b6c443b8fa35f4db20c8037085896dda8f))
+
+### Testing
+
+- **kani:** Prove the NEON rowmul word kernel on an ARM runner (#504)([e1d7aff](https://github.com/AbeCoull/prism-q/commit/e1d7aff0f385639e494277af064adb2fc43d36b7))
+- **kani:** Prove the AVX2 rowmul word kernels against scalar (#495)([4b93089](https://github.com/AbeCoull/prism-q/commit/4b93089347654d7c620a9e4987479afc2e578dcb))
+- **kani:** Check the AVX2 rowmul against the bitwise phase rule (#494)([6a011c2](https://github.com/AbeCoull/prism-q/commit/6a011c2c223134df80e3f9669afadfa6b0686520))
+- Merge integration tests into one binary (#493)([7ef066d](https://github.com/AbeCoull/prism-q/commit/7ef066d9c0d48ed7f547f617949cc401ea8e46c8))
+- Compare sparse instead of tensor network on 18q QFT (#490)([0ad1628](https://github.com/AbeCoull/prism-q/commit/0ad162866aa674416f27befe60957ca9d11363b5))
+- Add a route ledger and lowered route thresholds (#474)([0d4e55e](https://github.com/AbeCoull/prism-q/commit/0d4e55e83a04d81e2d12aa8f70d03e0141c321a3))
+- **bench:** Smoke-test and check the bench fixtures (#475)([ae12495](https://github.com/AbeCoull/prism-q/commit/ae12495f8b8914112fe0e44b56164dde76a98599))
+
+### Bench
+
+- **interleave:** Stop early on settled verdicts, weigh wide controls (#509)([1453835](https://github.com/AbeCoull/prism-q/commit/145383587d8623f6ad3c81c72ed1eed74f78be03))
+- **queue:** Mark a measurement in progress with a host-wide file (#507)([5edfdcb](https://github.com/AbeCoull/prism-q/commit/5edfdcb6e5665a0f3d7fe0f2d274489cbb5bf99d))
+- Add an interleaved same-binary A/B runner (#481)([87ad6d3](https://github.com/AbeCoull/prism-q/commit/87ad6d3a8853e294556207f40f7e325ddd9d94a3))
+- **statevector:** Count sweep passes against a tile lower bound (#473)([1dc8785](https://github.com/AbeCoull/prism-q/commit/1dc8785f6fba693117442f9cf3ee1751237809a2))
+- **gpu:** Add throughput, floor and pass-census rows (#472)([a4ac5a8](https://github.com/AbeCoull/prism-q/commit/a4ac5a899ee85b9f618fd475738aad90831f466b))
+## [py-v0.35.0] - 2026-10-12
+
+### Miscellaneous
+
+- **python:** Release 0.35.0([368c41b](https://github.com/AbeCoull/prism-q/commit/368c41b6cc8fd68b5e72695e698566789ccaeb71))
 ## [0.35.0] - 2026-10-12
 
 ### Bug Fixes
@@ -64,6 +137,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Miscellaneous
 
+- Release([79c4851](https://github.com/AbeCoull/prism-q/commit/79c4851f5a46ad38cfefb7c0e1fe087673c7c398))
 - Raise the MSRV to 1.88 and pin the toolchain to 1.99.0 (#470) (**BREAKING**)([66c4abd](https://github.com/AbeCoull/prism-q/commit/66c4abd2ea65218549076c876b74250d3db936e1))
 - **deps:** Refresh lockfiles and drop yanked versions (#469)([44d6cb8](https://github.com/AbeCoull/prism-q/commit/44d6cb8a74d0024c11e08c0dc92e7003605c0e50))
 

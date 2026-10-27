@@ -71,7 +71,8 @@ same qubits, and working sets that fit the local positions. A cyclic scan over m
 qubits than there are local positions evicts on every layer; `PRISM_DIST_RELABEL=0`
 switches the map off and falls back to a direct exchange per gate.
 `PRISM_DIST_EXCHANGE_CHUNK` tiles each exchange into messages of that many amplitudes
-and bounds the transfer buffers; by default each exchange is one message.
+and bounds the transfer buffers. The default, 2^29 amplitudes, sends a slice of up to
+8 GiB as one message and keeps every message within the `int` count MPI calls take.
 
 ## What runs distributed
 

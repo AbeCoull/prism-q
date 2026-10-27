@@ -1105,8 +1105,7 @@ impl DistributedStatevectorBackend {
     /// Exchange with the partner rank, then write this rank's half of the 2x2
     /// result. The combine is elementwise, so the exchange is tiled in chunks of
     /// [`crate::distributed::exchange_chunk`] amplitudes, bounding the receive
-    /// buffer to one chunk instead of a full slice copy. The default chunk is
-    /// the whole slice.
+    /// buffer to one chunk instead of a full slice copy.
     fn apply_global_1q(&mut self, target: usize, mat: [[Complex64; 2]; 2]) {
         let partner = self.context.rank() ^ (1usize << self.global_bit(target));
         let (c_self, c_remote) = if self.rank_bit_set(target) {
@@ -2233,7 +2232,8 @@ impl Backend for DistributedStatevectorBackend {
     /// rank offset for every amplitude, so however many there are they name one
     /// partner rank, and one slice exchange covers them. That is the direct
     /// route rather than a relabel because relabeling mutates the state, which
-    /// a `&self` query cannot do.
+    /// a `&self` query cannot do. The exchange streams in power of two tiles
+    /// within `exchange_chunk`, so the receive buffer is one tile.
     ///
     /// Collective: every rank must call it with identical observables.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
@@ -2241,6 +2241,9 @@ impl Backend for DistributedStatevectorBackend {
         let norm = comm.allreduce_sum_f64(crate::backend::state_norm_sqr(&self.inner.state));
         let local_qubits = self.local_qubits();
         let local_mask = (1usize << local_qubits) - 1;
+        let state = self.inner.state.as_slice();
+        let tile = 1usize << self.exchange_chunk.min(state.len()).ilog2();
+        let tile_mask = tile - 1;
         let mut recv: Vec<Complex64> = Vec::new();
 
         let mut values = Vec::with_capacity(observables.len());
@@ -2248,27 +2251,37 @@ impl Backend for DistributedStatevectorBackend {
             let (xmask, zmask, num_y) = crate::sim::pauli_masks(observable, self.num_qubits)?;
             let xphys = self.to_physical_mask(xmask);
             let zphys = self.to_physical_mask(zmask);
+            let (xlocal, zlocal) = (xphys & local_mask, zphys & local_mask);
             let partner_bits = xphys >> local_qubits;
-            if partner_bits != 0 {
-                recv.resize(self.inner.state.len(), Complex64::new(0.0, 0.0));
-                comm.sendrecv_c64(
-                    self.context.rank() ^ partner_bits,
-                    &self.inner.state,
-                    &mut recv,
-                );
-            }
-            let bra: &[Complex64] = if partner_bits == 0 {
-                &self.inner.state
+            let sandwich = if partner_bits == 0 {
+                crate::sim::pauli_sandwich(state, state, xlocal, zlocal, num_y)
             } else {
-                &recv
+                // The tile at `base` pairs with the partner tile at `base ^ xhigh`,
+                // XORed within by `xlow`; the Z sign splits the same way, so each
+                // tile is one exchange and one sandwich.
+                let partner = self.context.rank() ^ partner_bits;
+                let (xhigh, xlow, zlow) =
+                    (xlocal & !tile_mask, xlocal & tile_mask, zlocal & tile_mask);
+                recv.resize(tile, Complex64::new(0.0, 0.0));
+                let mut sum = Complex64::new(0.0, 0.0);
+                for base in (0..state.len()).step_by(tile) {
+                    let src = base ^ xhigh;
+                    comm.sendrecv_c64(partner, &state[src..src + tile], &mut recv);
+                    let part = crate::sim::pauli_sandwich(
+                        &recv,
+                        &state[base..base + tile],
+                        xlow,
+                        zlow,
+                        num_y,
+                    );
+                    if (base & zlocal).count_ones() & 1 == 1 {
+                        sum -= part;
+                    } else {
+                        sum += part;
+                    }
+                }
+                sum
             };
-            let sandwich = crate::sim::pauli_sandwich(
-                bra,
-                &self.inner.state,
-                xphys & local_mask,
-                zphys & local_mask,
-                num_y,
-            );
             let rank_parity = (self.context.rank() & (zphys >> local_qubits)).count_ones() & 1;
             let signed = if rank_parity == 1 {
                 -sandwich.re

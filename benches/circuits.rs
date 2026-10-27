@@ -690,6 +690,39 @@ fn bench_statevector_controlled_rotation(c: &mut Criterion) {
     group.finish();
 }
 
+/// One `Cu` per pair with the control below the target (`low_ctrl`) or above it
+/// (`high_ctrl`), applied without fusion so the row prices the kernel alone.
+fn bench_statevector_cu_kernel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/cu_kernel");
+    configure_group(&mut group);
+
+    for &n in &[12usize, 20] {
+        let pairs: Vec<(usize, usize)> = (0..n - 1)
+            .flat_map(|lo| [(lo, lo + 1), (lo, (lo + n / 2).min(n - 1))])
+            .filter(|&(lo, hi)| lo < hi)
+            .collect();
+        let rotation = Gate::Ry(0.37).matrix_2x2();
+        for (name, low_ctrl) in [("low_ctrl", true), ("high_ctrl", false)] {
+            let mut circuit = Circuit::new(n, 0);
+            for &(lo, hi) in &pairs {
+                let (control, target) = if low_ctrl { (lo, hi) } else { (hi, lo) };
+                circuit.add_gate(Gate::cu(rotation), &[control, target]);
+            }
+            let mut prep = Circuit::new(n, 0);
+            for q in 0..n {
+                prep.add_gate(Gate::H, &[q]);
+            }
+            let mut backend = StatevectorBackend::new(SEED);
+            backend.init(n, 0).unwrap();
+            backend.apply_instructions(&prep.instructions).unwrap();
+            group.bench_function(BenchmarkId::new(name, n), |b| {
+                b.iter(|| backend.apply_instructions(&circuit.instructions).unwrap());
+            });
+        }
+    }
+    group.finish();
+}
+
 /// QAOA on a ring plus a random perfect matching, `H` on every qubit first.
 ///
 /// `qaoa_circuit` puts its `Rzz` on a chain, whose runs of consecutive edges
@@ -5456,6 +5489,7 @@ criterion_group! {
     bench_statevector_hea,
     bench_statevector_qaoa,
     bench_statevector_controlled_rotation,
+    bench_statevector_cu_kernel,
     bench_statevector_qaoa_ring_matching,
     bench_statevector_trotter,
     bench_statevector_trotter_builder,

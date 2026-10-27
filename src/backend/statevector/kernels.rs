@@ -4163,17 +4163,16 @@ impl StatevectorBackend {
                 prepared.apply_full_sequential(hi, target);
             }
         } else {
-            let ctrl_mask = 1usize << control;
-            let tgt_mask = 1usize << target;
-            let num_iters = 1usize << (self.num_qubits - 2);
-            let base_ptr = self.state.as_mut_ptr() as *mut f64;
-            for i in 0..num_iters {
-                let base = insert_zero_bit(insert_zero_bit(i, control), target);
-                let idx0 = base | ctrl_mask;
-                let idx1 = idx0 | tgt_mask;
-                // SAFETY: indices from insert_zero_bit bijection are in-bounds and disjoint.
-                unsafe {
-                    prepared.apply_pair_ptr(base_ptr.add(idx0 * 2), base_ptr.add(idx1 * 2));
+            let ctrl_half = 1usize << control;
+            let ctrl_block = ctrl_half << 1;
+            let tgt_half = 1usize << target;
+            let block_size = tgt_half << 1;
+            for chunk in self.state.chunks_mut(block_size) {
+                let (lo, hi) = chunk.split_at_mut(tgt_half);
+                for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block)) {
+                    let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                    let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                    prepared.apply(lo_active, hi_active);
                 }
             }
         }
@@ -4208,29 +4207,45 @@ impl StatevectorBackend {
                 }
             }
         } else {
-            let ctrl_mask = 1usize << control;
-            let tgt_mask = 1usize << target;
-            let lo = control;
-            let hi = target;
-            let num_iters = 1usize << (self.num_qubits - 2);
-            let ptr = SendPtr(self.state.as_mut_ptr());
+            let ctrl_half = 1usize << control;
+            let ctrl_block = ctrl_half << 1;
+            let tgt_half = 1usize << target;
+            let block_size = tgt_half << 1;
             let prepared = simd::PreparedGate1q::new(&mat);
+            let num_blocks = self.state.len() / block_size;
 
-            // SAFETY: insert_zero_bit bijection gives disjoint index pairs per iteration.
-            (0..num_iters)
-                .into_par_iter()
-                .with_min_len(MIN_PAR_ITERS)
-                .for_each(move |i| {
-                    let base = insert_zero_bit(insert_zero_bit(i, lo), hi);
-                    let idx0 = base | ctrl_mask;
-                    let idx1 = idx0 | tgt_mask;
-                    // SAFETY: idx0 and idx1 are in bounds and unique for this iteration.
-                    // The outer iterator maps every pair once, so Rayon tasks do not alias.
-                    unsafe {
-                        let fp = ptr.as_f64_ptr();
-                        prepared.apply_pair_ptr(fp.add(idx0 * 2), fp.add(idx1 * 2));
-                    }
-                });
+            if num_blocks >= 4 {
+                self.state
+                    .par_chunks_mut(block_size)
+                    .with_min_len(chunk_min_len(block_size))
+                    .for_each(|chunk| {
+                        let (lo, hi) = chunk.split_at_mut(tgt_half);
+                        for (lo_sub, hi_sub) in
+                            lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block))
+                        {
+                            let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                            let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                            prepared.apply(lo_active, hi_active);
+                        }
+                    });
+            } else {
+                let inner_tile = MIN_PAR_ELEMS.max(ctrl_block);
+                for chunk in self.state.chunks_mut(block_size) {
+                    let (lo, hi) = chunk.split_at_mut(tgt_half);
+                    lo.par_chunks_mut(inner_tile)
+                        .zip(hi.par_chunks_mut(inner_tile))
+                        .for_each(|(lo_tile, hi_tile)| {
+                            for (lo_sub, hi_sub) in lo_tile
+                                .chunks_mut(ctrl_block)
+                                .zip(hi_tile.chunks_mut(ctrl_block))
+                            {
+                                let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                                let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                                prepared.apply(lo_active, hi_active);
+                            }
+                        });
+                }
+            }
         }
     }
 

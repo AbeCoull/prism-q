@@ -326,6 +326,8 @@ impl ClassicalType {
 struct ClassicalDecl {
     ty: ClassicalType,
     constant: bool,
+    /// The exact value of an `int` or `uint`, which an `f64` cannot hold past 2^53.
+    int: i128,
 }
 
 /// A classical array, its elements folded at parse time like any classical
@@ -543,13 +545,47 @@ impl<'a> Parser<'a> {
     }
 
     fn bind_classical(&mut self, name: &'a str, ty: ClassicalType, value: f64, constant: bool) {
-        self.classical.insert(name, ClassicalDecl { ty, constant });
+        self.classical.insert(
+            name,
+            ClassicalDecl {
+                ty,
+                constant,
+                int: 0,
+            },
+        );
         self.param_vars
             .get_or_insert_with(HashMap::new)
             .insert(name, value);
     }
 
+    /// Bind an integer variable, wrapped to `integer`'s width as a runtime one is.
+    fn bind_int(&mut self, name: &'a str, integer: RuntimeType, value: i128, constant: bool) {
+        let int = integer.store(ClassicalValue::Int(value)).to_int();
+        self.classical.insert(
+            name,
+            ClassicalDecl {
+                ty: ClassicalType::Int(integer),
+                constant,
+                int,
+            },
+        );
+        self.param_vars
+            .get_or_insert_with(HashMap::new)
+            .insert(name, int as f64);
+    }
+
     fn reject_redeclaration(&self, name: &str, line_num: usize) -> Result<()> {
+        let builtin = match name {
+            "true" | "false" => true,
+            "pi" | "\u{3c0}" | "tau" | "\u{3c4}" | "euler" | "\u{2107}" => !self.nested,
+            _ => false,
+        };
+        if builtin {
+            return Err(parse_error(
+                line_num,
+                format!("`{name}` is a built-in name and cannot be declared in the global scope"),
+            ));
+        }
         let clash = if self.classical.contains_key(name) {
             "a classical variable"
         } else if self.arrays.contains_key(name) {
@@ -901,6 +937,7 @@ impl<'a> Parser<'a> {
                     ClassicalDecl {
                         ty: decl.ty,
                         constant: decl.constant,
+                        int: decl.int,
                     },
                 )
             })

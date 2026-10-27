@@ -619,6 +619,7 @@ impl<'a> Parser<'a> {
             ClassicalDecl {
                 ty: kind,
                 constant: false,
+                int: 0,
             },
         );
         self.state().vars.insert(name, var);

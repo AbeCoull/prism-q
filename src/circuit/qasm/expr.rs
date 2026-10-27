@@ -716,6 +716,11 @@ fn divide(operation: &str, left: f64, right: f64, line: usize) -> Result<f64> {
 }
 
 fn resolve(name: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
+    match name {
+        "true" => return Ok(1.0),
+        "false" => return Ok(0.0),
+        _ => {}
+    }
     if let Some(value) = vars.and_then(|vars| vars.get(name)) {
         return Ok(*value);
     }
@@ -723,8 +728,6 @@ fn resolve(name: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result
         "pi" | "\u{3c0}" => Ok(std::f64::consts::PI),
         "tau" | "\u{3c4}" => Ok(std::f64::consts::TAU),
         "euler" => Ok(std::f64::consts::E),
-        "true" => Ok(1.0),
-        "false" => Ok(0.0),
         _ => Err(PrismError::Parse {
             line,
             message: format!("unknown identifier `{name}` in expression"),

@@ -2628,3 +2628,13 @@ fn flip_table_is_skipped_past_the_size_cap() {
     expected[0] = (1 << 24) | (1 << 26) | (1 << 31);
     assert_eq!(dst, expected);
 }
+
+// Each chunk samples the whole measurement record before reducing it to
+// detectors, so the record width bounds the chunk, not the detector count.
+#[test]
+fn detector_chunks_are_sized_by_the_measurement_record() {
+    let mut c = Circuit::new(640, 640);
+    c.measure_all();
+    let sampler = compile_detector_sampler(&c, vec![vec![0]], vec![], 42).unwrap();
+    assert_eq!(sampler.detector_chunk_size(), default_chunk_size(640));
+}

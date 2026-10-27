@@ -75,6 +75,16 @@ pub(super) fn div_ceil_grid(op: &str, name: &str, value: usize, block: u32) -> R
     Ok(require_u32(op, name, value)?.div_ceil(block).max(1))
 }
 
+const MAX_GRID_Y: u32 = 65_535;
+
+/// `(first, count)` launches covering `total` grid rows within the hardware limit on
+/// `gridDim.y`; each kernel offsets `blockIdx.y` by `first`.
+pub(super) fn grid_y_tiles(total: u32) -> impl Iterator<Item = (u32, u32)> {
+    (0..total)
+        .step_by(MAX_GRID_Y as usize)
+        .map(move |first| (first, (total - first).min(MAX_GRID_Y)))
+}
+
 /// Grow-only device buffers reused across launches, so a small per-call upload fills a
 /// resident allocation instead of allocating through `clone_htod`.
 ///
@@ -359,6 +369,37 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "dm_pauli_expect",
     "dm_pauli_expect_finalize",
 ];
+
+#[cfg(test)]
+mod grid_tests {
+    use super::{MAX_GRID_Y, grid_y_tiles};
+
+    #[test]
+    fn grid_y_tiles_cover_every_row_within_the_hardware_limit() {
+        for total in [
+            1,
+            2,
+            MAX_GRID_Y - 1,
+            MAX_GRID_Y,
+            MAX_GRID_Y + 1,
+            200_000,
+            u32::MAX,
+        ] {
+            let mut next = 0u64;
+            for (first, count) in grid_y_tiles(total) {
+                assert_eq!(u64::from(first), next, "total {total}: gap or overlap");
+                assert!(
+                    (1..=MAX_GRID_Y).contains(&count),
+                    "total {total}: count {count}"
+                );
+                next += u64::from(count);
+            }
+            assert_eq!(next, u64::from(total), "total {total}: rows not covered");
+        }
+        assert_eq!(grid_y_tiles(MAX_GRID_Y).count(), 1);
+        assert_eq!(grid_y_tiles(0).count(), 0);
+    }
+}
 
 #[cfg(test)]
 mod sync_tests {

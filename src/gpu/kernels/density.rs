@@ -391,9 +391,9 @@ pub(crate) fn pauli_sums(
     ensure_scratch(&mut scratch.u64_a, device, &xmasks)?;
     ensure_scratch(&mut scratch.u64_b, device, &zmasks)?;
     let partials = scratch.measure_partials.as_mut().unwrap();
-    {
+    for (mask_base, launch_masks) in super::grid_y_tiles(num_masks) {
         let cfg = LaunchConfig {
-            grid_dim: (blocks_per_mask, num_masks, 1),
+            grid_dim: (blocks_per_mask, launch_masks, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 2 * BLOCK_SIZE * std::mem::size_of::<f64>() as u32,
         };
@@ -403,9 +403,11 @@ pub(crate) fn pauli_sums(
             .arg(&d)
             .arg(scratch.u64_a.as_ref().unwrap().raw())
             .arg(scratch.u64_b.as_ref().unwrap().raw())
+            .arg(&mask_base)
             .arg(partials.raw_mut());
         // SAFETY: signature matches the kernel. `blocks_per_mask` blocks of two
-        // rows per thread cover the `d` rows of each of the `num_masks` masks,
+        // rows per thread cover the `d` rows of each of the `launch_masks` masks
+        // from `mask_base`, which end at or below `num_masks`,
         // every read `j * d + (j ^ x)` stays inside the `d * d` buffer because
         // `x < d`, and `partials` holds two f64s per (mask, block).
         unsafe {

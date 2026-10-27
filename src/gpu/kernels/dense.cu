@@ -594,7 +594,7 @@ extern "C" __global__ void rdm_qubit_finalize(
 
 // sv_pauli_expect: per-block complex partials of
 // sum_j conj(state[j ^ x]) * state[j] * (-1)^{popcount(j & z)} for every mask of
-// group g = blockIdx.y, PAULI_AMPS_PER_THREAD amplitudes per thread. A group holds up to
+// group g = group_base + blockIdx.y, PAULI_AMPS_PER_THREAD amplitudes per thread. A group holds up to
 // PAULI_GROUP_MASKS masks sharing one x, so each amplitude pair is read and
 // multiplied once for the whole group and only the sign differs per mask. The
 // product order matches the host reduction, so an x == 0 mask lands exactly on
@@ -608,11 +608,11 @@ extern "C" __global__ void rdm_qubit_finalize(
 #define PAULI_AMPS_PER_THREAD {{PAULI_AMPS_PER_THREAD}}
 extern "C" __global__ void sv_pauli_expect(
     const double2 *state, unsigned long long dim,
-    const unsigned long long *groups, unsigned int num_groups,
+    const unsigned long long *groups, unsigned int num_groups, unsigned int group_base,
     const unsigned long long *members, unsigned int num_masks, double *out_partials)
 {
     __shared__ double warp_sums[PAULI_GROUP_MASKS][2][32];
-    unsigned int g = blockIdx.y;
+    unsigned int g = group_base + blockIdx.y;
     unsigned long long x = groups[g];
     unsigned int start = (unsigned int)groups[num_groups + g];
     unsigned int count = (unsigned int)groups[num_groups + g + 1] - start;

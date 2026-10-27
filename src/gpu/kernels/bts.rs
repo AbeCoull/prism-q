@@ -478,26 +478,31 @@ pub(crate) fn launch_bts_transpose_meas_to_shot(
     let m_words_i = require_i32("bts_transpose_meas_to_shot", "m_words", m_words)?;
     let m_words_grid = require_u32("bts_transpose_meas_to_shot", "m_words", m_words)?;
     let s_words_grid = require_u32("bts_transpose_meas_to_shot", "s_words", s_words)?;
-    let cfg = LaunchConfig {
-        grid_dim: (m_words_grid, s_words_grid, 1),
-        block_dim: (64, 1, 1),
-        shared_mem_bytes: 0,
-    };
 
-    let mut builder = stream.launch_builder(&func);
-    builder
-        .arg(meas_major.raw())
-        .arg(&num_meas_i)
-        .arg(&num_shots_i)
-        .arg(&s_words_i)
-        .arg(&m_words_i)
-        .arg(shot_major.raw_mut());
-    // SAFETY: grid covers every (m_word, batch) tile exactly once; each tile's
-    // 64 threads produce 64 disjoint shot-major u64s. Shared tile is block-local.
-    unsafe {
+    for (batch_base, launch_batches) in super::grid_y_tiles(s_words_grid) {
+        let cfg = LaunchConfig {
+            grid_dim: (m_words_grid, launch_batches, 1),
+            block_dim: (64, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let batch_base_i = batch_base as i32;
+        let mut builder = stream.launch_builder(&func);
         builder
-            .launch(cfg)
-            .map_err(|e| driver_err("bts_transpose_meas_to_shot", e))?;
+            .arg(meas_major.raw())
+            .arg(&num_meas_i)
+            .arg(&num_shots_i)
+            .arg(&s_words_i)
+            .arg(&m_words_i)
+            .arg(&batch_base_i)
+            .arg(shot_major.raw_mut());
+        // SAFETY: the launches together cover every (m_word, batch) tile exactly once;
+        // each tile's 64 threads produce 64 disjoint shot-major u64s. Shared tile is
+        // block-local.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| driver_err("bts_transpose_meas_to_shot", e))?;
+        }
     }
     Ok(shot_major)
 }
@@ -1077,4 +1082,62 @@ pub(crate) fn try_count_meas_major(
     }
 
     table.finish(ctx, m_words, raw_transfer_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::launch_bts_transpose_meas_to_shot;
+    use crate::gpu::{GpuBuffer, GpuContext};
+
+    // 65,538 shot words need one tile row each, three past the 65,535 limit on
+    // gridDim.y, and the last word is partial.
+    #[test]
+    fn transpose_past_the_grid_y_limit_matches_host() {
+        let ctx = match GpuContext::new(0) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                assert!(
+                    std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+                    "PRISM_REQUIRE_GPU is set but no usable GPU was found ({e})"
+                );
+                eprintln!("SKIP: no usable GPU ({e})");
+                return;
+            }
+        };
+        let num_meas = 3;
+        let num_shots = 65_537 * 64 + 36usize;
+        let s_words = num_shots.div_ceil(64);
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let meas_major: Vec<u64> = (0..num_meas * s_words)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed
+            })
+            .collect();
+        let device = ctx.device();
+        let meas_major_dev = GpuBuffer::from_host(device, &meas_major).unwrap();
+
+        let shot_major_dev = launch_bts_transpose_meas_to_shot(
+            &ctx,
+            &meas_major_dev,
+            num_meas,
+            num_shots,
+            s_words,
+            1,
+        )
+        .unwrap();
+        let mut shot_major = vec![0u64; num_shots];
+        shot_major_dev
+            .copy_to_host(device, &mut shot_major)
+            .unwrap();
+
+        for (shot, &got) in shot_major.iter().enumerate() {
+            let want = (0..num_meas).fold(0u64, |acc, m| {
+                acc | ((meas_major[m * s_words + shot / 64] >> (shot % 64)) & 1) << m
+            });
+            assert_eq!(got, want, "shot {shot}");
+        }
+    }
 }

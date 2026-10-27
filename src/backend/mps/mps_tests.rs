@@ -3111,3 +3111,35 @@ fn a_truncated_chain_resets_and_reads_normalized_weights() {
         );
     }
 }
+
+#[test]
+fn single_site_density_matches_the_statevector_wherever_the_center_sits() {
+    let n = 7;
+    let circuit = crate::circuits::random_circuit(n, 6, 42);
+    let mut sv = crate::backend::statevector::StatevectorBackend::new(42);
+    sv.init(n, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+    let expected: Vec<_> = (0..n)
+        .map(|q| sv.reduced_density_matrix_1q(q).unwrap())
+        .collect();
+
+    let mut b = mps_after(&circuit, 1 << 10);
+    let mut centers = vec![None];
+    centers.extend((0..n).map(Some));
+    for center in centers {
+        match center {
+            Some(site) if b.center.is_some() => b.move_center(site),
+            Some(site) => b.establish_center(site),
+            None => b.center = None,
+        }
+        for (q, want) in expected.iter().enumerate() {
+            let got = b.reduced_density_matrix_1q(q).unwrap();
+            for (g, w) in got.as_flattened().iter().zip(want.as_flattened()) {
+                assert!(
+                    (g - w).norm() < 1e-10,
+                    "center {center:?} qubit {q}: {got:?} vs {want:?}"
+                );
+            }
+        }
+    }
+}

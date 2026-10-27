@@ -1683,6 +1683,38 @@ fn bench_mps_scaling(c: &mut Criterion) {
     group.finish();
 }
 
+/// Amplitude damping over a brickwork chain at bond 16. Every damping event
+/// reads a single-site reduced density matrix off the chain before choosing
+/// its branch, so these rows price that read under bonds the cap shapes.
+fn bench_mps_noisy_trajectory(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mps/noisy_trajectory");
+    configure_group(&mut group);
+
+    for &(n, depth, shots) in &[(12usize, 8usize, 4usize), (16, 10, 1)] {
+        let circuit = measure_all(&circuits::brickwork_circuit(n, depth, SEED));
+        let noise = prism_q::NoiseModel::with_amplitude_damping(&circuit, 0.01);
+        group.bench_with_input(
+            BenchmarkId::new("amplitude_damping_b16", n),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        run_shots_with_noise(
+                            BackendKind::Mps { max_bond_dim: 16 },
+                            circ,
+                            &noise,
+                            shots,
+                            SEED,
+                        )
+                        .unwrap(),
+                    )
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 fn bench_mps_linear_chain(c: &mut Criterion) {
     let mut group = c.benchmark_group("mps/linear_chain_d10");
     configure_group(&mut group);
@@ -5669,6 +5701,7 @@ criterion_group! {
     // MPS
     bench_mps_scaling,
     bench_mps_linear_chain,
+    bench_mps_noisy_trajectory,
     bench_mps_hotspots,
     bench_mps_brickwork,
     bench_mps_matched,

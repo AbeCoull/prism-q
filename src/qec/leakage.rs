@@ -96,6 +96,9 @@ pub(super) struct QecLeakageSampler {
     deferred: QecDeferredProgram,
     num_heralds: usize,
     seed: u64,
+    /// The last unit of a `total_shots`-shot run's window when the window stopped inside
+    /// it, so the next window lands the rest of it without running the unit again.
+    cached_unit: Option<(usize, UnitRecords)>,
 }
 
 /// One unit's output: X-frame flip, leak flag at measurement, and herald rows, each
@@ -123,6 +126,7 @@ impl QecLeakageSampler {
             deferred,
             num_heralds,
             seed: program.options().seed,
+            cached_unit: None,
         })
     }
 
@@ -142,6 +146,7 @@ impl QecLeakageSampler {
     pub(super) fn reseed(&mut self, seed: u64) {
         self.noiseless.reseed(seed);
         self.seed = seed;
+        self.cached_unit = None;
     }
 
     /// Sample shots `first_shot..first_shot + num_shots` of a `total_shots`-shot run:
@@ -163,14 +168,24 @@ impl QecLeakageSampler {
         };
         let mut heralds = vec![0u64; self.num_heralds * s_words];
         if num_shots > 0 {
+            let end_shot = first_shot + num_shots;
             let first_unit = first_shot / LEAK_UNIT_SHOTS;
-            let last_unit = (first_shot + num_shots - 1) / LEAK_UNIT_SHOTS;
+            let last_unit = (end_shot - 1) / LEAK_UNIT_SHOTS;
+            let mut units: Vec<UnitRecords> = self
+                .cached_unit
+                .take()
+                .filter(|(total, unit)| {
+                    *total == total_shots && unit.first_shot == first_unit * LEAK_UNIT_SHOTS
+                })
+                .map(|(_, unit)| unit)
+                .into_iter()
+                .collect();
+            let fresh = first_unit + units.len()..=last_unit;
             let run = |unit: usize| self.run_unit(unit, total_shots);
             #[cfg(feature = "parallel")]
-            let units: Vec<UnitRecords> =
-                (first_unit..=last_unit).into_par_iter().map(run).collect();
+            units.par_extend(fresh.into_par_iter().map(run));
             #[cfg(not(feature = "parallel"))]
-            let units: Vec<UnitRecords> = (first_unit..=last_unit).map(run).collect();
+            units.extend(fresh.map(run));
 
             for unit in &units {
                 let lo = first_shot.max(unit.first_shot);
@@ -195,6 +210,11 @@ impl QecLeakageSampler {
                     let unit_row = &unit.heralds[herald * words..(herald + 1) * words];
                     land_bits(row, dst, unit_row, src, count, |a, b| a | b);
                 }
+            }
+            if let Some(last) = units.pop()
+                && end_shot < last.first_shot + last.shots
+            {
+                self.cached_unit = Some((total_shots, last));
             }
         }
         Ok((

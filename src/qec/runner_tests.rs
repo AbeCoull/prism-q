@@ -283,3 +283,42 @@ fn parity_compile_is_the_same_over_any_window_count() {
         assert_eq!(split, reference, "{windows} windows");
     }
 }
+
+#[test]
+fn postselection_counts_match_a_per_shot_count_in_both_layouts() {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let (shots, rows, observables) = (200, 70, 3);
+    let rows_and_expected: Vec<(Vec<usize>, bool)> = (0..rows)
+        .map(|row| (vec![row], rng.random_range(0..2) == 1))
+        .collect();
+    let mut post = vec![0u64; shots * rows.div_ceil(64)];
+    let mut obs = vec![0u64; shots];
+    let mut accepted = 0;
+    let mut errors = vec![0u64; observables];
+    for shot in 0..shots {
+        let rejected_row = (rng.random_range(0..2) == 1).then(|| rng.random_range(0..rows));
+        for (row, (_, expected)) in rows_and_expected.iter().enumerate() {
+            if *expected != (rejected_row == Some(row)) {
+                post[shot * rows.div_ceil(64) + row / 64] |= 1 << (row % 64);
+            }
+        }
+        obs[shot] = rng.random_range(0..1u64 << observables);
+        if rejected_row.is_none() {
+            accepted += 1;
+            for (observable, count) in errors.iter_mut().enumerate() {
+                *count += (obs[shot] >> observable) & 1;
+            }
+        }
+    }
+    let post = PackedShots::from_shot_major(post, shots, rows);
+    let obs = PackedShots::from_shot_major(obs, shots, observables);
+    for post in [post.clone(), post.to_meas_major()] {
+        for obs in [obs.clone(), obs.to_meas_major()] {
+            let mask = qec_postselection_accept_mask(&post, &rows_and_expected);
+            assert_eq!(qec_count_ones(&mask), accepted);
+            let mut counts = vec![0u64; observables];
+            add_qec_logical_error_counts(&obs, Some(&mask), &mut counts);
+            assert_eq!(counts, errors);
+        }
+    }
+}

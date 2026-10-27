@@ -2659,7 +2659,8 @@ fn reference_simulation(circuit: &Circuit, seed: u64) -> Result<ReferenceInfo> {
             .iter()
             .map(|&(_, qubit, classical_bit)| (qubit, classical_bit))
             .collect();
-        let (is_random, random_x_support, outcomes) = stab.batch_measure_ref_info(&measurements);
+        let (is_random, random_x_support, outcomes) =
+            stab.batch_measure_ref_info(&measurements, true);
 
         return Ok(ReferenceInfo {
             outcomes,

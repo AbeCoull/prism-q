@@ -1348,6 +1348,21 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
             },
         );
     }
+
+    // Three words per row keeps the run below the batched measurement path, so
+    // each collapse goes through the per-instruction measurement on one dense
+    // cluster where most outcomes are random.
+    let n = 192;
+    let circuit = with_terminal_measurements(circuits::clifford_heavy_circuit(n, 10, SEED));
+    group.bench_with_input(
+        BenchmarkId::new("single_cluster_measure_all", n),
+        &circuit,
+        |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+            });
+        },
+    );
     group.finish();
 }
 

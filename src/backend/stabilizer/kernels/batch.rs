@@ -1004,7 +1004,7 @@ impl StabilizerBackend {
                                 _ => unreachable!("measure_run_len returns only measure runs"),
                             })
                             .collect();
-                        self.batch_measure_ref_info(&measurements);
+                        self.batch_measure_ref_info(&measurements, false);
                         idx += run;
                         continue;
                     }

@@ -826,7 +826,7 @@ impl StabilizerBackend {
 
     pub(super) fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
         self.ensure_destabilizers();
-        self.apply_measure_with_info(qubit, classical_bit);
+        self.measure_qubit(qubit, classical_bit);
     }
 
     pub(super) fn apply_reset(&mut self, qubit: usize) -> Result<()> {
@@ -834,7 +834,7 @@ impl StabilizerBackend {
         let prev_len = self.classical_bits.len();
         self.classical_bits.push(false);
         let scratch = prev_len;
-        self.apply_measure_with_info(qubit, scratch);
+        self.measure_qubit(qubit, scratch);
         let outcome = self.classical_bits[scratch];
         self.classical_bits.truncate(prev_len);
         if outcome {
@@ -843,11 +843,37 @@ impl StabilizerBackend {
         Ok(())
     }
 
+    /// Measure `qubit` into `classical_bit` and return the X support of the
+    /// stabilizer the collapse replaced, empty for a deterministic outcome.
     pub(crate) fn apply_measure_with_info(
         &mut self,
         qubit: usize,
         classical_bit: usize,
     ) -> (bool, Vec<usize>) {
+        match self.measure_qubit(qubit, classical_bit) {
+            Some(p_row) => (true, self.x_support(p_row - self.n)),
+            None => (false, Vec::new()),
+        }
+    }
+
+    /// Qubits where row `row` has an X bit.
+    fn x_support(&self, row: usize) -> Vec<usize> {
+        let base = row * self.stride();
+        let mut support = Vec::new();
+        for (w, &word) in self.xz[base..base + self.num_words].iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                support.push(w * 64 + bits.trailing_zeros() as usize);
+                bits &= bits - 1;
+            }
+        }
+        support
+    }
+
+    /// Measure `qubit` into `classical_bit` on current destabilizers. Returns
+    /// the anticommuting stabilizer row for a random outcome, whose
+    /// pre-collapse contents the collapse moves to destabilizer row `p - n`.
+    fn measure_qubit(&mut self, qubit: usize, classical_bit: usize) -> Option<usize> {
         self.sgi_stale = true;
         let n = self.n;
         let word = qubit / 64;
@@ -863,15 +889,7 @@ impl StabilizerBackend {
         }
 
         if let Some(p_row) = p {
-            let p_base = p_row * stride;
-            let mut support = Vec::new();
-            for q in 0..n {
-                if self.xz[p_base + q / 64] & (1u64 << (q % 64)) != 0 {
-                    support.push(q);
-                }
-            }
             self.measure_random(p_row, word, bit_mask, classical_bit);
-            (true, support)
         } else {
             let scratch = 2 * n;
             self.zero_row(scratch);
@@ -882,10 +900,9 @@ impl StabilizerBackend {
                 }
             }
 
-            let outcome = self.phase[scratch];
-            self.classical_bits[classical_bit] = outcome;
-            (false, Vec::new())
+            self.classical_bits[classical_bit] = self.phase[scratch];
         }
+        p
     }
 
     /// Measure a run of distinct qubits into distinct classical bits using one
@@ -895,10 +912,12 @@ impl StabilizerBackend {
     /// Bit-identical to applying the measurements sequentially: a random
     /// outcome invalidates the index, which is rebuilt before continuing.
     /// Returns, per measurement, whether the outcome was random, the X-support
-    /// of the pivot row for random outcomes, and the outcome bit.
+    /// of the pivot row for random outcomes (empty unless `with_support`), and
+    /// the outcome bit.
     pub(crate) fn batch_measure_ref_info(
         &mut self,
         measurements: &[(usize, usize)],
+        with_support: bool,
     ) -> (Vec<bool>, Vec<Vec<usize>>, Vec<bool>) {
         self.sgi_stale = true;
         self.ensure_destabilizers();
@@ -964,10 +983,12 @@ impl StabilizerBackend {
         for mi in 0..num_meas {
             let (qubit, classical_bit) = measurements[mi];
             if first_destab[mi] != usize::MAX {
-                let (_, support) = self.apply_measure_with_info(qubit, classical_bit);
+                let p_row = self.measure_qubit(qubit, classical_bit).unwrap();
                 is_random[mi] = true;
                 outcomes[mi] = self.classical_bits[classical_bit];
-                random_x_support[mi] = support;
+                if with_support {
+                    random_x_support[mi] = self.x_support(p_row - n);
+                }
                 build_index(
                     &mut first_destab,
                     &self.xz,

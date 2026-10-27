@@ -239,15 +239,43 @@ impl<'a> FlipGroups<'a> {
     fn xor_into(&self, dst: &mut [u64], group: usize, byte: usize) {
         match self.table {
             Some(table) => xor_words(dst, table.lookup(group, byte)),
-            None => {
-                let mut bits = byte;
-                while bits != 0 {
-                    let row = group * LUT_GROUP_SIZE + bits.trailing_zeros() as usize;
-                    xor_words(dst, &self.rows[row]);
-                    bits &= bits - 1;
-                }
-            }
+            None => self.xor_rows(dst, group, byte),
         }
+    }
+
+    #[inline(always)]
+    fn xor_rows(&self, dst: &mut [u64], group: usize, byte: usize) {
+        let mut bits = byte;
+        while bits != 0 {
+            let row = group * LUT_GROUP_SIZE + bits.trailing_zeros() as usize;
+            xor_words(dst, &self.rows[row]);
+            bits &= bits - 1;
+        }
+    }
+}
+
+/// Draw one random byte per flip group of a single shot, a full `u64` for every eight
+/// groups, and hand each group's byte to `xor`.
+#[inline(always)]
+fn draw_flip_groups(rng: &mut ChaCha8Rng, lut: &FlipGroups<'_>, mut xor: impl FnMut(usize, usize)) {
+    let mut rand_buf = 0u64;
+    let mut rand_pos = 8usize;
+    for g in 0..lut.num_full_groups {
+        if rand_pos >= 8 {
+            rand_buf = rng.next_u64();
+            rand_pos = 0;
+        }
+        let byte = (rand_buf & 0xFF) as usize;
+        rand_buf >>= 8;
+        rand_pos += 1;
+        xor(g, byte);
+    }
+    if lut.remainder_size > 0 {
+        if rand_pos >= 8 {
+            rand_buf = rng.next_u64();
+        }
+        let mask = (1u64 << lut.remainder_size) - 1;
+        xor(lut.num_full_groups, (rand_buf & mask) as usize);
     }
 }
 
@@ -874,26 +902,12 @@ impl CompiledSampler {
 
         if self.rank >= LUT_MIN_RANK {
             let lut = FlipGroups::new(&self.lut, &self.flip_rows, accum.len());
-            let mut rand_buf = 0u64;
-            let mut rand_pos = 8usize;
-
-            for g in 0..lut.num_full_groups {
-                if rand_pos >= 8 {
-                    rand_buf = self.rng.next_u64();
-                    rand_pos = 0;
+            let rng = &mut self.rng;
+            match lut.table {
+                Some(table) => {
+                    draw_flip_groups(rng, &lut, |g, byte| xor_words(accum, table.lookup(g, byte)))
                 }
-                let byte = (rand_buf & 0xFF) as usize;
-                rand_buf >>= 8;
-                rand_pos += 1;
-                lut.xor_into(accum, g, byte);
-            }
-            if lut.remainder_size > 0 {
-                if rand_pos >= 8 {
-                    rand_buf = self.rng.next_u64();
-                }
-                let mask = (1u64 << lut.remainder_size) - 1;
-                let byte = (rand_buf & mask) as usize;
-                lut.xor_into(accum, lut.num_full_groups, byte);
+                None => draw_flip_groups(rng, &lut, |g, byte| lut.xor_rows(accum, g, byte)),
             }
         } else {
             for j in 0..self.rank {

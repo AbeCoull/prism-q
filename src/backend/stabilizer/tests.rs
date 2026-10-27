@@ -1785,3 +1785,46 @@ fn random_pairs_bench_widths_split_on_the_sparse_gate_index() {
         );
     }
 }
+
+// The support a random collapse reports is the X support of the first
+// stabilizer row set at the measured qubit, read before the collapse, and the
+// batched run reports the same supports, outcomes and generator rows as single
+// steps (the scratch row is free to differ).
+#[test]
+fn measurement_support_matches_the_pivot_row_before_collapse() {
+    let n = 150;
+    let circuit = crate::circuits::clifford_heavy_circuit(n, 8, 42);
+    let mut single = StabilizerBackend::new(42);
+    single.init(n, n).unwrap();
+    single.apply_gates_only(&circuit.instructions).unwrap();
+    let mut batched = single.clone();
+
+    let stride = single.stride();
+    let mut supports = Vec::new();
+    let mut randoms = Vec::new();
+    for q in 0..n {
+        let pivot = (n..2 * n).find(|&r| single.xz[r * stride + q / 64] >> (q % 64) & 1 != 0);
+        let expected: Vec<usize> = pivot
+            .map(|p| {
+                (0..n)
+                    .filter(|&c| single.xz[p * stride + c / 64] >> (c % 64) & 1 != 0)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (random, support) = single.apply_measure_with_info(q, q);
+        assert_eq!(random, pivot.is_some());
+        assert_eq!(support, expected, "qubit {q}");
+        randoms.push(random);
+        supports.push(support);
+    }
+    assert!(randoms.iter().filter(|&&r| r).count() > n / 2);
+
+    let measurements: Vec<(usize, usize)> = (0..n).map(|q| (q, q)).collect();
+    let (is_random, batch_supports, outcomes) = batched.batch_measure_ref_info(&measurements, true);
+    assert_eq!(is_random, randoms);
+    assert_eq!(batch_supports, supports);
+    assert_eq!(outcomes, single.classical_results());
+    let rows = 2 * n * stride;
+    assert_eq!(batched.xz[..rows], single.xz[..rows]);
+    assert_eq!(batched.phase[..2 * n], single.phase[..2 * n]);
+}

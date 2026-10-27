@@ -1381,6 +1381,21 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
             },
         );
     }
+
+    // Three words per row keeps the run below the batched measurement path, so
+    // each collapse goes through the per-instruction measurement on one dense
+    // cluster where most outcomes are random.
+    let n = 192;
+    let circuit = with_terminal_measurements(circuits::clifford_heavy_circuit(n, 10, SEED));
+    group.bench_with_input(
+        BenchmarkId::new("single_cluster_measure_all", n),
+        &circuit,
+        |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+            });
+        },
+    );
     group.finish();
 }
 
@@ -1526,6 +1541,41 @@ fn bench_factored_stabilizer_measurement(c: &mut Criterion) {
                 });
             },
         );
+    }
+
+    // One cluster over the whole register, then every qubit measured in turn.
+    // Most collapses are random and each lands on the cluster that is left, so
+    // the per-measurement cost on a wide cluster is what these rows price.
+    for &n in &[256, 512] {
+        let circuit = with_terminal_measurements(circuits::clifford_heavy_circuit(n, 10, SEED));
+        group.bench_with_input(
+            BenchmarkId::new("single_cluster_measure_all", n),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// Bell pairs cut between the two halves of the register: no pair straddles
+// the cut, so no cluster reaches the rank kernel and the rows price the work
+// of sorting the subsystem's qubits by cluster across thousands of clusters.
+fn bench_factored_stabilizer_cut_rank(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored_stabilizer/cut_rank");
+    configure_group(&mut group);
+
+    for &n in &[2000usize, 8000] {
+        let circuit = circuits::independent_bell_pairs(n / 2);
+        let mut backend = prism_q::FactoredStabilizerBackend::new(42);
+        sim::run_on(&mut backend, &circuit).unwrap();
+        let subsystem: Vec<usize> = (0..n / 2).collect();
+        group.bench_function(BenchmarkId::new("bell_pairs_half", n), |b| {
+            b.iter(|| black_box(backend.entanglement_entropy(&subsystem).unwrap()));
+        });
     }
     group.finish();
 }
@@ -3449,6 +3499,42 @@ fn bench_expectation_density_matrix(c: &mut Criterion) {
         sim::run_on(&mut dm, &circuit).unwrap();
         group.bench_with_input(BenchmarkId::new("native", n), &dm, |b, backend| {
             b.iter(|| black_box(backend.pauli_expectations(&observables).unwrap()));
+        });
+    }
+
+    group.finish();
+}
+
+/// Pauli strings on a prepared register of many independent clusters, every
+/// string confined to the first cluster or two. The factored-stabilizer rows
+/// leave each cluster's destabilizers stale after its gates, so the cost of a
+/// call is the clusters it rebuilds; the factored rows hold one sub-state per
+/// qubit, so it is the per-string work outside the touched sub-states.
+fn bench_expectation_clustered(c: &mut Criterion) {
+    let mut group = c.benchmark_group("expectation/pauli_strings_clustered");
+    configure_group(&mut group);
+
+    for &(blocks, block_size) in &[(16usize, 32usize), (16, 128)] {
+        let n = blocks * block_size;
+        let circuit = circuits::local_clifford_blocks(blocks, block_size, 10, SEED);
+        let mut backend = prism_q::FactoredStabilizerBackend::new(42);
+        sim::run_on(&mut backend, &circuit).unwrap();
+        let observables: Vec<Vec<PauliTerm>> = (0..8)
+            .map(|q| vec![PauliTerm::z(q), PauliTerm::x(q + 1)])
+            .collect();
+        group.bench_function(
+            BenchmarkId::new(format!("factored_stabilizer_{blocks}x{block_size}"), n),
+            |b| b.iter(|| black_box(backend.pauli_expectations(&observables).unwrap())),
+        );
+    }
+
+    for &n in &[256usize, 1024] {
+        let circuit = circuits::single_qubit_rotation_circuit(n, 2, SEED);
+        let mut backend = prism_q::FactoredBackend::new(42);
+        sim::run_on(&mut backend, &circuit).unwrap();
+        let observables: Vec<Vec<PauliTerm>> = (0..n).map(|q| vec![PauliTerm::z(q)]).collect();
+        group.bench_function(BenchmarkId::new("factored_product", n), |b| {
+            b.iter(|| black_box(backend.pauli_expectations(&observables).unwrap()))
         });
     }
 
@@ -5571,6 +5657,7 @@ criterion_group! {
     bench_factored_stabilizer_single_cluster,
     bench_factored_stabilizer_local,
     bench_factored_stabilizer_measurement,
+    bench_factored_stabilizer_cut_rank,
     // Sparse
     bench_sparse_scaling,
     bench_sparse_walk,
@@ -5642,6 +5729,7 @@ criterion_group! {
     bench_expectation_factored,
     bench_expectation_native,
     bench_expectation_density_matrix,
+    bench_expectation_clustered,
     bench_expectation_grouped,
     // Factored backend
     bench_factored_random,

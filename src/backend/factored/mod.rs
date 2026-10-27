@@ -652,11 +652,16 @@ impl FactoredBackend {
         outcome
     }
 
-    /// Reduce a joint Pauli observable to per-sub-state masks in local qubit
-    /// coordinates. Rejects out-of-range qubits and duplicate factors.
-    fn substate_pauli_masks(&self, observable: &[PauliTerm]) -> Result<Vec<(usize, usize, u32)>> {
-        let mut masks = vec![(0usize, 0usize, 0u32); self.substates.len()];
-        let mut seen = vec![false; self.num_qubits];
+    /// Append observable `index`'s masks, in local qubit coordinates, to the
+    /// groups of the sub-states it touches, one entry per sub-state. Rejects
+    /// out-of-range qubits and duplicate factors; `seen` comes back cleared.
+    fn push_substate_pauli_masks(
+        &self,
+        index: usize,
+        observable: &[PauliTerm],
+        seen: &mut [bool],
+        groups: &mut [MaskGroup],
+    ) -> Result<()> {
         for term in observable {
             if term.qubit >= self.num_qubits {
                 return Err(crate::error::PrismError::InvalidQubit {
@@ -677,7 +682,11 @@ impl FactoredBackend {
             let ss = self.qubit_to_substate[term.qubit];
             let sub = self.substates[ss].as_ref().unwrap();
             let bit = 1usize << Self::local_qubit(sub, term.qubit);
-            let entry = &mut masks[ss];
+            let group = &mut groups[ss];
+            if group.last().is_none_or(|&(owner, _)| owner != index) {
+                group.push((index, (0, 0, 0)));
+            }
+            let entry = &mut group.last_mut().unwrap().1;
             match term.axis {
                 PauliAxis::X => entry.0 |= bit,
                 PauliAxis::Z => entry.1 |= bit,
@@ -688,7 +697,10 @@ impl FactoredBackend {
                 }
             }
         }
-        Ok(masks)
+        for term in observable {
+            seen[term.qubit] = false;
+        }
+        Ok(())
     }
 
     /// Schmidt spectrum of each sub-state the cut at `subsystem` splits, one
@@ -1111,37 +1123,33 @@ impl Backend for FactoredBackend {
     /// traversal of it, so the block is read once rather than once per
     /// observable. The cross-block product stays per observable.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
-        let masks: Vec<Vec<(usize, usize, u32)>> = observables
-            .iter()
-            .map(|observable| self.substate_pauli_masks(observable))
-            .collect::<Result<_>>()?;
+        let mut groups: Vec<MaskGroup> = vec![Vec::new(); self.substates.len()];
+        let mut seen = vec![false; self.num_qubits];
+        for (index, observable) in observables.iter().enumerate() {
+            self.push_substate_pauli_masks(index, observable, &mut seen, &mut groups)?;
+        }
 
         let mut products = vec![1.0f64; observables.len()];
-        let mut rows: Vec<usize> = Vec::new();
-        let mut group: Vec<(usize, usize, u32)> = Vec::new();
-        for (ss, slot) in self.substates.iter().enumerate() {
-            let Some(sub) = slot else { continue };
-            rows.clear();
-            group.clear();
-            for (index, observable_masks) in masks.iter().enumerate() {
-                let entry = observable_masks[ss];
-                if entry.0 == 0 && entry.1 == 0 {
-                    continue;
-                }
-                rows.push(index);
-                group.push(entry);
-            }
+        let mut masks: Vec<(usize, usize, u32)> = Vec::new();
+        for (ss, group) in groups.iter().enumerate() {
             if group.is_empty() {
                 continue;
             }
-            let (values, _) = crate::sim::pauli_expectations_from_masks(&sub.state, &group);
-            for (&index, value) in rows.iter().zip(values) {
+            let sub = self.substates[ss].as_ref().unwrap();
+            masks.clear();
+            masks.extend(group.iter().map(|&(_, entry)| entry));
+            let (values, _) = crate::sim::pauli_expectations_from_masks(&sub.state, &masks);
+            for (&(index, _), value) in group.iter().zip(values) {
                 products[index] *= value;
             }
         }
         Ok(products)
     }
 }
+
+/// The strings reaching one sub-state, as `(string index, (x mask, z mask, Y
+/// count))` in string order.
+type MaskGroup = Vec<(usize, (usize, usize, u32))>;
 
 /// Probability that bit `local` of a normalized sub-state reads one.
 fn branch_norm_sqr(state: &[Complex64], local: usize) -> f64 {

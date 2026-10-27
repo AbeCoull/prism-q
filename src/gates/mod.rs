@@ -655,8 +655,17 @@ pub struct MultiFusedData {
 
 impl MultiFusedData {
     /// Batch `(target_qubit, 2×2 matrix)` entries, computing the diagonal flag the
-    /// kernels branch on.
+    /// kernels branch on. Entries on one target fold into one matrix in list order, so
+    /// the batch holds each target once and its entries commute.
     pub fn new(gates: Vec<(usize, [[Complex64; 2]; 2])>) -> Self {
+        let mut folded: Vec<(usize, [[Complex64; 2]; 2])> = Vec::with_capacity(gates.len());
+        for (target, mat) in gates {
+            match folded.iter_mut().find(|(q, _)| *q == target) {
+                Some((_, acc)) => *acc = mat_mul_2x2(&mat, acc),
+                None => folded.push((target, mat)),
+            }
+        }
+        let gates = folded;
         let all_diagonal = gates.iter().all(|(_, m)| is_diagonal_2x2(m));
         Self {
             gates,

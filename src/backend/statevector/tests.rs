@@ -917,6 +917,39 @@ fn test_multi_fused_matches_individual() {
 }
 
 #[test]
+fn test_multi_fused_repeated_target_matches_individual() {
+    use crate::gates::MultiFusedData;
+
+    let n = 18;
+    let gates_data = vec![(17, Gate::H.matrix_2x2()), (17, Gate::Ry(0.7).matrix_2x2())];
+
+    let mut b1 = StatevectorBackend::new(42);
+    b1.init(n, 0).unwrap();
+    let mut b2 = StatevectorBackend::new(42);
+    b2.init(n, 0).unwrap();
+    for q in 0..n {
+        let mat = Gate::Ry(0.2 + q as f64 * 0.1).matrix_2x2();
+        b1.apply_single_gate(q, mat);
+        b2.apply_single_gate(q, mat);
+    }
+    for &(target, mat) in &gates_data {
+        b1.apply_single_gate(target, mat);
+    }
+    b2.apply(&Instruction::Gate {
+        gate: Gate::MultiFused(Box::new(MultiFusedData::new(gates_data))),
+        targets: [17].into_iter().collect(),
+    })
+    .unwrap();
+
+    for (i, (a, b)) in b1.state.iter().zip(&b2.state).enumerate() {
+        assert!(
+            (a - b).norm() < 1e-12,
+            "amplitude {i}: expected {a}, got {b}"
+        );
+    }
+}
+
+#[test]
 fn test_multi_fused_via_sim_run() {
     let n = 16;
     let mut c = Circuit::new(n, 0);
@@ -2383,6 +2416,35 @@ mod multi_pauli_rot {
     fn a_batch_over_the_budget_still_matches() {
         // Fourteen distinct qubits from 6 up: more than any tile's high budget.
         batch_matches_per_gate(20, &(6..20).collect::<Vec<_>>(), 40, 23);
+    }
+}
+
+#[test]
+fn multi_2q_tiers_take_each_gate_once_at_every_tile_width() {
+    use crate::circuit::SmallVec;
+    use crate::gates::{MULTI_2Q_MAX_TILE_BITS, MULTI_2Q_MIN_TILE_BITS};
+    let mat = crate::gates::Gate::Cx.matrix_4x4();
+    let gates: Vec<(usize, usize, [[Complex64; 4]; 4])> = (1..22).map(|q| (0, q, mat)).collect();
+    for tile_bits in MULTI_2Q_MIN_TILE_BITS..=MULTI_2Q_MAX_TILE_BITS {
+        let max_small = kernels::max_target_for_tile(1 << tile_bits);
+        let mut small = SmallVec::new();
+        let mut medium = SmallVec::new();
+        let mut large = SmallVec::new();
+        kernels::split_multi_2q_tiers(&gates, max_small, &mut small, &mut medium, &mut large);
+        let mut seen: Vec<usize> = small
+            .iter()
+            .chain(&medium)
+            .map(|&(_, q1, _)| q1)
+            .chain(large.iter().map(|&&(_, q1, _)| q1))
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (1..22).collect::<Vec<_>>(), "tile bits {tile_bits}");
+        assert!(small.iter().all(|&(_, q1, _)| q1 <= max_small));
+        assert!(
+            large
+                .iter()
+                .all(|&&(_, q1, _)| q1 > max_small.max(kernels::MULTI_GATE_MAX_L3_TARGET))
+        );
     }
 }
 

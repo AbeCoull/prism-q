@@ -155,6 +155,16 @@ fn tile_budget_reproduces_the_measured_host_and_bounds_the_rest() {
     assert_eq!(tile_budget_for(no_l2), 512 * KB);
 }
 
+#[test]
+fn tile_override_rounds_into_its_range_for_any_parsed_value() {
+    assert_eq!(tile_override_bytes(128), 128 * KB);
+    assert_eq!(tile_override_bytes(700), 512 * KB);
+    assert_eq!(tile_override_bytes(4096), 2 * MB);
+    assert_eq!(tile_override_bytes(1 << 54), 2 * MB);
+    assert_eq!(tile_override_bytes((1 << 54) + 1), 2 * MB);
+    assert_eq!(tile_override_bytes(usize::MAX), 2 * MB);
+}
+
 #[cfg(all(
     not(miri),
     any(

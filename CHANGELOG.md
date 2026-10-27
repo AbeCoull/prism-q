@@ -4,13 +4,6 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
-### Bug Fixes
-
-- **mps:** Draw measurement and reset outcomes from Born weights normalized by the
-  chain's squared norm, and divide the single-qubit reduced density matrix by its trace.
-  After a truncation the chain carries less than unit norm, and a certain outcome could
-  read the other way while the bit was recorded without a projection.
-
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

@@ -3053,3 +3053,61 @@ fn the_gauge_walk_bench_row_walks_under_its_cap() {
         "the row truncates, so it prices the cap"
     );
 }
+
+/// `X q0` beside a Bell pair on q1 and q2. A bond cap of one keeps half the
+/// pair's weight, so the chain carries a squared norm of 0.5 while q0 is
+/// certainly one.
+fn truncated_bell_beside_a_one() -> Circuit {
+    let mut c = Circuit::new(3, 3);
+    c.add_gate(Gate::X, &[0]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c
+}
+
+// The gate after the read keeps the measurement mid-circuit, so every shot
+// runs it on the chain rather than sampling the final distribution.
+#[test]
+fn a_truncated_chain_measures_a_certain_qubit_every_time() {
+    let mut c = truncated_bell_beside_a_one();
+    c.add_measure(0, 0);
+    c.add_gate(Gate::H, &[2]);
+    let result = sim::simulate(&c)
+        .backend(sim::BackendKind::Mps { max_bond_dim: 1 })
+        .seed(42)
+        .shots(200)
+        .unwrap();
+    let zeros = result.shots.iter().filter(|shot| !shot[0]).count();
+    assert_eq!(zeros, 0, "q0 read zero in {zeros} of 200 shots");
+
+    let mut c = truncated_bell_beside_a_one();
+    c.add_measure(0, 0);
+    for seed in 0..64 {
+        let mut b = MpsBackend::new(seed, 1);
+        b.init(3, 3).unwrap();
+        b.apply_instructions(&c.instructions).unwrap();
+        assert!(b.classical_results()[0], "seed {seed} read q0 as zero");
+    }
+}
+
+#[test]
+fn a_truncated_chain_resets_and_reads_normalized_weights() {
+    let mut b = mps_after(&truncated_bell_beside_a_one(), 1);
+    assert!((b.qubit_probability(0).unwrap() - 1.0).abs() < EPS);
+    let rho = b.reduced_density_matrix_1q(1).unwrap();
+    assert!((rho[0][0].re + rho[1][1].re - 1.0).abs() < EPS, "{rho:?}");
+    assert!((b.project_z_outcome(0, true) - 1.0).abs() < EPS);
+
+    let circuit = truncated_bell_beside_a_one();
+    for seed in 0..16 {
+        let mut b = MpsBackend::new(seed, 1);
+        b.init(3, 0).unwrap();
+        b.apply_instructions(&circuit.instructions).unwrap();
+        b.apply(&Instruction::Reset { qubit: 0 }).unwrap();
+        let p1 = b.qubit_probability(0).unwrap();
+        assert!(
+            p1.abs() < EPS,
+            "seed {seed}: q0 reads one with {p1} after a reset"
+        );
+    }
+}

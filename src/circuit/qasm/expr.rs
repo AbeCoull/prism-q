@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use super::lexer::{Kind, TIME_UNITS};
-use super::stream::Stream;
+use super::stream::{MAX_NESTING, Stream};
 use crate::error::{PrismError, Result};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -239,15 +239,27 @@ fn grouped(f: &mut fmt::Formatter<'_>, expr: &Expr<'_>) -> fmt::Result {
 /// `||`, `&&`, `|`, `^`, `&`, equality, ordering, shifts, then arithmetic.
 /// Otherwise the grammar stops at arithmetic, as every static construct reads.
 pub(crate) fn parse<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
-    if stream.is_dynamic() {
-        return parse_level(stream, 0);
-    }
-    parse_sum(stream)
+    Ok(parse_node(stream)?.0)
 }
 
 /// Arithmetic alone, for the operand of a static condition's comparison.
 pub(crate) fn parse_arithmetic<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
-    parse_sum(stream)
+    Ok(stream.nested(parse_sum)?.0)
+}
+
+/// An expression and the depth of its tree. Every walk over a tree recurses,
+/// so the parser rejects one past [`MAX_NESTING`] as it builds it; a flat chain
+/// such as `a + b + c` deepens the tree without nesting the parse.
+type Node<'a> = (Expr<'a>, usize);
+
+fn parse_node<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
+    stream.nested(|stream| {
+        if stream.is_dynamic() {
+            parse_levels(stream, 0)
+        } else {
+            parse_sum(stream)
+        }
+    })
 }
 
 /// Binary operator levels above arithmetic, loosest first.
@@ -267,22 +279,33 @@ const LEVELS: &[&[(Kind, BinaryOp)]] = &[
     &[(Kind::Shl, BinaryOp::Shl), (Kind::Shr, BinaryOp::Shr)],
 ];
 
-fn parse_level<'a>(stream: &mut Stream<'_, 'a>, level: usize) -> Result<Expr<'a>> {
-    let Some(ops) = LEVELS.get(level) else {
-        return parse_sum(stream);
-    };
-    let mut left = parse_level(stream, level + 1)?;
+/// Operators of `LEVELS[min_level..]` over arithmetic operands, each level left
+/// associative. Precedence climbing keeps one frame per nesting level of the
+/// source rather than one per operator level.
+fn parse_levels<'a>(stream: &mut Stream<'_, 'a>, min_level: usize) -> Result<Node<'a>> {
+    let mut left = parse_sum(stream)?;
     loop {
         let kind = stream.kind();
-        let Some(&(_, op)) = ops.iter().find(|(token, _)| *token == kind) else {
+        let Some((level, op)) =
+            LEVELS
+                .iter()
+                .enumerate()
+                .skip(min_level)
+                .find_map(|(level, ops)| {
+                    ops.iter()
+                        .find(|(token, _)| *token == kind)
+                        .map(|&(_, op)| (level, op))
+                })
+        else {
             return Ok(left);
         };
         stream.advance();
-        left = binary(op, left, parse_level(stream, level + 1)?);
+        let right = parse_levels(stream, level + 1)?;
+        left = binary(stream, op, left, right)?;
     }
 }
 
-fn parse_sum<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
+fn parse_sum<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
     let mut left = parse_product(stream)?;
     loop {
         let op = match stream.kind() {
@@ -291,11 +314,12 @@ fn parse_sum<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
             _ => return Ok(left),
         };
         stream.advance();
-        left = binary(op, left, parse_product(stream)?);
+        let right = parse_product(stream)?;
+        left = binary(stream, op, left, right)?;
     }
 }
 
-fn parse_product<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
+fn parse_product<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
     let mut left = parse_unary(stream)?;
     loop {
         let op = match stream.kind() {
@@ -305,41 +329,43 @@ fn parse_product<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
             _ => return Ok(left),
         };
         stream.advance();
-        left = binary(op, left, parse_unary(stream)?);
+        let right = parse_unary(stream)?;
+        left = binary(stream, op, left, right)?;
     }
 }
 
-fn parse_unary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
-    if stream.eat(Kind::Minus) {
-        return Ok(Expr::Negate(Box::new(parse_unary(stream)?)));
-    }
-    if stream.is_dynamic() && stream.eat(Kind::Bang) {
-        return Ok(Expr::Not(Box::new(parse_unary(stream)?)));
-    }
-    if stream.is_dynamic() && stream.eat(Kind::Tilde) {
-        return Ok(Expr::BitNot(Box::new(parse_unary(stream)?)));
-    }
-    if stream.eat(Kind::Plus) {
-        return parse_unary(stream);
-    }
-    parse_power(stream)
+fn parse_unary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
+    let wrap: fn(Box<Expr<'a>>) -> Expr<'a> = if stream.eat(Kind::Minus) {
+        Expr::Negate
+    } else if stream.is_dynamic() && stream.eat(Kind::Bang) {
+        Expr::Not
+    } else if stream.is_dynamic() && stream.eat(Kind::Tilde) {
+        Expr::BitNot
+    } else if stream.eat(Kind::Plus) {
+        return stream.nested(parse_unary);
+    } else {
+        return parse_power(stream);
+    };
+    let (inner, depth) = stream.nested(parse_unary)?;
+    deeper(stream, wrap(Box::new(inner)), depth)
 }
 
 /// `**` is right associative and binds tighter than unary minus, so `-2 ** 2`
 /// is `-4` and `2 ** -1` is a power of a negation.
-fn parse_power<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
+fn parse_power<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
     let base = parse_primary(stream)?;
     if stream.eat(Kind::Pow) {
-        return Ok(binary(BinaryOp::Pow, base, parse_unary(stream)?));
+        let exponent = stream.nested(parse_unary)?;
+        return binary(stream, BinaryOp::Pow, base, exponent);
     }
     Ok(base)
 }
 
-fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
+fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
     match stream.kind() {
         Kind::LParen => {
             stream.advance();
-            let inner = parse(stream)?;
+            let inner = parse_node(stream)?;
             if !stream.eat(Kind::RParen) {
                 return Err(PrismError::Parse {
                     line: stream.line(),
@@ -350,22 +376,27 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
         }
         Kind::Int | Kind::Float => {
             let token = stream.advance();
-            Ok(Expr::Number(number(token.text, token.line as usize)?))
+            Ok((Expr::Number(number(token.text, token.line as usize)?), 1))
         }
         Kind::Duration => {
             let token = stream.advance();
-            Ok(Expr::Duration(duration(token.text, token.line as usize)?))
+            Ok((
+                Expr::Duration(duration(token.text, token.line as usize)?),
+                1,
+            ))
         }
         Kind::Ident => {
             let name = stream.advance().text;
             if stream.kind() == Kind::LBracket {
-                return Ok(Expr::Element(Box::new(Element {
+                let (indices, depth) = index_nodes(stream)?;
+                let element = Expr::Element(Box::new(Element {
                     array: name,
-                    indices: index_groups(stream)?,
-                })));
+                    indices,
+                }));
+                return deeper(stream, element, depth);
             }
             if !stream.eat(Kind::LParen) {
-                return Ok(Expr::Ident(name));
+                return Ok((Expr::Ident(name), 1));
             }
             if name == "durationof" {
                 return Err(PrismError::UnsupportedConstruct {
@@ -373,9 +404,12 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
                     line: stream.line(),
                 });
             }
-            let mut args = vec![parse(stream)?];
+            let (first, mut depth) = parse_node(stream)?;
+            let mut args = vec![first];
             while stream.eat(Kind::Comma) {
-                args.push(parse(stream)?);
+                let (arg, arg_depth) = parse_node(stream)?;
+                args.push(arg);
+                depth = depth.max(arg_depth);
             }
             if !stream.eat(Kind::RParen) {
                 return Err(PrismError::Parse {
@@ -383,7 +417,7 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
                     message: format!("unmatched `(` after function `{name}`"),
                 });
             }
-            Ok(Expr::Call(Box::new(Call { name, args })))
+            deeper(stream, Expr::Call(Box::new(Call { name, args })), depth)
         }
         Kind::Eof => Err(PrismError::Parse {
             line: stream.line(),
@@ -395,23 +429,46 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
 
 /// `[i, j]` or `[i][j]`, read as one flat index list.
 pub(crate) fn index_groups<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Expr<'a>>> {
+    Ok(index_nodes(stream)?.0)
+}
+
+fn index_nodes<'a>(stream: &mut Stream<'_, 'a>) -> Result<(Vec<Expr<'a>>, usize)> {
     let mut indices = Vec::new();
+    let mut depth = 0;
     while stream.eat(Kind::LBracket) {
-        indices.push(parse(stream)?);
-        while stream.eat(Kind::Comma) {
-            indices.push(parse(stream)?);
+        loop {
+            let (index, index_depth) = parse_node(stream)?;
+            indices.push(index);
+            depth = depth.max(index_depth);
+            if !stream.eat(Kind::Comma) {
+                break;
+            }
         }
         stream.expect(Kind::RBracket)?;
     }
-    Ok(indices)
+    Ok((indices, depth))
 }
 
-fn binary<'a>(op: BinaryOp, left: Expr<'a>, right: Expr<'a>) -> Expr<'a> {
-    Expr::Binary {
+fn binary<'a>(
+    stream: &Stream<'_, 'a>,
+    op: BinaryOp,
+    (left, left_depth): Node<'a>,
+    (right, right_depth): Node<'a>,
+) -> Result<Node<'a>> {
+    let expr = Expr::Binary {
         op,
         left: Box::new(left),
         right: Box::new(right),
+    };
+    deeper(stream, expr, left_depth.max(right_depth))
+}
+
+/// `expr` over children at most `depth` deep.
+fn deeper<'a>(stream: &Stream<'_, 'a>, expr: Expr<'a>, depth: usize) -> Result<Node<'a>> {
+    if depth >= MAX_NESTING {
+        return Err(stream.too_deep());
     }
+    Ok((expr, depth + 1))
 }
 
 /// Read a numeric literal, in whichever radix it was written and with `_`

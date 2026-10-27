@@ -62,6 +62,9 @@ c[0] = measure q[0]; // OQ3 measurement
 OpenQASM 2.0 syntax also works: `qreg q[3];` / `creg c[3];` declarations and
 `measure q[0] -> c[0];` measurement.
 
+A program declares at most 2^24 qubits and 2^24 classical bits, physical `$k` indices
+included; past that the parse fails with `PrismError::Parse`.
+
 `output bit[3] c;` declares the register and marks it as the program's result.
 Every classical bit is reported either way, so the marking costs nothing and
 changes nothing.
@@ -503,6 +506,11 @@ or carrying an instruction with no matrix; `inv @` on a body that is not a gate 
 and a whole-number `pow` past one million repetitions, which returns `Parse` naming the
 count instead.
 
+Gate calls, loops and repetitions multiply, so one parse also stops with `Parse` once it
+expands past 2^24 units of work: an emitted instruction, one per qubit for a runtime
+rotation, or a statement or loop pass that emits none. A `pow` repetition is checked
+against the same bound before it is built.
+
 Every decline above happens at parse time, so a program that parses is one the IR can
 hold. The backend it then runs on may still decline the circuit; those limits are on the
 [Capabilities](capabilities.md) page, not here.
@@ -557,6 +565,10 @@ hold. The backend it then runs on may still decline the circuit; those limits ar
   `sqrt`, `tan`). `**` is right associative and binds tighter than unary minus,
   so `-2 ** 2` is `-4`. The constants, `true` and `false` cannot be redeclared
   in the global scope; a gate or `def` parameter may shadow a constant.
+  Statements, conditions and expressions nest at most 256 levels, an operator
+  chain such as `a + b + c` counting one level per operator, and a deeper source
+  fails with `PrismError::Parse`. The bound also covers the gate and `def` bodies
+  a call expands, counted together with the blocks around it.
 
 ```qasm
 bit[2] c;

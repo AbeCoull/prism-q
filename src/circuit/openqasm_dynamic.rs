@@ -84,9 +84,15 @@ fn key(stmt: &Stmt) -> usize {
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn parse_dynamic(input: &str) -> Result<DynamicProgram> {
+    parse_dynamic_within(input, MAX_EXPANSION)
+}
+
+/// [`parse_dynamic`] with `budget` units of expansion in place of the default.
+pub(super) fn parse_dynamic_within(input: &str, budget: usize) -> Result<DynamicProgram> {
     let tokens = lexer::tokenize(input)?;
     let program = syntax::parse_dynamic_program(&tokens)?;
     let mut parser = Parser::new_with(input, Dialect::Native);
+    parser.expansion_left.set(budget);
     parser.dynamic = Some(Box::new(DynamicState {
         builder: DynamicProgramBuilder::new(0, 0),
         analysis: RuntimeAnalysis::of(&program),
@@ -95,9 +101,9 @@ pub fn parse_dynamic(input: &str) -> Result<DynamicProgram> {
         loops: Vec::new(),
         repeat: 0,
     }));
-    if let Some(highest) = super::eval::highest_physical(&program) {
+    if let Some(width) = super::eval::physical_width(&program)? {
         parser.physical = true;
-        parser.total_qubits = highest + 1;
+        parser.total_qubits = width;
     }
     let tail = parser.execute(&program)?;
     parser.flush(tail);
@@ -706,6 +712,7 @@ impl<'a> Parser<'a> {
             .map(|operand| self.qubits_of(operand))
             .collect::<Result<_>>()?;
         let width = self.broadcast_length(&resolved, name, line)?;
+        self.charge(width, line)?;
         self.flush(std::mem::take(out));
         for at in 0..width {
             let qubits: SmallVec<[usize; 4]> = resolved

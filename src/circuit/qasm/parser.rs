@@ -61,9 +61,11 @@ fn program<'a>(mut stream: Stream<'_, 'a>, num_tokens: usize) -> Result<Block<'a
 }
 
 fn statement<'a>(stream: &mut Stream<'_, 'a>) -> Result<Stmt<'a>> {
-    let line = stream.line();
-    let kind = statement_kind(stream)?;
-    Ok(Stmt { line, kind })
+    stream.nested(|stream| {
+        let line = stream.line();
+        let kind = statement_kind(stream)?;
+        Ok(Stmt { line, kind })
+    })
 }
 
 fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
@@ -489,7 +491,7 @@ fn braced_block<'a>(stream: &mut Stream<'_, 'a>) -> Result<Block<'a>> {
 
 fn parse_condition<'a>(stream: &mut Stream<'_, 'a>) -> Result<Condition<'a>> {
     if stream.eat(Kind::LParen) {
-        let inner = parse_condition(stream)?;
+        let inner = stream.nested(parse_condition)?;
         stream.expect(Kind::RParen)?;
         let Some((op, rhs)) = comparison(stream)? else {
             return Ok(inner);

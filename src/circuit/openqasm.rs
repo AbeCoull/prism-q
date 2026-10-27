@@ -115,6 +115,7 @@ use crate::error::{PrismError, Result};
 use crate::gates::{Gate, spectral};
 use crate::sim::noise::{NoiseEvent, NoiseModel};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -374,6 +375,9 @@ pub(crate) struct Parser<'a> {
     total_cbits: usize,
     gate_expansion_depth: usize,
     region_depth: usize,
+    /// Blocks being executed, gate and `def` bodies included, so nesting that
+    /// each body keeps inside the parse limit cannot add up past it.
+    exec_depth: usize,
     param_vars: Option<HashMap<&'a str, f64>>,
     /// `input` slot per declared name, and the names in slot order.
     inputs: HashMap<&'a str, usize>,
@@ -415,6 +419,9 @@ pub(crate) struct Parser<'a> {
     /// Lowering into a control-flow graph, for [`parse_dynamic`]; `None` for
     /// every other entry point.
     dynamic: Option<Box<dynamic::DynamicState<'a>>>,
+    /// Work left of [`MAX_EXPANSION`], shared with every expansion parser this
+    /// one spawns.
+    expansion_left: Rc<Cell<usize>>,
     /// Qubit a bare `gphase` carries its phase on: qubit 0 at the top level, a
     /// gate's first qubit inside its body, so a control on the gate never
     /// lands on the carrier.
@@ -425,6 +432,14 @@ pub(crate) struct Parser<'a> {
 type Scope<'a> = (Vec<&'a str>, Vec<&'a str>);
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
+
+/// Most units of work one parse may expand to: an instruction emitted, or a
+/// statement or loop pass that emits none. Gate calls and loops multiply, so
+/// each per-construct bound alone still admits an exponential program.
+const MAX_EXPANSION: usize = 1 << 24;
+/// Most qubits, and separately most classical bits, a program may declare,
+/// which bounds what a later run allocates for them.
+const MAX_DECLARED_WIDTH: usize = 1 << 24;
 const MAX_FOR_ITERATIONS: i64 = 1_000_000;
 
 /// Largest whole-number `pow(k)` exponent, which bounds both the repetition of
@@ -504,6 +519,7 @@ impl<'a> Parser<'a> {
             total_cbits: 0,
             gate_expansion_depth: 0,
             region_depth: 0,
+            exec_depth: 0,
             param_vars: None,
             inputs: HashMap::new(),
             input_names: Vec::new(),
@@ -522,6 +538,7 @@ impl<'a> Parser<'a> {
             def_result: None,
             guard: None,
             dynamic: None,
+            expansion_left: Rc::new(Cell::new(MAX_EXPANSION)),
             phase_qubit: 0,
         }
     }
@@ -1031,6 +1048,9 @@ impl<'a> Parser<'a> {
             instrs
         };
         let repeats = k.abs() as usize;
+        if base.len().saturating_mul(repeats) > MAX_EXPANSION {
+            return Err(Self::expansion_exhausted(line_num));
+        }
         let mut powered = Vec::with_capacity(base.len() * repeats);
         for _ in 0..repeats {
             powered.extend(base.iter().cloned());

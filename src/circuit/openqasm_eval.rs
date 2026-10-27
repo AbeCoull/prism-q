@@ -12,21 +12,41 @@ use crate::circuit::qasm::ast::{
     OperandName, Stmt, StmtKind,
 };
 use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Duration, Expr, Timed};
+use crate::circuit::qasm::stream::MAX_NESTING;
 use crate::circuit::qasm::{lexer, parser as syntax};
 
-/// Highest `$k` the program names, `None` when it names none.
+/// Register width the highest `$k` the program names implies, `None` when it
+/// names none.
 ///
 /// Physical qubits declare no register, so the width comes from the tree
 /// before any of it runs.
-pub(super) fn highest_physical(block: &Block) -> Option<usize> {
-    let mut highest: Option<usize> = None;
+pub(super) fn physical_width(block: &Block) -> Result<Option<usize>> {
+    let mut highest: Option<(usize, usize)> = None;
     let mut note = |operand: &Operand| {
-        if let OperandName::Physical(index) = operand.name {
-            highest = Some(highest.map_or(index, |seen: usize| seen.max(index)));
+        if let OperandName::Physical(index) = operand.name
+            && highest.is_none_or(|(seen, _)| seen < index)
+        {
+            highest = Some((index, operand.line));
         }
     };
     walk_operands(block, &mut note);
-    highest
+    match highest {
+        None => Ok(None),
+        Some((index, line)) if index >= MAX_DECLARED_WIDTH => {
+            Err(too_wide(ast::RegisterKind::Qubit, line))
+        }
+        Some((index, _)) => Ok(Some(index + 1)),
+    }
+}
+
+fn too_wide(kind: ast::RegisterKind, line: usize) -> PrismError {
+    parse_error(
+        line,
+        format!(
+            "the program declares more than {MAX_DECLARED_WIDTH} {}s",
+            kind.name()
+        ),
+    )
 }
 
 fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
@@ -268,9 +288,9 @@ impl<'a> Parser<'a> {
     ) -> Result<(Circuit, Parameters, Vec<ResultSpec>, Option<NoiseModel>)> {
         let tokens = lexer::tokenize(self.input)?;
         let program = syntax::parse_program(&tokens)?;
-        if let Some(highest) = highest_physical(&program) {
+        if let Some(width) = physical_width(&program)? {
             self.physical = true;
-            self.total_qubits = highest + 1;
+            self.total_qubits = width;
         }
         let instructions = self.execute(&program)?;
         if self.verbatim_pending {
@@ -296,11 +316,35 @@ impl<'a> Parser<'a> {
     /// Run a block, threading the parameter link and noise event each statement
     /// may leave behind onto the instruction index they belong to.
     pub(super) fn execute(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
+        if self.exec_depth >= MAX_NESTING {
+            return Err(parse_error(
+                block.first().map_or(1, |stmt| stmt.line),
+                format!(
+                    "the program nests deeper than {MAX_NESTING} levels, counting the \
+                     gate and def bodies it expands"
+                ),
+            ));
+        }
+        self.exec_depth += 1;
+        let result = self.execute_block(block);
+        self.exec_depth -= 1;
+        result
+    }
+
+    fn execute_block(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
         let mut instructions = Vec::with_capacity(block.len());
         for stmt in block {
             let base = instructions.len();
+            let left = self.expansion_left.get();
             self.pending_input_slot = None;
             self.exec_stmt(stmt, &mut instructions)?;
+            // Nested blocks charged what they emitted as they ran; this
+            // statement owes only what it added on top.
+            let nested = left - self.expansion_left.get();
+            self.charge(
+                (instructions.len() - base).saturating_sub(nested).max(1),
+                stmt.line,
+            )?;
             if let Some(slot) = self.pending_input_slot.take() {
                 for offset in 0..instructions.len() - base {
                     self.links.push(ParamLink {
@@ -326,6 +370,25 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(instructions)
+    }
+
+    pub(super) fn charge(&self, units: usize, line: usize) -> Result<()> {
+        let left = self.expansion_left.get();
+        self.expansion_left.set(left.saturating_sub(units));
+        if units > left {
+            return Err(Self::expansion_exhausted(line));
+        }
+        Ok(())
+    }
+
+    pub(super) fn expansion_exhausted(line: usize) -> PrismError {
+        parse_error(
+            line,
+            format!(
+                "the program expands past {MAX_EXPANSION} instructions and statements, \
+                 counting every gate call, loop pass and repetition"
+            ),
+        )
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt<'a>, out: &mut Vec<Instruction>) -> Result<()> {
@@ -609,11 +672,17 @@ impl<'a> Parser<'a> {
             }
         };
         self.reject_redeclaration(name, line)?;
+        let grown = |total: usize| {
+            total
+                .checked_add(width)
+                .filter(|&total| total <= MAX_DECLARED_WIDTH)
+                .ok_or_else(|| too_wide(kind, line))
+        };
         match kind {
             ast::RegisterKind::Qubit => {
                 self.reject_mixed_addressing(line)?;
                 let offset = self.total_qubits;
-                self.total_qubits += width;
+                self.total_qubits = grown(offset)?;
                 self.qregs.insert(
                     name,
                     Register {
@@ -624,7 +693,7 @@ impl<'a> Parser<'a> {
             }
             ast::RegisterKind::Classical => {
                 let offset = self.total_cbits;
-                self.total_cbits += width;
+                self.total_cbits = grown(offset)?;
                 self.cregs.insert(
                     name,
                     Register {
@@ -1359,7 +1428,11 @@ impl<'a> Parser<'a> {
                 let mut at = first;
                 while (stride > 0 && at <= last) || (stride < 0 && at >= last) {
                     out.push(bound(at)?);
-                    at += stride;
+                    // A step past the integer range is past `last` too.
+                    let Some(next) = at.checked_add(stride) else {
+                        break;
+                    };
+                    at = next;
                 }
                 if out.is_empty() {
                     return Err(parse_error(
@@ -2014,6 +2087,7 @@ impl<'a> Parser<'a> {
             total_cbits: self.total_cbits,
             gate_expansion_depth: self.gate_expansion_depth + 1,
             region_depth: self.region_depth,
+            exec_depth: self.exec_depth,
             param_vars: Some(bindings),
             inputs: HashMap::new(),
             input_names: Vec::new(),
@@ -2032,6 +2106,7 @@ impl<'a> Parser<'a> {
             def_result: None,
             guard: None,
             dynamic: None,
+            expansion_left: Rc::clone(&self.expansion_left),
             phase_qubit: self.phase_qubit,
         };
         for (name, register) in &self.qregs {
@@ -2212,6 +2287,10 @@ impl<'a> Parser<'a> {
         let mut result = Ok(());
         self.enter_static_loop();
         for value in values {
+            if let Err(error) = self.charge(1, line) {
+                result = Err(error);
+                break;
+            }
             // Each pass drops what the body declared, so a declaration binds
             // for one pass, while a write to an outer name carries on.
             self.param_vars
@@ -2265,7 +2344,10 @@ impl<'a> Parser<'a> {
                             format!("for loop iterates more than {MAX_FOR_ITERATIONS} times"),
                         ));
                     }
-                    at += stride;
+                    let Some(next) = at.checked_add(stride) else {
+                        break;
+                    };
+                    at = next;
                 }
                 Ok(values)
             }

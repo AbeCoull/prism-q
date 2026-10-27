@@ -1182,13 +1182,14 @@ impl ClassicalCondition {
                 size,
                 value,
             } => {
-                let mut reg_val = 0u64;
-                for i in 0..*size {
-                    if classical_bits[offset + i] {
-                        reg_val |= 1u64 << i;
-                    }
-                }
-                let eq = reg_val == *value;
+                // Bits from 64 up weigh more than any `value` can hold, so a
+                // set one there decides inequality.
+                let (low, high) = classical_bits[*offset..offset + size].split_at((*size).min(64));
+                let reg_val = low
+                    .iter()
+                    .enumerate()
+                    .fold(0u64, |acc, (i, &bit)| acc | (u64::from(bit) << i));
+                let eq = reg_val == *value && !high.contains(&true);
                 if matches!(self, ClassicalCondition::RegisterEquals { .. }) {
                     eq
                 } else {

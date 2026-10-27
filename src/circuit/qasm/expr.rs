@@ -774,9 +774,6 @@ fn divide(operation: &str, left: f64, right: f64, line: usize) -> Result<f64> {
 
 fn resolve(name: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
     match name {
-        "pi" | "\u{3c0}" => return Ok(std::f64::consts::PI),
-        "tau" | "\u{3c4}" => return Ok(std::f64::consts::TAU),
-        "euler" | "e" => return Ok(std::f64::consts::E),
         "true" => return Ok(1.0),
         "false" => return Ok(0.0),
         _ => {}
@@ -784,10 +781,15 @@ fn resolve(name: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result
     if let Some(value) = vars.and_then(|vars| vars.get(name)) {
         return Ok(*value);
     }
-    Err(PrismError::Parse {
-        line,
-        message: format!("unknown identifier `{name}` in expression"),
-    })
+    match name {
+        "pi" | "\u{3c0}" => Ok(std::f64::consts::PI),
+        "tau" | "\u{3c4}" => Ok(std::f64::consts::TAU),
+        "euler" => Ok(std::f64::consts::E),
+        _ => Err(PrismError::Parse {
+            line,
+            message: format!("unknown identifier `{name}` in expression"),
+        }),
+    }
 }
 
 /// Apply an OpenQASM builtin. The spec spellings (`arcsin`, `ceiling`, `log`)

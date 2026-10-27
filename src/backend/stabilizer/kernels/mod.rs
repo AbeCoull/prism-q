@@ -789,6 +789,9 @@ impl StabilizerBackend {
                     self.sgi_reset(*qubit);
                 }
                 Instruction::Barrier { .. } => {}
+                Instruction::Save { label, .. } => {
+                    return Err(crate::backend::save_not_applied("Stabilizer", label));
+                }
                 Instruction::Conditional {
                     condition,
                     gate,

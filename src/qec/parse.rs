@@ -545,7 +545,7 @@ fn expand_repeats(input: &str) -> Result<Vec<(usize, String)>> {
     for (idx, raw) in input.lines().enumerate() {
         let line = strip_qec_comment(raw).trim();
         if !line.is_empty() {
-            lines.push((idx + 1, line.to_string()));
+            lines.push((idx + 1, strip_instruction_tag(line, idx + 1)?));
         }
     }
 
@@ -581,6 +581,9 @@ fn expand_repeat_block(
             let count = parse_repeat_header(line, *line_num)?;
             *index += 1;
             let body = expand_repeat_block(lines, index, true)?;
+            if body.is_empty() {
+                continue;
+            }
             let repeated_len = body.len().checked_mul(count).ok_or_else(|| {
                 qec_parse_error(
                     *line_num,
@@ -637,6 +640,19 @@ fn parse_repeat_header(line: &str, line_num: usize) -> Result<usize> {
 
 fn strip_qec_comment(line: &str) -> &str {
     line.split_once('#').map_or(line, |(before, _)| before)
+}
+
+fn strip_instruction_tag(line: &str, line_num: usize) -> Result<String> {
+    let name_end = line
+        .find(|c: char| c == '(' || c == '[' || c.is_whitespace())
+        .unwrap_or(line.len());
+    let Some(tagged) = line[name_end..].strip_prefix('[').filter(|_| name_end > 0) else {
+        return Ok(line.to_string());
+    };
+    let close = tagged
+        .find(']')
+        .ok_or_else(|| qec_parse_error(line_num, "unterminated instruction tag"))?;
+    Ok(format!("{}{}", &line[..name_end], &tagged[close + 1..]))
 }
 
 fn split_instruction(line: &str, line_num: usize) -> Result<(String, Option<String>, Vec<String>)> {

@@ -149,9 +149,8 @@ fn chunked_runs_draw_the_same_records_and_heralds() {
         M 0 1 2 3
         DETECTOR rec[-1] rec[-2]";
     let whole = run_qec_program(&program(text, 20_000, None)).unwrap();
-    let chunked = run_qec_program(&program(text, 20_000, Some(1_000))).unwrap();
-    let odd = run_qec_program(&program(text, 20_000, Some(3_333))).unwrap();
-    for other in [&chunked, &odd] {
+    for chunk_size in [64, 1_000, 3_333, 8_192] {
+        let other = run_qec_program(&program(text, 20_000, Some(chunk_size))).unwrap();
         assert_eq!(
             whole.heralds.as_ref().unwrap().raw_data(),
             other.heralds.as_ref().unwrap().raw_data()

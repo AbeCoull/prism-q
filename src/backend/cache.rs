@@ -69,10 +69,14 @@ pub(crate) fn tile_budget_bytes() -> usize {
     static CACHED: OnceLock<usize> = OnceLock::new();
     *CACHED.get_or_init(|| {
         if let Some(kb) = crate::env_knobs::usize_override("PRISM_TILE_KB", MIN_TILE_OVERRIDE_KB) {
-            return floor_pow2((kb << 10).min(MAX_TILE_OVERRIDE_BYTES));
+            return tile_override_bytes(kb);
         }
         topology().map_or(MIN_TILE_BYTES, tile_budget_for)
     })
+}
+
+fn tile_override_bytes(kb: usize) -> usize {
+    floor_pow2(kb.saturating_mul(1 << 10).min(MAX_TILE_OVERRIDE_BYTES))
 }
 
 /// The derived tile budget for `topology`; see [`tile_budget_bytes`].

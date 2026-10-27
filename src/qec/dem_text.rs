@@ -89,7 +89,10 @@ fn parse_block<'a>(
         }
         let (name, args, targets) = split_line(code, line)?;
         let instruction = parse_instruction(name, args, targets, line, lines)?;
-        block.push((line, instruction));
+        match instruction {
+            Instruction::Repeat { count, ref body } if count == 0 || body.is_empty() => {}
+            instruction => block.push((line, instruction)),
+        }
     }
     Err(dem_error(opened_at, "unterminated `repeat` block"))
 }
@@ -327,11 +330,12 @@ impl State {
                         .checked_add(*detectors)
                         .ok_or_else(|| dem_error(*line, "detector shift overflows"))?;
                 }
-                Instruction::Repeat { count, body } => {
+                Instruction::Repeat { count, body } if !body.is_empty() => {
                     for _ in 0..*count {
                         self.run(body)?;
                     }
                 }
+                Instruction::Repeat { .. } => {}
             }
         }
         Ok(())

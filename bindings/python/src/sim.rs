@@ -704,8 +704,8 @@ pub fn run_batch(
 /// Parse an OpenQASM string and run with automatic backend selection.
 #[pyfunction]
 #[pyo3(signature = (source, seed = DEFAULT_SEED))]
-pub fn run_qasm(source: &str, seed: u64) -> PyPrismResult<PyRunOutcome> {
-    let outcome = prism_q::run_qasm(source, seed)?;
+pub fn run_qasm(py: Python<'_>, source: &str, seed: u64) -> PyPrismResult<PyRunOutcome> {
+    let outcome = py.detach(|| prism_q::run_qasm(source, seed))?;
     Ok(PyRunOutcome::from_outcome(outcome))
 }
 

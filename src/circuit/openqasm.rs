@@ -103,6 +103,7 @@
 use num_complex::Complex64;
 
 use super::braket::{self, NoiseSpec, ResultSpec};
+use crate::circuit::dynamic::{ClassicalType as RuntimeType, ClassicalValue};
 use crate::circuit::qasm::ast::{self, DefParam};
 use crate::circuit::qasm::expr::Timed;
 use crate::circuit::synthesis;
@@ -274,12 +275,14 @@ struct Register {
     size: usize,
 }
 
+#[derive(Clone)]
 struct GateDefinition<'a> {
     params: Vec<&'a str>,
     qubits: Vec<&'a str>,
     body: ast::Block<'a>,
 }
 
+#[derive(Clone)]
 struct DefDefinition<'a> {
     args: Vec<DefParam<'a>>,
     result: Option<ast::BitResult<'a>>,
@@ -304,16 +307,31 @@ struct Alias {
 /// Type of a classical variable, which decides how its value is read back.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClassicalType {
-    Int,
+    /// `int` or `uint`, with the width a stored value wraps to.
+    Int(RuntimeType),
     Bool,
     Float,
     Duration,
     Stretch,
 }
 
+impl ClassicalType {
+    /// `value` as this type holds it, by the conversion a runtime variable of
+    /// the type applies: truncation toward zero and wraparound for the integers.
+    fn store(self, value: f64) -> f64 {
+        match self {
+            ClassicalType::Int(integer) => integer.store(ClassicalValue::Float(value)).to_float(),
+            ClassicalType::Bool => f64::from(u8::from(value != 0.0)),
+            _ => value,
+        }
+    }
+}
+
 struct ClassicalDecl {
     ty: ClassicalType,
     constant: bool,
+    /// The exact value of an `int` or `uint`, which an `f64` cannot hold past 2^53.
+    int: i128,
 }
 
 /// A classical array, its elements folded at parse time like any classical
@@ -349,8 +367,10 @@ pub(crate) struct Parser<'a> {
     input: &'a str,
     qregs: HashMap<&'a str, Register>,
     cregs: HashMap<&'a str, Register>,
-    gate_defs: HashMap<&'a str, GateDefinition<'a>>,
-    def_defs: HashMap<&'a str, DefDefinition<'a>>,
+    /// Shared with every expansion parser below this one; a definition
+    /// statement copies the map only while an expansion still holds it.
+    gate_defs: Rc<HashMap<&'a str, GateDefinition<'a>>>,
+    def_defs: Rc<HashMap<&'a str, DefDefinition<'a>>>,
     total_qubits: usize,
     total_cbits: usize,
     gate_expansion_depth: usize,
@@ -402,6 +422,10 @@ pub(crate) struct Parser<'a> {
     /// Work left of [`MAX_EXPANSION`], shared with every expansion parser this
     /// one spawns.
     expansion_left: Rc<Cell<usize>>,
+    /// Qubit a bare `gphase` carries its phase on: qubit 0 at the top level, a
+    /// gate's first qubit inside its body, so a control on the gate never
+    /// lands on the carrier.
+    phase_qubit: usize,
 }
 
 /// Classical and array names in scope at some point, classical first.
@@ -489,8 +513,8 @@ impl<'a> Parser<'a> {
             input,
             qregs: HashMap::new(),
             cregs: HashMap::new(),
-            gate_defs: HashMap::new(),
-            def_defs: HashMap::new(),
+            gate_defs: Rc::default(),
+            def_defs: Rc::default(),
             total_qubits: 0,
             total_cbits: 0,
             gate_expansion_depth: 0,
@@ -515,6 +539,7 @@ impl<'a> Parser<'a> {
             guard: None,
             dynamic: None,
             expansion_left: Rc::new(Cell::new(MAX_EXPANSION)),
+            phase_qubit: 0,
         }
     }
 
@@ -542,13 +567,47 @@ impl<'a> Parser<'a> {
     }
 
     fn bind_classical(&mut self, name: &'a str, ty: ClassicalType, value: f64, constant: bool) {
-        self.classical.insert(name, ClassicalDecl { ty, constant });
+        self.classical.insert(
+            name,
+            ClassicalDecl {
+                ty,
+                constant,
+                int: 0,
+            },
+        );
         self.param_vars
             .get_or_insert_with(HashMap::new)
             .insert(name, value);
     }
 
+    /// Bind an integer variable, wrapped to `integer`'s width as a runtime one is.
+    fn bind_int(&mut self, name: &'a str, integer: RuntimeType, value: i128, constant: bool) {
+        let int = integer.store(ClassicalValue::Int(value)).to_int();
+        self.classical.insert(
+            name,
+            ClassicalDecl {
+                ty: ClassicalType::Int(integer),
+                constant,
+                int,
+            },
+        );
+        self.param_vars
+            .get_or_insert_with(HashMap::new)
+            .insert(name, int as f64);
+    }
+
     fn reject_redeclaration(&self, name: &str, line_num: usize) -> Result<()> {
+        let builtin = match name {
+            "true" | "false" => true,
+            "pi" | "\u{3c0}" | "tau" | "\u{3c4}" | "euler" | "\u{2107}" => !self.nested,
+            _ => false,
+        };
+        if builtin {
+            return Err(parse_error(
+                line_num,
+                format!("`{name}` is a built-in name and cannot be declared in the global scope"),
+            ));
+        }
         let clash = if self.classical.contains_key(name) {
             "a classical variable"
         } else if self.arrays.contains_key(name) {
@@ -612,8 +671,8 @@ impl<'a> Parser<'a> {
     /// A global phase is observable through a `state_vector` result and under a
     /// control, where `ctrl(e^(i theta) I)` is a phase gate on the control, so
     /// it is carried rather than dropped. With controls it becomes exactly that
-    /// phase; without, an identity scaled by the phase on the first qubit,
-    /// which is the same operator wherever it is placed.
+    /// phase; without, an identity scaled by the phase on `phase_qubit`, which
+    /// is the same operator wherever it is placed.
     fn resolve_global_phase(
         &self,
         params: &[f64],
@@ -650,7 +709,7 @@ impl<'a> Parser<'a> {
             let zero = Complex64::new(0.0, 0.0);
             return Ok(vec![Self::ig(
                 Gate::Fused(Box::new([[scale, zero], [zero, scale]])),
-                &[0],
+                &[self.phase_qubit],
             )]);
         }
 
@@ -900,6 +959,7 @@ impl<'a> Parser<'a> {
                     ClassicalDecl {
                         ty: decl.ty,
                         constant: decl.constant,
+                        int: decl.int,
                     },
                 )
             })
@@ -1059,6 +1119,20 @@ impl<'a> Parser<'a> {
         let controlled = match &gate {
             g if g.num_qubits() == 1 => {
                 let mat = gate.matrix_2x2();
+                // `ctrl(e^(i theta) I)` acts on the controls alone, as a phase
+                // on the last of them under the rest; a bare `gphase` in a gate
+                // body lowers to exactly that identity.
+                if mat[0][1] == Complex64::ZERO
+                    && mat[1][0] == Complex64::ZERO
+                    && mat[0][0] == mat[1][1]
+                {
+                    let (&last, rest) = controls.split_last().expect("a control is present");
+                    let phase = Gate::P(mat[0][0].arg());
+                    return Ok(vec![match rest {
+                        [] => Self::ig(phase, &[last]),
+                        _ => Self::ig(Gate::mcu(phase.matrix_2x2(), rest.len() as u8), controls),
+                    }]);
+                }
                 vec![Self::ig(
                     Self::controlled_unitary(mat, widen(0)?),
                     &prefixed(&targets),

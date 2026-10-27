@@ -14,6 +14,7 @@ mod sign_truth_table_tests;
 mod tests;
 
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
@@ -149,11 +150,13 @@ fn gaussian_eliminate(rows: &mut [Vec<u64>], num_cols: usize) -> (usize, Vec<usi
 const LUT_GROUP_SIZE: usize = 8;
 const LUT_MIN_RANK: usize = 8;
 
+/// Largest flip table built. Past it, sampling XORs the flip rows each random byte selects
+/// straight from the rows, drawing the same bytes, so the shots do not change.
+const MAX_FLIP_LUT_BYTES: usize = 16 << 20;
+
 struct FlipLut {
     data: Vec<u64>,
     m_words: usize,
-    num_full_groups: usize,
-    remainder_size: usize,
 }
 
 impl FlipLut {
@@ -189,18 +192,90 @@ impl FlipLut {
             }
         }
 
-        Self {
-            data,
-            m_words,
-            num_full_groups,
-            remainder_size,
-        }
+        Self { data, m_words }
+    }
+
+    fn table_bytes(rank: usize, m_words: usize) -> usize {
+        rank.div_ceil(LUT_GROUP_SIZE) * (1 << LUT_GROUP_SIZE) * m_words * size_of::<u64>()
     }
 
     #[inline(always)]
     fn lookup(&self, group: usize, byte: usize) -> &[u64] {
         let offset = (group * (1 << LUT_GROUP_SIZE) + byte) * self.m_words;
         &self.data[offset..offset + self.m_words]
+    }
+}
+
+/// The flip rows in groups of `LUT_GROUP_SIZE`, each group XORed in by one random byte:
+/// through the table when it fits `MAX_FLIP_LUT_BYTES`, else row by row.
+#[derive(Clone, Copy)]
+struct FlipGroups<'a> {
+    table: Option<&'a FlipLut>,
+    rows: &'a [Vec<u64>],
+    num_full_groups: usize,
+    remainder_size: usize,
+}
+
+impl<'a> FlipGroups<'a> {
+    /// Build the table on the first call that needs it.
+    fn new(lut: &'a OnceLock<Option<FlipLut>>, rows: &'a [Vec<u64>], m_words: usize) -> Self {
+        let table = lut.get_or_init(|| {
+            (FlipLut::table_bytes(rows.len(), m_words) <= MAX_FLIP_LUT_BYTES)
+                .then(|| FlipLut::build(rows, m_words))
+        });
+        Self {
+            table: table.as_ref(),
+            rows,
+            num_full_groups: rows.len() / LUT_GROUP_SIZE,
+            remainder_size: rows.len() % LUT_GROUP_SIZE,
+        }
+    }
+
+    fn total_groups(&self) -> usize {
+        self.num_full_groups + usize::from(self.remainder_size > 0)
+    }
+
+    #[inline(always)]
+    fn xor_into(&self, dst: &mut [u64], group: usize, byte: usize) {
+        match self.table {
+            Some(table) => xor_words(dst, table.lookup(group, byte)),
+            None => self.xor_rows(dst, group, byte),
+        }
+    }
+
+    #[inline(always)]
+    fn xor_rows(&self, dst: &mut [u64], group: usize, byte: usize) {
+        let mut bits = byte;
+        while bits != 0 {
+            let row = group * LUT_GROUP_SIZE + bits.trailing_zeros() as usize;
+            xor_words(dst, &self.rows[row]);
+            bits &= bits - 1;
+        }
+    }
+}
+
+/// Draw one random byte per flip group of a single shot, a full `u64` for every eight
+/// groups, and hand each group's byte to `xor`.
+#[inline(always)]
+fn draw_flip_groups(rng: &mut ChaCha8Rng, lut: &FlipGroups<'_>, mut xor: impl FnMut(usize, usize)) {
+    let mut rand_buf = 0u64;
+    let mut rand_pos = 8usize;
+    for g in 0..lut.num_full_groups {
+        if rand_pos >= 8 {
+            rand_buf = rng.next_u64();
+            rand_pos = 0;
+        }
+        let byte = (rand_buf & 0xFF) as usize;
+        rand_buf >>= 8;
+        rand_pos += 1;
+        xor(g, byte);
+    }
+    if lut.remainder_size > 0 {
+        if rand_pos >= 8 {
+            rand_buf = rng.next_u64();
+        }
+        let mask = (1u64 << lut.remainder_size) - 1;
+        xor(lut.num_full_groups, (rand_buf & mask) as usize);
     }
 }
 
@@ -215,7 +290,7 @@ pub struct CompiledSampler {
     rank: usize,
     num_measurements: usize,
     rng: ChaCha8Rng,
-    lut: Option<FlipLut>,
+    lut: OnceLock<Option<FlipLut>>,
     sparse: Option<SparseParity>,
     parity_blocks: Option<ParityBlocks>,
     #[cfg(feature = "gpu")]
@@ -427,19 +502,13 @@ impl CompiledSampler {
         parity_blocks: Option<ParityBlocks>,
         seed: u64,
     ) -> Self {
-        let lut = if rank >= LUT_MIN_RANK {
-            Some(FlipLut::build(&flip_rows, num_measurements.div_ceil(64)))
-        } else {
-            None
-        };
-
         Self {
             flip_rows,
             ref_bits_packed,
             rank,
             num_measurements,
             rng: ChaCha8Rng::seed_from_u64(seed),
-            lut,
+            lut: OnceLock::new(),
             sparse,
             parity_blocks,
             #[cfg(feature = "gpu")]
@@ -582,8 +651,9 @@ impl CompiledSampler {
             return m_words;
         }
 
-        if let Some(lut) = &self.lut {
-            let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
+        if self.rank >= LUT_MIN_RANK {
+            let lut = FlipGroups::new(&self.lut, &self.flip_rows, m_words);
+            let total_groups = lut.total_groups();
             let bytes_per_shot = total_groups;
             let total_bytes = num_shots * bytes_per_shot;
             rand_buf.resize(total_bytes, 0);
@@ -620,9 +690,8 @@ impl CompiledSampler {
                     for g in 0..total_groups {
                         for s in tile_start..tile_end {
                             let byte = rand_buf[s * bytes_per_shot + g] as usize;
-                            let entry = lut.lookup(g, byte);
                             let shot_base = s * m_words;
-                            xor_words(&mut dst[shot_base..shot_base + m_words], entry);
+                            lut.xor_into(&mut dst[shot_base..shot_base + m_words], g, byte);
                         }
                     }
                 }
@@ -649,9 +718,8 @@ impl CompiledSampler {
                                 for s in tile_start..tile_end {
                                     let gs = chunk_start + s;
                                     let byte = rand_buf[gs * bytes_per_shot + g] as usize;
-                                    let entry = lut.lookup(g, byte);
                                     let base = s * m_words;
-                                    xor_words(&mut chunk[base..base + m_words], entry);
+                                    lut.xor_into(&mut chunk[base..base + m_words], g, byte);
                                 }
                             }
                         }
@@ -832,29 +900,14 @@ impl CompiledSampler {
             return;
         }
 
-        if let Some(lut) = &self.lut {
-            let mut rand_buf = 0u64;
-            let mut rand_pos = 8usize;
-
-            for g in 0..lut.num_full_groups {
-                if rand_pos >= 8 {
-                    rand_buf = self.rng.next_u64();
-                    rand_pos = 0;
+        if self.rank >= LUT_MIN_RANK {
+            let lut = FlipGroups::new(&self.lut, &self.flip_rows, accum.len());
+            let rng = &mut self.rng;
+            match lut.table {
+                Some(table) => {
+                    draw_flip_groups(rng, &lut, |g, byte| xor_words(accum, table.lookup(g, byte)))
                 }
-                let byte = (rand_buf & 0xFF) as usize;
-                rand_buf >>= 8;
-                rand_pos += 1;
-                let entry = lut.lookup(g, byte);
-                xor_words(accum, entry);
-            }
-            if lut.remainder_size > 0 {
-                if rand_pos >= 8 {
-                    rand_buf = self.rng.next_u64();
-                }
-                let mask = (1u64 << lut.remainder_size) - 1;
-                let byte = (rand_buf & mask) as usize;
-                let entry = lut.lookup(lut.num_full_groups, byte);
-                xor_words(accum, entry);
+                None => draw_flip_groups(rng, &lut, |g, byte| lut.xor_rows(accum, g, byte)),
             }
         } else {
             for j in 0..self.rank {
@@ -1270,6 +1323,8 @@ impl CompiledSampler {
         let rank = self.rank;
         let num_outcomes = 1usize << rank;
         let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+        let lut =
+            (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
         let mut counts = HashMap::new();
         let mut remaining = total_shots;
 
@@ -1286,12 +1341,10 @@ impl CompiledSampler {
 
             if count > 0 {
                 let mut outcome = self.ref_bits_packed[..m_words].to_vec();
-                if let Some(lut) = &self.lut {
-                    let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
-                    for g in 0..total_groups {
+                if let Some(lut) = lut {
+                    for g in 0..lut.total_groups() {
                         let byte = (key >> (g * 8)) & 0xFF;
-                        let entry = lut.lookup(g, byte);
-                        xor_words(&mut outcome, entry);
+                        lut.xor_into(&mut outcome, g, byte);
                     }
                 } else {
                     for j in 0..rank {
@@ -1324,10 +1377,11 @@ impl CompiledSampler {
         let num_outcomes = 1usize << rank;
         let mut rank_counts = vec![0u64; num_outcomes];
         let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+        let lut =
+            (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
 
-        if let Some(lut) = &self.lut {
-            let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
-            let bytes_per_shot = total_groups;
+        if let Some(lut) = lut {
+            let bytes_per_shot = lut.total_groups();
             let remainder_mask: u8 = if lut.remainder_size > 0 {
                 (1u8 << lut.remainder_size) - 1
             } else {
@@ -1391,12 +1445,10 @@ impl CompiledSampler {
                 continue;
             }
             let mut outcome = self.ref_bits_packed[..m_words].to_vec();
-            if let Some(lut) = &self.lut {
-                let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
-                for g in 0..total_groups {
+            if let Some(lut) = lut {
+                for g in 0..lut.total_groups() {
                     let byte = (key >> (g * 8)) & 0xFF;
-                    let entry = lut.lookup(g, byte);
-                    xor_words(&mut outcome, entry);
+                    lut.xor_into(&mut outcome, g, byte);
                 }
             } else {
                 for j in 0..rank {
@@ -2299,127 +2351,27 @@ impl PackedShots {
 
     /// Histogram of outcomes, keyed by `m_words()` packed words per shot.
     pub fn counts(&self) -> std::collections::HashMap<Vec<u64>, u64> {
-        if self.m_words > 8 {
-            return self.counts_wide();
+        if self.layout == ShotLayout::ShotMajor && self.m_words > 8 {
+            return self.counts_shot_major_wide();
         }
-        self.counts_packed()
-            .into_iter()
-            .map(|(k, v)| (k[..self.m_words].to_vec(), v))
-            .collect()
+        counts_from_chunks(|acc| acc.accumulate(self))
     }
 
-    fn counts_wide(&self) -> std::collections::HashMap<Vec<u64>, u64> {
-        use std::collections::HashMap;
-
-        let mut map = HashMap::new();
+    /// Shot-major keys wider than the accumulator's inline arms go straight into the
+    /// returned map; counting into an Fx map and converting it read slower at 1000
+    /// measurements.
+    fn counts_shot_major_wide(&self) -> std::collections::HashMap<Vec<u64>, u64> {
+        let mut map = std::collections::HashMap::new();
         let mw = self.m_words;
         let tail_mask = self.measurement_tail_mask();
-        let mut scratch = Vec::new();
-
-        match self.layout {
-            ShotLayout::ShotMajor => {
-                if shot_major_padding_bits_set(&self.data, self.num_shots, mw, tail_mask) {
-                    for s in 0..self.num_shots {
-                        let base = s * mw;
-                        count_vec_key_masked(
-                            &mut map,
-                            &self.data[base..base + mw],
-                            tail_mask,
-                            &mut scratch,
-                        );
-                    }
-                } else {
-                    for s in 0..self.num_shots {
-                        let base = s * mw;
-                        count_vec_key(&mut map, &self.data[base..base + mw]);
-                    }
-                }
+        if shot_major_padding_bits_set(&self.data, self.num_shots, mw, tail_mask) {
+            let mut scratch = Vec::new();
+            for shot in self.data.chunks_exact(mw).take(self.num_shots) {
+                count_vec_key_masked(&mut map, shot, tail_mask, &mut scratch);
             }
-            ShotLayout::MeasMajor => {
-                let batch_size = 64;
-                let mut shot_buf = vec![0u64; batch_size * mw];
-                for batch_start in (0..self.num_shots).step_by(batch_size) {
-                    let batch_end = (batch_start + batch_size).min(self.num_shots);
-                    let batch_len = batch_end - batch_start;
-                    shot_buf[..batch_len * mw].fill(0);
-
-                    let sw_base = batch_start / 64;
-                    let bit_off = batch_start % 64;
-
-                    for m in 0..self.num_measurements {
-                        let mword = m / 64;
-                        let mbit = m % 64;
-                        let meas_row = &self.data[m * self.s_words..];
-                        let word = meas_row[sw_base];
-                        let shifted = word >> bit_off;
-                        for s in 0..batch_len {
-                            if (shifted >> s) & 1 != 0 {
-                                shot_buf[s * mw + mword] |= 1u64 << mbit;
-                            }
-                        }
-                    }
-
-                    for s in 0..batch_len {
-                        let base = s * mw;
-                        count_vec_key(&mut map, &shot_buf[base..base + mw]);
-                    }
-                }
-            }
-        }
-
-        map
-    }
-
-    fn counts_packed(&self) -> std::collections::HashMap<[u64; 8], u64> {
-        use std::collections::HashMap;
-        let mut map = HashMap::new();
-        let mw = self.m_words;
-        debug_assert!(mw <= 8);
-        let tail_mask = self.measurement_tail_mask();
-
-        match self.layout {
-            ShotLayout::ShotMajor => {
-                for s in 0..self.num_shots {
-                    let base = s * mw;
-                    let mut key = [0u64; 8];
-                    key[..mw].copy_from_slice(&self.data[base..base + mw]);
-                    if mw > 0 {
-                        key[mw - 1] &= tail_mask;
-                    }
-                    *map.entry(key).or_insert(0) += 1;
-                }
-            }
-            ShotLayout::MeasMajor => {
-                let batch_size = 64;
-                let mut shot_buf = vec![0u64; batch_size * mw];
-                for batch_start in (0..self.num_shots).step_by(batch_size) {
-                    let batch_end = (batch_start + batch_size).min(self.num_shots);
-                    let batch_len = batch_end - batch_start;
-                    shot_buf[..batch_len * mw].fill(0);
-
-                    let sw_base = batch_start / 64;
-                    let bit_off = batch_start % 64;
-
-                    for m in 0..self.num_measurements {
-                        let mword = m / 64;
-                        let mbit = m % 64;
-                        let meas_row = &self.data[m * self.s_words..];
-                        let word = meas_row[sw_base];
-                        let shifted = word >> bit_off;
-                        for s in 0..batch_len {
-                            if (shifted >> s) & 1 != 0 {
-                                shot_buf[s * mw + mword] |= 1u64 << mbit;
-                            }
-                        }
-                    }
-
-                    for s in 0..batch_len {
-                        let base = s * mw;
-                        let mut key = [0u64; 8];
-                        key[..mw].copy_from_slice(&shot_buf[base..base + mw]);
-                        *map.entry(key).or_insert(0) += 1;
-                    }
-                }
+        } else {
+            for shot in self.data.chunks_exact(mw).take(self.num_shots) {
+                count_vec_key(&mut map, shot);
             }
         }
         map
@@ -2747,6 +2699,30 @@ fn require_clifford(circuit: &Circuit) -> Result<()> {
     })
 }
 
+/// [`require_clifford`], then, once the circuit measures, no resets and terminal
+/// measurements with no classical conditionals.
+fn require_compilable(circuit: &Circuit) -> Result<()> {
+    require_clifford(circuit)?;
+
+    let has_measurements = circuit
+        .instructions
+        .iter()
+        .any(|inst| matches!(inst, Instruction::Measure { .. }));
+    if has_measurements && circuit.has_resets() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: "compiled measurement sampling does not support reset instructions".to_string(),
+        });
+    }
+    if has_measurements && !circuit.has_terminal_measurements_only() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: "compiled measurement sampling requires terminal measurements and does not support classical conditionals".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn finish_sampler(
     mut flip_rows: Vec<Vec<u64>>,
     rank: usize,
@@ -2773,7 +2749,7 @@ fn finish_sampler(
 
 /// Compile a Clifford circuit's measurements via forward stabilizer
 /// simulation; [`compile_measurements`] routes registers of 64 or more qubits
-/// here.
+/// here, and the same circuit requirements apply.
 ///
 /// # Examples
 ///
@@ -2792,7 +2768,11 @@ fn finish_sampler(
 /// assert_eq!(counts.values().sum::<u64>(), 1000);
 /// ```
 pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
-    require_clifford(circuit)?;
+    require_compilable(circuit)?;
+    compile_forward_unchecked(circuit, seed)
+}
+
+fn compile_forward_unchecked(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     let schedule = live_forward::LiveSchedule::plan(circuit);
     if schedule.peak_live * schedule.peak_live <= LIVE_FORWARD_DENSITY * circuit.num_qubits {
         return live_forward::compile_forward_live(circuit, seed, &schedule);
@@ -3311,24 +3291,7 @@ pub fn compile_detector_sampler(
 ///
 /// Requires terminal measurements with no resets or classical conditionals.
 pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
-    require_clifford(circuit)?;
-
-    let has_measurements = circuit
-        .instructions
-        .iter()
-        .any(|inst| matches!(inst, Instruction::Measure { .. }));
-    if has_measurements && circuit.has_resets() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: "compiled measurement sampling does not support reset instructions".to_string(),
-        });
-    }
-    if has_measurements && !circuit.has_terminal_measurements_only() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: "compiled measurement sampling requires terminal measurements and does not support classical conditionals".to_string(),
-        });
-    }
+    require_compilable(circuit)?;
 
     if circuit.num_qubits >= 4 {
         let blocks = circuit.independent_subsystems();
@@ -3341,7 +3304,7 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
     }
 
     if circuit.num_qubits >= 64 {
-        return compile_forward(circuit, seed);
+        return compile_forward_unchecked(circuit, seed);
     }
 
     let measurement_rows = build_measurement_rows(circuit);
@@ -3383,21 +3346,30 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
     } else {
         use crate::backend::Backend;
         use crate::backend::stabilizer::StabilizerBackend;
-        let mut stab = StabilizerBackend::new(seed);
-        stab.init(circuit.num_qubits, circuit.num_classical_bits)?;
-        stab.apply_instructions(&circuit.instructions)?;
-        let ref_classical = stab.classical_results().to_vec();
-        let classical_bit_order: Vec<usize> = measurement_rows.iter().map(|(_, c, _)| *c).collect();
-        classical_bit_order
+        // Two measurements may share a classical bit, so each reads into a
+        // private bit numbered by its record index.
+        let first_measure = circuit
+            .instructions
             .iter()
-            .map(|&cbit| {
-                if cbit < ref_classical.len() {
-                    ref_classical[cbit]
-                } else {
-                    false
-                }
+            .position(|inst| matches!(inst, Instruction::Measure { .. }))
+            .unwrap_or(circuit.instructions.len());
+        let records: Vec<Instruction> = circuit.instructions[first_measure..]
+            .iter()
+            .filter_map(|inst| match inst {
+                Instruction::Measure { qubit, .. } => Some(*qubit),
+                _ => None,
             })
-            .collect()
+            .enumerate()
+            .map(|(record, qubit)| Instruction::Measure {
+                qubit,
+                classical_bit: record,
+            })
+            .collect();
+        let mut stab = StabilizerBackend::new(seed);
+        stab.init(circuit.num_qubits, num_measurements)?;
+        stab.apply_instructions(&circuit.instructions[..first_measure])?;
+        stab.apply_instructions(&records)?;
+        stab.classical_results().to_vec()
     };
 
     let num_meas_words = num_measurements.div_ceil(64);

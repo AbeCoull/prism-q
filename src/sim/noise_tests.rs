@@ -1296,6 +1296,128 @@ fn the_filtered_compile_carries_an_in_block_pair() {
     }
 }
 
+/// Shots of `circuit` under `noise` from the frame sampler, both compiled
+/// sweeps, and statevector trajectories, labelled by route.
+fn every_pauli_route(circuit: &Circuit, noise: &NoiseModel) -> Vec<(&'static str, Vec<Vec<bool>>)> {
+    const SHOTS: usize = 64;
+    let blocks = circuit.independent_subsystems();
+    assert!(blocks.len() > 1, "the filtered sweep needs two blocks");
+    let mut filtered = compile_noisy_filtered(circuit, noise, &blocks, 42).unwrap();
+    let mut monolithic = compile_noisy_monolithic(circuit, noise, 42).unwrap();
+    let trajectory = crate::sim::simulate(circuit)
+        .backend(BackendKind::Statevector)
+        .noise(noise)
+        .seed(42)
+        .shots(SHOTS)
+        .unwrap();
+    vec![
+        (
+            "frame",
+            run_shots_noisy_frame(circuit, noise, SHOTS, 42)
+                .unwrap()
+                .shots,
+        ),
+        ("filtered", filtered.sample_bulk_packed(SHOTS).to_shots()),
+        (
+            "monolithic",
+            monolithic.sample_bulk_packed(SHOTS).to_shots(),
+        ),
+        ("trajectory", trajectory.shots),
+    ]
+}
+
+fn assert_every_route_reads(circuit: &Circuit, noise: &NoiseModel, want: &[bool]) {
+    for (route, shots) in every_pauli_route(circuit, noise) {
+        assert!(
+            shots.iter().all(|shot| shot == want),
+            "{route}: {:?} against {want:?}",
+            shots.iter().find(|shot| *shot != want)
+        );
+    }
+}
+
+// A certain flip before each measurement of a terminal `measure_all` rides the
+// slot of the measurement before it for every qubit but the first.
+#[test]
+fn a_flip_before_each_measurement_reaches_every_bit() {
+    let mut circuit = Circuit::new(4, 4);
+    for q in 0..4 {
+        circuit.add_gate(Gate::Id, &[q]);
+    }
+    circuit.measure_all();
+    let noise = NoiseBuilder::new()
+        .before_measurements(NoiseChannel::Pauli {
+            px: 1.0,
+            py: 0.0,
+            pz: 0.0,
+        })
+        .build(&circuit)
+        .unwrap();
+    assert_eq!(
+        noise.after_gate[4].len(),
+        1,
+        "q1's flip sits on a measurement slot"
+    );
+
+    assert_every_route_reads(&circuit, &noise, &[true; 4]);
+    let auto = crate::sim::simulate(&circuit)
+        .noise(&noise)
+        .seed(42)
+        .shots(64)
+        .unwrap();
+    assert!(auto.shots.iter().all(|shot| shot == &[true; 4]));
+}
+
+// A flip on a measurement's slot lands after that read and before the next:
+// q0 reads zero, then q1 and the second read of q0 both read one.
+#[test]
+fn a_flip_between_measurements_reaches_only_the_later_reads() {
+    let mut circuit = Circuit::new(4, 3);
+    circuit.add_gate(Gate::Cx, &[2, 3]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    circuit.add_measure(0, 2);
+    let flip = |q: usize| NoiseEvent::pauli(q, 1.0, 0.0, 0.0);
+    let mut noise = bare_model(&circuit);
+    noise.after_gate[1] = vec![flip(0), flip(1)];
+
+    assert_every_route_reads(&circuit, &noise, &[false, true, true]);
+}
+
+// Crosstalk puts a flip on a spectator in the slot of a gate from another
+// subsystem block: X q3 after CX(0,1) and X q0 after CX(2,3).
+#[test]
+fn a_spectator_flip_stays_on_its_own_qubit() {
+    let mut circuit = Circuit::new(4, 4);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Cx, &[2, 3]);
+    circuit.measure_all();
+    let noise = NoiseBuilder::new()
+        .crosstalk(
+            GateFilter::all(),
+            [(3, 0)],
+            NoiseChannel::Pauli {
+                px: 1.0,
+                py: 0.0,
+                pz: 0.0,
+            },
+        )
+        .build(&circuit)
+        .unwrap();
+    assert_eq!(noise.after_gate[1][0].qubits.as_slice(), &[0]);
+
+    let want = [true, false, false, true];
+    assert_every_route_reads(&circuit, &noise, &want);
+    let mut public = compile_noisy(&circuit, &noise, 42).unwrap();
+    assert!(
+        public
+            .sample_bulk_packed(64)
+            .to_shots()
+            .iter()
+            .all(|shot| shot == &want)
+    );
+}
+
 // The exact walk defers one-qubit maps and folds them, a gate, and its
 // channels into one 16x16 sweep. Applying every instruction and channel on its
 // own is the reference: orientation (a CX with its control above its target),

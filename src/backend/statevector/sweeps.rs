@@ -465,16 +465,16 @@ impl Profiler {
         let tile = kernels::multi_2q_small_tile(self.n);
         let mut small = SmallVec::new();
         let mut medium = SmallVec::new();
+        let mut large = SmallVec::new();
         kernels::split_multi_2q_tiers(
             gates,
             kernels::max_target_for_tile(tile),
             &mut small,
             &mut medium,
+            &mut large,
         );
-        let tiled = small.len() + medium.len();
-        let passes =
-            usize::from(!small.is_empty()) + usize::from(!medium.is_empty()) + gates.len() - tiled;
-        (passes, tiled)
+        let passes = usize::from(!small.is_empty()) + usize::from(!medium.is_empty()) + large.len();
+        (passes, small.len() + medium.len())
     }
 
     fn multi_pauli_rot(&self, rotations: &[(usize, usize, f64)]) -> (usize, usize) {

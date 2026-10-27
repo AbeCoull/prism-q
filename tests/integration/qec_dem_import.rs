@@ -72,6 +72,34 @@ fn nested_repeats_expand_in_order() {
 }
 
 #[test]
+fn empty_repeats_run_no_iterations() {
+    let model = DetectorErrorModel::from_text(
+        "repeat 4000000000 {
+         }
+         repeat 4000000000 {
+             repeat 4000000000 {
+             }
+             repeat 0 {
+                 error(0.1) D0
+             }
+         }
+         repeat 2 {
+             repeat 4000000000 {
+             }
+             error(0.1) D0
+             shift_detectors 1
+         }",
+    )
+    .unwrap();
+    let detectors: Vec<usize> = model
+        .mechanisms()
+        .iter()
+        .map(|m| m.detectors()[0])
+        .collect();
+    assert_eq!(detectors, [0, 1]);
+}
+
+#[test]
 fn rejects_malformed_text() {
     for text in [
         "error(1.5) D0",

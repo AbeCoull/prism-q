@@ -921,6 +921,27 @@ fn assert_sgi_engaged_at_reset(circuit: &Circuit) {
 }
 
 #[test]
+fn test_sgi_bulk_path_rejects_a_save() {
+    let n = 300;
+    let mut c = Circuit::new(n, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_save(crate::circuit::SaveSpec::Probabilities, "mid");
+    c.add_gate(Gate::Cx, &[0, 1]);
+
+    let mut b = StabilizerBackend::new(42);
+    b.init(n, 0).unwrap();
+    assert!(
+        b.sgi_ready(),
+        "SGI path not engaged; the test would pass vacuously"
+    );
+    let err = b.apply_instructions(&c.instructions).unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { reason, .. } if reason.contains("`mid`")),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn test_sgi_reset_random_outcome_matches_gate_by_gate() {
     let n = 300;
     let circuit = sgi_reset_circuit(n);

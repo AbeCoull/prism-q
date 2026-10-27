@@ -648,6 +648,22 @@ fn dm_gpu_terminals_match_cpu() {
     }
 }
 
+// All 4^8 = 65,536 Paulis on eight qubits: one mask past the 65,535 limit on
+// gridDim.y that a mask-per-row launch would need.
+#[test]
+fn dm_gpu_expectations_pauli_past_the_grid_y_limit_match_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 8;
+    let (cpu, gpu) = f.prepared_pair(n);
+    let masks = all_pauli_masks(n);
+    let want = cpu.expectations_pauli(&masks);
+    let got = gpu.expectations_pauli(&masks);
+    assert_eq!(got.len(), masks.len());
+    for (k, (w, g)) in want.iter().zip(&got).enumerate() {
+        assert!((w - g).abs() < EPS, "pauli {:?}: cpu {w} gpu {g}", masks[k]);
+    }
+}
+
 #[test]
 fn dm_gpu_init_from_amplitudes_matches_cpu() {
     let Some(f) = Fixture::try_new() else { return };

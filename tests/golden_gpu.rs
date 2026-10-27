@@ -2756,6 +2756,45 @@ fn gpu_expectation_values_shared_x_groups_match_cpu_statevector() {
     }
 }
 
+// 600,000 strings over four qubits reduce in about 75,000 shared-X groups, past
+// the 65,535 limit on gridDim.y that one group-per-row launch would need.
+#[test]
+fn gpu_pauli_expectations_past_the_grid_y_limit_match_cpu() {
+    use prism_q::PauliTerm;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 4;
+    let circuit = prism_q::circuits::random_circuit(n, 6, common::SEED);
+    let mut cpu = StatevectorBackend::new(42);
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    for backend in [&mut cpu, &mut gpu] {
+        backend.init(n, 0).unwrap();
+        backend.apply_instructions(&circuit.instructions).unwrap();
+    }
+
+    let obs: Vec<Vec<PauliTerm>> = (0..600_000usize)
+        .map(|k| {
+            let (x, z) = (k % 16, (k / 16) % 16);
+            (0..n)
+                .filter_map(|q| match (x >> q & 1, z >> q & 1) {
+                    (1, 0) => Some(PauliTerm::x(q)),
+                    (0, 1) => Some(PauliTerm::z(q)),
+                    (1, 1) => Some(PauliTerm::y(q)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+
+    let want = cpu.pauli_expectations(&obs).unwrap();
+    let got = gpu.pauli_expectations(&obs).unwrap();
+    assert_eq!(got.len(), obs.len());
+    for (i, (w, g)) in want.iter().zip(&got).enumerate() {
+        assert!((w - g).abs() < EPS, "obs {i}: cpu={w}, gpu={g}");
+    }
+}
+
 // Three commuting groups, one per host branch of the grouped evaluation: six
 // members expand into 15 pair masks inline, eight Z-only members take the
 // moments pass on the state as run, seven mixed members take it on a

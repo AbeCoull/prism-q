@@ -8,7 +8,12 @@
 //
 // xz is laid out as (2n+1) rows × 2*num_words u64s per row, with X-bits in the
 // first num_words words of each row and Z-bits in the second num_words words.
-// phase is 2n+1 bytes.
+// phase is 2n+1 bytes. The tableau passes 2^31 words near 185,000 qubits, so row
+// offsets go through stab_row in 64-bit arithmetic.
+
+__device__ __forceinline__ unsigned long long stab_row(int row, int stride) {
+    return (unsigned long long)row * (unsigned long long)stride;
+}
 
 extern "C" __global__ void stab_set_initial_tableau(
     unsigned long long *xz,
@@ -23,10 +28,10 @@ extern "C" __global__ void stab_set_initial_tableau(
     int stride = 2 * num_words;
 
     // Destabilizer row i: X-bit i set in the X-half.
-    xz[i * stride + word_idx] = bit;
+    xz[stab_row(i, stride) + word_idx] = bit;
 
     // Stabilizer row (num_qubits + i): Z-bit i set in the Z-half.
-    xz[(num_qubits + i) * stride + num_words + word_idx] = bit;
+    xz[stab_row(num_qubits + i, stride) + num_words + word_idx] = bit;
 }
 
 // ============================================================================
@@ -112,7 +117,7 @@ extern "C" __global__ void stab_apply_word_grouped(
     unsigned int tid = threadIdx.x;
     unsigned int bsz = blockDim.x;
     int stride = 2 * num_words;
-    unsigned long long *rx = xz + row * stride;
+    unsigned long long *rx = xz + stab_row(row, stride);
     unsigned long long *rz = rx + num_words;
     unsigned int local_phase_xor = 0u;
 
@@ -326,9 +331,9 @@ __device__ __forceinline__ unsigned long long stab_rowmul_block(
     unsigned long long *warp_sums
 ) {
     int stride = 2 * num_words;
-    unsigned long long *src_x = xz + src_row * stride;
+    unsigned long long *src_x = xz + stab_row(src_row, stride);
     unsigned long long *src_z = src_x + num_words;
-    unsigned long long *dst_x = xz + dst_row * stride;
+    unsigned long long *dst_x = xz + stab_row(dst_row, stride);
     unsigned long long *dst_z = dst_x + num_words;
 
     unsigned long long local_sum = 0ULL;
@@ -433,7 +438,7 @@ extern "C" __global__ void stab_measure_find_pivot(
     int stride = 2 * num_words;
     int word_idx = target / 64;
     unsigned long long bit = 1ULL << (target % 64);
-    if ((xz[row * stride + word_idx] & bit) != 0ULL) {
+    if ((xz[stab_row(row, stride) + word_idx] & bit) != 0ULL) {
         atomicMin(out_pivot, row);
     }
 }
@@ -458,7 +463,7 @@ extern "C" __global__ void stab_measure_cascade(
     int stride = 2 * num_words;
     int word_idx = target / 64;
     unsigned long long bit = 1ULL << (target % 64);
-    if ((xz[r * stride + word_idx] & bit) == 0ULL) return;
+    if ((xz[stab_row(r, stride) + word_idx] & bit) == 0ULL) return;
 
     int tid = threadIdx.x;
     int bsz = blockDim.x;
@@ -485,15 +490,16 @@ extern "C" __global__ void stab_measure_fixup(
     int bsz = blockDim.x;
     int stride = 2 * num_words;
     int destab_row = pivot_row - num_qubits;
+    unsigned long long *pivot = xz + stab_row(pivot_row, stride);
+    unsigned long long *destab = xz + stab_row(destab_row, stride);
 
     __shared__ unsigned char pivot_phase_saved;
     if (tid == 0) pivot_phase_saved = phase[pivot_row];
     __syncthreads();
 
     for (int w = tid; w < stride; w += bsz) {
-        unsigned long long pv = xz[pivot_row * stride + w];
-        xz[destab_row * stride + w] = pv;
-        xz[pivot_row * stride + w] = 0ULL;
+        destab[w] = pivot[w];
+        pivot[w] = 0ULL;
     }
     __syncthreads();
 
@@ -502,7 +508,7 @@ extern "C" __global__ void stab_measure_fixup(
         phase[pivot_row] = outcome;
         int word_idx = target / 64;
         unsigned long long bit = 1ULL << (target % 64);
-        xz[pivot_row * stride + num_words + word_idx] = bit;
+        pivot[num_words + word_idx] = bit;
     }
 }
 
@@ -523,9 +529,10 @@ extern "C" __global__ void stab_measure_deterministic(
     int bsz = blockDim.x;
     int scratch = 2 * num_qubits;
     int stride = 2 * num_words;
+    unsigned long long *scratch_row = xz + stab_row(scratch, stride);
 
     for (int w = tid; w < stride; w += bsz) {
-        xz[scratch * stride + w] = 0ULL;
+        scratch_row[w] = 0ULL;
     }
     if (tid == 0) phase[scratch] = 0;
     __syncthreads();
@@ -535,7 +542,7 @@ extern "C" __global__ void stab_measure_deterministic(
     __shared__ unsigned long long warp_sums[32];
 
     for (int i = 0; i < num_qubits; ++i) {
-        if ((xz[i * stride + word_idx] & bit) == 0ULL) continue;
+        if ((xz[stab_row(i, stride) + word_idx] & bit) == 0ULL) continue;
         int src_row = num_qubits + i;
         unsigned long long sum =
             stab_rowmul_block(xz, num_words, src_row, scratch, tid, bsz, warp_sums);

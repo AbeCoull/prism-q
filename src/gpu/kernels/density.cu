@@ -209,17 +209,18 @@ extern "C" __global__ void dm_outer_product(
 }
 
 // Per-block complex partials of sum_j (-1)^{popcount(j & z)} rho[j][j ^ x] for
-// mask k = blockIdx.y; j runs over the 2^n rows, two per thread. Partials are
-// laid out [k][block][re, im].
+// mask k = mask_base + blockIdx.y; j runs over the 2^n rows, two per thread. Partials
+// are laid out [k][block][re, im].
 extern "C" __global__ void dm_pauli_expect(
     const double2 *state, unsigned long long d,
-    const unsigned long long *xmasks, const unsigned long long *zmasks, double *out_partials)
+    const unsigned long long *xmasks, const unsigned long long *zmasks, unsigned int mask_base,
+    double *out_partials)
 {
     extern __shared__ double sdata[];
     double *sr = sdata;
     double *si = sdata + blockDim.x;
     unsigned long long tid = threadIdx.x;
-    unsigned int k = blockIdx.y;
+    unsigned int k = mask_base + blockIdx.y;
     unsigned long long x = xmasks[k];
     unsigned long long z = zmasks[k];
     double re = 0.0, im = 0.0;

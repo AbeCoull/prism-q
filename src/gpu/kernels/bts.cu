@@ -330,7 +330,8 @@ extern "C" __global__ void bts_compact_counts_upto8(
 }
 
 // Bit-transpose a 64 x 64 block of the meas-major BTS output into shot-major
-// layout. Each block handles one tile indexed by (m_word, batch). The block
+// layout. Each block handles one tile indexed by (m_word, batch), with batch
+// offset by batch_base so the host can split s_words across launches. The block
 // loads 64 meas-major u64s into shared memory, then each thread writes one
 // shot-major u64 containing 64 measurements for its shot.
 //
@@ -343,10 +344,11 @@ extern "C" __global__ void bts_transpose_meas_to_shot(
     int num_shots,
     int s_words,
     int m_words,
+    int batch_base,
     unsigned long long *shot_major
 ) {
     int m_word = blockIdx.x;
-    int batch = blockIdx.y;
+    int batch = batch_base + (int)blockIdx.y;
     int tid = threadIdx.x;
 
     __shared__ unsigned long long tile[64];

@@ -999,9 +999,9 @@ pub(crate) fn pauli_sums(
     super::ensure_scratch(&mut scratch.u64_a, device, &groups)?;
     super::ensure_scratch(&mut scratch.u64_b, device, &members)?;
     let partials = scratch.measure_partials.as_mut().unwrap();
-    {
+    for (group_base, launch_groups) in super::grid_y_tiles(num_groups) {
         let cfg = LaunchConfig {
-            grid_dim: (blocks_per_mask, num_groups, 1),
+            grid_dim: (blocks_per_mask, launch_groups, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -1011,13 +1011,15 @@ pub(crate) fn pauli_sums(
             .arg(&dim)
             .arg(scratch.u64_a.as_ref().unwrap().raw())
             .arg(&num_groups)
+            .arg(&group_base)
             .arg(scratch.u64_b.as_ref().unwrap().raw())
             .arg(&num_masks)
             .arg(partials.raw_mut());
         // SAFETY: signature matches the kernel. `blocks_per_mask` blocks of
         // `PAULI_AMPS_PER_THREAD` amplitudes per thread cover the `dim` amplitudes
-        // of each of the `num_groups` groups of at most `PAULI_GROUP_MASKS`
-        // members, every partner read `j ^ x` stays below `dim` because
+        // of each of the `launch_groups` groups from `group_base`, which end at or
+        // below `num_groups` and hold at most `PAULI_GROUP_MASKS` members each,
+        // every partner read `j ^ x` stays below `dim` because
         // `x < dim` (masks are built from validated qubit indices), and every
         // member slot is a distinct mask index, so `partials` holds two f64s per
         // (slot, block). All buffers are held by the scratch guard.
@@ -1026,7 +1028,7 @@ pub(crate) fn pauli_sums(
                 .launch(cfg)
                 .map_err(|e| driver_err("sv_pauli_expect", e))?;
         }
-        device.count_launch(u64::from(num_groups));
+        device.count_launch(u64::from(launch_groups));
     }
     let norm_sq = state.pending_norm() * state.pending_norm();
     super::finalize_pauli_sums(

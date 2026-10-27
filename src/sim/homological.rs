@@ -194,61 +194,51 @@ impl ErrorChainComplex {
         let mut z_packed: Vec<Vec<u64>> = vec![vec![0u64; m_words]; n];
         let mut sign_packed = vec![0u64; m_words];
 
-        let mut meas_idx = m;
-        for instr in circuit.instructions.iter().rev() {
-            if let Instruction::Measure { qubit, .. } = instr {
-                meas_idx -= 1;
-                let word = meas_idx / 64;
-                let bit = meas_idx % 64;
-                z_packed[*qubit][word] |= 1u64 << bit;
-            }
-        }
-
         let mut error_probs = Vec::new();
         let mut e_cols: Vec<Vec<u64>> = Vec::new();
 
+        let mut meas_idx = m;
         for (instr_idx, instr) in circuit.instructions.iter().enumerate().rev() {
+            for event in &noise.after_gate[instr_idx] {
+                // An inert channel contributes no column, whatever its
+                // variant.
+                if event.channel.is_inert() {
+                    continue;
+                }
+                let (px, py, pz) = event.pauli_probs();
+                let q = event.qubit();
+                let p_total = px + py + pz;
+                if p_total < 1e-15 {
+                    continue;
+                }
+
+                let x_sens = &z_packed[q];
+                let z_sens = &x_packed[q];
+
+                if px > 1e-15 && x_sens.iter().any(|&w| w != 0) {
+                    error_probs.push(px);
+                    e_cols.push(x_sens.clone());
+                }
+
+                if pz > 1e-15 && z_sens.iter().any(|&w| w != 0) {
+                    error_probs.push(pz);
+                    e_cols.push(z_sens.clone());
+                }
+
+                if py > 1e-15 {
+                    let mut y_sens = vec![0u64; m_words];
+                    for w in 0..m_words {
+                        y_sens[w] = x_sens[w] ^ z_sens[w];
+                    }
+                    if y_sens.iter().any(|&w| w != 0) {
+                        error_probs.push(py);
+                        e_cols.push(y_sens);
+                    }
+                }
+            }
+
             match instr {
                 Instruction::Gate { gate, targets } => {
-                    let noise_events = &noise.after_gate[instr_idx];
-                    for event in noise_events {
-                        // An inert channel contributes no column, whatever its
-                        // variant.
-                        if event.channel.is_inert() {
-                            continue;
-                        }
-                        let (px, py, pz) = event.pauli_probs();
-                        let q = event.qubit();
-                        let p_total = px + py + pz;
-                        if p_total < 1e-15 {
-                            continue;
-                        }
-
-                        let x_sens = &z_packed[q];
-                        let z_sens = &x_packed[q];
-
-                        if px > 1e-15 && x_sens.iter().any(|&w| w != 0) {
-                            error_probs.push(px);
-                            e_cols.push(x_sens.clone());
-                        }
-
-                        if pz > 1e-15 && z_sens.iter().any(|&w| w != 0) {
-                            error_probs.push(pz);
-                            e_cols.push(z_sens.clone());
-                        }
-
-                        if py > 1e-15 {
-                            let mut y_sens = vec![0u64; m_words];
-                            for w in 0..m_words {
-                                y_sens[w] = x_sens[w] ^ z_sens[w];
-                            }
-                            if y_sens.iter().any(|&w| w != 0) {
-                                error_probs.push(py);
-                                e_cols.push(y_sens);
-                            }
-                        }
-                    }
-
                     batch_propagate_backward(
                         &mut x_packed,
                         &mut z_packed,
@@ -258,8 +248,11 @@ impl ErrorChainComplex {
                         m_words,
                     );
                 }
-                Instruction::Measure { .. }
-                | Instruction::Reset { .. }
+                Instruction::Measure { qubit, .. } => {
+                    meas_idx -= 1;
+                    z_packed[*qubit][meas_idx / 64] |= 1u64 << (meas_idx % 64);
+                }
+                Instruction::Reset { .. }
                 | Instruction::Barrier { .. }
                 | Instruction::Save { .. } => {}
                 Instruction::Conditional { gate, targets, .. } => {

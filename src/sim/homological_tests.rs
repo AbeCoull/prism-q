@@ -289,3 +289,27 @@ fn analytical_marginals_no_noise() {
         );
     }
 }
+
+// A terminal `measure_all` carries three of its four pre-measurement flips on
+// the slots of the measurements before them.
+#[test]
+fn analytical_marginals_count_flips_on_measurement_slots() {
+    let mut circuit = Circuit::new(4, 4);
+    for q in 0..4 {
+        circuit.add_gate(crate::gates::Gate::Id, &[q]);
+    }
+    circuit.measure_all();
+    let noise = crate::sim::noise::NoiseBuilder::new()
+        .before_measurements(crate::sim::noise::NoiseChannel::Pauli {
+            px: 0.1,
+            py: 0.0,
+            pz: 0.0,
+        })
+        .build(&circuit)
+        .unwrap();
+
+    let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+    for (bit, p) in marginals.iter().enumerate() {
+        assert!((p - 0.1).abs() < 1e-12, "bit {bit}: {p}");
+    }
+}

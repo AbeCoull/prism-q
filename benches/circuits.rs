@@ -4129,6 +4129,22 @@ fn bench_compiled_sampler(c: &mut Criterion) {
         });
     }
 
+    // Rank 4096 over 4096 measurements, where a flip table would take 64 MiB.
+    let mut hadamard_wide = Circuit::new(4096, 4096);
+    for q in 0..4096 {
+        hadamard_wide.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..4096 {
+        hadamard_wide.add_measure(q, q);
+    }
+    group.bench_function(BenchmarkId::new("compile", "hadamard_4096q"), |b| {
+        b.iter(|| prism_q::compile_measurements(&hadamard_wide, SEED).unwrap());
+    });
+    group.bench_function(BenchmarkId::new("single_shot", 4096), |b| {
+        let mut sampler = prism_q::compile_measurements(&hadamard_wide, SEED).unwrap();
+        b.iter(|| black_box(sampler.sample()));
+    });
+
     for &n in &[100, 500, 1000] {
         let mut circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
         circuit.num_classical_bits = n;
@@ -4158,6 +4174,20 @@ fn bench_compiled_sampler(c: &mut Criterion) {
             let mut sampler = prism_q::compile_forward(&circuit, SEED).unwrap();
             b.iter(|| sampler.sample_bulk_packed(10_000));
         });
+
+        for layout in ["meas_major", "shot_major"] {
+            let id = format!("{layout}_{n}q_10k");
+            group.bench_function(BenchmarkId::new("packed_counts", id), |b| {
+                let mut sampler = prism_q::compile_forward(&circuit, SEED).unwrap();
+                let packed = sampler.sample_bulk_packed(10_000);
+                let packed = if layout == "meas_major" {
+                    packed.to_meas_major()
+                } else {
+                    packed.to_shot_major()
+                };
+                b.iter(|| black_box(packed.counts()));
+            });
+        }
 
         // Under 256 shots the bit-sliced sampler takes its scalar kernel on x86.
         let id_packed_small = format!("packed_{}q_200", n);

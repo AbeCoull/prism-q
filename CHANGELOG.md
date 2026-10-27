@@ -4,17 +4,6 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
-### Bug Fixes
-
-- **backend:** A `PRISM_TILE_KB` value too large to shift into bytes wrapped, then panicked
-  or set a tile below the 128 KB floor. Such values now saturate to the 2 MB ceiling.
-- **gates:** `MultiFusedData::new` kept repeated targets, which the kernels reorder or
-  alias, so the batch returned wrong amplitudes. Entries on one target now fold into one
-  matrix in list order.
-- **statevector:** With `PRISM_MULTI_2Q_TILE_BITS=18` the in-place tile of a `Multi2q`
-  batch reaches qubit 17, past the L3 tier, and a gate on qubit 17 was applied there and
-  again in the untiled pass. Each gate now lands in exactly one tier at every tile width.
-
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

@@ -135,7 +135,8 @@ subset: `H`, `S`, `S_DAG`, `T`, `T_DAG`,
 below, which lower onto the same ops. The parser
 resolves `rec[-k]` references while building the program. Numeric arguments on
 basis measurements, such as `M(0.001)`, lower to pre-measurement Pauli flips
-that affect the measurement record. Inverted (`!`) targets are rejected.
+that affect the measurement record. Inverted (`!`) targets are rejected, and
+instruction tags such as `X_ERROR[tag](p)` are ignored.
 
 | Instruction | Lowering |
 | --- | --- |

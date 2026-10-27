@@ -1072,6 +1072,83 @@ fn qec_text_parser_caps_repeat_expansion() {
 }
 
 #[test]
+fn qec_text_parser_skips_empty_repeat_blocks() {
+    let program = parse_qec_program(
+        r#"
+        REPEAT 4000000000 {
+        }
+        REPEAT 4000000000 {
+            REPEAT 4000000000 {
+            }
+            REPEAT 0 {
+                M 0
+            }
+        }
+        REPEAT 2 {
+            REPEAT 4000000000 {
+            }
+            M 0
+        }
+        M 0
+        "#,
+    )
+    .unwrap();
+    assert_eq!(program.num_measurements(), 3);
+}
+
+#[test]
+fn qec_text_parser_ignores_instruction_tags() {
+    let tagged = parse_qec_program(
+        r#"
+        R[init] 0 1
+        H[t] 0
+        CX[pair: (0, 1)] 0 1
+        X_ERROR[tag](0.1) 0
+        DEPOLARIZE2[noise model v2](0.01) 0 1
+        REPEAT[rounds] 2 {
+            M[readout](0.001) 0
+            DETECTOR[d](1, 2) rec[-1]
+        }
+        OBSERVABLE_INCLUDE[](0) rec[-1]
+        TICK[]
+        "#,
+    )
+    .unwrap();
+    let untagged = parse_qec_program(
+        r#"
+        R 0 1
+        H 0
+        CX 0 1
+        X_ERROR(0.1) 0
+        DEPOLARIZE2(0.01) 0 1
+        REPEAT 2 {
+            M(0.001) 0
+            DETECTOR(1, 2) rec[-1]
+        }
+        OBSERVABLE_INCLUDE(0) rec[-1]
+        TICK
+        "#,
+    )
+    .unwrap();
+    assert_eq!(tagged, untagged);
+}
+
+#[test]
+fn qec_text_parser_rejects_unterminated_instruction_tags() {
+    for text in [
+        "X_ERROR[tag(0.1) 0",
+        "M[readout 0",
+        "REPEAT[rounds 2 {\nM 0\n}",
+    ] {
+        let err = parse_qec_program(text).unwrap_err();
+        assert!(
+            format!("{err}").contains("unterminated instruction tag"),
+            "`{text}` gave `{err}`"
+        );
+    }
+}
+
+#[test]
 fn qec_compiles_measurement_records_into_pauli_rows() {
     let mut program = QecProgram::new(3);
     let m0 = program.measure_z(0).unwrap();

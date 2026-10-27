@@ -4,20 +4,6 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
-### Bug Fixes
-
-- **qasm:** Fail with `PrismError::Parse` on a source that nests statements, conditions
-  or expressions deeper than 256 levels, a long operator chain included. Thousands of
-  nested parentheses or `if` statements, or a ten-thousand-term sum, overflowed the
-  stack.
-- **qasm:** Charge every instruction, statement and loop pass a parse expands to against
-  one budget of 2^24 units shared across gate expansion. Twenty gate definitions that
-  each call the previous one twice, or nested loops each under the per-loop bound,
-  expanded without limit.
-- **qasm:** Reject a program that declares more than 2^24 qubits or classical bits, and
-  end a range whose step would pass the integer range. Register widths summed past
-  `usize`, and a slice or `for` step near `i64::MAX`, overflowed.
-
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.

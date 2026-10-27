@@ -2337,7 +2337,30 @@ impl PackedShots {
 
     /// Histogram of outcomes, keyed by `m_words()` packed words per shot.
     pub fn counts(&self) -> std::collections::HashMap<Vec<u64>, u64> {
+        if self.layout == ShotLayout::ShotMajor && self.m_words > 8 {
+            return self.counts_shot_major_wide();
+        }
         counts_from_chunks(|acc| acc.accumulate(self))
+    }
+
+    /// Shot-major keys wider than the accumulator's inline arms go straight into the
+    /// returned map; counting into an Fx map and converting it read slower at 1000
+    /// measurements.
+    fn counts_shot_major_wide(&self) -> std::collections::HashMap<Vec<u64>, u64> {
+        let mut map = std::collections::HashMap::new();
+        let mw = self.m_words;
+        let tail_mask = self.measurement_tail_mask();
+        if shot_major_padding_bits_set(&self.data, self.num_shots, mw, tail_mask) {
+            let mut scratch = Vec::new();
+            for shot in self.data.chunks_exact(mw).take(self.num_shots) {
+                count_vec_key_masked(&mut map, shot, tail_mask, &mut scratch);
+            }
+        } else {
+            for shot in self.data.chunks_exact(mw).take(self.num_shots) {
+                count_vec_key(&mut map, shot);
+            }
+        }
+        map
     }
 }
 

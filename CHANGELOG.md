@@ -4,20 +4,6 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ## [Unreleased]
 
-### Bug Fixes
-
-- **qasm:** Resolve a declared variable before a built-in constant of the same name, so
-  `float e = 0.5; rx(e) q;` applies `rx(0.5)`.
-- **circuit:** Compare a register wider than 64 bits exactly in `ClassicalCondition`: a set
-  bit at position 64 or above makes it unequal to any value. `if (c == 1)` on a `bit[65]`
-  register panicked in debug builds and compared the wrong bits in release builds.
-- **qasm:** Store a static `int`, `uint` or `bool` the way a runtime variable of its type
-  stores it: truncated toward zero and wrapped to the declared width. `int n = 7; n /= 2;`
-  held 3.5, and `uint[8] u = 300;` held 300.
-- **qasm:** Carry a `gphase` inside a gate body on the gate's own first qubit, and lower a
-  controlled global phase to a phase gate on the controls. `ctrl @ g q[0], q[1]` on a gate
-  `g` whose body set a global phase failed with qubit 0 as both control and target.
-
 ### Features
 
 - Add non-consuming Rust and Python terminal route inspection with `plan(Query)`.
@@ -30,10 +16,6 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Compatibility
 
-- OpenQASM expressions no longer accept `e` for Euler's number; OpenQASM 3 spells the
-  constant `euler`, the only spelling the guide documents.
-- A statically evaluated `int[k]` or `uint[k]` declaration now needs `k` from 1 to 64,
-  as a runtime one already did, and values wrap at that width.
 - `require_exact()` accepts exact marginal and expectation routes even when full-state
   dispatch would select an approximate backend. Route failures can use different error text.
 - QEC detectors and observables, and the logical errors counted from them, are now

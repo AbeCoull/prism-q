@@ -10,6 +10,132 @@ use mpi::environment::Threading;
 #[cfg(any(test, feature = "distributed-mpi"))]
 use std::thread::ThreadId;
 
+/// Largest element count one MPI call accepts: rsmpi passes counts as C `int`
+/// and panics past it. A `Complex64` buffer counts two `f64` per amplitude.
+#[cfg(any(test, feature = "bench-internal", feature = "distributed-mpi"))]
+pub(crate) const MPI_MAX_COUNT: usize = i32::MAX as usize;
+
+/// Exchange `send` for `recv` with one `sendrecv` call per piece of at most
+/// `limit` elements; a buffer within `limit` goes as one call.
+#[cfg(any(test, feature = "bench-internal", feature = "distributed-mpi"))]
+pub(crate) fn sendrecv_pieces<T>(
+    send: &[T],
+    recv: &mut [T],
+    limit: usize,
+    mut sendrecv: impl FnMut(&[T], &mut [T]),
+) {
+    if send.len() <= limit {
+        sendrecv(send, recv);
+        return;
+    }
+    for (s, r) in send.chunks(limit).zip(recv.chunks_mut(limit)) {
+        sendrecv(s, r);
+    }
+}
+
+/// Allgather equal blocks across `size` ranks in rounds whose receive buffer
+/// holds at most `limit` elements. `gather(block, out)` concatenates every
+/// rank's `block` into `out` in rank order.
+#[cfg(any(test, feature = "bench-internal", feature = "distributed-mpi"))]
+pub(crate) fn allgather_pieces<T: Copy + Default>(
+    local: &[T],
+    size: usize,
+    limit: usize,
+    mut gather: impl FnMut(&[T], &mut [T]),
+) -> Vec<T> {
+    let len = local.len();
+    let mut out = vec![T::default(); len * size];
+    let piece = (limit / size).max(1);
+    if len <= piece {
+        gather(local, &mut out);
+        return out;
+    }
+    let mut round = vec![T::default(); piece * size];
+    for (k, block) in local.chunks(piece).enumerate() {
+        let n = block.len();
+        let round = &mut round[..n * size];
+        gather(block, round);
+        for (r, part) in round.chunks_exact(n).enumerate() {
+            let at = r * len + k * piece;
+            out[at..at + n].copy_from_slice(part);
+        }
+    }
+    out
+}
+
+/// Per-rank counts of each round of a varcount gather split so a round holds at
+/// most `limit` elements, paired with the offset into each rank's block where
+/// the round starts.
+#[cfg(any(test, feature = "bench-internal", feature = "distributed-mpi"))]
+fn varcount_rounds(counts: &[usize], limit: usize) -> impl Iterator<Item = (usize, Vec<usize>)> {
+    let piece = (limit / counts.len()).max(1);
+    let rounds = counts.iter().max().map_or(0, |&m| m.div_ceil(piece));
+    (0..rounds).map(move |k| {
+        let lo = k * piece;
+        let round = counts
+            .iter()
+            .map(|&c| c.saturating_sub(lo).min(piece))
+            .collect();
+        (lo, round)
+    })
+}
+
+/// Allgather blocks of differing length, `counts[r]` from rank `r`, in rounds
+/// whose receive buffer holds at most `limit` elements. `gather(block, counts,
+/// out)` concatenates every rank's `block` into `out` in rank order.
+#[cfg(any(test, feature = "bench-internal", feature = "distributed-mpi"))]
+pub(crate) fn allgatherv_pieces<T: Copy + Default>(
+    local: &[T],
+    counts: &[usize],
+    rank: usize,
+    limit: usize,
+    mut gather: impl FnMut(&[T], &[usize], &mut [T]),
+) -> Vec<T> {
+    let total: usize = counts.iter().sum();
+    let mut out = vec![T::default(); total];
+    if total <= limit {
+        gather(local, counts, &mut out);
+        return out;
+    }
+    let starts: Vec<usize> = counts
+        .iter()
+        .scan(0, |acc, &c| {
+            let start = *acc;
+            *acc += c;
+            Some(start)
+        })
+        .collect();
+    let mut buf = Vec::new();
+    for (lo, round) in varcount_rounds(counts, limit) {
+        buf.clear();
+        buf.resize(round.iter().sum(), T::default());
+        let mine = &local[lo.min(local.len())..][..round[rank]];
+        gather(mine, &round, &mut buf);
+        let mut at = 0;
+        for (&start, &n) in starts.iter().zip(&round).filter(|&(_, &n)| n > 0) {
+            out[start + lo..start + lo + n].copy_from_slice(&buf[at..at + n]);
+            at += n;
+        }
+    }
+    out
+}
+
+/// MPI counts and displacements for a varcount gather, or `None` when any count,
+/// displacement, or the total does not fit a C `int`.
+#[cfg(any(test, feature = "distributed-mpi"))]
+fn mpi_partition(counts: &[usize]) -> Option<(Vec<i32>, Vec<i32>)> {
+    let mut mpi_counts = Vec::with_capacity(counts.len());
+    let mut displs = Vec::with_capacity(counts.len());
+    let mut total: i32 = 0;
+    for &c in counts {
+        let c = i32::try_from(c).ok()?;
+        mpi_counts.push(c);
+        displs.push(total);
+        total = total.checked_add(c)?;
+    }
+    Some((mpi_counts, displs))
+}
+
 /// Collective and peer operations across a rank set.
 ///
 /// The amplitude exchange routines treat `Complex64` as two contiguous `f64`
@@ -282,34 +408,36 @@ impl RankComm for MpiComm {
 
     fn allgather_c64(&self, local: &[Complex64]) -> Vec<Complex64> {
         use mpi::traits::CommunicatorCollectives;
-        let mut out = vec![Complex64::new(0.0, 0.0); local.len() * self.size];
-        self.world_comm()
-            .all_gather_into(as_f64(local), as_f64_mut(&mut out));
-        out
+        let world = self.world_comm();
+        allgather_pieces(local, self.size, MPI_MAX_COUNT / 2, |block, out| {
+            world.all_gather_into(as_f64(block), as_f64_mut(out));
+        })
     }
 
     fn allgather_f64(&self, local: &[f64]) -> Vec<f64> {
         use mpi::traits::CommunicatorCollectives;
-        let mut out = vec![0.0_f64; local.len() * self.size];
-        self.world_comm().all_gather_into(local, &mut out);
-        out
+        let world = self.world_comm();
+        allgather_pieces(local, self.size, MPI_MAX_COUNT, |block, out| {
+            world.all_gather_into(block, out);
+        })
     }
 
     fn allgatherv_u64(&self, local: &[u64], counts: &[usize]) -> Vec<u64> {
         use mpi::datatype::PartitionMut;
         use mpi::traits::CommunicatorCollectives;
         debug_assert_eq!(counts[self.rank], local.len());
-        let counts: Vec<mpi::Count> = counts.iter().map(|&c| c as mpi::Count).collect();
-        let mut displs = Vec::with_capacity(counts.len());
-        let mut total: mpi::Count = 0;
-        for &c in &counts {
-            displs.push(total);
-            total += c;
-        }
-        let mut out = vec![0_u64; total as usize];
-        self.world_comm()
-            .all_gather_varcount_into(local, &mut PartitionMut::new(&mut out[..], counts, displs));
-        out
+        let world = self.world_comm();
+        allgatherv_pieces(
+            local,
+            counts,
+            self.rank,
+            MPI_MAX_COUNT,
+            |block, counts, out| {
+                let (counts, displs) =
+                    mpi_partition(counts).expect("a gather round fits an MPI count");
+                world.all_gather_varcount_into(block, &mut PartitionMut::new(out, counts, displs));
+            },
+        )
     }
 
     fn allreduce_sum_f64(&self, value: f64) -> f64 {
@@ -329,7 +457,9 @@ impl RankComm for MpiComm {
         debug_assert_eq!(send.len(), recv.len());
         let world = self.world_comm();
         let peer = world.process_at_rank(partner as i32);
-        p2p::send_receive_into(as_f64(send), &peer, as_f64_mut(recv), &peer);
+        sendrecv_pieces(send, recv, MPI_MAX_COUNT / 2, |s, r| {
+            p2p::send_receive_into(as_f64(s), &peer, as_f64_mut(r), &peer);
+        });
     }
 
     fn barrier(&self) {
@@ -357,6 +487,44 @@ mod owner_thread_tests {
             .downcast_ref::<String>()
             .expect("formatted panic message");
         assert!(message.contains("constructed the comm"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod count_limit_tests {
+    use super::*;
+
+    #[test]
+    fn mpi_partition_rejects_counts_past_the_int_limit() {
+        assert!(mpi_partition(&[MPI_MAX_COUNT + 1]).is_none());
+        assert!(
+            mpi_partition(&[MPI_MAX_COUNT, 1]).is_none(),
+            "total overflows"
+        );
+        let (counts, displs) = mpi_partition(&[MPI_MAX_COUNT - 1, 1]).expect("fits");
+        assert_eq!(counts, [i32::MAX - 1, 1]);
+        assert_eq!(displs, [0, i32::MAX - 1]);
+    }
+
+    #[test]
+    fn varcount_rounds_split_counts_past_the_int_limit_into_valid_partitions() {
+        let counts = [3 * MPI_MAX_COUNT, 5, MPI_MAX_COUNT + 7, 0];
+        assert!(mpi_partition(&counts).is_none());
+        let mut gathered = [0usize; 4];
+        for (lo, round) in varcount_rounds(&counts, MPI_MAX_COUNT) {
+            assert!(round.iter().sum::<usize>() <= MPI_MAX_COUNT);
+            assert!(mpi_partition(&round).is_some(), "round {round:?}");
+            for (r, &n) in round.iter().enumerate() {
+                if n > 0 {
+                    assert_eq!(
+                        gathered[r], lo,
+                        "rank {r} round starts where the last ended"
+                    );
+                }
+                gathered[r] += n;
+            }
+        }
+        assert_eq!(gathered, counts);
     }
 }
 

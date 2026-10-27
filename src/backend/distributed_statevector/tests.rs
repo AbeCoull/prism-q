@@ -4,7 +4,7 @@ use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::Circuit;
 use crate::circuit::builder::CircuitBuilder;
 use crate::distributed::DistributedContext;
-use crate::distributed::loopback::{run_ranks, run_ranks_max_gather};
+use crate::distributed::loopback::{run_ranks, run_ranks_max_exchange, run_ranks_max_gather};
 use crate::error::PrismError;
 use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::PauliTerm;
@@ -1643,6 +1643,60 @@ fn loopback_allgatherv_u64_round_trips_uneven_wide_blocks() {
     }
 }
 
+// A slice of 2^30 amplitudes is past the MPI `int` count but too large for a
+// test, so the loopback transport is given a small count limit instead. Every
+// collective and exchange must then split into calls under it and still move
+// the same data, so results match an unlimited run bit for bit.
+#[test]
+fn loopback_transport_splits_calls_past_the_count_limit() {
+    relax_min_local_qubits();
+    let n = 8;
+    let mut b = CircuitBuilder::new(n);
+    for q in 0..n {
+        b.h(q);
+    }
+    b.ry(0.7, 6)
+        .rx(1.1, 7)
+        .cx(0, 7)
+        .cz(2, 6)
+        .ry(-0.4, 7)
+        .cx(7, 1);
+    let circuit = b.build();
+    let observables = vec![
+        vec![PauliTerm::x(n - 1)],
+        vec![PauliTerm::y(n - 2), PauliTerm::x(3), PauliTerm::z(n - 1)],
+    ];
+    let shots = 100;
+
+    let run = |ctx: std::sync::Arc<DistributedContext>, relabel: bool| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend.set_relabel(relabel);
+        backend
+            .init(circuit.num_qubits, circuit.num_classical_bits)
+            .expect("init");
+        backend
+            .apply_instructions(&circuit.instructions)
+            .expect("apply");
+        (
+            backend.probabilities().expect("probabilities"),
+            backend.export_statevector().expect("export"),
+            backend
+                .pauli_expectations(&observables)
+                .expect("expectations"),
+            backend.reduced_density_matrix_1q(n - 1).expect("rdm"),
+            backend.sample_state_indices(shots, SEED).expect("samples"),
+        )
+    };
+
+    let size = 4;
+    let count_limit = 40;
+    for relabel in [true, false] {
+        let expected = run_ranks(size, |ctx| run(ctx, relabel));
+        let (limited, _) = run_ranks_max_exchange(size, count_limit, |ctx| run(ctx, relabel));
+        assert_eq!(limited, expected, "relabel {relabel}");
+    }
+}
+
 #[test]
 fn shots_mid_circuit_match_across_rank_counts() {
     relax_min_local_qubits();
@@ -2050,6 +2104,72 @@ fn pauli_expectations_match_the_dense_route_across_rank_counts() {
             assert!(
                 (e - a).abs() < 1e-12,
                 "observable {i} expected {e}, got {a}"
+            );
+        }
+    }
+}
+
+// The X and Y exchange streams the partner slice in tiles of the exchange
+// chunk, so the receive buffer stays one tile however wide the slice is. The
+// state is built from gates whose exchanges are also chunk tiled, so the peak
+// message size reflects the expectation path.
+#[test]
+fn pauli_expectations_exchange_stays_within_the_chunk() {
+    relax_min_local_qubits();
+    let n = 6;
+    let mut b = CircuitBuilder::new(n);
+    for q in 0..n {
+        b.ry(0.3 + 0.2 * q as f64, q);
+    }
+    b.cz(0, 5)
+        .cz(1, 4)
+        .cx(5, 0)
+        .rx(0.8, 4)
+        .ry(-0.6, 5)
+        .cz(2, 5)
+        .cx(4, 3);
+    let circuit = b.build();
+    let all = |p: fn(usize) -> PauliTerm| (0..n).map(p).collect::<Vec<_>>();
+    let observables = vec![
+        vec![PauliTerm::x(n - 1)],
+        vec![PauliTerm::y(n - 2), PauliTerm::x(n - 1)],
+        vec![PauliTerm::x(0), PauliTerm::y(3), PauliTerm::x(n - 1)],
+        vec![PauliTerm::x(2), PauliTerm::z(1), PauliTerm::y(n - 1)],
+        vec![PauliTerm::z(0), PauliTerm::z(n - 1)],
+        all(PauliTerm::x),
+        all(PauliTerm::y),
+    ];
+    let expected =
+        crate::sim::run_expectation_values(&circuit, &observables, SEED).expect("dense reference");
+
+    for size in [2usize, 4] {
+        for chunk in [1usize, 3, 4, 8, usize::MAX] {
+            let (per_rank, max_exchange) = run_ranks_max_exchange(size, usize::MAX, |ctx| {
+                let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                backend.set_relabel(false);
+                backend.set_exchange_chunk(chunk);
+                backend
+                    .init(circuit.num_qubits, circuit.num_classical_bits)
+                    .expect("init");
+                backend
+                    .apply_instructions(&circuit.instructions)
+                    .expect("apply");
+                backend
+                    .pauli_expectations(&observables)
+                    .expect("distributed expectations")
+            });
+            for values in &per_rank {
+                for (i, (e, a)) in expected.iter().zip(values.iter()).enumerate() {
+                    assert!(
+                        (e - a).abs() < 1e-12,
+                        "size {size} chunk {chunk}: observable {i} expected {e}, got {a}"
+                    );
+                }
+            }
+            let slice = 1usize << (n - size.trailing_zeros() as usize);
+            assert!(
+                max_exchange <= chunk.min(slice),
+                "size {size} chunk {chunk}: a message of {max_exchange} amplitudes exceeds the chunk"
             );
         }
     }

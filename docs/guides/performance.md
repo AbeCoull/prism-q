@@ -103,7 +103,7 @@ memory by default, and a layer that sets it discards the per-cap values below it
 | `PRISM_GPU_BTS_MIN_RANK` | `4` | Compiled-sampler rank from which BTS sampling runs on the device (minimum 1) |
 | `PRISM_GPU_BTS_MIN_WEIGHT_FACTOR` | `2` | Parity-weight factor for the BTS device route (minimum 1) |
 | `PRISM_DIST_MIN_LOCAL_QUBITS` | `10` | Minimum local qubits per rank before distribution is worthwhile (minimum 1) |
-| `PRISM_DIST_EXCHANGE_CHUNK` | unbounded | Amplitudes per message on the rank exchange paths (minimum 1) |
+| `PRISM_DIST_EXCHANGE_CHUNK` | `536870912` (2^29) | Amplitudes per message on the rank exchange paths (minimum 1) |
 | `PRISM_DIST_RELABEL` | `1` | `0`/`false` disables qubit relabeling in the distributed backend |
 | `RAYON_NUM_THREADS` | all cores | Rayon thread count, read by Rayon itself |
 | `PRISM_NO_AVX2_2Q` | unset | Flag: force the 128-bit FMA two-qubit kernel |

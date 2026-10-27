@@ -2,10 +2,12 @@
 //! launcher. Available to tests and, behind `bench-internal`, to benchmarks.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use num_complex::Complex64;
 
+use super::comm::{MPI_MAX_COUNT, allgather_pieces, allgatherv_pieces, sendrecv_pieces};
 use super::{DistributedContext, RankComm};
 
 /// Debug SIMD kernels overflow the default thread stack at the widths the
@@ -20,6 +22,12 @@ struct LoopbackShared {
     /// under its own lock so exchanges between disjoint pairs never contend
     /// with each other or with a collective in flight.
     mailboxes: Vec<Mailbox>,
+    /// Largest element count one transport call may carry, `c64` counting two
+    /// per amplitude as under MPI. A call past it panics, as rsmpi does at the
+    /// C `int` limit.
+    count_limit: usize,
+    /// Largest amplitude count one rank passed to a single `sendrecv_c64`.
+    max_exchange: AtomicUsize,
 }
 
 /// Collective state: every rank's contribution plus the barrier counter.
@@ -84,7 +92,7 @@ impl Mailbox {
 }
 
 impl LoopbackShared {
-    fn new(size: usize) -> Arc<Self> {
+    fn new(size: usize, count_limit: usize) -> Arc<Self> {
         Arc::new(Self {
             size,
             state: Mutex::new(LoopbackState {
@@ -98,6 +106,8 @@ impl LoopbackShared {
             }),
             cv: Condvar::new(),
             mailboxes: (0..size * size).map(|_| Mailbox::new()).collect(),
+            count_limit,
+            max_exchange: AtomicUsize::new(0),
         })
     }
 
@@ -132,6 +142,47 @@ impl std::fmt::Debug for LoopbackComm {
     }
 }
 
+impl LoopbackComm {
+    fn check_count(&self, count: usize) {
+        let limit = self.shared.count_limit;
+        assert!(
+            count <= limit,
+            "transport call of {count} elements exceeds the count limit {limit}"
+        );
+    }
+
+    /// One gather call: post `block` to this rank's slot and copy every slot
+    /// into `out` in rank order.
+    fn gather_into<T: Copy>(
+        &self,
+        block: &[T],
+        out: &mut [T],
+        slots: fn(&mut LoopbackState) -> &mut Vec<Vec<T>>,
+    ) {
+        {
+            let mut st = self.shared.state.lock().unwrap();
+            let slot = &mut slots(&mut st)[self.rank];
+            slot.clear();
+            slot.extend_from_slice(block);
+        }
+        self.shared.barrier();
+        {
+            let mut st = self.shared.state.lock().unwrap();
+            let mut at = 0;
+            for slot in slots(&mut st).iter() {
+                out[at..at + slot.len()].copy_from_slice(slot);
+                at += slot.len();
+            }
+        }
+        self.shared.barrier();
+    }
+
+    fn record_gather_block(&self, len: usize) {
+        let mut st = self.shared.state.lock().unwrap();
+        st.max_gather_block = st.max_gather_block.max(len);
+    }
+}
+
 impl RankComm for LoopbackComm {
     fn rank(&self) -> usize {
         self.rank
@@ -142,45 +193,30 @@ impl RankComm for LoopbackComm {
     }
 
     fn allgather_c64(&self, local: &[Complex64]) -> Vec<Complex64> {
-        {
-            let mut st = self.shared.state.lock().unwrap();
-            st.max_gather_block = st.max_gather_block.max(local.len());
-            let slot = &mut st.cslots[self.rank];
-            slot.clear();
-            slot.extend_from_slice(local);
-        }
-        self.shared.barrier();
-        let out = self.shared.state.lock().unwrap().cslots.concat();
-        self.shared.barrier();
-        out
+        self.record_gather_block(local.len());
+        let limit = self.shared.count_limit / 2;
+        allgather_pieces(local, self.shared.size, limit, |block, out| {
+            self.check_count(2 * out.len());
+            self.gather_into(block, out, |st| &mut st.cslots);
+        })
     }
 
     fn allgather_f64(&self, local: &[f64]) -> Vec<f64> {
-        {
-            let mut st = self.shared.state.lock().unwrap();
-            st.max_gather_block = st.max_gather_block.max(local.len());
-            let slot = &mut st.fslots[self.rank];
-            slot.clear();
-            slot.extend_from_slice(local);
-        }
-        self.shared.barrier();
-        let out = self.shared.state.lock().unwrap().fslots.concat();
-        self.shared.barrier();
-        out
+        self.record_gather_block(local.len());
+        let limit = self.shared.count_limit;
+        allgather_pieces(local, self.shared.size, limit, |block, out| {
+            self.check_count(out.len());
+            self.gather_into(block, out, |st| &mut st.fslots);
+        })
     }
 
     fn allgatherv_u64(&self, local: &[u64], counts: &[usize]) -> Vec<u64> {
         debug_assert_eq!(counts[self.rank], local.len());
-        {
-            let mut st = self.shared.state.lock().unwrap();
-            let slot = &mut st.uslots[self.rank];
-            slot.clear();
-            slot.extend_from_slice(local);
-        }
-        self.shared.barrier();
-        let out = self.shared.state.lock().unwrap().uslots.concat();
-        self.shared.barrier();
-        out
+        let limit = self.shared.count_limit;
+        allgatherv_pieces(local, counts, self.rank, limit, |block, _, out| {
+            self.check_count(out.len());
+            self.gather_into(block, out, |st| &mut st.uslots);
+        })
     }
 
     fn allreduce_sum_f64(&self, value: f64) -> f64 {
@@ -196,10 +232,16 @@ impl RankComm for LoopbackComm {
 
     fn sendrecv_c64(&self, partner: usize, send: &[Complex64], recv: &mut [Complex64]) {
         debug_assert_eq!(send.len(), recv.len());
+        self.shared
+            .max_exchange
+            .fetch_max(send.len(), Ordering::Relaxed);
         let size = self.shared.size;
-        // Ranks that skip an exchange do not block because their partner skips it too.
-        self.shared.mailboxes[self.rank * size + partner].send(send);
-        self.shared.mailboxes[partner * size + self.rank].recv(recv);
+        sendrecv_pieces(send, recv, self.shared.count_limit / 2, |s, r| {
+            self.check_count(2 * s.len());
+            // Ranks that skip an exchange do not block because their partner skips it too.
+            self.shared.mailboxes[self.rank * size + partner].send(s);
+            self.shared.mailboxes[partner * size + self.rank].recv(r);
+        });
     }
 
     fn barrier(&self) {
@@ -228,8 +270,33 @@ where
     F: Fn(Arc<DistributedContext>) -> T + Sync,
     T: Send,
 {
-    let shared = LoopbackShared::new(size);
-    let results = std::thread::scope(|scope| {
+    let shared = LoopbackShared::new(size, MPI_MAX_COUNT);
+    let results = run_shared(&shared, f);
+    let max_gather = shared.state.lock().unwrap().max_gather_block;
+    (results, max_gather)
+}
+
+/// [`run_ranks`] under a transport that panics on any call carrying more than
+/// `count_limit` elements, plus the largest amplitude count any rank passed to
+/// one `sendrecv_c64`.
+#[cfg(test)]
+pub(crate) fn run_ranks_max_exchange<T, F>(size: usize, count_limit: usize, f: F) -> (Vec<T>, usize)
+where
+    F: Fn(Arc<DistributedContext>) -> T + Sync,
+    T: Send,
+{
+    let shared = LoopbackShared::new(size, count_limit);
+    let results = run_shared(&shared, f);
+    (results, shared.max_exchange.load(Ordering::Relaxed))
+}
+
+fn run_shared<T, F>(shared: &Arc<LoopbackShared>, f: F) -> Vec<T>
+where
+    F: Fn(Arc<DistributedContext>) -> T + Sync,
+    T: Send,
+{
+    let size = shared.size;
+    std::thread::scope(|scope| {
         let handles: Vec<_> = (0..size)
             .map(|rank| {
                 let comm = LoopbackComm {
@@ -249,7 +316,5 @@ where
             .into_iter()
             .map(|h| h.join().expect("rank thread panicked"))
             .collect()
-    });
-    let max_gather = shared.state.lock().unwrap().max_gather_block;
-    (results, max_gather)
+    })
 }

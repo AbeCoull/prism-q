@@ -36,12 +36,14 @@ pub fn min_local_qubits() -> usize {
     })
 }
 
-/// Default for `PRISM_DIST_EXCHANGE_CHUNK`: each rank exchange goes as one message.
-pub const EXCHANGE_CHUNK_DEFAULT: usize = usize::MAX;
+/// Default for `PRISM_DIST_EXCHANGE_CHUNK`: 2^29 amplitudes, the largest power of two
+/// whose `f64` count fits the C `int` count of one MPI message.
+pub const EXCHANGE_CHUNK_DEFAULT: usize = 1 << 29;
 
 /// Largest rank exchange message in amplitudes, tunable via `PRISM_DIST_EXCHANGE_CHUNK`.
 ///
 /// Tiling the direct and relabel exchanges by this bounds the transfer buffers.
+/// The MPI transport splits any message past the `int` count limit regardless.
 /// An unparseable or out-of-range value warns on stderr and uses the default.
 pub fn exchange_chunk() -> usize {
     use std::sync::OnceLock;
@@ -181,6 +183,16 @@ mod knob_tests {
         assert_eq!(parse("4k"), d, "unparseable falls back");
         assert_eq!(parse("0"), d, "below the minimum falls back");
         assert_eq!(parse_usize_knob("PRISM_DIST_EXCHANGE_CHUNK", None, d, 1), d);
+    }
+
+    #[test]
+    fn exchange_chunk_default_fits_one_mpi_message() {
+        let f64_count = EXCHANGE_CHUNK_DEFAULT.checked_mul(2);
+        assert!(
+            f64_count.is_some_and(|c| c <= comm::MPI_MAX_COUNT),
+            "default chunk of {EXCHANGE_CHUNK_DEFAULT} amplitudes overflows an MPI count"
+        );
+        assert!(EXCHANGE_CHUNK_DEFAULT.is_power_of_two());
     }
 
     #[test]

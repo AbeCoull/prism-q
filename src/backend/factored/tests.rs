@@ -1170,3 +1170,81 @@ fn past_the_export_cap_only_the_entropy_answers() {
         "{entropy}"
     );
 }
+
+// Grouping each observable's masks under the sub-states it touches must give
+// the values a dense per-observable mask table gives, bit for bit, including
+// observables that reuse qubits another observable already named.
+#[test]
+fn pauli_expectations_match_a_per_observable_mask_table() {
+    use rand::{RngExt, SeedableRng};
+    let circuit = crate::circuits::independent_random_blocks(6, 3, 4, 42);
+    let n = circuit.num_qubits;
+    let mut fac = FactoredBackend::new(42);
+    sim::run_on(&mut fac, &circuit).unwrap();
+    assert!(fac.substates.iter().flatten().count() > 1);
+
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    let axes = [PauliAxis::X, PauliAxis::Y, PauliAxis::Z];
+    let mut observables: Vec<Vec<PauliTerm>> = vec![Vec::new()];
+    for _ in 0..60 {
+        let mut qubits: Vec<usize> = (0..n).filter(|_| rng.random_bool(0.3)).collect();
+        for i in (1..qubits.len()).rev() {
+            qubits.swap(i, rng.random_range(0..=i));
+        }
+        observables.push(
+            qubits
+                .into_iter()
+                .map(|q| PauliTerm::new(q, axes[rng.random_range(0..3)]))
+                .collect(),
+        );
+    }
+
+    let table: Vec<Vec<(usize, usize, u32)>> = observables
+        .iter()
+        .map(|observable| {
+            let mut masks = vec![(0usize, 0usize, 0u32); fac.substates.len()];
+            for term in observable {
+                let ss = fac.qubit_to_substate[term.qubit];
+                let sub = fac.substates[ss].as_ref().unwrap();
+                let bit = 1usize << sub.qubits.iter().position(|&q| q == term.qubit).unwrap();
+                let entry = &mut masks[ss];
+                match term.axis {
+                    PauliAxis::X => entry.0 |= bit,
+                    PauliAxis::Z => entry.1 |= bit,
+                    PauliAxis::Y => {
+                        entry.0 |= bit;
+                        entry.1 |= bit;
+                        entry.2 += 1;
+                    }
+                }
+            }
+            masks
+        })
+        .collect();
+    let mut expected = vec![1.0f64; observables.len()];
+    for (ss, slot) in fac.substates.iter().enumerate() {
+        let Some(sub) = slot else { continue };
+        let (rows, group): (Vec<usize>, Vec<(usize, usize, u32)>) = table
+            .iter()
+            .enumerate()
+            .filter(|(_, masks)| masks[ss].0 != 0 || masks[ss].1 != 0)
+            .map(|(index, masks)| (index, masks[ss]))
+            .unzip();
+        if group.is_empty() {
+            continue;
+        }
+        let (values, _) = crate::sim::pauli_expectations_from_masks(&sub.state, &group);
+        for (index, value) in rows.into_iter().zip(values) {
+            expected[index] *= value;
+        }
+    }
+
+    assert_eq!(fac.pauli_expectations(&observables).unwrap(), expected);
+    let duplicate = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(1), PauliTerm::x(1)],
+    ];
+    assert!(fac.pauli_expectations(&duplicate).is_err());
+    let out_of_range = vec![vec![PauliTerm::z(n)]];
+    assert!(fac.pauli_expectations(&out_of_range).is_err());
+}

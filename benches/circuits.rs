@@ -3457,6 +3457,42 @@ fn bench_expectation_density_matrix(c: &mut Criterion) {
     group.finish();
 }
 
+/// Pauli strings on a prepared register of many independent clusters, every
+/// string confined to the first cluster or two. The factored-stabilizer rows
+/// leave each cluster's destabilizers stale after its gates, so the cost of a
+/// call is the clusters it rebuilds; the factored rows hold one sub-state per
+/// qubit, so it is the per-string work outside the touched sub-states.
+fn bench_expectation_clustered(c: &mut Criterion) {
+    let mut group = c.benchmark_group("expectation/pauli_strings_clustered");
+    configure_group(&mut group);
+
+    for &(blocks, block_size) in &[(16usize, 32usize), (16, 128)] {
+        let n = blocks * block_size;
+        let circuit = circuits::local_clifford_blocks(blocks, block_size, 10, SEED);
+        let mut backend = prism_q::FactoredStabilizerBackend::new(42);
+        sim::run_on(&mut backend, &circuit).unwrap();
+        let observables: Vec<Vec<PauliTerm>> = (0..8)
+            .map(|q| vec![PauliTerm::z(q), PauliTerm::x(q + 1)])
+            .collect();
+        group.bench_function(
+            BenchmarkId::new(format!("factored_stabilizer_{blocks}x{block_size}"), n),
+            |b| b.iter(|| black_box(backend.pauli_expectations(&observables).unwrap())),
+        );
+    }
+
+    for &n in &[256usize, 1024] {
+        let circuit = circuits::single_qubit_rotation_circuit(n, 2, SEED);
+        let mut backend = prism_q::FactoredBackend::new(42);
+        sim::run_on(&mut backend, &circuit).unwrap();
+        let observables: Vec<Vec<PauliTerm>> = (0..n).map(|q| vec![PauliTerm::z(q)]).collect();
+        group.bench_function(BenchmarkId::new("factored_product", n), |b| {
+            b.iter(|| black_box(backend.pauli_expectations(&observables).unwrap()))
+        });
+    }
+
+    group.finish();
+}
+
 /// Weighted-observable evaluation at a molecular-Hamiltonian term count:
 /// 2000 Jordan-Wigner strings per size. The `grouped` arm is the
 /// qubit-wise-commuting route with variance; the `ungrouped` control is the
@@ -5588,6 +5624,7 @@ criterion_group! {
     bench_expectation_factored,
     bench_expectation_native,
     bench_expectation_density_matrix,
+    bench_expectation_clustered,
     bench_expectation_grouped,
     // Factored backend
     bench_factored_random,

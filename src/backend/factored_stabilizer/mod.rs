@@ -980,23 +980,24 @@ impl Backend for FactoredStabilizerBackend {
     /// string per cluster it touches and the value is the product of the
     /// cluster expectations. Every cluster's packed string lives in one scratch
     /// buffer, so a request packs its factors in a single pass and allocates
-    /// nothing per string.
+    /// nothing per string. A cluster with stale destabilizers is rebuilt once,
+    /// on the first string that reaches it.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
         for observable in observables {
             crate::sim::validate_observable(observable, self.num_qubits)?;
         }
 
-        let mut rows = Vec::with_capacity(self.subs.len());
+        let mut rows: Vec<Option<rowops::TableauRows<'_>>> = Vec::with_capacity(self.subs.len());
         let mut offsets = Vec::with_capacity(self.subs.len());
         let mut total = 0;
         let mut max_nw = 0;
         for sub in &self.subs {
             offsets.push(total);
-            rows.push(sub.as_ref().map(|sub| {
+            rows.push(None);
+            if let Some(sub) = sub {
                 total += 2 * sub.num_words;
                 max_nw = max_nw.max(sub.num_words);
-                sub.rows_with_destabilizers()
-            }));
+            }
         }
         let mut scratch = vec![0u64; total + 2 * max_nw];
         let (terms, acc) = scratch.split_at_mut(total);
@@ -1034,7 +1035,7 @@ impl Backend for FactoredStabilizerBackend {
                         continue;
                     }
                     let sub = self.subs[s].as_ref().unwrap();
-                    let (xz, phase) = rows[s].as_ref().unwrap();
+                    let (xz, phase) = rows[s].get_or_insert_with(|| sub.rows_with_destabilizers());
                     let nw = sub.num_words;
                     product *= rowops::pauli_expectation(
                         xz,

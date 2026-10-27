@@ -2328,6 +2328,80 @@ impl PreparedGate2q {
         }
     }
 
+    /// Apply the gate to `n_iter` groups from group `first`, counted in the
+    /// order [`Self::apply_full`] visits them. `n_iter` is a power of two that
+    /// divides `first`, so the range is one aligned run of the pair loop.
+    ///
+    /// # Safety
+    /// `state` must cover every group the range names, and no other thread may
+    /// touch those groups during the call.
+    #[cfg(feature = "parallel")]
+    pub(crate) unsafe fn apply_groups_ptr(
+        &self,
+        state: *mut f64,
+        first: usize,
+        n_iter: usize,
+        q0: usize,
+        q1: usize,
+    ) {
+        use crate::backend::statevector::insert_zero_bit;
+        let mask0 = 1usize << q0;
+        let mask1 = 1usize << q1;
+        let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
+        // An aligned run of 2^bits groups covers whole segments of the nested
+        // walk, so narrowing `lo` and `hi` to the run walks exactly that run.
+        let bits = n_iter.trailing_zeros() as usize;
+        let run_lo = lo.min(bits);
+        let run_hi = hi.min(bits + 1);
+        let start = insert_zero_bit(insert_zero_bit(first, lo), hi);
+
+        // SAFETY: same contract as the enclosing unsafe fn. The selected tier
+        // is guarded by runtime feature checks in the constructor.
+        unsafe {
+            let base = state.add(start * 2);
+            #[cfg(target_arch = "x86_64")]
+            match self.tier {
+                SimdTier::Avx2Fma if avx2_2q_enabled() => {
+                    // SAFETY: broadcast256 is Some whenever tier is Avx2Fma (constructor invariant).
+                    let mat256 = self.broadcast256.as_ref().unwrap_unchecked();
+                    apply_fused_2q_loop_avx2(
+                        base,
+                        n_iter,
+                        run_lo,
+                        run_hi,
+                        mask0,
+                        mask1,
+                        mat256,
+                        &self.broadcast,
+                    );
+                }
+                SimdTier::Avx2Fma | SimdTier::Fma => {
+                    apply_fused_2q_loop_fma(
+                        base,
+                        n_iter,
+                        run_lo,
+                        run_hi,
+                        mask0,
+                        mask1,
+                        &self.broadcast,
+                    );
+                }
+                SimdTier::Sse2 => {
+                    for_each_2q_base(n_iter, run_lo, run_hi, 1, |b| {
+                        let i = [b, b + mask1, b + mask0, b + mask0 + mask1];
+                        apply_fused_2q_group_sse2(base, i, &self.broadcast);
+                    });
+                }
+            }
+            #[cfg(target_arch = "aarch64")]
+            apply_fused_2q_loop_neon(base, n_iter, run_lo, run_hi, mask0, mask1, &self.broadcast);
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            for_each_2q_base(n_iter, run_lo, run_hi, 1, |b| {
+                self.apply_group_ptr(base, [b, b + mask1, b + mask0, b + mask0 + mask1]);
+            });
+        }
+    }
+
     /// Apply one group at scattered indices. Safe to call from Rayon closures
     /// when callers partition indices across threads.
     ///

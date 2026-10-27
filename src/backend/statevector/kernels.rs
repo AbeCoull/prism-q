@@ -4631,25 +4631,18 @@ impl StatevectorBackend {
     #[cfg(feature = "parallel")]
     #[inline(always)]
     fn apply_fused_2q_par(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
-        let mask0 = 1usize << q0;
-        let mask1 = 1usize << q1;
-        let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
         let n_iter = 1usize << (self.num_qubits - 2);
+        let tile = MIN_PAR_ITERS.min(n_iter);
         let ptr = SendPtr(self.state.as_mut_ptr());
         let prepared = simd::PreparedGate2q::new(mat);
 
-        // SAFETY: insert_zero_bit bijection gives disjoint index groups per iteration.
-        (0..n_iter)
-            .into_par_iter()
-            .with_min_len(MIN_PAR_ITERS)
-            .for_each(move |k| {
-                let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-                let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
-                // SAFETY: disjoint groups, ptr valid for state lifetime.
-                unsafe {
-                    prepared.apply_group_ptr(ptr.as_f64_ptr(), i);
-                }
-            });
+        (0..n_iter / tile).into_par_iter().for_each(move |t| {
+            // SAFETY: aligned runs of the group order are disjoint and each
+            // lies inside the state.
+            unsafe {
+                prepared.apply_groups_ptr(ptr.as_f64_ptr(), t * tile, tile, q0, q1);
+            }
+        });
     }
 
     #[cfg(feature = "parallel")]

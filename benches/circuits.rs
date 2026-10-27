@@ -723,6 +723,41 @@ fn bench_statevector_cu_kernel(c: &mut Criterion) {
     group.finish();
 }
 
+/// A wall of dense `Fused2q` on non-adjacent pairs applied straight to the
+/// backend, the path a two-qubit Kraus branch takes; fusion batches every
+/// such gate in the circuit rows.
+fn bench_statevector_fused_2q_kernel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/fused_2q_kernel");
+    configure_group(&mut group);
+
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let hh: [[Complex64; 4]; 4] = std::array::from_fn(|r| {
+        std::array::from_fn(|c| {
+            let sign = if (r & c).count_ones() % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            Complex64::new(sign * h * h, 0.0)
+        })
+    });
+    for &n in &[16usize, 20, 22] {
+        let mut circuit = Circuit::new(n, 0);
+        for lo in 0..n - 2 {
+            let hi = (lo + n / 2).min(n - 1);
+            if hi > lo + 1 {
+                circuit.add_gate(Gate::Fused2q(Box::new(hh)), &[lo, hi]);
+            }
+        }
+        let mut backend = StatevectorBackend::new(SEED);
+        backend.init(n, 0).unwrap();
+        group.bench_function(BenchmarkId::new("nonadjacent", n), |b| {
+            b.iter(|| backend.apply_instructions(&circuit.instructions).unwrap());
+        });
+    }
+    group.finish();
+}
+
 /// QAOA on a ring plus a random perfect matching, `H` on every qubit first.
 ///
 /// `qaoa_circuit` puts its `Rzz` on a chain, whose runs of consecutive edges
@@ -5632,6 +5667,7 @@ criterion_group! {
     bench_statevector_qaoa,
     bench_statevector_controlled_rotation,
     bench_statevector_cu_kernel,
+    bench_statevector_fused_2q_kernel,
     bench_statevector_qaoa_ring_matching,
     bench_statevector_trotter,
     bench_statevector_trotter_builder,

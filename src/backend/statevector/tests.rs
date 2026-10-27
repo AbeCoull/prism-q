@@ -2461,3 +2461,44 @@ fn multi_2q_order_check_flags_a_batch_that_descends_a_tier() {
     assert!(multi_2q_keeps_order(&ascending, 20));
     assert!(multi_2q_keeps_order(&descending[..1], 20));
 }
+
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_nonadjacent_fused_2q_matches_the_reference() {
+    let n = 16;
+    let mat: [[Complex64; 4]; 4] = std::array::from_fn(|r| {
+        std::array::from_fn(|c| Complex64::new(0.1 + 0.07 * r as f64, 0.3 - 0.05 * c as f64))
+    });
+    let mut prep = Circuit::new(n, 0);
+    for q in 0..n {
+        prep.add_gate(Gate::Ry(0.3 + 0.17 * q as f64), &[q]);
+        prep.add_gate(Gate::Rz(0.9 - 0.11 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        prep.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let start = run_manual_state(&prep);
+    for (q0, q1) in [
+        (0, 15),
+        (15, 0),
+        (3, 9),
+        (9, 3),
+        (0, 2),
+        (13, 15),
+        (1, 14),
+        (14, 1),
+    ] {
+        let mut circuit = prep.clone();
+        circuit.add_gate(Gate::Fused2q(Box::new(mat)), &[q0, q1]);
+        let (m0, m1) = (1 << q0, 1 << q1);
+        let mut expected = start.clone();
+        for base in (0..expected.len()).filter(|i| i & (m0 | m1) == 0) {
+            let i = [base, base | m1, base | m0, base | m0 | m1];
+            let a = i.map(|k| start[k]);
+            for (r, &k) in i.iter().enumerate() {
+                expected[k] = (0..4).map(|c| mat[r][c] * a[c]).sum();
+            }
+        }
+        assert_state_close(&run_manual_state(&circuit), &expected, 1e-12);
+    }
+}

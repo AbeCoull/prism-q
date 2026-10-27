@@ -2464,7 +2464,7 @@ impl CompiledDetectorSampler {
         total_shots: usize,
         acc: &mut A,
     ) -> Result<()> {
-        let chunk_size = default_chunk_size(self.detector_rows.len());
+        let chunk_size = self.detector_chunk_size();
         let mut remaining = total_shots;
         while remaining > 0 {
             let batch = remaining.min(chunk_size);
@@ -2473,6 +2473,10 @@ impl CompiledDetectorSampler {
             remaining -= batch;
         }
         Ok(())
+    }
+
+    fn detector_chunk_size(&self) -> usize {
+        default_chunk_size(self.num_measurements.max(self.detector_rows.len()))
     }
 
     pub fn sample_detector_counts(

@@ -12,6 +12,7 @@ use crate::circuit::qasm::ast::{
     OperandName, Stmt, StmtKind,
 };
 use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Duration, Expr, Timed};
+use crate::circuit::qasm::stream::MAX_NESTING;
 use crate::circuit::qasm::{lexer, parser as syntax};
 
 /// Register width the highest `$k` the program names implies, `None` when it
@@ -295,6 +296,22 @@ impl<'a> Parser<'a> {
     /// Run a block, threading the parameter link and noise event each statement
     /// may leave behind onto the instruction index they belong to.
     pub(super) fn execute(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
+        if self.exec_depth >= MAX_NESTING {
+            return Err(parse_error(
+                block.first().map_or(1, |stmt| stmt.line),
+                format!(
+                    "the program nests deeper than {MAX_NESTING} levels, counting the \
+                     gate and def bodies it expands"
+                ),
+            ));
+        }
+        self.exec_depth += 1;
+        let result = self.execute_block(block);
+        self.exec_depth -= 1;
+        result
+    }
+
+    fn execute_block(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
         let mut instructions = Vec::with_capacity(block.len());
         for stmt in block {
             let base = instructions.len();
@@ -335,19 +352,23 @@ impl<'a> Parser<'a> {
         Ok(instructions)
     }
 
-    fn charge(&self, units: usize, line: usize) -> Result<()> {
+    pub(super) fn charge(&self, units: usize, line: usize) -> Result<()> {
         let left = self.expansion_left.get();
         self.expansion_left.set(left.saturating_sub(units));
         if units > left {
-            return Err(parse_error(
-                line,
-                format!(
-                    "the program expands past {MAX_EXPANSION} instructions and statements, \
-                     counting every gate call, loop pass and repetition"
-                ),
-            ));
+            return Err(Self::expansion_exhausted(line));
         }
         Ok(())
+    }
+
+    pub(super) fn expansion_exhausted(line: usize) -> PrismError {
+        parse_error(
+            line,
+            format!(
+                "the program expands past {MAX_EXPANSION} instructions and statements, \
+                 counting every gate call, loop pass and repetition"
+            ),
+        )
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt<'a>, out: &mut Vec<Instruction>) -> Result<()> {
@@ -1996,6 +2017,7 @@ impl<'a> Parser<'a> {
             total_cbits: self.total_cbits,
             gate_expansion_depth: self.gate_expansion_depth + 1,
             region_depth: self.region_depth,
+            exec_depth: self.exec_depth,
             param_vars: Some(bindings),
             inputs: HashMap::new(),
             input_names: Vec::new(),

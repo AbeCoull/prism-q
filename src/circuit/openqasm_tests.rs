@@ -3243,3 +3243,87 @@ fn a_range_step_past_the_integer_range_ends_the_range() {
     .unwrap();
     assert_eq!(c.gate_count(), 1);
 }
+
+#[test]
+fn a_repeated_pow_is_bounded_before_it_allocates() {
+    let err = parse("OPENQASM 3.0;\nqubit[2] q;\npow(1000000) @ pow(1000000) @ cx q[0], q[1];")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("expands past"), "{err}");
+}
+
+#[test]
+fn a_runtime_rotation_is_charged_per_qubit() {
+    let source = |passes: usize| {
+        format!(
+            "OPENQASM 3.0;\nqubit[100] q;\nbit[1] c;\nfloat t = 0;\n\
+             c[0] = measure q[0];\nif (c[0]) t = pi;\n\
+             for int i in [1:{passes}] {{ rx(t) q; }}"
+        )
+    };
+    assert!(super::dynamic::parse_dynamic_within(&source(5), 1000).is_ok());
+    let err = super::dynamic::parse_dynamic_within(&source(20), 1000)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("expands past"), "{err}");
+}
+
+#[test]
+fn nested_boxes_just_inside_the_limit_fit_a_small_stack() {
+    let depth = MAX_NESTING - 8;
+    let source = format!(
+        "OPENQASM 3.0;\nqubit[1] q;\n{}x q[0];{}",
+        "box { ".repeat(depth),
+        " }".repeat(depth)
+    );
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            assert_eq!(parse(&source).unwrap().gate_count(), 1);
+            parse_dynamic(&source).unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn boxes_past_the_nesting_limit_are_a_parse_error() {
+    let source = format!(
+        "OPENQASM 3.0;\nqubit[1] q;\n{}x q[0];{}",
+        "box { ".repeat(3_000),
+        " }".repeat(3_000)
+    );
+    assert_too_deep(parse(&source));
+    assert_too_deep(parse_dynamic(&source));
+}
+
+#[test]
+fn gate_calls_through_deep_boxes_fit_a_small_stack() {
+    let depth = MAX_NESTING - 8;
+    let mut source = String::from("OPENQASM 3.0;\nqubit[1] q;\ngate g0 a { x a; }\n");
+    for level in 1..32 {
+        source.push_str(&format!(
+            "gate g{level} a {{ {}g{} a;{} }}\n",
+            "box { ".repeat(depth),
+            level - 1,
+            " }".repeat(depth)
+        ));
+    }
+    source.push_str("g31 q[0];\n");
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || {
+            let result = parse(&source);
+            assert!(
+                result.as_ref().is_ok_and(|c| c.gate_count() == 1)
+                    || result
+                        .as_ref()
+                        .is_err_and(|e| e.to_string().contains("nests deeper")),
+                "{result:?}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

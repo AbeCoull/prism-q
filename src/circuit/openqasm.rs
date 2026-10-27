@@ -355,6 +355,9 @@ pub(crate) struct Parser<'a> {
     total_cbits: usize,
     gate_expansion_depth: usize,
     region_depth: usize,
+    /// Blocks being executed, gate and `def` bodies included, so nesting that
+    /// each body keeps inside the parse limit cannot add up past it.
+    exec_depth: usize,
     param_vars: Option<HashMap<&'a str, f64>>,
     /// `input` slot per declared name, and the names in slot order.
     inputs: HashMap<&'a str, usize>,
@@ -492,6 +495,7 @@ impl<'a> Parser<'a> {
             total_cbits: 0,
             gate_expansion_depth: 0,
             region_depth: 0,
+            exec_depth: 0,
             param_vars: None,
             inputs: HashMap::new(),
             input_names: Vec::new(),
@@ -984,6 +988,9 @@ impl<'a> Parser<'a> {
             instrs
         };
         let repeats = k.abs() as usize;
+        if base.len().saturating_mul(repeats) > MAX_EXPANSION {
+            return Err(Self::expansion_exhausted(line_num));
+        }
         let mut powered = Vec::with_capacity(base.len() * repeats);
         for _ in 0..repeats {
             powered.extend(base.iter().cloned());

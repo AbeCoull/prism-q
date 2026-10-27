@@ -507,8 +507,9 @@ and a whole-number `pow` past one million repetitions, which returns `Parse` nam
 count instead.
 
 Gate calls, loops and repetitions multiply, so one parse also stops with `Parse` once it
-expands past 2^24 units of work: an emitted instruction, or a statement or loop pass that
-emits none.
+expands past 2^24 units of work: an emitted instruction, one per qubit for a runtime
+rotation, or a statement or loop pass that emits none. A `pow` repetition is checked
+against the same bound before it is built.
 
 Every decline above happens at parse time, so a program that parses is one the IR can
 hold. The backend it then runs on may still decline the circuit; those limits are on the
@@ -564,7 +565,8 @@ hold. The backend it then runs on may still decline the circuit; those limits ar
   `sqrt`, `tan`). `**` is right associative and binds tighter than unary minus,
   so `-2 ** 2` is `-4`. Statements, conditions and expressions nest at most 256
   levels, an operator chain such as `a + b + c` counting one level per operator,
-  and a deeper source fails with `PrismError::Parse`.
+  and a deeper source fails with `PrismError::Parse`. The bound also covers the
+  gate and `def` bodies a call expands, counted together with the blocks around it.
 
 ```qasm
 bit[2] c;

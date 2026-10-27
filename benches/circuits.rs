@@ -4081,7 +4081,33 @@ fn bench_qasm_parse(c: &mut Criterion) {
         });
     }
 
+    let text = gate_library_source(100, 2000, 16);
+    group.bench_with_input(
+        BenchmarkId::from_parameter("gate_library_100x2000"),
+        &text,
+        |b, text| {
+            b.iter(|| black_box(prism_q::circuit::openqasm::parse(black_box(text)).unwrap()));
+        },
+    );
+
     group.finish();
+}
+
+/// `defs` two-qubit gate definitions of eight statements each, then `calls`
+/// calls cycling through them on neighbouring qubits.
+fn gate_library_source(defs: usize, calls: usize, n: usize) -> String {
+    let mut text = format!("OPENQASM 3.0;\nqubit[{n}] q;\n");
+    for d in 0..defs {
+        text.push_str(&format!(
+            "gate g{d}(t) a, b {{ h a; rz(t) b; cx a, b; ry(t / 2) a; \
+             cx b, a; rx(t) b; s a; cx a, b; }}\n"
+        ));
+    }
+    for k in 0..calls {
+        let q = k % (n - 1);
+        text.push_str(&format!("g{}(0.{k}) q[{q}], q[{}];\n", k % defs, q + 1));
+    }
+    text
 }
 
 fn bench_compiled_sampler(c: &mut Criterion) {

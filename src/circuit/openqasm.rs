@@ -115,6 +115,7 @@ use crate::gates::{Gate, spectral};
 use crate::sim::noise::{NoiseEvent, NoiseModel};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 fn parse_error(line: usize, message: impl Into<String>) -> PrismError {
     PrismError::Parse {
@@ -272,12 +273,14 @@ struct Register {
     size: usize,
 }
 
+#[derive(Clone)]
 struct GateDefinition<'a> {
     params: Vec<&'a str>,
     qubits: Vec<&'a str>,
     body: ast::Block<'a>,
 }
 
+#[derive(Clone)]
 struct DefDefinition<'a> {
     args: Vec<DefParam<'a>>,
     result: Option<ast::BitResult<'a>>,
@@ -347,8 +350,10 @@ pub(crate) struct Parser<'a> {
     input: &'a str,
     qregs: HashMap<&'a str, Register>,
     cregs: HashMap<&'a str, Register>,
-    gate_defs: HashMap<&'a str, GateDefinition<'a>>,
-    def_defs: HashMap<&'a str, DefDefinition<'a>>,
+    /// Shared with every expansion parser below this one; a definition
+    /// statement copies the map only while an expansion still holds it.
+    gate_defs: Rc<HashMap<&'a str, GateDefinition<'a>>>,
+    def_defs: Rc<HashMap<&'a str, DefDefinition<'a>>>,
     total_qubits: usize,
     total_cbits: usize,
     gate_expansion_depth: usize,
@@ -473,8 +478,8 @@ impl<'a> Parser<'a> {
             input,
             qregs: HashMap::new(),
             cregs: HashMap::new(),
-            gate_defs: HashMap::new(),
-            def_defs: HashMap::new(),
+            gate_defs: Rc::default(),
+            def_defs: Rc::default(),
             total_qubits: 0,
             total_cbits: 0,
             gate_expansion_depth: 0,

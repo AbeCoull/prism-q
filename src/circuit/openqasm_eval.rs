@@ -505,7 +505,7 @@ impl<'a> Parser<'a> {
                         format!("gate '{name}' has an empty body"),
                     ));
                 }
-                self.gate_defs.insert(
+                Rc::make_mut(&mut self.gate_defs).insert(
                     *name,
                     GateDefinition {
                         params: params.clone(),
@@ -1034,7 +1034,7 @@ impl<'a> Parser<'a> {
         }
         let local = Self::def_result_local(name, args, result.is_some(), last, rest)?;
         Self::check_def_writes(name, args, local, body, true)?;
-        self.def_defs.insert(
+        Rc::make_mut(&mut self.def_defs).insert(
             name,
             DefDefinition {
                 args: args.to_vec(),
@@ -1938,8 +1938,8 @@ impl<'a> Parser<'a> {
             input: "",
             qregs: HashMap::new(),
             cregs: HashMap::new(),
-            gate_defs: HashMap::new(),
-            def_defs: HashMap::new(),
+            gate_defs: Rc::clone(&self.gate_defs),
+            def_defs: Rc::clone(&self.def_defs),
             total_qubits: self.total_qubits,
             total_cbits: self.total_cbits,
             gate_expansion_depth: self.gate_expansion_depth + 1,
@@ -1987,27 +1987,6 @@ impl<'a> Parser<'a> {
                 Alias {
                     kind: alias.kind,
                     indices: alias.indices.clone(),
-                },
-            );
-        }
-        for (name, def) in &self.gate_defs {
-            sub.gate_defs.insert(
-                *name,
-                GateDefinition {
-                    params: def.params.clone(),
-                    qubits: def.qubits.clone(),
-                    body: def.body.clone(),
-                },
-            );
-        }
-        for (name, def) in &self.def_defs {
-            sub.def_defs.insert(
-                *name,
-                DefDefinition {
-                    args: def.args.clone(),
-                    result: def.result.clone(),
-                    local: def.local,
-                    body: def.body.clone(),
                 },
             );
         }

@@ -153,3 +153,30 @@ fn from_seeds_independent_streams() {
     let mut b = Xoshiro256PlusPlus::from_seeds([5, 6, 7, 8]);
     assert_ne!(a.next_u64(), b.next_u64());
 }
+
+// Each 512-bit draw must be the next two AVX2 draws side by side, so the eight-lane
+// generator leaves the word stream of every sampler path unchanged.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn x8_draws_pair_consecutive_x4_draws() {
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let mut seeds_x4 = rng();
+    let mut seeds_x8 = rng();
+    // SAFETY: AVX-512F detected, which implies AVX2.
+    unsafe {
+        let mut x4 = Xoshiro256PlusPlusX4::from_scalar(&mut seeds_x4);
+        let mut x8 = Xoshiro256PlusPlusX8::from_scalar(&mut seeds_x8);
+        for draw in 0..37 {
+            let mut want = [0u64; 8];
+            for half in want.as_chunks_mut::<4>().0 {
+                *half =
+                    std::mem::transmute::<std::arch::x86_64::__m256i, [u64; 4]>(x4.next_m256i());
+            }
+            let got: [u64; 8] = std::mem::transmute(x8.next_m512i());
+            assert_eq!(got, want, "draw {draw}");
+        }
+    }
+    assert_eq!(seeds_x4.next_u64(), seeds_x8.next_u64());
+}

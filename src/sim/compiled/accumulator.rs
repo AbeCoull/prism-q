@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+#[cfg(target_arch = "x86_64")]
+use crate::backend::word_ops::{WordTier, word_tier};
 use crate::hash::FxHashMap;
 
 use super::{
@@ -243,6 +245,73 @@ unsafe fn transpose_64x64_avx2(matrix: &mut [u64; 64]) {
     }
 }
 
+/// The whole matrix in eight registers. Deltas 32, 16 and 8 pair registers; deltas 4, 2
+/// and 1 pair lanes `j` and `j ^ delta` of one register, so each lane takes its partner
+/// shifted left when it is the low row and right when it is the high row, and a
+/// per-lane select mask (`mask` on low rows, `!mask` on high) keeps the right half.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn transpose_64x64_avx512(matrix: &mut [u64; 64]) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+
+        let p = matrix.as_mut_ptr() as *mut __m512i;
+        let mut v = [_mm512_setzero_si512(); 8];
+        for (i, r) in v.iter_mut().enumerate() {
+            *r = _mm512_loadu_si512(p.add(i));
+        }
+
+        macro_rules! across {
+            ($delta:literal, $mask:expr) => {{
+                let m = _mm512_set1_epi64($mask as i64);
+                let step = $delta / 8;
+                for i in 0..8 {
+                    if i & step != 0 {
+                        continue;
+                    }
+                    let (a, b) = (v[i], v[i + step]);
+                    v[i] = _mm512_ternarylogic_epi64::<0xCA>(m, a, _mm512_slli_epi64::<$delta>(b));
+                    v[i + step] =
+                        _mm512_ternarylogic_epi64::<0xCA>(m, _mm512_srli_epi64::<$delta>(a), b);
+                }
+            }};
+        }
+        macro_rules! within {
+            ($delta:literal, $mask:expr, $high:literal, $r:ident => $partner:expr) => {{
+                let m = _mm512_mask_blend_epi64(
+                    $high,
+                    _mm512_set1_epi64($mask as i64),
+                    _mm512_set1_epi64(!$mask as i64),
+                );
+                for r in v.iter_mut() {
+                    let partner = {
+                        let $r = *r;
+                        $partner
+                    };
+                    let shifted = _mm512_mask_srli_epi64::<$delta>(
+                        _mm512_slli_epi64::<$delta>(partner),
+                        $high,
+                        partner,
+                    );
+                    *r = _mm512_ternarylogic_epi64::<0xCA>(m, *r, shifted);
+                }
+            }};
+        }
+
+        across!(32, TRANSPOSE_MASKS[0]);
+        across!(16, TRANSPOSE_MASKS[1]);
+        across!(8, TRANSPOSE_MASKS[2]);
+        within!(4, TRANSPOSE_MASKS[3], 0xF0, r => _mm512_shuffle_i64x2::<0x4E>(r, r));
+        within!(2, TRANSPOSE_MASKS[4], 0xCC, r => _mm512_permutex_epi64::<0x4E>(r));
+        within!(1, TRANSPOSE_MASKS[5], 0xAA, r => _mm512_shuffle_epi32::<0x4E>(r));
+
+        for (i, r) in v.iter().enumerate() {
+            _mm512_storeu_si512(p.add(i), *r);
+        }
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 unsafe fn transpose_64x64_neon(matrix: &mut [u64; 64]) {
     // SAFETY: same contract as the enclosing unsafe fn.
@@ -294,12 +363,18 @@ unsafe fn transpose_64x64_neon(matrix: &mut [u64; 64]) {
 #[inline]
 pub(super) fn transpose_64x64_dispatch(matrix: &mut [u64; 64]) {
     #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
+    match word_tier() {
+        WordTier::Avx512 => {
+            // SAFETY: AVX-512F detected
+            unsafe { transpose_64x64_avx512(matrix) };
+            return;
+        }
+        WordTier::Avx2 => {
             // SAFETY: AVX2 feature detected at runtime
             unsafe { transpose_64x64_avx2(matrix) };
             return;
         }
+        WordTier::Scalar => {}
     }
 
     #[cfg(target_arch = "aarch64")]

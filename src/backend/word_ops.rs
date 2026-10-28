@@ -142,6 +142,18 @@ pub(crate) fn word_tier() -> WordTier {
     })
 }
 
+/// Whether an AVX-512 test can run here. `PRISM_REQUIRE_AVX512=1` makes a host without
+/// the features fail rather than skip, for runs under an emulator meant to provide them.
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(crate) fn avx512_test_host() -> bool {
+    let detected = avx512_detected();
+    assert!(
+        detected || std::env::var_os("PRISM_REQUIRE_AVX512").is_none(),
+        "PRISM_REQUIRE_AVX512 is set but this CPU lacks avx512f with avx512vpopcntdq"
+    );
+    detected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

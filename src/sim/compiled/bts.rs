@@ -9,10 +9,12 @@ use super::SendPtrU64;
 use super::parity::SparseParity;
 #[cfg(target_arch = "aarch64")]
 use super::rng::Xoshiro256PlusPlusX2;
-#[cfg(target_arch = "x86_64")]
-use super::rng::Xoshiro256PlusPlusX4;
 use super::rng::{Xoshiro256PlusPlus, Xoshiro256PlusPlusLanes};
+#[cfg(target_arch = "x86_64")]
+use super::rng::{Xoshiro256PlusPlusX4, Xoshiro256PlusPlusX8};
 use super::shot_tail_mask;
+#[cfg(target_arch = "x86_64")]
+use crate::backend::word_ops::{WordTier, word_tier};
 
 pub(super) const BTS_BATCH_SHOTS: usize = 65536;
 
@@ -292,7 +294,14 @@ fn sample_bts_into(
 ) {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && num_shots >= 256 {
+        let tier = word_tier();
+        if tier == WordTier::Avx512 && num_shots >= 512 {
+            // SAFETY: AVX-512F detected, all pointer arithmetic bounded by allocation sizes
+            return unsafe {
+                sample_bts_meas_major_avx512(sparse, num_shots, ref_bits, rng, rank, output)
+            };
+        }
+        if tier != WordTier::Scalar && num_shots >= 256 {
             // SAFETY: AVX2 detected, all pointer arithmetic bounded by allocation sizes
             return unsafe {
                 sample_bts_meas_major_avx2(sparse, num_shots, ref_bits, rng, rank, output)
@@ -742,6 +751,168 @@ unsafe fn xor_reduce_avx2(
         }
         for &c in rest {
             acc = _mm256_xor_si256(acc, random[c as usize]);
+        }
+        acc
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+const BTS_OCT_TILE: usize = 4;
+
+/// Eight shot words per step. A column's 512-bit word joins its AVX2 words for quads
+/// `2u` and `2u + 1`, which the four-lane stream draws `rank` apart, so each octet's
+/// draws land in AVX2 order first and are regrouped per column.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn sample_bts_meas_major_avx512(
+    sparse: &SparseParity,
+    num_shots: usize,
+    ref_bits: &[u64],
+    rng: &mut Xoshiro256PlusPlus,
+    rank: usize,
+    output: &mut BtsOutput<'_>,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+
+        let s_words = num_shots.div_ceil(64);
+        let s_octs = num_shots.div_ceil(512);
+
+        let mut vrng = Xoshiro256PlusPlusX8::from_scalar(rng);
+
+        let tile = if rank == 0 {
+            s_octs
+        } else {
+            (16384 / (rank * 64)).clamp(1, BTS_OCT_TILE).min(s_octs)
+        };
+        let mut staged: Vec<__m512i> = vec![_mm512_setzero_si512(); rank];
+        let mut random_tile: Vec<__m512i> = vec![_mm512_setzero_si512(); rank * tile];
+
+        let tail_bits = num_shots % 512;
+        let tail_words = s_words % 8;
+
+        let mut oct_start = 0;
+        while oct_start < s_octs {
+            let n = tile.min(s_octs - oct_start);
+            let last = oct_start + n == s_octs;
+
+            for t in 0..n {
+                for draw in staged.iter_mut() {
+                    *draw = vrng.next_m512i();
+                }
+                let quads = staged.as_ptr() as *const __m256i;
+                for r in 0..rank {
+                    random_tile[r * tile + t] = _mm512_inserti64x4::<1>(
+                        _mm512_castsi256_si512(_mm256_loadu_si256(quads.add(r))),
+                        _mm256_loadu_si256(quads.add(rank + r)),
+                    );
+                }
+            }
+
+            if last && tail_bits != 0 {
+                let mut mask_buf = [0u64; 8];
+                for (w, val) in mask_buf.iter_mut().enumerate() {
+                    let valid = tail_bits.saturating_sub(w * 64).min(64);
+                    *val = if valid == 64 { !0 } else { (1u64 << valid) - 1 };
+                }
+                let mask_vec = _mm512_loadu_si512(mask_buf.as_ptr() as *const __m512i);
+                for r in 0..rank {
+                    let v = &mut random_tile[r * tile + n - 1];
+                    *v = _mm512_and_si512(*v, mask_vec);
+                }
+            }
+
+            let full = if last && tail_words != 0 { n - 1 } else { n };
+            for &m in &sparse.non_det_rows {
+                let m = m as usize;
+                let cols = sparse.row_cols(m);
+                let row = output.row_mut(m)[oct_start * 8..].as_mut_ptr();
+
+                match cols.len() {
+                    0 => unreachable!(),
+                    1 => {
+                        let c0 = cols[0] as usize * tile;
+                        for t in 0..full {
+                            _mm512_storeu_si512(
+                                row.add(t * 8) as *mut __m512i,
+                                random_tile[c0 + t],
+                            );
+                        }
+                    }
+                    2 => {
+                        let c0 = cols[0] as usize * tile;
+                        let c1 = cols[1] as usize * tile;
+                        for t in 0..full {
+                            _mm512_storeu_si512(
+                                row.add(t * 8) as *mut __m512i,
+                                _mm512_xor_si512(random_tile[c0 + t], random_tile[c1 + t]),
+                            );
+                        }
+                    }
+                    3 => {
+                        let c0 = cols[0] as usize * tile;
+                        let c1 = cols[1] as usize * tile;
+                        let c2 = cols[2] as usize * tile;
+                        for t in 0..full {
+                            _mm512_storeu_si512(
+                                row.add(t * 8) as *mut __m512i,
+                                _mm512_ternarylogic_epi64::<0x96>(
+                                    random_tile[c0 + t],
+                                    random_tile[c1 + t],
+                                    random_tile[c2 + t],
+                                ),
+                            );
+                        }
+                    }
+                    _ => {
+                        for t in 0..full {
+                            _mm512_storeu_si512(
+                                row.add(t * 8) as *mut __m512i,
+                                xor_reduce_avx512_tiled(cols, &random_tile, tile, t),
+                            );
+                        }
+                    }
+                }
+
+                if full < n {
+                    _mm512_mask_storeu_epi64(
+                        row.add(full * 8) as *mut i64,
+                        (1u8 << tail_words) - 1,
+                        xor_reduce_avx512_tiled(cols, &random_tile, tile, full),
+                    );
+                }
+            }
+
+            oct_start += n;
+        }
+
+        output.apply_ref_bits(ref_bits, num_shots);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn xor_reduce_avx512_tiled(
+    cols: &[u32],
+    random_tile: &[std::arch::x86_64::__m512i],
+    tile: usize,
+    t: usize,
+) -> std::arch::x86_64::__m512i {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let (pairs, rest) = cols.as_chunks::<2>();
+        let mut acc = _mm512_setzero_si512();
+        for pair in pairs {
+            acc = _mm512_ternarylogic_epi64::<0x96>(
+                acc,
+                random_tile[pair[0] as usize * tile + t],
+                random_tile[pair[1] as usize * tile + t],
+            );
+        }
+        for &c in rest {
+            acc = _mm512_xor_si512(acc, random_tile[c as usize * tile + t]);
         }
         acc
     }

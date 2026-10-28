@@ -139,8 +139,8 @@ jobs:
 
   # No hosted runner guarantees AVX-512, so the AVX-512 kernels run under Intel SDE
   # emulating Sapphire Rapids. PRISM_REQUIRE_AVX512 fails a test that would otherwise
-  # skip for want of the features, and PRISM_AVX512 routes the stabilizer suite through
-  # the AVX-512 dispatch.
+  # skip for want of the features, and PRISM_AVX512 routes the suites that own AVX-512
+  # kernels through the AVX-512 dispatch.
   avx512-sde:
     name: AVX-512 kernels (SDE)
     runs-on: ubuntu-latest
@@ -163,11 +163,13 @@ jobs:
           sudo sysctl -w kernel.yama.ptrace_scope=0
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$RUNNER_TEMP/sde/sde64 -spr --" >> "$GITHUB_ENV"
 
-      - name: Stabilizer suite through the AVX-512 dispatch
+      - name: Kernel suites through the AVX-512 dispatch
         env:
           PRISM_AVX512: "1"
           PRISM_REQUIRE_AVX512: "1"
-        run: cargo nextest run --features "$CI_FEATURES" --lib -E 'test(stabilizer)'
+        run: >-
+          cargo nextest run --features "$CI_FEATURES" --lib
+          -E 'test(stabilizer) | test(sim::compiled)'
 
   check-no-default-features:
     name: Lint & Test (no default features)

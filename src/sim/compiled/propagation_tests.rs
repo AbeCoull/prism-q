@@ -343,3 +343,128 @@ fn rowmul_avx2_matches_bitwise_phase_rule() {
     run::<16>(&mut rng);
     run::<18>(&mut rng);
 }
+
+// Each AVX-512 propagation kernel against its AVX2 counterpart on random rows, at
+// lengths that leave every masked tail width from one to seven words.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx512_propagation_kernels_match_avx2() {
+    use rand::{RngExt, SeedableRng};
+
+    // SAFETY: the caller establishes AVX-512F, which implies AVX2; every row holds
+    // `m` words.
+    unsafe fn apply(rows: &mut [Vec<u64>; 5], kernel: usize, wide: bool, m: usize) {
+        let [x0, z0, x1, z1, s] = rows;
+        macro_rules! pick {
+            ($narrow:ident, $wide:ident($($arg:expr),*)) => {
+                // SAFETY: same contract as the enclosing unsafe fn.
+                unsafe {
+                    if wide {
+                        $wide($($arg),*)
+                    } else {
+                        $narrow($($arg),*)
+                    }
+                }
+            };
+        }
+        match kernel {
+            0 => pick!(
+                batch_propagate_h_avx2,
+                batch_propagate_h_avx512(x0, z0, s, m)
+            ),
+            1 => pick!(
+                batch_propagate_s_avx2,
+                batch_propagate_s_avx512(x0, z0, s, m, true)
+            ),
+            2 => pick!(
+                batch_propagate_s_avx2,
+                batch_propagate_s_avx512(x0, z0, s, m, false)
+            ),
+            3 => pick!(
+                batch_propagate_sign_xor_avx2,
+                batch_propagate_sign_xor_avx512(s, z0, m)
+            ),
+            4 => pick!(
+                batch_propagate_sign_xor2_avx2,
+                batch_propagate_sign_xor2_avx512(s, x0, z0, m)
+            ),
+            5 => pick!(
+                batch_propagate_sx_avx2,
+                batch_propagate_sx_avx512(x0, z0, s, m, false)
+            ),
+            6 => pick!(
+                batch_propagate_sx_avx2,
+                batch_propagate_sx_avx512(x0, z0, s, m, true)
+            ),
+            7 => pick!(
+                batch_propagate_cx_avx2,
+                batch_propagate_cx_avx512(x0, z0, x1, z1, s, m)
+            ),
+            8 => pick!(
+                batch_propagate_cz_avx2,
+                batch_propagate_cz_avx512(x0, z0, x1, z1, s, m)
+            ),
+            _ => pick!(
+                batch_propagate_swap_avx2,
+                batch_propagate_swap_avx512(x0, z0, x1, z1, m)
+            ),
+        }
+    }
+
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for m in [8, 9, 10, 11, 12, 13, 14, 15, 16, 23, 37] {
+        let rows: [Vec<u64>; 5] = std::array::from_fn(|_| (0..m).map(|_| rng.random()).collect());
+        for kernel in 0..10 {
+            let mut narrow = rows.clone();
+            let mut wide = rows.clone();
+            // SAFETY: AVX-512F detected; every row holds `m` words.
+            unsafe {
+                apply(&mut narrow, kernel, false, m);
+                apply(&mut wide, kernel, true, m);
+            }
+            assert_eq!(wide, narrow, "kernel {kernel}, {m} words");
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn rowmul_avx512_matches_avx2() {
+    use rand::{RngExt, SeedableRng};
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for nw in [8, 9, 15, 16, 17, 24, 35, 64] {
+        for _ in 0..32 {
+            let mut src: Vec<u64> = (0..2 * nw).map(|_| rng.random()).collect();
+            let mut dst: Vec<u64> = (0..2 * nw).map(|_| rng.random()).collect();
+            if rng.random_bool(0.25) {
+                dst.clone_from(&src);
+            }
+            if rng.random_bool(0.25) {
+                let start = rng.random_range(0..nw);
+                for half in [0, nw] {
+                    let words = half + start..half + (start + 8).min(nw);
+                    src[words.clone()].fill(0);
+                    dst[words].fill(0);
+                }
+            }
+            let initial_sum = rng.random_range(0..4);
+            let mut narrow = dst.clone();
+            let mut wide = dst;
+            // SAFETY: AVX-512F and VPOPCNTDQ detected; both buffers hold `2 * nw` words.
+            let (want, got) = unsafe {
+                (
+                    rowmul_avx2(src.as_ptr(), narrow.as_mut_ptr(), nw, initial_sum),
+                    rowmul_avx512(src.as_ptr(), wide.as_mut_ptr(), nw, initial_sum),
+                )
+            };
+            assert_eq!(got, want, "{nw} words");
+            assert_eq!(wide, narrow, "{nw} words");
+        }
+    }
+}

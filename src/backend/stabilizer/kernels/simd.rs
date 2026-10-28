@@ -87,9 +87,12 @@ fn rowmul_words_scalar(
 /// Eight words per step. The phase mask splits on `x1`: `z2 & (z1 ^ x2)` when set and
 /// `z1 & x2 & !z2` when clear, two `vpternlogq` and a select, and both masks count
 /// through `vpopcntq` instead of the AVX2 nibble table.
+///
+/// # Safety
+/// Requires AVX-512F and VPOPCNTDQ, and all four slices of one length.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
-unsafe fn rowmul_words_avx512(
+pub(crate) unsafe fn rowmul_words_avx512(
     dst_x: &mut [u64],
     dst_z: &mut [u64],
     src_x: &[u64],

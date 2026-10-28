@@ -139,11 +139,13 @@ macro_rules! for_each_quad {
         }
     }};
 }
+#[cfg(target_arch = "x86_64")]
+pub(crate) use for_each_quad;
 
 /// Load eight f64 lanes at `p`, or the lanes `k` selects when it is not all ones.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn load_pd(p: *const f64, k: __mmask8) -> __m512d {
+pub(crate) unsafe fn load_pd(p: *const f64, k: __mmask8) -> __m512d {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         if k == 0xFF {
@@ -157,7 +159,7 @@ unsafe fn load_pd(p: *const f64, k: __mmask8) -> __m512d {
 /// Store eight f64 lanes at `p`, or the lanes `k` selects when it is not all ones.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-unsafe fn store_pd(p: *mut f64, k: __mmask8, v: __m512d) {
+pub(crate) unsafe fn store_pd(p: *mut f64, k: __mmask8, v: __m512d) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         if k == 0xFF {

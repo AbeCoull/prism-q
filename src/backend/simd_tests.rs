@@ -824,7 +824,7 @@ fn target_feature_kernel_count_is_pinned() {
         ("src/backend/simd.rs", 48),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
-        ("src/backend/statevector/kernels.rs", 12),
+        ("src/backend/statevector/kernels.rs", 17),
         ("src/sim/compiled/accumulator.rs", 2),
         ("src/sim/compiled/bts.rs", 4),
         ("src/sim/compiled/propagation.rs", 17),

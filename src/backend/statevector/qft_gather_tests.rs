@@ -168,6 +168,90 @@ fn row_kernels_match_scalar_butterflies() {
     }
 }
 
+// Row lengths 2 and 6 run the masked two-amplitude step, and the radix-4 quad must
+// match two AVX2 pair calls on the same offsets.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx512_row_kernels_match_avx2() {
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let w =
+        [0.3, 1.7, -2.4].map(|angle| Complex64::from_polar(std::f64::consts::FRAC_1_SQRT_2, angle));
+    let phases = qft_gather_phases(16, true);
+    for len in [2usize, 4, 6, 8, 10, 16] {
+        let rows: Vec<Vec<Complex64>> = (0..4)
+            .map(|r| random_state(5, 7 + r)[..len].to_vec())
+            .collect();
+        let close = |got: &[Complex64], want: &[Complex64], what: &str| {
+            assert!(max_diff(got, want) < TOL, "{what} len {len}");
+        };
+
+        let (mut want_lo, mut want_hi) = (rows[0].clone(), rows[1].clone());
+        let (mut got_lo, mut got_hi) = (rows[0].clone(), rows[1].clone());
+        // SAFETY: AVX-512F detected, which implies AVX2 and FMA; the rows share one even
+        // length.
+        unsafe {
+            radix2_rows_avx2fma(&mut want_lo, &mut want_hi, w[0]);
+            radix2_rows_avx512(&mut got_lo, &mut got_hi, w[0]);
+        }
+        close(&got_lo, &want_lo, "radix2 lo");
+        close(&got_hi, &want_hi, "radix2 hi");
+
+        let mut want: [Vec<Complex64>; 4] = std::array::from_fn(|r| rows[r].clone());
+        let mut got = want.clone();
+        let [qa, qb, qc, qd] = want.each_mut().map(Vec::as_mut_slice);
+        // SAFETY: as above.
+        unsafe { radix4_rows_avx2fma(qa, qb, qc, qd, w[0], w[1], w[2]) };
+        let [qa, qb, qc, qd] = got.each_mut().map(Vec::as_mut_slice);
+        // SAFETY: as above.
+        unsafe { radix4_rows_avx512(qa, qb, qc, qd, w[0], w[1], w[2]) };
+        for (g, e) in got.iter().zip(&want) {
+            close(g, e, "radix4 rows");
+        }
+
+        let (anchor, step) = (phases.phase(12345), 37);
+        let mut want = vec![Complex64::new(0.0, 0.0); len];
+        let mut got = want.clone();
+        // SAFETY: as above; `out` and the row share one even length.
+        unsafe {
+            qft_scatter_row_avx2fma(&mut want, &rows[0], anchor, &phases.low, step);
+            qft_scatter_row_avx512(&mut got, &rows[0], anchor, &phases.low, step);
+        }
+        close(&got, &want, "scatter");
+    }
+
+    let twiddles: Vec<[Complex64; 4]> = (0..3)
+        .map(|t| std::array::from_fn(|j| Complex64::from_polar(1.0, 0.4 * (4 * t + j) as f64)))
+        .collect();
+    let rows: Vec<Vec<Complex64>> = (0..4).map(|r| random_state(2, 11 + r)).collect();
+    let mut want: [Vec<Complex64>; 4] = std::array::from_fn(|r| rows[r].clone());
+    let mut got = want.clone();
+    // SAFETY: AVX-512F detected; every row holds four amplitudes, two AVX2 pairs.
+    unsafe {
+        let [pa, pb, pc, pd] = want.each_mut().map(|r| r.as_mut_ptr() as *mut f64);
+        for j in [0, 2] {
+            radix4_butterfly_pair_slices_avx2fma(
+                pa.add(2 * j),
+                pb.add(2 * j),
+                pc.add(2 * j),
+                pd.add(2 * j),
+                twiddles[0][j],
+                twiddles[0][j + 1],
+                twiddles[1][j],
+                twiddles[1][j + 1],
+                twiddles[2][j],
+                twiddles[2][j + 1],
+            );
+        }
+        let [pa, pb, pc, pd] = got.each_mut().map(|r| r.as_mut_ptr() as *mut f64);
+        radix4_butterfly_quad_avx512(pa, pb, pc, pd, &twiddles[0], &twiddles[1], &twiddles[2]);
+    }
+    for (g, e) in got.iter().zip(&want) {
+        assert!(max_diff(g, e) < TOL, "radix4 quad");
+    }
+}
+
 #[test]
 #[cfg_attr(debug_assertions, ignore = "256 MiB states, run with --release")]
 fn gathered_route_matches_paired_route_at_24_qubits() {

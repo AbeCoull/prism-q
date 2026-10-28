@@ -1,9 +1,9 @@
 //! Rowmul word kernels: XOR of X/Z words with Pauli phase accumulation, in
-//! AVX2 (with a non-temporal store variant), NEON, and scalar forms.
+//! AVX-512, AVX2 (with a non-temporal store variant), NEON, and scalar forms.
 
-#[cfg(target_arch = "x86_64")]
-use crate::backend::word_ops::has_avx2;
 pub(crate) use crate::backend::word_ops::xor_words_ptr as xor_words;
+#[cfg(target_arch = "x86_64")]
+use crate::backend::word_ops::{WordTier, word_tier};
 
 /// Rowmul word loop: XOR x/z words from src into dst, returning the
 /// accumulated phase sum (caller applies `sum & 3 >= 2`).
@@ -22,16 +22,23 @@ pub(crate) fn rowmul_words(
     let nw = dst_x.len();
 
     #[cfg(target_arch = "x86_64")]
-    if nw >= 16 && has_avx2() {
-        // SAFETY: AVX2 detected at runtime; slices have equal lengths (debug_assert above).
-        // The NT helper performs its own alignment check and falls back to
-        // non-NT stores if alignment is insufficient.
-        return unsafe { rowmul_words_avx2_nt(dst_x, dst_z, src_x, src_z, initial_sum) };
-    }
-    #[cfg(target_arch = "x86_64")]
-    if nw >= 4 && has_avx2() {
-        // SAFETY: AVX2 detected at runtime; slices have equal lengths (debug_assert above).
-        return unsafe { rowmul_words_avx2(dst_x, dst_z, src_x, src_z, initial_sum) };
+    {
+        let tier = word_tier();
+        if nw >= 8 && tier == WordTier::Avx512 {
+            // SAFETY: AVX-512F and VPOPCNTDQ detected at runtime; slices have equal
+            // lengths (debug_assert above).
+            return unsafe { rowmul_words_avx512(dst_x, dst_z, src_x, src_z, initial_sum) };
+        }
+        if nw >= 16 && tier != WordTier::Scalar {
+            // SAFETY: AVX2 detected at runtime; slices have equal lengths (debug_assert above).
+            // The NT helper performs its own alignment check and falls back to
+            // non-NT stores if alignment is insufficient.
+            return unsafe { rowmul_words_avx2_nt(dst_x, dst_z, src_x, src_z, initial_sum) };
+        }
+        if nw >= 4 && tier != WordTier::Scalar {
+            // SAFETY: AVX2 detected at runtime; slices have equal lengths (debug_assert above).
+            return unsafe { rowmul_words_avx2(dst_x, dst_z, src_x, src_z, initial_sum) };
+        }
     }
     #[cfg(target_arch = "aarch64")]
     if nw >= 2 {
@@ -75,6 +82,73 @@ fn rowmul_words_scalar(
     }
 
     sum
+}
+
+/// Eight words per step. The phase mask splits on `x1`: `z2 & (z1 ^ x2)` when set and
+/// `z1 & x2 & !z2` when clear, two `vpternlogq` and a select, and both masks count
+/// through `vpopcntq` instead of the AVX2 nibble table.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512vpopcntdq")]
+unsafe fn rowmul_words_avx512(
+    dst_x: &mut [u64],
+    dst_z: &mut [u64],
+    src_x: &[u64],
+    src_z: &[u64],
+    initial_sum: u64,
+) -> u64 {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+
+        let nw = dst_x.len();
+        let chunks = nw / 8;
+        let mut vsum_pos = _mm512_setzero_si512();
+        let mut vsum_nz = _mm512_setzero_si512();
+
+        for i in 0..chunks {
+            let off = i * 8;
+            let vx1 = _mm512_loadu_si512(src_x.as_ptr().add(off) as *const __m512i);
+            let vz1 = _mm512_loadu_si512(src_z.as_ptr().add(off) as *const __m512i);
+            let vx2 = _mm512_loadu_si512(dst_x.as_ptr().add(off) as *const __m512i);
+            let vz2 = _mm512_loadu_si512(dst_z.as_ptr().add(off) as *const __m512i);
+
+            let vnew_x = _mm512_xor_si512(vx1, vx2);
+            let vnew_z = _mm512_xor_si512(vz1, vz2);
+            _mm512_storeu_si512(dst_x.as_mut_ptr().add(off) as *mut __m512i, vnew_x);
+            _mm512_storeu_si512(dst_z.as_mut_ptr().add(off) as *mut __m512i, vnew_z);
+
+            let vsrc = _mm512_or_si512(vx1, vz1);
+            let vdst = _mm512_or_si512(vx2, vz2);
+            let vor = _mm512_or_si512(vsrc, vdst);
+            if _mm512_test_epi64_mask(vor, vor) == 0 {
+                continue;
+            }
+
+            let vnonzero =
+                _mm512_ternarylogic_epi64::<0x80>(_mm512_or_si512(vnew_x, vnew_z), vsrc, vdst);
+            let vpos_x1 = _mm512_ternarylogic_epi64::<0x28>(vz1, vx2, vz2);
+            let vpos_not_x1 = _mm512_ternarylogic_epi64::<0x40>(vz1, vx2, vz2);
+            let vpos = _mm512_ternarylogic_epi64::<0xCA>(vx1, vpos_x1, vpos_not_x1);
+
+            vsum_pos = _mm512_add_epi64(vsum_pos, _mm512_popcnt_epi64(vpos));
+            vsum_nz = _mm512_add_epi64(vsum_nz, _mm512_popcnt_epi64(vnonzero));
+        }
+
+        let total_pos = _mm512_reduce_add_epi64(vsum_pos) as u64;
+        let total_nz = _mm512_reduce_add_epi64(vsum_nz) as u64;
+        let sum = initial_sum
+            .wrapping_add(2u64.wrapping_mul(total_pos))
+            .wrapping_sub(total_nz);
+
+        let tail = chunks * 8;
+        rowmul_words_scalar(
+            &mut dst_x[tail..],
+            &mut dst_z[tail..],
+            &src_x[tail..],
+            &src_z[tail..],
+            sum,
+        )
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -751,7 +825,7 @@ mod neon_tests {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::rowmul_words_spec::{Kernel, check, check_reference, lane_popcount};
-    use super::{rowmul_words_avx2, rowmul_words_avx2_nt};
+    use super::{rowmul_words_avx2, rowmul_words_avx2_nt, rowmul_words_avx512};
     use rand::{RngExt, SeedableRng};
 
     #[test]
@@ -805,5 +879,49 @@ mod tests {
         run::<19>(&mut rng, nt);
         run::<24>(&mut rng, nt);
         run::<35>(&mut rng, nt);
+    }
+
+    // `PRISM_REQUIRE_AVX512=1` makes a host without the features fail rather than skip,
+    // for runs under an emulator that is meant to provide them.
+    #[test]
+    fn rowmul_words_avx512_matches_scalar() {
+        if !crate::backend::word_ops::avx512_detected() {
+            assert!(
+                std::env::var_os("PRISM_REQUIRE_AVX512").is_none(),
+                "PRISM_REQUIRE_AVX512 is set but this CPU lacks avx512f with avx512vpopcntdq"
+            );
+            return;
+        }
+
+        fn run<const N: usize>(rng: &mut rand_chacha::ChaCha8Rng) {
+            for _ in 0..64 {
+                let mut src: [[u64; N]; 2] = rng.random();
+                let mut dst: [[u64; N]; 2] = rng.random();
+                if rng.random_bool(0.25) {
+                    dst = src;
+                }
+                if N > 0 && rng.random_bool(0.25) {
+                    let start = rng.random_range(0..N);
+                    let end = (start + 8).min(N);
+                    for row in src.iter_mut().chain(&mut dst) {
+                        row[start..end].fill(0);
+                    }
+                }
+                check(rowmul_words_avx512, src, dst, rng.random());
+            }
+        }
+
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+        run::<0>(&mut rng);
+        run::<3>(&mut rng);
+        run::<7>(&mut rng);
+        run::<8>(&mut rng);
+        run::<9>(&mut rng);
+        run::<15>(&mut rng);
+        run::<16>(&mut rng);
+        run::<17>(&mut rng);
+        run::<24>(&mut rng);
+        run::<35>(&mut rng);
+        run::<64>(&mut rng);
     }
 }

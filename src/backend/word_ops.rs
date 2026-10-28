@@ -106,6 +106,42 @@ pub(crate) fn has_avx2() -> bool {
     false
 }
 
+/// Whether this CPU can run the AVX-512 word kernels: `avx512f` with
+/// `avx512vpopcntdq`, which leaves Skylake-SP and Cascade Lake on AVX2.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn avx512_detected() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vpopcntdq")
+    })
+}
+
+/// Widest x86 tier the word kernels dispatch to, read once per process.
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WordTier {
+    Scalar,
+    Avx2,
+    Avx512,
+}
+
+/// The tier for [`WordTier`] dispatch. AVX-512 takes part only when detected and
+/// `PRISM_AVX512=1` is set: its kernels are verified under emulation but not yet
+/// timed on AVX-512 hardware.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn word_tier() -> WordTier {
+    static CACHED: std::sync::OnceLock<WordTier> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if avx512_detected() && std::env::var_os("PRISM_AVX512").is_some_and(|v| v == "1") {
+            WordTier::Avx512
+        } else if has_avx2() {
+            WordTier::Avx2
+        } else {
+            WordTier::Scalar
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

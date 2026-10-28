@@ -636,7 +636,7 @@ fn target_feature_kernel_count_is_pinned() {
     let expected: [(&str, usize); 4] = [
         ("src/backend/simd.rs", 32),
         ("src/backend/word_ops.rs", 2),
-        ("src/backend/stabilizer/kernels/simd.rs", 3),
+        ("src/backend/stabilizer/kernels/simd.rs", 4),
         ("src/backend/statevector/kernels.rs", 12),
     ];
     for (file, want) in expected {

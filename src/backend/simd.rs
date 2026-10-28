@@ -5,6 +5,7 @@
 //!
 //! | Tier | Requirement | Complex multiply cost |
 //! |----------|------------------|---------------------------------|
+//! | AVX-512  | `avx512f` + `avx512vpopcntdq`, `PRISM_AVX512=1` | 512-bit: 1 mul + 1 fmaddsub (4 pairs) |
 //! | AVX2+FMA | `avx2` + `fma`   | 256-bit: 1 mul + 1 fmaddsub (2 pairs) |
 //! | FMA      | `fma`            | 128-bit: 1 mul + 1 fmaddsub |
 //! | NEON     | aarch64 baseline | 128-bit: 1 mul + 1 fma (pre-negated) |
@@ -22,6 +23,9 @@ use std::arch::x86_64::*;
 
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
+
+#[cfg(target_arch = "x86_64")]
+use crate::backend::word_ops::{WordTier, word_tier};
 
 #[cfg(target_arch = "x86_64")]
 struct MatBroadcast {
@@ -82,6 +86,84 @@ impl MatBroadcast256 {
             m10_ii: _mm256_set1_pd(mat[1][0].im),
             m11_rr: _mm256_set1_pd(mat[1][1].re),
             m11_ii: _mm256_set1_pd(mat[1][1].im),
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+struct MatBroadcast512 {
+    m00_rr: __m512d,
+    m00_ii: __m512d,
+    m01_rr: __m512d,
+    m01_ii: __m512d,
+    m10_rr: __m512d,
+    m10_ii: __m512d,
+    m11_rr: __m512d,
+    m11_ii: __m512d,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl MatBroadcast512 {
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn from_256(m: &MatBroadcast256) -> Self {
+        Self {
+            m00_rr: _mm512_broadcast_f64x4(m.m00_rr),
+            m00_ii: _mm512_broadcast_f64x4(m.m00_ii),
+            m01_rr: _mm512_broadcast_f64x4(m.m01_rr),
+            m01_ii: _mm512_broadcast_f64x4(m.m01_ii),
+            m10_rr: _mm512_broadcast_f64x4(m.m10_rr),
+            m10_ii: _mm512_broadcast_f64x4(m.m10_ii),
+            m11_rr: _mm512_broadcast_f64x4(m.m11_rr),
+            m11_ii: _mm512_broadcast_f64x4(m.m11_ii),
+        }
+    }
+}
+
+/// Visit `$n` complex values four at a time, binding the f64 offset and a lane mask that
+/// is all ones except on the last partial step.
+#[cfg(target_arch = "x86_64")]
+macro_rules! for_each_quad {
+    ($n:expr, |$off:ident, $k:ident| $body:block) => {{
+        let lanes: usize = 2 * $n;
+        let full = lanes & !7;
+        let mut $off = 0usize;
+        while $off < full {
+            let $k: __mmask8 = 0xFF;
+            $body
+            $off += 8;
+        }
+        if $off < lanes {
+            let $k: __mmask8 = (1u8 << (lanes - $off)) - 1;
+            $body
+        }
+    }};
+}
+
+/// Load eight f64 lanes at `p`, or the lanes `k` selects when it is not all ones.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn load_pd(p: *const f64, k: __mmask8) -> __m512d {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        if k == 0xFF {
+            _mm512_loadu_pd(p)
+        } else {
+            _mm512_maskz_loadu_pd(k, p)
+        }
+    }
+}
+
+/// Store eight f64 lanes at `p`, or the lanes `k` selects when it is not all ones.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn store_pd(p: *mut f64, k: __mmask8, v: __m512d) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        if k == 0xFF {
+            _mm512_storeu_pd(p, v);
+        } else {
+            _mm512_mask_storeu_pd(p, k, v);
         }
     }
 }
@@ -307,6 +389,42 @@ unsafe fn apply_slices_avx2fma(
 }
 
 #[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+pub(crate) unsafe fn complex_mul_avx512(c_rr: __m512d, c_ii: __m512d, z: __m512d) -> __m512d {
+    let z_swap = _mm512_permute_pd::<0b0101_0101>(z);
+    let t = _mm512_mul_pd(c_ii, z_swap);
+    _mm512_fmaddsub_pd(c_rr, z, t)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn apply_slices_avx512(lo: &mut [Complex64], hi: &mut [Complex64], mat: &MatBroadcast256) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert_eq!(lo.len(), hi.len());
+        let m = MatBroadcast512::from_256(mat);
+        let lo_ptr = lo.as_mut_ptr() as *mut f64;
+        let hi_ptr = hi.as_mut_ptr() as *mut f64;
+        for_each_quad!(lo.len(), |off, k| {
+            let a = load_pd(lo_ptr.add(off), k);
+            let b = load_pd(hi_ptr.add(off), k);
+            let new_a = _mm512_add_pd(
+                complex_mul_avx512(m.m00_rr, m.m00_ii, a),
+                complex_mul_avx512(m.m01_rr, m.m01_ii, b),
+            );
+            let new_b = _mm512_add_pd(
+                complex_mul_avx512(m.m10_rr, m.m10_ii, a),
+                complex_mul_avx512(m.m11_rr, m.m11_ii, b),
+            );
+            store_pd(lo_ptr.add(off), k, new_a);
+            store_pd(hi_ptr.add(off), k, new_b);
+        });
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn apply_full_loop_sse2(state: &mut [Complex64], target: usize, mat: &MatBroadcast) {
     // SAFETY: same contract as the enclosing unsafe fn.
@@ -406,6 +524,40 @@ unsafe fn apply_full_loop_avx2fma_inline(
                 );
                 _mm256_storeu_pd(lo_ptr.add(off), new_a);
                 _mm256_storeu_pd(hi_ptr.add(off), new_b);
+            }
+            offset += block_size;
+        }
+    }
+}
+
+/// Requires `target >= 2`, so each half block holds whole 512-bit steps.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn apply_full_loop_avx512(state: &mut [Complex64], target: usize, mat: &MatBroadcast256) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let m = MatBroadcast512::from_256(mat);
+        let half = 1usize << target;
+        let block_size = half << 1;
+        let base = state.as_mut_ptr() as *mut f64;
+        let n = state.len();
+        let mut offset = 0;
+        while offset < n {
+            let lo_ptr = base.add(offset * 2);
+            let hi_ptr = base.add((offset + half) * 2);
+            for off in (0..2 * half).step_by(8) {
+                let a = _mm512_loadu_pd(lo_ptr.add(off));
+                let b = _mm512_loadu_pd(hi_ptr.add(off));
+                let new_a = _mm512_add_pd(
+                    complex_mul_avx512(m.m00_rr, m.m00_ii, a),
+                    complex_mul_avx512(m.m01_rr, m.m01_ii, b),
+                );
+                let new_b = _mm512_add_pd(
+                    complex_mul_avx512(m.m10_rr, m.m10_ii, a),
+                    complex_mul_avx512(m.m11_rr, m.m11_ii, b),
+                );
+                _mm512_storeu_pd(lo_ptr.add(off), new_a);
+                _mm512_storeu_pd(hi_ptr.add(off), new_b);
             }
             offset += block_size;
         }
@@ -524,10 +676,30 @@ fn apply_slices_scalar(lo: &mut [Complex64], hi: &mut [Complex64], mat: &[[Compl
 }
 
 #[cfg(target_arch = "x86_64")]
-enum SimdTier {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SimdTier {
+    Avx512,
     Avx2Fma,
     Fma,
     Sse2,
+}
+
+/// The widest complex-arithmetic tier, read once per process. AVX-512 takes part under
+/// the same detection and `PRISM_AVX512=1` opt-in as [`word_tier`].
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn simd_tier() -> SimdTier {
+    static CACHED: std::sync::OnceLock<SimdTier> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if has_avx2_fma() && word_tier() == WordTier::Avx512 {
+            SimdTier::Avx512
+        } else if has_avx2_fma() {
+            SimdTier::Avx2Fma
+        } else if has_fma() {
+            SimdTier::Fma
+        } else {
+            SimdTier::Sse2
+        }
+    })
 }
 
 /// Bench-only kill switch for the AVX2 paired-group 2q kernel.
@@ -577,15 +749,8 @@ impl PreparedGate1q {
         #[cfg(target_arch = "x86_64")]
         {
             let broadcast = MatBroadcast::from_matrix(mat);
-            let has_avx2_fma = has_avx2_fma();
-            let tier = if has_avx2_fma {
-                SimdTier::Avx2Fma
-            } else if has_fma() {
-                SimdTier::Fma
-            } else {
-                SimdTier::Sse2
-            };
-            let broadcast256 = if has_avx2_fma {
+            let tier = simd_tier();
+            let broadcast256 = if matches!(tier, SimdTier::Avx512 | SimdTier::Avx2Fma) {
                 // SAFETY: AVX support is implied by the detected AVX2 feature.
                 Some(unsafe { MatBroadcast256::from_matrix(mat) })
             } else {
@@ -619,6 +784,10 @@ impl PreparedGate1q {
             // in the constructor. Slices have matching lengths by debug assert.
             unsafe {
                 match self.tier {
+                    SimdTier::Avx512 => {
+                        let b256 = self.broadcast256.as_ref().unwrap_unchecked();
+                        apply_slices_avx512(lo, hi, b256);
+                    }
                     SimdTier::Avx2Fma => {
                         let b256 = self.broadcast256.as_ref().unwrap_unchecked();
                         apply_slices_avx2fma(lo, hi, b256, &self.broadcast);
@@ -653,10 +822,18 @@ impl PreparedGate1q {
             // SAFETY: The selected tier is guarded by runtime feature checks
             // in the constructor. The target index is validated by circuit construction.
             unsafe {
+                const MAX_AVX2_STATE: usize = 8192;
+                const MIN_AVX2_TARGET: usize = 2;
                 match self.tier {
+                    SimdTier::Avx512 => {
+                        if target >= MIN_AVX2_TARGET && state.len() <= MAX_AVX2_STATE {
+                            let b256 = self.broadcast256.as_ref().unwrap_unchecked();
+                            apply_full_loop_avx512(state, target, b256);
+                        } else {
+                            apply_full_loop_fma(state, target, &self.broadcast);
+                        }
+                    }
                     SimdTier::Avx2Fma => {
-                        const MAX_AVX2_STATE: usize = 8192;
-                        const MIN_AVX2_TARGET: usize = 2;
                         if target >= MIN_AVX2_TARGET && state.len() <= MAX_AVX2_STATE {
                             let b256 = self.broadcast256.as_ref().unwrap_unchecked();
                             apply_full_loop_avx2fma_inline(state, target, b256);
@@ -705,6 +882,14 @@ impl PreparedGate1q {
             // in the constructor. Tile indices are validated by callers.
             unsafe {
                 match self.tier {
+                    SimdTier::Avx512 => {
+                        if target >= 2 {
+                            let b256 = self.broadcast256.as_ref().unwrap_unchecked();
+                            apply_full_loop_avx512(state, target, b256);
+                        } else {
+                            apply_full_loop_fma(state, target, &self.broadcast);
+                        }
+                    }
                     SimdTier::Avx2Fma => {
                         if target >= 2 {
                             let b256 = self.broadcast256.as_ref().unwrap_unchecked();
@@ -746,7 +931,7 @@ impl PreparedGate1q {
             #[cfg(target_arch = "x86_64")]
             {
                 match self.tier {
-                    SimdTier::Avx2Fma | SimdTier::Fma => {
+                    SimdTier::Avx512 | SimdTier::Avx2Fma | SimdTier::Fma => {
                         apply_pair_fma(a_ptr, b_ptr, &self.broadcast)
                     }
                     SimdTier::Sse2 => apply_pair_sse2(a_ptr, b_ptr, &self.broadcast),
@@ -982,16 +1167,45 @@ unsafe fn negate_slice_avx2(slice: &mut [Complex64]) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn negate_slice_avx512(slice: &mut [Complex64]) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let sign = _mm512_set1_epi64(i64::MIN);
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        for_each_quad!(slice.len(), |off, k| {
+            let v = _mm512_castpd_si512(load_pd(ptr.add(off), k));
+            store_pd(
+                ptr.add(off),
+                k,
+                _mm512_castsi512_pd(_mm512_xor_si512(v, sign)),
+            );
+        });
+    }
+}
+
 const MIN_SIMD_SLICE: usize = 4;
 
 #[inline(always)]
 pub(crate) fn negate_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
-    if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 checked above, and the slice bounds drive
-        // all pointer arithmetic inside the helper.
-        unsafe { negate_slice_avx2(slice) };
-        return;
+    if slice.len() >= MIN_SIMD_SLICE {
+        match simd_tier() {
+            SimdTier::Avx512 => {
+                // SAFETY: AVX-512F detected, and the slice bounds drive all pointer
+                // arithmetic inside the helper.
+                unsafe { negate_slice_avx512(slice) };
+                return;
+            }
+            SimdTier::Avx2Fma => {
+                // SAFETY: AVX2 checked above, and the slice bounds drive
+                // all pointer arithmetic inside the helper.
+                unsafe { negate_slice_avx2(slice) };
+                return;
+            }
+            SimdTier::Fma | SimdTier::Sse2 => {}
+        }
     }
     #[cfg(target_arch = "aarch64")]
     if slice.len() >= MIN_SIMD_SLICE {
@@ -1036,15 +1250,43 @@ unsafe fn swap_slices_avx2(a: &mut [Complex64], b: &mut [Complex64]) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn swap_slices_avx512(a: &mut [Complex64], b: &mut [Complex64]) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert_eq!(a.len(), b.len());
+        let ap = a.as_mut_ptr() as *mut f64;
+        let bp = b.as_mut_ptr() as *mut f64;
+        for_each_quad!(a.len(), |off, k| {
+            let va = load_pd(ap.add(off), k);
+            let vb = load_pd(bp.add(off), k);
+            store_pd(ap.add(off), k, vb);
+            store_pd(bp.add(off), k, va);
+        });
+    }
+}
+
 #[inline(always)]
 pub(crate) fn swap_slices(a: &mut [Complex64], b: &mut [Complex64]) {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
-    if a.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 checked above, slices have equal length,
-        // and Rust's two mutable references guarantee non-overlap.
-        unsafe { swap_slices_avx2(a, b) };
-        return;
+    if a.len() >= MIN_SIMD_SLICE {
+        match simd_tier() {
+            SimdTier::Avx512 => {
+                // SAFETY: AVX-512F detected, slices have equal length, and Rust's two
+                // mutable references guarantee non-overlap.
+                unsafe { swap_slices_avx512(a, b) };
+                return;
+            }
+            SimdTier::Avx2Fma => {
+                // SAFETY: AVX2 checked above, slices have equal length,
+                // and Rust's two mutable references guarantee non-overlap.
+                unsafe { swap_slices_avx2(a, b) };
+                return;
+            }
+            SimdTier::Fma | SimdTier::Sse2 => {}
+        }
     }
     #[cfg(target_arch = "aarch64")]
     if a.len() >= MIN_SIMD_SLICE {
@@ -1115,12 +1357,54 @@ unsafe fn norm_sqr_sum_avx2fma(slice: &[Complex64]) -> f64 {
     }
 }
 
+/// Four accumulators over sixteen amplitudes per step, as the AVX2 kernel runs them,
+/// then the remaining steps into one accumulator with the last under a lane mask.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn norm_sqr_sum_avx512(slice: &[Complex64]) -> f64 {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let ptr = slice.as_ptr() as *const f64;
+        let unrolled = slice.len() / 16;
+
+        let mut a0 = _mm512_setzero_pd();
+        let mut a1 = _mm512_setzero_pd();
+        let mut a2 = _mm512_setzero_pd();
+        let mut a3 = _mm512_setzero_pd();
+        for i in 0..unrolled {
+            let base = i * 32;
+            let v0 = _mm512_loadu_pd(ptr.add(base));
+            let v1 = _mm512_loadu_pd(ptr.add(base + 8));
+            let v2 = _mm512_loadu_pd(ptr.add(base + 16));
+            let v3 = _mm512_loadu_pd(ptr.add(base + 24));
+            a0 = _mm512_fmadd_pd(v0, v0, a0);
+            a1 = _mm512_fmadd_pd(v1, v1, a1);
+            a2 = _mm512_fmadd_pd(v2, v2, a2);
+            a3 = _mm512_fmadd_pd(v3, v3, a3);
+        }
+
+        let mut acc = _mm512_add_pd(_mm512_add_pd(a0, a1), _mm512_add_pd(a2, a3));
+        let tail = ptr.add(unrolled * 32);
+        for_each_quad!(slice.len() - unrolled * 16, |off, k| {
+            let v = load_pd(tail.add(off), k);
+            acc = _mm512_fmadd_pd(v, v, acc);
+        });
+        _mm512_reduce_add_pd(acc)
+    }
+}
+
 pub(crate) fn norm_sqr_sum(slice: &[Complex64]) -> f64 {
     #[cfg(target_arch = "x86_64")]
-    if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 and FMA checked above, and the helper reads
-        // only within the shared slice.
-        return unsafe { norm_sqr_sum_avx2fma(slice) };
+    if slice.len() >= MIN_SIMD_SLICE {
+        match simd_tier() {
+            // SAFETY: AVX-512F detected, and the helper reads only within the shared
+            // slice.
+            SimdTier::Avx512 => return unsafe { norm_sqr_sum_avx512(slice) },
+            // SAFETY: AVX2 and FMA checked above, and the helper reads
+            // only within the shared slice.
+            SimdTier::Avx2Fma => return unsafe { norm_sqr_sum_avx2fma(slice) },
+            SimdTier::Fma | SimdTier::Sse2 => {}
+        }
     }
     #[cfg(target_arch = "aarch64")]
     if slice.len() >= MIN_SIMD_SLICE {
@@ -1195,14 +1479,75 @@ unsafe fn norm_sqr_to_slice_avx2(src: &[Complex64], dst: &mut [f64]) {
     }
 }
 
+/// Eight norms per step: the squared lanes of two vectors split into real and imaginary
+/// halves by two `vpermt2pd` and added, in amplitude order. `SCALED` multiplies by
+/// `scale`. The remainder runs scalar, as in the AVX2 kernel.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn norm_sqr_to_slice_avx512<const SCALED: bool>(
+    src: &[Complex64],
+    dst: &mut [f64],
+    scale: f64,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(dst.len() >= src.len());
+        let inp = src.as_ptr() as *const f64;
+        let out = dst.as_mut_ptr();
+        let s = _mm512_set1_pd(scale);
+        let idx_re = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);
+        let idx_im = _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15);
+        let octs = src.len() / 8;
+
+        for i in 0..octs {
+            let v0 = _mm512_loadu_pd(inp.add(i * 16));
+            let v1 = _mm512_loadu_pd(inp.add(i * 16 + 8));
+            let sq0 = _mm512_mul_pd(v0, v0);
+            let sq1 = _mm512_mul_pd(v1, v1);
+            let norms = _mm512_add_pd(
+                _mm512_permutex2var_pd(sq0, idx_re, sq1),
+                _mm512_permutex2var_pd(sq0, idx_im, sq1),
+            );
+            _mm512_storeu_pd(
+                out.add(i * 8),
+                if SCALED {
+                    _mm512_mul_pd(norms, s)
+                } else {
+                    norms
+                },
+            );
+        }
+
+        let tail = octs * 8;
+        for (j, c) in src[tail..].iter().enumerate() {
+            *out.add(tail + j) = if SCALED {
+                c.norm_sqr() * scale
+            } else {
+                c.norm_sqr()
+            };
+        }
+    }
+}
+
 pub(crate) fn norm_sqr_to_slice(src: &[Complex64], dst: &mut [f64]) {
     debug_assert!(dst.len() >= src.len());
     #[cfg(target_arch = "x86_64")]
-    if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 checked above. The destination length debug
-        // assert keeps all stores in bounds.
-        unsafe { norm_sqr_to_slice_avx2(src, dst) };
-        return;
+    if src.len() >= MIN_SIMD_SLICE {
+        match simd_tier() {
+            SimdTier::Avx512 => {
+                // SAFETY: AVX-512F detected. The destination length debug assert keeps
+                // all stores in bounds.
+                unsafe { norm_sqr_to_slice_avx512::<false>(src, dst, 1.0) };
+                return;
+            }
+            SimdTier::Avx2Fma => {
+                // SAFETY: AVX2 checked above. The destination length debug
+                // assert keeps all stores in bounds.
+                unsafe { norm_sqr_to_slice_avx2(src, dst) };
+                return;
+            }
+            SimdTier::Fma | SimdTier::Sse2 => {}
+        }
     }
     #[cfg(target_arch = "aarch64")]
     if src.len() >= MIN_SIMD_SLICE {
@@ -1266,11 +1611,22 @@ unsafe fn norm_sqr_to_slice_scaled_avx2(src: &[Complex64], dst: &mut [f64], scal
 pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale: f64) {
     debug_assert!(dst.len() >= src.len());
     #[cfg(target_arch = "x86_64")]
-    if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 checked above. The destination length debug
-        // assert keeps all stores in bounds.
-        unsafe { norm_sqr_to_slice_scaled_avx2(src, dst, scale) };
-        return;
+    if src.len() >= MIN_SIMD_SLICE {
+        match simd_tier() {
+            SimdTier::Avx512 => {
+                // SAFETY: AVX-512F detected. The destination length debug assert keeps
+                // all stores in bounds.
+                unsafe { norm_sqr_to_slice_avx512::<true>(src, dst, scale) };
+                return;
+            }
+            SimdTier::Avx2Fma => {
+                // SAFETY: AVX2 checked above. The destination length debug
+                // assert keeps all stores in bounds.
+                unsafe { norm_sqr_to_slice_scaled_avx2(src, dst, scale) };
+                return;
+            }
+            SimdTier::Fma | SimdTier::Sse2 => {}
+        }
     }
     #[cfg(target_arch = "aarch64")]
     if src.len() >= MIN_SIMD_SLICE {
@@ -1319,13 +1675,37 @@ unsafe fn zero_slice_avx2(slice: &mut [Complex64]) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn zero_slice_avx512(slice: &mut [Complex64]) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let z = _mm512_setzero_pd();
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        for_each_quad!(slice.len(), |off, k| {
+            store_pd(ptr.add(off), k, z);
+        });
+    }
+}
+
 pub(crate) fn zero_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
-    if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 checked above, and the helper writes only
-        // within the mutable slice.
-        unsafe { zero_slice_avx2(slice) };
-        return;
+    if slice.len() >= MIN_SIMD_SLICE {
+        match simd_tier() {
+            SimdTier::Avx512 => {
+                // SAFETY: AVX-512F detected, and the helper writes only within the
+                // mutable slice.
+                unsafe { zero_slice_avx512(slice) };
+                return;
+            }
+            SimdTier::Avx2Fma => {
+                // SAFETY: AVX2 checked above, and the helper writes only
+                // within the mutable slice.
+                unsafe { zero_slice_avx2(slice) };
+                return;
+            }
+            SimdTier::Fma | SimdTier::Sse2 => {}
+        }
     }
     let zero = Complex64::new(0.0, 0.0);
     for amp in slice.iter_mut() {
@@ -1349,6 +1729,34 @@ unsafe fn scale_slice_avx2(slice: &mut [Complex64], factor: f64) {
         if !slice.len().is_multiple_of(2) {
             slice[slice.len() - 1] *= factor;
         }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", test))]
+#[target_feature(enable = "avx512f")]
+unsafe fn scale_slice_avx512(slice: &mut [Complex64], factor: f64) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let f = _mm512_set1_pd(factor);
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        for_each_quad!(slice.len(), |off, k| {
+            store_pd(ptr.add(off), k, _mm512_mul_pd(load_pd(ptr.add(off), k), f));
+        });
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn scale_complex_slice_avx512(slice: &mut [Complex64], factor: Complex64) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let rr = _mm512_set1_pd(factor.re);
+        let ii = _mm512_set1_pd(factor.im);
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        for_each_quad!(slice.len(), |off, k| {
+            let v = load_pd(ptr.add(off), k);
+            store_pd(ptr.add(off), k, complex_mul_avx512(rr, ii, v));
+        });
     }
 }
 
@@ -1397,13 +1805,25 @@ unsafe fn scale_complex_slice_fma(slice: &mut [Complex64], factor: Complex64) {
 pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
     #[cfg(target_arch = "x86_64")]
     {
-        if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-            // SAFETY: AVX2 and FMA checked above, and the helper
-            // writes only within the mutable slice.
-            unsafe { scale_complex_slice_avx2fma(slice, factor) };
-            return;
+        let tier = simd_tier();
+        if slice.len() >= MIN_SIMD_SLICE {
+            match tier {
+                SimdTier::Avx512 => {
+                    // SAFETY: AVX-512F detected, and the helper writes only within the
+                    // mutable slice.
+                    unsafe { scale_complex_slice_avx512(slice, factor) };
+                    return;
+                }
+                SimdTier::Avx2Fma => {
+                    // SAFETY: AVX2 and FMA checked above, and the helper
+                    // writes only within the mutable slice.
+                    unsafe { scale_complex_slice_avx2fma(slice, factor) };
+                    return;
+                }
+                SimdTier::Fma | SimdTier::Sse2 => {}
+            }
         }
-        if slice.len() >= 2 && has_fma() {
+        if slice.len() >= 2 && tier != SimdTier::Sse2 {
             // SAFETY: FMA checked above, and the helper writes only
             // within the mutable slice.
             unsafe { scale_complex_slice_fma(slice, factor) };
@@ -1428,6 +1848,34 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
     }
     for amp in slice.iter_mut() {
         *amp *= factor;
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "distributed"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn combine_global_half_avx512(
+    dst: &mut [Complex64],
+    remote: &[Complex64],
+    c_self: Complex64,
+    c_remote: Complex64,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let s_rr = _mm512_set1_pd(c_self.re);
+        let s_ii = _mm512_set1_pd(c_self.im);
+        let r_rr = _mm512_set1_pd(c_remote.re);
+        let r_ii = _mm512_set1_pd(c_remote.im);
+        let dp = dst.as_mut_ptr() as *mut f64;
+        let rp = remote.as_ptr() as *const f64;
+        for_each_quad!(dst.len(), |off, k| {
+            let d = load_pd(dp.add(off), k);
+            let r = load_pd(rp.add(off), k);
+            let acc = _mm512_add_pd(
+                complex_mul_avx512(s_rr, s_ii, d),
+                complex_mul_avx512(r_rr, r_ii, r),
+            );
+            store_pd(dp.add(off), k, acc);
+        });
     }
 }
 
@@ -1547,12 +1995,23 @@ pub(crate) fn combine_global_half(
     debug_assert_eq!(dst.len(), remote.len());
     #[cfg(target_arch = "x86_64")]
     {
-        if dst.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-            // SAFETY: AVX2 and FMA are available; slices have equal length.
-            unsafe { combine_global_half_avx2fma(dst, remote, c_self, c_remote) };
-            return;
+        let tier = simd_tier();
+        if dst.len() >= MIN_SIMD_SLICE {
+            match tier {
+                SimdTier::Avx512 => {
+                    // SAFETY: AVX-512F detected; slices have equal length.
+                    unsafe { combine_global_half_avx512(dst, remote, c_self, c_remote) };
+                    return;
+                }
+                SimdTier::Avx2Fma => {
+                    // SAFETY: AVX2 and FMA are available; slices have equal length.
+                    unsafe { combine_global_half_avx2fma(dst, remote, c_self, c_remote) };
+                    return;
+                }
+                SimdTier::Fma | SimdTier::Sse2 => {}
+            }
         }
-        if dst.len() >= 2 && has_fma() {
+        if dst.len() >= 2 && tier != SimdTier::Sse2 {
             // SAFETY: FMA is available; slices have equal length.
             unsafe { combine_global_half_fma(dst, remote, c_self, c_remote) };
             return;
@@ -1565,6 +2024,27 @@ pub(crate) fn combine_global_half(
         return;
     }
     combine_global_half_scalar(dst, remote, c_self, c_remote);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn scale_complex_to_slice_avx512(
+    dst: &mut [Complex64],
+    src: &[Complex64],
+    factor: Complex64,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(dst.len() >= src.len());
+        let rr = _mm512_set1_pd(factor.re);
+        let ii = _mm512_set1_pd(factor.im);
+        let dp = dst.as_mut_ptr() as *mut f64;
+        let sp = src.as_ptr() as *const f64;
+        for_each_quad!(src.len(), |off, k| {
+            let v = load_pd(sp.add(off), k);
+            store_pd(dp.add(off), k, complex_mul_avx512(rr, ii, v));
+        });
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1624,15 +2104,28 @@ pub(crate) fn scale_complex_to_slice(dst: &mut [Complex64], src: &[Complex64], f
     );
     #[cfg(target_arch = "x86_64")]
     {
-        if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-            // SAFETY: AVX2 and FMA checked above. The assert keeps
-            // every load and store in bounds, Rust references provide valid
-            // slices, and SIMD avoids the measured scalar bottleneck in large
-            // factored merge copies.
-            unsafe { scale_complex_to_slice_avx2fma(dst, src, factor) };
-            return;
+        let tier = simd_tier();
+        if src.len() >= MIN_SIMD_SLICE {
+            match tier {
+                SimdTier::Avx512 => {
+                    // SAFETY: AVX-512F detected. The assert keeps every load and store
+                    // in bounds, Rust references provide valid slices, and SIMD avoids
+                    // the measured scalar bottleneck in large factored merge copies.
+                    unsafe { scale_complex_to_slice_avx512(dst, src, factor) };
+                    return;
+                }
+                SimdTier::Avx2Fma => {
+                    // SAFETY: AVX2 and FMA checked above. The assert keeps
+                    // every load and store in bounds, Rust references provide valid
+                    // slices, and SIMD avoids the measured scalar bottleneck in large
+                    // factored merge copies.
+                    unsafe { scale_complex_to_slice_avx2fma(dst, src, factor) };
+                    return;
+                }
+                SimdTier::Fma | SimdTier::Sse2 => {}
+            }
         }
-        if src.len() >= 2 && has_fma() {
+        if src.len() >= 2 && tier != SimdTier::Sse2 {
             // SAFETY: FMA checked above. The assert keeps every
             // load and store in bounds, Rust references provide valid slices,
             // and SIMD avoids the measured scalar bottleneck in factored merge
@@ -1668,7 +2161,11 @@ pub(crate) fn scale_complex_to_slice(dst: &mut [Complex64], src: &[Complex64], f
 fn scale_slice(slice: &mut [Complex64], factor: f64) {
     #[cfg(target_arch = "x86_64")]
     {
-        if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+        if slice.len() >= MIN_SIMD_SLICE && simd_tier() == SimdTier::Avx512 {
+            // SAFETY: AVX-512F detected, and the helper writes only within the mutable
+            // slice.
+            unsafe { scale_slice_avx512(slice, factor) };
+        } else if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
             // SAFETY: AVX2 checked above, and the helper writes
             // only within the mutable slice.
             unsafe { scale_slice_avx2(slice, factor) };
@@ -1934,6 +2431,84 @@ unsafe fn apply_fused_2q_loop_avx2(
     }
 }
 
+/// Apply four consecutive groups (k to k+3) of a 2q gate using AVX-512.
+///
+/// Precondition: the lower gate qubit `lo` is at least 2 and `i` is group k's row
+/// indices, so one 512-bit load reads row r of all four groups. Every lane runs the AVX2
+/// pair kernel's two chains; `fmaddsub` by one stands in for `addsub`, which AVX-512
+/// lacks, and rounds identically.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn apply_fused_2q_quad_avx512_inner(
+    state: *mut f64,
+    i: [usize; 4],
+    mat: &Mat4x4Broadcast256,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let one = _mm512_set1_pd(1.0);
+        let s0 = _mm512_loadu_pd(state.add(i[0] * 2));
+        let s1 = _mm512_loadu_pd(state.add(i[1] * 2));
+        let s2 = _mm512_loadu_pd(state.add(i[2] * 2));
+        let s3 = _mm512_loadu_pd(state.add(i[3] * 2));
+
+        let sf0 = _mm512_permute_pd::<0b0101_0101>(s0);
+        let sf1 = _mm512_permute_pd::<0b0101_0101>(s1);
+        let sf2 = _mm512_permute_pd::<0b0101_0101>(s2);
+        let sf3 = _mm512_permute_pd::<0b0101_0101>(s3);
+
+        macro_rules! row {
+            ($r:expr) => {{
+                let off = $r * 4;
+                let mut re = _mm512_mul_pd(_mm512_broadcast_f64x4(mat.rr[off]), s0);
+                let mut im = _mm512_mul_pd(_mm512_broadcast_f64x4(mat.ii[off]), sf0);
+                re = _mm512_fmadd_pd(_mm512_broadcast_f64x4(mat.rr[off + 1]), s1, re);
+                im = _mm512_fmadd_pd(_mm512_broadcast_f64x4(mat.ii[off + 1]), sf1, im);
+                re = _mm512_fmadd_pd(_mm512_broadcast_f64x4(mat.rr[off + 2]), s2, re);
+                im = _mm512_fmadd_pd(_mm512_broadcast_f64x4(mat.ii[off + 2]), sf2, im);
+                re = _mm512_fmadd_pd(_mm512_broadcast_f64x4(mat.rr[off + 3]), s3, re);
+                im = _mm512_fmadd_pd(_mm512_broadcast_f64x4(mat.ii[off + 3]), sf3, im);
+                _mm512_storeu_pd(state.add(i[$r] * 2), _mm512_fmaddsub_pd(one, re, im));
+            }};
+        }
+        row!(0);
+        row!(1);
+        row!(2);
+        row!(3);
+    }
+}
+
+/// Quad-batched 2q kernel main loop. Requires `lo >= 2` so four consecutive groups map
+/// to adjacent state positions; hands `lo < 2` to the AVX2 pair loop.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn apply_fused_2q_loop_avx512(
+    state: *mut f64,
+    n_iter: usize,
+    lo: usize,
+    hi: usize,
+    mask0: usize,
+    mask1: usize,
+    mat256: &Mat4x4Broadcast256,
+    mat128: &Mat4x4Broadcast,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        if lo < 2 {
+            apply_fused_2q_loop_avx2(state, n_iter, lo, hi, mask0, mask1, mat256, mat128);
+            return;
+        }
+        // `lo >= 2` makes the lowest segment a multiple of four long, so every quad
+        // stays inside it and no tail is left.
+        for_each_2q_base(n_iter, lo, hi, 4, |base| {
+            let i = [base, base + mask1, base + mask0, base + mask0 + mask1];
+            apply_fused_2q_quad_avx512_inner(state, i, mat256);
+        });
+    }
+}
+
 /// Apply one 4-element group of a 2q gate using SSE2 intrinsics.
 ///
 /// Uses the 5-op complex multiply (shuffle + 2×mul + xor + add) since SSE2
@@ -2162,15 +2737,8 @@ impl PreparedGate2q {
         #[cfg(target_arch = "x86_64")]
         {
             let broadcast = Mat4x4Broadcast::from_matrix(mat);
-            let has_avx2_fma = has_avx2_fma();
-            let tier = if has_avx2_fma {
-                SimdTier::Avx2Fma
-            } else if has_fma() {
-                SimdTier::Fma
-            } else {
-                SimdTier::Sse2
-            };
-            let broadcast256 = if has_avx2_fma {
+            let tier = simd_tier();
+            let broadcast256 = if matches!(tier, SimdTier::Avx512 | SimdTier::Avx2Fma) {
                 // SAFETY: AVX support is implied by the detected AVX2 feature.
                 Some(unsafe { Mat4x4Broadcast256::from_matrix(mat) })
             } else {
@@ -2285,6 +2853,20 @@ impl PreparedGate2q {
             // in the constructor. The loop builds disjoint 4-amplitude groups.
             unsafe {
                 match self.tier {
+                    SimdTier::Avx512 if avx2_2q_enabled() => {
+                        // SAFETY: broadcast256 is Some whenever tier is Avx512 (constructor invariant).
+                        let mat256 = self.broadcast256.as_ref().unwrap_unchecked();
+                        apply_fused_2q_loop_avx512(
+                            base,
+                            n_iter,
+                            lo,
+                            hi,
+                            mask0,
+                            mask1,
+                            mat256,
+                            &self.broadcast,
+                        );
+                    }
                     SimdTier::Avx2Fma if avx2_2q_enabled() => {
                         // SAFETY: broadcast256 is Some whenever tier is Avx2Fma (constructor invariant).
                         let mat256 = self.broadcast256.as_ref().unwrap_unchecked();
@@ -2299,7 +2881,7 @@ impl PreparedGate2q {
                             &self.broadcast,
                         );
                     }
-                    SimdTier::Avx2Fma | SimdTier::Fma => {
+                    SimdTier::Avx512 | SimdTier::Avx2Fma | SimdTier::Fma => {
                         apply_fused_2q_loop_fma(
                             base,
                             n_iter,
@@ -2361,6 +2943,20 @@ impl PreparedGate2q {
             let base = state.add(start * 2);
             #[cfg(target_arch = "x86_64")]
             match self.tier {
+                SimdTier::Avx512 if avx2_2q_enabled() => {
+                    // SAFETY: broadcast256 is Some whenever tier is Avx512 (constructor invariant).
+                    let mat256 = self.broadcast256.as_ref().unwrap_unchecked();
+                    apply_fused_2q_loop_avx512(
+                        base,
+                        n_iter,
+                        run_lo,
+                        run_hi,
+                        mask0,
+                        mask1,
+                        mat256,
+                        &self.broadcast,
+                    );
+                }
                 SimdTier::Avx2Fma if avx2_2q_enabled() => {
                     // SAFETY: broadcast256 is Some whenever tier is Avx2Fma (constructor invariant).
                     let mat256 = self.broadcast256.as_ref().unwrap_unchecked();
@@ -2375,7 +2971,7 @@ impl PreparedGate2q {
                         &self.broadcast,
                     );
                 }
-                SimdTier::Avx2Fma | SimdTier::Fma => {
+                SimdTier::Avx512 | SimdTier::Avx2Fma | SimdTier::Fma => {
                     apply_fused_2q_loop_fma(
                         base,
                         n_iter,

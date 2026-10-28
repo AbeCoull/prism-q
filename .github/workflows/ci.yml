@@ -170,6 +170,7 @@ jobs:
         run: >-
           cargo nextest run --features "$CI_FEATURES" --lib
           -E 'test(stabilizer) | test(word_ops) | test(sim::compiled)'
+          -E 'test(backend::simd) | test(backend::statevector) | test(backend::factored)'
 
   check-no-default-features:
     name: Lint & Test (no default features)

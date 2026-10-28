@@ -494,6 +494,13 @@ fn test_prepared_kraus_2q_matches_scalar_reference() {
 
         // SAFETY: AVX2 and FMA checked above.
         let prepared = unsafe { PreparedKraus2q::new(&s) };
+        if crate::backend::word_ops::avx512_test_host() {
+            let mut wide = buf.clone();
+            // SAFETY: AVX-512F checked above; every slot index is in bounds and no
+            // other thread touches the buffer.
+            unsafe { prepared.apply_block_ptr_avx512(wide.as_mut_ptr() as *mut f64, 0, flats) };
+            assert_state_close(&wide, &reference, &format!("avx512 stride {}", flats[1]));
+        }
         // SAFETY: AVX2 and FMA checked above; every slot index is in bounds
         // and no other thread touches the buffer.
         unsafe { prepared.apply_block_ptr(buf.as_mut_ptr() as *mut f64, 0, flats) };
@@ -814,7 +821,7 @@ fn target_feature_kernel_count_is_pinned() {
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
     let expected: [(&str, usize); 8] = [
-        ("src/backend/simd.rs", 47),
+        ("src/backend/simd.rs", 48),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
         ("src/backend/statevector/kernels.rs", 12),

@@ -171,6 +171,15 @@ jobs:
           cargo nextest run --features "$CI_FEATURES" --lib
           -E 'test(stabilizer) | test(word_ops) | test(sim::compiled)'
           -E 'test(backend::simd) | test(backend::statevector) | test(backend::factored)'
+          -E 'test(density_matrix)'
+
+      - name: Density-matrix integration through the AVX-512 dispatch
+        env:
+          PRISM_AVX512: "1"
+          PRISM_REQUIRE_AVX512: "1"
+        run: >-
+          cargo nextest run --features "$CI_FEATURES" --test integration
+          -E 'test(/^density_matrix_(correctness|fold_contract)::/)'
 
   check-no-default-features:
     name: Lint & Test (no default features)

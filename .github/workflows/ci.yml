@@ -169,7 +169,7 @@ jobs:
           PRISM_REQUIRE_AVX512: "1"
         run: >-
           cargo nextest run --features "$CI_FEATURES" --lib
-          -E 'test(stabilizer) | test(sim::compiled)'
+          -E 'test(stabilizer) | test(word_ops) | test(sim::compiled)'
 
   check-no-default-features:
     name: Lint & Test (no default features)

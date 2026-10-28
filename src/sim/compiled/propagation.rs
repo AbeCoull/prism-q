@@ -1611,7 +1611,7 @@ unsafe fn rowmul_avx512(
     unsafe {
         let (src_x, src_z) = std::slice::from_raw_parts(src_ptr, 2 * nw).split_at(nw);
         let (dst_x, dst_z) = std::slice::from_raw_parts_mut(dst_ptr, 2 * nw).split_at_mut(nw);
-        rowmul_words_avx512(dst_x, dst_z, src_x, src_z, initial_sum)
+        rowmul_words_avx512::<false>(dst_x, dst_z, src_x, src_z, initial_sum)
     }
 }
 

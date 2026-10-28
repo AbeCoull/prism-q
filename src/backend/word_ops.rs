@@ -1,5 +1,5 @@
-//! Bulk XOR over bit-packed u64 words with AVX2/NEON dispatch, plus the cached
-//! runtime AVX2 check shared by the SIMD word kernels.
+//! Bulk XOR over bit-packed u64 words with AVX-512/AVX2/NEON dispatch, plus the cached
+//! runtime checks shared by the SIMD word kernels.
 
 #[inline(always)]
 pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
@@ -28,11 +28,20 @@ pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
 #[inline(always)]
 pub(crate) unsafe fn xor_words_ptr(dst: *mut u64, src: *const u64, len: usize) {
     #[cfg(target_arch = "x86_64")]
-    if has_avx2() {
-        // SAFETY: AVX2 detected; the caller guarantees both pointers are valid
-        // for len u64 values.
-        unsafe { xor_words_avx2(dst, src, len) };
-        return;
+    match word_tier() {
+        WordTier::Avx512 if len >= 8 => {
+            // SAFETY: AVX-512F detected; the caller guarantees both pointers are valid
+            // for len u64 values.
+            unsafe { xor_words_avx512(dst, src, len) };
+            return;
+        }
+        WordTier::Avx512 | WordTier::Avx2 => {
+            // SAFETY: AVX2 detected; the caller guarantees both pointers are valid
+            // for len u64 values.
+            unsafe { xor_words_avx2(dst, src, len) };
+            return;
+        }
+        WordTier::Scalar => {}
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -70,6 +79,34 @@ unsafe fn xor_words_avx2(dst: *mut u64, src: *const u64, len: usize) {
     for i in tail..len {
         // SAFETY: same contract as the enclosing unsafe fn.
         unsafe { *dst.add(i) ^= *src.add(i) };
+    }
+}
+
+/// Eight words per step, the last partial step under a lane mask.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn xor_words_avx512(dst: *mut u64, src: *const u64, len: usize) {
+    use std::arch::x86_64::*;
+
+    let full = len & !7;
+    for off in (0..full).step_by(8) {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        // Unaligned loads and stores serve arbitrary slice alignment.
+        unsafe {
+            let d = _mm512_loadu_si512(dst.add(off) as *const __m512i);
+            let s = _mm512_loadu_si512(src.add(off) as *const __m512i);
+            _mm512_storeu_si512(dst.add(off) as *mut __m512i, _mm512_xor_si512(d, s));
+        }
+    }
+    if full < len {
+        let k: __mmask8 = (1u8 << (len - full)) - 1;
+        // SAFETY: same contract as the enclosing unsafe fn. The mask covers only the
+        // words below len, and masked-off lanes are neither read nor written.
+        unsafe {
+            let d = _mm512_maskz_loadu_epi64(k, dst.add(full) as *const i64);
+            let s = _mm512_maskz_loadu_epi64(k, src.add(full) as *const i64);
+            _mm512_mask_storeu_epi64(dst.add(full) as *mut i64, k, _mm512_xor_si512(d, s));
+        }
     }
 }
 
@@ -132,7 +169,10 @@ pub(crate) enum WordTier {
 pub(crate) fn word_tier() -> WordTier {
     static CACHED: std::sync::OnceLock<WordTier> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
-        if avx512_detected() && std::env::var_os("PRISM_AVX512").is_some_and(|v| v == "1") {
+        if avx512_detected()
+            && has_avx2()
+            && std::env::var_os("PRISM_AVX512").is_some_and(|v| v == "1")
+        {
             WordTier::Avx512
         } else if has_avx2() {
             WordTier::Avx2
@@ -180,6 +220,27 @@ mod tests {
             // SAFETY: equal lengths; avx2 verified above.
             unsafe { xor_words_avx2(dst.as_mut_ptr(), src.as_ptr(), src.len()) };
             assert_eq!(dst, expected, "xor_words_avx2 kernel");
+        }
+    }
+
+    // Every length from one full step to three, so each masked tail width runs.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn xor_words_avx512_matches_scalar() {
+        if !avx512_test_host() {
+            return;
+        }
+        for len in 8..=24 {
+            let src: Vec<u64> = (0..len as u64)
+                .map(|i| 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(i + 1))
+                .collect();
+            let mut dst: Vec<u64> = (0..len as u64)
+                .map(|i| 0xD1B5_4A32_D192_ED03u64.wrapping_add(i))
+                .collect();
+            let expected: Vec<u64> = dst.iter().zip(&src).map(|(d, s)| d ^ s).collect();
+            // SAFETY: equal lengths; AVX-512F detected above.
+            unsafe { xor_words_avx512(dst.as_mut_ptr(), src.as_ptr(), len) };
+            assert_eq!(dst, expected, "{len} words");
         }
     }
 }

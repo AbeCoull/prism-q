@@ -29,7 +29,7 @@ env:
   # Separate from CI_FEATURES so the default published feature set stays tested alone.
   CI_DIST_FEATURES: parallel distributed
   # Mirrors `rust-version` in Cargo.toml and `msrv` in clippy.toml. Update all three together.
-  CI_MSRV: 1.88.0
+  CI_MSRV: 1.89.0
   # Miri and ThreadSanitizer run on this nightly, which also keys their caches: Miri
   # rebuilds its sysroot per toolchain, and dependencies cached under another one no
   # longer link against it.
@@ -136,6 +136,38 @@ jobs:
           cargo nextest run --features "$CI_FEATURES"
           --lib --test integration --test backend_equivalence
           -E '(kind(lib) & test(route_ledger)) | binary(backend_equivalence) | test(/^(degenerate_inputs|conformance_matrix|backend_matrix|measurement_matrix|golden_small_circuits|differential_wide|sampling_contract)::/)'
+
+  # No hosted runner guarantees AVX-512, so the AVX-512 kernels run under Intel SDE
+  # emulating Sapphire Rapids. PRISM_REQUIRE_AVX512 fails a test that would otherwise
+  # skip for want of the features, and PRISM_AVX512 routes the stabilizer suite through
+  # the AVX-512 dispatch.
+  avx512-sde:
+    name: AVX-512 kernels (SDE)
+    runs-on: ubuntu-latest
+    env:
+      SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+      SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: avx512-sde
+          nextest: true
+
+      - name: Install Intel SDE
+        run: |
+          curl -sSfL "$SDE_URL" -o "$RUNNER_TEMP/sde.tar.xz"
+          echo "$SDE_SHA256  $RUNNER_TEMP/sde.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/sde"
+          tar -xJf "$RUNNER_TEMP/sde.tar.xz" -C "$RUNNER_TEMP/sde" --strip-components=1
+          sudo sysctl -w kernel.yama.ptrace_scope=0
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$RUNNER_TEMP/sde/sde64 -spr --" >> "$GITHUB_ENV"
+
+      - name: Stabilizer suite through the AVX-512 dispatch
+        env:
+          PRISM_AVX512: "1"
+          PRISM_REQUIRE_AVX512: "1"
+        run: cargo nextest run --features "$CI_FEATURES" --lib -E 'test(stabilizer)'
 
   check-no-default-features:
     name: Lint & Test (no default features)
@@ -413,12 +445,13 @@ jobs:
           --features parallel --test determinism --test backend_equivalence
 
   # `rust-version` is published to crates.io, and every other job runs on the toolchain
-  # `rust-toolchain.toml` pins, far ahead of the floor. 1.88 rather than the edition-2024
-  # floor of 1.85: the SIMD kernels call `std::arch` intrinsics from `#[target_feature]`
-  # functions without an inner unsafe block, which 1.87 is the first release to accept
-  # without warning, and the `gpu` feature reaches libloading 0.9 through cudarc, which
-  # requires 1.88. Library targets only, since dev-dependencies do not constrain a
-  # consumer. `distributed-mpi` stays out because mpi-sys needs a system MPI to build.
+  # `rust-toolchain.toml` pins, far ahead of the floor. 1.89 rather than the edition-2024
+  # floor of 1.85: the AVX-512 word kernels call intrinsics stable from 1.89, the SIMD
+  # kernels call `std::arch` intrinsics from `#[target_feature]` functions without an
+  # inner unsafe block, which 1.87 is the first release to accept without warning, and
+  # the `gpu` feature reaches libloading 0.9 through cudarc, which requires 1.88. Library
+  # targets only, since dev-dependencies do not constrain a consumer. `distributed-mpi`
+  # stays out because mpi-sys needs a system MPI to build.
   msrv:
     name: MSRV floor
     runs-on: ubuntu-latest
@@ -967,6 +1000,7 @@ jobs:
       - check
       - check-release-profile
       - check-lowered-thresholds
+      - avx512-sde
       - check-no-default-features
       - check-distributed
       - mpi-linux

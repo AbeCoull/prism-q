@@ -264,7 +264,7 @@ the process default, or the request set it.
 
 ## Compatibility
 
-The minimum supported Rust version is 1.88.0. It is pinned in three places that are
+The minimum supported Rust version is 1.89.0. It is pinned in three places that are
 updated together: `rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`, and the
 `CI_MSRV` variable the `msrv` CI job builds against. That job checks the library with
 `parallel`, `gpu` and `distributed`; `distributed-mpi` needs a system MPI to build and

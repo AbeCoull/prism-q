@@ -1,5 +1,5 @@
 //! Rowmul word kernels: XOR of X/Z words with Pauli phase accumulation, in
-//! AVX-512, AVX2 (with a non-temporal store variant), NEON, and scalar forms.
+//! AVX-512 and AVX2 (each with a non-temporal store variant), NEON, and scalar forms.
 
 pub(crate) use crate::backend::word_ops::xor_words_ptr as xor_words;
 #[cfg(target_arch = "x86_64")]
@@ -24,10 +24,17 @@ pub(crate) fn rowmul_words(
     #[cfg(target_arch = "x86_64")]
     {
         let tier = word_tier();
+        if nw >= 16 && tier == WordTier::Avx512 {
+            // SAFETY: AVX-512F and VPOPCNTDQ detected at runtime; slices have equal
+            // lengths (debug_assert above). The NT helper checks alignment itself.
+            return unsafe { rowmul_words_avx512_nt(dst_x, dst_z, src_x, src_z, initial_sum) };
+        }
         if nw >= 8 && tier == WordTier::Avx512 {
             // SAFETY: AVX-512F and VPOPCNTDQ detected at runtime; slices have equal
             // lengths (debug_assert above).
-            return unsafe { rowmul_words_avx512(dst_x, dst_z, src_x, src_z, initial_sum) };
+            return unsafe {
+                rowmul_words_avx512::<false>(dst_x, dst_z, src_x, src_z, initial_sum)
+            };
         }
         if nw >= 16 && tier != WordTier::Scalar {
             // SAFETY: AVX2 detected at runtime; slices have equal lengths (debug_assert above).
@@ -87,9 +94,15 @@ fn rowmul_words_scalar(
 /// Eight words per step. The phase mask splits on `x1`: `z2 & (z1 ^ x2)` when set and
 /// `z1 & x2 & !z2` when clear, two `vpternlogq` and a select, and both masks count
 /// through `vpopcntq` instead of the AVX2 nibble table.
+///
+/// `STREAM` writes the destination rows with non-temporal stores.
+///
+/// # Safety
+/// Requires AVX-512F and VPOPCNTDQ, and all four slices of one length. With `STREAM`,
+/// both destination rows must be 64-byte aligned.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
-unsafe fn rowmul_words_avx512(
+pub(crate) unsafe fn rowmul_words_avx512<const STREAM: bool>(
     dst_x: &mut [u64],
     dst_z: &mut [u64],
     src_x: &[u64],
@@ -114,8 +127,15 @@ unsafe fn rowmul_words_avx512(
 
             let vnew_x = _mm512_xor_si512(vx1, vx2);
             let vnew_z = _mm512_xor_si512(vz1, vz2);
-            _mm512_storeu_si512(dst_x.as_mut_ptr().add(off) as *mut __m512i, vnew_x);
-            _mm512_storeu_si512(dst_z.as_mut_ptr().add(off) as *mut __m512i, vnew_z);
+            if STREAM {
+                // SAFETY: the caller guarantees both rows are 64-byte aligned, and chunk
+                // offsets advance by 64 bytes, preserving alignment.
+                _mm512_stream_si512(dst_x.as_mut_ptr().add(off) as *mut __m512i, vnew_x);
+                _mm512_stream_si512(dst_z.as_mut_ptr().add(off) as *mut __m512i, vnew_z);
+            } else {
+                _mm512_storeu_si512(dst_x.as_mut_ptr().add(off) as *mut __m512i, vnew_x);
+                _mm512_storeu_si512(dst_z.as_mut_ptr().add(off) as *mut __m512i, vnew_z);
+            }
 
             let vsrc = _mm512_or_si512(vx1, vz1);
             let vdst = _mm512_or_si512(vx2, vz2);
@@ -134,6 +154,10 @@ unsafe fn rowmul_words_avx512(
             vsum_nz = _mm512_add_epi64(vsum_nz, _mm512_popcnt_epi64(vnonzero));
         }
 
+        if STREAM {
+            _mm_sfence();
+        }
+
         let total_pos = _mm512_reduce_add_epi64(vsum_pos) as u64;
         let total_nz = _mm512_reduce_add_epi64(vsum_nz) as u64;
         let sum = initial_sum
@@ -148,6 +172,26 @@ unsafe fn rowmul_words_avx512(
             &src_z[tail..],
             sum,
         )
+    }
+}
+
+/// [`rowmul_words_avx512`], streaming when both destination rows are 64-byte aligned.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512vpopcntdq")]
+unsafe fn rowmul_words_avx512_nt(
+    dst_x: &mut [u64],
+    dst_z: &mut [u64],
+    src_x: &[u64],
+    src_z: &[u64],
+    initial_sum: u64,
+) -> u64 {
+    // SAFETY: same contract as the enclosing unsafe fn. The streaming form runs only
+    // once both destination rows are checked 64-byte aligned.
+    unsafe {
+        if (dst_x.as_ptr() as usize) & 63 != 0 || (dst_z.as_ptr() as usize) & 63 != 0 {
+            return rowmul_words_avx512::<false>(dst_x, dst_z, src_x, src_z, initial_sum);
+        }
+        rowmul_words_avx512::<true>(dst_x, dst_z, src_x, src_z, initial_sum)
     }
 }
 
@@ -475,7 +519,7 @@ unsafe fn rowmul_words_neon(
 mod rowmul_words_spec {
     pub(super) type Kernel = unsafe fn(&mut [u64], &mut [u64], &[u64], &[u64], u64) -> u64;
 
-    #[repr(align(32))]
+    #[repr(align(64))]
     struct Aligned<const N: usize>([u64; N]);
 
     fn phase_masks(x1: u64, z1: u64, x2: u64, z2: u64) -> (u64, u64) {
@@ -545,8 +589,8 @@ mod rowmul_words_spec {
     }
 
     /// Check an AVX2 rowmul kernel against the regrouped reference on `[x, z]` rows of
-    /// `N` words. The destination rows are 32-byte aligned so the non-temporal kernel
-    /// takes its streaming path. Callers establish AVX2 before calling, except under
+    /// `N` words. The destination rows are 64-byte aligned so the non-temporal kernels
+    /// take their streaming path. Callers establish AVX2 before calling, except under
     /// Kani, which runs no CPU.
     pub(super) fn check<const N: usize>(
         kernel: Kernel,
@@ -564,6 +608,34 @@ mod rowmul_words_spec {
             for (g, w) in got.iter().zip(want) {
                 assert_eq!(g, w);
             }
+        }
+    }
+
+    /// [`check`] with one destination row a word past a 64-byte boundary, each row in
+    /// turn, so the non-temporal kernels take their unaligned fallback.
+    #[cfg(test)]
+    pub(super) fn check_unaligned<const N: usize>(
+        kernel: Kernel,
+        src: [[u64; N]; 2],
+        dst: [[u64; N]; 2],
+        initial_sum: u64,
+    ) {
+        let mut want = dst;
+        let want_sum = reference(&src, &mut want, initial_sum);
+        for (skew_x, skew_z) in [(1, 0), (0, 1)] {
+            let mut buf = vec![0u64; 2 * N + 32];
+            let base = buf.as_ptr().align_offset(64);
+            let (head, tail) = buf[base..].split_at_mut(N.next_multiple_of(8) + 8);
+            let got_x = &mut head[skew_x..skew_x + N];
+            let got_z = &mut tail[skew_z..skew_z + N];
+            got_x.copy_from_slice(&dst[0]);
+            got_z.copy_from_slice(&dst[1]);
+            // SAFETY: all four rows hold exactly `N` words; the caller establishes the
+            // kernel's CPU features.
+            let got_sum = unsafe { kernel(got_x, got_z, &src[0], &src[1], initial_sum) };
+            assert_eq!(got_sum, want_sum);
+            assert_eq!(&*got_x, &want[0][..]);
+            assert_eq!(&*got_z, &want[1][..]);
         }
     }
 
@@ -824,8 +896,12 @@ mod neon_tests {
 
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
-    use super::rowmul_words_spec::{Kernel, check, check_reference, lane_popcount};
-    use super::{rowmul_words_avx2, rowmul_words_avx2_nt, rowmul_words_avx512};
+    use super::rowmul_words_spec::{
+        Kernel, check, check_reference, check_unaligned, lane_popcount,
+    };
+    use super::{
+        rowmul_words_avx2, rowmul_words_avx2_nt, rowmul_words_avx512, rowmul_words_avx512_nt,
+    };
     use rand::{RngExt, SeedableRng};
 
     #[test]
@@ -881,19 +957,13 @@ mod tests {
         run::<35>(&mut rng, nt);
     }
 
-    // `PRISM_REQUIRE_AVX512=1` makes a host without the features fail rather than skip,
-    // for runs under an emulator that is meant to provide them.
     #[test]
     fn rowmul_words_avx512_matches_scalar() {
-        if !crate::backend::word_ops::avx512_detected() {
-            assert!(
-                std::env::var_os("PRISM_REQUIRE_AVX512").is_none(),
-                "PRISM_REQUIRE_AVX512 is set but this CPU lacks avx512f with avx512vpopcntdq"
-            );
+        if !crate::backend::word_ops::avx512_test_host() {
             return;
         }
 
-        fn run<const N: usize>(rng: &mut rand_chacha::ChaCha8Rng) {
+        fn run<const N: usize>(rng: &mut rand_chacha::ChaCha8Rng, kernel: Kernel) {
             for _ in 0..64 {
                 let mut src: [[u64; N]; 2] = rng.random();
                 let mut dst: [[u64; N]; 2] = rng.random();
@@ -907,21 +977,27 @@ mod tests {
                         row[start..end].fill(0);
                     }
                 }
-                check(rowmul_words_avx512, src, dst, rng.random());
+                check(kernel, src, dst, rng.random());
             }
         }
 
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-        run::<0>(&mut rng);
-        run::<3>(&mut rng);
-        run::<7>(&mut rng);
-        run::<8>(&mut rng);
-        run::<9>(&mut rng);
-        run::<15>(&mut rng);
-        run::<16>(&mut rng);
-        run::<17>(&mut rng);
-        run::<24>(&mut rng);
-        run::<35>(&mut rng);
-        run::<64>(&mut rng);
+        let wide: Kernel = rowmul_words_avx512::<false>;
+        let nt: Kernel = rowmul_words_avx512_nt;
+        run::<0>(&mut rng, wide);
+        run::<3>(&mut rng, wide);
+        run::<7>(&mut rng, wide);
+        run::<8>(&mut rng, wide);
+        run::<9>(&mut rng, wide);
+        run::<15>(&mut rng, wide);
+        run::<16>(&mut rng, nt);
+        run::<17>(&mut rng, nt);
+        run::<24>(&mut rng, nt);
+        run::<35>(&mut rng, nt);
+        run::<64>(&mut rng, nt);
+        for _ in 0..8 {
+            check_unaligned::<16>(nt, rng.random(), rng.random(), rng.random());
+            check_unaligned::<35>(nt, rng.random(), rng.random(), rng.random());
+        }
     }
 }

@@ -4,6 +4,10 @@
 
 use super::accumulator::transpose_64x64_dispatch;
 use super::{PauliVec, flip_bit, get_bit, set_bit};
+#[cfg(target_arch = "x86_64")]
+use crate::backend::stabilizer::kernels::rowmul_words_avx512;
+#[cfg(target_arch = "x86_64")]
+use crate::backend::word_ops::{WordTier, word_tier};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -455,6 +459,299 @@ unsafe fn batch_propagate_swap_avx2(
     }
 }
 
+/// Visit `$m_words` in eight-word steps, binding the word offset and a lane mask that is
+/// all ones except on the last partial step.
+#[cfg(target_arch = "x86_64")]
+macro_rules! for_each_word_oct {
+    ($m_words:expr, |$off:ident, $k:ident| $body:block) => {{
+        let m_words: usize = $m_words;
+        let full = m_words & !7;
+        let mut $off = 0usize;
+        while $off < full {
+            let $k: std::arch::x86_64::__mmask8 = 0xFF;
+            $body
+            $off += 8;
+        }
+        if $off < m_words {
+            let $k: std::arch::x86_64::__mmask8 = (1u8 << (m_words - $off)) - 1;
+            $body
+        }
+    }};
+}
+
+/// Load eight words at `p`, or the lanes `k` selects when it is not all ones.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn load_words(p: *const u64, k: std::arch::x86_64::__mmask8) -> std::arch::x86_64::__m512i {
+    use std::arch::x86_64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        if k == 0xFF {
+            _mm512_loadu_si512(p as *const __m512i)
+        } else {
+            _mm512_maskz_loadu_epi64(k, p as *const i64)
+        }
+    }
+}
+
+/// Store eight words at `p`, or the lanes `k` selects when it is not all ones.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn store_words(p: *mut u64, k: std::arch::x86_64::__mmask8, v: std::arch::x86_64::__m512i) {
+    use std::arch::x86_64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        if k == 0xFF {
+            _mm512_storeu_si512(p as *mut __m512i, v);
+        } else {
+            _mm512_mask_storeu_epi64(p as *mut i64, k, v);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn batch_propagate_h_avx512(
+    xq: &mut [u64],
+    zq: &mut [u64],
+    sign: &mut [u64],
+    m_words: usize,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let (xp, zp, sp) = (xq.as_mut_ptr(), zq.as_mut_ptr(), sign.as_mut_ptr());
+        for_each_word_oct!(m_words, |off, k| {
+            let xv = load_words(xp.add(off), k);
+            let zv = load_words(zp.add(off), k);
+            let sv = load_words(sp.add(off), k);
+            store_words(
+                sp.add(off),
+                k,
+                _mm512_ternarylogic_epi64::<0x78>(sv, xv, zv),
+            );
+            store_words(xp.add(off), k, zv);
+            store_words(zp.add(off), k, xv);
+        });
+    }
+}
+
+/// `S` when `negate_z`, `Sdg` otherwise: the sign takes `x & !z` or `x & z`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn batch_propagate_s_avx512(
+    xq: &mut [u64],
+    zq: &mut [u64],
+    sign: &mut [u64],
+    m_words: usize,
+    negate_z: bool,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let (xp, zp, sp) = (xq.as_ptr(), zq.as_mut_ptr(), sign.as_mut_ptr());
+        if negate_z {
+            for_each_word_oct!(m_words, |off, k| {
+                let xv = load_words(xp.add(off), k);
+                let zv = load_words(zp.add(off), k);
+                let sv = load_words(sp.add(off), k);
+                store_words(
+                    sp.add(off),
+                    k,
+                    _mm512_ternarylogic_epi64::<0xB4>(sv, xv, zv),
+                );
+                store_words(zp.add(off), k, _mm512_xor_si512(zv, xv));
+            });
+        } else {
+            for_each_word_oct!(m_words, |off, k| {
+                let xv = load_words(xp.add(off), k);
+                let zv = load_words(zp.add(off), k);
+                let sv = load_words(sp.add(off), k);
+                store_words(
+                    sp.add(off),
+                    k,
+                    _mm512_ternarylogic_epi64::<0x78>(sv, xv, zv),
+                );
+                store_words(zp.add(off), k, _mm512_xor_si512(zv, xv));
+            });
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn batch_propagate_sign_xor_avx512(dst: &mut [u64], src: &[u64], m_words: usize) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let (dp, sp) = (dst.as_mut_ptr(), src.as_ptr());
+        for_each_word_oct!(m_words, |off, k| {
+            let dv = load_words(dp.add(off), k);
+            let sv = load_words(sp.add(off), k);
+            store_words(dp.add(off), k, _mm512_xor_si512(dv, sv));
+        });
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn batch_propagate_sign_xor2_avx512(dst: &mut [u64], a: &[u64], b: &[u64], m_words: usize) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let (dp, ap, bp) = (dst.as_mut_ptr(), a.as_ptr(), b.as_ptr());
+        for_each_word_oct!(m_words, |off, k| {
+            let dv = load_words(dp.add(off), k);
+            let av = load_words(ap.add(off), k);
+            let bv = load_words(bp.add(off), k);
+            store_words(
+                dp.add(off),
+                k,
+                _mm512_ternarylogic_epi64::<0x96>(dv, av, bv),
+            );
+        });
+    }
+}
+
+/// `SXdg` when `negate_x`, `SX` otherwise: the sign takes `!x & z` or `x & z`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn batch_propagate_sx_avx512(
+    xq: &mut [u64],
+    zq: &[u64],
+    sign: &mut [u64],
+    m_words: usize,
+    negate_x: bool,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let (xp, zp, sp) = (xq.as_mut_ptr(), zq.as_ptr(), sign.as_mut_ptr());
+        if negate_x {
+            for_each_word_oct!(m_words, |off, k| {
+                let xv = load_words(xp.add(off), k);
+                let zv = load_words(zp.add(off), k);
+                let sv = load_words(sp.add(off), k);
+                store_words(
+                    sp.add(off),
+                    k,
+                    _mm512_ternarylogic_epi64::<0xD2>(sv, xv, zv),
+                );
+                store_words(xp.add(off), k, _mm512_xor_si512(xv, zv));
+            });
+        } else {
+            for_each_word_oct!(m_words, |off, k| {
+                let xv = load_words(xp.add(off), k);
+                let zv = load_words(zp.add(off), k);
+                let sv = load_words(sp.add(off), k);
+                store_words(
+                    sp.add(off),
+                    k,
+                    _mm512_ternarylogic_epi64::<0x78>(sv, xv, zv),
+                );
+                store_words(xp.add(off), k, _mm512_xor_si512(xv, zv));
+            });
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn batch_propagate_cx_avx512(
+    x_ctrl: &[u64],
+    z_ctrl: &mut [u64],
+    x_tgt: &mut [u64],
+    z_tgt: &[u64],
+    sign: &mut [u64],
+    m_words: usize,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let (xcp, zcp) = (x_ctrl.as_ptr(), z_ctrl.as_mut_ptr());
+        let (xtp, ztp) = (x_tgt.as_mut_ptr(), z_tgt.as_ptr());
+        let sp = sign.as_mut_ptr();
+        for_each_word_oct!(m_words, |off, k| {
+            let xc = load_words(xcp.add(off), k);
+            let zc = load_words(zcp.add(off), k);
+            let xt = load_words(xtp.add(off), k);
+            let zt = load_words(ztp.add(off), k);
+            let sv = load_words(sp.add(off), k);
+            let xc_eq = _mm512_ternarylogic_epi64::<0x90>(xc, zc, xt);
+            store_words(
+                sp.add(off),
+                k,
+                _mm512_ternarylogic_epi64::<0x78>(sv, xc_eq, zt),
+            );
+            store_words(xtp.add(off), k, _mm512_xor_si512(xt, xc));
+            store_words(zcp.add(off), k, _mm512_xor_si512(zc, zt));
+        });
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn batch_propagate_cz_avx512(
+    x0: &[u64],
+    z0: &mut [u64],
+    x1: &[u64],
+    z1: &mut [u64],
+    sign: &mut [u64],
+    m_words: usize,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let (x0p, z0p, x1p, z1p) = (x0.as_ptr(), z0.as_mut_ptr(), x1.as_ptr(), z1.as_mut_ptr());
+        let sp = sign.as_mut_ptr();
+        for_each_word_oct!(m_words, |off, k| {
+            let xv0 = load_words(x0p.add(off), k);
+            let zv0 = load_words(z0p.add(off), k);
+            let xv1 = load_words(x1p.add(off), k);
+            let zv1 = load_words(z1p.add(off), k);
+            let sv = load_words(sp.add(off), k);
+            let x0_zne = _mm512_ternarylogic_epi64::<0x60>(xv0, zv0, zv1);
+            store_words(
+                sp.add(off),
+                k,
+                _mm512_ternarylogic_epi64::<0x78>(sv, x0_zne, xv1),
+            );
+            store_words(z0p.add(off), k, _mm512_xor_si512(zv0, xv1));
+            store_words(z1p.add(off), k, _mm512_xor_si512(zv1, xv0));
+        });
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn batch_propagate_swap_avx512(
+    x0: &mut [u64],
+    z0: &mut [u64],
+    x1: &mut [u64],
+    z1: &mut [u64],
+    m_words: usize,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let (x0p, z0p, x1p, z1p) = (
+            x0.as_mut_ptr(),
+            z0.as_mut_ptr(),
+            x1.as_mut_ptr(),
+            z1.as_mut_ptr(),
+        );
+        for_each_word_oct!(m_words, |off, k| {
+            let xv0 = load_words(x0p.add(off), k);
+            let xv1 = load_words(x1p.add(off), k);
+            store_words(x0p.add(off), k, xv1);
+            store_words(x1p.add(off), k, xv0);
+            let zv0 = load_words(z0p.add(off), k);
+            let zv1 = load_words(z1p.add(off), k);
+            store_words(z0p.add(off), k, zv1);
+            store_words(z1p.add(off), k, zv0);
+        });
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 unsafe fn batch_propagate_h_neon(xq: &mut [u64], zq: &mut [u64], sign: &mut [u64], m_words: usize) {
@@ -844,12 +1141,22 @@ fn propagate_rows_1q(
     m_words: usize,
 ) {
     #[cfg(target_arch = "x86_64")]
-    let use_avx2 = m_words >= 4 && is_x86_feature_detected!("avx2");
+    let tier = word_tier();
+    #[cfg(target_arch = "x86_64")]
+    let use_avx512 = m_words >= 8 && tier == WordTier::Avx512;
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = m_words >= 4 && tier != WordTier::Scalar;
     #[cfg(target_arch = "aarch64")]
     let use_neon = m_words >= 2;
 
     match gate {
         Gate::H => {
+            #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid with m_words elements
+                unsafe { batch_propagate_h_avx512(xq, zq, sign, m_words) };
+                return;
+            }
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
@@ -869,6 +1176,12 @@ fn propagate_rows_1q(
         }
         Gate::S => {
             #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid with m_words elements
+                unsafe { batch_propagate_s_avx512(xq, zq, sign, m_words, true) };
+                return;
+            }
+            #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
                 unsafe { batch_propagate_s_avx2(xq, zq, sign, m_words, true) };
@@ -886,6 +1199,12 @@ fn propagate_rows_1q(
             }
         }
         Gate::Sdg => {
+            #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid with m_words elements
+                unsafe { batch_propagate_s_avx512(xq, zq, sign, m_words, false) };
+                return;
+            }
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
@@ -905,6 +1224,12 @@ fn propagate_rows_1q(
         }
         Gate::X => {
             #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid with m_words elements
+                unsafe { batch_propagate_sign_xor_avx512(sign, zq, m_words) };
+                return;
+            }
+            #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
                 unsafe { batch_propagate_sign_xor_avx2(sign, zq, m_words) };
@@ -921,6 +1246,12 @@ fn propagate_rows_1q(
             }
         }
         Gate::Y => {
+            #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid with m_words elements
+                unsafe { batch_propagate_sign_xor2_avx512(sign, xq, zq, m_words) };
+                return;
+            }
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
@@ -939,6 +1270,12 @@ fn propagate_rows_1q(
         }
         Gate::Z => {
             #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid with m_words elements
+                unsafe { batch_propagate_sign_xor_avx512(sign, xq, m_words) };
+                return;
+            }
+            #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
                 unsafe { batch_propagate_sign_xor_avx2(sign, xq, m_words) };
@@ -955,6 +1292,12 @@ fn propagate_rows_1q(
             }
         }
         Gate::SX => {
+            #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid with m_words elements
+                unsafe { batch_propagate_sx_avx512(xq, zq, sign, m_words, false) };
+                return;
+            }
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
@@ -973,6 +1316,12 @@ fn propagate_rows_1q(
             }
         }
         Gate::SXdg => {
+            #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid with m_words elements
+                unsafe { batch_propagate_sx_avx512(xq, zq, sign, m_words, true) };
+                return;
+            }
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
@@ -1005,12 +1354,22 @@ fn propagate_rows_2q(
     m_words: usize,
 ) {
     #[cfg(target_arch = "x86_64")]
-    let use_avx2 = m_words >= 4 && is_x86_feature_detected!("avx2");
+    let tier = word_tier();
+    #[cfg(target_arch = "x86_64")]
+    let use_avx512 = m_words >= 8 && tier == WordTier::Avx512;
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = m_words >= 4 && tier != WordTier::Scalar;
     #[cfg(target_arch = "aarch64")]
     let use_neon = m_words >= 2;
 
     match gate {
         Gate::Cx => {
+            #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid, ctrl != tgt
+                unsafe { batch_propagate_cx_avx512(x0, z0, x1, z1, sign, m_words) };
+                return;
+            }
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid, ctrl != tgt
@@ -1031,6 +1390,12 @@ fn propagate_rows_2q(
         }
         Gate::Cz => {
             #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid, q0 != q1
+                unsafe { batch_propagate_cz_avx512(x0, z0, x1, z1, sign, m_words) };
+                return;
+            }
+            #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid, q0 != q1
                 unsafe { batch_propagate_cz_avx2(x0, z0, x1, z1, sign, m_words) };
@@ -1049,6 +1414,12 @@ fn propagate_rows_2q(
             }
         }
         Gate::Swap => {
+            #[cfg(target_arch = "x86_64")]
+            if use_avx512 {
+                // SAFETY: AVX-512F detected, slices are valid, q0 != q1
+                unsafe { batch_propagate_swap_avx512(x0, z0, x1, z1, m_words) };
+                return;
+            }
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid, q0 != q1
@@ -1226,6 +1597,24 @@ unsafe fn rowmul_neon(src_ptr: *const u64, dst_ptr: *mut u64, nw: usize, initial
     }
 }
 
+/// [`rowmul_avx2`] on AVX-512, through the stabilizer row kernel over the `[x | z]`
+/// halves of both buffers.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn rowmul_avx512(
+    src_ptr: *const u64,
+    dst_ptr: *mut u64,
+    nw: usize,
+    initial_sum: u64,
+) -> u64 {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let (src_x, src_z) = std::slice::from_raw_parts(src_ptr, 2 * nw).split_at(nw);
+        let (dst_x, dst_z) = std::slice::from_raw_parts_mut(dst_ptr, 2 * nw).split_at_mut(nw);
+        rowmul_words_avx512::<false>(dst_x, dst_z, src_x, src_z, initial_sum)
+    }
+}
+
 /// Rowmul: multiply src into xz[r_base..], returning the resulting phase.
 #[inline(always)]
 pub(super) fn rowmul_phase(
@@ -1239,11 +1628,22 @@ pub(super) fn rowmul_phase(
     let initial_sum = if src_phase { 2u64 } else { 0 } + if dst_phase { 2u64 } else { 0 };
 
     #[cfg(target_arch = "x86_64")]
-    if nw >= 4 && is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 detected, src has 2*nw elements, xz[r_base..] has 2*nw elements
-        let sum =
-            unsafe { rowmul_avx2(src.as_ptr(), xz.as_mut_ptr().add(r_base), nw, initial_sum) };
-        return (sum & 3) >= 2;
+    {
+        let tier = word_tier();
+        if nw >= 8 && tier == WordTier::Avx512 {
+            // SAFETY: AVX-512F and VPOPCNTDQ detected, src has 2*nw elements, xz[r_base..]
+            // has 2*nw elements
+            let sum = unsafe {
+                rowmul_avx512(src.as_ptr(), xz.as_mut_ptr().add(r_base), nw, initial_sum)
+            };
+            return (sum & 3) >= 2;
+        }
+        if nw >= 4 && tier != WordTier::Scalar {
+            // SAFETY: AVX2 detected, src has 2*nw elements, xz[r_base..] has 2*nw elements
+            let sum =
+                unsafe { rowmul_avx2(src.as_ptr(), xz.as_mut_ptr().add(r_base), nw, initial_sum) };
+            return (sum & 3) >= 2;
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -1287,17 +1687,32 @@ pub(super) fn rowmul_phase_into(
     let initial_sum = if src_phase { 2u64 } else { 0 } + if dst_phase { 2u64 } else { 0 };
 
     #[cfg(target_arch = "x86_64")]
-    if nw >= 4 && is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 detected, xz[s_base..] is src, scratch is dst
-        let sum = unsafe {
-            rowmul_avx2(
-                xz.as_ptr().add(s_base),
-                scratch.as_mut_ptr(),
-                nw,
-                initial_sum,
-            )
-        };
-        return (sum & 3) >= 2;
+    {
+        let tier = word_tier();
+        if nw >= 8 && tier == WordTier::Avx512 {
+            // SAFETY: AVX-512F and VPOPCNTDQ detected, xz[s_base..] is src, scratch is dst
+            let sum = unsafe {
+                rowmul_avx512(
+                    xz.as_ptr().add(s_base),
+                    scratch.as_mut_ptr(),
+                    nw,
+                    initial_sum,
+                )
+            };
+            return (sum & 3) >= 2;
+        }
+        if nw >= 4 && tier != WordTier::Scalar {
+            // SAFETY: AVX2 detected, xz[s_base..] is src, scratch is dst
+            let sum = unsafe {
+                rowmul_avx2(
+                    xz.as_ptr().add(s_base),
+                    scratch.as_mut_ptr(),
+                    nw,
+                    initial_sum,
+                )
+            };
+            return (sum & 3) >= 2;
+        }
     }
 
     #[cfg(target_arch = "aarch64")]

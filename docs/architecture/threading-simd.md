@@ -35,11 +35,12 @@ Pool width can change results; see [Determinism](#determinism).
 
 One `Complex64` fills a 128-bit register. Single-qubit gate kernels use `PreparedGate1q` with runtime CPU detection and tiered dispatch:
 
-1. **AVX2+FMA** (256-bit): 2 complex pairs per iteration. Gated by `MAX_AVX2_STATE` for full-state passes (Skylake frequency throttling), but used freely within MultiFused L2 tiles where data is cache-resident.
-2. **FMA** (128-bit): Default for larger states. 3-op complex multiply (permute + mul + fmaddsub).
-3. **SSE2** (128-bit): x86_64 baseline, 2 mul plus shuffle, xor and add.
-4. **NEON** (128-bit): the aarch64 baseline, 1 mul plus 1 fma against a pre-negated matrix.
-5. **Scalar**: no intrinsics, for everything that is neither x86_64 nor aarch64.
+1. **AVX-512** (512-bit): 4 complex pairs per iteration, with masked tails. Opt-in through `PRISM_AVX512=1` on CPUs with `avx512f` and `avx512vpopcntdq`, and kept to the same `MAX_AVX2_STATE` and tile rules as AVX2. Verified under emulation, not yet timed on AVX-512 hardware.
+2. **AVX2+FMA** (256-bit): 2 complex pairs per iteration. Gated by `MAX_AVX2_STATE` for full-state passes (Skylake frequency throttling), but used freely within MultiFused L2 tiles where data is cache-resident.
+3. **FMA** (128-bit): Default for larger states. 3-op complex multiply (permute + mul + fmaddsub).
+4. **SSE2** (128-bit): x86_64 baseline, 2 mul plus shuffle, xor and add.
+5. **NEON** (128-bit): the aarch64 baseline, 1 mul plus 1 fma against a pre-negated matrix.
+6. **Scalar**: no intrinsics, for everything that is neither x86_64 nor aarch64.
 
 `_pext_u64` is not a tier. BatchPhase, BatchRzz and DiagonalBatch use it for LUT
 indexing where BMI2 is present, one bit extraction in place of a shift-and-or loop, and
@@ -124,8 +125,8 @@ comparison run used.
   `rayon::current_num_threads()`, so a different pool width yields a different, equally
   distributed shot set. Pin the width when byte-identical shot payloads matter across
   machines, through `RAYON_NUM_THREADS` on the global path or through the width passed to
-  `ThreadPool::with_threads` on the scoped one. Within a stream, the AVX2, NEON and
-  scalar kernels lay the same four xoshiro lanes over the shot words, so an x86 host
+  `ThreadPool::with_threads` on the scoped one. Within a stream, the AVX-512, AVX2, NEON
+  and scalar kernels lay the same four xoshiro lanes over the shot words, so an x86 host
   and an Apple or Graviton host draw the same shots from one seed;
   `tests/integration/qec_ir.rs` pins the noiseless fingerprint on every CI platform.
   Noise draws go through the platform's `exp` and `ln`, so a noisy payload is bitwise on

@@ -140,6 +140,26 @@ fn correlator_shot_major_equals_meas_major() {
     assert_eq!(a.total_shots(), 4);
 }
 
+// Random matrices, so every bit position of every stage is exercised.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn transpose_64x64_avx512_matches_scalar() {
+    use rand::{RngExt, SeedableRng};
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for _ in 0..32 {
+        let original: [u64; 64] = rng.random();
+        let mut want = original;
+        transpose_64x64(&mut want);
+        let mut got = original;
+        // SAFETY: AVX-512F detected.
+        unsafe { transpose_64x64_avx512(&mut got) };
+        assert_eq!(got, want);
+    }
+}
+
 #[test]
 fn transpose_64x64_scalar_involutive() {
     let mut matrix = [0u64; 64];

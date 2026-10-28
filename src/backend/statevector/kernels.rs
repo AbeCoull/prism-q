@@ -2006,6 +2006,104 @@ unsafe fn radix4_butterfly_pair_slices_avx2fma(
     }
 }
 
+/// The quad loop of [`apply_radix4_groups`] over `groups` radix-4 groups of `s` offsets
+/// starting at `base`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn radix4_groups_avx512(
+    base: *mut f64,
+    groups: usize,
+    s: usize,
+    k_base: usize,
+    twiddles_scaled: &[Complex64],
+    step_outer: usize,
+    step_inner: usize,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        for g in 0..groups {
+            let group_off = g * s * 4;
+            for k_offset in (0..s).step_by(4) {
+                let k = k_base + k_offset;
+                let w = |step: usize, shift: usize| -> [Complex64; 4] {
+                    std::array::from_fn(|j| twiddles_scaled[(k + j + shift) * step])
+                };
+                let a = base.add((group_off + k_offset) * 2);
+                radix4_butterfly_quad_avx512(
+                    a,
+                    a.add(s * 2),
+                    a.add(2 * s * 2),
+                    a.add(3 * s * 2),
+                    &w(step_outer, 0),
+                    &w(step_outer, s),
+                    &w(step_inner, 0),
+                );
+            }
+        }
+    }
+}
+
+/// Radix-4 DIF butterflies at four consecutive offsets of four rows, `a` to `d`. Twiddle
+/// `j` of each array belongs to offset `j`. Each lane runs the AVX2 pair kernel's
+/// arithmetic, so the two agree bitwise.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn radix4_butterfly_quad_avx512(
+    a_ptr: *mut f64,
+    b_ptr: *mut f64,
+    c_ptr: *mut f64,
+    d_ptr: *mut f64,
+    w_2s_k: &[Complex64; 4],
+    w_2s_kps: &[Complex64; 4],
+    w_s_k: &[Complex64; 4],
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm512_add_pd, _mm512_loadu_pd, _mm512_movedup_pd, _mm512_mul_pd, _mm512_permute_pd,
+            _mm512_set1_pd, _mm512_storeu_pd, _mm512_sub_pd,
+        };
+        macro_rules! parts {
+            ($w:expr) => {{
+                let v = _mm512_loadu_pd($w.as_ptr() as *const f64);
+                (_mm512_movedup_pd(v), _mm512_permute_pd::<0xFF>(v))
+            }};
+        }
+        let inv_sqrt2_v = _mm512_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
+        let (w_2s_k_rr, w_2s_k_ii) = parts!(w_2s_k);
+        let (w_2s_kps_rr, w_2s_kps_ii) = parts!(w_2s_kps);
+        let (w_s_k_rr, w_s_k_ii) = parts!(w_s_k);
+
+        let a = _mm512_loadu_pd(a_ptr);
+        let b = _mm512_loadu_pd(b_ptr);
+        let c = _mm512_loadu_pd(c_ptr);
+        let d = _mm512_loadu_pd(d_ptr);
+
+        let t_ac_sum = _mm512_mul_pd(_mm512_add_pd(a, c), inv_sqrt2_v);
+        let t_ac_diff = simd::complex_mul_avx512(w_2s_k_rr, w_2s_k_ii, _mm512_sub_pd(a, c));
+        let t_bd_sum = _mm512_mul_pd(_mm512_add_pd(b, d), inv_sqrt2_v);
+        let t_bd_diff = simd::complex_mul_avx512(w_2s_kps_rr, w_2s_kps_ii, _mm512_sub_pd(b, d));
+
+        _mm512_storeu_pd(
+            a_ptr,
+            _mm512_mul_pd(_mm512_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
+        );
+        _mm512_storeu_pd(
+            b_ptr,
+            simd::complex_mul_avx512(w_s_k_rr, w_s_k_ii, _mm512_sub_pd(t_ac_sum, t_bd_sum)),
+        );
+        _mm512_storeu_pd(
+            c_ptr,
+            _mm512_mul_pd(_mm512_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
+        );
+        _mm512_storeu_pd(
+            d_ptr,
+            simd::complex_mul_avx512(w_s_k_rr, w_s_k_ii, _mm512_sub_pd(t_ac_diff, t_bd_diff)),
+        );
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn neon_twiddle_parts(
@@ -2183,7 +2281,26 @@ fn apply_radix4_groups(
 
     #[cfg(target_arch = "x86_64")]
     {
-        if simd::has_avx2_fma() && s >= 2 {
+        let tier = simd::simd_tier();
+        if tier == simd::SimdTier::Avx512 && s >= 4 {
+            // SAFETY: AVX-512F detected. Quads of adjacent offsets stay inside the same
+            // radix-4 group because s is a power of two of at least four. The safe
+            // alternative is the scalar radix-4 loop below, which the AVX2 path already
+            // replaces for the measured QFT speedup.
+            unsafe {
+                radix4_groups_avx512(
+                    group.as_mut_ptr() as *mut f64,
+                    groups,
+                    s,
+                    k_base,
+                    twiddles_scaled,
+                    step_outer,
+                    step_inner,
+                )
+            };
+            return;
+        }
+        if matches!(tier, simd::SimdTier::Avx512 | simd::SimdTier::Avx2Fma) && s >= 2 {
             // SAFETY: has_avx2_fma() is runtime checked. Adjacent pairs stay
             // inside the same radix-4 group because s >= 2. The safe
             // alternative is the scalar radix-4 loop below; this SIMD path is
@@ -2412,10 +2529,13 @@ fn radix4_runs(
     let _ = inv_sqrt2;
 
     #[cfg(target_arch = "x86_64")]
-    if simd::has_avx2_fma() && n >= 2 {
+    let tier = simd::simd_tier();
+    #[cfg(target_arch = "x86_64")]
+    if matches!(tier, simd::SimdTier::Avx512 | simd::SimdTier::Avx2Fma) && n >= 2 {
         let mut j = 0usize;
-        // SAFETY: AVX2 detected. Each call reads and writes two adjacent amplitudes
-        // at offset `j` of four disjoint slices of length `n`, with `j + 2 <= n`.
+        // SAFETY: AVX2, and AVX-512F for the quad loop, detected. Each call reads and
+        // writes four or two adjacent amplitudes at offset `j` of four disjoint slices
+        // of length `n`, with `j + 4 <= n` or `j + 2 <= n`.
         unsafe {
             let (pa, pb, pc, pd) = (
                 qa.as_mut_ptr() as *mut f64,
@@ -2423,6 +2543,20 @@ fn radix4_runs(
                 qc.as_mut_ptr() as *mut f64,
                 qd.as_mut_ptr() as *mut f64,
             );
+            if tier == simd::SimdTier::Avx512 {
+                while j + 4 <= n {
+                    radix4_butterfly_quad_avx512(
+                        pa.add(j * 2),
+                        pb.add(j * 2),
+                        pc.add(j * 2),
+                        pd.add(j * 2),
+                        w_outer[j..].first_chunk().expect("four twiddles"),
+                        w_outer_s[j..].first_chunk().expect("four twiddles"),
+                        w_inner[j..].first_chunk().expect("four twiddles"),
+                    );
+                    j += 4;
+                }
+            }
             while j + 2 <= n {
                 radix4_butterfly_pair_slices_avx2fma(
                     pa.add(j * 2),
@@ -2686,10 +2820,18 @@ fn qft_dif_rows(buf: &mut [Complex64], row_len: usize, bits: usize, compact: &[C
 fn radix2_rows(lo: &mut [Complex64], hi: &mut [Complex64], w: Complex64) {
     debug_assert_eq!(lo.len(), hi.len());
     #[cfg(target_arch = "x86_64")]
-    if simd::has_avx2_fma() {
-        // SAFETY: AVX2 detected. The rows share one even length.
-        unsafe { radix2_rows_avx2fma(lo, hi, w) };
-        return;
+    match simd::simd_tier() {
+        simd::SimdTier::Avx512 => {
+            // SAFETY: AVX-512F detected. The rows share one even length.
+            unsafe { radix2_rows_avx512(lo, hi, w) };
+            return;
+        }
+        simd::SimdTier::Avx2Fma => {
+            // SAFETY: AVX2 detected. The rows share one even length.
+            unsafe { radix2_rows_avx2fma(lo, hi, w) };
+            return;
+        }
+        simd::SimdTier::Fma | simd::SimdTier::Sse2 => {}
     }
     let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
     for (a, b) in lo.iter_mut().zip(hi.iter_mut()) {
@@ -2721,6 +2863,36 @@ unsafe fn radix2_rows_avx2fma(lo: &mut [Complex64], hi: &mut [Complex64], w: Com
     }
 }
 
+/// Four amplitudes per step; a row length that leaves two runs one masked step.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn radix2_rows_avx512(lo: &mut [Complex64], hi: &mut [Complex64], w: Complex64) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use simd::{load_pd, store_pd};
+        use std::arch::x86_64::{
+            __mmask8, _mm512_add_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_sub_pd,
+        };
+        let inv_sqrt2_v = _mm512_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
+        let (w_rr, w_ii) = (_mm512_set1_pd(w.re), _mm512_set1_pd(w.im));
+        let (pl, ph) = (lo.as_mut_ptr() as *mut f64, hi.as_mut_ptr() as *mut f64);
+        simd::for_each_quad!(lo.len(), |off, k| {
+            let a = load_pd(pl.add(off), k);
+            let b = load_pd(ph.add(off), k);
+            store_pd(
+                pl.add(off),
+                k,
+                _mm512_mul_pd(_mm512_add_pd(a, b), inv_sqrt2_v),
+            );
+            store_pd(
+                ph.add(off),
+                k,
+                simd::complex_mul_avx512(w_rr, w_ii, _mm512_sub_pd(a, b)),
+            );
+        });
+    }
+}
+
 /// Radix-4 DIF butterflies across four rows of one even length sharing one twiddle
 /// triple, in the argument order of [`radix4_butterfly_values`].
 #[inline(always)]
@@ -2737,10 +2909,18 @@ fn radix4_rows(
     debug_assert!(qb.len() == n && qc.len() == n && qd.len() == n);
 
     #[cfg(target_arch = "x86_64")]
-    if simd::has_avx2_fma() {
-        // SAFETY: AVX2 detected. The four rows share one even length.
-        unsafe { radix4_rows_avx2fma(qa, qb, qc, qd, w_outer, w_outer_s, w_inner) };
-        return;
+    match simd::simd_tier() {
+        simd::SimdTier::Avx512 => {
+            // SAFETY: AVX-512F detected. The four rows share one even length.
+            unsafe { radix4_rows_avx512(qa, qb, qc, qd, w_outer, w_outer_s, w_inner) };
+            return;
+        }
+        simd::SimdTier::Avx2Fma => {
+            // SAFETY: AVX2 detected. The four rows share one even length.
+            unsafe { radix4_rows_avx2fma(qa, qb, qc, qd, w_outer, w_outer_s, w_inner) };
+            return;
+        }
+        simd::SimdTier::Fma | simd::SimdTier::Sse2 => {}
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -2840,6 +3020,68 @@ unsafe fn radix4_rows_avx2fma(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn radix4_rows_avx512(
+    qa: &mut [Complex64],
+    qb: &mut [Complex64],
+    qc: &mut [Complex64],
+    qd: &mut [Complex64],
+    w_outer: Complex64,
+    w_outer_s: Complex64,
+    w_inner: Complex64,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use simd::{load_pd, store_pd};
+        use std::arch::x86_64::{
+            __mmask8, _mm512_add_pd, _mm512_mul_pd, _mm512_set1_pd, _mm512_sub_pd,
+        };
+        let inv_sqrt2_v = _mm512_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
+        let (wo_rr, wo_ii) = (_mm512_set1_pd(w_outer.re), _mm512_set1_pd(w_outer.im));
+        let (ws_rr, ws_ii) = (_mm512_set1_pd(w_outer_s.re), _mm512_set1_pd(w_outer_s.im));
+        let (wi_rr, wi_ii) = (_mm512_set1_pd(w_inner.re), _mm512_set1_pd(w_inner.im));
+        let (pa, pb, pc, pd) = (
+            qa.as_mut_ptr() as *mut f64,
+            qb.as_mut_ptr() as *mut f64,
+            qc.as_mut_ptr() as *mut f64,
+            qd.as_mut_ptr() as *mut f64,
+        );
+        simd::for_each_quad!(qa.len(), |off, k| {
+            let a = load_pd(pa.add(off), k);
+            let b = load_pd(pb.add(off), k);
+            let c = load_pd(pc.add(off), k);
+            let d = load_pd(pd.add(off), k);
+
+            let t_ac_sum = _mm512_mul_pd(_mm512_add_pd(a, c), inv_sqrt2_v);
+            let t_ac_diff = simd::complex_mul_avx512(wo_rr, wo_ii, _mm512_sub_pd(a, c));
+            let t_bd_sum = _mm512_mul_pd(_mm512_add_pd(b, d), inv_sqrt2_v);
+            let t_bd_diff = simd::complex_mul_avx512(ws_rr, ws_ii, _mm512_sub_pd(b, d));
+
+            store_pd(
+                pa.add(off),
+                k,
+                _mm512_mul_pd(_mm512_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
+            );
+            store_pd(
+                pb.add(off),
+                k,
+                simd::complex_mul_avx512(wi_rr, wi_ii, _mm512_sub_pd(t_ac_sum, t_bd_sum)),
+            );
+            store_pd(
+                pc.add(off),
+                k,
+                _mm512_mul_pd(_mm512_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
+            );
+            store_pd(
+                pd.add(off),
+                k,
+                simd::complex_mul_avx512(wi_rr, wi_ii, _mm512_sub_pd(t_ac_diff, t_bd_diff)),
+            );
+        });
+    }
+}
+
 /// Write `row` into `out` with amplitude `j` times `anchor * low[j * step]`.
 #[inline(always)]
 fn qft_scatter_row(
@@ -2851,10 +3093,18 @@ fn qft_scatter_row(
 ) {
     debug_assert_eq!(out.len(), row.len());
     #[cfg(target_arch = "x86_64")]
-    if simd::has_avx2_fma() {
-        // SAFETY: AVX2 detected. `out` and `row` share one even length.
-        unsafe { qft_scatter_row_avx2fma(out, row, anchor, low, step) };
-        return;
+    match simd::simd_tier() {
+        simd::SimdTier::Avx512 => {
+            // SAFETY: AVX-512F detected. `out` and `row` share one even length.
+            unsafe { qft_scatter_row_avx512(out, row, anchor, low, step) };
+            return;
+        }
+        simd::SimdTier::Avx2Fma => {
+            // SAFETY: AVX2 detected. `out` and `row` share one even length.
+            unsafe { qft_scatter_row_avx2fma(out, row, anchor, low, step) };
+            return;
+        }
+        simd::SimdTier::Fma | simd::SimdTier::Sse2 => {}
     }
     for (j, (o, &a)) in out.iter_mut().zip(row).enumerate() {
         *o = a * (anchor * low[j * step]);
@@ -2890,6 +3140,49 @@ unsafe fn qft_scatter_row_avx2fma(
             );
             x += 2 * step;
         }
+    }
+}
+
+/// Four amplitudes per step. A two-amplitude tail reads only the two phases it needs
+/// and stores under a lane mask.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn qft_scatter_row_avx512(
+    out: &mut [Complex64],
+    row: &[Complex64],
+    anchor: Complex64,
+    low: &[Complex64],
+    step: usize,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use simd::{load_pd, store_pd};
+        use std::arch::x86_64::{
+            __mmask8, _mm512_movedup_pd, _mm512_permute_pd, _mm512_set_pd, _mm512_set1_pd,
+        };
+        let (a_rr, a_ii) = (_mm512_set1_pd(anchor.re), _mm512_set1_pd(anchor.im));
+        let (src, dst) = (row.as_ptr() as *const f64, out.as_mut_ptr() as *mut f64);
+        let zero = Complex64::new(0.0, 0.0);
+        simd::for_each_quad!(row.len(), |off, k| {
+            let x = off / 2 * step;
+            let (p0, p1) = (low[x], low[x + step]);
+            let (p2, p3) = if k == 0xFF {
+                (low[x + 2 * step], low[x + 3 * step])
+            } else {
+                (zero, zero)
+            };
+            let w = simd::complex_mul_avx512(
+                a_rr,
+                a_ii,
+                _mm512_set_pd(p3.im, p3.re, p2.im, p2.re, p1.im, p1.re, p0.im, p0.re),
+            );
+            let v = load_pd(src.add(off), k);
+            store_pd(
+                dst.add(off),
+                k,
+                simd::complex_mul_avx512(_mm512_movedup_pd(w), _mm512_permute_pd::<0xFF>(w), v),
+            );
+        });
     }
 }
 

@@ -245,6 +245,13 @@ fn combine_global_half_x86_tiers_match_scalar() {
             assert_state_close(&actual, &expected, &format!("avx2fma len={len}"));
         }
 
+        if crate::backend::word_ops::avx512_test_host() {
+            let mut actual = dst0.clone();
+            // SAFETY: AVX-512F checked above, and the slices have equal length.
+            unsafe { combine_global_half_avx512(&mut actual, &remote, c_self, c_remote) };
+            assert_state_close(&actual, &expected, &format!("avx512 len={len}"));
+        }
+
         let mut actual = dst0.clone();
         combine_global_half(&mut actual, &remote, c_self, c_remote);
         assert_state_close(&actual, &expected, &format!("dispatch len={len}"));
@@ -487,6 +494,13 @@ fn test_prepared_kraus_2q_matches_scalar_reference() {
 
         // SAFETY: AVX2 and FMA checked above.
         let prepared = unsafe { PreparedKraus2q::new(&s) };
+        if crate::backend::word_ops::avx512_test_host() {
+            let mut wide = buf.clone();
+            // SAFETY: AVX-512F checked above; every slot index is in bounds and no
+            // other thread touches the buffer.
+            unsafe { prepared.apply_block_ptr_avx512(wide.as_mut_ptr() as *mut f64, 0, flats) };
+            assert_state_close(&wide, &reference, &format!("avx512 stride {}", flats[1]));
+        }
         // SAFETY: AVX2 and FMA checked above; every slot index is in bounds
         // and no other thread touches the buffer.
         unsafe { prepared.apply_block_ptr(buf.as_mut_ptr() as *mut f64, 0, flats) };
@@ -507,12 +521,16 @@ fn available_tiers() -> Vec<SimdTier> {
     if has_avx2_fma() {
         tiers.push(SimdTier::Avx2Fma);
     }
+    if crate::backend::word_ops::avx512_test_host() {
+        tiers.push(SimdTier::Avx512);
+    }
     tiers
 }
 
 #[cfg(target_arch = "x86_64")]
 fn tier_name(tier: &SimdTier) -> &'static str {
     match tier {
+        SimdTier::Avx512 => "avx512",
         SimdTier::Avx2Fma => "avx2fma",
         SimdTier::Fma => "fma",
         SimdTier::Sse2 => "sse2",
@@ -624,6 +642,175 @@ fn norm_sqr_sum_avx2fma_matches_scalar() {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
+fn random_amplitudes(rng: &mut rand_chacha::ChaCha8Rng, n: usize) -> Vec<Complex64> {
+    use rand::RngExt;
+    (0..n)
+        .map(|_| c(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0)))
+        .collect()
+}
+
+// Lengths 4 to 13 leave every masked tail width, and 37 runs several full steps first.
+#[cfg(target_arch = "x86_64")]
+const AVX512_SLICE_LENGTHS: [usize; 11] = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 37];
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx512_slice_ops_match_avx2() {
+    use rand::SeedableRng;
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    let factor = c(0.6, -0.8);
+    for n in AVX512_SLICE_LENGTHS {
+        let a0 = random_amplitudes(&mut rng, n);
+        let b0 = random_amplitudes(&mut rng, n);
+        // SAFETY: AVX-512F detected, which implies AVX2 and FMA; every slice holds `n`
+        // amplitudes and `dst` at least as many.
+        unsafe {
+            let (mut want, mut got) = (a0.clone(), a0.clone());
+            negate_slice_avx2(&mut want);
+            negate_slice_avx512(&mut got);
+            assert_eq!(got, want, "negate n={n}");
+
+            let (mut want_a, mut want_b) = (a0.clone(), b0.clone());
+            let (mut got_a, mut got_b) = (a0.clone(), b0.clone());
+            swap_slices_avx2(&mut want_a, &mut want_b);
+            swap_slices_avx512(&mut got_a, &mut got_b);
+            assert_eq!((got_a, got_b), (want_a, want_b), "swap n={n}");
+
+            let mut got = a0.clone();
+            zero_slice_avx512(&mut got);
+            assert_eq!(got, vec![c(0.0, 0.0); n], "zero n={n}");
+
+            let (mut want, mut got) = (a0.clone(), a0.clone());
+            scale_slice_avx2(&mut want, -1.75);
+            scale_slice_avx512(&mut got, -1.75);
+            assert_state_close(&got, &want, &format!("scale n={n}"));
+
+            let (mut want, mut got) = (a0.clone(), a0.clone());
+            scale_complex_slice_avx2fma(&mut want, factor);
+            scale_complex_slice_avx512(&mut got, factor);
+            assert_state_close(&got, &want, &format!("scale_complex n={n}"));
+
+            let (mut want, mut got) = (b0.clone(), b0.clone());
+            scale_complex_to_slice_avx2fma(&mut want, &a0, factor);
+            scale_complex_to_slice_avx512(&mut got, &a0, factor);
+            assert_state_close(&got, &want, &format!("scale_complex_to n={n}"));
+
+            let (want, got) = (norm_sqr_sum_avx2fma(&a0), norm_sqr_sum_avx512(&a0));
+            assert!(
+                (got - want).abs() < 1e-9,
+                "norm_sqr_sum n={n}: {got} vs {want}"
+            );
+
+            let (mut want, mut got) = (vec![0.0; n], vec![0.0; n]);
+            norm_sqr_to_slice_avx2(&a0, &mut want);
+            norm_sqr_to_slice_avx512::<false>(&a0, &mut got, 1.0);
+            for (g, w) in got.iter().zip(&want) {
+                assert!((g - w).abs() < EPS, "norm_sqr_to_slice n={n}");
+            }
+            norm_sqr_to_slice_scaled_avx2(&a0, &mut want, 0.3);
+            norm_sqr_to_slice_avx512::<true>(&a0, &mut got, 0.3);
+            for (g, w) in got.iter().zip(&want) {
+                assert!((g - w).abs() < EPS, "norm_sqr_to_slice_scaled n={n}");
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx512_prepared_1q_matches_avx2() {
+    use rand::SeedableRng;
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    let mat = asymmetric_gate();
+    let with_tier = |tier| {
+        let mut prepared = PreparedGate1q::new(&mat);
+        prepared.tier = tier;
+        prepared
+    };
+    let (narrow, wide) = (with_tier(SimdTier::Avx2Fma), with_tier(SimdTier::Avx512));
+    for n in AVX512_SLICE_LENGTHS {
+        let (lo0, hi0) = (
+            random_amplitudes(&mut rng, n),
+            random_amplitudes(&mut rng, n),
+        );
+        let (mut want_lo, mut want_hi) = (lo0.clone(), hi0.clone());
+        let (mut got_lo, mut got_hi) = (lo0, hi0);
+        narrow.apply(&mut want_lo, &mut want_hi);
+        wide.apply(&mut got_lo, &mut got_hi);
+        assert_state_close(&got_lo, &want_lo, &format!("apply lo n={n}"));
+        assert_state_close(&got_hi, &want_hi, &format!("apply hi n={n}"));
+    }
+    for nq in [3usize, 6, 9] {
+        let state0 = random_amplitudes(&mut rng, 1 << nq);
+        for target in 0..nq {
+            let (mut want, mut got) = (state0.clone(), state0.clone());
+            narrow.apply_tiled(&mut want, target);
+            wide.apply_tiled(&mut got, target);
+            assert_state_close(&got, &want, &format!("tiled nq={nq} target={target}"));
+        }
+    }
+}
+
+// Lower targets 0 and 1 hand off to the AVX2 pair loop and 2 and up take the quad
+// kernel, through both the tile entry point and the parallel run entry point.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx512_prepared_2q_matches_avx2() {
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let mat = dense_4x4();
+    let with_tier = |tier| {
+        let mut prepared = PreparedGate2q::new(&mat);
+        prepared.tier = tier;
+        prepared
+    };
+    let (narrow, wide) = (with_tier(SimdTier::Avx2Fma), with_tier(SimdTier::Avx512));
+    for &(nq, q0, q1) in &[
+        (4, 0, 1),
+        (4, 1, 2),
+        (4, 2, 3),
+        (5, 3, 2),
+        (6, 1, 5),
+        (6, 2, 5),
+        (8, 7, 2),
+        (8, 3, 6),
+        (10, 4, 9),
+    ] {
+        let state0 = random_state(nq, 0xCAFE_F00D);
+        let (mut want, mut got) = (state0.clone(), state0.clone());
+        narrow.apply_tiled(&mut want, nq, q0, q1);
+        wide.apply_tiled(&mut got, nq, q0, q1);
+        assert_state_close(&got, &want, &format!("tiled nq={nq} q0={q0} q1={q1}"));
+
+        #[cfg(feature = "parallel")]
+        for run in [4usize, 16].into_iter().filter(|&run| run <= 1 << (nq - 2)) {
+            let groups = 1usize << (nq - 2);
+            let (mut want, mut got) = (state0.clone(), state0.clone());
+            for first in (0..groups).step_by(run) {
+                // SAFETY: each aligned run names in-bounds groups of this state, and no
+                // other thread touches it.
+                unsafe {
+                    narrow.apply_groups_ptr(want.as_mut_ptr() as *mut f64, first, run, q0, q1);
+                    wide.apply_groups_ptr(got.as_mut_ptr() as *mut f64, first, run, q0, q1);
+                }
+            }
+            assert_state_close(
+                &got,
+                &want,
+                &format!("runs of {run} nq={nq} q0={q0} q1={q1}"),
+            );
+        }
+    }
+}
+
 // Completeness tripwire: pin the count of `#[target_feature]` kernels so adding
 // one without a paired per-tier test fails here. Reads source text only, so it
 // runs on every arch.
@@ -633,11 +820,15 @@ fn target_feature_kernel_count_is_pinned() {
     let needle = concat!("target_feature", "(enable");
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
-    let expected: [(&str, usize); 4] = [
-        ("src/backend/simd.rs", 32),
-        ("src/backend/word_ops.rs", 2),
-        ("src/backend/stabilizer/kernels/simd.rs", 4),
-        ("src/backend/statevector/kernels.rs", 12),
+    let expected: [(&str, usize); 8] = [
+        ("src/backend/simd.rs", 48),
+        ("src/backend/word_ops.rs", 3),
+        ("src/backend/stabilizer/kernels/simd.rs", 5),
+        ("src/backend/statevector/kernels.rs", 17),
+        ("src/sim/compiled/accumulator.rs", 2),
+        ("src/sim/compiled/bts.rs", 4),
+        ("src/sim/compiled/propagation.rs", 17),
+        ("src/sim/compiled/rng.rs", 4),
     ];
     for (file, want) in expected {
         let path = format!("{root}/{file}");

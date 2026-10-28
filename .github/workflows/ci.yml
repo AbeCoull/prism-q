@@ -139,8 +139,12 @@ jobs:
 
   # No hosted runner guarantees AVX-512, so the AVX-512 kernels run under Intel SDE
   # emulating Sapphire Rapids. PRISM_REQUIRE_AVX512 fails a test that would otherwise
-  # skip for want of the features, and PRISM_AVX512 routes the stabilizer suite through
-  # the AVX-512 dispatch.
+  # skip for want of the features, and PRISM_AVX512 routes the suites that own AVX-512
+  # kernels through the AVX-512 dispatch. The distributed features compile the
+  # global-half combine kernel. Each test binary runs as one libtest process: SDE
+  # spends about 10 s starting every process, which under nextest's process per test
+  # was most of the job. The pinned local-qubit floor keeps the distributed tests'
+  # cached knob the same whichever runs first in the shared process.
   avx512-sde:
     name: AVX-512 kernels (SDE)
     runs-on: ubuntu-latest
@@ -152,7 +156,6 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: avx512-sde
-          nextest: true
 
       - name: Install Intel SDE
         run: |
@@ -163,11 +166,23 @@ jobs:
           sudo sysctl -w kernel.yama.ptrace_scope=0
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$RUNNER_TEMP/sde/sde64 -spr --" >> "$GITHUB_ENV"
 
-      - name: Stabilizer suite through the AVX-512 dispatch
+      - name: Kernel suites through the AVX-512 dispatch
         env:
           PRISM_AVX512: "1"
           PRISM_REQUIRE_AVX512: "1"
-        run: cargo nextest run --features "$CI_FEATURES" --lib -E 'test(stabilizer)'
+          PRISM_DIST_MIN_LOCAL_QUBITS: "1"
+        run: >-
+          cargo test --profile ci-release --features "$CI_DIST_FEATURES" --lib --
+          stabilizer word_ops sim::compiled backend::simd backend::statevector
+          backend::factored density_matrix qft
+
+      - name: Density-matrix integration through the AVX-512 dispatch
+        env:
+          PRISM_AVX512: "1"
+          PRISM_REQUIRE_AVX512: "1"
+        run: >-
+          cargo test --profile ci-release --features "$CI_DIST_FEATURES" --test integration --
+          density_matrix_correctness:: density_matrix_fold_contract::
 
   check-no-default-features:
     name: Lint & Test (no default features)

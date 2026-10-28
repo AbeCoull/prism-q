@@ -164,6 +164,46 @@ fn vector_and_scalar_paths_draw_one_stream() {
     }
 }
 
+// The AVX-512 kernel regroups the four-lane stream into eight-word columns, so it must
+// match the portable loop bitwise across partial octets, partial tiles (rank 17 tiles
+// four octets, rank 300 one), and every column count the row XOR specialises.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx512_path_draws_the_same_stream() {
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let num_meas = 40;
+    for rank in [0, 1, 2, 3, 5, 17, 70, 300] {
+        let mut setup = rng(11 + rank as u64);
+        let mask = (1u64 << num_meas) - 1;
+        let flip_rows: Vec<Vec<u64>> = (0..rank).map(|_| vec![setup.next_u64() & mask]).collect();
+        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
+        let ref_bits = vec![setup.next_u64() & mask];
+        for num_shots in [512, 513, 576, 1000, 1024, 1536, 2048 + 64, 4672, 5000] {
+            let mut scalar_rng = rng(99);
+            let mut vector_rng = rng(99);
+            let scalar = scalar_samples(&sparse, num_shots, &ref_bits, &mut scalar_rng, rank);
+            let words = num_shots.div_ceil(64);
+            let mut vector = vec![0; num_meas * words];
+            let mut output = BtsOutput::contiguous(&mut vector, num_meas, words);
+            // SAFETY: AVX-512F detected.
+            unsafe {
+                sample_bts_meas_major_avx512(
+                    &sparse,
+                    num_shots,
+                    &ref_bits,
+                    &mut vector_rng,
+                    rank,
+                    &mut output,
+                );
+            }
+            assert_eq!(scalar, vector, "{num_shots} shots, rank {rank}");
+            assert_eq!(scalar_rng.next_u64(), vector_rng.next_u64());
+        }
+    }
+}
+
 #[test]
 fn strided_output_preserves_stream_and_neighbouring_words() {
     const SENTINEL: u64 = 0x1234_5678_9abc_def0;

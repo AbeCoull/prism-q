@@ -29,7 +29,8 @@ the architecture reference under [Fusion Pipeline](../architecture/fusion.md) an
    shape by hand. Budgets past 256 KB are derived, not measured, so a core with a
    larger cache is worth a sweep of `PRISM_TILE_KB`.
 3. **SIMD** vectorizes the inner complex-arithmetic loop. The tier is picked at
-   runtime: AVX2+FMA, FMA or SSE2 on x86_64, NEON on aarch64, scalar elsewhere.
+   runtime: AVX-512 (opt-in, see `PRISM_AVX512` below), AVX2+FMA, FMA or SSE2 on x86_64,
+   NEON on aarch64, scalar elsewhere.
 
 The levers are ordered, and lever 3 comes after a prior question: whether the arithmetic
 can be removed rather than issued faster. A kernel whose operations an algebraic identity or an
@@ -97,7 +98,7 @@ memory by default, and a layer that sets it discards the per-cap values below it
 |----------|---------|--------|
 | `PRISM_MAX_DENSE_OUTCOME_BITS` | detected | Measured-bit cap for dense terminal sampling |
 | `PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB` | `256` | Soft cap on cached QFT twiddle tables; `0` disables the cache |
-| `PRISM_AVX512` | unset | `1` runs the stabilizer row kernel on AVX-512 where the CPU has `avx512f` and `avx512vpopcntdq`; verified under emulation, not yet timed on AVX-512 hardware |
+| `PRISM_AVX512` | unset | `1` runs on AVX-512 the statevector gate kernels (single-qubit, `Multi2q` tiles, parallel `Fused2q` runs), QFT butterflies and bulk amplitude ops, the density-matrix two-qubit Kraus block, the stabilizer row kernel (with its streaming-store form), bulk word XOR, and the compiled sampler's propagation, BTS, random-word and transpose kernels where the CPU has `avx512f` and `avx512vpopcntdq`; verified under emulation, not yet timed on AVX-512 hardware |
 | `PRISM_GPU_MIN_QUBITS` | `14` | Auto GPU crossover qubit count (`gpu` feature) |
 | `PRISM_STABILIZER_GPU_MIN_QUBITS` | `100000` | Stabilizer GPU crossover qubit count |
 | `PRISM_GPU_BTS_MIN_SHOTS` | `131072` | Shot count from which compiled BTS sampling runs on the device |
@@ -111,7 +112,7 @@ memory by default, and a layer that sets it discards the per-cap values below it
 | `PRISM_TILE_KB` | detected | Cache-resident tile budget in KB, rounded down to a power of two, 128 to 2048; derived from the cache topology when unset (256 on a 256 KB L2) |
 | `PRISM_MULTI_2Q_TILE_BITS` | detected | Log2 of the `Multi2q` tile in amplitudes, 13 to 18; the tile budget when unset (14 at 256 KB) |
 | `PRISM_MULTI_2Q_LOW_BITS` | 6 | Log2 of the contiguous run a `Multi2q` tile gathers, 6 to one below the tile bits; fewer means more high qubits per pass |
-| `PRISM_NO_AVX2_KRAUS` | unset | Flag: disable the AVX2 dense two-qubit Kraus kernel |
+| `PRISM_NO_AVX2_KRAUS` | unset | Flag: disable the AVX2 and AVX-512 dense two-qubit Kraus kernels |
 | `PRISM_NO_REORDER` | unset | Flag: disable the `Fused2q` reordering that fills each `Multi2q` tile |
 | `PRISM_NO_QFT_BLOCK` | unset | Flag: expand `QftBlock` to the textbook sequence and leave expanded QFTs as gates |
 

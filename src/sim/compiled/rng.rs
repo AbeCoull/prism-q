@@ -324,6 +324,69 @@ impl Xoshiro256PlusPlusX4 {
     }
 }
 
+/// The four [`Xoshiro256PlusPlusX4`] streams across eight lanes: lanes `4..8` run one
+/// step ahead of lanes `0..4` and every lane steps twice per draw, so each 512-bit draw
+/// is two consecutive AVX2 draws side by side and the word stream is unchanged.
+#[cfg(target_arch = "x86_64")]
+pub(super) struct Xoshiro256PlusPlusX8 {
+    s0: std::arch::x86_64::__m512i,
+    s1: std::arch::x86_64::__m512i,
+    s2: std::arch::x86_64::__m512i,
+    s3: std::arch::x86_64::__m512i,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Xoshiro256PlusPlusX8 {
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    // SAFETY: caller must ensure AVX-512F is available
+    pub(super) unsafe fn from_scalar(rng: &mut Xoshiro256PlusPlus) -> Self {
+        use std::arch::x86_64::*;
+        let mut lanes = Xoshiro256PlusPlusLanes::from_scalar(rng).0;
+        let mut words = [[0u64; 8]; 4];
+        for (j, lane) in lanes.iter_mut().enumerate() {
+            for (k, w) in words.iter_mut().enumerate() {
+                w[j] = lane.s[k];
+            }
+            lane.next_u64();
+            for (k, w) in words.iter_mut().enumerate() {
+                w[j + 4] = lane.s[k];
+            }
+        }
+        // SAFETY: each row of `words` holds eight u64 values.
+        unsafe {
+            Self {
+                s0: _mm512_loadu_si512(words[0].as_ptr() as *const __m512i),
+                s1: _mm512_loadu_si512(words[1].as_ptr() as *const __m512i),
+                s2: _mm512_loadu_si512(words[2].as_ptr() as *const __m512i),
+                s3: _mm512_loadu_si512(words[3].as_ptr() as *const __m512i),
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f")]
+    // SAFETY: caller must ensure AVX-512F is available
+    pub(super) unsafe fn next_m512i(&mut self) -> std::arch::x86_64::__m512i {
+        use std::arch::x86_64::*;
+
+        let result = _mm512_add_epi64(
+            _mm512_rol_epi64::<23>(_mm512_add_epi64(self.s0, self.s3)),
+            self.s0,
+        );
+        for _ in 0..2 {
+            let t = _mm512_slli_epi64::<17>(self.s1);
+            let s1 = _mm512_ternarylogic_epi64::<0x96>(self.s0, self.s1, self.s2);
+            let s0 = _mm512_ternarylogic_epi64::<0x96>(self.s0, self.s1, self.s3);
+            self.s2 = _mm512_ternarylogic_epi64::<0x96>(self.s0, self.s2, t);
+            self.s3 = _mm512_rol_epi64::<45>(_mm512_xor_si512(self.s3, self.s1));
+            self.s0 = s0;
+            self.s1 = s1;
+        }
+        result
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 pub(super) struct Xoshiro256PlusPlusX2 {
     s0: std::arch::aarch64::uint64x2_t,

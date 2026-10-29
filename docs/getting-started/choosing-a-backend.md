@@ -28,9 +28,10 @@ flowchart TD
     IND -- no --> SV[Statevector]
 ```
 
-Two routes sit outside the tree: a large Clifford circuit that splits into independent
-blocks goes to `FactoredStabilizer`, and a Clifford+T circuit with few T gates tries the
-stabilizer rank and Pauli propagation engines first. The memory limit is half of
+Routes outside the tree: a Clifford circuit of 16 or more qubits that splits into
+independent blocks goes to `FactoredStabilizer`. On a Clifford+T circuit with few T
+gates, shots can take the stabilizer-rank sampler, and marginals at 12 qubits and above
+take deterministic Pauli propagation. Probabilities always come from the tree. The memory limit is half of
 physical memory unless `PRISM_MAX_SV_QUBITS` sets it.
 
 ## Choose explicitly

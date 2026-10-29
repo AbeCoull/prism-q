@@ -40,9 +40,10 @@ let marginals = simulate(&circuit).seed(42).marginals().unwrap();
 ```
 
 ```admonish tip title="Sampling scales past the statevector"
-`sample_counts` and `shots` route through the compiled samplers, which propagate
-measurements through the circuit instead of rebuilding the statevector for every shot.
-Clifford circuits sample at thousands of qubits. See
+On a Clifford circuit, `sample_counts` and `shots` route through the compiled samplers,
+which propagate measurements through the circuit instead of rebuilding the state for
+every shot, so Clifford circuits sample at thousands of qubits. Other circuits with
+terminal measurements sample from one final state. See
 [Compiled Samplers](../architecture/samplers.md).
 ```
 

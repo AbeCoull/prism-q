@@ -1,10 +1,10 @@
-"""Execute the Python examples in docs/guides/python.md and docs/tutorials.
+"""Execute the Python examples in docs/guides/python.md, docs/tutorials and the READMEs.
 
 Blocks fenced as ``python`` run in order in one namespace, so an example may use
 what an earlier one defined. ``python,ignore`` marks a block that needs hardware
 or a launcher CI does not have. A block whose last line ends in ``# raises`` must
-raise ``PrismError``. A tutorial page starts from an empty namespace, so its
-blocks import what they use, as a reader copying them would.
+raise ``PrismError``. A tutorial or README page starts from an empty namespace,
+so its blocks import what they use, as a reader copying them would.
 """
 
 import re
@@ -15,8 +15,10 @@ import pytest
 
 import prism_q
 
-GUIDE = Path(__file__).resolve().parents[3] / "docs" / "guides" / "python.md"
-TUTORIALS = GUIDE.parents[1] / "tutorials"
+ROOT = Path(__file__).resolve().parents[3]
+GUIDE = ROOT / "docs" / "guides" / "python.md"
+TUTORIALS = ROOT / "docs" / "tutorials"
+READMES = [ROOT / "README.md", ROOT / "bindings" / "python" / "README.md"]
 
 # Inputs the guide names without building, keyed by a fragment of the block that
 # first reads them and supplied just before it runs.
@@ -123,18 +125,17 @@ def test_python_guide_examples_run(tmp_path, monkeypatch):
     assert ran > 0
 
 
-def tutorial_pages():
-    if not TUTORIALS.exists():
-        return []
-    return [
-        page
-        for page in sorted(TUTORIALS.glob("*.md"))
-        if "```python\n" in page.read_text(encoding="utf-8")
-    ]
+def example_pages():
+    pages = [page for page in READMES if page.exists()]
+    if TUTORIALS.exists():
+        pages += sorted(TUTORIALS.glob("*.md"))
+    return [page for page in pages if "```python\n" in page.read_text(encoding="utf-8")]
 
 
-@pytest.mark.parametrize("page", tutorial_pages(), ids=lambda page: page.stem)
-def test_tutorial_examples_run(page, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "page", example_pages(), ids=lambda page: page.relative_to(ROOT).as_posix()
+)
+def test_page_examples_run(page, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     namespace = {"__name__": "__main__"}
     for line, info, code in fenced_blocks(page.read_text(encoding="utf-8")):

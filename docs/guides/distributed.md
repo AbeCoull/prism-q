@@ -97,6 +97,17 @@ Not supported: noise models, which the backend rejects because trajectory execut
 not lockstep across ranks; GPU execution, which is single device; and selection by
 `BackendKind::Auto`.
 
+The planned route for noisy shots runs them in lockstep: every rank takes the shots in
+the same order and seeds each shot's noise stream from the run seed and the shot index,
+as the host trajectory loop already does, so all ranks draw the same Pauli and Kraus
+branches without exchanging them. Pauli and depolarizing events read nothing from the
+state. A damping or thermal-relaxation event weighs its branches by the qubit's excited
+population, one `Allreduce` of rank-local sums per event, and a custom Kraus channel
+also needs the qubit's coherence, so a qubit sitting in a rank bit is relabeled local
+before that reduction. Two-qubit Kraus channels stay out, since the backend has no
+two-qubit reduced density matrix, and shots run one at a time across all ranks rather
+than in parallel on each.
+
 ## Testing and measuring
 
 The rank logic is covered without an MPI runtime by the thread loopback transport:

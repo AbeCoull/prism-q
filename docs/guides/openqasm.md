@@ -474,7 +474,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 
 | Construct | Status | What a decline returns |
 | --- | --- | --- |
-| `OPENQASM 2.0` and `3.0` headers | Parses | Any other version: `UnsupportedConstruct` naming the version |
+| `OPENQASM 2.x` and `3.x` headers | Parses | Another major version: `UnsupportedConstruct` naming the version. A header that is not a number: `Parse` |
 | `include "..."` | Accepted and ignored | Nothing. The standard gates are built in, so an include adds no names; a gate it would have defined declines later by name |
 | `qubit`, `qreg`, `bit`, `creg` | Parses | |
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |

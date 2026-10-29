@@ -31,8 +31,9 @@ let probs = result.probabilities.unwrap();
 ## What it does
 
 - Nine CPU backends: statevector, stabilizer, factored stabilizer, sparse, MPS, product
-  state, tensor network and dynamic factored split-state, each picked from the
-  circuit's structure, plus an exact density matrix selected by name.
+  state, tensor network (on expectation and marginal queries) and dynamic factored
+  split-state, each picked from the circuit's structure, plus an exact density matrix
+  selected by name.
 - Compiled shot samplers that do not rebuild the statevector for every shot, including
   the noisy and detector/QEC paths.
 - Clifford+T engines (stabilizer rank, stochastic and deterministic Pauli propagation)

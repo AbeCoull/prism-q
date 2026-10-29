@@ -92,9 +92,29 @@ and bounds the transfer buffers. The default, 2^29 amplitudes, sends a slice of 
   cap; a register past the cap is rejected before the run.
 - A caller-supplied `initial_state`: every rank receives the full vector and keeps its
   own slice.
+- Noisy shots through `.noise(&model)`, for every channel the trajectory engine runs:
+  Pauli and depolarizing, amplitude and phase damping, thermal relaxation, one- and
+  two-qubit Kraus, leakage, and quasi-static drift. Every rank runs the shots one at a
+  time in shot order on one sharded state, re-initialized per shot, and seeds each
+  shot's noise stream from the run seed and the shot index, so the ranks draw the same
+  branches without exchanging them. Pauli events read nothing from the state. A damping
+  or thermal event reads the qubit's excited population, one gather of a scalar per
+  rank; a one-qubit Kraus event reads the qubit's reduced density matrix, one gather of
+  four scalars per rank plus a half-slice exchange when the qubit sits on a rank bit; a
+  two-qubit Kraus event relabels the pair local and gathers its block. With relabeling
+  off, that relabel is undone after the read, two more exchanges; with fewer than two
+  local qubits, the event gathers the whole state instead, under the export cap. Every
+  rank sums the gathered parts in rank order, so every rank weighs a draw against the
+  same value. The records match the host statevector's trajectory engine run serially
+  at the same seed. The host's default route for a Pauli-only model with terminal
+  measurements samples from shared error prefixes instead, so its records differ.
+- Before the first noisy shot the ranks compare the circuit, noise model, shot count,
+  and seed, and whether each rank accepted the run under the limits it resolved for
+  itself. A run that any rank rejects fails on every rank rather than leaving the
+  others waiting at a collective.
 
-Not supported: noise models, which the backend rejects because trajectory execution is
-not lockstep across ranks; GPU execution, which is single device; and selection by
+Not supported: GPU execution, which is single device; shot parallelism and the shared
+Pauli error prefixes the host trajectory engine uses; and selection by
 `BackendKind::Auto`.
 
 The planned route for noisy shots runs them in lockstep: every rank takes the shots in

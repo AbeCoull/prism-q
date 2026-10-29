@@ -536,20 +536,6 @@ pub(super) fn decide_noisy(
 ) -> Result<NoisyRoute> {
     noise_model.validate_for(circuit)?;
 
-    // Trajectory execution runs shots on Rayon worker threads, whose
-    // scheduling order differs per rank. Per-shot distributed backends would
-    // issue collectives out of lockstep and deadlock or corrupt exchanges.
-    // Reject until a lockstep noisy path exists.
-    #[cfg(feature = "distributed")]
-    if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
-        return Err(crate::error::PrismError::IncompatibleBackend {
-            backend: format!("{kind:?}"),
-            reason: "noisy shot sampling is not supported on the distributed backend; \
-                     trajectory execution cannot keep rank collectives in lockstep"
-                .into(),
-        });
-    }
-
     if kind.is_density_matrix() {
         noise::validate_mixture_inputs(circuit, Some(noise_model), None)?;
         return Ok(NoisyRoute::Mixture);
@@ -646,28 +632,52 @@ pub(super) fn decide_noisy(
         });
     }
     // A correlated two-qubit Kraus branch reads a two-qubit reduced density
-    // matrix, which only the host statevector answers. Without this the model
-    // clears every routing gate and fails part way through the first shot, on a
-    // backend an Auto route may have picked for the caller.
-    if noise_model.has_two_qubit_kraus()
-        && !matches!(
-            plan,
-            BackendPlan::Statevector { .. }
-                | BackendPlan::Sparse
-                | BackendPlan::Factored
-                | BackendPlan::Mps { .. }
-        )
-    {
+    // matrix. Without this the model clears every routing gate and fails part
+    // way through the first shot, on a backend an Auto route may have picked
+    // for the caller.
+    let answers_pair = match plan {
+        BackendPlan::Statevector { .. }
+        | BackendPlan::Sparse
+        | BackendPlan::Factored
+        | BackendPlan::Mps { .. } => true,
+        #[cfg(feature = "distributed")]
+        BackendPlan::Distributed(_) => true,
+        _ => false,
+    };
+    if noise_model.has_two_qubit_kraus() && !answers_pair {
+        #[cfg(feature = "distributed")]
+        const PAIR_ROUTES: &str = "a statevector, sparse, factored, MPS or distributed statevector";
+        #[cfg(not(feature = "distributed"))]
+        const PAIR_ROUTES: &str = "a statevector, sparse, factored or MPS";
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{:?}", plan.resolved()),
-            reason: "a two-qubit Kraus channel needs the pair's reduced density matrix \
-                     its branch probabilities are drawn from, and a kernel for the branch \
-                     operator, which is not unitary. A tableau and a product state have no \
-                     such kernel, and a tensor network traces out no arbitrary pair; run on \
-                     a statevector, sparse, factored or MPS route, or evaluate the channel \
-                     exactly on BackendKind::DensityMatrix"
-                .into(),
+            reason: format!(
+                "a two-qubit Kraus channel needs the pair's reduced density matrix its \
+                 branch probabilities are drawn from, and a kernel for the branch operator, \
+                 which is not unitary. A tableau and a product state have no such kernel, \
+                 and a tensor network traces out no arbitrary pair; run on {PAIR_ROUTES} \
+                 route, or evaluate the channel exactly on BackendKind::DensityMatrix"
+            ),
         });
+    }
+    // A two-qubit Kraus branch on the distributed statevector reads the pair's block
+    // under the export cap, gathering the whole state when the pair cannot sit in the
+    // local slice.
+    #[cfg(feature = "distributed")]
+    if let BackendKind::StatevectorDistributed { context } = kind
+        && noise_model.has_two_qubit_kraus()
+    {
+        let name = crate::backend::distributed_statevector::BACKEND_NAME;
+        crate::backend::reduced_density::reduced_density_side(name, 2, limits)?;
+        let rank_bits = context.size().trailing_zeros() as usize;
+        if circuit.num_qubits.saturating_sub(rank_bits) < 2 {
+            crate::backend::dense_statevector_len(
+                name,
+                "statevector export",
+                circuit.num_qubits,
+                limits,
+            )?;
+        }
     }
     Ok(NoisyRoute::Trajectory(plan))
 }

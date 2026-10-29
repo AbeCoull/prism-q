@@ -320,8 +320,8 @@ let result = simulate(&circuit).distributed(context).seed(42).run()?;
 
 Results do not depend on the rank count. The
 [distributed guide](https://abecoull.github.io/prism-q/guides/distributed.html) covers
-the layout, the qubit relabeling that keeps busy qubits local, the launch scripts, and
-the limits (power-of-two ranks, no noise models, CPU only).
+the layout, the qubit relabeling that keeps busy qubits local, lockstep noisy shots, the
+launch scripts, and the limits (power-of-two ranks, CPU only).
 
 ## Benchmarks
 
@@ -345,9 +345,6 @@ and [`benches/README.md`](benches/README.md).
   distributed backend is CPU only; sharding one statevector across devices also needs
   peer access, since a host-staged exchange costs far more than the gate it serves.
 - ROCm ports of the CUDA statevector and stabilizer kernels.
-- Noisy shots on the distributed backend, which rejects noise models today. The
-  [distributed guide](https://abecoull.github.io/prism-q/guides/distributed.html#what-runs-distributed)
-  describes the planned lockstep route.
 
 ## Contributing
 

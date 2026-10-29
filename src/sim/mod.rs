@@ -25,7 +25,7 @@ use route::*;
 pub(crate) mod shots;
 pub mod stabilizer_rank;
 mod terminal_sampling;
-mod trajectory;
+pub(crate) mod trajectory;
 pub mod unified_pauli;
 
 pub use braket::ResultValue;
@@ -3842,6 +3842,51 @@ fn run_shots_distributed(
     Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
 }
 
+/// Noisy shots on the distributed statevector: trajectories run serially in shot
+/// order on every rank, on one sharded backend that each shot re-initializes.
+///
+/// Shot `i` seeds its noise stream and the backend's measurement stream from the
+/// run seed and `i`, as the host trajectory loop does, so every rank draws the same
+/// branches without exchanging them. The weights a draw is compared against come
+/// from reductions every rank receives whole, so every rank takes the same branch
+/// and issues the same collectives. Validation and the first `init` read limits each
+/// rank resolves for itself, so every rank agrees on their outcome before the first
+/// shot. Past that point a shot's errors follow only from the shared inputs and the
+/// replicated qubit map, so each one fires on every rank at the same instruction.
+#[cfg(feature = "distributed")]
+fn run_noisy_shots_distributed(
+    kind: &BackendKind,
+    context: std::sync::Arc<crate::distributed::DistributedContext>,
+    circuit: &Circuit,
+    noise_model: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<ShotsResult> {
+    use crate::backend::distributed_statevector::DistributedStatevectorBackend;
+
+    let mut backend = DistributedStatevectorBackend::with_limits(context, seed, limits);
+    let fingerprint =
+        DistributedStatevectorBackend::debug_fingerprint(&(circuit, noise_model, num_shots, seed));
+    let validated = decide_noisy(kind, circuit, noise_model, limits).map(|_| ());
+    backend.fail_together(fingerprint, validated)?;
+    let ready = backend.init(circuit.num_qubits, circuit.num_classical_bits);
+    backend.fail_together(fingerprint, ready)?;
+    trajectory::run_trajectories_held(
+        &mut backend,
+        DistributedStatevectorBackend::set_seed,
+        circuit,
+        noise_model,
+        num_shots,
+        seed,
+        ResolvedBackend::Distributed,
+    )
+    .map(|mut result| {
+        result.metadata.reason = RouteRule::PerShot;
+        result
+    })
+}
+
 /// Execute a circuit multiple times with explicit backend selection.
 pub(crate) fn run_shots_with(
     kind: BackendKind,
@@ -4231,6 +4276,18 @@ pub(crate) fn run_shots_with_noise(
     seed: u64,
     limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
+    #[cfg(feature = "distributed")]
+    if let BackendKind::StatevectorDistributed { context } = &kind {
+        return run_noisy_shots_distributed(
+            &kind,
+            context.clone(),
+            circuit,
+            noise_model,
+            num_shots,
+            seed,
+            limits,
+        );
+    }
     let plan = match decide_noisy(&kind, circuit, noise_model, limits)? {
         NoisyRoute::Mixture => {
             let probs = exact_noisy_probabilities(&kind, circuit, noise_model, None, seed, limits)?;

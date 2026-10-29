@@ -21,8 +21,7 @@ The nine CPU backends implement the `Backend` trait; the distributed statevector
 backend is a tenth, feature-gated implementation covered by the Distributed
 column. `Planned` marks only work the roadmap carries: in this table a ROCm port
 of the existing CUDA kernels, and under [Not yet supported](#not-yet-supported)
-multi-GPU and distributed GPU execution and noisy shots on the distributed
-statevector, run in lockstep across ranks. Backends without a CUDA kernel have
+multi-GPU and distributed GPU execution. Backends without a CUDA kernel have
 nothing to port, so their ROCm cell is `No`, and the roadmap carries no
 distributed execution for any backend other than the statevector.
 
@@ -63,9 +62,10 @@ Notes:
 - **Distributed** covers the optional `distributed` and `distributed-mpi` features.
   The statevector backend splits the state across MPI ranks with exact results,
   including gates, measurement, reset, and multi-shot sampling without gathering
-  the dense state. Use `simulate(&circuit).distributed(context)`. A run can start
-  from an injected amplitude vector through `.initial_state(...)`: every rank
-  receives the full `2^n` vector and keeps only its own slice.
+  the dense state. Noisy shots run every trajectory channel in lockstep, one shot
+  at a time on every rank. Use `simulate(&circuit).distributed(context)`. A run
+  can start from an injected amplitude vector through `.initial_state(...)`: every
+  rank receives the full `2^n` vector and keeps only its own slice.
 
 ## Dense multi-qubit unitaries
 
@@ -261,7 +261,6 @@ the process default, or the request set it.
 | ROCm (AMD GPU) | Planned | No AMD device kernels; the GPU path is CUDA-only |
 | Distributed GPU | Planned | No multi-node GPU execution |
 | Multi-GPU | Planned | A GPU context binds a single device; sharding one statevector across devices also needs peer access between them to stay ahead of the host path |
-| Distributed noisy shots | Planned | Noise models are rejected on the distributed backend; trajectory execution is not lockstep across ranks |
 
 ## Compatibility
 

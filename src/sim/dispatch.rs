@@ -403,6 +403,8 @@ impl BackendKind {
             BackendKind::AutoGpu { .. }
             | BackendKind::StatevectorGpu { .. }
             | BackendKind::DensityMatrixGpu { .. } => true,
+            #[cfg(feature = "distributed")]
+            BackendKind::StatevectorDistributed { .. } => true,
             _ => false,
         }
     }
@@ -423,15 +425,24 @@ impl BackendKind {
         }
     }
 
-    pub(crate) fn general_noise_backend_names() -> &'static str {
+    pub(crate) fn general_noise_backend_names() -> String {
+        let mut names = vec!["Auto", "Statevector"];
         #[cfg(feature = "gpu")]
-        {
-            "Auto, Statevector, StatevectorGpu, Sparse, Mps, ProductState, Factored, TensorNetwork, DensityMatrix, or DensityMatrixGpu"
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            "Auto, Statevector, Sparse, Mps, ProductState, Factored, TensorNetwork, or DensityMatrix"
-        }
+        names.push("StatevectorGpu");
+        #[cfg(feature = "distributed")]
+        names.push("StatevectorDistributed");
+        names.extend([
+            "Sparse",
+            "Mps",
+            "ProductState",
+            "Factored",
+            "TensorNetwork",
+            "DensityMatrix",
+        ]);
+        #[cfg(feature = "gpu")]
+        names.push("DensityMatrixGpu");
+        let last = names.pop().expect("at least one name");
+        format!("{}, or {last}", names.join(", "))
     }
 }
 

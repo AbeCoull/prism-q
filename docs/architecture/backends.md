@@ -87,6 +87,8 @@ thread pool stays in the tens of megabytes. Above it trajectories run serially w
 live backend, bounded by the ordinary state cap. Pauli-noise runs grouped by error pattern
 follow the same rule, one state per worker, and add a pattern table and 16 bytes a shot
 for grouping; the outcome draw walks the amplitudes once and builds no `2^n` table.
+The distributed statevector runs its trajectories serially at every width, holding one
+slice per rank that each shot re-initializes, and groups no error patterns.
 
 Three backends grow after `init`, and each checks at the growth event, rejecting with
 an error naming itself before the allocation. A factored sub-state merge checks the

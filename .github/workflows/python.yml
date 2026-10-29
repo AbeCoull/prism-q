@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "bindings/python/**"
+      - "README.md"
       - "docs/guides/python.md"
       - "docs/tutorials/**"
       - "src/**"
@@ -120,6 +121,9 @@ jobs:
         with:
           command: sdist
           args: --manifest-path bindings/python/Cargo.toml --out dist
+      # PyPI renders the README from this metadata and rejects markup it cannot render.
+      - name: Check package metadata
+        run: pipx run twine==7.0.0 check --strict dist/*
       - uses: actions/upload-artifact@v7
         with:
           name: sdist

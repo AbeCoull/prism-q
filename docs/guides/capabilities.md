@@ -51,7 +51,8 @@ probability, shot, and observable queries through their own routes (see
 Notes:
 
 - **AVX2/FMA/BMI2** is the x86-64 SIMD tier. The active tier is chosen at runtime
-  (AVX2+FMA, then FMA, then SSE2 baseline). See
+  (AVX2+FMA, then FMA, then SSE2 baseline, with an AVX-512 tier first when
+  `PRISM_AVX512=1` is set on a CPU that has it). See
   [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
 - **NEON** is the ARM64 SIMD tier. Backends marked `SIMD` carry a NEON kernel that
   mirrors the x86-64 path; the rest fall back to scalar code on ARM64.

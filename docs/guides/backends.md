@@ -30,15 +30,16 @@ state across MPI ranks with exact results; see
 
 ## Statevector
 
-The default for dense circuits: exact, fully general, and the fastest option whenever the
-state fits in RAM. The memory cap is derived from system RAM (override with
+The default for dense circuits: exact and fully general. The memory cap is derived from system RAM (override with
 `PRISM_MAX_SV_QUBITS`). Above it, auto-dispatch falls back to Sparse or MPS.
 
 ## Stabilizer
 
 A circuit of only Clifford gates (H, S, Sdg, SX, SXdg, X, Y, Z, Id, CX, CZ, SWAP,
 measurement) runs on the stabilizer tableau in $O(n^2)$ and scales to thousands of qubits.
-Auto-dispatch selects it whenever the circuit is Clifford-only.
+Auto-dispatch selects it for a Clifford-only circuit with entangling gates, unless the
+circuit has 16 or more qubits and splits into independent blocks, which go to Factored
+Stabilizer. Shots on Clifford circuits take the compiled sampler instead.
 
 ```admonish tip
 Add even a single non-Clifford gate (`T`, `Rz(θ)` with arbitrary θ) and the stabilizer

@@ -3,9 +3,9 @@
 ## Build
 
 ```bash
-cargo build                           # core (no parallelism)
-cargo build --features parallel       # Rayon parallelism plus faer SVD
-cargo build --features "parallel gpu" # add the optional CUDA statevector backend
+cargo build                           # default: Rayon parallelism plus faer SVD
+cargo build --no-default-features     # single-threaded core
+cargo build --features "parallel gpu" # add the optional CUDA backends
 cargo build --all-features            # everything; needs MPI and libclang, see below
 ```
 

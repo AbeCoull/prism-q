@@ -79,9 +79,6 @@
 //!   qubits (`$0`)
 //! - Bit literal comparisons against integers other than `0` / `1`
 //! - Negative integer literals in `if` register comparisons
-//! - `else` whose `if` body measures into a bit the condition reads, and
-//!   `switch` whose arm measures into the switched register: both lowerings
-//!   re-read the bits after an earlier body ran
 //! - `switch` with a `default` and more case labels than the region depth bound
 //! - an `array` of `bit`, `duration` or any other non-numeric element type
 //! - `durationof`, a ratio over a `stretch`, and a ratio mixing `dt` with SI
@@ -96,7 +93,10 @@
 //! # Error behaviour
 //!
 //! Parse failures return `PrismError::Parse` or `PrismError::UnsupportedConstruct`
-//! with the source line number. The parser never panics on user input.
+//! with the source line number. The parser never panics on user input. An `else`
+//! whose `if` body measures into a bit the condition reads, and a `switch` whose
+//! arm measures into the switched register, return `Parse`: both lowerings re-read
+//! the bits after an earlier body ran.
 //!
 //! The reverse direction is [`qasm_export`](super::qasm_export).
 

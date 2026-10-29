@@ -286,23 +286,75 @@ fn a_lookback_counts_padded_records() {
 }
 
 #[test]
-fn a_compiled_condition_reads_a_padded_record() {
+fn a_condition_reads_a_padded_record() {
     let mut program = QecProgram::with_options(1, options(8));
     program.push_op(QecOp::Pad { value: true }).unwrap();
     program
-        .feedforward(
-            &[QecRecordRef::lookback(1).unwrap()],
-            true,
-            vec![QecOp::Gate {
-                gate: Gate::X,
-                targets: vec![0],
-            }],
-        )
+        .feedforward(&[QecRecordRef::lookback(1).unwrap()], true, x_body(0))
         .unwrap();
     program.measure_z(0).unwrap();
-    let result = run_qec_program(&program).unwrap();
-    for shot in 0..8 {
-        assert!(result.measurements.get_bit(shot, 1), "shot {shot}");
+    for result in [
+        run_qec_program_reference(&program).unwrap(),
+        run_qec_program(&program).unwrap(),
+    ] {
+        for shot in 0..8 {
+            assert!(result.measurements.get_bit(shot, 1), "shot {shot}");
+        }
+    }
+}
+
+#[test]
+fn a_condition_reads_an_erasure_record() {
+    let mut program = QecProgram::with_options(2, options(8));
+    program
+        .push_op(QecOp::HeraldedErase {
+            probability: 1.0,
+            qubit: 1,
+        })
+        .unwrap();
+    program
+        .feedforward(&[QecRecordRef::lookback(1).unwrap()], true, x_body(0))
+        .unwrap();
+    program.measure_z(0).unwrap();
+    for result in [
+        run_qec_program_reference(&program).unwrap(),
+        run_qec_program(&program).unwrap(),
+    ] {
+        for shot in 0..8 {
+            assert!(result.measurements.get_bit(shot, 0), "shot {shot} herald");
+            assert!(result.measurements.get_bit(shot, 1), "shot {shot}");
+        }
+    }
+}
+
+#[test]
+fn a_condition_follows_each_shots_erasure_herald() {
+    let mut program = QecProgram::with_options(2, options(64));
+    program
+        .push_op(QecOp::HeraldedErase {
+            probability: 0.5,
+            qubit: 1,
+        })
+        .unwrap();
+    program
+        .feedforward(&[QecRecordRef::lookback(1).unwrap()], true, x_body(0))
+        .unwrap();
+    program.measure_z(0).unwrap();
+    for result in [
+        run_qec_program_reference(&program).unwrap(),
+        run_qec_program(&program).unwrap(),
+    ] {
+        let heralds = (0..64)
+            .filter(|&shot| result.measurements.get_bit(shot, 0))
+            .count();
+        assert!(heralds > 0 && heralds < 64, "{heralds} heralds");
+        for shot in 0..64 {
+            assert_eq!(
+                result.measurements.get_bit(shot, 1),
+                result.measurements.get_bit(shot, 0),
+                "shot {shot}"
+            );
+        }
     }
 }
 

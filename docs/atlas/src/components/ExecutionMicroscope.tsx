@@ -9,7 +9,7 @@ import {
 } from "../models/simd-execution";
 import "../styles/microscope.css";
 
-const revision = "7adde35d0bacaff71711148223ac8df06a008d01";
+const revision = "07acc59bf9aba08b706bcc85efed35e0c456bb12";
 const source = `https://github.com/AbeCoull/prism-q/blob/${revision}/src/backend/simd.rs`;
 const numeric = (value: number) =>
   value === 0
@@ -198,19 +198,19 @@ export function ExecutionMicroscope(
   const sumVisible = diagonal ? currentStep >= 5 : currentStep >= 7;
   const sourceLine = diagonal
     ? width === 0
-      ? "L922-L945"
+      ? "L1109-L1132"
       : width === 256
-        ? "L1352-L1372"
+        ? "L1762-L1782"
         : architecture === "neon"
-          ? "L834-L918"
-          : "L784-L918"
+          ? "L1021-L1105"
+          : "L971-L1105"
     : architecture === "neon"
-      ? "L124-L139"
+      ? "L208-L223"
       : width === 256
-        ? "L258-L311"
+        ? "L342-L384"
         : width === 128
-          ? "L186-L231"
-          : "L516-L529";
+          ? "L270-L315"
+          : "L670-L683";
   return (
     <section
       className="execution-microscope"

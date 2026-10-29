@@ -1,5 +1,5 @@
 {
-  "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+  "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12",
   "files": {
     "benches/common/mod.rs": "6f2f13934e6c5d56c3a3bacd6e46809aa84812bb11fb179377d2c16982b65504",
     "scripts/bench_ab.sh": "72b2e573a4a1b4aa1fa62c2b09e9f31d36535e16d5166bd93d4f53ca51e0d762",
@@ -10,12 +10,12 @@
     "src/backend/mod.rs": "fa54d761b77ec3f7a1c23eaaee8762e3cf5132d51e31aa8a58a3201e087e7d3d",
     "src/backend/mps/mod.rs": "b68fbea595f9b3bee154b910931f829ae3baf91366791ce34706f38836a03978",
     "src/backend/mps/svd.rs": "b7261b1375df9e057b6edbd1b7b062fcaa441fade1628c573488fc1185fadedb",
-    "src/backend/simd.rs": "968a7cc3fc38e924e21ed16afe5e8a947433ecddb37627e5c53183213f51ced7",
+    "src/backend/simd.rs": "4104dd7ff8841d9ee377bd48de27b78e7005b4352fa0e2b343dd36339df34ff3",
     "src/backend/sparse.rs": "4531b7ecc25cfb807724859360575b3a8eb8ddf7e79ac8fbd89f22da2efc801b",
-    "src/backend/stabilizer/kernels/mod.rs": "49a1b5758bb9e3e45cdc15feaaad16ec24e41d89a4932176b758783b010fe966",
+    "src/backend/stabilizer/kernels/mod.rs": "ab880d8f1ca13666b5928d2bdba423978aa3e323cfef3d19a2fc1501407e5817",
     "src/backend/stabilizer/kernels/rowops.rs": "da2d91ab3e0ef0a4bf6a06decadfc88798652531b2c2845f2ca3b7c48b70c493",
     "src/backend/stabilizer/mod.rs": "4163286a65c6cdb8e761ddc852a3940c200d8a9540735bad2cd05d951ed769c0",
-    "src/backend/statevector/kernels.rs": "cc7797aa4e1447b1b677298a434a4ec44ba7fd666a3ca3e225db562a8afa30c7",
+    "src/backend/statevector/kernels.rs": "c44da3694d9bef16074f0dbc94c8e4d376307851963af8418d8a4b9b9cae6384",
     "src/backend/statevector/mod.rs": "3305b12ff3b37254f6aa659a2c90f3efc0cb9a04236317327a963f3ee369d0d6",
     "src/backend/tensornetwork.rs": "b620d10bef160ecf7add5241bbcfa74a21a8dbbb4d4971f8f84a56218633a997",
     "src/circuit/fusion.rs": "461bab838923514e6fafaf79a5507c408888ac2596a0cab55088c2c4bf21f78f",

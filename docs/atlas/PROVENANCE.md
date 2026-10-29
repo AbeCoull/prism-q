@@ -1,6 +1,6 @@
 # Technical limitations and provenance
 
-The atlas audits PRISM-Q revision `7adde35d0bacaff71711148223ac8df06a008d01`.
+The atlas audits PRISM-Q revision `07acc59bf9aba08b706bcc85efed35e0c456bb12`.
 Source links and a SHA-256 manifest pin that snapshot. Later revisions can change
 branches, thresholds or semantics.
 

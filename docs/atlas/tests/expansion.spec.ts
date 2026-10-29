@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const revision = "7adde35d0bacaff71711148223ac8df06a008d01";
+const revision = "07acc59bf9aba08b706bcc85efed35e0c456bb12";
 const plannerQuery =
   "?renderer=svg&compiler=diagonal-pair-runs-20-Host&pass=11";
 
@@ -105,7 +105,7 @@ test("microscope steps source groups, coefficients, pair addresses, and stored p
     scope.getByRole("link", { name: /Kernel source at/ }),
   ).toHaveAttribute(
     "href",
-    new RegExp(`${revision}/src/backend/simd\\.rs#L258`),
+    new RegExp(`${revision}/src/backend/simd\\.rs#L342`),
   );
   await expect(scope).toContainText("this is not a trace of a native run");
   expect(errors).toEqual([]);

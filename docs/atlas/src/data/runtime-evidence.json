@@ -20,7 +20,7 @@
     ],
     "derivation": "Gate and conditional targets use SmallVec<[usize; 4]>, preserving inline storage for four indices.",
     "limitations": "Classical dependencies and nonunitary instructions cannot be modeled by unitary composition alone.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "boxed-gate-payloads",
@@ -43,7 +43,7 @@
     ],
     "derivation": "Fused stores a 2 by 2 matrix, Fused2q stores a 4 by 4 matrix, and MultiFused and Multi2q store batches.",
     "limitations": "A tiled batch need not be one dense unitary over all its targets.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "fusion-host-pass-order",
@@ -60,7 +60,7 @@
     ],
     "derivation": "Listed in the order the host branch runs them. Each pass keeps its own width threshold.",
     "limitations": "The supports_fused=false entry bypasses all fusion. Tests use lower thresholds than native runs.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "fusion-native-floors",
@@ -83,7 +83,7 @@
     ],
     "derivation": "Post-phase rebatching on a buffer equal to circuit width instead uses the diagonal floor of 14.",
     "limitations": "The floors compare against buffer width, which is twice the logical width for density matrices. Stage planning can take the place of batching.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "fusion-cache-stage-planner",
@@ -106,7 +106,7 @@
     ],
     "derivation": "The floor is floor(log2(LLC bytes / 16)) + 1, at least 16, with fallback 20; stages_at also requires equal circuit and buffer widths and at most 64 qubits.",
     "limitations": "The floor depends on detected host cache. The scheduler is heuristic and stops segments at nonbatchable instructions.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "fusion-device-profile",
@@ -123,7 +123,7 @@
     ],
     "derivation": "Two-qubit absorption is restricted to members of same-pair runs; device lowering schedules its own tiles.",
     "limitations": "This covers the compiler profile only, not CUDA kernel scheduling or speed.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "fusion-composition-order",
@@ -146,7 +146,7 @@
     ],
     "derivation": "Column-state evolution applies each new matrix on the left.",
     "limitations": "Order cannot be reversed for noncommuting gates.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "fusion-diagonal-commutation",
@@ -163,7 +163,7 @@
     ],
     "derivation": "Separate blockers track all 1q gates and diagonal gates for each qubit.",
     "limitations": "Only these listed rules apply; there is no general symbolic commutation. A CX target blocks diagonal movement.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "fusion-self-inverse-cancellation",
@@ -186,7 +186,7 @@
     ],
     "derivation": "CZ and SWAP admit target reversal while CX requires matching ordered targets.",
     "limitations": "The pass handles self-inverse two-qubit gates only. Other cancellations can fall out of later matrix fusion.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "statevector-full-sweep-traffic",
@@ -209,7 +209,7 @@
     ],
     "derivation": "2^n amplitudes times 16 bytes per complex128 amplitude times one read and one write.",
     "limitations": "Payload only, not measured DRAM traffic. Cache reuse, specialized gates and batching all change the real figure. Dividing by an assumed bandwidth gives a lower bound on time.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "dispatch-base-family-tree",
@@ -226,7 +226,7 @@
     ],
     "derivation": "The branches select ProductState, Stabilizer, Sparse or Mps, Factored and Statevector respectively.",
     "limitations": "Terminal-specific routes, noise, decomposition and initial-state requirements can supersede this base tree.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "dispatch-sparse-support-probe",
@@ -249,7 +249,7 @@
     ],
     "derivation": "The probe applies gates to a sparse backend initialized at zero and tests entry_count after each operation.",
     "limitations": "The probe rejects resets, saves, and measurement arrangements that are not terminal.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "dispatch-query-inspection",
@@ -272,7 +272,7 @@
     ],
     "derivation": "Each terminal is represented by Query, allowing distinct plans for probabilities, shots, expectations and diagnostics.",
     "limitations": "Plans list possible runtime fallbacks separately. Memory excludes circuit storage, allocator overhead and process memory; Unknown has no byte count.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "dispatch-terminal-routes",
@@ -295,7 +295,7 @@
     ],
     "derivation": "Terminal route decisions inspect requested results and circuit structure before generic backend execution.",
     "limitations": "A non-Clifford gate does not force dense simulation. Each route still has its own eligibility checks and budgets.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "sparse-storage-and-limits",
@@ -318,7 +318,7 @@
     ],
     "derivation": "Memory scales with support plus map overhead; affected gates prune small entries and rescale retained amplitudes.",
     "limitations": "Width is limited by usize::BITS, dense Gate::Unitary is unsupported, and Hadamards can grow support exponentially.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "factored-dense-groups",
@@ -341,7 +341,7 @@
     ],
     "derivation": "Group storage sums 2^group_width complex amplitudes; global qubits map into sorted local group coordinates.",
     "limitations": "A highly entangled circuit can merge every qubit into one dense group. Measurement and reset splitting is subject to a seven-qubit floor.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "mps-site-layout",
@@ -358,7 +358,7 @@
     ],
     "derivation": "The flat tensor index is alpha*(2*chi_right) + physical*chi_right + beta.",
     "limitations": "Cost depends on bond dimension and routing as well as qubit count. Dense output still needs 2^n storage.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "mps-relative-svd-threshold",
@@ -381,7 +381,7 @@
     ],
     "derivation": "The implementation computes a relative threshold then limits retained rank; native default epsilon is 1e-12.",
     "limitations": "It bounds singular values, not discarded probability or global accuracy.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "mps-discarded-weight-report",
@@ -398,7 +398,7 @@
     ],
     "derivation": "The cumulative value adds sum(discarded s_i^2)/sum(all s_i^2) over cuts; result queries normalize the state.",
     "limitations": "The sum can exceed one and does not measure final state error. The per-cut weights rely on the implementation's orthogonality-center handling.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "mps-fidelity-estimate-caveat",
@@ -421,7 +421,7 @@
     ],
     "derivation": "The field reports max(0, 1-sum(local discarded weights)); conservative accumulated error involves the square of summed square roots.",
     "limitations": "Error from many successive cuts accumulates differently from a single cut, so the field name overstates what it guarantees.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "tensor-network-deferred-contraction",
@@ -444,7 +444,7 @@
     ],
     "derivation": "Seeded restarts can reduce peak intermediate size; slicing sums fixed-index assignments exactly. Positive tolerance permits rank reduction before replanning.",
     "limitations": "Slicing trades extra work for lower peak memory, and bounded contraction gives up exactness. Arbitrary circuits can still be expensive.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "fusion-existing-differential-tests",
@@ -467,7 +467,7 @@
     ],
     "derivation": "The unfused reference calls backend.apply directly, while the fused comparison uses sim::run_on; integration tolerance is 1e-10.",
     "limitations": "Reading the tests shows what they cover. It does not show that they pass on a later revision.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "benchmark-seeds-and-tiers",
@@ -490,7 +490,7 @@
     ],
     "derivation": "PRISM_BENCH_SAMPLES can override the sample count with a minimum of ten; fast groups use short warmup and measurement windows.",
     "limitations": "This is harness configuration; the atlas contains no benchmark results. Fast-tier numbers are for triage only.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "benchmark-control-verdicts",
@@ -513,6 +513,6 @@
     ],
     "derivation": "Separate-binary comparison and interleaved coarse-switch comparison use controls to detect unresolved host or layout variation.",
     "limitations": "Only PASS and FAIL are results. RERUN and host-busy runs say nothing about performance.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   }
 ]

@@ -20,7 +20,7 @@
     ],
     "derivation": "Index i encodes sum_q bit(q)*2^q. SIMD loads interpret each Complex64 as adjacent real and imaginary f64 values.",
     "limitations": "Applies to the dense CPU backend only.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-state-bytes",
@@ -37,13 +37,13 @@
       {
         "path": "src/backend/simd.rs",
         "symbol": "apply_full_loop_fma",
-        "startLine": 348,
-        "endLine": 371
+        "startLine": 468,
+        "endLine": 491
       }
     ],
     "derivation": "One amplitude is two 8-byte f64 values. Multiply 16 by the number of basis states.",
     "limitations": "Amplitude payload only. Outputs, allocator overhead and scratch are excluded.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-pair-map",
@@ -54,13 +54,13 @@
       {
         "path": "src/backend/simd.rs",
         "symbol": "apply_full_loop_fma",
-        "startLine": 343,
-        "endLine": 374
+        "startLine": 463,
+        "endLine": 494
       }
     ],
     "derivation": "half=2^t; mask=half-1; i0=((k & ~mask)<<1)|(k & mask); i1=i0|half. k ranges from 0 through 2^(n-1)-1.",
     "limitations": "This is the general non-diagonal 1q matrix kernel; diagonal gates have specialized paths.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-pair-stride",
@@ -71,13 +71,13 @@
       {
         "path": "src/backend/simd.rs",
         "symbol": "apply_full_loop_avx2fma_inline",
-        "startLine": 386,
-        "endLine": 410
+        "startLine": 506,
+        "endLine": 530
       }
     ],
     "derivation": "A block has 2^(t+1) amplitudes. Lower and upper half pointers differ by 2^t amplitudes, each 16 bytes.",
     "limitations": "Address spacing alone does not determine cache misses or latency.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-avx-lanes",
@@ -88,19 +88,19 @@
       {
         "path": "src/backend/simd.rs",
         "symbol": "apply_slices_avx2fma",
-        "startLine": 278,
-        "endLine": 300
+        "startLine": 362,
+        "endLine": 384
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "apply_full_loop_avx2fma_inline",
-        "startLine": 386,
-        "endLine": 408
+        "startLine": 506,
+        "endLine": 528
       }
     ],
     "derivation": "Each _mm256_loadu_pd reads four adjacent f64 values. The lower and upper amplitude halves are loaded separately.",
     "limitations": "Lane order is ascending lane number. The 128-bit kernels pack one amplitude per register.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-avx-complex-multiply",
@@ -111,19 +111,19 @@
       {
         "path": "src/backend/simd.rs",
         "symbol": "complex_mul_avx2fma",
-        "startLine": 258,
-        "endLine": 265
+        "startLine": 342,
+        "endLine": 349
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "MatBroadcast256::from_matrix",
-        "startLine": 72,
-        "endLine": 85
+        "startLine": 76,
+        "endLine": 89
       }
     ],
     "derivation": "z=[x0,y0,x1,y1]; permute=[y0,x0,y1,x1]; t=ci*permute; fmaddsub(cr,z,t)=[cr*x0-ci*y0,cr*y0+ci*x0,cr*x1-ci*y1,cr*y1+ci*x1].",
     "limitations": "These are the source intrinsics. The compiled instruction stream was not captured.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-neon-complex-multiply",
@@ -134,25 +134,25 @@
       {
         "path": "src/backend/simd.rs",
         "symbol": "MatBroadcast::from_matrix on aarch64",
-        "startLine": 101,
-        "endLine": 119
+        "startLine": 185,
+        "endLine": 203
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "complex_mul_neon",
-        "startLine": 122,
-        "endLine": 134
+        "startLine": 206,
+        "endLine": 218
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "apply_slices_neon",
-        "startLine": 227,
-        "endLine": 256
+        "startLine": 311,
+        "endLine": 340
       }
     ],
     "derivation": "vextq_f64(z,z,1) gives [im,re]; vmulq_f64(cr,z) plus vfmaq_f64(product,[-ci,+ci],swapped) gives the complex product.",
     "limitations": "NEON is the aarch64 path; it does not use 256-bit AVX lane packing.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-fma-sse-fallbacks",
@@ -163,55 +163,55 @@
       {
         "path": "src/backend/simd.rs",
         "symbol": "complex_mul_sse2",
-        "startLine": 137,
-        "endLine": 153
+        "startLine": 221,
+        "endLine": 237
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "complex_mul_fma",
-        "startLine": 187,
-        "endLine": 194
+        "startLine": 271,
+        "endLine": 278
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "PreparedGate1q::new",
-        "startLine": 574,
-        "endLine": 610
+        "startLine": 748,
+        "endLine": 777
       }
     ],
     "derivation": "Both pack [re,im]. Runtime detection selects AVX2+FMA, then FMA, then the x86_64 SSE2 baseline.",
     "limitations": "The best detected tier can still fall back to a narrower full-state kernel according to target and state length.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-primary-route",
     "chapter": "hardware",
-    "claim": "For an ordinary CPU 1q matrix on x86_64, AVX2 is selected exactly when AVX2 and FMA are available, t>=2, and either n<=13 or the parallel feature is enabled with n>=15.",
+    "claim": "For an ordinary CPU 1q matrix on x86_64, AVX2 is selected exactly when AVX2 and FMA are available, the opt-in AVX-512 tier is off, t>=2, and either n<=13 or the parallel feature is enabled with n>=15.",
     "status": "implementation",
     "sources": [
       {
         "path": "src/backend/simd.rs",
         "symbol": "PreparedGate1q::apply_full_sequential",
-        "startLine": 645,
-        "endLine": 694
+        "startLine": 816,
+        "endLine": 873
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "PreparedGate1q::apply",
-        "startLine": 612,
-        "endLine": 643
+        "startLine": 779,
+        "endLine": 814
       },
       {
         "path": "src/backend/statevector/kernels.rs",
         "symbol": "apply_single_gate_par",
-        "startLine": 3075,
-        "endLine": 3114
+        "startLine": 3368,
+        "endLine": 3407
       },
       {
         "path": "src/backend/statevector/kernels.rs",
         "symbol": "StatevectorBackend::apply_single_gate",
-        "startLine": 3626,
-        "endLine": 3639
+        "startLine": 3919,
+        "endLine": 3932
       },
       {
         "path": "src/backend/mod.rs",
@@ -221,8 +221,8 @@
       }
     ],
     "derivation": "Sequential full-state AVX2 requires target>=2 and slice length<=8192. With parallel at n>=15, t<=12 uses 8192-amplitude tiles, and higher targets use paired slices whose apply method selects AVX2. At n=14 the ordinary path is FMA.",
-    "limitations": "Assumes valid 0<=t<n, a non-miri build, and a general dense CPU 1q gate. Excludes diagonal, controlled-pointer, MultiFused, and GPU paths. The parallel feature is a build choice, not a requested thread count.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "limitations": "Assumes valid 0<=t<n, a non-miri build, and a general dense CPU 1q gate. Excludes diagonal, controlled-pointer, MultiFused, and GPU paths. The parallel feature is a build choice, not a requested thread count. With PRISM_AVX512=1 on an AVX-512 host, the same conditions select 512-bit loops instead; the atlas does not model that tier.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-context-routes",
@@ -233,19 +233,19 @@
       {
         "path": "src/backend/simd.rs",
         "symbol": "PreparedGate1q::apply_tiled",
-        "startLine": 696,
-        "endLine": 733
+        "startLine": 875,
+        "endLine": 920
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "PreparedGate1q::apply_pair_ptr",
-        "startLine": 735,
-        "endLine": 769
+        "startLine": 922,
+        "endLine": 958
       }
     ],
     "derivation": "apply_tiled branches on target>=2 without the 8192-element guard. apply_pair_ptr maps both Avx2Fma and Fma to apply_pair_fma.",
-    "limitations": "The target in a gathered tile is a tile coordinate and can differ from its circuit qubit index.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "limitations": "The target in a gathered tile is a tile coordinate and can differ from its circuit qubit index. With PRISM_AVX512=1 on an AVX-512 host, the same conditions select 512-bit loops instead; the atlas does not model that tier.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-thread-partition",
@@ -256,8 +256,8 @@
       {
         "path": "src/backend/statevector/kernels.rs",
         "symbol": "apply_single_gate_par",
-        "startLine": 3075,
-        "endLine": 3114
+        "startLine": 3368,
+        "endLine": 3407
       },
       {
         "path": "src/backend/mod.rs",
@@ -268,7 +268,7 @@
     ],
     "derivation": "B=2^(t+1), T=max(8192,B). If B<=8192 and N/T>=4 use 8192-element tiles. Else if N/T>=4 use whole B blocks split into halves. Otherwise split each pair of halves into min(8192,2^t)-element chunks.",
     "limitations": "Rayon task count need not match worker count. These branches set no thread affinity or NUMA placement.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-traffic-model",
@@ -279,13 +279,13 @@
       {
         "path": "src/backend/simd.rs",
         "symbol": "apply_full_loop_fma",
-        "startLine": 353,
-        "endLine": 371
+        "startLine": 473,
+        "endLine": 491
       }
     ],
     "derivation": "Each pair has four complex multiplies at 6 FLOPs and two complex adds at 2 FLOPs: 28 FLOPs. Two 16-byte reads plus two 16-byte writes give 64 bytes per pair. There are 2^(n-1) pairs, giving 0.4375 FLOP per logical byte.",
     "limitations": "FMA counts as two FLOPs. Addressing, coefficient loads, cache reuse and write allocation are excluded. The bound 32*2^n/W assumes all logical traffic crosses a memory level with sustained bandwidth W.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-cache-budget",
@@ -320,7 +320,7 @@
     ],
     "derivation": "The budget rounds down a clamped power of two. The L2 contribution is per physical core; the LLC contribution uses one quarter of its per-logical-CPU share. Divide bytes by 16 for amplitude count. Parallel sizing reads available hardware parallelism, not Rayon pool width.",
     "limitations": "Cache residency is assumed, not measured. PRISM_TILE_KB can override the default range to 128 KiB through 2 MiB.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-multifused-streams",
@@ -343,13 +343,13 @@
       {
         "path": "src/backend/statevector/kernels.rs",
         "symbol": "apply_multi_1q_par_routed",
-        "startLine": 3555,
-        "endLine": 3609
+        "startLine": 3848,
+        "endLine": 3902
       }
     ],
     "derivation": "The subcube route copies each selected run into tile scratch, calls apply_tiled for every gate, then copies runs back. The in-place route loops over gates inside each parallel tile. Exactly zero gathered subcubes return before gate work and stores.",
     "limitations": "The planner picks among these routes, so fused execution does not always cost one DRAM sweep per gate.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-cuda-layout-budget",
@@ -384,7 +384,7 @@
     ],
     "derivation": "GpuState allocates 2*2^n f64 values. The 25-byte budget adds 8 bytes of probability scratch plus 1 byte of margin. Successful device initialization clears the host amplitude vector.",
     "limitations": "The resource coefficient is not an exact allocation-size formula for every query.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-cuda-pairs",
@@ -419,7 +419,7 @@
     ],
     "derivation": "k=blockIdx.x*blockDim.x+threadIdx.x. Threads with k>=2^(n-1) return. Scalar coefficient arguments describe the 2x2 matrix. This kernel directly reads and writes the global state.",
     "limitations": "Launch shape and address pattern say nothing about occupancy, achieved bandwidth or speedup.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-cuda-shared-tile",
@@ -448,7 +448,7 @@
     ],
     "derivation": "Ten tile qubits include the lowest five, making each warp's consecutive tile offsets contiguous global amplitudes. A pass adds at most five higher targets. Low-target gates join the first pass. Each tile is loaded once, processed across all assigned gates, then stored.",
     "limitations": "n<=10 and passes with fewer than three gates use per-gate fallback. Occupancy and throughput were not measured.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-rank-layout",
@@ -471,7 +471,7 @@
     ],
     "derivation": "L=2^(n-p), global index=rank*L+local_index. Rank count must be a power of two and the local qubit floor is checked.",
     "limitations": "After relabeling, circuit qubits map to physical positions through qubit_map rather than identity.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-rank-direct-exchange",
@@ -494,7 +494,7 @@
     ],
     "derivation": "Rank-bit zero computes m00*own+m01*remote; rank-bit one computes m11*own+m10*remote. A direct general 1q gate sends 16L bytes and receives 16L bytes per rank, tiled by exchange_chunk.",
     "limitations": "The communication volume is derived payload, excludes protocol overhead, and describes direct exchange. Default relabeling can avoid repeated direct exchanges.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-rank-relabel",
@@ -523,7 +523,7 @@
     ],
     "derivation": "The moving indices have local bit unequal to rank bit. Each rank sends and receives L/2 amplitudes, or 8L bytes each way. Map updates record circuit-to-physical positions. A SWAP can be map-only. Batched instruction windows can plan future victims.",
     "limitations": "Local working-set fit determines reuse. Cyclic scans can force eviction. Relabeling can be disabled or impossible when no victim remains.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-mpi-threading",
@@ -558,7 +558,7 @@
     ],
     "derivation": "MPI receives contiguous double views of complex slices and sendrecv_pieces splits around the C int count limit. The default chunk is 2^29 complex amplitudes, or 8 GiB maximum payload per message.",
     "limitations": "The chunk size is a ceiling, not an allocation made on every call. Nothing in this source overlaps communication with compute or uses GPU-aware MPI, and multi-node scaling was not measured.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   },
   {
     "id": "hardware-diagonal-route",
@@ -587,24 +587,24 @@
       {
         "path": "src/backend/statevector/kernels.rs",
         "symbol": "StatevectorBackend::apply_diagonal_gate_par",
-        "startLine": 3642,
-        "endLine": 3673
+        "startLine": 3935,
+        "endLine": 3966
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "apply_diagonal_sequential",
-        "startLine": 876,
-        "endLine": 945
+        "startLine": 1063,
+        "endLine": 1132
       },
       {
         "path": "src/backend/simd.rs",
         "symbol": "scale_complex_slice",
-        "startLine": 1355,
-        "endLine": 1431
+        "startLine": 1765,
+        "endLine": 1854
       }
     ],
     "derivation": "The high-target branch runs when 2^n/2^(target+1)<4, equivalent to target>=n-2. It scales 4096-amplitude chunks using the AVX2 helper. Other branches call the 128-bit FMA diagonal loop. Z skips the unchanged lower member; Rz normally scales both. No cross-input products or row additions occur.",
-    "limitations": "Assumes valid targets, non-miri build and AVX2+FMA availability. The aarch64 path remains 128-bit NEON. The x86 diagonal fallback without FMA is scalar. Fused matrices are checked for diagonality and do not force the general matrix kernel.",
-    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+    "limitations": "Assumes valid targets, non-miri build and AVX2+FMA availability. The aarch64 path remains 128-bit NEON. The x86 diagonal fallback without FMA is scalar. Fused matrices are checked for diagonality and do not force the general matrix kernel. With PRISM_AVX512=1 on an AVX-512 host, the same conditions select 512-bit loops instead; the atlas does not model that tier.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
   }
 ]

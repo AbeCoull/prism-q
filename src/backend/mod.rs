@@ -37,10 +37,9 @@
 //! [`Backend::reduced_density_matrix_1q`] and [`Backend::apply_1q_matrix`] are
 //! two halves of one capability, sampling a non-Pauli branch and applying the
 //! operator it selects, so their coverage is one set by construction. That set is
-//! `BackendKind::supports_general_noise`, less the distributed statevector:
-//! trajectories run shots on Rayon workers whose order differs per rank, so
-//! per-shot noise would issue rank collectives out of lockstep, and
-//! `run_shots_with_noise` rejects the backend for that reason.
+//! `BackendKind::supports_general_noise`. On the distributed statevector both are
+//! collective, so its trajectories run one shot at a time, in shot order, on every
+//! rank.
 
 #[cfg(all(target_arch = "x86_64", any(kani, test)))]
 pub(crate) mod avx2_model;

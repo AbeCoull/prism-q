@@ -12,10 +12,11 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use num_complex::Complex64;
 use prism_q::DistributedStatevectorBackend;
 use prism_q::backend::Backend;
-use prism_q::circuit::{Circuit, fusion::fuse_circuit};
+use prism_q::circuit::{Circuit, Instruction, fusion::fuse_circuit};
 use prism_q::circuits;
 use prism_q::distributed::loopback::run_ranks;
 use prism_q::gates::{Gate, Multi2qData};
+use prism_q::{NoiseChannel, NoiseEvent, NoiseModel, simulate};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -36,6 +37,10 @@ fn sample_sizes() -> &'static [usize] {
 
 fn wall_sizes() -> &'static [usize] {
     if is_fast() { &[16] } else { &[20, 22] }
+}
+
+fn noisy_sizes() -> &'static [usize] {
+    if is_fast() { &[12] } else { &[16] }
 }
 
 /// `layers` rounds of a seeded Rx or Ry on every qubit followed by a nearest
@@ -334,6 +339,86 @@ fn bench_cyclic_wall(c: &mut Criterion) {
     group.finish();
 }
 
+/// One event of `channel` after every gate, on each of its targets.
+fn per_target_noise(circuit: &Circuit, channel: &NoiseChannel) -> NoiseModel {
+    let after_gate = circuit
+        .instructions
+        .iter()
+        .map(|instr| match instr {
+            Instruction::Gate { targets, .. } => targets
+                .iter()
+                .map(|&q| NoiseEvent {
+                    channel: channel.clone(),
+                    qubits: [q].into_iter().collect(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    NoiseModel {
+        after_gate,
+        readout: Vec::new(),
+    }
+}
+
+/// Lockstep noisy trajectories of a measured two-layer cyclic wall at two and
+/// four ranks: shots run one at a time on every rank, on one sharded state each
+/// shot re-initializes. Depolarizing events read no state, damping reads one
+/// `Allreduce` per event, and the custom Kraus channel reads the qubit's reduced
+/// density matrix, with a partner exchange when the qubit sits on a rank bit.
+fn bench_noisy_shots(c: &mut Criterion) {
+    let mut group = c.benchmark_group("distributed/noisy_shots");
+    configure_group(&mut group);
+
+    const SHOTS: usize = 16;
+    let real = |re: f64| Complex64::new(re, 0.0);
+    let gamma = 0.01_f64;
+    let keep = (1.0 - gamma).sqrt();
+    let (diag, off, s) = (0.5 * (1.0 + keep), 0.5 * (1.0 - keep), 0.5 * gamma.sqrt());
+    let channels = [
+        ("depolarizing", NoiseChannel::Depolarizing { p: 0.01 }),
+        ("damping", NoiseChannel::AmplitudeDamping { gamma }),
+        (
+            "kraus_1q",
+            NoiseChannel::Custom {
+                kraus: vec![
+                    [[real(diag), real(off)], [real(off), real(diag)]],
+                    [[real(s), real(-s)], [real(s), real(-s)]],
+                ],
+            },
+        ),
+    ];
+
+    for &n in noisy_sizes() {
+        let mut circuit = Circuit::new(n, n);
+        circuit.instructions = cyclic_wall(n, 2, SEED).instructions;
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+        for (name, channel) in &channels {
+            let noise = per_target_noise(&circuit, channel);
+            for ranks in [2usize, 4] {
+                let id = BenchmarkId::new(format!("{name}/{n}"), format!("{ranks}ranks"));
+                group.bench_with_input(id, &circuit, |b, circ| {
+                    b.iter(|| {
+                        let shots = run_ranks(ranks, |ctx| {
+                            simulate(circ)
+                                .distributed(ctx)
+                                .noise(&noise)
+                                .seed(SEED)
+                                .shots(SHOTS)
+                                .unwrap()
+                        });
+                        std::hint::black_box(shots);
+                    });
+                });
+            }
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -344,6 +429,7 @@ criterion_group! {
     bench_controlled_star_direct,
     bench_fused_2q_two_global,
     bench_sample_indices,
-    bench_cyclic_wall
+    bench_cyclic_wall,
+    bench_noisy_shots
 }
 criterion_main!(benches);

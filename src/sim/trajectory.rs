@@ -1106,22 +1106,62 @@ pub(crate) fn run_trajectories(
 
     let readout = written_readout(circuit, &noise.readout);
     let memory = MemorySpec::of(noise);
+    run_serial(circuit, memory, num_shots, seed, route, |shot_seed, rng| {
+        let mut backend = backend_factory(shot_seed);
+        let (result, leaked) =
+            run_shot(backend.as_mut(), circuit, &prepared, &readout, memory, rng)?;
+        Ok((
+            result,
+            leaked,
+            crate::sim::backend_metadata(backend.as_ref()),
+        ))
+    })
+}
+
+/// Serial trajectories on one held `backend`, which `reseed` hands each shot's seed
+/// before the shot's `init` returns it to |0...0>. Records match
+/// [`run_trajectories`] with `force_serial` on a factory building the same backend
+/// from that seed.
+#[cfg(feature = "distributed")]
+pub(crate) fn run_trajectories_held<B: Backend>(
+    backend: &mut B,
+    mut reseed: impl FnMut(&mut B, u64),
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+    route: crate::sim::ResolvedBackend,
+) -> Result<ShotsResult> {
+    let prepared = PreparedNoise::new(noise);
+    let readout = written_readout(circuit, &noise.readout);
+    let memory = MemorySpec::of(noise);
+    run_serial(circuit, memory, num_shots, seed, route, |shot_seed, rng| {
+        reseed(backend, shot_seed);
+        let (result, leaked) = run_shot(backend, circuit, &prepared, &readout, memory, rng)?;
+        Ok((result, leaked, crate::sim::backend_metadata(backend)))
+    })
+}
+
+/// Run shot `i` for every `i` in order, `shot` taking its seed and noise stream and
+/// returning its record, leak flags and metadata.
+fn run_serial(
+    circuit: &Circuit,
+    memory: Option<MemorySpec>,
+    num_shots: usize,
+    seed: u64,
+    route: crate::sim::ResolvedBackend,
+    mut shot: impl FnMut(
+        u64,
+        &mut ChaCha8Rng,
+    ) -> Result<(Vec<bool>, Vec<bool>, crate::sim::RunMetadata)>,
+) -> Result<ShotsResult> {
     let mut shots = Vec::with_capacity(num_shots);
     let mut leaked = Vec::new();
     let mut metadata = crate::sim::RunMetadata::exact(route);
     for i in 0..num_shots {
         let shot_seed = crate::sim::mix_seed(seed, i);
         let mut rng = noise_rng(shot_seed);
-        let mut backend = backend_factory(shot_seed);
-        let (result, shot_leaked) = run_shot(
-            backend.as_mut(),
-            circuit,
-            &prepared,
-            &readout,
-            memory,
-            &mut rng,
-        )?;
-        let shot_metadata = crate::sim::backend_metadata(backend.as_ref());
+        let (result, shot_leaked, shot_metadata) = shot(shot_seed, &mut rng)?;
         if i == 0 {
             metadata = shot_metadata;
         } else {

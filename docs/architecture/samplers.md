@@ -235,8 +235,8 @@ picked it.
 The trajectory engine (`src/sim/trajectory.rs`) covers everything the compiled
 family rejects: non-Pauli channels, mid-circuit measurement, reset, classical
 conditionals, and non-Clifford gates, at per-shot state evolution cost.
-Distributed backends reject noisy sampling entirely; per-shot trajectories
-cannot keep rank collectives in lockstep.
+On the distributed statevector the trajectories run serially in shot order on
+every rank, so the ranks issue their collectives in lockstep.
 
 Pauli noise on the host statevector, with measurements that are all terminal, no
 reset, and no live event after the first measurement, skips the per-shot cost.

@@ -54,8 +54,9 @@
 //!
 //! - Circuits that fit one host; the inner statevector backend does the same
 //!   work without collectives.
-//! - Per-shot noise trajectories; `run_shots_with_noise` rejects the backend
-//!   (see the `backend` module docs).
+//! - Many noisy shots of a circuit that fits one host. Trajectories here run one
+//!   shot at a time across every rank, where the host engine spreads shots over
+//!   threads and shares Pauli error prefixes between them.
 //!
 //! # Qubit relabeling
 //!
@@ -114,6 +115,13 @@
 //! [`DistributedStatevectorBackend::sample_state_indices`] for the algorithm,
 //! which [`Backend::sample_basis_states`] exposes at the trait level. Circuits
 //! with mid-circuit measurements fall back to one lockstep run per shot.
+//!
+//! Noisy shots run as trajectories in shot order on every rank, one backend
+//! re-initialized per shot. Each shot seeds its noise stream from the run seed
+//! and the shot index, so ranks draw the same branches without exchanging them.
+//! A damping or thermal event weighs its branches by `qubit_probability`, one
+//! `Allreduce`, and a Kraus channel by a reduced density matrix summed in rank
+//! order, so every rank compares its draw against the same value.
 
 mod plan;
 #[cfg(test)]
@@ -150,7 +158,11 @@ use crate::sim::unified_pauli::PauliTerm;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-const BACKEND_NAME: &str = "distributed_statevector";
+pub(crate) const BACKEND_NAME: &str = "distributed_statevector";
+
+/// Amplitudes per message when a rank-bit qubit's coherence is read in place, which
+/// bounds the receive buffer a per-event noise read allocates (1 MiB).
+const RDM_READ_CHUNK: usize = 1 << 16;
 
 /// Shard length at which the combine loops below fan out to Rayon. Not tied to
 /// `PARALLEL_THRESHOLD_QUBITS`, whose move to 15 was measured on dense kernels only.
@@ -609,6 +621,42 @@ impl DistributedStatevectorBackend {
         self.relabel = enabled;
     }
 
+    /// Seed the measurement stream the next `init` starts, so one backend can
+    /// replay what a backend built from `seed` would draw.
+    pub(crate) fn set_seed(&mut self, seed: u64) {
+        self.seed = seed;
+    }
+
+    /// Return `local`'s error on every rank it failed on and a matching error on
+    /// the rest, so a failure read from rank-local state, such as a limit each
+    /// rank resolves for itself, stops every rank instead of leaving the others
+    /// waiting at a collective the failed rank never enters. `fingerprint` folds
+    /// the inputs the ranks must share, and a rank holding another value fails
+    /// every rank the same way.
+    ///
+    /// Collective: one gather of two words per rank.
+    pub(crate) fn fail_together(&self, fingerprint: u64, local: Result<()>) -> Result<()> {
+        let words = self
+            .context
+            .comm()
+            .allgather_u64(&[fingerprint, u64::from(local.is_err())]);
+        let mut ranks = words.as_chunks::<2>().0.iter();
+        if let Some(other) = ranks.clone().position(|w| w[0] != fingerprint) {
+            return Err(self.unsupported(&format!(
+                "the run on rank {} differs from rank {other}: every rank must run the \
+                 same circuit, noise model, shot count, and seed",
+                self.context.rank()
+            )));
+        }
+        local?;
+        match ranks.position(|w| w[1] != 0) {
+            None => Ok(()),
+            Some(failed) => Err(self.unsupported(&format!(
+                "rank {failed} rejected the run, so every rank stops with it"
+            ))),
+        }
+    }
+
     /// Number of `sendrecv` messages this rank has issued since `init`, gate and
     /// relabel exchanges only: the `&self` query paths cannot record theirs.
     pub fn exchange_messages(&self) -> u64 {
@@ -955,14 +1003,15 @@ impl DistributedStatevectorBackend {
         hasher.finish()
     }
 
-    /// Fold the instruction stream into the value ranks compare.
+    /// Fold an instruction stream, or any value ranks must share, into the value
+    /// ranks compare.
     ///
     /// Hashes the `Debug` rendering rather than walking the structure. `Gate`
     /// has variants carrying dense matrices and no fingerprint of its own, and
     /// `f64`'s `Debug` round-trips, so ranks differing in any field of any
     /// instruction hash differently and a new variant is covered without being
     /// listed here. Runs once per multi-rank run, not per gate.
-    fn circuit_fingerprint(instructions: &[Instruction]) -> u64 {
+    pub(crate) fn debug_fingerprint(value: &dyn std::fmt::Debug) -> u64 {
         use std::fmt::Write as _;
         use std::hash::Hasher;
 
@@ -975,7 +1024,7 @@ impl DistributedStatevectorBackend {
         }
 
         let mut hasher = std::hash::DefaultHasher::new();
-        let _ = write!(HashSink(&mut hasher), "{instructions:?}");
+        let _ = write!(HashSink(&mut hasher), "{value:?}");
         hasher.finish()
     }
 
@@ -990,7 +1039,7 @@ impl DistributedStatevectorBackend {
     /// a rank that never reaches the run at all: that one hangs in this
     /// allgather instead of a later one.
     fn check_circuit_agreement(&self, instructions: &[Instruction]) -> Result<()> {
-        let local = Self::circuit_fingerprint(instructions);
+        let local = Self::debug_fingerprint(&instructions);
         let all = self.context.comm().allgather_u64(&[local]);
         match all.iter().position(|&other| other != local) {
             None => Ok(()),
@@ -1786,7 +1835,9 @@ impl DistributedStatevectorBackend {
         }
     }
 
-    /// Total scaled weight of the `qubit == outcome` subspace across ranks.
+    /// Total scaled weight of the `qubit == outcome` subspace across ranks, summed in
+    /// rank order so every rank compares its draws against the same bits; an MPI
+    /// reduction need not return identical bits on every rank.
     fn prob_outcome_global(&self, qubit: usize, outcome: bool) -> f64 {
         let norm_sq = self.inner.pending_norm * self.inner.pending_norm;
         let local_prob = if qubit < self.local_qubits() {
@@ -1796,7 +1847,8 @@ impl DistributedStatevectorBackend {
         } else {
             0.0
         };
-        self.context.comm().allreduce_sum_f64(local_prob) * norm_sq
+        let parts = self.context.comm().allgather_f64(&[local_prob]);
+        parts.iter().sum::<f64>() * norm_sq
     }
 
     /// Total weight of the `qubit == 1` subspace across all ranks. Used by
@@ -2320,7 +2372,7 @@ impl Backend for DistributedStatevectorBackend {
             } else {
                 (&state[..half], &state[half..])
             };
-            let chunk = self.exchange_chunk.min(half).max(1);
+            let chunk = self.exchange_chunk.min(half).clamp(1, RDM_READ_CHUNK);
             let mut recv = vec![Complex64::new(0.0, 0.0); chunk];
             let mut sums = (0.0, 0.0, Complex64::new(0.0, 0.0));
             let mut off = 0;
@@ -2401,6 +2453,12 @@ impl Backend for DistributedStatevectorBackend {
         }
         normalize_trace(&mut rho, dim);
         Ok(rho)
+    }
+
+    /// The pair's block reads through [`Backend::reduced_density_matrix`], and
+    /// `Gate::Fused2q` runs at any rank split.
+    fn supports_two_qubit_kraus(&self) -> bool {
+        true
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {

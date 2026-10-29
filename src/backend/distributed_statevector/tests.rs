@@ -7,8 +7,9 @@ use crate::distributed::DistributedContext;
 use crate::distributed::loopback::{run_ranks, run_ranks_max_exchange, run_ranks_max_gather};
 use crate::error::PrismError;
 use crate::limits::ResolvedLimits;
+use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError};
 use crate::sim::unified_pauli::PauliTerm;
-use crate::sim::{ResolvedBackend, run_on, run_on_state, simulate};
+use crate::sim::{ResolvedBackend, ShotsResult, run_on, run_on_state, simulate};
 use num_complex::Complex64;
 
 const SEED: u64 = 42;
@@ -1724,28 +1725,416 @@ fn shots_mid_circuit_match_across_rank_counts() {
     }
 }
 
-#[test]
-fn noisy_shots_rejected_on_distributed_kind() {
-    let mut circuit = Circuit::new(2, 2);
-    circuit.add_gate(crate::gates::Gate::H, &[0]);
-    circuit.add_measure(0, 0);
-    let noise = crate::sim::noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
-    let kind = crate::sim::BackendKind::StatevectorDistributed {
-        context: DistributedContext::serial(),
+/// Five qubits, so four ranks leave three local positions and the top two qubits
+/// start on rank bits. A mid-circuit measurement guards a region, so shots apply
+/// different gate streams and the noise model carries guarded slots.
+fn noisy_circuit() -> Circuit {
+    let mut b = CircuitBuilder::new_with_classical(5, 5);
+    b.h(0).ry(0.7, 4).cx(0, 3).rx(1.1, 2).cx(4, 1).h(3);
+    b.measure(3, 0);
+    b.guarded(crate::circuit::ClassicalCondition::BitIsOne(0), |body| {
+        body.x(4).ry(0.4, 1);
+    });
+    b.cx(2, 4).ry(1.3, 0).h(4).cx(1, 0);
+    for q in 0..5 {
+        b.measure(q, q);
+    }
+    b.build()
+}
+
+/// Two events per slot, cycling through `channels` and over every qubit, rank-bit
+/// qubits included, with readout error on one bit.
+fn cycled_noise(circuit: &Circuit, channels: &[NoiseChannel]) -> NoiseModel {
+    let n = circuit.num_qubits;
+    let mut after_gate = vec![Vec::new(); circuit.noise_slot_count()];
+    for (slot, events) in after_gate.iter_mut().enumerate() {
+        for k in 0..2 {
+            let channel = channels[(2 * slot + k) % channels.len()].clone();
+            let q = (3 * slot + k) % n;
+            let qubits = if channel.num_qubits() == 2 {
+                crate::circuit::smallvec![q, (q + 2) % n]
+            } else {
+                crate::circuit::smallvec![q]
+            };
+            events.push(NoiseEvent { channel, qubits });
+        }
+    }
+    let mut readout = vec![None; circuit.num_classical_bits];
+    readout[1] = Some(ReadoutError {
+        p01: 0.05,
+        p10: 0.08,
+    });
+    NoiseModel {
+        after_gate,
+        readout,
+    }
+}
+
+fn real(re: f64) -> Complex64 {
+    Complex64::new(re, 0.0)
+}
+
+/// Amplitude damping in the X basis: the branch weights read `<X>`, so they
+/// depend on the qubit's coherence and not only on its populations.
+fn x_basis_damping(gamma: f64) -> NoiseChannel {
+    let keep = (1.0 - gamma).sqrt();
+    let (a, b) = (0.5 * (1.0 + keep), 0.5 * (1.0 - keep));
+    let s = 0.5 * gamma.sqrt();
+    NoiseChannel::Custom {
+        kraus: vec![
+            [[real(a), real(b)], [real(b), real(a)]],
+            [[real(s), real(-s)], [real(s), real(-s)]],
+        ],
+    }
+}
+
+/// Joint decay `|11> -> |00>` after a Hadamard on the high qubit, so the branch
+/// weights read the pair's coherence.
+fn pair_damping(gamma: f64) -> NoiseChannel {
+    let mut keep = [[real(0.0); 4]; 4];
+    let mut decay = [[real(0.0); 4]; 4];
+    for (t, row) in keep.iter_mut().enumerate().take(3) {
+        row[t] = real(1.0);
+    }
+    keep[3][3] = real((1.0 - gamma).sqrt());
+    decay[0][3] = real(gamma.sqrt());
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let after_h = |a: [[Complex64; 4]; 4]| {
+        let mut k = [[real(0.0); 4]; 4];
+        for (t, row) in k.iter_mut().enumerate() {
+            for (u, entry) in row.iter_mut().enumerate() {
+                for m in (u & 1..4).step_by(2) {
+                    let sign = if (m >> 1) & (u >> 1) == 1 { -h } else { h };
+                    *entry += a[t][m] * sign;
+                }
+            }
+        }
+        k
     };
-    let err = crate::sim::run_shots_with_noise(
-        kind,
-        &circuit,
-        &noise,
-        10,
+    NoiseChannel::Kraus2q {
+        kraus: vec![after_h(keep), after_h(decay)],
+    }
+}
+
+fn noisy_channel_sets() -> Vec<(&'static str, Vec<NoiseChannel>)> {
+    let thermal = |t1, t2, gate_time, excited_population| NoiseChannel::ThermalRelaxation {
+        t1,
+        t2,
+        gate_time,
+        excited_population,
+    };
+    vec![
+        (
+            "depolarizing",
+            vec![
+                NoiseChannel::Depolarizing { p: 0.1 },
+                NoiseChannel::Pauli {
+                    px: 0.02,
+                    py: 0.05,
+                    pz: 0.03,
+                },
+                NoiseChannel::TwoQubitDepolarizing { p: 0.15 },
+            ],
+        ),
+        (
+            "amplitude damping",
+            vec![
+                NoiseChannel::AmplitudeDamping { gamma: 0.2 },
+                NoiseChannel::PhaseDamping { gamma: 0.15 },
+            ],
+        ),
+        (
+            "thermal relaxation",
+            vec![
+                thermal(40.0, 55.0, 6.0, 0.0),
+                thermal(30.0, 50.0, 4.0, 0.25),
+            ],
+        ),
+        ("custom 1q kraus", vec![x_basis_damping(0.3)]),
+        (
+            "2q kraus",
+            vec![pair_damping(0.35), NoiseChannel::Depolarizing { p: 0.05 }],
+        ),
+        (
+            "leakage and quasi-static",
+            vec![
+                NoiseChannel::Leakage { p: 0.1 },
+                NoiseChannel::Seepage { p: 0.3 },
+                NoiseChannel::LeakageTransport { p: 0.4 },
+                NoiseChannel::QuasiStatic {
+                    axis: crate::sim::unified_pauli::PauliAxis::Z,
+                    weights: vec![(0, 0.3), (1, 0.1)],
+                },
+                NoiseChannel::QuasiStatic {
+                    axis: crate::sim::unified_pauli::PauliAxis::X,
+                    weights: vec![(1, 0.2)],
+                },
+                NoiseChannel::AmplitudeDamping { gamma: 0.1 },
+            ],
+        ),
+    ]
+}
+
+/// The host statevector's serial trajectory loop, one backend built per shot.
+fn host_noisy_shots(circuit: &Circuit, noise: &NoiseModel, shots: usize) -> ShotsResult {
+    crate::sim::trajectory::run_trajectories(
+        |s| Box::new(StatevectorBackend::new(s)),
+        circuit,
+        noise,
+        shots,
         SEED,
-        &ResolvedLimits::process_default(),
+        true,
+        ResolvedBackend::Statevector,
     )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        crate::error::PrismError::IncompatibleBackend { .. }
-    ));
+    .expect("host trajectories")
+}
+
+// Records are compared bit for bit: every rank draws from the host's per-shot
+// streams, and a branch weight differs from the host's only by summation order,
+// which moves a draw only when it lands within a few ulps of a branch edge.
+#[test]
+fn noisy_shots_match_the_host_trajectories_across_rank_counts() {
+    relax_min_local_qubits();
+    let circuit = noisy_circuit();
+    let shots = 64;
+    for (name, channels) in noisy_channel_sets() {
+        let noise = cycled_noise(&circuit, &channels);
+        noise.validate_for(&circuit).expect("valid model");
+        let expected = host_noisy_shots(&circuit, &noise, shots);
+        assert!(
+            expected.counts().len() > 1,
+            "{name}: the reference must spread over several records"
+        );
+        for size in [1usize, 2, 4] {
+            let per_rank = run_ranks(size, |ctx| {
+                simulate(&circuit)
+                    .distributed(ctx)
+                    .noise(&noise)
+                    .seed(SEED)
+                    .shots(shots)
+                    .expect("distributed noisy shots")
+            });
+            for result in &per_rank {
+                assert_eq!(result.shots, expected.shots, "{name}, {size} ranks");
+                assert_eq!(result.leaked, expected.leaked, "{name}, {size} ranks");
+                assert_eq!(result.metadata.backend, ResolvedBackend::Distributed);
+            }
+        }
+    }
+}
+
+// The direct exchange paths, for gates, one-qubit matrices and the partner read
+// of a rank-bit qubit's coherence, on one backend reseeded per shot.
+#[test]
+fn noisy_shots_without_relabeling_match_the_host_trajectories() {
+    relax_min_local_qubits();
+    let circuit = noisy_circuit();
+    let shots = 32;
+    for (name, channels) in noisy_channel_sets() {
+        let noise = cycled_noise(&circuit, &channels);
+        let expected = host_noisy_shots(&circuit, &noise, shots);
+        for size in [2usize, 4] {
+            let per_rank = run_ranks(size, |ctx| {
+                let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                backend.set_relabel(false);
+                crate::sim::trajectory::run_trajectories_held(
+                    &mut backend,
+                    DistributedStatevectorBackend::set_seed,
+                    &circuit,
+                    &noise,
+                    shots,
+                    SEED,
+                    ResolvedBackend::Distributed,
+                )
+                .expect("distributed noisy shots")
+            });
+            for result in &per_rank {
+                assert_eq!(result.shots, expected.shots, "{name}, {size} ranks");
+                assert_eq!(result.leaked, expected.leaked, "{name}, {size} ranks");
+            }
+        }
+    }
+}
+
+// Ranks handed different models would issue different collectives part way
+// through a shot; the run fails on every rank before the first one.
+#[test]
+fn noisy_shots_fail_on_every_rank_when_the_ranks_disagree() {
+    relax_min_local_qubits();
+    let circuit = noisy_circuit();
+    for size in [2usize, 4] {
+        let errors = run_ranks(size, |ctx| {
+            let gamma = if ctx.rank() == 1 { 0.3 } else { 0.2 };
+            let noise = cycled_noise(&circuit, &[NoiseChannel::AmplitudeDamping { gamma }]);
+            simulate(&circuit)
+                .distributed(ctx)
+                .noise(&noise)
+                .seed(SEED)
+                .shots(8)
+                .unwrap_err()
+        });
+        for err in errors {
+            assert!(
+                matches!(&err, PrismError::BackendUnsupported { operation, .. }
+                    if operation.contains("differs")),
+                "{size} ranks: {err}"
+            );
+        }
+    }
+}
+
+// A cap each rank resolves for itself can reject a run on one rank alone: at
+// `init`, or for a pair channel, at validation. Every rank fails with it.
+#[test]
+fn noisy_shots_fail_on_every_rank_when_one_rank_rejects() {
+    relax_min_local_qubits();
+    let circuit = noisy_circuit();
+    let cases = [
+        (
+            "statevector cap",
+            vec![NoiseChannel::AmplitudeDamping { gamma: 0.2 }],
+            crate::Limits {
+                max_statevector_qubits: Some(1),
+                ..Default::default()
+            },
+        ),
+        (
+            "export cap",
+            vec![pair_damping(0.35)],
+            crate::Limits {
+                max_export_qubits: Some(2),
+                ..Default::default()
+            },
+        ),
+    ];
+    for (name, channels, tight) in &cases {
+        let noise = cycled_noise(&circuit, channels);
+        for size in [2usize, 4] {
+            let errors = run_ranks(size, |ctx| {
+                let rank = ctx.rank();
+                let limits = if rank == 1 {
+                    *tight
+                } else {
+                    crate::Limits::default()
+                };
+                let err = simulate(&circuit)
+                    .distributed(ctx)
+                    .limits(limits)
+                    .noise(&noise)
+                    .seed(SEED)
+                    .shots(8)
+                    .unwrap_err();
+                (rank, err)
+            });
+            for (rank, err) in errors {
+                if rank == 1 {
+                    assert!(
+                        matches!(err, PrismError::ResourceLimit(_)),
+                        "{name}, {size} ranks: {err}"
+                    );
+                } else {
+                    assert!(
+                        matches!(&err, PrismError::BackendUnsupported { operation, .. }
+                            if operation.contains("rank 1 rejected")),
+                        "{name}, {size} ranks, rank {rank}: {err}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// Seeds and shot counts enter the fingerprint as well as the model.
+#[test]
+fn noisy_shots_fail_on_every_rank_when_seed_or_shot_count_differs() {
+    relax_min_local_qubits();
+    let circuit = noisy_circuit();
+    let noise = cycled_noise(&circuit, &[NoiseChannel::AmplitudeDamping { gamma: 0.2 }]);
+    for differing in ["seed", "shots"] {
+        let errors = run_ranks(2, |ctx| {
+            let rank = ctx.rank();
+            let (seed, shots) = match differing {
+                "seed" => (SEED + rank as u64, 8),
+                _ => (SEED, 8 + rank),
+            };
+            simulate(&circuit)
+                .distributed(ctx)
+                .noise(&noise)
+                .seed(seed)
+                .shots(shots)
+                .unwrap_err()
+        });
+        for err in errors {
+            assert!(
+                matches!(&err, PrismError::BackendUnsupported { operation, .. }
+                    if operation.contains("differs")),
+                "{differing}: {err}"
+            );
+        }
+    }
+}
+
+// Three qubits on four ranks leave one local position, so a pair's block cannot be
+// made local and each two-qubit Kraus event reads the gathered state.
+#[test]
+fn noisy_shots_gather_the_state_when_a_pair_cannot_be_local() {
+    relax_min_local_qubits();
+    let mut b = CircuitBuilder::new_with_classical(3, 3);
+    b.h(0).ry(0.9, 1).cx(0, 2).h(2).cx(1, 0).ry(0.6, 2);
+    for q in 0..3 {
+        b.measure(q, q);
+    }
+    let circuit = b.build();
+    let noise = cycled_noise(&circuit, &[pair_damping(0.35)]);
+    let shots = 32;
+    let expected = host_noisy_shots(&circuit, &noise, shots);
+    assert!(expected.counts().len() > 1);
+    let per_rank = run_ranks(4, |ctx| {
+        simulate(&circuit)
+            .distributed(ctx)
+            .noise(&noise)
+            .seed(SEED)
+            .shots(shots)
+            .expect("distributed noisy shots")
+    });
+    for result in &per_rank {
+        assert_eq!(result.shots, expected.shots);
+    }
+}
+
+// The plan applies the export cap the run checks before the first shot.
+#[test]
+fn noisy_shot_plan_reports_the_pair_export_cap() {
+    relax_min_local_qubits();
+    let circuit = noisy_circuit();
+    let noise = cycled_noise(&circuit, &[pair_damping(0.35)]);
+    let tight = crate::Limits {
+        max_export_qubits: Some(2),
+        ..Default::default()
+    };
+    let plans = run_ranks(2, |ctx| {
+        let tight_plan = simulate(&circuit)
+            .distributed(ctx.clone())
+            .limits(tight)
+            .noise(&noise)
+            .seed(SEED)
+            .plan(crate::Query::Shots(8))
+            .expect("plan");
+        let default_plan = simulate(&circuit)
+            .distributed(ctx)
+            .noise(&noise)
+            .seed(SEED)
+            .plan(crate::Query::Shots(8))
+            .expect("plan");
+        (tight_plan.would_fail, default_plan.would_fail)
+    });
+    for (tight, default) in plans {
+        assert!(
+            matches!(tight, Some(PrismError::ResourceLimit(_))),
+            "{tight:?}"
+        );
+        assert!(default.is_none(), "{default:?}");
+    }
 }
 
 /// Statevector reference for `circuit` with its instructions applied unfused.

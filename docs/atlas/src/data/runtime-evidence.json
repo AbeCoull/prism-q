@@ -1,0 +1,518 @@
+[
+  {
+    "id": "circuit-instruction-representation",
+    "chapter": "compiler",
+    "claim": "A circuit is an instruction vector with quantum and classical register widths; instructions include gates, measurement, reset, barriers, conditionals, regions and saves.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/circuit/mod.rs",
+        "symbol": "Circuit",
+        "startLine": 44,
+        "endLine": 48
+      },
+      {
+        "path": "src/circuit/mod.rs",
+        "symbol": "Instruction",
+        "startLine": 1659,
+        "endLine": 1692
+      }
+    ],
+    "derivation": "Gate and conditional targets use SmallVec<[usize; 4]>, preserving inline storage for four indices.",
+    "limitations": "Classical dependencies and nonunitary instructions cannot be modeled by unitary composition alone.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "boxed-gate-payloads",
+    "chapter": "compiler",
+    "claim": "Fused and batched matrices use boxed payloads to retain a 16-byte gate enum.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/gates/mod.rs",
+        "symbol": "Gate",
+        "startLine": 20,
+        "endLine": 140
+      },
+      {
+        "path": "src/gates/tests.rs",
+        "symbol": "test_gate_enum_size",
+        "startLine": 430,
+        "endLine": 436
+      }
+    ],
+    "derivation": "Fused stores a 2 by 2 matrix, Fused2q stores a 4 by 4 matrix, and MultiFused and Multi2q store batches.",
+    "limitations": "A tiled batch need not be one dense unitary over all its targets.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "fusion-host-pass-order",
+    "chapter": "compiler",
+    "claim": "Host fusion performs guarded bodies, cancellation, Rzz recognition and batching, 1q fusion, 1q reorder, cancellation, 1q fusion, 2q absorption and same-pair fusion before choosing staging or batching.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/circuit/fusion.rs",
+        "symbol": "fuse_at_width",
+        "startLine": 1717,
+        "endLine": 1752
+      }
+    ],
+    "derivation": "Listed in the order the host branch runs them. Each pass keeps its own width threshold.",
+    "limitations": "The supports_fused=false entry bypasses all fusion. Tests use lower thresholds than native runs.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "fusion-native-floors",
+    "chapter": "compiler",
+    "claim": "Native buffer-width floors are 10 for general fusion, 12 for 2q fusion, 14 for multi-1q and diagonal batches, 16 for Pauli batches, and 18 for post-phase rebatching on wider buffers.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/circuit/fusion.rs",
+        "symbol": "MIN_QUBITS_FOR_FUSION",
+        "startLine": 29,
+        "endLine": 90
+      },
+      {
+        "path": "src/circuit/fusion.rs",
+        "symbol": "batch_passes",
+        "startLine": 1776,
+        "endLine": 1804
+      }
+    ],
+    "derivation": "Post-phase rebatching on a buffer equal to circuit width instead uses the diagonal floor of 14.",
+    "limitations": "The floors compare against buffer width, which is twice the logical width for density matrices. Stage planning can take the place of batching.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "fusion-cache-stage-planner",
+    "chapter": "compiler",
+    "claim": "Host fusion switches to tile staging once its own-width statevector exceeds a cache-derived floor.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/circuit/fusion_stage.rs",
+        "symbol": "stage_floor",
+        "startLine": 24,
+        "endLine": 46
+      },
+      {
+        "path": "src/circuit/fusion_stage.rs",
+        "symbol": "plan_with",
+        "startLine": 130,
+        "endLine": 169
+      }
+    ],
+    "derivation": "The floor is floor(log2(LLC bytes / 16)) + 1, at least 16, with fallback 20; stages_at also requires equal circuit and buffer widths and at most 64 qubits.",
+    "limitations": "The floor depends on detected host cache. The scheduler is heuristic and stops segments at nonbatchable instructions.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "fusion-device-profile",
+    "chapter": "compiler",
+    "claim": "Device fusion keeps an isolated CX and its neighbouring 1q gates as they are instead of folding them into a dense 4 by 4 gate.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/circuit/fusion.rs",
+        "symbol": "device_passes",
+        "startLine": 1754,
+        "endLine": 1772
+      }
+    ],
+    "derivation": "Two-qubit absorption is restricted to members of same-pair runs; device lowering schedules its own tiles.",
+    "limitations": "This covers the compiler profile only, not CUDA kernel scheduling or speed.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "fusion-composition-order",
+    "chapter": "compiler",
+    "claim": "Chronological gates G1, G2, G3 fuse to G3 times G2 times G1.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/circuit/fusion.rs",
+        "symbol": "accumulate_1q",
+        "startLine": 246,
+        "endLine": 257
+      },
+      {
+        "path": "src/circuit/fusion_tests.rs",
+        "symbol": "test_fusion_matrix_order_matters",
+        "startLine": 432,
+        "endLine": 456
+      }
+    ],
+    "derivation": "Column-state evolution applies each new matrix on the left.",
+    "limitations": "Order cannot be reversed for noncommuting gates.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "fusion-diagonal-commutation",
+    "chapter": "compiler",
+    "claim": "Diagonal 1q gates can reorder past CX on the control and CZ or Rzz on either target, with explicit dependencies preserved.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/circuit/fusion.rs",
+        "symbol": "reorder_1q_gates",
+        "startLine": 356,
+        "endLine": 473
+      }
+    ],
+    "derivation": "Separate blockers track all 1q gates and diagonal gates for each qubit.",
+    "limitations": "Only these listed rules apply; there is no general symbolic commutation. A CX target blocks diagonal movement.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "fusion-self-inverse-cancellation",
+    "chapter": "compiler",
+    "claim": "CX, CZ and SWAP pairs cancel when no intervening instruction touches their qubits; reversing CX targets does not preserve the operation.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/circuit/fusion.rs",
+        "symbol": "is_cancelling_pair",
+        "startLine": 123,
+        "endLine": 151
+      },
+      {
+        "path": "src/circuit/fusion.rs",
+        "symbol": "cancel_self_inverse_pairs",
+        "startLine": 154,
+        "endLine": 225
+      }
+    ],
+    "derivation": "CZ and SWAP admit target reversal while CX requires matching ordered targets.",
+    "limitations": "The pass handles self-inverse two-qubit gates only. Other cancellations can fall out of later matrix fusion.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "statevector-full-sweep-traffic",
+    "chapter": "compiler",
+    "claim": "A full read/write sweep of a complex128 statevector transfers 32 times 2^n bytes of amplitude payload.",
+    "status": "model",
+    "sources": [
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "Memory layout",
+        "startLine": 1,
+        "endLine": 45
+      },
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend",
+        "startLine": 248,
+        "endLine": 265
+      }
+    ],
+    "derivation": "2^n amplitudes times 16 bytes per complex128 amplitude times one read and one write.",
+    "limitations": "Payload only, not measured DRAM traffic. Cache reuse, specialized gates and batching all change the real figure. Dividing by an assumed bandwidth gives a lower bound on time.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "dispatch-base-family-tree",
+    "chapter": "backends",
+    "claim": "The base automatic family tree checks no entanglement, Clifford structure, statevector cap, sparse viability, partial independence, then dense statevector.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/sim/dispatch.rs",
+        "symbol": "select_auto_backend_choice",
+        "startLine": 500,
+        "endLine": 524
+      }
+    ],
+    "derivation": "The branches select ProductState, Stabilizer, Sparse or Mps, Factored and Statevector respectively.",
+    "limitations": "Terminal-specific routes, noise, decomposition and initial-state requirements can supersede this base tree.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "dispatch-sparse-support-probe",
+    "chapter": "backends",
+    "claim": "Above the statevector cap, automatic sparse selection accepts structural sparsity or a probe that stays at no more than 128 entries, within usize index width.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/sim/dispatch.rs",
+        "symbol": "AUTO_SPARSE_MAX_SUPPORT",
+        "startLine": 143,
+        "endLine": 147
+      },
+      {
+        "path": "src/sim/dispatch.rs",
+        "symbol": "sparse_support_fits",
+        "startLine": 500,
+        "endLine": 541
+      }
+    ],
+    "derivation": "The probe applies gates to a sparse backend initialized at zero and tests entry_count after each operation.",
+    "limitations": "The probe rejects resets, saves, and measurement arrangements that are not terminal.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "dispatch-query-inspection",
+    "chapter": "backends",
+    "claim": "The public plan(Query) API reports the planned backend, rule, placement, exactness, alternatives, fallbacks, memory estimate and predictable failures.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/sim/plan.rs",
+        "symbol": "Plan",
+        "startLine": 103,
+        "endLine": 117
+      },
+      {
+        "path": "src/sim/plan.rs",
+        "symbol": "pub fn plan",
+        "startLine": 140,
+        "endLine": 176
+      }
+    ],
+    "derivation": "Each terminal is represented by Query, allowing distinct plans for probabilities, shots, expectations and diagnostics.",
+    "limitations": "Plans list possible runtime fallbacks separately. Memory excludes circuit storage, allocator overhead and process memory; Unknown has no byte count.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "dispatch-terminal-routes",
+    "chapter": "backends",
+    "claim": "Shot and expectation routes can use compiled Clifford sampling, stabilizer-rank paths, deterministic Pauli propagation and tensor contraction instead of the base backend family.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/sim/route.rs",
+        "symbol": "decide_shots",
+        "startLine": 223,
+        "endLine": 260
+      },
+      {
+        "path": "src/sim/route.rs",
+        "symbol": "decide_expectations",
+        "startLine": 274,
+        "endLine": 330
+      }
+    ],
+    "derivation": "Terminal route decisions inspect requested results and circuit structure before generic backend execution.",
+    "limitations": "A non-Clifford gate does not force dense simulation. Each route still has its own eligibility checks and budgets.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "sparse-storage-and-limits",
+    "chapter": "backends",
+    "claim": "Sparse simulation stores basis indices and amplitudes in FxHashMap with a retained swap map and a default squared-magnitude pruning threshold of 1e-28.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/sparse.rs",
+        "symbol": "SparseBackend",
+        "startLine": 90,
+        "endLine": 109
+      },
+      {
+        "path": "src/backend/sparse.rs",
+        "symbol": "DEFAULT_EPSILON",
+        "startLine": 1,
+        "endLine": 86
+      }
+    ],
+    "derivation": "Memory scales with support plus map overhead; affected gates prune small entries and rescale retained amplitudes.",
+    "limitations": "Width is limited by usize::BITS, dense Gate::Unitary is unsupported, and Hadamards can grow support exponentially.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "factored-dense-groups",
+    "chapter": "backends",
+    "claim": "Factored simulation holds a dense substate per entangled group and merges groups when a gate bridges them.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/factored/mod.rs",
+        "symbol": "Memory layout",
+        "startLine": 1,
+        "endLine": 35
+      },
+      {
+        "path": "src/backend/factored/mod.rs",
+        "symbol": "merge_substates",
+        "startLine": 196,
+        "endLine": 225
+      }
+    ],
+    "derivation": "Group storage sums 2^group_width complex amplitudes; global qubits map into sorted local group coordinates.",
+    "limitations": "A highly entangled circuit can merge every qubit into one dense group. Measurement and reset splitting is subject to a seven-qubit floor.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "mps-site-layout",
+    "chapter": "mps",
+    "claim": "MPS stores site tensors shaped (chi_left, 2, chi_right); local gates act on sites and nonadjacent pairs use SWAP routing.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "MpsBackend",
+        "startLine": 1,
+        "endLine": 42
+      }
+    ],
+    "derivation": "The flat tensor index is alpha*(2*chi_right) + physical*chi_right + beta.",
+    "limitations": "Cost depends on bond dimension and routing as well as qubit count. Dense output still needs 2^n storage.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "mps-relative-svd-threshold",
+    "chapter": "mps",
+    "claim": "SVD truncation keeps singular values strictly above epsilon times the largest, retains at least one, and applies the bond cap.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/mps/svd.rs",
+        "symbol": "truncated_svd_rank",
+        "startLine": 233,
+        "endLine": 246
+      },
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "set_svd_epsilon",
+        "startLine": 411,
+        "endLine": 428
+      }
+    ],
+    "derivation": "The implementation computes a relative threshold then limits retained rank; native default epsilon is 1e-12.",
+    "limitations": "It bounds singular values, not discarded probability or global accuracy.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "mps-discarded-weight-report",
+    "chapter": "mps",
+    "claim": "MPS accumulates discarded squared singular weight divided by total squared weight for each SVD cut.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "truncation_discarded",
+        "startLine": 440,
+        "endLine": 486
+      }
+    ],
+    "derivation": "The cumulative value adds sum(discarded s_i^2)/sum(all s_i^2) over cuts; result queries normalize the state.",
+    "limitations": "The sum can exceed one and does not measure final state error. The per-cut weights rely on the implementation's orthogonality-center handling.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "mps-fidelity-estimate-caveat",
+    "chapter": "mps",
+    "claim": "The reported MPS fidelity floor is a first-order estimate, not a certificate of final infidelity.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/sim/metadata.rs",
+        "symbol": "fidelity_lower_bound",
+        "startLine": 200,
+        "endLine": 223
+      },
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "fn exactness",
+        "startLine": 2943,
+        "endLine": 2951
+      }
+    ],
+    "derivation": "The field reports max(0, 1-sum(local discarded weights)); conservative accumulated error involves the square of summed square roots.",
+    "limitations": "Error from many successive cuts accumulates differently from a single cut, so the field name overstates what it guarantees.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "tensor-network-deferred-contraction",
+    "chapter": "backends",
+    "claim": "The tensor-network backend appends gate tensors, plans contractions from metadata and can use exact index slicing or optional bounded contraction.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/tensornetwork.rs",
+        "symbol": "TensorNetworkBackend",
+        "startLine": 1,
+        "endLine": 76
+      },
+      {
+        "path": "src/backend/tensornetwork.rs",
+        "symbol": "plan_with_restarts",
+        "startLine": 850,
+        "endLine": 880
+      }
+    ],
+    "derivation": "Seeded restarts can reduce peak intermediate size; slicing sums fixed-index assignments exactly. Positive tolerance permits rank reduction before replanning.",
+    "limitations": "Slicing trades extra work for lower peak memory, and bounded contraction gives up exactness. Arbitrary circuits can still be expensive.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "fusion-existing-differential-tests",
+    "chapter": "compiler",
+    "claim": "Existing tests compare fused and unfused complex states and separately check staged execution, dependency rules and matrix composition order.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "tests/integration/fusion_correctness.rs",
+        "symbol": "assert_fusion_preserves_state",
+        "startLine": 16,
+        "endLine": 63
+      },
+      {
+        "path": "src/circuit/fusion_stage_tests.rs",
+        "symbol": "assert_staged_matches_unfused",
+        "startLine": 80,
+        "endLine": 119
+      }
+    ],
+    "derivation": "The unfused reference calls backend.apply directly, while the fused comparison uses sim::run_on; integration tolerance is 1e-10.",
+    "limitations": "Reading the tests shows what they cover. It does not show that they pass on a later revision.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "benchmark-seeds-and-tiers",
+    "chapter": "benchmarks",
+    "claim": "Bench circuits use seed 0xDEAD_BEEF; shared Criterion configuration defaults to 30 samples with a ten-sample fast tier.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "benches/common/mod.rs",
+        "symbol": "SEED",
+        "startLine": 14,
+        "endLine": 14
+      },
+      {
+        "path": "benches/common/mod.rs",
+        "symbol": "sample_size",
+        "startLine": 73,
+        "endLine": 89
+      }
+    ],
+    "derivation": "PRISM_BENCH_SAMPLES can override the sample count with a minimum of ten; fast groups use short warmup and measurement windows.",
+    "limitations": "This is harness configuration; the atlas contains no benchmark results. Fast-tier numbers are for triage only.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  },
+  {
+    "id": "benchmark-control-verdicts",
+    "chapter": "benchmarks",
+    "claim": "The A/B and same-binary interleaved scripts distinguish PASS, FAIL, host-busy and RERUN states, with a default 5 percent regression threshold.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "scripts/bench_ab.sh",
+        "symbol": "Exit status",
+        "startLine": 131,
+        "endLine": 157
+      },
+      {
+        "path": "scripts/bench_interleave.sh",
+        "symbol": "Exit status",
+        "startLine": 99,
+        "endLine": 112
+      }
+    ],
+    "derivation": "Separate-binary comparison and interleaved coarse-switch comparison use controls to detect unresolved host or layout variation.",
+    "limitations": "Only PASS and FAIL are results. RERUN and host-busy runs say nothing about performance.",
+    "revision": "07acc59bf9aba08b706bcc85efed35e0c456bb12"
+  }
+]

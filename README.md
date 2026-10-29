@@ -36,6 +36,9 @@ back to OpenQASM 3.0.
 - Documentation: <https://abecoull.github.io/prism-q/> (machine-readable index at
   [`llms.txt`](https://abecoull.github.io/prism-q/llms.txt))
 - API reference: [docs.rs](https://docs.rs/prism-q)
+- Interactive atlas: [PRISM-Q atlas](https://abecoull.github.io/prism-q/atlas/), which
+  follows one statevector gate from its matrix through memory layout and SIMD lanes,
+  and replays recorded fusion passes. [Source and reproduction guide](docs/atlas/README.md).
 - Measured timings: [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html),
   with the method in
   [Benchmark Methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html)

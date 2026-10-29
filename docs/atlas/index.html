@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#fbfaf6" />
+    <meta
+      name="description"
+      content="Follow one quantum gate through the PRISM-Q statevector backend: amplitude pairing, complex128 memory layout, the AVX2 and NEON kernels, and recorded fusion passes."
+    />
+    <meta property="og:title" content="PRISM-Q atlas" />
+    <meta
+      property="og:description"
+      content="An interactive look at how PRISM-Q applies a gate and fuses circuits, checked against native recordings."
+    />
+    <meta property="og:image" content="./preview/statevector-desktop.png" />
+    <title>PRISM-Q atlas</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

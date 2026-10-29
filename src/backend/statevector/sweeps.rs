@@ -722,7 +722,7 @@ pub(crate) fn tick() {
 }
 
 #[cfg(test)]
-pub(super) fn take_ticks() -> usize {
+pub(crate) fn take_ticks() -> usize {
     PASS_TICKS.with(|ticks| ticks.replace(0))
 }
 

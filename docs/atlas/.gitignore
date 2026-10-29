@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.cache/
+test-results/
+playwright-report/
+.openai/
+public/native-gates.json
+public/native-fusion.json
+*.tsbuildinfo

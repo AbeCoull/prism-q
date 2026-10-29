@@ -1,0 +1,89 @@
+{
+  "date": "2026-10-28",
+  "auditedRevision": "7adde35d0bacaff71711148223ac8df06a008d01",
+  "atlas": {
+    "numericalAndHardwareTests": {
+      "passed": 125,
+      "command": "npm test"
+    },
+    "sourceRecords": 65,
+    "canonicalSourceHashes": 40,
+    "nativeConfigurations": 140,
+    "nativeStepsPerConfiguration": 4,
+    "nativeCompilerRecords": 31,
+    "nativeCompilerSnapshots": 432,
+    "compilerProducerHashes": 223,
+    "browserTests": {
+      "passed": 28,
+      "browser": "Microsoft Edge",
+      "platform": "Windows",
+      "includesScreenshotComparisons": 6
+    },
+    "productionBuild": "PASS",
+    "evidenceVerification": "PASS",
+    "productionSmoke": {
+      "verdict": "PASS",
+      "path": "/prism-q/atlas/",
+      "checks": [
+        "built assets",
+        "native JSON fixtures",
+        "compiler link restoration",
+        "no page or request errors"
+      ]
+    }
+  },
+  "simulatorRegression": {
+    "features": [
+      "parallel"
+    ],
+    "format": "PASS",
+    "clippy": "PASS",
+    "nextest": {
+      "passed": 3673,
+      "skipped": 12
+    },
+    "doctests": {
+      "passed": 59
+    },
+    "scope": "Prior full Rust gate retained; no Rust source changed in the review fixes. The opt-in native recorder was rerun successfully."
+  },
+  "compilerReplay": {
+    "maxAbsoluteError": 3.062757341903057e-16,
+    "maxNormSquaredError": 2.0539125955565396e-14,
+    "plannerExample": {
+      "width": 20,
+      "profile": "Host",
+      "beforeKernelTraversals": 150,
+      "afterKernelTraversals": 8
+    },
+    "meaning": "Actual pass outputs and test-only kernel entry counters; no timing or memory-traffic measurement. One deterministic input per circuit."
+  },
+  "performance": {
+    "verdict": "N/A",
+    "reason": "Documentation application, opt-in export example, and ignored compiler recorder; production simulator hot paths unchanged. No benchmarks collected."
+  },
+  "limitations": [
+    "Statevector execution and compiler fusion are interactive; nine remaining chapters are source dossiers.",
+    "Compiler snapshots disclose test-only export wiring relative to the audited base, with embedded exporter text and producer hashes.",
+    "Pages workflow prepared but not executed remotely in this session.",
+    "Screenshot baselines are specific to Windows Edge; functional browser checks are portable.",
+    "Publication target is the repository and GitHub Pages only, as selected by the user. No private Site source upload performed."
+  ],
+  "reviewFixes": {
+    "status": "implemented",
+    "pipelineMutationChecks": "reject missing or reordered passes, invented floors, unknown families, false enable states and planner branches",
+    "recordingProvenance": "actual checkout and dirty state retained separately from audited implementation; complete producer fingerprints and routing environment",
+    "browserRegressions": [
+      "Z low-half bypass and scalar source link",
+      "controlled compiler selectors",
+      "visible graph selection and keyboard traversal",
+      "active chapter and all mobile dossiers",
+      "readable scientific text and contained mobile overflow",
+      "before and after native streams with control-target semantics"
+    ],
+    "closures": [
+      "compiler contract review: no remaining blocker",
+      "desktop visual closure: no new blocker"
+    ]
+  }
+}

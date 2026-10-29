@@ -20,7 +20,7 @@
       }
     ],
     "derivation": "index=sum(bit(q)*2^q); 16 bytes per complex128 amplitude.",
-    "limitations": "Relative offsets are defined; allocator alignment beyond the type requirement is not established."
+    "limitations": "Only relative offsets are fixed. The source guarantees no alignment beyond what Complex64 requires."
   },
   {
     "id": "state-index-pairs",
@@ -43,12 +43,12 @@
       }
     ],
     "derivation": "half=1<<q; mask=half-1; i=((k&~mask)<<1)|(k&mask); j=i|half.",
-    "limitations": "The shown scalar formulas describe numerical semantics; native routing may use SIMD and parallel kernels."
+    "limitations": "These scalar formulas give the arithmetic. Native execution may route through SIMD and parallel kernels that compute the same values."
   },
   {
     "id": "pair-separation",
     "chapter": 2,
-    "claim": "Amplitude-pair separation is 2^q amplitudes, while each half-block is a consecutive memory stream.",
+    "claim": "The two amplitudes of a pair sit 2^q amplitudes apart, and each half-block is contiguous in memory.",
     "status": "theory",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
     "sources": [
@@ -66,7 +66,7 @@
       }
     ],
     "derivation": "byte separation=16*2^q; pairs in a block are (base+t,base+2^q+t).",
-    "limitations": "Cache-line alignment, cache misses, throughput, and timing are not measured by this model."
+    "limitations": "The model says nothing about cache-line alignment, cache misses or timing."
   },
   {
     "id": "gate-matrices",
@@ -83,12 +83,12 @@
       }
     ],
     "derivation": "Rz(theta)=diag(exp(-i theta/2),exp(i theta/2)); P(theta)=diag(1,exp(i theta)).",
-    "limitations": "Global phase may be ignored in state equivalence, but conditional branch phase cannot be discarded."
+    "limitations": "Global phase can be ignored when comparing states. The relative phase between conditional branches cannot."
   },
   {
     "id": "cx-control",
     "chapter": 2,
-    "claim": "The specialized CPU CX path swaps target partners only in the control-one subspace.",
+    "claim": "The dedicated CPU CX kernel swaps target pairs only where the control bit is 1.",
     "status": "implementation",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
     "sources": [
@@ -100,12 +100,12 @@
       }
     ],
     "derivation": "CX(0,1) maps index 1 to 3; CX(1,0) leaves index 1 unchanged.",
-    "limitations": "The first qubit listed is control; visual ket labels display descending bit significance."
+    "limitations": "The first listed qubit is the control. Ket labels in the figures print the most significant bit first."
   },
   {
     "id": "measurement-born",
     "chapter": 1,
-    "claim": "CPU Z measurement samples the sum of squared amplitudes on the one subspace and zeroes rejected amplitudes.",
+    "claim": "A CPU Z measurement draws the outcome from the total probability of the bit-1 subspace and zeroes the amplitudes it rejects.",
     "status": "implementation",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
     "sources": [
@@ -117,7 +117,7 @@
       }
     ],
     "derivation": "P(1)=sum(bit_q(x)=1)|a_x|^2; projected state divides by sqrt(P(outcome)).",
-    "limitations": "The random sample is a shot outcome, not a deterministic probability threshold animation."
+    "limitations": "The figure shows one sampled shot, so another run can collapse the other way."
   },
   {
     "id": "lazy-normalization",
@@ -163,7 +163,7 @@
       }
     ],
     "derivation": "I=(0,0),X=(1,0),Z=(0,1),Y=(1,1); commutation=x dot z'+z dot x' mod 2.",
-    "limitations": "Dense probabilities or amplitudes still require exponential output space."
+    "limitations": "Dense probabilities or amplitudes still need 2^n outputs."
   },
   {
     "id": "stabilizer-updates",
@@ -215,7 +215,7 @@
       }
     ],
     "derivation": "X support means anticommutation with Zq; Bell q0 measurement is fair and q1 is correlated.",
-    "limitations": "The plain stabilizer backend rejects non-Clifford gates; other specialized representations may accept them."
+    "limitations": "The stabilizer backend rejects non-Clifford gates. Other backends accept some of them."
   },
   {
     "id": "mps-layout",
@@ -278,7 +278,7 @@
       }
     ],
     "derivation": "chi_new=min(max(1,count(s>epsilon*s_max)),max_bond_dim); default epsilon=1e-12.",
-    "limitations": "This is a relative singular-value cutoff, not a cumulative discarded-weight budget."
+    "limitations": "The cutoff is relative to the largest singular value. It does not budget the total discarded weight."
   },
   {
     "id": "mps-local-error",
@@ -330,7 +330,7 @@
       }
     ],
     "derivation": "reported fidelity_lower_bound=max(0,1-truncation_discarded).",
-    "limitations": "The sum can exceed 1 and is not the final measured infidelity. Report this as implementation metadata, not a newly proved universal multi-cut error theorem."
+    "limitations": "The sum can exceed 1 and does not measure final infidelity. Treat the reported bound as bookkeeping; no multi-cut error theorem backs it."
   },
   {
     "id": "noise-pauli",
@@ -399,12 +399,12 @@
       }
     ],
     "derivation": "detector=record[r0] XOR ... XOR record[rk] XOR reference.",
-    "limitations": "A random noiseless detector is not automatically an error event; non-Clifford programs use raw parity under both settings."
+    "limitations": "A detector that is random without noise does not signal an error. Non-Clifford programs report raw parity under either setting."
   },
   {
     "id": "qec-decoders",
     "chapter": 9,
-    "claim": "Implemented decoders include graphlike union-find, matching exact for quantized weights, and BP+OSD for hypergraphs.",
+    "claim": "The decoders are union-find for graphlike errors, matching (exact for quantized weights), and BP+OSD for hypergraphs.",
     "status": "implementation",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
     "sources": [
@@ -428,6 +428,6 @@
       }
     ],
     "derivation": "graph edges use max(0,ln((1-p)/p)); matching quantizes at 2^-23 of largest weight.",
-    "limitations": "Graphlike decoders reject mechanisms with more than two detectors. BP+OSD is not generally exact outside its exhaustive search coverage."
+    "limitations": "Graphlike decoders reject mechanisms with more than two detectors. BP+OSD is exact only where its exhaustive search reaches."
   }
 ]

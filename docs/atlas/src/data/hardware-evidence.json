@@ -19,7 +19,7 @@
       }
     ],
     "derivation": "Index i encodes sum_q bit(q)*2^q. SIMD loads interpret each Complex64 as adjacent real and imaginary f64 values.",
-    "limitations": "This describes the dense CPU backend, not all backend representations.",
+    "limitations": "Applies to the dense CPU backend only.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {
@@ -76,7 +76,7 @@
       }
     ],
     "derivation": "A block has 2^(t+1) amplitudes. Lower and upper half pointers differ by 2^t amplitudes, each 16 bytes.",
-    "limitations": "Byte address spacing does not determine cache misses or memory latency.",
+    "limitations": "Address spacing alone does not determine cache misses or latency.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {
@@ -105,7 +105,7 @@
   {
     "id": "hardware-avx-complex-multiply",
     "chapter": "hardware",
-    "claim": "AVX2 complex multiply uses permute 0101, imaginary multiply, then alternating fused subtract/add.",
+    "claim": "The AVX2 complex multiply is a permute with mask 0101, a multiply by the imaginary coefficient, and an fmaddsub.",
     "status": "implementation",
     "sources": [
       {
@@ -122,7 +122,7 @@
       }
     ],
     "derivation": "z=[x0,y0,x1,y1]; permute=[y0,x0,y1,x1]; t=ci*permute; fmaddsub(cr,z,t)=[cr*x0-ci*y0,cr*y0+ci*x0,cr*x1-ci*y1,cr*y1+ci*x1].",
-    "limitations": "This names source intrinsics and their semantics, not a captured machine-code instruction trace.",
+    "limitations": "These are the source intrinsics. The compiled instruction stream was not captured.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {
@@ -267,7 +267,7 @@
       }
     ],
     "derivation": "B=2^(t+1), T=max(8192,B). If B<=8192 and N/T>=4 use 8192-element tiles. Else if N/T>=4 use whole B blocks split into halves. Otherwise split each pair of halves into min(8192,2^t)-element chunks.",
-    "limitations": "Rayon task count need not equal worker count. No fixed affinity or NUMA placement is established by these branches.",
+    "limitations": "Rayon task count need not match worker count. These branches set no thread affinity or NUMA placement.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {
@@ -284,7 +284,7 @@
       }
     ],
     "derivation": "Each pair has four complex multiplies at 6 FLOPs and two complex adds at 2 FLOPs: 28 FLOPs. Two 16-byte reads plus two 16-byte writes give 64 bytes per pair. There are 2^(n-1) pairs, giving 0.4375 FLOP per logical byte.",
-    "limitations": "FMA counts as two FLOPs. This excludes addressing, coefficient loads, cache reuse, write allocation and other traffic. It is not measured bandwidth or latency. A bandwidth floor 32*2^n/W assumes all logical traffic crosses the memory level with sustained bandwidth W.",
+    "limitations": "FMA counts as two FLOPs. Addressing, coefficient loads, cache reuse and write allocation are excluded. The bound 32*2^n/W assumes all logical traffic crosses a memory level with sustained bandwidth W.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {
@@ -319,7 +319,7 @@
       }
     ],
     "derivation": "The budget rounds down a clamped power of two. The L2 contribution is per physical core; the LLC contribution uses one quarter of its per-logical-CPU share. Divide bytes by 16 for amplitude count. Parallel sizing reads available hardware parallelism, not Rayon pool width.",
-    "limitations": "Cache residency is a design assumption, not a measured guarantee. PRISM_TILE_KB can override the default range to 128 KiB through 2 MiB.",
+    "limitations": "Cache residency is assumed, not measured. PRISM_TILE_KB can override the default range to 128 KiB through 2 MiB.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {
@@ -348,7 +348,7 @@
       }
     ],
     "derivation": "The subcube route copies each selected run into tile scratch, calls apply_tiled for every gate, then copies runs back. The in-place route loops over gates inside each parallel tile. Exactly zero gathered subcubes return before gate work and stores.",
-    "limitations": "The planner can select multiple routes. One gate per full DRAM sweep is not a universal model for fused execution.",
+    "limitations": "The planner picks among these routes, so fused execution does not always cost one DRAM sweep per gate.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {
@@ -418,7 +418,7 @@
       }
     ],
     "derivation": "k=blockIdx.x*blockDim.x+threadIdx.x. Threads with k>=2^(n-1) return. Scalar coefficient arguments describe the 2x2 matrix. This kernel directly reads and writes the global state.",
-    "limitations": "Address patterns and launch shape alone establish no occupancy, achieved bandwidth, transaction count, or speedup.",
+    "limitations": "Launch shape and address pattern say nothing about occupancy, achieved bandwidth or speedup.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {
@@ -447,7 +447,7 @@
       }
     ],
     "derivation": "Ten tile qubits include the lowest five, making each warp's consecutive tile offsets contiguous global amplitudes. A pass adds at most five higher targets. Low-target gates join the first pass. Each tile is loaded once, processed across all assigned gates, then stored.",
-    "limitations": "n<=10 and passes with fewer than three gates use per-gate fallback. Shared-memory use does not imply measured occupancy or throughput.",
+    "limitations": "n<=10 and passes with fewer than three gates use per-gate fallback. Occupancy and throughput were not measured.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {
@@ -557,7 +557,7 @@
       }
     ],
     "derivation": "MPI receives contiguous double views of complex slices and sendrecv_pieces splits around the C int count limit. The default chunk is 2^29 complex amplitudes, or 8 GiB maximum payload per message.",
-    "limitations": "A maximum chunk is not an unconditional allocation. This source establishes no asynchronous network overlap, GPU-aware MPI or measured multi-node scaling.",
+    "limitations": "The chunk size is a ceiling, not an allocation made on every call. Nothing in this source overlaps communication with compute or uses GPU-aware MPI, and multi-node scaling was not measured.",
     "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
   },
   {

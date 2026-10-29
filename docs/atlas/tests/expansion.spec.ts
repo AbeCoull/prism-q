@@ -8,7 +8,7 @@ async function openExpansion(page: Page, query = "?renderer=svg") {
   await page.goto(`/${query}`);
   await expect(
     page.getByRole("heading", {
-      name: "The execution microscope",
+      name: "Step through the kernel",
       exact: true,
     }),
   ).toBeVisible();
@@ -22,7 +22,7 @@ async function openExpansion(page: Page, query = "?renderer=svg") {
 
 function microscope(page: Page) {
   return page.getByRole("region", {
-    name: "The execution microscope",
+    name: "Step through the kernel",
     exact: true,
   });
 }
@@ -102,14 +102,12 @@ test("microscope steps source groups, coefficients, pair addresses, and stored p
   );
   await expect(scope).not.toContainText(/NaN|Infinity/);
   await expect(
-    scope.getByRole("link", { name: /Read this intrinsic sequence/ }),
+    scope.getByRole("link", { name: /Kernel source at/ }),
   ).toHaveAttribute(
     "href",
     new RegExp(`${revision}/src/backend/simd\\.rs#L258`),
   );
-  await expect(scope).toContainText(
-    "not a native instruction trace or disassembly",
-  );
+  await expect(scope).toContainText("this is not a trace of a native run");
   expect(errors).toEqual([]);
 });
 
@@ -148,7 +146,7 @@ test("microscope switches to NEON diagonal scaling and identity-half bypass", as
     scope.getByText("Low half bypassed", { exact: true }),
   ).toBeVisible();
   await expect(scope.locator(".micro-bypass")).toContainText(
-    "no low-half load, arithmetic, or store",
+    "never loads, multiplies or stores the low half",
   );
   await expect(scope).not.toContainText(/NaN|Infinity/);
 });
@@ -197,8 +195,8 @@ test("native compiler width and profile controls reach the measured cache planne
     .getByRole("button", { name: "Next compiler pass", exact: true })
     .click();
   await expect(lab.getByTestId("compiler-sweeps")).toHaveText(/150\s*→\s*8/);
-  await expect(lab).toContainText("NATIVE COUNTER · NOT TIMING");
-  await expect(lab).toContainText("A COUNT IS NOT A BANDWIDTH MEASUREMENT");
+  await expect(lab).toContainText("Counted, not timed");
+  await expect(lab).toContainText("Modelled traffic");
 });
 
 test("dependency graph selection and matrix cells expose recorded operator values", async ({
@@ -299,7 +297,7 @@ test("rewrite challenge exposes a basis counterexample and the favorable plus in
     "0.000000",
   );
   await challenge.getByRole("button", { name: /Remove both X gates/ }).click();
-  await expect(challenge).toContainText("ILLEGAL REWRITE");
+  await expect(challenge).toContainText("Invalid rewrite");
   await expect(challenge.getByTestId("rewrite-fidelity")).toHaveText(
     "0.000000",
   );
@@ -313,7 +311,7 @@ test("rewrite challenge exposes a basis counterexample and the favorable plus in
     "0.000000",
   );
   await expect(challenge).toContainText(
-    "Normalization alone cannot establish circuit equivalence",
+    "a correct norm proves nothing about the circuit",
   );
 });
 
@@ -371,10 +369,9 @@ test("operator matrix remains interactive when real WebGL creation is unavailabl
   });
   const lab = await openExpansion(page, plannerQuery);
   await expect(
-    lab.getByText(
-      "WebGL is unavailable. Every coefficient remains accessible in the matrix table.",
-      { exact: true },
-    ),
+    lab.getByText("WebGL is unavailable. The matrix table shows every entry.", {
+      exact: true,
+    }),
   ).toBeVisible();
   await lab
     .getByRole("button", { name: /^Coefficient row 0 column 1:/ })

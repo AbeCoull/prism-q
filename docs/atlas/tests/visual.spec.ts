@@ -4,13 +4,13 @@ async function openAtlas(page: Page, query = "") {
   await page.goto(`/${query}`);
   await expect(
     page.getByRole("heading", {
-      name: "One gate. Every amplitude.",
+      name: "Applying a one-qubit gate",
       exact: true,
     }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", {
-      name: "Anatomy of a statevector gate",
+      name: "Amplitude pairs and SIMD registers",
       exact: true,
     }),
   ).toBeVisible();
@@ -236,9 +236,12 @@ test("diagonal gates and unrecorded examples retain their evidence boundaries", 
   await page.getByRole("tab", { name: "Hardware" }).click();
   await expect(
     page
-      .getByText("Independent complex scaling replaces the cross-row sum.", {
-        exact: false,
-      })
+      .getByText(
+        "Each amplitude is scaled by its own entry, with no cross-row sum.",
+        {
+          exact: false,
+        },
+      )
       .first(),
   ).toBeVisible();
   const angle = page.getByRole("slider", {
@@ -247,11 +250,9 @@ test("diagonal gates and unrecorded examples retain their evidence boundaries", 
   });
   await angle.focus();
   await angle.press("Home");
-  await expect(
-    page.getByText("EDUCATIONAL MODEL", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText("Browser model", { exact: true })).toBeVisible();
   await expect(page.getByTestId("native-error")).toContainText(
-    "UNVERIFIED BY REPLAY",
+    "Not checked against native",
   );
 });
 

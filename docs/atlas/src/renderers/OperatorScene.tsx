@@ -18,11 +18,11 @@ function Coefficients({ matrix, selected, onSelect }: Props) {
       <mesh position={[(size - 1) * 0.8, -0.15, (size - 1) * 0.8]}>
         <boxGeometry args={[size * 1.6 + 0.35, 0.18, size * 1.6 + 0.35]} />
         <meshStandardMaterial
-          color="#1d2c22"
+          color="#e9e6df"
           roughness={0.8}
           metalness={0.25}
         />
-        <Edges color="#51624e" />
+        <Edges color="#c3bfb5" />
       </mesh>
       {matrix.flatMap((row, r) =>
         row.map((value, c) => {
@@ -49,7 +49,7 @@ function Coefficients({ matrix, selected, onSelect }: Props) {
               <mesh position={[0, -0.015, 0]} rotation={[-Math.PI / 2, 0, 0]}>
                 <ringGeometry args={[0.44, 0.48, 40]} />
                 <meshBasicMaterial
-                  color={active ? "#d5e8bc" : "#52674f"}
+                  color={active ? "#2457b5" : "#c3bfb5"}
                   side={2}
                 />
               </mesh>
@@ -58,7 +58,7 @@ function Coefficients({ matrix, selected, onSelect }: Props) {
                   [-0.45, 0.015, 0],
                   [0.45, 0.015, 0],
                 ]}
-                color="#526c49"
+                color="#c3bfb5"
                 lineWidth={0.7}
               />
               <Line
@@ -66,7 +66,7 @@ function Coefficients({ matrix, selected, onSelect }: Props) {
                   [0, 0.015, 0.45],
                   [0, 0.015, -0.45],
                 ]}
-                color="#526c49"
+                color="#c3bfb5"
                 lineWidth={0.7}
               />
               {active && (
@@ -74,14 +74,14 @@ function Coefficients({ matrix, selected, onSelect }: Props) {
                   <Ink
                     text="+Re"
                     position={[0.6, -0.04, 0]}
-                    color="#b8c8a5"
+                    color="#57554f"
                     size={0.085}
                     flat
                   />
                   <Ink
                     text="+Im"
                     position={[0, -0.04, -0.6]}
-                    color="#b8c8a5"
+                    color="#57554f"
                     size={0.085}
                     flat
                   />
@@ -95,7 +95,7 @@ function Coefficients({ matrix, selected, onSelect }: Props) {
                     roughness={0.48}
                     metalness={0.25}
                   />
-                  <Edges color={active ? "#e0eccb" : "#78916a"} />
+                  <Edges color={active ? "#1c1b18" : "#8f8b82"} />
                 </mesh>
               )}
               {magnitude > 1e-14 && (
@@ -108,14 +108,14 @@ function Coefficients({ matrix, selected, onSelect }: Props) {
                       -0.42 * Math.sin(phase),
                     ],
                   ]}
-                  color={active ? "#e5c29f" : "#b7d5a0"}
+                  color={active ? "#b8432c" : "#2457b5"}
                   lineWidth={2}
                 />
               )}
               <Ink
                 text={`${r},${c}`}
                 position={[0, -0.04, 0.66]}
-                color={active ? "#dce9cc" : "#94a58d"}
+                color={active ? "#1c1b18" : "#6a6862"}
                 size={0.13}
                 flat
               />
@@ -146,12 +146,12 @@ export default function OperatorScene(props: Props) {
         <directionalLight
           position={[3, 8, 5]}
           intensity={2.4}
-          color="#e5edda"
+          color="#1c1b18"
         />
         <directionalLight
           position={[-4, 3, -4]}
           intensity={1.1}
-          color="#9ab7a4"
+          color="#57554f"
         />
         <Coefficients {...props} />
         <OrbitControls

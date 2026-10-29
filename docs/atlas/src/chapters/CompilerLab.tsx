@@ -43,17 +43,17 @@ const families: Record<string, { title: string; description: string }> = {
   "legal-disjoint": {
     title: "Disjoint gates can move",
     description:
-      "X on q0 is separated by an operation on q1. The qubits are independent, so a legal reorder can expose X² = I. Repeated rotations across all qubits create matrix and tiled fusion opportunities.",
+      "An operation on q1 sits between two X gates on q0. The qubits are independent, so reordering brings the X gates together and they cancel. Rotations repeated on every qubit give the matrix and tile passes something to fuse.",
   },
   "blocked-dependency": {
     title: "A CX blocks cancellation",
     description:
-      "The two X gates on the control of a CX cannot be canceled by moving through it. The native stream preserves the interaction, while neighboring single-qubit gates can still form dense blocks.",
+      "Two X gates on the control of a CX cannot cancel, because neither can move past the CX. The CX stays in the stream, while the single-qubit gates around it still fuse into dense blocks.",
   },
   "diagonal-pair-runs": {
     title: "Parity phases and pair blocks",
     description:
-      "CX–Rz–CX becomes a parity rotation. Diagonal runs and repeated two-qubit pairs expose different batching mechanisms; Host and Device profiles intentionally retain different intermediate representations.",
+      "CX, Rz, CX collapses to a parity rotation. Diagonal runs and repeated two-qubit pairs go through different batching passes, and the Host and Device profiles keep different intermediate forms.",
   },
 };
 const gateNames: Record<string, string> = {
@@ -166,7 +166,7 @@ function Diagram({
             markerHeight="5"
             orient="auto-start-reverse"
           >
-            <path d="M0 0 8 4 0 8Z" fill="#718b65" />
+            <path d="M0 0 8 4 0 8Z" fill="#8f8b82" />
           </marker>
         </defs>
         {visibleQubits.map((q, at) => (
@@ -264,7 +264,7 @@ function Diagram({
                     cx={position.x}
                     cy={48 + row(q) * 38}
                     r="3"
-                    fill={active ? "#d0e6b9" : "#7f9873"}
+                    fill={active ? "#2457b5" : "#57554f"}
                   />
                 ))}
               {cx ? (
@@ -273,18 +273,18 @@ function Diagram({
                     cx={position.x}
                     cy={48 + row(instruction.targets[0]) * 38}
                     r="4"
-                    fill={active ? "#d0e6b9" : "#91a28f"}
+                    fill={active ? "#2457b5" : "#57554f"}
                   />
                   <circle
                     cx={position.x}
                     cy={48 + row(instruction.targets[1]) * 38}
                     r="10"
                     fill="var(--bg)"
-                    stroke="var(--sage)"
+                    stroke="var(--blue)"
                   />
                   <path
                     d={`M${position.x - 7} ${48 + row(instruction.targets[1]) * 38}h14M${position.x} ${41 + row(instruction.targets[1]) * 38}v14`}
-                    stroke="var(--sage)"
+                    stroke="var(--blue)"
                   />
                   <title>
                     Control q{instruction.targets[0]}, target q
@@ -361,7 +361,7 @@ function SweepChart({
             />
             <i>{stage.metrics.measuredKernelSweeps}</i>
           </span>
-          <small>{String(index).padStart(2, "0")}</small>
+          <small>{index}</small>
         </button>
       ))}
     </div>
@@ -571,11 +571,11 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
       </div>
       <div className="compiler-experiment-note">
         <p>{families[record.family]?.description}</p>
-        <span className="pill">NATIVE SNAPSHOTS</span>
+        <span className="pill">Native snapshots</span>
       </div>
       <p className="fine">
-        Unavailable combinations are disabled. Change width first to compare
-        families or profiles without changing another experimental variable.
+        Combinations that were not recorded are disabled. To compare circuits or
+        profiles at a fixed width, set the width first.
       </p>
       <div className="compiler-metrics">
         <div>
@@ -586,20 +586,20 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
           </strong>
         </div>
         <div>
-          <span>Instrumented kernel traversals</span>
+          <span>Kernel sweeps (counted)</span>
           <strong data-testid="compiler-sweeps">
             {baseline.measuredKernelSweeps} <i>→</i>{" "}
             {metrics.measuredKernelSweeps}
           </strong>
         </div>
         <div>
-          <span>Maximum native amplitude error</span>
+          <span>Largest amplitude error</span>
           <strong className="compiler-error" data-testid="compiler-error">
             {stage.state.maxAbsoluteError.toExponential(2)}
           </strong>
         </div>
         <div>
-          <span>In-tile operator applications</span>
+          <span>Operators applied inside tiles</span>
           <strong>{metrics.tileApplications}</strong>
         </div>
       </div>
@@ -609,8 +609,8 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
           aria-label="Native compiler stages"
         >
           <div className="compiler-pass-title">
-            <span>PASS</span>
-            <span>IR COUNT</span>
+            <span>Pass</span>
+            <span>Instructions</span>
           </div>
           {record.stages.map((pass, index) => (
             <button
@@ -619,13 +619,11 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
               aria-pressed={stageIndex === index}
               onClick={() => setStage(index)}
             >
-              <span className="pass-ordinal">
-                {`${index}`.padStart(2, "0")}
-              </span>
+              <span className="pass-ordinal">{index}</span>
               <span>
                 {names[pass.name] ?? pass.name}
                 {!pass.enabled && (
-                  <small>SKIPPED · WIDTH FLOOR {pass.floor}</small>
+                  <small>Skipped below {pass.floor} qubits</small>
                 )}
               </span>
               <b>{pass.metrics.instructionCount}</b>
@@ -636,13 +634,12 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
           <div className="compiler-stage-heading">
             <div>
               <p className="eyebrow">
-                PASS {`${stageIndex}`.padStart(2, "0")} /{" "}
-                {record.stages.length - 1}
+                Pass {stageIndex} of {record.stages.length - 1}
               </p>
               <h3>{names[stage.name] ?? stage.name}</h3>
             </div>
             <span className={`pill ${stage.enabled ? "" : "model"}`}>
-              {stage.enabled ? "EXECUTED" : "SKIPPED"}
+              {stage.enabled ? "Ran" : "Skipped"}
             </span>
           </div>
           <div className="compiler-stage-step">
@@ -674,17 +671,17 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
           </div>
           <p className="compiler-stage-explanation">
             {!stage.enabled
-              ? `The ${record.width}-qubit stream is below this pass's ${stage.floor}-qubit floor. The recorded stream is unchanged.`
+              ? `This pass needs at least ${stage.floor} qubits and the circuit has ${record.width}, so the stream is unchanged.`
               : stageIndex === 0
-                ? "Original unfused circuit. The deterministic initial state is complex and normalized; all subsequent streams are executed against this reference."
+                ? "The circuit before any fusion. Every later stream runs on the same fixed, normalized complex input and is compared with this one."
                 : change < 0
-                  ? `${-change} fewer logical instructions than the previous snapshot. A smaller IR count does not by itself establish fewer state traversals or faster execution.`
+                  ? `${-change} fewer instructions than the previous pass. Fewer instructions do not always mean fewer sweeps over the state; check the sweep count.`
                   : change > 0
-                    ? `${change} additional logical instructions after this transformation. Follow the actual traversal counts rather than equating representation size with cost.`
-                    : "Instruction count is unchanged at this stage. Inspect the stream for changed order, matrix coefficients, or batching structure."}
+                    ? `${change} more instructions than the previous pass. Instruction count is not cost; check the sweep count.`
+                    : "Same instruction count as the previous pass. The order, matrices or batching may still have changed."}
           </p>
           <div className="compiler-stream-heading">
-            <span>RECORDED OUTPUT STREAM</span>
+            <span>Instruction stream after this pass</span>
             <div>
               <button
                 aria-pressed={!dag}
@@ -743,30 +740,30 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
             Selected instruction {instruction?.index}: qubit support [
             {instruction?.support.join(", ")}].{" "}
             {dag
-              ? "Incident dependency edges preserve the qubits named in their tooltips."
-              : "CX uses a filled control and a circled target; generic spans show fused or batched support."}
+              ? "Hover an edge to see the qubit it orders."
+              : "CX draws a filled control and a circled target. Boxes spanning several wires are fused or batched instructions."}
           </p>
           {compare && stageIndex > 0 && (
             <p className="fine">
-              Previous snapshot: {previous.metrics.instructionCount}{" "}
-              instructions, {previous.metrics.measuredKernelSweeps} kernel
-              traversals. Current snapshot: {stage.metrics.instructionCount}{" "}
-              instructions, {stage.metrics.measuredKernelSweeps} kernel
-              traversals. Streams are complete recorded snapshots; corresponding
-              positions do not establish instruction ancestry.
+              Before: {previous.metrics.instructionCount} instructions,{" "}
+              {previous.metrics.measuredKernelSweeps} kernel sweeps. Now:{" "}
+              {stage.metrics.instructionCount} instructions,{" "}
+              {stage.metrics.measuredKernelSweeps} kernel sweeps. Both are full
+              recorded streams; an instruction in the same position is not
+              necessarily derived from the one before.
             </p>
           )}
           <p className="fine">
             {dag
-              ? "Conservative qubit-order dependency graph, derived from this snapshot. Edges preserve same-qubit order; the graph does not claim to reproduce the native planner's commutation analysis."
-              : "Columns are native instruction order, not physical duration. Vertical spans mark the complete support of fused or batched instructions."}{" "}
-            Scroll within the figure to inspect every instruction. Tab enters
-            the selected instruction; arrow keys move between instructions, and
-            Home or End reaches the stream boundaries.
+              ? "Edges join instructions that share a qubit, in stream order. This is simpler than the commutation analysis the fusion passes use."
+              : "Columns are instruction order, not time."}{" "}
+            Scroll the figure sideways for long streams. Tab focuses the
+            selected instruction, arrow keys move between instructions, and Home
+            and End jump to either end.
           </p>
           <div className="compiler-counter-heading">
-            <span>KERNEL TRAVERSALS THROUGH THE PIPELINE</span>
-            <b>NATIVE COUNTER · NOT TIMING</b>
+            <span>Kernel sweeps after each pass</span>
+            <b>Counted, not timed</b>
           </div>
           <SweepChart record={record} selected={stageIndex} select={setStage} />
           <div className="compiler-source">
@@ -781,19 +778,19 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
         <div className="operator-inspector">
           <div className="operator-inspector-title">
             <div>
-              <p className="eyebrow">INSPECT THE ACTUAL MATRIX</p>
               <h3>
                 Instruction {instruction.index}: <code>{instruction.gate}</code>
               </h3>
             </div>
             <span className="pill">
-              {instruction.kernelSweeps} KERNEL TRAVERSALS
+              {instruction.kernelSweeps} kernel{" "}
+              {instruction.kernelSweeps === 1 ? "sweep" : "sweeps"}
             </span>
           </div>
           <div className="operator-inspector-grid">
             <div className="operator-geometry">
               <div className="operator-geometry-hud">
-                <span>COMPLEX OPERATOR LANDSCAPE</span>
+                <span>Matrix entries</span>
                 <button
                   className="text-button"
                   onClick={() => setShow3d(!show3d)}
@@ -805,8 +802,7 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
                 <SceneBoundary
                   fallback={
                     <p className="operator-fallback">
-                      WebGL is unavailable. Every coefficient remains accessible
-                      in the matrix table.
+                      WebGL is unavailable. The matrix table shows every entry.
                     </p>
                   }
                 >
@@ -828,22 +824,20 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
                 <div className="operator-table-intro">
                   <Equation block tex={String.raw`U^\dagger U=I`} />
                   <p>
-                    Coefficient height is magnitude |uᵣ𝒸|. A spoke in the local
-                    complex plane encodes arg(uᵣ𝒸); the phase of a zero
-                    coefficient is undefined. These values come from the native
-                    output matrix.
+                    In the 3D view, bar height is |uᵣ𝒸| and the spoke points
+                    along arg(uᵣ𝒸). Zero entries have no phase. Values are from
+                    the recorded matrix.
                   </p>
                 </div>
               )}
               <div className="operator-geometry-legend">
-                <span>HEIGHT = |u|</span>
-                <span>SPOKE = arg(u)</span>
-                <span>SPOKES: |u| &gt;= 1e-14</span>
+                <span>height = |u|</span>
+                <span>spoke = arg(u)</span>
+                <span>spokes drawn for |u| ≥ 1e-14</span>
               </div>
               <p className="operator-phase-key">
-                Magnitude: height = 1.8 × |u| in scene units. Phase: +Re = 0°,
-                +Im = +90°, −Re = 180°, −Im = −90°. Rows are outputs; columns
-                are inputs.
+                Height is 1.8 × |u| in scene units. Phase 0° points along +Re
+                and 90° along +Im. Rows are outputs and columns are inputs.
               </p>
             </div>
             <div className="operator-values">
@@ -912,13 +906,11 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
                 </dl>
               </div>
               <p className="fine">
-                Matrices are exported from the actual gate or batch entries. For
-                a two-target matrix, local basis order is |targets[0]
-                targets[1]&#x27e9;, with the first target as the matrix MSB;
-                global q0 is still the statevector LSB. An expanded matrix for a
-                named gate does not imply that the matrix is physically stored
-                in the Gate enum. Transformed instruction ancestry was not
-                exported and is not inferred.
+                Matrices come from the recorded gate or batch entries. For two
+                targets the local basis is |targets[0] targets[1]&#x27e9;, so
+                the first target is the matrix MSB, while q0 is still the
+                statevector LSB. A named gate is shown expanded to its matrix;
+                the Gate enum does not necessarily store one.
               </p>
             </div>
           </div>
@@ -926,25 +918,24 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
       )}
       <div className="compiler-proof">
         <div>
-          <p className="eyebrow">CORRECTNESS IS SEPARATE FROM COST</p>
-          <h3>The optimized stream preserves the state.</h3>
+          <h3>Every pass leaves the output state unchanged</h3>
           <p>
-            Every native stage was run on the same normalized complex input. All
-            amplitudes were compared with unfused CPU execution before these
-            samples were recorded. The final instruction stream also matches the
-            public fusion pipeline. One deterministic input is a regression
-            check, not an exhaustive proof of operator equivalence.
+            Each stage ran on the same normalized complex input, and every
+            amplitude was compared with the unfused run before these samples
+            were recorded. The final stream also matches what the public fusion
+            pipeline produces. One input is a regression check, not a proof that
+            the operators are equal.
           </p>
           <div className="compiler-proof-badges">
             <span>Σ |α|² = {stage.state.normSquared.toFixed(12)}</span>
             <span>max |Δα| &lt; 10⁻¹²</span>
-            <span>PUBLIC PIPELINE: MATCH</span>
+            <span>Public pipeline: match</span>
           </div>
         </div>
         <div className="compiler-samples">
           <div className="sample-head">
-            <span>BASIS INDEX</span>
-            <span>NATIVE COMPLEX AMPLITUDE</span>
+            <span>Basis state</span>
+            <span>Recorded amplitude</span>
           </div>
           {stage.state.samples.map((sample) => (
             <div key={sample.index}>
@@ -957,32 +948,32 @@ function Laboratory({ fixture }: { fixture: FusionFixture }) {
       <RewriteChallenge />
       <div className="compiler-traffic">
         <div>
-          <p className="eyebrow">A COUNT IS NOT A BANDWIDTH MEASUREMENT</p>
+          <h3>Modelled traffic</h3>
           <strong>{formatBytes(metrics.modeledPayloadBytes)}</strong>
-          <span>conditional full-sweep payload model at this stage</span>
+          <span>if every sweep at this pass streamed the whole state</span>
           <p>
-            32 × 2ⁿ bytes per modeled full read/write sweep. Actual DRAM traffic
-            differs with caches, diagonal skips, partial updates, and gathered
-            subcubes. Native kernel entry counts are observations; this byte
-            total is a model.
+            Each full sweep reads and writes 32 × 2ⁿ bytes. Real DRAM traffic is
+            different once caches, diagonal skips, partial updates and gathered
+            subcubes come in. The sweep counts are measured; this byte total is
+            not.
           </p>
         </div>
         <div>
           <p>
             The fixture uses {fixture.generator.threads} Rayon threads.{" "}
             {record.profile === "Device"
-              ? "Device is the optimizer profile. These snapshots and equivalence checks were executed by the CPU statevector backend; no CUDA performance is asserted."
-              : "Host batching can choose a cache-derived stage planner. Only the branch actually reached on the recorded host is included."}
+              ? "Device here means the optimizer profile. The CPU statevector backend ran these snapshots and checks; nothing here says anything about CUDA speed."
+              : "Host batching can pick the cache stage planner. Only the branch the recording machine took is shown."}
           </p>
           <a href="./native-fusion.json" download>
-            Download native compiler fixture ↓
+            Download the compiler recordings ↓
           </a>
           <a
             href="https://github.com/AbeCoull/prism-q/blob/main/docs/atlas/research/fusion-traces.md"
             target="_blank"
             rel="noreferrer"
           >
-            Reproduce and audit these traces ↗
+            How these were recorded ↗
           </a>
         </div>
       </div>
@@ -1018,29 +1009,25 @@ export default function CompilerLab() {
     >
       <div className="compiler-intro">
         <div>
-          <p className="eyebrow">CHAPTER 03 · THE COMPILER LABORATORY</p>
-          <h2 id="compiler-title">
-            Fewer passes.
-            <br />
-            <em>Same unitary.</em>
-          </h2>
+          <h2 id="compiler-title">What fusion does to a real circuit</h2>
         </div>
         <p>
-          Watch the actual optimizer rewrite a circuit. Inspect every
-          intermediate matrix, challenge a dependency, and separate a smaller
-          gate list from less work on the statevector.
+          Each step below is the output of one PRISM-Q fusion pass, recorded
+          from the real compiler. Count how many times each version sweeps the
+          state, open any fused matrix, and try a rewrite that breaks the
+          circuit.
         </p>
       </div>
       {error ? (
         <p role="alert" className="compiler-loading">
-          Native compiler evidence could not be loaded: {error}. Run the native
-          trace generator before building the atlas.
+          The compiler recordings did not load: {error}. Run the trace generator
+          before building the atlas.
         </p>
       ) : fixture ? (
         <Laboratory fixture={fixture} />
       ) : (
         <p className="compiler-loading" role="status">
-          Loading and validating native compiler evidence…
+          Loading compiler recordings…
         </p>
       )}
     </section>

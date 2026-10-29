@@ -13,19 +13,16 @@ export default function RewriteChallenge() {
     <section className="rewrite-challenge" aria-labelledby="rewrite-title">
       <div className="rewrite-header">
         <div>
-          <p className="eyebrow">
-            ADVERSARIAL REWRITE EXPERIMENT · EDUCATIONAL MODEL
-          </p>
           <h3 id="rewrite-title">Can the two X gates disappear?</h3>
         </div>
         <span className={`pill ${remove ? "model" : ""}`}>
-          {remove ? "ILLEGAL REWRITE" : "ORIGINAL OPERATOR"}
+          {remove ? "Invalid rewrite" : "Original circuit"}
         </span>
       </div>
       <p>
-        They act on the same control qubit, but a CX sits between them. Try
-        deleting both and inspect the output. This sandbox evaluates the
-        proposed rewrite; it does not claim that PRISM-Q performs it.
+        Both act on the control qubit, with a CX between them. Delete them and
+        compare the output. PRISM-Q does not make this rewrite; the point is to
+        see why it can't.
       </p>
       <div className="rewrite-grid">
         <div>
@@ -105,14 +102,12 @@ export default function RewriteChallenge() {
           </div>
           <p className="rewrite-verdict" aria-live="polite">
             {result.fidelity > 1 - 1e-12
-              ? "This input hides the error. The target |+⟩ is unchanged by X, so these two different operators agree on this particular state. Switch to a basis input to expose the invalid rewrite."
-              : `The candidate changes the output. Both states remain normalized, but fidelity is ${result.fidelity.toFixed(6)}. Normalization alone cannot establish circuit equivalence.`}
+              ? "This input hides the error. X leaves |+⟩ unchanged, so the two circuits agree on this one state. Pick a basis input to see them differ."
+              : `The output changes. Both states are still normalized, but the fidelity is ${result.fidelity.toFixed(6)}, so a correct norm proves nothing about the circuit.`}
           </p>
           <p className="fine">
-            Basis labels use |q1 q0⟩. The input equation groups logical
-            subsystems and does not change that stored ordering. Operator
-            equivalence requires agreement on all inputs, not one favorable
-            example.
+            Basis labels are |q1 q0⟩. Two circuits are equal only if they agree
+            on every input, not one convenient example.
           </p>
         </div>
       </div>

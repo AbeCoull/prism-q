@@ -1,6 +1,6 @@
 {
   "browser": "Microsoft Edge",
-  "base": "http://127.0.0.1:4173",
+  "base": "http://127.0.0.1:4181",
   "pageErrors": [],
   "operatorRenderer": "webgl",
   "pageWidth": 390,

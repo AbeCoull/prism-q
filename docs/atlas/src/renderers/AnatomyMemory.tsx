@@ -27,7 +27,7 @@ export function memoryRows(n: number, pair: [number, number]) {
 function Solid({
   paths,
   top,
-  edge = "#4b5e4c",
+  edge = "#aeaaa0",
 }: {
   paths: SolidPaths;
   top: string;
@@ -35,12 +35,12 @@ function Solid({
 }) {
   return (
     <g>
-      <path d={paths.fill} fill="#1b271e" />
+      <path d={paths.fill} fill="#e9e6df" />
       {paths.shades.map((path, index) => (
         <path
           key={index}
           d={path}
-          fill={["#334838", "#2c3d30", "#243327", "#1d2b21"][index]}
+          fill={["#f4f2ed", "#e6e3dc", "#d9d6ce", "#cdc9c0"][index]}
         />
       ))}
       <path d={paths.top} fill={top} />
@@ -123,11 +123,11 @@ export default function AnatomyMemory({
           const [x, y] = coordinate(0, row);
           return (
             <g key={memoryRow} transform={`translate(${x},${y})`}>
-              <Solid paths={geometry.rowBase} top="#17251c" edge="#3c503f" />
+              <Solid paths={geometry.rowBase} top="#e9e6df" edge="#c3bfb5" />
               <text
                 x="-52"
                 y="-18"
-                fill="#9fb59f"
+                fill="#57554f"
                 fontSize="10"
                 textAnchor="end"
               >
@@ -137,7 +137,7 @@ export default function AnatomyMemory({
                 <text
                   x="-53"
                   y="-30"
-                  fill="#d6a17c"
+                  fill="#b8432c"
                   fontSize="7"
                   textAnchor="end"
                 >
@@ -152,10 +152,10 @@ export default function AnatomyMemory({
           const selected = index === pair[0] || index === pair[1];
           const color =
             index === pair[0]
-              ? "#99b7a5"
+              ? "#2457b5"
               : index === pair[1]
-                ? "#d6a17c"
-                : "#38503c";
+                ? "#b8432c"
+                : "#fdfcf9";
           return (
             <g
               key={index}
@@ -178,23 +178,23 @@ export default function AnatomyMemory({
               </title>
               <Solid
                 paths={geometry.amplitude}
-                top="#263c2b"
-                edge={selected ? color : "#4a6250"}
+                top="#f4f2ed"
+                edge={selected ? color : "#aeaaa0"}
               />
               <Solid
                 paths={geometry.real}
                 top={color}
-                edge={selected ? color : "#527259"}
+                edge={selected ? color : "#aeaaa0"}
               />
               <Solid
                 paths={geometry.imag}
                 top={color}
-                edge={selected ? color : "#527259"}
+                edge={selected ? color : "#aeaaa0"}
               />
               <text
                 x="-12"
                 y="-12"
-                fill={selected ? "#14231a" : "#a0b7a0"}
+                fill={selected ? "#ffffff" : "#33322e"}
                 fontSize="6.3"
                 textAnchor="middle"
               >
@@ -203,7 +203,7 @@ export default function AnatomyMemory({
               <text
                 x="13"
                 y="2"
-                fill={selected ? "#14231a" : "#a0b7a0"}
+                fill={selected ? "#ffffff" : "#33322e"}
                 fontSize="6.3"
                 textAnchor="middle"
               >
@@ -225,7 +225,7 @@ export default function AnatomyMemory({
         <path
           d={`M${ax},${ay - 18} L${ax + 38},${ay - 40} L${bx + 38},${by - 40} L${bx},${by - 18}`}
           fill="none"
-          stroke="#d6a17c"
+          stroke="#b8432c"
           strokeWidth="0.9"
           strokeDasharray="4 4"
           pointerEvents="none"
@@ -233,17 +233,17 @@ export default function AnatomyMemory({
 
         {[
           {
-            name: skipLow ? "a: BYPASSED (d0 = 1)" : "INPUT a",
+            name: skipLow ? "a: skipped (d0 = 1)" : "Input a",
             bypassed: skipLow,
             index: bankBase,
-            color: "#99b7a5",
+            color: "#2457b5",
             x: labelX - 92,
           },
           {
-            name: "INPUT b",
+            name: "Input b",
             bypassed: false,
             index: bankBase + 2 ** target,
-            color: "#d6a17c",
+            color: "#b8432c",
             x: labelX + 75,
           },
         ].map((bank) => (
@@ -268,7 +268,7 @@ export default function AnatomyMemory({
                   top={
                     !bank.bypassed && (phase === 1 || phase === 2)
                       ? bank.color
-                      : "#304a36"
+                      : "#f4f2ed"
                   }
                 />
                 <text
@@ -276,8 +276,8 @@ export default function AnatomyMemory({
                   y="-2"
                   fill={
                     !bank.bypassed && (phase === 1 || phase === 2)
-                      ? "#13251a"
-                      : "#afc0ab"
+                      ? "#ffffff"
+                      : "#33322e"
                   }
                   fontSize="6"
                   textAnchor="middle"
@@ -291,27 +291,27 @@ export default function AnatomyMemory({
         <text
           x={labelX}
           y="-151"
-          fill="#c9d6c1"
+          fill="#1c1b18"
           fontSize="14"
           textAnchor="middle"
         >
           {width === 0
-            ? "SCALAR f64 FIELDS"
-            : `${width}-BIT ${architecture === "neon" ? "NEON" : width === 256 ? "AVX2" : "FMA"} INPUT LANES`}
+            ? "Scalar f64 fields"
+            : `${width}-bit ${architecture === "neon" ? "NEON" : width === 256 ? "AVX2" : "FMA"} input lanes`}
         </text>
         <text
           x={labelX}
           y={maxY - 34}
-          fill="#d6a17c"
+          fill="#b8432c"
           fontSize="14"
           textAnchor="middle"
         >
-          PAIR DISTANCE {16 * 2 ** target} B
+          Pair distance {16 * 2 ** target} B
         </text>
         <text
           x={labelX}
           y={maxY - 13}
-          fill="#a3b5a1"
+          fill="#57554f"
           fontSize="11"
           textAnchor="middle"
         >

@@ -9,7 +9,7 @@ test("Z bypasses the low input and scalar evidence links to scalar code", async 
   await expect(scene.locator('[data-execution="loaded"]')).toHaveCount(1);
   await expect(scene.locator('[data-execution="bypassed"]')).toHaveCount(1);
   const microscope = page.getByRole("region", {
-    name: "The execution microscope",
+    name: "Step through the kernel",
     exact: true,
   });
   await expect(microscope.locator(".micro-source a")).toHaveAttribute(
@@ -96,27 +96,21 @@ test("compiler changes and keyboard traversal keep selection visible", async ({
   await expect(graph.locator('[tabindex="0"]')).toHaveCount(1);
 });
 
-test("chapter location updates and every dossier stays reachable on mobile", async ({
-  page,
-}) => {
-  await page.goto("/?renderer=svg#compiler-laboratory");
-  const rail = page.getByRole("complementary", { name: "Atlas chapters" });
-  await expect(
-    rail.getByRole("button", { name: /03.*Gate fusion/ }),
-  ).toHaveAttribute("aria-current", "location");
+test("every chapter stays reachable on mobile", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  const contents = page.getByRole("combobox", {
-    name: "Atlas chapter",
-    exact: true,
-  });
-  await expect(contents.locator("option")).toHaveCount(11);
-  await contents.selectOption("5");
+  await page.goto("/?renderer=svg");
+  const methods = page.locator("#methodology");
+  await expect(methods.locator(".chapter-list button")).toHaveCount(9);
+  await methods
+    .getByRole("button", { name: "MPS and entanglement complexity" })
+    .click();
   await expect(page.getByRole("dialog")).toContainText("MPS");
   await page.keyboard.press("Escape");
-  await contents.selectOption("2");
+  const nav = page.getByRole("navigation", { name: "Primary" });
+  await nav.getByRole("link", { name: "Fusion", exact: true }).click();
+  await expect(page.getByTestId("compiler-laboratory")).toBeInViewport();
+  await nav.getByRole("link", { name: "Gates", exact: true }).click();
   await expect(page.getByTestId("workspace")).toBeInViewport();
-  await contents.selectOption("3");
-  await expect(contents).toHaveValue("3");
 });
 
 test("scientific text stays readable without mobile page overflow", async ({
@@ -142,13 +136,20 @@ test("scientific text stays readable without mobile page overflow", async ({
       () => document.documentElement.scrollWidth - innerWidth,
     ),
   ).toBeLessThanOrEqual(1);
-  const colors = await page.evaluate(() => ({
-    faint: getComputedStyle(document.documentElement)
-      .getPropertyValue("--faint")
-      .trim(),
-    background: getComputedStyle(document.documentElement).backgroundColor,
-  }));
-  expect(colors.faint).toBe("#91a28f");
+  const contrast = await page.evaluate(() => {
+    const style = getComputedStyle(document.documentElement);
+    const luminance = (hex: string) => {
+      const [r, g, b] = [1, 3, 5].map((at) => {
+        const v = parseInt(hex.slice(at, at + 2), 16) / 255;
+        return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const faint = luminance(style.getPropertyValue("--faint").trim());
+    const panel = luminance(style.getPropertyValue("--panel").trim());
+    return (Math.max(faint, panel) + 0.05) / (Math.min(faint, panel) + 0.05);
+  });
+  expect(contrast).toBeGreaterThanOrEqual(4.5);
   await expect(page.locator(".micro-register.is-pending").first()).toHaveCSS(
     "opacity",
     "1",
@@ -179,7 +180,7 @@ test("before and after show complete native streams without inventing ancestry",
     "0",
   );
   await expect(lab).toContainText(
-    "corresponding positions do not establish instruction ancestry",
+    "an instruction in the same position is not necessarily derived from the one before",
   );
   await lab
     .getByRole("button", { name: "Before / after", exact: true })

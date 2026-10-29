@@ -82,7 +82,7 @@ try {
   assert.equal(
     await page
       .getByTestId("workspace")
-      .getByText("NATIVE REPLAY", { exact: true })
+      .getByText("Native replay", { exact: true })
       .count(),
     1,
   );

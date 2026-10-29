@@ -2,7 +2,7 @@
   margin: 50px 0;
   padding: 30px;
   border: 1px solid var(--line);
-  background: linear-gradient(125deg, #18221c, #111916 60%);
+  background: linear-gradient(125deg, var(--panel), var(--panel) 60%);
   border-radius: 12px;
 }
 .micro-heading {
@@ -14,15 +14,14 @@
 }
 .micro-heading .eyebrow {
   display: block;
-  color: var(--copper);
-  font: 11px var(--mono);
-  text-transform: uppercase;
-  letter-spacing: 1.3px;
+  color: var(--red);
+  font: var(--fs-label) var(--sans);
+  letter-spacing: 0.3px;
   margin-bottom: 10px;
 }
 .micro-route {
-  color: var(--sage);
-  font: 11px var(--mono);
+  color: var(--blue);
+  font: var(--fs-label) var(--sans);
   white-space: nowrap;
   padding-bottom: 4px;
 }
@@ -42,20 +41,20 @@
   padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--fs-ui);
   white-space: nowrap;
 }
 .micro-transport button:nth-child(2) {
-  background: #b7d5a018;
-  color: var(--sage);
+  background: var(--tint-a);
+  color: var(--blue);
 }
 .micro-transport input {
   flex: 1;
   min-width: 60px;
-  accent-color: var(--sage);
+  accent-color: var(--blue);
 }
 .micro-transport > span {
-  font: 11px var(--mono);
+  font: var(--fs-label) var(--sans);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -79,49 +78,49 @@
   text-align: left;
   padding: 13px 10px;
   width: 100%;
-  font-size: 11px;
+  font-size: var(--fs-ui);
   line-height: 1.5;
   color: var(--muted);
 }
 .micro-timeline li button > span {
-  font: 11px var(--mono);
+  font: var(--fs-label) var(--sans);
   padding-top: 2px;
   color: var(--faint);
 }
 .micro-timeline li.active {
-  background: #b7d5a00c;
-  border-color: var(--sage);
+  background: var(--tint-a);
+  border-color: var(--blue);
 }
 .micro-timeline li.active button,
 .micro-timeline li.active button > span {
-  color: var(--sage);
+  color: var(--blue);
 }
 .micro-timeline li.completed button > span {
-  color: var(--copper);
+  color: var(--red);
 }
 .micro-step-heading {
   min-height: 156px;
 }
 .micro-step-heading > span {
-  font: 11px var(--mono);
-  color: var(--copper);
-  letter-spacing: 1px;
+  font: var(--fs-label) var(--sans);
+  color: var(--red);
+  letter-spacing: 0.3px;
 }
 .micro-step-heading h3 {
   margin: 6px 0 10px;
 }
 .micro-step-heading code {
   display: block;
-  font-size: 11px;
-  color: var(--sage);
+  font-size: var(--fs-ui);
+  color: var(--blue);
   overflow-wrap: anywhere;
   padding: 10px;
-  background: #0c1310;
+  background: var(--panel);
   border: 1px solid var(--line);
 }
 .micro-step-heading p {
   margin-top: 10px;
-  font-size: 11px;
+  font-size: var(--fs-ui);
   line-height: 1.7;
 }
 .micro-coefficients {
@@ -140,18 +139,18 @@
   align-items: center;
 }
 .micro-coefficients button > span {
-  font: 11px var(--mono);
-  color: var(--copper);
+  font: var(--fs-label) var(--sans);
+  color: var(--red);
 }
 .micro-coefficients button code {
-  font-size: 11px;
+  font-size: var(--fs-ui);
 }
 .micro-coefficients button[aria-pressed="true"] {
-  border-color: var(--sage);
-  background: #b7d5a00b;
+  border-color: var(--blue);
+  background: var(--tint-a);
 }
 .micro-addresses {
-  font: 11px/1.8 var(--mono);
+  font: var(--fs-label)/1.8 var(--sans);
   color: var(--muted);
   margin-bottom: 15px;
   overflow-wrap: anywhere;
@@ -175,11 +174,12 @@
 }
 .micro-context span {
   flex: 1 1 320px;
+  font: 15px var(--sans);
 }
 .micro-context button,
 .micro-context a {
-  color: var(--sage);
-  font-size: 12px;
+  color: var(--blue);
+  font: 15px var(--sans);
   min-height: 30px;
 }
 .micro-register {
@@ -192,10 +192,11 @@
 }
 .micro-register.is-pending {
   opacity: 1;
-  border-left: 2px dashed var(--muted);
+  border-left: 2px dashed var(--line-strong);
+  padding-left: 8px;
 }
 .micro-register-label {
-  font: 11px/1.5 var(--mono);
+  font: var(--fs-label)/1.5 var(--sans);
   color: var(--muted);
   overflow-wrap: anywhere;
 }
@@ -204,30 +205,25 @@
   gap: 3px;
 }
 .micro-lane {
-  border: 1px solid #b7d5a030;
-  background: #b7d5a007;
+  border: 1px solid var(--line);
+  background: var(--field);
   padding: 7px 4px;
   min-width: 0;
   text-align: center;
 }
-.micro-lane.imag {
-  border-color: #d4a17b30;
-  background: #d4a17b07;
-}
+
 .micro-lane small {
   display: block;
-  font: 11px var(--mono);
+  font: var(--fs-label) var(--sans);
   color: var(--faint);
   margin-bottom: 4px;
 }
 .micro-lane span {
-  font: 12px var(--mono);
-  color: var(--sage);
+  font: 13px var(--mono);
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
-.micro-lane.imag span {
-  color: var(--copper);
-}
+
 .micro-phase {
   padding-left: 18px;
   border-left: 1px solid var(--line);
@@ -247,12 +243,12 @@
   stroke-dasharray: 3 5;
 }
 .micro-axis {
-  stroke: #526156;
+  stroke: var(--line);
   stroke-width: 0.75;
 }
 .micro-argand svg text {
   fill: var(--muted);
-  font: 11px var(--mono);
+  font: var(--fs-label) var(--sans);
 }
 .micro-vector {
   stroke-width: 2;
@@ -266,17 +262,17 @@
     cy 650ms ease;
 }
 .micro-vector.before {
-  stroke: var(--copper);
+  stroke: var(--red);
   stroke-dasharray: 4 3;
 }
 .micro-vector.after {
-  stroke: var(--sage);
+  stroke: var(--blue);
 }
 .micro-point.before {
-  fill: var(--copper);
+  fill: var(--red);
 }
 .micro-point.after {
-  fill: var(--sage);
+  fill: var(--blue);
 }
 .micro-phase-readout {
   display: grid;
@@ -289,13 +285,13 @@
   margin-bottom: 4px;
 }
 .micro-phase-readout span {
-  font: 11px/1.6 var(--mono);
+  font: var(--fs-label)/1.6 var(--sans);
   overflow-wrap: anywhere;
   color: var(--muted);
 }
 .micro-phase-readout small,
 .micro-phase > p {
-  font-size: 11px;
+  font-size: var(--fs-ui);
   line-height: 1.7;
   color: var(--faint);
 }
@@ -308,10 +304,10 @@
   height: 6px;
   margin-right: 6px;
   border-radius: 50%;
-  background: var(--sage);
+  background: var(--blue);
 }
 .micro-key.before {
-  background: var(--copper);
+  background: var(--red);
 }
 .micro-source {
   display: flex;
@@ -320,28 +316,28 @@
   border-top: 1px solid var(--line);
   margin-top: 25px;
   padding-top: 15px;
-  font-size: 11px;
+  font-size: var(--fs-ui);
   line-height: 1.7;
   color: var(--muted);
 }
 .micro-source a {
-  color: var(--sage);
+  color: var(--blue);
 }
 .micro-source span {
   max-width: 400px;
   text-align: right;
 }
 .micro-bypass {
-  border: 1px solid var(--sage);
+  border: 1px solid var(--blue);
   padding: 20px;
-  background: #b7d5a008;
+  background: var(--tint-a);
 }
 .micro-bypass strong {
-  color: var(--sage);
+  color: var(--blue);
   font-weight: 400;
 }
 .micro-bypass p {
-  font-size: 12px;
+  font-size: 17px;
   margin-top: 10px;
 }
 @media (max-width: 1150px) {
@@ -409,13 +405,13 @@
     grid-template-columns: 90px minmax(0, 1fr);
   }
   .micro-register-label {
-    font-size: 11px;
+    font-size: var(--fs-ui);
   }
   .micro-lane span {
-    font-size: 11px;
+    font-size: var(--fs-ui);
   }
   .micro-lane small {
-    font-size: 11px;
+    font-size: var(--fs-ui);
   }
   .micro-lane {
     padding: 7px 1px;
@@ -425,7 +421,7 @@
     gap: 8px;
   }
   .micro-phase-readout span {
-    font-size: 11px;
+    font-size: var(--fs-ui);
   }
   .micro-source {
     flex-direction: column;

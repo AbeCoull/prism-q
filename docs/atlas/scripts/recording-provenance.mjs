@@ -43,6 +43,32 @@ function git(args) {
   return result.stdout;
 }
 
+function blobs(revision, paths) {
+  const result = spawnSync("git", ["cat-file", "--batch"], {
+    cwd: root,
+    input: paths
+      .map(
+        (path) => `${revision}:${path}
+`,
+      )
+      .join(""),
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  assert.equal(result.status, 0, result.error?.message ?? `${result.stderr}`);
+  const out = result.stdout,
+    files = new Map();
+  let at = 0;
+  for (const path of paths) {
+    const end = out.indexOf(10, at);
+    const header = out.toString("utf8", at, end).split(" ");
+    assert.equal(header[1], "blob", `Missing ${path} at ${revision}`);
+    const size = Number(header[2]);
+    files.set(path, out.subarray(end + 1, end + 1 + size));
+    at = end + 2 + size;
+  }
+  return files;
+}
+
 // Ignored files never enter the manifest: a clean checkout must list the same paths.
 function sourcePaths(revision = null) {
   const paths = new Set(Object.keys(audit.files));
@@ -150,12 +176,14 @@ export function verifyRecording(provenance, fixture) {
     uncommitted || /^[a-f0-9]{40}$/.test(revision),
     `No commit records ${fixture}; fetch full history`,
   );
+  const committed = revision
+    ? blobs(
+        revision,
+        provenance.sources.map((source) => source.path),
+      )
+    : null;
   const read = (path) =>
-    canonical(
-      revision
-        ? git(["show", `${revision}:${path}`])
-        : readFileSync(resolve(root, path)),
-    );
+    canonical(committed?.get(path) ?? readFileSync(resolve(root, path)));
   assert.deepEqual(
     provenance.sources.map((source) => source.path),
     sourcePaths(revision),

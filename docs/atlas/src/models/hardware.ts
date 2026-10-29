@@ -28,15 +28,15 @@ export function kernelRoute(
     reason:
       architecture !== "avx2"
         ? architecture === "neon"
-          ? "NEON is baseline on AArch64; one complex number per 128-bit vector."
-          : "Portable arithmetic model; no SIMD lanes."
+          ? "NEON is always present on AArch64. Each 128-bit vector holds one complex number."
+          : "Plain f64 arithmetic, no SIMD lanes."
         : target < 2
-          ? "Target < 2: this general gate path chooses 128-bit FMA."
+          ? "The general kernel uses 256-bit AVX2 only for targets 2 and up, so this runs at 128 bits."
           : n === 14
-            ? "At 14 qubits, the full sequential state exceeds 8192 amplitudes and Rayon has not started."
+            ? "At 14 qubits the state is past the 8192-amplitude AVX2 limit for the sequential path, and threading starts at 15."
             : !parallel && n > 13
-              ? "Without parallel, the full sequential state exceeds the 8192-amplitude AVX2 limit."
-              : "Target ≥ 2 and the sequential slice is within 8192 amplitudes, or the parallel slice path is active.",
+              ? "Without the parallel feature the state is past the 8192-amplitude AVX2 limit for the sequential path."
+              : "The target is 2 or higher, and either the state is within 8192 amplitudes or the threaded path splits it into slices that are.",
   };
 }
 export const stateBytes = (n: number, precision = 16, density = false) =>
@@ -73,7 +73,7 @@ export function diagonalRoute(
         ? "Rayon: 4096-amplitude scaling slices"
         : "Rayon: diagonal tiles",
     reason:
-      "Diagonal entries scale each half independently. The AVX2 bulk scaler is used only by the parallel high-target branch; no cross-row addition is needed.",
+      "Each half is scaled by its own entry, with no cross-row sum. Only the threaded path for the top two targets uses the 256-bit AVX2 scaler.",
   };
 }
 export const bandwidthSeconds = (n: number, passes: number, gbps: number) =>

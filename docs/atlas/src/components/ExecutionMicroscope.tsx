@@ -137,8 +137,8 @@ function Argand({
           phase {phase(after)} · probability {abs2(after).toExponential(5)}
         </span>
         <small>
-          The circle rescales to this amplitude. Probabilities use the complete
-          state normalization.
+          The circle is scaled to this amplitude. Probabilities are relative to
+          the whole state.
         </small>
       </div>
     </div>
@@ -219,8 +219,7 @@ export function ExecutionMicroscope(
     >
       <div className="micro-heading">
         <div>
-          <span className="eyebrow">Inside one kernel iteration</span>
-          <h2 id="microscope-title">The execution microscope</h2>
+          <h2 id="microscope-title">Step through the kernel</h2>
         </div>
         <span className="micro-route">
           {n} qubits · q[{target}] ·{" "}
@@ -232,14 +231,14 @@ export function ExecutionMicroscope(
       {props.contextLabel && (
         <div className="micro-context">
           <span>{props.contextLabel}</span>
-          <button onClick={props.onEdit}>Edit experiment ↑</button>
-          <a href="#gate-laboratory">Gate and address views ↑</a>
+          <button onClick={props.onEdit}>Change settings ↑</button>
+          <a href="#gate-laboratory">Back to the memory view ↑</a>
         </div>
       )}
       <p>
-        Follow the source operations from loaded amplitudes to stored outputs.
-        Every number comes from the selected state, gate, and pair. This
-        educational evaluation is not a native instruction trace or disassembly.
+        Each step is one group of intrinsics from the kernel source, from the
+        loads to the stores, evaluated on the pair and gate chosen above. The
+        browser computes the values; this is not a trace of a native run.
       </p>
       <div className="micro-transport">
         <button
@@ -302,7 +301,7 @@ export function ExecutionMicroscope(
                 onClick={() => chooseStep(index)}
                 aria-current={index === currentStep ? "step" : undefined}
               >
-                <span>{String(index + 1).padStart(2, "0")}</span>
+                <span>{index + 1}</span>
                 {group.title}
               </button>
             </li>
@@ -310,7 +309,7 @@ export function ExecutionMicroscope(
         </ol>
         <div className="micro-workbench">
           <div className="micro-step-heading" aria-live="polite">
-            <span>GROUP {String(currentStep + 1).padStart(2, "0")}</span>
+            <span>Step {currentStep + 1}</span>
             <h3>{groups[currentStep].title}</h3>
             <code>{groups[currentStep].code}</code>
             <p>{groups[currentStep].detail}</p>
@@ -349,9 +348,9 @@ export function ExecutionMicroscope(
             <div className="micro-bypass">
               <strong>Low half bypassed</strong>
               <p>
-                d0 is within 1e-15 of 1+0i in each component. The kernel
-                performs no low-half load, arithmetic, or store. The selected
-                amplitude remains {complexText(amplitude(before, pair[0]), 6)}.
+                d0 is within 1e-15 of 1+0i, so the kernel never loads,
+                multiplies or stores the low half. This amplitude stays at{" "}
+                {complexText(amplitude(before, pair[0]), 6)}.
               </p>
             </div>
           ) : (
@@ -441,17 +440,17 @@ export function ExecutionMicroscope(
           />
           <p>
             {currentStep === last
-              ? "The sage vector has reached the stored output."
-              : "The sage vector advances when the store group is reached. The copper vector preserves the input."}
+              ? "The blue arrow now shows the stored output."
+              : "The dashed red arrow is the input. The blue arrow moves to the output at the store step."}
           </p>
         </aside>
       </div>
       <div className="micro-source">
         <a href={`${source}#${sourceLine}`} target="_blank" rel="noreferrer">
-          Read this intrinsic sequence at 7adde35 ↗
+          Kernel source at {revision.slice(0, 7)} ↗
         </a>
         <span>
-          Lane values use JavaScript binary64 arithmetic; native FMA can differ
+          Lane values are computed in JavaScript doubles. Native FMA can differ
           in the last bits.
         </span>
       </div>

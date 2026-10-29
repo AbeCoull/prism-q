@@ -50,11 +50,11 @@ const stages = [
   "Verify state",
 ];
 const stageNotes = [
-  "Insert a zero bit at the target position. Every pair is disjoint, so each output has one owner.",
-  "Read both complex inputs before either location is overwritten. A register holds interleaved real and imaginary components.",
-  "Form two matrix rows from the original inputs. Diagonal matrices take an independent scaling path.",
-  "Write the new amplitudes to their original basis-index locations. The array layout does not change.",
-  "Compare the full result with native PRISM-Q replay where available. Check normalization separately from amplitude agreement.",
+  "Insert a zero at the target bit to get i, and set it to get j. Pairs never overlap, so each amplitude is written once.",
+  "Load both inputs before writing either. Each register holds real and imaginary parts side by side.",
+  "Each output is one matrix row applied to both inputs. A diagonal matrix has no cross terms and takes a separate scaling path.",
+  "Write the results back to the same two indices. The array layout does not change.",
+  "Compare the whole state with the native PRISM-Q recording, when one exists, and check the norm separately.",
 ];
 
 function SourceLink({ id, label }: { id: string; label?: string }) {
@@ -149,8 +149,8 @@ function AmplitudePlot({
   return (
     <section className="amplitude-panel" aria-labelledby="amplitudes-title">
       <div className="section-top">
-        <h3 id="amplitudes-title">The resulting state</h3>
-        <span className="micro">PROBABILITY · |αⱼ|²</span>
+        <h3 id="amplitudes-title">Resulting state</h3>
+        <span className="micro">Probability |αⱼ|²</span>
       </div>
       <div
         className="probability-chart"
@@ -182,7 +182,7 @@ function AmplitudePlot({
         <span>
           <i className="key old" />
           Input <i className="key new" />
-          Output · local vertical scale: {ceiling.toPrecision(3)}
+          Output · y-axis max {ceiling.toPrecision(3)}
         </span>
         {total > 32 && (
           <span>
@@ -226,13 +226,14 @@ function HardwarePanel({ diagonal }: { diagonal: boolean }) {
   return (
     <div className="hardware-content">
       <div>
-        <p className="eyebrow">IMPLEMENTED ROUTE · SELECTED CPU CAPABILITIES</p>
-        <h3>{route.name}</h3>
+        <h3>
+          Kernel route: <span>{route.name}</span>
+        </h3>
         <p>{route.reason}</p>
         <p className="technical">{route.partition}</p>
         <SourceLink
           id={diagonal ? "hardware-diagonal-route" : "hardware-primary-route"}
-          label="Read the audited kernel evidence"
+          label="Kernel source"
         />
       </div>
       <div className="probe-controls">
@@ -260,12 +261,11 @@ function HardwarePanel({ diagonal }: { diagonal: boolean }) {
             checked={parallel}
             onChange={(x) => setParallel(x.target.checked)}
           />
-          Built with parallel
+          Built with the parallel feature
         </label>
         <p className="fine">
-          Routing probe only. No state is allocated at the probe width. CPU
-          choice describes a capability assumption, not detection of the browser
-          host.
+          This evaluates the routing rule only; no state is allocated. The CPU
+          choice is an assumption, not a detection of this machine.
         </p>
       </div>
     </div>
@@ -298,16 +298,14 @@ function PerformanceModel() {
     <section id="bandwidth-model" className="model-section">
       <div className="section-top">
         <div>
-          <p className="eyebrow">ANALYTICAL MODEL · NO TIMING DATA</p>
-          <h2>Count the bytes before counting the nanoseconds.</h2>
+          <h2>How many bytes a gate moves</h2>
         </div>
-        <span className="pill model">MODEL</span>
       </div>
       <p className="section-intro">
-        A full complex128 read/write sweep moves 32 × 2ⁿ logical bytes. This
-        lower-bound model assumes the entire state is streamed from the selected
-        memory level. It excludes allocation, launch costs, cache reuse, and
-        specialized diagonal skips.
+        One sweep over a complex128 state reads and writes 32 × 2ⁿ bytes. The
+        lower bound below assumes each sweep streams the whole state from one
+        memory level. It ignores allocation, launch overhead, cache reuse, and
+        the diagonal skip.
       </p>
       <div className="model-grid">
         <div className="model-controls">
@@ -403,12 +401,12 @@ function PerformanceModel() {
                 </g>
               ))}
             </g>
-            <path d={roof} fill="none" stroke="var(--sage)" strokeWidth="2" />
+            <path d={roof} fill="none" stroke="var(--blue)" strokeWidth="2" />
             <circle
               cx={x(intensity)}
               cy={y(Math.min(peak, bandwidth * intensity))}
               r="5"
-              fill="var(--copper)"
+              fill="var(--red)"
             />
             <text
               x={x(intensity) + 10}
@@ -425,24 +423,23 @@ function PerformanceModel() {
             </text>
           </svg>
           <p className="fine">
-            Four complex multiplies (6 real FLOPs each) and two complex adds (2
-            each): 28 FLOPs per pair, or 14 per amplitude. A fused group of g
-            general 1q gates has ideal logical intensity 14g/32 FLOP/B if it
-            reuses each amplitude in one sweep. Dense multi-qubit fusion can add
-            more arithmetic.
+            Four complex multiplies (6 FLOPs each) and two complex adds (2 each)
+            make 28 FLOPs per pair, or 14 per amplitude. Fusing g general
+            one-qubit gates into one sweep gives at most 14g/32 FLOP/B. Dense
+            multi-qubit fusion adds more arithmetic on top.
           </p>
           <p className="model-warning">
             {stateBytes(n) <= cache * 2 ** 20
-              ? "Payload fits the selected cache capacity. A DRAM streaming estimate may overstate external traffic; capacity alone does not establish residency."
-              : "Payload exceeds selected cache capacity. Streaming may dominate, but the model does not establish achieved bandwidth."}{" "}
-            {formatBytes(bytes)} per full sweep; {passes} → {fused} ideal
-            grouped sweeps.
+              ? "The state fits in the selected cache, so the DRAM estimate probably overstates traffic. Fitting does not guarantee the state stays resident."
+              : "The state is larger than the selected cache, so streaming from memory probably dominates. The model does not predict achieved bandwidth."}{" "}
+            {formatBytes(bytes)} per sweep; {passes} sweeps become {fused} when
+            grouped.
           </p>
         </div>
       </div>
       <SourceLink
         id="fusion-cache-stage-planner"
-        label="PRISM-Q uses a cache-derived stage planner"
+        label="The cache stage planner PRISM-Q uses"
       />
     </section>
   );
@@ -501,8 +498,7 @@ function EvidenceDialog({
     >
       <div className="dialog-top">
         <div>
-          <p className="eyebrow">SOURCE DOSSIER · {revision.slice(0, 7)}</p>
-          <h2 id="evidence-heading">{selected?.title ?? "Source evidence"}</h2>
+          <h2 id="evidence-heading">{selected?.title ?? "Source index"}</h2>
         </div>
         <button autoFocus aria-label="Close source evidence" onClick={close}>
           ×
@@ -513,14 +509,14 @@ function EvidenceDialog({
           <p>{selected.note}</p>
           {selected.n !== 2 && (
             <p className="dossier-status">
-              Source audit complete. The full interactive chapter belongs to a
-              subsequent implementation phase.
+              This chapter has source notes only. There is no interactive page
+              for it yet.
             </p>
           )}
         </>
       )}
       <label className="search">
-        Search implementation claims
+        Search claims
         <input
           type="search"
           value={query}
@@ -529,8 +525,8 @@ function EvidenceDialog({
         />
       </label>
       <p className="fine">
-        {relevant.length} records · pinned source links · no benchmark
-        measurements in this release
+        {relevant.length} records, each linked to source lines at a fixed
+        revision. No timing data.
       </p>
       <div className="evidence-list">
         {relevant.map((item) => (
@@ -538,9 +534,7 @@ function EvidenceDialog({
             <span
               className={`pill ${item.status === "model" || item.status === "theory" ? "model" : ""}`}
             >
-              {item.status === "source-audited"
-                ? "IMPLEMENTATION"
-                : item.status.toUpperCase()}
+              {item.status}
             </span>
             <p>{item.claim}</p>
             <p className="fine">{item.derivation}</p>
@@ -591,20 +585,8 @@ function useNativeGates() {
 export default function App() {
   const e = useExperiment();
   const { native, nativeError } = useNativeGates();
-  const [activeChapter, setActiveChapter] = useState(
-    location.hash === "#compiler-laboratory" ? 3 : 2,
-  );
   useEffect(() => {
     let mounted = true;
-    const update = () => {
-      const compiler = document.getElementById("compiler-laboratory");
-      setActiveChapter(
-        compiler && compiler.getBoundingClientRect().top < innerHeight * 0.4
-          ? 3
-          : 2,
-      );
-    };
-    update();
     document.fonts.ready.then(() => {
       if (!mounted) return;
       const target =
@@ -613,14 +595,9 @@ export default function App() {
           ? document.getElementById(location.hash.slice(1))
           : null;
       target?.scrollIntoView({ behavior: "instant" });
-      update();
     });
-    window.addEventListener("scroll", update, { passive: true });
-    window.addEventListener("resize", update);
     return () => {
       mounted = false;
-      window.removeEventListener("scroll", update);
-      window.removeEventListener("resize", update);
     };
   }, []);
   const [dialog, setDialog] = useState<number | null | false>(false),
@@ -699,22 +676,6 @@ export default function App() {
       setCopied(true);
     }
   };
-  const goToChapter = (chapter: number) => {
-    if (chapter !== 2 && chapter !== 3) {
-      setDialog(chapter);
-      return;
-    }
-    const id = chapter === 3 ? "compiler-laboratory" : "gate-laboratory";
-    document.getElementById(id)?.scrollIntoView({
-      behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
-        ? "instant"
-        : "smooth",
-    });
-    const url = new URL(location.href);
-    url.hash = id;
-    history.replaceState(null, "", url);
-    setActiveChapter(chapter);
-  };
   return (
     <>
       <a className="skip-link" href="#main-content">
@@ -724,142 +685,42 @@ export default function App() {
         <a
           className="brand"
           href="#main-content"
-          aria-label="Inside PRISM-Q home"
+          aria-label="PRISM-Q atlas home"
         >
-          <svg viewBox="0 0 36 36" aria-hidden="true">
-            <path d="M18 4 33 30H3ZM18 4v26M3 30l15-8 15 8" />
-          </svg>
-          <span>
-            PRISM–Q <small>ANATOMY SERIES</small>
-          </span>
+          PRISM-Q <span>atlas</span>
         </a>
         <nav aria-label="Primary">
-          <a className="active" href="#gate-laboratory">
-            The atlas
-          </a>
+          <a href="#gate-laboratory">Gates</a>
+          <a href="#compiler-laboratory">Fusion</a>
           <button onClick={() => setDialog(null)}>
-            Source index <span>{evidence.length}</span>
+            Sources ({evidence.length})
           </button>
-          <a href="#methodology">Methodology</a>
+          <a href="#methodology">Methods</a>
+          <a
+            href="https://github.com/AbeCoull/prism-q"
+            target="_blank"
+            rel="noreferrer"
+          >
+            GitHub
+          </a>
         </nav>
-        <a
-          className="repository"
-          href="https://github.com/AbeCoull/prism-q"
-          target="_blank"
-          rel="noreferrer"
-        >
-          GitHub <span>↗</span>
-        </a>
       </header>
-      <nav className="mobile-chapters" aria-label="Mobile chapter contents">
-        <label htmlFor="chapter-selector">Contents</label>
-        <select
-          id="chapter-selector"
-          aria-label="Atlas chapter"
-          value={activeChapter}
-          onChange={(event) => goToChapter(Number(event.target.value))}
-        >
-          {chapters.map((chapter) => (
-            <option key={chapter.n} value={chapter.n}>
-              {String(chapter.n).padStart(2, "0")} {chapter.title}
-              {[2, 3].includes(chapter.n) ? " (live)" : ""}
-            </option>
-          ))}
-        </select>
-      </nav>
       <div className="page-shell">
-        <aside className="chapter-rail" aria-label="Atlas chapters">
-          <p className="eyebrow">INSIDE PRISM-Q</p>
-          <p className="rail-title">
-            From quantum algebra
-            <br />
-            to silicon.
-          </p>
-          <ol>
-            {chapters.map((chapter) => (
-              <li key={chapter.n}>
-                <button
-                  className={chapter.n === activeChapter ? "current" : ""}
-                  aria-current={
-                    chapter.n === activeChapter ? "location" : undefined
-                  }
-                  onClick={() => goToChapter(chapter.n)}
-                >
-                  <span>{`${chapter.n}`.padStart(2, "0")}</span>
-                  <span>
-                    {chapter.title}
-                    {[2, 3].includes(chapter.n) && (
-                      <small>INTERACTIVE CHAPTER</small>
-                    )}
-                  </span>
-                  {[2, 3].includes(chapter.n) ? (
-                    <b>↗</b>
-                  ) : (
-                    <b className="dossier-dot" title="Source dossier">
-                      ·
-                    </b>
-                  )}
-                </button>
-              </li>
-            ))}
-          </ol>
-          <div className="rail-note">
-            <span className="status-dot" />
-            SOURCE SNAPSHOT
-            <br />
-            <a href={`https://github.com/AbeCoull/prism-q/tree/${revision}`}>
-              {revision.slice(0, 7)} ↗
-            </a>
-            <p>
-              11 source dossiers.
-              <br />
-              Gate microscope + compiler laboratory.
-            </p>
-          </div>
-        </aside>
         <main id="main-content">
           <section className="intro">
-            <div className="breadcrumb">
-              <span className="status-dot" /> INTERACTIVE RESEARCH ATLAS{" "}
-              <i>/</i> CHAPTER 02
-            </div>
-            <div className="intro-row">
-              <div>
-                <h1>
-                  One gate.
-                  <br />
-                  <em>Every amplitude.</em>
-                </h1>
-                <p className="subtitle">
-                  Anatomy of a quantum statevector gate:
-                  <br />
-                  from a unitary matrix to SIMD instructions.
-                </p>
-                <nav
-                  className="chapter-shortcuts"
-                  aria-label="Interactive laboratories"
-                >
-                  <a href="#gate-laboratory">
-                    02 <span>Gate microscope</span> ↓
-                  </a>
-                  <a href="#compiler-laboratory">
-                    03 <span>Compiler laboratory</span> ↓
-                  </a>
-                </nav>
-              </div>
-              <div className="intro-note">
-                <span className="tiny-index">[ 02 / 11 ]</span>
-                <p>
-                  A quantum operation is a linear map.
-                  <br />A simulator turns it into memory traffic.
-                  <br />
-                  Trace the mechanism, one pair at a time.
-                </p>
-                <a href="#gate-laboratory">
-                  Enter the experiment <span>↓</span>
-                </a>
-              </div>
-            </div>
+            <h1>Applying a one-qubit gate</h1>
+            <p className="lede">
+              A gate on qubit q mixes the amplitudes of a state two at a time.
+              This page follows one of those pairs through the PRISM-Q
+              statevector backend: where the two amplitudes sit in memory, how
+              the AVX2 and NEON kernels load and combine them, and what the
+              fusion passes do to a whole circuit.
+            </p>
+            <p>
+              The settings next to the figure drive everything below it. Where
+              PRISM-Q recorded the same case natively, the page checks its own
+              arithmetic against that recording.
+            </p>
           </section>
           <section
             id="gate-laboratory"
@@ -868,22 +729,21 @@ export default function App() {
           >
             <div className="lab-heading">
               <div>
-                <span className="fig-number">FIG. 02.1</span>
-                <h2>Anatomy of a statevector gate</h2>
+                <h2>Amplitude pairs and SIMD registers</h2>
               </div>
               <button
                 aria-label="Source evidence"
                 className="text-button"
                 onClick={() => setDialog(null)}
               >
-                Source evidence <span>↗</span>
+                Sources <span>↗</span>
               </button>
             </div>
             <div className="instrument">
               <div className="scene-section">
                 <div className="scene-hud">
                   <span className="pill">
-                    {trace ? "NATIVE REPLAY" : "EDUCATIONAL MODEL"}
+                    {trace ? "Native replay" : "Browser model"}
                   </span>
                   <span>
                     <b style={{ fontWeight: 400 }}>{route.name}</b> <i>·</i>{" "}
@@ -913,17 +773,17 @@ export default function App() {
                     </SceneBoundary>
                   )}
                   <div className="scene-annotation">
-                    <span className="annotation-index">01</span>
                     <div>
-                      CONTIGUOUS COMPLEX128 STORAGE
+                      Contiguous complex128 storage
                       <br />
                       <small>
-                        Relative byte offsets · q₀ is the least significant bit
+                        Byte offsets from the start of the vector. q₀ is the
+                        lowest bit.
                       </small>
                     </div>
                   </div>
                   <div className="scene-coordinate">
-                    PAIR DISTANCE{" "}
+                    Pair distance{" "}
                     <strong data-testid="pair-offset">
                       {16 * 2 ** e.target} bytes
                     </strong>
@@ -932,9 +792,9 @@ export default function App() {
                 <div className="scene-footer">
                   <span>
                     <i className="key new" />
-                    aᵢ <i className="key copper" />
+                    aᵢ <i className="key pair-b" />
                     aⱼ <i className="key old" />
-                    64-byte model lines
+                    64-byte cache lines (modelled)
                   </span>
                   <button
                     className="text-button"
@@ -942,7 +802,7 @@ export default function App() {
                       setRenderer(renderer === "3d" ? "svg" : "3d")
                     }
                   >
-                    {renderer === "3d" ? "SVG view" : "3D view"} ↗
+                    {renderer === "3d" ? "Switch to SVG" : "Switch to 3D"}
                   </button>
                 </div>
                 <div className="timeline">
@@ -960,7 +820,7 @@ export default function App() {
                       aria-pressed={e.phase === index}
                       onClick={() => e.set({ phase: index })}
                     >
-                      <span>{`0${index + 1}`}</span>
+                      <span>{index + 1}</span>
                       {stage}
                     </button>
                   ))}
@@ -973,11 +833,10 @@ export default function App() {
                   </button>
                 </div>
                 <p className="stage-note" aria-live="polite">
-                  <span>0{e.phase + 1}</span>
                   {diagonal && e.phase === 1
-                    ? "Load each amplitude independently for diagonal scaling. A unit diagonal coefficient can skip its half entirely."
+                    ? "Load each amplitude on its own; a diagonal gate needs no partner. When the low coefficient is exactly 1, that half is skipped."
                     : diagonal && e.phase === 2
-                      ? "Multiply each amplitude by its own diagonal coefficient. No cross-row sum is formed."
+                      ? "Multiply each amplitude by its own diagonal entry. There are no cross terms."
                       : stageNotes[e.phase]}
                 </p>
               </div>
@@ -986,8 +845,7 @@ export default function App() {
                 aria-label="Experiment controls"
               >
                 <div className="control-title">
-                  <span className="status-dot" />
-                  <h3>Experiment parameters</h3>
+                  <h3>Settings</h3>
                 </div>
                 <Range
                   label="Qubit count"
@@ -1044,7 +902,7 @@ export default function App() {
                       className="text-button"
                       onClick={() => e.set({ theta: Math.PI / 3 })}
                     >
-                      Restore native angle π/3
+                      Reset to the recorded angle, π/3
                     </button>
                   </>
                 )}
@@ -1078,16 +936,16 @@ export default function App() {
                       e.set({ basis: x.target.value === "basis" })
                     }
                   >
-                    <option value="fixture">Normalized complex fixture</option>
+                    <option value="fixture">Complex test state</option>
                     <option value="basis">Basis state |0…0⟩</option>
                   </select>
                 </label>
                 <div className="precision">
-                  <span>PRECISION</span>
+                  <span>Precision</span>
                   <strong>
                     complex128 <small>2 × f64</small>
                   </strong>
-                  <span className="fine">Native CPU state format</span>
+                  <span className="fine">The CPU backend state format</span>
                 </div>
                 <div className="control-stats">
                   <div>
@@ -1122,8 +980,7 @@ export default function App() {
           <section className="detail-section">
             <div className="detail-heading">
               <div>
-                <p className="eyebrow">FIVE VIEWS · ONE SELECTED PAIR</p>
-                <h2>Follow the same two amplitudes.</h2>
+                <h2>The selected pair, step by step</h2>
               </div>
               <div className="pair-picker">
                 <label htmlFor="pair-index">Pair ordinal k</label>
@@ -1192,7 +1049,6 @@ export default function App() {
               {e.layer === "Mathematics" && (
                 <div className="math-content">
                   <div>
-                    <p className="eyebrow">A · LINEAR ALGEBRA</p>
                     <div className="operator-line">
                       <span className="operator-name">
                         {e.gate}
@@ -1205,20 +1061,18 @@ export default function App() {
                       tex={String.raw`\begin{pmatrix}\alpha_i'\\\alpha_j'\end{pmatrix}=\begin{pmatrix}u_{00}&u_{01}\\u_{10}&u_{11}\end{pmatrix}\begin{pmatrix}\alpha_i\\\alpha_j\end{pmatrix}`}
                     />
                     <p>
-                      Apply U to target q{e.target}, leaving every other basis
-                      bit unchanged. Each pair is a two-dimensional subspace.
-                      The complete operator is{" "}
+                      U acts on q{e.target} and leaves every other bit alone, so
+                      it mixes amplitudes two at a time. As a full operator it
+                      is{" "}
                       <Equation
                         tex={String.raw`I_{2^{n-q-1}}\otimes U\otimes I_{2^q}`}
                       />{" "}
-                      in the ordering |qₙ₋₁…q₀⟩.
+                      with bits ordered |qₙ₋₁…q₀⟩.
                     </p>
                     <SourceLink id="state-index-pairs" />
                   </div>
                   <div className="live-calculation">
-                    <p className="eyebrow">
-                      SELECTED PAIR · LIVE COMPLEX ARITHMETIC
-                    </p>
+                    <h3>The selected pair</h3>
                     <div>
                       <span>αᵢ · |{binary(i, e.n)}⟩</span>
                       <code>{complexText(a, 6)}</code>
@@ -1239,9 +1093,8 @@ export default function App() {
                       <code>{complexText(outB, 6)}</code>
                     </div>
                     <p className="fine">
-                      Input at depth {e.depth - 1}; output at depth {e.depth}.
-                      Amplitude phase is retained. Probability is |α|², not the
-                      real component.
+                      Input after {e.depth - 1} applications, output after{" "}
+                      {e.depth}. Probability is |α|², not the real part.
                     </p>
                   </div>
                 </div>
@@ -1249,39 +1102,36 @@ export default function App() {
               {e.layer === "Algorithm" && (
                 <div className="algorithm-content">
                   <div>
-                    <p className="eyebrow">B · THE PAIR ITERATOR</p>
                     <pre>
                       <code>{`half = 1 << ${e.target}       // ${2 ** e.target}\nmask = half - 1       // ${2 ** e.target - 1}\nk = ${e.pairIndex}\ni = ((k & ~mask) << 1) | (k & mask)\n  = ${i}\nj = i | half\n  = ${j}\n\na, b = state[i], state[j]\nstate[i] = u00*a + u01*b\nstate[j] = u10*a + u11*b`}</code>
                     </pre>
                     <p className="fine">
-                      Pseudocode follows the scalar reference. SIMD loops
-                      process contiguous half-block streams while preserving
-                      this pairing.
+                      This is the scalar reference. The SIMD loops walk each
+                      half as a contiguous stream but keep the same pairing.
                     </p>
                   </div>
                   <div>
-                    <p className="eyebrow">DEPENDENCY INVARIANT</p>
                     <h3>
                       {diagonal
-                        ? "Diagonal scaling is independent."
-                        : "Two reads. Then two writes."}
+                        ? "Diagonal entries scale independently"
+                        : "Read both, then write both"}
                     </h3>
                     <p>
-                      For a general matrix, both new values depend on both
-                      original values. Overwriting αᵢ before forming αⱼ′ would
-                      change the operator. Disjoint pairs let different tasks
-                      work without writing the same amplitude.
+                      With a general matrix each output depends on both inputs,
+                      so writing αᵢ′ before computing αⱼ′ gives the wrong
+                      answer. Pairs never overlap, so threads can take different
+                      pairs without writing to the same amplitude.
                     </p>
                     <p>
-                      With target q{e.target}, the lower and upper streams are
-                      separated by {2 ** e.target} amplitudes, but each stream
-                      advances sequentially within a block. Pair separation is
-                      not the traversal step of every load.
+                      For target q{e.target} the two streams are {2 ** e.target}{" "}
+                      amplitudes apart, but each one moves through memory an
+                      element at a time. The pair distance is not the stride of
+                      every load.
                     </p>
                     <p className="route-note">
                       {diagonal
-                        ? "This matrix is diagonal. PRISM-Q detects it and scales each half independently; the full multiply/add pseudocode is a mathematically equivalent reference."
-                        : "The selected Fused matrix follows the general one-qubit gate path."}
+                        ? "This matrix is diagonal, so PRISM-Q scales each half on its own. The multiply-add pseudocode above gives the same result."
+                        : "This matrix goes through the general one-qubit kernel."}
                     </p>
                     <SourceLink id="state-index-pairs" />
                   </div>
@@ -1290,12 +1140,10 @@ export default function App() {
               {e.layer === "Memory" && (
                 <div className="memory-content">
                   <div>
-                    <p className="eyebrow">
-                      C · BINARY INDEX → RELATIVE ADDRESS
-                    </p>
+                    <h3>Index to byte offset</h3>
                     {pair.map((index, k) => (
                       <div
-                        className={`address-row ${k ? "copper-text" : "sage-text"}`}
+                        className={`address-row ${k ? "pair-b-text" : "pair-a-text"}`}
                         key={index}
                       >
                         <span>α{k ? "ⱼ" : "ᵢ"}</span>
@@ -1323,10 +1171,10 @@ export default function App() {
                       </div>
                     ))}
                     <p>
-                      Each <code>Complex64</code> occupies adjacent real and
-                      imaginary f64 components. Real is at +16j bytes; imaginary
-                      is at +16j + 8 bytes. These are offsets from the vector
-                      base, not process addresses.
+                      A <code>Complex64</code> stores its real part at +16j
+                      bytes and its imaginary part at +16j + 8. These are
+                      offsets from the start of the vector, not process
+                      addresses.
                     </p>
                     <div className="component-strip">
                       <span>
@@ -1345,24 +1193,22 @@ export default function App() {
                     </div>
                   </div>
                   <div>
-                    <p className="eyebrow">CACHE PLACEMENT IS A MODEL</p>
                     <h3>
                       {cacheLine(i) === cacheLine(j)
-                        ? "Same modeled cache line."
-                        : "Different modeled cache lines."}
+                        ? "Same cache line"
+                        : "Different cache lines"}
                     </h3>
                     <p>
-                      The drawing assumes a 64-byte cache line and a
-                      line-aligned base, giving four complex128 amplitudes per
-                      line. Selected lines: {cacheLine(i)} and {cacheLine(j)}.
-                      PRISM-Q uses unaligned SIMD loads; its Vec does not
-                      promise this cache-line alignment.
+                      The drawing assumes 64-byte lines and a vector that starts
+                      on a line boundary, so four amplitudes share a line. The
+                      pair sits on lines {cacheLine(i)} and {cacheLine(j)}. In
+                      practice the Vec makes no alignment promise, and the SIMD
+                      loads are unaligned.
                     </p>
                     <p>
-                      At high targets, two distant but individually contiguous
-                      streams can still prefetch effectively. This view does not
-                      infer cache misses, TLB misses, residency, or achieved
-                      bandwidth from address distance.
+                      At high targets the two streams are far apart, but each is
+                      contiguous and prefetches well. Address distance alone
+                      says nothing about cache misses or bandwidth.
                     </p>
                     <SourceLink id="hardware-state-layout" />
                   </div>
@@ -1372,7 +1218,7 @@ export default function App() {
                 <>
                   <HardwarePanel diagonal={diagonal} />
                   <div className="intrinsic-panel">
-                    <p className="eyebrow">D · INTRINSIC-LEVEL MECHANISM</p>
+                    <h3>Intrinsics</h3>
                     {diagonal ? (
                       <>
                         <Equation
@@ -1380,10 +1226,10 @@ export default function App() {
                           block
                         />
                         <p>
-                          Independent complex scaling replaces the cross-row
-                          sum. For Z, d₀ = 1, so the lower half is skipped. The
-                          register width follows the diagonal specialization,
-                          not the generic matrix route.
+                          Each amplitude is scaled by its own entry, with no
+                          cross-row sum. For Z, d₀ = 1, so the low half is
+                          skipped. The register width is the diagonal kernel's,
+                          not the general kernel's.
                         </p>
                       </>
                     ) : e.architecture === "scalar" ? (
@@ -1392,9 +1238,9 @@ export default function App() {
                           {"re(cz) = cr*zr − ci*zi\nim(cz) = cr*zi + ci*zr"}
                         </pre>
                         <p>
-                          Scalar arithmetic has no SIMD register layout. The
-                          browser evaluates f64 operations; this is not a native
-                          scalar microbenchmark.
+                          No SIMD registers on this path. The browser runs the
+                          same f64 operations, which says nothing about native
+                          scalar speed.
                         </p>
                       </>
                     ) : (
@@ -1429,12 +1275,12 @@ export default function App() {
                               : "swap = _mm_shuffle_pd(z, z, 0b01)\nt = _mm_mul_pd(ci, swap)\ncz = _mm_fmaddsub_pd(cr, z, t)"}
                         </pre>
                         <p>
-                          Ascending lanes correspond to ascending loaded f64
-                          addresses. AVX2 holds two adjacent amplitudes from one
-                          half, while a second register holds their partners.
-                          Even FMA lanes subtract and odd lanes add. NEON
-                          instead broadcasts the signed imaginary coefficients
-                          [−ci, +ci].
+                          Lane order follows load address. With AVX2 one
+                          register holds two neighbouring amplitudes from one
+                          half and a second register holds their partners.
+                          fmaddsub subtracts in even lanes and adds in odd ones.
+                          NEON broadcasts signed imaginary coefficients [−ci,
+                          +ci] instead.
                         </p>
                         <div className="complex-product">
                           <span>u₀₀ × αᵢ =</span>
@@ -1448,11 +1294,10 @@ export default function App() {
               {e.layer === "Validation" && (
                 <div className="validation-content">
                   <div>
-                    <p className="eyebrow">E · NUMERICAL EVIDENCE</p>
                     <h3>
                       {trace
-                        ? "Native replay agrees with the browser model."
-                        : "Educational execution, no matching native fixture."}
+                        ? "Matches the native recording"
+                        : "No native recording for this case"}
                     </h3>
                     <div className="validation-metrics">
                       <div>
@@ -1471,25 +1316,24 @@ export default function App() {
                       </div>
                     </div>
                     <p>
-                      Native fixtures cover n = 2…6, every target, seven gates,
-                      and four repeated steps at θ = π/3, plus sampled 16-qubit
-                      H, Z, and Rz steps through the threaded tile,
-                      paired-slice, and diagonal scaling routes. The exporter
-                      executes actual <code>StatevectorBackend::apply</code>{" "}
-                      with <code>Gate::Fused</code>. Z and Rz take the diagonal
-                      specialization; other named gates take the general 2×2
-                      kernel even at angles where their matrix is diagonal.
+                      Recordings cover 2 to 6 qubits, every target, seven gates
+                      and four repeated steps at θ = π/3. Sampled 16-qubit runs
+                      of H, Z and Rz cover the threaded tile, paired slice and
+                      diagonal paths. The exporter calls{" "}
+                      <code>StatevectorBackend::apply</code> with{" "}
+                      <code>Gate::Fused</code>. Z and Rz take the diagonal
+                      kernel. The other gates take the general 2×2 kernel, even
+                      at angles where their matrix happens to be diagonal.
                     </p>
                     <p>
-                      Tests compare every recorded step against both this
-                      browser model and an independent dense Kronecker operator.
-                      Floating-point arithmetic may differ through FMA
-                      contraction; agreement uses a 10⁻¹² amplitude tolerance,
-                      not a bitwise guarantee.
+                      Tests compare each recorded step with this page's model
+                      and with a dense Kronecker operator built separately. FMA
+                      contraction can change the last bits, so agreement is
+                      checked to 10⁻¹² rather than bit for bit.
                     </p>
                   </div>
                   <div className="provenance-card">
-                    <p className="eyebrow">FIXTURE PROVENANCE</p>
+                    <h3>Recording details</h3>
                     <dl>
                       <dt>Simulator</dt>
                       <dd>
@@ -1499,47 +1343,45 @@ export default function App() {
                       </dd>
                       <dt>Revision</dt>
                       <dd>{native?.provenance.sourceRevision.slice(0, 12)}</dd>
-                      <dt>Audited implementation</dt>
+                      <dt>Audit revision</dt>
                       <dd>{native?.provenance.auditRevision.slice(0, 12)}</dd>
                       <dt>Recording changes</dt>
                       <dd>
                         {native?.provenance.dirtyTree
-                          ? "Uncommitted producer changes fingerprinted"
-                          : "Clean recording checkout"}
+                          ? "Uncommitted changes, hashed"
+                          : "Clean checkout"}
                       </dd>
                       <dt>Execution</dt>
                       <dd>Native Rust · complex128</dd>
                       <dt>Seed</dt>
-                      <dd>42 (input formula is deterministic)</dd>
+                      <dd>42; the input state is a fixed formula</dd>
                       <dt>Trace</dt>
-                      <dd>{trace?.id ?? "No recorded match"}</dd>
+                      <dd>{trace?.id ?? "None for this case"}</dd>
                       <dt>Timing</dt>
                       <dd>Not collected</dd>
                     </dl>
                     <a href="./native-gates.json" download>
-                      Download replay fixtures ↓
+                      Download the recordings ↓
                     </a>
                     <p className="fine">
-                      Architecture selection changes the instructional kernel
-                      model. It does not rerun the native fixture on AVX2 or
-                      NEON, and does not assert which ISA produced the recorded
-                      amplitudes.
+                      The architecture menu changes the kernel this page draws.
+                      It does not rerun the recording, and the recording does
+                      not say which ISA produced it.
                     </p>
                   </div>
                 </div>
               )}
             </div>
             <div className="persistent-validation">
-              <span className="status-dot" />
               <span>
                 {trace
                   ? `Native fixture ${trace.id} · step ${e.depth} · max amplitude error ${result.error?.toExponential(2)}`
-                  : "Browser educational model · no matching native trace"}
+                  : "Browser model · no native recording for this case"}
               </span>
               <span data-testid="native-error">
                 {result.error !== null
                   ? `Δ ≤ 10⁻¹²: ${result.error <= 1e-12 ? "PASS" : "FAIL"}`
-                  : "UNVERIFIED BY REPLAY"}
+                  : "Not checked against native"}
               </span>
             </div>
           </section>
@@ -1552,50 +1394,45 @@ export default function App() {
           />
           <section className="derivation-section" id="derivation">
             <div>
-              <p className="eyebrow">THE DERIVATION</p>
-              <h2>
-                One bit chooses the partner.
-                <br />
-                <em>All other bits stay fixed.</em>
-              </h2>
+              <h2>Why amplitudes pair up</h2>
               <p>
-                Expand the state in the computational basis. Group all indices
-                whose non-target bits agree. Each group contains exactly the two
-                target-bit values, so a one-qubit gate reduces to 2ⁿ⁻¹
-                independent matrix-vector products.
+                Write the state in the computational basis and group the indices
+                that agree on every bit except q. Each group has two members,
+                one with bit q clear and one with it set, so a one-qubit gate
+                becomes 2ⁿ⁻¹ independent 2×2 products.
               </p>
               <Equation
                 block
                 tex={String.raw`|\psi\rangle=\sum_{k}\left(\alpha_{i(k)}|0\rangle_q+\alpha_{j(k)}|1\rangle_q\right)\otimes |k\rangle_{\neg q}`}
               />
               <p className="fine">
-                The displayed tensor product groups logical subsystems; it does
-                not reorder the stored index bits. The full ordered operator is
-                given in view A.
+                The tensor product groups subsystems for the algebra; the stored
+                bits are not reordered. View A gives the operator in storage
+                order.
               </p>
             </div>
             <div className="derivation-facts">
               <div>
-                <span>PAIR STRIDE</span>
+                <span>Pair stride</span>
                 <Equation tex={String.raw`s=2^q`} />
-                <p>Logical separation in amplitudes.</p>
+                <p>Distance between partners, in amplitudes.</p>
               </div>
               <div>
-                <span>PARTNER INDEX</span>
+                <span>Partner index</span>
                 <Equation tex={String.raw`j=i\oplus(1\ll q)`} />
                 <p>Valid when bit q of i is zero.</p>
               </div>
               <div>
-                <span>WORK AND STORAGE</span>
+                <span>Work and memory</span>
                 <Equation
                   tex={String.raw`T(n)=\Theta(2^n),\quad M(n)=16\cdot2^n\ \mathrm{bytes}`}
                 />
-                <p>Fixed-size one-qubit gate; complex128 amplitude payload.</p>
+                <p>One gate touches every amplitude; each takes 16 bytes.</p>
               </div>
             </div>
           </section>
           <ExecutionMicroscope
-            contextLabel={`${e.gate}, θ = ${e.theta.toFixed(4)} rad, application ${e.depth}, pair [${pair.join(", ")}], initial state: ${e.basis ? "basis |0>" : "deterministic complex fixture"}`}
+            contextLabel={`${e.gate}, θ = ${e.theta.toFixed(4)} rad, application ${e.depth}, pair [${pair.join(", ")}], input: ${e.basis ? "basis |0⟩" : "fixed complex test state"}`}
             onEdit={() => {
               const control = document.querySelector<HTMLSelectElement>(
                 'select[aria-label="Gate"]',
@@ -1615,47 +1452,51 @@ export default function App() {
           <PerformanceModel />
           <CompilerLab />
           <section id="methodology" className="methodology">
-            <p className="eyebrow">METHODS, PROVENANCE & LIMITATIONS</p>
-            <h2>A diagram is a claim. Make it auditable.</h2>
-            <div className="method-grid">
-              <article>
-                <span>01</span>
-                <h3>Implementation evidence</h3>
-                <p>
-                  {evidence.length} source records cover the eleven planned
-                  chapters. Links are pinned to {revision.slice(0, 7)}. Research
-                  notes document representations, limits, and the actual runtime
-                  branches.
-                </p>
-                <button className="text-button" onClick={() => setDialog(null)}>
-                  Open source-evidence matrix ↗
-                </button>
-              </article>
-              <article>
-                <span>02</span>
-                <h3>Independent numerical reference</h3>
-                <p>
-                  Native outputs are checked against a dense tensor-product
-                  operator built separately from the browser pair iterator.
-                  Separate agents audited runtime and mathematics, with
-                  cross-review and an adversarial pass. Hardware prose was
-                  self-reviewed by its author.
-                </p>
-              </article>
-              <article>
-                <span>03</span>
-                <h3>Models stay models</h3>
-                <p>
-                  No native SIMD runs in this browser. The 3D view is an address
-                  and register schematic, not a physical CPU floorplan. Cache
-                  sizes, alignment, bandwidth, and roofline ceilings are
-                  assumptions. No measured performance or competitor comparison
-                  is supplied.
-                </p>
-              </article>
-            </div>
-            <p className="credits">
-              Isometric SVG geometry uses{" "}
+            <h2>Where the numbers come from</h2>
+            <h3>Source links</h3>
+            <p>
+              {evidence.length} records tie each claim on this page to source
+              lines at{" "}
+              <a href={`https://github.com/AbeCoull/prism-q/tree/${revision}`}>
+                <code>{revision.slice(0, 7)}</code>
+              </a>
+              .{" "}
+              <button className="inline-link" onClick={() => setDialog(null)}>
+                Open the source index
+              </button>
+              .
+            </p>
+            <h3>An independent reference</h3>
+            <p>
+              Native outputs are checked against a dense tensor-product operator
+              that shares no code with the page&apos;s pair iterator, so a bug
+              in one does not hide in the other.
+            </p>
+            <h3>What is modelled</h3>
+            <p>
+              Nothing here runs native SIMD. The 3D view is a diagram of
+              addresses and registers, not a CPU layout. Cache size, alignment,
+              bandwidth and the roofline ceilings are inputs you set. The page
+              reports no timings.
+            </p>
+            <h3>Other chapters</h3>
+            <p>These have source notes but no interactive page yet.</p>
+            <ul className="chapter-list">
+              {chapters
+                .filter((chapter) => ![2, 3].includes(chapter.n))
+                .map((chapter) => (
+                  <li key={chapter.n}>
+                    <button
+                      className="inline-link"
+                      onClick={() => setDialog(chapter.n)}
+                    >
+                      {chapter.title}
+                    </button>
+                  </li>
+                ))}
+            </ul>
+            <p className="fine credits">
+              The SVG figure uses geometry from{" "}
               <a
                 href="https://github.com/wheresryan22/anatomy"
                 target="_blank"
@@ -1663,20 +1504,14 @@ export default function App() {
               >
                 Anatomy
               </a>
-              ; 3D geometry uses React Three Fiber. Equations use KaTeX. A text
-              and SVG view remains available without WebGL.{" "}
+              , the 3D view uses React Three Fiber, and equations use KaTeX. The
+              SVG view works without WebGL.{" "}
               <a href="https://github.com/AbeCoull/prism-q/tree/main/docs/atlas">
-                Extension and reproduction guide ↗
+                How to regenerate and extend the atlas
               </a>
+              .
             </p>
           </section>
-          <footer>
-            <span>
-              INSIDE PRISM-Q <i>/</i> FROM QUANTUM ALGEBRA TO SILICON
-            </span>
-            <span>Source-grounded. Numerically checked.</span>
-            <a href="#main-content">Back to top ↑</a>
-          </footer>
         </main>
       </div>
       {dialog !== false && (

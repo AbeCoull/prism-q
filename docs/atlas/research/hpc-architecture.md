@@ -1,8 +1,8 @@
 # Dense execution and hardware evidence
 
-Source snapshot: `7adde35d0bacaff71711148223ac8df06a008d01`. References below
-name source paths, symbols, and inclusive line ranges. These findings describe
-implementation and analytical models. No benchmark was run for this audit.
+Source snapshot: `7adde35d0bacaff71711148223ac8df06a008d01`. References give
+source paths, symbols and inclusive line ranges. Everything here is read from the
+source or derived as a model; no benchmark was run for this audit.
 
 ## State, indices, and pair ownership
 
@@ -26,29 +26,27 @@ state[i0] = m00*a + m01*b
 state[i1] = m10*a + m11*b
 ```
 
-This is a bijection from `(k, target bit)` to state indices. Every pair is
-disjoint and the two inputs are loaded before either output is stored. The
-distance within one pair is `16 * 2^t` bytes, but each half of a block is a
-contiguous stream. It is inaccurate to describe every target as random memory
-access. Evidence: `src/backend/simd.rs:343-374`.
+This is a bijection from `(k, target bit)` to state indices. Pairs are disjoint,
+and both inputs are loaded before either output is stored. The two members of a
+pair are `16 * 2^t` bytes apart, but each half of a block is a contiguous stream,
+so a high target does not mean random access. Evidence: `src/backend/simd.rs:343-374`.
 
-## The flagship lane scene
+## Register lanes
 
-Display register lanes in ascending lane number, which also means ascending
-memory address for a load. For two neighboring pair indices within a block:
+Lanes are listed in ascending lane number, which for a load is also ascending
+memory address. For two neighboring pair indices within a block:
 
-| Register | Lane 0 | Lane 1 | Lane 2 | Lane 3 |
-|---|---|---|---|---|
-| AVX2 `a` | `re(a0)` | `im(a0)` | `re(a1)` | `im(a1)` |
-| AVX2 `b` | `re(b0)` | `im(b0)` | `re(b1)` | `im(b1)` |
-| `permute(a, 0101)` | `im(a0)` | `re(a0)` | `im(a1)` | `re(a1)` |
-| coefficient real broadcast | `cr` | `cr` | `cr` | `cr` |
-| coefficient imaginary broadcast | `ci` | `ci` | `ci` | `ci` |
+| Register                        | Lane 0   | Lane 1   | Lane 2   | Lane 3   |
+| ------------------------------- | -------- | -------- | -------- | -------- |
+| AVX2 `a`                        | `re(a0)` | `im(a0)` | `re(a1)` | `im(a1)` |
+| AVX2 `b`                        | `re(b0)` | `im(b0)` | `re(b1)` | `im(b1)` |
+| `permute(a, 0101)`              | `im(a0)` | `re(a0)` | `im(a1)` | `re(a1)` |
+| coefficient real broadcast      | `cr`     | `cr`     | `cr`     | `cr`     |
+| coefficient imaginary broadcast | `ci`     | `ci`     | `ci`     | `ci`     |
 
-An AVX2 register holds two complex amplitudes from the same half, not two
-complete amplitude pairs and not separated real and imaginary arrays. Two
-input registers provide two pairs. For a coefficient `c = cr + i*ci`, the
-actual intrinsic sequence is:
+An AVX2 register holds two complex amplitudes from the same half, interleaved
+as real and imaginary parts. The two input registers together supply two pairs.
+For a coefficient `c = cr + i*ci`, the intrinsic sequence is:
 
 ```text
 z_swap = _mm256_permute_pd(z, 0b0101)
@@ -73,24 +71,23 @@ prepares the imaginary coefficient as `[-ci,+ci]`, swaps lanes with
 
 ### Exact routing controls
 
-For the ordinary dense, non-diagonal one-qubit matrix path, the CPU scene
-must account for both the `parallel` build feature and the qubit count.
+For the ordinary dense, non-diagonal one-qubit matrix path, the kernel width
+depends on both the `parallel` build feature and the qubit count.
 
-| Context on an AVX2+FMA x86_64 CPU | Actual arithmetic |
-|---|---|
-| Sequential, `n <= 13`, `t >= 2` | AVX2, two pairs per iteration |
-| Sequential, `t < 2` or `n >= 14` | 128-bit FMA, one pair per iteration |
+| Context on an AVX2+FMA x86_64 CPU        | Arithmetic                                                       |
+| ---------------------------------------- | ---------------------------------------------------------------- |
+| Sequential, `n <= 13`, `t >= 2`          | AVX2, two pairs per iteration                                    |
+| Sequential, `t < 2` or `n >= 14`         | 128-bit FMA, one pair per iteration                              |
 | `parallel` enabled, `n >= 15`, `t <= 12` | Tasks over 8192-amplitude tiles; AVX2 if `t >= 2`, FMA otherwise |
-| `parallel` enabled, `n >= 15`, `t >= 13` | Tasks apply AVX2 to paired lower/upper slices |
-| `PreparedGate1q::apply_tiled`, `t >= 2` | AVX2 without the full-state length limit |
-| `PreparedGate1q::apply_pair_ptr` | 128-bit FMA even when AVX2 is available |
+| `parallel` enabled, `n >= 15`, `t >= 13` | Tasks apply AVX2 to paired lower/upper slices                    |
+| `PreparedGate1q::apply_tiled`, `t >= 2`  | AVX2 without the full-state length limit                         |
+| `PreparedGate1q::apply_pair_ptr`         | 128-bit FMA even when AVX2 is available                          |
 
-Thus, for the ordinary path, valid `0 <= t < n`, and non-miri builds:
-`use_avx2 = cpu_avx2 && cpu_fma && t >= 2 &&
+For the ordinary path, valid `0 <= t < n`, and non-miri builds, the branch
+conditions combine to `use_avx2 = cpu_avx2 && cpu_fma && t >= 2 &&
 (n <= 13 || (parallel_feature && n >= 15))`. At 14 qubits the ordinary path
-uses 128-bit FMA. The predicate is derived from the branch conditions, not
-from measurement. Avoid applying it to diagonal gates, controlled pointer
-kernels, MultiFused tile coordinates, or GPU execution. A host without FMA
+uses 128-bit FMA. The predicate does not cover diagonal gates, controlled pointer
+kernels, MultiFused tile coordinates or GPU execution. A host without FMA
 uses SSE2 on x86_64; aarch64 uses NEON; other architectures use scalar code.
 Evidence: `src/backend/simd.rs:574-643,645-733,743-769`;
 `src/backend/statevector/kernels.rs:3075-3114,3626-3639`;
@@ -107,7 +104,7 @@ does not force general matrix arithmetic. Evidence:
 For diagonal gates on an AVX2+FMA x86_64 CPU, the exact width predicate is
 `use_avx2 = parallel_feature && n >= 15 && t >= n-2`. All other diagonal
 routes use 128-bit FMA when FMA is available. Without FMA the diagonal
-sequential path is scalar, rather than the general kernel's SSE2 fallback.
+sequential path is scalar, where the general kernel would fall back to SSE2.
 On aarch64 the diagonal arithmetic remains 128-bit NEON. The high-target
 parallel branch runs when fewer than four target blocks exist, splits each
 pair of halves into 4096-amplitude chunks, and calls the AVX2-capable complex
@@ -118,9 +115,9 @@ Evidence: `src/backend/statevector/kernels.rs:601-625,3642-3673`;
 Each diagonal output depends only on its own input: `a'=d0*a`, `b'=d1*b`.
 There are no cross-input products or row additions. Z leaves the lower
 member untouched because `d0=1`, scaling only the upper member by -1. Rz
-usually scales both. The lower member is skipped when both real and
-imaginary components of `d0-1` satisfy the phase-one tolerance. These traffic
-counts differ from the general matrix model. Evidence:
+usually scales both. The lower member is skipped when both components of
+`d0-1` are within the phase-one tolerance, so diagonal traffic differs from the
+general matrix model. Evidence:
 `src/backend/simd.rs:789-829`; `src/backend/mod.rs:274-278`.
 
 ## Threading and cache traffic
@@ -130,22 +127,19 @@ The ordinary one-qubit parallel path starts at 15 qubits. Let
 tiles exist, Rayon partitions the state into 8192-amplitude tiles. Otherwise,
 with at least four `T` tiles, each block is split into lower and upper slices.
 With fewer tiles, each block is traversed separately while paired slices are
-partitioned into `min(8192,2^t)`-amplitude subtiles. These are exact branch
-conditions; task counts are not necessarily worker counts. No fixed CPU
-affinity, NUMA placement, cache-line size, bandwidth, or core count follows
-from this code. Evidence: `src/backend/statevector/kernels.rs:3075-3114`.
+partitioned into `min(8192,2^t)`-amplitude subtiles. Task count need not
+match worker count, and the code fixes no CPU affinity, NUMA placement,
+cache-line size, bandwidth or core count. Evidence: `src/backend/statevector/kernels.rs:3075-3114`.
 
 For a general dense one-qubit matrix, conventional arithmetic counting gives
 four complex multiplies (six FLOPs each) and two complex additions (two
 FLOPs each), or 28 FLOPs per pair and `14 * 2^n` FLOPs per gate. Counting
 two amplitude reads and two amplitude writes gives 64 logical bytes per
 pair, or `32 * 2^n` bytes per gate and `28/64 = 0.4375` FLOP per byte.
-This is an analytical payload model. It excludes coefficients, write
-allocation, cache reuse, page effects, and instructions for addressing. FMA
-counts as two FLOPs; the model does not assert a particular assembly listing.
-With sustained bandwidth `W`, `32 * 2^n / W` is a bandwidth floor under
-the assumption that the complete logical stream crosses that memory level.
-It is not a measured gate latency.
+The payload model leaves out coefficients, write allocation, cache reuse, page
+effects and addressing instructions, and counts an FMA as two FLOPs. With
+sustained bandwidth `W`, `32 * 2^n / W` is a lower bound on time if the whole
+logical stream crosses that memory level.
 
 MultiFused changes the stream count: apply all eligible gates inside each tile
 before moving on. The tile budget is a power of two from 256 KiB through
@@ -154,8 +148,8 @@ before moving on. The tile budget is a power of two from 256 KiB through
 expose enough tiles for hardware concurrency. The tile width uses available
 hardware parallelism, not Rayon pool width. High targets can also be gathered
 into contiguous subcube scratch, processed locally, and scattered back.
-The gather path skips an exactly zero subcube. A scene showing every gate
-making a complete DRAM pass would misrepresent these routes. Evidence:
+The gather path skips an exactly zero subcube. With these routes a gate does
+not always cost a full DRAM pass. Evidence:
 `src/backend/cache.rs:22-29,53-89,96-134`;
 `src/backend/statevector/kernels.rs:36-60,456-539,3536-3609`.
 
@@ -163,9 +157,8 @@ making a complete DRAM pass would misrepresent these routes. Evidence:
 
 The device state is `2 * 2^n` interleaved `f64` values, interpreted by CUDA as
 `double2*`. The amplitude payload stays 16 bytes per amplitude. The resource
-gate budgets 25 bytes per amplitude, comprising the amplitude payload,
-probabilities scratch, and margin, so 25 is a budget coefficient rather than
-the state layout. On successful device initialization the host amplitude
+gate budgets 25 bytes per amplitude: the 16-byte payload, probability
+scratch and a margin. The 25 is a budgeting figure, not the state layout. On successful device initialization the host amplitude
 vector is cleared. Evidence: `src/gpu/mod.rs:1-5,108-112,299-332`;
 `src/backend/statevector/mod.rs:955-966`.
 
@@ -175,12 +168,12 @@ as the CPU. Extra threads return at the bounds check. Kernel coefficients
 travel as scalar launch arguments. The kernel contains no per-gate shared
 memory tile. Coalescing depends on target: for `t=0`, each stream selects
 every other `double2`; for `t>=5`, a warp's corresponding inputs are 32
-consecutive amplitudes while it remains inside a half block. These address
-patterns do not determine measured transaction efficiency or occupancy.
+consecutive amplitudes while it remains inside a half block. Address
+patterns alone do not give transaction efficiency or occupancy.
 Evidence: `src/gpu/kernels/dense.rs:21,206-247`;
 `src/gpu/kernels/dense.cu:36-47,74-90`.
 
-The non-diagonal MultiFused CUDA route has a stronger visual mechanism:
+The non-diagonal MultiFused CUDA route keeps data on chip between gates:
 one block loads 1024 amplitudes into a 16 KiB shared-memory tile, applies
 several gates, then stores it. Each of 512 threads owns one pair during
 each gate, and a block barrier separates gates. The ten tile qubits always
@@ -204,17 +197,16 @@ of the local slice and requires no amplitude exchange. These costs exclude
 transport headers and configuration collectives. Evidence:
 `src/backend/distributed_statevector/mod.rs:1-29,1035-1072,1103-1137`.
 
-Relabeling is enabled by default, so a scene presenting the direct exchange
-as the universal path would be wrong. A circuit-to-physical map turns SWAP
+Relabeling is on by default, so most gates on a global qubit do not take the
+direct exchange path. A circuit-to-physical map turns SWAP
 into metadata updates. Before non-diagonal action on a global position,
 the backend can exchange only the half slice where the local bit differs
 from the rank bit, move the qubit into a local position, then reuse local
 SIMD kernels for later gates. One relabel sends `8L` bytes and receives
 `8L` bytes per rank. Batched instruction execution plans windows that fit
 the local positions and uses future required use to select victims;
-single-gate execution uses least recently used eviction. The physical
-bit diagram must therefore show the current map, not permanently identify
-circuit qubit number with rank bit. Evidence:
+single-gate execution uses least recently used eviction. The mapping from
+circuit qubit to rank bit therefore changes during a run. Evidence:
 `src/backend/distributed_statevector/mod.rs:60-91,746-791`;
 `src/distributed/mod.rs:61-79`.
 
@@ -222,27 +214,27 @@ circuit qubit number with rank bit. Evidence:
 memory work while MPI calls stay on the constructing thread below
 `MPI_THREAD_MULTIPLE`. Transfers pass complex buffers as contiguous doubles
 and split past the MPI count limit. The default exchange chunk is `2^29`
-complex amplitudes, a maximum message size of 8 GiB, not a universal working
-buffer allocation. There is no source evidence here for automatic
-multi-node speedup, overlapped communication, GPU-aware MPI, or a combined
-CUDA/distributed backend. Evidence: `src/distributed/comm.rs:248-285,323-386,454-462`;
+complex amplitudes, a maximum message size of 8 GiB; it is a ceiling, not a
+buffer allocated on every exchange. Nothing in this source overlaps
+communication with compute, uses GPU-aware MPI or combines the CUDA and
+distributed backends, and no multi-node speedup was measured. Evidence: `src/distributed/comm.rs:248-285,323-386,454-462`;
 `src/distributed/mod.rs:39-58`.
 
-## Strong scenes and evidence limits
+## Candidate scenes
 
 1. Follow the same two amplitude pairs from basis indices through AoS memory,
    load, lane permutation, multiply, alternating FMA, row addition, and store.
-   The route selector must identify full-state, parallel slice, or tile context.
+   The route selector names the context: full state, parallel slice, or tile.
 2. Apply a gate sequence gate by gate, then tile by tile. Show logical memory
-   crossings as a model with explicit state size and tile size. Do not label
-   modeled traffic as measured bandwidth or speedup.
+   crossings as a model with explicit state and tile sizes, labeled as modeled
+   traffic.
 3. Transfer the tile mechanism to CUDA: global memory, anchored gather,
    16 KiB shared tile, repeated pair updates and barriers, final store.
 4. Turn a high state-index bit into a rank bit, animate an XOR partner
    exchange, then enable relabeling to trade a half-slice exchange for later
    local work. Show circuit and physical qubit labels separately.
 
-The source establishes ownership, memory order, dispatch predicates, and
-deterministic work counts. CPU frequency changes, cache residency, memory
-bandwidth, occupancy, host-device crossover, and network scaling require
-measurements on a named machine. No new empirical result is claimed.
+The source fixes ownership, memory order, dispatch predicates and
+deterministic work counts. CPU frequency, cache residency, memory bandwidth,
+occupancy, host-device crossover and network scaling need measurements on a
+named machine.

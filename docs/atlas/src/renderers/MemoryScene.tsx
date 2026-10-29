@@ -15,9 +15,10 @@ export type MemorySceneProps = {
   skipLow: boolean;
 };
 
-const SAGE = "#99b7a5";
-const COPPER = "#d6a17c";
-const MUTED = "#77877d";
+const PAIR_A = "#2457b5";
+const PAIR_B = "#b8432c";
+const MUTED = "#6a6862";
+const LABEL = "#57554f";
 const COLUMN = 1.44;
 const ROW = 0.62;
 
@@ -100,7 +101,8 @@ function Amplitude({
   onSelect: (index: number) => void;
 }) {
   const [hovered, setHovered] = useState(false);
-  const color = selected === "a" ? SAGE : selected === "b" ? COPPER : "#65756a";
+  const color =
+    selected === "a" ? PAIR_A : selected === "b" ? PAIR_B : "#9a968c";
   const highlighted = selected !== null;
   const activate = (event: ThreeEvent<MouseEvent>) => {
     event.stopPropagation();
@@ -119,11 +121,11 @@ function Amplitude({
       <mesh position={[0, -0.025, 0]}>
         <boxGeometry args={[1.35, 0.15, 0.51]} />
         <meshStandardMaterial
-          color={highlighted ? "#36483d" : "#1b2420"}
+          color={highlighted ? "#d5dcea" : "#d6d3cb"}
           roughness={0.88}
         />
         <Edges
-          color={highlighted || hovered ? color : "#36433b"}
+          color={highlighted || hovered ? color : "#aeaaa0"}
           threshold={15}
         />
       </mesh>
@@ -131,7 +133,7 @@ function Amplitude({
         <mesh key={side} position={[side * 0.323, 0.068, 0]}>
           <boxGeometry args={[0.61, 0.035, 0.424]} />
           <meshStandardMaterial
-            color={highlighted ? color : hovered ? "#4c6152" : "#2d3930"}
+            color={highlighted ? color : hovered ? "#dce4f3" : "#f4f2ed"}
             roughness={0.7}
             metalness={0.08}
             emissive={
@@ -146,15 +148,15 @@ function Amplitude({
       <Ink
         text={`${index}.r`}
         position={[-0.323, 0.092, 0]}
-        color={highlighted ? "#152018" : "#b2c4b1"}
-        size={index < 100 ? 0.15 : 0.11}
+        color={highlighted ? "#ffffff" : "#33322e"}
+        size={Math.min(0.2, 0.95 / `${index}.r`.length)}
         flat
       />
       <Ink
         text={`${index}.i`}
         position={[0.323, 0.092, 0]}
-        color={highlighted ? "#152018" : "#b2c4b1"}
-        size={index < 100 ? 0.15 : 0.11}
+        color={highlighted ? "#ffffff" : "#33322e"}
+        size={Math.min(0.2, 0.95 / `${index}.i`.length)}
         flat
       />
     </group>
@@ -185,8 +187,8 @@ function Register({
     <group position={[x, 1.12, z]}>
       <mesh position={[0, -0.085, 0]}>
         <boxGeometry args={[bankWidth, 0.11, 0.69]} />
-        <meshStandardMaterial color="#1b2620" roughness={0.86} />
-        <Edges color={active ? color : "#4a5b4d"} />
+        <meshStandardMaterial color="#d6d3cb" roughness={0.86} />
+        <Edges color={active ? color : "#aeaaa0"} />
       </mesh>
       {Array.from({ length: lanes }, (_, lane) => {
         const slotX = (lane - (lanes - 1) / 2) * laneWidth;
@@ -196,21 +198,21 @@ function Register({
             <mesh>
               <boxGeometry args={[laneWidth - 0.025, 0.06, 0.58]} />
               <meshStandardMaterial
-                color={active ? color : "#36463b"}
+                color={active ? color : "#f4f2ed"}
                 roughness={0.8}
               />
             </mesh>
             <Ink
               text={label}
               position={[0, 0.035, 0.02]}
-              color={active ? "#16231b" : "#c9d6c1"}
+              color={active ? "#ffffff" : "#33322e"}
               size={0.16}
               flat
             />
             <Ink
               text={`${lane}`}
               position={[0, 0.036, -0.19]}
-              color={active ? "#314b37" : "#8fa58f"}
+              color={active ? "#e8eefa" : LABEL}
               size={0.09}
               flat
             />
@@ -256,8 +258,8 @@ function Storage({
   const bankBase = width === 256 ? Math.floor(pair[0] / 2) * 2 : pair[0];
   const laneTitle =
     width === 0
-      ? "SCALAR FIELDS"
-      : `${width}-BIT ${architecture === "neon" ? "NEON" : width === 256 ? "AVX2" : "FMA"}`;
+      ? "Scalar fields"
+      : `${width}-bit ${architecture === "neon" ? "NEON" : width === 256 ? "AVX2" : "FMA"}`;
   const registerName =
     width === 256
       ? "2 complex / input vector"
@@ -268,18 +270,22 @@ function Storage({
 
   return (
     <group>
-      <ambientLight intensity={1.2} />
+      <ambientLight intensity={1.6} />
       <directionalLight
         position={[-5, 12, 8]}
-        intensity={2.1}
-        color="#e3e9cf"
+        intensity={0.9}
+        color="#ffffff"
       />
-      <directionalLight position={[9, 6, -4]} intensity={0.7} color="#93aea2" />
+      <directionalLight
+        position={[9, 6, -4]}
+        intensity={0.35}
+        color="#ffffff"
+      />
 
       <mesh position={[2.16, -0.19, (depth - ROW) / 2]}>
         <boxGeometry args={[6.12, 0.12, depth + 0.32]} />
-        <meshStandardMaterial color="#121c16" roughness={1} />
-        <Edges color="#344336" />
+        <meshStandardMaterial color="#e9e6df" roughness={1} />
+        <Edges color="#c3bfb5" />
       </mesh>
 
       {rows.map((memoryRow, visualRow) => (
@@ -289,13 +295,13 @@ function Storage({
               [-0.73, -0.095, visualRow * ROW - 0.28],
               [5.05, -0.095, visualRow * ROW - 0.28],
             ]}
-            color="#485648"
+            color="#c3bfb5"
             lineWidth={0.7}
           />
           <Ink
             text={`0x${(memoryRow * 64).toString(16).padStart(4, "0")}`}
             position={[-1.37, -0.06, visualRow * ROW]}
-            color="#8fa58f"
+            color={LABEL}
             size={0.15}
             flat
           />
@@ -320,7 +326,7 @@ function Storage({
             <Ink
               text="address window break"
               position={[2.16, 0.12, visualRow * ROW - ROW / 2]}
-              color={COPPER}
+              color={PAIR_B}
               size={0.105}
               flat
             />
@@ -330,70 +336,70 @@ function Storage({
 
       <Line
         points={[a, [5.35, 0.19, a[2]], [5.35, 0.19, b[2]], b]}
-        color={COPPER}
+        color={PAIR_B}
         lineWidth={1}
         dashed
         dashSize={0.09}
         gapSize={0.065}
       />
       <Ink
-        text={`PAIR +${16 * 2 ** target} B`}
+        text={`Pair distance +${16 * 2 ** target} B`}
         position={[2.16, 0.02, depth + 0.37]}
-        color={COPPER}
+        color={PAIR_B}
         size={0.2}
         flat
       />
       <Ink
-        text="4 amplitudes / 64 B model row"
+        text="4 amplitudes per 64 B row"
         position={[2.16, -0.02, depth + 0.76]}
-        color="#a3b5a1"
+        color="#57554f"
         size={0.15}
         flat
       />
       <Ink
-        text="re, im : f64 + f64"
+        text="re, im: two f64 each"
         position={[2.16, -0.02, depth + 1.05]}
-        color="#8fa58f"
+        color={LABEL}
         size={0.13}
         flat
       />
 
       <Register
-        name={skipLow ? "a: BYPASSED (d0 = 1)" : "INPUT a"}
+        name={skipLow ? "a: skipped (d0 = 1)" : "Input a"}
         index={bankBase}
         width={width}
         x={0.6}
         z={-1.6}
-        color={SAGE}
+        color={PAIR_A}
         active={!skipLow && phase >= 1 && phase < 3}
       />
       <Register
-        name="INPUT b"
+        name="Input b"
         index={bankBase + 2 ** target}
         width={width}
         x={3.88}
         z={-1.6}
-        color={COPPER}
+        color={PAIR_B}
         active={phase >= 1 && phase < 3}
       />
       <Ink
         text={laneTitle}
         position={[2.16, 1.13, -2.88]}
-        color="#c9d6c1"
+        color="#1c1b18"
         size={0.24}
         flat
       />
       <Ink
         text={registerName}
         position={[2.16, 1.13, -2.51]}
-        color="#a3b5a1"
+        color="#57554f"
         size={0.16}
         flat
       />
       <Ink
-        text="Ascending lane number = ascending load address"
+        text="Lane order follows load address"
         position={[2.16, 1.13, -3.25]}
-        color="#8fa58f"
+        color={LABEL}
         size={0.13}
         flat
       />
@@ -403,7 +409,7 @@ function Storage({
           key={column}
           text={`+${column * 16} B`}
           position={[column * COLUMN, -0.04, -0.59]}
-          color="#8fa58f"
+          color={LABEL}
           size={0.14}
           flat
         />
@@ -417,8 +423,8 @@ function FitCamera({ rows }: { rows: number }) {
   useEffect(() => {
     if (camera instanceof OrthographicCamera) {
       camera.zoom = Math.min(
-        size.width / (rows > 8 ? 13.5 : 11),
-        size.height / (rows > 8 ? 10.5 : rows > 4 ? 8.5 : 6.8),
+        size.width / (rows > 8 ? 11.5 : 9.4),
+        size.height / (rows > 8 ? 9 : rows > 4 ? 7.3 : 5.9),
       );
       camera.updateProjectionMatrix();
       invalidate();

@@ -47,7 +47,7 @@ async function capture(locator, filename) {
 try {
   await open("?renderer=svg&n=4&q=2&gate=Rx");
   const microscope = page.getByRole("region", {
-    name: "The execution microscope",
+    name: "Step through the kernel",
     exact: true,
   });
   await microscope.getByRole("button", { name: /^u01\b/ }).click();

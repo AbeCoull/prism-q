@@ -29,10 +29,10 @@
 //! received buffers after communication.
 //!
 //! Measurement, reset, and classical conditionals are supported. Measurement
-//! probabilities are summed with `Allreduce`. Each rank uses the same seeded RNG,
-//! so ranks agree without exchanging the draw. Reset runs one trajectory of the
-//! reset channel, as [`Backend::reset`] specifies: sample the outcome, collapse
-//! onto it, and apply X when it is 1.
+//! probabilities gather one scalar per rank and sum in rank order. Each rank uses the
+//! same seeded RNG, so ranks agree without exchanging the draw. Reset runs one
+//! trajectory of the reset channel, as [`Backend::reset`] specifies: sample the
+//! outcome, collapse onto it, and apply X when it is 1.
 //!
 //! Per-qubit probabilities, Pauli expectation values, and reduced density
 //! matrices answer from rank-local sums plus one reduction, at any register
@@ -119,9 +119,9 @@
 //! Noisy shots run as trajectories in shot order on every rank, one backend
 //! re-initialized per shot. Each shot seeds its noise stream from the run seed
 //! and the shot index, so ranks draw the same branches without exchanging them.
-//! A damping or thermal event weighs its branches by `qubit_probability`, one
-//! `Allreduce`, and a Kraus channel by a reduced density matrix summed in rank
-//! order, so every rank compares its draw against the same value.
+//! A damping or thermal event weighs its branches by `qubit_probability`, and a Kraus
+//! channel by a reduced density matrix, both gathered and summed in rank order, so
+//! every rank compares its draw against the same value.
 
 mod plan;
 #[cfg(test)]
@@ -544,8 +544,8 @@ pub struct DistributedStatevectorBackend {
     exchange_messages: u64,
     exchange_amplitudes: u64,
     /// RNG for measurement decisions, seeded identically on every rank and
-    /// advanced in lockstep. Outcomes are derived from `Allreduce`d global
-    /// probabilities, so all ranks agree without exchanging the draw.
+    /// advanced in lockstep. Outcomes are derived from global probabilities summed in
+    /// rank order, so all ranks agree without exchanging the draw.
     meas_rng: ChaCha8Rng,
     /// Circuit qubit to physical position. Positions below `local_qubits()`
     /// index the local slice; the rest are rank bits. Identity until a SWAP or
@@ -1858,8 +1858,8 @@ impl DistributedStatevectorBackend {
     }
 
     /// Measure `qubit`, collapse the state, and record the bit. Deterministic
-    /// across ranks: the outcome is drawn from the lockstep `meas_rng` against an
-    /// `Allreduce`d probability, so every rank collapses to the same branch.
+    /// across ranks: the outcome is drawn from the lockstep `meas_rng` against a
+    /// probability summed in rank order, so every rank collapses to the same branch.
     fn measure_dist(&mut self, qubit: usize, classical_bit: usize) {
         let qubit = self.physical_qubit(qubit);
         let prob_one = self.prob_one_global(qubit);
@@ -2180,8 +2180,8 @@ impl Backend for DistributedStatevectorBackend {
             // Measurement routes through the distributed path even at a single
             // rank, so `meas_rng` is the sole measurement RNG and one seed
             // draws one outcome stream. Outcomes then agree across rank counts
-            // except where the `Allreduce` association order moves a summed
-            // probability across the drawn value, the caveat
+            // except where the summation order moves a summed probability
+            // across the drawn value, the caveat
             // `sample_state_indices` documents for the same reason.
             Instruction::Measure {
                 qubit,
@@ -2209,7 +2209,7 @@ impl Backend for DistributedStatevectorBackend {
             }
             Instruction::Gate { gate, targets } => self.apply_gate(gate, targets),
             // Every rank draws measurement outcomes from the same seeded RNG
-            // against an `Allreduce`d probability, so every rank holds the same
+            // against a probability summed in rank order, so every rank holds the same
             // classical bits and takes the same branch without a consensus
             // exchange.
             Instruction::Region(region) => self.apply_region(region),

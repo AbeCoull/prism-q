@@ -97,8 +97,8 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
   automatically.
 - A GPU context binds one device; there is no multi-GPU or distributed GPU
   execution. The stabilizer GPU path is experimental. ROCm is not implemented.
-- The distributed backend is CPU only, needs a power-of-two rank count, and
-  rejects noise models.
+- The distributed backend is CPU only and needs a power-of-two rank count. Noisy
+  shots run as serial trajectories in lockstep across ranks.
 - Amplitudes are `f64` complex on every backend; there is no single-precision
   mode.
 - Library only: no command-line tool, GUI, or hardware backend connectivity.

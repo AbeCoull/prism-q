@@ -183,7 +183,7 @@ fn timed_check(ctx: std::sync::Arc<prism_q::distributed::DistributedContext>, re
             backend
                 .apply_instructions(&circuit.instructions)
                 .expect("warmup");
-            // The marginal is one Allreduce, so it lines the ranks up before
+            // The marginal is one gather, so it lines the ranks up before
             // the clock starts.
             backend.qubit_probability(0).expect("sync");
             let start = Instant::now();

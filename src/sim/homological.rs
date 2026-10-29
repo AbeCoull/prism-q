@@ -168,7 +168,8 @@ impl ErrorChainComplex {
     /// Build the error chain complex from a Clifford circuit and noise model.
     ///
     /// Uses backward Pauli propagation (same as the compiled noisy sampler)
-    /// to determine which measurements are sensitive to each error location.
+    /// to determine which measurements are sensitive to each error location. A circuit
+    /// with a guarded gate returns `IncompatibleBackend`.
     pub fn build(circuit: &Circuit, noise: &NoiseModel, _seed: u64) -> Result<Self> {
         noise.validate_for(circuit)?;
         noise.ensure_no_guarded_events(circuit, "error chain complex")?;
@@ -256,15 +257,15 @@ impl ErrorChainComplex {
                 Instruction::Reset { .. }
                 | Instruction::Barrier { .. }
                 | Instruction::Save { .. } => {}
-                Instruction::Conditional { gate, targets, .. } => {
-                    batch_propagate_backward(
-                        &mut x_packed,
-                        &mut z_packed,
-                        &mut sign_packed,
-                        gate,
-                        targets.as_slice(),
-                        m_words,
-                    );
+                Instruction::Conditional { .. } => {
+                    return Err(crate::error::PrismError::IncompatibleBackend {
+                        backend: "error chain complex".to_string(),
+                        reason: "a guarded gate runs only on the shots its condition holds, \
+                                 and an error on a guard bit can decide that, so which \
+                                 measurements an earlier error reaches varies per shot; one \
+                                 error matrix cannot describe it"
+                            .to_string(),
+                    });
                 }
                 Instruction::Region(_) => {
                     return Err(crate::error::PrismError::IncompatibleBackend {

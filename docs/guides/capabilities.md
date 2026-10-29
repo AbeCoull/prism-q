@@ -246,6 +246,7 @@ input and answers anyway.
 | A save needs a route that holds a state | `IncompatibleBackend` naming the save and the route. The compiled samplers reorder measurements, the stabilizer-rank engine carries a weighted sum of branches, and the Pauli-propagation engines carry no state vector at all |
 | A save has no OpenQASM spelling | `ExportUnsupported` naming the save and its label. The subset has no save syntax to export into |
 | Noise inside a guarded body needs one state per shot | `IncompatibleBackend` from the density matrix (any guard), the compiled noisy sampler (`compiled noisy sampler`) and `ErrorChainComplex` (`error chain complex`). Trajectories and the stabilizer replay fire a body's events on the shots that take the branch |
+| The error chain complex takes no guarded gates | `IncompatibleBackend` from `ErrorChainComplex` (`error chain complex`) for a circuit with a conditional. Whether the gate runs is decided per shot, and an error on its guard bit can decide it, so which measurements an earlier error reaches is not fixed. The compiled samplers decline conditionals for the same reason |
 | Schedule rules need a static schedule | `IncompatibleBackend` from `NoiseBuilder::build` when an idle, scheduled idle, detuning or before-measurement rule meets a circuit holding a region, whose duration depends on the branch |
 
 Backend width and memory caps are separate and live with the terminals that raise

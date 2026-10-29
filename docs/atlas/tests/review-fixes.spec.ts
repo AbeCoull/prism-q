@@ -14,7 +14,7 @@ test("Z bypasses the low input and scalar evidence links to scalar code", async 
   });
   await expect(microscope.locator(".micro-source a")).toHaveAttribute(
     "href",
-    /#L922-L945$/,
+    /#L1109-L1132$/,
   );
   await page.getByRole("button", { name: "Next stage", exact: true }).click();
   await page.getByRole("button", { name: "Next stage", exact: true }).click();

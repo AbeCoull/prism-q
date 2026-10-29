@@ -518,10 +518,12 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
                         apply_reference_pauli_index(&mut backend, pauli, *qubit)?;
                     }
                     set_shot_record(&mut measurement_data, m_words, shot, next_record, erased);
+                    backend.classical_bits[next_record] = erased;
                     next_record += 1;
                 }
                 QecOp::Pad { value } => {
                     set_shot_record(&mut measurement_data, m_words, shot, next_record, *value);
+                    backend.classical_bits[next_record] = *value;
                     next_record += 1;
                 }
                 QecOp::Feedforward { .. } => {

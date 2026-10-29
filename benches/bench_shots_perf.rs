@@ -11,17 +11,16 @@ use criterion::BatchSize;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use prism_q::BackendKind;
 use prism_q::circuit::Circuit;
+#[cfg(feature = "bench-internal")]
+use prism_q::compile_qec_profiled_sampler;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::sim::noise::NoiseModel;
 use prism_q::{
     DetectorErrorModel, QecBasis, QecCircuitNoise, QecNoise, QecOp, QecOptions, QecPauli,
-    QecProgram, QecRecordRef, run_qec_program,
+    QecProgram, QecRecordRef, parse_qec_program, run_qec_program,
 };
-#[cfg(feature = "bench-internal")]
-use prism_q::{compile_qec_profiled_sampler, parse_qec_program};
 use std::collections::HashMap;
-#[cfg(feature = "bench-internal")]
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -1303,6 +1302,77 @@ fn bench_qec_chunked_noise(c: &mut Criterion) {
     group.finish();
 }
 
+/// `program(rounds)` as text with its middle rounds in one `REPEAT` block, the form
+/// generated memory circuits arrive in: the lines the three-round text adds to the
+/// two-round text are one middle round. Detector coordinates drop their round, which
+/// `to_text` writes absolute, so every middle round reads the same.
+fn qec_repeat_text(program: impl Fn(usize) -> QecProgram, rounds: usize) -> String {
+    let text_of = |rounds: usize| {
+        let text = program(rounds).to_text().unwrap();
+        text.lines()
+            .map(|line| {
+                match line
+                    .strip_prefix("DETECTOR(")
+                    .and_then(|l| l.split_once(')'))
+                {
+                    Some((coords, records)) => {
+                        let spatial: Vec<&str> = coords.split(',').take(2).collect();
+                        format!("DETECTOR({}){records}", spatial.join(","))
+                    }
+                    None => line.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let two = text_of(2);
+    let three = text_of(3);
+    let two: Vec<&str> = two.lines().collect();
+    let three: Vec<&str> = three.lines().collect();
+    let prefix = two.iter().zip(&three).take_while(|(a, b)| a == b).count();
+    let suffix = two[prefix..]
+        .iter()
+        .rev()
+        .zip(three.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let text = format!(
+        "{}\nREPEAT {} {{\n{}\n}}\n{}",
+        two[..prefix].join("\n"),
+        rounds - 2,
+        three[prefix..three.len() - suffix].join("\n"),
+        two[two.len() - suffix..].join("\n"),
+    );
+    let flat = parse_qec_program(&text_of(rounds)).unwrap();
+    assert_eq!(parse_qec_program(&text).unwrap().ops(), flat.ops());
+    text
+}
+
+fn bench_qec_parse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_parse");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    let noise = QecCircuitNoise::uniform(0.001);
+    for distance in [15, 25] {
+        let surface = qec_repeat_text(
+            |rounds| QecProgram::surface_memory(distance, rounds, QecBasis::Z, &noise).unwrap(),
+            distance,
+        );
+        let color = qec_repeat_text(
+            |rounds| QecProgram::color_memory(distance, rounds, QecBasis::Z, &noise).unwrap(),
+            distance,
+        );
+        for (label, text) in [("surface_z_p001", surface), ("color_z_p001", color)] {
+            group.bench_with_input(BenchmarkId::new(label, distance), &text, |b, text| {
+                b.iter(|| parse_qec_program(black_box(text)).unwrap());
+            });
+        }
+    }
+    group.finish();
+}
+
 /// A 1M-shot distance-5 repetition memory postselected on all 20 check records, so
 /// counting the accepted shots and their logical errors is a large share of the run:
 /// once over the whole run unchunked, and once per chunk at 16384 shots, a whole number
@@ -1359,6 +1429,7 @@ criterion_group! {
     bench_qec_erasure_runner,
     bench_qec_feedforward_runner,
     bench_qec_chunked_noise,
-    bench_qec_postselection
+    bench_qec_postselection,
+    bench_qec_parse
 }
 criterion_main!(benches);

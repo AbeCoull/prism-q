@@ -909,6 +909,79 @@ fn qec_text_parser_flattens_repeat_blocks() {
     assert_eq!(program.detector_rows().unwrap(), vec![vec![0], vec![1]]);
 }
 
+/// Copy each `REPEAT` body's lines `count` times, so the result has no blocks.
+fn flatten_repeats(text: &str) -> String {
+    fn block<'a>(lines: &mut impl Iterator<Item = &'a str>, out: &mut Vec<&'a str>) {
+        while let Some(line) = lines.next() {
+            if line == "}" {
+                return;
+            }
+            if let Some(count) = line
+                .strip_prefix("REPEAT ")
+                .and_then(|rest| rest.strip_suffix(" {"))
+            {
+                let mut body = Vec::new();
+                block(lines, &mut body);
+                for _ in 0..count.parse::<usize>().unwrap() {
+                    out.extend(&body);
+                }
+            } else {
+                out.push(line);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    block(
+        &mut text.lines().map(str::trim).filter(|l| !l.is_empty()),
+        &mut out,
+    );
+    out.join("\n")
+}
+
+#[test]
+fn qec_text_parser_repeats_parse_like_their_flattened_text() {
+    for text in [
+        // Detectors compare each round with the one before it, across the block edge.
+        "R 0 1 2\nM 1\nREPEAT 4 {\nCX 0 1\nX_ERROR(0.01) 1\nMR 1\nDETECTOR(1, 0) rec[-1] rec[-2]\nPOSTSELECT rec[-1]\n}\nM 0 2\nOBSERVABLE_INCLUDE(0) rec[-1] rec[-3]",
+        "M 0\nREPEAT 2 {\nM 0\nREPEAT 3 {\nMPP X0*Z1\nDETECTOR rec[-1] rec[-2]\n}\nMPAD 1\nDETECTOR rec[-5]\n}\nDETECTOR rec[-1]",
+        "M 0 1\nREPEAT 3 {\nH 0\nDETECTOR rec[-2]\nTICK\n}",
+        "REPEAT 3 {\nHERALDED_ERASE(0.1) 2\nM 1\nDETECTOR rec[-1] rec[-2]\n}\nREPEAT 0 {\nM 0\n}\nREPEAT 1 {\nM 0\n}",
+        "E(0.1) X0\nREPEAT 3 {\nELSE_CORRELATED_ERROR(0.1) Z0\n}\nM 0",
+        "E(0.1) X0\nREPEAT 3 {\nELSE_CORRELATED_ERROR(0.1) Z0\nM 0\nE(0.2) Y0\n}\nDETECTOR rec[-1]",
+        "E(0.1) X0\nREPEAT 2 {\nREPEAT 2 {\nELSE_CORRELATED_ERROR(0.1) Z0\n}\n}\nM 0",
+        "REPEAT 3 {\nQUBIT_COORDS(1, 2) 5\n}\nM 0",
+    ] {
+        assert_eq!(
+            parse_qec_program(text).unwrap(),
+            parse_qec_program(&flatten_repeats(text)).unwrap(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn qec_text_parser_checks_repeat_blocks_before_instructions() {
+    let err = parse_qec_program("BOGUS 0\nREPEAT 1000001 {\nM 0\n}").unwrap_err();
+    assert!(format!("{err}").contains("expansion exceeds"), "{err}");
+
+    let err = parse_qec_program("M 0\nREPEAT 3 {\nM 0\nDETECTOR rec[-3]\n}").unwrap_err();
+    assert!(matches!(err, PrismError::Parse { line: 4, .. }), "{err}");
+
+    let program = parse_qec_program("REPEAT 0 {\nBOGUS 0\n}\nM 0").unwrap();
+    assert_eq!(program.num_measurements(), 1);
+
+    // The second round's ELSE follows the first round's measurement.
+    let err = parse_qec_program("E(0.1) X0\nREPEAT 2 {\nELSE_CORRELATED_ERROR(0.1) Z0\nM 0\n}")
+        .unwrap_err();
+    assert!(matches!(err, PrismError::Parse { line: 3, .. }), "{err}");
+
+    let program = parse_qec_program(
+        "REPEAT 18446744073709551615 {\n}\nREPEAT 1000000000000 {\nREPEAT 0 {\nM 0\n}\n}\nM 0",
+    )
+    .unwrap();
+    assert_eq!(program.num_measurements(), 1);
+}
+
 #[test]
 fn qec_text_parser_ingests_noise_and_measure_reset() {
     let text = r#"

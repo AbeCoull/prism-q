@@ -28,11 +28,10 @@ const MAX_QEC_EXPANDED_LINES: usize = 1_000_000;
 /// `CY`, and swap-family gates lower to `H`, `S`, `SQRT_X`, `CX`, and `CZ` sequences, so
 /// a `SQRT_Y` reads back as `S_DAG`, `SQRT_X`, `S` and a `SWAP` as three `CX`.
 pub fn parse_qec_program(input: &str) -> Result<QecProgram> {
-    let lines = expand_repeats(input)?;
+    let lines = instruction_lines(input)?;
+    check_repeats(&lines)?;
     let mut parser = QecTextParser::default();
-    for (line_num, line) in lines {
-        parser.parse_line(line_num, &line)?;
-    }
+    parser.parse_block(&lines, &mut 0)?;
     let num_qubits = parser.max_qubit.map_or(0, |qubit| qubit + 1);
     QecProgram::from_ops(num_qubits, QecOptions::default(), parser.ops)
 }
@@ -45,6 +44,72 @@ struct QecTextParser {
 }
 
 impl QecTextParser {
+    /// Parse `lines` from `index` through the `}` closing the enclosing block, or to the
+    /// end. Expects nesting already checked by [`check_repeats`].
+    fn parse_block(&mut self, lines: &[(usize, String)], index: &mut usize) -> Result<()> {
+        while let Some((line_num, line)) = lines.get(*index) {
+            *index += 1;
+            if line == "}" {
+                return Ok(());
+            }
+            if is_repeat_header(line) {
+                let count = parse_repeat_header(line, *line_num)?;
+                self.parse_repeat(lines, index, count)?;
+            } else {
+                self.parse_line(*line_num, line)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Parse a `REPEAT` body once and append `count - 1` copies of its ops with record
+    /// references shifted. A body whose first op joins the op before the block
+    /// (`ELSE_CORRELATED_ERROR`) is parsed again per copy, since each copy joins the last.
+    fn parse_repeat(
+        &mut self,
+        lines: &[(usize, String)],
+        index: &mut usize,
+        count: usize,
+    ) -> Result<()> {
+        let body_start = *index;
+        if count == 0 {
+            skip_block(lines, index);
+            return Ok(());
+        }
+        let start = self.ops.len();
+        let joined_branches = |ops: &[QecOp]| match start.checked_sub(1).map(|at| &ops[at]) {
+            Some(QecOp::CorrelatedError { branches }) => branches.len(),
+            _ => 0,
+        };
+        let branches_before = joined_branches(&self.ops);
+        let records_before = self.measurement_count;
+        self.parse_block(lines, index)?;
+        if joined_branches(&self.ops) != branches_before {
+            for _ in 1..count {
+                *index = body_start;
+                self.parse_block(lines, index)?;
+            }
+            return Ok(());
+        }
+        let end = self.ops.len();
+        if end == start {
+            return Ok(());
+        }
+        let records_per_copy = self.measurement_count - records_before;
+        for _ in 1..count {
+            let shift = self.measurement_count - records_before;
+            let copy = self.ops.len();
+            self.ops.extend_from_within(start..end);
+            if records_per_copy > 0 {
+                for op in &mut self.ops[copy..] {
+                    shift_records(op, shift);
+                }
+            }
+            self.measurement_count += records_per_copy;
+        }
+        Ok(())
+    }
+
     fn parse_line(&mut self, line_num: usize, line: &str) -> Result<()> {
         let (name, args, targets) = split_instruction(line, line_num)?;
         match name.as_str() {
@@ -540,7 +605,7 @@ fn measurement_basis(name: &str) -> QecBasis {
     }
 }
 
-fn expand_repeats(input: &str) -> Result<Vec<(usize, String)>> {
+fn instruction_lines(input: &str) -> Result<Vec<(usize, String)>> {
     let mut lines = Vec::new();
     for (idx, raw) in input.lines().enumerate() {
         let line = strip_qec_comment(raw).trim();
@@ -548,9 +613,14 @@ fn expand_repeats(input: &str) -> Result<Vec<(usize, String)>> {
             lines.push((idx + 1, strip_instruction_tag(line, idx + 1)?));
         }
     }
+    Ok(lines)
+}
 
+/// Check `REPEAT` nesting and the expanded instruction count before any instruction is
+/// parsed, so these errors take precedence over a malformed instruction anywhere.
+fn check_repeats(lines: &[(usize, String)]) -> Result<()> {
     let mut index = 0;
-    let expanded = expand_repeat_block(&lines, &mut index, false)?;
+    check_repeat_block(lines, &mut index, false)?;
     if index != lines.len() {
         let (line_num, _) = &lines[index];
         return Err(qec_parse_error(
@@ -558,15 +628,15 @@ fn expand_repeats(input: &str) -> Result<Vec<(usize, String)>> {
             "unexpected trailing repeat block",
         ));
     }
-    Ok(expanded)
+    Ok(())
 }
 
-fn expand_repeat_block(
+fn check_repeat_block(
     lines: &[(usize, String)],
     index: &mut usize,
     in_repeat: bool,
-) -> Result<Vec<(usize, String)>> {
-    let mut expanded = Vec::new();
+) -> Result<usize> {
+    let mut expanded = 0usize;
     while *index < lines.len() {
         let (line_num, line) = &lines[*index];
         if line == "}" {
@@ -577,28 +647,26 @@ fn expand_repeat_block(
             return Ok(expanded);
         }
 
-        if line.to_ascii_uppercase().starts_with("REPEAT ") {
+        if is_repeat_header(line) {
             let count = parse_repeat_header(line, *line_num)?;
             *index += 1;
-            let body = expand_repeat_block(lines, index, true)?;
-            if body.is_empty() {
+            let body = check_repeat_block(lines, index, true)?;
+            if body == 0 {
                 continue;
             }
-            let repeated_len = body.len().checked_mul(count).ok_or_else(|| {
+            let repeated_len = body.checked_mul(count).ok_or_else(|| {
                 qec_parse_error(
                     *line_num,
                     format!("`REPEAT` expansion exceeds {MAX_QEC_EXPANDED_LINES} instructions"),
                 )
             })?;
-            if expanded.len().saturating_add(repeated_len) > MAX_QEC_EXPANDED_LINES {
+            if expanded.saturating_add(repeated_len) > MAX_QEC_EXPANDED_LINES {
                 return Err(qec_parse_error(
                     *line_num,
                     format!("`REPEAT` expansion exceeds {MAX_QEC_EXPANDED_LINES} instructions"),
                 ));
             }
-            for _ in 0..count {
-                expanded.extend(body.iter().cloned());
-            }
+            expanded += repeated_len;
             continue;
         }
 
@@ -606,13 +674,13 @@ fn expand_repeat_block(
             return Err(qec_parse_error(*line_num, "unexpected `{`"));
         }
 
-        if expanded.len() == MAX_QEC_EXPANDED_LINES {
+        if expanded == MAX_QEC_EXPANDED_LINES {
             return Err(qec_parse_error(
                 *line_num,
                 format!("QEC text exceeds {MAX_QEC_EXPANDED_LINES} instructions"),
             ));
         }
-        expanded.push((*line_num, line.clone()));
+        expanded += 1;
         *index += 1;
     }
 
@@ -623,6 +691,53 @@ fn expand_repeat_block(
         });
     }
     Ok(expanded)
+}
+
+fn is_repeat_header(line: &str) -> bool {
+    line.get(..7)
+        .is_some_and(|head| head.eq_ignore_ascii_case("REPEAT "))
+}
+
+fn skip_block(lines: &[(usize, String)], index: &mut usize) {
+    let mut depth = 1usize;
+    while depth > 0 {
+        let line = &lines[*index].1;
+        *index += 1;
+        if line == "}" {
+            depth -= 1;
+        } else if is_repeat_header(line) {
+            depth += 1;
+        }
+    }
+}
+
+fn shift_records(op: &mut QecOp, by: usize) {
+    let records = match op {
+        QecOp::Detector { records, .. }
+        | QecOp::ObservableInclude { records, .. }
+        | QecOp::Postselect { records, .. } => records,
+        QecOp::Feedforward { records, body, .. } => {
+            for op in body {
+                shift_records(op, by);
+            }
+            records
+        }
+        QecOp::Gate { .. }
+        | QecOp::Measure { .. }
+        | QecOp::MeasurePauliProduct { .. }
+        | QecOp::Reset { .. }
+        | QecOp::ExpectationValue { .. }
+        | QecOp::Noise { .. }
+        | QecOp::Tick
+        | QecOp::CorrelatedError { .. }
+        | QecOp::HeraldedErase { .. }
+        | QecOp::Pad { .. } => return,
+    };
+    for record in records {
+        if let QecRecordRef::Absolute(index) = record {
+            *index += by;
+        }
+    }
 }
 
 fn parse_repeat_header(line: &str, line_num: usize) -> Result<usize> {

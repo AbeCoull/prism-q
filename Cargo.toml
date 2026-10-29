@@ -12,6 +12,7 @@ repository = "https://github.com/AbeCoull/prism-q"
 homepage = "https://abecoull.github.io/prism-q/"
 keywords = ["quantum", "quantum-computing", "simulator", "openqasm", "qec"]
 categories = ["science", "science::quantum-computing", "simulation", "mathematics"]
+exclude = ["docs/atlas"]
 
 [workspace]
 members = [".", "bindings/python"]

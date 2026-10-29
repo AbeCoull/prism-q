@@ -1,0 +1,42 @@
+{
+  "browser": "Microsoft Edge",
+  "base": "http://127.0.0.1:4173",
+  "checks": [
+    {
+      "label": "desktop 1440 by 1000",
+      "viewport": 1440,
+      "scrollWidth": 1440,
+      "reducedMotion": true,
+      "renderer": "webgl"
+    },
+    {
+      "label": "desktop SVG fallback",
+      "viewport": 1440,
+      "scrollWidth": 1440,
+      "reducedMotion": true,
+      "renderer": "svg"
+    },
+    {
+      "label": "mobile 390 by 844",
+      "viewport": 390,
+      "scrollWidth": 390,
+      "reducedMotion": true,
+      "renderer": "webgl"
+    },
+    {
+      "label": "mobile SVG fallback",
+      "viewport": 390,
+      "scrollWidth": 390,
+      "reducedMotion": true,
+      "renderer": "svg"
+    }
+  ],
+  "pageErrors": [],
+  "videoBytes": 1646222,
+  "video": {
+    "duration": 9.84,
+    "width": 1440,
+    "height": 1000
+  },
+  "capture": "Five manual execution stages. No native timing is recorded."
+}

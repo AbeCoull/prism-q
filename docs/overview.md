@@ -46,6 +46,8 @@ let probs = result.probabilities.unwrap();
 
 - [Installation](./getting-started/install.md) and [Your First Circuit](./getting-started/first-circuit.md)
 - [Architecture](./architecture/overview.md): backends, dispatch tree, fusion pipeline and SIMD strategy
+- [Interactive atlas](./atlas/index.html): one statevector gate traced from its matrix
+  through memory layout and SIMD lanes, and native recordings of each fusion pass
 - [Benchmarks](./benchmarks.md): measured timings on the reference circuit suite, and
   the [methodology](./guides/benchmarking.md) behind them
 - [Glossary](./glossary.md)

@@ -1,0 +1,16 @@
+{
+  "browser": "Microsoft Edge",
+  "base": "http://127.0.0.1:4173",
+  "pageErrors": [],
+  "operatorRenderer": "webgl",
+  "pageWidth": 390,
+  "viewportWidth": 390,
+  "katexErrors": 0,
+  "captures": [
+    "execution-microscope.png",
+    "compiler-laboratory.png",
+    "operator-landscape.png",
+    "rewrite-challenge-mobile.png"
+  ],
+  "meaning": "Native compiler replay and source-derived arithmetic. No runtime measurement."
+}

@@ -1864,3 +1864,7 @@ pub(crate) fn fuse_before_batching(circuit: &Circuit, n: usize) -> Cow<'_, Circu
 #[cfg(test)]
 #[path = "fusion_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "fusion_atlas_tests.rs"]
+mod atlas_tests;

@@ -1,0 +1,610 @@
+[
+  {
+    "id": "hardware-state-layout",
+    "chapter": "hardware",
+    "claim": "The CPU dense state is a contiguous array of 2^n Complex64 amplitudes in basis-index order; q0 is the least significant bit.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend",
+        "startLine": 8,
+        "endLine": 11
+      },
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend.state",
+        "startLine": 248,
+        "endLine": 250
+      }
+    ],
+    "derivation": "Index i encodes sum_q bit(q)*2^q. SIMD loads interpret each Complex64 as adjacent real and imaginary f64 values.",
+    "limitations": "This describes the dense CPU backend, not all backend representations.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-state-bytes",
+    "chapter": "hardware",
+    "claim": "Dense amplitude storage is 16*2^n bytes: 512 MiB at 25 qubits and 16 GiB at 30 qubits.",
+    "status": "theory",
+    "sources": [
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend.state",
+        "startLine": 248,
+        "endLine": 250
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "apply_full_loop_fma",
+        "startLine": 348,
+        "endLine": 371
+      }
+    ],
+    "derivation": "One amplitude is two 8-byte f64 values. Multiply 16 by the number of basis states.",
+    "limitations": "Amplitude payload only. Outputs, allocator overhead and scratch are excluded.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-pair-map",
+    "chapter": "hardware",
+    "claim": "A 1q gate visits disjoint amplitude pairs by inserting a zero target bit into each compressed pair index.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "apply_full_loop_fma",
+        "startLine": 343,
+        "endLine": 374
+      }
+    ],
+    "derivation": "half=2^t; mask=half-1; i0=((k & ~mask)<<1)|(k & mask); i1=i0|half. k ranges from 0 through 2^(n-1)-1.",
+    "limitations": "This is the general non-diagonal 1q matrix kernel; diagonal gates have specialized paths.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-pair-stride",
+    "chapter": "hardware",
+    "claim": "The two amplitudes in a target-t pair are 16*2^t bytes apart, while each half-block is contiguous.",
+    "status": "theory",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "apply_full_loop_avx2fma_inline",
+        "startLine": 386,
+        "endLine": 410
+      }
+    ],
+    "derivation": "A block has 2^(t+1) amplitudes. Lower and upper half pointers differ by 2^t amplitudes, each 16 bytes.",
+    "limitations": "Byte address spacing does not determine cache misses or memory latency.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-avx-lanes",
+    "chapter": "hardware",
+    "claim": "Each AVX2 input register packs two complex amplitudes from one half as [re0, im0, re1, im1]. Two registers supply two independent amplitude pairs.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "apply_slices_avx2fma",
+        "startLine": 278,
+        "endLine": 300
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "apply_full_loop_avx2fma_inline",
+        "startLine": 386,
+        "endLine": 408
+      }
+    ],
+    "derivation": "Each _mm256_loadu_pd reads four adjacent f64 values. The lower and upper amplitude halves are loaded separately.",
+    "limitations": "Lane order is ascending lane number. The 128-bit kernels pack one amplitude per register.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-avx-complex-multiply",
+    "chapter": "hardware",
+    "claim": "AVX2 complex multiply uses permute 0101, imaginary multiply, then alternating fused subtract/add.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "complex_mul_avx2fma",
+        "startLine": 258,
+        "endLine": 265
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "MatBroadcast256::from_matrix",
+        "startLine": 72,
+        "endLine": 85
+      }
+    ],
+    "derivation": "z=[x0,y0,x1,y1]; permute=[y0,x0,y1,x1]; t=ci*permute; fmaddsub(cr,z,t)=[cr*x0-ci*y0,cr*y0+ci*x0,cr*x1-ci*y1,cr*y1+ci*x1].",
+    "limitations": "This names source intrinsics and their semantics, not a captured machine-code instruction trace.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-neon-complex-multiply",
+    "chapter": "hardware",
+    "claim": "NEON packs one complex amplitude in [re,im], swaps lanes and fuses against a pre-negated imaginary coefficient [-ci,+ci].",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "MatBroadcast::from_matrix on aarch64",
+        "startLine": 101,
+        "endLine": 119
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "complex_mul_neon",
+        "startLine": 122,
+        "endLine": 134
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "apply_slices_neon",
+        "startLine": 227,
+        "endLine": 256
+      }
+    ],
+    "derivation": "vextq_f64(z,z,1) gives [im,re]; vmulq_f64(cr,z) plus vfmaq_f64(product,[-ci,+ci],swapped) gives the complex product.",
+    "limitations": "NEON is the aarch64 path; it does not use 256-bit AVX lane packing.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-fma-sse-fallbacks",
+    "chapter": "hardware",
+    "claim": "The x86 128-bit FMA path uses shuffle, multiply and fmaddsub; SSE2 uses shuffle, two multiplies, a sign XOR and add.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "complex_mul_sse2",
+        "startLine": 137,
+        "endLine": 153
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "complex_mul_fma",
+        "startLine": 187,
+        "endLine": 194
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "PreparedGate1q::new",
+        "startLine": 574,
+        "endLine": 610
+      }
+    ],
+    "derivation": "Both pack [re,im]. Runtime detection selects AVX2+FMA, then FMA, then the x86_64 SSE2 baseline.",
+    "limitations": "The best detected tier can still fall back to a narrower full-state kernel according to target and state length.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-primary-route",
+    "chapter": "hardware",
+    "claim": "For an ordinary CPU 1q matrix on x86_64, AVX2 is selected exactly when AVX2 and FMA are available, t>=2, and either n<=13 or the parallel feature is enabled with n>=15.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "PreparedGate1q::apply_full_sequential",
+        "startLine": 645,
+        "endLine": 694
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "PreparedGate1q::apply",
+        "startLine": 612,
+        "endLine": 643
+      },
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "apply_single_gate_par",
+        "startLine": 3075,
+        "endLine": 3114
+      },
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "StatevectorBackend::apply_single_gate",
+        "startLine": 3626,
+        "endLine": 3639
+      },
+      {
+        "path": "src/backend/mod.rs",
+        "symbol": "PARALLEL_THRESHOLD_QUBITS",
+        "startLine": 88,
+        "endLine": 97
+      }
+    ],
+    "derivation": "Sequential full-state AVX2 requires target>=2 and slice length<=8192. With parallel at n>=15, t<=12 uses 8192-amplitude tiles, and higher targets use paired slices whose apply method selects AVX2. At n=14 the ordinary path is FMA.",
+    "limitations": "Assumes valid 0<=t<n, a non-miri build, and a general dense CPU 1q gate. Excludes diagonal, controlled-pointer, MultiFused, and GPU paths. The parallel feature is a build choice, not a requested thread count.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-context-routes",
+    "chapter": "hardware",
+    "claim": "MultiFused tile application removes the full-state AVX2 length limit while retaining t>=2; single-pair pointer application uses 128-bit FMA on AVX2 hosts.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "PreparedGate1q::apply_tiled",
+        "startLine": 696,
+        "endLine": 733
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "PreparedGate1q::apply_pair_ptr",
+        "startLine": 735,
+        "endLine": 769
+      }
+    ],
+    "derivation": "apply_tiled branches on target>=2 without the 8192-element guard. apply_pair_ptr maps both Avx2Fma and Fma to apply_pair_fma.",
+    "limitations": "The target in a gathered tile is a tile coordinate and can differ from its circuit qubit index.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-thread-partition",
+    "chapter": "hardware",
+    "claim": "Ordinary 1q parallel execution uses whole tiles, whole paired half-blocks, or paired subtiles according to the number and size of blocks.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "apply_single_gate_par",
+        "startLine": 3075,
+        "endLine": 3114
+      },
+      {
+        "path": "src/backend/mod.rs",
+        "symbol": "PARALLEL_THRESHOLD_QUBITS",
+        "startLine": 88,
+        "endLine": 97
+      }
+    ],
+    "derivation": "B=2^(t+1), T=max(8192,B). If B<=8192 and N/T>=4 use 8192-element tiles. Else if N/T>=4 use whole B blocks split into halves. Otherwise split each pair of halves into min(8192,2^t)-element chunks.",
+    "limitations": "Rayon task count need not equal worker count. No fixed affinity or NUMA placement is established by these branches.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-traffic-model",
+    "chapter": "hardware",
+    "claim": "A general dense 1q gate has a conventional arithmetic count of 14*2^n FLOPs and logical amplitude traffic of 32*2^n bytes.",
+    "status": "model",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "apply_full_loop_fma",
+        "startLine": 353,
+        "endLine": 371
+      }
+    ],
+    "derivation": "Each pair has four complex multiplies at 6 FLOPs and two complex adds at 2 FLOPs: 28 FLOPs. Two 16-byte reads plus two 16-byte writes give 64 bytes per pair. There are 2^(n-1) pairs, giving 0.4375 FLOP per logical byte.",
+    "limitations": "FMA counts as two FLOPs. This excludes addressing, coefficient loads, cache reuse, write allocation and other traffic. It is not measured bandwidth or latency. A bandwidth floor 32*2^n/W assumes all logical traffic crosses the memory level with sustained bandwidth W.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-cache-budget",
+    "chapter": "hardware",
+    "claim": "Default cache tiles span 256 KiB through 1 MiB, derived from L2 per core and last-level cache sharing, and parallel passes can shrink tiles to expose concurrency.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/cache.rs",
+        "symbol": "CacheTopology::l2_per_core",
+        "startLine": 22,
+        "endLine": 29
+      },
+      {
+        "path": "src/backend/cache.rs",
+        "symbol": "tile_budget_bytes",
+        "startLine": 53,
+        "endLine": 89
+      },
+      {
+        "path": "src/backend/cache.rs",
+        "symbol": "min_parallel_tiles and parallel_tile_len",
+        "startLine": 96,
+        "endLine": 134
+      },
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "multi_gate_l2_tile",
+        "startLine": 36,
+        "endLine": 60
+      }
+    ],
+    "derivation": "The budget rounds down a clamped power of two. The L2 contribution is per physical core; the LLC contribution uses one quarter of its per-logical-CPU share. Divide bytes by 16 for amplitude count. Parallel sizing reads available hardware parallelism, not Rayon pool width.",
+    "limitations": "Cache residency is a design assumption, not a measured guarantee. PRISM_TILE_KB can override the default range to 128 KiB through 2 MiB.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-multifused-streams",
+    "chapter": "hardware",
+    "claim": "MultiFused can apply several gates within one tile, including gathering high-bit subcubes into contiguous scratch before processing and scattering.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "apply_multi_1q_subcube",
+        "startLine": 456,
+        "endLine": 509
+      },
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "apply_multi_1q_subcubes",
+        "startLine": 511,
+        "endLine": 539
+      },
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "apply_multi_1q_par_routed",
+        "startLine": 3555,
+        "endLine": 3609
+      }
+    ],
+    "derivation": "The subcube route copies each selected run into tile scratch, calls apply_tiled for every gate, then copies runs back. The in-place route loops over gates inside each parallel tile. Exactly zero gathered subcubes return before gate work and stores.",
+    "limitations": "The planner can select multiple routes. One gate per full DRAM sweep is not a universal model for fused execution.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-cuda-layout-budget",
+    "chapter": "hardware",
+    "claim": "CUDA stores amplitudes as interleaved f64 values interpreted as double2; resource checks budget 25 bytes per amplitude while amplitude payload remains 16 bytes.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/gpu/mod.rs",
+        "symbol": "module memory layout",
+        "startLine": 1,
+        "endLine": 5
+      },
+      {
+        "path": "src/gpu/mod.rs",
+        "symbol": "STATEVECTOR_BYTES_PER_AMPLITUDE",
+        "startLine": 108,
+        "endLine": 112
+      },
+      {
+        "path": "src/gpu/mod.rs",
+        "symbol": "GpuState::new",
+        "startLine": 299,
+        "endLine": 332
+      },
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend::init",
+        "startLine": 955,
+        "endLine": 966
+      }
+    ],
+    "derivation": "GpuState allocates 2*2^n f64 values. The 25-byte budget adds 8 bytes of probability scratch plus 1 byte of margin. Successful device initialization clears the host amplitude vector.",
+    "limitations": "The resource coefficient is not an exact allocation-size formula for every query.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-cuda-pairs",
+    "chapter": "hardware",
+    "claim": "The ordinary CUDA 1q kernel assigns one inserted-bit amplitude pair to each thread in a 256-thread block.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/gpu/kernels/dense.rs",
+        "symbol": "BLOCK_SIZE",
+        "startLine": 21,
+        "endLine": 21
+      },
+      {
+        "path": "src/gpu/kernels/dense.rs",
+        "symbol": "launch_apply_gate_1q",
+        "startLine": 206,
+        "endLine": 247
+      },
+      {
+        "path": "src/gpu/kernels/dense.cu",
+        "symbol": "apply_gate_1q and apply2x2",
+        "startLine": 36,
+        "endLine": 47
+      },
+      {
+        "path": "src/gpu/kernels/dense.cu",
+        "symbol": "apply_gate_1q",
+        "startLine": 74,
+        "endLine": 90
+      }
+    ],
+    "derivation": "k=blockIdx.x*blockDim.x+threadIdx.x. Threads with k>=2^(n-1) return. Scalar coefficient arguments describe the 2x2 matrix. This kernel directly reads and writes the global state.",
+    "limitations": "Address patterns and launch shape alone establish no occupancy, achieved bandwidth, transaction count, or speedup.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-cuda-shared-tile",
+    "chapter": "hardware",
+    "claim": "A non-diagonal CUDA MultiFused tile holds 1024 complex amplitudes in 16 KiB of shared memory and uses 512 threads with a barrier after each gate.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/gpu/kernels/dense.cu",
+        "symbol": "apply_multi_fused_tiled",
+        "startLine": 803,
+        "endLine": 889
+      },
+      {
+        "path": "src/gpu/kernels/dense.rs",
+        "symbol": "MultiFused tile constants",
+        "startLine": 1750,
+        "endLine": 1764
+      },
+      {
+        "path": "src/gpu/kernels/dense.rs",
+        "symbol": "launch_apply_multi_fused_nondiag",
+        "startLine": 1911,
+        "endLine": 1963
+      }
+    ],
+    "derivation": "Ten tile qubits include the lowest five, making each warp's consecutive tile offsets contiguous global amplitudes. A pass adds at most five higher targets. Low-target gates join the first pass. Each tile is loaded once, processed across all assigned gates, then stored.",
+    "limitations": "n<=10 and passes with fewer than three gates use per-gate fallback. Shared-memory use does not imply measured occupancy or throughput.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-rank-layout",
+    "chapter": "hardware",
+    "claim": "With P=2^p ranks, each rank initially owns 2^(n-p) consecutive amplitudes; low physical qubit bits select local indices and high bits select rank.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/distributed_statevector/mod.rs",
+        "symbol": "distributed memory layout",
+        "startLine": 1,
+        "endLine": 11
+      },
+      {
+        "path": "src/backend/distributed_statevector/mod.rs",
+        "symbol": "prepare_shard",
+        "startLine": 1035,
+        "endLine": 1072
+      }
+    ],
+    "derivation": "L=2^(n-p), global index=rank*L+local_index. Rank count must be a power of two and the local qubit floor is checked.",
+    "limitations": "After relabeling, circuit qubits map to physical positions through qubit_map rather than identity.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-rank-direct-exchange",
+    "chapter": "hardware",
+    "claim": "A direct global 1q gate pairs rank r with r XOR 2^(q-local_qubits) and combines the local shard with the received shard; a global diagonal gate only scales local amplitudes.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/distributed_statevector/mod.rs",
+        "symbol": "apply_global_1q",
+        "startLine": 1103,
+        "endLine": 1130
+      },
+      {
+        "path": "src/backend/distributed_statevector/mod.rs",
+        "symbol": "apply_global_diagonal_1q",
+        "startLine": 1132,
+        "endLine": 1137
+      }
+    ],
+    "derivation": "Rank-bit zero computes m00*own+m01*remote; rank-bit one computes m11*own+m10*remote. A direct general 1q gate sends 16L bytes and receives 16L bytes per rank, tiled by exchange_chunk.",
+    "limitations": "The communication volume is derived payload, excludes protocol overhead, and describes direct exchange. Default relabeling can avoid repeated direct exchanges.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-rank-relabel",
+    "chapter": "hardware",
+    "claim": "Default distributed relabeling moves a global target into a local bit position by exchanging a half slice and retains the new mapping for later gates.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/distributed_statevector/mod.rs",
+        "symbol": "qubit relabeling",
+        "startLine": 60,
+        "endLine": 91
+      },
+      {
+        "path": "src/backend/distributed_statevector/mod.rs",
+        "symbol": "half_slice_swap and relabel_swap",
+        "startLine": 746,
+        "endLine": 791
+      },
+      {
+        "path": "src/distributed/mod.rs",
+        "symbol": "relabel_enabled",
+        "startLine": 61,
+        "endLine": 79
+      }
+    ],
+    "derivation": "The moving indices have local bit unequal to rank bit. Each rank sends and receives L/2 amplitudes, or 8L bytes each way. Map updates record circuit-to-physical positions. A SWAP can be map-only. Batched instruction windows can plan future victims.",
+    "limitations": "Local working-set fit determines reuse. Cyclic scans can force eviction. Relabeling can be disabled or impossible when no victim remains.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-mpi-threading",
+    "chapter": "hardware",
+    "claim": "MPI requests MPI_THREAD_FUNNELED or higher; below MPI_THREAD_MULTIPLE all MPI calls are confined to the constructing thread while Rayon workers perform memory work.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/distributed/comm.rs",
+        "symbol": "REQUIRED_THREADING and owner_for",
+        "startLine": 248,
+        "endLine": 285
+      },
+      {
+        "path": "src/distributed/comm.rs",
+        "symbol": "MpiComm::world and attach_world",
+        "startLine": 323,
+        "endLine": 386
+      },
+      {
+        "path": "src/distributed/comm.rs",
+        "symbol": "MpiComm::sendrecv_c64",
+        "startLine": 454,
+        "endLine": 462
+      },
+      {
+        "path": "src/distributed/mod.rs",
+        "symbol": "EXCHANGE_CHUNK_DEFAULT",
+        "startLine": 39,
+        "endLine": 58
+      }
+    ],
+    "derivation": "MPI receives contiguous double views of complex slices and sendrecv_pieces splits around the C int count limit. The default chunk is 2^29 complex amplitudes, or 8 GiB maximum payload per message.",
+    "limitations": "A maximum chunk is not an unconditional allocation. This source establishes no asynchronous network overlap, GPU-aware MPI or measured multi-node scaling.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  },
+  {
+    "id": "hardware-diagonal-route",
+    "chapter": "hardware",
+    "claim": "Diagonal Z and Rz gates use independent complex scaling; on an AVX2+FMA host, their AVX2 route requires the parallel feature, n>=15 and target>=n-2.",
+    "status": "implementation",
+    "sources": [
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend::dispatch_gate",
+        "startLine": 851,
+        "endLine": 872
+      },
+      {
+        "path": "src/gates/mod.rs",
+        "symbol": "Gate::is_diagonal_1q",
+        "startLine": 1561,
+        "endLine": 1575
+      },
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "apply_diagonal_high_target_par",
+        "startLine": 601,
+        "endLine": 625
+      },
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "StatevectorBackend::apply_diagonal_gate_par",
+        "startLine": 3642,
+        "endLine": 3673
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "apply_diagonal_sequential",
+        "startLine": 876,
+        "endLine": 945
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "scale_complex_slice",
+        "startLine": 1355,
+        "endLine": 1431
+      }
+    ],
+    "derivation": "The high-target branch runs when 2^n/2^(target+1)<4, equivalent to target>=n-2. It scales 4096-amplitude chunks using the AVX2 helper. Other branches call the 128-bit FMA diagonal loop. Z skips the unchanged lower member; Rz normally scales both. No cross-input products or row additions occur.",
+    "limitations": "Assumes valid targets, non-miri build and AVX2+FMA availability. The aarch64 path remains 128-bit NEON. The x86 diagonal fallback without FMA is scalar. Fused matrices are checked for diagonality and do not force the general matrix kernel.",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01"
+  }
+]

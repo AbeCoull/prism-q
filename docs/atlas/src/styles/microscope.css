@@ -1,0 +1,444 @@
+.execution-microscope {
+  margin: 50px 0;
+  padding: 30px;
+  border: 1px solid var(--line);
+  background: linear-gradient(125deg, #18221c, #111916 60%);
+  border-radius: 12px;
+}
+.micro-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 20px;
+  margin-bottom: 15px;
+}
+.micro-heading .eyebrow {
+  display: block;
+  color: var(--copper);
+  font: 11px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 1.3px;
+  margin-bottom: 10px;
+}
+.micro-route {
+  color: var(--sage);
+  font: 11px var(--mono);
+  white-space: nowrap;
+  padding-bottom: 4px;
+}
+.execution-microscope > p {
+  max-width: 830px;
+}
+.micro-transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 17px 0;
+  margin: 14px 0 10px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.micro-transport button {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.micro-transport button:nth-child(2) {
+  background: #b7d5a018;
+  color: var(--sage);
+}
+.micro-transport input {
+  flex: 1;
+  min-width: 60px;
+  accent-color: var(--sage);
+}
+.micro-transport > span {
+  font: 11px var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.micro-body {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) 245px;
+  gap: 22px;
+  padding-top: 13px;
+}
+.micro-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.micro-timeline li {
+  border-left: 1px solid var(--line);
+}
+.micro-timeline li button {
+  display: flex;
+  gap: 12px;
+  text-align: left;
+  padding: 13px 10px;
+  width: 100%;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.micro-timeline li button > span {
+  font: 11px var(--mono);
+  padding-top: 2px;
+  color: var(--faint);
+}
+.micro-timeline li.active {
+  background: #b7d5a00c;
+  border-color: var(--sage);
+}
+.micro-timeline li.active button,
+.micro-timeline li.active button > span {
+  color: var(--sage);
+}
+.micro-timeline li.completed button > span {
+  color: var(--copper);
+}
+.micro-step-heading {
+  min-height: 156px;
+}
+.micro-step-heading > span {
+  font: 11px var(--mono);
+  color: var(--copper);
+  letter-spacing: 1px;
+}
+.micro-step-heading h3 {
+  margin: 6px 0 10px;
+}
+.micro-step-heading code {
+  display: block;
+  font-size: 11px;
+  color: var(--sage);
+  overflow-wrap: anywhere;
+  padding: 10px;
+  background: #0c1310;
+  border: 1px solid var(--line);
+}
+.micro-step-heading p {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.micro-coefficients {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 14px 0;
+}
+.micro-coefficients button {
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  border-radius: 3px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.micro-coefficients button > span {
+  font: 11px var(--mono);
+  color: var(--copper);
+}
+.micro-coefficients button code {
+  font-size: 11px;
+}
+.micro-coefficients button[aria-pressed="true"] {
+  border-color: var(--sage);
+  background: #b7d5a00b;
+}
+.micro-addresses {
+  font: 11px/1.8 var(--mono);
+  color: var(--muted);
+  margin-bottom: 15px;
+  overflow-wrap: anywhere;
+}
+.micro-registers {
+  display: grid;
+  gap: 7px;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.micro-context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font: 12px/1.7 var(--mono);
+}
+.micro-context span {
+  flex: 1 1 320px;
+}
+.micro-context button,
+.micro-context a {
+  color: var(--sage);
+  font-size: 12px;
+  min-height: 30px;
+}
+.micro-register {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  transition: opacity 220ms;
+  min-width: 480px;
+}
+.micro-register.is-pending {
+  opacity: 1;
+  border-left: 2px dashed var(--muted);
+}
+.micro-register-label {
+  font: 11px/1.5 var(--mono);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.micro-lanes {
+  display: grid;
+  gap: 3px;
+}
+.micro-lane {
+  border: 1px solid #b7d5a030;
+  background: #b7d5a007;
+  padding: 7px 4px;
+  min-width: 0;
+  text-align: center;
+}
+.micro-lane.imag {
+  border-color: #d4a17b30;
+  background: #d4a17b07;
+}
+.micro-lane small {
+  display: block;
+  font: 11px var(--mono);
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+.micro-lane span {
+  font: 12px var(--mono);
+  color: var(--sage);
+  font-variant-numeric: tabular-nums;
+}
+.micro-lane.imag span {
+  color: var(--copper);
+}
+.micro-phase {
+  padding-left: 18px;
+  border-left: 1px solid var(--line);
+}
+.micro-phase > h3 {
+  font-size: 14px;
+  margin-bottom: 9px;
+}
+.micro-argand svg {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+.micro-orbit {
+  stroke: var(--line);
+  fill: none;
+  stroke-dasharray: 3 5;
+}
+.micro-axis {
+  stroke: #526156;
+  stroke-width: 0.75;
+}
+.micro-argand svg text {
+  fill: var(--muted);
+  font: 11px var(--mono);
+}
+.micro-vector {
+  stroke-width: 2;
+  transition:
+    x2 650ms ease,
+    y2 650ms ease;
+}
+.micro-point {
+  transition:
+    cx 650ms ease,
+    cy 650ms ease;
+}
+.micro-vector.before {
+  stroke: var(--copper);
+  stroke-dasharray: 4 3;
+}
+.micro-vector.after {
+  stroke: var(--sage);
+}
+.micro-point.before {
+  fill: var(--copper);
+}
+.micro-point.after {
+  fill: var(--sage);
+}
+.micro-phase-readout {
+  display: grid;
+  gap: 9px;
+  margin-top: 5px;
+}
+.micro-phase-readout strong {
+  font: 12px var(--mono);
+  font-weight: 400;
+  margin-bottom: 4px;
+}
+.micro-phase-readout span {
+  font: 11px/1.6 var(--mono);
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.micro-phase-readout small,
+.micro-phase > p {
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--faint);
+}
+.micro-phase > p {
+  margin-top: 18px;
+}
+.micro-key {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--sage);
+}
+.micro-key.before {
+  background: var(--copper);
+}
+.micro-source {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  border-top: 1px solid var(--line);
+  margin-top: 25px;
+  padding-top: 15px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.micro-source a {
+  color: var(--sage);
+}
+.micro-source span {
+  max-width: 400px;
+  text-align: right;
+}
+.micro-bypass {
+  border: 1px solid var(--sage);
+  padding: 20px;
+  background: #b7d5a008;
+}
+.micro-bypass strong {
+  color: var(--sage);
+  font-weight: 400;
+}
+.micro-bypass p {
+  font-size: 12px;
+  margin-top: 10px;
+}
+@media (max-width: 1150px) {
+  .micro-body {
+    grid-template-columns: 160px minmax(0, 1fr);
+  }
+  .micro-phase {
+    grid-column: 2;
+    padding: 16px 0 0;
+    border-left: none;
+    border-top: 1px solid var(--line);
+  }
+  .micro-argand {
+    display: grid;
+    grid-template-columns: 210px minmax(0, 1fr);
+    gap: 15px;
+  }
+}
+@media (max-width: 700px) {
+  .execution-microscope {
+    padding: 18px;
+    margin: 28px 0;
+  }
+  .micro-heading {
+    display: block;
+  }
+  .micro-route {
+    display: block;
+    margin-top: 14px;
+    white-space: normal;
+    line-height: 1.8;
+  }
+  .micro-transport {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .micro-transport input {
+    order: 2;
+    flex-basis: 100%;
+  }
+  .micro-body {
+    display: block;
+  }
+  .micro-timeline {
+    display: flex;
+    overflow-x: auto;
+    padding-bottom: 15px;
+    margin-bottom: 15px;
+  }
+  .micro-timeline li {
+    flex: 0 0 140px;
+    border-left: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .micro-timeline li button {
+    padding: 8px;
+  }
+  .micro-step-heading {
+    min-height: 0;
+  }
+  .micro-phase {
+    margin-top: 24px;
+  }
+  .micro-register {
+    grid-template-columns: 90px minmax(0, 1fr);
+  }
+  .micro-register-label {
+    font-size: 11px;
+  }
+  .micro-lane span {
+    font-size: 11px;
+  }
+  .micro-lane small {
+    font-size: 11px;
+  }
+  .micro-lane {
+    padding: 7px 1px;
+  }
+  .micro-argand {
+    grid-template-columns: 140px minmax(0, 1fr);
+    gap: 8px;
+  }
+  .micro-phase-readout span {
+    font-size: 11px;
+  }
+  .micro-source {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .micro-source span {
+    text-align: left;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .micro-vector,
+  .micro-point,
+  .micro-register {
+    transition: none;
+  }
+}

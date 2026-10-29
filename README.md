@@ -36,6 +36,10 @@ back to OpenQASM 3.0.
 - Documentation: <https://abecoull.github.io/prism-q/> (machine-readable index at
   [`llms.txt`](https://abecoull.github.io/prism-q/llms.txt))
 - API reference: [docs.rs](https://docs.rs/prism-q)
+- Interactive atlas: [Inside PRISM-Q: From Quantum Algebra to Silicon](https://abecoull.github.io/prism-q/atlas/),
+  tracing a statevector gate through its matrix, binary addresses, complex128 memory,
+  SIMD arithmetic, and native fusion passes with inspectable complex matrices.
+  [Source and reproduction guide](docs/atlas/README.md).
 - Measured timings: [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html),
   with the method in
   [Benchmark Methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html)

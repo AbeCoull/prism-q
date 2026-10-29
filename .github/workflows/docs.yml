@@ -24,6 +24,8 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.4.52
@@ -31,6 +33,26 @@ jobs:
         run: cargo install --locked mdbook-admonish@1.20.0 mdbook-mermaid@0.14.0 mdbook-katex@0.9.4
       - name: Build book
         run: mdbook build docs
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/atlas/package-lock.json
+      - name: Validate and build interactive atlas
+        working-directory: docs/atlas
+        run: |
+          npm ci
+          npm run evidence
+          npm test
+          npm run build
+          npx playwright install --with-deps chromium
+          npm run test:production
+          npm run test:visual
+      - name: Include atlas in documentation deployment
+        run: |
+          rm -rf docs/book/atlas
+          mkdir -p docs/book/atlas
+          cp -R docs/atlas/dist/. docs/book/atlas/
       - name: Add canonical links and generate sitemap.xml
         # mdBook exposes a chapter's source path but no helper to turn it into
         # the rendered URL, so the per-page canonical link and og:url are

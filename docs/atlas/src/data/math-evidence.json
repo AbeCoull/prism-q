@@ -1,0 +1,433 @@
+[
+  {
+    "id": "state-layout",
+    "chapter": 2,
+    "claim": "The CPU statevector is a contiguous Vec<Complex64> with q0 as the least significant basis-index bit.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend",
+        "startLine": 8,
+        "endLine": 18
+      },
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend",
+        "startLine": 248,
+        "endLine": 254
+      }
+    ],
+    "derivation": "index=sum(bit(q)*2^q); 16 bytes per complex128 amplitude.",
+    "limitations": "Relative offsets are defined; allocator alignment beyond the type requirement is not established."
+  },
+  {
+    "id": "state-index-pairs",
+    "chapter": 2,
+    "claim": "One-qubit application inserts a zero target bit into each pair ordinal and updates both amplitudes from their original values.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "PreparedGate1q::apply_full_sequential",
+        "startLine": 680,
+        "endLine": 692
+      },
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "apply_slices_scalar",
+        "startLine": 516,
+        "endLine": 523
+      }
+    ],
+    "derivation": "half=1<<q; mask=half-1; i=((k&~mask)<<1)|(k&mask); j=i|half.",
+    "limitations": "The shown scalar formulas describe numerical semantics; native routing may use SIMD and parallel kernels."
+  },
+  {
+    "id": "pair-separation",
+    "chapter": 2,
+    "claim": "Amplitude-pair separation is 2^q amplitudes, while each half-block is a consecutive memory stream.",
+    "status": "theory",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/simd.rs",
+        "symbol": "PreparedGate1q::apply_full_sequential",
+        "startLine": 680,
+        "endLine": 692
+      },
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "apply_cx",
+        "startLine": 3699,
+        "endLine": 3710
+      }
+    ],
+    "derivation": "byte separation=16*2^q; pairs in a block are (base+t,base+2^q+t).",
+    "limitations": "Cache-line alignment, cache misses, throughput, and timing are not measured by this model."
+  },
+  {
+    "id": "gate-matrices",
+    "chapter": 1,
+    "claim": "Gate matrices distinguish phase rotation P from Rz and complex Rx from real Ry.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/gates/mod.rs",
+        "symbol": "Gate::matrix_2x2",
+        "startLine": 1017,
+        "endLine": 1073
+      }
+    ],
+    "derivation": "Rz(theta)=diag(exp(-i theta/2),exp(i theta/2)); P(theta)=diag(1,exp(i theta)).",
+    "limitations": "Global phase may be ignored in state equivalence, but conditional branch phase cannot be discarded."
+  },
+  {
+    "id": "cx-control",
+    "chapter": 2,
+    "claim": "The specialized CPU CX path swaps target partners only in the control-one subspace.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "StatevectorBackend::apply_cx",
+        "startLine": 3677,
+        "endLine": 3713
+      }
+    ],
+    "derivation": "CX(0,1) maps index 1 to 3; CX(1,0) leaves index 1 unchanged.",
+    "limitations": "The first qubit listed is control; visual ket labels display descending bit significance."
+  },
+  {
+    "id": "measurement-born",
+    "chapter": 1,
+    "claim": "CPU Z measurement samples the sum of squared amplitudes on the one subspace and zeroes rejected amplitudes.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "StatevectorBackend::apply_measure",
+        "startLine": 4944,
+        "endLine": 4985
+      }
+    ],
+    "derivation": "P(1)=sum(bit_q(x)=1)|a_x|^2; projected state divides by sqrt(P(outcome)).",
+    "limitations": "The random sample is a shot outcome, not a deterministic probability threshold animation."
+  },
+  {
+    "id": "lazy-normalization",
+    "chapter": 2,
+    "claim": "Measurement normalization is deferred through pending_norm; the raw state slice need not be normalized.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend::state_vector",
+        "startLine": 575,
+        "endLine": 583
+      },
+      {
+        "path": "src/backend/statevector/mod.rs",
+        "symbol": "StatevectorBackend::host_probability_vector",
+        "startLine": 601,
+        "endLine": 615
+      },
+      {
+        "path": "src/backend/statevector/kernels.rs",
+        "symbol": "StatevectorBackend::apply_measure",
+        "startLine": 4983,
+        "endLine": 4985
+      }
+    ],
+    "derivation": "logical amplitude=pending_norm*state[x]; logical probability=pending_norm^2*|state[x]|^2.",
+    "limitations": "Use export_statevector for normalized copies, or render the separate scale explicitly."
+  },
+  {
+    "id": "stabilizer-storage",
+    "chapter": 4,
+    "claim": "The Aaronson-Gottesman tableau has n destabilizer rows, n stabilizer rows and one scratch row, with packed X/Z bits and a sign bit.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/stabilizer/mod.rs",
+        "symbol": "StabilizerBackend",
+        "startLine": 8,
+        "endLine": 21
+      }
+    ],
+    "derivation": "I=(0,0),X=(1,0),Z=(0,1),Y=(1,1); commutation=x dot z'+z dot x' mod 2.",
+    "limitations": "Dense probabilities or amplitudes still require exponential output space."
+  },
+  {
+    "id": "stabilizer-updates",
+    "chapter": 4,
+    "claim": "H, S and CX update binary X/Z bits with phase corrections that preserve signed Pauli conjugation.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/stabilizer/kernels/rowops.rs",
+        "symbol": "h_row",
+        "startLine": 33,
+        "endLine": 41
+      },
+      {
+        "path": "src/backend/stabilizer/kernels/rowops.rs",
+        "symbol": "s_row",
+        "startLine": 44,
+        "endLine": 49
+      },
+      {
+        "path": "src/backend/stabilizer/kernels/rowops.rs",
+        "symbol": "cx_row",
+        "startLine": 95,
+        "endLine": 109
+      }
+    ],
+    "derivation": "H: r^=xz; swap(x,z). S: r^=xz; z^=x. CX: r^=xc*zt*(xt^zc^1); xt^=xc; zc^=zt.",
+    "limitations": "Right-hand sides for phase updates use original input bits."
+  },
+  {
+    "id": "stabilizer-measurement",
+    "chapter": 4,
+    "claim": "A tableau Z measurement is random if a stabilizer row has X support on the measured qubit; otherwise row products determine the outcome.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/stabilizer/mod.rs",
+        "symbol": "StabilizerBackend::measure_qubit",
+        "startLine": 876,
+        "endLine": 905
+      },
+      {
+        "path": "src/backend/stabilizer/kernels/mod.rs",
+        "symbol": "StabilizerBackend::measure_random",
+        "startLine": 674,
+        "endLine": 763
+      }
+    ],
+    "derivation": "X support means anticommutation with Zq; Bell q0 measurement is fair and q1 is correlated.",
+    "limitations": "The plain stabilizer backend rejects non-Clifford gates; other specialized representations may accept them."
+  },
+  {
+    "id": "mps-layout",
+    "chapter": 5,
+    "claim": "Each MPS site has shape (chi_left,2,chi_right) with contiguous complex128 storage.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "SiteTensor",
+        "startLine": 147,
+        "endLine": 165
+      },
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "MpsBackend",
+        "startLine": 14,
+        "endLine": 21
+      }
+    ],
+    "derivation": "offset(alpha,b,beta)=alpha*(2*chi_right)+b*chi_right+beta.",
+    "limitations": "Logical qubits can move between sites; site position and logical qubit must be labeled separately."
+  },
+  {
+    "id": "mps-svd",
+    "chapter": 5,
+    "claim": "Adjacent two-qubit application reshapes a contracted gate result into a (2*chi_left) by (2*chi_right) matrix, factors it, and rebuilds two sites.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "MpsBackend::cut_adjacent_pair",
+        "startLine": 1300,
+        "endLine": 1361
+      }
+    ],
+    "derivation": "M[(alpha*2+i),(j*chi_right+beta)]=theta_prime[alpha,i,j,beta]; M=U diag(s) Vdagger.",
+    "limitations": "SVD matrix storage is column-major, distinct from site tensor flat packing."
+  },
+  {
+    "id": "mps-cutoff",
+    "chapter": 5,
+    "claim": "Truncation retains singular values strictly above epsilon times the largest, keeping at least one value and respecting the bond cap.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/mps/svd.rs",
+        "symbol": "truncated_svd_rank",
+        "startLine": 233,
+        "endLine": 245
+      },
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "MpsBackend::set_svd_epsilon",
+        "startLine": 411,
+        "endLine": 427
+      }
+    ],
+    "derivation": "chi_new=min(max(1,count(s>epsilon*s_max)),max_bond_dim); default epsilon=1e-12.",
+    "limitations": "This is a relative singular-value cutoff, not a cumulative discarded-weight budget."
+  },
+  {
+    "id": "mps-local-error",
+    "chapter": 5,
+    "claim": "A single orthonormal Schmidt truncation has discarded squared weight delta and normalized fidelity 1-delta.",
+    "status": "theory",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "MpsBackend::record_truncation",
+        "startLine": 476,
+        "endLine": 485
+      },
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "MpsBackend::truncation_discarded",
+        "startLine": 440,
+        "endLine": 469
+      }
+    ],
+    "derivation": "lambda=[sqrt(.9),sqrt(.1)],chi=1 gives delta=.1 and normalized fidelity=.9; entropy=.4689955936 bits.",
+    "limitations": "The unnormalized 2-norm error sqrt(delta), normalized Euclidean distance and infidelity are different quantities."
+  },
+  {
+    "id": "mps-reported-bound",
+    "chapter": 5,
+    "claim": "PRISM-Q sums relative discarded squared weight across SVDs and reports max(0,1-total) in approximate metadata.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "MpsBackend::record_truncation",
+        "startLine": 476,
+        "endLine": 485
+      },
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "MpsBackend::truncation_discarded",
+        "startLine": 463,
+        "endLine": 469
+      },
+      {
+        "path": "src/backend/mps/mod.rs",
+        "symbol": "MpsBackend::exactness",
+        "startLine": 2938,
+        "endLine": 2950
+      }
+    ],
+    "derivation": "reported fidelity_lower_bound=max(0,1-truncation_discarded).",
+    "limitations": "The sum can exceed 1 and is not the final measured infidelity. Report this as implementation metadata, not a newly proved universal multi-cut error theorem."
+  },
+  {
+    "id": "noise-pauli",
+    "chapter": 9,
+    "claim": "Depolarizing p is the total probability of nonidentity Pauli noise; one-qubit branches have p/3 and two-qubit branches p/15.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/sim/noise.rs",
+        "symbol": "NoiseChannel",
+        "startLine": 36,
+        "endLine": 65
+      }
+    ],
+    "derivation": "E(rho)=(1-p)rho+(p/3)(XrhoX+YrhoY+ZrhoZ).",
+    "limitations": "Other libraries may define depolarizing p differently. Compare channel equations before comparing parameters."
+  },
+  {
+    "id": "noise-trajectories",
+    "chapter": 9,
+    "claim": "Custom Kraus trajectories compute branch probabilities from the full reduced density matrix and normalize the chosen branch.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/sim/trajectory.rs",
+        "symbol": "effect_probability",
+        "startLine": 563,
+        "endLine": 569
+      },
+      {
+        "path": "src/sim/trajectory.rs",
+        "symbol": "apply_custom_kraus",
+        "startLine": 571,
+        "endLine": 617
+      },
+      {
+        "path": "src/sim/noise.rs",
+        "symbol": "NoiseChannel::Custom",
+        "startLine": 66,
+        "endLine": 79
+      }
+    ],
+    "derivation": "p_k=Tr(K_k^dagger K_k rho_q); psi_k=K_k psi/sqrt(p_k).",
+    "limitations": "A single trajectory is not the mixed state; finite ensembles have sampling uncertainty."
+  },
+  {
+    "id": "qec-detectors",
+    "chapter": 9,
+    "claim": "Detectors are parities over records; the default reference XORs a fixed noiseless baseline while Raw returns the parity directly.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/qec/mod.rs",
+        "symbol": "QecOp",
+        "startLine": 296,
+        "endLine": 305
+      },
+      {
+        "path": "src/qec/mod.rs",
+        "symbol": "QecDetectorReference",
+        "startLine": 600,
+        "endLine": 615
+      }
+    ],
+    "derivation": "detector=record[r0] XOR ... XOR record[rk] XOR reference.",
+    "limitations": "A random noiseless detector is not automatically an error event; non-Clifford programs use raw parity under both settings."
+  },
+  {
+    "id": "qec-decoders",
+    "chapter": 9,
+    "claim": "Implemented decoders include graphlike union-find, matching exact for quantized weights, and BP+OSD for hypergraphs.",
+    "status": "implementation",
+    "revision": "7adde35d0bacaff71711148223ac8df06a008d01",
+    "sources": [
+      {
+        "path": "src/qec/decoder.rs",
+        "symbol": "UnionFindDecoder",
+        "startLine": 20,
+        "endLine": 64
+      },
+      {
+        "path": "src/qec/matching.rs",
+        "symbol": "MatchingDecoder",
+        "startLine": 28,
+        "endLine": 63
+      },
+      {
+        "path": "src/qec/bposd.rs",
+        "symbol": "OsdMethod",
+        "startLine": 28,
+        "endLine": 46
+      }
+    ],
+    "derivation": "graph edges use max(0,ln((1-p)/p)); matching quantizes at 2^-23 of largest weight.",
+    "limitations": "Graphlike decoders reject mechanisms with more than two detectors. BP+OSD is not generally exact outside its exhaustive search coverage."
+  }
+]

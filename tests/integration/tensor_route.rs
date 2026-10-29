@@ -3,7 +3,10 @@
 //! the statevector otherwise. Above the statevector cap the path competes with
 //! MPS instead, and wins only where the MPS bond grows.
 
-use prism_q::circuits::{brickwork_circuit, hardware_efficient_ansatz, random_circuit};
+use prism_q::circuits::{
+    brickwork_circuit, hardware_efficient_ansatz, qft_circuit, random_circuit,
+    single_qubit_rotation_circuit,
+};
 use prism_q::{BackendKind, Circuit, Gate, PauliTerm, ResolvedBackend, simulate};
 
 const SEED: u64 = 0xDEAD_BEEF;
@@ -188,4 +191,26 @@ fn above_the_cap_marginals_of_a_bond_heavy_chain_take_the_tensor_path() {
 fn above_the_cap_a_low_bond_chain_stays_on_mps() {
     let circuit = hardware_efficient_ansatz(64, 2, SEED);
     assert_eq!(auto_backend(&circuit, &two_local(64)), ResolvedBackend::Mps);
+}
+
+// The all-to-all controlled-phase ladder pushes every observable's bounded plan past
+// the peak bound, so Auto never offers a QFT to a tensor contraction, which takes
+// minutes at 18 qubits.
+#[test]
+fn a_wide_qft_stays_on_the_statevector() {
+    let mut circuit = single_qubit_rotation_circuit(20, 1, SEED);
+    circuit.instructions.extend(qft_circuit(20).instructions);
+    let textbook = prism_q::circuit::expand_qft_blocks(&circuit).into_owned();
+    for circuit in [circuit, textbook] {
+        assert_eq!(
+            auto_backend(&circuit, &two_local(20)),
+            ResolvedBackend::Statevector
+        );
+        let marginals = simulate(&circuit)
+            .backend(BackendKind::Auto)
+            .seed(42)
+            .marginals()
+            .unwrap();
+        assert_eq!(marginals.metadata.backend, ResolvedBackend::Statevector);
+    }
 }

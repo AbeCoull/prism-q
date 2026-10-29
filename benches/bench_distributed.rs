@@ -363,9 +363,11 @@ fn per_target_noise(circuit: &Circuit, channel: &NoiseChannel) -> NoiseModel {
 
 /// Lockstep noisy trajectories of a measured two-layer cyclic wall at two and
 /// four ranks: shots run one at a time on every rank, on one sharded state each
-/// shot re-initializes. Depolarizing events read no state, damping reads one
-/// `Allreduce` per event, and the custom Kraus channel reads the qubit's reduced
-/// density matrix, with a partner exchange when the qubit sits on a rank bit.
+/// shot re-initializes. Depolarizing events read no state, damping gathers one
+/// scalar per rank per event, and the custom Kraus channel reads the qubit's reduced
+/// density matrix, with a partner exchange when the qubit sits on a rank bit. The
+/// `noiseless` rows run the same wall once without a model and sample it, the floor
+/// the per-shot trajectories are measured against.
 fn bench_noisy_shots(c: &mut Criterion) {
     let mut group = c.benchmark_group("distributed/noisy_shots");
     configure_group(&mut group);
@@ -394,6 +396,21 @@ fn bench_noisy_shots(c: &mut Criterion) {
         circuit.instructions = cyclic_wall(n, 2, SEED).instructions;
         for q in 0..n {
             circuit.add_measure(q, q);
+        }
+        for ranks in [2usize, 4] {
+            let id = BenchmarkId::new(format!("noiseless/{n}"), format!("{ranks}ranks"));
+            group.bench_with_input(id, &circuit, |b, circ| {
+                b.iter(|| {
+                    let shots = run_ranks(ranks, |ctx| {
+                        simulate(circ)
+                            .distributed(ctx)
+                            .seed(SEED)
+                            .shots(SHOTS)
+                            .unwrap()
+                    });
+                    std::hint::black_box(shots);
+                });
+            });
         }
         for (name, channel) in &channels {
             let noise = per_target_noise(&circuit, channel);

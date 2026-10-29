@@ -645,7 +645,7 @@ fn loopback_measure_deterministic_basis_state() {
 fn loopback_measure_determinism_across_ranks() {
     relax_min_local_qubits();
     // With a fixed seed the outcomes and post measurement probabilities must be
-    // identical for every rank count (lockstep meas_rng plus Allreduce).
+    // identical for every rank count (lockstep meas_rng plus a rank-order gather).
     let n = 6;
     let mut b = CircuitBuilder::new_with_classical(n, n);
     b.h(0).h(3).h(5);

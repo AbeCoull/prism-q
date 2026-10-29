@@ -114,9 +114,9 @@ CPU twin.
 Requires `--features "parallel distributed bench-internal"`. Rank pairs run on the
 thread loopback transport, so exchanges move at memcpy speed: the rows resolve
 packing, copying, and per-gate dispatch cost, not network latency. Outside
-`bench-fast` each group runs at two register widths; the larger one puts the
-per-rank shard above the Rayon threshold so the combine loops after an exchange
-fan out.
+`bench-fast` each group except `sample_indices` and `noisy_shots` runs at two register
+widths; the larger one puts the per-rank shard above the Rayon threshold so the combine
+loops after an exchange fan out.
 
 | Group | What it measures |
 |-------|-----------------|
@@ -127,6 +127,7 @@ fan out.
 | `distributed/fused_2q_two_global` | Dense Fused2q repeated on both rank bits at 18 and 20 qubits across four ranks with relabeling off: the two step butterfly exchange for a two qubit gate over two global qubits |
 | `distributed/sample_indices` | 4096 terminal shots of a 20 qubit uniform state at two and four ranks with relabeling off: the per-rank cumulative distribution, owner draws, and the index gather |
 | `distributed/cyclic_wall/ranks{2,4}` | Three layers of a seeded Rx or Ry on every qubit and a nearest neighbour CX ring at 20 and 22 qubits across two and four ranks with relabeling on: the cyclic scan whose working set exceeds the local positions, so eviction choice sets the exchange count |
+| `distributed/noisy_shots` | 16 shots of a two-layer cyclic wall with every qubit measured, at 16 qubits (12 under `bench-fast`) on two and four ranks, with depolarizing, amplitude damping, or a one-qubit Kraus channel after every gate: serial trajectories in lockstep. `noiseless` runs the same wall without a model: one fused run and terminal sampling, the floor the per-shot trajectories are measured against |
 
 ### Instruction counts (iai)
 

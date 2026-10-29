@@ -325,3 +325,52 @@ fn a_noise_model_built_before_the_measurements_is_an_error() {
     let err = noisy_marginals_analytical(&circuit, &noise, 42).unwrap_err();
     assert!(err.to_string().contains("event slots"), "{err}");
 }
+
+fn flip_then_conditional(
+    flipped: usize,
+    body: crate::gates::Gate,
+) -> (crate::circuit::Circuit, NoiseModel) {
+    let mut circuit = crate::circuit::Circuit::new(2, 2);
+    circuit.add_gate(crate::gates::Gate::Id, &[flipped]);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: crate::circuit::ClassicalCondition::BitIsOne(0),
+        gate: body,
+        targets: [1].as_slice().into(),
+    });
+    circuit.add_measure(1, 1);
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.after_gate.iter_mut().for_each(Vec::clear);
+    noise.after_gate[0].push(crate::sim::noise::NoiseEvent::pauli(flipped, 0.1, 0.0, 0.0));
+    (circuit, noise)
+}
+
+// Bit 0 always reads 0, so the guarded H never runs and the flip before it
+// reaches bit 1 every time it fires.
+#[test]
+fn a_guarded_non_pauli_gate_is_rejected() {
+    let (circuit, noise) = flip_then_conditional(1, crate::gates::Gate::H);
+    let err = ErrorChainComplex::build(&circuit, &noise, 42).err();
+    assert!(
+        matches!(
+            err,
+            Some(crate::error::PrismError::IncompatibleBackend { .. })
+        ),
+        "{err:?}"
+    );
+}
+
+// A flip of bit 0 also decides whether the guarded X flips bit 1, a path the
+// backward propagation never sees.
+#[test]
+fn a_guarded_pauli_is_rejected() {
+    let (circuit, noise) = flip_then_conditional(0, crate::gates::Gate::X);
+    let err = ErrorChainComplex::build(&circuit, &noise, 42).err();
+    assert!(
+        matches!(
+            err,
+            Some(crate::error::PrismError::IncompatibleBackend { .. })
+        ),
+        "{err:?}"
+    );
+}

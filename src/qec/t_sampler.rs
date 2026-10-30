@@ -10,6 +10,7 @@ use crate::backend::mps::MpsBackend;
 use crate::circuit::{Circuit, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
+use crate::limits::{LimitSource, ResolvedLimits};
 use crate::sim::compiled::PackedShots;
 use crate::sim::unified_pauli::{PauliTerm, run_spd_observable_light_cone};
 
@@ -18,6 +19,8 @@ use crate::sim::unified_pauli::{PauliTerm, run_spd_observable_light_cone};
 #[non_exhaustive]
 pub enum QecTStrategy {
     /// Exact light-cone SPD, then CAMPS, then an exact tensor-network scalar fallback.
+    /// The fallback declines a contraction over the peak cap instead of slicing it,
+    /// unless the slice budget is set through the environment or the process default.
     Auto,
     /// One state-vector simulation per shot. Correctness oracle.
     Reference,
@@ -743,9 +746,26 @@ fn run_qec_program_camps(program: &QecProgram) -> Result<QecSampleResult> {
 // Private exact fallback for Auto. Contracts each scalar observable directly
 // as <0| U^dagger P U |0> and does not materialize a dense statevector.
 fn run_qec_program_tensor_network_observable(program: &QecProgram) -> Result<QecSampleResult> {
+    let limits = tensor_network_fallback_limits(ResolvedLimits::process_default());
+    run_qec_program_tensor_network_observable_within(program, &limits)
+}
+
+/// Turn slicing off unless the slice budget was set explicitly. The fallback runs after
+/// SPD and CAMPS have both failed, and declining there is cheaper than summing up to the
+/// default 1024 contractions.
+fn tensor_network_fallback_limits(mut limits: ResolvedLimits) -> ResolvedLimits {
+    if limits.tn_slices.source == LimitSource::Detected {
+        limits.tn_slices.value = 1;
+    }
+    limits
+}
+
+fn run_qec_program_tensor_network_observable_within(
+    program: &QecProgram,
+    limits: &ResolvedLimits,
+) -> Result<QecSampleResult> {
     let lowered = lower_pauli_observables(program)?;
     let circuit = &lowered.circuit;
-    let limits = &crate::limits::ResolvedLimits::process_default();
     evaluate_observable_program(program, &lowered, |terms| {
         Ok(ConditionalEval {
             mean: crate::backend::tensornetwork::expectation_zero_state(circuit, terms, limits)?,

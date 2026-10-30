@@ -100,6 +100,7 @@ CPU twin.
 | `qec_noisy_runner_split` | Parse, compile, sample, noise, detector, postselection, logical count, and total QEC timings |
 | `qec_feedforward_runner` | Packed native QEC execution of a repetition memory whose Pauli feed-forward corrections land as record flips |
 | `qec_chunked_noise` | 100k-shot repetition memories on the record and leakage samplers at `chunk_size` 64 against the unchunked run, so a split noise unit's cost shows against one drawn whole |
+| `qec_sample_one_shot` | One shot per call from compiled distance-5 and distance-25 memories at p = 1e-3, on the parity route and, with measurements kept, the record route, where walking every noise event dominates the call |
 | `qec_postselection` | A 1M-shot repetition memory postselected on 20 records, unchunked and at 16384-shot chunks, where counting accepted shots and their logical errors is a large share of the run |
 
 ### Decoder benchmarks (qec_decoder)

@@ -1373,6 +1373,31 @@ fn bench_qec_parse(c: &mut Criterion) {
     group.finish();
 }
 
+/// Compiling a memory of `distance` rounds at p = 1e-3 to its sampler without kept
+/// measurements, so the detector parity walk dominates.
+fn bench_qec_compile(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_compile");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    let noise = QecCircuitNoise::uniform(0.001);
+    for distance in [5, 15, 25] {
+        let surface = QecProgram::surface_memory(distance, distance, QecBasis::Z, &noise).unwrap();
+        let color = QecProgram::color_memory(distance, distance, QecBasis::Z, &noise).unwrap();
+        for (label, mut program) in [("surface_z_p001", surface), ("color_z_p001", color)] {
+            program.set_options(QecOptions {
+                keep_measurements: false,
+                ..program.options()
+            });
+            group.bench_with_input(BenchmarkId::new(label, distance), &program, |b, program| {
+                b.iter(|| program.compile_sampler().unwrap());
+            });
+        }
+    }
+    group.finish();
+}
+
 /// A 1M-shot distance-5 repetition memory postselected on all 20 check records, so
 /// counting the accepted shots and their logical errors is a large share of the run:
 /// once over the whole run unchunked, and once per chunk at 16384 shots, a whole number
@@ -1430,6 +1455,7 @@ criterion_group! {
     bench_qec_feedforward_runner,
     bench_qec_chunked_noise,
     bench_qec_postselection,
-    bench_qec_parse
+    bench_qec_parse,
+    bench_qec_compile
 }
 criterion_main!(benches);

@@ -101,6 +101,8 @@ CPU twin.
 | `qec_feedforward_runner` | Packed native QEC execution of a repetition memory whose Pauli feed-forward corrections land as record flips |
 | `qec_chunked_noise` | 100k-shot repetition memories on the record and leakage samplers at `chunk_size` 64 against the unchunked run, so a split noise unit's cost shows against one drawn whole |
 | `qec_postselection` | A 1M-shot repetition memory postselected on 20 records, unchunked and at 16384-shot chunks, where counting accepted shots and their logical errors is a large share of the run |
+| `qec_parse` | Parsing distance-15 and distance-25 surface and color memory text written with `REPEAT` blocks |
+| `qec_compile` | Compiling distance-5, 15 and 25 surface and color memories at p = 1e-3 to their sampler without kept measurements, where the detector parity walk dominates |
 
 ### Decoder benchmarks (qec_decoder)
 

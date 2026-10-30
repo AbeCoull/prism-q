@@ -5,7 +5,8 @@
 # base time, a linear drift per invocation, deterministic noise, and an effect on
 # variant b, so a case states what the measurement would have read and the
 # expected verdict. The last cases run the whole script against a stub bench
-# binary to cover the A B B A order, the smoke test, and the host-load guard.
+# binary to cover the A B B A order and its several-variant form, the smoke test,
+# and the host-load guard.
 #
 # Usage: scripts/bench_interleave_test.sh
 
@@ -133,6 +134,30 @@ else
     sed 's/^/      /' "$dir/report.md"
 fi
 
+# Two variants in one table, in the order the runner uses: b regresses 10% on x/a,
+# c reads flat. Each gets its own verdict and the run takes the worse.
+dir="$SCRATCH/two-variants"
+mkdir -p "$dir"
+awk 'BEGIN { OFS = "\t"; t = 0
+    for (r = 1; r <= 10; r++) {
+        split((r % 2) ? "a b c c b a" : "b c a a c b", order, " ")
+        for (s = 1; s <= 6; s++) {
+            v = order[s]; t++
+            ns = 1000 * (1 + 0.002 * t); if (v == "b") ns *= 1.10
+            print r, s, v, "target", "x/a", ns, ns, ns
+            print r, s, v, "control", "c/a", 800 * (1 + 0.002 * t), 0, 800 * (1 + 0.002 * t)
+        } } }' > "$dir/raw.tsv"
+bash "$RUNNER" --from-tsv "$dir/raw.tsv" --out "$dir/report.md" --max-host-load 0 > /dev/null 2>&1
+got=$?
+if [[ "$got" == 1 ]] && grep -q '^\*\*Regression verdict\*\*: FAIL. Each variant against a: b FAIL, c PASS.$' "$dir/report.md" \
+    && grep -q '^\*\*Variant b verdict\*\*: FAIL' "$dir/report.md" && grep -q '^\*\*Variant c verdict\*\*: PASS' "$dir/report.md" \
+    && [[ "$(grep -c '^\*\*Regression verdict' "$dir/report.md")" == 1 ]]; then
+    PASS=$((PASS + 1)); printf 'ok    %-34s exit 1, b FAIL, c PASS\n' two-variants
+else
+    FAIL=$((FAIL + 1)); printf 'FAIL  %-34s exit %s\n' two-variants "$got"
+    sed 's/^/      /' "$dir/report.md"
+fi
+
 echo
 echo "=== bench_interleave end to end against a stub binary ==="
 
@@ -219,6 +244,27 @@ if e2e regression 1 STUB_EFFECT=1.10 -- --max-host-load 0; then
         FAIL=$((FAIL + 1)); printf 'FAIL  %-34s order %s\n' e2e-regression "$got_order"
         sed 's/^/      /' "$E2E_DIR/report.md"
     fi
+fi
+
+if e2e two-variants 1 STUB_EFFECT=1.10 -- --max-host-load 0 --variants b,c; then
+    # Warmup a b c, then a b c c b a and b c a a c b, each slot one target and
+    # one control invocation.
+    want_order="a a b b c c"
+    for (( r = 1; r <= 6; r++ )); do
+        if (( r % 2 )); then want_order+=" a a b b c c c c b b a a"; else want_order+=" b b c c a a a a c c b b"; fi
+    done
+    got_order="$(tr '\n' ' ' < "$E2E_DIR/state/order" | sed 's/ $//')"
+    if [[ "$got_order" == "$want_order" ]] \
+        && grep -q 'Each variant against a: b FAIL, c PASS' "$E2E_DIR/report.md"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 1, mirrored order, b FAIL, c PASS\n' e2e-two-variants
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s order %s\n' e2e-two-variants "$got_order"
+        sed 's/^/      /' "$E2E_DIR/report.md"
+    fi
+fi
+
+if e2e bad-variant 1 -- --max-host-load 0 --variants b,a; then
+    PASS=$((PASS + 1)); printf 'ok    %-34s exit 1, a is the base\n' e2e-bad-variant
 fi
 
 if e2e same-code 0 -- --max-host-load 0; then

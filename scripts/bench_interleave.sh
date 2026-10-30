@@ -13,13 +13,15 @@
 #   3. Run one discarded invocation per variant, then ROUNDS rounds of four short
 #      Criterion invocations over the filter, ordered A B B A in odd rounds and
 #      B A A B in even ones. Each invocation is its own process with
-#      PRISM_BENCH_VARIANT set to a or b.
+#      PRISM_BENCH_VARIANT set to a or b. With --variants b,c,... a round runs
+#      a b c ... c b a in odd rounds and b c ... a a ... c b in even ones, so every
+#      variant sits at the same mean position and each is compared with a.
 #   4. Per row and round, take the paired change (B1 + B2) / (A1 + A2) - 1 of
 #      each invocation's estimate, by default its fastest sample per iteration.
 #      Linear drift across the four invocations cancels exactly in that ratio,
 #      and alternating the order cancels any cost tied to a position in the round.
 #   5. Drop a round as disturbed when, on the median row, the two invocations of
-#      one variant disagree by more than the threshold. Load from other work
+#      any one variant disagree by more than the threshold. Load from other work
 #      shows up there, and the test never compares A with B, so dropping a round
 #      cannot bias the change. Replacement rounds run until ROUNDS undisturbed
 #      ones are in, up to half as many again.
@@ -49,7 +51,8 @@
 #                 resolved this way.
 # The run is RERUN when a control is off zero or wide and unresolved, when a
 # target row is undecided and nothing failed, or when fewer than six rounds were
-# undisturbed.
+# undisturbed. With several variants each gets its own table and verdict, and the
+# run takes the worst: FAIL or NO DATA, then RERUN, then PASS.
 #
 # Usage:
 #   scripts/bench_interleave.sh -f '^statevector/qft_textbook/(16|20)$' -c '^mps/random_d10/16$'
@@ -61,6 +64,10 @@
 #   --filter,   -f  Criterion filter regex for the rows the switch changes (required)
 #   --control,  -c  Criterion filter regex for rows the switch does not reach. Run
 #                   in the same rounds, in their own invocation per slot.
+#   --variants      comma-separated letters compared with a, each a change behind
+#                   `prism_q::bench_variant(letter)` (default b). One build carries
+#                   them all; each extra variant adds two invocations per round.
+#                   Read from the table under --from-tsv.
 #   --bench,    -b  bench target (default: circuits)
 #   --features      cargo feature list (default: "parallel bench-internal"; the
 #                   switch only exists under bench-internal)
@@ -136,6 +143,7 @@ THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
 MAX_HOST_LOAD=10
 WAIT_IDLE=0
 NO_EARLY_STOP=""
+VARIANT_LIST="b"
 # A wide control is resolved when every target |change| is at least this many
 # control half-widths.
 WIDE_CONTROL_EFFECT_RATIO=3
@@ -144,7 +152,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --filter|-f)    FILTER="$2"; shift 2 ;;
         --control|-c)   CONTROL_FILTER="$2"; shift 2 ;;
-        --bench|-b)     BENCH="$2"; shift 2 ;;
+        --variants)     VARIANT_LIST="$2"; shift 2 ;;
+        --bench|-b)    BENCH="$2"; shift 2 ;;
         --features)     FEATURES="$2"; shift 2 ;;
         --exe)          EXE="$2"; shift 2 ;;
         --build-only)   BUILD_ONLY="$2"; shift 2 ;;
@@ -197,6 +206,14 @@ fi
 if (( SAMPLES < 10 )); then
     echo "Error: --samples is $SAMPLES; Criterion's floor is 10." >&2
     exit 1
+fi
+IFS=',' read -r -a VARIANTS <<< "$VARIANT_LIST"
+if [[ -z "$FROM_TSV" ]]; then
+    if (( ${#VARIANTS[@]} == 0 )) || [[ -n "$(printf '%s\n' "${VARIANTS[@]}" | grep -vx '[b-z]')" ]] ||
+       [[ -n "$(printf '%s\n' "${VARIANTS[@]}" | sort | uniq -d)" ]]; then
+        echo "Error: --variants is '$VARIANT_LIST'; name distinct letters b to z, comma separated." >&2
+        exit 1
+    fi
 fi
 
 cd "$PROJECT_DIR"
@@ -370,24 +387,31 @@ run_slot() {
 }
 
 # Rounds whose same-variant invocations disagree past the threshold on the
-# median row, as `round spread_percent`, from the raw table so far.
+# median row, as `round spread_percent`, from the raw table so far. A row's
+# spread in a round is the largest over its variants.
 disturbed_rounds() {
     awk -F'\t' -v col="$EST_COL" -v threshold="$THRESHOLD" '
         function abs(x) { return x < 0 ? -x : x }
         NF >= 6 && $1 > 0 {
             k = $1 SUBSEP $5 SUBSEP $3
             if (k in first) { second[k] = $col + 0 } else { first[k] = $col + 0 }
-            ids[$5] = 1
+            ids[$5] = 1; vs[$3] = 1
             if ($1 + 0 > rounds) { rounds = $1 + 0 }
         }
         END {
             for (r = 1; r <= rounds; r++) {
                 n = 0
                 for (id in ids) {
-                    ka = r SUBSEP id SUBSEP "a"; kb = r SUBSEP id SUBSEP "b"
-                    if (!(ka in second) || !(kb in second) || first[ka] <= 0 || first[kb] <= 0) { continue }
-                    a = abs(second[ka] / first[ka] - 1); b = abs(second[kb] / first[kb] - 1)
-                    x[++n] = 100 * (a > b ? a : b)
+                    worst = -1; pairs = 0
+                    for (v in vs) {
+                        kv = r SUBSEP id SUBSEP v
+                        if (!(kv in second) || first[kv] <= 0) { continue }
+                        s = abs(second[kv] / first[kv] - 1)
+                        if (s > worst) { worst = s }
+                        pairs++
+                    }
+                    if (pairs < 2) { continue }
+                    x[++n] = 100 * worst
                 }
                 for (i = 2; i <= n; i++) {
                     t = x[i]; j = i - 1
@@ -411,9 +435,12 @@ run_round() {
             LOADED_ROUNDS="${LOADED_ROUNDS}${LOADED_ROUNDS:+, }round $round at ${load}%"
         fi
     fi
-    if (( round % 2 == 1 )); then order=(a b b a); else order=(b a a b); fi
+    local fwd=() back=() i
+    for (( i = ${#VARIANTS[@]} - 1; i >= 0; i-- )); do back+=("${VARIANTS[i]}"); done
+    fwd=("${VARIANTS[@]}")
+    if (( round % 2 == 1 )); then order=(a "${fwd[@]}" "${back[@]}" a); else order=("${fwd[@]}" a a "${back[@]}"); fi
     echo ">>> round $round (${order[*]})"
-    for slot in 1 2 3 4; do
+    for (( slot = 1; slot <= ${#order[@]}; slot++ )); do
         run_slot "$round" "$slot" "${order[slot - 1]}"
     done
 }
@@ -428,7 +455,7 @@ disturbed_text() {
 # verdict and exits with the run's status; `decide` prints `stop` when every
 # verdict is settled under the early-stop rule and `go` otherwise.
 analyze() {
-    awk -v mode="$1" -v disturbed="$2" -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" \
+    awk -v mode="$1" -v disturbed="$2" -v var="${3:-b}" -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" \
         -v loaded="$LOADED_ROUNDS" -v light="${LIGHT:-0}" -v col="$EST_COL" \
         -v wide_ratio="$WIDE_CONTROL_EFFECT_RATIO" '
 BEGIN {
@@ -493,7 +520,7 @@ END {
         m = 0
         for (r = 1; r <= rounds; r++) {
             if (r in drop) { continue }
-            ka = id SEP r SEP "a"; kb = id SEP r SEP "b"
+            ka = id SEP r SEP "a"; kb = id SEP r SEP var
             if (cnt[ka] != 2 || cnt[kb] != 2 || sum[ka] <= 0 || sum[kb] <= 0) { continue }
             x[++m] = (sum[kb] / sum[ka] - 1) * 100
         }
@@ -524,15 +551,15 @@ END {
         exit 0
     }
 
-    print "| Benchmark | A | B | Change | 95% interval | Rounds | Verdict |"
+    print "| Benchmark | A | " toupper(var) " | Change | 95% interval | Rounds | Verdict |"
     print "| --- | ---: | ---: | ---: | :---: | ---: | --- |"
     compared = 0; ctl_rows = 0; wide_rows = 0
     for (i = 1; i <= n; i++) {
         id = order[i]
         if (!(id in done)) { continue }
-        na = vals[id SEP "a"]; nb = vals[id SEP "b"]
+        na = vals[id SEP "a"]; nb = vals[id SEP var]
         for (j = 1; j <= na; j++) { va[j] = all[id SEP "a" SEP j] }
-        for (j = 1; j <= nb; j++) { vb[j] = all[id SEP "b" SEP j] }
+        for (j = 1; j <= nb; j++) { vb[j] = all[id SEP var SEP j] }
         sort_n(va, na); sort_n(vb, nb)
         abs_a = median_of(va, na); abs_b = median_of(vb, nb)
 
@@ -572,8 +599,9 @@ END {
     }
 
     print ""
-    printf "A and B are the median of each variant over its invocations. Change is the median over\n"
-    printf "rounds of (B1 + B2) / (A1 + A2) - 1; the interval covers it with at least %.1f%%.\n", min_cov
+    V = toupper(var)
+    printf "A and %s are the median of each variant over its invocations. Change is the median over\n", V
+    printf "rounds of (%s1 + %s2) / (A1 + A2) - 1; the interval covers it with at least %.1f%%.\n", V, V, min_cov
     printf "%d filter row(s) and %d control row(s); widest filter interval %.1f points.\n",
         compared, ctl_rows, widest
     if (wide_rows > 0) {
@@ -630,6 +658,36 @@ END {
 ' "$RAW"
 }
 
+all_settled() {
+    local v
+    for v in "${VARIANTS[@]}"; do
+        [[ "$(analyze decide "$1" "$v")" == stop ]] || return 1
+    done
+}
+
+# One table and verdict per variant, then the run's verdict, the worst of them:
+# FAIL or NO DATA, then RERUN, then PASS.
+report_variants() {
+    local v section status verdict rank worst_rank=0 worst_word="" worst_status=0 summary=""
+    for v in "${VARIANTS[@]}"; do
+        echo "### Variant $v against a"
+        echo ""
+        section="$(analyze report "$DISTURBED" "$v")"
+        status=$?
+        verdict="$(grep -m1 -oE '^\*\*Regression verdict\*\*: [A-Z ]+' <<< "$section" | sed 's/.*: //; s/[ .]*$//')"
+        printf '%s\n\n' "${section/'**Regression verdict**'/**Variant $v verdict**}"
+        case "$verdict" in
+            FAIL) rank=4 ;; "NO DATA") rank=3 ;; RERUN) rank=2 ;; *) rank=1 ;;
+        esac
+        if (( rank > worst_rank )); then
+            worst_rank="$rank"; worst_word="$verdict"; worst_status="$status"
+        fi
+        summary+="${summary:+, }$v $verdict"
+    done
+    echo "**Regression verdict**: $worst_word. Each variant against a: $summary."
+    return "$worst_status"
+}
+
 # --- Measure ---
 
 LOADED_ROUNDS=""
@@ -658,18 +716,17 @@ if [[ -z "$FROM_TSV" ]]; then
     [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]] && COMMIT="$COMMIT with uncommitted changes"
 
     echo ">>> smoke test: every row once per variant in Criterion's test mode"
-    smoke_test a
-    smoke_test b
+    for v in a "${VARIANTS[@]}"; do smoke_test "$v"; done
     echo ""
 
     preflight
     echo ">>> warmup: one discarded invocation per variant"
     warm_start="$(date +%s)"
-    run_slot 0 1 a
-    run_slot 0 2 b
+    slot=0
+    for v in a "${VARIANTS[@]}"; do slot=$(( slot + 1 )); run_slot 0 "$slot" "$v"; done
     : > "$RAW"
-    per_slot=$(( ($(date +%s) - warm_start + 1) / 2 ))
-    printf '>>> projected: about %d min for %d rounds\n\n' $(( (per_slot * 4 + 2) * ROUNDS / 60 + 1 )) "$ROUNDS"
+    per_slot=$(( ($(date +%s) - warm_start + 1) / slot ))
+    printf '>>> projected: about %d min for %d rounds\n\n' $(( (per_slot * 2 * slot + 2) * ROUNDS / 60 + 1 )) "$ROUNDS"
 
     round=1
     while :; do
@@ -677,7 +734,7 @@ if [[ -z "$FROM_TSV" ]]; then
         disturbed="$(disturbed_text)"
         undisturbed=$(( round - $(wc -w <<< "$disturbed") ))
         (( undisturbed < ROUNDS && round < ROUNDS + ROUNDS / 2 )) || break
-        if [[ -z "$NO_EARLY_STOP" ]] && (( undisturbed >= 6 )) && [[ "$(analyze decide "$disturbed")" == stop ]]; then
+        if [[ -z "$NO_EARLY_STOP" ]] && (( undisturbed >= 6 )) && all_settled "$disturbed"; then
             STOPPED_EARLY="$undisturbed"
             echo ">>> every verdict settled after $undisturbed undisturbed round(s); stopping early"
             break
@@ -690,6 +747,7 @@ if [[ -z "$FROM_TSV" ]]; then
 else
     [[ -f "$FROM_TSV" ]] || { echo "Error: --from-tsv '$FROM_TSV' does not exist." >&2; exit 1; }
     awk -F'\t' 'NF >= 6' "$FROM_TSV" > "$RAW"
+    IFS=',' read -r -a VARIANTS <<< "$(awk -F'\t' '$3 != "a" { print $3 }' "$RAW" | sort -u | paste -sd, -)"
     LOADED_ROUNDS="$(awk -F'\t' '$1 == "#loaded" { print $2 }' "$FROM_TSV")"
     PROVENANCE="from tsv"; COMMIT="from tsv"; WALL="from tsv"
     ROUNDS="$(awk -F'\t' '$1 > m { m = $1 } END { print m + 0 }' "$RAW")"
@@ -717,7 +775,11 @@ set +e
     echo "| Filter | \`${FILTER:-from tsv}\` |"
     [[ -n "$CONTROL_FILTER" ]] && echo "| Control filter | \`$CONTROL_FILTER\` |"
     echo "| Binary | $PROVENANCE, commit $COMMIT |"
-    echo "| Variants | a and b of \`PRISM_BENCH_VARIANT\`, one process per invocation |"
+    if (( ${#VARIANTS[@]} == 1 )); then
+        echo "| Variants | a and ${VARIANTS[0]} of \`PRISM_BENCH_VARIANT\`, one process per invocation |"
+    else
+        echo "| Variants | a against each of $(IFS=,; echo "${VARIANTS[*]}" | sed 's/,/, /g') of \`PRISM_BENCH_VARIANT\`, one process per invocation |"
+    fi
     echo "| Features | \`$FEATURES\` |"
     echo "| Tier | $TIER |"
     echo "| Rounds | $ROUNDS_RUN run toward $ROUNDS undisturbed, A B B A then B A A B, after one discarded invocation per variant |"
@@ -743,7 +805,11 @@ set +e
     echo "| Wall time | $WALL |"
     echo "| Threshold | ${THRESHOLD}% |"
     echo ""
-    analyze report "$DISTURBED"
+    if (( ${#VARIANTS[@]} == 1 )); then
+        analyze report "$DISTURBED" "${VARIANTS[0]}"
+    else
+        report_variants
+    fi
 } > "$OUT"
 STATUS=$?
 set -e

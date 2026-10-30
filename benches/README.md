@@ -487,6 +487,14 @@ if crate::bench_variant_b() {
 a circuit or a pass is chosen, never inside a gate kernel's loop. Bench code can call
 `prism_q::bench_variant_b()` too.
 
+Several changes can share one build. Give each its own letter through
+`bench_variant('c')`, `bench_variant('d')`, and so on, and pass `--variants b,c,d`. Each
+round then runs `a b c d d c b a` in odd rounds and `b c d a a d c b` in even ones, which
+keeps every variant at the same mean position, so linear drift cancels in each
+comparison with `a`. The report holds one table and verdict per variant, and the run's
+verdict is the worst of them. Each extra variant adds two invocations to every round,
+so keep a run to about three.
+
 ```bash
 ./scripts/bench_interleave.sh -f '^statevector/random_d10/(12|16|20)$' -c '^mps/random_d10/16$'
 ./scripts/bench_interleave.sh -f '^sparse/' --light                     # triage
@@ -524,6 +532,32 @@ Use `bench_ab.sh` for anything a switch cannot express: a change spread across m
 sites, a data layout change, a dependency or toolchain bump, or a comparison against
 another commit. A queue step `ix NAME DIR [options]` runs the interleaved runner from
 `bench_queue.sh`, building its one binary in the build phase.
+
+## Batches of branches: one combined A/B
+
+`scripts/bench_batch.sh` merges several branches onto one base in a throwaway checkout
+and A/Bs its tip against the base on the union of their rows, through the queue. One
+build and one measurement then stand in for one A/B per branch. A batch file names a
+branch, a bench target, the rows that cover it, and optionally control rows, per line:
+
+```text
+perf/fused2q-pairs  circuits          ^statevector/(qft_textbook|qv)/20$
+perf/mps-center     circuits          ^mps/random_d10/16$  ^product/scaling_d10/64$
+perf/qec-walk       bench_shots_perf  ^qec_detector_sampling/surf_p001_drop/5$
+```
+
+```bash
+./scripts/bench_batch.sh batch.txt -- --light --escalate          # merge, print the plan
+./scripts/bench_batch.sh --schedule batch.txt                      # merge and run detached
+./scripts/bench_batch.sh --only 1,2 --schedule batch.txt           # bisect a FAIL by halves
+```
+
+A PASS clears every branch in the batch. A FAIL names rows rather than branches, so run
+each half with `--only` to find the branch, about log2(N) more A/Bs. A speedup in one
+branch can hide a regression in another on a row both reach, so batch branches whose
+changes touch separate code, and give a branch its own A/B when its deterministic counts
+moved on a row another branch also changes. A claimed speedup can come from a batch only
+when the claimed rows run code no other branch in it touches.
 
 ## Knob sweeps on other hardware
 

@@ -95,7 +95,7 @@ pub use distributed::MpiComm;
 #[cfg(feature = "distributed")]
 pub use distributed::{DistributedContext, RankComm, SerialComm};
 #[cfg(feature = "bench-internal")]
-pub use env_knobs::bench_variant_b;
+pub use env_knobs::{bench_variant, bench_variant_b};
 pub use error::{PrismError, ResourceKind, ResourceLimit, Result};
 pub use gates::{
     BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData, UnitaryData,

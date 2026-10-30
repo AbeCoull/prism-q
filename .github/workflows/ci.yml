@@ -518,6 +518,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Verify that only a valid second run clears a FAIL
         run: bash scripts/bench_ci_test.sh
+      - name: Verify queue retries, build-only, and the build lock wait
+        run: bash scripts/bench_queue_test.sh
 
   # Compares the public API against the last release, at the release type the
   # conventional commits since it imply before the pre-1.0 clamp, with the PR

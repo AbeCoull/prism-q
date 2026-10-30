@@ -64,6 +64,27 @@ bench_lock_acquire() {
     return 0
 }
 
+# Wait while a live process other than a parent holds the marker, polling every
+# 30 seconds for at most $2 seconds. $1 is a checkout on the host. Returns 1 when
+# the marker is still held at the limit. A build waits here, since cargo on the
+# host is exactly what a measurement in progress must not see.
+bench_lock_wait() {
+    local dir="$1" limit="$2" waited=0 lock pid
+    [[ -n "${PRISM_BENCH_LOCK_HELD:-}" ]] && return 0
+    lock="$(bench_lock_path "$dir")"
+    while [[ -f "$lock" ]]; do
+        pid="$(awk '/^pid: / { print $2; exit }' "$lock")"
+        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        (( waited >= limit )) && return 1
+        (( waited == 0 )) && echo ">>> waiting for the measurement holding $lock (pid $pid) to finish"
+        sleep 30
+        waited=$((waited + 30))
+    done
+    return 0
+}
+
 # Remove the marker this process wrote. One that another process has since
 # taken under --force-lock is left to that process.
 bench_lock_release() {

@@ -24,17 +24,22 @@
 #      one build of it, and a later queue reuses whatever is cached. A step whose
 #      checkout has uncommitted changes is keyed on those changes as well. An
 #      interleaved step builds only its checkout, by default with
-#      "parallel bench-internal".
+#      "parallel bench-internal". The phase first waits, up to --wait-idle, for
+#      any other live holder of the MEASURING marker to finish, because a build
+#      is what a measurement in progress must not see.
 #   3. Measure. Each step runs in turn with no build in between. An A/B runs
 #      against its cached binaries with --wait-idle, so it starts once the host
 #      settles rather than failing on a busy one; an interleaved step runs its
-#      one binary through bench_interleave.sh --exe the same way. The phase
+#      one binary through bench_interleave.sh --exe the same way. A step that
+#      exits RERUN runs again against the same binaries, up to --retries times,
+#      and the reports of each earlier attempt move to NAME-tryN/. The phase
 #      holds the MEASURING marker (see bench_lock.sh): written before the first
 #      step, removed at ALLDONE or on any other exit, and refused while another
 #      live process holds it.
 #
 # Progress goes to a status file, one START and one END line per step with its
-# exit code, then ALLDONE. Each step logs in full to its own file; nothing is
+# exit code, a RETRY line per repeated attempt, then ALLDONE. Each step logs in
+# full to its own file; nothing is
 # piped through tail, since a buffered pipe makes a live step and a dead one
 # look the same. A SIGINT or SIGTERM to the queue's pid ends the running step,
 # removes the marker, and writes STOPPED to the status file.
@@ -48,7 +53,11 @@
 #                   a terminal session dies with that session's job object even
 #                   under nohup; elsewhere it uses setsid and nohup.
 #   --dry-run       print the plan and which builds are cached, then stop
-#   --out DIR       reports, logs, and the status file (default bench_results/queue-<stamp>)
+#   --build-only    fill the cache for every step, then stop before measuring
+#   --retries N     times a step that exits RERUN runs again (default 2, 0 disables).
+#                   A RERUN says the host or a lane moved, not the change, so the
+#                   same binaries on a later attempt answer it without a rebuild.
+#   --out DIR      reports, logs, and the status file (default bench_results/queue-<stamp>)
 #   --cache DIR     binary cache (default bench_results/bin)
 #   --ref-root DIR  where reference worktrees live (default: next to the repository)
 #   --wait-idle S   seconds each A/B waits for an idle host (default 3600)
@@ -74,6 +83,8 @@ source "$SCRIPT_DIR/bench_lock.sh"
 
 SCHEDULE=""
 DRY_RUN=""
+BUILD_ONLY=""
+RETRIES=2
 OUT_DIR=""
 CACHE_DIR=""
 REF_ROOT=""
@@ -86,7 +97,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --schedule)  SCHEDULE=1; shift ;;
         --dry-run)   DRY_RUN=1; shift ;;
-        --out)       OUT_DIR="$2"; shift 2 ;;
+        --build-only) BUILD_ONLY=1; shift ;;
+        --retries)   RETRIES="$2"; shift 2 ;;
+        --out)      OUT_DIR="$2"; shift 2 ;;
         --cache)     CACHE_DIR="$2"; shift 2 ;;
         --ref-root)  REF_ROOT="$2"; shift 2 ;;
         --wait-idle) WAIT_IDLE="$2"; shift 2 ;;
@@ -120,7 +133,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 if [[ -n "$SCHEDULE" ]]; then
     args=(--out "$OUT_DIR" --cache "$CACHE_DIR" --ref-root "$REF_ROOT" --wait-idle "$WAIT_IDLE"
-          --task-name "$TASK_NAME" ${FORCE_LOCK:+--force-lock} "$QUEUE_FILE")
+          --retries "$RETRIES" --task-name "$TASK_NAME" ${FORCE_LOCK:+--force-lock}
+          ${BUILD_ONLY:+--build-only} "$QUEUE_FILE")
     if command -v schtasks >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
         task="$TASK_NAME"
         runner="$OUT_DIR/run.sh"
@@ -307,6 +321,11 @@ build_into() {
     mv "$exe.tmp" "$exe"
 }
 
+if [[ -z "$FORCE_LOCK" ]] && ! bench_lock_wait "$PROJECT_DIR" "$WAIT_IDLE"; then
+    mark "LOCKED"
+    exit 1
+fi
+
 mark "START build"
 build_failed=0
 for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
@@ -331,6 +350,11 @@ for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
 done
 mark "END build failed=$build_failed"
 
+if [[ -n "$BUILD_ONLY" ]]; then
+    mark "ALLDONE"
+    exit "$build_failed"
+fi
+
 # --- Measure ---
 
 # Every step inherits PRISM_BENCH_LOCK_HELD from here, so none writes a marker
@@ -340,30 +364,49 @@ if ! bench_lock_acquire "$PROJECT_DIR" bench_queue.sh "$TASK_NAME" "$OUT_DIR" "$
     exit 1
 fi
 
-any_failed=0
-for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
-    name="${STEP_NAME[s]}"
+# One attempt at step $1 against its cached binaries.
+measure_step() {
+    local s="$1" name="${STEP_NAME[$1]}"
     split_args "${STEP_ARGS[s]}"
-    mark "START $name"
     if [[ "${STEP_KIND[s]}" == ab ]]; then
-        if [[ ! -f "${NEW_EXE_OF[s]}" || ! -f "${REF_EXE_OF[s]}" ]]; then
-            mark "END $name exit=build-failed"; any_failed=1; continue
-        fi
         run_step "$OUT_DIR/$name.log" bash "$BENCH_AB" --project-dir "${STEP_DIR[s]}" "${SPLIT[@]}" \
             --new-exe "${NEW_EXE_OF[s]}" --ref-exe "${REF_EXE_OF[s]}" \
             --wait-idle "$WAIT_IDLE" --out "$OUT_DIR/$name.md"
-        status=$?
     elif [[ "${STEP_KIND[s]}" == ix ]]; then
-        if [[ ! -f "${NEW_EXE_OF[s]}" ]]; then
-            mark "END $name exit=build-failed"; any_failed=1; continue
-        fi
         run_step "$OUT_DIR/$name.log" bash "$BENCH_IX" --project-dir "${STEP_DIR[s]}" "${SPLIT[@]}" \
             --exe "${NEW_EXE_OF[s]}" --wait-idle "$WAIT_IDLE" --out "$OUT_DIR/$name.md"
-        status=$?
     else
         run_step "$OUT_DIR/$name.log" run_in "${STEP_DIR[s]}" "${SPLIT[@]}"
-        status=$?
     fi
+}
+
+# Move attempt $2 of step $1 aside, so the next attempt writes the usual names and
+# the summary below reads the last one.
+keep_attempt() {
+    local name="$1" dir="$OUT_DIR/$1-try$2" f
+    mkdir -p "$dir"
+    for f in "$name.md" "$name.log" "$name.tsv" "$name-confirm.md" "$name-escalate.md"; do
+        [[ -f "$OUT_DIR/$f" ]] && mv "$OUT_DIR/$f" "$dir/"
+    done
+}
+
+any_failed=0
+for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
+    name="${STEP_NAME[s]}"
+    mark "START $name"
+    if [[ "${STEP_KIND[s]}" != run && ( ! -f "${NEW_EXE_OF[s]}" ||
+          ( "${STEP_KIND[s]}" == ab && ! -f "${REF_EXE_OF[s]}" ) ) ]]; then
+        mark "END $name exit=build-failed"; any_failed=1; continue
+    fi
+    attempt=1
+    while :; do
+        measure_step "$s"
+        status=$?
+        [[ "${STEP_KIND[s]}" != run ]] && (( status == 3 && attempt <= RETRIES )) || break
+        keep_attempt "$name" "$attempt"
+        attempt=$((attempt + 1))
+        mark "RETRY $name attempt $attempt after exit=3"
+    done
     (( status == 0 )) || any_failed=1
     mark "END $name exit=$status"
 done
@@ -378,7 +421,9 @@ mark "ALLDONE"
         if [[ -f "$OUT_DIR/$name.md" ]]; then
             verdict="$(grep -m1 -E '^\*\*Regression verdict' "$OUT_DIR/$name.md")"
             final="$(grep -E '^\*\*Final verdict' "$OUT_DIR/$name.md" | tail -1)"
-            printf '%s: %s\n' "$name" "${final:-$verdict}"
+            tries=""
+            [[ -d "$OUT_DIR/$name-try1" ]] && tries=" ($(find "$OUT_DIR" -maxdepth 1 -name "$name-try*" | wc -l) earlier RERUN attempts in $name-tryN/)"
+            printf '%s: %s%s\n' "$name" "${final:-$verdict}" "$tries"
         elif [[ -f "$OUT_DIR/$name.log" ]] && grep -q '^Error: smoke test failed' "$OUT_DIR/$name.log"; then
             printf '%s: %s\n' "$name" "$(grep -m1 '^Error: smoke test failed' "$OUT_DIR/$name.log")"
         fi

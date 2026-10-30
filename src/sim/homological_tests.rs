@@ -125,6 +125,87 @@ fn boundary_independent_bell_pairs() {
 }
 
 #[test]
+fn boundary_reset_returns_the_qubit_to_zero() {
+    let mut circuit = crate::circuit::Circuit::new(1, 1);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    circuit.add_reset(0);
+    circuit.add_measure(0, 0);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    let ecc = ErrorChainComplex::build(&circuit, &noise, 42).unwrap();
+    assert_eq!((ecc.boundary_dim(), ecc.homology_dim()), (1, 0));
+}
+
+#[test]
+fn boundary_reset_of_a_bell_half_leaves_its_partner_mixed() {
+    let mut circuit = crate::circuit::Circuit::new(2, 2);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    circuit.add_gate(crate::gates::Gate::Cx, &[0, 1]);
+    circuit.add_reset(0);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    let ecc = ErrorChainComplex::build(&circuit, &noise, 42).unwrap();
+    // Z on q1 commutes with the mixed state, so no Z-type error is logical.
+    assert_eq!((ecc.boundary_dim(), ecc.homology_dim()), (2, 0));
+}
+
+#[test]
+fn boundary_mid_circuit_measurement_collapses_its_qubit() {
+    let mut circuit = crate::circuit::Circuit::new(1, 2);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    circuit.add_measure(0, 1);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    let ecc = ErrorChainComplex::build(&circuit, &noise, 42).unwrap();
+    // The state ends in an X eigenstate, so a Z error flips it and no Z readout sees it.
+    assert_eq!((ecc.boundary_dim(), ecc.homology_dim()), (0, 1));
+}
+
+#[test]
+fn boundary_z_readout_after_a_mixed_reset_counts_again() {
+    for reset_q1 in [true, false] {
+        let mut circuit = crate::circuit::Circuit::new(2, 3);
+        circuit.add_gate(crate::gates::Gate::H, &[0]);
+        circuit.add_gate(crate::gates::Gate::Cx, &[0, 1]);
+        circuit.add_reset(0);
+        if reset_q1 {
+            circuit.add_reset(1);
+        } else {
+            circuit.add_measure(1, 2);
+        }
+        circuit.add_gate(crate::gates::Gate::H, &[1]);
+        circuit.add_measure(0, 0);
+        circuit.add_measure(1, 1);
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        let ecc = ErrorChainComplex::build(&circuit, &noise, 42).unwrap();
+        // q1 ends in an X eigenstate, so a Z error on it is logical.
+        assert_eq!(
+            (ecc.boundary_dim(), ecc.homology_dim()),
+            (1, 1),
+            "reset_q1={reset_q1}"
+        );
+    }
+}
+
+#[test]
+fn boundary_counts_a_circuit_with_no_final_measurement() {
+    let mut circuit = crate::circuit::Circuit::new(1, 1);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    let ecc = ErrorChainComplex::build(&circuit, &noise, 42).unwrap();
+    assert_eq!((ecc.boundary_dim(), ecc.homology_dim()), (1, 1));
+
+    let mut unmeasured = crate::circuit::Circuit::new(2, 0);
+    unmeasured.add_gate(crate::gates::Gate::H, &[0]);
+    let noise = NoiseModel::uniform_depolarizing(&unmeasured, 0.001);
+    let ecc = ErrorChainComplex::build(&unmeasured, &noise, 42).unwrap();
+    assert_eq!((ecc.boundary_dim(), ecc.homology_dim()), (2, 2));
+}
+
+#[test]
 fn boundary_partial_measurement() {
     let mut circuit = crate::circuit::Circuit::new(3, 1);
     circuit.add_gate(crate::gates::Gate::H, &[0]);

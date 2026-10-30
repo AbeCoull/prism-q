@@ -1348,6 +1348,38 @@ fn qec_repeat_text(program: impl Fn(usize) -> QecProgram, rounds: usize) -> Stri
     text
 }
 
+/// One shot at a time from a compiled distance-`d` memory at p = 1e-3, on the parity
+/// route and, with measurements kept, the record route, so the per-call cost of walking
+/// every noise event dominates.
+fn bench_qec_sample_one_shot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_sample_one_shot");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    let noise = QecCircuitNoise::uniform(0.001);
+    for distance in [5, 25] {
+        let surface = QecProgram::surface_memory(distance, distance, QecBasis::Z, &noise).unwrap();
+        let color = QecProgram::color_memory(distance, distance, QecBasis::Z, &noise).unwrap();
+        for (label, base, keep) in [
+            ("surface_z_p001", &surface, false),
+            ("color_z_p001", &color, false),
+            ("surface_z_p001_keep", &surface, true),
+        ] {
+            let mut program = base.clone();
+            program.set_options(QecOptions {
+                keep_measurements: keep,
+                ..base.options()
+            });
+            let mut sampler = program.compile_sampler().unwrap();
+            group.bench_function(BenchmarkId::new(label, distance), |b| {
+                b.iter(|| black_box(sampler.sample(1, None).unwrap()));
+            });
+        }
+    }
+    group.finish();
+}
+
 fn bench_qec_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_parse");
     group.sample_size(10);
@@ -1454,6 +1486,7 @@ criterion_group! {
     bench_qec_erasure_runner,
     bench_qec_feedforward_runner,
     bench_qec_chunked_noise,
+    bench_qec_sample_one_shot,
     bench_qec_postselection,
     bench_qec_parse,
     bench_qec_compile

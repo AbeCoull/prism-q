@@ -873,6 +873,40 @@ fn bench_stab_bts_marginals_cpu_vs_gpu(c: &mut Criterion) {
     }
 }
 
+/// Device counts under the `noisy_sampling/compiled_readout` noise model: noise and
+/// readout flips land in the device record before the count reduction. The
+/// `compiled_readout` circuit compiles too sparse for the GPU BTS weight floor, so the
+/// fixture is a 100-qubit parity fan: 50 H sources, each other qubit the parity of
+/// four. One million shots clears the BTS shot floor.
+fn bench_gpu_noisy_readout_counts(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+
+    let mut circuit = Circuit::new(100, 100);
+    for q in 0..50 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 50..100 {
+        for k in 0..4 {
+            circuit.add_gate(Gate::Cx, &[(q - 50 + k) % 50, q]);
+        }
+    }
+    circuit.measure_all();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    noise.with_readout_error(0.02, 0.05);
+
+    let mut group = c.benchmark_group("noisy_sampling");
+    configure_group(&mut group);
+    group.bench_function(BenchmarkId::new("gpu_readout", "parity_fan_100q_1m"), |b| {
+        b.iter(|| {
+            let mut sampler = prism_q::compile_noisy(&circuit, &noise, SEED)
+                .unwrap()
+                .with_gpu(ctx.clone());
+            black_box(sampler.try_sample_counts(1_000_000).unwrap());
+        });
+    });
+    group.finish();
+}
+
 /// Explicit device counts over a low-rank, wide-measurement workload.
 /// This exercises `sample_bulk_packed_device().counts()` where the compacted
 /// `(bitstring, count)` output is far smaller than the full packed shot matrix.
@@ -1297,6 +1331,7 @@ criterion_group! {
     bench_stab_bts_cpu_vs_gpu,
     bench_stab_bts_packed_cpu_vs_gpu,
     bench_stab_bts_marginals_cpu_vs_gpu,
+    bench_gpu_noisy_readout_counts,
     bench_stab_bts_device_counts_explicit,
     bench_stab_gpu_shots_explicit,
     bench_gpu_dm_noisy_channels,

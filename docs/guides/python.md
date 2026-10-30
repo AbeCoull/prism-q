@@ -413,6 +413,7 @@ print(result.metadata.is_exact)              # True
 print(result.metadata.fidelity_lower_bound)  # None when exact
 print(result.metadata.placement)             # 'host' or 'device'
 print(result.metadata.bond)                  # None unless the MPS ran
+print(result.metadata.blocks)                # per-block engines when 'Decomposed'
 ```
 
 `is_exact` is False when the engine that ran can discard state weight or

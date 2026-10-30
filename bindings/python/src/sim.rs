@@ -803,6 +803,17 @@ impl PyRunMetadata {
         self.inner.bond.map(|inner| PyBondReport { inner })
     }
 
+    /// Engine name per independent block, ordered by each block's lowest
+    /// qubit, when `backend` is `"Decomposed"`; empty otherwise.
+    #[getter]
+    fn blocks(&self) -> Vec<String> {
+        self.inner
+            .blocks
+            .iter()
+            .map(|backend| format!("{backend:?}"))
+            .collect()
+    }
+
     fn __repr__(&self) -> String {
         let exact = match self.inner.exactness {
             Exactness::Exact => "exact".to_string(),

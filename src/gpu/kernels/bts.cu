@@ -480,6 +480,60 @@ extern "C" __global__ void bts_generate_and_apply_noise_meas_major_by_row(
     meas_major[idx] ^= acc;
 }
 
+// Readout error on the measurement-major record, after the reference bits and
+// noise are in. One thread per (readout entry, 64-shot batch). Each entry is
+// three u64s: the record row, then the p01 and p10 thresholds scaled to 2^64.
+// One draw per shot serves both rates, since the live bit selects which one
+// applies. The stream seed mirrors the noise kernel's, with the entry index in
+// place of the event. Rows are distinct per entry, so no two threads share a
+// word.
+extern "C" __global__ void bts_apply_readout_meas_major(
+    unsigned long long *meas_major,
+    int s_words,
+    const unsigned long long *readout,
+    int num_entries,
+    unsigned int batch_block_base,
+    unsigned long long tail_mask,
+    unsigned long long master_seed
+) {
+    int entry = blockIdx.x;
+    int batch = (int)(batch_block_base + blockIdx.y) * blockDim.x + threadIdx.x;
+    if (entry >= num_entries || batch >= s_words) return;
+
+    unsigned long long row = readout[(unsigned long long)entry * 3ULL + 0ULL];
+    unsigned long long t01 = readout[(unsigned long long)entry * 3ULL + 1ULL];
+    unsigned long long t10 = readout[(unsigned long long)entry * 3ULL + 2ULL];
+
+    unsigned long long seed = master_seed
+        ^ ((unsigned long long)entry * 0x9e3779b97f4a7c15ULL)
+        ^ bts_splitmix64_step((unsigned long long)batch);
+    unsigned long long s0 = bts_splitmix64_step(seed);
+    unsigned long long s1 = bts_splitmix64_step(s0);
+    unsigned long long s2 = bts_splitmix64_step(s1);
+    unsigned long long s3 = bts_splitmix64_step(s2);
+
+    unsigned long long idx = row * (unsigned long long)s_words + (unsigned long long)batch;
+    unsigned long long word = meas_major[idx];
+    unsigned long long flips = 0ULL;
+    #pragma unroll 8
+    for (int bit = 0; bit < 64; ++bit) {
+        unsigned long long result = bts_rotl64(s0 + s3, 23) + s0;
+        unsigned long long t = s1 << 17;
+        s2 ^= s0;
+        s3 ^= s1;
+        s1 ^= s2;
+        s0 ^= s3;
+        s2 ^= t;
+        s3 = bts_rotl64(s3, 45);
+
+        unsigned long long threshold = ((word >> bit) & 1ULL) ? t10 : t01;
+        if (result < threshold) flips |= 1ULL << bit;
+    }
+
+    if (batch == s_words - 1) flips &= tail_mask;
+    if (flips != 0ULL) meas_major[idx] = word ^ flips;
+}
+
 extern "C" __global__ void bts_apply_noise_masks_meas_major(
     unsigned long long *meas_major,
     int num_meas,

@@ -709,6 +709,62 @@ pub(crate) fn apply_noise_masks_meas_major(
     Ok(())
 }
 
+/// Flip readout error into a measurement-major record of `num_shots` shots, one
+/// thread per (entry, 64-shot batch). `readout` holds three `u64`s per entry: the
+/// record row, then the `p01` and `p10` thresholds scaled to `2^64`. Rows must be
+/// distinct and below the record's row count.
+pub(crate) fn apply_readout_meas_major(
+    ctx: &GpuContext,
+    meas_major: &mut GpuBuffer<u64>,
+    num_shots: usize,
+    readout: &GpuBuffer<u64>,
+    num_entries: usize,
+    master_seed: u64,
+) -> Result<()> {
+    let s_words = num_shots.div_ceil(64);
+    if s_words == 0 || num_entries == 0 {
+        return Ok(());
+    }
+
+    let (stream, func) = stream_and_fn(ctx, "bts_apply_readout_meas_major")?;
+    let s_words_i = require_i32("bts_apply_readout_meas_major", "s_words", s_words)?;
+    let num_entries_i = require_i32("bts_apply_readout_meas_major", "num_entries", num_entries)?;
+    let entries_grid = require_u32("bts_apply_readout_meas_major", "num_entries", num_entries)?;
+    let block_threads = noise_block_threads(s_words);
+    let batch_blocks = div_ceil_grid(
+        "bts_apply_readout_meas_major",
+        "s_words",
+        s_words,
+        block_threads,
+    )?;
+    let tail_mask = shot_tail_mask(num_shots);
+
+    for (block_base, launch_blocks) in super::grid_y_tiles(batch_blocks) {
+        let cfg = LaunchConfig {
+            grid_dim: (entries_grid, launch_blocks, 1),
+            block_dim: (block_threads, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut builder = stream.launch_builder(&func);
+        builder
+            .arg(meas_major.raw_mut())
+            .arg(&s_words_i)
+            .arg(readout.raw())
+            .arg(&num_entries_i)
+            .arg(&block_base)
+            .arg(&tail_mask)
+            .arg(&master_seed);
+        // SAFETY: signature matches the kernel. The launches cover every (entry,
+        // batch) pair once and entries name distinct rows, so each thread owns one word.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| driver_err("bts_apply_readout_meas_major", e))?;
+        }
+    }
+    Ok(())
+}
+
 /// Sample `num_shots` BTS shots in shot-major layout, `num_shots * m_words` words,
 /// transposing on device instead of through the host `into_shot_major_data()`.
 pub(crate) fn launch_bts_sample_shot_major_host(

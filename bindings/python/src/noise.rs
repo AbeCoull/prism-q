@@ -629,7 +629,7 @@ impl PyErrorChainComplex {
         })
     }
 
-    /// Stabilizer generators no measurement detects.
+    /// Independent errors that leave the state unchanged and no final measurement detects.
     #[getter]
     fn boundary_dim(&self) -> usize {
         self.inner.boundary_dim()

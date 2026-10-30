@@ -1043,8 +1043,9 @@ logical_classes = ErrorChainComplex(ghz, model).homology_dim
 classical bit reads 1 under Pauli noise, with no sampling and no rank limit.
 `ErrorChainComplex(circuit, model)` exposes the GF(2) chain complex behind it:
 `homology_dim` counts the independent logical error classes, `boundary_dim` the
-stabilizer generators no measurement detects, and `noisy_marginals(noiseless)` maps
-noiseless record marginals to noisy ones.
+independent errors that leave the state unchanged and that no final measurement
+detects, and `noisy_marginals(noiseless)` maps noiseless record marginals to noisy
+ones.
 
 ## Parameter sweeps
 

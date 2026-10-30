@@ -112,7 +112,7 @@ for (( i = 0; i < ${#BRANCHES[@]}; i++ )); do
     b="${BRANCHES[i]}"
     [[ "$merged" == *" $b "* ]] && continue
     merged+="$b "
-    if ! git -C "$DIR" merge -q --no-ff --no-edit -m "batch: $b" "$b" > /dev/null 2>&1; then
+    if ! git -C "$DIR" merge -q --no-ff --no-verify --no-edit -m "batch: $b" "$b" > /dev/null 2>&1; then
         echo "Error: $b conflicts with the branches merged before it:" >&2
         git -C "$DIR" diff --name-only --diff-filter=U | sed 's/^/    /' >&2
         git -C "$DIR" merge --abort

@@ -49,6 +49,12 @@ cargo doc --no-deps --features "parallel gpu distributed"
 These run on any host: the `gpu` and `distributed` features build without a CUDA toolkit
 or MPI.
 
+Before opening a pull request, `scripts/pre_pr.sh` reads the branch's diff against
+`origin/main` and runs the gate at `parallel` plus the checks CI runs that the gate
+above misses for that diff: the doc build, the public API snapshot, semver, the Python
+parity manifest, `--no-default-features` and cross-target clippy. `--plan` lists what it
+would run and why.
+
 `--all-features` adds `distributed-mpi`, which needs a system MPI installation and
 libclang for its bindgen step. Run it when a change touches the MPI surface or the
 `Cargo.toml` feature wiring. On Windows, dot-source `scripts/mpi-env.ps1` first

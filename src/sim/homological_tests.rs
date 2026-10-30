@@ -374,3 +374,62 @@ fn a_guarded_pauli_is_rejected() {
         "{err:?}"
     );
 }
+
+fn flipped_before(
+    then: impl FnOnce(&mut crate::circuit::Circuit),
+) -> (crate::circuit::Circuit, NoiseModel) {
+    let mut circuit = crate::circuit::Circuit::new(1, 1);
+    circuit.add_gate(crate::gates::Gate::Id, &[0]);
+    then(&mut circuit);
+    circuit.add_measure(0, 0);
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.after_gate.iter_mut().for_each(Vec::clear);
+    noise.after_gate[0].push(crate::sim::noise::NoiseEvent::pauli(0, 0.1, 0.0, 0.0));
+    (circuit, noise)
+}
+
+#[test]
+fn a_reset_discards_an_earlier_flip() {
+    let (circuit, noise) = flipped_before(|c| c.add_reset(0));
+    let ecc = ErrorChainComplex::build(&circuit, &noise, 42).unwrap();
+    assert_eq!(ecc.noisy_marginals(&[0.0]), vec![0.0]);
+}
+
+#[test]
+fn a_flip_after_a_reset_still_counts() {
+    let (circuit, mut noise) = flipped_before(|c| c.add_reset(0));
+    noise.after_gate.swap(0, 1);
+    let ecc = ErrorChainComplex::build(&circuit, &noise, 42).unwrap();
+    assert!((ecc.noisy_marginals(&[0.0])[0] - 0.1).abs() < 1e-12);
+}
+
+#[test]
+fn a_non_clifford_gate_is_rejected() {
+    let (circuit, noise) = flipped_before(|c| {
+        c.add_gate(crate::gates::Gate::H, &[0]);
+        c.add_gate(crate::gates::Gate::T, &[0]);
+        c.add_gate(crate::gates::Gate::H, &[0]);
+    });
+    let err = ErrorChainComplex::build(&circuit, &noise, 42).err();
+    assert!(
+        matches!(
+            err,
+            Some(crate::error::PrismError::IncompatibleBackend { .. })
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_non_pauli_channel_is_rejected_by_the_build() {
+    let (circuit, _) = flipped_before(|_| {});
+    let noise = NoiseModel::with_amplitude_damping(&circuit, 0.1);
+    let err = ErrorChainComplex::build(&circuit, &noise, 42).err();
+    assert!(
+        matches!(
+            err,
+            Some(crate::error::PrismError::IncompatibleBackend { .. })
+        ),
+        "{err:?}"
+    );
+}

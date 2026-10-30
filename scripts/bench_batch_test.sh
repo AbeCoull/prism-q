@@ -113,6 +113,17 @@ else
     bad "unknown branch"
 fi
 
+printf '#!/bin/sh\nexit 1\n' > "$REPO/.git/hooks/commit-msg"
+chmod +x "$REPO/.git/hooks/commit-msg"
+batch "$SCRATCH/batch.txt"
+status=$?
+rm "$REPO/.git/hooks/commit-msg"
+if [[ "$status" -eq 0 ]] && git -C "$SCRATCH/combined" merge-base --is-ancestor two HEAD; then
+    ok "a commit-msg hook does not block the batch merges"
+else
+    bad "commit-msg hook"
+fi
+
 batch --schedule --task-name T "$SCRATCH/batch.txt"
 if grep -q -- '^--schedule --task-name T ' "$REPO/scripts/queue-args"; then
     ok "--schedule hands the queue to bench_queue.sh"

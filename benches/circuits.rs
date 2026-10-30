@@ -30,6 +30,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 mod common;
+use common::fixtures::sparse_entanglement_circuit;
 use common::{
     SEED, configure_group, heisenberg_hamiltonian, ising_hamiltonian, run_shots_with, run_with,
 };
@@ -71,21 +72,6 @@ fn qft_like_circuit(n_qubits: usize) -> Circuit {
         for j in (i + 1)..n_qubits {
             let theta = std::f64::consts::TAU / (1u64 << (j - i)) as f64;
             circuit.add_gate(Gate::cphase(theta), &[i, j]);
-        }
-    }
-
-    circuit
-}
-
-fn sparse_entanglement_circuit(n_qubits: usize, depth: usize) -> Circuit {
-    let mut circuit = Circuit::new(n_qubits, 0);
-
-    for _ in 0..depth {
-        for q in 0..n_qubits {
-            circuit.add_gate(Gate::H, &[q]);
-        }
-        if n_qubits >= 2 {
-            circuit.add_gate(Gate::Cx, &[0, n_qubits - 1]);
         }
     }
 

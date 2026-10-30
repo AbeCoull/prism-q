@@ -7,6 +7,7 @@
 //! affected rows stayed green, kept reporting, and went non-monotonic in qubit
 //! count. Nothing else in the suite checks the engine a run actually used.
 
+use crate::bench_fixtures;
 use prism_q::backend::Backend;
 use prism_q::sim::{Engine, ResolvedBackend};
 use prism_q::{BackendKind, MpsBackend, NoiseChannel, NoiseEvent, NoiseModel, circuits, sim};
@@ -453,6 +454,11 @@ fn statevector_corpus_rows_reach_the_statevector() {
             &circuits::phase_estimation_circuit(n),
         );
     }
+    assert_resolves(
+        "entanglement_16q_d10/sparse",
+        BackendKind::Statevector,
+        &bench_fixtures::sparse_entanglement_circuit(16, 10),
+    );
 }
 
 // The `factored/disjoint_blocks` rows price the collapse a batched diagonal

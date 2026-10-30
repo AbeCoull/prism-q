@@ -2,6 +2,8 @@
 //! linked once. A file that changes process-wide state (an environment cap, the global
 //! Rayon pool, the default limits) stays a separate `tests/<name>.rs` binary instead.
 
+#[path = "../../benches/common/fixtures.rs"]
+mod bench_fixtures;
 #[path = "../common/mod.rs"]
 mod common;
 #[path = "../conformance_corpus/mod.rs"]

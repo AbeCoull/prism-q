@@ -61,6 +61,7 @@ worth the disk.
 | `statevector/clifford_d10` | Clifford-heavy circuits, depth 10, 4–20 qubits |
 | `statevector/depth_sweep_12q` | 12-qubit random circuits, depth 5–100 |
 | `statevector/entanglement_16q_d10` | Sparse vs dense entanglement, 16 qubits |
+| `statevector/dense_unitary/k{3,4}/{20,24}` | Two layers of seeded Haar-random 3- and 4-qubit `Gate::Unitary` blocks tiling the register, the dense gather-scatter kernel |
 | `statevector/trotter_builder/heisenberg/{16,20}` | One second-order product-formula step of the `9n - 9` term Heisenberg chain from `Circuit::add_trotter`: `XX` and `YY` couplings as native `PauliRot`, `ZZ` as `Rzz`, fields as named rotations, under the default pipeline |
 | `stabilizer_rank` | Clifford+T shot sampling: terminal rows (including 1000q chi2) and mid-circuit rows with measurement, reset, and conditional gates |
 | `tn/scalar_hea_l2` | Tensor-network scalar contraction, hardware-efficient ansatz, 2 layers, 20–50 qubits (`bench-internal`) |

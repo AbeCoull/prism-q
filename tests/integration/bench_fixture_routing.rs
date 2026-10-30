@@ -461,6 +461,46 @@ fn statevector_corpus_rows_reach_the_statevector() {
     );
 }
 
+// The `statevector/dense_unitary` rows price the dense k-qubit kernel. Two layers of
+// block tilings connect the register only through the shift between them, and the
+// fused stream must still hold every block as a `Gate::Unitary` of width k: a lowering
+// to `Mcu` or a diagonal batch, or a fusion pass that starts absorbing the blocks,
+// would leave the rows timing a different kernel.
+#[test]
+fn dense_unitary_rows_keep_every_block_dense() {
+    use prism_q::circuit::Instruction;
+    use prism_q::gates::Gate;
+
+    for k in [3usize, 4] {
+        for n in [20usize, 24] {
+            let layers = bench_fixtures::DENSE_UNITARY_LAYERS;
+            let circuit = bench_fixtures::dense_unitary_layers(n, k, layers, SEED);
+            let label = format!("dense_unitary/k{k}/{n}");
+            assert_resolves(&label, BackendKind::Statevector, &circuit);
+
+            let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+            let dense = fused
+                .instructions
+                .iter()
+                .filter(|inst| {
+                    matches!(
+                        inst,
+                        Instruction::Gate {
+                            gate: Gate::Unitary(_),
+                            targets,
+                        } if targets.len() == k
+                    )
+                })
+                .count();
+            assert_eq!(
+                (dense, fused.instructions.len()),
+                (n / k * layers, n / k * layers),
+                "{label}: the fused stream is no longer the dense blocks alone"
+            );
+        }
+    }
+}
+
 // The `factored/disjoint_blocks` rows price the collapse a batched diagonal
 // gate causes when it merges its whole target list. Two properties carry that,
 // and neither is visible in a timing: the fused stream must hold a batch whose

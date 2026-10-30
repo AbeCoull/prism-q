@@ -30,7 +30,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 mod common;
-use common::fixtures::sparse_entanglement_circuit;
+use common::fixtures::{DENSE_UNITARY_LAYERS, dense_unitary_layers, sparse_entanglement_circuit};
 use common::{
     SEED, configure_group, heisenberg_hamiltonian, ising_hamiltonian, run_shots_with, run_with,
 };
@@ -1187,6 +1187,26 @@ fn bench_statevector_entanglement(c: &mut Criterion) {
             run_with(BackendKind::Statevector, &dense, 42).unwrap();
         });
     });
+
+    group.finish();
+}
+
+// Fusion leaves a `Gate::Unitary` whole and the fixture has nothing else to fuse, so
+// these rows time the dense gather-scatter kernel at the two widest matrices it takes.
+fn bench_statevector_dense_unitary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/dense_unitary");
+    configure_group(&mut group);
+
+    for k in [3usize, 4] {
+        for n in [20usize, 24] {
+            let circuit = dense_unitary_layers(n, k, DENSE_UNITARY_LAYERS, SEED);
+            group.bench_with_input(BenchmarkId::new(format!("k{k}"), n), &circuit, |b, circ| {
+                b.iter(|| {
+                    run_with(BackendKind::Statevector, circ, 42).unwrap();
+                });
+            });
+        }
+    }
 
     group.finish();
 }
@@ -5697,6 +5717,7 @@ criterion_group! {
     bench_statevector_clifford,
     bench_statevector_depth_sweep,
     bench_statevector_entanglement,
+    bench_statevector_dense_unitary,
     bench_statevector_scalability,
     bench_statevector_marginals,
     bench_statevector_rdm,

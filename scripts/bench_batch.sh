@@ -112,9 +112,16 @@ for (( i = 0; i < ${#BRANCHES[@]}; i++ )); do
     b="${BRANCHES[i]}"
     [[ "$merged" == *" $b "* ]] && continue
     merged+="$b "
-    if ! git -C "$DIR" merge -q --no-ff --no-verify --no-edit -m "batch: $b" "$b" > /dev/null 2>&1; then
+    if ! out="$(git -C "$DIR" -c user.name=bench_batch -c user.email=bench_batch@localhost \
+        merge -q --no-ff --no-verify --no-edit -m "batch: $b" "$b" 2>&1)"; then
+        conflicts="$(git -C "$DIR" diff --name-only --diff-filter=U)"
+        if [[ -z "$conflicts" ]]; then
+            echo "Error: merging $b failed:" >&2
+            echo "$out" | sed 's/^/    /' >&2
+            exit 1
+        fi
         echo "Error: $b conflicts with the branches merged before it:" >&2
-        git -C "$DIR" diff --name-only --diff-filter=U | sed 's/^/    /' >&2
+        echo "$conflicts" | sed 's/^/    /' >&2
         git -C "$DIR" merge --abort
         echo "  Rebase it, or measure it in a batch of its own." >&2
         exit 1

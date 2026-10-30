@@ -2,13 +2,17 @@
 # Verify the combined tree and queue file scripts/bench_batch.sh writes, against
 # a stub bench_queue.sh.
 #
-# A scratch repository holds a base commit and three branches, two that merge
-# cleanly and one that conflicts with the first. The stub records its arguments,
-# so each case checks what was merged and what the queue file asks to measure.
+# A scratch repository holds a base commit, three branches (two that merge
+# cleanly, one that conflicts with the first) and an unrelated root. The stub
+# records its arguments, so each case checks what was merged and what the queue
+# file asks to measure.
 #
 # Usage: scripts/bench_batch_test.sh
 
 set -uo pipefail
+
+# Run as a CI runner does: no global identity, hooks or other user config.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRATCH="$(mktemp -d)"
@@ -24,7 +28,8 @@ echo base > "$REPO/a.txt"; g add a.txt; g commit -q -m base
 g checkout -q -b one;      echo one > "$REPO/one.txt";   g add one.txt;   g commit -q -m one
 g checkout -q -b two main; echo two > "$REPO/two.txt";   g add two.txt;   g commit -q -m two
 g checkout -q -b clash main; echo clash > "$REPO/one.txt"; g add one.txt; g commit -q -m clash
-g checkout -q main
+g switch -q --orphan stranger; echo s > "$REPO/s.txt"; g add s.txt; g commit -q -m stranger
+g checkout -q -f main
 mkdir -p "$REPO/scripts"
 cp "$SCRIPT_DIR/bench_batch.sh" "$REPO/scripts/"
 cat > "$REPO/scripts/bench_queue.sh" <<'STUB'
@@ -103,6 +108,15 @@ if [[ $? -eq 1 ]] && grep -q 'clash conflicts' "$SCRATCH/log" && grep -q 'one.tx
     ok "conflict names the branch and aborts the merge"
 else
     bad "conflict"
+fi
+
+printf 'one circuits ^x$\nstranger circuits ^y$\n' > "$SCRATCH/stranger.txt"
+batch "$SCRATCH/stranger.txt"
+if [[ $? -eq 1 ]] && grep -q 'merging stranger failed' "$SCRATCH/log" \
+    && grep -q 'unrelated histories' "$SCRATCH/log"; then
+    ok "a merge that fails without a conflict shows git's reason"
+else
+    bad "non-conflict merge failure"
 fi
 
 printf 'nosuch circuits ^x$\n' > "$SCRATCH/missing.txt"

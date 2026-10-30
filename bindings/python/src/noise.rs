@@ -306,7 +306,7 @@ impl PyGateFilter {
 
 /// Rules are copied when added and emit events in registration order at `build`.
 #[pyclass(name = "NoiseBuilder", module = "prism_q")]
-pub(crate) struct PyNoiseBuilder(NoiseBuilder);
+pub(crate) struct PyNoiseBuilder(pub(crate) NoiseBuilder);
 
 #[pymethods]
 impl PyNoiseBuilder {

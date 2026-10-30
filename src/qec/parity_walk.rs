@@ -954,6 +954,10 @@ struct WindowVisitor {
     own: OwnFlips,
     spill: SpillFlips,
     branch_flips: Vec<u64>,
+    /// Ascending row words where some target of the current event is nonzero; branch
+    /// flips are computed over these words alone, gathered into `gathered`.
+    support: Vec<u32>,
+    gathered: Vec<u64>,
 }
 
 impl WindowVisitor {
@@ -973,6 +977,8 @@ impl WindowVisitor {
                 outputs: Vec::new(),
             },
             branch_flips: Vec::new(),
+            support: Vec::new(),
+            gathered: Vec::new(),
         }
     }
 
@@ -980,15 +986,47 @@ impl WindowVisitor {
         (self.own, self.spill)
     }
 
-    /// Record one kept branch of an owned event: the outputs its flips land on.
+    /// Fill `support` with the row words below `words` where some row of `slots` is
+    /// nonzero, and `gathered` with each slot's x then z words there. Returns the
+    /// support size.
+    fn gather(&mut self, rows: &WindowRows<'_>, slots: &[usize], words: usize) -> usize {
+        let gathered = &mut self.gathered;
+        gathered.clear();
+        gathered.resize(words, 0);
+        for &slot in slots {
+            let (x, z) = rows.row(slot);
+            for ((any, &x), &z) in gathered.iter_mut().zip(&x[..words]).zip(&z[..words]) {
+                *any |= x | z;
+            }
+        }
+        self.support.clear();
+        self.support
+            .extend((0..words as u32).filter(|&word| gathered[word as usize] != 0));
+        gathered.clear();
+        for &slot in slots {
+            let (x, z) = rows.row(slot);
+            gathered.extend(self.support.iter().map(|&word| x[word as usize]));
+            gathered.extend(self.support.iter().map(|&word| z[word as usize]));
+        }
+        self.support.len()
+    }
+
+    /// Record one kept branch of an owned event: the outputs its flips land on, `words`
+    /// being the branch at `support`.
     fn push_branch(&mut self, rows: &WindowRows<'_>, words: impl Iterator<Item = u64>) {
         let start = self.own.outputs.len();
-        push_outputs(&mut self.own.outputs, words, &rows.output_of_column);
+        push_outputs(
+            &mut self.own.outputs,
+            &self.support,
+            words,
+            &rows.output_of_column,
+        );
         self.own.outputs[start..].sort_unstable();
         self.own.branch_offsets.push(self.own.outputs.len() as u32);
     }
 
-    /// Record the detector flips of one branch of another window's event.
+    /// Record the detector flips of one branch of another window's event, `words` being
+    /// the branch at `support`, which holds detector words only.
     fn push_spill(
         &mut self,
         rows: &WindowRows<'_>,
@@ -999,7 +1037,8 @@ impl WindowVisitor {
         let start = self.spill.outputs.len();
         push_outputs(
             &mut self.spill.outputs,
-            words.take(rows.det_words),
+            &self.support,
+            words,
             &rows.output_of_column,
         );
         if self.spill.outputs.len() == start {
@@ -1018,24 +1057,31 @@ impl WindowVisitor {
         py: f64,
         pz: f64,
     ) {
-        let (x, z) = rows.row(slot);
-        if self.position >= self.lo {
-            let Some((px, py, pz)) = qec_single_noise_rates(x, z, px, py, pz) else {
-                return;
-            };
-            self.own.events.push(KeptEvent {
-                candidate,
-                draw: QecNoiseDraw::single(px, py, pz),
-                rates: [px, py, pz],
-            });
-            self.push_branch(rows, z.iter().copied());
-            self.push_branch(rows, x.iter().zip(z).map(|(x, z)| x ^ z));
-            self.push_branch(rows, x.iter().copied());
+        let owned = self.position >= self.lo;
+        let words = if owned { rows.words } else { rows.det_words };
+        let k = self.gather(rows, &[slot], words);
+        if k == 0 {
+            return;
+        }
+        let gathered = std::mem::take(&mut self.gathered);
+        let (x, z) = gathered.split_at(k);
+        if owned {
+            if let Some((px, py, pz)) = qec_single_noise_rates(x, z, px, py, pz) {
+                self.own.events.push(KeptEvent {
+                    candidate,
+                    draw: QecNoiseDraw::single(px, py, pz),
+                    rates: [px, py, pz],
+                });
+                self.push_branch(rows, z.iter().copied());
+                self.push_branch(rows, x.iter().zip(z).map(|(x, z)| x ^ z));
+                self.push_branch(rows, x.iter().copied());
+            }
         } else {
             self.push_spill(rows, candidate, 0, z.iter().copied());
             self.push_spill(rows, candidate, 1, x.iter().zip(z).map(|(x, z)| x ^ z));
             self.push_spill(rows, candidate, 2, x.iter().copied());
         }
+        self.gathered = gathered;
     }
 
     fn pair(
@@ -1045,34 +1091,40 @@ impl WindowVisitor {
         candidate: u32,
         draw: QecNoiseDraw,
     ) {
-        let (x0, z0) = rows.row(slots[0]);
-        let (x1, z1) = rows.row(slots[1]);
-        let p = draw.pair_rate();
+        let owned = self.position >= self.lo;
+        let words = if owned { rows.words } else { rows.det_words };
+        let k = self.gather(rows, &slots, words);
+        if k == 0 {
+            return;
+        }
+        let gathered = std::mem::take(&mut self.gathered);
+        let [x0, z0, x1, z1] = [0, 1, 2, 3].map(|run| &gathered[run * k..(run + 1) * k]);
         let mut branch_flips = std::mem::take(&mut self.branch_flips);
-        if self.position >= self.lo {
+        if owned {
+            let p = draw.pair_rate();
             if qec_pair_branch_flips(x0, z0, x1, z1, p, &mut branch_flips) {
                 self.own.events.push(KeptEvent {
                     candidate,
                     draw,
                     rates: [p, 0.0, 0.0],
                 });
-                for flips in branch_flips.chunks_exact(rows.words) {
+                for flips in branch_flips.chunks_exact(k) {
                     self.push_branch(rows, flips.iter().copied());
                 }
             }
-        } else if rows.det_words > 0 {
-            let det = rows.det_words;
+        } else {
             branch_flips.clear();
-            branch_flips.resize(15 * det, 0);
-            for (sample, branch) in (1..=15).zip(branch_flips.chunks_exact_mut(det)) {
-                append_qec_pauli_noise_effect(branch, sample / 4, &x0[..det], &z0[..det]);
-                append_qec_pauli_noise_effect(branch, sample % 4, &x1[..det], &z1[..det]);
+            branch_flips.resize(15 * k, 0);
+            for (sample, branch) in (1..=15).zip(branch_flips.chunks_exact_mut(k)) {
+                append_qec_pauli_noise_effect(branch, sample / 4, x0, z0);
+                append_qec_pauli_noise_effect(branch, sample % 4, x1, z1);
             }
-            for (branch, flips) in branch_flips.chunks_exact(det).enumerate() {
+            for (branch, flips) in branch_flips.chunks_exact(k).enumerate() {
                 self.push_spill(rows, candidate, branch as u16, flips.iter().copied());
             }
         }
         self.branch_flips = branch_flips;
+        self.gathered = gathered;
     }
 
     /// One product event: every branch's flips are the XOR of its letters' effects on
@@ -1087,55 +1139,64 @@ impl WindowVisitor {
         tables: &[QecProductTable],
     ) {
         let product = &tables[table as usize];
-        let words = if self.position >= self.lo {
-            rows.words
-        } else {
-            rows.det_words
-        };
-        if words == 0 {
+        let owned = self.position >= self.lo;
+        let words = if owned { rows.words } else { rows.det_words };
+        let k = self.gather(rows, slots, words);
+        if k == 0 {
             return;
         }
+        let gathered = std::mem::take(&mut self.gathered);
         let mut branch_flips = std::mem::take(&mut self.branch_flips);
         branch_flips.clear();
-        branch_flips.resize(product.rates.len() * words, 0);
+        branch_flips.resize(product.rates.len() * k, 0);
         let mut any = false;
-        for (branch, flips) in branch_flips.chunks_exact_mut(words).enumerate() {
-            for (&slot, &letter) in slots.iter().zip(product.branch_letters(branch)) {
-                let (x, z) = rows.row(slot);
-                append_qec_pauli_noise_effect(flips, letter as usize, &x[..words], &z[..words]);
+        for (branch, flips) in branch_flips.chunks_exact_mut(k).enumerate() {
+            for (target, &letter) in (0..slots.len()).zip(product.branch_letters(branch)) {
+                let x = &gathered[2 * target * k..][..k];
+                let z = &gathered[(2 * target + 1) * k..][..k];
+                append_qec_pauli_noise_effect(flips, letter as usize, x, z);
             }
             any |= flips.iter().any(|&w| w != 0);
         }
-        if self.position >= self.lo {
+        if owned {
             if any {
                 self.own.events.push(KeptEvent {
                     candidate,
                     draw: QecNoiseDraw::products(p, table),
                     rates: [p, 0.0, 0.0],
                 });
-                for flips in branch_flips.chunks_exact(words) {
+                for flips in branch_flips.chunks_exact(k) {
                     self.push_branch(rows, flips.iter().copied());
                 }
             }
         } else {
-            for (branch, flips) in branch_flips.chunks_exact(words).enumerate() {
+            for (branch, flips) in branch_flips.chunks_exact(k).enumerate() {
                 self.push_spill(rows, candidate, branch as u16, flips.iter().copied());
             }
         }
         self.branch_flips = branch_flips;
+        self.gathered = gathered;
     }
 }
 
-/// Append the outputs of the set columns in `words`, through `output_of_column`.
+/// Append the outputs of the set columns in `words`, the row words at `support`, through
+/// `output_of_column`. Support words past the output columns, such as the record
+/// fingerprint, emit nothing.
 fn push_outputs(
     outputs: &mut Vec<u32>,
+    support: &[u32],
     words: impl Iterator<Item = u64>,
     output_of_column: &[u32],
 ) {
-    for (word_idx, word) in words.take(output_of_column.len() / 64).enumerate() {
+    let column_words = output_of_column.len() / 64;
+    let columns = support
+        .iter()
+        .take_while(|&&word| (word as usize) < column_words);
+    for (&word_idx, word) in columns.zip(words) {
+        let base = word_idx as usize * 64;
         let mut bits = word;
         while bits != 0 {
-            let output = output_of_column[word_idx * 64 + bits.trailing_zeros() as usize];
+            let output = output_of_column[base + bits.trailing_zeros() as usize];
             debug_assert_ne!(output, u32::MAX, "a set column holds an output");
             outputs.push(output);
             bits &= bits - 1;

@@ -169,10 +169,20 @@ impl ErrorChainComplex {
     ///
     /// Uses backward Pauli propagation (same as the compiled noisy sampler)
     /// to determine which measurements are sensitive to each error location. A circuit
-    /// with a guarded gate returns `IncompatibleBackend`.
+    /// with a non-Clifford or guarded gate, or a model with any channel other than a
+    /// single-qubit Pauli, returns `IncompatibleBackend`.
     pub fn build(circuit: &Circuit, noise: &NoiseModel, _seed: u64) -> Result<Self> {
         noise.validate_for(circuit)?;
         noise.ensure_no_guarded_events(circuit, "error chain complex")?;
+        noise.ensure_chain_complex_channels()?;
+        if !circuit.is_clifford_only() {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "error chain complex".to_string(),
+                reason: "a non-Clifford gate maps a Pauli error to a sum of Paulis, which \
+                         no single error column describes"
+                    .to_string(),
+            });
+        }
         let m = circuit
             .instructions
             .iter()
@@ -254,9 +264,11 @@ impl ErrorChainComplex {
                     meas_idx -= 1;
                     z_packed[*qubit][meas_idx / 64] |= 1u64 << (meas_idx % 64);
                 }
-                Instruction::Reset { .. }
-                | Instruction::Barrier { .. }
-                | Instruction::Save { .. } => {}
+                Instruction::Reset { qubit } => {
+                    x_packed[*qubit].fill(0);
+                    z_packed[*qubit].fill(0);
+                }
+                Instruction::Barrier { .. } | Instruction::Save { .. } => {}
                 Instruction::Conditional { .. } => {
                     return Err(crate::error::PrismError::IncompatibleBackend {
                         backend: "error chain complex".to_string(),
@@ -489,7 +501,6 @@ pub fn noisy_marginals_analytical(
     noise: &NoiseModel,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    noise.ensure_chain_complex_channels()?;
     let ecc = ErrorChainComplex::build(circuit, noise, seed)?;
     let compiled = crate::sim::compiled::compile_measurements(circuit, seed)?;
     let noiseless = compiled.marginal_probabilities();

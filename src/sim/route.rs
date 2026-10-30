@@ -23,11 +23,10 @@ pub(super) fn plan_probability_route(
     let (decompose, has_partial_independence) = analyze_independence(circuit);
     if let Some((components, clifford_only)) = decompose {
         let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
-        if kind.is_auto()
-            && clifford_only
+        let auto_takes_it = kind.is_auto()
             && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
-            && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
-        {
+            && max_block >= MIN_BLOCK_FOR_FACTORED_STAB;
+        if clifford_only && (auto_takes_it || matches!(kind, BackendKind::FactoredStabilizer)) {
             return ProbabilityRoute::FactoredStabilizer;
         }
         return ProbabilityRoute::Decomposed(components);

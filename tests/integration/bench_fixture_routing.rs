@@ -501,6 +501,56 @@ fn dense_unitary_rows_keep_every_block_dense() {
     }
 }
 
+// `product/expectation` and `product/noisy_trajectory` price the product backend's own
+// terminals, so each must report it. A circuit with no entangling gate is the one the
+// decomposed route would split per qubit, and a marginal route that fell back to the
+// dense probability vector would fail outright at these widths rather than run slow.
+#[test]
+fn product_expectation_rows_run_on_the_product_backend() {
+    for n in [64usize, 128, 256, 512] {
+        let circuit = circuits::single_qubit_rotation_circuit(n, 10, SEED);
+        let observables = bench_fixtures::product_observables(n);
+
+        let expectations = sim::simulate(&circuit)
+            .backend(BackendKind::ProductState)
+            .seed(42)
+            .expectation_values_reported(&observables)
+            .unwrap();
+        assert_eq!(
+            expectations.metadata.backend,
+            ResolvedBackend::ProductState,
+            "expectation/pauli/{n}"
+        );
+        assert_eq!(expectations.values.len(), 2 * n - 1);
+
+        let marginals = sim::simulate(&circuit)
+            .backend(BackendKind::ProductState)
+            .seed(42)
+            .marginals()
+            .unwrap();
+        assert_eq!(
+            marginals.metadata.backend,
+            ResolvedBackend::ProductState,
+            "expectation/marginals/{n}"
+        );
+
+        let mut measured = circuit.clone();
+        measured.measure_all();
+        let noise = NoiseModel::uniform_depolarizing(&measured, 0.01);
+        let shots = sim::simulate(&measured)
+            .backend(BackendKind::ProductState)
+            .noise(&noise)
+            .seed(SEED)
+            .shots(4)
+            .unwrap();
+        assert_eq!(
+            shots.metadata.backend,
+            ResolvedBackend::ProductState,
+            "noisy_trajectory/{n}"
+        );
+    }
+}
+
 // The `factored/disjoint_blocks` rows price the collapse a batched diagonal
 // gate causes when it merges its whole target list. Two properties carry that,
 // and neither is visible in a timing: the fused stream must hold a batch whose

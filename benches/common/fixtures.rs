@@ -2,10 +2,19 @@
 //! routing checks run on the circuits the rows time.
 
 use num_complex::Complex64;
+use prism_q::PauliTerm;
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+
+/// The `product/expectation/pauli` observables: `Z` on every qubit, then `XX` on every
+/// bond of the chain.
+pub fn product_observables(n_qubits: usize) -> Vec<Vec<PauliTerm>> {
+    let singles = (0..n_qubits).map(|q| vec![PauliTerm::z(q)]);
+    let bonds = (1..n_qubits).map(|q| vec![PauliTerm::x(q - 1), PauliTerm::x(q)]);
+    singles.chain(bonds).collect()
+}
 
 /// `depth` layers of H on every qubit, then CX on every fourth bond of the chain, the
 /// first bond advancing one per layer: a quarter of the dense layer's CX, with the

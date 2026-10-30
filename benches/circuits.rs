@@ -30,7 +30,9 @@ use std::hint::black_box;
 use std::time::Duration;
 
 mod common;
-use common::fixtures::{DENSE_UNITARY_LAYERS, dense_unitary_layers, sparse_entanglement_circuit};
+use common::fixtures::{
+    DENSE_UNITARY_LAYERS, dense_unitary_layers, product_observables, sparse_entanglement_circuit,
+};
 use common::{
     SEED, configure_group, heisenberg_hamiltonian, ising_hamiltonian, run_shots_with, run_with,
 };
@@ -2094,6 +2096,72 @@ fn bench_product_sampling(c: &mut Criterion) {
             b.iter(|| {
                 black_box(
                     run_shots_with(BackendKind::ProductState, circ, SAMPLING_SHOTS, SEED).unwrap(),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
+// The product backend's own Pauli evaluation, `O(1)` per factor: `pauli` asks for a `Z`
+// on every qubit and an `XX` on every bond, `marginals` takes the per-qubit `Z` route
+// that skips the dense probability vector.
+fn bench_product_expectation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("product/expectation");
+    configure_group(&mut group);
+
+    for &n in &PRODUCT_SAMPLING_QUBITS {
+        let circuit = circuits::single_qubit_rotation_circuit(n, 10, SEED);
+        let observables = product_observables(n);
+        group.bench_with_input(BenchmarkId::new("pauli", n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::ProductState)
+                        .seed(42)
+                        .expectation_values(&observables)
+                        .unwrap(),
+                )
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("marginals", n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::ProductState)
+                        .seed(42)
+                        .marginals()
+                        .unwrap(),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
+const PRODUCT_NOISY_SHOTS: usize = 100;
+
+// One product state per shot with a depolarizing draw after every gate, the trajectory
+// loop with no `2^n` term to hide it.
+fn bench_product_noisy_trajectory(c: &mut Criterion) {
+    let mut group = c.benchmark_group("product/noisy_trajectory");
+    configure_group(&mut group);
+
+    for &n in &PRODUCT_SAMPLING_QUBITS {
+        let mut circuit = circuits::single_qubit_rotation_circuit(n, 10, SEED);
+        circuit.measure_all();
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    run_shots_with_noise(
+                        BackendKind::ProductState,
+                        circ,
+                        &noise,
+                        PRODUCT_NOISY_SHOTS,
+                        SEED,
+                    )
+                    .unwrap(),
                 )
             });
         });
@@ -5753,6 +5821,8 @@ criterion_group! {
     // Product state
     bench_product_scaling,
     bench_product_sampling,
+    bench_product_expectation,
+    bench_product_noisy_trajectory,
     // Tensor network
     bench_tn_scaling,
     bench_tn_linear_chain,

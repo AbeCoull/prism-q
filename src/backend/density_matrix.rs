@@ -920,6 +920,13 @@ impl DensityMatrixBackend {
             let s = block_superoperator(&[*matrix]);
             return self.apply_block_superoperator(qubit, &s);
         }
+        #[cfg(feature = "bench-internal")]
+        if crate::bench_variant_b()
+            && (matrix[0][1].norm() >= 1e-14 || matrix[1][0].norm() >= 1e-14)
+        {
+            simd::apply_1q_sandwich_blocked(&mut self.sv.state, n, qubit, matrix);
+            return Ok(());
+        }
         self.sv.apply_1q_matrix(qubit + n, matrix)?;
         self.sv.apply_1q_matrix(qubit, &conjugate_2x2(matrix))
     }
@@ -1936,3 +1943,7 @@ impl Backend for DensityMatrixBackend {
         self.apply_1q_sandwich(qubit, matrix)
     }
 }
+
+#[cfg(test)]
+#[path = "density_matrix_tests.rs"]
+mod tests;

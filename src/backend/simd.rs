@@ -1060,6 +1060,218 @@ unsafe fn apply_diagonal_loop_neon(
     }
 }
 
+/// Evolve `rho -> U rho U^dagger` for a one-qubit `U` on `qubit` of the `4^n` density
+/// matrix buffer `rho` (row bit at `qubit + n`, column bit at `qubit`) in one pass.
+///
+/// Each 2x2 `(row-bit, col-bit)` block is loaded once, takes `U` on the left and
+/// `U^dagger` on the right in registers, and is stored once: the same 16 complex
+/// multiplies per block as two register passes, with half the loads and stores.
+#[cfg(any(test, feature = "bench-internal"))]
+#[inline(always)]
+pub(crate) fn apply_1q_sandwich_blocked(
+    rho: &mut [Complex64],
+    n: usize,
+    qubit: usize,
+    mat: &[[Complex64; 2]; 2],
+) {
+    debug_assert_eq!(rho.len(), 1usize << (2 * n));
+    debug_assert!(qubit < n);
+    let rbit = 1usize << (qubit + n);
+    let cbit = 1usize << qubit;
+    let conj = [
+        [mat[0][0].conj(), mat[0][1].conj()],
+        [mat[1][0].conj(), mat[1][1].conj()],
+    ];
+
+    #[cfg(target_arch = "x86_64")]
+    if matches!(simd_tier(), SimdTier::Avx512 | SimdTier::Avx2Fma) {
+        // SAFETY: AVX2 detected, and every block index the loops form lies
+        // below `rho.len()` because `rbit` and `cbit` are bits of it.
+        unsafe {
+            let u = MatBroadcast256::from_matrix(mat);
+            if qubit == 0 {
+                sandwich_1q_blocked_q0_avx2fma(rho, rbit, &u, &conj);
+            } else {
+                let v = MatBroadcast256::from_matrix(&conj);
+                sandwich_1q_blocked_avx2fma(rho, rbit, cbit, &u, &v);
+            }
+        }
+        return;
+    }
+
+    sandwich_1q_blocked_scalar(rho, rbit, cbit, mat, &conj);
+}
+
+#[cfg(any(test, feature = "bench-internal"))]
+#[inline(always)]
+fn sandwich_1q_blocked_scalar(
+    rho: &mut [Complex64],
+    rbit: usize,
+    cbit: usize,
+    u: &[[Complex64; 2]; 2],
+    v: &[[Complex64; 2]; 2],
+) {
+    for row in (0..rho.len()).step_by(rbit << 1) {
+        for col in (row..row + rbit).step_by(cbit << 1) {
+            for i in col..col + cbit {
+                let a = rho[i];
+                let b = rho[i + cbit];
+                let c = rho[i + rbit];
+                let d = rho[i + rbit + cbit];
+                let t00 = u[0][0] * a + u[0][1] * c;
+                let t10 = u[1][0] * a + u[1][1] * c;
+                let t01 = u[0][0] * b + u[0][1] * d;
+                let t11 = u[1][0] * b + u[1][1] * d;
+                rho[i] = v[0][0] * t00 + v[0][1] * t01;
+                rho[i + cbit] = v[1][0] * t00 + v[1][1] * t01;
+                rho[i + rbit] = v[0][0] * t10 + v[0][1] * t11;
+                rho[i + rbit + cbit] = v[1][0] * t10 + v[1][1] * t11;
+            }
+        }
+    }
+}
+
+/// Two blocks per vector: requires `cbit >= 2`, so `i` and `i + 1` are both block bases.
+#[cfg(any(test, feature = "bench-internal"))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn sandwich_1q_blocked_avx2fma(
+    rho: &mut [Complex64],
+    rbit: usize,
+    cbit: usize,
+    u: &MatBroadcast256,
+    v: &MatBroadcast256,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let len = rho.len();
+        let p = rho.as_mut_ptr() as *mut f64;
+        let mut row = 0;
+        while row < len {
+            let mut col = row;
+            while col < row + rbit {
+                let mut i = col;
+                while i < col + cbit {
+                    let pa = p.add(2 * i);
+                    let pb = p.add(2 * (i + cbit));
+                    let pc = p.add(2 * (i + rbit));
+                    let pd = p.add(2 * (i + rbit + cbit));
+                    let a = _mm256_loadu_pd(pa);
+                    let b = _mm256_loadu_pd(pb);
+                    let c = _mm256_loadu_pd(pc);
+                    let d = _mm256_loadu_pd(pd);
+                    let t00 = _mm256_add_pd(
+                        complex_mul_avx2fma(u.m00_rr, u.m00_ii, a),
+                        complex_mul_avx2fma(u.m01_rr, u.m01_ii, c),
+                    );
+                    let t10 = _mm256_add_pd(
+                        complex_mul_avx2fma(u.m10_rr, u.m10_ii, a),
+                        complex_mul_avx2fma(u.m11_rr, u.m11_ii, c),
+                    );
+                    let t01 = _mm256_add_pd(
+                        complex_mul_avx2fma(u.m00_rr, u.m00_ii, b),
+                        complex_mul_avx2fma(u.m01_rr, u.m01_ii, d),
+                    );
+                    let t11 = _mm256_add_pd(
+                        complex_mul_avx2fma(u.m10_rr, u.m10_ii, b),
+                        complex_mul_avx2fma(u.m11_rr, u.m11_ii, d),
+                    );
+                    _mm256_storeu_pd(
+                        pa,
+                        _mm256_add_pd(
+                            complex_mul_avx2fma(v.m00_rr, v.m00_ii, t00),
+                            complex_mul_avx2fma(v.m01_rr, v.m01_ii, t01),
+                        ),
+                    );
+                    _mm256_storeu_pd(
+                        pb,
+                        _mm256_add_pd(
+                            complex_mul_avx2fma(v.m10_rr, v.m10_ii, t00),
+                            complex_mul_avx2fma(v.m11_rr, v.m11_ii, t01),
+                        ),
+                    );
+                    _mm256_storeu_pd(
+                        pc,
+                        _mm256_add_pd(
+                            complex_mul_avx2fma(v.m00_rr, v.m00_ii, t10),
+                            complex_mul_avx2fma(v.m01_rr, v.m01_ii, t11),
+                        ),
+                    );
+                    _mm256_storeu_pd(
+                        pd,
+                        _mm256_add_pd(
+                            complex_mul_avx2fma(v.m10_rr, v.m10_ii, t10),
+                            complex_mul_avx2fma(v.m11_rr, v.m11_ii, t11),
+                        ),
+                    );
+                    i += 2;
+                }
+                col += cbit << 1;
+            }
+            row += rbit << 1;
+        }
+    }
+}
+
+/// Qubit 0: a block's row halves `[a, b]` and `[c, d]` are each one vector, so the
+/// left product runs across the pair and the right product within each vector
+/// against its own half swap, with lane-varying `conj(U)` coefficients.
+#[cfg(any(test, feature = "bench-internal"))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn sandwich_1q_blocked_q0_avx2fma(
+    rho: &mut [Complex64],
+    rbit: usize,
+    u: &MatBroadcast256,
+    v: &[[Complex64; 2]; 2],
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let diag_rr = _mm256_setr_pd(v[0][0].re, v[0][0].re, v[1][1].re, v[1][1].re);
+        let diag_ii = _mm256_setr_pd(v[0][0].im, v[0][0].im, v[1][1].im, v[1][1].im);
+        let off_rr = _mm256_setr_pd(v[0][1].re, v[0][1].re, v[1][0].re, v[1][0].re);
+        let off_ii = _mm256_setr_pd(v[0][1].im, v[0][1].im, v[1][0].im, v[1][0].im);
+        let len = rho.len();
+        let p = rho.as_mut_ptr() as *mut f64;
+        let mut row = 0;
+        while row < len {
+            let mut i = row;
+            while i < row + rbit {
+                let px = p.add(2 * i);
+                let py = p.add(2 * (i + rbit));
+                let x = _mm256_loadu_pd(px);
+                let y = _mm256_loadu_pd(py);
+                let tx = _mm256_add_pd(
+                    complex_mul_avx2fma(u.m00_rr, u.m00_ii, x),
+                    complex_mul_avx2fma(u.m01_rr, u.m01_ii, y),
+                );
+                let ty = _mm256_add_pd(
+                    complex_mul_avx2fma(u.m10_rr, u.m10_ii, x),
+                    complex_mul_avx2fma(u.m11_rr, u.m11_ii, y),
+                );
+                let sx = _mm256_permute2f128_pd(tx, tx, 0x01);
+                let sy = _mm256_permute2f128_pd(ty, ty, 0x01);
+                _mm256_storeu_pd(
+                    px,
+                    _mm256_add_pd(
+                        complex_mul_avx2fma(diag_rr, diag_ii, tx),
+                        complex_mul_avx2fma(off_rr, off_ii, sx),
+                    ),
+                );
+                _mm256_storeu_pd(
+                    py,
+                    _mm256_add_pd(
+                        complex_mul_avx2fma(diag_rr, diag_ii, ty),
+                        complex_mul_avx2fma(off_rr, off_ii, sy),
+                    ),
+                );
+                i += 2;
+            }
+            row += rbit << 1;
+        }
+    }
+}
+
 /// Apply a diagonal single-qubit gate using a tight SIMD loop.
 ///
 /// For gates where `d0 ≈ 1` (Z, S, T, P), set `skip_lo = true` to halve

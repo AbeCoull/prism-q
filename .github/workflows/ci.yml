@@ -520,6 +520,10 @@ jobs:
         run: bash scripts/bench_ci_test.sh
       - name: Verify queue retries, build-only, and the build lock wait
         run: bash scripts/bench_queue_test.sh
+      - name: Verify the interleaved runner's statistics and variant order
+        run: bash scripts/bench_interleave_test.sh
+      - name: Verify the combined tree and queue a batch writes
+        run: bash scripts/bench_batch_test.sh
 
   # Compares the public API against the last release, at the release type the
   # conventional commits since it imply before the pre-1.0 clamp, with the PR

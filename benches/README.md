@@ -292,14 +292,24 @@ EOF
 
 Binaries are cached under `bench_results/bin`, keyed on commit, features, bench target,
 and toolchain, so steps that share a reference build it once and a later queue reuses it.
-Each A/B waits up to an hour for an idle host. `--schedule` matters on Windows: a child of
+`--build-only` fills the cache and stops. Each A/B waits up to an hour for an idle host.
+`--schedule` matters on Windows: a child of
 a terminal session is torn down with that session's job object even under `nohup`, so the
 queue registers a scheduled task and starts it there. The task opens a console window,
 and closing that window ends the queue. A second queue scheduled while one runs needs its own
-`--task-name`, and a first step that waits for the other's `ALLDONE`. Every step logs in full to its own
+`--task-name`. Its build phase waits for a live `MEASURING` marker to clear before
+compiling anything, but the first queue writes that marker only once its own builds end,
+so start the second after the first reaches its measure phase. Every step logs in full to its own
 file; the status file carries one START and END line per step, the verdicts, and
 `ALLDONE`. A `kill -INT` or `kill -TERM` of the queue's pid ends the running step, removes
 the `MEASURING` marker, and writes `STOPPED` instead.
+
+A step that exits RERUN runs again against the same cached binaries, up to `--retries`
+times (default 2). RERUN says the host or a lane moved rather than the change, and a later
+attempt on a quieter host answers it without a rebuild. Earlier attempts keep their reports
+in `NAME-tryN/`, the status file gets a `RETRY` line for each, and the summary line names
+how many there were. FAIL, host-busy, and smoke-test exits are not retried: a FAIL is
+already confirmed from fresh copies inside `bench_ab.sh`.
 
 ### Keeping an A/B affordable
 

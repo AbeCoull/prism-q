@@ -228,6 +228,7 @@ pub(super) struct QecRecordNoise {
     deferred: QecDeferredProgram,
     /// Kept events in draw order, positions descending.
     events: Vec<QecRecordEvent>,
+    fire_rates: Vec<f64>,
     /// Aliases the circuit touches, ascending by [`QecDeferredProgram::last_use`].
     aliases_by_last_use: Vec<u32>,
     record_of_alias: Vec<u32>,
@@ -261,6 +262,7 @@ pub(super) struct QecRecordEvent {
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub(super) struct QecParityNoise {
     events: Vec<QecParityNoiseEvent>,
+    fire_rates: Vec<f64>,
     branch_offsets: Vec<u32>,
     outputs: Vec<u32>,
     pair_tables: Vec<[f64; 15]>,
@@ -378,6 +380,7 @@ impl QecParityNoise {
         draw_qec_unit(
             &self.events,
             |event| &event.draw,
+            &self.fire_rates,
             &self.pair_tables,
             &self.product_tables,
             &mut rng,
@@ -413,8 +416,10 @@ impl QecParityNoise {
         pair_tables: Vec<[f64; 15]>,
         product_tables: Vec<QecProductTable>,
     ) -> Self {
+        let fire_rates = events.iter().map(|event| event.draw.rate()).collect();
         Self {
             events,
+            fire_rates,
             branch_offsets,
             outputs,
             pair_tables,
@@ -604,9 +609,11 @@ impl QecRecordNoise {
         }
         let (aliases_by_last_use, record_of_alias) = record_walk_order(&deferred);
         let gate_count = deferred.gates.len();
+        let fire_rates = events.iter().map(|event| event.draw.rate()).collect();
         Ok(Some(Self {
             deferred,
             events,
+            fire_rates,
             aliases_by_last_use,
             record_of_alias,
             gate_count,
@@ -762,6 +769,7 @@ impl QecRecordNoise {
         draw_qec_unit(
             &self.events,
             |event| &event.draw,
+            &self.fire_rates,
             &self.deferred.pair_tables,
             &self.deferred.product_tables,
             &mut rng,
@@ -1391,7 +1399,6 @@ impl QecNoiseDraw {
         }
     }
 
-    #[cfg(feature = "parallel")]
     fn rate(&self) -> f64 {
         match *self {
             Self::Single { rates, .. } => rates.p_event,
@@ -1421,17 +1428,53 @@ fn qec_noise_unit_rng(seed: u64, unit: usize) -> Xoshiro256PlusPlus {
 
 /// Draw every event over one unit of `unit_shots` shots, event-major, calling
 /// `flip(event_index, event, shot, branch)` per fault. The record and parity paths both
-/// draw through here, so they consume each unit's stream identically.
+/// draw through here, so they consume each unit's stream identically. `fire_rates`
+/// holds each event's [`QecNoiseDraw::rate`].
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn draw_qec_unit<E>(
     events: &[E],
     draw: impl Fn(&E) -> &QecNoiseDraw,
+    fire_rates: &[f64],
     pair_tables: &[[f64; 15]],
     product_tables: &[QecProductTable],
     rng: &mut Xoshiro256PlusPlus,
     unit_shots: usize,
     mut flip: impl FnMut(usize, &E, usize, usize),
 ) {
+    debug_assert_eq!(events.len(), fire_rates.len());
+    if unit_shots < QEC_SKIP_MIN_SHOTS {
+        // Each kind's per-shot loop takes one uniform per shot and fires below the
+        // event's rate, so the rates alone decide each miss and an event is read only
+        // when it fires. A one-shot unit otherwise streams the whole event table for a
+        // few faults.
+        for (index, (event, &p)) in events.iter().zip(fire_rates).enumerate() {
+            if p == 0.0 {
+                continue;
+            }
+            for shot in 0..unit_shots {
+                let r = rng.next_f64();
+                if r >= p {
+                    continue;
+                }
+                let branch = match *draw(event) {
+                    QecNoiseDraw::Single { rates, .. } => match rates.branch(r) {
+                        Some(branch) => branch,
+                        None => continue,
+                    },
+                    QecNoiseDraw::Pair { .. } => qec_uniform_15(rng),
+                    QecNoiseDraw::PairTable { table, .. } => {
+                        qec_table_branch(&pair_tables[table as usize], r)
+                    }
+                    QecNoiseDraw::Products { table, .. } => {
+                        qec_table_branch(&product_tables[table as usize].rates, r)
+                    }
+                };
+                flip(index, event, shot, branch);
+            }
+        }
+        return;
+    }
     let mut misses = QecMissThresholds::new(unit_shots);
     for (index, event) in events.iter().enumerate() {
         match *draw(event) {
@@ -1470,6 +1513,10 @@ fn draw_qec_unit<E>(
         }
     }
 }
+
+/// Units below this many shots draw each event once per shot instead of skipping
+/// between faults.
+const QEC_SKIP_MIN_SHOTS: usize = 32;
 
 /// The geometric skip between faults of one event, with the uniform draw below which
 /// the first skip lands past every shot.
@@ -2383,7 +2430,7 @@ fn draw_qec_single_noise(
         return;
     }
 
-    if rates.p_event >= 0.5 || num_shots < 32 {
+    if rates.p_event >= 0.5 {
         for shot in 0..num_shots {
             if let Some(branch) = rates.branch(rng.next_f64()) {
                 flip(shot, branch);
@@ -2415,7 +2462,7 @@ fn draw_qec_pair_noise(
         return;
     }
 
-    if p >= 0.5 || num_shots < 32 {
+    if p >= 0.5 {
         for shot in 0..num_shots {
             if rng.next_f64() < p {
                 flip(shot, qec_uniform_15(rng));
@@ -2446,7 +2493,7 @@ fn draw_qec_table_noise(
         return;
     }
 
-    if p >= 0.5 || num_shots < 32 {
+    if p >= 0.5 {
         for shot in 0..num_shots {
             let r = rng.next_f64();
             if r < p {

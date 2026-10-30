@@ -1066,7 +1066,6 @@ unsafe fn apply_diagonal_loop_neon(
 /// Each 2x2 `(row-bit, col-bit)` block is loaded once, takes `U` on the left and
 /// `U^dagger` on the right in registers, and is stored once: the same 16 complex
 /// multiplies per block as two register passes, with half the loads and stores.
-#[cfg(any(test, feature = "bench-internal"))]
 #[inline(always)]
 pub(crate) fn apply_1q_sandwich_blocked(
     rho: &mut [Complex64],
@@ -1102,7 +1101,6 @@ pub(crate) fn apply_1q_sandwich_blocked(
     sandwich_1q_blocked_scalar(rho, rbit, cbit, mat, &conj);
 }
 
-#[cfg(any(test, feature = "bench-internal"))]
 #[inline(always)]
 fn sandwich_1q_blocked_scalar(
     rho: &mut [Complex64],
@@ -1132,7 +1130,6 @@ fn sandwich_1q_blocked_scalar(
 }
 
 /// Two blocks per vector: requires `cbit >= 2`, so `i` and `i + 1` are both block bases.
-#[cfg(any(test, feature = "bench-internal"))]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn sandwich_1q_blocked_avx2fma(
@@ -1216,7 +1213,6 @@ unsafe fn sandwich_1q_blocked_avx2fma(
 /// Qubit 0: a block's row halves `[a, b]` and `[c, d]` are each one vector, so the
 /// left product runs across the pair and the right product within each vector
 /// against its own half swap, with lane-varying `conj(U)` coefficients.
-#[cfg(any(test, feature = "bench-internal"))]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn sandwich_1q_blocked_q0_avx2fma(

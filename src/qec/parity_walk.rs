@@ -307,47 +307,8 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
         spills.push(result.spill);
     }
 
-    let product_tables = &plan.deferred.product_tables;
-    let pieces: Vec<NoisePiece> = if spills.iter().all(|spill| spill.keys.is_empty()) {
-        owns.into_iter()
-            .map(|own| merge_window(own, &[], product_tables))
-            .collect()
-    } else {
-        #[cfg(feature = "parallel")]
-        {
-            owns.into_par_iter()
-                .enumerate()
-                .map(|(window, own)| merge_window(own, &spills[window + 1..], product_tables))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            owns.into_iter()
-                .enumerate()
-                .map(|(window, own)| merge_window(own, &spills[window + 1..], product_tables))
-                .collect()
-        }
-    };
-
-    let mut events = Vec::with_capacity(pieces.iter().map(|piece| piece.events.len()).sum());
-    let mut branch_offsets = Vec::with_capacity(
-        1 + pieces
-            .iter()
-            .map(|piece| piece.branch_offsets.len() - 1)
-            .sum::<usize>(),
-    );
-    branch_offsets.push(0u32);
-    let mut outputs = Vec::with_capacity(pieces.iter().map(|piece| piece.outputs.len()).sum());
-    for piece in pieces.iter().rev() {
-        let first_branch = branch_offsets.len() - 1;
-        let base = outputs.len() as u32;
-        events.extend(piece.events.iter().map(|&(kept, branch)| WalkEvent {
-            kept,
-            first_branch: first_branch + branch,
-        }));
-        branch_offsets.extend(piece.branch_offsets[1..].iter().map(|&end| end + base));
-        outputs.extend_from_slice(&piece.outputs);
-    }
+    let (events, branch_offsets, outputs) =
+        assemble_windows(&owns, &spills, &plan.deferred.product_tables);
     Ok(ParityWalk {
         pattern,
         random,
@@ -1250,14 +1211,6 @@ impl WalkVisitor for WindowVisitor {
     }
 }
 
-/// One window's kept events with every window's flips merged in, in walk order.
-struct NoisePiece {
-    /// Event and its branch index into `branch_offsets`.
-    events: Vec<(KeptEvent, usize)>,
-    branch_offsets: Vec<u32>,
-    outputs: Vec<u32>,
-}
-
 fn branch_count(draw: QecNoiseDraw, product_tables: &[QecProductTable]) -> usize {
     match draw {
         QecNoiseDraw::Single { .. } => 3,
@@ -1266,48 +1219,123 @@ fn branch_count(draw: QecNoiseDraw, product_tables: &[QecProductTable]) -> usize
     }
 }
 
-/// Merge the flips later windows saw on `own`'s events into them.
+/// Lay the windows' kept events out last window first, the order one walk visits them,
+/// with the flips later windows saw on each event merged into its branches. Every
+/// window's section is sized first, so each window writes its outputs once, straight
+/// into the final arrays.
+fn assemble_windows(
+    owns: &[OwnFlips],
+    spills: &[SpillFlips],
+    product_tables: &[QecProductTable],
+) -> (Vec<WalkEvent>, Vec<u32>, Vec<u32>) {
+    let section_len: Vec<usize> = owns
+        .iter()
+        .enumerate()
+        .map(|(window, own)| {
+            own.outputs.len()
+                + spills[window + 1..]
+                    .iter()
+                    .map(|spill| spilled_onto(own, spill))
+                    .sum::<usize>()
+        })
+        .collect();
+    let total_events = owns.iter().map(|own| own.events.len()).sum();
+    let total_branches = owns
+        .iter()
+        .map(|own| own.branch_offsets.len() - 1)
+        .sum::<usize>();
+    let total_outputs = section_len.iter().sum();
+
+    let mut events = Vec::with_capacity(total_events);
+    let mut branch_offsets = vec![0u32; total_branches + 1];
+    let mut outputs = vec![0u32; total_outputs];
+    let mut jobs = Vec::with_capacity(owns.len());
+    let mut offsets_rest = &mut branch_offsets[1..];
+    let mut outputs_rest = &mut outputs[..];
+    let mut base = 0usize;
+    for window in (0..owns.len()).rev() {
+        let own = &owns[window];
+        let mut branch = total_branches - offsets_rest.len();
+        events.extend(own.events.iter().map(|&kept| {
+            let event = WalkEvent {
+                kept,
+                first_branch: branch,
+            };
+            branch += branch_count(kept.draw, product_tables);
+            event
+        }));
+        let (offsets, rest) =
+            std::mem::take(&mut offsets_rest).split_at_mut(own.branch_offsets.len() - 1);
+        offsets_rest = rest;
+        let (out, rest) = std::mem::take(&mut outputs_rest).split_at_mut(section_len[window]);
+        outputs_rest = rest;
+        jobs.push((window, base as u32, offsets, out));
+        base += section_len[window];
+    }
+
+    let fill = |(window, base, offsets, out): (usize, u32, &mut [u32], &mut [u32])| {
+        merge_window(
+            &owns[window],
+            &spills[window + 1..],
+            product_tables,
+            base,
+            offsets,
+            out,
+        );
+    };
+    #[cfg(feature = "parallel")]
+    jobs.into_par_iter().for_each(fill);
+    #[cfg(not(feature = "parallel"))]
+    jobs.into_iter().for_each(fill);
+    (events, branch_offsets, outputs)
+}
+
+/// Outputs `spill` holds for branches of `own`'s events. Both list candidates
+/// ascending, the order the walk visits them.
+fn spilled_onto(own: &OwnFlips, spill: &SpillFlips) -> usize {
+    let mut candidates = own.events.iter().map(|kept| kept.candidate).peekable();
+    let mut total = 0;
+    for (at, &(candidate, _)) in spill.keys.iter().enumerate() {
+        while candidates.next_if(|&held| held < candidate).is_some() {}
+        if candidates.peek() == Some(&candidate) {
+            total += (spill.offsets[at + 1] - spill.offsets[at]) as usize;
+        }
+    }
+    total
+}
+
+/// Write `own`'s branches into `out`, each followed by the flips later windows saw on
+/// it, a branch's outputs ascending, and each branch's end into `offsets`; `base` is
+/// where `out` starts in the walk's outputs.
 fn merge_window(
-    own: OwnFlips,
+    own: &OwnFlips,
     later: &[SpillFlips],
     product_tables: &[QecProductTable],
-) -> NoisePiece {
+    base: u32,
+    offsets: &mut [u32],
+    out: &mut [u32],
+) {
     let sources: Vec<&SpillFlips> = later
         .iter()
         .filter(|spill| !spill.keys.is_empty())
         .collect();
     if sources.is_empty() {
-        let mut branch = 0usize;
-        let events = own
-            .events
-            .iter()
-            .map(|&kept| {
-                let first = branch;
-                branch += branch_count(kept.draw, product_tables);
-                (kept, first)
-            })
-            .collect();
-        return NoisePiece {
-            events,
-            branch_offsets: own.branch_offsets,
-            outputs: own.outputs,
-        };
+        out.copy_from_slice(&own.outputs);
+        for (slot, &end) in offsets.iter_mut().zip(&own.branch_offsets[1..]) {
+            *slot = base + end;
+        }
+        return;
     }
-    let mut piece = NoisePiece {
-        events: Vec::with_capacity(own.events.len()),
-        branch_offsets: vec![0],
-        outputs: Vec::with_capacity(own.outputs.len()),
-    };
     let mut cursors = vec![0usize; sources.len()];
+    let mut written = 0usize;
     let mut branch = 0usize;
-    for &kept in &own.events {
-        let branches = branch_count(kept.draw, product_tables);
-        piece.events.push((kept, piece.branch_offsets.len() - 1));
-        for b in 0..branches {
-            let start = piece.outputs.len();
+    for kept in &own.events {
+        for b in 0..branch_count(kept.draw, product_tables) {
+            let start = written;
             let own_range =
                 own.branch_offsets[branch] as usize..own.branch_offsets[branch + 1] as usize;
-            piece.outputs.extend_from_slice(&own.outputs[own_range]);
+            written += own_range.len();
+            out[start..written].copy_from_slice(&own.outputs[own_range]);
             let key = (kept.candidate, b as u16);
             let mut spilled = false;
             for (source, cursor) in sources.iter().zip(cursors.iter_mut()) {
@@ -1317,17 +1345,19 @@ fn merge_window(
                 if *cursor < source.keys.len() && source.keys[*cursor] == key {
                     let range =
                         source.offsets[*cursor] as usize..source.offsets[*cursor + 1] as usize;
-                    piece.outputs.extend_from_slice(&source.outputs[range]);
+                    let from = written;
+                    written += range.len();
+                    out[from..written].copy_from_slice(&source.outputs[range]);
                     *cursor += 1;
                     spilled = true;
                 }
             }
             if spilled {
-                piece.outputs[start..].sort_unstable();
+                out[start..written].sort_unstable();
             }
-            piece.branch_offsets.push(piece.outputs.len() as u32);
+            offsets[branch] = base + written as u32;
             branch += 1;
         }
     }
-    piece
+    debug_assert_eq!(written, out.len());
 }

@@ -668,28 +668,21 @@ fn trajectory_plan(
     // matrix. Without this the model clears every routing gate and fails part
     // way through the first shot, on a backend an Auto route may have picked
     // for the caller.
-    let answers_pair = match plan {
-        BackendPlan::Statevector { .. }
-        | BackendPlan::Sparse
-        | BackendPlan::Factored
-        | BackendPlan::Mps { .. } => true,
+    if noise_model.has_two_qubit_kraus() && !plan.supports_two_qubit_kraus(limits) {
         #[cfg(feature = "distributed")]
-        BackendPlan::Distributed(_) => true,
-        _ => false,
-    };
-    if noise_model.has_two_qubit_kraus() && !answers_pair {
-        #[cfg(feature = "distributed")]
-        const PAIR_ROUTES: &str = "a statevector, sparse, factored, MPS or distributed statevector";
+        const PAIR_ROUTES: &str =
+            "a host statevector, sparse, factored, MPS or distributed statevector";
         #[cfg(not(feature = "distributed"))]
-        const PAIR_ROUTES: &str = "a statevector, sparse, factored or MPS";
+        const PAIR_ROUTES: &str = "a host statevector, sparse, factored or MPS";
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{:?}", plan.resolved()),
             reason: format!(
                 "a two-qubit Kraus channel needs the pair's reduced density matrix its \
                  branch probabilities are drawn from, and a kernel for the branch operator, \
                  which is not unitary. A tableau and a product state have no such kernel, \
-                 and a tensor network traces out no arbitrary pair; run on {PAIR_ROUTES} \
-                 route, or evaluate the channel exactly on BackendKind::DensityMatrix"
+                 a tensor network traces out no arbitrary pair, and a device-resident \
+                 statevector reads no pair; run on {PAIR_ROUTES} route, or evaluate the \
+                 channel exactly on BackendKind::DensityMatrix"
             ),
         });
     }

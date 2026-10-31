@@ -921,6 +921,12 @@ impl BackendPlan {
         }
     }
 
+    /// Ask the backend this plan builds, built without state, whether it runs a
+    /// two-qubit Kraus branch.
+    pub(super) fn supports_two_qubit_kraus(&self, limits: &ResolvedLimits) -> bool {
+        self.build(0, limits).supports_two_qubit_kraus()
+    }
+
     pub(super) fn is_host_statevector(&self) -> bool {
         matches!(self, BackendPlan::Statevector { accel: Accel::Cpu })
     }

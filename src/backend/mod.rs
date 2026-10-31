@@ -467,6 +467,16 @@ pub(crate) mod sealed {
     pub trait Sealed {
         /// Caps the backend was built under.
         fn limits(&self) -> crate::limits::ResolvedLimits;
+
+        /// Apply the no-jump branch of amplitude or phase damping at rate `gamma`,
+        /// `diag(1, keep) / sqrt(1 - gamma p1)` with `keep = sqrt(1 - gamma) > 0`, to
+        /// `qubit` in the pass that reads its `p1`, and return that `p1`. A branch norm
+        /// `1 - gamma p1` at or below the trajectory's `JUMP_EPSILON` leaves the state
+        /// as it was. `None`, with the state untouched, where no deferred norm can take
+        /// the normalization.
+        fn damp_no_jump(&mut self, _qubit: usize, _gamma: f64, _keep: f64) -> Option<f64> {
+            None
+        }
     }
 }
 

@@ -1337,3 +1337,141 @@ fn every_channel_keeps_its_seeded_records() {
     ]);
     assert_eq!(prints, expected);
 }
+
+fn copy_of(backend: &StatevectorBackend) -> StatevectorBackend {
+    let mut copy = StatevectorBackend::new(7);
+    copy.copy_state_from(backend);
+    copy
+}
+
+#[track_caller]
+fn assert_states_close(got: &StatevectorBackend, want: &StatevectorBackend, label: &str) {
+    let (got, want) = (
+        got.export_statevector().unwrap(),
+        want.export_statevector().unwrap(),
+    );
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!((g - w).norm() < 1e-12, "{label}: amplitude {i} {g} vs {w}");
+    }
+}
+
+/// A seeded five-qubit state, and the same state after measuring qubit 4, which
+/// leaves a deferred norm and a qubit whose `p1` is zero or one.
+fn damping_states() -> [StatevectorBackend; 2] {
+    use rand::RngExt;
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let amplitudes: Vec<Complex64> = (0..32)
+        .map(|_| Complex64::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0)))
+        .collect();
+    let norm = amplitudes.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+    let mut fresh = StatevectorBackend::new(42);
+    fresh
+        .init_from_state(amplitudes.iter().map(|a| a / norm).collect(), 1)
+        .unwrap();
+    let mut measured = copy_of(&fresh);
+    measured
+        .apply(&Instruction::Measure {
+            qubit: 4,
+            classical_bit: 0,
+        })
+        .unwrap();
+    assert_ne!(measured.pending_norm, 1.0);
+    [fresh, measured]
+}
+
+#[test]
+fn one_pass_damping_matches_the_two_step_branch() {
+    use crate::backend::sealed::Sealed;
+    for (index, state) in damping_states().iter().enumerate() {
+        for gamma in [1e-3, 0.3] {
+            let damping = Damping::new(gamma);
+            for qubit in 0..5 {
+                let read = copy_of(state)
+                    .damp_no_jump(qubit, gamma, damping.keep)
+                    .unwrap();
+                assert_eq!(read, state.qubit_probability(qubit).unwrap());
+                for moves in [true, false] {
+                    for r in [0.0, 0.5 * gamma, gamma, 0.5, 1.0 - f64::EPSILON] {
+                        let (mut fused, mut two_step) = (copy_of(state), copy_of(state));
+                        apply_diagonal_kraus_2op(&mut fused, qubit, damping, moves, r).unwrap();
+                        apply_damping_two_step(&mut two_step, qubit, damping, moves, r).unwrap();
+                        let label = format!("state {index} gamma {gamma} q{qubit} {moves} r {r}");
+                        assert_states_close(&fused, &two_step, &label);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// `|1>` under a deferred norm a few ulps above one reads `p1 > 1`, so `r = gamma`
+// lies under `gamma * p1` and the jump wins after the pass has applied the no-jump
+// branch. At `gamma` just under one the branch norm `1 - gamma` sits at the floor,
+// which leaves the state alone.
+#[test]
+fn one_pass_damping_keeps_the_rule_at_its_edges() {
+    let mut excited = StatevectorBackend::new(42);
+    excited.init(1, 0).unwrap();
+    excited.apply(&one_gate(Gate::X, 0)).unwrap();
+    let mut rounded = copy_of(&excited);
+    rounded.pending_norm = 1.0 + 4.0 * f64::EPSILON;
+    assert!(0.5 < 0.5 * rounded.qubit_probability(0).unwrap());
+
+    let floor = 1.0 - 1e-13;
+    for (state, gamma, r, label) in [
+        (&rounded, 0.5, 0.5, "rounded jump"),
+        (&excited, floor, 1.0 - 1e-14, "norm at the floor"),
+    ] {
+        for moves in [true, false] {
+            let damping = Damping::new(gamma);
+            let (mut fused, mut two_step) = (copy_of(state), copy_of(state));
+            apply_diagonal_kraus_2op(&mut fused, 0, damping, moves, r).unwrap();
+            apply_damping_two_step(&mut two_step, 0, damping, moves, r).unwrap();
+            assert_states_close(&fused, &two_step, &format!("{label} {moves}"));
+        }
+    }
+    let mut decayed = copy_of(&rounded);
+    apply_diagonal_kraus_2op(&mut decayed, 0, Damping::new(0.5), true, 0.5).unwrap();
+    assert!((decayed.qubit_probability(0).unwrap()).abs() < 1e-12);
+}
+
+#[test]
+fn a_no_jump_damping_event_is_one_pass() {
+    use crate::backend::statevector::sweeps::take_ticks;
+    let [state, _] = damping_states();
+    let damping = Damping::new(1e-3);
+    let (mut fused, mut two_step) = (copy_of(&state), copy_of(&state));
+    take_ticks();
+    apply_diagonal_kraus_2op(&mut fused, 2, damping, true, 0.5).unwrap();
+    assert_eq!(take_ticks(), 1);
+    apply_damping_two_step(&mut two_step, 2, damping, true, 0.5).unwrap();
+    assert_eq!(take_ticks(), 2);
+}
+
+// A qubit held at `|1>`: nine no-jump branches, then a jump that renormalizes and an
+// `X` that re-excites. Each no-jump branch halves the raw `|1>` weight and doubles
+// the squared deferred norm, so the 1800 here would carry both past the range of an
+// `f64` without the fold.
+#[test]
+fn a_long_trajectory_keeps_its_deferred_norm_in_range() {
+    let mut backend = StatevectorBackend::new(42);
+    backend.init(1, 0).unwrap();
+    backend.apply(&one_gate(Gate::X, 0)).unwrap();
+    let damping = Damping::new(0.5);
+    for step in 0..2000 {
+        let jump = step % 10 == 9;
+        let r = if jump { 0.0 } else { 0.9 };
+        apply_diagonal_kraus_2op(&mut backend, 0, damping, true, r).unwrap();
+        if jump {
+            backend.apply(&one_gate(Gate::X, 0)).unwrap();
+        }
+    }
+    assert!((backend.qubit_probability(0).unwrap() - 1.0).abs() < 1e-9);
+    let norm: f64 = backend
+        .export_statevector()
+        .unwrap()
+        .iter()
+        .map(|a| a.norm_sqr())
+        .sum();
+    assert!((norm - 1.0).abs() < 1e-9, "norm {norm}");
+}

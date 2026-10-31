@@ -91,6 +91,11 @@ const PARALLEL_INIT_QUBITS: usize = 20;
 #[cfg(feature = "parallel")]
 const INIT_ZERO_CHUNK: usize = 1 << 16;
 
+/// `pending_norm` past which a no-jump damping branch folds it into the amplitudes.
+/// Each branch shrinks the `|1>` half and grows the deferred norm, so a long
+/// trajectory would otherwise walk its amplitudes toward the subnormal range.
+const MAX_PENDING_NORM: f64 = 1e32;
+
 /// Per-block partial sums for a 1q reduced density matrix: `(p0, p1, r)` over
 /// one `2 * 2^qubit` block whose low half holds the qubit-0 amplitudes.
 #[inline(always)]
@@ -878,6 +883,26 @@ impl StatevectorBackend {
 impl crate::backend::sealed::Sealed for StatevectorBackend {
     fn limits(&self) -> crate::limits::ResolvedLimits {
         self.limits
+    }
+
+    /// Reads `p1` and scales the `|1>` half by `keep` in one pass over that half, and
+    /// moves `1 / sqrt(1 - gamma p1)` into `pending_norm`.
+    fn damp_no_jump(&mut self, qubit: usize, gamma: f64, keep: f64) -> Option<f64> {
+        if self.is_gpu_resident() {
+            return None;
+        }
+        debug_assert!(keep > 0.0, "a zero keep leaves no |1> half to restore");
+        let p1 = self.scale_qubit_one(qubit, keep);
+        let denom = 1.0 - gamma * p1;
+        if denom <= crate::sim::trajectory::JUMP_EPSILON {
+            self.scale_qubit_one(qubit, 1.0 / keep);
+        } else {
+            self.pending_norm *= 1.0 / denom.sqrt();
+            if self.pending_norm > MAX_PENDING_NORM {
+                self.fold_pending_norm();
+            }
+        }
+        Some(p1)
     }
 }
 

@@ -899,6 +899,35 @@ fn grouped_pauli_trajectories_identical_across_thread_counts() {
     );
 }
 
+// Damping weighs each branch by P(1), so every shot runs its own trajectory, and the
+// no-jump branch leaves its normalization deferred in that shot's backend. The
+// records still hang off the shot seeds alone.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn damping_trajectories_identical_across_thread_counts() {
+    let mut circuit = prism_q::circuits::hardware_efficient_ansatz(10, 2, SEED);
+    circuit.measure_all();
+    let noise = NoiseModel::with_amplitude_damping(&circuit, 0.02);
+    let shots = |threads: usize, num_shots: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .noise(&noise)
+                .seed(SEED)
+                .shots(num_shots)
+                .expect("noisy shots")
+        })
+    };
+    let single = shots(1, 200);
+    let wide = shots(THREADS_HI, 200);
+    assert_eq!(single.metadata.backend, ResolvedBackend::Statevector);
+    assert_eq!(single.shots, wide.shots, "damping trajectory bits differ");
+    assert_eq!(
+        shots(THREADS_HI, 3).shots,
+        single.shots[..3],
+        "serial trajectories differ from split ones"
+    );
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn noisy_stabilizer_trajectories_identical_across_thread_counts() {

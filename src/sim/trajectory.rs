@@ -300,48 +300,92 @@ pub(crate) struct Kraus2q {
 /// Minimum p_jump for applying the jump branch instead of the no-jump
 /// branch. Below this, the jump is numerically indistinguishable from zero and
 /// dividing by sqrt(p_jump) produces NaN/inf.
-const JUMP_EPSILON: f64 = 1e-12;
+pub(crate) const JUMP_EPSILON: f64 = 1e-12;
 
 /// Apply a single-qubit diagonal Kraus channel with 2 operators of the form:
 ///   K_0 = diag(1, c), no-jump
 ///   K_1 = [[0, s01_upper], [0, s11_lower]], jump (AD)
 ///       or diag(0, s), jump (PD, pass s01_upper=0)
 ///
-/// where c = sqrt(1-gamma). The effective jump probability is gamma * p1.
+/// where c = sqrt(1-gamma). The effective jump probability is gamma * p1, taken
+/// when the uniform draw `r` falls below it.
+///
+/// No `p1` up to one lifts `gamma * p1` past an `r >= gamma`, so there a backend
+/// offering [`damp_no_jump`](crate::backend::sealed::Sealed::damp_no_jump) applies
+/// the no-jump branch in the pass that reads `p1`. Rounding can leave that `p1` just
+/// past one, so the jump test reruns on it, and a jump it then picks undoes the
+/// branch's scaling of the `|1>` half.
 fn apply_diagonal_kraus_2op(
+    backend: &mut dyn Backend,
+    qubit: usize,
+    damping: Damping,
+    jump_moves_population: bool,
+    r: f64,
+) -> Result<()> {
+    let Damping { gamma, keep } = damping;
+    if r >= gamma
+        && let Some(p1) = backend.damp_no_jump(qubit, gamma, keep)
+    {
+        let p_jump = gamma * p1;
+        if r < p_jump && p_jump > JUMP_EPSILON {
+            let denom = 1.0 - p_jump;
+            let applied = if denom > JUMP_EPSILON {
+                keep / denom.sqrt()
+            } else {
+                1.0
+            };
+            let s = (gamma / p_jump).sqrt() / applied;
+            return apply_damping_jump(backend, qubit, s, jump_moves_population);
+        }
+        return Ok(());
+    }
+    apply_damping_two_step(backend, qubit, damping, jump_moves_population, r)
+}
+
+/// [`apply_diagonal_kraus_2op`] as a `p1` read followed by a matrix pass.
+fn apply_damping_two_step(
     backend: &mut dyn Backend,
     qubit: usize,
     Damping { gamma, keep }: Damping,
     jump_moves_population: bool,
-    rng: &mut ChaCha8Rng,
+    r: f64,
 ) -> Result<()> {
     let p1 = backend.qubit_probability(qubit)?;
     let p_jump = gamma * p1;
-    let r: f64 = rand::RngExt::random(rng);
-
-    let zero = Complex64::new(0.0, 0.0);
 
     if r < p_jump && p_jump > JUMP_EPSILON {
         let s = (gamma / p_jump).sqrt();
-        let mat = if jump_moves_population {
-            [[zero, Complex64::new(s, 0.0)], [zero, zero]]
-        } else {
-            [[zero, zero], [zero, Complex64::new(s, 0.0)]]
-        };
-        backend.apply_1q_matrix(qubit, &mat)?;
-    } else {
-        let denom = 1.0 - p_jump;
-        if denom <= JUMP_EPSILON {
-            return Ok(());
-        }
-        let inv = 1.0 / denom.sqrt();
-        let mat = [
-            [Complex64::new(inv, 0.0), zero],
-            [zero, Complex64::new(keep * inv, 0.0)],
-        ];
-        backend.apply_1q_matrix(qubit, &mat)?;
+        return apply_damping_jump(backend, qubit, s, jump_moves_population);
     }
-    Ok(())
+    let denom = 1.0 - p_jump;
+    if denom <= JUMP_EPSILON {
+        return Ok(());
+    }
+    let inv = 1.0 / denom.sqrt();
+    let zero = Complex64::new(0.0, 0.0);
+    let mat = [
+        [Complex64::new(inv, 0.0), zero],
+        [zero, Complex64::new(keep * inv, 0.0)],
+    ];
+    backend.apply_1q_matrix(qubit, &mat)
+}
+
+/// The jump branch scaled by `s`: `|0><1|` when it moves population, `|1><1|` when it
+/// dephases.
+fn apply_damping_jump(
+    backend: &mut dyn Backend,
+    qubit: usize,
+    s: f64,
+    jump_moves_population: bool,
+) -> Result<()> {
+    let zero = Complex64::new(0.0, 0.0);
+    let s = Complex64::new(s, 0.0);
+    let mat = if jump_moves_population {
+        [[zero, s], [zero, zero]]
+    } else {
+        [[zero, zero], [zero, s]]
+    };
+    backend.apply_1q_matrix(qubit, &mat)
 }
 
 fn apply_amplitude_damping(
@@ -350,7 +394,7 @@ fn apply_amplitude_damping(
     damping: Damping,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    apply_diagonal_kraus_2op(backend, qubit, damping, true, rng)
+    apply_diagonal_kraus_2op(backend, qubit, damping, true, rand::RngExt::random(rng))
 }
 
 fn apply_phase_damping(
@@ -359,7 +403,7 @@ fn apply_phase_damping(
     damping: Damping,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    apply_diagonal_kraus_2op(backend, qubit, damping, false, rng)
+    apply_diagonal_kraus_2op(backend, qubit, damping, false, rand::RngExt::random(rng))
 }
 
 /// A trajectory over a model with guarded slots.

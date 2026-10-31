@@ -154,6 +154,21 @@ fn test_bulk_norm_sqr_sum() {
 }
 
 #[test]
+fn norm_sqr_sum_scale_sums_as_norm_sqr_sum_then_scales() {
+    for n in [1usize, 2, 3, 4, 5, 7, 8, 9, 16, 17, 37, 101] {
+        let original: Vec<Complex64> = (0..n)
+            .map(|i| c(0.07 * i as f64 - 1.0, 0.03 * i as f64 + 0.2))
+            .collect();
+        let mut scaled = original.clone();
+        let sum = norm_sqr_sum_scale(&mut scaled, -0.37);
+        assert_eq!(sum, norm_sqr_sum(&original), "n={n}");
+        for (s, o) in scaled.iter().zip(&original) {
+            assert_eq!(*s, o * -0.37, "n={n}");
+        }
+    }
+}
+
+#[test]
 fn test_bulk_zero() {
     let mut slice = vec![c(1.0, 2.0), c(3.0, 4.0), c(5.0, 6.0)];
     zero_slice(&mut slice);
@@ -724,6 +739,15 @@ fn avx512_slice_ops_match_avx2() {
                 "norm_sqr_sum n={n}: {got} vs {want}"
             );
 
+            let (mut want, mut got) = (a0.clone(), a0.clone());
+            let want_sum = norm_sqr_sum_scale_avx2fma(&mut want, -1.75);
+            let got_sum = norm_sqr_sum_scale_avx512(&mut got, -1.75);
+            assert!(
+                (got_sum - want_sum).abs() < 1e-9,
+                "norm_sqr_sum_scale n={n}: {got_sum} vs {want_sum}"
+            );
+            assert_state_close(&got, &want, &format!("norm_sqr_sum_scale n={n}"));
+
             let (mut want, mut got) = (vec![0.0; n], vec![0.0; n]);
             norm_sqr_to_slice_avx2(&a0, &mut want);
             norm_sqr_to_slice_avx512::<false>(&a0, &mut got, 1.0);
@@ -840,7 +864,7 @@ fn target_feature_kernel_count_is_pinned() {
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
     let expected: [(&str, usize); 8] = [
-        ("src/backend/simd.rs", 50),
+        ("src/backend/simd.rs", 52),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
         ("src/backend/statevector/kernels.rs", 17),

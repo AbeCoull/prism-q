@@ -98,6 +98,7 @@ CPU twin.
 
 | Group | What it measures |
 |-------|-----------------|
+| `run_counts_terminal/clifford_random_pairs_d20_100/{1000,2000}` | 100 shots of `sample_counts` on depth-20 random long-range Clifford pairs measured whole, where the forward compile over the full tableau is the cost |
 | `qec_clifford_runner` | Packed native Clifford QEC execution |
 | `qec_noisy_runner` | Packed native QEC execution with Pauli-noise rows |
 | `qec_noisy_runner_split` | Parse, compile, sample, noise, detector, postselection, logical count, and total QEC timings |

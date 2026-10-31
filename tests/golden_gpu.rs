@@ -2323,7 +2323,7 @@ fn device_counts_survive_two_outcome_contention() {
 // change that silently drops this test back to the CPU path fails there.
 #[test]
 fn noisy_compiled_gpu_reductions_match_cpu_statistics() {
-    use prism_q::{Circuit, NoiseModel, compile_noisy};
+    use prism_q::{NoiseModel, compile_noisy};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -2333,16 +2333,7 @@ fn noisy_compiled_gpu_reductions_match_cpu_statistics() {
     }
 
     let n = 32;
-    let mut circuit = Circuit::new(n, n);
-    for q in 0..16 {
-        circuit.add_gate(Gate::H, &[q]);
-    }
-    for q in 16..32 {
-        for k in 0..4 {
-            circuit.add_gate(Gate::Cx, &[(q - 16 + k) % 16, q]);
-        }
-    }
-    circuit.measure_all();
+    let circuit = parity_fan_circuit();
     let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
 
     let mut cpu = compile_noisy(&circuit, &noise, 42).unwrap();
@@ -2405,6 +2396,146 @@ fn noisy_compiled_gpu_reductions_match_cpu_statistics() {
     );
     assert!(
         (cpu_violation - gpu_violation).abs() < tol,
+        "parity violation rate: cpu={cpu_violation} gpu={gpu_violation}"
+    );
+}
+
+fn parity_fan_circuit() -> prism_q::Circuit {
+    let mut circuit = prism_q::Circuit::new(32, 32);
+    for q in 0..16 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 16..32 {
+        for k in 0..4 {
+            circuit.add_gate(Gate::Cx, &[(q - 16 + k) % 16, q]);
+        }
+    }
+    circuit.measure_all();
+    circuit
+}
+
+// Readout error flips the device record before the marginal and count
+// reductions. Every bit of the parity fan is uniform before readout, so bit
+// `q` reads one with probability `(1 - p10 + p01) / 2`; the GPU marginals
+// must sit within 5 sigma of that and of the CPU sampler. Bits 5 and 21 carry
+// one-sided rates and bit 31 none, so a record mapped to the wrong row shows.
+// The host path is bit-reproducible at a fixed seed, so a GPU result equal to
+// the CPU one means the device path declined.
+#[test]
+fn noisy_compiled_gpu_readout_matches_cpu_statistics() {
+    use prism_q::{NoiseModel, compile_noisy};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let shots = bts_min_shots_env().max(131_072);
+    if shots > 262_144 {
+        return;
+    }
+
+    let n = 32;
+    let circuit = parity_fan_circuit();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+    noise.with_readout_error(0.03, 0.08);
+    noise.set_bit_readout_error(5, 0.25, 0.0);
+    noise.set_bit_readout_error(21, 0.0, 0.4);
+    noise.readout[31] = None;
+    let expected: Vec<f64> = noise
+        .readout
+        .iter()
+        .map(|r| r.as_ref().map_or(0.5, |r| 0.5 * (1.0 - r.p10 + r.p01)))
+        .collect();
+
+    let mut cpu = compile_noisy(&circuit, &noise, 42).unwrap();
+    let mut gpu = compile_noisy(&circuit, &noise, 42)
+        .unwrap()
+        .with_gpu(f.ctx.clone());
+
+    let pair_tol = 5.0 * (0.5 / shots as f64).sqrt();
+    let rate_tol = |p: f64| 5.0 * (p * (1.0 - p) / shots as f64).sqrt();
+
+    let cpu_marginals = cpu.sample_marginals(shots);
+    #[cfg(feature = "bench-internal")]
+    let before = f.ctx.pass_census();
+    let gpu_marginals = gpu.sample_marginals(shots);
+    #[cfg(feature = "bench-internal")]
+    assert!(
+        (f.ctx.pass_census() - before).drains > 0,
+        "marginals never touched the device"
+    );
+    assert_ne!(
+        cpu_marginals, gpu_marginals,
+        "GPU marginals equal the host stream: the device path declined"
+    );
+    for q in 0..n {
+        assert!(
+            (gpu_marginals[q] - expected[q]).abs() < rate_tol(expected[q]),
+            "marginal[{q}]: gpu={} expected={}",
+            gpu_marginals[q],
+            expected[q]
+        );
+        assert!(
+            (cpu_marginals[q] - gpu_marginals[q]).abs() < pair_tol,
+            "marginal[{q}]: cpu={} gpu={}",
+            cpu_marginals[q],
+            gpu_marginals[q]
+        );
+    }
+
+    let cpu_counts = cpu.sample_counts(shots);
+    #[cfg(feature = "bench-internal")]
+    let before = f.ctx.pass_census();
+    let gpu_counts = gpu.sample_counts(shots);
+    #[cfg(feature = "bench-internal")]
+    assert!(
+        (f.ctx.pass_census() - before).drains > 0,
+        "counts never touched the device"
+    );
+    assert_ne!(
+        cpu_counts, gpu_counts,
+        "GPU counts equal the host stream: the device path declined"
+    );
+    assert_eq!(gpu_counts.values().sum::<u64>(), shots as u64);
+
+    let cpu_freq = one_frequencies_from_counts(&cpu_counts, n, shots as u64);
+    let gpu_freq = one_frequencies_from_counts(&gpu_counts, n, shots as u64);
+    for q in 0..n {
+        assert!(
+            (gpu_freq[q] - expected[q]).abs() < rate_tol(expected[q]),
+            "count frequency[{q}]: gpu={} expected={}",
+            gpu_freq[q],
+            expected[q]
+        );
+        assert!(
+            (cpu_freq[q] - gpu_freq[q]).abs() < pair_tol,
+            "count frequency[{q}]: cpu={} gpu={}",
+            cpu_freq[q],
+            gpu_freq[q]
+        );
+    }
+
+    // Readout flips each record independently, so the rate at which a parity
+    // qubit disagrees with its four sources is a per-shot joint statistic the
+    // marginals cannot carry.
+    let parity_violation = |counts: &std::collections::HashMap<Vec<u64>, u64>| -> f64 {
+        let bit = |key: &Vec<u64>, q: usize| (key[q / 64] >> (q % 64)) & 1;
+        let mut violations = 0u64;
+        for (key, count) in counts {
+            for q in 16..32 {
+                let mut parity = bit(key, q);
+                for k in 0..4 {
+                    parity ^= bit(key, (q - 16 + k) % 16);
+                }
+                if parity != 0 {
+                    violations += count;
+                }
+            }
+        }
+        violations as f64 / (shots * 16) as f64
+    };
+    let cpu_violation = parity_violation(&cpu_counts);
+    let gpu_violation = parity_violation(&gpu_counts);
+    assert!(
+        (cpu_violation - gpu_violation).abs() < pair_tol,
         "parity violation rate: cpu={cpu_violation} gpu={gpu_violation}"
     );
 }

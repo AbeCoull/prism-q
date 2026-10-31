@@ -355,6 +355,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "bts_transpose_meas_to_shot",
     "bts_apply_noise_masks_meas_major",
     "bts_generate_and_apply_noise_meas_major_by_row",
+    "bts_apply_readout_meas_major",
     // Density-matrix sweeps over the embedded 2n-qubit buffer.
     "dm_diagonal",
     "dm_norm_sqr",

@@ -356,7 +356,7 @@ fn label_width(label: &str, font_size: f64) -> f64 {
 }
 
 fn emit_theme_vars(svg: &mut String, theme: &Theme, auto_theme: bool) {
-    let _ = write!(svg, "<style>:root{{");
+    let _ = write!(svg, "<style>.pq-circuit{{");
     if auto_theme {
         LIGHT.emit_css_vars(svg);
     } else {
@@ -364,7 +364,7 @@ fn emit_theme_vars(svg: &mut String, theme: &Theme, auto_theme: bool) {
     }
     let _ = write!(svg, "}}");
     if auto_theme {
-        let _ = write!(svg, "@media(prefers-color-scheme:dark){{:root{{");
+        let _ = write!(svg, "@media(prefers-color-scheme:dark){{.pq-circuit{{");
         DARK.emit_css_vars(svg);
         let _ = write!(svg, "}}}}");
     }
@@ -559,7 +559,7 @@ fn render_svg(
     let _ = writeln!(
         svg,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {:.1} {:.1}\" \
-         role=\"img\" aria-label=\"Quantum circuit: {} qubits, {} moments\">",
+         class=\"pq-circuit\" role=\"img\" aria-label=\"Quantum circuit: {} qubits, {} moments\">",
         total_width,
         total_height,
         num_qubits,
@@ -599,16 +599,16 @@ fn render_svg(
     };
     let _ = write!(
         svg,
-        "text{{font-family:Inter,-apple-system,system-ui,sans-serif;\
+        ".pq-circuit text{{font-family:Inter,-apple-system,system-ui,sans-serif;\
          font-size:{:.0}px;text-rendering:optimizeLegibility;\
          font-variant-numeric:tabular-nums;}}\
-         .gate text{{font-family:'JetBrains Mono','Fira Code',Consolas,monospace;\
+         .pq-circuit .gate text{{font-family:'JetBrains Mono','Fira Code',Consolas,monospace;\
          font-weight:600;letter-spacing:-0.01em;}}\
-         .gate{{filter:var(--shadow-filter);cursor:pointer;\
+         .pq-circuit .gate{{filter:var(--shadow-filter);cursor:pointer;\
          transition:filter 0.15s ease,opacity 0.1s ease;{anim_gate}}}\
-         .gate:hover{{filter:var(--hover-filter);opacity:0.92;}}\
-         .ctrl{{cursor:pointer;transition:r 0.1s ease;{anim_gate}}}\
-         .ctrl:hover circle{{r:{:.1};}}",
+         .pq-circuit .gate:hover{{filter:var(--hover-filter);opacity:0.92;}}\
+         .pq-circuit .ctrl{{cursor:pointer;transition:r 0.1s ease;{anim_gate}}}\
+         .pq-circuit .ctrl:hover circle{{r:{:.1};}}",
         opts.font_size,
         opts.control_radius + 1.5,
     );
@@ -622,19 +622,19 @@ fn render_svg(
     ] {
         let _ = write!(
             svg,
-            ".gate-{prefix} rect,.gate-{prefix} circle\
+            ".pq-circuit .gate-{prefix} rect,.pq-circuit .gate-{prefix} circle\
              {{fill:url(#{id});stroke:var(--{prefix}-str);}}\
-             .gate-{prefix} text{{fill:var(--{prefix}-txt);}}",
+             .pq-circuit .gate-{prefix} text{{fill:var(--{prefix}-txt);}}",
         );
     }
     let _ = write!(
         svg,
-        ".gate-ctrl line{{stroke:var(--ctrl-str);}}\
-         .gate-meas path,.gate-meas line{{stroke:var(--meas-txt);}}"
+        ".pq-circuit .gate-ctrl line{{stroke:var(--ctrl-str);}}\
+         .pq-circuit .gate-meas path,.pq-circuit .gate-meas line{{stroke:var(--meas-txt);}}"
     );
     let _ = write!(
         svg,
-        ".qlabel{{font-family:'JetBrains Mono','Fira Code',Consolas,monospace;\
+        ".pq-circuit .qlabel{{font-family:'JetBrains Mono','Fira Code',Consolas,monospace;\
          font-weight:500;font-size:{:.1}px;letter-spacing:0.02em;fill:var(--text);}}",
         opts.font_size * 0.92,
     );
@@ -646,18 +646,18 @@ fn render_svg(
         );
         let max_m = moments.len().min(50);
         for i in 0..=max_m {
-            let _ = write!(svg, ".m{i}{{animation-delay:{}ms}}", i * 30);
+            let _ = write!(svg, ".pq-circuit .m{i}{{animation-delay:{}ms}}", i * 30);
         }
         let _ = write!(
             svg,
             "@keyframes wire-flow{{to{{stroke-dashoffset:-12}}}}\
-             .wire-anim{{stroke-dasharray:1 11;animation:wire-flow 2s linear infinite;}}"
+             .pq-circuit .wire-anim{{stroke-dasharray:1 11;animation:wire-flow 2s linear infinite;}}"
         );
         let _ = write!(
             svg,
             "@media(prefers-reduced-motion:reduce){{\
-             .gate,.ctrl{{animation:none!important;}}\
-             .wire-anim{{animation:none!important;stroke-dasharray:none;}}}}"
+             .pq-circuit .gate,.pq-circuit .ctrl{{animation:none!important;}}\
+             .pq-circuit .wire-anim{{animation:none!important;stroke-dasharray:none;}}}}"
         );
     }
     let _ = writeln!(svg, "</style>");
@@ -1495,16 +1495,16 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
     let _ = writeln!(
         svg,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {:.0} {:.0}\" \
-         role=\"img\" aria-label=\"Gate density heatmap: {n} qubits, {depth} moments\">",
+         class=\"pq-circuit\" role=\"img\" aria-label=\"Gate density heatmap: {n} qubits, {depth} moments\">",
         total_w, total_h,
     );
     emit_theme_vars(&mut svg, theme, opts.auto_theme);
     let _ = writeln!(
         svg,
-        "text{{font-family:Inter,-apple-system,system-ui,sans-serif;\
+        ".pq-circuit text{{font-family:Inter,-apple-system,system-ui,sans-serif;\
          text-rendering:optimizeLegibility;}}\
-         .hm rect{{stroke:var(--bg);stroke-width:0.5;transition:filter 0.1s ease;}}\
-         .hm rect:hover{{stroke:var(--text);stroke-width:1;filter:brightness(1.15);cursor:crosshair;}}\
+         .pq-circuit .hm rect{{stroke:var(--bg);stroke-width:0.5;transition:filter 0.1s ease;}}\
+         .pq-circuit .hm rect:hover{{stroke:var(--text);stroke-width:1;filter:brightness(1.15);cursor:crosshair;}}\
          </style>",
     );
     let _ = writeln!(

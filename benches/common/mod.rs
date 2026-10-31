@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+pub mod fixtures;
+
 use prism_q::circuit::Circuit;
 use prism_q::sim;
 use prism_q::{BackendKind, PauliObservable, PauliTerm};

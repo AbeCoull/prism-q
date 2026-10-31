@@ -7,6 +7,7 @@
 //! silently wrong measurement: the affected rows stayed green, kept reporting,
 //! and went non-monotonic in qubit count. Nothing else in the suite checks the engine a run actually used.
 
+use crate::bench_fixtures;
 use prism_q::backend::Backend;
 use prism_q::sim::{Engine, ResolvedBackend};
 use prism_q::{BackendKind, MpsBackend, NoiseChannel, NoiseEvent, NoiseModel, circuits, sim};
@@ -451,6 +452,101 @@ fn statevector_corpus_rows_reach_the_statevector() {
             &format!("qpe_t_gate/{n}"),
             BackendKind::Statevector,
             &circuits::phase_estimation_circuit(n),
+        );
+    }
+    assert_resolves(
+        "entanglement_16q_d10/sparse",
+        BackendKind::Statevector,
+        &bench_fixtures::sparse_entanglement_circuit(16, 10),
+    );
+}
+
+// The `statevector/dense_unitary` rows price the dense k-qubit kernel. Two layers of
+// block tilings connect the register only through the shift between them, and the
+// fused stream must still hold every block as a `Gate::Unitary` of width k: a lowering
+// to `Mcu` or a diagonal batch, or a fusion pass that starts absorbing the blocks,
+// would leave the rows timing a different kernel.
+#[test]
+fn dense_unitary_rows_keep_every_block_dense() {
+    use prism_q::circuit::Instruction;
+    use prism_q::gates::Gate;
+
+    for k in [3usize, 4] {
+        for n in [20usize, 24] {
+            let layers = bench_fixtures::DENSE_UNITARY_LAYERS;
+            let circuit = bench_fixtures::dense_unitary_layers(n, k, layers, SEED);
+            let label = format!("dense_unitary/k{k}/{n}");
+            assert_resolves(&label, BackendKind::Statevector, &circuit);
+
+            let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+            let dense = fused
+                .instructions
+                .iter()
+                .filter(|inst| {
+                    matches!(
+                        inst,
+                        Instruction::Gate {
+                            gate: Gate::Unitary(_),
+                            targets,
+                        } if targets.len() == k
+                    )
+                })
+                .count();
+            assert_eq!(
+                (dense, fused.instructions.len()),
+                (n / k * layers, n / k * layers),
+                "{label}: the fused stream is no longer the dense blocks alone"
+            );
+        }
+    }
+}
+
+// `product/expectation` and `product/noisy_trajectory` price the product backend's own
+// terminals, so each must report it. A circuit with no entangling gate is the one the
+// decomposed route would split per qubit, and a marginal route that fell back to the
+// dense probability vector would fail outright at these widths rather than run slow.
+#[test]
+fn product_expectation_rows_run_on_the_product_backend() {
+    for n in [64usize, 128, 256, 512] {
+        let circuit = circuits::single_qubit_rotation_circuit(n, 10, SEED);
+        let observables = bench_fixtures::product_observables(n);
+
+        let expectations = sim::simulate(&circuit)
+            .backend(BackendKind::ProductState)
+            .seed(42)
+            .expectation_values_reported(&observables)
+            .unwrap();
+        assert_eq!(
+            expectations.metadata.backend,
+            ResolvedBackend::ProductState,
+            "expectation/pauli/{n}"
+        );
+        assert_eq!(expectations.values.len(), 2 * n - 1);
+
+        let marginals = sim::simulate(&circuit)
+            .backend(BackendKind::ProductState)
+            .seed(42)
+            .marginals()
+            .unwrap();
+        assert_eq!(
+            marginals.metadata.backend,
+            ResolvedBackend::ProductState,
+            "expectation/marginals/{n}"
+        );
+
+        let mut measured = circuit.clone();
+        measured.measure_all();
+        let noise = NoiseModel::uniform_depolarizing(&measured, 0.01);
+        let shots = sim::simulate(&measured)
+            .backend(BackendKind::ProductState)
+            .noise(&noise)
+            .seed(SEED)
+            .shots(4)
+            .unwrap();
+        assert_eq!(
+            shots.metadata.backend,
+            ResolvedBackend::ProductState,
+            "noisy_trajectory/{n}"
         );
     }
 }

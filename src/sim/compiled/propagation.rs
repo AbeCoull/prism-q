@@ -1883,14 +1883,14 @@ pub(super) fn colmajor_forward_sim(
     let nw = n.div_ceil(64);
     let row_words = total_rows.div_ceil(64);
 
-    let mut x_cols: Vec<Vec<u64>> = vec![vec![0u64; row_words]; n];
-    let mut z_cols: Vec<Vec<u64>> = vec![vec![0u64; row_words]; n];
+    let mut x_cols = vec![0u64; n * row_words];
+    let mut z_cols = vec![0u64; n * row_words];
     let mut phase: Vec<u64> = vec![0u64; row_words];
 
     for q in 0..n {
-        x_cols[q][q / 64] |= 1u64 << (q % 64);
+        x_cols[q * row_words + q / 64] |= 1u64 << (q % 64);
         let stab_row = n + q;
-        z_cols[q][stab_row / 64] |= 1u64 << (stab_row % 64);
+        z_cols[q * row_words + stab_row / 64] |= 1u64 << (stab_row % 64);
     }
 
     for inst in instructions {
@@ -1900,13 +1900,13 @@ pub(super) fn colmajor_forward_sim(
             _ => continue,
         };
 
-        batch_propagate_backward(
+        batch_propagate_backward_flat(
             &mut x_cols,
             &mut z_cols,
             &mut phase,
+            row_words,
             forward_as_backward_gate(gate)?,
             targets,
-            row_words,
         );
     }
 
@@ -1917,17 +1917,18 @@ pub(super) fn colmajor_forward_sim(
     let mut block = [0u64; 64];
     for (cols, offset) in [(&x_cols, 0), (&z_cols, nw)] {
         for qw in 0..nw {
-            let qubits = &cols[qw * 64..n.min(qw * 64 + 64)];
+            let qubits = &cols[qw * 64 * row_words..n.min(qw * 64 + 64) * row_words];
+            let count = qubits.len() / row_words;
             for rw in 0..row_words {
                 let mut any = 0u64;
-                for (b, col) in qubits.iter().enumerate() {
+                for (b, col) in qubits.chunks_exact(row_words).enumerate() {
                     block[b] = col[rw];
                     any |= col[rw];
                 }
                 if any == 0 {
                     continue;
                 }
-                block[qubits.len()..].fill(0);
+                block[count..].fill(0);
                 transpose_64x64_dispatch(&mut block);
                 let rows = (total_rows - rw * 64).min(64);
                 for (i, &word) in block[..rows].iter().enumerate() {

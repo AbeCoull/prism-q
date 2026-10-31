@@ -151,13 +151,19 @@ from the stream a circuit trajectory gives shot `i`. Readout error flips the fin
 record, so a branch reads the bit the measurement wrote, as a guarded region does on a
 circuit.
 
+Leak flags and quasi-static draws belong to the shot, not the block. Each shot draws
+its quasi-static normals once before its first event, for every source any block or
+rotation names, and a qubit that leaks stays leaked into later blocks until a reset or
+seepage returns it. `ShotsResult::leaked` carries the heralds as it does for a circuit.
+A program whose arms are written as guarded regions of one circuit draws the same
+values in the same order, so the two give the same seeded shots
+(`tests/integration/noisy_programs.rs`).
+
 Declined with `IncompatibleBackend`:
 
 - The density matrix, which holds the mixture rather than a trajectory.
-- Leakage and quasi-static channels, whose per-shot memory the walk does not carry
-  from one block to the next.
-- An over-rotation rule matching a runtime rotation, whose angle exists only once the
-  shot evaluates it.
+- An over-rotation rule matching a runtime rotation, fixed or drifting, whose angle
+  exists only once the shot evaluates it.
 
 A program with no runtime control flow builds the rules against its one circuit and
 runs as that circuit does under `Simulate::noise`, mixture routes included.

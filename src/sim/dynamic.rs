@@ -6,7 +6,7 @@ use rand_chacha::ChaCha8Rng;
 use super::branching::{self, BranchLimits};
 use super::dispatch::{BackendPlan, ExecutionPlan};
 use super::noise::{NoiseBuilder, NoiseEvent, NoiseModel, ReadoutError};
-use super::trajectory::{self, PreparedNoise};
+use super::trajectory::{self, MemorySpec, PreparedNoise, ShotMemory};
 use super::{
     BackendKind, CountsResult, RunMetadata, Seeded, ShotsResult, Unseeded, backend_metadata,
     decide_noisy_program, expand_for_backend, fuse_for_backend, mix_seed, resolve, run_counts_with,
@@ -76,7 +76,9 @@ impl<'p, SeedState> SimulateProgram<'p, SeedState> {
 
     /// Sample one noisy trajectory per shot, `rules` compiled against each block's
     /// circuit and each runtime rotation. Readout error flips the returned record,
-    /// not the bits a branch reads.
+    /// not the bits a branch reads. Leak flags and quasi-static draws last the
+    /// whole shot, across every block it enters, and [`ShotsResult::leaked`]
+    /// records the qubits each shot leaked.
     pub fn noise(mut self, rules: &'p NoiseBuilder) -> Self {
         self.noise = Some(rules);
         self
@@ -106,8 +108,8 @@ impl SimulateProgram<'_, Seeded> {
     /// raises. Under [`SimulateProgram::noise`], also anything
     /// [`NoiseBuilder::build`] reports for a block, and
     /// [`PrismError::IncompatibleBackend`] for the density matrix, for a channel
-    /// the backend cannot sample, for a leakage or quasi-static channel, and for
-    /// an over-rotation rule matching a runtime rotation.
+    /// the backend cannot sample, and for an over-rotation rule matching a runtime
+    /// rotation.
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
         let seed = self.seed.seed;
         let limits = &ResolvedLimits::process_default();
@@ -190,6 +192,8 @@ struct ProgramNoise {
     /// Each block's events with one slot per action, empty but for rotations.
     actions: Vec<PreparedNoise>,
     readout: Vec<Option<ReadoutError>>,
+    /// What each shot keeps from block to block: leak flags, quasi-static draws.
+    memory: Option<MemorySpec>,
 }
 
 impl ProgramNoise {
@@ -233,6 +237,7 @@ impl ProgramNoise {
             blocks,
             actions,
             readout: trajectory::written_readout(summary, &readout),
+            memory: MemorySpec::of(&channels),
         };
         Ok((compiled, channels))
     }
@@ -362,12 +367,6 @@ impl<'p> Prepared<'p> {
             ));
         }
         let (noise, channels) = ProgramNoise::compile(program, summary, rules)?;
-        if channels.has_leakage() || channels.quasi_static_sources() > 0 {
-            return Err(incompatible(
-                "leakage and quasi-static channels keep per-shot memory, which noisy \
-                 trajectories do not carry from one block of a dynamic program to the next",
-            ));
-        }
         let plan = decide_noisy_program(kind, summary, &channels, limits)?;
         #[cfg(feature = "distributed")]
         if matches!(plan, BackendPlan::Distributed(_)) {
@@ -396,19 +395,19 @@ impl<'p> Prepared<'p> {
 
     fn run_per_shot(&self, kind: &BackendKind, num_shots: usize, seed: u64) -> Result<ShotsResult> {
         let reuse = self.plan.is_host_statevector();
-        let shot = |state: &mut ShotState, i: usize| -> Result<(Vec<bool>, RunMetadata)> {
+        let shot = |state: &mut ShotState, i: usize| -> Result<ShotRun> {
             let shot_seed = mix_seed(seed, i);
             if reuse {
                 let backend = state.statevector.get_or_insert_with(|| {
                     StatevectorBackend::with_limits(shot_seed, &self.limits)
                 });
                 backend.rng = ChaCha8Rng::seed_from_u64(shot_seed);
-                let bits = self.run_shot(backend, &mut state.vars, shot_seed)?;
-                return Ok((bits, backend_metadata(backend)));
+                let (bits, leaked) = self.run_shot(backend, &mut state.vars, shot_seed)?;
+                return Ok((bits, leaked, backend_metadata(backend)));
             }
             let mut backend = self.plan.build(shot_seed, &self.limits);
-            let bits = self.run_shot(&mut *backend, &mut state.vars, shot_seed)?;
-            Ok((bits, backend_metadata(&*backend)))
+            let (bits, leaked) = self.run_shot(&mut *backend, &mut state.vars, shot_seed)?;
+            Ok((bits, leaked, backend_metadata(&*backend)))
         };
 
         #[cfg(feature = "parallel")]
@@ -419,7 +418,7 @@ impl<'p> Prepared<'p> {
             )
         {
             use rayon::prelude::*;
-            let runs: Vec<Result<(Vec<bool>, RunMetadata)>> = (0..num_shots)
+            let runs: Vec<Result<ShotRun>> = (0..num_shots)
                 .into_par_iter()
                 .map_init(ShotState::default, |state, i| shot(state, i))
                 .collect();
@@ -431,37 +430,37 @@ impl<'p> Prepared<'p> {
         self.fold((0..num_shots).map(|i| shot(&mut state, i)))
     }
 
-    fn fold(
-        &self,
-        runs: impl IntoIterator<Item = Result<(Vec<bool>, RunMetadata)>>,
-    ) -> Result<ShotsResult> {
+    fn fold(&self, runs: impl IntoIterator<Item = Result<ShotRun>>) -> Result<ShotsResult> {
         let runs = runs.into_iter();
         let mut shots = Vec::with_capacity(runs.size_hint().0);
+        let mut leaked = Vec::with_capacity(runs.size_hint().0);
         let mut metadata = RunMetadata::exact(self.plan.resolved());
         for (i, run) in runs.enumerate() {
-            let (bits, shot_metadata) = run?;
+            let (bits, shot_leaked, shot_metadata) = run?;
             if i == 0 {
                 metadata = shot_metadata;
             } else {
                 metadata.weaken_with(&shot_metadata);
             }
             shots.push(bits);
+            leaked.push(shot_leaked);
         }
-        Ok(
-            ShotsResult::from_shots(shots, self.program.num_classical_bits())
-                .with_metadata(metadata),
-        )
+        let result = ShotsResult::from_shots(shots, self.program.num_classical_bits())
+            .with_metadata(metadata);
+        let memory = self.noise.as_ref().and_then(|noise| noise.memory);
+        Ok(trajectory::with_leak_record(result, memory, leaked))
     }
 
-    /// Walk the graph once from a fresh state, returning the classical bits.
-    /// A noisy program draws its noise from the stream of `shot_seed` a circuit
+    /// Walk the graph once from a fresh state, returning the classical bits and
+    /// the qubits the shot leaked (empty unless the noise carries leakage). A
+    /// noisy program draws its noise from the stream of `shot_seed` a circuit
     /// trajectory uses.
     fn run_shot(
         &self,
         backend: &mut dyn Backend,
         vars: &mut Vec<ClassicalValue>,
         shot_seed: u64,
-    ) -> Result<Vec<bool>> {
+    ) -> Result<(Vec<bool>, Vec<bool>)> {
         backend.init(self.program.num_qubits(), self.program.num_classical_bits())?;
         vars.clear();
         vars.extend_from_slice(&self.initial);
@@ -473,11 +472,14 @@ impl<'p> Prepared<'p> {
         }
         self.apply_block(0, backend)?;
         self.run_from(0, steps, backend, vars)?;
-        Ok(backend.classical_results().to_vec())
+        Ok((backend.classical_results().to_vec(), Vec::new()))
     }
 
     /// [`Prepared::run_shot`] past the entry's step count, firing each block's
     /// events after their instructions and readout error on the finished record.
+    /// Leak flags and quasi-static draws carry from each block to the next, so a
+    /// shot draws them in the order a circuit trajectory over the same
+    /// instructions does.
     fn run_noisy_shot(
         &self,
         noise: &ProgramNoise,
@@ -485,12 +487,21 @@ impl<'p> Prepared<'p> {
         backend: &mut dyn Backend,
         vars: &mut [ClassicalValue],
         rng: &mut ChaCha8Rng,
-    ) -> Result<Vec<bool>> {
+    ) -> Result<(Vec<bool>, Vec<bool>)> {
+        let mut memory = noise
+            .memory
+            .map(|spec| ShotMemory::new(self.program.num_qubits(), spec, rng));
         let mut at = 0;
         loop {
             let circuit = &self.blocks[at].block.circuit;
-            trajectory::evolve_noisy(backend, circuit, &noise.blocks[at], 0, rng)?;
-            let rotations = Some((&noise.actions[at], &mut *rng));
+            let events = &noise.blocks[at];
+            match &mut memory {
+                Some(memory) => {
+                    trajectory::evolve_with_memory(backend, circuit, events, memory, rng)?
+                }
+                None => trajectory::evolve_noisy(backend, circuit, events, 0, rng)?,
+            }
+            let rotations = Some((&noise.actions[at], memory.as_mut(), &mut *rng));
             let Some(next) = self.finish_block_with(at, backend, vars, rotations)? else {
                 break;
             };
@@ -499,7 +510,8 @@ impl<'p> Prepared<'p> {
         }
         let mut bits = backend.classical_results().to_vec();
         trajectory::apply_readout_errors(&mut bits, &noise.readout, rng);
-        Ok(bits)
+        let leaked = memory.map(ShotMemory::into_ever_leaked).unwrap_or_default();
+        Ok((bits, leaked))
     }
 
     /// Carry a shot whose state has run block `at`'s circuit to the end of the
@@ -548,13 +560,14 @@ impl<'p> Prepared<'p> {
     }
 
     /// [`Prepared::finish_block`], firing slot `i` of `rotation_noise` after
-    /// action `i` when it is a rotation.
+    /// action `i` when it is a rotation, through the shot's memory when it keeps
+    /// one.
     fn finish_block_with(
         &self,
         at: usize,
         backend: &mut dyn Backend,
         vars: &mut [ClassicalValue],
-        mut rotation_noise: Option<(&PreparedNoise, &mut ChaCha8Rng)>,
+        mut rotation_noise: Option<(&PreparedNoise, Option<&mut ShotMemory>, &mut ChaCha8Rng)>,
     ) -> Result<Option<usize>> {
         let block = self.blocks[at].block;
         let variables = self.program.variables();
@@ -578,12 +591,20 @@ impl<'p> Prepared<'p> {
                             ),
                         });
                     }
-                    backend.apply(&Instruction::Gate {
+                    let rotation = Instruction::Gate {
                         gate: kind.gate(angle),
                         targets: targets.clone(),
-                    })?;
-                    if let Some((noise, rng)) = rotation_noise.as_mut() {
-                        trajectory::fire_slot(backend, noise, index, rng)?;
+                    };
+                    match rotation_noise.as_mut() {
+                        Some((noise, memory, rng)) => trajectory::apply_and_fire(
+                            backend,
+                            &rotation,
+                            noise,
+                            index,
+                            memory.as_deref_mut(),
+                            rng,
+                        )?,
+                        None => backend.apply(&rotation)?,
                     }
                 }
             }
@@ -636,6 +657,9 @@ impl<'p> Prepared<'p> {
         }
     }
 }
+
+/// One shot's classical bits, leaked qubits, and metadata.
+type ShotRun = (Vec<bool>, Vec<bool>, RunMetadata);
 
 /// What one worker keeps across the shots it runs.
 #[derive(Default)]
@@ -732,6 +756,7 @@ mod tests {
                 prepared
                     .run_shot(&mut backend, &mut Vec::new(), shot_seed)
                     .unwrap()
+                    .0
             })
             .collect();
         assert_eq!(reused.shots, fresh);

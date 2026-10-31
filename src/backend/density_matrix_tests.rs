@@ -87,3 +87,36 @@ fn blocked_1q_sandwich_matches_two_register_passes() {
         }
     }
 }
+
+#[test]
+fn expectations_pauli_match_a_serial_trace_across_the_parallel_floor() {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    for n in 1..=7 {
+        let d = 1usize << n;
+        let rho = random_rho(&mut rng, n, &[0.5, 0.3, 0.2]);
+        let masks: Vec<(usize, usize, u32)> = (0..d)
+            .flat_map(|x| (0..d).map(move |z| (x, z, (x & z).count_ones())))
+            .collect();
+        let mut dm = DensityMatrixBackend::new(42);
+        dm.init_from_density_matrix(rho.clone(), 0).unwrap();
+        let got = dm.expectations_pauli(&masks);
+
+        for (&(xmask, zmask, num_y), got) in masks.iter().zip(&got) {
+            let trace: Complex64 = (0..d)
+                .map(|j| {
+                    let sign = if (j & zmask).count_ones() % 2 == 1 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    rho[j * d + (j ^ xmask)] * sign
+                })
+                .sum();
+            let want = (trace * i_pow(num_y)).re;
+            assert!(
+                (got - want).abs() < EPS,
+                "n={n} x={xmask:#b} z={zmask:#b}: {got} vs {want}",
+            );
+        }
+    }
+}

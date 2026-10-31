@@ -196,6 +196,18 @@ fn bench_api_queries(c: &mut Criterion) {
         });
     });
 
+    // A 64-amplitude state, where one query's fixed cost outweighs its arithmetic.
+    let mut small_circuit = prism_q::circuits::hardware_efficient_ansatz(6, 2, SEED);
+    small_circuit.measure_all();
+    group.bench_function("sample_counts_hea_6q_100", |b| {
+        b.iter(|| {
+            sim::simulate(&small_circuit)
+                .seed(42)
+                .sample_counts(100)
+                .unwrap()
+        });
+    });
+
     let marginal_circuit = clifford_t_marginal_circuit(14);
     group.bench_function("marginals_auto_clifford_t_14q", |b| {
         b.iter(|| {

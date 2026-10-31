@@ -813,6 +813,36 @@ fn noisy_gpu_test_circuit_routes_to_gpu_bts() {
 
 #[cfg(feature = "gpu")]
 #[test]
+fn gpu_readout_bench_fixture_routes_to_gpu_bts() {
+    let mut circuit = Circuit::new(100, 100);
+    for q in 0..50 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 50..100 {
+        for k in 0..4 {
+            circuit.add_gate(Gate::Cx, &[(q - 50 + k) % 50, q]);
+        }
+    }
+    circuit.measure_all();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    noise.with_readout_error(0.02, 0.05);
+
+    let gpu = compile_noisy(&circuit, &noise, 0xDEAD_BEEF)
+        .unwrap()
+        .with_gpu(crate::gpu::GpuContext::stub_for_tests());
+    assert!(
+        !gpu.readout.is_empty() && !gpu.events.has_pairs(),
+        "the fixture must carry readout and no pair events"
+    );
+    assert!(
+        gpu.noiseless.should_use_gpu_bts(1_000_000),
+        "noisy_sampling/gpu_readout/parity_fan_100q_1m relies on this fixture \
+         passing the GPU BTS routing gates"
+    );
+}
+
+#[cfg(feature = "gpu")]
+#[test]
 fn compiled_noisy_with_stub_gpu_matches_cpu_below_threshold() {
     let n = 12;
     let mut circuit = circuits::ghz_circuit(n);

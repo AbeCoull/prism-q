@@ -426,6 +426,29 @@ fn bench_histogram_counts(c: &mut Criterion) {
     group.finish();
 }
 
+// Forty qubits with T gates on twenty of them: the Clifford register holds 2^20
+// amplitudes, its width cap, and diagonalizing the measured Paulis over them is most
+// of the call. Route pinned in `tests/integration/bench_fixture_routing.rs`.
+fn bench_clifford_register_counts(c: &mut Criterion) {
+    let mut group = c.benchmark_group("clifford_register_counts");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(3));
+
+    let mut circuit = prism_q::circuits::clifford_t_circuit(40, 20, 0.05, SEED);
+    circuit.measure_all();
+    group.bench_function("40q_d20_t5pct/1000", |b| {
+        b.iter(|| {
+            sim::simulate(&circuit)
+                .seed(42)
+                .sample_counts(1000)
+                .unwrap()
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_rank_space_counts(c: &mut Criterion) {
     let mut group = c.benchmark_group("rank_space_counts");
     group.sample_size(10);
@@ -1599,6 +1622,7 @@ criterion_group! {
     bench_compiled_counts,
     bench_histogram_counts,
     bench_rank_space_counts,
+    bench_clifford_register_counts,
     bench_sparse_deterministic,
     bench_qec_clifford_runner,
     bench_qec_noisy_runner,

@@ -9,7 +9,7 @@
 
 use crate::bench_fixtures;
 use prism_q::backend::Backend;
-use prism_q::sim::{Engine, ResolvedBackend};
+use prism_q::sim::{Engine, ResolvedBackend, RouteRule};
 use prism_q::{BackendKind, MpsBackend, NoiseChannel, NoiseEvent, NoiseModel, circuits, sim};
 
 // The bench seed, not the test seed: these fixtures are the bench rows, and
@@ -1036,4 +1036,15 @@ fn factored_stabilizer_block_rows_run_whole() {
             "{label}: ran per block rather than on one factored-stabilizer backend"
         );
     }
+}
+
+#[test]
+fn clifford_register_counts_row_fills_the_register() {
+    let mut circuit = circuits::clifford_t_circuit(40, 20, 0.05, SEED);
+    circuit.measure_all();
+    let counts = sim::simulate(&circuit)
+        .seed(42)
+        .sample_counts(1000)
+        .unwrap();
+    assert_eq!(counts.metadata.reason, RouteRule::CliffordRegister);
 }

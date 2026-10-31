@@ -191,6 +191,24 @@ fn the_gauge_walk_row_stays_under_its_cap() {
     );
 }
 
+// The `mps/observables` rows price the environment sweeps over the finished
+// chain, so what needs pinning is the bond that chain ends at, not the peak
+// along the way.
+#[test]
+fn the_observable_rows_sweep_at_the_cap() {
+    let circuit = circuits::brickwork_circuit(64, 12, SEED);
+    let mut backend = MpsBackend::new(SEED, 64);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    assert_eq!(
+        backend.current_max_bond_dim(),
+        64,
+        "observables/*_b64/64: the finished chain no longer sits at the cap"
+    );
+}
+
 // The `mps/matched_d12` row prices SWAP routing at real bond, so its two
 // claims are that gates stay non-adjacent and that the bond saturates the
 // cap. The second check is the one that catches a fixed pairing: its gates

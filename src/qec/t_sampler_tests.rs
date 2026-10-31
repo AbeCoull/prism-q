@@ -156,6 +156,55 @@ fn tensor_network_observable_matches_reference_on_deterministic_t_fixtures() {
     }
 }
 
+fn brickwork_t_program(num_qubits: usize, layers: usize) -> QecProgram {
+    let mut program = QecProgram::with_options(num_qubits, options(64));
+    for qubit in 0..num_qubits {
+        program.push_gate(Gate::H, &[qubit]).unwrap();
+    }
+    for layer in 0..layers {
+        for qubit in (layer % 2..num_qubits - 1).step_by(2) {
+            program.push_gate(Gate::Cx, &[qubit, qubit + 1]).unwrap();
+        }
+        for qubit in 0..num_qubits {
+            program.push_gate(Gate::T, &[qubit]).unwrap();
+            program.push_gate(Gate::H, &[qubit]).unwrap();
+        }
+    }
+    let records: Vec<_> = (0..num_qubits)
+        .map(|qubit| QecRecordRef::absolute(program.measure_z(qubit).unwrap()))
+        .collect();
+    program.observable_include(0, &records).unwrap();
+    program
+}
+
+#[test]
+fn tensor_network_fallback_refuses_an_over_cap_observable_without_slicing() {
+    use crate::backend::tensornetwork::last_slice_count;
+    use crate::limits::{LimitKnob, Limits};
+
+    let program = brickwork_t_program(10, 6);
+    let capped = Limits::new().max_tn_peak_qubits(8);
+
+    let fallback = tensor_network_fallback_limits(ResolvedLimits::resolve(Some(&capped)));
+    let err = run_qec_program_tensor_network_observable_within(&program, &fallback).unwrap_err();
+    assert!(
+        matches!(&err, PrismError::ResourceLimit(limit) if limit.knob == Some(LimitKnob::TnPeakQubits)),
+        "{err}"
+    );
+    assert_eq!(last_slice_count(), 1, "the refusal recorded a slice plan");
+
+    let sliceable = ResolvedLimits::resolve(Some(&capped.max_tn_slices(1 << 10)));
+    run_qec_program_tensor_network_observable_within(
+        &program,
+        &tensor_network_fallback_limits(sliceable),
+    )
+    .unwrap();
+    assert!(
+        last_slice_count() > 1,
+        "the fixture fits the peak cap unsliced"
+    );
+}
+
 #[test]
 fn auto_uses_tensor_network_when_spd_nonexact_and_camps_fails() {
     let program = h_t_h_program(256);

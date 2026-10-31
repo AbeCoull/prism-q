@@ -1073,12 +1073,10 @@ pub(super) fn plan_for_family(
 /// [`accel_for`] and reused across shots; soft-mode init fallback covers VRAM
 /// shrinking after resolution.
 ///
-/// A shot loop resolves once and replays the plan, with one exception: a
-/// decomposable circuit carrying a temporal Clifford prefix keeps the
-/// per-shot route through the full pipeline, so this runs once per shot there.
-/// The tree is pure and returns the same plan every time, so the repeat costs
-/// its own instruction scans and changes nothing. Work added here is paid per
-/// shot on that route, not once.
+/// A shot loop resolves once and replays the plan; a decomposable circuit with a
+/// temporal Clifford prefix plans each block once. Only the temporal-Clifford
+/// fallback resolves per shot, for a save point inside the leading Clifford run,
+/// and the public shot paths reject save points before reaching it.
 pub(super) fn resolve(
     kind: &BackendKind,
     circuit: &Circuit,

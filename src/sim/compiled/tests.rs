@@ -2331,6 +2331,15 @@ fn live_forward_matches_dense_when_every_qubit_stays_live() {
     assert_live_matches_dense(&c, "clifford 150 partial register");
 }
 
+// Long-range pairs leave about half the rows anticommuting with each early pivot,
+// enough row words to split the dense collapse across the pool.
+#[test]
+fn live_forward_matches_dense_past_the_parallel_collapse_floor() {
+    let mut c = circuits::clifford_random_pairs(768, 20, 42);
+    c.measure_all();
+    assert_live_matches_dense(&c, "random pairs 768");
+}
+
 // Records on untouched qubits, a qubit read twice, a readout order that differs from
 // the order the qubits fall idle, and the S/SX family on the way to the readout.
 #[test]

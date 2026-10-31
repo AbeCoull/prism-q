@@ -616,6 +616,57 @@ fn test_noisy_plans_execute_to_the_same_scalar() {
     }
 }
 
+// Extents of 1 to 3, a few open legs, and endpoints drawn with repeats, so the
+// exact queue meets sizes off the powers of two and pairs sharing several legs.
+fn random_network(seed: u64) -> Vec<TensorMeta> {
+    use rand::RngExt;
+    let tensors = 20;
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut metas = vec![
+        TensorMeta {
+            shape: SmallVec::new(),
+            legs: SmallVec::new(),
+        };
+        tensors
+    ];
+    for leg in 0..36 {
+        let extent = rng.random_range(1..=3);
+        let a = rng.random_range(0..tensors);
+        let b = (a + rng.random_range(1..tensors)) % tensors;
+        let ends: &[usize] = if leg % 9 == 0 { &[a] } else { &[a, b] };
+        for &end in ends {
+            metas[end].shape.push(extent);
+            metas[end].legs.push(leg);
+        }
+    }
+    metas
+}
+
+// At temperature zero the noisy key is the result size itself, so the heap arm
+// pops in the order the exact pass's size stacks have to reproduce.
+#[test]
+fn test_exact_plans_match_the_heap_order() {
+    let mut networks: Vec<Vec<TensorMeta>> = (0..4).map(random_network).collect();
+    for (n, layers) in [(20, 2), (50, 2), (30, 7)] {
+        let circuit = crate::circuits::hardware_efficient_ansatz(n, layers, 42);
+        let terms = [PauliTerm::z(0), PauliTerm::z(n / 2)];
+        let network = scalar_network(&circuit, &terms);
+        networks.push(network.tensors.iter().map(TensorMeta::of).collect());
+    }
+    let chain = loaded_backend(&crate::circuits::cz_chain_circuit(40, 8, 42));
+    let (doubled, _, _) = chain.double_for_partial_trace(20);
+    networks.push(doubled.iter().map(TensorMeta::of).collect());
+
+    for metas in &networks {
+        let slots = || metas.iter().cloned().map(Some).collect::<Vec<_>>();
+        let exact = plan_pairs(slots(), None, usize::MAX).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let heap = plan_pairs(slots(), Some((&mut rng, 0.0)), usize::MAX).unwrap();
+        assert_eq!(exact.pairs, heap.pairs);
+        assert_eq!((exact.peak, exact.total), (heap.peak, heap.total));
+    }
+}
+
 // Mid-circuit measure and reset must agree with the statevector on the
 // seeded outcome stream, not just on the marginals, and on the final
 // distribution after further gates.

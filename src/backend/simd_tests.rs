@@ -413,6 +413,25 @@ fn assert_state_close(actual: &[Complex64], expected: &[Complex64], label: &str)
     }
 }
 
+#[test]
+fn sandwich_1q_blocked_tiers_match_scalar() {
+    let mat = [[c(0.6, 0.1), c(-0.3, 0.7)], [c(0.2, -0.5), c(0.8, 0.4)]];
+    let conj = [
+        [mat[0][0].conj(), mat[0][1].conj()],
+        [mat[1][0].conj(), mat[1][1].conj()],
+    ];
+    for n in 1..=5 {
+        let rho = random_state(2 * n, 0xCAFE_F00D);
+        for qubit in 0..n {
+            let mut via_dispatch = rho.clone();
+            apply_1q_sandwich_blocked(&mut via_dispatch, n, qubit, &mat);
+            let mut via_scalar = rho.clone();
+            sandwich_1q_blocked_scalar(&mut via_scalar, 1 << (qubit + n), 1 << qubit, &mat, &conj);
+            assert_state_close(&via_dispatch, &via_scalar, &format!("n={n} qubit={qubit}"));
+        }
+    }
+}
+
 // Reference test: AVX2 paired-group kernel must agree with the 128-bit
 // FMA per-group kernel across (q0, q1) configurations covering adjacent,
 // non-adjacent, reversed-order, and the lo == 0 fallback path.
@@ -821,7 +840,7 @@ fn target_feature_kernel_count_is_pinned() {
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
     let expected: [(&str, usize); 8] = [
-        ("src/backend/simd.rs", 48),
+        ("src/backend/simd.rs", 50),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
         ("src/backend/statevector/kernels.rs", 17),

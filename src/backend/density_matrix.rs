@@ -913,12 +913,17 @@ impl DensityMatrixBackend {
     ///
     /// Above the parallel threshold, and always on the device, the two products
     /// compile to one block superoperator and sweep the buffer once; below it
-    /// the superoperator's dense 4x4 block loses to two cheap register passes.
+    /// the superoperator's dense 4x4 block loses to one blocked register pass,
+    /// and a diagonal `U` keeps its two phase passes.
     fn apply_1q_sandwich(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
         let n = self.num_qubits;
         if self.sv.is_gpu_resident() || 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             let s = block_superoperator(&[*matrix]);
             return self.apply_block_superoperator(qubit, &s);
+        }
+        if matrix[0][1].norm() >= 1e-14 || matrix[1][0].norm() >= 1e-14 {
+            simd::apply_1q_sandwich_blocked(&mut self.sv.state, n, qubit, matrix);
+            return Ok(());
         }
         self.sv.apply_1q_matrix(qubit + n, matrix)?;
         self.sv.apply_1q_matrix(qubit, &conjugate_2x2(matrix))
@@ -1936,3 +1941,7 @@ impl Backend for DensityMatrixBackend {
         self.apply_1q_sandwich(qubit, matrix)
     }
 }
+
+#[cfg(test)]
+#[path = "density_matrix_tests.rs"]
+mod tests;

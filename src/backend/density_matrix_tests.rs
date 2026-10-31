@@ -54,6 +54,50 @@ fn random_rho(rng: &mut ChaCha8Rng, n: usize, weights: &[f64]) -> Vec<Complex64>
 }
 
 #[test]
+fn rzz_run_sweep_equals_full_sweep() {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let one = Complex64::new(1.0, 0.0);
+    // n = 6 runs the scalar arms and n = 8 the rayon ones.
+    for n in [6, 8] {
+        let rho = random_rho(&mut rng, n, &[0.5, 0.3, 0.2]);
+        let mut full = DensityMatrixBackend::new(42);
+        full.init_from_density_matrix(rho.clone(), 0).unwrap();
+        let mut runs = DensityMatrixBackend::new(42);
+        runs.init_from_density_matrix(rho.clone(), 0).unwrap();
+        let mut routed = DensityMatrixBackend::new(42);
+        routed.init_from_density_matrix(rho.clone(), 0).unwrap();
+        for theta in [0.7, 0.3, -2.4] {
+            let diag = DensityMatrixBackend::rzz_sandwich_diagonal(theta);
+            assert_eq!(
+                diag.iter().filter(|&&d| d == one).count(),
+                8,
+                "theta={theta}"
+            );
+            for q0 in 0..n {
+                for q1 in 0..n {
+                    full.sv.state.copy_from_slice(&rho);
+                    full.kraus_2q_diagonal_sweep(&diag, q0, q1).unwrap();
+
+                    runs.sv.state.copy_from_slice(&rho);
+                    runs.kraus_2q_diagonal_runs(&diag, q0, q1);
+                    assert!(
+                        runs.sv.state == full.sv.state,
+                        "run sweep n={n} ({q0}, {q1}) theta={theta}"
+                    );
+
+                    routed.sv.state.copy_from_slice(&rho);
+                    routed.apply_rzz_sandwich(q0, q1, theta).unwrap();
+                    assert!(
+                        routed.sv.state == full.sv.state,
+                        "routed sandwich n={n} ({q0}, {q1}) theta={theta}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn blocked_1q_sandwich_matches_two_register_passes() {
     let mut rng = ChaCha8Rng::seed_from_u64(42);
     for n in 1..=7 {

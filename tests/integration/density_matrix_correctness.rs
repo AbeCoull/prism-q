@@ -2140,7 +2140,7 @@ fn dm_rzz_sandwich_matches_channel_route() {
     let base = circuits::random_circuit(N, 4, SEED);
     let masks = all_pauli_masks(N);
 
-    for &(q0, q1) in &[(0usize, 1usize), (2, 3), (1, 2), (0, N - 1)] {
+    for &(q0, q1) in &[(0usize, 1usize), (2, 3), (1, 2), (0, N - 1), (3, 4), (4, 3)] {
         for theta in [0.0, 0.3, 1.0, std::f64::consts::PI, -2.4] {
             for mixed in [false, true] {
                 let prepare = || {
@@ -2181,7 +2181,7 @@ fn dm_rzz_phase_shows_in_probabilities_under_basis_change() {
     // PAR_N puts the buffer at 2n = 16 qubits, so the sweep takes its rayon arm;
     // the tomography test above stays small and covers the scalar one.
     const N: usize = PAR_N;
-    for &(q0, q1) in &[(0usize, 1usize), (1, 2), (0, N - 1)] {
+    for &(q0, q1) in &[(0usize, 1usize), (1, 2), (0, N - 1), (3, N - 1), (N - 2, 3)] {
         let mut circuit = Circuit::new(N, 0);
         for q in 0..N {
             circuit.add_gate(Gate::H, &[q]);

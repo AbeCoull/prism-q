@@ -4836,10 +4836,10 @@ fn bench_density_matrix_rzz_layers_fused(c: &mut Criterion) {
 /// each class covers aligned runs of `2^min(q0, q1)` amplitudes, so a pass that
 /// skips those classes saves memory traffic only where a skipped run spans whole
 /// cache lines: from 3 at any 16-byte alignment, and at 2 only on a buffer that
-/// starts on a line. `adjacent` `(2, 3)` and `q2_qtop` `(2, n - 1)` sit just
-/// below that floor, `adjacent_q3` `(3, 4)` and `q3_qtop` `(3, n - 1)` are the
-/// same two shapes on it, and `q0_qtop` `(0, n - 1)` is the far end, where no
-/// run fills a line.
+/// starts on a line. The backend skips from 3. `adjacent` `(2, 3)` and
+/// `q2_qtop` `(2, n - 1)` sit just below that floor and time the full pass,
+/// `adjacent_q3` `(3, 4)` and `q3_qtop` `(3, n - 1)` are the same two shapes on
+/// it, and `q0_qtop` `(0, n - 1)` is the far end, where no run fills a line.
 fn bench_density_matrix_rzz_sandwich(c: &mut Criterion) {
     let mut group = c.benchmark_group("density_matrix/rzz_sandwich");
     configure_group(&mut group);

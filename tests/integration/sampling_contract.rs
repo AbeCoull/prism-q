@@ -760,7 +760,11 @@ fn clifford_dynamic_routes_agree() {
             route("statevector", BackendKind::Statevector, R::Statevector),
             route("sparse", BackendKind::Sparse, R::Sparse),
             route("mps", mps(), R::Mps),
-            noisy("zero noise", R::Stabilizer, None),
+            noisy(
+                "zero noise deferred",
+                R::CompiledStabilizer,
+                Some(Engine::NoisyCompiledSampler),
+            ),
         ],
         SHOTS,
     );
@@ -845,16 +849,11 @@ fn deterministic_dynamic_routes_return_one_key() {
     for conditional in [false, true] {
         let circuit = deterministic_dynamic_case(conditional);
         assert_eq!(exact_distribution(&circuit), expected);
-        let auto = if conditional {
-            route("auto", BackendKind::Auto, R::ProductState)
-        } else {
-            compiled("auto deferred", BackendKind::Auto)
-        };
         check_routes(
             &format!("deterministic dynamic, conditional {conditional}"),
             &circuit,
             &[
-                auto,
+                compiled("auto deferred", BackendKind::Auto),
                 route("statevector", BackendKind::Statevector, R::Statevector),
                 route("sparse", BackendKind::Sparse, R::Sparse),
                 route("mps", mps(), R::Mps),

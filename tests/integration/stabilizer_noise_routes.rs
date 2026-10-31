@@ -161,14 +161,15 @@ fn the_block_filtered_compile_carries_readout() {
     );
 }
 
-// A mid-circuit measurement puts `run_shots_noisy` on per-shot replay, the one
-// route that applies readout to the unpacked record, on the shot's own stream.
+// A gate on a measured qubit with no reset between keeps `run_shots_noisy` on
+// per-shot replay, the one route that applies readout to the unpacked record, on
+// the shot's own stream.
 #[test]
 fn the_replay_route_carries_readout() {
     let mut circuit = Circuit::new(2, 2);
     circuit.add_gate(Gate::X, &[0]);
     circuit.add_measure(0, 0);
-    circuit.add_gate(Gate::X, &[1]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
     circuit.add_measure(1, 1);
 
     let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);

@@ -93,6 +93,81 @@ fn defer_measure_reset_rejects_measured_qubit_reuse() {
 }
 
 #[test]
+fn defer_measure_reset_controls_a_guarded_pauli_on_the_measured_alias() {
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(Gate::H, &[0]);
+    c.add_measure(0, 0);
+    c.add_reset(0);
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::Y,
+        targets: smallvec![1],
+    });
+    c.add_measure(1, 1);
+
+    let deferred = defer_measure_reset_circuit(&c).unwrap();
+    let gates: Vec<(Gate, Vec<usize>)> = deferred
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Gate { gate, targets } => Some((gate.clone(), targets.to_vec())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        gates,
+        vec![
+            (Gate::H, vec![0]),
+            (Gate::Sdg, vec![1]),
+            (Gate::Cx, vec![0, 1]),
+            (Gate::S, vec![1]),
+        ]
+    );
+    assert!(deferred.has_terminal_measurements_only());
+
+    let mut sampler = compile_measurements(&deferred, 42).unwrap();
+    for shot in sampler.sample_bulk(256) {
+        assert_eq!(shot[0], shot[1]);
+    }
+}
+
+#[test]
+fn defer_measure_reset_rejects_guards_no_controlled_pauli_expresses() {
+    let mut hadamard = Circuit::new(2, 2);
+    hadamard.add_measure(0, 0);
+    hadamard.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::H,
+        targets: smallvec![1],
+    });
+    hadamard.add_measure(1, 1);
+
+    let mut both_bits = Circuit::new(3, 3);
+    both_bits.add_measure(0, 0);
+    both_bits.add_measure(1, 1);
+    both_bits.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::RegisterEquals {
+            offset: 0,
+            size: 2,
+            value: 0b11,
+        },
+        gate: Gate::X,
+        targets: smallvec![2],
+    });
+    both_bits.add_measure(2, 2);
+
+    for (circuit, reason) in [
+        (&hadamard, "classical conditionals on `h`"),
+        (&both_bits, "reads two measured bits"),
+    ] {
+        let err = defer_measure_reset_circuit(circuit)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(reason), "{err}");
+    }
+}
+
+#[test]
 fn run_shots_deferred_reset_preserves_bell_correlation() {
     let mut c = Circuit::new(2, 2);
     c.add_gate(Gate::H, &[0]);

@@ -523,7 +523,9 @@ pub(super) fn backend_rule(kind: &BackendKind, circuit: &Circuit, plan: &Backend
 
 pub(super) enum NoisyRoute {
     Mixture,
-    Compiled,
+    /// The circuit samples as it stands, or as the rewrite of a dynamic one to
+    /// terminal measurements.
+    Compiled(Option<Box<compiled::DeferredCircuit>>),
     Trajectory(BackendPlan),
 }
 
@@ -542,27 +544,12 @@ pub(super) fn decide_noisy(
 
     check_noisy_per_shot(kind, circuit, noise_model, limits)?;
 
-    if noise_model.has_only_pauli_channels() {
-        let use_compiled = (kind.is_auto()
-            || matches!(
-                kind,
-                BackendKind::Stabilizer | BackendKind::FactoredStabilizer
-            ))
-            && supports_compiled_measurement_sampling(circuit)
-            || {
-                #[cfg(feature = "gpu")]
-                {
-                    matches!(kind, BackendKind::StabilizerGpu { .. })
-                        && supports_compiled_measurement_sampling(circuit)
-                }
-                #[cfg(not(feature = "gpu"))]
-                {
-                    false
-                }
-            };
-
-        if use_compiled {
-            return Ok(NoisyRoute::Compiled);
+    if noise_model.has_only_pauli_channels() && is_clifford_sampler_kind(kind) {
+        if supports_compiled_measurement_sampling(circuit) {
+            return Ok(NoisyRoute::Compiled(None));
+        }
+        if let Ok(deferred) = compiled::defer_noisy_circuit(circuit, noise_model) {
+            return Ok(NoisyRoute::Compiled(Some(Box::new(deferred))));
         }
     }
 

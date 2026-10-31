@@ -17,7 +17,8 @@ use crate::error::Result;
 use crate::gates::Gate;
 use crate::limits::ResolvedLimits;
 use crate::sim::compiled::{
-    PackedShots, batch_propagate_backward, compile_measurements, xor_words,
+    DeferredCircuit, GuardedEvent, PackedShots, batch_propagate_backward, compile_measurements,
+    defer_noisy_circuit, xor_words,
 };
 use crate::sim::trajectory::{PreparedChannel, PreparedEvent, PreparedNoise};
 use crate::sim::unified_pauli::PauliAxis;
@@ -2973,10 +2974,15 @@ fn run_shots_noisy_frame(
 /// Sample a Pauli-noisy Clifford circuit through the compiled noisy sampler or
 /// the frame sampler.
 ///
-/// Circuits with resets, classical conditionals, or mid-circuit measurements
-/// fall back to per-shot stabilizer replay. Non-Clifford circuits take the
-/// same fallback and error on the first non-Clifford gate; the public entry
-/// point routes them to the trajectory engine before reaching here.
+/// A circuit with resets, mid-circuit measurements, or guarded Pauli gates is
+/// first rewritten to terminal measurements: a reset moves its qubit to a fresh
+/// one, and a guarded Pauli becomes that Pauli controlled by the measured qubits
+/// its condition reads, which holds for a single bit, a parity, or a register
+/// comparison reading one measured bit. A circuit the rewrite declines, such as
+/// one reusing a measured qubit without a reset, falls back to per-shot
+/// stabilizer replay. Non-Clifford circuits take the same fallback and error on
+/// the first non-Clifford gate; the public entry point routes them to the
+/// trajectory engine before reaching here.
 pub fn run_shots_noisy(
     circuit: &Circuit,
     noise: &NoiseModel,
@@ -3007,6 +3013,9 @@ pub(crate) fn run_validated_shots_noisy(
     }
 
     if !super::supports_compiled_measurement_sampling(circuit) {
+        if let Ok(deferred) = defer_noisy_circuit(circuit, noise) {
+            return run_deferred_shots_noisy(&deferred, num_shots, seed);
+        }
         let limits = ResolvedLimits::process_default();
         return run_shots_noisy_brute_with(
             |s| Box::new(StabilizerBackend::with_limits(s, &limits)),
@@ -3022,6 +3031,154 @@ pub(crate) fn run_validated_shots_noisy(
     } else {
         run_shots_noisy_compiled(circuit, noise, num_shots, seed)
     }
+}
+
+/// Sample a circuit [`defer_noisy_circuit`] rewrote: its terminal form through
+/// [`run_validated_shots_noisy`] when no guarded body carries an event, else through
+/// [`run_shots_noisy_guarded`].
+pub(crate) fn run_deferred_shots_noisy(
+    deferred: &DeferredCircuit,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    if deferred.guarded.is_empty() {
+        return run_validated_shots_noisy(&deferred.circuit, &deferred.noise, num_shots, seed);
+    }
+    run_shots_noisy_guarded(deferred, num_shots, seed)
+}
+
+/// Sample a deferred circuit whose guarded bodies carry events. The compiled sampler
+/// draws every shot's records under the every-shot events, then each guarded event, in
+/// execution order, lands on the shots whose guard holds, then readout. A guard reads
+/// records measured before its event, which only earlier guarded events can still flip.
+pub(crate) fn run_shots_noisy_guarded(
+    deferred: &DeferredCircuit,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    let circuit = &deferred.circuit;
+    let mut sampler = compile_validated_noisy(circuit, &deferred.noise, seed)?;
+    let readout = std::mem::take(&mut sampler.readout);
+    let flips = guarded_flips(circuit, &deferred.guarded);
+
+    let (mut accum, m_words) = sampler.sample_bulk_words_shot_major_cpu(num_shots);
+    for flip in &flips {
+        flip.land(&mut accum, num_shots, m_words, &mut sampler.rng);
+    }
+    apply_readout_packed(&mut accum, num_shots, m_words, &readout, &mut sampler.rng);
+
+    let shots = unpack_and_remap(
+        &accum,
+        m_words,
+        num_shots,
+        &circuit.classical_bit_order(),
+        circuit.num_classical_bits,
+    );
+    Ok(
+        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
+            crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer)
+                .with_engine(crate::sim::Engine::NoisyCompiledSampler)
+                .with_reason(crate::sim::RouteRule::CompiledCliffordSampler),
+        ),
+    )
+}
+
+/// A guarded event's record flips: an X error flips `x_flips`, a Z error `z_flips`, a Y
+/// both.
+struct GuardedFlip {
+    records: SmallVec<[usize; 4]>,
+    invert: bool,
+    x_flips: Vec<u64>,
+    z_flips: Vec<u64>,
+    probs: (f64, f64, f64),
+}
+
+impl GuardedFlip {
+    /// Draw the event on each of `num_shots` shot-major records in `accum`, landing it
+    /// where the guard holds on that shot.
+    fn land(&self, accum: &mut [u64], num_shots: usize, m_words: usize, rng: &mut ChaCha8Rng) {
+        let (px, py, pz) = self.probs;
+        let p_event = px + py + pz;
+        let mut fire = |shot: usize, branch: f64| {
+            let words = &mut accum[shot * m_words..(shot + 1) * m_words];
+            let holds = self.records.iter().fold(self.invert, |acc, &record| {
+                acc ^ ((words[record / 64] >> (record % 64)) & 1 == 1)
+            });
+            if !holds {
+                return;
+            }
+            if branch < px + py {
+                xor_words(words, &self.x_flips);
+            }
+            if branch >= px {
+                xor_words(words, &self.z_flips);
+            }
+        };
+        if p_event < 0.5 && num_shots >= 32 {
+            let ln_1mp = (-p_event).ln_1p();
+            let mut shot = geometric_sample(rng, ln_1mp);
+            while shot < num_shots {
+                let r: f64 = rand::RngExt::random(rng);
+                fire(shot, r * p_event);
+                shot += 1 + geometric_sample(rng, ln_1mp);
+            }
+        } else {
+            for shot in 0..num_shots {
+                let r: f64 = rand::RngExt::random(rng);
+                if r < p_event {
+                    fire(shot, r);
+                }
+            }
+        }
+    }
+}
+
+/// The record flips of each guarded event, in order, from one backward sweep of
+/// `circuit`, whose measurements are all terminal.
+fn guarded_flips(circuit: &Circuit, guarded: &[GuardedEvent]) -> Vec<GuardedFlip> {
+    let num_measurements = circuit
+        .instructions
+        .iter()
+        .filter(|inst| matches!(inst, Instruction::Measure { .. }))
+        .count();
+    let m_words = num_measurements.div_ceil(64);
+    let mut x_packed: Vec<Vec<u64>> = vec![vec![0u64; m_words]; circuit.num_qubits];
+    let mut z_packed: Vec<Vec<u64>> = vec![vec![0u64; m_words]; circuit.num_qubits];
+    let mut sign_packed: Vec<u64> = vec![0u64; m_words];
+
+    let mut flips = Vec::with_capacity(guarded.len());
+    let mut pending = guarded.iter().rev().peekable();
+    let mut mi = num_measurements;
+    for (instr_idx, inst) in circuit.instructions.iter().enumerate().rev() {
+        while let Some(event) = pending.next_if(|event| event.anchor == instr_idx) {
+            flips.push(GuardedFlip {
+                records: event.records.clone(),
+                invert: event.invert,
+                x_flips: z_packed[event.qubit].clone(),
+                z_flips: x_packed[event.qubit].clone(),
+                probs: event.probs,
+            });
+        }
+        match inst {
+            Instruction::Gate { gate, targets } => {
+                batch_propagate_backward(
+                    &mut x_packed,
+                    &mut z_packed,
+                    &mut sign_packed,
+                    gate,
+                    targets.as_slice(),
+                    m_words,
+                );
+            }
+            Instruction::Measure { qubit, .. } => {
+                mi -= 1;
+                z_packed[*qubit][mi / 64] |= 1u64 << (mi % 64);
+            }
+            _ => {}
+        }
+    }
+    flips.reverse();
+    flips
 }
 
 fn finish_noisy_compiled_run(
@@ -3075,6 +3232,18 @@ pub(crate) fn run_shots_noisy_with_gpu(
     }
 
     if !super::supports_compiled_measurement_sampling(circuit) {
+        if let Ok(deferred) = defer_noisy_circuit(circuit, noise) {
+            if !deferred.guarded.is_empty() {
+                return run_shots_noisy_guarded(&deferred, num_shots, seed);
+            }
+            return run_shots_noisy_with_gpu(
+                &deferred.circuit,
+                &deferred.noise,
+                num_shots,
+                seed,
+                context,
+            );
+        }
         let limits = ResolvedLimits::process_default();
         return run_shots_noisy_brute_with(
             |s| Box::new(StabilizerBackend::with_limits(s, &limits)),

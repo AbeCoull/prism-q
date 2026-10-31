@@ -790,9 +790,10 @@ fn decomposed_mid_circuit_shots_identical_across_thread_counts() {
 }
 
 // H and S layers over brick CX, then a measurement of qubit 0 that conditions
-// an X on qubit 1 and a reset of qubit 0, so the circuit stays off the compiled
-// sampler and every shot replays on a tableau.
-fn dynamic_clifford_circuit(n: usize) -> Circuit {
+// `guarded` on qubit 1 and a reset of qubit 0. A guarded H has no
+// controlled-Pauli form, so that circuit stays off the compiled sampler and every
+// shot replays on a tableau; a guarded X compiles.
+fn dynamic_clifford_circuit(n: usize, guarded: Gate) -> Circuit {
     let layer = |c: &mut Circuit, depth: usize| {
         for q in 0..n {
             let gate = if (q + depth).is_multiple_of(3) {
@@ -813,7 +814,7 @@ fn dynamic_clifford_circuit(n: usize) -> Circuit {
     circuit.add_measure(0, 0);
     circuit.instructions.push(Instruction::Conditional {
         condition: ClassicalCondition::BitIsOne(0),
-        gate: Gate::X,
+        gate: guarded,
         targets: SmallVec::from_slice(&[1]),
     });
     circuit.add_reset(0);
@@ -827,7 +828,7 @@ fn dynamic_clifford_circuit(n: usize) -> Circuit {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn stabilizer_mid_circuit_shots_identical_across_thread_counts() {
-    let circuit = dynamic_clifford_circuit(20);
+    let circuit = dynamic_clifford_circuit(20, Gate::H);
     assert_per_shot_matches_serial(&circuit, ResolvedBackend::Stabilizer);
 }
 
@@ -902,7 +903,7 @@ fn grouped_pauli_trajectories_identical_across_thread_counts() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn noisy_stabilizer_trajectories_identical_across_thread_counts() {
-    let circuit = dynamic_clifford_circuit(20);
+    let circuit = dynamic_clifford_circuit(20, Gate::H);
     let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
     let shots = |threads: usize| {
         in_pool(threads, || {
@@ -937,5 +938,34 @@ fn noisy_stabilizer_trajectories_identical_across_thread_counts() {
         serial.shots,
         single.shots[..3],
         "serial trajectories differ from split ones"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn noisy_guarded_pauli_shots_identical_across_thread_counts() {
+    let circuit = dynamic_clifford_circuit(20, Gate::X);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let shots = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .noise(&noise)
+                .seed(SEED)
+                .shots(PER_SHOT_SHOTS)
+                .expect("noisy shots")
+        })
+    };
+    let single = shots(1);
+    let wide = shots(THREADS_HI);
+    assert_eq!(
+        single.metadata.backend,
+        ResolvedBackend::CompiledStabilizer,
+        "unexpected guarded route"
+    );
+    assert_eq!(single.shots, wide.shots, "guarded record bits differ");
+    assert_eq!(
+        format!("{:?}", single.metadata),
+        format!("{:?}", wide.metadata),
+        "guarded metadata differs"
     );
 }

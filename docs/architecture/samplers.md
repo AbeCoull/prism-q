@@ -215,17 +215,42 @@ part way through a trajectory.
 Noisy sampling is reachable through `simulate(...).noise(...).shots(n)` /
 `.sample_counts(n)`; the other builder terminals reject an inline noise model.
 `run_shots_with_noise` (`src/sim/mod.rs`) routes Pauli-only noise on Clifford
-circuits with terminal measurements (no resets, no classical conditionals) to
-the compiled family when the backend is Auto or stabilizer-family; every other
-accepted combination runs the trajectory engine over the resolved backend.
-Within the compiled family, `run_shots_noisy` (`src/sim/noise.rs`) picks one
-engine per call:
+circuits to the compiled family when the backend is Auto or stabilizer-family,
+provided the measurements are terminal or the circuit rewrites to terminal
+measurements as below; every other accepted combination runs the trajectory
+engine over the resolved backend. Within the compiled family, `run_shots_noisy`
+(`src/sim/noise.rs`) picks one engine per call:
 
 | Engine | Selected when | Limitations |
 |---|---|---|
-| Brute-force replay (`run_shots_noisy_brute_with`) | Resets, classical conditionals, or mid-circuit measurements | Per-shot tableau replay, O(shots) simulations; non-Clifford circuits error here (the public entry point routes them to the trajectory engine instead) |
-| Pauli frame | Shallow circuits: gate count / qubits < 3, or < 5 at >= 200 qubits | Clifford, terminal measurements only |
-| Compiled Pauli (`NoisyCompiledSampler`) | Remaining Clifford + terminal-measurement circuits | Clifford, terminal measurements only |
+| Brute-force replay (`run_shots_noisy_brute_with`) | Dynamic circuits the rewrite declines | Per-shot tableau replay, O(shots) simulations; non-Clifford circuits error here (the public entry point routes them to the trajectory engine instead) |
+| Pauli frame | Shallow circuits: gate count / qubits < 3, or < 5 at >= 200 qubits | Clifford, terminal measurements, no event in a guarded body |
+| Compiled Pauli (`NoisyCompiledSampler`) | Remaining Clifford circuits | Clifford, terminal measurements after the rewrite |
+
+A circuit with resets, mid-circuit measurements or guarded Pauli gates is
+rewritten to terminal measurements first (`defer_noisy_circuit` in
+`src/sim/compiled/mod.rs`). A reset moves its qubit to a fresh alias, and a
+measured alias is never touched again, so its measurement moves to the end
+unchanged. A guarded Pauli `P` on qubit `t` becomes `P` controlled by the alias
+of each record its condition reads, plus an unconditional `P` when the condition
+is inverted: a Pauli fired on a record's value is exactly a controlled Pauli from
+an alias that holds that value, which is the principle of deferred measurement.
+That needs the condition to be a parity of measured bits, so the rewrite takes a
+single bit, a `Parity`, and a register comparison that reads at most one bit a
+measurement has written (an unwritten bit reads 0); a guarded body holds Pauli
+gates only. An event on a measured alias drops, since the record already holds
+the value the shot keeps, which is also why a qubit measured twice without a
+reset between declines the noisy rewrite. The noiseless shot route takes the
+same rewrite at two shots or more.
+
+An event in a guarded body fires only on the shots whose guard holds, and that
+choice is not linear in the records, so no fixed map holds it. The compiled
+sampler draws every shot's records under the every-shot events; each guarded
+event, in execution order, then draws at its rate on every shot and lands its
+precomputed record flips on the shots whose guard parity holds, and readout comes
+last. A guard reads only records measured before its event, which no later event
+reaches, so execution order decides every guard against its final value. Such a
+circuit always takes the compiled sampler rather than the frame sampler.
 
 The last two, and the noiseless compiled sampler, all resolve to
 `ResolvedBackend::CompiledStabilizer`. `RunMetadata::engine` names which one
@@ -233,8 +258,8 @@ ran, so a test pins a route off the result rather than off the predicates that
 picked it.
 
 The trajectory engine (`src/sim/trajectory.rs`) covers everything the compiled
-family rejects: non-Pauli channels, mid-circuit measurement, reset, classical
-conditionals, and non-Clifford gates, at per-shot state evolution cost.
+family rejects: non-Pauli channels, non-Clifford gates, and the dynamic circuits
+the rewrite declines, at per-shot state evolution cost.
 On the distributed statevector the trajectories run serially in shot order on
 every rank, so the ranks issue their collectives in lockstep.
 
@@ -295,10 +320,11 @@ constructors and every gate rule of `NoiseBuilder` put a guarded gate's noise in
 its body slot; the rules that read a schedule decline a circuit holding a
 region, whose duration depends on the branch.
 
-Trajectories and the stabilizer replay walk the guards per shot. The compiled
-noisy sampler and the error chain complex fix their maps before a shot, so they
-reject a model whose body slots carry an event, and the density matrix rejects
-any guard before reading a slot. A model of exactly `n` slots is still accepted
+Trajectories and the stabilizer replay walk the guards per shot. `compile_noisy`
+and the error chain complex fix their maps before a shot, so they reject a model
+whose body slots carry an event; the noisy shot route lands such an event after
+the map, as described above. The density matrix rejects any guard before reading
+a slot. A model of exactly `n` slots is still accepted
 where it was before: on a circuit whose guards are all conditionals (which then
 carry no gate noise) and, readout only, on a circuit with a region.
 

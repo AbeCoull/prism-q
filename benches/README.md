@@ -64,6 +64,7 @@ worth the disk.
 | `statevector/dense_unitary/k{3,4}/{20,24}` | Two layers of seeded Haar-random 3- and 4-qubit `Gate::Unitary` blocks tiling the register, the dense gather-scatter kernel |
 | `product/expectation/{pauli,marginals}/{64,128,256,512}` | Product-state Pauli evaluation after 10 layers of seeded rotations: `Z` on every qubit and `XX` on every bond, and the per-qubit `Z` marginal route |
 | `product/noisy_trajectory/{64,128,256,512}` | The same circuit measured, 100 shots of 1% depolarizing trajectories on the product backend |
+| `noisy_sampling/trajectory_{amplitude,phase}_damping/hea_12q_g1e-3_1000` | 1000 shots of a measured three-layer hardware-efficient ansatz at 12 qubits with amplitude or phase damping at `gamma = 1e-3` on every gate target: one statevector trajectory per shot, with a probability read and a no-jump pass per event. `trajectory_pauli/hea_12q_p1e-3_1000` runs the same circuit under depolarizing noise, whose shots share one simulation per error pattern |
 | `statevector/trotter_builder/heisenberg/{16,20}` | One second-order product-formula step of the `9n - 9` term Heisenberg chain from `Circuit::add_trotter`: `XX` and `YY` couplings as native `PauliRot`, `ZZ` as `Rzz`, fields as named rotations, under the default pipeline |
 | `stabilizer_rank` | Clifford+T shot sampling: terminal rows (including 1000q chi2) and mid-circuit rows with measurement, reset, and conditional gates |
 | `tn/scalar_hea_l2` | Tensor-network scalar contraction, hardware-efficient ansatz, 2 layers, 20–50 qubits (`bench-internal`) |

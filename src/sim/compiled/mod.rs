@@ -1325,12 +1325,11 @@ impl CompiledSampler {
         let rank = self.rank;
         let num_outcomes = 1usize << rank;
         let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
-        let lut =
-            (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
-        let mut counts = HashMap::new();
+        let mut key_counts = vec![0u64; num_outcomes];
+        let mut nonzero_keys = 0;
         let mut remaining = total_shots;
 
-        for key in 0..num_outcomes {
+        for (key, key_count) in key_counts.iter_mut().enumerate() {
             if remaining == 0 {
                 break;
             }
@@ -1340,24 +1339,62 @@ impl CompiledSampler {
             } else {
                 binomial_sample(&mut fast_rng, remaining, 1.0 / outcomes_left as f64)
             };
+            *key_count = count as u64;
+            nonzero_keys += usize::from(count > 0);
+            remaining -= count;
+        }
 
-            if count > 0 {
-                let mut outcome = self.ref_bits_packed[..m_words].to_vec();
-                if let Some(lut) = lut {
-                    for g in 0..lut.total_groups() {
-                        let byte = (key >> (g * 8)) & 0xFF;
-                        lut.xor_into(&mut outcome, g, byte);
-                    }
-                } else {
-                    for j in 0..rank {
-                        if (key >> j) & 1 != 0 {
-                            xor_words(&mut outcome, &self.flip_rows[j]);
-                        }
+        let lut =
+            (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
+        let ref_bits = &self.ref_bits_packed[..m_words];
+        let flip_rows = &self.flip_rows;
+        let outcome = |key: usize| {
+            let mut outcome = ref_bits.to_vec();
+            if let Some(lut) = lut {
+                for g in 0..lut.total_groups() {
+                    let byte = (key >> (g * 8)) & 0xFF;
+                    lut.xor_into(&mut outcome, g, byte);
+                }
+            } else {
+                for (j, row) in flip_rows.iter().enumerate() {
+                    if (key >> j) & 1 != 0 {
+                        xor_words(&mut outcome, row);
                     }
                 }
-                counts.insert(outcome, count as u64);
             }
-            remaining -= count;
+            outcome
+        };
+        let mut counts = HashMap::with_capacity(nonzero_keys);
+
+        #[cfg(feature = "parallel")]
+        if nonzero_keys >= MIN_KEYS_FOR_PAR_MULTINOMIAL {
+            use rayon::prelude::*;
+
+            let keys_per_thread = num_outcomes.div_ceil(rayon::current_num_threads());
+            let shards: Vec<Vec<(Vec<u64>, u64)>> = key_counts
+                .par_chunks(keys_per_thread)
+                .enumerate()
+                .map(|(tid, shard)| {
+                    let shard_start = tid * keys_per_thread;
+                    shard
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &count)| count > 0)
+                        .map(|(i, &count)| (outcome(shard_start + i), count))
+                        .collect()
+                })
+                .collect();
+
+            for shard in shards {
+                counts.extend(shard);
+            }
+            return counts;
+        }
+
+        for (key, &count) in key_counts.iter().enumerate() {
+            if count > 0 {
+                counts.insert(outcome(key), count);
+            }
         }
 
         counts
@@ -2692,6 +2729,10 @@ fn gray_code_exact_counts(
 const MAX_RANK_FOR_GRAY_CODE: usize = 25;
 const MAX_RANK_FOR_MULTINOMIAL: usize = 22;
 const MIN_SHOTS_PER_OUTCOME_MULTINOMIAL: usize = 8;
+/// Nonzero keys from which multinomial counts build their outcomes on the pool. The
+/// binomial draws stay serial in key order, so the counts do not depend on the pool size.
+#[cfg(feature = "parallel")]
+const MIN_KEYS_FOR_PAR_MULTINOMIAL: usize = 1 << 13;
 const MAX_RANK_FOR_RANK_SPACE: usize = 20;
 const MIN_SHOTS_PER_OUTCOME: usize = 4;
 const MAX_LUT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;

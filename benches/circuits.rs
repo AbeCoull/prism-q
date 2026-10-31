@@ -1854,10 +1854,10 @@ fn bench_mps_brickwork(c: &mut Criterion) {
         b.iter(|| run_mps_apply_only_with_epsilon(circ, 256, 1e-3));
     });
 
-    // The walk on its own: at 12 qubits the peak bond clears the rank at which
-    // a threshold cut takes the orthogonality center, and stays under the cap,
-    // so every cut pays the walk for an error the cap never makes. Shape pinned
-    // in `tests/integration/bench_fixture_routing.rs`.
+    // The two-site update at bond on its own: at 12 qubits the peak bond stays
+    // under both the cap and the rank at which a threshold cut takes the
+    // orthogonality center, so no cut truncates or walks. Shape pinned in
+    // `tests/integration/bench_fixture_routing.rs`.
     let circuit = circuits::brickwork_circuit(12, 24, SEED);
     group.bench_with_input(BenchmarkId::new("b256", 12), &circuit, |b, circ| {
         b.iter(|| run_mps_apply_only(circ, 256));

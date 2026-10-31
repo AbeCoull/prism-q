@@ -1552,7 +1552,7 @@ fn a_cut_gauges_when_it_drops_what_the_factorization_resolves() {
 // drop, and the mark outlives the bonds that set it.
 #[test]
 fn a_chain_whose_bonds_reach_the_gauge_rank_takes_the_center() {
-    let circuit = crate::circuits::brickwork_circuit(12, 8, 42);
+    let circuit = crate::circuits::brickwork_circuit(14, 24, 42);
     let b = mps_after(&circuit, 4096);
     assert_eq!(b.current_max_bond_dim(), GAUGE_RANK);
     assert!(b.center.is_some(), "no center at the gauge rank");
@@ -2779,8 +2779,8 @@ fn assert_center_at_bond(b: &MpsBackend, bond: usize) {
 }
 
 // Every cut of a chain whose ranks run 2, 4, 8, 16 against the dense
-// spectrum. The run reaches the gauge rank and leaves a center right of the
-// first bond, so the first cut walks it to site 1, the second reads the same
+// spectrum. The run stays under the gauge rank, so the center is recorded at
+// the right end: the first cut walks it to site 1, the second reads the same
 // site for nothing, and each cut after that pays one step; the entropy call
 // at the same cut pays nothing.
 #[test]
@@ -2788,9 +2788,12 @@ fn schmidt_values_match_the_statevector_across_every_cut() {
     let n = 12;
     let circuit = crate::circuits::brickwork_circuit(n, 8, 42);
     let mut b = mps_after(&circuit, 4096);
-    let rest = b
-        .center
-        .expect("the run reached the gauge rank without a center");
+    assert_eq!(
+        b.center, None,
+        "the run took the center under the gauge rank"
+    );
+    let rest = n - 1;
+    b.establish_center(rest);
     let discarded = b.truncation_discarded();
     let mark = b.center_steps;
 
@@ -2824,7 +2827,6 @@ fn schmidt_values_match_the_statevector_across_every_cut() {
     }
 
     assert_eq!(b.truncation_discarded(), discarded);
-    assert!(rest >= 1, "the run left the center at site 0");
     assert_eq!(b.center_steps - mark, (rest - 1) + (n - 3));
 }
 
@@ -3031,23 +3033,24 @@ fn a_gauged_run_lands_where_its_booked_weight_says() {
     }
 }
 
-// The row `mps/brickwork_d24/b256/12` prices the walk rather than the cap, so
-// the fixture has to clear the rank at which a threshold cut takes the center
-// and stay under its cap. Held against the constant itself: raising it past
-// the fixture's peak would leave the row measuring traversal alone.
+// The row `mps/brickwork_d24/b256/12` prices the two-site update at bond with
+// neither the cap nor the walk, so the fixture has to peak under the rank at
+// which a threshold cut takes the center as well as under its cap. Held
+// against the constant itself: lowering it to the fixture's peak would put the
+// walk back on every cut of the row.
 #[test]
-fn the_gauge_walk_bench_row_walks_under_its_cap() {
+fn the_ungauged_bench_row_stays_off_the_walk() {
     let b = mps_after(
         &crate::circuits::brickwork_circuit(12, 24, 0xDEAD_BEEF),
         256,
     );
     let peak = b.current_max_bond_dim();
     assert!(
-        (GAUGE_RANK..256).contains(&peak),
-        "peak bond {peak} no longer walks under the 256 cap"
+        (2..GAUGE_RANK).contains(&peak),
+        "peak bond {peak} leaves the row off the ungauged path"
     );
-    assert!(b.center.is_some(), "the row records no center to walk");
-    assert!(b.center_steps > 0, "the row never walks");
+    assert_eq!(b.center, None, "the row recorded a center");
+    assert_eq!(b.center_steps, 0, "the row walked");
     assert!(
         b.truncation_discarded() < 1e-20,
         "the row truncates, so it prices the cap"

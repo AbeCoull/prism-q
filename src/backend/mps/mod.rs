@@ -88,7 +88,7 @@ const DEFAULT_SVD_EPSILON: f64 = 1e-12;
 /// threshold to 1e-12, while at bond 256 a 16-qubit chain read 2.8e-7 from
 /// values dropped at 8.6e-16 of the largest, under [`SVD_RESOLUTION`], and
 /// another seed read 1.0e-8 with nothing dropped at all.
-const GAUGE_RANK: usize = 16;
+const GAUGE_RANK: usize = 128;
 /// Relative size under which a value dropped by a cut on a chain under
 /// [`GAUGE_RANK`] is taken as the factorization's own rounding.
 const SVD_RESOLUTION: f64 = 4.0 * f64::EPSILON;

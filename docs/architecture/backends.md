@@ -138,7 +138,7 @@ Chain of rank-3 tensors with adaptive bond dimension (default max 256). O(n·χ�
 
 Hybrid SVD dispatch: faer (bidiag+D&C) for matrices with m×n ≥ 256, hand-rolled Jacobi for small matrices.
 
-Once any bond reaches 16, a truncating cut first moves the chain's orthogonality center to the cut, so the discarded singular weight is the state's 2-norm error rather than a value the ungauged environment amplifies. Below that width a cut runs ungauged and treats drops under four machine epsilons of the largest value as rounding.
+Once any bond reaches 128, a truncating cut first moves the chain's orthogonality center to the cut, so the discarded singular weight is the state's 2-norm error rather than a value the ungauged environment amplifies. Below that width a cut runs ungauged and treats drops under four machine epsilons of the largest value as rounding.
 
 ## Product State
 

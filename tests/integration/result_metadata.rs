@@ -150,6 +150,38 @@ fn decomposed_mps_reports_peak_bond_over_blocks() {
 }
 
 #[test]
+fn decomposed_run_names_each_block_backend() {
+    let mut circuit = Circuit::new(10, 0);
+    circuit.add_gate(Gate::Rx(0.3), &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    circuit.add_gate(Gate::H, &[3]);
+    circuit.add_gate(Gate::Cx, &[3, 4]);
+    for q in 5..10 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    let auto = simulate(&circuit).seed(SEED).run().unwrap();
+    assert_eq!(auto.metadata.backend, ResolvedBackend::Decomposed);
+    let mut expected = vec![ResolvedBackend::Statevector, ResolvedBackend::Stabilizer];
+    expected.extend([ResolvedBackend::ProductState; 5]);
+    assert_eq!(auto.metadata.blocks, expected);
+
+    let explicit = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(explicit.metadata.blocks, [ResolvedBackend::Statevector; 7]);
+
+    let whole = simulate(&brickwork_circuit(10, 4, SEED))
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert!(whole.metadata.blocks.is_empty());
+}
+
+#[test]
 fn require_exact_leaves_an_exact_route_alone() {
     let outcome = simulate(&bell()).seed(SEED).require_exact().run().unwrap();
     assert!(outcome.metadata.is_exact());

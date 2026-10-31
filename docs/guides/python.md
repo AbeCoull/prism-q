@@ -413,6 +413,7 @@ print(result.metadata.is_exact)              # True
 print(result.metadata.fidelity_lower_bound)  # None when exact
 print(result.metadata.placement)             # 'host' or 'device'
 print(result.metadata.bond)                  # None unless the MPS ran
+print(result.metadata.blocks)                # per-block engines when 'Decomposed'
 ```
 
 `is_exact` is False when the engine that ran can discard state weight or
@@ -1376,6 +1377,22 @@ hanging. `.max_steps(n)` sets another bound:
 b = DynamicProgramBuilder(1, 0)
 b.begin_while("forever", True).add_gate(Gate.x(), [0]).end()
 simulate_program(b.build()).max_steps(100).shots(1)  # raises
+```
+
+`.noise(rules)` takes a `NoiseBuilder` rather than a `NoiseModel`, since a program
+holds one circuit per block and a model is laid out against one circuit. The rules
+compile against every block and every runtime rotation, and each shot runs one
+noisy trajectory. Readout error flips the returned record, not the bits a branch
+reads, as on a circuit. The density matrix, leakage and quasi-static channels, and
+an over-rotation rule matching a runtime rotation raise `incompatible_backend`.
+
+```python
+from prism_q import GateFilter, NoiseBuilder, NoiseChannel
+
+rules = NoiseBuilder().after_gates(
+    GateFilter.all().named("h"), NoiseChannel.amplitude_damping(0.4)
+)
+noisy = simulate_program(program).noise(rules).seed(42).shots(1000)
 ```
 
 A program with no runtime control flow runs as its circuit, with the same seeded

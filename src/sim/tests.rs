@@ -106,6 +106,41 @@ fn factored_stabilizer_route_starts_at_16_qubits_with_pair_blocks() {
     ));
 }
 
+#[test]
+fn explicit_factored_stabilizer_runs_decomposable_circuits_whole() {
+    let limits = ResolvedLimits::process_default();
+    for circuit in [
+        crate::circuits::local_clifford_blocks(4, 2, 20, 42),
+        crate::circuits::local_clifford_blocks(8, 2, 20, 42),
+    ] {
+        let n = circuit.num_qubits;
+        assert!(matches!(
+            plan_probability_route(&BackendKind::FactoredStabilizer, &circuit, &limits),
+            ProbabilityRoute::FactoredStabilizer
+        ));
+        assert!(
+            matches!(
+                plan_probability_route(&BackendKind::Stabilizer, &circuit, &limits),
+                ProbabilityRoute::Decomposed(_)
+            ),
+            "{n}q: an explicit tableau keeps the block split"
+        );
+        let outcome = run_with(BackendKind::FactoredStabilizer, &circuit, 42, &limits).unwrap();
+        assert_eq!(
+            outcome.metadata.backend,
+            ResolvedBackend::FactoredStabilizer
+        );
+        assert_eq!(outcome.metadata.reason, RouteRule::ExplicitBackend);
+        let mut statevector = StatevectorBackend::new(42);
+        let reference = crate::sim::run_on(&mut statevector, &circuit).unwrap();
+        let got = outcome.probabilities.unwrap().to_vec();
+        let want = reference.probabilities.unwrap().to_vec();
+        for (a, b) in got.iter().zip(&want) {
+            assert!((a - b).abs() < 1e-12, "{n}q: {a} against {b}");
+        }
+    }
+}
+
 // The decomposition bypass in `try_native_terminal_backend` is scoped to
 // the product state. Pin both halves: a product circuit reaches the native
 // sampler even though its route is decomposed, and a decomposable circuit

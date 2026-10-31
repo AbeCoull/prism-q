@@ -1042,6 +1042,22 @@ fn finish_trajectory(
     readout: &[Option<ReadoutError>],
     rng: &mut ChaCha8Rng,
 ) -> Result<Vec<bool>> {
+    evolve_noisy(backend, circuit, noise, from, rng)?;
+    let mut results = backend.classical_results().to_vec();
+    apply_readout_errors(&mut results, readout, rng);
+    Ok(results)
+}
+
+/// Apply `circuit.instructions[from..]` to the state `backend` holds, firing each
+/// slot of `noise` after its instruction. `noise` holds no per-shot memory
+/// channel.
+pub(crate) fn evolve_noisy(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    noise: &PreparedNoise,
+    from: usize,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
     if noise.num_slots() == circuit.instructions.len() {
         for (instr, events) in circuit.instructions[from..]
             .iter()
@@ -1052,18 +1068,27 @@ fn finish_trajectory(
                 apply_noise_event(backend, event, rng)?;
             }
         }
-    } else {
-        let mut walk = TrajectoryWalk {
-            backend: &mut *backend,
-            noise,
-            rng: &mut *rng,
-        };
-        walk_noise_slots(circuit, from, &mut walk)?;
+        return Ok(());
     }
+    let mut walk = TrajectoryWalk {
+        backend,
+        noise,
+        rng,
+    };
+    walk_noise_slots(circuit, from, &mut walk)
+}
 
-    let mut results = backend.classical_results().to_vec();
-    apply_readout_errors(&mut results, readout, rng);
-    Ok(results)
+/// Fire the events of `noise` slot `slot` on the state `backend` holds.
+pub(crate) fn fire_slot(
+    backend: &mut dyn Backend,
+    noise: &PreparedNoise,
+    slot: usize,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    for event in noise.slot(slot) {
+        apply_noise_event(backend, event, rng)?;
+    }
+    Ok(())
 }
 
 /// Trajectories split across Rayon workers when `sim::state_splits_across_workers`

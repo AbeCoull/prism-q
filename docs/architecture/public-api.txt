@@ -2620,6 +2620,7 @@ pub struct prism_q::sim::RejectReason
 pub prism_q::sim::RejectReason::error: prism_q::error::PrismError
 #[non_exhaustive] pub struct prism_q::sim::RunMetadata
 pub prism_q::sim::RunMetadata::backend: prism_q::ResolvedBackend
+pub prism_q::sim::RunMetadata::blocks: alloc::vec::Vec<prism_q::ResolvedBackend>
 pub prism_q::sim::RunMetadata::bond: core::option::Option<prism_q::BondReport>
 pub prism_q::sim::RunMetadata::engine: core::option::Option<prism_q::Engine>
 pub prism_q::sim::RunMetadata::exactness: prism_q::Exactness
@@ -2686,6 +2687,7 @@ pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::shots(self, usize) ->
 impl<'p, SeedState> prism_q::SimulateProgram<'p, SeedState>
 pub fn prism_q::SimulateProgram<'p, SeedState>::backend(self, prism_q::BackendKind) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::max_steps(self, u64) -> Self
+pub fn prism_q::SimulateProgram<'p, SeedState>::noise(self, &'p prism_q::sim::noise::builder::NoiseBuilder) -> Self
 impl<'p> prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>
 pub fn prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::sim::Seeded>
 pub struct prism_q::sim::Unseeded
@@ -4140,6 +4142,7 @@ pub prism_q::ResourceLimit::required: u128
 pub prism_q::ResourceLimit::resource: prism_q::error::ResourceKind
 #[non_exhaustive] pub struct prism_q::RunMetadata
 pub prism_q::RunMetadata::backend: prism_q::ResolvedBackend
+pub prism_q::RunMetadata::blocks: alloc::vec::Vec<prism_q::ResolvedBackend>
 pub prism_q::RunMetadata::bond: core::option::Option<prism_q::BondReport>
 pub prism_q::RunMetadata::engine: core::option::Option<prism_q::Engine>
 pub prism_q::RunMetadata::exactness: prism_q::Exactness
@@ -4220,6 +4223,7 @@ pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::shots(self, usize) ->
 impl<'p, SeedState> prism_q::SimulateProgram<'p, SeedState>
 pub fn prism_q::SimulateProgram<'p, SeedState>::backend(self, prism_q::BackendKind) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::max_steps(self, u64) -> Self
+pub fn prism_q::SimulateProgram<'p, SeedState>::noise(self, &'p prism_q::sim::noise::builder::NoiseBuilder) -> Self
 impl<'p> prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>
 pub fn prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::sim::Seeded>
 pub struct prism_q::SparseBackend

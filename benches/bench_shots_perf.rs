@@ -10,7 +10,7 @@
 use criterion::BatchSize;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use prism_q::BackendKind;
-use prism_q::circuit::Circuit;
+use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec, guarded};
 #[cfg(feature = "bench-internal")]
 use prism_q::compile_qec_profiled_sampler;
 use prism_q::gates::Gate;
@@ -1256,6 +1256,72 @@ fn bench_qec_feedforward_runner(c: &mut Criterion) {
     group.finish();
 }
 
+/// Circuit form of [`qec_corrected_repetition_program`] on a GHZ data register: each
+/// round measures check `Z_q Z_{q+1}` onto an ancilla it then resets, and the check
+/// reading 1 applies `X` on data qubits `0..=q` through a guarded body.
+fn corrected_repetition_circuit(n_data: usize, rounds: usize) -> Circuit {
+    let n_checks = n_data - 1;
+    let mut circuit = Circuit::new(n_data + n_checks, rounds * n_checks + n_data);
+    circuit.add_gate(Gate::H, &[0]);
+    for q in 1..n_data {
+        circuit.add_gate(Gate::Cx, &[q - 1, q]);
+    }
+    for round in 0..rounds {
+        let first_bit = round * n_checks;
+        for q in 0..n_checks {
+            let ancilla = n_data + q;
+            circuit.add_gate(Gate::Cx, &[q, ancilla]);
+            circuit.add_gate(Gate::Cx, &[q + 1, ancilla]);
+            circuit.add_measure(ancilla, first_bit + q);
+            circuit.add_reset(ancilla);
+        }
+        for q in 0..n_checks {
+            let body = (0..=q)
+                .map(|target| Instruction::Gate {
+                    gate: Gate::X,
+                    targets: SmallVec::from_slice(&[target]),
+                })
+                .collect();
+            circuit
+                .instructions
+                .extend(guarded(ClassicalCondition::BitIsOne(first_bit + q), body));
+        }
+    }
+    for q in 0..n_data {
+        circuit.add_measure(q, rounds * n_checks + q);
+    }
+    circuit
+}
+
+/// [`corrected_repetition_circuit`] under depolarizing noise on every gate, guarded ones
+/// included, sampled through the `Auto` noisy shot route.
+fn bench_noisy_dynamic_shots(c: &mut Criterion) {
+    let mut group = c.benchmark_group("noisy_dynamic_shots");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    for &(distance, shots) in &[(5usize, 10_000usize), (9, 2_000)] {
+        let circuit = corrected_repetition_circuit(distance, distance);
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        group.bench_with_input(
+            BenchmarkId::new(format!("rep_d{distance}_p001"), shots),
+            &circuit,
+            |b, circuit| {
+                b.iter(|| {
+                    sim::simulate(circuit)
+                        .noise(&noise)
+                        .seed(SEED)
+                        .shots(shots)
+                        .unwrap()
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 /// 100k-shot repetition memories on the record and leakage samplers at chunk 64, where
 /// each window covers a sliver of one 8192-shot noise unit, against the unchunked run of
 /// the same program. Both draw the same shots at the same seed.
@@ -1485,6 +1551,7 @@ criterion_group! {
     bench_qec_workflow,
     bench_qec_erasure_runner,
     bench_qec_feedforward_runner,
+    bench_noisy_dynamic_shots,
     bench_qec_chunked_noise,
     bench_qec_sample_one_shot,
     bench_qec_postselection,

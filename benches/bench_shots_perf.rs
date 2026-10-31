@@ -1406,7 +1406,10 @@ fn bench_qec_parse(c: &mut Criterion) {
 }
 
 /// Compiling a memory of `distance` rounds at p = 1e-3 to its sampler without kept
-/// measurements, so the detector parity walk dominates.
+/// measurements, so the detector parity walk dominates. `from_text` adds the parse of
+/// the same program's text, the time to first shot for a caller holding a file, and
+/// `kept` compiles with the default options, which keep measurements and take the
+/// records route.
 fn bench_qec_compile(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_compile");
     group.sample_size(10);
@@ -1427,6 +1430,34 @@ fn bench_qec_compile(c: &mut Criterion) {
             });
         }
     }
+
+    let distance = 25;
+    let text = qec_repeat_text(
+        |rounds| QecProgram::surface_memory(distance, rounds, QecBasis::Z, &noise).unwrap(),
+        distance,
+    );
+    group.bench_with_input(
+        BenchmarkId::new("surface_z_p001_from_text", distance),
+        &text,
+        |b, text| {
+            b.iter(|| {
+                let mut program = parse_qec_program(black_box(text)).unwrap();
+                program.set_options(QecOptions {
+                    keep_measurements: false,
+                    ..program.options()
+                });
+                program.compile_sampler().unwrap()
+            });
+        },
+    );
+    let kept = QecProgram::surface_memory(distance, distance, QecBasis::Z, &noise).unwrap();
+    group.bench_with_input(
+        BenchmarkId::new("surface_z_p001_kept", distance),
+        &kept,
+        |b, program| {
+            b.iter(|| program.compile_sampler().unwrap());
+        },
+    );
     group.finish();
 }
 

@@ -45,6 +45,7 @@ mod native_sampling;
 mod noise_construction;
 mod noise_validation;
 mod noisy_guards;
+mod noisy_programs;
 mod observable_variance;
 mod openqasm_goldens;
 mod parameter_binding;

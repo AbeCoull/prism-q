@@ -267,6 +267,27 @@ its loop, rather than hanging; `SimulateProgram::max_steps` sets another bound. 
 architecture page on [dynamic programs](../architecture/dynamic-programs.md) covers the
 block structure, the backends that run it, and what it costs.
 
+`SimulateProgram::noise` takes `NoiseBuilder` rules, which compile against every block
+and runtime rotation, and runs one noisy trajectory per shot. The loop above with
+amplitude damping after each `h`:
+
+```rust
+# use prism_q::circuit::openqasm;
+# use prism_q::simulate_program;
+# let program = openqasm::parse_dynamic(
+#     "OPENQASM 3.0; qubit[1] q; bit[1] c; h q[0]; c[0] = measure q[0];
+#      while (c[0]) { reset q[0]; h q[0]; c[0] = measure q[0]; }",
+# )?;
+use prism_q::{GateFilter, NoiseBuilder, NoiseChannel};
+
+let rules = NoiseBuilder::new().after_gates(
+    GateFilter::all().named("h"),
+    NoiseChannel::AmplitudeDamping { gamma: 0.4 },
+);
+let noisy = simulate_program(&program).noise(&rules).seed(42).shots(1000)?;
+# Ok::<(), prism_q::PrismError>(())
+```
+
 Declined under `parse_dynamic`, all `UnsupportedConstruct`: a runtime value where a
 parse-time constant belongs (an index, a loop bound, a `def` argument, the angle of any
 other gate), a builtin function over a runtime value, a register declared inside a

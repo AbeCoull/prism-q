@@ -132,6 +132,36 @@ Stabilizer rank, the Pauli-propagation engines, and the distributed
 statevector decline with `IncompatibleBackend`: the first two keep no per-shot state, and
 the distributed backend runs its ranks in lockstep on one circuit.
 
+### Noise
+
+`SimulateProgram::noise` takes a `NoiseBuilder`, not a `NoiseModel`: a model is laid
+out slot by slot against one circuit, and a program holds one circuit per block that
+the builder's merging decides. The rules compile against each block's circuit, guarded
+regions included, and against each runtime rotation as a one-gate circuit of its own.
+
+The compiled noisy sampler and the error chain complex cannot follow control flow, and
+the density matrix holds no per-shot state to branch on, so a noisy program runs one
+trajectory per shot. Routing reads the summary circuit and every compiled event the way
+a noisy circuit's trajectory route does: Pauli noise on Clifford blocks stays on the
+tableau, other channels move to the statevector family, and a channel the chosen
+backend cannot sample is rejected before a shot starts. Blocks run unfused so each
+event stays on its instruction, and the host statevector stops branching shots by
+outcome history, since noise makes every history its own. Shot `i` draws its noise
+from the stream a circuit trajectory gives shot `i`. Readout error flips the finished
+record, so a branch reads the bit the measurement wrote, as a guarded region does on a
+circuit.
+
+Declined with `IncompatibleBackend`:
+
+- The density matrix, which holds the mixture rather than a trajectory.
+- Leakage and quasi-static channels, whose per-shot memory the walk does not carry
+  from one block to the next.
+- An over-rotation rule matching a runtime rotation, whose angle exists only once the
+  shot evaluates it.
+
+A program with no runtime control flow builds the rules against its one circuit and
+runs as that circuit does under `Simulate::noise`, mixture routes included.
+
 ### What stays declined
 
 - A runtime value where a parse-time constant belongs: a qubit index, a loop bound, a
@@ -142,8 +172,7 @@ the distributed backend runs its ranks in lockstep on one circuit.
   measurement writes.
 - A measurement straight into a variable; measure into a bit and assign the bit.
 - `break` and `continue` inside a `for`, which unrolls at parse time.
-- `input` parameters and noise models. A dynamic program has no parameter binding and
-  no noise slots.
+- `input` parameters. A dynamic program has no parameter binding.
 
 Writing a classical bit from an expression is also out of reach: bits are written by
 measurement only, which no backend relaxes.

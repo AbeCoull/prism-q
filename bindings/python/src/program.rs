@@ -14,6 +14,7 @@ use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
 use crate::error::{PyPrismResult, invalid};
 use crate::gate::PyGate;
+use crate::noise::PyNoiseBuilder;
 use crate::sim::{DEFAULT_SEED, PyCountsResult, PyShotsResult};
 
 /// A program whose instruction count can depend on measurement outcomes: basic
@@ -302,13 +303,15 @@ impl PyDynamicProgramBuilder {
 }
 
 /// A configured run of a `DynamicProgram`. Set options with `.seed()`,
-/// `.backend()` and `.max_steps()`, then call `shots` or `sample_counts`.
+/// `.backend()`, `.max_steps()` and `.noise()`, then call `shots` or
+/// `sample_counts`.
 #[pyclass(name = "ProgramSimulation", module = "prism_q")]
 pub struct PyProgramSimulation {
     program: Py<PyDynamicProgram>,
     seed: Option<u64>,
     kind: Option<BackendKind>,
     max_steps: Option<u64>,
+    noise: Option<Py<PyNoiseBuilder>>,
 }
 
 impl PyProgramSimulation {
@@ -322,6 +325,7 @@ impl PyProgramSimulation {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let max_steps = self.max_steps;
+        let rules = self.noise.as_ref().map(|rules| rules.borrow(py).0.clone());
         Ok(py.detach(|| {
             let mut sim = core_simulate_program(program);
             if let Some(k) = kind {
@@ -329,6 +333,9 @@ impl PyProgramSimulation {
             }
             if let Some(bound) = max_steps {
                 sim = sim.max_steps(bound);
+            }
+            if let Some(rules) = &rules {
+                sim = sim.noise(rules);
             }
             terminal(sim.seed(seed))
         })?)
@@ -353,6 +360,14 @@ impl PyProgramSimulation {
     /// raises `PrismError` with `kind == "step_limit"` naming the loop.
     fn max_steps(mut slf: PyRefMut<'_, Self>, max_steps: u64) -> PyRefMut<'_, Self> {
         slf.max_steps = Some(max_steps);
+        slf
+    }
+
+    /// Sample one noisy trajectory per shot, `rules` compiled against each block
+    /// and each runtime rotation. Readout error flips the returned record, not
+    /// the bits a branch reads.
+    fn noise(mut slf: PyRefMut<'_, Self>, rules: Py<PyNoiseBuilder>) -> PyRefMut<'_, Self> {
+        slf.noise = Some(rules);
         slf
     }
 
@@ -382,5 +397,6 @@ pub fn simulate_program(program: Py<PyDynamicProgram>) -> PyProgramSimulation {
         seed: None,
         kind: None,
         max_steps: None,
+        noise: None,
     }
 }

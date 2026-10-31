@@ -454,6 +454,17 @@ fn bench_rank_space_counts(c: &mut Criterion) {
         }
     }
 
+    // Eight shots per outcome is the floor of the multinomial counts route.
+    for &n_qubits in &[16, 18] {
+        let circuit = clifford_circuit_with_measurements(n_qubits, 50);
+        let mut sampler = prism_q::compile_measurements(&circuit, SEED).unwrap();
+        let n_shots = 8 << sampler.rank();
+        let label = format!("clifford_d50_{n_qubits}q");
+        group.bench_with_input(BenchmarkId::new(&label, n_shots), &n_shots, |b, &shots| {
+            b.iter(|| sampler.sample_counts(shots));
+        });
+    }
+
     group.finish();
 }
 

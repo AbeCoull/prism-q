@@ -93,6 +93,7 @@ impl GateFilter {
     }
 }
 
+#[derive(Clone)]
 enum Rule {
     PerTarget {
         filter: GateFilter,
@@ -334,7 +335,7 @@ impl DriftDistribution {
 /// assert_eq!(noise.after_gate.len(), circuit.instructions.len());
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct NoiseBuilder {
     rules: Vec<Rule>,
     readout: Vec<(usize, ReadoutError)>,

@@ -2,6 +2,8 @@
 //! linked once. A file that changes process-wide state (an environment cap, the global
 //! Rayon pool, the default limits) stays a separate `tests/<name>.rs` binary instead.
 
+#[path = "../../benches/common/fixtures.rs"]
+mod bench_fixtures;
 #[path = "../common/mod.rs"]
 mod common;
 #[path = "../conformance_corpus/mod.rs"]
@@ -43,6 +45,7 @@ mod native_sampling;
 mod noise_construction;
 mod noise_validation;
 mod noisy_guards;
+mod noisy_programs;
 mod observable_variance;
 mod openqasm_goldens;
 mod parameter_binding;

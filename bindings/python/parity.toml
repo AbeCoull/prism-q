@@ -160,6 +160,7 @@ exclude = [
 "Simulate::state_vector" = "Simulation.state_vector"
 "SimulateProgram::backend" = "ProgramSimulation.backend"
 "SimulateProgram::max_steps" = "ProgramSimulation.max_steps"
+"SimulateProgram::noise" = "ProgramSimulation.noise"
 "SimulateProgram::sample_counts" = "ProgramSimulation.sample_counts"
 "SimulateProgram::seed" = "ProgramSimulation.seed"
 "SimulateProgram::shots" = "ProgramSimulation.shots"

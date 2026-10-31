@@ -104,6 +104,12 @@ const MIN_BOND_FOR_PAR: usize = 32;
 /// Largest `bond_left * bond_right` at which a single-site environment step keeps
 /// the four-index sum and its zero skip rather than two dense passes.
 const DENSE_ENV_MAX_BONDS: usize = 4;
+/// `m * k * n` at or above which one pass of an environment step multiplies
+/// through faer rather than the scalar loops: the floor `tensornetwork.rs`
+/// measured for the same call, which a bond-64 site clears and a bond-32 one
+/// does not.
+#[cfg(feature = "parallel")]
+const MIN_FAER_ENV_WORK: usize = 1 << 18;
 /// Shot count at or above which native sampling splits the shot loop across
 /// the Rayon pool; per-shot substreams keep the output identical either way.
 #[cfg(feature = "parallel")]
@@ -257,19 +263,120 @@ fn mps_pauli_factors(observable: &[PauliTerm]) -> Vec<(usize, MpsPauliAxis)> {
         .collect()
 }
 
-#[inline]
-fn pauli_matrix_entry(axis: Option<MpsPauliAxis>, j: usize, k: usize) -> Complex64 {
-    match (axis, j, k) {
-        (None, 0, 0) | (None, 1, 1) => ONE,
-        (None, _, _) => ZERO,
-        (Some(MpsPauliAxis::X), 0, 1) | (Some(MpsPauliAxis::X), 1, 0) => ONE,
-        (Some(MpsPauliAxis::X), _, _) => ZERO,
-        (Some(MpsPauliAxis::Y), 0, 1) => Complex64::new(0.0, -1.0),
-        (Some(MpsPauliAxis::Y), 1, 0) => Complex64::new(0.0, 1.0),
-        (Some(MpsPauliAxis::Y), _, _) => ZERO,
-        (Some(MpsPauliAxis::Z), 0, 0) => ONE,
-        (Some(MpsPauliAxis::Z), 1, 1) => Complex64::new(-1.0, 0.0),
-        (Some(MpsPauliAxis::Z), _, _) => ZERO,
+/// Replace each `[j, α']` pair of rows in `tmp`, laid out `[β, j, α']` with
+/// rows of `br`, by `Σ_j tmp[β, j, α'] · M[j, k]` for the Pauli matrix `M`.
+fn fold_pauli_into_rows(tmp: &mut [Complex64], br: usize, axis: Option<MpsPauliAxis>) {
+    let Some(axis) = axis else {
+        return;
+    };
+    for pair in tmp.chunks_exact_mut(2 * br) {
+        let (zero, one) = pair.split_at_mut(br);
+        match axis {
+            MpsPauliAxis::X => zero.swap_with_slice(one),
+            MpsPauliAxis::Y => {
+                for (z, o) in zero.iter_mut().zip(one) {
+                    let (z0, o0) = (*z, *o);
+                    *z = Complex64::new(-o0.im, o0.re);
+                    *o = Complex64::new(z0.im, -z0.re);
+                }
+            }
+            MpsPauliAxis::Z => {
+                for o in one {
+                    *o = -*o;
+                }
+            }
+        }
+    }
+}
+
+/// `out = xᵀ · y` over row-major `x` (`r` by `m`), `y` (`r` by `n`) and
+/// `out` (`m` by `n`), with `y` conjugated when `CONJ_Y`.
+fn gemm_tn<const CONJ_Y: bool>(
+    out: &mut [Complex64],
+    x: &[Complex64],
+    y: &[Complex64],
+    r: usize,
+    m: usize,
+    n: usize,
+) {
+    debug_assert_eq!((x.len(), y.len(), out.len()), (r * m, r * n, m * n));
+    #[cfg(feature = "parallel")]
+    if r * m * n >= MIN_FAER_ENV_WORK {
+        use faer::linalg::matmul::matmul;
+        use faer::{Accum, MatMut, MatRef, Par};
+        let out = MatMut::from_column_major_slice_mut(out, n, m);
+        let y = MatRef::from_column_major_slice(y, n, r);
+        let x = MatRef::from_column_major_slice(x, m, r).transpose();
+        if CONJ_Y {
+            matmul(out, Accum::Replace, y.conjugate(), x, ONE, Par::rayon(0));
+        } else {
+            matmul(out, Accum::Replace, y, x, ONE, Par::rayon(0));
+        }
+        return;
+    }
+    out.fill(ZERO);
+    for (x_row, y_row) in x.chunks_exact(m).zip(y.chunks_exact(n)) {
+        for (&xv, out_row) in x_row.iter().zip(out.chunks_exact_mut(n)) {
+            for (o, &yv) in out_row.iter_mut().zip(y_row) {
+                *o += xv * if CONJ_Y { yv.conj() } else { yv };
+            }
+        }
+    }
+}
+
+/// `out = x · y` over row-major `x` (`m` by `k`), `y` (`k` by `n`) and `out`
+/// (`m` by `n`).
+fn gemm_nn(out: &mut [Complex64], x: &[Complex64], y: &[Complex64], m: usize, k: usize, n: usize) {
+    debug_assert_eq!((x.len(), y.len(), out.len()), (m * k, k * n, m * n));
+    #[cfg(feature = "parallel")]
+    if m * k * n >= MIN_FAER_ENV_WORK {
+        use faer::linalg::matmul::matmul;
+        use faer::{Accum, MatMut, MatRef, Par};
+        matmul(
+            MatMut::from_column_major_slice_mut(out, n, m),
+            Accum::Replace,
+            MatRef::from_column_major_slice(y, n, k),
+            MatRef::from_column_major_slice(x, k, m),
+            ONE,
+            Par::rayon(0),
+        );
+        return;
+    }
+    out.fill(ZERO);
+    for (out_row, x_row) in out.chunks_exact_mut(n).zip(x.chunks_exact(k)) {
+        for (&xv, y_row) in x_row.iter().zip(y.chunks_exact(n)) {
+            for (o, &yv) in out_row.iter_mut().zip(y_row) {
+                *o += xv * yv;
+            }
+        }
+    }
+}
+
+/// `out = x · yᴴ` over row-major `x` (`m` by `k`), `y` (`n` by `k`) and `out`
+/// (`m` by `n`).
+fn gemm_nh(out: &mut [Complex64], x: &[Complex64], y: &[Complex64], m: usize, k: usize, n: usize) {
+    debug_assert_eq!((x.len(), y.len(), out.len()), (m * k, n * k, m * n));
+    #[cfg(feature = "parallel")]
+    if m * k * n >= MIN_FAER_ENV_WORK {
+        use faer::linalg::matmul::matmul;
+        use faer::{Accum, MatMut, MatRef, Par};
+        matmul(
+            MatMut::from_column_major_slice_mut(out, n, m),
+            Accum::Replace,
+            MatRef::from_column_major_slice(y, k, n).adjoint(),
+            MatRef::from_column_major_slice(x, k, m),
+            ONE,
+            Par::rayon(0),
+        );
+        return;
+    }
+    for (out_row, x_row) in out.chunks_exact_mut(n).zip(x.chunks_exact(k)) {
+        for (o, y_row) in out_row.iter_mut().zip(y.chunks_exact(k)) {
+            *o = x_row
+                .iter()
+                .zip(y_row)
+                .fold(ZERO, |acc, (&xv, &yv)| acc + xv * yv.conj());
+        }
     }
 }
 
@@ -611,11 +718,11 @@ impl MpsBackend {
         let site_axis = self.pauli_site_axes(pauli_factors)?;
 
         let mut env: Vec<Complex64> = vec![ONE; 1];
-        let mut env_cols: usize = 1;
-
-        for (i, a) in self.sites.iter().enumerate().take(self.num_qubits) {
-            env = self.contract_pauli_env(i, &env, env_cols, site_axis[i]);
-            env_cols = a.bond_right;
+        let mut next = Vec::new();
+        let mut tmp = Vec::new();
+        for (site, &axis) in site_axis.iter().enumerate() {
+            self.contract_pauli_env(site, &env, axis, &mut tmp, &mut next);
+            std::mem::swap(&mut env, &mut next);
         }
 
         Ok(env[0])
@@ -649,64 +756,33 @@ impl MpsBackend {
     }
 
     /// Absorb one site into the `⟨ψ|P|ψ⟩` environment, applying `axis` as the
-    /// site's Pauli matrix (identity when `None`).
+    /// site's Pauli matrix (identity when `None`), as two matrix products.
     ///
-    /// `env` is indexed `[bra bond, ket bond]` with `env_cols` columns; the
-    /// result is indexed the same way with `bond_right` columns.
+    /// `env` is the `bond_left` square indexed `[bra bond, ket bond]`; `out`
+    /// is resized to the `bond_right` square indexed the same way. `tmp` is
+    /// scratch held across a sweep.
     fn contract_pauli_env(
         &self,
         site: usize,
         env: &[Complex64],
-        env_cols: usize,
         axis: Option<MpsPauliAxis>,
-    ) -> Vec<Complex64> {
+        tmp: &mut Vec<Complex64>,
+        out: &mut Vec<Complex64>,
+    ) {
         let a = &self.sites[site];
         let bl = a.bond_left;
         let br = a.bond_right;
+        debug_assert_eq!(env.len(), bl * bl);
 
-        // Step 1: tmp[β, j, α'] = Σ_α env[α, β] · conj(A[α, j, α'])
-        let mut tmp = vec![ZERO; bl * 2 * br];
-        for alpha in 0..bl {
-            for j in 0..2 {
-                for alpha_p in 0..br {
-                    let a_val = a.data[a.idx(alpha, j, alpha_p)].conj();
-                    if a_val == ZERO {
-                        continue;
-                    }
-                    for beta in 0..bl {
-                        let e_ab = env[alpha * env_cols + beta];
-                        tmp[beta * (2 * br) + j * br + alpha_p] += a_val * e_ab;
-                    }
-                }
-            }
-        }
+        // tmp[β, j, α'] = Σ_α env[α, β] · conj(A[α, j, α']), then the Pauli
+        // matrix folded over j.
+        tmp.resize(bl * 2 * br, ZERO);
+        gemm_tn::<true>(tmp, env, &a.data, bl, bl, 2 * br);
+        fold_pauli_into_rows(tmp, br, axis);
 
-        // Step 2: new_env[α', β'] = Σ_{β, j, k} tmp[β, j, α'] · M[j,k] · A[β, k, β']
-        // with M = local Pauli matrix at this site (or identity if no factor).
-        let mut new_env = vec![ZERO; br * br];
-        for beta in 0..bl {
-            for j in 0..2 {
-                for k in 0..2 {
-                    let m_jk = pauli_matrix_entry(axis, j, k);
-                    if m_jk == ZERO {
-                        continue;
-                    }
-                    for beta_p in 0..br {
-                        let a_bk = a.data[a.idx(beta, k, beta_p)];
-                        if a_bk == ZERO {
-                            continue;
-                        }
-                        let ma_val = m_jk * a_bk;
-                        for alpha_p in 0..br {
-                            let t = tmp[beta * (2 * br) + j * br + alpha_p];
-                            new_env[alpha_p * br + beta_p] += t * ma_val;
-                        }
-                    }
-                }
-            }
-        }
-
-        new_env
+        // out[α', β'] = Σ_{β, k} tmp[β, k, α'] · A[β, k, β']
+        out.resize(br * br, ZERO);
+        gemm_tn::<false>(out, tmp, &a.data, 2 * bl, br, br);
     }
 
     /// Identity environments left of every site, plus `⟨ψ|ψ⟩` as the last
@@ -718,10 +794,10 @@ impl MpsBackend {
     fn pauli_env_prefixes(&self) -> Vec<Vec<Complex64>> {
         let mut prefixes = Vec::with_capacity(self.num_qubits + 1);
         prefixes.push(vec![ONE; 1]);
-        let mut env_cols = 1usize;
+        let mut tmp = Vec::new();
         for site in 0..self.num_qubits {
-            let next = self.contract_pauli_env(site, prefixes.last().unwrap(), env_cols, None);
-            env_cols = self.sites[site].bond_right;
+            let mut next = Vec::new();
+            self.contract_pauli_env(site, prefixes.last().unwrap(), None, &mut tmp, &mut next);
             prefixes.push(next);
         }
         prefixes
@@ -2144,10 +2220,10 @@ impl MpsBackend {
         new_env
     }
 
-    /// Absorb one site into a right environment, in the two passes
-    /// [`Self::inner_product`] uses: `O(χ³)` instead of the four-index sum's
-    /// `O(χ⁴)`. `tmp` carries the intermediate across a sweep so the inner
-    /// buffer is allocated once rather than per site.
+    /// Absorb one site into a right environment as two matrix products:
+    /// `O(χ³)` instead of the four-index sum's `O(χ⁴)`. `out` is resized to the
+    /// `bond_left` square, and `tmp` carries the intermediate across a sweep so
+    /// the inner buffer is allocated once rather than per site.
     ///
     /// [`Self::compute_right_env`] calls this only past
     /// [`DENSE_ENV_MAX_BONDS`]. Below it the chains a projection leaves behind
@@ -2159,46 +2235,20 @@ impl MpsBackend {
         site: usize,
         env: &[Complex64],
         tmp: &mut Vec<Complex64>,
-    ) -> Vec<Complex64> {
+        out: &mut Vec<Complex64>,
+    ) {
         let t = &self.sites[site];
         let bl = t.bond_left;
         let br = t.bond_right;
+        debug_assert_eq!(env.len(), br * br);
 
         // tmp[α, i, β'] = Σ_β A[α, i, β] · env[β, β']
-        tmp.clear();
         tmp.resize(bl * 2 * br, ZERO);
-        for alpha in 0..bl {
-            for i in 0..2 {
-                for beta in 0..br {
-                    let a = t.data[t.idx(alpha, i, beta)];
-                    if a == ZERO {
-                        continue;
-                    }
-                    let dst = (alpha * 2 + i) * br;
-                    let src = beta * br;
-                    for beta_p in 0..br {
-                        tmp[dst + beta_p] += a * env[src + beta_p];
-                    }
-                }
-            }
-        }
+        gemm_nn(tmp, &t.data, env, 2 * bl, br, br);
 
-        // new_env[α, α'] = Σ_{i, β'} tmp[α, i, β'] · conj(A[α', i, β'])
-        let mut new_env = vec![ZERO; bl * bl];
-        for alpha_p in 0..bl {
-            for i in 0..2 {
-                for beta_p in 0..br {
-                    let a = t.data[t.idx(alpha_p, i, beta_p)].conj();
-                    if a == ZERO {
-                        continue;
-                    }
-                    for alpha in 0..bl {
-                        new_env[alpha * bl + alpha_p] += tmp[(alpha * 2 + i) * br + beta_p] * a;
-                    }
-                }
-            }
-        }
-        new_env
+        // out[α, α'] = Σ_{i, β'} tmp[α, i, β'] · conj(A[α', i, β'])
+        out.resize(bl * bl, ZERO);
+        gemm_nh(out, tmp, &t.data, bl, 2 * br, bl);
     }
 
     /// Right environment of `site`, contracted from `to`; every site after `to`
@@ -2207,6 +2257,7 @@ impl MpsBackend {
         let mut env_dim = self.sites[to].bond_right;
         let mut env = identity_env(env_dim);
         let mut tmp = Vec::new();
+        let mut next = Vec::new();
 
         for s in (site + 1..=to).rev() {
             let t = &self.sites[s];
@@ -2215,7 +2266,8 @@ impl MpsBackend {
             debug_assert_eq!(env_dim, br);
 
             if bl * br > DENSE_ENV_MAX_BONDS {
-                env = self.contract_right_env(s, &env, &mut tmp);
+                self.contract_right_env(s, &env, &mut tmp, &mut next);
+                std::mem::swap(&mut env, &mut next);
                 env_dim = bl;
                 continue;
             }
@@ -2257,7 +2309,8 @@ impl MpsBackend {
         let mut tmp = Vec::new();
         envs.push(vec![ONE]);
         for site in (1..n).rev() {
-            let next = self.contract_right_env(site, envs.last().unwrap(), &mut tmp);
+            let mut next = Vec::new();
+            self.contract_right_env(site, envs.last().unwrap(), &mut tmp, &mut next);
             envs.push(next);
         }
         envs.reverse();
@@ -3284,6 +3337,9 @@ impl Backend for MpsBackend {
         let rights = self.right_environments();
         let norm = prefixes[self.num_qubits][0].re;
 
+        let mut tmp = Vec::new();
+        let mut env = Vec::new();
+        let mut next = Vec::new();
         observables
             .iter()
             .map(|observable| {
@@ -3296,17 +3352,18 @@ impl Backend for MpsBackend {
                 };
                 let last = site_axis.iter().rposition(Option::is_some).unwrap();
 
-                let mut env = self.contract_pauli_env(
+                self.contract_pauli_env(
                     first,
                     &prefixes[first],
-                    self.sites[first].bond_left,
                     site_axis[first],
+                    &mut tmp,
+                    &mut env,
                 );
-                let mut cols = self.sites[first].bond_right;
-                for (site, axis) in site_axis.iter().enumerate().take(last + 1).skip(first + 1) {
-                    env = self.contract_pauli_env(site, &env, cols, *axis);
-                    cols = self.sites[site].bond_right;
+                for (site, &axis) in site_axis.iter().enumerate().take(last + 1).skip(first + 1) {
+                    self.contract_pauli_env(site, &env, axis, &mut tmp, &mut next);
+                    std::mem::swap(&mut env, &mut next);
                 }
+                let cols = self.sites[last].bond_right;
 
                 // The identity cap right of `last` carries the ket bond first,
                 // so closing the two chains is a trace of the two matrices.

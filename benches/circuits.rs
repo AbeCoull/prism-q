@@ -5759,6 +5759,30 @@ fn bench_dynamic_rus(c: &mut Criterion) {
     group.finish();
 }
 
+/// The repeat-until-success program under amplitude damping after every gate, which
+/// runs one noisy trajectory per shot instead of splitting shots by outcome history.
+fn bench_dynamic_rus_noisy(c: &mut Criterion) {
+    let shots = 1_000usize;
+    let n = 10;
+    let program = rus_program(n);
+    let rules = prism_q::NoiseBuilder::new().after_gates(
+        prism_q::GateFilter::all(),
+        prism_q::NoiseChannel::AmplitudeDamping { gamma: 0.001 },
+    );
+    let mut group = c.benchmark_group("dynamic/rus_noisy");
+    configure_group(&mut group);
+    group.bench_function(BenchmarkId::from_parameter(n), |b| {
+        b.iter(|| {
+            prism_q::simulate_program(&program)
+                .noise(&rules)
+                .seed(SEED)
+                .shots(shots)
+                .unwrap()
+        });
+    });
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -5930,6 +5954,7 @@ criterion_group! {
     bench_dynamic_clifford_shots,
     bench_dynamic_temporal_prefix_blocks,
     bench_dynamic_rus,
+    bench_dynamic_rus_noisy,
     // Trajectories with leak flags and quasi-static draws
     bench_noise_with_memory
 }

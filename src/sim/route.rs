@@ -23,11 +23,10 @@ pub(super) fn plan_probability_route(
     let (decompose, has_partial_independence) = analyze_independence(circuit);
     if let Some((components, clifford_only)) = decompose {
         let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
-        if kind.is_auto()
-            && clifford_only
+        let auto_takes_it = kind.is_auto()
             && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
-            && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
-        {
+            && max_block >= MIN_BLOCK_FOR_FACTORED_STAB;
+        if clifford_only && (auto_takes_it || matches!(kind, BackendKind::FactoredStabilizer)) {
             return ProbabilityRoute::FactoredStabilizer;
         }
         return ProbabilityRoute::Decomposed(components);
@@ -541,6 +540,56 @@ pub(super) fn decide_noisy(
         return Ok(NoisyRoute::Mixture);
     }
 
+    check_noisy_per_shot(kind, circuit, noise_model, limits)?;
+
+    if noise_model.has_only_pauli_channels() {
+        let use_compiled = (kind.is_auto()
+            || matches!(
+                kind,
+                BackendKind::Stabilizer | BackendKind::FactoredStabilizer
+            ))
+            && supports_compiled_measurement_sampling(circuit)
+            || {
+                #[cfg(feature = "gpu")]
+                {
+                    matches!(kind, BackendKind::StabilizerGpu { .. })
+                        && supports_compiled_measurement_sampling(circuit)
+                }
+                #[cfg(not(feature = "gpu"))]
+                {
+                    false
+                }
+            };
+
+        if use_compiled {
+            return Ok(NoisyRoute::Compiled);
+        }
+    }
+
+    trajectory_plan(kind, circuit, noise_model, limits).map(NoisyRoute::Trajectory)
+}
+
+/// The trajectory plan for a dynamic program under noise: `summary` is the
+/// program's summary circuit and `channels` every event its blocks and runtime
+/// rotations carry.
+pub(super) fn decide_noisy_program(
+    kind: &BackendKind,
+    summary: &Circuit,
+    channels: &NoiseModel,
+    limits: &ResolvedLimits,
+) -> Result<BackendPlan> {
+    check_noisy_per_shot(kind, summary, channels, limits)?;
+    trajectory_plan(kind, summary, channels, limits)
+}
+
+/// Reject a kind that cannot run `noise_model`'s channels on `circuit` one pure
+/// state per shot.
+fn check_noisy_per_shot(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    noise_model: &NoiseModel,
+    limits: &ResolvedLimits,
+) -> Result<()> {
     if !kind.supports_noisy_per_shot() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),
@@ -583,31 +632,15 @@ pub(super) fn decide_noisy(
     if !kind.is_auto() {
         validate_explicit_backend(kind, circuit, limits)?;
     }
+    Ok(())
+}
 
-    if noise_model.has_only_pauli_channels() {
-        let use_compiled = (kind.is_auto()
-            || matches!(
-                kind,
-                BackendKind::Stabilizer | BackendKind::FactoredStabilizer
-            ))
-            && supports_compiled_measurement_sampling(circuit)
-            || {
-                #[cfg(feature = "gpu")]
-                {
-                    matches!(kind, BackendKind::StabilizerGpu { .. })
-                        && supports_compiled_measurement_sampling(circuit)
-                }
-                #[cfg(not(feature = "gpu"))]
-                {
-                    false
-                }
-            };
-
-        if use_compiled {
-            return Ok(NoisyRoute::Compiled);
-        }
-    }
-
+fn trajectory_plan(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    noise_model: &NoiseModel,
+    limits: &ResolvedLimits,
+) -> Result<BackendPlan> {
     let plan = if kind.is_auto() && !noise_model.has_only_pauli_channels() {
         general_noise_plan(kind, circuit, noise_model, limits)
     } else {
@@ -679,5 +712,5 @@ pub(super) fn decide_noisy(
             )?;
         }
     }
-    Ok(NoisyRoute::Trajectory(plan))
+    Ok(plan)
 }

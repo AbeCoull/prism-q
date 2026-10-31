@@ -50,7 +50,8 @@ pub enum ResolvedBackend {
     /// map rather than from a `Backend`.
     CompiledStabilizer,
     /// One engine per independent block, merged. The decomposed route holds no
-    /// joint state, so no single engine names the result.
+    /// joint state, so no single engine names the result; [`RunMetadata::blocks`]
+    /// names each block's.
     Decomposed,
     /// A backend outside the built-in set, named by [`Backend::name`].
     ///
@@ -145,6 +146,10 @@ pub struct RunMetadata {
     /// [`BondReport::saturated`] is the signal that the cap bound the run;
     /// [`Exactness`] marks the route and cannot say.
     pub bond: Option<BondReport>,
+    /// Engine each independent block ran on, ordered by the lowest qubit each
+    /// block holds, when `backend` is [`ResolvedBackend::Decomposed`]. Empty on
+    /// every other route.
+    pub blocks: Vec<ResolvedBackend>,
 }
 
 impl RunMetadata {
@@ -161,6 +166,7 @@ impl RunMetadata {
             placement,
             shots: None,
             bond: None,
+            blocks: Vec::new(),
         }
     }
 
@@ -268,7 +274,9 @@ impl RunMetadata {
         let mut bound = Some(1.0f64);
         let mut all_device = true;
         let mut bond: Option<BondReport> = None;
+        let mut blocks = Vec::new();
         for part in parts {
+            blocks.push(part.backend);
             all_device &= part.placement == Placement::Device;
             bond = match (bond, part.bond) {
                 (Some(a), Some(b)) => Some(BondReport {
@@ -302,6 +310,7 @@ impl RunMetadata {
         };
         let mut metadata = Self::new(ResolvedBackend::Decomposed, exactness, placement);
         metadata.bond = bond;
+        metadata.blocks = blocks;
         metadata
     }
 }

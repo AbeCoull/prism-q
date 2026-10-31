@@ -1,18 +1,23 @@
 //! Per-shot execution of a [`DynamicProgram`].
 
 use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 
 use super::branching::{self, BranchLimits};
 use super::dispatch::{BackendPlan, ExecutionPlan};
+use super::noise::{NoiseBuilder, NoiseEvent, NoiseModel, ReadoutError};
+use super::trajectory::{self, PreparedNoise};
 use super::{
     BackendKind, CountsResult, RunMetadata, Seeded, ShotsResult, Unseeded, backend_metadata,
-    expand_for_backend, fuse_for_backend, mix_seed, resolve, run_counts_with, run_shots_with,
-    validate_explicit_backend,
+    decide_noisy_program, expand_for_backend, fuse_for_backend, mix_seed, resolve, run_counts_with,
+    run_shots_with, run_shots_with_noise, validate_explicit_backend,
 };
 use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
-use crate::circuit::Instruction;
-use crate::circuit::dynamic::{Action, BasicBlock, ClassicalValue, DynamicProgram, Terminator};
+use crate::circuit::dynamic::{
+    Action, BasicBlock, ClassicalValue, DynamicProgram, RotationKind, Terminator,
+};
+use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::limits::ResolvedLimits;
 
@@ -27,6 +32,7 @@ pub struct SimulateProgram<'p, SeedState> {
     kind: BackendKind,
     seed: SeedState,
     max_steps: u64,
+    noise: Option<&'p NoiseBuilder>,
 }
 
 /// Start a run of `program` on [`BackendKind::Auto`].
@@ -50,6 +56,7 @@ pub fn simulate_program(program: &DynamicProgram) -> SimulateProgram<'_, Unseede
         kind: BackendKind::Auto,
         seed: Unseeded,
         max_steps: DEFAULT_MAX_STEPS,
+        noise: None,
     }
 }
 
@@ -66,6 +73,14 @@ impl<'p, SeedState> SimulateProgram<'p, SeedState> {
         self.max_steps = max_steps;
         self
     }
+
+    /// Sample one noisy trajectory per shot, `rules` compiled against each block's
+    /// circuit and each runtime rotation. Readout error flips the returned record,
+    /// not the bits a branch reads.
+    pub fn noise(mut self, rules: &'p NoiseBuilder) -> Self {
+        self.noise = Some(rules);
+        self
+    }
 }
 
 impl<'p> SimulateProgram<'p, Unseeded> {
@@ -75,6 +90,7 @@ impl<'p> SimulateProgram<'p, Unseeded> {
             kind: self.kind,
             seed: Seeded { seed },
             max_steps: self.max_steps,
+            noise: self.noise,
         }
     }
 }
@@ -87,14 +103,35 @@ impl SimulateProgram<'_, Seeded> {
     /// [`PrismError::StepLimit`] when a shot runs past the step bound,
     /// [`PrismError::IncompatibleBackend`] for a backend that cannot walk the
     /// graph or hold the program's gates, and anything a block's execution
-    /// raises.
+    /// raises. Under [`SimulateProgram::noise`], also anything
+    /// [`NoiseBuilder::build`] reports for a block, and
+    /// [`PrismError::IncompatibleBackend`] for the density matrix, for a channel
+    /// the backend cannot sample, for a leakage or quasi-static channel, and for
+    /// an over-rotation rule matching a runtime rotation.
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
         let seed = self.seed.seed;
         let limits = &ResolvedLimits::process_default();
         if let Some(circuit) = self.program.static_circuit() {
-            return run_shots_with(self.kind, circuit, num_shots, seed, limits);
+            return match self.noise {
+                Some(rules) => run_shots_with_noise(
+                    self.kind,
+                    circuit,
+                    &rules.build(circuit)?,
+                    num_shots,
+                    seed,
+                    limits,
+                ),
+                None => run_shots_with(self.kind, circuit, num_shots, seed, limits),
+            };
         }
-        let prepared = Prepared::new(self.program, &self.kind, seed, self.max_steps, limits)?;
+        let prepared = Prepared::new(
+            self.program,
+            &self.kind,
+            seed,
+            self.max_steps,
+            limits,
+            self.noise,
+        )?;
         prepared.run(&self.kind, num_shots, seed)
     }
 
@@ -105,7 +142,9 @@ impl SimulateProgram<'_, Seeded> {
     /// Same conditions as [`SimulateProgram::shots`].
     pub fn sample_counts(self, num_shots: usize) -> Result<CountsResult> {
         let num_classical_bits = self.program.num_classical_bits();
-        if let Some(circuit) = self.program.static_circuit() {
+        if self.noise.is_none()
+            && let Some(circuit) = self.program.static_circuit()
+        {
             let (counts, metadata) = run_counts_with(
                 self.kind,
                 circuit,
@@ -141,7 +180,95 @@ pub(super) struct Prepared<'p> {
     initial: Vec<ClassicalValue>,
     max_steps: u64,
     pub(super) limits: ResolvedLimits,
+    noise: Option<ProgramNoise>,
 }
+
+/// A program's noise rules compiled block by block for its trajectories.
+struct ProgramNoise {
+    /// Each block's events in the slot layout of its own circuit.
+    blocks: Vec<PreparedNoise>,
+    /// Each block's events with one slot per action, empty but for rotations.
+    actions: Vec<PreparedNoise>,
+    readout: Vec<Option<ReadoutError>>,
+}
+
+impl ProgramNoise {
+    /// Compile `rules` for `program`, also returning every event in one model
+    /// for the route to read.
+    fn compile(
+        program: &DynamicProgram,
+        summary: &Circuit,
+        rules: &NoiseBuilder,
+    ) -> Result<(Self, NoiseModel)> {
+        let mut blocks = Vec::with_capacity(program.blocks().len());
+        let mut actions = Vec::with_capacity(program.blocks().len());
+        let mut channels = Vec::new();
+        let mut readout = Vec::new();
+        for block in program.blocks() {
+            let mut model = rules.build(&block.circuit)?;
+            let mut rotations = Vec::with_capacity(block.actions.len());
+            for action in &block.actions {
+                rotations.push(match action {
+                    Action::Rotation { kind, targets, .. } => {
+                        rotation_events(program, rules, *kind, targets)?
+                    }
+                    Action::Assign { .. } => Vec::new(),
+                });
+            }
+            let rotations = NoiseModel {
+                after_gate: rotations,
+                readout: Vec::new(),
+            };
+            blocks.push(PreparedNoise::new(&model));
+            actions.push(PreparedNoise::new(&rotations));
+            readout = std::mem::take(&mut model.readout);
+            channels.extend(model.after_gate);
+            channels.extend(rotations.after_gate);
+        }
+        let channels = NoiseModel {
+            after_gate: channels,
+            readout: Vec::new(),
+        };
+        let compiled = Self {
+            blocks,
+            actions,
+            readout: trajectory::written_readout(summary, &readout),
+        };
+        Ok((compiled, channels))
+    }
+}
+
+/// The events `rules` place after a runtime `kind` rotation on `targets`,
+/// compiled as a one-gate circuit.
+fn rotation_events(
+    program: &DynamicProgram,
+    rules: &NoiseBuilder,
+    kind: RotationKind,
+    targets: &[usize],
+) -> Result<Vec<NoiseEvent>> {
+    let events_at = |angle: f64| -> Result<Vec<NoiseEvent>> {
+        let mut circuit = Circuit::new(program.num_qubits(), program.num_classical_bits());
+        circuit.add_gate(kind.gate(angle), targets);
+        Ok(rules.build(&circuit)?.after_gate.swap_remove(0))
+    };
+    let events = events_at(1.0)?;
+    // A rule reading the angle emits different events at another one, and a
+    // runtime angle exists only once the shot evaluates it.
+    if events != events_at(2.0)? {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "NoiseBuilder".into(),
+            reason: format!(
+                "an over-rotation rule scales with the angle of the gate it follows, and \
+                 a runtime {kind:?} angle is known only once each shot evaluates it"
+            ),
+        });
+    }
+    Ok(events)
+}
+
+#[cfg(feature = "distributed")]
+const DISTRIBUTED_LOCKSTEP: &str =
+    "the distributed statevector runs its ranks in lockstep on one circuit";
 
 impl<'p> Prepared<'p> {
     pub(super) fn new(
@@ -150,40 +277,40 @@ impl<'p> Prepared<'p> {
         seed: u64,
         max_steps: u64,
         limits: &ResolvedLimits,
+        rules: Option<&NoiseBuilder>,
     ) -> Result<Self> {
         let summary = program.summary_circuit();
-        if !kind.is_auto() {
-            validate_explicit_backend(kind, &summary, limits)?;
-        }
-        let plan = match resolve(kind, &summary, false, limits) {
-            #[cfg(feature = "distributed")]
-            ExecutionPlan::Backend(BackendPlan::Distributed(_)) => {
-                return Err(decline(
-                    kind,
-                    "the distributed statevector runs its ranks in lockstep on one circuit",
-                ));
-            }
-            ExecutionPlan::Backend(plan) => plan,
-            _ => {
-                return Err(decline(
-                    kind,
-                    "this engine keeps no per-shot state to walk a control-flow graph on",
-                ));
+        let (plan, noise) = match rules {
+            None => (Self::plan(kind, &summary, limits)?, None),
+            Some(rules) => {
+                let (noise, plan) = Self::noisy_plan(program, kind, &summary, limits, rules)?;
+                (plan, Some(noise))
             }
         };
-        let probe = plan.build(seed, limits);
-        let blocks = program
-            .blocks()
-            .iter()
-            .map(|block| {
-                let expanded = expand_for_backend(&*probe, &block.circuit);
-                let fused = fuse_for_backend(&*probe, &expanded);
-                PreparedBlock {
-                    instructions: fused.into_owned().instructions,
+        let blocks = if noise.is_some() {
+            program
+                .blocks()
+                .iter()
+                .map(|block| PreparedBlock {
+                    instructions: block.circuit.instructions.clone(),
                     block,
-                }
-            })
-            .collect();
+                })
+                .collect()
+        } else {
+            let probe = plan.build(seed, limits);
+            program
+                .blocks()
+                .iter()
+                .map(|block| {
+                    let expanded = expand_for_backend(&*probe, &block.circuit);
+                    let fused = fuse_for_backend(&*probe, &expanded);
+                    PreparedBlock {
+                        instructions: fused.into_owned().instructions,
+                        block,
+                    }
+                })
+                .collect()
+        };
         Ok(Self {
             program,
             plan,
@@ -195,12 +322,66 @@ impl<'p> Prepared<'p> {
                 .collect(),
             max_steps,
             limits: *limits,
+            noise,
         })
+    }
+
+    fn plan(kind: &BackendKind, summary: &Circuit, limits: &ResolvedLimits) -> Result<BackendPlan> {
+        if !kind.is_auto() {
+            validate_explicit_backend(kind, summary, limits)?;
+        }
+        match resolve(kind, summary, false, limits) {
+            #[cfg(feature = "distributed")]
+            ExecutionPlan::Backend(BackendPlan::Distributed(_)) => {
+                Err(decline(kind, DISTRIBUTED_LOCKSTEP))
+            }
+            ExecutionPlan::Backend(plan) => Ok(plan),
+            _ => Err(decline(
+                kind,
+                "this engine keeps no per-shot state to walk a control-flow graph on",
+            )),
+        }
+    }
+
+    /// Compile `rules` and pick the trajectory backend that runs them.
+    fn noisy_plan(
+        program: &DynamicProgram,
+        kind: &BackendKind,
+        summary: &Circuit,
+        limits: &ResolvedLimits,
+        rules: &NoiseBuilder,
+    ) -> Result<(ProgramNoise, BackendPlan)> {
+        let incompatible = |reason: &str| PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: reason.into(),
+        };
+        if kind.is_density_matrix() {
+            return Err(incompatible(
+                "noise on a dynamic program runs one trajectory per shot, and the density \
+                 matrix holds the mixture instead of a trajectory",
+            ));
+        }
+        let (noise, channels) = ProgramNoise::compile(program, summary, rules)?;
+        if channels.has_leakage() || channels.quasi_static_sources() > 0 {
+            return Err(incompatible(
+                "leakage and quasi-static channels keep per-shot memory, which noisy \
+                 trajectories do not carry from one block of a dynamic program to the next",
+            ));
+        }
+        let plan = decide_noisy_program(kind, summary, &channels, limits)?;
+        #[cfg(feature = "distributed")]
+        if matches!(plan, BackendPlan::Distributed(_)) {
+            return Err(decline(kind, DISTRIBUTED_LOCKSTEP));
+        }
+        Ok((noise, plan))
     }
 
     fn run(&self, kind: &BackendKind, num_shots: usize, seed: u64) -> Result<ShotsResult> {
         let num_qubits = self.program.num_qubits();
-        if self.plan.is_host_statevector() && num_qubits < self.limits.statevector_qubits.value {
+        if self.noise.is_none()
+            && self.plan.is_host_statevector()
+            && num_qubits < self.limits.statevector_qubits.value
+        {
             #[cfg(feature = "parallel")]
             let parallel =
                 super::shots_split_across_workers(kind, &[(self.plan.resolved(), num_qubits)])
@@ -221,12 +402,12 @@ impl<'p> Prepared<'p> {
                 let backend = state.statevector.get_or_insert_with(|| {
                     StatevectorBackend::with_limits(shot_seed, &self.limits)
                 });
-                backend.rng = rand_chacha::ChaCha8Rng::seed_from_u64(shot_seed);
-                let bits = self.run_shot(backend, &mut state.vars)?;
+                backend.rng = ChaCha8Rng::seed_from_u64(shot_seed);
+                let bits = self.run_shot(backend, &mut state.vars, shot_seed)?;
                 return Ok((bits, backend_metadata(backend)));
             }
             let mut backend = self.plan.build(shot_seed, &self.limits);
-            let bits = self.run_shot(&mut *backend, &mut state.vars)?;
+            let bits = self.run_shot(&mut *backend, &mut state.vars, shot_seed)?;
             Ok((bits, backend_metadata(&*backend)))
         };
 
@@ -273,19 +454,52 @@ impl<'p> Prepared<'p> {
     }
 
     /// Walk the graph once from a fresh state, returning the classical bits.
+    /// A noisy program draws its noise from the stream of `shot_seed` a circuit
+    /// trajectory uses.
     fn run_shot(
         &self,
         backend: &mut dyn Backend,
         vars: &mut Vec<ClassicalValue>,
+        shot_seed: u64,
     ) -> Result<Vec<bool>> {
         backend.init(self.program.num_qubits(), self.program.num_classical_bits())?;
         vars.clear();
         vars.extend_from_slice(&self.initial);
         let mut steps = 0;
         self.count_step(0, &mut steps)?;
+        if let Some(noise) = &self.noise {
+            let mut rng = trajectory::noise_rng(shot_seed);
+            return self.run_noisy_shot(noise, steps, backend, vars, &mut rng);
+        }
         self.apply_block(0, backend)?;
         self.run_from(0, steps, backend, vars)?;
         Ok(backend.classical_results().to_vec())
+    }
+
+    /// [`Prepared::run_shot`] past the entry's step count, firing each block's
+    /// events after their instructions and readout error on the finished record.
+    fn run_noisy_shot(
+        &self,
+        noise: &ProgramNoise,
+        mut steps: u64,
+        backend: &mut dyn Backend,
+        vars: &mut [ClassicalValue],
+        rng: &mut ChaCha8Rng,
+    ) -> Result<Vec<bool>> {
+        let mut at = 0;
+        loop {
+            let circuit = &self.blocks[at].block.circuit;
+            trajectory::evolve_noisy(backend, circuit, &noise.blocks[at], 0, rng)?;
+            let rotations = Some((&noise.actions[at], &mut *rng));
+            let Some(next) = self.finish_block_with(at, backend, vars, rotations)? else {
+                break;
+            };
+            self.count_step(next, &mut steps)?;
+            at = next;
+        }
+        let mut bits = backend.classical_results().to_vec();
+        trajectory::apply_readout_errors(&mut bits, &noise.readout, rng);
+        Ok(bits)
     }
 
     /// Carry a shot whose state has run block `at`'s circuit to the end of the
@@ -330,9 +544,21 @@ impl<'p> Prepared<'p> {
         backend: &mut dyn Backend,
         vars: &mut [ClassicalValue],
     ) -> Result<Option<usize>> {
+        self.finish_block_with(at, backend, vars, None)
+    }
+
+    /// [`Prepared::finish_block`], firing slot `i` of `rotation_noise` after
+    /// action `i` when it is a rotation.
+    fn finish_block_with(
+        &self,
+        at: usize,
+        backend: &mut dyn Backend,
+        vars: &mut [ClassicalValue],
+        mut rotation_noise: Option<(&PreparedNoise, &mut ChaCha8Rng)>,
+    ) -> Result<Option<usize>> {
         let block = self.blocks[at].block;
         let variables = self.program.variables();
-        for action in &block.actions {
+        for (index, action) in block.actions.iter().enumerate() {
             match action {
                 Action::Assign { var, value } => {
                     let evaluated = value.eval(backend.classical_results(), vars)?;
@@ -356,6 +582,9 @@ impl<'p> Prepared<'p> {
                         gate: kind.gate(angle),
                         targets: targets.clone(),
                     })?;
+                    if let Some((noise, rng)) = rotation_noise.as_mut() {
+                        trajectory::fire_slot(backend, noise, index, rng)?;
+                    }
                 }
             }
         }
@@ -490,6 +719,7 @@ mod tests {
             3,
             100,
             &ResolvedLimits::process_default(),
+            None,
         )
         .unwrap();
         let reused = prepared
@@ -497,8 +727,11 @@ mod tests {
             .unwrap();
         let fresh: Vec<Vec<bool>> = (0..64)
             .map(|i| {
-                let mut backend = StatevectorBackend::new(mix_seed(3, i));
-                prepared.run_shot(&mut backend, &mut Vec::new()).unwrap()
+                let shot_seed = mix_seed(3, i);
+                let mut backend = StatevectorBackend::new(shot_seed);
+                prepared
+                    .run_shot(&mut backend, &mut Vec::new(), shot_seed)
+                    .unwrap()
             })
             .collect();
         assert_eq!(reused.shots, fresh);

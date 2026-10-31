@@ -292,6 +292,7 @@ fn program_shots(
         42,
         10_000,
         &ResolvedLimits::process_default(),
+        None,
     )
     .unwrap();
     branch_program_shots(&prepared, num_shots, 42, limits)
@@ -460,6 +461,7 @@ fn a_program_branch_counts_its_own_steps() {
         42,
         3,
         &ResolvedLimits::process_default(),
+        None,
     )
     .unwrap();
     let limits = BranchLimits::for_width(6, false, &ResolvedLimits::process_default());

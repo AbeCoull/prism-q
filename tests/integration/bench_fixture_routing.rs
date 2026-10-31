@@ -1,11 +1,11 @@
 //! Bench fixtures reach the backend their row names.
 //!
 //! Independent-subsystem decomposition is chosen before a backend family is
-//! resolved and does not consult an explicit [`BackendKind`], so a fixture whose
-//! interaction graph splits runs on per-block backends no matter what a caller
-//! asked for. That is correct routing and a silently wrong measurement: the
-//! affected rows stayed green, kept reporting, and went non-monotonic in qubit
-//! count. Nothing else in the suite checks the engine a run actually used.
+//! resolved, and only an explicit `FactoredStabilizer` keeps a splitting circuit
+//! whole, so a fixture whose interaction graph splits runs on per-block backends
+//! under any other explicit [`BackendKind`]. That is correct routing and a
+//! silently wrong measurement: the affected rows stayed green, kept reporting,
+//! and went non-monotonic in qubit count. Nothing else in the suite checks the engine a run actually used.
 
 use crate::bench_fixtures;
 use prism_q::backend::Backend;
@@ -953,6 +953,69 @@ fn temporal_prefix_block_rows_split_and_open_on_a_clifford_prefix() {
             result.metadata.backend,
             ResolvedBackend::Decomposed,
             "temporal_prefix_blocks/{n}q: the shots must run decomposed"
+        );
+    }
+}
+
+// Mirrors `random_clifford_circuit` in benches/circuits.rs: each brick CX lands
+// with probability one half, so the register can split into blocks.
+fn random_clifford_circuit(n: usize, depth: usize, seed: u64) -> prism_q::circuit::Circuit {
+    use prism_q::Gate;
+    use rand::{RngExt, SeedableRng};
+
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = prism_q::circuit::Circuit::new(n, 0);
+    let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
+    for layer in 0..depth {
+        for q in 0..n {
+            let gate = rng.random_range(0..cliffords.len());
+            circuit.add_gate(cliffords[gate].clone(), &[q]);
+        }
+        for q in (layer % 2..n - 1).step_by(2) {
+            if rng.random_bool(0.5) {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+    }
+    circuit
+}
+
+// `factored_stabilizer/scaling` and `factored_stabilizer/local_blocks` price
+// the backend that merges and splits clusters as the circuit runs, so their
+// fixtures must split into several blocks and still run whole on one
+// factored-stabilizer backend. The explicit tableau run is the witness that a
+// fixture splits: that kind keeps the per-block route.
+#[test]
+fn factored_stabilizer_block_rows_run_whole() {
+    let mut rows = Vec::new();
+    for n in [10usize, 50, 100, 500, 1000] {
+        rows.push((format!("scaling/{n}"), random_clifford_circuit(n, 10, SEED)));
+    }
+    for (blocks, size) in [(5usize, 2usize), (5, 4), (10, 5), (20, 5), (50, 5)] {
+        rows.push((
+            format!("local_blocks/{blocks}x{size}"),
+            circuits::local_clifford_blocks(blocks, size, 10, SEED),
+        ));
+    }
+    for (label, circuit) in rows {
+        let split = sim::simulate(&circuit)
+            .backend(BackendKind::Stabilizer)
+            .seed(42)
+            .run()
+            .unwrap();
+        assert!(
+            split.metadata.blocks.len() > 1,
+            "{label}: the fixture no longer splits, so the row prices one cluster"
+        );
+        let whole = sim::simulate(&circuit)
+            .backend(BackendKind::FactoredStabilizer)
+            .seed(42)
+            .run()
+            .unwrap();
+        assert_eq!(
+            whole.metadata.backend,
+            ResolvedBackend::FactoredStabilizer,
+            "{label}: ran per block rather than on one factored-stabilizer backend"
         );
     }
 }

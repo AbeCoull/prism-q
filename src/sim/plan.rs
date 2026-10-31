@@ -713,7 +713,7 @@ fn inspect_probability(
     Ok(match plan_probability_route(kind, circuit, limits) {
         ProbabilityRoute::FactoredStabilizer => Plan::new(
             ResolvedBackend::FactoredStabilizer,
-            RouteRule::LargeCliffordBlocks,
+            backend_rule(kind, circuit, &BackendPlan::FactoredStabilizer),
         ),
         ProbabilityRoute::Decomposed(components) => {
             let mut plan = Plan::new(ResolvedBackend::Decomposed, RouteRule::IndependentBlocks);

@@ -188,6 +188,7 @@ weight, where the state lived, and the shot count for a sampled result.
 | `placement` | `Host` or `Device` |
 | `shots` | Shots drawn, `None` for an analytic result |
 | `bond` | Peak bond dimension against the cap, `None` unless the MPS ran |
+| `blocks` | The engine of each independent block when `backend` is `Decomposed`, ordered by each block's lowest qubit; empty otherwise |
 
 `Approximate` marks the route rather than the run. An MPS at bond 256 on a
 circuit that never fills a bond truncates nothing and still reports

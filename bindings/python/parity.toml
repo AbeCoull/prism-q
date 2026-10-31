@@ -420,6 +420,7 @@ exclude = [
 "ReducedDensityMatrix::purity" = "ReducedDensityMatrix.purity"
 "ReducedDensityMatrix::qubits" = "ReducedDensityMatrix.qubits"
 "RunMetadata::backend" = "RunMetadata.backend"
+"RunMetadata::blocks" = "RunMetadata.blocks"
 "RunMetadata::bond" = "RunMetadata.bond"
 "RunMetadata::engine" = "RunMetadata.engine"
 "RunMetadata::exactness" = { rust_only = "Python reads the same fact through is_exact and fidelity_lower_bound" }

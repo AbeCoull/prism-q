@@ -2251,7 +2251,7 @@ fn run_route(
                 opts
             };
             execute(&mut backend, circuit, &fs_opts).map(|mut r| {
-                r.metadata.reason = RouteRule::LargeCliffordBlocks;
+                r.metadata.reason = backend_rule(kind, circuit, &BackendPlan::FactoredStabilizer);
                 r
             })
         }

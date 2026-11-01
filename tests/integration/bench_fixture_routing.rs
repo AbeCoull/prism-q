@@ -165,13 +165,13 @@ fn the_measured_brickwork_row_carries_bond() {
     assert_eq!(measured, 12, "measure_brickwork_16q_r3: measurement count");
 }
 
-// The `mps/brickwork_d24/b256/12` row prices the orthogonality-center walk
-// rather than the cap, so its fixture has to stay under the cap while carrying
-// enough bond to walk. The half of that claim which reads the rank at which a
+// The `mps/brickwork_d24/b256/12` row prices the two-site update at bond with
+// neither the cap nor the orthogonality-center walk, so its fixture has to stay
+// under the cap. The half of that claim which reads the rank at which a
 // threshold cut takes the center is held against the constant itself, in the
 // backend's own tests; what an outside test can see is the cap.
 #[test]
-fn the_gauge_walk_row_stays_under_its_cap() {
+fn the_ungauged_row_stays_under_its_cap() {
     let circuit = circuits::brickwork_circuit(12, 24, SEED);
     let mut backend = MpsBackend::new(SEED, 256);
     backend

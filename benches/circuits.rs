@@ -3623,6 +3623,12 @@ fn bench_expectation_native(c: &mut Criterion) {
 /// No in-group control arm: the statevector answers observables through the
 /// simulation helper rather than the trait method, so it cannot be timed on
 /// the same footing. The statevector arms of the groups above serve instead.
+///
+/// The `jordan_wigner` rows read the seeded operator of
+/// `expectation/pauli_sum_grouped` off the mixture, capped at 2000 strings: 1329
+/// at 10 qubits and 2000 at 12. Each evolves its state the first time a filter
+/// selects it: the 12-qubit buffer is 256 MB, and setup outside a routine runs on
+/// every invocation of this target.
 fn bench_expectation_density_matrix(c: &mut Criterion) {
     use prism_q::backend::Backend;
     use prism_q::backend::density_matrix::DensityMatrixBackend;
@@ -3640,6 +3646,24 @@ fn bench_expectation_density_matrix(c: &mut Criterion) {
         sim::run_on(&mut dm, &circuit).unwrap();
         group.bench_with_input(BenchmarkId::new("native", n), &dm, |b, backend| {
             b.iter(|| black_box(backend.pauli_expectations(&observables).unwrap()));
+        });
+    }
+
+    for &n in &[10usize, 12] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let observables: Vec<Vec<PauliTerm>> = circuits::jordan_wigner_hamiltonian(n, 2000, SEED)
+            .into_iter()
+            .map(|(_, factors)| factors)
+            .collect();
+
+        let mut prepared = None;
+        group.bench_function(BenchmarkId::new("jordan_wigner", n), |b| {
+            let dm = prepared.get_or_insert_with(|| {
+                let mut dm = DensityMatrixBackend::new(SEED);
+                sim::run_on(&mut dm, &circuit).unwrap();
+                dm
+            });
+            b.iter(|| black_box(dm.pauli_expectations(&observables).unwrap()));
         });
     }
 

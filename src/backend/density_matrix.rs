@@ -1639,6 +1639,8 @@ impl DensityMatrixBackend {
     ///
     /// Each row of the `4^n` buffer is visited once and contributes one entry per
     /// observable, so the strided sweep is paid once instead of once per observable.
+    /// From `2^16` row-observable pairs under `parallel`, the rows fold across Rayon
+    /// jobs into per-job sums, so the result moves by ulps with the split.
     pub fn expectations_pauli(&self, masks: &[(usize, usize, u32)]) -> Vec<f64> {
         let d = self.dim();
         #[cfg(feature = "gpu")]
@@ -1654,9 +1656,10 @@ impl DensityMatrixBackend {
                 .map(|(value, &(_, _, num_y))| (value * i_pow(num_y)).re)
                 .collect();
         }
-        let mut acc = vec![Complex64::new(0.0, 0.0); masks.len()];
-        for j in 0..d {
-            let row = &self.sv.state[j * d..(j + 1) * d];
+        let state = self.sv.state.as_slice();
+        let fresh = || vec![Complex64::new(0.0, 0.0); masks.len()];
+        let accumulate = |mut acc: Vec<Complex64>, j: usize| {
+            let row = &state[j * d..(j + 1) * d];
             for (slot, &(xmask, zmask, _)) in acc.iter_mut().zip(masks) {
                 let sign = if (j & zmask).count_ones() & 1 == 1 {
                     -1.0
@@ -1665,7 +1668,27 @@ impl DensityMatrixBackend {
                 };
                 *slot += row[j ^ xmask] * sign;
             }
-        }
+            acc
+        };
+        #[cfg(feature = "parallel")]
+        let acc = if d * masks.len() >= crate::backend::MIN_PAR_REDUCE_ELEMS {
+            use rayon::prelude::*;
+            let add = |mut a: Vec<Complex64>, b: Vec<Complex64>| {
+                for (x, y) in a.iter_mut().zip(&b) {
+                    *x += y;
+                }
+                a
+            };
+            (0..d)
+                .into_par_iter()
+                .with_min_len(reduced_density::fold_min_len(d, masks.len()))
+                .fold(fresh, accumulate)
+                .reduce(fresh, add)
+        } else {
+            (0..d).fold(fresh(), accumulate)
+        };
+        #[cfg(not(feature = "parallel"))]
+        let acc = (0..d).fold(fresh(), accumulate);
         acc.iter()
             .zip(masks)
             .map(|(value, &(_, _, num_y))| (value * i_pow(num_y)).re)

@@ -5389,6 +5389,74 @@ impl StatevectorBackend {
         prob_one * norm_sq
     }
 
+    /// Scale the `|1>` half of `qubit` by `factor` in the pass that reads P(1), and
+    /// return P(1) from before the scaling, summed as [`Self::qubit_probability_one`]
+    /// sums it.
+    pub(super) fn scale_qubit_one(&mut self, qubit: usize, factor: f64) -> f64 {
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            return self.scale_qubit_one_par(qubit, factor);
+        }
+
+        #[cfg(test)]
+        super::sweeps::tick();
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+        let norm_sq = self.pending_norm * self.pending_norm;
+
+        let mut prob_one = 0.0f64;
+        for block in self.state.chunks_mut(block_size) {
+            prob_one += simd::norm_sqr_sum_scale(&mut block[half..], factor);
+        }
+        prob_one * norm_sq
+    }
+
+    #[cfg(feature = "parallel")]
+    fn scale_qubit_one_par(&mut self, qubit: usize, factor: f64) -> f64 {
+        #[cfg(test)]
+        super::sweeps::tick();
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+        let norm_sq = self.pending_norm * self.pending_norm;
+        let num_blocks = self.state.len() / block_size;
+
+        let prob_one = if num_blocks >= 4 {
+            self.state
+                .par_chunks_mut(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .map(|chunk| simd::norm_sqr_sum_scale(&mut chunk[half..], factor))
+                .sum::<f64>()
+        } else {
+            self.state
+                .chunks_mut(block_size)
+                .map(|chunk| {
+                    chunk[half..]
+                        .par_chunks_mut(MIN_PAR_ELEMS)
+                        .map(|tile| simd::norm_sqr_sum_scale(tile, factor))
+                        .sum::<f64>()
+                })
+                .sum::<f64>()
+        };
+        prob_one * norm_sq
+    }
+
+    /// Multiply the amplitudes by `pending_norm` and reset it to one.
+    pub(super) fn fold_pending_norm(&mut self) {
+        #[cfg(test)]
+        super::sweeps::tick();
+        let factor = Complex64::new(self.pending_norm, 0.0);
+        self.pending_norm = 1.0;
+
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            self.state
+                .par_chunks_mut(MIN_PAR_ELEMS)
+                .for_each(|chunk| simd::scale_complex_slice(chunk, factor));
+            return;
+        }
+        simd::scale_complex_slice(&mut self.state, factor);
+    }
+
     #[inline(always)]
     pub(super) fn reduced_density_matrix_one(&self, qubit: usize) -> [[Complex64; 2]; 2] {
         #[cfg(feature = "parallel")]

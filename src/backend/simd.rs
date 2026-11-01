@@ -1658,6 +1658,169 @@ unsafe fn norm_sqr_sum_neon(slice: &[Complex64]) -> f64 {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn norm_sqr_sum_scale_avx2fma(slice: &mut [Complex64], factor: f64) -> f64 {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        let f = _mm256_set1_pd(factor);
+        let pairs = slice.len() / 2;
+
+        let mut a0 = _mm256_setzero_pd();
+        let mut a1 = _mm256_setzero_pd();
+        let mut a2 = _mm256_setzero_pd();
+        let mut a3 = _mm256_setzero_pd();
+        let unrolled = pairs / 4;
+        let remainder = pairs % 4;
+
+        for i in 0..unrolled {
+            let base = i * 16;
+            let v0 = _mm256_loadu_pd(ptr.add(base));
+            let v1 = _mm256_loadu_pd(ptr.add(base + 4));
+            let v2 = _mm256_loadu_pd(ptr.add(base + 8));
+            let v3 = _mm256_loadu_pd(ptr.add(base + 12));
+            a0 = _mm256_fmadd_pd(v0, v0, a0);
+            a1 = _mm256_fmadd_pd(v1, v1, a1);
+            a2 = _mm256_fmadd_pd(v2, v2, a2);
+            a3 = _mm256_fmadd_pd(v3, v3, a3);
+            _mm256_storeu_pd(ptr.add(base), _mm256_mul_pd(v0, f));
+            _mm256_storeu_pd(ptr.add(base + 4), _mm256_mul_pd(v1, f));
+            _mm256_storeu_pd(ptr.add(base + 8), _mm256_mul_pd(v2, f));
+            _mm256_storeu_pd(ptr.add(base + 12), _mm256_mul_pd(v3, f));
+        }
+
+        let mut acc = _mm256_add_pd(_mm256_add_pd(a0, a1), _mm256_add_pd(a2, a3));
+        let tail_base = unrolled * 16;
+        for i in 0..remainder {
+            let p = ptr.add(tail_base + i * 4);
+            let v = _mm256_loadu_pd(p);
+            acc = _mm256_fmadd_pd(v, v, acc);
+            _mm256_storeu_pd(p, _mm256_mul_pd(v, f));
+        }
+
+        let hi128 = _mm256_extractf128_pd(acc, 1);
+        let sum128 = _mm_add_pd(_mm256_castpd256_pd128(acc), hi128);
+        let hi64 = _mm_unpackhi_pd(sum128, sum128);
+        let total = _mm_add_sd(sum128, hi64);
+        let mut result = _mm_cvtsd_f64(total);
+        if !slice.len().is_multiple_of(2) {
+            let last = &mut slice[slice.len() - 1];
+            result += last.norm_sqr();
+            *last *= factor;
+        }
+        result
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn norm_sqr_sum_scale_avx512(slice: &mut [Complex64], factor: f64) -> f64 {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        let f = _mm512_set1_pd(factor);
+        let unrolled = slice.len() / 16;
+
+        let mut a0 = _mm512_setzero_pd();
+        let mut a1 = _mm512_setzero_pd();
+        let mut a2 = _mm512_setzero_pd();
+        let mut a3 = _mm512_setzero_pd();
+        for i in 0..unrolled {
+            let base = i * 32;
+            let v0 = _mm512_loadu_pd(ptr.add(base));
+            let v1 = _mm512_loadu_pd(ptr.add(base + 8));
+            let v2 = _mm512_loadu_pd(ptr.add(base + 16));
+            let v3 = _mm512_loadu_pd(ptr.add(base + 24));
+            a0 = _mm512_fmadd_pd(v0, v0, a0);
+            a1 = _mm512_fmadd_pd(v1, v1, a1);
+            a2 = _mm512_fmadd_pd(v2, v2, a2);
+            a3 = _mm512_fmadd_pd(v3, v3, a3);
+            _mm512_storeu_pd(ptr.add(base), _mm512_mul_pd(v0, f));
+            _mm512_storeu_pd(ptr.add(base + 8), _mm512_mul_pd(v1, f));
+            _mm512_storeu_pd(ptr.add(base + 16), _mm512_mul_pd(v2, f));
+            _mm512_storeu_pd(ptr.add(base + 24), _mm512_mul_pd(v3, f));
+        }
+
+        let mut acc = _mm512_add_pd(_mm512_add_pd(a0, a1), _mm512_add_pd(a2, a3));
+        let tail = ptr.add(unrolled * 32);
+        for_each_quad!(slice.len() - unrolled * 16, |off, k| {
+            let v = load_pd(tail.add(off), k);
+            acc = _mm512_fmadd_pd(v, v, acc);
+            store_pd(tail.add(off), k, _mm512_mul_pd(v, f));
+        });
+        _mm512_reduce_add_pd(acc)
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn norm_sqr_sum_scale_neon(slice: &mut [Complex64], factor: f64) -> f64 {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        let f = vdupq_n_f64(factor);
+        let mut a0 = vdupq_n_f64(0.0);
+        let mut a1 = vdupq_n_f64(0.0);
+        let mut a2 = vdupq_n_f64(0.0);
+        let mut a3 = vdupq_n_f64(0.0);
+        let unrolled = slice.len() / 4;
+        let remainder = slice.len() % 4;
+        for i in 0..unrolled {
+            let base = i * 8;
+            let v0 = vld1q_f64(ptr.add(base));
+            let v1 = vld1q_f64(ptr.add(base + 2));
+            let v2 = vld1q_f64(ptr.add(base + 4));
+            let v3 = vld1q_f64(ptr.add(base + 6));
+            a0 = vfmaq_f64(a0, v0, v0);
+            a1 = vfmaq_f64(a1, v1, v1);
+            a2 = vfmaq_f64(a2, v2, v2);
+            a3 = vfmaq_f64(a3, v3, v3);
+            vst1q_f64(ptr.add(base), vmulq_f64(v0, f));
+            vst1q_f64(ptr.add(base + 2), vmulq_f64(v1, f));
+            vst1q_f64(ptr.add(base + 4), vmulq_f64(v2, f));
+            vst1q_f64(ptr.add(base + 6), vmulq_f64(v3, f));
+        }
+        let mut acc = vaddq_f64(vaddq_f64(a0, a1), vaddq_f64(a2, a3));
+        let tail = unrolled * 4;
+        for i in 0..remainder {
+            let p = ptr.add((tail + i) * 2);
+            let v = vld1q_f64(p);
+            acc = vfmaq_f64(acc, v, v);
+            vst1q_f64(p, vmulq_f64(v, f));
+        }
+        vaddvq_f64(acc)
+    }
+}
+
+/// [`norm_sqr_sum`] that scales each amplitude by `factor` once read: one pass, and
+/// the same sum bit for bit, since every tier accumulates in `norm_sqr_sum`'s order.
+pub(crate) fn norm_sqr_sum_scale(slice: &mut [Complex64], factor: f64) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    if slice.len() >= MIN_SIMD_SLICE {
+        match simd_tier() {
+            // SAFETY: AVX-512F detected, and the helper reads and writes only within the
+            // mutable slice.
+            SimdTier::Avx512 => return unsafe { norm_sqr_sum_scale_avx512(slice, factor) },
+            // SAFETY: AVX2 detected, and the helper reads and writes only within the
+            // mutable slice.
+            SimdTier::Avx2Fma => return unsafe { norm_sqr_sum_scale_avx2fma(slice, factor) },
+            SimdTier::Fma | SimdTier::Sse2 => {}
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if slice.len() >= MIN_SIMD_SLICE {
+        // SAFETY: NEON is baseline on aarch64, and the helper reads and writes only
+        // within the mutable slice.
+        return unsafe { norm_sqr_sum_scale_neon(slice, factor) };
+    }
+    let mut sum = 0.0;
+    for amp in slice.iter_mut() {
+        sum += amp.norm_sqr();
+        *amp *= factor;
+    }
+    sum
+}
+
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn norm_sqr_to_slice_avx2(src: &[Complex64], dst: &mut [f64]) {
     // SAFETY: same contract as the enclosing unsafe fn.

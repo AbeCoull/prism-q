@@ -107,7 +107,7 @@ Gate kernels use enum dispatch with specialized routines for CX, CZ, SWAP, Cu, M
 
 Rayon parallelism at ≥15 qubits with `par_chunks_mut` and `MIN_PAR_ELEMS = 4096` per task. BMI2 `_pext_u64` accelerates BatchPhase, BatchRzz, and DiagonalBatch LUT indexing.
 
-Measurement normalization is deferred: `pending_norm` accumulates the factors instead of rescaling the full state after each collapse, and a circuit without measurements never touches it.
+Normalization is deferred: `pending_norm` accumulates the factors instead of rescaling the full state after each measurement collapse or each no-jump branch of a damping trajectory, which then costs one pass over the `|1>` half, and a circuit with neither never touches it.
 
 The Quantum Fourier Transform is a representative statevector workload, dense with
 controlled-phase gates that the fusion pipeline batches:

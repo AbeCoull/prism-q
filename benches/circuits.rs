@@ -1945,6 +1945,41 @@ fn bench_mps_entropy(c: &mut Criterion) {
     group.finish();
 }
 
+// Observables at real bond: twelve brickwork layers cross every cut six times,
+// so the cuts with six sites either side of the 64-qubit chain can reach bond
+// 64, the cap, and the environment sweeps run there. The marginals row prices
+// the whole terminal; the Pauli row builds the chain once and prices the sweeps
+// alone, over the `product/expectation/pauli` observables. Shape pinned in
+// `tests/integration/bench_fixture_routing.rs`.
+fn bench_mps_observables(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mps/observables");
+    configure_group(&mut group);
+
+    let n = 64;
+    let circuit = circuits::brickwork_circuit(n, 12, SEED);
+    group.bench_with_input(BenchmarkId::new("marginals_b64", n), &circuit, |b, circ| {
+        b.iter(|| {
+            black_box(
+                sim::simulate(circ)
+                    .backend(BackendKind::Mps { max_bond_dim: 64 })
+                    .seed(42)
+                    .marginals()
+                    .unwrap(),
+            )
+        });
+    });
+
+    let mut backend = MpsBackend::new(SEED, 64);
+    backend.init(n, 0).unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    let observables = product_observables(n);
+    group.bench_function(BenchmarkId::new("pauli_b64", n), |b| {
+        b.iter(|| black_box(backend.pauli_expectations(&observables).unwrap()));
+    });
+
+    group.finish();
+}
+
 /// Shot count for both sparse sampling groups: sized so the sampling loop is
 /// roughly half of a populated row (measured against the bare run of the same
 /// fixture), and high enough to lift the empty-map rows off the microsecond
@@ -5874,6 +5909,7 @@ criterion_group! {
     bench_mps_matched,
     bench_mps_sampling,
     bench_mps_entropy,
+    bench_mps_observables,
     // Product state
     bench_product_scaling,
     bench_product_sampling,

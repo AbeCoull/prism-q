@@ -223,6 +223,189 @@ fn mps_pauli_expectation_returns_one_for_normalized_state() {
     );
 }
 
+fn pauli_matrix_entry(axis: Option<MpsPauliAxis>, j: usize, k: usize) -> Complex64 {
+    match (axis, j, k) {
+        (None, 0, 0) | (None, 1, 1) => ONE,
+        (None, _, _) => ZERO,
+        (Some(MpsPauliAxis::X), 0, 1) | (Some(MpsPauliAxis::X), 1, 0) => ONE,
+        (Some(MpsPauliAxis::X), _, _) => ZERO,
+        (Some(MpsPauliAxis::Y), 0, 1) => Complex64::new(0.0, -1.0),
+        (Some(MpsPauliAxis::Y), 1, 0) => Complex64::new(0.0, 1.0),
+        (Some(MpsPauliAxis::Y), _, _) => ZERO,
+        (Some(MpsPauliAxis::Z), 0, 0) => ONE,
+        (Some(MpsPauliAxis::Z), 1, 1) => Complex64::new(-1.0, 0.0),
+        (Some(MpsPauliAxis::Z), _, _) => ZERO,
+    }
+}
+
+// The index loops the two environment steps ran before they became matrix
+// products, kept as the reference the products answer to.
+fn reference_pauli_env(
+    a: &SiteTensor,
+    env: &[Complex64],
+    axis: Option<MpsPauliAxis>,
+) -> Vec<Complex64> {
+    let (bl, br) = (a.bond_left, a.bond_right);
+    let mut tmp = vec![ZERO; bl * 2 * br];
+    for alpha in 0..bl {
+        for j in 0..2 {
+            for alpha_p in 0..br {
+                let a_val = a.data[a.idx(alpha, j, alpha_p)].conj();
+                for beta in 0..bl {
+                    tmp[beta * (2 * br) + j * br + alpha_p] += a_val * env[alpha * bl + beta];
+                }
+            }
+        }
+    }
+    let mut new_env = vec![ZERO; br * br];
+    for beta in 0..bl {
+        for j in 0..2 {
+            for k in 0..2 {
+                let m_jk = pauli_matrix_entry(axis, j, k);
+                for beta_p in 0..br {
+                    let ma_val = m_jk * a.data[a.idx(beta, k, beta_p)];
+                    for alpha_p in 0..br {
+                        new_env[alpha_p * br + beta_p] +=
+                            tmp[beta * (2 * br) + j * br + alpha_p] * ma_val;
+                    }
+                }
+            }
+        }
+    }
+    new_env
+}
+
+fn reference_right_env(t: &SiteTensor, env: &[Complex64]) -> Vec<Complex64> {
+    let (bl, br) = (t.bond_left, t.bond_right);
+    let mut tmp = vec![ZERO; bl * 2 * br];
+    for alpha in 0..bl {
+        for i in 0..2 {
+            for beta in 0..br {
+                let a = t.data[t.idx(alpha, i, beta)];
+                let dst = (alpha * 2 + i) * br;
+                for beta_p in 0..br {
+                    tmp[dst + beta_p] += a * env[beta * br + beta_p];
+                }
+            }
+        }
+    }
+    let mut new_env = vec![ZERO; bl * bl];
+    for alpha_p in 0..bl {
+        for i in 0..2 {
+            for beta_p in 0..br {
+                let a = t.data[t.idx(alpha_p, i, beta_p)].conj();
+                for alpha in 0..bl {
+                    new_env[alpha * bl + alpha_p] += tmp[(alpha * 2 + i) * br + beta_p] * a;
+                }
+            }
+        }
+    }
+    new_env
+}
+
+// Shapes run largest first through one scratch set, so a stale window from a
+// wider site would show in a narrower one. Under `parallel` the bond-64 and
+// wider shapes take faer for both passes, (64, 32) and (32, 64) for one pass
+// each, and the rest the scalar loops; without it every shape is scalar.
+#[test]
+fn env_contractions_match_the_reference_loops() {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let mut random = |len: usize| -> Vec<Complex64> {
+        (0..len)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect()
+    };
+    let mut b = MpsBackend::new(42, 1024);
+    b.init(1, 0).unwrap();
+    let (mut tmp, mut out) = (Vec::new(), Vec::new());
+    for (bl, br) in [
+        (64, 64),
+        (96, 40),
+        (40, 96),
+        (64, 32),
+        (32, 64),
+        (48, 48),
+        (16, 16),
+        (3, 5),
+        (5, 3),
+        (2, 1),
+        (1, 2),
+        (1, 1),
+    ] {
+        b.sites[0] = SiteTensor {
+            bond_left: bl,
+            bond_right: br,
+            data: random(bl * 2 * br),
+        };
+        let left = random(bl * bl);
+        let right = random(br * br);
+        let close = |actual: &[Complex64], expected: &[Complex64], label: &str| {
+            assert_eq!(actual.len(), expected.len(), "{label} ({bl}, {br}): length");
+            let scale = expected.iter().map(|x| x.norm()).fold(1.0, f64::max);
+            for (i, (x, e)) in actual.iter().zip(expected).enumerate() {
+                assert!(
+                    (x - e).norm() <= 1e-12 * scale,
+                    "{label} ({bl}, {br})[{i}]: {x} against {e}"
+                );
+            }
+        };
+
+        for axis in [
+            None,
+            Some(MpsPauliAxis::X),
+            Some(MpsPauliAxis::Y),
+            Some(MpsPauliAxis::Z),
+        ] {
+            b.contract_pauli_env(0, &left, axis, &mut tmp, &mut out);
+            close(
+                &out,
+                &reference_pauli_env(&b.sites[0], &left, axis),
+                &format!("pauli env {axis:?}"),
+            );
+        }
+        b.contract_right_env(0, &right, &mut tmp, &mut out);
+        close(&out, &reference_right_env(&b.sites[0], &right), "right env");
+    }
+}
+
+// Fourteen qubits put the middle sites at bond 64 with nothing truncated, so
+// the windowed route crosses the faer floor under `parallel` and still has an
+// exact state to answer to.
+#[test]
+fn pauli_expectations_at_bond_64_match_statevector() {
+    let circuit = crate::circuits::brickwork_circuit(14, 12, 0xDEAD_BEEF);
+    let mut b = MpsBackend::new(42, 64);
+    b.init(14, 0).unwrap();
+    b.apply_instructions(&circuit.instructions).unwrap();
+    assert_eq!(b.current_max_bond_dim(), 64);
+    assert!(b.truncation_discarded() < 1e-20);
+
+    let mut observables: Vec<Vec<PauliTerm>> = (0..14).map(|q| vec![PauliTerm::z(q)]).collect();
+    observables.extend((0..13).map(|q| vec![PauliTerm::x(q), PauliTerm::x(q + 1)]));
+    observables.extend((0..12).map(|q| vec![PauliTerm::y(q), PauliTerm::z(q + 2)]));
+    observables.push(vec![PauliTerm::x(0), PauliTerm::y(6), PauliTerm::z(13)]);
+    observables.push(vec![PauliTerm::y(7)]);
+
+    let mut sv = crate::backend::statevector::StatevectorBackend::new(42);
+    sv.init(14, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+    let reference = sv.pauli_expectations(&observables).unwrap();
+
+    let windowed = b.pauli_expectations(&observables).unwrap();
+    for ((observable, value), expected) in observables.iter().zip(windowed).zip(reference) {
+        let factors = mps_pauli_factors(observable);
+        let plain = b.pauli_expectation(&factors).unwrap().re;
+        assert!(
+            (value - expected).abs() < 1e-10,
+            "{factors:?}: windowed {value}, statevector {expected}"
+        );
+        assert!(
+            (plain - expected).abs() < 1e-10,
+            "{factors:?}: plain {plain}, statevector {expected}"
+        );
+    }
+}
+
 #[test]
 fn test_svd_2x2() {
     let a = vec![

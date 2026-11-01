@@ -4852,22 +4852,30 @@ fn bench_density_matrix_rzz_layers_fused(c: &mut Criterion) {
     group.finish();
 }
 
-/// One bare `Rzz` sandwich in isolation, at two target pairs that pin the route
-/// as position independent.
+/// One bare `Rzz` sandwich in isolation, at target pairs either side of
+/// `min(q0, q1) = 3`.
 ///
-/// Both the two-pass register route and the combined single pass sweep the whole
-/// buffer contiguously and branch only on index bits, so neither reads an
-/// amplitude and neither depends on where the targets sit. `(2, 3)` and
-/// `(0, n - 1)` are the extremes of that claim and are expected to agree. A
-/// variant that skipped the entry classes whose combined phase is 1 would break
-/// the agreement, since those classes only fall on whole cache lines once
-/// `min(q0, q1)` is large enough; these rows are where that would show.
+/// A full pass branches only on index bits, so it costs the same wherever the
+/// targets sit. Half the sixteen entry classes carry a combined phase of 1, and
+/// each class covers aligned runs of `2^min(q0, q1)` amplitudes, so a pass that
+/// skips those classes saves memory traffic only where a skipped run spans whole
+/// cache lines: from 3 at any 16-byte alignment, and at 2 only on a buffer that
+/// starts on a line. The backend skips from 3. `adjacent` `(2, 3)` and
+/// `q2_qtop` `(2, n - 1)` sit just below that floor and time the full pass,
+/// `adjacent_q3` `(3, 4)` and `q3_qtop` `(3, n - 1)` are the same two shapes on
+/// it, and `q0_qtop` `(0, n - 1)` is the far end, where no run fills a line.
 fn bench_density_matrix_rzz_sandwich(c: &mut Criterion) {
     let mut group = c.benchmark_group("density_matrix/rzz_sandwich");
     configure_group(&mut group);
 
     for &n in &[10, 12] {
-        for &(q0, q1, label) in &[(2usize, 3usize, "adjacent"), (0, n - 1, "q0_qtop")] {
+        for &(q0, q1, label) in &[
+            (2usize, 3usize, "adjacent"),
+            (0, n - 1, "q0_qtop"),
+            (2, n - 1, "q2_qtop"),
+            (3, 4, "adjacent_q3"),
+            (3, n - 1, "q3_qtop"),
+        ] {
             let instruction = Instruction::Gate {
                 gate: Gate::Rzz(0.7),
                 targets: SmallVec::from_slice(&[q0, q1]),

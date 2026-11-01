@@ -1025,7 +1025,24 @@ impl DensityMatrixBackend {
     /// generic route's two register passes therefore collapse onto the single
     /// contiguous pass [`DensityMatrixBackend::kraus_2q_diagonal_sweep`]
     /// already runs for a diagonal channel.
+    ///
+    /// On the host from `min(q0, q1) = 3`, where one class covers runs of at
+    /// least 128 bytes and so whole cache lines at any 16-byte alignment, the
+    /// pass is [`DensityMatrixBackend::kraus_2q_diagonal_runs`] instead, which
+    /// leaves the cancelled classes unread.
     fn apply_rzz_sandwich(&mut self, q0: usize, q1: usize, theta: f64) -> Result<()> {
+        let diag = Self::rzz_sandwich_diagonal(theta);
+        if q0.min(q1) >= 3 && !self.sv.is_gpu_resident() {
+            self.kraus_2q_diagonal_runs(&diag, q0, q1);
+            return Ok(());
+        }
+        self.kraus_2q_diagonal_sweep(&diag, q0, q1)
+    }
+
+    /// The table [`DensityMatrixBackend::apply_rzz_sandwich`] sweeps. The
+    /// cancelled classes hold exactly 1, which a phase times its conjugate can
+    /// miss by one rounding (`1 - 2^-53` at `theta = 0.3`).
+    fn rzz_sandwich_diagonal(theta: f64) -> [Complex64; 16] {
         let phase = [
             Complex64::from_polar(1.0, -theta / 2.0),
             Complex64::from_polar(1.0, theta / 2.0),
@@ -1035,10 +1052,12 @@ impl DensityMatrixBackend {
             for tc in 0..4usize {
                 let pr = ((tr >> 1) ^ tr) & 1;
                 let pc = ((tc >> 1) ^ tc) & 1;
-                diag[4 * tr + tc] = phase[pr] * phase[pc].conj();
+                if pr != pc {
+                    diag[4 * tr + tc] = phase[pr] * phase[pc].conj();
+                }
             }
         }
-        self.kraus_2q_diagonal_sweep(&diag, q0, q1)
+        diag
     }
 
     /// Evolve `rho -> D rho D^dagger` for a diagonal batch `D` in one buffer
@@ -1536,6 +1555,56 @@ impl DensityMatrixBackend {
             *amp *= diag[diag_slot(idx, q0, q1, n)];
         }
         Ok(())
+    }
+
+    /// [`DensityMatrixBackend::kraus_2q_diagonal_sweep`] on the host, run by
+    /// run, skipping every run whose factor is exactly 1.
+    ///
+    /// No block position sits below `min(q0, q1)`, so the slot is constant over
+    /// each aligned run of `2^min(q0, q1)` amplitudes. A skipped run is never
+    /// read, which saves the whole cache lines it covers and nothing below a
+    /// 64-byte run. Every other amplitude takes the full sweep's multiply, so
+    /// the buffer ends equal to the full sweep's.
+    fn kraus_2q_diagonal_runs(&mut self, diag: &[Complex64; 16], q0: usize, q1: usize) {
+        let n = self.num_qubits;
+        let shift = q0.min(q1);
+        let one = Complex64::new(1.0, 0.0);
+        let active = (0..16)
+            .filter(|&slot| diag[slot] != one)
+            .fold(0u16, |mask, slot| mask | (1 << slot));
+
+        #[cfg(feature = "parallel")]
+        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            use crate::backend::MIN_PAR_ELEMS;
+            use rayon::prelude::*;
+
+            let diag = *diag;
+            self.sv
+                .state
+                .par_chunks_exact_mut(1 << shift)
+                .enumerate()
+                .with_min_len((MIN_PAR_ELEMS >> shift).max(1))
+                .for_each(move |(run, amps)| {
+                    let slot = diag_slot(run << shift, q0, q1, n);
+                    if active & (1 << slot) != 0 {
+                        let factor = diag[slot];
+                        for amp in amps {
+                            *amp *= factor;
+                        }
+                    }
+                });
+            return;
+        }
+
+        for (run, amps) in self.sv.state.chunks_exact_mut(1 << shift).enumerate() {
+            let slot = diag_slot(run << shift, q0, q1, n);
+            if active & (1 << slot) != 0 {
+                let factor = diag[slot];
+                for amp in amps {
+                    *amp *= factor;
+                }
+            }
+        }
     }
 
     /// Sweep the buffer applying the compiled 16x16 block superoperator `s`,

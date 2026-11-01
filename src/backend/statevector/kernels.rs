@@ -2019,25 +2019,56 @@ unsafe fn radix4_groups_avx512(
     step_outer: usize,
     step_inner: usize,
 ) {
-    // SAFETY: same contract as the enclosing unsafe fn.
+    let len = twiddles_scaled.len();
+    assert!((k_base + 2 * s - 1) * step_outer < len && (k_base + s - 1) * step_inner < len);
+    let twiddles = twiddles_scaled.as_ptr();
+    // SAFETY: the amplitudes follow the enclosing unsafe fn's contract, and the last quad
+    // reads twiddles `(k_base + 2s - 1) * step_outer` and `(k_base + s - 1) * step_inner`,
+    // which the assertion bounds. A checked per-element gather took 31% of a profiled
+    // 22-qubit AVX-512 QFT.
     unsafe {
         for g in 0..groups {
             let group_off = g * s * 4;
             for k_offset in (0..s).step_by(4) {
                 let k = k_base + k_offset;
-                let w = |step: usize, shift: usize| -> [Complex64; 4] {
-                    std::array::from_fn(|j| twiddles_scaled[(k + j + shift) * step])
-                };
                 let a = base.add((group_off + k_offset) * 2);
-                radix4_butterfly_quad_avx512(
+                radix4_butterfly_quad_packed_avx512(
                     a,
                     a.add(s * 2),
                     a.add(2 * s * 2),
                     a.add(3 * s * 2),
-                    &w(step_outer, 0),
-                    &w(step_outer, s),
-                    &w(step_inner, 0),
+                    twiddle_quad_avx512(twiddles, k, step_outer),
+                    twiddle_quad_avx512(twiddles, k + s, step_outer),
+                    twiddle_quad_avx512(twiddles, k, step_inner),
                 );
+            }
+        }
+    }
+}
+
+/// Pack twiddles `(k + j) * step` for `j < 4` one per lane pair. Step 1 is one load, step
+/// 2 two loads and a shuffle, and a wider step four separate reads.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn twiddle_quad_avx512(
+    twiddles: *const Complex64,
+    k: usize,
+    step: usize,
+) -> std::arch::x86_64::__m512d {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{_mm512_loadu_pd, _mm512_setr_pd, _mm512_shuffle_f64x2};
+        match step {
+            1 => _mm512_loadu_pd(twiddles.add(k).cast()),
+            2 => _mm512_shuffle_f64x2::<0xD8>(
+                _mm512_loadu_pd(twiddles.add(2 * k).cast()),
+                _mm512_loadu_pd(twiddles.add(2 * k + 3).cast()),
+            ),
+            _ => {
+                let (w0, w1) = (*twiddles.add(k * step), *twiddles.add((k + 1) * step));
+                let (w2, w3) = (*twiddles.add((k + 2) * step), *twiddles.add((k + 3) * step));
+                _mm512_setr_pd(w0.re, w0.im, w1.re, w1.im, w2.re, w2.im, w3.re, w3.im)
             }
         }
     }
@@ -2049,6 +2080,7 @@ unsafe fn radix4_groups_avx512(
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
+#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
 unsafe fn radix4_butterfly_quad_avx512(
     a_ptr: *mut f64,
     b_ptr: *mut f64,
@@ -2060,15 +2092,43 @@ unsafe fn radix4_butterfly_quad_avx512(
 ) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
+        use std::arch::x86_64::_mm512_loadu_pd;
+        radix4_butterfly_quad_packed_avx512(
+            a_ptr,
+            b_ptr,
+            c_ptr,
+            d_ptr,
+            _mm512_loadu_pd(w_2s_k.as_ptr() as *const f64),
+            _mm512_loadu_pd(w_2s_kps.as_ptr() as *const f64),
+            _mm512_loadu_pd(w_s_k.as_ptr() as *const f64),
+        );
+    }
+}
+
+/// [`radix4_butterfly_quad_avx512`] with each twiddle quad packed in one register, as
+/// [`twiddle_quad_avx512`] returns it.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+unsafe fn radix4_butterfly_quad_packed_avx512(
+    a_ptr: *mut f64,
+    b_ptr: *mut f64,
+    c_ptr: *mut f64,
+    d_ptr: *mut f64,
+    w_2s_k: std::arch::x86_64::__m512d,
+    w_2s_kps: std::arch::x86_64::__m512d,
+    w_s_k: std::arch::x86_64::__m512d,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
         use std::arch::x86_64::{
             _mm512_add_pd, _mm512_loadu_pd, _mm512_movedup_pd, _mm512_mul_pd, _mm512_permute_pd,
             _mm512_set1_pd, _mm512_storeu_pd, _mm512_sub_pd,
         };
         macro_rules! parts {
-            ($w:expr) => {{
-                let v = _mm512_loadu_pd($w.as_ptr() as *const f64);
-                (_mm512_movedup_pd(v), _mm512_permute_pd::<0xFF>(v))
-            }};
+            ($w:expr) => {
+                (_mm512_movedup_pd($w), _mm512_permute_pd::<0xFF>($w))
+            };
         }
         let inv_sqrt2_v = _mm512_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
         let (w_2s_k_rr, w_2s_k_ii) = parts!(w_2s_k);

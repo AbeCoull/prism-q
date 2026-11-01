@@ -109,6 +109,55 @@ fn register_distribution_matches_the_statevector() {
 }
 
 #[test]
+fn register_gates_match_their_basis_action() {
+    let width = 5;
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let start: Vec<Complex64> = (0..1usize << width)
+        .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+        .collect();
+    let mut gates = Vec::new();
+    for m in 0..width {
+        gates.push(RegisterGate::H(m));
+        gates.push(RegisterGate::Sdg(m));
+        let others = ((1usize << width) - 1) & !(1 << m);
+        let mut fans: Vec<usize> = (0..width).filter(|&c| c != m).map(|c| 1 << c).collect();
+        fans.push(others);
+        fans.extend((0..3).map(|_| others & rng.random_range(1..1usize << width)));
+        for controls in fans.into_iter().filter(|&c| c != 0) {
+            gates.push(RegisterGate::CxFan {
+                controls,
+                target: m,
+            });
+        }
+    }
+    for gate in &gates {
+        let mut want = start.clone();
+        match *gate {
+            RegisterGate::H(m) => {
+                for b in (0..want.len()).filter(|b| (b >> m) & 1 == 0) {
+                    let (a0, a1) = (start[b], start[b | 1 << m]);
+                    want[b] = (a0 + a1) * FRAC_1_SQRT_2;
+                    want[b | 1 << m] = (a0 - a1) * FRAC_1_SQRT_2;
+                }
+            }
+            RegisterGate::Sdg(m) => {
+                for b in (0..want.len()).filter(|b| (b >> m) & 1 == 1) {
+                    want[b] = start[b] * Complex64::new(0.0, -1.0);
+                }
+            }
+            RegisterGate::CxFan { controls, target } => {
+                for b in (0..want.len()).filter(|b| (b & controls).count_ones() % 2 == 1) {
+                    want[b] = start[b ^ 1 << target];
+                }
+            }
+        }
+        let mut got = start.clone();
+        apply_to_amps(&mut got, gate);
+        assert_eq!(got, want);
+    }
+}
+
+#[test]
 fn register_marginals_follow_the_measurement_map() {
     let n = 5;
     let base = random_clifford_t(n, 40, 5, 7);

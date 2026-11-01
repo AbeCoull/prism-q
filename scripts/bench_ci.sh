@@ -72,9 +72,11 @@ CIRCUITS_FILTER+="|compiled_sampler/(noiseless/noiseless_500q_10k|noisy/noisy_50
 
 CIRCUITS_ROWS=8
 
-# The load guard reads the runner straight after this job's own build and smoke
-# test, while the build's tail and the runner agent still hold part of it.
-# Waiting lets that settle and still refuses a runner that stays busy.
+# The job builds head in place straight before measuring. A same-code run
+# measured off such a build read 9.1% slower at the median on the development
+# host, though one load reading after the build already looked idle, so the
+# first pass waits for the runner to read quiet for a minute without a break.
+# Busy time counts against --wait-idle, and a runner that stays busy is refused.
 args=(
     --bench circuits
     --filter "$CIRCUITS_FILTER"
@@ -82,6 +84,7 @@ args=(
     --ref "$PRISM_BENCH_REF"
     --features "$FEATURES"
     --wait-idle 120
+    --settle 60
 )
 
 if [[ -n "${PRISM_BENCH_REF_EXE:-}" && -f "${PRISM_BENCH_REF_EXE}" ]]; then

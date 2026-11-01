@@ -182,7 +182,12 @@ impl CliffordRegister {
 enum RegisterGate {
     H(usize),
     Sdg(usize),
-    Cx(usize, usize),
+    /// CX from every bit of `controls` onto `target`. The gates commute, so together
+    /// they flip `target` where the controls have odd parity, in one pass.
+    CxFan {
+        controls: usize,
+        target: usize,
+    },
 }
 
 fn conjugate(p: &mut RegisterPauli, gate: &RegisterGate) {
@@ -204,17 +209,25 @@ fn conjugate(p: &mut RegisterPauli, gate: &RegisterGate) {
                 p.z ^= 1 << m;
             }
         }
-        RegisterGate::Cx(c, t) => {
-            let (xc, zc) = ((p.x >> c) & 1 == 1, (p.z >> c) & 1 == 1);
-            let (xt, zt) = ((p.x >> t) & 1 == 1, (p.z >> t) & 1 == 1);
-            if xc && zt && !(xt ^ zc) {
-                p.phase4 = (p.phase4 + 2) & 3;
-            }
-            if xc {
-                p.x ^= 1 << t;
-            }
-            if zt {
-                p.z ^= 1 << c;
+        RegisterGate::CxFan {
+            controls,
+            target: t,
+        } => {
+            let mut rest = controls;
+            while rest != 0 {
+                let c = rest.trailing_zeros() as usize;
+                rest &= rest - 1;
+                let (xc, zc) = ((p.x >> c) & 1 == 1, (p.z >> c) & 1 == 1);
+                let (xt, zt) = ((p.x >> t) & 1 == 1, (p.z >> t) & 1 == 1);
+                if xc && zt && !(xt ^ zc) {
+                    p.phase4 = (p.phase4 + 2) & 3;
+                }
+                if xc {
+                    p.x ^= 1 << t;
+                }
+                if zt {
+                    p.z ^= 1 << c;
+                }
             }
         }
     }
@@ -222,27 +235,33 @@ fn conjugate(p: &mut RegisterPauli, gate: &RegisterGate) {
 
 fn apply_to_amps(amps: &mut [Complex64], gate: &RegisterGate) {
     match *gate {
-        RegisterGate::H(m) => {
-            let mask = 1usize << m;
-            for b in (0..amps.len()).filter(|b| b & mask == 0) {
-                let (a0, a1) = (amps[b], amps[b | mask]);
-                amps[b] = (a0 + a1) * FRAC_1_SQRT_2;
-                amps[b | mask] = (a0 - a1) * FRAC_1_SQRT_2;
+        RegisterGate::H(m) => for_each_pair(amps, m, |_, a0, a1| {
+            let (x, y) = (*a0, *a1);
+            *a0 = (x + y) * FRAC_1_SQRT_2;
+            *a1 = (x - y) * FRAC_1_SQRT_2;
+        }),
+        RegisterGate::Sdg(m) => for_each_pair(amps, m, |_, _, a1| {
+            *a1 = Complex64::new(a1.im, -a1.re);
+        }),
+        RegisterGate::CxFan { controls, target } => for_each_pair(amps, target, |b, a0, a1| {
+            if (b & controls).count_ones() & 1 == 1 {
+                std::mem::swap(a0, a1);
             }
-        }
-        RegisterGate::Sdg(m) => {
-            let mask = 1usize << m;
-            for (b, amp) in amps.iter_mut().enumerate() {
-                if b & mask != 0 {
-                    *amp *= Complex64::new(0.0, -1.0);
-                }
-            }
-        }
-        RegisterGate::Cx(c, t) => {
-            let (cm, tm) = (1usize << c, 1usize << t);
-            for b in (0..amps.len()).filter(|b| b & cm != 0 && b & tm == 0) {
-                amps.swap(b, b | tm);
-            }
+        }),
+    }
+}
+
+/// Call `f(b, amps[b], amps[b | 1 << bit])` for every index `b` with `bit` clear.
+#[inline(always)]
+fn for_each_pair<F>(amps: &mut [Complex64], bit: usize, f: F)
+where
+    F: Fn(usize, &mut Complex64, &mut Complex64),
+{
+    let half = 1usize << bit;
+    for (j, block) in amps.chunks_exact_mut(2 * half).enumerate() {
+        let (lo, hi) = block.split_at_mut(half);
+        for (k, (a0, a1)) in lo.iter_mut().zip(hi).enumerate() {
+            f(2 * j * half + k, a0, a1);
         }
     }
 }
@@ -275,11 +294,15 @@ fn register_marginals(
             }
             step(RegisterGate::H(b), &mut rows[i..]);
         }
-        let zs: Vec<usize> = (0..width)
-            .filter(|&b| b != c && (rows[i].z >> b) & 1 == 1)
-            .collect();
-        for b in zs {
-            step(RegisterGate::Cx(b, c), &mut rows[i..]);
+        let controls = rows[i].z as usize & !(1 << c);
+        if controls != 0 {
+            step(
+                RegisterGate::CxFan {
+                    controls,
+                    target: c,
+                },
+                &mut rows[i..],
+            );
         }
         debug_assert!(rows[i].x == 0 && rows[i].z == 1 << c);
         flips.push(rows[i].phase4 == 2);

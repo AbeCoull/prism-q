@@ -739,6 +739,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     steps:
+      # The instrumented build of every test binary has filled the runner's disk;
+      # these preinstalled SDKs are unused here.
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:

@@ -252,6 +252,64 @@ fn avx512_row_kernels_match_avx2() {
     }
 }
 
+// Every stage pair from inner stride four up, through the AVX-512 groups and through the
+// AVX2 pair kernel at the same offsets, compared bit for bit. In-tile pairs read the
+// compact table at steps 1 and 2; whole-state pairs read the full table at outer steps
+// from 1 to 2^(n - 4), which puts the shuffled step 2 on the outer twiddles too.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx512_radix4_groups_match_avx2_bitwise() {
+    if !crate::backend::word_ops::avx512_test_host() {
+        return;
+    }
+    let bits = |v: &[Complex64]| -> Vec<[u64; 2]> {
+        v.iter().map(|a| [a.re.to_bits(), a.im.to_bits()]).collect()
+    };
+    for n in [4usize, 7, 10, 12] {
+        let fft_len = 1usize << n;
+        for inverse in [false, true] {
+            let whole = qft_twiddles_scaled(n, inverse);
+            let compact = qft_compact_twiddles(inverse);
+            let mut want = random_state(n, 42 + n as u64);
+            let mut got = want.clone();
+            for top in (4..=n).rev() {
+                let s = 1usize << (top - 2);
+                let groups = fft_len / (4 * s);
+                for (table, step_outer, step_inner) in [
+                    (&compact[2 * s..4 * s], 1, 2),
+                    (&whole[..], fft_len / (4 * s), fft_len / (2 * s)),
+                ] {
+                    let (pg, pw) = (got.as_mut_ptr() as *mut f64, want.as_mut_ptr() as *mut f64);
+                    // SAFETY: AVX-512F detected, which implies AVX2 and FMA. Both states hold
+                    // `groups` radix-4 groups of stride `s`, a power of two of at least four,
+                    // and every twiddle index stays below `table.len()`.
+                    unsafe {
+                        radix4_groups_avx512(pg, groups, s, 0, table, step_outer, step_inner);
+                        for g in 0..groups {
+                            for k in (0..s).step_by(2) {
+                                radix4_butterfly_pair_avx2fma(
+                                    pw.add((g * 4 * s + k) * 2),
+                                    s,
+                                    table[k * step_outer],
+                                    table[(k + 1) * step_outer],
+                                    table[(k + s) * step_outer],
+                                    table[(k + s + 1) * step_outer],
+                                    table[k * step_inner],
+                                    table[(k + 1) * step_inner],
+                                );
+                            }
+                        }
+                    }
+                    assert!(
+                        bits(&got) == bits(&want),
+                        "n {n}, s {s}, steps {step_outer}/{step_inner}, inverse {inverse}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(debug_assertions, ignore = "256 MiB states, run with --release")]
 fn gathered_route_matches_paired_route_at_24_qubits() {

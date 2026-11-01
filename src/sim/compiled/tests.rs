@@ -2181,7 +2181,7 @@ fn multinomial_counts_match_serial_draws_for_every_pool_size() {
 
         #[cfg(feature = "parallel")]
         {
-            assert_eq!(expected[0].len() >= MIN_KEYS_FOR_PAR_MULTINOMIAL, parallel);
+            assert_eq!((1usize << rank) >= MIN_KEYS_FOR_PAR_MULTINOMIAL, parallel);
             for num_threads in [1, 2, 3, 8] {
                 let actual = rayon::ThreadPoolBuilder::new()
                     .num_threads(num_threads)

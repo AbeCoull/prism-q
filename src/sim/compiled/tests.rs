@@ -2128,6 +2128,77 @@ fn multinomial_high_rank_falls_through() {
     assert!(counts.len() > 1);
 }
 
+fn serial_multinomial_counts(
+    sampler: &mut CompiledSampler,
+    total_shots: usize,
+) -> std::collections::HashMap<Vec<u64>, u64> {
+    let m_words = sampler.num_measurements.div_ceil(64);
+    let num_outcomes = 1usize << sampler.rank;
+    let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut sampler.rng);
+    let mut counts = std::collections::HashMap::new();
+    let mut remaining = total_shots;
+    for key in 0..num_outcomes {
+        if remaining == 0 {
+            break;
+        }
+        let outcomes_left = num_outcomes - key;
+        let count = if outcomes_left == 1 {
+            remaining
+        } else {
+            binomial_sample(&mut fast_rng, remaining, 1.0 / outcomes_left as f64)
+        };
+        if count > 0 {
+            let mut outcome = sampler.ref_bits_packed[..m_words].to_vec();
+            for (j, row) in sampler.flip_rows.iter().enumerate() {
+                if (key >> j) & 1 != 0 {
+                    xor_words(&mut outcome, row);
+                }
+            }
+            counts.insert(outcome, count as u64);
+        }
+        remaining -= count;
+    }
+    counts
+}
+
+#[test]
+fn multinomial_counts_match_serial_draws_for_every_pool_size() {
+    for (n, rank, parallel) in [(13, 12, false), (15, 14, true)] {
+        let mut c = circuits::clifford_heavy_circuit(n, 60, 42);
+        c.measure_all();
+        let shots = MIN_SHOTS_PER_OUTCOME_MULTINOMIAL << rank;
+        let mut reference = compile_measurements(&c, 42).unwrap();
+        assert_eq!(reference.rank(), rank);
+        assert!(reference.parity_blocks.is_none());
+        let expected = [
+            serial_multinomial_counts(&mut reference, shots),
+            serial_multinomial_counts(&mut reference, shots),
+        ];
+        let sample = || {
+            let mut sampler = compile_measurements(&c, 42).unwrap();
+            [sampler.sample_counts(shots), sampler.sample_counts(shots)]
+        };
+
+        #[cfg(feature = "parallel")]
+        {
+            assert_eq!((1usize << rank) >= MIN_KEYS_FOR_PAR_MULTINOMIAL, parallel);
+            for num_threads in [1, 2, 3, 8] {
+                let actual = rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_threads)
+                    .build()
+                    .unwrap()
+                    .install(sample);
+                assert_eq!(actual, expected, "rank {rank}, {num_threads} threads");
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = parallel;
+            assert_eq!(sample(), expected, "rank {rank}");
+        }
+    }
+}
+
 #[cfg(feature = "gpu")]
 #[test]
 fn gpu_bts_below_threshold_with_stub_context_stays_on_cpu() {

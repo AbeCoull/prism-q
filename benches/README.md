@@ -226,6 +226,9 @@ each one rather than reporting a number.
 two seconds and stops with exit 2 when other work holds more than `--max-host-load`
 (default 10% of all CPUs; one busy thread on an 8-thread host is 12.5%), listing the
 busiest processes. `--wait-idle SECONDS` waits for the load to fall instead of stopping.
+`--settle SECONDS` asks for that many seconds of quiet readings in a row before the first
+pass, for a job that builds just before it measures: a build leaves the host disturbed
+after its processes exit, which one idle reading does not show.
 The same reading before each measured pass is recorded in the report, and a FAIL with a
 busy pass behind it reads RERUN. Background load read as a 15% to 82% same-code control
 spread on one run it overlapped.
@@ -657,7 +660,9 @@ Representative CI workloads:
 The sizes are the smallest that still exercise the pipeline that ships, not the smallest
 available: `MIN_QUBITS_FOR_DIAG_BATCH = 16` and `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in
 `circuit/fusion.rs` are the floors, and `qft_textbook` has no 18 in its size list so it
-stays at 20. Six passes over the eight rows take about 75 seconds.
+stays at 20. Six passes over the eight rows take about 75 seconds. The job builds head in
+place just before measuring, so `bench_ci.sh` passes `--settle 60`: the first pass waits
+until the runner has read quiet for a minute without a break.
 
 The stabilizer row measures a CNOT wall rather than a GHZ chain. A GHZ chain collapses
 once and reads the rest of the register off deterministically, so it prices almost none

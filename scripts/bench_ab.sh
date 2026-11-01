@@ -121,6 +121,12 @@
 #   --wait-idle     seconds to wait for the host to fall under --max-host-load
 #                   before giving up (default 0). A queued run passes a long wait
 #                   so it starts when the host settles instead of failing.
+#   --settle        seconds the host must stay under --max-host-load without a
+#                   break before the first measured pass (default 0, one reading).
+#                   A build just before measuring leaves the host disturbed after
+#                   its processes exit, so a job that builds in place waits out the
+#                   window. A busy reading restarts it, and the busy time counts
+#                   against --wait-idle. With no load reading it is a plain wait.
 #   --force-lock    measure even while a live process holds the MEASURING
 #                   marker. The marker (see bench_lock.sh) is written before the
 #                   host load check and removed on exit, so other sessions on
@@ -197,6 +203,7 @@ MIN_ROWS=1
 THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
 MAX_HOST_LOAD=10
 WAIT_IDLE=0
+SETTLE=0
 FORCE_LOCK=""
 CONFIRM=1
 ESCALATE=""
@@ -225,6 +232,7 @@ while [[ $# -gt 0 ]]; do
         --project-dir) PROJECT_DIR="$(cd "$2" && pwd)"; shift 2 ;;
         --max-host-load) MAX_HOST_LOAD="$2"; shift 2 ;;
         --wait-idle)   WAIT_IDLE="$2"; shift 2 ;;
+        --settle)      SETTLE="$2"; shift 2 ;;
         --force-lock)  FORCE_LOCK=1; shift ;;
         --no-confirm)  CONFIRM=""; shift ;;
         --escalate)    ESCALATE=1; shift ;;
@@ -716,35 +724,55 @@ busy_processes() {
 
 # Stop, or wait up to --wait-idle, while other work holds more of the host than
 # --max-host-load. Every row of the run would carry that load, and the controls
-# only see the part of it that changes between passes.
+# only see the part of it that changes between passes. Under --settle the host
+# must then read quiet for that many seconds in a row before the first pass.
 preflight() {
-    (( MAX_HOST_LOAD > 0 )) || return 0
-    local load waited=0
-    while :; do
+    local load="" waited=0 quiet_since=""
+    if (( MAX_HOST_LOAD > 0 )); then
         load="$(host_load)"
         if [[ -z "$load" ]]; then
             echo ">>> no host load reading here, so the load guard is off for this run"
             MAX_HOST_LOAD=0
-            return 0
         fi
+    fi
+    if (( MAX_HOST_LOAD <= 0 )); then
+        if (( SETTLE > 0 )); then
+            echo ">>> settling for ${SETTLE}s before measuring"
+            sleep "$SETTLE"
+        fi
+        return 0
+    fi
+    while :; do
         if (( load <= MAX_HOST_LOAD )); then
-            echo ">>> host ${load}% busy before measuring"
-            echo ""
-            return 0
+            [[ -n "$quiet_since" ]] || quiet_since=$SECONDS
+            if (( SECONDS - quiet_since >= SETTLE )); then
+                if (( SETTLE > 0 )); then
+                    echo ">>> host ${load}% busy before measuring, quiet for $(( SECONDS - quiet_since ))s"
+                else
+                    echo ">>> host ${load}% busy before measuring"
+                fi
+                echo ""
+                return 0
+            fi
+            sleep 3
+        else
+            quiet_since=""
+            if (( waited >= WAIT_IDLE )); then
+                echo "Error: the host is ${load}% busy before measuring, over --max-host-load ${MAX_HOST_LOAD}%." >&2
+                busy_processes | sed 's/^/    /' >&2
+                echo "  Stop that work, pass --wait-idle SECONDS to wait for it, or raise" >&2
+                echo "  --max-host-load if the load is part of what is being measured." >&2
+                exit 2
+            fi
+            echo ">>> host ${load}% busy, waiting for it to fall under ${MAX_HOST_LOAD}% (${waited}s of ${WAIT_IDLE}s)"
+            if (( waited % 600 == 0 )); then
+                busy_processes | sed 's/^/    /'
+            fi
+            sleep 28
+            waited=$(( waited + 30 ))
         fi
-        if (( waited >= WAIT_IDLE )); then
-            echo "Error: the host is ${load}% busy before measuring, over --max-host-load ${MAX_HOST_LOAD}%." >&2
-            busy_processes | sed 's/^/    /' >&2
-            echo "  Stop that work, pass --wait-idle SECONDS to wait for it, or raise" >&2
-            echo "  --max-host-load if the load is part of what is being measured." >&2
-            exit 2
-        fi
-        echo ">>> host ${load}% busy, waiting for it to fall under ${MAX_HOST_LOAD}% (${waited}s of ${WAIT_IDLE}s)"
-        if (( waited % 600 == 0 )); then
-            busy_processes | sed 's/^/    /'
-        fi
-        sleep 28
-        waited=$(( waited + 30 ))
+        load="$(host_load)"
+        load="${load:-0}"
     done
 }
 

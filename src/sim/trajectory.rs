@@ -1833,21 +1833,26 @@ fn inverse_cdf(draws: &[(f64, usize)], weights: impl IntoIterator<Item = f64>) -
 /// error-free group a whole prefix.
 #[cfg(feature = "parallel")]
 fn work_chunks<'a>(groups: &PauliGroups, order: &'a [usize], parts: usize) -> Vec<&'a [usize]> {
-    let cost = |group: usize| {
+    balanced_chunks(order, parts, |&group| {
         if groups.patterns[group].is_empty() {
             groups.prefix
         } else {
             groups.prefix - groups.starts[group]
         }
-    };
-    let total: usize = order.iter().map(|&group| cost(group)).sum();
+    })
+}
+
+/// Split `items` into at most `parts` contiguous runs of about equal total `cost`.
+#[cfg(feature = "parallel")]
+fn balanced_chunks<T>(items: &[T], parts: usize, cost: impl Fn(&T) -> usize) -> Vec<&[T]> {
+    let total: usize = items.iter().map(&cost).sum();
     let mut chunks = Vec::with_capacity(parts);
     let mut begin = 0usize;
     let mut done = 0usize;
-    for (index, &group) in order.iter().enumerate() {
-        done += cost(group);
+    for (index, item) in items.iter().enumerate() {
+        done += cost(item);
         if done * parts >= total * (chunks.len() + 1) {
-            chunks.push(&order[begin..=index]);
+            chunks.push(&items[begin..=index]);
             begin = index + 1;
         }
     }
@@ -2095,6 +2100,361 @@ fn collect_groups(
         }
     }
     Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
+}
+
+/// Headroom over one in the `P(1)` a no-jump pass reads, which rounding can lift past
+/// one. A damping draw at or above `gamma * (1 + P1_HEADROOM)` takes the no-jump pass
+/// for any such `P(1)`.
+const P1_HEADROOM: f64 = 1e-6;
+
+/// What every shot still on a [`SharedPrefix`] does at one of its events.
+#[derive(Clone, Copy)]
+enum SharedEvent {
+    /// Draws nothing and leaves the state alone.
+    Silent,
+    /// A Pauli channel, the identity on a draw at or above `bound`.
+    Pauli { bound: f64 },
+    /// Damping on `qubit`, the no-jump pass on a draw at or above `bound`.
+    Damping {
+        qubit: usize,
+        damping: Damping,
+        bound: f64,
+    },
+}
+
+impl SharedEvent {
+    fn of(event: &PreparedEvent) -> Option<Self> {
+        Some(match &event.channel {
+            PreparedChannel::Identity => Self::Silent,
+            PreparedChannel::Pauli(thresholds) => Self::Pauli {
+                bound: thresholds.xyz,
+            },
+            PreparedChannel::PauliPair { p, .. } => Self::Pauli { bound: *p },
+            PreparedChannel::AmplitudeDamping(damping) | PreparedChannel::PhaseDamping(damping) => {
+                Self::Damping {
+                    qubit: event.qubits[0],
+                    damping: *damping,
+                    bound: damping.gamma * (1.0 + P1_HEADROOM),
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// Draw the event's uniform, the one its channel draws, and report whether the shot
+    /// leaves the shared state on it.
+    #[inline]
+    fn leaves(self, rng: &mut ChaCha8Rng) -> bool {
+        match self {
+            Self::Silent => false,
+            Self::Pauli { bound } | Self::Damping { bound, .. } => {
+                rand::RngExt::random::<f64>(rng) < bound
+            }
+        }
+    }
+}
+
+/// The gates a damping run's shots share on the host statevector until each draws its
+/// first branch.
+///
+/// Up to the first instruction that is not a gate or barrier, or whose slot holds a
+/// channel other than Pauli, depolarizing, damping, or thermal relaxation over no time,
+/// a shot whose draws stay at or above each event's bound applies what every other such
+/// shot applies: a Pauli channel's identity and the no-jump damping pass. Which event a
+/// shot leaves on reads its noise stream alone, and the walk checks each `P(1)` it reads
+/// against [`P1_HEADROOM`].
+struct SharedPrefix<'a> {
+    circuit: &'a Circuit,
+    noise: &'a PreparedNoise,
+    readout: &'a [Option<ReadoutError>],
+    seed: u64,
+    limits: &'a ResolvedLimits,
+    /// Instructions shared.
+    len: usize,
+    /// Every event of slots `..len`, in firing order.
+    events: Vec<SharedEvent>,
+}
+
+/// The state of a [`SharedPrefix`] with instructions `..at` applied and the shared
+/// branch of every event before `ordinal` taken.
+struct SharedWalk {
+    state: StatevectorBackend,
+    at: usize,
+    ordinal: usize,
+}
+
+impl SharedPrefix<'_> {
+    fn start(&self) -> Result<SharedWalk> {
+        let mut state = StatevectorBackend::with_limits(self.seed, self.limits);
+        state.init(self.circuit.num_qubits, self.circuit.num_classical_bits)?;
+        Ok(SharedWalk {
+            state,
+            at: 0,
+            ordinal: 0,
+        })
+    }
+
+    /// Advance `walk` until event `target` fires next, or to the end of the prefix for
+    /// `events.len()`. `false` once a no-jump pass reads `P(1)` past its headroom.
+    fn advance(&self, walk: &mut SharedWalk, target: usize) -> Result<bool> {
+        let offsets = &self.noise.offsets;
+        while walk.at < self.len && offsets[walk.at] <= target {
+            if !self.fire(walk, offsets[walk.at]) {
+                return Ok(false);
+            }
+            walk.state.apply(&self.circuit.instructions[walk.at])?;
+            walk.at += 1;
+        }
+        Ok(self.fire(walk, target))
+    }
+
+    fn fire(&self, walk: &mut SharedWalk, to: usize) -> bool {
+        use crate::backend::sealed::Sealed;
+        for event in &self.events[walk.ordinal..to] {
+            if let SharedEvent::Damping {
+                qubit,
+                damping,
+                bound,
+            } = *event
+            {
+                match walk.state.damp_no_jump(qubit, damping.gamma, damping.keep) {
+                    Some(p1) if damping.gamma * p1 <= bound => {}
+                    _ => return false,
+                }
+            }
+        }
+        walk.ordinal = to;
+        true
+    }
+
+    /// Run `shot` on `backend` from where `walk` stands: its state, the shot's own
+    /// measurement seed, and its noise stream redrawn past the events before
+    /// `walk.ordinal`, then the rest of the slot and the circuit as its trajectory runs
+    /// them.
+    fn resume(
+        &self,
+        walk: &SharedWalk,
+        backend: &mut StatevectorBackend,
+        shot: usize,
+    ) -> Result<ShotRun> {
+        let shot_seed = crate::sim::mix_seed(self.seed, shot);
+        backend.copy_state_from(&walk.state);
+        backend.rng = ChaCha8Rng::seed_from_u64(shot_seed);
+        let mut rng = noise_rng(shot_seed);
+        for event in &self.events[..walk.ordinal] {
+            event.leaves(&mut rng);
+        }
+        for event in &self.noise.events[walk.ordinal..self.noise.offsets[walk.at]] {
+            apply_noise_event(backend, event, &mut rng)?;
+        }
+        let bits = finish_trajectory(
+            backend,
+            self.circuit,
+            self.noise,
+            walk.at,
+            self.readout,
+            &mut rng,
+        )?;
+        Ok((shot, bits, crate::sim::backend_metadata(backend)))
+    }
+
+    /// Resume each of `forks`, `(event, shot)` pairs in event order, where it leaves.
+    fn run_forks(
+        &self,
+        walk: &mut SharedWalk,
+        backend: &mut StatevectorBackend,
+        forks: &[(usize, usize)],
+        runs: &mut Vec<ShotRun>,
+    ) -> Result<bool> {
+        for &(ordinal, shot) in forks {
+            if !self.advance(walk, ordinal)? {
+                return Ok(false);
+            }
+            runs.push(self.resume(walk, backend, shot)?);
+        }
+        Ok(true)
+    }
+
+    /// Walk to the end of the prefix and resume each of `terminal` there, in at most
+    /// `parts` runs that each hold a copy of the walked state.
+    #[cfg(feature = "parallel")]
+    fn run_terminal_split(&self, terminal: &[usize], parts: usize) -> Result<Option<Vec<ShotRun>>> {
+        if terminal.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let mut walk = self.start()?;
+        if !self.advance(&mut walk, self.events.len())? {
+            return Ok(None);
+        }
+        let runs: Vec<&[usize]> = terminal.chunks(terminal.len().div_ceil(parts)).collect();
+        let mut walks: Vec<SharedWalk> = (1..runs.len())
+            .map(|_| {
+                let mut state = StatevectorBackend::with_limits(self.seed, self.limits);
+                state.copy_state_from(&walk.state);
+                SharedWalk {
+                    state,
+                    at: walk.at,
+                    ordinal: walk.ordinal,
+                }
+            })
+            .collect();
+        walks.push(walk);
+        let resumed = walks
+            .into_par_iter()
+            .zip(runs)
+            .map(|(walk, shots)| {
+                let mut backend = StatevectorBackend::with_limits(self.seed, self.limits);
+                shots
+                    .iter()
+                    .map(|&shot| self.resume(&walk, &mut backend, shot))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(resumed.into_iter().flatten().collect()))
+    }
+
+    /// Instructions a shot leaving on event `ordinal` runs on its own.
+    #[cfg(feature = "parallel")]
+    fn fork_cost(&self, ordinal: usize) -> usize {
+        self.circuit.instructions.len() + 1
+            - self
+                .noise
+                .offsets
+                .partition_point(|&offset| offset <= ordinal)
+    }
+}
+
+/// Run `num_shots` trajectories of a damping model on the host statevector, with the
+/// records [`run_trajectories`] draws, by walking their shared no-jump state once.
+/// `None` when no damping event falls in the [`SharedPrefix`], or once the walk reads a
+/// `P(1)` past its headroom.
+///
+/// Each shot copies the walked state at the event it leaves on, or at the end of the
+/// prefix, reseeds the backend with its shot seed, redraws its noise stream that far,
+/// and finishes as its per-shot trajectory would, so it keeps its per-shot bits. Shots
+/// split across Rayon workers under the per-shot rule for `route`: those that leave
+/// inside the prefix as contiguous runs of their leave order balanced by work, each run
+/// walking a state as far as its last shot, and those that reach the end off one walk.
+pub(crate) fn run_shared_prefix(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+    route: crate::sim::ResolvedBackend,
+    limits: &ResolvedLimits,
+) -> Result<Option<ShotsResult>> {
+    if MemorySpec::of(noise).is_some() {
+        return Ok(None);
+    }
+    let prepared = PreparedNoise::new(noise);
+    let len = circuit
+        .instructions
+        .iter()
+        .zip(prepared.slots_from(0))
+        .position(|(instruction, slot)| {
+            !matches!(
+                instruction,
+                Instruction::Gate { .. } | Instruction::Barrier { .. }
+            ) || slot.iter().any(|event| SharedEvent::of(event).is_none())
+        })
+        .unwrap_or(circuit.instructions.len());
+    let events: Vec<SharedEvent> = prepared
+        .events_before(len)
+        .iter()
+        .filter_map(SharedEvent::of)
+        .collect();
+    if !events
+        .iter()
+        .any(|event| matches!(event, SharedEvent::Damping { .. }))
+    {
+        return Ok(None);
+    }
+
+    #[cfg(feature = "parallel")]
+    let split =
+        num_shots >= 4 && crate::sim::state_splits_across_workers(route, circuit.num_qubits);
+    let leaves_on = |shot: usize| {
+        let mut rng = noise_rng(crate::sim::mix_seed(seed, shot));
+        events.iter().position(|event| event.leaves(&mut rng))
+    };
+    #[cfg(feature = "parallel")]
+    let left: Vec<Option<usize>> = if split {
+        (0..num_shots).into_par_iter().map(leaves_on).collect()
+    } else {
+        (0..num_shots).map(leaves_on).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let left: Vec<Option<usize>> = (0..num_shots).map(leaves_on).collect();
+    let mut forks = Vec::new();
+    let mut terminal = Vec::new();
+    for (shot, ordinal) in left.into_iter().enumerate() {
+        match ordinal {
+            Some(ordinal) => forks.push((ordinal, shot)),
+            None => terminal.push(shot),
+        }
+    }
+    forks.sort_by_key(|&(ordinal, _)| ordinal);
+
+    let readout = written_readout(circuit, &noise.readout);
+    let prefix = SharedPrefix {
+        circuit,
+        noise: &prepared,
+        readout: &readout,
+        seed,
+        limits,
+        len,
+        events,
+    };
+    let end = prefix.events.len();
+    let shot_backend = || StatevectorBackend::with_limits(seed, limits);
+
+    #[cfg(feature = "parallel")]
+    if split {
+        let chunks = balanced_chunks(&forks, rayon::current_num_threads(), |&(ordinal, _)| {
+            prefix.fork_cost(ordinal)
+        });
+        let (forked, finished) = rayon::join(
+            || {
+                chunks
+                    .into_par_iter()
+                    .map(|chunk| {
+                        let mut walk = prefix.start()?;
+                        let mut runs = Vec::with_capacity(chunk.len());
+                        let shared =
+                            prefix.run_forks(&mut walk, &mut shot_backend(), chunk, &mut runs)?;
+                        Ok(shared.then_some(runs))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            },
+            || prefix.run_terminal_split(&terminal, rayon::current_num_threads()),
+        );
+        let mut runs = Vec::with_capacity(num_shots);
+        for chunk in forked? {
+            let Some(chunk) = chunk else {
+                return Ok(None);
+            };
+            runs.extend(chunk);
+        }
+        let Some(finished) = finished? else {
+            return Ok(None);
+        };
+        runs.extend(finished);
+        return fold_replayed(circuit, route, num_shots, runs).map(Some);
+    }
+
+    let mut walk = prefix.start()?;
+    let mut backend = shot_backend();
+    let mut runs = Vec::with_capacity(num_shots);
+    if !prefix.run_forks(&mut walk, &mut backend, &forks, &mut runs)? {
+        return Ok(None);
+    }
+    if !terminal.is_empty() && !prefix.advance(&mut walk, end)? {
+        return Ok(None);
+    }
+    for &shot in &terminal {
+        runs.push(prefix.resume(&walk, &mut backend, shot)?);
+    }
+    fold_replayed(circuit, route, num_shots, runs).map(Some)
 }
 
 #[cfg(test)]

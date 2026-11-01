@@ -277,6 +277,22 @@ circuit, 1000 shots fall into about 190 patterns, four in five of them the
 error-free one. When distinct patterns pass nine tenths of the shots the run
 falls back to per-shot trajectories.
 
+Amplitude and phase damping on the host statevector share the gates before the
+first instruction that is not a gate or barrier, or whose events include a
+channel other than Pauli, depolarizing or damping. A damping draw at or above
+`gamma` takes the no-jump pass for any `P(1)` up to one, and a Pauli draw past
+its last threshold is the identity, so until a shot draws below one of those
+bounds its state is the one every other such shot holds, and which event it
+leaves on reads only its own noise stream. The run draws each shot's leave event
+first, walks the shared state once, and each shot copies that state where it
+leaves, or at the end of the prefix, reseeds, redraws its stream that far and
+finishes its own trajectory. The records are seed-identical to the per-shot
+path. At `gamma = 1e-3` on a 12-qubit, 138-event ansatz, 875 of 1000 shots
+draw nothing below `gamma` and reach the end of the prefix, and the run makes
+15% of the per-shot full-state passes, half of them in the terminal
+measurements. A walk that reads `P(1)` past one by more than its headroom falls
+back to per-shot trajectories, as do leakage and quasi-static channels.
+
 A two-qubit channel is sampled as one joint draw over its 15 non-identity
 Pauli products, never as two single-qubit draws: the true probability that both
 letters move is `0.6p`, where independent draws give `(0.8p)^2`. The compiled

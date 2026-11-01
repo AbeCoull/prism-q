@@ -83,7 +83,9 @@ comparison run used.
   generator is seeded from the run seed and the shot index, not the worker, and results
   are collected in shot order. Pauli-noise runs that simulate each distinct error pattern
   once keep the rule: a shot's pattern, outcome and readout flips all draw from its own
-  seed, so the group a worker picks up moves no record.
+  seed, so the group a worker picks up moves no record. So do damping runs that walk
+  the shared no-jump state once: a shot copies the walk where its own draws leave it,
+  so which worker walked that far moves no record.
 - **Native block sampling: bitwise for a given seed, at any thread count.** The sparse,
   factored and product-state samplers draw shots in blocks of 256, each block from its
   own ChaCha8 stream keyed on the block index, and the blocks depend on the shot count

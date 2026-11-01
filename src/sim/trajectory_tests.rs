@@ -1475,3 +1475,234 @@ fn a_long_trajectory_keeps_its_deferred_norm_in_range() {
         .sum();
     assert!((norm - 1.0).abs() < 1e-9, "norm {norm}");
 }
+
+fn damping_ansatz(n: usize, layers: usize) -> Circuit {
+    let mut circuit = circuits::hardware_efficient_ansatz(n, layers, 42);
+    circuit.measure_all();
+    circuit
+}
+
+/// Amplitude damping on every gate target, phase damping when `dephasing`.
+fn damping_model(circuit: &Circuit, gamma: f64, dephasing: bool) -> NoiseModel {
+    let mut noise = NoiseModel::with_amplitude_damping(circuit, gamma);
+    if dephasing {
+        for event in noise.after_gate.iter_mut().flatten() {
+            event.channel = NoiseChannel::PhaseDamping { gamma };
+        }
+    }
+    noise
+}
+
+fn shared_prefix(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> Option<ShotsResult> {
+    run_shared_prefix(
+        circuit,
+        noise,
+        num_shots,
+        seed,
+        crate::sim::ResolvedBackend::Statevector,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+}
+
+#[track_caller]
+fn assert_same_records(got: &ShotsResult, want: &ShotsResult, label: &str) {
+    assert_eq!(got.shots, want.shots, "{label}");
+    assert_eq!(got.counts(), want.counts(), "{label}");
+    assert_eq!(
+        format!("{:?}", got.metadata),
+        format!("{:?}", want.metadata),
+        "{label}"
+    );
+}
+
+// Rates from one where most shots never jump to one where every shot leaves the
+// shared state on its first event, and shot counts from none up past the split.
+#[test]
+fn shared_prefix_keeps_the_per_shot_records() {
+    let circuit = damping_ansatz(6, 2);
+    for seed in [42, 7, 0xDEAD_BEEF] {
+        for gamma in [1e-3, 0.05, 0.6, 1.0] {
+            for dephasing in [false, true] {
+                let noise = damping_model(&circuit, gamma, dephasing);
+                for shots in [0, 1, 3, 4, 150] {
+                    let label = format!("seed {seed} gamma {gamma} {dephasing} {shots} shots");
+                    let shared = shared_prefix(&circuit, &noise, shots, seed).expect(&label);
+                    let reference = per_shot(&circuit, &noise, shots, seed);
+                    assert_same_records(&shared, &reference, &label);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn shared_prefix_records_do_not_depend_on_the_pool() {
+    let circuit = damping_ansatz(10, 2);
+    for (gamma, dephasing) in [(2e-3, false), (0.02, true)] {
+        let noise = damping_model(&circuit, gamma, dephasing);
+        let reference = per_shot(&circuit, &noise, 300, 42);
+        for threads in [1, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let shared = pool
+                .install(|| shared_prefix(&circuit, &noise, 300, 42))
+                .unwrap();
+            let label = format!("gamma {gamma}, {threads} threads");
+            assert_same_records(&shared, &reference, &label);
+        }
+    }
+}
+
+// From 15 qubits the kernels split instead of the shots, so one walk carries every
+// shot, those that leave and those that reach the end. One thread keeps the
+// kernels' reductions in a fixed order on both sides.
+#[cfg(feature = "parallel")]
+#[test]
+fn a_wide_shared_prefix_keeps_the_per_shot_records() {
+    let circuit = damping_ansatz(16, 1);
+    let noise = damping_model(&circuit, 0.01, false);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        let shared = shared_prefix(&circuit, &noise, 24, 42).unwrap();
+        assert_same_records(&shared, &per_shot(&circuit, &noise, 24, 42), "16 qubits");
+    });
+}
+
+fn thermal(gate_time: f64) -> NoiseChannel {
+    NoiseChannel::ThermalRelaxation {
+        t1: 30.0,
+        t2: 50.0,
+        gate_time,
+        excited_population: 0.1,
+    }
+}
+
+// Damping, Pauli and pair channels and a thermal event over no time all share the
+// gates. A thermal event that draws against the state ends the prefix, as does the
+// first measurement, and the region, condition and reset past it run per shot. The
+// statevector route takes the shared prefix and keeps the same records.
+#[test]
+fn shared_prefix_stops_at_the_first_unshared_instruction() {
+    let shareable = [
+        NoiseChannel::AmplitudeDamping { gamma: 0.08 },
+        NoiseChannel::Depolarizing { p: 0.05 },
+        NoiseChannel::PhaseDamping { gamma: 0.1 },
+        NoiseChannel::TwoQubitDepolarizing { p: 0.06 },
+        thermal(0.0),
+    ];
+    let mut ending = shareable.to_vec();
+    ending.insert(3, thermal(4.0));
+
+    let mut conditioned = Circuit::new(4, 5);
+    conditioned
+        .instructions
+        .extend(circuits::hardware_efficient_ansatz(4, 1, 7).instructions);
+    conditioned.add_measure(0, 4);
+    conditioned.instructions.push(Instruction::Conditional {
+        condition: crate::circuit::ClassicalCondition::BitIsOne(4),
+        gate: Gate::X,
+        targets: smallvec![1],
+    });
+    conditioned.add_reset(0);
+    conditioned
+        .instructions
+        .extend(circuits::hardware_efficient_ansatz(4, 1, 8).instructions);
+    conditioned.measure_all();
+
+    let (shots, seed) = (200, 0xDEAD_BEEF);
+    let circuits = [
+        (mixed_circuit(false), false),
+        (mixed_circuit(true), true),
+        (conditioned, false),
+    ];
+    for (index, (circuit, regions)) in circuits.iter().enumerate() {
+        let slots = if *regions {
+            circuit.noise_slot_count()
+        } else {
+            circuit.instructions.len()
+        };
+        for channels in [&shareable[..], &ending[..]] {
+            let noise = cycled_model(circuit, slots, channels);
+            noise.validate_for(circuit).unwrap();
+            let label = format!("circuit {index}, {} channels", channels.len());
+            let reference = per_shot(circuit, &noise, shots, seed);
+            let shared = shared_prefix(circuit, &noise, shots, seed).expect(&label);
+            assert_same_records(&shared, &reference, &label);
+            let routed = statevector_route(circuit, &noise, shots, seed);
+            assert_eq!(routed.shots, reference.shots, "{label}");
+        }
+    }
+}
+
+// Per-shot memory, a model with no damping, damping only past an event that draws
+// against the state or past the first measurement, and a state whose P(1) reads past
+// the headroom all leave the per-shot path in charge.
+#[test]
+fn shared_prefix_declines_what_it_cannot_share() {
+    let circuit = damping_ansatz(5, 2);
+    let (shots, seed) = (60, 42);
+    let event = |channel, qubit| NoiseEvent {
+        channel,
+        qubits: smallvec![qubit],
+    };
+
+    let mut leaky = damping_model(&circuit, 0.01, false);
+    leaky.after_gate[0].push(event(NoiseChannel::Leakage { p: 0.05 }, 0));
+    // The idle thermal event keeps the model off the grouped Pauli routes.
+    let mut undamped = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    undamped.after_gate[0].push(event(thermal(0.0), 0));
+    let mut drawing_first = damping_model(&circuit, 0.01, false);
+    drawing_first.after_gate[0] = vec![event(thermal(4.0), 0)];
+    let mut measured_first = Circuit::new(5, 6);
+    measured_first.add_measure(0, 5);
+    measured_first
+        .instructions
+        .extend(circuit.instructions.iter().cloned());
+
+    // `diag(1, 1.01)` on `|1>` lifts P(1) to 1.0201 ahead of the second event.
+    let mut gain = Circuit::new(2, 2);
+    gain.add_gate(Gate::X, &[0]);
+    let one = Complex64::new(1.0, 0.0);
+    let zero = Complex64::new(0.0, 0.0);
+    gain.add_gate(
+        Gate::Fused(Box::new([[one, zero], [zero, Complex64::new(1.01, 0.0)]])),
+        &[0],
+    );
+    gain.add_gate(Gate::H, &[1]);
+    gain.measure_all();
+
+    let cases = [
+        (&circuit, leaky, "per-shot memory"),
+        (&circuit, undamped, "no damping"),
+        (&circuit, drawing_first, "a drawing thermal event first"),
+        (
+            &measured_first,
+            damping_model(&measured_first, 0.01, false),
+            "a measurement first",
+        ),
+        (&gain, damping_model(&gain, 1e-3, false), "P(1) past one"),
+    ];
+    for (circuit, noise, label) in cases {
+        assert!(
+            shared_prefix(circuit, &noise, shots, seed).is_none(),
+            "{label}"
+        );
+        assert_eq!(
+            statevector_route(circuit, &noise, shots, seed).shots,
+            per_shot(circuit, &noise, shots, seed).shots,
+            "{label}"
+        );
+    }
+}

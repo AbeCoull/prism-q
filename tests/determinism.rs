@@ -498,6 +498,29 @@ fn compiled_sampler_reproducible_at_fixed_thread_count() {
     );
 }
 
+// Long-range pairs keep all 1000 qubits live, so the forward compile takes the
+// whole-register tableau, whose collapse passes split across the pool at this width.
+// Sampling runs at one fixed width, so equal shots mean equal compiled rows.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn dense_forward_compile_identical_across_thread_counts() {
+    let mut circuit = prism_q::circuits::clifford_random_pairs(1000, 20, SEED);
+    circuit.measure_all();
+
+    let compiled = |threads: usize| {
+        let mut sampler = in_pool(threads, || {
+            prism_q::compile_forward(&circuit, SEED).expect("forward compile")
+        });
+        let shots = in_pool(1, || sampler.sample_bulk_packed(256).into_data());
+        (sampler.rank(), shots)
+    };
+    assert_eq!(
+        compiled(1),
+        compiled(THREADS_HI),
+        "compiled sampler differs"
+    );
+}
+
 // The sparse sampler uses the MPS substream family (streams 2 and up) at
 // shot-block grain; same pins and miri ignore as the MPS case below.
 #[test]

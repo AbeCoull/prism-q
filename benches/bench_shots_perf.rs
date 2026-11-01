@@ -332,6 +332,22 @@ fn bench_run_counts_terminal(c: &mut Criterion) {
         );
     }
 
+    // Long-range random pairs keep every qubit live to the readout, so the forward
+    // compile takes the whole-register tableau and its collapse passes are the cost;
+    // 100 shots leave sampling a small share. 4000 is left out at about 3 s per
+    // iteration.
+    for &n in &[1000, 2000] {
+        let mut circuit = prism_q::circuits::clifford_random_pairs(n, 20, SEED);
+        circuit.measure_all();
+        group.bench_with_input(
+            BenchmarkId::new("clifford_random_pairs_d20_100", n),
+            &circuit,
+            |b, circ| {
+                b.iter(|| run_counts_with(BackendKind::Auto, circ, 100, SEED).unwrap());
+            },
+        );
+    }
+
     group.finish();
 }
 

@@ -2792,6 +2792,12 @@ fn compile_forward_unchecked(circuit: &Circuit, seed: u64) -> Result<CompiledSam
 /// qubit live the two meet near 200 times the register.
 const LIVE_FORWARD_DENSITY: usize = 64;
 
+/// Row words a random collapse in [`compile_forward_dense`] multiplies before its row
+/// pass splits across the pool: two tasks of
+/// [`MIN_PAR_ELEMS`](crate::backend::MIN_PAR_ELEMS) words.
+#[cfg(feature = "parallel")]
+const MIN_PAR_COLLAPSE_WORDS: usize = 2 * crate::backend::MIN_PAR_ELEMS;
+
 /// [`compile_forward`] over the whole register at once, measured at the end.
 pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     let measurements: Vec<(usize, usize)> = circuit
@@ -2857,13 +2863,48 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
 
             hits.copy_from_slice(columns.column(bit));
             hits[p_row / 64] &= !(1u64 << (p_row % 64));
-            for_each_row(&hits, total_rows, |r| {
-                let r_base = r * stride;
-                let old = xz[r_base + word];
-                phase[r] = rowmul_phase(&p_data, &mut xz, r_base, nw, p_phase, phase[r]);
-                columns.update(r, old, xz[r_base + word]);
-                xor_words(&mut gen_dep[r][..rank_words], &p_dep[..rank_words]);
-            });
+
+            // Dependencies only reach random bits below k, so the words past them are
+            // zero in every row.
+            let live = k.div_ceil(64);
+            let collapse = |row: &mut [u64], sign: &mut bool, dep: &mut [u64]| {
+                *sign = rowmul_phase(&p_data, row, 0, nw, p_phase, *sign);
+                xor_words(&mut dep[..live], &p_dep[..live]);
+            };
+            #[cfg(feature = "parallel")]
+            let hit_rows: usize = hits.iter().map(|w| w.count_ones() as usize).sum();
+            #[cfg(feature = "parallel")]
+            let done_parallel = if hit_rows * stride >= MIN_PAR_COLLAPSE_WORDS {
+                use rayon::prelude::*;
+                xz.par_chunks_mut(64 * stride)
+                    .zip(phase.par_chunks_mut(64))
+                    .zip(gen_dep[..total_rows].par_chunks_mut(64))
+                    .zip(hits.par_iter())
+                    .with_min_len(crate::backend::chunk_min_len(64 * stride))
+                    .for_each(|(((rows, signs), deps), word_hits)| {
+                        for_each_row(std::slice::from_ref(word_hits), signs.len(), |i| {
+                            let row = &mut rows[i * stride..(i + 1) * stride];
+                            collapse(row, &mut signs[i], &mut deps[i]);
+                        });
+                    });
+                true
+            } else {
+                false
+            };
+            #[cfg(not(feature = "parallel"))]
+            let done_parallel = false;
+            if !done_parallel {
+                for_each_row(&hits, total_rows, |r| {
+                    let row = &mut xz[r * stride..(r + 1) * stride];
+                    collapse(row, &mut phase[r], &mut gen_dep[r]);
+                });
+            }
+            // Every multiplied row's X word moved by the pivot's.
+            for (w, &rows) in hits.iter().enumerate() {
+                if rows != 0 {
+                    columns.update_rows(w, rows, p_data[word]);
+                }
+            }
 
             let dest_idx = p_row - n;
             let dest_base = dest_idx * stride;
@@ -2985,6 +3026,17 @@ impl XWordColumns {
         while diff != 0 {
             let b = diff.trailing_zeros() as usize;
             self.bits[b * self.row_words + row / 64] ^= 1u64 << (row % 64);
+            diff &= diff - 1;
+        }
+    }
+
+    /// Record that the X word of every row set in `rows`, word `w` of a row bitset,
+    /// changed by `diff`.
+    #[inline]
+    fn update_rows(&mut self, w: usize, rows: u64, mut diff: u64) {
+        while diff != 0 {
+            let b = diff.trailing_zeros() as usize;
+            self.bits[b * self.row_words + w] ^= rows;
             diff &= diff - 1;
         }
     }

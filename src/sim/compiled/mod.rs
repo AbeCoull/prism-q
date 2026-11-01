@@ -16,11 +16,13 @@ mod tests;
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
-use crate::circuit::{Circuit, Instruction, SmallVec};
+use crate::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
+use crate::gates::Gate;
 #[cfg(feature = "gpu")]
 use crate::gpu::kernels::bts::GpuBtsCache;
 use crate::sim::ShotsResult;
+use crate::sim::noise::{NoiseEvent, NoiseModel};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -3115,119 +3117,466 @@ fn compile_measurements_filtered(
     ))
 }
 
-/// Convert reset reuse into fresh qubit aliases and move measurements to the end.
+/// Convert reset reuse into fresh qubit aliases and move measurements to the end. A
+/// guarded Pauli becomes that Pauli controlled by the alias of each record its guard
+/// reads, the deferred-measurement form of classical feed-forward.
 pub(crate) fn defer_measure_reset_circuit(circuit: &Circuit) -> Result<Circuit> {
-    if !circuit.is_clifford_only() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: "deferred measurement sampling requires Clifford gates".to_string(),
-        });
+    let mut walk = DeferralWalk::new(circuit, None)?;
+    walk.run(&circuit.instructions)?;
+    Ok(walk.finish().circuit)
+}
+
+/// A dynamic circuit rewritten by [`defer_noisy_circuit`].
+pub(crate) struct DeferredCircuit {
+    /// Gates on the aliases, then one terminal measurement per record in record order.
+    pub(crate) circuit: Circuit,
+    /// The events that fire on every shot, one slot per instruction of `circuit`, and the
+    /// source model's readout.
+    pub(crate) noise: NoiseModel,
+    /// Events of guarded bodies in execution order, each firing only on the shots whose
+    /// guard holds.
+    pub(crate) guarded: Vec<GuardedEvent>,
+}
+
+/// A one-qubit Pauli event from a guarded body slot.
+pub(crate) struct GuardedEvent {
+    /// Instruction of the deferred circuit the event follows.
+    pub(crate) anchor: usize,
+    /// The guard holds where the parity of these records, XOR `invert`, is one.
+    pub(crate) records: SmallVec<[usize; 4]>,
+    pub(crate) invert: bool,
+    pub(crate) qubit: usize,
+    pub(crate) probs: (f64, f64, f64),
+}
+
+/// [`defer_measure_reset_circuit`] carrying `noise` onto the rewrite. An event on a
+/// measured alias drops, since its record already holds the value the shot keeps, so
+/// measuring an alias a second time without a reset between is rejected.
+pub(crate) fn defer_noisy_circuit(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+) -> Result<DeferredCircuit> {
+    let mut walk = DeferralWalk::new(circuit, Some(noise))?;
+    noise.ensure_only_pauli_channels()?;
+    walk.run(&circuit.instructions)?;
+    Ok(walk.finish())
+}
+
+struct DeferralWalk<'a> {
+    num_classical_bits: usize,
+    aliases: Vec<usize>,
+    measured_aliases: Vec<bool>,
+    next_qubit: usize,
+    deferred_measurements: Vec<(usize, usize)>,
+    /// Record each classical bit last took, `None` until a measurement writes it.
+    bit_records: Vec<Option<usize>>,
+    transformed: Circuit,
+    noise: Option<&'a NoiseModel>,
+    after_gate: Vec<Vec<NoiseEvent>>,
+    guarded: Vec<GuardedEvent>,
+}
+
+impl<'a> DeferralWalk<'a> {
+    fn new(circuit: &Circuit, noise: Option<&'a NoiseModel>) -> Result<Self> {
+        if !circuit.is_clifford_only() {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "CompiledSampler".to_string(),
+                reason: "deferred measurement sampling requires Clifford gates".to_string(),
+            });
+        }
+
+        let has_measurements = circuit
+            .instructions
+            .iter()
+            .any(|inst| matches!(inst, Instruction::Measure { .. }));
+        if !has_measurements {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "CompiledSampler".to_string(),
+                reason: "deferred measurement sampling requires measurements".to_string(),
+            });
+        }
+
+        Ok(Self {
+            num_classical_bits: circuit.num_classical_bits,
+            aliases: (0..circuit.num_qubits).collect(),
+            measured_aliases: vec![false; circuit.num_qubits],
+            next_qubit: circuit.num_qubits,
+            deferred_measurements: Vec::new(),
+            bit_records: vec![None; circuit.num_classical_bits],
+            transformed: Circuit::new(circuit.num_qubits, circuit.num_classical_bits),
+            noise,
+            after_gate: Vec::new(),
+            guarded: Vec::new(),
+        })
     }
 
-    let has_measurements = circuit
-        .instructions
-        .iter()
-        .any(|inst| matches!(inst, Instruction::Measure { .. }));
-    if !has_measurements {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: "deferred measurement sampling requires measurements".to_string(),
-        });
-    }
-
-    let mut aliases: Vec<usize> = (0..circuit.num_qubits).collect();
-    let mut measured_aliases = vec![false; circuit.num_qubits];
-    let mut next_qubit = circuit.num_qubits;
-    let mut deferred_measurements: Vec<(usize, usize)> = Vec::new();
-    let mut transformed = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
-
-    for inst in &circuit.instructions {
-        match inst {
-            Instruction::Gate { gate, targets } => {
-                let mapped = map_deferred_targets(targets, &aliases, &measured_aliases)?;
-                transformed.instructions.push(Instruction::Gate {
-                    gate: gate.clone(),
-                    targets: mapped,
-                });
-            }
-            Instruction::Measure {
-                qubit,
-                classical_bit,
-            } => {
-                if *qubit >= aliases.len() {
-                    return Err(PrismError::InvalidQubit {
-                        index: *qubit,
-                        register_size: aliases.len(),
+    /// Rewrite the top-level `instructions`, whose guarded noise slots follow their own.
+    fn run(&mut self, instructions: &[Instruction]) -> Result<()> {
+        let mut nested = instructions.len();
+        for (slot, inst) in instructions.iter().enumerate() {
+            match inst {
+                Instruction::Gate { gate, targets } => {
+                    let mapped =
+                        map_deferred_targets(targets, &self.aliases, &self.measured_aliases)?;
+                    self.transformed.instructions.push(Instruction::Gate {
+                        gate: gate.clone(),
+                        targets: mapped,
                     });
                 }
-                if *classical_bit >= circuit.num_classical_bits {
-                    return Err(PrismError::InvalidClassicalBit {
-                        index: *classical_bit,
-                        register_size: circuit.num_classical_bits,
-                    });
-                }
-                let alias = aliases[*qubit];
-                deferred_measurements.push((alias, *classical_bit));
-                measured_aliases[alias] = true;
-            }
-            Instruction::Reset { qubit } => {
-                if *qubit >= aliases.len() {
-                    return Err(PrismError::InvalidQubit {
-                        index: *qubit,
-                        register_size: aliases.len(),
-                    });
-                }
-                aliases[*qubit] = next_qubit;
-                next_qubit += 1;
-                measured_aliases.push(false);
-                transformed.num_qubits = next_qubit;
-            }
-            Instruction::Barrier { qubits } => {
-                let mut mapped = SmallVec::<[usize; 4]>::with_capacity(qubits.len());
-                for &q in qubits {
-                    if q >= aliases.len() {
+                Instruction::Measure {
+                    qubit,
+                    classical_bit,
+                } => {
+                    if *qubit >= self.aliases.len() {
                         return Err(PrismError::InvalidQubit {
-                            index: q,
-                            register_size: aliases.len(),
+                            index: *qubit,
+                            register_size: self.aliases.len(),
                         });
                     }
-                    mapped.push(aliases[q]);
+                    if *classical_bit >= self.num_classical_bits {
+                        return Err(PrismError::InvalidClassicalBit {
+                            index: *classical_bit,
+                            register_size: self.num_classical_bits,
+                        });
+                    }
+                    let alias = self.aliases[*qubit];
+                    if self.noise.is_some() && self.measured_aliases[alias] {
+                        return Err(PrismError::IncompatibleBackend {
+                            backend: "CompiledSampler".to_string(),
+                            reason: "deferred noisy sampling requires reset before measuring a \
+                                     measured qubit again, since noise between the two \
+                                     measurements reaches the second alone"
+                                .to_string(),
+                        });
+                    }
+                    self.bit_records[*classical_bit] = Some(self.deferred_measurements.len());
+                    self.deferred_measurements.push((alias, *classical_bit));
+                    self.measured_aliases[alias] = true;
                 }
-                transformed
-                    .instructions
-                    .push(Instruction::Barrier { qubits: mapped });
+                Instruction::Reset { qubit } => {
+                    if *qubit >= self.aliases.len() {
+                        return Err(PrismError::InvalidQubit {
+                            index: *qubit,
+                            register_size: self.aliases.len(),
+                        });
+                    }
+                    self.aliases[*qubit] = self.next_qubit;
+                    self.next_qubit += 1;
+                    self.measured_aliases.push(false);
+                    self.transformed.num_qubits = self.next_qubit;
+                }
+                Instruction::Barrier { qubits } => {
+                    let mut mapped = SmallVec::<[usize; 4]>::with_capacity(qubits.len());
+                    for &q in qubits {
+                        if q >= self.aliases.len() {
+                            return Err(PrismError::InvalidQubit {
+                                index: q,
+                                register_size: self.aliases.len(),
+                            });
+                        }
+                        mapped.push(self.aliases[q]);
+                    }
+                    self.transformed
+                        .instructions
+                        .push(Instruction::Barrier { qubits: mapped });
+                }
+                Instruction::Conditional {
+                    condition,
+                    gate,
+                    targets,
+                } => {
+                    require_guarded_pauli(gate)?;
+                    let (records, invert) = self.guard(condition)?;
+                    self.push_guarded_pauli(gate, targets, &records, invert)?;
+                    self.carry_guarded(nested, &records, invert)?;
+                    nested += 1;
+                }
+                Instruction::Region(region) => {
+                    for body_inst in region.body() {
+                        match body_inst {
+                            Instruction::Gate { gate, .. } => require_guarded_pauli(gate)?,
+                            Instruction::Barrier { .. } => {}
+                            _ => {
+                                return Err(PrismError::IncompatibleBackend {
+                                    backend: "CompiledSampler".to_string(),
+                                    reason: "deferred measurement sampling does not support a \
+                                             guarded body holding a measurement, reset, save \
+                                             point or nested guard"
+                                        .to_string(),
+                                });
+                            }
+                        }
+                    }
+                    let (records, invert) = self.guard(region.condition())?;
+                    for (offset, body_inst) in region.body().iter().enumerate() {
+                        if let Instruction::Gate { gate, targets } = body_inst {
+                            self.push_guarded_pauli(gate, targets, &records, invert)?;
+                        }
+                        self.carry_guarded(nested + offset, &records, invert)?;
+                    }
+                    nested += region.noise_slots();
+                }
+                Instruction::Save { label, .. } => {
+                    return Err(PrismError::IncompatibleBackend {
+                        backend: "CompiledSampler".to_string(),
+                        reason: format!(
+                            "save point `{label}` needs a state to read, and shot sampling \
+                             reorders measurements rather than holding one"
+                        ),
+                    });
+                }
             }
-            Instruction::Conditional { .. } | Instruction::Region(_) => {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "CompiledSampler".to_string(),
-                    reason: "deferred measurement sampling does not support classical conditionals"
-                        .to_string(),
-                });
+            self.carry(slot);
+        }
+        Ok(())
+    }
+
+    /// The records whose parity, XOR the returned flag, decides `condition` against the
+    /// bits the measurements so far wrote. A bit no measurement wrote reads 0 and drops
+    /// out, so a register comparison is a parity while it reads at most one written bit.
+    fn guard(&self, condition: &ClassicalCondition) -> Result<(SmallVec<[usize; 4]>, bool)> {
+        let record = |bit: usize| {
+            self.bit_records
+                .get(bit)
+                .copied()
+                .ok_or(PrismError::InvalidClassicalBit {
+                    index: bit,
+                    register_size: self.num_classical_bits,
+                })
+        };
+        match condition {
+            ClassicalCondition::BitIsOne(bit) => Ok((record(*bit)?.into_iter().collect(), false)),
+            ClassicalCondition::BitIsZero(bit) => Ok((record(*bit)?.into_iter().collect(), true)),
+            ClassicalCondition::Parity { bits, expected } => {
+                let mut records = SmallVec::new();
+                for &bit in bits.iter() {
+                    records.extend(record(bit)?);
+                }
+                Ok((records, !expected))
             }
-            Instruction::Save { label, .. } => {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "CompiledSampler".to_string(),
-                    reason: format!(
-                        "save point `{label}` needs a state to read, and shot sampling \
-                         reorders measurements rather than holding one"
-                    ),
-                });
+            ClassicalCondition::RegisterEquals {
+                offset,
+                size,
+                value,
+            }
+            | ClassicalCondition::RegisterNotEquals {
+                offset,
+                size,
+                value,
+            } => {
+                let not_equals = matches!(condition, ClassicalCondition::RegisterNotEquals { .. });
+                let mut feasible = *size >= 64 || value >> size == 0;
+                let mut written: Option<(usize, bool)> = None;
+                for i in 0..*size {
+                    let want = i < 64 && (value >> i) & 1 == 1;
+                    match record(offset.saturating_add(i))? {
+                        None => feasible &= !want,
+                        Some(r) => {
+                            if written.replace((r, want)).is_some() {
+                                return Err(PrismError::IncompatibleBackend {
+                                    backend: "CompiledSampler".to_string(),
+                                    reason: format!(
+                                        "deferred measurement sampling applies a guard as a \
+                                         parity of measured bits, and a comparison of the \
+                                         {size}-bit register at bit {offset} that reads two \
+                                         measured bits is not one"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+                Ok(match (feasible, written) {
+                    (false, _) => (SmallVec::new(), not_equals),
+                    (true, None) => (SmallVec::new(), !not_equals),
+                    (true, Some((r, want))) => (SmallVec::from_slice(&[r]), want == not_equals),
+                })
             }
         }
     }
 
-    transformed.num_qubits = next_qubit;
-    transformed
-        .instructions
-        .reserve(deferred_measurements.len());
-    for (qubit, classical_bit) in deferred_measurements {
-        transformed.instructions.push(Instruction::Measure {
-            qubit,
-            classical_bit,
-        });
+    /// Emit Pauli `gate` on `targets[0]` under the guard `(records, invert)`: once
+    /// unconditionally when `invert` holds, then once controlled by each record's alias.
+    fn push_guarded_pauli(
+        &mut self,
+        gate: &Gate,
+        targets: &SmallVec<[usize; 4]>,
+        records: &[usize],
+        invert: bool,
+    ) -> Result<()> {
+        if matches!(gate, Gate::Id) {
+            return Ok(());
+        }
+        let target = map_deferred_targets(targets, &self.aliases, &self.measured_aliases)?[0];
+        if invert {
+            self.transformed.add_gate(gate.clone(), &[target]);
+        }
+        if records.is_empty() {
+            return Ok(());
+        }
+        let (controlled, conjugate) = match gate {
+            Gate::X => (Gate::Cx, false),
+            Gate::Z => (Gate::Cz, false),
+            _ => (Gate::Cx, true),
+        };
+        if conjugate {
+            self.transformed.add_gate(Gate::Sdg, &[target]);
+        }
+        for &record in records {
+            let control = self.deferred_measurements[record].0;
+            self.transformed
+                .add_gate(controlled.clone(), &[control, target]);
+        }
+        if conjugate {
+            self.transformed.add_gate(Gate::S, &[target]);
+        }
+        Ok(())
     }
 
-    Ok(transformed)
+    /// Index of the last instruction emitted, which an event carried now follows. An
+    /// empty barrier stands in while nothing is emitted.
+    fn anchor(&mut self) -> usize {
+        if self.transformed.instructions.is_empty() {
+            self.transformed.instructions.push(Instruction::Barrier {
+                qubits: SmallVec::new(),
+            });
+        }
+        let len = self.transformed.instructions.len();
+        self.after_gate.resize_with(len, Vec::new);
+        len - 1
+    }
+
+    /// `event` on the aliases its qubits hold now, `None` once every target is measured.
+    /// A pair losing one target keeps the marginal on the other, 4p/15 per letter.
+    fn live_event(&self, event: &NoiseEvent) -> Option<NoiseEvent> {
+        let live = |q: usize| {
+            let alias = self.aliases[q];
+            (!self.measured_aliases[alias]).then_some(alias)
+        };
+        if let Some((q0, q1, p)) = event.pauli_pair() {
+            return match (live(q0), live(q1)) {
+                (Some(a0), Some(a1)) => Some(NoiseEvent {
+                    channel: event.channel.clone(),
+                    qubits: SmallVec::from_slice(&[a0, a1]),
+                }),
+                (Some(alias), None) | (None, Some(alias)) => {
+                    let letter = p * 4.0 / 15.0;
+                    Some(NoiseEvent::pauli(alias, letter, letter, letter))
+                }
+                (None, None) => None,
+            };
+        }
+        live(event.qubit()).map(|alias| NoiseEvent {
+            channel: event.channel.clone(),
+            qubits: SmallVec::from_slice(&[alias]),
+        })
+    }
+
+    /// Carry the events of top-level slot `slot` onto the last instruction emitted.
+    fn carry(&mut self, slot: usize) {
+        let Some(noise) = self.noise else {
+            return;
+        };
+        for event in &noise.after_gate[slot] {
+            if let Some(live) = self.live_event(event) {
+                let anchor = self.anchor();
+                self.after_gate[anchor].push(live);
+            }
+        }
+    }
+
+    /// Carry the events of guarded slot `slot`, which fire on the shots the guard
+    /// `(records, invert)` holds: into [`DeferredCircuit::guarded`], or among the
+    /// every-shot events when the guard reads no record and so always holds.
+    fn carry_guarded(
+        &mut self,
+        slot: usize,
+        records: &SmallVec<[usize; 4]>,
+        invert: bool,
+    ) -> Result<()> {
+        let Some(events) = self.noise.and_then(|noise| noise.after_gate.get(slot)) else {
+            return Ok(());
+        };
+        if records.is_empty() && !invert {
+            return Ok(());
+        }
+        for event in events {
+            let Some(probs) = event.channel.as_pauli() else {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "CompiledSampler".to_string(),
+                    reason: "deferred noisy sampling draws a guarded body's events one qubit \
+                             at a time, and a two-qubit channel in a body slot needs a \
+                             per-shot route"
+                        .to_string(),
+                });
+            };
+            let alias = self.aliases[event.qubit()];
+            if self.measured_aliases[alias] || event.channel.is_inert() {
+                continue;
+            }
+            let anchor = self.anchor();
+            if records.is_empty() {
+                self.after_gate[anchor].push(NoiseEvent {
+                    channel: event.channel.clone(),
+                    qubits: SmallVec::from_slice(&[alias]),
+                });
+            } else {
+                self.guarded.push(GuardedEvent {
+                    anchor,
+                    records: records.clone(),
+                    invert,
+                    qubit: alias,
+                    probs,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> DeferredCircuit {
+        self.transformed.num_qubits = self.next_qubit;
+        self.transformed
+            .instructions
+            .reserve(self.deferred_measurements.len());
+        for (qubit, classical_bit) in self.deferred_measurements {
+            self.transformed.instructions.push(Instruction::Measure {
+                qubit,
+                classical_bit,
+            });
+        }
+        let readout = match self.noise {
+            Some(noise) => {
+                self.after_gate
+                    .resize_with(self.transformed.instructions.len(), Vec::new);
+                noise.readout.clone()
+            }
+            None => Vec::new(),
+        };
+        DeferredCircuit {
+            circuit: self.transformed,
+            noise: NoiseModel {
+                after_gate: self.after_gate,
+                readout,
+            },
+            guarded: self.guarded,
+        }
+    }
+}
+
+/// Reject a guarded gate other than a Pauli, which no controlled Clifford applies.
+fn require_guarded_pauli(gate: &Gate) -> Result<()> {
+    if matches!(gate, Gate::Id | Gate::X | Gate::Y | Gate::Z) {
+        return Ok(());
+    }
+    Err(PrismError::IncompatibleBackend {
+        backend: "CompiledSampler".to_string(),
+        reason: format!(
+            "deferred measurement sampling does not support classical conditionals on `{}`: \
+             it applies a guarded Pauli (`X`, `Y`, `Z`, `I`) as Paulis controlled by the \
+             measured qubits",
+            gate.name()
+        ),
+    })
 }
 
 fn map_deferred_targets(

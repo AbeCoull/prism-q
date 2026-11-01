@@ -1,6 +1,6 @@
 use super::*;
 use crate::circuits;
-use crate::sim::Engine;
+use crate::sim::{Engine, ResolvedBackend};
 
 type EngineFn = fn(&Circuit, &NoiseModel, usize, u64) -> Result<ShotsResult>;
 
@@ -1860,4 +1860,327 @@ fn correlated_detuning_draws_reproduce_the_requested_covariance() {
     for shot in drawn_detunings(locked, 2, 64) {
         assert!((shot[0] - shot[1]).abs() < 1e-12, "{shot:?}");
     }
+}
+
+fn guarded_gate(
+    condition: crate::circuit::ClassicalCondition,
+    gate: Gate,
+    target: usize,
+) -> Instruction {
+    Instruction::Conditional {
+        condition,
+        gate,
+        targets: crate::circuit::smallvec![target],
+    }
+}
+
+fn pauli_region(
+    condition: crate::circuit::ClassicalCondition,
+    body: &[(Gate, usize)],
+) -> Instruction {
+    let body = body
+        .iter()
+        .map(|(gate, target)| Instruction::Gate {
+            gate: gate.clone(),
+            targets: crate::circuit::smallvec![*target],
+        })
+        .collect();
+    Instruction::Region(Box::new(crate::circuit::GuardedRegion::new(
+        condition, body,
+    )))
+}
+
+fn replay(circuit: &Circuit, noise: &NoiseModel, shots: usize) -> ShotsResult {
+    run_shots_noisy_brute_with(
+        |s| Box::new(StabilizerBackend::new(s)),
+        circuit,
+        noise,
+        shots,
+        42,
+    )
+    .unwrap()
+}
+
+// Every guard form the deferral folds, each with a known outcome: X on a bit, Z on a
+// parity, Y on a zero bit, a region reading a bit of a reset qubit, a register
+// comparison with one bit written, a one-bit register, and a guard on a bit nothing
+// has written yet.
+fn deterministic_feedforward() -> Circuit {
+    use crate::circuit::ClassicalCondition as C;
+    let mut circuit = Circuit::new(10, 10);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_measure(0, 0);
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsOne(0), Gate::X, 1));
+    circuit.add_measure(1, 1);
+    circuit.add_gate(Gate::H, &[2]);
+    circuit.instructions.push(guarded_gate(
+        C::Parity {
+            bits: vec![0, 1].into_boxed_slice(),
+            expected: false,
+        },
+        Gate::Z,
+        2,
+    ));
+    circuit.add_gate(Gate::H, &[2]);
+    circuit.add_measure(2, 2);
+    circuit.add_measure(4, 4);
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsZero(4), Gate::Y, 3));
+    circuit.add_measure(3, 3);
+    circuit.add_reset(0);
+    circuit.add_measure(0, 8);
+    circuit.instructions.push(pauli_region(
+        C::BitIsOne(0),
+        &[(Gate::X, 5), (Gate::Z, 5), (Gate::Id, 5)],
+    ));
+    circuit.add_measure(5, 5);
+    circuit.add_gate(Gate::X, &[6]);
+    circuit.add_measure(6, 6);
+    circuit.instructions.push(guarded_gate(
+        C::RegisterEquals {
+            offset: 6,
+            size: 2,
+            value: 0b01,
+        },
+        Gate::X,
+        7,
+    ));
+    circuit.add_measure(7, 7);
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsOne(9), Gate::X, 9));
+    circuit.instructions.push(guarded_gate(
+        C::RegisterEquals {
+            offset: 8,
+            size: 1,
+            value: 0,
+        },
+        Gate::X,
+        9,
+    ));
+    circuit.add_measure(9, 9);
+    circuit
+}
+
+#[test]
+fn guarded_paulis_compile_to_the_records_stabilizer_replay_reads() {
+    let circuit = deterministic_feedforward();
+    let want = [true, true, true, true, false, true, true, true, false, true];
+    let replayed = replay(&circuit, &bare_model(&circuit), 16);
+    let compiled = crate::sim::simulate(&circuit).seed(42).shots(64).unwrap();
+    let inert = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    let noisy = crate::sim::simulate(&circuit)
+        .noise(&inert)
+        .seed(42)
+        .shots(64)
+        .unwrap();
+
+    assert_eq!(replayed.metadata.backend, ResolvedBackend::Stabilizer);
+    assert_eq!(
+        compiled.metadata.backend,
+        ResolvedBackend::CompiledStabilizer
+    );
+    assert_eq!(noisy.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    for (label, shots) in [
+        ("replay", &replayed.shots),
+        ("compiled", &compiled.shots),
+        ("noisy compiled", &noisy.shots),
+    ] {
+        assert!(
+            shots.iter().all(|shot| shot == &want),
+            "{label}: {:?}",
+            shots.iter().find(|shot| *shot != &want)
+        );
+    }
+}
+
+// q0 reads a fair coin into c0, whose readout always reports 1. The guard on c0 copies
+// the true value onto q1, and onto q2 an X that a certain X in the guarded slot undoes,
+// so c1 is the hidden coin and c2 is always 0: the guarded event lands only where the
+// guard holds, and the guard reads the record before readout.
+#[test]
+fn a_guarded_event_lands_where_its_guard_holds_before_readout() {
+    use crate::circuit::ClassicalCondition as C;
+    let mut circuit = Circuit::new(3, 3);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsOne(0), Gate::X, 1));
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsOne(0), Gate::X, 2));
+    circuit.add_measure(1, 1);
+    circuit.add_measure(2, 2);
+    let mut noise = NoiseModel {
+        after_gate: vec![Vec::new(); circuit.noise_slot_count()],
+        readout: vec![None; 3],
+    };
+    noise.after_gate[circuit.instructions.len() + 1] = vec![NoiseEvent::pauli(2, 1.0, 0.0, 0.0)];
+    noise.set_bit_readout_error(0, 1.0, 0.0);
+
+    let shots = 4000;
+    let compiled = crate::sim::simulate(&circuit)
+        .noise(&noise)
+        .seed(42)
+        .shots(shots)
+        .unwrap();
+    assert_eq!(compiled.metadata.engine, Some(Engine::NoisyCompiledSampler));
+    for (label, result) in [
+        ("compiled", &compiled),
+        ("replay", &replay(&circuit, &noise, shots)),
+    ] {
+        assert!(
+            result.shots.iter().all(|shot| shot[0] && !shot[2]),
+            "{label}: {:?}",
+            result.shots.iter().find(|shot| !shot[0] || shot[2])
+        );
+        let ones = result.shots.iter().filter(|shot| shot[1]).count() as f64;
+        assert!(
+            (ones / shots as f64 - 0.5).abs() < 0.05,
+            "{label}: the hidden coin read one on {ones} of {shots} shots"
+        );
+    }
+}
+
+// One round of the distance-3 repetition code with a random first check: data q0 in
+// |+>, checks onto ancillas 3 and 4 that are then reset, corrections through a bit, a
+// region and a parity, then the data read out. Five bits, 32 outcomes.
+fn noisy_feedforward_round() -> Circuit {
+    use crate::circuit::ClassicalCondition as C;
+    let mut circuit = Circuit::new(5, 5);
+    circuit.add_gate(Gate::H, &[0]);
+    for (data, ancilla) in [(0, 3), (1, 3), (1, 4), (2, 4)] {
+        circuit.add_gate(Gate::Cx, &[data, ancilla]);
+    }
+    circuit.add_measure(3, 0);
+    circuit.add_measure(4, 1);
+    circuit.add_reset(3);
+    circuit.add_reset(4);
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsOne(0), Gate::X, 0));
+    circuit
+        .instructions
+        .push(pauli_region(C::BitIsOne(1), &[(Gate::X, 1), (Gate::Z, 2)]));
+    circuit.instructions.push(guarded_gate(
+        C::Parity {
+            bits: vec![0, 1].into_boxed_slice(),
+            expected: true,
+        },
+        Gate::Y,
+        2,
+    ));
+    circuit.add_gate(Gate::Cx, &[0, 3]);
+    circuit.add_measure(0, 2);
+    circuit.add_measure(1, 3);
+    circuit.add_measure(2, 4);
+    circuit
+}
+
+fn outcome_frequencies(shots: &[Vec<bool>]) -> Vec<f64> {
+    let mut counts = vec![0.0; 1 << shots[0].len()];
+    for shot in shots {
+        let index = shot
+            .iter()
+            .enumerate()
+            .fold(0, |acc, (bit, &set)| acc | (usize::from(set) << bit));
+        counts[index] += 1.0;
+    }
+    counts
+        .iter()
+        .map(|count| count / shots.len() as f64)
+        .collect()
+}
+
+// Depolarizing noise on every gate, guarded ones included, and readout error on the
+// check bit the corrections read. Each outcome's compiled and replayed frequencies
+// agree within five two-sample binomial standard errors at the pooled rate, plus one
+// count.
+#[test]
+fn noisy_feedforward_counts_follow_stabilizer_replay() {
+    let circuit = noisy_feedforward_round();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.05);
+    noise.set_bit_readout_error(0, 0.08, 0.03);
+    let shots = 40_000;
+
+    let compiled = crate::sim::simulate(&circuit)
+        .noise(&noise)
+        .seed(42)
+        .shots(shots)
+        .unwrap();
+    assert_eq!(compiled.metadata.engine, Some(Engine::NoisyCompiledSampler));
+    let replayed = replay(&circuit, &noise, shots);
+
+    let sampled = outcome_frequencies(&compiled.shots);
+    let reference = outcome_frequencies(&replayed.shots);
+    for (outcome, (&f, &r)) in sampled.iter().zip(&reference).enumerate() {
+        let pooled = (f + r) / 2.0;
+        let sigma = (pooled * (1.0 - pooled) * 2.0 / shots as f64).sqrt();
+        assert!(
+            (f - r).abs() <= 5.0 * sigma + 1.0 / shots as f64,
+            "outcome {outcome:#07b}: compiled {f}, replay {r}"
+        );
+    }
+}
+
+#[test]
+fn a_noisy_dynamic_circuit_takes_the_compiled_route() {
+    let circuit = noisy_feedforward_round();
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let plan = crate::sim::simulate(&circuit)
+        .noise(&noise)
+        .plan(crate::sim::Query::Shots(1000))
+        .unwrap();
+    let result = crate::sim::simulate(&circuit)
+        .noise(&noise)
+        .seed(42)
+        .shots(1000)
+        .unwrap();
+    for (backend, engine, rule) in [
+        (plan.backend, plan.engine, plan.rule),
+        (
+            result.metadata.backend,
+            result.metadata.engine,
+            result.metadata.reason,
+        ),
+    ] {
+        assert_eq!(backend, ResolvedBackend::CompiledStabilizer);
+        assert_eq!(engine, Some(Engine::NoisyCompiledSampler));
+        assert_eq!(rule, crate::sim::RouteRule::CompiledCliffordSampler);
+    }
+
+    // A comparison reading two measured bits is no parity, so it stays per shot.
+    let mut nonlinear = Circuit::new(3, 3);
+    nonlinear.add_gate(Gate::H, &[0]);
+    nonlinear.add_gate(Gate::H, &[1]);
+    nonlinear.add_measure(0, 0);
+    nonlinear.add_measure(1, 1);
+    nonlinear.instructions.push(guarded_gate(
+        crate::circuit::ClassicalCondition::RegisterEquals {
+            offset: 0,
+            size: 2,
+            value: 0b11,
+        },
+        Gate::X,
+        2,
+    ));
+    nonlinear.add_measure(2, 2);
+    let noise = NoiseModel::uniform_depolarizing(&nonlinear, 0.0);
+    let result = crate::sim::simulate(&nonlinear)
+        .noise(&noise)
+        .seed(42)
+        .shots(64)
+        .unwrap();
+    assert_ne!(result.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert_eq!(result.metadata.reason, crate::sim::RouteRule::PerShot);
+    assert!(
+        result
+            .shots
+            .iter()
+            .all(|shot| shot[2] == (shot[0] && shot[1]))
+    );
 }

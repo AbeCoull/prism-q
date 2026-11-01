@@ -2569,12 +2569,6 @@ fn supports_deferred_measurement_sampling(circuit: &Circuit) -> bool {
             .instructions
             .iter()
             .any(|inst| matches!(inst, Instruction::Measure { .. }))
-        && !circuit.instructions.iter().any(|inst| {
-            matches!(
-                inst,
-                Instruction::Conditional { .. } | Instruction::Region(_)
-            )
-        })
 }
 
 fn is_clifford_sampler_kind(kind: &BackendKind) -> bool {
@@ -4267,8 +4261,9 @@ fn general_noise_plan(
 /// For Clifford circuits with Auto/Stabilizer/FactoredStabilizer backends,
 /// uses the compiled noisy sampler (fast O(n²·m) compile + O(events·m/64) per shot).
 /// For all other cases, falls back to per-shot simulation with noise injection.
-/// The compiled noisy path is limited to terminal measurements with no resets
-/// or classical conditionals. Pauli noise on the host statevector, or on a
+/// A circuit with resets, mid-circuit measurements or guarded Pauli gates takes
+/// the compiled path through its rewrite to terminal measurements, as
+/// [`noise::run_shots_noisy`] describes. Pauli noise on the host statevector, or on a
 /// tensor network whose probabilities fit the dense cap, under the same limits
 /// draws every shot's errors first and simulates each distinct pattern once;
 /// see [`trajectory::PauliGroups`]. On the host statevector, a circuit with a
@@ -4303,7 +4298,14 @@ pub(crate) fn run_shots_with_noise(
             )
             .with_metadata(exact_mixture_metadata(&kind)));
         }
-        NoisyRoute::Compiled => {
+        NoisyRoute::Compiled(deferred) => {
+            let (circuit, noise_model) = match deferred.as_deref() {
+                Some(deferred) if !deferred.guarded.is_empty() => {
+                    return noise::run_shots_noisy_guarded(deferred, num_shots, seed);
+                }
+                Some(deferred) => (&deferred.circuit, &deferred.noise),
+                None => (circuit, noise_model),
+            };
             #[cfg(feature = "gpu")]
             if let BackendKind::StabilizerGpu { context } = &kind {
                 return noise::run_shots_noisy_with_gpu(

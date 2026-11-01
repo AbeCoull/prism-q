@@ -437,12 +437,19 @@ pub(super) fn inspect<S>(
                     limits,
                     RouteRule::ExactMixture,
                 ),
-                NoisyRoute::Compiled => {
+                NoisyRoute::Compiled(deferred) => {
                     let mut p = Plan::new(
                         ResolvedBackend::CompiledStabilizer,
                         RouteRule::CompiledCliffordSampler,
                     );
-                    p.engine = Some(if noise::use_frame_sampler(circuit) {
+                    let frame = match deferred.as_deref() {
+                        Some(deferred) => {
+                            deferred.guarded.is_empty()
+                                && noise::use_frame_sampler(&deferred.circuit)
+                        }
+                        None => noise::use_frame_sampler(circuit),
+                    };
+                    p.engine = Some(if frame {
                         Engine::FrameSampler
                     } else {
                         Engine::NoisyCompiledSampler

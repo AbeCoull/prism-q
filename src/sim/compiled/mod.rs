@@ -1298,6 +1298,10 @@ impl CompiledSampler {
             if self.rank <= MAX_RANK_FOR_MULTINOMIAL
                 && total_shots >= num_outcomes * MIN_SHOTS_PER_OUTCOME_MULTINOMIAL
             {
+                #[cfg(feature = "parallel")]
+                if num_outcomes >= MIN_KEYS_FOR_PAR_MULTINOMIAL {
+                    return self.sample_counts_multinomial_pooled(total_shots);
+                }
                 return self.sample_counts_multinomial(total_shots);
             }
 
@@ -1325,14 +1329,79 @@ impl CompiledSampler {
         let rank = self.rank;
         let num_outcomes = 1usize << rank;
         let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
-        let mut draw = |key: usize, remaining: usize| {
+        let lut =
+            (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
+        let mut counts = HashMap::new();
+        let mut remaining = total_shots;
+
+        for key in 0..num_outcomes {
+            if remaining == 0 {
+                break;
+            }
             let outcomes_left = num_outcomes - key;
-            if outcomes_left == 1 {
+            let count = if outcomes_left == 1 {
                 remaining
             } else {
                 binomial_sample(&mut fast_rng, remaining, 1.0 / outcomes_left as f64)
+            };
+
+            if count > 0 {
+                let mut outcome = self.ref_bits_packed[..m_words].to_vec();
+                if let Some(lut) = lut {
+                    for g in 0..lut.total_groups() {
+                        let byte = (key >> (g * 8)) & 0xFF;
+                        lut.xor_into(&mut outcome, g, byte);
+                    }
+                } else {
+                    for j in 0..rank {
+                        if (key >> j) & 1 != 0 {
+                            xor_words(&mut outcome, &self.flip_rows[j]);
+                        }
+                    }
+                }
+                counts.insert(outcome, count as u64);
             }
-        };
+            remaining -= count;
+        }
+
+        counts
+    }
+
+    #[cfg(feature = "parallel")]
+    fn sample_counts_multinomial_pooled(
+        &mut self,
+        total_shots: usize,
+    ) -> std::collections::HashMap<Vec<u64>, u64> {
+        use rayon::prelude::*;
+        use std::collections::HashMap;
+
+        let m_words = self.num_measurements.div_ceil(64);
+
+        if total_shots == 0 || self.num_measurements == 0 {
+            return HashMap::new();
+        }
+
+        let rank = self.rank;
+        let num_outcomes = 1usize << rank;
+        let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+        let mut key_counts = vec![0u64; num_outcomes];
+        let mut nonzero_keys = 0;
+        let mut remaining = total_shots;
+        for (key, key_count) in key_counts.iter_mut().enumerate() {
+            if remaining == 0 {
+                break;
+            }
+            let outcomes_left = num_outcomes - key;
+            let count = if outcomes_left == 1 {
+                remaining
+            } else {
+                binomial_sample(&mut fast_rng, remaining, 1.0 / outcomes_left as f64)
+            };
+            *key_count = count as u64;
+            nonzero_keys += usize::from(count > 0);
+            remaining -= count;
+        }
+
         let lut =
             (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
         let ref_bits = &self.ref_bits_packed[..m_words];
@@ -1353,58 +1422,26 @@ impl CompiledSampler {
             }
             outcome
         };
-        let mut remaining = total_shots;
 
-        #[cfg(feature = "parallel")]
-        if num_outcomes >= MIN_KEYS_FOR_PAR_MULTINOMIAL {
-            use rayon::prelude::*;
+        let keys_per_thread = num_outcomes.div_ceil(rayon::current_num_threads());
+        let shards: Vec<Vec<(Vec<u64>, u64)>> = key_counts
+            .par_chunks(keys_per_thread)
+            .enumerate()
+            .map(|(tid, shard)| {
+                let shard_start = tid * keys_per_thread;
+                shard
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &count)| count > 0)
+                    .map(|(i, &count)| (outcome(shard_start + i), count))
+                    .collect()
+            })
+            .collect();
 
-            let mut key_counts = vec![0u64; num_outcomes];
-            let mut nonzero_keys = 0;
-            for (key, key_count) in key_counts.iter_mut().enumerate() {
-                if remaining == 0 {
-                    break;
-                }
-                let count = draw(key, remaining);
-                *key_count = count as u64;
-                nonzero_keys += usize::from(count > 0);
-                remaining -= count;
-            }
-
-            let keys_per_thread = num_outcomes.div_ceil(rayon::current_num_threads());
-            let shards: Vec<Vec<(Vec<u64>, u64)>> = key_counts
-                .par_chunks(keys_per_thread)
-                .enumerate()
-                .map(|(tid, shard)| {
-                    let shard_start = tid * keys_per_thread;
-                    shard
-                        .iter()
-                        .enumerate()
-                        .filter(|&(_, &count)| count > 0)
-                        .map(|(i, &count)| (outcome(shard_start + i), count))
-                        .collect()
-                })
-                .collect();
-
-            let mut counts = HashMap::with_capacity(nonzero_keys);
-            for shard in shards {
-                counts.extend(shard);
-            }
-            return counts;
+        let mut counts = HashMap::with_capacity(nonzero_keys);
+        for shard in shards {
+            counts.extend(shard);
         }
-
-        let mut counts = HashMap::new();
-        for key in 0..num_outcomes {
-            if remaining == 0 {
-                break;
-            }
-            let count = draw(key, remaining);
-            if count > 0 {
-                counts.insert(outcome(key), count as u64);
-            }
-            remaining -= count;
-        }
-
         counts
     }
 

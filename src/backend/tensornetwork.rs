@@ -724,27 +724,119 @@ fn contract_meta(a: &TensorMeta, b: &TensorMeta) -> TensorMeta {
     TensorMeta { shape, legs }
 }
 
-/// Contraction candidates ordered by size key, then by the higher slot id
-/// descending, then the lower.
+/// Noisy-pass candidates as `(key, higher slot, lower slot)`, reversed into
+/// [`PairQueue`] order.
+type PairHeap = BinaryHeap<Reverse<(u64, Reverse<usize>, Reverse<usize>)>>;
+
+/// Candidate pairs of one planning pass, popped by size key, then by the
+/// higher slot id descending, then the lower.
 ///
 /// The key is the result element count, scaled by Gumbel noise on a noisy
 /// planning pass. Newest-first on ties keeps the contraction on its frontier
 /// instead of letting fresh tensors accumulate legs. Reversing the tie-break
 /// raises peak intermediates 16x on `hardware_efficient_ansatz(50, 3)`.
-type PairQueue = BinaryHeap<Reverse<(u64, Reverse<usize>, Reverse<usize>)>>;
-
-/// Compute the size key for one candidate pair.
 ///
-/// The noisy arm multiplies by `2^(temperature * gumbel)` and compares the
-/// result through its bit pattern, which orders positive floats numerically.
-fn pair_key(cost: usize, noise: Option<(&mut ChaCha8Rng, f64)>) -> u64 {
-    match noise {
-        None => cost as u64,
-        Some((rng, temperature)) => {
-            use rand::RngExt;
-            let uniform: f64 = rng.random::<f64>();
-            let gumbel = -(-uniform.max(f64::MIN_POSITIVE).ln()).ln();
-            ((cost as f64) * (temperature * gumbel).exp2()).to_bits()
+/// The exact pass needs no heap. Each pair is queued when its higher slot
+/// fills, so the higher slot never decreases from one push to the next, and
+/// one slot's pairs go in ascending lower slot. A stack of `(lower, higher)`
+/// pairs per size, sizes ascending, therefore holds each size's next pair on
+/// top, and pops come out in the heap's order without its sift. Stacks below
+/// `lowest` are empty.
+enum PairQueue<'r> {
+    Exact {
+        sizes: Vec<(usize, Vec<(usize, usize)>)>,
+        lowest: usize,
+    },
+    Noisy {
+        heap: PairHeap,
+        rng: &'r mut ChaCha8Rng,
+        temperature: f64,
+    },
+}
+
+/// Compute the noisy size key for one candidate pair.
+///
+/// Multiplies by `2^(temperature * gumbel)` and compares the result through its
+/// bit pattern, which orders positive floats numerically.
+fn pair_key(cost: usize, rng: &mut ChaCha8Rng, temperature: f64) -> u64 {
+    use rand::RngExt;
+    let uniform: f64 = rng.random::<f64>();
+    let gumbel = -(-uniform.max(f64::MIN_POSITIVE).ln()).ln();
+    ((cost as f64) * (temperature * gumbel).exp2()).to_bits()
+}
+
+impl PairQueue<'_> {
+    /// Queue `slot` against every slot in `others`, each lower than `slot` and
+    /// listed in the order the legs were walked.
+    ///
+    /// The noisy arm draws one key per entry, in that order and twice for a pair
+    /// sharing two legs. The exact arm drops the repeat, which would carry the
+    /// same key.
+    fn push_pairs(
+        &mut self,
+        slots: &[Option<TensorMeta>],
+        slot: usize,
+        others: &mut SmallVec<[usize; 8]>,
+    ) {
+        let meta = slots[slot].as_ref().expect("slot just filled");
+        let cost = |other: usize| {
+            contraction_result_size(meta, slots[other].as_ref().expect("holder list pruned"))
+        };
+        match self {
+            Self::Exact { sizes, lowest } => {
+                others.sort_unstable();
+                others.dedup();
+                for &other in others.iter() {
+                    let size = cost(other);
+                    let at = match sizes.binary_search_by_key(&size, |&(key, _)| key) {
+                        Ok(at) => at,
+                        Err(at) => {
+                            sizes.insert(at, (size, Vec::new()));
+                            at
+                        }
+                    };
+                    sizes[at].1.push((other, slot));
+                    *lowest = (*lowest).min(at);
+                }
+            }
+            Self::Noisy {
+                heap,
+                rng,
+                temperature,
+            } => {
+                for &other in others.iter() {
+                    let key = pair_key(cost(other), rng, *temperature);
+                    heap.push(Reverse((key, Reverse(slot), Reverse(other))));
+                }
+            }
+        }
+    }
+
+    /// Pop the cheapest queued pair whose members are both still live, lower
+    /// slot first.
+    ///
+    /// Returns `None` once no two live tensors share a leg.
+    fn pop_live(&mut self, slots: &[Option<TensorMeta>]) -> Option<(usize, usize)> {
+        let live = |i: usize, j: usize| slots[i].is_some() && slots[j].is_some();
+        match self {
+            Self::Exact { sizes, lowest } => {
+                while let Some((_, stack)) = sizes.get_mut(*lowest) {
+                    match stack.pop() {
+                        Some((i, j)) if live(i, j) => return Some((i, j)),
+                        Some(_) => {}
+                        None => *lowest += 1,
+                    }
+                }
+                None
+            }
+            Self::Noisy { heap, .. } => {
+                while let Some(Reverse((_, Reverse(j), Reverse(i)))) = heap.pop() {
+                    if live(i, j) {
+                        return Some((i, j));
+                    }
+                }
+                None
+            }
         }
     }
 }
@@ -759,44 +851,23 @@ fn queue_slot_pairs(
     slot: usize,
     leg_holders: &mut Vec<SmallVec<[usize; 2]>>,
     queue: &mut PairQueue,
-    noise: &mut Option<(&mut ChaCha8Rng, f64)>,
 ) {
     let meta = slots[slot].as_ref().expect("slot just filled");
+    let mut others: SmallVec<[usize; 8]> = SmallVec::new();
     for &leg in &meta.legs {
         if leg >= leg_holders.len() {
             leg_holders.resize(leg + 1, SmallVec::new());
         }
         leg_holders[leg].retain(|held| slots[*held].is_some());
-        for &other in leg_holders[leg].iter().filter(|&&held| held != slot) {
-            let cost = contraction_result_size(
-                meta,
-                slots[other].as_ref().expect("holder list pruned above"),
-            );
-            queue.push(Reverse((
-                pair_key(
-                    cost,
-                    noise
-                        .as_mut()
-                        .map(|(rng, temperature)| (&mut **rng, *temperature)),
-                ),
-                Reverse(other.max(slot)),
-                Reverse(other.min(slot)),
-            )));
-        }
+        others.extend(
+            leg_holders[leg]
+                .iter()
+                .copied()
+                .filter(|&held| held != slot),
+        );
         leg_holders[leg].push(slot);
     }
-}
-
-/// Pop the cheapest queued pair whose members are both still live.
-///
-/// Returns `None` once no two live tensors share a leg.
-fn pop_live_pair(queue: &mut PairQueue, slots: &[Option<TensorMeta>]) -> Option<(usize, usize)> {
-    while let Some(Reverse((_, Reverse(j), Reverse(i)))) = queue.pop() {
-        if slots[i].is_some() && slots[j].is_some() {
-            return Some((i, j));
-        }
-    }
-    None
+    queue.push_pairs(slots, slot, &mut others);
 }
 
 /// Run one greedy planning pass over the metadata, deterministic when `noise`
@@ -808,14 +879,24 @@ fn pop_live_pair(queue: &mut PairQueue, slots: &[Option<TensorMeta>]) -> Option<
 /// can still win on `total`.
 fn plan_pairs(
     mut slots: Vec<Option<TensorMeta>>,
-    mut noise: Option<(&mut ChaCha8Rng, f64)>,
+    noise: Option<(&mut ChaCha8Rng, f64)>,
     abort_above: usize,
 ) -> Option<ContractionPlan> {
     let mut leg_holders: Vec<SmallVec<[usize; 2]>> = Vec::new();
-    let mut queue: PairQueue = BinaryHeap::new();
+    let mut queue = match noise {
+        None => PairQueue::Exact {
+            sizes: Vec::new(),
+            lowest: 0,
+        },
+        Some((rng, temperature)) => PairQueue::Noisy {
+            heap: BinaryHeap::new(),
+            rng,
+            temperature,
+        },
+    };
 
     for slot in 0..slots.len() {
-        queue_slot_pairs(&slots, slot, &mut leg_holders, &mut queue, &mut noise);
+        queue_slot_pairs(&slots, slot, &mut leg_holders, &mut queue);
     }
 
     let mut plan = ContractionPlan {
@@ -823,7 +904,7 @@ fn plan_pairs(
         peak: 0,
         total: 0,
     };
-    while let Some((i, j)) = pop_live_pair(&mut queue, &slots) {
+    while let Some((i, j)) = queue.pop_live(&slots) {
         let a = slots[i].take().expect("popped pair is live");
         let b = slots[j].take().expect("popped pair is live");
         let result = contract_meta(&a, &b);
@@ -835,13 +916,7 @@ fn plan_pairs(
         plan.total += elements;
         plan.pairs.push((i, j));
         slots.push(Some(result));
-        queue_slot_pairs(
-            &slots,
-            slots.len() - 1,
-            &mut leg_holders,
-            &mut queue,
-            &mut noise,
-        );
+        queue_slot_pairs(&slots, slots.len() - 1, &mut leg_holders, &mut queue);
     }
     Some(plan)
 }

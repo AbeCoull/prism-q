@@ -16,7 +16,7 @@ use crate::circuit::dynamic::{
 };
 use crate::circuit::qasm::ast::{AssignOp, Block, Condition, Operand, Stmt, StmtKind};
 use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Expr};
-use crate::circuit::qasm::stream::Stream;
+use crate::circuit::qasm::stream::{Stream, with_stack};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
 /// What the evaluator carries while lowering into a control-flow graph.
@@ -84,7 +84,7 @@ fn key(stmt: &Stmt) -> usize {
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn parse_dynamic(input: &str) -> Result<DynamicProgram> {
-    parse_dynamic_within(input, MAX_EXPANSION)
+    with_stack(|| parse_dynamic_within(input, MAX_EXPANSION))
 }
 
 /// [`parse_dynamic`] with `budget` units of expansion in place of the default.
@@ -208,20 +208,24 @@ fn compound_op(op: AssignOp) -> dynamic::BinaryOp {
 
 /// Whether some leaf of `expr` is a runtime value according to `leaf`.
 fn reads_leaf(expr: &Expr, leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>>) -> Result<bool> {
-    Ok(match expr {
-        Expr::Number(_) | Expr::Duration(_) => false,
-        Expr::Ident(_) => leaf(expr)?.is_some(),
-        Expr::Element(element) => {
-            leaf(expr)?.is_some()
-                || element.indices.iter().try_fold(false, |seen, index| {
-                    Ok::<_, PrismError>(seen || reads_leaf(index, leaf)?)
-                })?
-        }
-        Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => reads_leaf(inner, leaf)?,
-        Expr::Binary { left, right, .. } => reads_leaf(left, leaf)? || reads_leaf(right, leaf)?,
-        Expr::Call(call) => call.args.iter().try_fold(false, |seen, arg| {
-            Ok::<_, PrismError>(seen || reads_leaf(arg, leaf)?)
-        })?,
+    with_stack(|| {
+        Ok(match expr {
+            Expr::Number(_) | Expr::Duration(_) => false,
+            Expr::Ident(_) => leaf(expr)?.is_some(),
+            Expr::Element(element) => {
+                leaf(expr)?.is_some()
+                    || element.indices.iter().try_fold(false, |seen, index| {
+                        Ok::<_, PrismError>(seen || reads_leaf(index, leaf)?)
+                    })?
+            }
+            Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => {
+                reads_leaf(inner, leaf)?
+            }
+            Expr::Binary { left, right, .. } => reads_leaf(left, leaf)? || reads_leaf(right, leaf)?,
+            Expr::Call(call) => call.args.iter().try_fold(false, |seen, arg| {
+                Ok::<_, PrismError>(seen || reads_leaf(arg, leaf)?)
+            })?,
+        })
     })
 }
 
@@ -232,36 +236,38 @@ fn lower(
     leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>>,
     fold: &impl Fn(&Expr) -> Result<f64>,
 ) -> Result<ClassicalExpr> {
-    if !reads_leaf(expr, leaf)? {
-        return Ok(constant(fold(expr)?));
-    }
-    let recurse = |inner: &Expr| lower(inner, line, leaf, fold);
-    Ok(match expr {
-        Expr::Ident(_) | Expr::Element(_) => match leaf(expr)? {
-            Some(lowered) => lowered,
-            None => {
+    with_stack(|| {
+        if !reads_leaf(expr, leaf)? {
+            return Ok(constant(fold(expr)?));
+        }
+        let recurse = |inner: &Expr| lower(inner, line, leaf, fold);
+        Ok(match expr {
+            Expr::Ident(_) | Expr::Element(_) => match leaf(expr)? {
+                Some(lowered) => lowered,
+                None => {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!("`{expr}`, an array indexed by a runtime value"),
+                        line,
+                    });
+                }
+            },
+            Expr::Negate(inner) => ClassicalExpr::unary(UnaryOp::Neg, recurse(inner)?),
+            Expr::Not(inner) => ClassicalExpr::unary(UnaryOp::Not, recurse(inner)?),
+            Expr::BitNot(inner) => ClassicalExpr::unary(UnaryOp::BitNot, recurse(inner)?),
+            Expr::Binary { op, left, right } => {
+                ClassicalExpr::binary(runtime_op(*op), recurse(left)?, recurse(right)?)
+            }
+            Expr::Call(call) => {
                 return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("`{expr}`, an array indexed by a runtime value"),
+                    construct: format!(
+                        "builtin `{}` over a runtime value; only operators run at runtime",
+                        call.name
+                    ),
                     line,
                 });
             }
-        },
-        Expr::Negate(inner) => ClassicalExpr::unary(UnaryOp::Neg, recurse(inner)?),
-        Expr::Not(inner) => ClassicalExpr::unary(UnaryOp::Not, recurse(inner)?),
-        Expr::BitNot(inner) => ClassicalExpr::unary(UnaryOp::BitNot, recurse(inner)?),
-        Expr::Binary { op, left, right } => {
-            ClassicalExpr::binary(runtime_op(*op), recurse(left)?, recurse(right)?)
-        }
-        Expr::Call(call) => {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
-                    "builtin `{}` over a runtime value; only operators run at runtime",
-                    call.name
-                ),
-                line,
-            });
-        }
-        Expr::Number(_) | Expr::Duration(_) => unreachable!("a literal reads no runtime leaf"),
+            Expr::Number(_) | Expr::Duration(_) => unreachable!("a literal reads no runtime leaf"),
+        })
     })
 }
 
@@ -427,8 +433,7 @@ impl<'a> Parser<'a> {
     fn is_bit_name(&self, name: &str) -> bool {
         self.cregs.contains_key(name)
             || self
-                .aliases
-                .get(name)
+                .alias(name)
                 .is_some_and(|alias| alias.kind == ast::RegisterKind::Classical)
     }
 
@@ -437,7 +442,7 @@ impl<'a> Parser<'a> {
         if let Some(register) = self.cregs.get(name) {
             return register_read(register.offset, register.size, line).map(Some);
         }
-        match self.aliases.get(name) {
+        match self.alias(name) {
             Some(alias) if alias.kind == ast::RegisterKind::Classical => {
                 let contiguous = alias.indices.windows(2).all(|pair| pair[1] == pair[0] + 1);
                 if !contiguous {
@@ -620,14 +625,17 @@ impl<'a> Parser<'a> {
             RuntimeType::Float | RuntimeType::Angle => ClassicalType::Float,
             integer => ClassicalType::Int(integer),
         };
-        self.classical.insert(
-            name,
-            ClassicalDecl {
-                ty: kind,
-                constant: false,
-                int: 0,
-            },
-        );
+        let decl = ClassicalDecl {
+            ty: kind,
+            constant: false,
+            int: 0,
+        };
+        if Rc::make_mut(&mut self.classical)
+            .insert(name, decl)
+            .is_none()
+        {
+            self.declared.push(name);
+        }
         self.state().vars.insert(name, var);
         Ok(())
     }
@@ -751,7 +759,7 @@ impl<'a> Parser<'a> {
         let result = self.execute(block);
         self.state().repeat -= 1;
         self.nested = was_nested;
-        self.close_scope(&scope);
+        self.close_scope(scope);
         let leftover = result?;
         self.flush(leftover);
         Ok(())
@@ -1049,7 +1057,7 @@ impl<'a> Walk<'_, 'a> {
     }
 
     fn expr_reads(&self, expr: &Expr) -> Reads {
-        match expr {
+        with_stack(|| match expr {
             Expr::Number(_) | Expr::Duration(_) => Reads::default(),
             Expr::Ident(name) => self.name_reads(name),
             Expr::Element(element) => element
@@ -1063,7 +1071,7 @@ impl<'a> Walk<'_, 'a> {
             Expr::Call(call) => call.args.iter().fold(Reads::default(), |reads, arg| {
                 reads.or(self.expr_reads(arg))
             }),
-        }
+        })
     }
 
     fn argument_reads(&self, argument: &ast::Argument) -> Reads {
@@ -1115,11 +1123,13 @@ impl<'a> Walk<'_, 'a> {
     /// Walk `block` at runtime depth `depth`, reporting whether anything in it
     /// opens a block of the graph.
     fn block(&mut self, block: &[Stmt<'a>], depth: usize) -> bool {
-        let mut needs = false;
-        for stmt in block {
-            needs |= self.stmt(stmt, depth);
-        }
-        needs
+        with_stack(|| {
+            let mut needs = false;
+            for stmt in block {
+                needs |= self.stmt(stmt, depth);
+            }
+            needs
+        })
     }
 
     fn stmt(&mut self, stmt: &Stmt<'a>, depth: usize) -> bool {

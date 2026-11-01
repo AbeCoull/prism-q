@@ -3253,6 +3253,40 @@ for uint i in [0:3] { h2 q[0]; }";
     assert_expands_past(parse_within(source, 36));
 }
 
+// A def body gets its own copy of the caller's values and constants, so each
+// call pays a unit for every name it copies.
+#[test]
+fn a_def_call_charges_the_names_it_copies() {
+    let calls = format!(
+        "OPENQASM 3.0;
+qubit[1] q;
+def f(qubit a) {{ x a; }}
+{}",
+        "f(q[0]);
+"
+        .repeat(8)
+    );
+    assert_eq!(parse_within(&calls, 1 << 10).unwrap().gate_count(), 8);
+    let constants: String = (0..100)
+        .map(|i| {
+            format!(
+                "const int k{i} = {i};
+"
+            )
+        })
+        .collect();
+    let crowded = calls.replace(
+        "qubit[1] q;
+",
+        &format!(
+            "qubit[1] q;
+{constants}"
+        ),
+    );
+    assert_expands_past(parse_within(&crowded, 1 << 10));
+    assert_eq!(parse(&crowded).unwrap().gate_count(), 8);
+}
+
 #[test]
 fn oversized_registers_are_parse_errors() {
     let wide = |decls: &str| {
@@ -3319,6 +3353,59 @@ fn nested_boxes_just_inside_the_limit_fit_a_small_stack() {
         .spawn(move || {
             assert_eq!(parse(&source).unwrap().gate_count(), 1);
             parse_dynamic(&source).unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+// A 64 KiB stack holds a few levels at most, so every walk below has to move
+// onto heap segments to finish.
+#[test]
+fn sources_inside_the_limit_outgrow_a_tiny_stack() {
+    let depth = MAX_NESTING - 8;
+    let header = "OPENQASM 3.0;\nqubit[2] q;\nbit[2] c;\n";
+    let sources = [
+        nested_parens(depth),
+        long_sum(depth),
+        format!(
+            "{header}rx({}1{}) q[0];",
+            "sin(".repeat(depth),
+            ")".repeat(depth)
+        ),
+        format!("{header}rx({}1) q[0];", "-".repeat(depth)),
+        format!(
+            "{header}const array[int, 1] a = {{0}};\nx q[{}0{}];",
+            "a[".repeat(depth),
+            "]".repeat(depth)
+        ),
+        format!(
+            "{header}{}x q[0];{}",
+            "box { ".repeat(depth),
+            " }".repeat(depth)
+        ),
+        format!(
+            "{header}{}x q[0];{}",
+            (0..depth)
+                .map(|i| format!("for int i{i} in [0:0] {{ "))
+                .collect::<String>(),
+            " }".repeat(depth)
+        ),
+        format!(
+            "{header}c[0] = measure q[0];\nint x = {}c[0];\nif (x == 1) x q[1];",
+            "-".repeat(depth)
+        ),
+    ];
+    std::thread::Builder::new()
+        .stack_size(64 << 10)
+        .spawn(move || {
+            for source in &sources {
+                parse_dynamic(source).unwrap();
+                if !source.contains("measure") {
+                    parse(source).unwrap();
+                    parse_braket(source).unwrap();
+                }
+            }
         })
         .unwrap()
         .join()

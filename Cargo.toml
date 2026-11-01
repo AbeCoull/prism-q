@@ -38,6 +38,7 @@ rayon = { version = "1.12", optional = true }
 faer = { version = "0.24", optional = true, default-features = false, features = ["std", "rayon", "linalg"] }
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["cuda-12040", "dynamic-loading", "driver", "nvrtc", "std"] }
 mpi = { version = "0.8", optional = true }
+stacker = "0.1"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

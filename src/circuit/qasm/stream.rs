@@ -8,6 +8,23 @@ use crate::error::{PrismError, Result};
 /// the depth of an expression tree.
 pub(crate) const MAX_NESTING: usize = 256;
 
+/// Free stack below which [`with_stack`] moves onto a fresh segment. Covers the
+/// frames between two guarded calls, and dropping a tree [`MAX_NESTING`] deep
+/// (under 100 KiB in a debug build).
+const RED_ZONE: usize = 256 * 1024;
+
+/// Size of each heap segment [`with_stack`] allocates.
+const SEGMENT: usize = 4 * 1024 * 1024;
+
+/// Run `walk` with at least [`RED_ZONE`] of stack, growing onto a heap segment when
+/// the thread's own stack runs short. Every recursive walk of a syntax tree calls
+/// through it, so depth is bounded by the nesting caps rather than the thread's
+/// stack size.
+#[inline(always)]
+pub(crate) fn with_stack<T>(walk: impl FnOnce() -> T) -> T {
+    stacker::maybe_grow(RED_ZONE, SEGMENT, walk)
+}
+
 /// `'t` is the token slice, `'a` the source it was read from. They are
 /// separate so a tree outlives the slice it was parsed from.
 pub(crate) struct Stream<'t, 'a> {
@@ -113,7 +130,7 @@ impl<'t, 'a> Stream<'t, 'a> {
             return Err(self.too_deep());
         }
         self.depth += 1;
-        let result = parse(self);
+        let result = with_stack(|| parse(self));
         self.depth -= 1;
         result
     }

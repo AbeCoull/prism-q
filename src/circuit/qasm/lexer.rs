@@ -160,6 +160,7 @@ struct Lexer<'a> {
 /// rescans for them. A pragma line survives whole, since the pragma grammar is
 /// its own, and so does a calibration body.
 pub(crate) fn tokenize(source: &str) -> Result<Vec<Token<'_>>> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let mut lexer = Lexer {
         source,
         bytes: source.as_bytes(),

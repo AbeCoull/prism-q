@@ -225,3 +225,9 @@ fn a_calibration_body_is_one_token() {
     assert_eq!(kinds("x cal {"), [Kind::Ident, Kind::Ident, Kind::LBrace]);
     assert!(tokenize("cal { open").is_err());
 }
+
+#[test]
+fn a_leading_byte_order_mark_is_skipped() {
+    assert_eq!(kinds("\u{feff}x;"), [Kind::Ident, Kind::Semicolon]);
+    assert!(tokenize("x;\u{feff}").is_err());
+}

@@ -206,10 +206,11 @@ distributed statevector backends answer that reduction, the distributed one thro
 tensor network decline it. `Auto` counts a two-qubit
 Kraus event as entangling when it picks the trajectory backend, so a circuit of
 one-qubit gates carrying a crosstalk channel runs on the statevector (or the sparse
-map or MPS past the dense cap) instead of the product state. `run_shots_with_noise`
-checks `Backend::supports_two_qubit_kraus` before the first shot, so an explicit kind
-or a device statevector that declines the channel is named at dispatch rather than
-part way through a trajectory.
+map or MPS past the dense cap) instead of the product state. Routing asks the backend
+a trajectory plan builds for `Backend::supports_two_qubit_kraus` before the first shot,
+so an explicit kind that declines the channel, a device statevector included, is named
+at dispatch rather than part way through a trajectory, and `Auto` with a device keeps
+such a model on the host statevector.
 
 ## Noisy engine routing and the observable-result contract
 

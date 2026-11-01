@@ -3218,6 +3218,54 @@ fn auto_gpu_noisy_trajectories_match_cpu_auto() {
     }
 }
 
+// A device-resident statevector reads no two-qubit reduced density matrix, so a
+// correlated two-qubit Kraus channel keeps an `AutoGpu` trajectory on the host
+// above the crossover instead of failing on the first event. On the host the
+// run is the `Auto` run, shot for shot.
+#[test]
+fn auto_gpu_two_qubit_kraus_trajectories_run_on_the_host() {
+    use prism_q::simulate;
+    use prism_q::{GateFilter, NoiseBuilder, NoiseChannel};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 14;
+    let mut circuit = prism_q::Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.measure_all();
+    let p: f64 = 0.1;
+    let zero = Complex64::new(0.0, 0.0);
+    let mut keep = [[zero; 4]; 4];
+    let mut flip = [[zero; 4]; 4];
+    for t in 0..4 {
+        keep[t][t] = Complex64::new((1.0 - p).sqrt(), 0.0);
+        flip[t][3 - t] = Complex64::new(p.sqrt(), 0.0);
+    }
+    let noise = NoiseBuilder::new()
+        .after_gates_joint(
+            GateFilter::all().arity(2),
+            NoiseChannel::Kraus2q {
+                kraus: vec![keep, flip],
+            },
+        )
+        .build(&circuit)
+        .unwrap();
+
+    let cpu = simulate(&circuit).noise(&noise).seed(42).shots(64).unwrap();
+    let gpu = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .noise(&noise)
+        .seed(42)
+        .shots(64)
+        .expect("AutoGpu must run a two-qubit Kraus channel on the host");
+    assert_eq!(cpu.shots, gpu.shots);
+}
+
 #[test]
 fn over_vram_init_reports_the_device_budget() {
     let Some(f) = Fixture::try_new() else { return };

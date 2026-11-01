@@ -1122,9 +1122,12 @@ impl Backend for StatevectorBackend {
         Ok(self.reduced_density_matrix_one(qubit))
     }
 
+    /// Read off the device context rather than the device state, so the answer
+    /// holds before [`Backend::init`]; a soft init that falls back to the host
+    /// clears the context.
     fn supports_two_qubit_kraus(&self) -> bool {
         #[cfg(feature = "gpu")]
-        if self.gpu_state.is_some() {
+        if self.gpu_context.is_some() {
             return false;
         }
         true

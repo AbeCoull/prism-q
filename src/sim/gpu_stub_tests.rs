@@ -273,3 +273,59 @@ fn auto_gpu_general_noise_product_circuit_matches_auto() {
     .unwrap();
     assert_eq!(auto_shots.shots, gpu_shots.shots);
 }
+
+fn correlated_bit_flip_after_pairs(circuit: &Circuit, p: f64) -> noise::NoiseModel {
+    let zero = Complex64::new(0.0, 0.0);
+    let mut keep = [[zero; 4]; 4];
+    let mut flip = [[zero; 4]; 4];
+    for t in 0..4 {
+        keep[t][t] = Complex64::new((1.0 - p).sqrt(), 0.0);
+        flip[t][3 - t] = Complex64::new(p.sqrt(), 0.0);
+    }
+    noise::NoiseBuilder::new()
+        .after_gates_joint(
+            noise::GateFilter::all().arity(2),
+            noise::NoiseChannel::Kraus2q {
+                kraus: vec![keep, flip],
+            },
+        )
+        .build(circuit)
+        .unwrap()
+}
+
+// Above the crossover the explicit device kind resolves hard, and a
+// device-resident statevector reads no two-qubit reduced density matrix, so
+// the plan must be declined at routing, not on the first Kraus event.
+#[test]
+fn statevector_gpu_two_qubit_kraus_declines_at_routing() {
+    let circuit = measured_chain_circuit(16);
+    let noise = correlated_bit_flip_after_pairs(&circuit, 0.1);
+    let Err(err) = decide_noisy(
+        &statevector_gpu_stub(),
+        &circuit,
+        &noise,
+        &ResolvedLimits::process_default(),
+    ) else {
+        panic!("a device statevector plan with a two-qubit Kraus channel passed routing");
+    };
+    match err {
+        crate::error::PrismError::IncompatibleBackend { reason, .. } => {
+            assert!(reason.contains("two-qubit Kraus"), "{reason}");
+        }
+        other => panic!("expected IncompatibleBackend, got {other}"),
+    }
+}
+
+// Below the crossover the explicit device kind resolves to the host, which
+// runs the channel, so it must match explicit `Statevector` shot for shot.
+#[test]
+fn statevector_gpu_two_qubit_kraus_below_crossover_runs_on_the_host() {
+    let circuit = measured_chain_circuit(8);
+    let noise = correlated_bit_flip_after_pairs(&circuit, 0.1);
+    let limits = ResolvedLimits::process_default();
+    let host =
+        run_shots_with_noise(BackendKind::Statevector, &circuit, &noise, 64, 42, &limits).unwrap();
+    let gpu =
+        run_shots_with_noise(statevector_gpu_stub(), &circuit, &noise, 64, 42, &limits).unwrap();
+    assert_eq!(host.shots, gpu.shots);
+}

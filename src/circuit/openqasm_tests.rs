@@ -3477,11 +3477,17 @@ fn a_control_count_must_be_positive_and_carryable() {
         matches!(zero, PrismError::Parse { .. }) && zero.to_string().contains("positive"),
         "{zero}"
     );
-    let wide = parse(&format!("{head}ctrl(300) @ x q[0], q[1];")).unwrap_err();
-    assert!(
-        matches!(wide, PrismError::UnsupportedConstruct { .. }),
-        "{wide}"
-    );
+    for chain in [
+        "ctrl(300) @ x q[0], q[1];",
+        "ctrl(200) @ negctrl(56) @ x q[0];",
+    ] {
+        let wide = parse(&format!("{head}{chain}")).unwrap_err();
+        assert!(
+            matches!(&wide, PrismError::UnsupportedConstruct { construct, .. }
+                if construct.contains("past 255 controls")),
+            "{chain}: {wide}"
+        );
+    }
 }
 
 #[test]

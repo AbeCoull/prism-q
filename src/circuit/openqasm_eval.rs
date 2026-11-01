@@ -1630,6 +1630,7 @@ impl<'a> Parser<'a> {
         line: usize,
     ) -> Result<Vec<super::Modifier>> {
         let mut out = Vec::with_capacity(modifiers.len());
+        let mut controls = 0usize;
         for modifier in modifiers {
             match modifier {
                 ast::Modifier::Inv => out.push(super::Modifier::Inv),
@@ -1638,6 +1639,15 @@ impl<'a> Parser<'a> {
                         None => 1,
                         Some(expr) => self.control_count(expr, line)?,
                     };
+                    // Checked over the whole chain before any entry is built, so
+                    // a long run of `ctrl(255) @` costs nothing to refuse.
+                    controls += count;
+                    if controls > usize::from(u8::MAX) {
+                        return Err(PrismError::UnsupportedConstruct {
+                            construct: format!("ctrl @ chain past {} controls", u8::MAX),
+                            line,
+                        });
+                    }
                     out.extend((0..count).map(|_| super::Modifier::Ctrl { negated: *negated }));
                 }
                 ast::Modifier::Pow(expr) => {

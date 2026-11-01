@@ -4269,6 +4269,9 @@ fn general_noise_plan(
 /// see [`trajectory::PauliGroups`]. On the host statevector, a circuit with a
 /// mid-circuit measurement, reset or condition shares the gates before the first
 /// of them the same way, and each shot finishes its own trajectory from there.
+/// Damping on the host statevector walks the no-jump state its shots share once,
+/// and each shot finishes its own trajectory from its first jump draw; see
+/// [`trajectory::run_shared_prefix`].
 pub(crate) fn run_shots_with_noise(
     kind: BackendKind,
     circuit: &Circuit,
@@ -4360,6 +4363,21 @@ pub(crate) fn run_shots_with_noise(
             result.metadata.reason = RouteRule::PerShot;
             result
         });
+    }
+    // A walked state and a shot state at once.
+    if host_statevector
+        && circuit.num_qubits < limits.statevector_qubits.value
+        && let Some(mut result) = trajectory::run_shared_prefix(
+            circuit,
+            noise_model,
+            num_shots,
+            seed,
+            plan.resolved(),
+            limits,
+        )?
+    {
+        result.metadata.reason = RouteRule::PerShot;
+        return Ok(result);
     }
     let route = plan.resolved();
     trajectory::run_trajectories(

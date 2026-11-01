@@ -923,9 +923,9 @@ fn grouped_pauli_trajectories_identical_across_thread_counts() {
     );
 }
 
-// Damping weighs each branch by P(1), so every shot runs its own trajectory, and the
-// no-jump branch leaves its normalization deferred in that shot's backend. The
-// records still hang off the shot seeds alone.
+// Damping weighs each branch by P(1), so no error pattern can be drawn ahead of the
+// state, and the no-jump branch leaves its normalization deferred in the backend.
+// The records still hang off the shot seeds alone.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn damping_trajectories_identical_across_thread_counts() {
@@ -950,6 +950,47 @@ fn damping_trajectories_identical_across_thread_counts() {
         single.shots[..3],
         "serial trajectories differ from split ones"
     );
+}
+
+// Damping shots walk their shared no-jump state once and each copies it where its
+// own draws leave, so how the walk and the shots split across workers moves no
+// record or count. Phase damping at a rate where most shots leave early, and
+// amplitude damping at one where most never do.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn shared_damping_prefix_identical_across_thread_counts() {
+    let mut circuit = prism_q::circuits::hardware_efficient_ansatz(10, 2, SEED);
+    circuit.measure_all();
+    let phase = prism_q::NoiseBuilder::new()
+        .after_gates(
+            prism_q::GateFilter::all(),
+            prism_q::NoiseChannel::PhaseDamping { gamma: 0.2 },
+        )
+        .build(&circuit)
+        .expect("phase damping model");
+    let amplitude = NoiseModel::with_amplitude_damping(&circuit, 1e-3);
+    for noise in [&phase, &amplitude] {
+        let run = |threads: usize| {
+            in_pool(threads, || {
+                let shots = simulate(&circuit)
+                    .noise(noise)
+                    .seed(SEED)
+                    .shots(300)
+                    .expect("noisy shots");
+                let counts = simulate(&circuit)
+                    .noise(noise)
+                    .seed(SEED)
+                    .sample_counts(300)
+                    .expect("noisy counts");
+                (shots, counts)
+            })
+        };
+        let (single, single_counts) = run(1);
+        let (wide, wide_counts) = run(THREADS_HI);
+        assert_eq!(single.shots, wide.shots, "damping prefix bits differ");
+        assert_eq!(single_counts.counts, wide_counts.counts);
+        assert_eq!(single_counts.counts, single.counts());
+    }
 }
 
 #[test]

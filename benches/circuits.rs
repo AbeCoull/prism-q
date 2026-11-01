@@ -4673,10 +4673,11 @@ fn bench_noisy_sampling(c: &mut Criterion) {
     );
 
     // Amplitude and phase damping on every gate target. Their branch weight reads
-    // P(1), so no error pattern can be drawn ahead of the state and every shot runs
-    // its own trajectory, one probability read and one no-jump pass per event. The
-    // depolarizing arm on the same circuit draws its patterns first and simulates
-    // each distinct one once, the floor the damping arms are read against.
+    // P(1), so no error pattern can be drawn ahead of the state: the shots walk their
+    // shared no-jump state once, one pass per event, and each runs its own trajectory
+    // from its first jump draw. The depolarizing arm on the same circuit draws its
+    // patterns first and simulates each distinct one once, the floor the damping arms
+    // are read against.
     let hea = with_terminal_measurements(circuits::hardware_efficient_ansatz(12, 3, SEED));
     let gamma = 1e-3;
     let amplitude_damping = prism_q::NoiseModel::with_amplitude_damping(&hea, gamma);

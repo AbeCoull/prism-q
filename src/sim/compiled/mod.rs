@@ -1664,6 +1664,7 @@ pub(crate) fn xor_mask_shot_major(
         use rayon::prelude::*;
         accum[..num_shots * m_words]
             .par_chunks_mut(m_words)
+            .with_min_len(crate::backend::chunk_min_len(m_words))
             .for_each(|shot| xor_words(shot, mask));
         return;
     }

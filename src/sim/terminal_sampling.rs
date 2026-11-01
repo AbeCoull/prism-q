@@ -176,7 +176,9 @@ fn build_outcome_distribution<T: Sync>(
 
     #[cfg(feature = "parallel")]
     {
-        if map.direct_state_key(items.len()) {
+        if items.len() >= 1 << crate::backend::PARALLEL_THRESHOLD_QUBITS
+            && map.direct_state_key(items.len())
+        {
             let mut probs = vec![0.0f64; outcomes];
             probs
                 .par_iter_mut()

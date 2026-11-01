@@ -1552,6 +1552,7 @@ impl NoisyCompiledSampler {
             use rayon::prelude::*;
             accum
                 .par_chunks_mut(m_words)
+                .with_min_len(crate::backend::chunk_min_len(m_words))
                 .for_each(|shot| xor_words(shot, ref_bits_packed));
         } else {
             for s in 0..num_shots {

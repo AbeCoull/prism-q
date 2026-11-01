@@ -488,6 +488,7 @@ fn conjugate_all(branches: &mut [WeightedBranch], gate: &Gate, targets: &[usize]
         use rayon::prelude::*;
         branches
             .par_iter_mut()
+            .with_min_len(crate::backend::MIN_PAR_ITERS)
             .try_for_each(|b| b.offset.conjugate_by(gate, targets))?;
         return Ok(());
     }

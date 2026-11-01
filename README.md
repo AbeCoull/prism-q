@@ -341,10 +341,10 @@ and [`benches/README.md`](benches/README.md).
 
 ## Roadmap
 
-- Multi-GPU and distributed GPU execution. A GPU context binds one device and the
-  distributed backend is CPU only; sharding one statevector across devices also needs
-  peer access, since a host-staged exchange costs far more than the gate it serves.
-- ROCm ports of the CUDA statevector and stabilizer kernels.
+Open work is grouped under QEC and noise, stabilizer and Clifford+T simulation, large
+structured circuits, input and interop, the GPU, CPU reach, and running beyond one
+device. The [roadmap](https://abecoull.github.io/prism-q/roadmap.html) tags each item
+with what it waits on and lists the hardware that would unblock some of them.
 
 ## Contributing
 

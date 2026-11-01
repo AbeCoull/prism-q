@@ -13,13 +13,13 @@ runtime where one exists, and a scalar path runs otherwise.
 | SIMD | Supported with a dedicated SIMD-accelerated kernel on this architecture |
 | Scalar | Runs, but without a dedicated SIMD kernel (portable fallback) |
 | No | Not available for this backend |
-| Planned | Not implemented yet; on the roadmap |
+| Roadmap | Not implemented yet; the [roadmap](../roadmap.md) carries it and says what it waits on |
 
 ## Backend support by architecture
 
 The nine CPU backends implement the `Backend` trait; the distributed statevector
 backend is a tenth, feature-gated implementation covered by the Distributed
-column. `Planned` marks only work the roadmap carries: in this table a ROCm port
+column. `Roadmap` marks only work the roadmap carries: in this table a ROCm port
 of the existing CUDA kernels, and under [Not yet supported](#not-yet-supported)
 multi-GPU and distributed GPU execution. Backends without a CUDA kernel have
 nothing to port, so their ROCm cell is `No`, and the roadmap carries no
@@ -27,8 +27,8 @@ distributed execution for any backend other than the statevector.
 
 | Backend | x86-64 | AVX2/FMA/BMI2 | ARM64 | NEON | CUDA (NVIDIA) | ROCm (AMD) | Distributed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Statevector | Yes | SIMD | Yes | SIMD | Yes | Planned | Yes |
-| Stabilizer | Yes | SIMD | Yes | SIMD | Yes | Planned | No |
+| Statevector | Yes | SIMD | Yes | SIMD | Yes | Roadmap | Yes |
+| Stabilizer | Yes | SIMD | Yes | SIMD | Yes | Roadmap | No |
 | Factored Stabilizer | Yes | SIMD | Yes | SIMD | No | No | No |
 | Sparse | Yes | Scalar | Yes | Scalar | No | No | No |
 | MPS | Yes | SIMD | Yes | SIMD | No | No | No |
@@ -261,9 +261,9 @@ the process default, or the request set it.
 
 | Target | Status | Notes |
 | --- | --- | --- |
-| ROCm (AMD GPU) | Planned | No AMD device kernels; the GPU path is CUDA-only |
-| Distributed GPU | Planned | No multi-node GPU execution |
-| Multi-GPU | Planned | A GPU context binds a single device; sharding one statevector across devices also needs peer access between them to stay ahead of the host path |
+| ROCm (AMD GPU) | Roadmap, needs hardware | No AMD device kernels; the GPU path is CUDA-only |
+| Distributed GPU | Roadmap, research | No multi-node GPU execution; it follows multi-GPU on one host |
+| Multi-GPU | Roadmap, needs hardware | A GPU context binds a single device; sharding one statevector across devices also needs peer access between them to stay ahead of the host path |
 
 ## Compatibility
 

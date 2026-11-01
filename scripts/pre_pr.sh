@@ -262,8 +262,14 @@ check_doc_build() {
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "${DOC_FEATURES//,/ }"
 }
 
+# stacker's build script assembles for the target, so a cross check needs a C
+# toolchain for it. On Windows the clang and llvm-ar that Visual Studio bundles serve.
 check_cross() {
-    cargo clippy --target "$1" --lib --features parallel "${LINT[@]}"
+    local tools=() bin var="${1//-/_}"
+    for bin in "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Tools/Llvm/x64/bin; do
+        [[ -x "$bin/clang.exe" ]] && tools=("CC_$var=$bin/clang.exe" "AR_$var=$bin/llvm-ar.exe")
+    done
+    env "${tools[@]}" cargo clippy --target "$1" --lib --features parallel "${LINT[@]}"
 }
 
 check_public_api() {

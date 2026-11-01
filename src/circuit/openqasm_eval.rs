@@ -12,7 +12,7 @@ use crate::circuit::qasm::ast::{
     OperandName, Stmt, StmtKind,
 };
 use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Duration, Expr, Timed};
-use crate::circuit::qasm::stream::MAX_NESTING;
+use crate::circuit::qasm::stream::{MAX_NESTING, with_stack};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
 /// Register width the highest `$k` the program names implies, `None` when it
@@ -50,62 +50,64 @@ fn too_wide(kind: ast::RegisterKind, line: usize) -> PrismError {
 }
 
 fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
-    for stmt in block {
-        match &stmt.kind {
-            StmtKind::Alias { sources, .. } => sources.iter().for_each(&mut *note),
-            StmtKind::Call {
-                params, operands, ..
-            } => {
-                for param in params {
-                    if let Argument::Operand(operand) = param {
-                        note(operand);
+    with_stack(|| {
+        for stmt in block {
+            match &stmt.kind {
+                StmtKind::Alias { sources, .. } => sources.iter().for_each(&mut *note),
+                StmtKind::Call {
+                    params, operands, ..
+                } => {
+                    for param in params {
+                        if let Argument::Operand(operand) = param {
+                            note(operand);
+                        }
+                    }
+                    operands.iter().for_each(&mut *note);
+                }
+                StmtKind::Measure(measure) => {
+                    note(&measure.source);
+                    note(&measure.target);
+                }
+                StmtKind::CallAssign(assign) => {
+                    note(&assign.target);
+                    for arg in &assign.args {
+                        if let Argument::Operand(operand) = arg {
+                            note(operand);
+                        }
                     }
                 }
-                operands.iter().for_each(&mut *note);
-            }
-            StmtKind::Measure(measure) => {
-                note(&measure.source);
-                note(&measure.target);
-            }
-            StmtKind::CallAssign(assign) => {
-                note(&assign.target);
-                for arg in &assign.args {
-                    if let Argument::Operand(operand) = arg {
-                        note(operand);
+                StmtKind::Return(Some(ast::ReturnValue::Measure(source))) => note(source),
+                StmtKind::Reset { targets }
+                | StmtKind::Barrier { targets }
+                | StmtKind::Delay { targets, .. }
+                | StmtKind::Nop { targets } => targets.iter().for_each(&mut *note),
+                StmtKind::If(conditional) => {
+                    match &conditional.condition {
+                        Condition::Truthy(operand) | Condition::Negated(operand) => note(operand),
+                        Condition::Compare { lhs, .. } => note(lhs),
+                        Condition::Parity { bits, .. } => bits.iter().for_each(&mut *note),
+                        Condition::Expr(_) => {}
+                    }
+                    walk_operands(&conditional.then_body, note);
+                    if let Some(body) = &conditional.else_body {
+                        walk_operands(body, note);
                     }
                 }
-            }
-            StmtKind::Return(Some(ast::ReturnValue::Measure(source))) => note(source),
-            StmtKind::Reset { targets }
-            | StmtKind::Barrier { targets }
-            | StmtKind::Delay { targets, .. }
-            | StmtKind::Nop { targets } => targets.iter().for_each(&mut *note),
-            StmtKind::If(conditional) => {
-                match &conditional.condition {
-                    Condition::Truthy(operand) | Condition::Negated(operand) => note(operand),
-                    Condition::Compare { lhs, .. } => note(lhs),
-                    Condition::Parity { bits, .. } => bits.iter().for_each(&mut *note),
-                    Condition::Expr(_) => {}
+                StmtKind::For { body, .. }
+                | StmtKind::While { body, .. }
+                | StmtKind::Box { body, .. }
+                | StmtKind::DefDef { body, .. }
+                | StmtKind::GateDef { body, .. } => walk_operands(body, note),
+                StmtKind::Switch { operand, arms } => {
+                    note(operand);
+                    for arm in arms {
+                        walk_operands(&arm.body, note);
+                    }
                 }
-                walk_operands(&conditional.then_body, note);
-                if let Some(body) = &conditional.else_body {
-                    walk_operands(body, note);
-                }
+                _ => {}
             }
-            StmtKind::For { body, .. }
-            | StmtKind::While { body, .. }
-            | StmtKind::Box { body, .. }
-            | StmtKind::DefDef { body, .. }
-            | StmtKind::GateDef { body, .. } => walk_operands(body, note),
-            StmtKind::Switch { operand, arms } => {
-                note(operand);
-                for arm in arms {
-                    walk_operands(&arm.body, note);
-                }
-            }
-            _ => {}
         }
-    }
+    })
 }
 
 /// Fold an expression to a number, where a ratio of two durations counts as
@@ -116,7 +118,7 @@ fn number_of(
     line: usize,
     vars: Option<&HashMap<&str, f64>>,
     durations: &HashMap<&str, Timed>,
-    arrays: &HashMap<&str, ClassicalArray>,
+    arrays: &HashMap<&str, Rc<ClassicalArray>>,
 ) -> Result<f64> {
     let value = syntax_expr::eval(expr, line, vars);
     if value.is_ok() {
@@ -187,7 +189,7 @@ fn timed_of(
     line: usize,
     vars: Option<&HashMap<&str, f64>>,
     durations: &HashMap<&str, Timed>,
-    arrays: &HashMap<&str, ClassicalArray>,
+    arrays: &HashMap<&str, Rc<ClassicalArray>>,
 ) -> Result<Timed> {
     if arrays.is_empty() || !expr.reads_element() {
         return syntax_expr::eval_timed(expr, line, vars, durations);
@@ -202,16 +204,17 @@ fn resolve_elements<'e>(
     line: usize,
     vars: Option<&HashMap<&str, f64>>,
     durations: &HashMap<&str, Timed>,
-    arrays: &HashMap<&str, ClassicalArray>,
+    arrays: &HashMap<&str, Rc<ClassicalArray>>,
 ) -> Result<Expr<'e>> {
-    let resolve = |inner: &Expr<'e>| resolve_elements(inner, line, vars, durations, arrays);
+    let resolve =
+        |inner: &Expr<'e>| with_stack(|| resolve_elements(inner, line, vars, durations, arrays));
     Ok(match expr {
         Expr::Element(element) => {
             let array = arrays.get(element.array).ok_or_else(|| {
                 parse_error(line, format!("`{}` is not a declared array", element.array))
             })?;
             let at = element_offset(array, element.array, &element.indices, line, |index| {
-                number_of(index, line, vars, durations, arrays)
+                with_stack(|| number_of(index, line, vars, durations, arrays))
             })?;
             Expr::Number(array.values[at])
         }
@@ -275,15 +278,17 @@ fn is_bit_param(args: &[DefParam], name: &str) -> bool {
 
 /// Line of the first `return` in `block`, nested bodies included.
 fn return_line(block: &[Stmt]) -> Option<usize> {
-    block.iter().find_map(|stmt| match &stmt.kind {
-        StmtKind::Return(_) => Some(stmt.line),
-        StmtKind::If(conditional) => return_line(&conditional.then_body)
-            .or_else(|| conditional.else_body.as_deref().and_then(return_line)),
-        StmtKind::For { body, .. } | StmtKind::While { body, .. } | StmtKind::Box { body, .. } => {
-            return_line(body)
-        }
-        StmtKind::Switch { arms, .. } => arms.iter().find_map(|arm| return_line(&arm.body)),
-        _ => None,
+    with_stack(|| {
+        block.iter().find_map(|stmt| match &stmt.kind {
+            StmtKind::Return(_) => Some(stmt.line),
+            StmtKind::If(conditional) => return_line(&conditional.then_body)
+                .or_else(|| conditional.else_body.as_deref().and_then(return_line)),
+            StmtKind::For { body, .. }
+            | StmtKind::While { body, .. }
+            | StmtKind::Box { body, .. } => return_line(body),
+            StmtKind::Switch { arms, .. } => arms.iter().find_map(|arm| return_line(&arm.body)),
+            _ => None,
+        })
     })
 }
 
@@ -332,7 +337,7 @@ impl<'a> Parser<'a> {
             ));
         }
         self.exec_depth += 1;
-        let result = self.execute_block(block);
+        let result = with_stack(|| self.execute_block(block));
         self.exec_depth -= 1;
         result
     }
@@ -642,7 +647,7 @@ impl<'a> Parser<'a> {
                 }
                 Ok(())
             }
-            StmtKind::CallAssign(assign) => self.exec_call_assign(assign, line, out),
+            StmtKind::CallAssign(assign) => with_stack(|| self.exec_call_assign(assign, line, out)),
             StmtKind::ArrayDecl(decl) if self.is_runtime_decl(stmt) => {
                 Err(PrismError::UnsupportedConstruct {
                     construct: format!(
@@ -705,7 +710,7 @@ impl<'a> Parser<'a> {
                 self.reject_mixed_addressing(line)?;
                 let offset = self.total_qubits;
                 self.total_qubits = grown(offset)?;
-                self.qregs.insert(
+                Rc::make_mut(&mut self.qregs).insert(
                     name,
                     Register {
                         offset,
@@ -716,7 +721,7 @@ impl<'a> Parser<'a> {
             ast::RegisterKind::Classical => {
                 let offset = self.total_cbits;
                 self.total_cbits = grown(offset)?;
-                self.cregs.insert(
+                Rc::make_mut(&mut self.cregs).insert(
                     name,
                     Register {
                         offset,
@@ -806,14 +811,17 @@ impl<'a> Parser<'a> {
         } else {
             value
         };
-        self.classical.insert(
-            name,
-            ClassicalDecl {
-                ty,
-                constant,
-                int: 0,
-            },
-        );
+        let decl = ClassicalDecl {
+            ty,
+            constant,
+            int: 0,
+        };
+        if Rc::make_mut(&mut self.classical)
+            .insert(name, decl)
+            .is_none()
+        {
+            self.declared.push(name);
+        }
         self.durations.insert(name, value);
     }
 
@@ -940,15 +948,15 @@ impl<'a> Parser<'a> {
             None => values.resize(total, 0.0),
             Some(init) => self.fold_initializer(kind, init, &dims, decl.name, line, &mut values)?,
         }
-        self.arrays.insert(
-            decl.name,
-            ClassicalArray {
-                ty: kind,
-                constant: decl.constant,
-                dims,
-                values,
-            },
-        );
+        let array = ClassicalArray {
+            ty: kind,
+            constant: decl.constant,
+            dims,
+            values,
+        };
+        if self.arrays.insert(decl.name, Rc::new(array)).is_none() {
+            self.declared.push(decl.name);
+        }
         Ok(())
     }
 
@@ -1020,7 +1028,7 @@ impl<'a> Parser<'a> {
             Some(op) => kind.store(compound(op, current, folded, line)?),
         };
         if let Some(array) = self.arrays.get_mut(assign.array) {
-            array.values[at] = updated;
+            Rc::make_mut(array).values[at] = updated;
         }
         Ok(())
     }
@@ -1117,7 +1125,7 @@ impl<'a> Parser<'a> {
         }
         let kind =
             kind.ok_or_else(|| parse_error(line, format!("alias `{name}` names nothing")))?;
-        self.aliases.insert(name, Alias { kind, indices });
+        Rc::make_mut(&mut self.aliases).insert(name, Alias { kind, indices });
         Ok(())
     }
 
@@ -1131,7 +1139,7 @@ impl<'a> Parser<'a> {
         let Some(name) = source.register() else {
             return Ok((ast::RegisterKind::Qubit, self.qubits_of(source)?));
         };
-        let alias_kind = self.aliases.get(name).map(|alias| alias.kind);
+        let alias_kind = self.alias(name).map(|alias| alias.kind);
         if self.qregs.contains_key(name) || alias_kind == Some(ast::RegisterKind::Qubit) {
             return Ok((ast::RegisterKind::Qubit, self.qubits_of(source)?));
         }
@@ -1275,60 +1283,62 @@ impl<'a> Parser<'a> {
         block: &Block<'a>,
         top: bool,
     ) -> Result<()> {
-        for stmt in block {
-            match &stmt.kind {
-                StmtKind::RegisterDecl {
-                    kind: ast::RegisterKind::Classical,
-                    name: declared,
-                    ..
-                } if !(top && local == Some(*declared)) => {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!(
-                            "`bit {declared}` inside def `{name}`, which does not return it; \
-                             holding it would need a classical bit the program never declared"
-                        ),
-                        line: stmt.line,
-                    });
-                }
-                StmtKind::Measure(measure) => {
-                    let target = measure.target.register();
-                    if target.is_some() && target == local {
-                        continue;
+        with_stack(|| {
+            for stmt in block {
+                match &stmt.kind {
+                    StmtKind::RegisterDecl {
+                        kind: ast::RegisterKind::Classical,
+                        name: declared,
+                        ..
+                    } if !(top && local == Some(*declared)) => {
+                        return Err(PrismError::UnsupportedConstruct {
+                            construct: format!(
+                                "`bit {declared}` inside def `{name}`, which does not return it; \
+                                 holding it would need a classical bit the program never declared"
+                            ),
+                            line: stmt.line,
+                        });
                     }
-                    let construct = match target {
-                        Some(param) if is_bit_param(args, param) => format!(
-                            "measure into bit parameter `{param}` of def `{name}`, which is \
-                             passed by value"
-                        ),
-                        _ => format!(
-                            "measure into `{}` inside def `{name}`, which writes classical \
-                             bits only through its result",
-                            measure.target.describe()
-                        ),
-                    };
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct,
-                        line: stmt.line,
-                    });
-                }
-                StmtKind::If(conditional) => {
-                    Self::check_def_writes(name, args, local, &conditional.then_body, false)?;
-                    if let Some(body) = &conditional.else_body {
+                    StmtKind::Measure(measure) => {
+                        let target = measure.target.register();
+                        if target.is_some() && target == local {
+                            continue;
+                        }
+                        let construct = match target {
+                            Some(param) if is_bit_param(args, param) => format!(
+                                "measure into bit parameter `{param}` of def `{name}`, which is \
+                                 passed by value"
+                            ),
+                            _ => format!(
+                                "measure into `{}` inside def `{name}`, which writes classical \
+                                 bits only through its result",
+                                measure.target.describe()
+                            ),
+                        };
+                        return Err(PrismError::UnsupportedConstruct {
+                            construct,
+                            line: stmt.line,
+                        });
+                    }
+                    StmtKind::If(conditional) => {
+                        Self::check_def_writes(name, args, local, &conditional.then_body, false)?;
+                        if let Some(body) = &conditional.else_body {
+                            Self::check_def_writes(name, args, local, body, false)?;
+                        }
+                    }
+                    StmtKind::For { body, .. } | StmtKind::Box { body, .. } => {
                         Self::check_def_writes(name, args, local, body, false)?;
                     }
-                }
-                StmtKind::For { body, .. } | StmtKind::Box { body, .. } => {
-                    Self::check_def_writes(name, args, local, body, false)?;
-                }
-                StmtKind::Switch { arms, .. } => {
-                    for arm in arms {
-                        Self::check_def_writes(name, args, local, &arm.body, false)?;
+                    StmtKind::Switch { arms, .. } => {
+                        for arm in arms {
+                            Self::check_def_writes(name, args, local, &arm.body, false)?;
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     // ------------------------------------------------------------- operands
@@ -1382,7 +1392,7 @@ impl<'a> Parser<'a> {
         name: &str,
         operand: &Operand,
     ) -> Result<Option<SmallVec<[usize; 4]>>> {
-        let Some(alias) = self.aliases.get(name) else {
+        let Some(alias) = self.alias(name) else {
             return Ok(None);
         };
         if alias.kind != kind {
@@ -1861,7 +1871,7 @@ impl<'a> Parser<'a> {
             sub.phase_qubit = first;
         }
         for (&qubit_name, qubit) in def.qubits.iter().zip(call_qubits) {
-            sub.aliases.insert(
+            sub.params.insert(
                 qubit_name,
                 Alias {
                     kind: ast::RegisterKind::Qubit,
@@ -1946,6 +1956,16 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // The body takes its own copy of the caller's values and constants, and a
+        // bit parameter can unshare the register and alias tables, so the copies
+        // come out of the expansion budget like the work they stand for.
+        let copied = self.param_vars.as_ref().map_or(0, HashMap::len)
+            + self.durations.len()
+            + self.classical.len()
+            + self.arrays.len()
+            + self.aliases.len()
+            + self.cregs.len();
+        self.charge(copied, line)?;
         let mut bindings: HashMap<&'a str, f64> = self.param_vars.clone().unwrap_or_default();
         let mut durations = self.durations.clone();
         let mut qubit_bindings: Vec<(&'a str, usize)> = Vec::new();
@@ -2148,7 +2168,13 @@ impl<'a> Parser<'a> {
         // The body runs in a parser of its own, so a write it made to an outer
         // variable would be dropped on return; only the constants it may read
         // stay declared, and a write to anything else is rejected.
-        sub.classical.retain(|_, decl| decl.constant);
+        sub.classical = Rc::new(
+            self.classical
+                .iter()
+                .filter(|(_, decl)| decl.constant)
+                .map(|(name, decl)| (*name, decl.clone()))
+                .collect(),
+        );
         sub.durations = durations;
         // A def sees the global constants and nothing else it does not take as
         // an argument, so only a `const` array reaches its body.
@@ -2156,10 +2182,10 @@ impl<'a> Parser<'a> {
             .arrays
             .iter()
             .filter(|(_, array)| array.constant)
-            .map(|(name, array)| (*name, array.clone()))
+            .map(|(name, array)| (*name, Rc::clone(array)))
             .collect();
         for (param_name, qubit) in qubit_bindings {
-            sub.aliases.insert(
+            sub.params.insert(
                 param_name,
                 Alias {
                     kind: ast::RegisterKind::Qubit,
@@ -2184,8 +2210,11 @@ impl<'a> Parser<'a> {
         let contiguous = bits.windows(2).all(|pair| pair[1] == pair[0] + 1);
         match bits.first() {
             Some(&offset) if contiguous => {
-                self.aliases.remove(name);
-                self.cregs.insert(
+                self.params.remove(name);
+                if self.aliases.contains_key(name) {
+                    Rc::make_mut(&mut self.aliases).remove(name);
+                }
+                Rc::make_mut(&mut self.cregs).insert(
                     name,
                     Register {
                         offset,
@@ -2194,7 +2223,7 @@ impl<'a> Parser<'a> {
                 );
             }
             _ => {
-                self.aliases.insert(
+                self.params.insert(
                     name,
                     Alias {
                         kind: ast::RegisterKind::Classical,
@@ -2208,11 +2237,11 @@ impl<'a> Parser<'a> {
     /// A parser for an expanded body: the enclosing registers and definitions,
     /// one level deeper, with its own bindings.
     fn expansion_parser(&self, bindings: HashMap<&'a str, f64>) -> Parser<'a> {
-        let mut sub = Parser {
+        Parser {
             dialect: self.dialect,
             input: "",
-            qregs: HashMap::new(),
-            cregs: HashMap::new(),
+            qregs: Rc::clone(&self.qregs),
+            cregs: Rc::clone(&self.cregs),
             gate_defs: Rc::clone(&self.gate_defs),
             def_defs: Rc::clone(&self.def_defs),
             total_qubits: self.total_qubits,
@@ -2231,44 +2260,18 @@ impl<'a> Parser<'a> {
             pending_noise: None,
             verbatim_pending: false,
             physical: self.physical,
-            aliases: HashMap::new(),
-            classical: self.classical_copy(),
+            aliases: Rc::clone(&self.aliases),
+            params: self.params.clone(),
+            classical: Rc::clone(&self.classical),
             durations: HashMap::new(),
             arrays: HashMap::new(),
+            declared: Vec::new(),
             def_result: None,
             guard: None,
             dynamic: None,
             expansion_left: Rc::clone(&self.expansion_left),
             phase_qubit: self.phase_qubit,
-        };
-        for (name, register) in &self.qregs {
-            sub.qregs.insert(
-                *name,
-                Register {
-                    offset: register.offset,
-                    size: register.size,
-                },
-            );
         }
-        for (name, register) in &self.cregs {
-            sub.cregs.insert(
-                *name,
-                Register {
-                    offset: register.offset,
-                    size: register.size,
-                },
-            );
-        }
-        for (name, alias) in &self.aliases {
-            sub.aliases.insert(
-                *name,
-                Alias {
-                    kind: alias.kind,
-                    indices: alias.indices.clone(),
-                },
-            );
-        }
-        sub
     }
 
     // ------------------------------------------------------------ control flow
@@ -2310,37 +2313,27 @@ impl<'a> Parser<'a> {
         let was_nested = std::mem::replace(&mut self.nested, true);
         let result = self.execute(body);
         self.nested = was_nested;
-        self.close_scope(&scope);
+        self.close_scope(scope);
         result
     }
 
-    /// The classical and array names in scope, for [`Parser::close_scope`].
-    pub(super) fn open_scope(&self) -> Scope<'a> {
-        (
-            self.classical.keys().copied().collect(),
-            self.arrays.keys().copied().collect(),
-        )
+    /// The point to hand [`Parser::close_scope`] when the scope ends.
+    pub(super) fn open_scope(&self) -> usize {
+        self.declared.len()
     }
 
     /// Drop the names declared since `scope` was opened. Names declared before
     /// it keep whatever the body wrote to them.
-    pub(super) fn close_scope(&mut self, scope: &Scope<'a>) {
-        let (classical, arrays) = scope;
-        let declared: Vec<&'a str> = self
-            .classical
-            .keys()
-            .copied()
-            .filter(|name| !classical.contains(name))
-            .collect();
-        for name in declared {
+    pub(super) fn close_scope(&mut self, scope: usize) {
+        for name in self.declared.split_off(scope) {
             self.forget_runtime(name);
-            self.classical.remove(name);
+            Rc::make_mut(&mut self.classical).remove(name);
             self.durations.remove(name);
+            self.arrays.remove(name);
             if let Some(values) = self.param_vars.as_mut() {
                 values.remove(name);
             }
         }
-        self.arrays.retain(|name, _| arrays.contains(name));
     }
 
     /// Run a guarded block one nesting level down, in a scope of its own.
@@ -2351,23 +2344,24 @@ impl<'a> Parser<'a> {
     pub(super) fn region(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
         self.enter_region_depth(block)?;
         let scope = self.open_scope();
-        let outer_guard = self.guard.replace(scope.clone());
+        let outer_guard = self.guard.replace(scope);
         let was_nested = std::mem::replace(&mut self.nested, true);
         self.enter_collecting();
         let body = self.execute(block);
         self.leave_collecting();
         self.nested = was_nested;
         self.guard = outer_guard;
-        self.close_scope(&scope);
+        self.close_scope(scope);
         self.region_depth -= 1;
         body
     }
 
     fn reject_guarded_write(&self, name: &str, line: usize) -> Result<()> {
-        let Some((classical, arrays)) = &self.guard else {
+        let Some(guard) = self.guard else {
             return Ok(());
         };
-        if classical.contains(&name) || arrays.contains(&name) {
+        let outer = self.classical.contains_key(name) || self.arrays.contains_key(name);
+        if outer && !self.declared[guard..].contains(&name) {
             return Err(PrismError::UnsupportedConstruct {
                 construct: format!(
                     "a write to `{name}` under a runtime `if` or `switch`; the variable is \
@@ -2431,7 +2425,7 @@ impl<'a> Parser<'a> {
             let was_nested = std::mem::replace(&mut self.nested, true);
             let produced = self.execute(body);
             self.nested = was_nested;
-            self.close_scope(&scope);
+            self.close_scope(scope);
             match produced {
                 Ok(produced) => out.extend(produced),
                 Err(error) => {
@@ -2584,7 +2578,7 @@ impl<'a> Parser<'a> {
                 name: operand.describe(),
                 line: operand.line,
             })?;
-        if let Some(alias) = self.aliases.get(name) {
+        if let Some(alias) = self.alias(name) {
             return match alias.indices.as_slice() {
                 [single] => Ok((*single, 1)),
                 _ => Err(parse_error(

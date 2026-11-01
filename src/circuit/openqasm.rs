@@ -114,6 +114,7 @@ use super::braket::{self, NoiseSpec, ResultSpec};
 use crate::circuit::dynamic::{ClassicalType as RuntimeType, ClassicalValue};
 use crate::circuit::qasm::ast::{self, DefParam};
 use crate::circuit::qasm::expr::Timed;
+use crate::circuit::qasm::stream::with_stack;
 use crate::circuit::synthesis;
 use crate::circuit::{
     Circuit, ClassicalCondition, Instruction, MAX_REGION_DEPTH, ParamLink, Parameters, SmallVec,
@@ -217,7 +218,7 @@ pub fn parse_parametric(input: &str) -> Result<(Circuit, Parameters)> {
 ///
 /// Same conditions as [`parse_parametric`].
 pub fn parse_parametric_with(input: &str, dialect: Dialect) -> Result<(Circuit, Parameters)> {
-    Parser::new_with(input, dialect).parse()
+    with_stack(|| Parser::new_with(input, dialect).parse())
 }
 
 /// A Braket program: the circuit, its free parameters, and everything the
@@ -246,8 +247,8 @@ pub struct BraketProgram {
 /// Same conditions as [`parse_parametric`], plus a malformed pragma and a
 /// noise pragma with no preceding instruction to follow.
 pub fn parse_braket(input: &str) -> Result<BraketProgram> {
-    let mut parser = Parser::new_with(input, Dialect::Braket);
-    let (circuit, parameters, results, noise) = parser.parse_program()?;
+    let (circuit, parameters, results, noise) =
+        with_stack(|| Parser::new_with(input, Dialect::Braket).parse_program())?;
     Ok(BraketProgram {
         circuit,
         parameters,
@@ -278,6 +279,7 @@ impl Modifier {
     }
 }
 
+#[derive(Clone)]
 struct Register {
     offset: usize,
     size: usize,
@@ -307,6 +309,7 @@ struct DefResult<'a> {
 }
 
 /// A `let` alias: the qubits or bits it names, in the order it named them.
+#[derive(Clone)]
 struct Alias {
     kind: ast::RegisterKind,
     indices: Vec<usize>,
@@ -335,6 +338,7 @@ impl ClassicalType {
     }
 }
 
+#[derive(Clone)]
 struct ClassicalDecl {
     ty: ClassicalType,
     constant: bool,
@@ -373,8 +377,9 @@ fn invalid_index(kind: ast::RegisterKind, index: usize, register_size: usize) ->
 
 pub(crate) struct Parser<'a> {
     input: &'a str,
-    qregs: HashMap<&'a str, Register>,
-    cregs: HashMap<&'a str, Register>,
+    /// Shared with the expansion parsers below this one, like `gate_defs`.
+    qregs: Rc<HashMap<&'a str, Register>>,
+    cregs: Rc<HashMap<&'a str, Register>>,
     /// Shared with every expansion parser below this one; a definition
     /// statement copies the map only while an expansion still holds it.
     gate_defs: Rc<HashMap<&'a str, GateDefinition<'a>>>,
@@ -411,19 +416,25 @@ pub(crate) struct Parser<'a> {
     /// The program names physical qubits (`$0`) instead of declaring registers.
     physical: bool,
     /// `let` aliases by name; the values live beside the registers they index.
-    aliases: HashMap<&'a str, Alias>,
+    aliases: Rc<HashMap<&'a str, Alias>>,
+    /// Qubit and bit parameters bound for the body being expanded, read before
+    /// `aliases`, so a call binds them without copying the shared table.
+    params: HashMap<&'a str, Alias>,
     /// Declared classical variables. The values sit in `param_vars`, which is
     /// where every expression already reads them, or in `durations`.
-    classical: HashMap<&'a str, ClassicalDecl>,
+    classical: Rc<HashMap<&'a str, ClassicalDecl>>,
     /// `duration` and `stretch` values, which no numeric expression reads
     /// directly.
     durations: HashMap<&'a str, Timed>,
-    arrays: HashMap<&'a str, ClassicalArray>,
+    arrays: HashMap<&'a str, Rc<ClassicalArray>>,
+    /// Names added to `classical` and `arrays`, oldest first. A scope opens at a
+    /// length of this log and closes by dropping the names past it.
+    declared: Vec<&'a str>,
     /// The `def` body being expanded; `None` outside one.
     def_result: Option<DefResult<'a>>,
-    /// The classical and array names in scope where the innermost runtime
-    /// guard opened, none of which its body may write; `None` outside a guard.
-    guard: Option<Scope<'a>>,
+    /// Length of `declared` where the innermost runtime guard opened. Its body
+    /// may write only the names declared past it; `None` outside a guard.
+    guard: Option<usize>,
     /// Lowering into a control-flow graph, for [`parse_dynamic`]; `None` for
     /// every other entry point.
     dynamic: Option<Box<dynamic::DynamicState<'a>>>,
@@ -435,9 +446,6 @@ pub(crate) struct Parser<'a> {
     /// lands on the carrier.
     phase_qubit: usize,
 }
-
-/// Classical and array names in scope at some point, classical first.
-type Scope<'a> = (Vec<&'a str>, Vec<&'a str>);
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
 
@@ -519,8 +527,8 @@ impl<'a> Parser<'a> {
         Self {
             dialect,
             input,
-            qregs: HashMap::new(),
-            cregs: HashMap::new(),
+            qregs: Rc::default(),
+            cregs: Rc::default(),
             gate_defs: Rc::default(),
             def_defs: Rc::default(),
             total_qubits: 0,
@@ -539,10 +547,12 @@ impl<'a> Parser<'a> {
             pending_noise: None,
             verbatim_pending: false,
             physical: false,
-            aliases: HashMap::new(),
-            classical: HashMap::new(),
+            aliases: Rc::default(),
+            params: HashMap::new(),
+            classical: Rc::default(),
             durations: HashMap::new(),
             arrays: HashMap::new(),
+            declared: Vec::new(),
             def_result: None,
             guard: None,
             dynamic: None,
@@ -574,15 +584,22 @@ impl<'a> Parser<'a> {
         Ok(Some(model))
     }
 
+    fn alias(&self, name: &str) -> Option<&Alias> {
+        self.params.get(name).or_else(|| self.aliases.get(name))
+    }
+
     fn bind_classical(&mut self, name: &'a str, ty: ClassicalType, value: f64, constant: bool) {
-        self.classical.insert(
-            name,
-            ClassicalDecl {
-                ty,
-                constant,
-                int: 0,
-            },
-        );
+        let decl = ClassicalDecl {
+            ty,
+            constant,
+            int: 0,
+        };
+        if Rc::make_mut(&mut self.classical)
+            .insert(name, decl)
+            .is_none()
+        {
+            self.declared.push(name);
+        }
         self.param_vars
             .get_or_insert_with(HashMap::new)
             .insert(name, value);
@@ -591,14 +608,17 @@ impl<'a> Parser<'a> {
     /// Bind an integer variable, wrapped to `integer`'s width as a runtime one is.
     fn bind_int(&mut self, name: &'a str, integer: RuntimeType, value: i128, constant: bool) {
         let int = integer.store(ClassicalValue::Int(value)).to_int();
-        self.classical.insert(
-            name,
-            ClassicalDecl {
-                ty: ClassicalType::Int(integer),
-                constant,
-                int,
-            },
-        );
+        let decl = ClassicalDecl {
+            ty: ClassicalType::Int(integer),
+            constant,
+            int,
+        };
+        if Rc::make_mut(&mut self.classical)
+            .insert(name, decl)
+            .is_none()
+        {
+            self.declared.push(name);
+        }
         self.param_vars
             .get_or_insert_with(HashMap::new)
             .insert(name, int as f64);
@@ -620,7 +640,7 @@ impl<'a> Parser<'a> {
             "a classical variable"
         } else if self.arrays.contains_key(name) {
             "an array"
-        } else if self.aliases.contains_key(name) {
+        } else if self.alias(name).is_some() {
             "an alias"
         } else if self.qregs.contains_key(name) || self.cregs.contains_key(name) {
             "a register"
@@ -956,22 +976,6 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(broadcast_len)
-    }
-
-    fn classical_copy(&self) -> HashMap<&'a str, ClassicalDecl> {
-        self.classical
-            .iter()
-            .map(|(name, decl)| {
-                (
-                    *name,
-                    ClassicalDecl {
-                        ty: decl.ty,
-                        constant: decl.constant,
-                        int: decl.int,
-                    },
-                )
-            })
-            .collect()
     }
 
     /// Accept the OpenQASM versions this parser implements, and name the one it

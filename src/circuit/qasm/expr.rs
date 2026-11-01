@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use super::lexer::{Kind, TIME_UNITS};
-use super::stream::{MAX_NESTING, Stream};
+use super::stream::{MAX_NESTING, Stream, with_stack};
 use crate::error::{PrismError, Result};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -137,25 +137,25 @@ impl<'a> Expr<'a> {
     /// True when the expression reads `name`, which decides whether it depends
     /// on an `input` slot.
     pub(crate) fn mentions(&self, name: &str) -> bool {
-        match self {
+        with_stack(|| match self {
             Expr::Number(_) | Expr::Duration(_) => false,
             Expr::Ident(ident) => *ident == name,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.mentions(name),
             Expr::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
             Expr::Call(call) => call.args.iter().any(|arg| arg.mentions(name)),
             Expr::Element(element) => element.indices.iter().any(|index| index.mentions(name)),
-        }
+        })
     }
 
     /// True when the expression reads an array element.
     pub(crate) fn reads_element(&self) -> bool {
-        match self {
+        with_stack(|| match self {
             Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) => false,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.reads_element(),
             Expr::Binary { left, right, .. } => left.reads_element() || right.reads_element(),
             Expr::Call(call) => call.args.iter().any(Expr::reads_element),
             Expr::Element(_) => true,
-        }
+        })
     }
 
     /// The identifier this expression is, when it is exactly one and nothing
@@ -549,7 +549,7 @@ pub(crate) fn eval(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) 
 }
 
 fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
-    match expr {
+    with_stack(|| match expr {
         Expr::Number(value) => Ok(*value),
         Expr::Duration(_) => Err(PrismError::Parse {
             line,
@@ -576,7 +576,7 @@ fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Resu
                 .collect::<Result<Vec<_>>>()?;
             apply(call.name, &values, line)
         }
-    }
+    })
 }
 
 fn arithmetic(op: BinaryOp, left: f64, right: f64, line: usize) -> Result<f64> {
@@ -627,7 +627,7 @@ fn integral(op: &str, value: f64, line: usize) -> Result<i64> {
 
 /// True when the expression reads a duration: a literal, or a name `times` holds.
 pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
-    match expr {
+    with_stack(|| match expr {
         Expr::Number(_) => false,
         Expr::Duration(_) => true,
         Expr::Ident(name) => times.contains_key(name),
@@ -635,7 +635,7 @@ pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
         Expr::Binary { left, right, .. } => is_timed(left, times) || is_timed(right, times),
         Expr::Call(call) => call.args.iter().any(|arg| is_timed(arg, times)),
         Expr::Element(element) => element.indices.iter().any(|index| is_timed(index, times)),
-    }
+    })
 }
 
 /// Fold an expression that may read durations, resolving the duration and

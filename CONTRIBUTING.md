@@ -86,9 +86,12 @@ missing device fails the run.
 
 ```bash
 # requires: rustup component add llvm-tools-preview && cargo install cargo-llvm-cov
-cargo llvm-cov --all-features                     # terminal summary
-cargo llvm-cov --all-features --html --open       # browseable HTML report
+cargo llvm-cov nextest --features parallel                 # terminal summary, as CI measures it
+cargo llvm-cov nextest --features parallel --html --open   # browseable HTML report
 ```
+
+CI measures coverage at `--features parallel`. `--all-features` adds the MPI transport
+and needs a system MPI installation and libclang, as described above.
 
 ## Fuzzing
 

@@ -27,7 +27,7 @@ count, compiler and crate version of that run.
 | Family | Generator | Circuit | Sizes |
 |--------|-----------|---------|-------|
 | GHZ | `ghz_circuit(n)` | H on qubit 0, then a CX chain | 24, 28, 256, 1024, 4096 |
-| QFT | `qft_circuit(n)` | Textbook quantum Fourier transform; the generator emits one `QftBlock`, which the CPU statevector runs as its FFT path and other backends expand | 16, 20, 24, 26, 28 |
+| QFT | `qft_circuit(n)` | Textbook quantum Fourier transform; the generator emits one `QftBlock`, which the CPU and GPU statevectors run as an FFT and other backends expand | 16, 20, 24, 26, 28 |
 | HEA | `hardware_efficient_ansatz(n, 5, seed)` | 5 layers of random Ry and Rz on every qubit followed by a linear CX chain | 16, 20, 24, 26, 28 |
 | QV | `quantum_volume_circuit(n, n, seed)` | `n` layers, each a random pairing of qubits with a random SU(4) on each pair, decomposed into CX and single-qubit rotations | 16, 20, 24 |
 

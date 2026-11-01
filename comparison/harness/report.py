@@ -35,6 +35,30 @@ def _fmt_ratio(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}x"
 
 
+# First PRISM-Q release that runs a QFT arriving as gates on its block FFT path.
+QFT_RECOGNITION_VERSION = (0, 35, 0)
+
+
+def _version(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("-")[0].split(".")[:3] if part.isdigit())
+
+
+def _qft_note(prismq_version: str | None) -> str:
+    sequence = "The QFT rows hand every simulator the same expanded textbook sequence. "
+    if prismq_version and _version(prismq_version) < QFT_RECOGNITION_VERSION:
+        return sequence + (
+            f"PRISM-Q {prismq_version}, which produced these numbers, ran it gate by gate. "
+            "From 0.35.0 it recognizes the exact QFT in that gate list and runs it on its "
+            "block FFT path, as it would a QFT parsed from OpenQASM, so these QFT rows "
+            "predate that path."
+        )
+    return sequence + (
+        "PRISM-Q recognizes the exact QFT in that gate list and runs it on its block FFT "
+        "path, as it would a QFT parsed from OpenQASM; `PRISM_NO_QFT_BLOCK` turns the "
+        "recognition off."
+    )
+
+
 def _timing(row: dict[str, Any], name: str) -> float | None:
     entry = row["timings"].get(name)
     if not entry or "median_ms" not in entry:
@@ -162,9 +186,7 @@ def render(results: dict[str, Any]) -> str:
         "routes it to its stabilizer backend, so that row compares two tableau simulations "
         "plus the dense read-out rather than two statevector runs. The GHZ rows at every "
         "size are dominated by materializing the `2^n` probability vector, not by the gates. "
-        "The QFT rows hand every simulator the same expanded textbook sequence. PRISM-Q "
-        "recognizes the exact QFT in that gate list and runs it on its block FFT path, as it "
-        "would a QFT parsed from OpenQASM; `PRISM_NO_QFT_BLOCK` turns the recognition off."
+        + _qft_note(adapters.get("prismq", {}).get("version"))
     )
     lines.append("")
 

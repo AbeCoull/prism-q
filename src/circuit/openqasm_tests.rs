@@ -1527,20 +1527,18 @@ fn test_recursive_gate_def_rejected() {
 }
 
 #[test]
-fn test_empty_gate_body() {
+fn test_empty_gate_body_is_the_identity() {
     let qasm = r#"
         OPENQASM 3.0;
-        qubit[1] q;
+        qubit[2] q;
         gate noop a { }
         noop q[0];
+        inv @ noop q[0];
+        ctrl @ noop q[0], q[1];
+        x q[1];
     "#;
-    let err = parse(qasm);
-    assert!(err.is_err(), "empty gate body should be rejected");
-    let msg = format!("{}", err.unwrap_err());
-    assert!(
-        msg.contains("empty body"),
-        "error should mention empty body: {msg}"
-    );
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.instructions.len(), 1, "{:?}", c.instructions);
 }
 
 #[test]
@@ -2920,11 +2918,25 @@ fn test_physical_scan_skips_string_literals() {
 // A `defcal` names a calibration target rather than a program qubit, and is
 // rejected by name rather than by the register it would otherwise size.
 #[test]
-fn test_defcal_is_rejected_by_name() {
-    let qasm = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ndefcal x $0 { }";
+fn test_a_calibration_leaves_its_gate_meaning_alone() {
+    let qasm = "OPENQASM 3.0;\ndefcalgrammar \"openpulse\";\ncal { extern port d0; }\n\
+                defcal x $0 { play(d0, gaussian(...)); }\nqubit[1] q;\nx q[0];";
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.instructions.len(), 1);
+    assert!(matches!(
+        &c.instructions[0],
+        Instruction::Gate { gate: Gate::X, .. }
+    ));
+}
+
+// A defcal says how to pulse a gate, not what the gate is, so a name only a
+// defcal introduces has no unitary to run.
+#[test]
+fn test_a_gate_only_a_defcal_names_is_declined_at_the_call() {
+    let qasm = "OPENQASM 3.0;\ndefcal flux $0 { }\nqubit[1] q;\nflux q[0];";
     let err = parse(qasm).unwrap_err();
     assert!(
-        matches!(&err, PrismError::UnsupportedConstruct { construct, .. } if construct == "defcal"),
+        matches!(&err, PrismError::UnsupportedConstruct { construct, .. } if construct == "flux"),
         "got {err}"
     );
 }
@@ -2960,13 +2972,10 @@ fn test_control_and_target_must_differ() {
 // A `defcal` body carries physical qubits too, and skipping only its first
 // line would size the register off the rest of it.
 #[test]
-fn test_physical_scan_skips_a_defcal_body() {
+fn test_physical_scan_skips_a_defcal() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ndefcal x $0 {\n  shift_phase($1, 0.5);\n}";
-    let err = parse(qasm).unwrap_err();
-    assert!(
-        matches!(&err, PrismError::UnsupportedConstruct { construct, .. } if construct == "defcal"),
-        "got {err}"
-    );
+    let c = parse(qasm).unwrap();
+    assert_eq!((c.num_qubits, c.instructions.len()), (2, 1));
 }
 
 // A quote inside a line comment must not open a string that swallows a later
@@ -3043,7 +3052,10 @@ fn a_gate_parameter_shadows_a_register_of_the_same_name() {
 #[test]
 fn a_subscript_reads_back_into_its_diagnostic() {
     for (source, wanted) in [
-        ("qubit[4] q;\nh q[-1];\n", "negative index in `q[-1]`"),
+        (
+            "qubit[4] q;\nh q[-5];\n",
+            "index -5 in `q[-5]` is before its start",
+        ),
         (
             "qubit[4] q;\nh q[0:0:3];\n",
             "range step in `q[0:0:3]` must be non-zero",
@@ -3414,4 +3426,161 @@ fn built_in_names_cannot_be_redeclared_at_the_top_level() {
             .to_string();
         assert!(err.contains("built-in"), "{decl}: {err}");
     }
+}
+
+fn same_instructions(a: &str, b: &str) {
+    let (left, right) = (parse(a).unwrap(), parse(b).unwrap());
+    assert_eq!(
+        format!("{:?}", left.instructions),
+        format!("{:?}", right.instructions),
+        "`{a}` against `{b}`"
+    );
+}
+
+#[test]
+fn a_negative_index_counts_from_the_end() {
+    let head = "OPENQASM 3.0;\nqubit[4] q;\n";
+    same_instructions(&format!("{head}x q[-1];"), &format!("{head}x q[3];"));
+    same_instructions(&format!("{head}h q[1:-1];"), &format!("{head}h q[1:3];"));
+    same_instructions(
+        &format!("{head}h q[{{-1, 0}}];"),
+        &format!("{head}h q[3];\nh q[0];"),
+    );
+    same_instructions(
+        &format!("{head}const array[int, 3] a = {{0, 1, 2}};\nx q[a[-1]];"),
+        &format!("{head}x q[2];"),
+    );
+}
+
+#[test]
+fn a_counted_control_is_that_many_controls() {
+    let head = "OPENQASM 3.0;\nqubit[4] q;\n";
+    same_instructions(
+        &format!("{head}ctrl(2) @ x q[0], q[1], q[2];"),
+        &format!("{head}ctrl @ ctrl @ x q[0], q[1], q[2];"),
+    );
+    same_instructions(
+        &format!("{head}const int n = 2;\nnegctrl(n) @ ctrl @ x q[0], q[1], q[2], q[3];"),
+        &format!("{head}negctrl @ negctrl @ ctrl @ x q[0], q[1], q[2], q[3];"),
+    );
+    same_instructions(
+        &format!("{head}ctrl(1) @ x q[0], q[1];"),
+        &format!("{head}cx q[0], q[1];"),
+    );
+}
+
+#[test]
+fn a_control_count_must_be_positive_and_carryable() {
+    let head = "OPENQASM 3.0;\nqubit[2] q;\n";
+    let zero = parse(&format!("{head}ctrl(0) @ x q[0];")).unwrap_err();
+    assert!(
+        matches!(zero, PrismError::Parse { .. }) && zero.to_string().contains("positive"),
+        "{zero}"
+    );
+    for chain in [
+        "ctrl(300) @ x q[0], q[1];",
+        "ctrl(200) @ negctrl(56) @ x q[0];",
+    ] {
+        let wide = parse(&format!("{head}{chain}")).unwrap_err();
+        assert!(
+            matches!(&wide, PrismError::UnsupportedConstruct { construct, .. }
+                if construct.contains("past 255 controls")),
+            "{chain}: {wide}"
+        );
+    }
+}
+
+#[test]
+fn nop_names_its_qubits_and_does_nothing() {
+    let c = parse("OPENQASM 3.0;\nqubit[2] q;\nnop q[0], q[1];\nnop;\nx q[0];").unwrap();
+    assert_eq!(c.instructions.len(), 1);
+    let err = parse("OPENQASM 3.0;\nqubit[2] q;\nnop r;").unwrap_err();
+    assert!(matches!(err, PrismError::UndefinedRegister { .. }), "{err}");
+}
+
+#[test]
+fn a_gate_length_designator_is_dropped() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[2] q;\nx[100ns] q[0];\nrx(0.5)[20dt] q[1];",
+        "OPENQASM 3.0;\nqubit[2] q;\nx q[0];\nrx(0.5) q[1];",
+    );
+}
+
+#[test]
+fn a_bit_declared_from_a_measurement_measures_into_it() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[2] q;\nh q;\nbit b = measure q[0];\nbit[2] c = measure q;",
+        "OPENQASM 3.0;\nqubit[2] q;\nh q;\nbit b;\nb = measure q[0];\nbit[2] c;\nc = measure q;",
+    );
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\n\
+         def mx(qubit a) -> bit { h a; bit r = measure a; return r; }\nc[0] = mx(q[0]);",
+        "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\nh q[0];\nc[0] = measure q[0];",
+    );
+}
+
+#[test]
+fn a_bit_initializer_of_zeros_is_the_cleared_register() {
+    for decl in [
+        "bit b = 0;",
+        "bit[4] b = \"0000\";",
+        "bit[4] b = \"00_00\";",
+        "bit[3] b = 0;",
+    ] {
+        let c = parse(&format!("OPENQASM 3.0;\n{decl}\nqubit[1] q;\nx q[0];"))
+            .unwrap_or_else(|e| panic!("{decl}: {e}"));
+        assert_eq!(c.instructions.len(), 1, "{decl}");
+    }
+}
+
+#[test]
+fn a_bit_initializer_with_a_set_bit_is_declined_by_name() {
+    for decl in ["bit[2] f = \"11\";", "bit b = 1;", "bit[3] f = 4;"] {
+        let err = parse(&format!("OPENQASM 3.0;\n{decl}")).unwrap_err();
+        assert!(
+            matches!(&err, PrismError::UnsupportedConstruct { construct, .. }
+                if construct.contains("classical write")),
+            "{decl}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_bit_string_must_match_its_register() {
+    for (decl, wanted) in [
+        ("bit[3] f = \"01\";", "has 2 bit(s)"),
+        ("bit[2] f = \"0a\";", "neither 0 nor 1"),
+    ] {
+        let err = parse(&format!("OPENQASM 3.0;\n{decl}")).unwrap_err();
+        assert!(
+            matches!(err, PrismError::Parse { .. }) && err.to_string().contains(wanted),
+            "{decl}: {err}"
+        );
+    }
+}
+
+#[test]
+fn unicode_names_declare_and_read_back() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit γ;\ngate rr(θ) a { rz(θ) a; }\nrr(π / 2) γ;",
+        "OPENQASM 3.0;\nqubit g;\nrz(pi / 2) g;",
+    );
+}
+
+#[test]
+fn an_annotation_is_skipped_where_a_statement_starts() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[2] q;\n@openqasm.reversible\ngate g a { h a; }\n\
+         @bind q[0] to a \"sensor\"\ng q[0];\ninv @h q[1];",
+        "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ninv @ h q[1];",
+    );
+}
+
+#[test]
+fn an_empty_def_is_a_call_that_does_nothing() {
+    let c =
+        parse("OPENQASM 3.0;\nqubit[1] q;\ndef idle(qubit a) { }\nidle(q[0]);\nx q[0];").unwrap();
+    assert_eq!(c.instructions.len(), 1);
+    let err = parse("OPENQASM 3.0;\nqubit[1] q;\ndef f(qubit a) -> bit { }").unwrap_err();
+    assert!(err.to_string().contains("body is empty"), "{err}");
 }

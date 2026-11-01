@@ -124,8 +124,20 @@ fn a_modifier_chain_reads_in_order() {
             modifiers, name, ..
         } => {
             assert_eq!(name, "x");
-            assert!(matches!(modifiers[0], Modifier::Ctrl { negated: false }));
-            assert!(matches!(modifiers[1], Modifier::Ctrl { negated: true }));
+            assert!(matches!(
+                modifiers[0],
+                Modifier::Ctrl {
+                    negated: false,
+                    count: None
+                }
+            ));
+            assert!(matches!(
+                modifiers[1],
+                Modifier::Ctrl {
+                    negated: true,
+                    count: None
+                }
+            ));
             assert!(matches!(modifiers[2], Modifier::Inv));
             assert!(matches!(modifiers[3], Modifier::Pow(_)));
         }
@@ -283,7 +295,7 @@ fn definitions_keep_their_signatures() {
 
 #[test]
 fn unimplemented_keywords_are_rejected_by_name() {
-    for keyword in ["defcal", "extern", "opaque", "while", "break"] {
+    for keyword in ["extern", "opaque", "while", "break"] {
         let source = format!("{keyword} x;");
         match error(&source) {
             PrismError::UnsupportedConstruct { construct, .. } => {

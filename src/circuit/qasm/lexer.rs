@@ -15,9 +15,12 @@ pub(crate) enum Kind {
     Str,
     /// `$0`, a hardware qubit. The token text is the digits.
     Physical,
-    /// A whole `#pragma` line, text included, which the pragma grammar reads
-    /// for itself.
+    /// A whole `#pragma` or `pragma` line, text included, which the pragma
+    /// grammar reads for itself.
     Pragma,
+    /// The braced body of a `cal` or `defcal`, written in a calibration grammar
+    /// this crate does not read. The token text is the content inside the braces.
+    Calibration,
     LParen,
     RParen,
     LBracket,
@@ -70,6 +73,7 @@ impl Kind {
             Kind::Str => "a string",
             Kind::Physical => "a physical qubit",
             Kind::Pragma => "a pragma",
+            Kind::Calibration => "a calibration block",
             Kind::LParen => "`(`",
             Kind::RParen => "`)`",
             Kind::LBracket => "`[`",
@@ -134,10 +138,6 @@ impl<'a> Token<'a> {
     }
 }
 
-/// The two Unicode constants the expression language accepts beside their
-/// ASCII names.
-const UNICODE_IDENTS: [&str; 2] = ["\u{3c0}", "\u{3c4}"];
-
 /// Time units a number may carry, written straight after its digits. `s` comes
 /// last so it never shadows a longer unit, and the micro sign has both of its
 /// Unicode spellings beside `us`.
@@ -149,12 +149,16 @@ struct Lexer<'a> {
     at: usize,
     line: usize,
     line_start: usize,
+    /// Set by a `cal` or `defcal` keyword, so the next `{` opens a calibration
+    /// block rather than a scope.
+    calibration_pending: bool,
 }
 
 /// Split `source` into tokens, ending with one [`Kind::Eof`].
 ///
-/// Comments and whitespace are dropped here, so nothing downstream rescans for
-/// them. A `#pragma` line survives whole, since the pragma grammar is its own.
+/// Comments, whitespace and annotations are dropped here, so nothing downstream
+/// rescans for them. A pragma line survives whole, since the pragma grammar is
+/// its own, and so does a calibration body.
 pub(crate) fn tokenize(source: &str) -> Result<Vec<Token<'_>>> {
     let mut lexer = Lexer {
         source,
@@ -162,6 +166,7 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token<'_>>> {
         at: 0,
         line: 1,
         line_start: 0,
+        calibration_pending: false,
     };
     // Dense gate lists run near one token per 1.5 bytes (`cx q[0], q[1];`), so
     // half the byte count leaves one doubling at most on any real program.
@@ -172,8 +177,40 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token<'_>>> {
             out.push(lexer.token(Kind::Eof, lexer.at, lexer.at));
             return Ok(out);
         }
-        out.push(lexer.next_token()?);
+        match lexer.bytes[lexer.at] {
+            // An annotation is an `@` glued to a name where a statement starts,
+            // which a modifier's `@` never is. It runs to the end of its line
+            // and carries nothing an ideal simulation acts on.
+            b'@' if statement_starts(&out) && lexer.ident_starts(lexer.at + 1) => {
+                lexer.skip_line();
+                continue;
+            }
+            b'{' if lexer.calibration_pending => {
+                lexer.calibration_pending = false;
+                out.push(lexer.calibration_block()?);
+                continue;
+            }
+            _ => {}
+        }
+        let token = lexer.next_token()?;
+        if token.kind == Kind::Ident
+            && matches!(token.text, "cal" | "defcal")
+            && statement_starts(&out)
+        {
+            lexer.calibration_pending = true;
+        }
+        out.push(token);
     }
+}
+
+/// True when the next token opens a statement.
+fn statement_starts(out: &[Token]) -> bool {
+    out.last().is_none_or(|token| {
+        matches!(
+            token.kind,
+            Kind::Semicolon | Kind::LBrace | Kind::RBrace | Kind::Pragma | Kind::Calibration
+        )
+    })
 }
 
 impl<'a> Lexer<'a> {
@@ -274,10 +311,7 @@ impl<'a> Lexer<'a> {
         }
 
         if byte.is_ascii_alphabetic() || byte == b'_' {
-            while self.at < self.bytes.len() && is_ident_byte(self.bytes[self.at]) {
-                self.at += 1;
-            }
-            return Ok(self.token(Kind::Ident, start, self.at));
+            return Ok(self.ident(start));
         }
 
         if byte.is_ascii_digit() || (byte == b'.' && self.peek_digit(1)) {
@@ -337,17 +371,104 @@ impl<'a> Lexer<'a> {
         Ok(self.token(kind, start, self.at))
     }
 
-    /// `pi` and `tau` written as themselves, the only non-ASCII this grammar
-    /// accepts.
+    /// A name that opens with a non-ASCII letter, `θ` or `π`.
     fn unicode_ident(&mut self, start: usize) -> Result<Token<'a>> {
-        for name in UNICODE_IDENTS {
-            if self.source[start..].starts_with(name) {
-                self.at += name.len();
-                return Ok(self.token(Kind::Ident, start, self.at));
+        let character = self.source[start..].chars().next().unwrap_or('?');
+        if !character.is_alphabetic() {
+            return Err(self.error(start, format!("unexpected character `{character}`")));
+        }
+        Ok(self.ident(start))
+    }
+
+    /// A name: letters, digits and `_`, where a letter may be any alphabetic
+    /// Unicode character. `pragma` takes the rest of its line with it.
+    fn ident(&mut self, start: usize) -> Token<'a> {
+        loop {
+            while self.at < self.bytes.len() && is_ident_byte(self.bytes[self.at]) {
+                self.at += 1;
+            }
+            if self.bytes.get(self.at).is_none_or(u8::is_ascii) {
+                break;
+            }
+            match self.source[self.at..].chars().next() {
+                Some(character) if character.is_alphabetic() => {
+                    self.at += character.len_utf8();
+                }
+                _ => break,
             }
         }
-        let character = self.source[start..].chars().next().unwrap_or('?');
-        Err(self.error(start, format!("unexpected character `{character}`")))
+        if &self.source[start..self.at] == "pragma" {
+            self.skip_line();
+            return self.token(Kind::Pragma, start, self.at);
+        }
+        self.token(Kind::Ident, start, self.at)
+    }
+
+    /// True when a name could open at byte `at`.
+    fn ident_starts(&self, at: usize) -> bool {
+        match self.bytes.get(at) {
+            Some(byte) if byte.is_ascii() => byte.is_ascii_alphabetic() || *byte == b'_',
+            Some(_) => self.source[at..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphabetic),
+            None => false,
+        }
+    }
+
+    fn skip_line(&mut self) {
+        while self.at < self.bytes.len() && self.bytes[self.at] != b'\n' {
+            self.at += 1;
+        }
+    }
+
+    /// The braces of a `cal` or `defcal` body and everything between them, read
+    /// as opaque text. Nested braces balance, and a string or comment may hold
+    /// either brace without closing the block.
+    fn calibration_block(&mut self) -> Result<Token<'a>> {
+        let open = self.at;
+        let opened = self.line;
+        let column = (open - self.line_start + 1) as u32;
+        self.at += 1;
+        let mut depth = 1usize;
+        while depth > 0 {
+            let Some(&byte) = self.bytes.get(self.at) else {
+                return Err(PrismError::Parse {
+                    line: opened,
+                    message: "unterminated calibration block".into(),
+                });
+            };
+            match byte {
+                b'\n' => {
+                    self.newline();
+                    continue;
+                }
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                b'"' => {
+                    self.at += 1;
+                    while self.bytes.get(self.at).is_some_and(|byte| *byte != b'"') {
+                        if self.bytes[self.at] == b'\n' {
+                            self.newline();
+                        } else {
+                            self.at += 1;
+                        }
+                    }
+                }
+                b'/' if matches!(self.bytes.get(self.at + 1), Some(b'/' | b'*')) => {
+                    self.skip_trivia()?;
+                    continue;
+                }
+                _ => {}
+            }
+            self.at += 1;
+        }
+        Ok(Token {
+            kind: Kind::Calibration,
+            text: &self.source[open + 1..self.at - 1],
+            line: opened as u32,
+            column,
+        })
     }
 
     fn peek_digit(&self, ahead: usize) -> bool {

@@ -175,3 +175,53 @@ fn malformed_input_is_rejected_with_its_line() {
         }
     }
 }
+
+#[test]
+fn a_name_may_open_with_any_letter() {
+    assert_eq!(texts("θ_1 γ πx a_é"), ["θ_1", "γ", "πx", "a_é"]);
+    assert!(tokenize("x → y").is_err());
+}
+
+#[test]
+fn both_pragma_spellings_take_their_line() {
+    for source in ["#pragma a.b c\nx", "pragma a.b c\nx"] {
+        assert_eq!(kinds(source), [Kind::Pragma, Kind::Ident], "`{source}`");
+    }
+}
+
+// A modifier's `@` follows a name; only an `@` opening a statement starts an
+// annotation.
+#[test]
+fn only_a_statement_opening_at_is_an_annotation() {
+    assert_eq!(
+        kinds("@ns.tag rest of line\nx;"),
+        [Kind::Ident, Kind::Semicolon]
+    );
+    assert_eq!(
+        kinds("x; @tag\ny;"),
+        [Kind::Ident, Kind::Semicolon, Kind::Ident, Kind::Semicolon]
+    );
+    assert_eq!(kinds("inv @h"), [Kind::Ident, Kind::At, Kind::Ident]);
+}
+
+#[test]
+fn a_calibration_body_is_one_token() {
+    let source = "defcal x $0 { play(d, \"}\"); /* } */ // }\n { nested } }\nx;";
+    assert_eq!(
+        kinds(source),
+        [
+            Kind::Ident,
+            Kind::Ident,
+            Kind::Physical,
+            Kind::Calibration,
+            Kind::Ident,
+            Kind::Semicolon
+        ]
+    );
+    let tokens = tokenize(source).unwrap();
+    assert_eq!(tokens[4].line, 3, "lines inside the body still count");
+    assert_eq!(kinds("cal { ... }"), [Kind::Ident, Kind::Calibration]);
+    // Not at a statement start, `cal` is an ordinary name and `{` an ordinary brace.
+    assert_eq!(kinds("x cal {"), [Kind::Ident, Kind::Ident, Kind::LBrace]);
+    assert!(tokenize("cal { open").is_err());
+}

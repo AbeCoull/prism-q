@@ -28,6 +28,9 @@ pub(crate) enum StmtKind<'a> {
         kind: RegisterKind,
         name: &'a str,
         size: Option<Expr<'a>>,
+        /// `bit[2] c = "00";` or `bit c = 0;`. A `measure` initializer parses as
+        /// the declaration followed by the measurement instead.
+        init: Option<Box<BitInit<'a>>>,
     },
     InputDecl {
         ty: &'a str,
@@ -79,6 +82,10 @@ pub(crate) enum StmtKind<'a> {
     /// `delay[d] q;`. Empty targets mean every qubit.
     Delay {
         duration: Expr<'a>,
+        targets: Vec<Operand<'a>>,
+    },
+    /// `nop q;`, which names qubits and does nothing to them.
+    Nop {
         targets: Vec<Operand<'a>>,
     },
     If(Box<Conditional<'a>>),
@@ -175,6 +182,13 @@ pub(crate) enum ReturnValue<'a> {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) enum BitInit<'a> {
+    /// A bit-string literal, its characters as written with `_` separators.
+    Bits(&'a str),
+    Value(Expr<'a>),
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct Measure<'a> {
     pub source: Operand<'a>,
     pub target: Operand<'a>,
@@ -217,8 +231,10 @@ pub(crate) enum Modifier<'a> {
     /// `pow(k)`. Real, so a fractional power reaches the matrix path.
     Pow(Expr<'a>),
     /// `ctrl` and `negctrl`, which differ only in the control polarity.
+    /// `ctrl(n)` is `n` of them, so `count` is `None` for the bare form.
     Ctrl {
         negated: bool,
+        count: Option<Expr<'a>>,
     },
 }
 

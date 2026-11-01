@@ -286,15 +286,30 @@ fn pragmas_need_the_braket_dialect() {
 }
 
 #[test]
-fn an_unknown_pragma_is_named() {
+fn an_unknown_braket_pragma_is_named() {
     for body in [
         "h q[0];\n#pragma braket nonsense",
-        "h q[0];\n#pragma qiskit something",
+        "h q[0];\npragma braket nonsense",
     ] {
         assert!(
             matches!(parse_err(body), PrismError::UnsupportedConstruct { .. }),
             "`{body}`"
         );
+    }
+}
+
+// The language asks a pass to ignore a pragma it does not read, and every
+// namespace but `braket` is one this crate does not read.
+#[test]
+fn a_pragma_outside_the_braket_namespace_is_ignored() {
+    for body in [
+        "h q[0];\n#pragma qiskit something",
+        "h q[0];\npragma ibm.user alice account 12345678",
+        "h q[0];\npragma braketeer run",
+    ] {
+        let source = program(body);
+        let parsed = openqasm::parse_braket(&source).unwrap_or_else(|e| panic!("`{body}`: {e}"));
+        assert_eq!(parsed.circuit.instructions.len(), 1, "`{body}`");
     }
 }
 

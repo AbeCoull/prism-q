@@ -36,7 +36,7 @@ fn statevector_pauli_expectation(
     // ⟨ψ|P|ψ⟩ = Σ_{x,y} ψ*_x P_{x,y} ψ_y
     // For a Pauli string P = ⊗ P_i, the matrix element is non-zero
     // only when y differs from x by the X-bits of P, and the value
-    // is (-1)^(z_bits·x) · i^(num_y_factors).
+    // is (-1)^(z_bits·y) · i^(num_y_factors).
     let mut x_mask = 0usize;
     let mut z_mask = 0usize;
     let mut num_y = 0usize;
@@ -60,7 +60,7 @@ fn statevector_pauli_expectation(
     let mut sum = Complex64::new(0.0, 0.0);
     for x in 0..(1 << n) {
         let y = x ^ x_mask;
-        let sign = if (z_mask & x).count_ones() & 1 == 1 {
+        let sign = if (z_mask & y).count_ones() & 1 == 1 {
             -1.0
         } else {
             1.0
@@ -173,6 +173,35 @@ fn mps_pauli_expectation_mixed_xyz_matches_statevector() {
     ] {
         let mps_val = mps.pauli_expectation(&factors).unwrap();
         let sv_val = statevector_pauli_expectation(&c, &factors);
+        assert!(
+            (mps_val - sv_val).norm() < 1e-8,
+            "factors={factors:?}: mps={mps_val:?}, sv={sv_val:?}"
+        );
+    }
+}
+
+#[test]
+fn mps_pauli_expectation_odd_y_strings_match_statevector() {
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::S, &[0]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::T, &[1]);
+    let mps = run_mps(&c);
+
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    for (factors, expected) in [
+        (vec![(0usize, MpsPauliAxis::Y)], 1.0),
+        (vec![(1, MpsPauliAxis::Y)], h),
+        (vec![(0, MpsPauliAxis::Y), (1, MpsPauliAxis::X)], h),
+        (vec![(1, MpsPauliAxis::Y), (0, MpsPauliAxis::Y)], h),
+    ] {
+        let mps_val = mps.pauli_expectation(&factors).unwrap();
+        let sv_val = statevector_pauli_expectation(&c, &factors);
+        assert!(
+            (sv_val - Complex64::new(expected, 0.0)).norm() < 1e-10,
+            "factors={factors:?}: sv={sv_val:?}, expected {expected}"
+        );
         assert!(
             (mps_val - sv_val).norm() < 1e-8,
             "factors={factors:?}: mps={mps_val:?}, sv={sv_val:?}"

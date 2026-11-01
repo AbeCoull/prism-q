@@ -62,6 +62,14 @@ c[0] = measure q[0]; // OQ3 measurement
 OpenQASM 2.0 syntax also works: `qreg q[3];` / `creg c[3];` declarations and
 `measure q[0] -> c[0];` measurement.
 
+A `bit` declaration can take its value at once. `bit b = measure q[0];` measures
+into it, and `bit[2] f = "00";` or `bit b = 0;` spell out the cleared register it
+starts as anyway. An initializer with a set bit returns `UnsupportedConstruct`, since
+nothing in the instruction list writes a classical bit.
+
+A name may open with any Unicode letter, so `gate cphase(θ) a, b { ... }` and
+`qubit γ;` parse.
+
 A program declares at most 2^24 qubits and 2^24 classical bits, physical `$k` indices
 included; past that the parse fails with `PrismError::Parse`.
 
@@ -73,7 +81,8 @@ changes nothing.
 
 An index may be a single position, an inclusive range with an optional step in
 the middle, or an explicit set. A sliced register broadcasts exactly as a whole
-one does.
+one does. A negative index counts from the end: `q[-1]` is the last qubit and
+`q[1:-1]` runs from the second to the last.
 
 ```qasm
 OPENQASM 3.0;
@@ -497,7 +506,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | --- | --- | --- |
 | `OPENQASM 2.x` and `3.x` headers | Parses | Another major version: `UnsupportedConstruct` naming the version. A header that is not a number: `Parse` |
 | `include "..."` | Accepted and ignored | Nothing. The standard gates are built in, so an include adds no names; a gate it would have defined declines later by name |
-| `qubit`, `qreg`, `bit`, `creg` | Parses | |
+| `qubit`, `qreg`, `bit`, `creg` | Parses | A `bit` initializer with a set bit: `UnsupportedConstruct`. A bit string whose length differs from the register: `Parse` |
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
 | `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic` |
 | `array` | Parses; folded at parse time | An element type other than `int`, `uint`, `float`, `angle` or `bool`: `UnsupportedConstruct`. An initializer of the wrong shape, an index out of range, or more than 2^20 elements: `Parse` |
@@ -506,17 +515,21 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |
+| `nop` | Parses; emits nothing | |
 | `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
 | `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present: `UnsupportedConstruct` |
 | `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
 | `while`, `break`, `continue` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list. `break` or `continue` inside a `for`: `UnsupportedConstruct` |
 | `def` | Inlines its body at the call site, with `bit` parameters and a `bit` result | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width: `Parse` |
 | `return` | Parses as the last statement of a `def` | Anywhere else: `UnsupportedConstruct` |
-| `gate` blocks | Parses | |
-| `defcal`, `extern`, `opaque` | Declines | `UnsupportedConstruct`. Pulse-level calibration and calls out of the program have nothing to run against here |
-| `ctrl`, `negctrl`, `inv`, `pow(k)` | Parses, chainable in any order | See [Other supported constructs](#other-supported-constructs) for the reach of each, and below for the declines |
+| `gate` blocks | Parses; an empty body is the identity | |
+| A gate length, `x[100ns] q;` | Parses; the length is dropped | |
+| `defcalgrammar`, `cal`, `defcal` | Parsed and skipped: a calibration says how a gate is pulsed, not what it does | A call to a gate only a `defcal` names: `UnsupportedConstruct` naming it |
+| `extern`, `opaque` | Declines | `UnsupportedConstruct`. A call out of the program has nothing to run against here |
+| `ctrl`, `negctrl`, `ctrl(n)`, `negctrl(n)`, `inv`, `pow(k)` | Parses, chainable in any order | See [Other supported constructs](#other-supported-constructs) for the reach of each, and below for the declines |
 | `gphase(theta)` | Parses and is carried | |
-| `#pragma braket ...` | Parses under `Dialect::Braket` | Any other dialect, or any other pragma: `UnsupportedConstruct` naming the pragma |
+| `#pragma braket ...`, `pragma braket ...` | Parses under `Dialect::Braket` | Any other dialect, or a `braket` pragma this crate does not read: `UnsupportedConstruct` naming it |
+| Any other pragma, and annotations (`@ns.tag ...`) | Ignored, as the language asks of a pass that does not read them | |
 | A gate name the crate does not implement | Declines | `UnsupportedConstruct` naming it |
 | A gate call at the wrong width | Declines | `GateArity` naming the gate, the arity it wanted, and what it got |
 
@@ -539,7 +552,7 @@ hold. The backend it then runs on may still decline the circuit; those limits ar
 ## Other supported constructs
 
 - Gate modifiers: `ctrl @`, `negctrl @`, `inv @`, `pow(k) @`, chainable and in
-  any order. A control consumes one qubit from the front of the argument list,
+  any order. `ctrl(n) @` and `negctrl(n) @` stand for `n` controls. A control consumes one qubit from the front of the argument list,
   in the order the modifiers are written, and `negctrl` differs from `ctrl` only
   in firing on `|0>`.
 

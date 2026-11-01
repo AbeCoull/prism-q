@@ -4,9 +4,9 @@
 //! find where a statement, a block or an argument ended.
 
 use super::ast::{
-    Argument, ArrayDecl, ArrayInit, AssignOp, BitResult, Block, CallAssign, CmpOp, Condition,
-    Conditional, DefParam, ElementAssign, ForRange, Index, Measure, Modifier, Operand, OperandName,
-    Range, RegisterKind, ReturnValue, Stmt, StmtKind, SwitchArm,
+    Argument, ArrayDecl, ArrayInit, AssignOp, BitInit, BitResult, Block, CallAssign, CmpOp,
+    Condition, Conditional, DefParam, ElementAssign, ForRange, Index, Measure, Modifier, Operand,
+    OperandName, Range, RegisterKind, ReturnValue, Stmt, StmtKind, SwitchArm,
 };
 use super::expr::{self, Expr};
 use super::lexer::{Kind, Token};
@@ -25,7 +25,6 @@ const DECLARATION_TYPES: &[&str] = &[
 /// would otherwise give a bare syntax error (`while (c[0]) { }` reads as a
 /// malformed gate call). A dynamic parse reads the [`LOOP_KEYWORDS`] instead.
 const UNSUPPORTED: &[(&str, &str)] = &[
-    ("defcal", "defcal"),
     ("extern", "extern"),
     ("opaque", "opaque"),
     ("while", "while"),
@@ -55,9 +54,19 @@ fn program<'a>(mut stream: Stream<'_, 'a>, num_tokens: usize) -> Result<Block<'a
     // A gate statement runs six to twelve tokens.
     let mut out = Block::with_capacity(num_tokens / 6);
     while !stream.at_end() {
-        out.push(statement(&mut stream)?);
+        statement_into(&mut stream, &mut out)?;
     }
     Ok(out)
+}
+
+/// Append the next statement to `out`. A `bit` declaration initialized by a
+/// measurement appends two, the declaration and the measurement.
+fn statement_into<'a>(stream: &mut Stream<'_, 'a>, out: &mut Block<'a>) -> Result<()> {
+    if stream.is_keyword("bit") {
+        return bit_declaration(stream, out);
+    }
+    out.push(statement(stream)?);
+    Ok(())
 }
 
 fn statement<'a>(stream: &mut Stream<'_, 'a>) -> Result<Stmt<'a>> {
@@ -94,8 +103,7 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     match word {
         "OPENQASM" => version(stream),
         "include" => include(stream),
-        "qubit" => oq3_register(stream, RegisterKind::Qubit),
-        "bit" => oq3_register(stream, RegisterKind::Classical),
+        "qubit" => qubit_register(stream),
         "qreg" => legacy_register(stream, RegisterKind::Qubit),
         "creg" => legacy_register(stream, RegisterKind::Classical),
         "input" | "output" => port(stream),
@@ -104,6 +112,14 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         "reset" => reset(stream),
         "barrier" => barrier(stream),
         "delay" => delay(stream),
+        "nop" => nop(stream),
+        "defcalgrammar" => {
+            stream.advance();
+            stream.expect(Kind::Str)?;
+            stream.expect(Kind::Semicolon)?;
+            Ok(StmtKind::Empty)
+        }
+        "cal" | "defcal" => calibration(stream),
         "if" => conditional(stream),
         "for" => for_loop(stream),
         "while" => while_loop(stream),
@@ -146,19 +162,69 @@ fn include<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     Ok(StmtKind::Include)
 }
 
-/// `qubit[4] q;` and `bit c;`, where the size precedes the name.
-fn oq3_register<'a>(stream: &mut Stream<'_, 'a>, kind: RegisterKind) -> Result<StmtKind<'a>> {
+/// `qubit[4] q;`, where the size precedes the name.
+fn qubit_register<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     stream.advance();
-    let size = if stream.eat(Kind::LBracket) {
-        let size = expr::parse(stream)?;
-        stream.expect(Kind::RBracket)?;
-        Some(size)
-    } else {
-        None
-    };
+    let size = register_size(stream)?;
     let name = stream.expect_ident()?;
     stream.expect(Kind::Semicolon)?;
-    Ok(StmtKind::RegisterDecl { kind, name, size })
+    Ok(StmtKind::RegisterDecl {
+        kind: RegisterKind::Qubit,
+        name,
+        size,
+        init: None,
+    })
+}
+
+/// `bit[2] c;`, with an optional initializer: `= measure q;`, a bit string, or a
+/// value.
+fn bit_declaration<'a>(stream: &mut Stream<'_, 'a>, out: &mut Block<'a>) -> Result<()> {
+    let line = stream.line();
+    stream.advance();
+    let size = register_size(stream)?;
+    let name = stream.expect_ident()?;
+    let mut source = None;
+    let mut init = None;
+    if stream.eat(Kind::Assign) {
+        if stream.eat_keyword("measure") {
+            source = Some(operand(stream)?);
+        } else if stream.kind() == Kind::Str {
+            init = Some(Box::new(BitInit::Bits(stream.advance().text)));
+        } else {
+            init = Some(Box::new(BitInit::Value(expr::parse(stream)?)));
+        }
+    }
+    stream.expect(Kind::Semicolon)?;
+    out.push(Stmt {
+        line,
+        kind: StmtKind::RegisterDecl {
+            kind: RegisterKind::Classical,
+            name,
+            size,
+            init,
+        },
+    });
+    if let Some(source) = source {
+        let target = Operand {
+            name: OperandName::Register(name),
+            index: None,
+            line,
+        };
+        out.push(Stmt {
+            line,
+            kind: StmtKind::Measure(Box::new(Measure { source, target })),
+        });
+    }
+    Ok(())
+}
+
+fn register_size<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<Expr<'a>>> {
+    if !stream.eat(Kind::LBracket) {
+        return Ok(None);
+    }
+    let size = expr::parse(stream)?;
+    stream.expect(Kind::RBracket)?;
+    Ok(Some(size))
 }
 
 /// `qreg q[4];`, where the size follows the name.
@@ -173,6 +239,7 @@ fn legacy_register<'a>(stream: &mut Stream<'_, 'a>, kind: RegisterKind) -> Resul
         kind,
         name,
         size: Some(size),
+        init: None,
     })
 }
 
@@ -328,6 +395,32 @@ fn delay<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     Ok(StmtKind::Delay { duration, targets })
 }
 
+fn nop<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    stream.advance();
+    let targets = if stream.kind() == Kind::Semicolon {
+        Vec::new()
+    } else {
+        operand_list(stream, "nop")?
+    };
+    stream.expect(Kind::Semicolon)?;
+    Ok(StmtKind::Nop { targets })
+}
+
+/// `cal { ... }` and `defcal name(args) operands -> type { ... }`. A calibration
+/// says how a gate is pulsed, not what it does, so a gate-level simulation keeps
+/// the gate's own meaning and the statement reads as empty. The lexer has
+/// already taken the body whole.
+fn calibration<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    let keyword = stream.advance().text;
+    while !stream.eat(Kind::Calibration) {
+        if matches!(stream.kind(), Kind::Semicolon | Kind::Eof) {
+            return Err(stream.expected(&format!("a braced body for `{keyword}`")));
+        }
+        stream.advance();
+    }
+    Ok(StmtKind::Empty)
+}
+
 /// `box { ... }`, with an optional duration designator before the body.
 fn boxed<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     stream.advance();
@@ -474,7 +567,9 @@ fn body<'a>(stream: &mut Stream<'_, 'a>) -> Result<Block<'a>> {
     if stream.kind() == Kind::LBrace {
         return braced_block(stream);
     }
-    Ok(vec![statement(stream)?])
+    let mut out = Block::new();
+    statement_into(stream, &mut out)?;
+    Ok(out)
 }
 
 fn braced_block<'a>(stream: &mut Stream<'_, 'a>) -> Result<Block<'a>> {
@@ -484,7 +579,7 @@ fn braced_block<'a>(stream: &mut Stream<'_, 'a>) -> Result<Block<'a>> {
         if stream.at_end() {
             return Err(stream.expected("`}` closing a block"));
         }
-        out.push(statement(stream)?);
+        statement_into(stream, &mut out)?;
     }
     Ok(out)
 }
@@ -755,6 +850,12 @@ fn call_or_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     } else {
         SmallVec::new()
     };
+    // `x[100ns] q;` asks for a gate length, which an ideal simulation has no
+    // clock to honour, so the designator is read and dropped.
+    if stream.eat(Kind::LBracket) {
+        expr::parse(stream)?;
+        stream.expect(Kind::RBracket)?;
+    }
     let mut operands = SmallVec::new();
     if stream.kind() != Kind::Semicolon {
         operands.push(operand(stream)?);
@@ -888,7 +989,8 @@ fn element_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind
     }))))
 }
 
-/// `inv @`, `pow(k) @`, `ctrl @` and `negctrl @`, in any order and chainable.
+/// `inv @`, `pow(k) @`, `ctrl @`, `negctrl @` and their counted forms
+/// `ctrl(n) @` and `negctrl(n) @`, in any order and chainable.
 fn modifier_chain<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Modifier<'a>>> {
     let mut out = Vec::new();
     loop {
@@ -909,12 +1011,12 @@ fn modifier_chain<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Modifier<'a>>> 
         }
         let mark = stream.mark();
         stream.advance();
-        let mut exponent = None;
+        let mut argument = None;
         if stream.kind() == Kind::LParen {
             stream.advance();
             let parsed = expr::parse(stream);
             match parsed {
-                Ok(value) if stream.eat(Kind::RParen) => exponent = Some(value),
+                Ok(value) if stream.eat(Kind::RParen) => argument = Some(value),
                 _ => {
                     stream.rewind(mark);
                     return Ok(out);
@@ -925,10 +1027,16 @@ fn modifier_chain<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Modifier<'a>>> 
             stream.rewind(mark);
             return Ok(out);
         }
-        out.push(match (word, exponent) {
+        out.push(match (word, argument) {
             ("inv", None) => Modifier::Inv,
-            ("ctrl", None) => Modifier::Ctrl { negated: false },
-            ("negctrl", None) => Modifier::Ctrl { negated: true },
+            ("ctrl", count) => Modifier::Ctrl {
+                negated: false,
+                count,
+            },
+            ("negctrl", count) => Modifier::Ctrl {
+                negated: true,
+                count,
+            },
             ("pow", Some(exponent)) => Modifier::Pow(exponent),
             _ => {
                 return Err(PrismError::UnsupportedConstruct {

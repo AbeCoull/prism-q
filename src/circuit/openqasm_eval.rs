@@ -78,7 +78,8 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
             StmtKind::Return(Some(ast::ReturnValue::Measure(source))) => note(source),
             StmtKind::Reset { targets }
             | StmtKind::Barrier { targets }
-            | StmtKind::Delay { targets, .. } => targets.iter().for_each(&mut *note),
+            | StmtKind::Delay { targets, .. }
+            | StmtKind::Nop { targets } => targets.iter().for_each(&mut *note),
             StmtKind::If(conditional) => {
                 match &conditional.condition {
                     Condition::Truthy(operand) | Condition::Negated(operand) => note(operand),
@@ -250,11 +251,16 @@ fn element_offset(
     }
     let mut at = 0usize;
     for (index, &size) in indices.iter().zip(&array.dims) {
-        let value = fold(index)?;
+        let written = fold(index)?;
+        let value = if written < 0.0 {
+            written + size as f64
+        } else {
+            written
+        };
         if value.fract() != 0.0 || value < 0.0 || value >= size as f64 {
             return Err(parse_error(
                 line,
-                format!("index {value} is outside `{name}`, whose dimension has size {size}"),
+                format!("index {written} is outside `{name}`, whose dimension has size {size}"),
             ));
         }
         at = at * size + value as usize;
@@ -399,10 +405,23 @@ impl<'a> Parser<'a> {
                 Self::check_version_number(version, line)?;
                 Ok(())
             }
-            StmtKind::RegisterDecl { kind, name, size } => {
+            StmtKind::RegisterDecl {
+                kind,
+                name,
+                size,
+                init,
+            } => {
                 if let Some(result) = self.def_result.as_ref().filter(|result| {
                     *kind == ast::RegisterKind::Classical && result.local == Some(*name)
                 }) {
+                    if init.is_some() {
+                        return Err(PrismError::UnsupportedConstruct {
+                            construct: format!(
+                                "an initializer on `{name}`, the bit def returns; the                                  caller's bits hold it and the instruction list has no                                  classical write"
+                            ),
+                            line,
+                        });
+                    }
                     // The returned bit is the caller's target, bound before the
                     // body ran, so its declaration allocates nothing.
                     let width = match size {
@@ -430,6 +449,9 @@ impl<'a> Parser<'a> {
                     });
                 }
                 self.declare_register(*kind, name, size.as_ref(), line)?;
+                if let Some(init) = init {
+                    self.check_bit_init(name, size.as_ref(), init, line)?;
+                }
                 Ok(())
             }
             StmtKind::InputDecl { ty, name } => {
@@ -537,6 +559,12 @@ impl<'a> Parser<'a> {
                 }
                 Ok(())
             }
+            StmtKind::Nop { targets } => {
+                for target in targets {
+                    self.qubits_of(target)?;
+                }
+                Ok(())
+            }
             StmtKind::If(conditional) if self.dynamic.is_some() => {
                 self.exec_if_dynamic(stmt, conditional, line, out)
             }
@@ -582,12 +610,6 @@ impl<'a> Parser<'a> {
                 qubits,
                 body,
             } => {
-                if body.is_empty() {
-                    return Err(parse_error(
-                        line,
-                        format!("gate '{name}' has an empty body"),
-                    ));
-                }
                 Rc::make_mut(&mut self.gate_defs).insert(
                     *name,
                     GateDefinition {
@@ -1131,7 +1153,22 @@ impl<'a> Parser<'a> {
         line: usize,
     ) -> Result<()> {
         let Some((last, rest)) = body.split_last() else {
-            return Err(parse_error(line, format!("def `{name}` has an empty body")));
+            if result.is_some() {
+                return Err(parse_error(
+                    line,
+                    format!("def `{name}` declares a `bit` result but its body is empty"),
+                ));
+            }
+            Rc::make_mut(&mut self.def_defs).insert(
+                name,
+                DefDefinition {
+                    args: args.to_vec(),
+                    result: None,
+                    local: None,
+                    body: Block::new(),
+                },
+            );
+            return Ok(());
         };
         // A `return` anywhere but last decides at run time whether the rest of
         // the body runs, which no guarded region can say.
@@ -1390,9 +1427,22 @@ impl<'a> Parser<'a> {
         operand: &Operand,
     ) -> Result<SmallVec<[usize; 4]>> {
         let line = operand.line;
+        let from_end = |value: i64| {
+            if value < 0 {
+                value + size as i64
+            } else {
+                value
+            }
+        };
         let bound = |value: i64| -> Result<usize> {
-            let at = usize::try_from(value).map_err(|_| {
-                parse_error(line, format!("negative index in `{}`", operand.describe()))
+            let at = usize::try_from(from_end(value)).map_err(|_| {
+                parse_error(
+                    line,
+                    format!(
+                        "index {value} in `{}` is before its start",
+                        operand.describe()
+                    ),
+                )
             })?;
             if at >= size {
                 return Err(invalid_index(kind, at, size));
@@ -1415,8 +1465,8 @@ impl<'a> Parser<'a> {
                         Some(expr) => self.integer_of(expr, line),
                     }
                 };
-                let first = at(&range.start, 0)?;
-                let last = at(&range.stop, size as i64 - 1)?;
+                let first = from_end(at(&range.start, 0)?);
+                let last = from_end(at(&range.stop, size as i64 - 1)?);
                 let stride = at(&range.step, 1)?;
                 if stride == 0 {
                     return Err(parse_error(
@@ -1579,28 +1629,100 @@ impl<'a> Parser<'a> {
         modifiers: &[ast::Modifier],
         line: usize,
     ) -> Result<Vec<super::Modifier>> {
-        modifiers
-            .iter()
-            .map(|modifier| {
-                Ok(match modifier {
-                    ast::Modifier::Inv => super::Modifier::Inv,
-                    ast::Modifier::Ctrl { negated } => super::Modifier::Ctrl { negated: *negated },
-                    ast::Modifier::Pow(expr) => {
-                        let exponent = self.value_of(expr, line)?;
-                        if exponent.fract() == 0.0 && exponent.abs() > MAX_POW_REPEATS as f64 {
-                            return Err(parse_error(
-                                line,
-                                format!(
-                                    "pow({exponent}) repeats a gate more than \
-                                     {MAX_POW_REPEATS} times"
-                                ),
-                            ));
-                        }
-                        super::Modifier::Pow(exponent)
+        let mut out = Vec::with_capacity(modifiers.len());
+        for modifier in modifiers {
+            match modifier {
+                ast::Modifier::Inv => out.push(super::Modifier::Inv),
+                ast::Modifier::Ctrl { negated, count } => {
+                    let count = match count {
+                        None => 1,
+                        Some(expr) => self.control_count(expr, line)?,
+                    };
+                    out.extend((0..count).map(|_| super::Modifier::Ctrl { negated: *negated }));
+                }
+                ast::Modifier::Pow(expr) => {
+                    let exponent = self.value_of(expr, line)?;
+                    if exponent.fract() == 0.0 && exponent.abs() > MAX_POW_REPEATS as f64 {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "pow({exponent}) repeats a gate more than \
+                                 {MAX_POW_REPEATS} times"
+                            ),
+                        ));
                     }
-                })
-            })
-            .collect()
+                    out.push(super::Modifier::Pow(exponent));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The `n` of `ctrl(n) @`: a positive integer, at most the widest control
+    /// chain a gate can carry.
+    fn control_count(&self, expr: &Expr, line: usize) -> Result<usize> {
+        let count = self.integer_of(expr, line)?;
+        if count < 1 {
+            return Err(parse_error(
+                line,
+                format!("`ctrl({expr})` needs a positive control count, got {count}"),
+            ));
+        }
+        if count > i64::from(u8::MAX) {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("ctrl @ chain past {} controls", u8::MAX),
+                line,
+            });
+        }
+        Ok(count as usize)
+    }
+
+    /// Check a `bit` declaration's initializer against its width. The register
+    /// starts cleared and nothing in the instruction list writes a classical
+    /// bit, so only an initializer of all zeros has a form here.
+    fn check_bit_init(
+        &self,
+        name: &str,
+        size: Option<&Expr<'a>>,
+        init: &ast::BitInit<'a>,
+        line: usize,
+    ) -> Result<()> {
+        let width = match size {
+            Some(size) => self.integer_of(size, line)?,
+            None => 1,
+        };
+        let set = match init {
+            ast::BitInit::Bits(text) => {
+                let digits: Vec<char> = text.chars().filter(|c| *c != '_').collect();
+                if let Some(bad) = digits.iter().find(|c| !matches!(c, '0' | '1')) {
+                    return Err(parse_error(
+                        line,
+                        format!("`\"{text}\"` is not a bit string: `{bad}` is neither 0 nor 1"),
+                    ));
+                }
+                if digits.len() as i64 != width {
+                    return Err(parse_error(
+                        line,
+                        format!(
+                            "`\"{text}\"` has {} bit(s) but `{name}` declares {width}",
+                            digits.len()
+                        ),
+                    ));
+                }
+                digits.contains(&'1')
+            }
+            ast::BitInit::Value(expr) => self.integer_of(expr, line)? != 0,
+        };
+        if set {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "`{name}` initialized with a set bit; the instruction list has no classical \
+                     write"
+                ),
+                line,
+            });
+        }
+        Ok(())
     }
 
     /// Evaluate a call's angle arguments, reporting the one `input` slot they
@@ -2617,12 +2739,16 @@ impl<'a> Parser<'a> {
     /// rejected rather than dropped, so a lost result request cannot pass
     /// unnoticed.
     fn exec_pragma(&mut self, text: &str, line: usize) -> Result<Vec<Instruction>> {
-        let body = text.trim_start_matches("#pragma").trim();
-        let Some(braket_body) = body.strip_prefix("braket") else {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("pragma `{body}`"),
-                line,
-            });
+        let text = text.strip_prefix('#').unwrap_or(text);
+        let body = text.strip_prefix("pragma").unwrap_or(text).trim();
+        // A pragma no pass here reads is ignored, as the language asks. One
+        // naming `braket` is read, or declined, since dropping a noise or result
+        // request this crate understands would change the answer.
+        let Some(braket_body) = body
+            .strip_prefix("braket")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        else {
+            return Ok(Vec::new());
         };
         if self.dialect != Dialect::Braket {
             return Err(PrismError::UnsupportedConstruct {

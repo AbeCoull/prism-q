@@ -10,7 +10,7 @@
 //! | Header | `OPENQASM 3.0;` | 2.0 also accepted for compat; a later major version is rejected rather than read as 3 |
 //! | Include | `include "stdgates.inc";` | Accepted, ignored (gates built-in) |
 //! | Qubit declaration | `qubit[4] q;` | OQ3 syntax (primary) |
-//! | Bit declaration | `bit[4] c;` | OQ3 syntax (primary) |
+//! | Bit declaration | `bit[4] c;` `bit b = measure q[0];` `bit[2] f = "00";` | OQ3 syntax (primary). An initializer is a measurement, or a bit string or value of all zeros |
 //! | Legacy qreg/creg | `qreg q[4]; creg c[4];` | OQ2 compat |
 //! | Input parameter | `input float[64] theta;` | One named slot; [`parse_parametric`] returns them |
 //! | Output declaration | `output bit[4] c;` | Declares the register; every bit is reported anyway |
@@ -19,15 +19,17 @@
 //! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase/cphaseshift, cphaseshift00/01/10, crx, cry, crz, csx/cv, swap, pswap, xy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
 //! | Pauli rotation | `rzz(t) q[0], q[1];` `rxyz(t) q[0], q[1], q[2];` | `r` plus the Pauli letters, one per qubit argument; `rxx`, `ryy`, `rzz` are the two-letter cases, also spelled `xx`, `yy`, `zz` |
 //! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli/ccnot, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
-//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` and `negctrl @` (chainable), `pow(k) @` for any real k. A control applies to whatever the gate expanded to, so it reaches a user `gate` and a lowered gate as well as a direct one; a fractional `pow` is the principal power of what the call expanded to |
+//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` and `negctrl @` (chainable), `ctrl(n) @` and `negctrl(n) @` for `n` of them, `pow(k) @` for any real k. A control applies to whatever the gate expanded to, so it reaches a user `gate` and a lowered gate as well as a direct one; a fractional `pow` is the principal power of what the call expanded to |
 //! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
 //! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand |
 //! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name; declined under a runtime `if` or `switch` for a name declared outside it |
 //! | Classical array | `array[int, 2, 2] a = {{1, 2}, {3, 4}};` `a[0, 1] = 5;` `h q[a[1][0]];` | `int`, `uint`, `float`, `angle` or `bool` elements, any number of dimensions, folded at parse time like a scalar; a `def` reads only `const` arrays |
 //! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number |
 //! | Delay | `delay[d] q[0];` `delay[s];` | The identity on its qubits, all of them when none is named; emits nothing |
+//! | No-op | `nop q[0];` | Names its qubits and emits nothing |
+//! | Gate length | `x[100ns] q[0];` | The designator is dropped, since an ideal simulation has no clock |
 //! | Box | `box { ... }` `box[100ns] { ... }` | The body runs in place with no barrier at its edges; names it declares go out of scope with it |
-//! | Register slice | `h q[0:2];` `h q[0:2:6];` `h q[{0, 3}];` | Inclusive range with an optional step in the middle, or an explicit index set. Broadcasts like a whole register |
+//! | Register slice | `h q[0:2];` `h q[0:2:6];` `h q[{0, 3}];` | Inclusive range with an optional step in the middle, or an explicit index set. Broadcasts like a whole register. A negative index counts from the end |
 //! | Register alias | `let a = q[0:1];` `let a = q[2] ++ q[0];` | Names qubits or bits in the order written; an alias is itself sliceable |
 //! | Physical qubits | `h $0;` `cx $0, $1;` | Absolute indices with no declaration; the register is as wide as the highest one named, and a declared register alongside is rejected |
 //! | Block comments | `/* ... */` | Skipped by the lexer; they do not nest |
@@ -52,6 +54,9 @@
 //! | Static for loop | `for int i in [0:n] { ... }` | Inclusive ranges, optional step, set form `{a,b,c}` |
 //! | Barrier | `barrier q[0], q[1];` | |
 //! | Line comments | `// comment` | |
+//! | Names | `qubit γ;` `gate rr(θ) a { ... }` | Any Unicode letter may open or continue a name |
+//! | Pragmas and annotations | `pragma ns.option on` `@ns.tag ...` | Ignored, as the language asks of a pass that does not read them; `braket` pragmas are read below |
+//! | Calibration | `defcalgrammar "openpulse";` `cal { ... }` `defcal x $0 { ... }` | Skipped: a calibration says how a gate is pulsed, not what it does |
 //! | Expression operators | `rx(2 ** -1 % 3)` | `+ - * / %` and `**`, which is right associative and binds tighter than unary minus |
 //! | Expression builtins | `rx(mod(7, 3))` | `arcsin`, `arccos`, `arctan`, `ceiling`, `cos`, `exp`, `floor`, `log`, `mod`, `popcount`, `pow`, `sin`, `sqrt`, `tan`, plus the shorter C spellings |
 //! | Angle dialect | [`parse_with`] | `gpi`, `gpi2`, `ms` take turns under [`Dialect::Native`] and radians under [`Dialect::Braket`] |
@@ -62,7 +67,10 @@
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
 //!
-//! - `defcal`, `extern`, `opaque`, and `return` outside a `def`
+//! - `extern`, `opaque`, and `return` outside a `def`
+//! - a call to a gate only a `defcal` names, which has no unitary to run
+//! - a `bit` initializer with a set bit: nothing in the instruction list writes
+//!   a classical bit
 //! - `while`, `break` and `continue`, which [`parse_dynamic`] reads into a
 //!   control-flow graph
 //! - a `def` result of any type but `bit`, a call that drops a `bit` result, and

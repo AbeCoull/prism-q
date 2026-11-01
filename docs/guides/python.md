@@ -1383,8 +1383,9 @@ simulate_program(b.build()).max_steps(100).shots(1)  # raises
 holds one circuit per block and a model is laid out against one circuit. The rules
 compile against every block and every runtime rotation, and each shot runs one
 noisy trajectory. Readout error flips the returned record, not the bits a branch
-reads, as on a circuit. The density matrix, leakage and quasi-static channels, and
-an over-rotation rule matching a runtime rotation raise `incompatible_backend`.
+reads, as on a circuit. Leak flags and quasi-static draws last the whole shot, so a
+qubit leaked in one block stays leaked in the next. The density matrix and an
+over-rotation rule matching a runtime rotation raise `incompatible_backend`.
 
 ```python
 from prism_q import GateFilter, NoiseBuilder, NoiseChannel

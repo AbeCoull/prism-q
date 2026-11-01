@@ -1,5 +1,6 @@
 //! Noise on dynamic programs: agreement with the exact mixture of a
-//! deferred-measurement lowering, a noisy loop against its analytic law, and the
+//! deferred-measurement lowering, a noisy loop against its analytic law, leakage
+//! and quasi-static drift against the same program as guarded regions, and the
 //! noise a program declines.
 
 use std::f64::consts::PI;
@@ -8,9 +9,10 @@ use num_complex::Complex64;
 use prism_q::circuit::dynamic::{
     ClassicalExpr, DynamicProgram, DynamicProgramBuilder, RotationKind,
 };
+use prism_q::circuit::{ClassicalCondition, GuardedRegion, Instruction};
 use prism_q::{
-    BackendKind, Circuit, Gate, GateFilter, NoiseBuilder, NoiseChannel, NoiseEvent, PrismError,
-    simulate, simulate_program,
+    BackendKind, Circuit, DriftDistribution, Gate, GateFilter, NoiseBuilder, NoiseChannel,
+    NoiseEvent, PrismError, simulate, simulate_program,
 };
 use smallvec::smallvec;
 
@@ -303,6 +305,171 @@ fn readout_error_flips_the_record_and_not_the_bit_a_branch_reads() {
     assert!(shots.shots.iter().all(|shot| shot[0]));
 }
 
+fn gate(gate: Gate, targets: &[usize]) -> Instruction {
+    Instruction::Gate {
+        gate,
+        targets: targets.iter().copied().collect(),
+    }
+}
+
+fn region(condition: ClassicalCondition, body: Vec<Instruction>) -> Instruction {
+    Instruction::Region(Box::new(GuardedRegion::new(condition, body)))
+}
+
+/// Run `program` and `circuit` under `rules` at one seed on each backend and
+/// require the same shots and leak records. `circuit` holds the program's
+/// instructions in the order a shot meets them, each branch arm a guarded region,
+/// so a circuit trajectory makes the same draws in the same order.
+fn assert_matches_guarded_circuit(
+    program: &DynamicProgram,
+    circuit: &Circuit,
+    rules: &NoiseBuilder,
+    shots: usize,
+) -> Vec<prism_q::ShotsResult> {
+    assert!(program.static_circuit().is_none());
+    let noise = rules.build(circuit).unwrap();
+    [
+        BackendKind::Auto,
+        BackendKind::Statevector,
+        BackendKind::Sparse,
+    ]
+    .into_iter()
+    .map(|kind| {
+        let dynamic = simulate_program(program)
+            .backend(kind.clone())
+            .noise(rules)
+            .seed(SEED)
+            .shots(shots)
+            .unwrap();
+        let direct = simulate(circuit)
+            .backend(kind.clone())
+            .noise(&noise)
+            .seed(SEED)
+            .shots(shots)
+            .unwrap();
+        assert_eq!(
+            dynamic.metadata.backend, direct.metadata.backend,
+            "{kind:?}"
+        );
+        assert_eq!(dynamic.shots, direct.shots, "{kind:?}");
+        assert_eq!(dynamic.leaked, direct.leaked, "{kind:?}");
+        dynamic
+    })
+    .collect()
+}
+
+#[test]
+fn a_leaky_program_matches_its_guarded_circuit_shot_for_shot() {
+    let mut b = DynamicProgramBuilder::new(3, 3);
+    b.add_gate(Gate::H, &[0])
+        .add_gate(Gate::Cx, &[0, 1])
+        .add_measure(0, 0);
+    b.begin_if(ClassicalExpr::Bit(0));
+    b.add_gate(Gate::Cx, &[1, 2]).add_reset(0);
+    b.end().unwrap();
+    b.add_gate(Gate::H, &[0])
+        .add_measure(0, 0)
+        .add_measure(1, 1)
+        .add_measure(2, 2);
+    let program = b.build().unwrap();
+
+    let mut circuit = Circuit::new(3, 3);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(region(
+        ClassicalCondition::BitIsOne(0),
+        vec![gate(Gate::Cx, &[1, 2]), Instruction::Reset { qubit: 0 }],
+    ));
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    circuit.add_measure(2, 2);
+
+    let rules = NoiseBuilder::new()
+        .after_gates_joint(
+            GateFilter::all().arity(2),
+            NoiseChannel::LeakageTransport { p: 0.3 },
+        )
+        .after_gates(GateFilter::all(), NoiseChannel::Leakage { p: 0.05 })
+        .after_gates(GateFilter::all(), NoiseChannel::Seepage { p: 0.2 })
+        .after_gates(
+            GateFilter::all(),
+            NoiseChannel::AmplitudeDamping { gamma: 0.05 },
+        )
+        .uniform_readout_error(0.01, 0.02);
+    for result in assert_matches_guarded_circuit(&program, &circuit, &rules, 2_000) {
+        let leaked = result.leaked.expect("a leakage model records heralds");
+        let heralded = leaked.iter().filter(|shot| shot.iter().any(|&q| q)).count();
+        assert!(heralded > 100, "{heralded} of 2000 shots leaked");
+    }
+}
+
+#[test]
+fn a_drifting_program_matches_its_guarded_circuit_shot_for_shot() {
+    let mut b = DynamicProgramBuilder::new(2, 2);
+    b.add_gate(Gate::Rx(1.1), &[0]).add_measure(0, 0);
+    b.begin_if(ClassicalExpr::Bit(0));
+    b.add_gate(Gate::Rx(0.7), &[1]);
+    b.end().unwrap();
+    b.add_gate(Gate::Rx(0.9), &[1]).add_measure(1, 1);
+    let program = b.build().unwrap();
+
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::Rx(1.1), &[0]);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(region(
+        ClassicalCondition::BitIsOne(0),
+        vec![gate(Gate::Rx(0.7), &[1])],
+    ));
+    circuit.add_gate(Gate::Rx(0.9), &[1]);
+    circuit.add_measure(1, 1);
+
+    let rules = NoiseBuilder::new()
+        .over_rotation_drift(GateFilter::all().named("rx"), 0.4)
+        .over_rotation_drift_per_qubit(
+            GateFilter::all().named("rx"),
+            DriftDistribution::independent([0.3, 0.5]),
+        )
+        .after_gates(
+            GateFilter::all(),
+            NoiseChannel::AmplitudeDamping { gamma: 0.05 },
+        );
+    for result in assert_matches_guarded_circuit(&program, &circuit, &rules, 2_000) {
+        assert!(result.leaked.is_none());
+    }
+}
+
+#[test]
+fn a_qubit_leaked_in_one_block_stays_leaked_in_the_next() {
+    // `x` leaks qubit 0 in the entry block, so the `y` in the join block finds it
+    // leaked and does not act: it reads 1. Were the flag dropped at the block
+    // boundary, `y` would turn the leaked `|1>` into `|0>`.
+    let mut b = DynamicProgramBuilder::new(2, 2);
+    b.add_gate(Gate::X, &[0])
+        .add_gate(Gate::H, &[1])
+        .add_measure(1, 1);
+    b.begin_if(ClassicalExpr::Bit(1));
+    b.add_gate(Gate::X, &[1]);
+    b.end().unwrap();
+    b.add_gate(Gate::Y, &[0]).add_measure(0, 0);
+    let program = b.build().unwrap();
+    assert!(program.blocks().len() > 1);
+    let rules = NoiseBuilder::new().after_gates(
+        GateFilter::all().named("x").on_qubits([0]),
+        NoiseChannel::Leakage { p: 1.0 },
+    );
+    let result = simulate_program(&program)
+        .noise(&rules)
+        .seed(SEED)
+        .shots(200)
+        .unwrap();
+    assert!(result.shots.iter().all(|shot| shot[0]));
+    assert!(result.shots.iter().any(|shot| shot[1]));
+    let leaked = result.leaked.expect("a leakage model records heralds");
+    assert!(leaked.iter().all(|shot| shot == &[true, false]));
+}
+
 fn assert_incompatible(result: prism_q::Result<prism_q::ShotsResult>, needle: &str) {
     match result {
         Err(PrismError::IncompatibleBackend { reason, .. }) => assert!(
@@ -341,10 +508,11 @@ fn noise_a_program_cannot_carry_is_declined() {
         NoiseBuilder::new().after_gates(GateFilter::all(), NoiseChannel::Leakage { p: 0.01 });
     assert_incompatible(
         simulate_program(&program)
+            .backend(BackendKind::DensityMatrix)
             .noise(&leakage)
             .seed(SEED)
             .shots(10),
-        "leakage",
+        "trajector",
     );
 
     let mut b = DynamicProgramBuilder::new(1, 1);
@@ -352,13 +520,16 @@ fn noise_a_program_cannot_carry_is_declined() {
     b.add_measure(0, 0);
     let rotating = b.build().unwrap();
     let over_rotation = NoiseBuilder::new().over_rotation(GateFilter::all(), 0.05);
-    assert_incompatible(
-        simulate_program(&rotating)
-            .noise(&over_rotation)
-            .seed(SEED)
-            .shots(10),
-        "angle",
-    );
+    let drift = NoiseBuilder::new().over_rotation_drift(GateFilter::all(), 0.05);
+    for rules in [&over_rotation, &drift] {
+        assert_incompatible(
+            simulate_program(&rotating)
+                .noise(rules)
+                .seed(SEED)
+                .shots(10),
+            "angle",
+        );
+    }
 }
 
 #[test]

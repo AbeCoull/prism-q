@@ -391,7 +391,6 @@ struct MemoryWalk<'a> {
     backend: &'a mut dyn Backend,
     noise: &'a PreparedNoise,
     memory: &'a mut ShotMemory,
-    leakage: bool,
     rng: &'a mut ChaCha8Rng,
 }
 
@@ -401,11 +400,7 @@ impl SlotWalk for MemoryWalk<'_> {
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
-        if self.leakage {
-            apply_leaky_instruction(self.backend, instruction, self.memory, self.rng)
-        } else {
-            self.backend.apply(instruction)
-        }
+        apply_memory_instruction(self.backend, instruction, self.memory, self.rng)
     }
 
     fn fire(&mut self, slot: usize) -> Result<()> {
@@ -758,22 +753,30 @@ impl MemorySpec {
 /// register. The leaked qubit is then an unentangled `|1>`: measuring it
 /// reports 1 and collapses nothing else, and a return to a random basis state
 /// takes one coin and at most one `X`.
-struct ShotMemory {
+pub(crate) struct ShotMemory {
+    leakage: bool,
     leaked: Vec<bool>,
     ever_leaked: Vec<bool>,
     drift: Vec<f64>,
 }
 
 impl ShotMemory {
-    fn new(num_qubits: usize, spec: MemorySpec, rng: &mut ChaCha8Rng) -> Self {
+    /// Draw the shot's quasi-static normals from `rng`, before any of its events.
+    pub(crate) fn new(num_qubits: usize, spec: MemorySpec, rng: &mut ChaCha8Rng) -> Self {
         let mut drift = vec![0.0; spec.sources];
         standard_normals(rng, &mut drift);
         let flags = if spec.leakage { num_qubits } else { 0 };
         Self {
+            leakage: spec.leakage,
             leaked: vec![false; flags],
             ever_leaked: vec![false; flags],
             drift,
         }
+    }
+
+    /// Return which qubits leaked at any point of the shot, empty without leakage.
+    pub(crate) fn into_ever_leaked(self) -> Vec<bool> {
+        self.ever_leaked
     }
 
     #[inline]
@@ -863,6 +866,19 @@ fn apply_leaky_instruction(
     }
 }
 
+fn apply_memory_instruction(
+    backend: &mut dyn Backend,
+    instr: &Instruction,
+    memory: &mut ShotMemory,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    if memory.leakage {
+        apply_leaky_instruction(backend, instr, memory, rng)
+    } else {
+        backend.apply(instr)
+    }
+}
+
 /// Apply one event on the memory path. A channel without memory of its own
 /// skips an event naming a leaked qubit.
 fn apply_memory_event(
@@ -934,30 +950,37 @@ fn run_memory_shot(
 ) -> Result<(Vec<bool>, Vec<bool>)> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
     let mut memory = ShotMemory::new(circuit.num_qubits, spec, rng);
-    if noise.num_slots() == circuit.instructions.len() {
-        for (instr, events) in circuit.instructions.iter().zip(noise.slots_from(0)) {
-            if spec.leakage {
-                apply_leaky_instruction(backend, instr, &mut memory, rng)?;
-            } else {
-                backend.apply(instr)?;
-            }
-            for event in events {
-                apply_memory_event(backend, event, &mut memory, rng)?;
-            }
-        }
-    } else {
-        let mut walk = MemoryWalk {
-            backend: &mut *backend,
-            noise,
-            memory: &mut memory,
-            leakage: spec.leakage,
-            rng: &mut *rng,
-        };
-        walk_noise_slots(circuit, 0, &mut walk)?;
-    }
+    evolve_with_memory(backend, circuit, noise, &mut memory, rng)?;
     let mut results = backend.classical_results().to_vec();
     apply_readout_errors(&mut results, readout, rng);
     Ok((results, memory.ever_leaked))
+}
+
+/// [`evolve_noisy`] from the first instruction on the memory path, reading and
+/// updating the leak flags and drift `memory` holds for the rest of the shot.
+pub(crate) fn evolve_with_memory(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    noise: &PreparedNoise,
+    memory: &mut ShotMemory,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    if noise.num_slots() == circuit.instructions.len() {
+        for (instr, events) in circuit.instructions.iter().zip(noise.slots_from(0)) {
+            apply_memory_instruction(backend, instr, memory, rng)?;
+            for event in events {
+                apply_memory_event(backend, event, memory, rng)?;
+            }
+        }
+        return Ok(());
+    }
+    let mut walk = MemoryWalk {
+        backend,
+        noise,
+        memory,
+        rng,
+    };
+    walk_noise_slots(circuit, 0, &mut walk)
 }
 
 /// One trajectory on the path `memory` selects: its record, and the qubits it
@@ -1078,15 +1101,29 @@ pub(crate) fn evolve_noisy(
     walk_noise_slots(circuit, from, &mut walk)
 }
 
-/// Fire the events of `noise` slot `slot` on the state `backend` holds.
-pub(crate) fn fire_slot(
+/// Apply `instruction` to the state `backend` holds and fire the events of
+/// `noise` slot `slot` after it, on the memory path when the shot keeps `memory`.
+pub(crate) fn apply_and_fire(
     backend: &mut dyn Backend,
+    instruction: &Instruction,
     noise: &PreparedNoise,
     slot: usize,
+    memory: Option<&mut ShotMemory>,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    for event in noise.slot(slot) {
-        apply_noise_event(backend, event, rng)?;
+    match memory {
+        Some(memory) => {
+            apply_memory_instruction(backend, instruction, memory, rng)?;
+            for event in noise.slot(slot) {
+                apply_memory_event(backend, event, memory, rng)?;
+            }
+        }
+        None => {
+            backend.apply(instruction)?;
+            for event in noise.slot(slot) {
+                apply_noise_event(backend, event, rng)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1203,7 +1240,7 @@ fn run_serial(
     ))
 }
 
-fn with_leak_record(
+pub(crate) fn with_leak_record(
     result: ShotsResult,
     memory: Option<MemorySpec>,
     leaked: Vec<Vec<bool>>,

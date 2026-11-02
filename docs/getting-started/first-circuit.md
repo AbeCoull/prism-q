@@ -27,6 +27,13 @@ for i in 0..probs.len() {
 // |11> = 0.5000
 ```
 
+<figure class="circuit-figure">
+<div class="circuit-scroll" role="region" aria-label="Bell pair circuit" tabindex="0">
+<img src="../diagrams/bell_2.svg" alt="A Hadamard on q[0] followed by a controlled X from q[0] to q[1].">
+</div>
+<figcaption>H creates a superposition; CX correlates the two qubits. <a href="../diagrams/bell_2.svg">Open full SVG</a>.</figcaption>
+</figure>
+
 Measurement is in the Z basis by default. `measure_in_basis(qubit, axis, bit)` measures
 along X, Y or Z, and `measure_pauli_product(&terms, bit)` records the parity of a Pauli
 string such as `X0 Z1`. Both lower onto gates every backend already runs. A basis
@@ -45,10 +52,6 @@ let circuit = CircuitBuilder::new_with_classical(2, 2)
     .build();
 assert_eq!(circuit.num_qubits, 3);
 ```
-
-The 5-qubit GHZ state, drawn by PRISM-Q's SVG renderer:
-
-![GHZ state preparation circuit](../diagrams/ghz_5.svg)
 
 ## From OpenQASM
 

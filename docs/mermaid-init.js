@@ -3,37 +3,53 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 (() => {
+    const diagrams = document.querySelectorAll('.mermaid');
+    if (!diagrams.length) {
+        return;
+    }
+
+    for (const diagram of diagrams) {
+        diagram.setAttribute('tabindex', '0');
+        diagram.setAttribute('role', 'region');
+        diagram.setAttribute('aria-label', 'Diagram');
+    }
+
     const darkThemes = ['ayu', 'navy', 'coal'];
-    const lightThemes = ['light', 'rust'];
+    const root = document.documentElement;
+    const style = getComputedStyle(root);
+    const color = name => style.getPropertyValue(name).trim();
+    const surface = color('--doc-code-bg');
+    const text = color('--fg');
+    const border = color('--doc-muted');
 
-    const classList = document.getElementsByTagName('html')[0].classList;
+    mermaid.initialize({
+        startOnLoad: true,
+        theme: 'base',
+        themeVariables: {
+            darkMode: darkThemes.some(theme => root.classList.contains(theme)),
+            background: color('--bg'),
+            fontFamily: style.fontFamily,
+            fontSize: '14px',
+            primaryColor: surface,
+            primaryTextColor: text,
+            primaryBorderColor: border,
+            secondaryColor: surface,
+            secondaryTextColor: text,
+            secondaryBorderColor: border,
+            tertiaryColor: surface,
+            tertiaryTextColor: text,
+            tertiaryBorderColor: border,
+            lineColor: border,
+            textColor: text,
+            edgeLabelBackground: color('--bg'),
+            noteBkgColor: surface,
+            noteTextColor: text,
+            noteBorderColor: border,
+        },
+        flowchart: { curve: 'linear', useMaxWidth: false },
+    });
 
-    let lastThemeWasLight = true;
-    for (const cssClass of classList) {
-        if (darkThemes.includes(cssClass)) {
-            lastThemeWasLight = false;
-            break;
-        }
-    }
-
-    const theme = lastThemeWasLight ? 'default' : 'dark';
-    mermaid.initialize({ startOnLoad: true, theme });
-
-    // Simplest way to make mermaid re-render the diagrams in the new theme is via refreshing the page
-
-    for (const darkTheme of darkThemes) {
-        document.getElementById(darkTheme).addEventListener('click', () => {
-            if (lastThemeWasLight) {
-                window.location.reload();
-            }
-        });
-    }
-
-    for (const lightTheme of lightThemes) {
-        document.getElementById(lightTheme).addEventListener('click', () => {
-            if (!lastThemeWasLight) {
-                window.location.reload();
-            }
-        });
+    for (const button of document.querySelectorAll('#theme-list .theme')) {
+        button.addEventListener('click', () => window.location.reload());
     }
 })();

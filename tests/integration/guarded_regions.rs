@@ -1082,12 +1082,13 @@ fn export_rejects_a_parity_past_the_classical_register() {
 }
 
 #[test]
-fn a_parity_term_carrying_a_comparison_is_rejected() {
+fn a_parity_term_carrying_a_comparison_needs_the_dynamic_parse() {
     let qasm = "OPENQASM 3.0;\nqubit[1] q;\nbit[2] c;\nif (c[0] == 1 ^ c[1]) x q[0];";
     assert!(matches!(
         openqasm::parse(qasm),
-        Err(PrismError::Parse { .. })
+        Err(PrismError::UnsupportedConstruct { .. })
     ));
+    assert!(openqasm::parse_dynamic(qasm).is_ok());
 }
 
 // An `else` whose arm never arrives keeps the block open rather than dropping

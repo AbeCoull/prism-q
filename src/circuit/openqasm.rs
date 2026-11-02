@@ -21,8 +21,11 @@
 //! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli/ccnot, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
 //! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` and `negctrl @` (chainable), `ctrl(n) @` and `negctrl(n) @` for `n` of them, `pow(k) @` for any real k. A control applies to whatever the gate expanded to, so it reaches a user `gate` and a lowered gate as well as a direct one; a fractional `pow` is the principal power of what the call expanded to |
 //! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
-//! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand |
-//! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name; declined under a runtime `if` or `switch` for a name declared outside it |
+//! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand. An integer is exact and wraps at its width, 64 bits by default; `float[32]` rounds to single precision; `angle[n]` holds the nearest multiple of `2 pi / 2^n`, modulo `2 pi` |
+//! | Classical assignment | `n = n + 1;` `n += 1;` `n <<= 2;` | Plain and compound forms, `+=` through `>>=`, on a declared, non-`const` name; declined under a runtime `if` or `switch` for a name declared outside it |
+//! | Cast | `int[8](x)` `uint[2](c)` `bool(c)` `angle[3](t)` | Converts to the named scalar type; `bit[n](x)` reads as a `uint[n]` |
+//! | Integer bit read | `a[i]` on `uint[4] a` | One bit of the integer; a negative index counts from the top bit |
+//! | Expression statement | `a == 2;` | Evaluated and discarded |
 //! | Classical array | `array[int, 2, 2] a = {{1, 2}, {3, 4}};` `a[0, 1] = 5;` `h q[a[1][0]];` | `int`, `uint`, `float`, `angle` or `bool` elements, any number of dimensions, folded at parse time like a scalar; a `def` reads only `const` arrays |
 //! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number |
 //! | Delay | `delay[d] q[0];` `delay[s];` | The identity on its qubits, all of them when none is named; emits nothing |
@@ -43,9 +46,10 @@
 //! | Conditional negation | `if (!c[0]) x q[0];` | Negated bit truthy test |
 //! | Guarded region | `if (c[0]) { x q[0]; measure q[1] -> c[1]; }` | Braced body, any statement, nestable; names it declares go out of scope with it |
 //! | Conditional parity | `if (c[0] ^ c[2]) x q[0];` | Parity over bits, optionally `(...) == 0` |
+//! | General condition | `if (int[4](c) == -1) ...` `if (n > 2) ...` | One that reads no classical bit keeps the arm it takes at parse time; otherwise it lowers to the bit or register guard it spells, and one that spells none declines |
 //! | Else arm | `if (c[0]) { ... } else { ... }` | Lowers to a second guard on the negated condition |
 //! | Else-if chain | `if (c[0]) { ... } else if (c[1]) { ... }` | Nests under the negated arm |
-//! | Switch | `switch (c) { case 0 { ... } default { ... } }` | Lowers to one guard per case label |
+//! | Switch | `switch (c) { case 0 { ... } default { ... } }` `switch (uint[2](c))` | Lowers to one guard per case label; a target that reads no classical bit keeps one arm at parse time |
 //! | Hex / binary literals | `if (c == 0xff) ...` | `0x`, `0b`, `0o` integer prefixes with optional `_` separators |
 //! | Boolean literals | `rx(true * pi) ...` | `true` / `false` evaluate to `1.0` / `0.0` |
 //! | Gate definition | `gate rxx(t) a,b { ... }` | User-defined gates |
@@ -57,7 +61,7 @@
 //! | Names | `qubit γ;` `gate rr(θ) a { ... }` | Any Unicode letter may open or continue a name |
 //! | Pragmas and annotations | `pragma ns.option on` `@ns.tag ...` | Ignored, as the language asks of a pass that does not read them; `braket` pragmas are read below |
 //! | Calibration | `defcalgrammar "openpulse";` `cal { ... }` `defcal x $0 { ... }` | Skipped: a calibration says how a gate is pulsed, not what it does |
-//! | Expression operators | `rx(2 ** -1 % 3)` | `+ - * / %` and `**`, which is right associative and binds tighter than unary minus |
+//! | Expression operators | `rx(2 ** -1 % 3)` | `+ - * / %`, the comparisons, `&& \|\| !` and `& \| ^ ~ << >>`, with C precedence. `**` is right associative and binds tighter than unary minus. `/` and `%` on two integers truncate toward zero |
 //! | Expression builtins | `rx(mod(7, 3))` | `arcsin`, `arccos`, `arctan`, `ceiling`, `cos`, `exp`, `floor`, `log`, `mod`, `popcount`, `pow`, `sin`, `sqrt`, `tan`, plus the shorter C spellings |
 //! | Angle dialect | [`parse_with`] | `gpi`, `gpi2`, `ms` take turns under [`Dialect::Native`] and radians under [`Dialect::Braket`] |
 //! | Result pragma | `#pragma braket result expectation z(q[0])` | [`Dialect::Braket`] only; reaches the caller through [`parse_braket`] |
@@ -88,6 +92,9 @@
 //! - Bit literal comparisons against integers other than `0` / `1`
 //! - Negative integer literals in `if` register comparisons
 //! - `switch` with a `default` and more case labels than the region depth bound
+//! - a condition or `switch` target over classical bits that no bit or
+//!   register guard spells, such as `c[0] && c[1]`, which [`parse_dynamic`]
+//!   evaluates at runtime
 //! - an `array` of `bit`, `duration` or any other non-numeric element type
 //! - `durationof`, a ratio over a `stretch`, and a ratio mixing `dt` with SI
 //!   units: nothing here sizes a stretch or knows a backend's sample period
@@ -113,7 +120,7 @@ use num_complex::Complex64;
 use super::braket::{self, NoiseSpec, ResultSpec};
 use crate::circuit::dynamic::{ClassicalType as RuntimeType, ClassicalValue};
 use crate::circuit::qasm::ast::{self, DefParam};
-use crate::circuit::qasm::expr::Timed;
+use crate::circuit::qasm::expr::{self as syntax_expr, Timed};
 use crate::circuit::qasm::stream::with_stack;
 use crate::circuit::synthesis;
 use crate::circuit::{
@@ -321,19 +328,35 @@ enum ClassicalType {
     /// `int` or `uint`, with the width a stored value wraps to.
     Int(RuntimeType),
     Bool,
-    Float,
+    /// `float[32]` when `single`, which rounds what it holds to single
+    /// precision; every other width holds a double.
+    Float {
+        single: bool,
+    },
+    /// `angle[n]`, a multiple of `2 pi / 2^n` in `[0, 2 pi)`. With no width the
+    /// value wraps into that range unrounded.
+    Angle(Option<u32>),
     Duration,
     Stretch,
 }
 
 impl ClassicalType {
-    /// `value` as this type holds it, by the conversion a runtime variable of
-    /// the type applies: truncation toward zero and wraparound for the integers.
-    fn store(self, value: f64) -> f64 {
+    const FLOAT: ClassicalType = ClassicalType::Float { single: false };
+
+    /// `value` as this type holds it: truncation toward zero and wraparound for
+    /// the integers, truthiness for `bool`, and for an `angle[n]` the nearest
+    /// multiple of `2 pi / 2^n`, ties to even, taken modulo `2 pi`.
+    fn store(self, value: ClassicalValue) -> ClassicalValue {
         match self {
-            ClassicalType::Int(integer) => integer.store(ClassicalValue::Float(value)).to_float(),
-            ClassicalType::Bool => f64::from(u8::from(value != 0.0)),
-            _ => value,
+            ClassicalType::Int(integer) => integer.store(value),
+            ClassicalType::Bool => ClassicalValue::Bool(value.truthy()),
+            ClassicalType::Float { single } => {
+                ClassicalValue::Float(syntax_expr::real(value.to_float(), single))
+            }
+            ClassicalType::Angle(width) => {
+                ClassicalValue::Float(syntax_expr::angle(value.to_float(), width))
+            }
+            ClassicalType::Duration | ClassicalType::Stretch => value,
         }
     }
 }
@@ -342,8 +365,6 @@ impl ClassicalType {
 struct ClassicalDecl {
     ty: ClassicalType,
     constant: bool,
-    /// The exact value of an `int` or `uint`, which an `f64` cannot hold past 2^53.
-    int: i128,
 }
 
 /// A classical array, its elements folded at parse time like any classical
@@ -353,7 +374,7 @@ struct ClassicalArray {
     ty: ClassicalType,
     constant: bool,
     dims: Vec<usize>,
-    values: Vec<f64>,
+    values: Vec<ClassicalValue>,
 }
 
 /// Most elements an array may hold, which bounds the allocation a declared
@@ -391,7 +412,7 @@ pub(crate) struct Parser<'a> {
     /// Blocks being executed, gate and `def` bodies included, so nesting that
     /// each body keeps inside the parse limit cannot add up past it.
     exec_depth: usize,
-    param_vars: Option<HashMap<&'a str, f64>>,
+    param_vars: Option<HashMap<&'a str, ClassicalValue>>,
     /// `input` slot per declared name, and the names in slot order.
     inputs: HashMap<&'a str, usize>,
     input_names: Vec<String>,
@@ -588,12 +609,15 @@ impl<'a> Parser<'a> {
         self.params.get(name).or_else(|| self.aliases.get(name))
     }
 
-    fn bind_classical(&mut self, name: &'a str, ty: ClassicalType, value: f64, constant: bool) {
-        let decl = ClassicalDecl {
-            ty,
-            constant,
-            int: 0,
-        };
+    /// Bind `name` to `value` as `ty` holds it.
+    fn bind_classical(
+        &mut self,
+        name: &'a str,
+        ty: ClassicalType,
+        value: ClassicalValue,
+        constant: bool,
+    ) {
+        let decl = ClassicalDecl { ty, constant };
         if Rc::make_mut(&mut self.classical)
             .insert(name, decl)
             .is_none()
@@ -602,26 +626,7 @@ impl<'a> Parser<'a> {
         }
         self.param_vars
             .get_or_insert_with(HashMap::new)
-            .insert(name, value);
-    }
-
-    /// Bind an integer variable, wrapped to `integer`'s width as a runtime one is.
-    fn bind_int(&mut self, name: &'a str, integer: RuntimeType, value: i128, constant: bool) {
-        let int = integer.store(ClassicalValue::Int(value)).to_int();
-        let decl = ClassicalDecl {
-            ty: ClassicalType::Int(integer),
-            constant,
-            int,
-        };
-        if Rc::make_mut(&mut self.classical)
-            .insert(name, decl)
-            .is_none()
-        {
-            self.declared.push(name);
-        }
-        self.param_vars
-            .get_or_insert_with(HashMap::new)
-            .insert(name, int as f64);
+            .insert(name, ty.store(value));
     }
 
     fn reject_redeclaration(&self, name: &str, line_num: usize) -> Result<()> {

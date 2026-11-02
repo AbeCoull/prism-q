@@ -7,11 +7,12 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::circuit::dynamic::ClassicalExpr;
 use crate::circuit::qasm::ast::{
     self, Argument, AssignOp, Block, CmpOp, Condition, DefParam, ForRange, Index, Operand,
     OperandName, Stmt, StmtKind,
 };
-use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Duration, Expr, Timed};
+use crate::circuit::qasm::expr::{self as syntax_expr, Duration, Expr, Timed};
 use crate::circuit::qasm::stream::{MAX_NESTING, with_stack};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
@@ -98,8 +99,7 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
                 | StmtKind::Box { body, .. }
                 | StmtKind::DefDef { body, .. }
                 | StmtKind::GateDef { body, .. } => walk_operands(body, note),
-                StmtKind::Switch { operand, arms } => {
-                    note(operand);
+                StmtKind::Switch { arms, .. } => {
                     for arm in arms {
                         walk_operands(&arm.body, note);
                     }
@@ -116,10 +116,10 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
 fn number_of(
     expr: &Expr,
     line: usize,
-    vars: Option<&HashMap<&str, f64>>,
+    vars: Option<&HashMap<&str, ClassicalValue>>,
     durations: &HashMap<&str, Timed>,
     arrays: &HashMap<&str, Rc<ClassicalArray>>,
-) -> Result<f64> {
+) -> Result<ClassicalValue> {
     let value = syntax_expr::eval(expr, line, vars);
     if value.is_ok() {
         return value;
@@ -132,7 +132,7 @@ fn number_of(
         return value;
     }
     match syntax_expr::eval_timed(expr, line, vars, durations)? {
-        Timed::Number(value) => Ok(value),
+        Timed::Number(value) => Ok(ClassicalValue::Float(value)),
         Timed::Duration(_) => Err(parse_error(
             line,
             format!("`{expr}` is a duration where a number belongs"),
@@ -144,50 +144,11 @@ fn number_of(
     }
 }
 
-/// `compound` on integers, exact before the declared width wraps the result.
-fn compound_int(op: AssignOp, current: i128, folded: i128, line: usize) -> Result<i128> {
-    Ok(match op {
-        AssignOp::Add => current.wrapping_add(folded),
-        AssignOp::Sub => current.wrapping_sub(folded),
-        AssignOp::Mul => current.wrapping_mul(folded),
-        AssignOp::Div if folded == 0 => {
-            return Err(parse_error(
-                line,
-                "division by zero in a compound assignment",
-            ));
-        }
-        AssignOp::Rem if folded == 0 => {
-            return Err(parse_error(line, "modulo by zero in a compound assignment"));
-        }
-        AssignOp::Div => current / folded,
-        AssignOp::Rem => current % folded,
-    })
-}
-
-fn compound(op: AssignOp, current: f64, folded: f64, line: usize) -> Result<f64> {
-    Ok(match op {
-        AssignOp::Add => current + folded,
-        AssignOp::Sub => current - folded,
-        AssignOp::Mul => current * folded,
-        AssignOp::Div if folded == 0.0 => {
-            return Err(parse_error(
-                line,
-                "division by zero in a compound assignment",
-            ));
-        }
-        AssignOp::Rem if folded == 0.0 => {
-            return Err(parse_error(line, "modulo by zero in a compound assignment"));
-        }
-        AssignOp::Div => current / folded,
-        AssignOp::Rem => current % folded,
-    })
-}
-
 /// Fold a timing expression, resolving the array elements it reads first.
 fn timed_of(
     expr: &Expr,
     line: usize,
-    vars: Option<&HashMap<&str, f64>>,
+    vars: Option<&HashMap<&str, ClassicalValue>>,
     durations: &HashMap<&str, Timed>,
     arrays: &HashMap<&str, Rc<ClassicalArray>>,
 ) -> Result<Timed> {
@@ -202,22 +163,32 @@ fn timed_of(
 fn resolve_elements<'e>(
     expr: &Expr<'e>,
     line: usize,
-    vars: Option<&HashMap<&str, f64>>,
+    vars: Option<&HashMap<&str, ClassicalValue>>,
     durations: &HashMap<&str, Timed>,
     arrays: &HashMap<&str, Rc<ClassicalArray>>,
 ) -> Result<Expr<'e>> {
-    let resolve =
-        |inner: &Expr<'e>| with_stack(|| resolve_elements(inner, line, vars, durations, arrays));
+    replace_elements(expr, &|element| {
+        let array = arrays.get(element.array).ok_or_else(|| {
+            parse_error(line, format!("`{}` is not a declared array", element.array))
+        })?;
+        let at = element_offset(array, element.array, &element.indices, line, |index| {
+            with_stack(|| number_of(index, line, vars, durations, arrays))
+        })?;
+        Ok(Some(array.values[at]))
+    })
+}
+
+/// `expr` with each element `value` gives a value for replaced by it.
+fn replace_elements<'e>(
+    expr: &Expr<'e>,
+    value: &impl Fn(&syntax_expr::Element<'e>) -> Result<Option<ClassicalValue>>,
+) -> Result<Expr<'e>> {
+    let resolve = |inner: &Expr<'e>| with_stack(|| replace_elements(inner, value));
     Ok(match expr {
-        Expr::Element(element) => {
-            let array = arrays.get(element.array).ok_or_else(|| {
-                parse_error(line, format!("`{}` is not a declared array", element.array))
-            })?;
-            let at = element_offset(array, element.array, &element.indices, line, |index| {
-                with_stack(|| number_of(index, line, vars, durations, arrays))
-            })?;
-            Expr::Number(array.values[at])
-        }
+        Expr::Element(element) => match value(element)? {
+            Some(value) => Expr::Number(value),
+            None => expr.clone(),
+        },
         Expr::Negate(inner) => Expr::Negate(Box::new(resolve(inner)?)),
         Expr::Not(inner) => Expr::Not(Box::new(resolve(inner)?)),
         Expr::BitNot(inner) => Expr::BitNot(Box::new(resolve(inner)?)),
@@ -230,6 +201,11 @@ fn resolve_elements<'e>(
             name: call.name,
             args: call.args.iter().map(resolve).collect::<Result<_>>()?,
         })),
+        Expr::Cast(cast) => Expr::Cast(Box::new(syntax_expr::Cast {
+            ty: cast.ty,
+            width: cast.width.as_ref().map(resolve).transpose()?,
+            value: resolve(&cast.value)?,
+        })),
         other => other.clone(),
     })
 }
@@ -240,7 +216,7 @@ fn element_offset(
     name: &str,
     indices: &[Expr],
     line: usize,
-    fold: impl Fn(&Expr) -> Result<f64>,
+    fold: impl Fn(&Expr) -> Result<ClassicalValue>,
 ) -> Result<usize> {
     if indices.len() != array.dims.len() {
         return Err(parse_error(
@@ -254,7 +230,7 @@ fn element_offset(
     }
     let mut at = 0usize;
     for (index, &size) in indices.iter().zip(&array.dims) {
-        let written = fold(index)?;
+        let written = fold(index)?.to_float();
         let value = if written < 0.0 {
             written + size as f64
         } else {
@@ -269,6 +245,106 @@ fn element_offset(
         at = at * size + value as usize;
     }
     Ok(at)
+}
+
+/// The guard a lowered condition spells, when it has one: a bit or its negation,
+/// or a register, a cast of one, or a bit compared with a whole number.
+fn guard_condition(condition: &ClassicalExpr) -> Option<ClassicalCondition> {
+    use crate::circuit::dynamic::{BinaryOp as Op, ClassicalType as Ty, UnaryOp};
+    match condition {
+        ClassicalExpr::Bit(bit) => Some(ClassicalCondition::BitIsOne(*bit)),
+        ClassicalExpr::Register { offset, size } => Some(ClassicalCondition::RegisterNotEquals {
+            offset: *offset,
+            size: *size,
+            value: 0,
+        }),
+        ClassicalExpr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => guard_condition(operand).map(|guard| guard.negate()),
+        ClassicalExpr::Cast {
+            ty: Ty::Bool,
+            operand,
+        } => guard_condition(operand),
+        ClassicalExpr::Binary {
+            op: op @ (Op::Eq | Op::Ne),
+            lhs,
+            rhs,
+        } => {
+            let (bits, value) = match (lhs.as_ref(), rhs.as_ref()) {
+                (ClassicalExpr::Const(value), bits) | (bits, ClassicalExpr::Const(value)) => {
+                    (bits, *value)
+                }
+                _ => return None,
+            };
+            if matches!(value, ClassicalValue::Float(float) if float.fract() != 0.0) {
+                return None;
+            }
+            let (span, value) = match bits {
+                ClassicalExpr::Cast {
+                    ty: Ty::Int { width },
+                    operand,
+                } => {
+                    let (offset, size) = register_value(operand)?;
+                    let width = *width as usize;
+                    if width > size {
+                        ((offset, size), u64::try_from(value.to_int()).ok()?)
+                    } else {
+                        ((offset, width), signed_pattern(value.to_int(), width)?)
+                    }
+                }
+                _ => (register_value(bits)?, u64::try_from(value.to_int()).ok()?),
+            };
+            let equals = match span {
+                (bit, 1) if value <= 1 => {
+                    if value == 1 {
+                        ClassicalCondition::BitIsOne(bit)
+                    } else {
+                        ClassicalCondition::BitIsZero(bit)
+                    }
+                }
+                (offset, size) => ClassicalCondition::RegisterEquals {
+                    offset,
+                    size,
+                    value,
+                },
+            };
+            Some(if *op == Op::Eq {
+                equals
+            } else {
+                equals.negate()
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The low `width` bits an `int[width]` holding `value` spells, when it can.
+fn signed_pattern(value: i128, width: usize) -> Option<u64> {
+    let half = 1i128 << (width - 1);
+    (-half..half)
+        .contains(&value)
+        .then(|| (value & ((half << 1) - 1)) as u64)
+}
+
+/// The span of bits `expr` reads as an unsigned value: a bit, a register, or an
+/// unsigned cast of one, which keeps the low bits a narrower width names. A
+/// signed cast reads as unsigned only when wider than its bits.
+pub(super) fn register_value(expr: &ClassicalExpr) -> Option<(usize, usize)> {
+    use crate::circuit::dynamic::ClassicalType as Ty;
+    match expr {
+        ClassicalExpr::Bit(bit) => Some((*bit, 1)),
+        ClassicalExpr::Register { offset, size } => Some((*offset, *size)),
+        ClassicalExpr::Cast { ty, operand } => {
+            let (offset, size) = register_value(operand)?;
+            match *ty {
+                Ty::Uint { width } => Some((offset, size.min(width as usize))),
+                Ty::Int { width } if (width as usize) > size => Some((offset, size)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn is_bit_param(args: &[DefParam], name: &str) -> bool {
@@ -406,6 +482,18 @@ impl<'a> Parser<'a> {
         let line = stmt.line;
         match &stmt.kind {
             StmtKind::Empty | StmtKind::Include => Ok(()),
+            StmtKind::Expr(value) => {
+                match value.finds_call(&|name| self.def_defs.contains_key(name)) {
+                    Some(def) => Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "a call to def `{def}` inside an expression, whose result \
+                             nothing yet carries"
+                        ),
+                        line,
+                    }),
+                    None => Ok(()),
+                }
+            }
             StmtKind::Version(version) => {
                 Self::check_version_number(version, line)?;
                 Ok(())
@@ -422,7 +510,9 @@ impl<'a> Parser<'a> {
                     if init.is_some() {
                         return Err(PrismError::UnsupportedConstruct {
                             construct: format!(
-                                "an initializer on `{name}`, the bit def returns; the                                  caller's bits hold it and the instruction list has no                                  classical write"
+                                "an initializer on `{name}`, the bit def returns; the \
+                                 caller's bits hold it and the instruction list has no \
+                                 classical write"
                             ),
                             line,
                         });
@@ -585,11 +675,11 @@ impl<'a> Parser<'a> {
                 out.extend(self.exec_for(variable, range, body, line)?);
                 Ok(())
             }
-            StmtKind::Switch { operand, arms } if self.switch_needs_graph(stmt, operand) => {
-                self.exec_switch_branches(operand, arms, line)
+            StmtKind::Switch { target, arms } if self.switch_needs_graph(stmt, target) => {
+                self.exec_switch_branches(target, arms, line)
             }
-            StmtKind::Switch { operand, arms } => {
-                out.extend(self.exec_switch(operand, arms, line)?);
+            StmtKind::Switch { target, arms } => {
+                out.extend(self.exec_switch(target, arms, line)?);
                 Ok(())
             }
             StmtKind::While { condition, body } if self.dynamic.is_some() => {
@@ -760,7 +850,7 @@ impl<'a> Parser<'a> {
         let kind = match ty {
             "int" | "uint" => ClassicalType::Int(self.runtime_type(ty, width, line)?),
             "bool" => ClassicalType::Bool,
-            "float" | "angle" => ClassicalType::Float,
+            "float" | "angle" => self.real_type(ty, width, line)?,
             "duration" => ClassicalType::Duration,
             "stretch" => ClassicalType::Stretch,
             other => {
@@ -781,21 +871,14 @@ impl<'a> Parser<'a> {
             if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
                 let zero = Timed::Duration(Duration::default());
                 self.bind_duration(name, kind, zero, constant);
-            } else if let ClassicalType::Int(integer) = kind {
-                self.bind_int(name, integer, 0, constant);
             } else {
-                self.bind_classical(name, kind, 0.0, constant);
+                self.bind_classical(name, kind, ClassicalValue::Int(0), constant);
             }
             return Ok(());
         };
         if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
             let folded = self.duration_of(value, line)?;
             self.bind_duration(name, kind, folded, constant);
-            return Ok(());
-        }
-        if let ClassicalType::Int(integer) = kind {
-            let folded = self.int_of(value, line)?;
-            self.bind_int(name, integer, folded, constant);
             return Ok(());
         }
         let folded = self.fold_typed(kind, value, line)?;
@@ -811,11 +894,7 @@ impl<'a> Parser<'a> {
         } else {
             value
         };
-        let decl = ClassicalDecl {
-            ty,
-            constant,
-            int: 0,
-        };
+        let decl = ClassicalDecl { ty, constant };
         if Rc::make_mut(&mut self.classical)
             .insert(name, decl)
             .is_none()
@@ -866,7 +945,7 @@ impl<'a> Parser<'a> {
                 format!("`{target}` is not a declared classical variable"),
             ));
         };
-        let (kind, constant, current) = (decl.ty, decl.constant, decl.int);
+        let (kind, constant) = (decl.ty, decl.constant);
         if constant {
             return Err(parse_error(
                 line,
@@ -877,21 +956,12 @@ impl<'a> Parser<'a> {
         if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
             return self.assign_duration(target, kind, op, value, line);
         }
-        if let ClassicalType::Int(integer) = kind {
-            let folded = self.int_of(value, line)?;
-            let updated = match op {
-                None => folded,
-                Some(op) => compound_int(op, current, folded, line)?,
-            };
-            self.bind_int(target, integer, updated, false);
-            return Ok(());
-        }
         let folded = self.fold_typed(kind, value, line)?;
         let updated = match op {
             None => folded,
             Some(op) => {
-                let current = self.fold_typed(kind, &Expr::Ident(target), line)?;
-                kind.store(compound(op, current, folded, line)?)
+                let current = self.typed_of(&Expr::Ident(target), line)?;
+                syntax_expr::arithmetic(op.binary(), current, folded, line)?
             }
         };
         self.bind_classical(target, kind, updated, false);
@@ -903,7 +973,8 @@ impl<'a> Parser<'a> {
             "int" => ClassicalType::Int(RuntimeType::Int { width: 64 }),
             "uint" => ClassicalType::Int(RuntimeType::Uint { width: 64 }),
             "bool" => ClassicalType::Bool,
-            "float" | "angle" => ClassicalType::Float,
+            "float" => ClassicalType::FLOAT,
+            "angle" => ClassicalType::Angle(None),
             other => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!(
@@ -945,7 +1016,7 @@ impl<'a> Parser<'a> {
         }
         let mut values = Vec::with_capacity(total);
         match &decl.init {
-            None => values.resize(total, 0.0),
+            None => values.resize(total, kind.store(ClassicalValue::Int(0))),
             Some(init) => self.fold_initializer(kind, init, &dims, decl.name, line, &mut values)?,
         }
         let array = ClassicalArray {
@@ -969,7 +1040,7 @@ impl<'a> Parser<'a> {
         dims: &[usize],
         name: &str,
         line: usize,
-        values: &mut Vec<f64>,
+        values: &mut Vec<ClassicalValue>,
     ) -> Result<()> {
         match (init, dims.split_first()) {
             (ast::ArrayInit::Value(expr), None) => {
@@ -1018,15 +1089,15 @@ impl<'a> Parser<'a> {
         }
         self.reject_guarded_write(assign.array, line)?;
         let at = element_offset(array, assign.array, &assign.indices, line, |index| {
-            self.value_of(index, line)
+            self.typed_of(index, line)
         })?;
         let kind = array.ty;
         let current = array.values[at];
         let folded = self.fold_typed(kind, &assign.value, line)?;
-        let updated = match assign.op {
+        let updated = kind.store(match assign.op {
             None => folded,
-            Some(op) => kind.store(compound(op, current, folded, line)?),
-        };
+            Some(op) => syntax_expr::arithmetic(op.binary(), current, folded, line)?,
+        });
         if let Some(array) = self.arrays.get_mut(assign.array) {
             Rc::make_mut(array).values[at] = updated;
         }
@@ -1059,19 +1130,12 @@ impl<'a> Parser<'a> {
         let updated = match op {
             None => value,
             Some(op) => {
-                let op = match op {
-                    AssignOp::Add => BinaryOp::Add,
-                    AssignOp::Sub => BinaryOp::Sub,
-                    AssignOp::Mul => BinaryOp::Mul,
-                    AssignOp::Div => BinaryOp::Div,
-                    AssignOp::Rem => BinaryOp::Rem,
-                };
                 let current = self
                     .durations
                     .get(target)
                     .copied()
                     .unwrap_or(Timed::Stretch);
-                syntax_expr::combine_timed(op, current, value, line)?
+                syntax_expr::combine_timed(op.binary(), current, value, line)?
             }
         };
         if let Timed::Number(number) = updated {
@@ -1085,8 +1149,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Fold an initializer to the value its declared type holds, naming an
-    /// `input` rather than leaving it to read as an unknown identifier.
-    fn fold_typed(&self, kind: ClassicalType, value: &Expr, line: usize) -> Result<f64> {
+    /// `input` rather than leaving it to read as an unknown identifier. An
+    /// integer or `bool` takes a whole number, which a fractional float is not.
+    fn fold_typed(&self, kind: ClassicalType, value: &Expr, line: usize) -> Result<ClassicalValue> {
         if let Some(name) = self.input_names.iter().find(|name| value.mentions(name)) {
             return Err(PrismError::UnsupportedConstruct {
                 construct: format!(
@@ -1095,15 +1160,12 @@ impl<'a> Parser<'a> {
                 line,
             });
         }
-        match kind {
-            ClassicalType::Float | ClassicalType::Duration | ClassicalType::Stretch => {
-                self.value_of(value, line)
+        Ok(kind.store(match kind {
+            ClassicalType::Int(_) | ClassicalType::Bool => {
+                ClassicalValue::Int(self.int_of(value, line)?)
             }
-            ClassicalType::Int(integer) => Ok(integer
-                .store(ClassicalValue::Int(self.int_of(value, line)?))
-                .to_float()),
-            ClassicalType::Bool => Ok(f64::from(self.int_of(value, line)? != 0)),
-        }
+            _ => self.typed_of(value, line)?,
+        }))
     }
 
     fn declare_alias(&mut self, name: &'a str, sources: &[Operand<'a>], line: usize) -> Result<()> {
@@ -1508,48 +1570,78 @@ impl<'a> Parser<'a> {
     // ------------------------------------------------------------ expressions
 
     pub(super) fn value_of(&self, expr: &Expr, line: usize) -> Result<f64> {
-        self.reject_runtime(expr, line)?;
-        number_of(
-            expr,
-            line,
-            self.param_vars.as_ref(),
-            &self.durations,
-            &self.arrays,
-        )
+        Ok(self.typed_of(expr, line)?.to_float())
     }
 
-    /// An integer initializer or assignment: an integer variable read exactly,
-    /// anything else folded and required to be whole.
-    fn int_of(&self, expr: &Expr, line: usize) -> Result<i128> {
-        if let Expr::Ident(name) = expr
-            && let Some(decl) = self.classical.get(name)
-            && matches!(decl.ty, ClassicalType::Int(_))
-            && self.param_vars.as_ref().and_then(|vars| vars.get(name)) == Some(&(decl.int as f64))
-        {
-            return Ok(decl.int);
+    pub(super) fn typed_of(&self, expr: &Expr, line: usize) -> Result<ClassicalValue> {
+        self.reject_runtime(expr, line)?;
+        let vars = self.param_vars.as_ref();
+        if !self.classical.is_empty() && expr.reads_element() {
+            let resolved = replace_elements(expr, &|element| {
+                let Some(at) = self.int_bit(element, line)? else {
+                    return Ok(None);
+                };
+                let value = vars.and_then(|vars| vars.get(element.array));
+                Ok(value.map(|value| ClassicalValue::Int((value.to_int() >> at) & 1)))
+            })?;
+            return number_of(&resolved, line, vars, &self.durations, &self.arrays);
         }
-        let value = self.value_of(expr, line)?;
-        if !value.is_finite() || value.fract() != 0.0 {
+        number_of(expr, line, vars, &self.durations, &self.arrays)
+    }
+
+    /// The bit `int[n] x` or `uint[n] x` reads as `x[i]`, `None` for any other
+    /// element. A negative index counts from the top bit.
+    pub(super) fn int_bit(
+        &self,
+        element: &syntax_expr::Element,
+        line: usize,
+    ) -> Result<Option<u32>> {
+        use crate::circuit::dynamic::ClassicalType as Ty;
+        if self.arrays.contains_key(element.array) {
+            return Ok(None);
+        }
+        let Some(ClassicalDecl {
+            ty: ClassicalType::Int(Ty::Int { width } | Ty::Uint { width }),
+            ..
+        }) = self.classical.get(element.array)
+        else {
+            return Ok(None);
+        };
+        let name = element.array;
+        let [index] = element.indices.as_slice() else {
             return Err(parse_error(
                 line,
-                format!("expected an integer, got {value}"),
+                format!("`{name}` is an integer and takes one bit index"),
+            ));
+        };
+        let written = self.int_of(index, line)?;
+        let at = if written < 0 {
+            written + i128::from(*width)
+        } else {
+            written
+        };
+        if !(0..i128::from(*width)).contains(&at) {
+            return Err(parse_error(
+                line,
+                format!("bit {written} is outside `{name}`, which holds {width} bits"),
             ));
         }
-        Ok(value as i128)
+        Ok(Some(at as u32))
+    }
+
+    /// Fold `expr` to an integer: an integer exactly, a float only when whole.
+    fn int_of(&self, expr: &Expr, line: usize) -> Result<i128> {
+        match self.typed_of(expr, line)? {
+            ClassicalValue::Float(value) if !value.is_finite() || value.fract() != 0.0 => Err(
+                parse_error(line, format!("expected an integer, got {value}")),
+            ),
+            value => Ok(value.to_int()),
+        }
     }
 
     pub(super) fn integer_of(&self, expr: &Expr, line: usize) -> Result<i64> {
-        let value = self.value_of(expr, line)?;
-        if !value.is_finite() || value.fract() != 0.0 {
-            return Err(parse_error(
-                line,
-                format!("expected an integer, got {value}"),
-            ));
-        }
-        if value > i64::MAX as f64 || value < i64::MIN as f64 {
-            return Err(parse_error(line, "integer expression out of range"));
-        }
-        Ok(value as i64)
+        i64::try_from(self.int_of(expr, line)?)
+            .map_err(|_| parse_error(line, "integer expression out of range"))
     }
 
     // ------------------------------------------------------------------ calls
@@ -1782,9 +1874,16 @@ impl<'a> Parser<'a> {
         let Argument::Operand(operand) = argument else {
             return None;
         };
-        let array = operand
-            .register()
-            .filter(|name| self.arrays.contains_key(name))?;
+        let array = operand.register().filter(|name| {
+            self.arrays.contains_key(name)
+                || matches!(
+                    self.classical.get(name),
+                    Some(ClassicalDecl {
+                        ty: ClassicalType::Int(_),
+                        ..
+                    })
+                )
+        })?;
         let Some(Index::Single(index)) = &operand.index else {
             return None;
         };
@@ -1860,11 +1959,15 @@ impl<'a> Parser<'a> {
 
         // A gate body sees its own parameters and nothing else, which is what
         // the language scopes it to.
-        let bindings: HashMap<&'a str, f64> = def
+        let bindings: HashMap<&'a str, ClassicalValue> = def
             .params
             .iter()
             .copied()
-            .zip(call_params.iter().copied())
+            .zip(
+                call_params
+                    .iter()
+                    .map(|&value| ClassicalValue::Float(value)),
+            )
             .collect();
         let mut sub = self.expansion_parser(bindings);
         if let Some(&first) = call_qubits.first() {
@@ -1966,7 +2069,8 @@ impl<'a> Parser<'a> {
             + self.aliases.len()
             + self.cregs.len();
         self.charge(copied, line)?;
-        let mut bindings: HashMap<&'a str, f64> = self.param_vars.clone().unwrap_or_default();
+        let mut bindings: HashMap<&'a str, ClassicalValue> =
+            self.param_vars.clone().unwrap_or_default();
         let mut durations = self.durations.clone();
         let mut qubit_bindings: Vec<(&'a str, usize)> = Vec::new();
         let mut bit_bindings: Vec<(&'a str, SmallVec<[usize; 4]>)> = Vec::new();
@@ -2033,17 +2137,15 @@ impl<'a> Parser<'a> {
                         });
                     }
                     let value = number_of(expr, line, Some(&bindings), &durations, &self.arrays)?;
-                    let value = if *integral {
-                        let rounded = value.round();
-                        if (value - rounded).abs() > 0.0 {
+                    let value = match value {
+                        ClassicalValue::Float(float) if *integral && float.fract() != 0.0 => {
                             return Err(parse_error(
                                 line,
                                 format!("def `{name}` parameter `{param_name}` takes an integer"),
                             ));
                         }
-                        rounded
-                    } else {
-                        value
+                        value if *integral => ClassicalValue::Int(value.to_int()),
+                        value => value,
                     };
                     bindings.insert(param_name, value);
                 }
@@ -2236,7 +2338,7 @@ impl<'a> Parser<'a> {
 
     /// A parser for an expanded body: the enclosing registers and definitions,
     /// one level deeper, with its own bindings.
-    fn expansion_parser(&self, bindings: HashMap<&'a str, f64>) -> Parser<'a> {
+    fn expansion_parser(&self, bindings: HashMap<&'a str, ClassicalValue>) -> Parser<'a> {
         Parser {
             dialect: self.dialect,
             input: "",
@@ -2281,6 +2383,36 @@ impl<'a> Parser<'a> {
         conditional: &ast::Conditional<'a>,
         line: usize,
     ) -> Result<Vec<Instruction>> {
+        let general = match &conditional.condition {
+            Condition::Expr(_) => true,
+            Condition::Truthy(operand)
+            | Condition::Negated(operand)
+            | Condition::Compare { lhs: operand, .. } => {
+                self.single_bit(operand).is_none()
+                    && operand.register().is_some_and(|name| {
+                        !self.is_bit_name(name)
+                            && (self.classical.contains_key(name)
+                                || self.arrays.contains_key(name)
+                                || syntax_expr::eval(&Expr::Ident(name), line, None).is_ok()
+                                || self
+                                    .param_vars
+                                    .as_ref()
+                                    .is_some_and(|vars| vars.contains_key(name)))
+                    })
+            }
+            Condition::Parity { .. } => false,
+        };
+        if general {
+            let expr = super::dynamic::condition_expr(&conditional.condition)?;
+            if let ClassicalExpr::Const(value) = self.lower_expr(&expr, line)? {
+                let body = if value.truthy() {
+                    Some(&conditional.then_body)
+                } else {
+                    conditional.else_body.as_ref()
+                };
+                return body.map_or(Ok(Vec::new()), |body| self.exec_box(body));
+            }
+        }
         let condition = self.condition_of(&conditional.condition, line)?;
         let then_instrs = self.region(&conditional.then_body)?;
         let Some(else_body) = &conditional.else_body else {
@@ -2421,7 +2553,7 @@ impl<'a> Parser<'a> {
             // for one pass, while a write to an outer name carries on.
             self.param_vars
                 .get_or_insert_with(HashMap::new)
-                .insert(variable, value as f64);
+                .insert(variable, ClassicalValue::Int(i128::from(value)));
             let was_nested = std::mem::replace(&mut self.nested, true);
             let produced = self.execute(body);
             self.nested = was_nested;
@@ -2482,11 +2614,22 @@ impl<'a> Parser<'a> {
 
     fn exec_switch(
         &mut self,
-        operand: &Operand<'a>,
+        target: &Expr<'a>,
         arms: &[ast::SwitchArm<'a>],
         line: usize,
     ) -> Result<Vec<Instruction>> {
-        let (offset, size) = self.switch_operand(operand)?;
+        let lowered = self.lower_expr(target, line)?;
+        if let ClassicalExpr::Const(value) = lowered {
+            return self.exec_switch_constant(value, arms, line);
+        }
+        let (offset, size) =
+            register_value(&lowered).ok_or_else(|| PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "a `switch` on `{target}`, which no guard on classical bits spells; \
+                     `openqasm::parse_dynamic` evaluates it at runtime"
+                ),
+                line,
+            })?;
         let mut labels: Vec<u64> = Vec::new();
         let mut cases: Vec<(Vec<u64>, Vec<Instruction>)> = Vec::new();
         let mut default: Option<Vec<Instruction>> = None;
@@ -2566,35 +2709,50 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    /// The `(offset, size)` of the classical range a `switch` reads. A bit
-    /// reference is a range of one.
-    fn switch_operand(&self, operand: &Operand) -> Result<(usize, usize)> {
-        if operand.index.is_some() {
-            return Ok((self.bit_of(operand)?, 1));
+    /// The one arm a `switch` on a parse-time value runs, or its `default`.
+    fn exec_switch_constant(
+        &mut self,
+        value: ClassicalValue,
+        arms: &[ast::SwitchArm<'a>],
+        line: usize,
+    ) -> Result<Vec<Instruction>> {
+        if matches!(value, ClassicalValue::Float(float) if float.fract() != 0.0) {
+            return Err(parse_error(
+                line,
+                format!("`switch` needs an integer, got {}", value.to_float()),
+            ));
         }
-        let name = operand
-            .register()
-            .ok_or_else(|| PrismError::UndefinedRegister {
-                name: operand.describe(),
-                line: operand.line,
-            })?;
-        if let Some(alias) = self.alias(name) {
-            return match alias.indices.as_slice() {
-                [single] => Ok((*single, 1)),
-                _ => Err(parse_error(
-                    operand.line,
-                    format!("`switch` on alias `{name}`, which is not one contiguous register"),
-                )),
+        let value = value.to_int();
+        let mut labels: Vec<i128> = Vec::new();
+        let mut taken = None;
+        let mut default = None;
+        for arm in arms {
+            let Some(arm_labels) = &arm.labels else {
+                if default.replace(&arm.body).is_some() {
+                    return Err(parse_error(
+                        arm.line,
+                        "`switch` has more than one `default` arm",
+                    ));
+                }
+                continue;
             };
+            for label in arm_labels {
+                let label = self.int_of(label, arm.line)?;
+                if labels.contains(&label) {
+                    return Err(parse_error(
+                        arm.line,
+                        format!("`switch` case label {label} appears twice"),
+                    ));
+                }
+                labels.push(label);
+                if label == value {
+                    taken = Some(&arm.body);
+                }
+            }
         }
-        let register = self
-            .cregs
-            .get(name)
-            .ok_or_else(|| PrismError::UndefinedRegister {
-                name: name.to_string(),
-                line: operand.line,
-            })?;
-        Ok((register.offset, register.size))
+        taken
+            .or(default)
+            .map_or(Ok(Vec::new()), |body| self.exec_box(body))
     }
 
     /// The bit an unsubscripted name stands for when it names exactly one,
@@ -2678,10 +2836,17 @@ impl<'a> Parser<'a> {
                     expected,
                 })
             }
-            Condition::Expr(expr) => Err(parse_error(
-                line,
-                format!("`{expr}` has no form a guard on classical bits can take"),
-            )),
+            Condition::Expr(expr) => {
+                guard_condition(&self.lower_expr(expr, line)?).ok_or_else(|| {
+                    PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "condition `{expr}`, which no guard on classical bits spells; \
+                             `openqasm::parse_dynamic` evaluates it at runtime"
+                        ),
+                        line,
+                    }
+                })
+            }
             Condition::Compare { lhs, op, rhs } => {
                 let negate = *op == CmpOp::NotEqual;
                 let value = self.integer_of(rhs, line)?;

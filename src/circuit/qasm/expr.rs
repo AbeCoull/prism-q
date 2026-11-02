@@ -9,6 +9,7 @@ use std::fmt;
 
 use super::lexer::{Kind, TIME_UNITS};
 use super::stream::{MAX_NESTING, Stream, with_stack};
+use crate::circuit::dynamic::{self, ClassicalValue, UnaryOp};
 use crate::error::{PrismError, Result};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -35,6 +36,38 @@ pub(crate) enum BinaryOp {
 }
 
 impl BinaryOp {
+    fn is_bitwise(self) -> bool {
+        matches!(
+            self,
+            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+        )
+    }
+
+    pub(crate) fn runtime(self) -> dynamic::BinaryOp {
+        use dynamic::BinaryOp as Op;
+        match self {
+            BinaryOp::Add => Op::Add,
+            BinaryOp::Sub => Op::Sub,
+            BinaryOp::Mul => Op::Mul,
+            BinaryOp::Div => Op::Div,
+            BinaryOp::Rem => Op::Rem,
+            BinaryOp::Pow => Op::Pow,
+            BinaryOp::Shl => Op::Shl,
+            BinaryOp::Shr => Op::Shr,
+            BinaryOp::BitAnd => Op::BitAnd,
+            BinaryOp::BitOr => Op::BitOr,
+            BinaryOp::BitXor => Op::BitXor,
+            BinaryOp::Eq => Op::Eq,
+            BinaryOp::Ne => Op::Ne,
+            BinaryOp::Lt => Op::Lt,
+            BinaryOp::Le => Op::Le,
+            BinaryOp::Gt => Op::Gt,
+            BinaryOp::Ge => Op::Ge,
+            BinaryOp::And => Op::And,
+            BinaryOp::Or => Op::Or,
+        }
+    }
+
     fn spelling(self) -> &'static str {
         match self {
             BinaryOp::Add => "+",
@@ -102,7 +135,9 @@ impl Timed {
 
 #[derive(Clone, Debug)]
 pub(crate) enum Expr<'a> {
-    Number(f64),
+    /// A literal, or a value already folded into the tree. An integer literal
+    /// stays an exact integer.
+    Number(ClassicalValue),
     Duration(Duration),
     Ident(&'a str),
     Negate(Box<Expr<'a>>),
@@ -119,6 +154,125 @@ pub(crate) enum Expr<'a> {
     Call(Box<Call<'a>>),
     /// An array element, `a[i, j]` or `a[i][j]`.
     Element(Box<Element<'a>>),
+    Cast(Box<Cast<'a>>),
+}
+
+/// `int[8](x)`, `bool(x)` and the other scalar casts.
+#[derive(Clone, Debug)]
+pub(crate) struct Cast<'a> {
+    pub ty: CastType,
+    pub width: Option<Expr<'a>>,
+    pub value: Expr<'a>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CastType {
+    Bool,
+    Int,
+    Uint,
+    Float,
+    Angle,
+    /// `bit[n](x)`, read as the `uint[n]` its bits spell.
+    Bit,
+}
+
+impl CastType {
+    pub(crate) fn named(name: &str) -> Option<CastType> {
+        Some(match name {
+            "bool" => CastType::Bool,
+            "int" => CastType::Int,
+            "uint" => CastType::Uint,
+            "float" => CastType::Float,
+            "angle" => CastType::Angle,
+            "bit" => CastType::Bit,
+            _ => return None,
+        })
+    }
+
+    fn spelling(self) -> &'static str {
+        match self {
+            CastType::Bool => "bool",
+            CastType::Int => "int",
+            CastType::Uint => "uint",
+            CastType::Float => "float",
+            CastType::Angle => "angle",
+            CastType::Bit => "bit",
+        }
+    }
+
+    /// The runtime type the cast converts to, `width` already checked.
+    pub(crate) fn runtime(self, width: Option<u32>) -> dynamic::ClassicalType {
+        use dynamic::ClassicalType as Ty;
+        match self {
+            CastType::Bool => Ty::Bool,
+            CastType::Int => Ty::Int {
+                width: width.unwrap_or(64),
+            },
+            CastType::Uint => Ty::Uint {
+                width: width.unwrap_or(64),
+            },
+            CastType::Bit => Ty::Uint {
+                width: width.unwrap_or(1),
+            },
+            CastType::Float => Ty::Float,
+            CastType::Angle => Ty::Angle,
+        }
+    }
+
+    /// Check a width written as `ty[width]`.
+    pub(crate) fn width(self, value: ClassicalValue, line: usize) -> Result<u32> {
+        let most = match self {
+            CastType::Bool => {
+                return Err(PrismError::Parse {
+                    line,
+                    message: "`bool` takes no width".into(),
+                });
+            }
+            CastType::Float => 128,
+            _ => 64,
+        };
+        let spelling = self.spelling();
+        match value {
+            ClassicalValue::Int(width) if (1..=most).contains(&width) => Ok(width as u32),
+            other => Err(PrismError::Parse {
+                line,
+                message: format!("`{spelling}[{}]` needs 1 to {most} bits", other.to_float()),
+            }),
+        }
+    }
+
+    /// `value` converted to this type: truthiness for `bool`, truncation toward
+    /// zero and wraparound for the integers, single precision for `float[32]`,
+    /// and the nearest step of an `angle[n]`.
+    pub(crate) fn convert(self, width: Option<u32>, value: ClassicalValue) -> ClassicalValue {
+        match self {
+            CastType::Float => ClassicalValue::Float(real(value.to_float(), width == Some(32))),
+            CastType::Angle => ClassicalValue::Float(angle(value.to_float(), width)),
+            _ => self.runtime(width).store(value),
+        }
+    }
+}
+
+/// `value` as a float holds it, rounded to single precision when `single`.
+pub(crate) fn real(value: f64, single: bool) -> f64 {
+    if single {
+        f64::from(value as f32)
+    } else {
+        value
+    }
+}
+
+/// `value` as an `angle[width]` holds it: the nearest multiple of
+/// `2 pi / 2^width`, ties to even, taken modulo `2 pi`. With no width the value
+/// wraps into `[0, 2 pi)` unrounded.
+pub(crate) fn angle(value: f64, width: Option<u32>) -> f64 {
+    let tau = std::f64::consts::TAU;
+    let turns = value.rem_euclid(tau) / tau;
+    let Some(width) = width else {
+        return turns * tau;
+    };
+    let steps = 2f64.powi(width as i32);
+    (turns * steps).round_ties_even() % steps / steps * tau
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +298,29 @@ impl<'a> Expr<'a> {
             Expr::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
             Expr::Call(call) => call.args.iter().any(|arg| arg.mentions(name)),
             Expr::Element(element) => element.indices.iter().any(|index| index.mentions(name)),
+            Expr::Cast(cast) => {
+                cast.value.mentions(name) || cast.width.as_ref().is_some_and(|w| w.mentions(name))
+            }
+        })
+    }
+
+    /// The first function the expression calls that `wanted` picks out.
+    pub(crate) fn finds_call(&self, wanted: &impl Fn(&str) -> bool) -> Option<&'a str> {
+        with_stack(|| match self {
+            Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) => None,
+            Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => {
+                inner.finds_call(wanted)
+            }
+            Expr::Binary { left, right, .. } => {
+                left.finds_call(wanted).or_else(|| right.finds_call(wanted))
+            }
+            Expr::Call(call) if wanted(call.name) => Some(call.name),
+            Expr::Call(call) => call.args.iter().find_map(|arg| arg.finds_call(wanted)),
+            Expr::Element(element) => element
+                .indices
+                .iter()
+                .find_map(|index| index.finds_call(wanted)),
+            Expr::Cast(cast) => cast.value.finds_call(wanted),
         })
     }
 
@@ -155,6 +332,7 @@ impl<'a> Expr<'a> {
             Expr::Binary { left, right, .. } => left.reads_element() || right.reads_element(),
             Expr::Call(call) => call.args.iter().any(Expr::reads_element),
             Expr::Element(_) => true,
+            Expr::Cast(cast) => cast.value.reads_element(),
         })
     }
 
@@ -171,15 +349,9 @@ impl<'a> Expr<'a> {
 impl fmt::Display for Expr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::Number(value) => {
-                // A whole number reads back as it was written rather than as a
-                // float, since that is how an index or a bound is spelled.
-                if value.fract() == 0.0 && value.abs() < 1e15 {
-                    write!(f, "{}", *value as i64)
-                } else {
-                    write!(f, "{value}")
-                }
-            }
+            Expr::Number(ClassicalValue::Int(value)) => write!(f, "{value}"),
+            Expr::Number(ClassicalValue::Float(value)) => write!(f, "{value}"),
+            Expr::Number(ClassicalValue::Bool(value)) => write!(f, "{value}"),
             Expr::Duration(duration) if duration.dt == 0.0 => write!(f, "{}ns", duration.ns),
             Expr::Duration(duration) => write!(f, "{}dt", duration.dt),
             Expr::Ident(name) => f.write_str(name),
@@ -220,6 +392,13 @@ impl fmt::Display for Expr<'_> {
                 }
                 f.write_str("]")
             }
+            Expr::Cast(cast) => {
+                f.write_str(cast.ty.spelling())?;
+                if let Some(width) = &cast.width {
+                    write!(f, "[{width}]")?;
+                }
+                write!(f, "({})", cast.value)
+            }
         }
     }
 }
@@ -235,9 +414,8 @@ fn grouped(f: &mut fmt::Formatter<'_>, expr: &Expr<'_>) -> fmt::Result {
 
 /// Parse one expression, leaving the cursor on whatever follows it.
 ///
-/// A dynamic stream reads the full classical operator set, loosest first:
-/// `||`, `&&`, `|`, `^`, `&`, equality, ordering, shifts, then arithmetic.
-/// Otherwise the grammar stops at arithmetic, as every static construct reads.
+/// The classical operators read loosest first: `||`, `&&`, `|`, `^`, `&`,
+/// equality, ordering, shifts, then arithmetic.
 pub(crate) fn parse<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
     Ok(parse_node(stream)?.0)
 }
@@ -253,13 +431,7 @@ pub(crate) fn parse_arithmetic<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'
 type Node<'a> = (Expr<'a>, usize);
 
 fn parse_node<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
-    stream.nested(|stream| {
-        if stream.is_dynamic() {
-            parse_levels(stream, 0)
-        } else {
-            parse_sum(stream)
-        }
-    })
+    stream.nested(|stream| parse_levels(stream, 0))
 }
 
 /// Binary operator levels above arithmetic, loosest first.
@@ -337,9 +509,9 @@ fn parse_product<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
 fn parse_unary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
     let wrap: fn(Box<Expr<'a>>) -> Expr<'a> = if stream.eat(Kind::Minus) {
         Expr::Negate
-    } else if stream.is_dynamic() && stream.eat(Kind::Bang) {
+    } else if stream.eat(Kind::Bang) {
         Expr::Not
-    } else if stream.is_dynamic() && stream.eat(Kind::Tilde) {
+    } else if stream.eat(Kind::Tilde) {
         Expr::BitNot
     } else if stream.eat(Kind::Plus) {
         return stream.nested(parse_unary);
@@ -387,6 +559,11 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
         }
         Kind::Ident => {
             let name = stream.advance().text;
+            if let Some(ty) = CastType::named(name)
+                && matches!(stream.kind(), Kind::LBracket | Kind::LParen)
+            {
+                return cast(stream, ty);
+            }
             if stream.kind() == Kind::LBracket {
                 let (indices, depth) = index_nodes(stream)?;
                 let element = Expr::Element(Box::new(Element {
@@ -425,6 +602,25 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
         }),
         _ => Err(stream.expected("a value")),
     }
+}
+
+/// The rest of a cast after its type name: an optional `[width]`, then the
+/// parenthesised value.
+fn cast<'a>(stream: &mut Stream<'_, 'a>, ty: CastType) -> Result<Node<'a>> {
+    let mut depth = 0;
+    let width = if stream.eat(Kind::LBracket) {
+        let (width, width_depth) = parse_node(stream)?;
+        stream.expect(Kind::RBracket)?;
+        depth = width_depth;
+        Some(width)
+    } else {
+        None
+    };
+    stream.expect(Kind::LParen)?;
+    let (value, value_depth) = parse_node(stream)?;
+    stream.expect(Kind::RParen)?;
+    let cast = Expr::Cast(Box::new(Cast { ty, width, value }));
+    deeper(stream, cast, depth.max(value_depth))
 }
 
 /// `[i, j]` or `[i][j]`, read as one flat index list.
@@ -472,19 +668,15 @@ fn deeper<'a>(stream: &Stream<'_, 'a>, expr: Expr<'a>, depth: usize) -> Result<N
 }
 
 /// Read a numeric literal, in whichever radix it was written and with `_`
-/// separators dropped.
-fn number(text: &str, line: usize) -> Result<f64> {
-    // Qubit indices are nearly every literal a program writes; fifteen digits
-    // stay exact in an f64.
-    if text.len() <= 15 && text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Ok(text
-            .bytes()
-            .fold(0u64, |acc, byte| acc * 10 + u64::from(byte - b'0')) as f64);
+/// separators dropped. One with no point and no exponent is an exact integer.
+fn number(text: &str, line: usize) -> Result<ClassicalValue> {
+    // Qubit indices are nearly every literal a program writes.
+    if text.len() <= 18 && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(ClassicalValue::Int(
+            text.bytes()
+                .fold(0i128, |acc, byte| acc * 10 + i128::from(byte - b'0')),
+        ));
     }
-    let invalid = || PrismError::Parse {
-        line,
-        message: format!("invalid number: `{text}`"),
-    };
     let radix = match text.get(..2) {
         Some("0x" | "0X") => Some(16u32),
         Some("0b" | "0B") => Some(2),
@@ -496,17 +688,30 @@ fn number(text: &str, line: usize) -> Result<f64> {
     } else {
         Cow::Borrowed(text)
     };
-    let value = match radix {
-        Some(radix) => u64::from_str_radix(&cleaned[2..], radix).map_err(|_| invalid())? as f64,
-        None => cleaned.parse::<f64>().map_err(|_| invalid())?,
+    let digits = match radix {
+        Some(radix) => Some((&cleaned[2..], radix)),
+        None if cleaned.bytes().all(|byte| byte.is_ascii_digit()) => Some((&cleaned[..], 10)),
+        None => None,
     };
+    if let Some((digits, radix)) = digits {
+        return u64::from_str_radix(digits, radix)
+            .map(|value| ClassicalValue::Int(i128::from(value)))
+            .map_err(|_| PrismError::Parse {
+                line,
+                message: format!("invalid integer literal `{text}`: it must fit in 64 bits"),
+            });
+    }
+    let value = cleaned.parse::<f64>().map_err(|_| PrismError::Parse {
+        line,
+        message: format!("invalid number: `{text}`"),
+    })?;
     if !value.is_finite() {
         return Err(PrismError::Parse {
             line,
             message: format!("value is not finite: `{text}`"),
         });
     }
-    Ok(value)
+    Ok(ClassicalValue::Float(value))
 }
 
 /// Read a duration literal, its unit attached.
@@ -517,7 +722,7 @@ fn duration(text: &str, line: usize) -> Result<Duration> {
             message: format!("invalid duration: `{text}`"),
         });
     };
-    let value = number(&text[..text.len() - unit.len()], line)?;
+    let value = number(&text[..text.len() - unit.len()], line)?.to_float();
     let nanoseconds = match *unit {
         "dt" => return Ok(Duration { ns: 0.0, dt: value }),
         "ns" => 1.0,
@@ -535,20 +740,32 @@ fn duration(text: &str, line: usize) -> Result<Duration> {
 ///
 /// The finiteness check sits here rather than on each operator so that an
 /// overflow built from finite parts is caught too.
-pub(crate) fn eval(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
+pub(crate) fn eval(
+    expr: &Expr,
+    line: usize,
+    vars: Option<&HashMap<&str, ClassicalValue>>,
+) -> Result<ClassicalValue> {
     let value = evaluate(expr, line, vars)?;
-    if !value.is_finite() {
+    if let ClassicalValue::Float(value) = value
+        && !value.is_finite()
+    {
         return Err(PrismError::Parse {
             line,
             message: format!(
-                "the expression evaluates to {value} (must be finite); this typically                  means a divide by zero, a log or sqrt of a non-positive value, or an                  overflow"
+                "the expression evaluates to {value} (must be finite); this typically \
+                 means a divide by zero, a log or sqrt of a non-positive value, or an \
+                 overflow"
             ),
         });
     }
     Ok(value)
 }
 
-fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
+fn evaluate(
+    expr: &Expr,
+    line: usize,
+    vars: Option<&HashMap<&str, ClassicalValue>>,
+) -> Result<ClassicalValue> {
     with_stack(|| match expr {
         Expr::Number(value) => Ok(*value),
         Expr::Duration(_) => Err(PrismError::Parse {
@@ -560,13 +777,23 @@ fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Resu
             line,
             message: format!("`{}` is not a declared array", element.array),
         }),
-        Expr::Negate(inner) => Ok(-evaluate(inner, line, vars)?),
-        Expr::Not(inner) => Ok(f64::from(u8::from(evaluate(inner, line, vars)? == 0.0))),
-        Expr::BitNot(inner) => Ok(!integral("~", evaluate(inner, line, vars)?, line)? as f64),
+        Expr::Negate(inner) => dynamic::unary(UnaryOp::Neg, evaluate(inner, line, vars)?),
+        Expr::Not(inner) => dynamic::unary(UnaryOp::Not, evaluate(inner, line, vars)?),
+        Expr::BitNot(inner) => {
+            let value = integral("~", evaluate(inner, line, vars)?, line)?;
+            dynamic::unary(UnaryOp::BitNot, value)
+        }
         Expr::Binary { op, left, right } => {
             let left = evaluate(left, line, vars)?;
-            let right = evaluate(right, line, vars)?;
-            arithmetic(*op, left, right, line)
+            match op {
+                BinaryOp::And if !left.truthy() => return Ok(ClassicalValue::Bool(false)),
+                BinaryOp::Or if left.truthy() => return Ok(ClassicalValue::Bool(true)),
+                BinaryOp::And | BinaryOp::Or => {
+                    return Ok(ClassicalValue::Bool(evaluate(right, line, vars)?.truthy()));
+                }
+                _ => {}
+            }
+            arithmetic(*op, left, evaluate(right, line, vars)?, line)
         }
         Expr::Call(call) => {
             let values = call
@@ -576,53 +803,78 @@ fn evaluate(expr: &Expr, line: usize, vars: Option<&HashMap<&str, f64>>) -> Resu
                 .collect::<Result<Vec<_>>>()?;
             apply(call.name, &values, line)
         }
+        Expr::Cast(cast) => {
+            let width = match &cast.width {
+                Some(width) => Some(cast.ty.width(evaluate(width, line, vars)?, line)?),
+                None => None,
+            };
+            Ok(cast.ty.convert(width, evaluate(&cast.value, line, vars)?))
+        }
     })
 }
 
-fn arithmetic(op: BinaryOp, left: f64, right: f64, line: usize) -> Result<f64> {
-    let truth = |value: bool| Ok(f64::from(u8::from(value)));
-    let bits = |value: f64| integral(op.spelling(), value, line);
+/// `op` over two folded values, by the arithmetic a runtime expression follows:
+/// two integers stay an exact integer, with `/` truncating toward zero, and a
+/// float on either side makes a float.
+pub(crate) fn arithmetic(
+    op: BinaryOp,
+    left: ClassicalValue,
+    right: ClassicalValue,
+    line: usize,
+) -> Result<ClassicalValue> {
+    let (left, right) = if op.is_bitwise() {
+        (
+            integral(op.spelling(), left, line)?,
+            integral(op.spelling(), right, line)?,
+        )
+    } else {
+        (left, right)
+    };
     match op {
-        BinaryOp::Add => Ok(left + right),
-        BinaryOp::Sub => Ok(left - right),
-        BinaryOp::Mul => Ok(left * right),
-        BinaryOp::Div => divide("division", left, right, line),
-        BinaryOp::Rem => divide("modulo", left, right, line),
-        BinaryOp::Pow => finite(line, op.spelling(), left.powf(right)),
-        BinaryOp::Eq => truth(left == right),
-        BinaryOp::Ne => truth(left != right),
-        BinaryOp::Lt => truth(left < right),
-        BinaryOp::Le => truth(left <= right),
-        BinaryOp::Gt => truth(left > right),
-        BinaryOp::Ge => truth(left >= right),
-        BinaryOp::And => truth(left != 0.0 && right != 0.0),
-        BinaryOp::Or => truth(left != 0.0 || right != 0.0),
-        BinaryOp::BitAnd => Ok((bits(left)? & bits(right)?) as f64),
-        BinaryOp::BitOr => Ok((bits(left)? | bits(right)?) as f64),
-        BinaryOp::BitXor => Ok((bits(left)? ^ bits(right)?) as f64),
-        BinaryOp::Shl | BinaryOp::Shr => {
-            let (value, shift) = (bits(left)?, bits(right)?);
-            match (op, u32::try_from(shift).ok().filter(|&shift| shift < 64)) {
-                (BinaryOp::Shl, Some(shift)) => Ok(value.wrapping_shl(shift) as f64),
-                (_, Some(shift)) => Ok((value >> shift) as f64),
-                _ => Err(PrismError::Parse {
-                    line,
-                    message: format!("shift by {right} is outside 0 to 63"),
-                }),
-            }
+        BinaryOp::Div | BinaryOp::Rem if right.to_float() == 0.0 => {
+            let operation = if op == BinaryOp::Div {
+                "division"
+            } else {
+                "modulo"
+            };
+            return Err(PrismError::Parse {
+                line,
+                message: format!("{operation} by zero"),
+            });
         }
+        BinaryOp::Shl | BinaryOp::Shr if !(0..64).contains(&right.to_int()) => {
+            return Err(PrismError::Parse {
+                line,
+                message: format!("shift by {} is outside 0 to 63", right.to_int()),
+            });
+        }
+        _ => {}
+    }
+    let value = dynamic::binary(op.runtime(), left, right).map_err(|err| PrismError::Parse {
+        line,
+        message: err.to_string(),
+    })?;
+    match value {
+        ClassicalValue::Float(value) if op == BinaryOp::Pow => {
+            Ok(ClassicalValue::Float(finite(line, op.spelling(), value)?))
+        }
+        other => Ok(other),
     }
 }
 
-/// An operand of a bitwise operator, which has to be a whole number.
-fn integral(op: &str, value: f64, line: usize) -> Result<i64> {
-    if value.fract() != 0.0 || value.abs() > i64::MAX as f64 {
-        return Err(PrismError::Parse {
-            line,
-            message: format!("`{op}` takes whole numbers, got {value}"),
-        });
+/// An operand of a bitwise operator: an integer, or a float with no fractional
+/// part, which is read as one.
+fn integral(op: &str, value: ClassicalValue, line: usize) -> Result<ClassicalValue> {
+    match value {
+        ClassicalValue::Float(float) if float.fract() != 0.0 || float.abs() > i64::MAX as f64 => {
+            Err(PrismError::Parse {
+                line,
+                message: format!("`{op}` takes whole numbers, got {float}"),
+            })
+        }
+        ClassicalValue::Float(float) => Ok(ClassicalValue::Int(float as i128)),
+        other => Ok(other),
     }
-    Ok(value as i64)
 }
 
 /// True when the expression reads a duration: a literal, or a name `times` holds.
@@ -635,6 +887,7 @@ pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
         Expr::Binary { left, right, .. } => is_timed(left, times) || is_timed(right, times),
         Expr::Call(call) => call.args.iter().any(|arg| is_timed(arg, times)),
         Expr::Element(element) => element.indices.iter().any(|index| is_timed(index, times)),
+        Expr::Cast(cast) => is_timed(&cast.value, times),
     })
 }
 
@@ -646,17 +899,17 @@ pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
 pub(crate) fn eval_timed(
     expr: &Expr,
     line: usize,
-    vars: Option<&HashMap<&str, f64>>,
+    vars: Option<&HashMap<&str, ClassicalValue>>,
     times: &HashMap<&str, Timed>,
 ) -> Result<Timed> {
     if !is_timed(expr, times) {
-        return Ok(Timed::Number(eval(expr, line, vars)?));
+        return Ok(Timed::Number(eval(expr, line, vars)?.to_float()));
     }
     match expr {
         Expr::Duration(duration) => Ok(Timed::Duration(*duration)),
         Expr::Ident(name) => match times.get(name) {
             Some(value) => Ok(*value),
-            None => Ok(Timed::Number(resolve(name, line, vars)?)),
+            None => Ok(Timed::Number(resolve(name, line, vars)?.to_float())),
         },
         Expr::Negate(inner) => Ok(match eval_timed(inner, line, vars, times)? {
             Timed::Number(value) => Timed::Number(-value),
@@ -680,7 +933,11 @@ pub(crate) fn eval_timed(
             line,
             message: format!("`{expr}` indexes `{}` with a duration", element.array),
         }),
-        Expr::Number(value) => Ok(Timed::Number(*value)),
+        Expr::Cast(cast) => Err(PrismError::Parse {
+            line,
+            message: format!("`{expr}` casts a duration to `{}`", cast.ty.spelling()),
+        }),
+        Expr::Number(value) => Ok(Timed::Number(value.to_float())),
     }
 }
 
@@ -692,7 +949,9 @@ pub(crate) fn combine_timed(op: BinaryOp, left: Timed, right: Timed, line: usize
         message: "division by zero in a duration expression".into(),
     };
     Ok(match (op, left, right) {
-        (_, Timed::Number(a), Timed::Number(b)) => Timed::Number(arithmetic(op, a, b, line)?),
+        (_, Timed::Number(a), Timed::Number(b)) => Timed::Number(
+            arithmetic(op, ClassicalValue::Float(a), ClassicalValue::Float(b), line)?.to_float(),
+        ),
         (Add, Timed::Duration(a), Timed::Duration(b)) => Timed::Duration(Duration {
             ns: a.ns + b.ns,
             dt: a.dt + b.dt,
@@ -758,44 +1017,37 @@ pub(crate) fn combine_timed(op: BinaryOp, left: Timed, right: Timed, line: usize
     })
 }
 
-fn divide(operation: &str, left: f64, right: f64, line: usize) -> Result<f64> {
-    if right == 0.0 {
-        return Err(PrismError::Parse {
-            line,
-            message: format!("{operation} by zero in angle expression"),
-        });
-    }
-    Ok(if operation == "division" {
-        left / right
-    } else {
-        left % right
-    })
-}
-
-fn resolve(name: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
+fn resolve(
+    name: &str,
+    line: usize,
+    vars: Option<&HashMap<&str, ClassicalValue>>,
+) -> Result<ClassicalValue> {
     match name {
-        "true" => return Ok(1.0),
-        "false" => return Ok(0.0),
+        "true" => return Ok(ClassicalValue::Bool(true)),
+        "false" => return Ok(ClassicalValue::Bool(false)),
         _ => {}
     }
     if let Some(value) = vars.and_then(|vars| vars.get(name)) {
         return Ok(*value);
     }
-    match name {
-        "pi" | "\u{3c0}" => Ok(std::f64::consts::PI),
-        "tau" | "\u{3c4}" => Ok(std::f64::consts::TAU),
-        "euler" => Ok(std::f64::consts::E),
-        _ => Err(PrismError::Parse {
-            line,
-            message: format!("unknown identifier `{name}` in expression"),
-        }),
-    }
+    let constant = match name {
+        "pi" | "\u{3c0}" => std::f64::consts::PI,
+        "tau" | "\u{3c4}" => std::f64::consts::TAU,
+        "euler" | "\u{2107}" => std::f64::consts::E,
+        _ => {
+            return Err(PrismError::Parse {
+                line,
+                message: format!("unknown identifier `{name}` in expression"),
+            });
+        }
+    };
+    Ok(ClassicalValue::Float(constant))
 }
 
 /// Apply an OpenQASM builtin. The spec spellings (`arcsin`, `ceiling`, `log`)
 /// are the primary names; the shorter C ones are accepted too, since exported
 /// and hand-written sources use both.
-fn apply(name: &str, args: &[f64], line: usize) -> Result<f64> {
+fn apply(name: &str, args: &[ClassicalValue], line: usize) -> Result<ClassicalValue> {
     let arity = |wanted: usize| -> Result<()> {
         if args.len() == wanted {
             Ok(())
@@ -806,56 +1058,62 @@ fn apply(name: &str, args: &[f64], line: usize) -> Result<f64> {
             })
         }
     };
-    let value = match name {
+    match name {
         "mod" => {
             arity(2)?;
-            args[0] % args[1]
+            return arithmetic(BinaryOp::Rem, args[0], args[1], line);
         }
         "pow" => {
             arity(2)?;
-            args[0].powf(args[1])
+            return arithmetic(BinaryOp::Pow, args[0], args[1], line);
         }
-        _ => {
+        "popcount" => {
             arity(1)?;
-            let arg = args[0];
-            match name {
-                "sin" => arg.sin(),
-                "cos" => arg.cos(),
-                "tan" => arg.tan(),
-                "arcsin" | "asin" => arg.asin(),
-                "arccos" | "acos" => arg.acos(),
-                "arctan" | "atan" => arg.atan(),
-                "sqrt" => arg.sqrt(),
-                "exp" => arg.exp(),
-                "log" | "ln" => arg.ln(),
-                "log2" => arg.log2(),
-                "abs" => arg.abs(),
-                "ceiling" | "ceil" => arg.ceil(),
-                "floor" => arg.floor(),
-                "popcount" => popcount(arg, line)?,
-                _ => {
-                    return Err(PrismError::Parse {
-                        line,
-                        message: format!("unknown function `{name}` in expression"),
-                    });
-                }
-            }
+            return popcount(args[0], line);
+        }
+        _ => arity(1)?,
+    }
+    let arg = args[0].to_float();
+    let value = match name {
+        "sin" => arg.sin(),
+        "cos" => arg.cos(),
+        "tan" => arg.tan(),
+        "arcsin" | "asin" => arg.asin(),
+        "arccos" | "acos" => arg.acos(),
+        "arctan" | "atan" => arg.atan(),
+        "sqrt" => arg.sqrt(),
+        "exp" => arg.exp(),
+        "log" | "ln" => arg.ln(),
+        "log2" => arg.log2(),
+        "abs" => arg.abs(),
+        "ceiling" | "ceil" => arg.ceil(),
+        "floor" => arg.floor(),
+        _ => {
+            return Err(PrismError::Parse {
+                line,
+                message: format!("unknown function `{name}` in expression"),
+            });
         }
     };
-    finite(line, name, value)
+    Ok(ClassicalValue::Float(finite(line, name, value)?))
 }
 
-/// Set bits of a non-negative integer. The argument arrives as the `f64` every
-/// expression evaluates to, so a fractional or negative one is rejected rather
-/// than truncated.
-fn popcount(arg: f64, line: usize) -> Result<f64> {
-    if arg < 0.0 || arg.fract() != 0.0 || arg > u64::MAX as f64 {
-        return Err(PrismError::Parse {
-            line,
-            message: format!("`popcount` takes a non-negative integer, got {arg}"),
-        });
-    }
-    Ok(f64::from((arg as u64).count_ones()))
+/// Set bits of a non-negative integer. A float with a fractional part, or a
+/// negative value, is rejected rather than truncated.
+fn popcount(arg: ClassicalValue, line: usize) -> Result<ClassicalValue> {
+    let reject = || PrismError::Parse {
+        line,
+        message: format!(
+            "`popcount` takes a non-negative integer, got {}",
+            arg.to_float()
+        ),
+    };
+    let value = match integral("popcount", arg, line).map_err(|_| reject())? {
+        ClassicalValue::Int(value) => value,
+        other => other.to_int(),
+    };
+    let value = u64::try_from(value).map_err(|_| reject())?;
+    Ok(ClassicalValue::Int(i128::from(value.count_ones())))
 }
 
 /// Reject a result no angle can carry, naming what produced it.

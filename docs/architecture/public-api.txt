@@ -1021,6 +1021,9 @@ pub prism_q::circuit::dynamic::ClassicalExpr::Binary::lhs: alloc::boxed::Box<pri
 pub prism_q::circuit::dynamic::ClassicalExpr::Binary::op: prism_q::circuit::dynamic::BinaryOp
 pub prism_q::circuit::dynamic::ClassicalExpr::Binary::rhs: alloc::boxed::Box<prism_q::circuit::dynamic::ClassicalExpr>
 pub prism_q::circuit::dynamic::ClassicalExpr::Bit(usize)
+pub prism_q::circuit::dynamic::ClassicalExpr::Cast
+pub prism_q::circuit::dynamic::ClassicalExpr::Cast::operand: alloc::boxed::Box<prism_q::circuit::dynamic::ClassicalExpr>
+pub prism_q::circuit::dynamic::ClassicalExpr::Cast::ty: prism_q::circuit::dynamic::ClassicalType
 pub prism_q::circuit::dynamic::ClassicalExpr::Const(prism_q::circuit::dynamic::ClassicalValue)
 pub prism_q::circuit::dynamic::ClassicalExpr::Register
 pub prism_q::circuit::dynamic::ClassicalExpr::Register::offset: usize
@@ -1031,6 +1034,7 @@ pub prism_q::circuit::dynamic::ClassicalExpr::Unary::operand: alloc::boxed::Box<
 pub prism_q::circuit::dynamic::ClassicalExpr::Var(prism_q::circuit::dynamic::VarId)
 impl prism_q::circuit::dynamic::ClassicalExpr
 pub fn prism_q::circuit::dynamic::ClassicalExpr::binary(prism_q::circuit::dynamic::BinaryOp, prism_q::circuit::dynamic::ClassicalExpr, prism_q::circuit::dynamic::ClassicalExpr) -> Self
+pub fn prism_q::circuit::dynamic::ClassicalExpr::cast(prism_q::circuit::dynamic::ClassicalType, prism_q::circuit::dynamic::ClassicalExpr) -> Self
 pub fn prism_q::circuit::dynamic::ClassicalExpr::unary(prism_q::circuit::dynamic::UnaryOp, prism_q::circuit::dynamic::ClassicalExpr) -> Self
 impl core::convert::From<bool> for prism_q::circuit::dynamic::ClassicalExpr
 pub fn prism_q::circuit::dynamic::ClassicalExpr::from(bool) -> Self

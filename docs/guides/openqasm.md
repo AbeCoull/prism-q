@@ -126,11 +126,17 @@ h q[cursor];
 
 Each type holds what the language says it holds. An `int` or `uint` is an exact
 integer that wraps at its width, 64 bits when none is given, and `/` or `%` between two
-integers truncates toward zero, so `1 / 2` is `0` while `1.0 / 2` is `0.5`. A
-`float[32]` rounds to single precision. An `angle[n]` holds the nearest multiple of
-`2 pi / 2^n`, taken modulo `2 pi`. A cast such as `int[8](x)`, `uint[2](c)`, `bool(x)` or
-`angle[3](t)` converts the same way, and `a[i]` on an integer reads one of its bits.
-An expression on its own, `a == 2;`, is evaluated and discarded.
+integers truncates toward zero, so `1 / 2` is `0` while `1.0 / 2` is `0.5`. A `float[n]`
+is an IEEE 754 float of 16, 32, 64 or 128 bits: `float[16]` and `float[32]` round to half
+and single precision, and `float[128]` holds a double, since nothing here computes in
+quad precision. A float takes `+ - * /` and `**`; `%` takes integers, and `mod(a, b)` is
+the float remainder. An `angle[n]` holds the nearest multiple of `2 pi / 2^n`, taken
+modulo `2 pi`. A cast such as `int[8](x)`, `uint[2](c)`, `bool(x)` or `angle[3](t)`
+converts the same way, and `a[i]` on an integer reads one of its bits. A float cast to an
+integer drops its fraction and wraps at the integer's width, so `int[8](1e30)` is `0`;
+past about `1.7e38` it saturates first, and NaN reads as `0`. A float has no bit pattern
+to cast to `bit[n]`; cast it to `uint` first. An expression on its own, `a == 2;`, is
+evaluated and discarded.
 
 A declaration inside a `for` body binds for that pass only: the scope the body
 opened is dropped at the end of each iteration, while a write to a name declared
@@ -276,8 +282,8 @@ variable reaches it, or when a loop or a measured branch writes it from outside 
 scope it was declared in. Every other variable folds at parse time as it does under
 `parse`, so a program `parse` accepts gives the same circuit under `parse_dynamic`, and
 runs with the same seeded shots. Runtime `int` and `uint` variables wrap at their
-declared width as folded ones do. A runtime `float` or `angle` holds a double whatever
-its width, so `float[32]` rounding and `angle[n]` steps apply only to folded values.
+declared width as folded ones do, and runtime floats round to their width. A runtime
+`angle` holds a double whatever its width, so `angle[n]` steps apply only to folded values.
 
 A shot that runs more than a million blocks stops with `PrismError::StepLimit` naming
 its loop, rather than hanging; `SimulateProgram::max_steps` sets another bound. The
@@ -524,7 +530,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |
 | `nop` | Parses; emits nothing | |
-| Casts, `int[8](x)`, `bool(c)` | Parses | A width on `bool`, or outside 1 to 64 bits (128 for `float`): `Parse` |
+| Casts, `int[8](x)`, `bool(c)` | Parses | A width on `bool`, an integer width outside 1 to 64 bits, a float width other than 16, 32, 64 or 128, or a float cast to `bit`: `Parse` |
 | Expression statements, `a == 2;` | Evaluated and discarded | A call to a `def` inside one: `UnsupportedConstruct` |
 | `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. A condition over classical bits that no bit or register guard spells: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
 | `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present, or a target over classical bits that no register guard spells: `UnsupportedConstruct` |

@@ -2753,7 +2753,7 @@ fn expression_operators_follow_openqasm_precedence() {
         ("2 ** 3 * 4", 32.0),
         ("7 % 3", 1.0),
         ("-7 % 3", -1.0),
-        ("7.5 % 2", 1.5),
+        ("mod(7.5, 2)", 1.5),
         ("1 + 2 * 3 % 4", 3.0),
     ];
     for (expression, expected) in cases {
@@ -3761,6 +3761,30 @@ fn a_cast_width_is_checked() {
         ("rx(bool[2](1)) q[0];", "takes no width"),
         ("rx(int[0](1)) q[0];", "needs 1 to 64 bits"),
         ("rx(uint[65](1)) q[0];", "needs 1 to 64 bits"),
+        ("rx(float[8](1)) q[0];", "needs 16, 32, 64 or 128 bits"),
+        ("float[24] f = 1.0;", "needs 16, 32, 64 or 128 bits"),
+    ] {
+        let err = parse_error_of(body);
+        assert!(err.to_string().contains(wanted), "{body}: {err}");
+    }
+}
+
+#[test]
+fn floats_follow_ieee_754_and_the_language_casts() {
+    for (body, want) in [
+        ("float[16] f = 0.1; rx(f) q[0];", 0.0999755859375),
+        ("rx(float[16](3.14159)) q[0];", 3.140625),
+        ("rx(float[128](0.1)) q[0];", 0.1),
+        ("rx(mod(7.5, 2)) q[0];", 1.5),
+        ("rx(bit[2](uint(2.5))) q[0];", 2.0),
+        ("rx(int[8](1e30)) q[0];", 0.0),
+    ] {
+        assert_eq!(rx_angle(body), want, "{body}");
+    }
+    for (body, wanted) in [
+        ("rx(7.5 % 2) q[0];", "`%` takes integers"),
+        ("float f = 7.5; f %= 2; rx(f) q[0];", "`%` takes integers"),
+        ("rx(bit[2](2.5)) q[0];", "cannot hold the float"),
     ] {
         let err = parse_error_of(body);
         assert!(err.to_string().contains(wanted), "{body}: {err}");

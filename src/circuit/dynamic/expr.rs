@@ -34,7 +34,12 @@ pub enum ClassicalType {
     Uint {
         width: u32,
     },
-    Float,
+    /// An IEEE 754 float of `width` bits, 16, 32, 64 or 128. A 16- or 32-bit
+    /// float rounds each value it holds to half or single precision; 64 and
+    /// 128 bits hold a double.
+    Float {
+        width: u32,
+    },
     /// A float held modulo `2 pi`, in `[0, 2 pi)`.
     Angle,
 }
@@ -44,7 +49,7 @@ impl ClassicalType {
         match self {
             ClassicalType::Bool => ValueKind::Bool,
             ClassicalType::Int { .. } | ClassicalType::Uint { .. } => ValueKind::Int,
-            ClassicalType::Float | ClassicalType::Angle => ValueKind::Float,
+            ClassicalType::Float { .. } | ClassicalType::Angle => ValueKind::Float,
         }
     }
 
@@ -55,6 +60,11 @@ impl ClassicalType {
             {
                 Err(PrismError::InvalidParameter {
                     message: format!("integer width {width} is outside 1 to 64"),
+                })
+            }
+            ClassicalType::Float { width } if !matches!(width, 16 | 32 | 64 | 128) => {
+                Err(PrismError::InvalidParameter {
+                    message: format!("float width {width} is not 16, 32, 64 or 128"),
                 })
             }
             _ => Ok(()),
@@ -79,7 +89,7 @@ impl ClassicalType {
             ClassicalType::Uint { width } => {
                 ClassicalValue::Int(value.to_int().rem_euclid(1i128 << width))
             }
-            ClassicalType::Float => ClassicalValue::Float(value.to_float()),
+            ClassicalType::Float { width } => ClassicalValue::Float(real(value.to_float(), width)),
             ClassicalType::Angle => {
                 ClassicalValue::Float(value.to_float().rem_euclid(std::f64::consts::TAU))
             }
@@ -306,7 +316,7 @@ impl ClassicalExpr {
                 let right = rhs.check(variables, num_classical_bits)?;
                 let float = left == ValueKind::Float || right == ValueKind::Float;
                 Ok(match op {
-                    op if op.is_bitwise() && float => {
+                    op if (op.is_bitwise() || *op == BinaryOp::Rem) && float => {
                         return Err(float_operand(&format!("{op:?}")));
                     }
                     op if op.is_bitwise() => ValueKind::Int,
@@ -399,7 +409,32 @@ pub(crate) fn check_bit(bit: usize, num_classical_bits: usize) -> Result<()> {
 
 fn float_operand(op: &str) -> PrismError {
     PrismError::InvalidParameter {
-        message: format!("bitwise `{op}` on a float"),
+        message: format!("`{op}` on a float, which takes integers"),
+    }
+}
+
+/// `value` as a `float[width]` holds it: rounded to half precision at 16 bits
+/// and single precision at 32, ties to even, and unchanged at any other width.
+pub(crate) fn real(value: f64, width: u32) -> f64 {
+    match width {
+        16 => half(value),
+        32 => f64::from(value as f32),
+        _ => value,
+    }
+}
+
+/// The nearest IEEE 754 half-precision value, past 65504 an infinity.
+fn half(value: f64) -> f64 {
+    if !value.is_finite() || value == 0.0 {
+        return value;
+    }
+    let exponent = (((value.abs().to_bits() >> 52) as i32) - 1023).max(-14);
+    let step = 2f64.powi(exponent - 10);
+    let rounded = (value / step).round_ties_even() * step;
+    if rounded.abs() > 65504.0 {
+        f64::INFINITY.copysign(value)
+    } else {
+        rounded
     }
 }
 

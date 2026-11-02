@@ -214,51 +214,62 @@ impl CastType {
             CastType::Bit => Ty::Uint {
                 width: width.unwrap_or(1),
             },
-            CastType::Float => Ty::Float,
+            CastType::Float => Ty::Float {
+                width: width.unwrap_or(64),
+            },
             CastType::Angle => Ty::Angle,
         }
     }
 
     /// Check a width written as `ty[width]`.
     pub(crate) fn width(self, value: ClassicalValue, line: usize) -> Result<u32> {
-        let most = match self {
-            CastType::Bool => {
+        let spelling = self.spelling();
+        let fits = match (self, value) {
+            (CastType::Bool, _) => {
                 return Err(PrismError::Parse {
                     line,
                     message: "`bool` takes no width".into(),
                 });
             }
-            CastType::Float => 128,
-            _ => 64,
+            (CastType::Float, ClassicalValue::Int(width)) => matches!(width, 16 | 32 | 64 | 128),
+            (_, ClassicalValue::Int(width)) => (1..=64).contains(&width),
+            _ => false,
         };
-        let spelling = self.spelling();
-        match value {
-            ClassicalValue::Int(width) if (1..=most).contains(&width) => Ok(width as u32),
-            other => Err(PrismError::Parse {
+        if !fits {
+            let range = if self == CastType::Float {
+                "16, 32, 64 or 128"
+            } else {
+                "1 to 64"
+            };
+            return Err(PrismError::Parse {
                 line,
-                message: format!("`{spelling}[{}]` needs 1 to {most} bits", other.to_float()),
-            }),
+                message: format!("`{spelling}[{}]` needs {range} bits", value.to_float()),
+            });
         }
+        Ok(value.to_int() as u32)
     }
 
     /// `value` converted to this type: truthiness for `bool`, truncation toward
-    /// zero and wraparound for the integers, single precision for `float[32]`,
-    /// and the nearest step of an `angle[n]`.
-    pub(crate) fn convert(self, width: Option<u32>, value: ClassicalValue) -> ClassicalValue {
-        match self {
-            CastType::Float => ClassicalValue::Float(real(value.to_float(), width == Some(32))),
-            CastType::Angle => ClassicalValue::Float(angle(value.to_float(), width)),
+    /// zero and wraparound for the integers, the precision of a `float[n]`, and
+    /// the nearest step of an `angle[n]`. A float has no bit pattern to cast.
+    pub(crate) fn convert(
+        self,
+        width: Option<u32>,
+        value: ClassicalValue,
+        line: usize,
+    ) -> Result<ClassicalValue> {
+        Ok(match (self, value) {
+            (CastType::Bit, ClassicalValue::Float(float)) => {
+                return Err(PrismError::Parse {
+                    line,
+                    message: format!(
+                        "`bit` cannot hold the float {float}; cast it to `uint` first"
+                    ),
+                });
+            }
+            (CastType::Angle, value) => ClassicalValue::Float(angle(value.to_float(), width)),
             _ => self.runtime(width).store(value),
-        }
-    }
-}
-
-/// `value` as a float holds it, rounded to single precision when `single`.
-pub(crate) fn real(value: f64, single: bool) -> f64 {
-    if single {
-        f64::from(value as f32)
-    } else {
-        value
+        })
     }
 }
 
@@ -808,7 +819,8 @@ fn evaluate(
                 Some(width) => Some(cast.ty.width(evaluate(width, line, vars)?, line)?),
                 None => None,
             };
-            Ok(cast.ty.convert(width, evaluate(&cast.value, line, vars)?))
+            cast.ty
+                .convert(width, evaluate(&cast.value, line, vars)?, line)
         }
     })
 }
@@ -831,6 +843,19 @@ pub(crate) fn arithmetic(
         (left, right)
     };
     match op {
+        BinaryOp::Rem
+            if matches!(left, ClassicalValue::Float(_))
+                || matches!(right, ClassicalValue::Float(_)) =>
+        {
+            return Err(PrismError::Parse {
+                line,
+                message: format!(
+                    "`%` takes integers, not {} and {}; `mod` is the float remainder",
+                    left.to_float(),
+                    right.to_float()
+                ),
+            });
+        }
         BinaryOp::Div | BinaryOp::Rem if right.to_float() == 0.0 => {
             let operation = if op == BinaryOp::Div {
                 "division"
@@ -1061,7 +1086,20 @@ fn apply(name: &str, args: &[ClassicalValue], line: usize) -> Result<ClassicalVa
     match name {
         "mod" => {
             arity(2)?;
-            return arithmetic(BinaryOp::Rem, args[0], args[1], line);
+            let (left, right) = (args[0], args[1]);
+            if !matches!(
+                (left, right),
+                (ClassicalValue::Float(_), _) | (_, ClassicalValue::Float(_))
+            ) {
+                return arithmetic(BinaryOp::Rem, left, right, line);
+            }
+            if right.to_float() == 0.0 {
+                return Err(PrismError::Parse {
+                    line,
+                    message: "modulo by zero".into(),
+                });
+            }
+            return Ok(ClassicalValue::Float(left.to_float() % right.to_float()));
         }
         "pow" => {
             arity(2)?;

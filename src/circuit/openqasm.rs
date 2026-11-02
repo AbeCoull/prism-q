@@ -21,7 +21,7 @@
 //! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli/ccnot, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
 //! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` and `negctrl @` (chainable), `ctrl(n) @` and `negctrl(n) @` for `n` of them, `pow(k) @` for any real k. A control applies to whatever the gate expanded to, so it reaches a user `gate` and a lowered gate as well as a direct one; a fractional `pow` is the principal power of what the call expanded to |
 //! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
-//! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand. An integer is exact and wraps at its width, 64 bits by default; `float[32]` rounds to single precision; `angle[n]` holds the nearest multiple of `2 pi / 2^n`, modulo `2 pi` |
+//! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand. An integer is exact and wraps at its width, 64 bits by default; a float is 16, 32, 64 or 128 bits, `float[16]` and `float[32]` rounding to half and single precision; `angle[n]` holds the nearest multiple of `2 pi / 2^n`, modulo `2 pi` |
 //! | Classical assignment | `n = n + 1;` `n += 1;` `n <<= 2;` | Plain and compound forms, `+=` through `>>=`, on a declared, non-`const` name; declined under a runtime `if` or `switch` for a name declared outside it |
 //! | Cast | `int[8](x)` `uint[2](c)` `bool(c)` `angle[3](t)` | Converts to the named scalar type; `bit[n](x)` reads as a `uint[n]` |
 //! | Integer bit read | `a[i]` on `uint[4] a` | One bit of the integer; a negative index counts from the top bit |
@@ -61,7 +61,7 @@
 //! | Names | `qubit γ;` `gate rr(θ) a { ... }` | Any Unicode letter may open or continue a name |
 //! | Pragmas and annotations | `pragma ns.option on` `@ns.tag ...` | Ignored, as the language asks of a pass that does not read them; `braket` pragmas are read below |
 //! | Calibration | `defcalgrammar "openpulse";` `cal { ... }` `defcal x $0 { ... }` | Skipped: a calibration says how a gate is pulsed, not what it does |
-//! | Expression operators | `rx(2 ** -1 % 3)` | `+ - * / %`, the comparisons, `&& \|\| !` and `& \| ^ ~ << >>`, with C precedence. `**` is right associative and binds tighter than unary minus. `/` and `%` on two integers truncate toward zero |
+//! | Expression operators | `rx(2 ** 3 % 5)` | `+ - * / %`, the comparisons, `&& \|\| !` and `& \| ^ ~ << >>`, with C precedence. `**` is right associative and binds tighter than unary minus. `/` and `%` on two integers truncate toward zero |
 //! | Expression builtins | `rx(mod(7, 3))` | `arcsin`, `arccos`, `arctan`, `ceiling`, `cos`, `exp`, `floor`, `log`, `mod`, `popcount`, `pow`, `sin`, `sqrt`, `tan`, plus the shorter C spellings |
 //! | Angle dialect | [`parse_with`] | `gpi`, `gpi2`, `ms` take turns under [`Dialect::Native`] and radians under [`Dialect::Braket`] |
 //! | Result pragma | `#pragma braket result expectation z(q[0])` | [`Dialect::Braket`] only; reaches the caller through [`parse_braket`] |
@@ -328,11 +328,9 @@ enum ClassicalType {
     /// `int` or `uint`, with the width a stored value wraps to.
     Int(RuntimeType),
     Bool,
-    /// `float[32]` when `single`, which rounds what it holds to single
-    /// precision; every other width holds a double.
-    Float {
-        single: bool,
-    },
+    /// `float[n]`, which rounds what it holds to half or single precision at
+    /// 16 or 32 bits and holds a double at 64 and 128.
+    Float(u32),
     /// `angle[n]`, a multiple of `2 pi / 2^n` in `[0, 2 pi)`. With no width the
     /// value wraps into that range unrounded.
     Angle(Option<u32>),
@@ -341,7 +339,7 @@ enum ClassicalType {
 }
 
 impl ClassicalType {
-    const FLOAT: ClassicalType = ClassicalType::Float { single: false };
+    const FLOAT: ClassicalType = ClassicalType::Float(64);
 
     /// `value` as this type holds it: truncation toward zero and wraparound for
     /// the integers, truthiness for `bool`, and for an `angle[n]` the nearest
@@ -350,8 +348,8 @@ impl ClassicalType {
         match self {
             ClassicalType::Int(integer) => integer.store(value),
             ClassicalType::Bool => ClassicalValue::Bool(value.truthy()),
-            ClassicalType::Float { single } => {
-                ClassicalValue::Float(syntax_expr::real(value.to_float(), single))
+            ClassicalType::Float(width) => {
+                ClassicalValue::Float(crate::circuit::dynamic::real(value.to_float(), width))
             }
             ClassicalType::Angle(width) => {
                 ClassicalValue::Float(syntax_expr::angle(value.to_float(), width))

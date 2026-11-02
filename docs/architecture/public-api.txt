@@ -41,6 +41,7 @@ pub fn prism_q::backend::density_matrix::DensityMatrixBackend::reset(&mut self, 
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::density_matrix::DensityMatrixBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::supports_initial_state(&self) -> bool
@@ -87,6 +88,7 @@ pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend:
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_initial_state(&self) -> bool
@@ -129,6 +131,7 @@ pub fn prism_q::backend::factored::FactoredBackend::reset(&mut self, usize) -> p
 pub fn prism_q::backend::factored::FactoredBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::factored::FactoredBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::factored::FactoredBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::factored::FactoredBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::factored::FactoredBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::factored::FactoredBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::factored::FactoredBackend::supports_initial_state(&self) -> bool
@@ -173,6 +176,7 @@ pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::reset(&
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_initial_state(&self) -> bool
@@ -229,6 +233,7 @@ pub fn prism_q::backend::mps::MpsBackend::reset(&mut self, usize) -> prism_q::er
 pub fn prism_q::backend::mps::MpsBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::mps::MpsBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::mps::MpsBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::mps::MpsBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::mps::MpsBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::mps::MpsBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::mps::MpsBackend::supports_initial_state(&self) -> bool
@@ -271,6 +276,7 @@ pub fn prism_q::backend::product::ProductStateBackend::reset(&mut self, usize) -
 pub fn prism_q::backend::product::ProductStateBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::product::ProductStateBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::product::ProductStateBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::product::ProductStateBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::product::ProductStateBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::product::ProductStateBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::product::ProductStateBackend::supports_initial_state(&self) -> bool
@@ -314,6 +320,7 @@ pub fn prism_q::backend::sparse::SparseBackend::reset(&mut self, usize) -> prism
 pub fn prism_q::backend::sparse::SparseBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::sparse::SparseBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::sparse::SparseBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::sparse::SparseBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::sparse::SparseBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::sparse::SparseBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::sparse::SparseBackend::supports_initial_state(&self) -> bool
@@ -367,6 +374,7 @@ pub fn prism_q::backend::stabilizer::StabilizerBackend::reset(&mut self, usize) 
 pub fn prism_q::backend::stabilizer::StabilizerBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::stabilizer::StabilizerBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::stabilizer::StabilizerBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::stabilizer::StabilizerBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::stabilizer::StabilizerBackend::supports_initial_state(&self) -> bool
@@ -413,6 +421,7 @@ pub fn prism_q::backend::statevector::StatevectorBackend::reset(&mut self, usize
 pub fn prism_q::backend::statevector::StatevectorBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::statevector::StatevectorBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::statevector::StatevectorBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::statevector::StatevectorBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::statevector::StatevectorBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::statevector::StatevectorBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::statevector::StatevectorBackend::supports_initial_state(&self) -> bool
@@ -457,6 +466,7 @@ pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::reset(&mut self, u
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::supports_initial_state(&self) -> bool
@@ -499,6 +509,7 @@ pub fn prism_q::backend::Backend::reset(&mut self, usize) -> prism_q::error::Res
 pub fn prism_q::backend::Backend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::Backend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::Backend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::Backend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::Backend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::Backend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::Backend::supports_initial_state(&self) -> bool
@@ -537,6 +548,7 @@ pub fn prism_q::backend::density_matrix::DensityMatrixBackend::reset(&mut self, 
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::density_matrix::DensityMatrixBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::supports_initial_state(&self) -> bool
@@ -575,6 +587,7 @@ pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend:
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_initial_state(&self) -> bool
@@ -613,6 +626,7 @@ pub fn prism_q::backend::factored::FactoredBackend::reset(&mut self, usize) -> p
 pub fn prism_q::backend::factored::FactoredBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::factored::FactoredBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::factored::FactoredBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::factored::FactoredBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::factored::FactoredBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::factored::FactoredBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::factored::FactoredBackend::supports_initial_state(&self) -> bool
@@ -651,6 +665,7 @@ pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::reset(&
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_initial_state(&self) -> bool
@@ -689,6 +704,7 @@ pub fn prism_q::backend::mps::MpsBackend::reset(&mut self, usize) -> prism_q::er
 pub fn prism_q::backend::mps::MpsBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::mps::MpsBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::mps::MpsBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::mps::MpsBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::mps::MpsBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::mps::MpsBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::mps::MpsBackend::supports_initial_state(&self) -> bool
@@ -727,6 +743,7 @@ pub fn prism_q::backend::product::ProductStateBackend::reset(&mut self, usize) -
 pub fn prism_q::backend::product::ProductStateBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::product::ProductStateBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::product::ProductStateBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::product::ProductStateBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::product::ProductStateBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::product::ProductStateBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::product::ProductStateBackend::supports_initial_state(&self) -> bool
@@ -765,6 +782,7 @@ pub fn prism_q::backend::sparse::SparseBackend::reset(&mut self, usize) -> prism
 pub fn prism_q::backend::sparse::SparseBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::sparse::SparseBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::sparse::SparseBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::sparse::SparseBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::sparse::SparseBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::sparse::SparseBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::sparse::SparseBackend::supports_initial_state(&self) -> bool
@@ -803,6 +821,7 @@ pub fn prism_q::backend::stabilizer::StabilizerBackend::reset(&mut self, usize) 
 pub fn prism_q::backend::stabilizer::StabilizerBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::stabilizer::StabilizerBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::stabilizer::StabilizerBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::stabilizer::StabilizerBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::stabilizer::StabilizerBackend::supports_initial_state(&self) -> bool
@@ -841,6 +860,7 @@ pub fn prism_q::backend::statevector::StatevectorBackend::reset(&mut self, usize
 pub fn prism_q::backend::statevector::StatevectorBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::statevector::StatevectorBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::statevector::StatevectorBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::statevector::StatevectorBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::statevector::StatevectorBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::statevector::StatevectorBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::statevector::StatevectorBackend::supports_initial_state(&self) -> bool
@@ -879,6 +899,7 @@ pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::reset(&mut self, u
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::supports_initial_state(&self) -> bool
@@ -995,6 +1016,9 @@ pub prism_q::circuit::dynamic::Action::Rotation
 pub prism_q::circuit::dynamic::Action::Rotation::angle: prism_q::circuit::dynamic::ClassicalExpr
 pub prism_q::circuit::dynamic::Action::Rotation::kind: prism_q::circuit::dynamic::RotationKind
 pub prism_q::circuit::dynamic::Action::Rotation::targets: smallvec::SmallVec<[usize; 4]>
+pub prism_q::circuit::dynamic::Action::WriteBits
+pub prism_q::circuit::dynamic::Action::WriteBits::bits: smallvec::SmallVec<[usize; 4]>
+pub prism_q::circuit::dynamic::Action::WriteBits::value: prism_q::circuit::dynamic::ClassicalExpr
 #[non_exhaustive] pub enum prism_q::circuit::dynamic::BinaryOp
 pub prism_q::circuit::dynamic::BinaryOp::Add
 pub prism_q::circuit::dynamic::BinaryOp::And
@@ -1119,6 +1143,7 @@ pub fn prism_q::DynamicProgramBuilder::new(usize, usize) -> Self
 pub fn prism_q::DynamicProgramBuilder::num_classical_bits(&self) -> usize
 pub fn prism_q::DynamicProgramBuilder::num_qubits(&self) -> usize
 pub fn prism_q::DynamicProgramBuilder::variable(&self, &str) -> core::option::Option<prism_q::circuit::dynamic::VarId>
+pub fn prism_q::DynamicProgramBuilder::write_bits(&mut self, &[usize], prism_q::circuit::dynamic::ClassicalExpr) -> &mut Self
 pub struct prism_q::circuit::dynamic::VarId(_)
 impl prism_q::circuit::dynamic::VarId
 pub fn prism_q::circuit::dynamic::VarId::index(self) -> usize
@@ -3363,6 +3388,7 @@ pub fn prism_q::backend::density_matrix::DensityMatrixBackend::reset(&mut self, 
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::density_matrix::DensityMatrixBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::density_matrix::DensityMatrixBackend::supports_initial_state(&self) -> bool
@@ -3455,6 +3481,7 @@ pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend:
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::distributed_statevector::DistributedStatevectorBackend::supports_initial_state(&self) -> bool
@@ -3501,6 +3528,7 @@ pub fn prism_q::DynamicProgramBuilder::new(usize, usize) -> Self
 pub fn prism_q::DynamicProgramBuilder::num_classical_bits(&self) -> usize
 pub fn prism_q::DynamicProgramBuilder::num_qubits(&self) -> usize
 pub fn prism_q::DynamicProgramBuilder::variable(&self, &str) -> core::option::Option<prism_q::circuit::dynamic::VarId>
+pub fn prism_q::DynamicProgramBuilder::write_bits(&mut self, &[usize], prism_q::circuit::dynamic::ClassicalExpr) -> &mut Self
 pub struct prism_q::EntropyResult
 pub prism_q::EntropyResult::entropy: f64
 pub prism_q::EntropyResult::metadata: prism_q::RunMetadata
@@ -3560,6 +3588,7 @@ pub fn prism_q::backend::factored::FactoredBackend::reset(&mut self, usize) -> p
 pub fn prism_q::backend::factored::FactoredBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::factored::FactoredBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::factored::FactoredBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::factored::FactoredBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::factored::FactoredBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::factored::FactoredBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::factored::FactoredBackend::supports_initial_state(&self) -> bool
@@ -3606,6 +3635,7 @@ pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::reset(&
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::supports_initial_state(&self) -> bool
@@ -3736,6 +3766,7 @@ pub fn prism_q::backend::mps::MpsBackend::reset(&mut self, usize) -> prism_q::er
 pub fn prism_q::backend::mps::MpsBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::mps::MpsBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::mps::MpsBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::mps::MpsBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::mps::MpsBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::mps::MpsBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::mps::MpsBackend::supports_initial_state(&self) -> bool
@@ -3979,6 +4010,7 @@ pub fn prism_q::backend::product::ProductStateBackend::reset(&mut self, usize) -
 pub fn prism_q::backend::product::ProductStateBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::product::ProductStateBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::product::ProductStateBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::product::ProductStateBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::product::ProductStateBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::product::ProductStateBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::product::ProductStateBackend::supports_initial_state(&self) -> bool
@@ -4265,6 +4297,7 @@ pub fn prism_q::backend::sparse::SparseBackend::reset(&mut self, usize) -> prism
 pub fn prism_q::backend::sparse::SparseBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::sparse::SparseBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::sparse::SparseBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::sparse::SparseBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::sparse::SparseBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::sparse::SparseBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::sparse::SparseBackend::supports_initial_state(&self) -> bool
@@ -4348,6 +4381,7 @@ pub fn prism_q::backend::stabilizer::StabilizerBackend::reset(&mut self, usize) 
 pub fn prism_q::backend::stabilizer::StabilizerBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::stabilizer::StabilizerBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::stabilizer::StabilizerBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::stabilizer::StabilizerBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::stabilizer::StabilizerBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::stabilizer::StabilizerBackend::supports_initial_state(&self) -> bool
@@ -4393,6 +4427,7 @@ pub fn prism_q::backend::statevector::StatevectorBackend::reset(&mut self, usize
 pub fn prism_q::backend::statevector::StatevectorBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::statevector::StatevectorBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::statevector::StatevectorBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::statevector::StatevectorBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::statevector::StatevectorBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::statevector::StatevectorBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::statevector::StatevectorBackend::supports_initial_state(&self) -> bool
@@ -4461,6 +4496,7 @@ pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::reset(&mut self, u
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::resolved(&self) -> prism_q::ResolvedBackend
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::sample_basis_states(&mut self, usize, u64) -> prism_q::error::Result<prism_q::backend::BasisSamples>
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::schmidt_values(&mut self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::set_classical_bit(&mut self, usize, bool) -> prism_q::error::Result<()>
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::supports_fused_gates(&self) -> bool
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::supports_initial_density_matrix(&self) -> bool
 pub fn prism_q::backend::tensornetwork::TensorNetworkBackend::supports_initial_state(&self) -> bool

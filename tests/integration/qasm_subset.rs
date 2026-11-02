@@ -438,7 +438,6 @@ fn an_array_that_cannot_stand_is_rejected() {
             "already a classical variable",
         ),
         ("rx(b[0] + 1) q[0];", "not a declared array"),
-        ("c[0] = 1;", "not a name an assignment can write"),
         ("array[int, 2] a;\na[0] /= 0;", "division by zero"),
         (deep.as_str(), "nests deeper"),
     ];
@@ -452,6 +451,7 @@ fn an_array_that_cannot_stand_is_rejected() {
     }
     for (body, needle) in [
         ("array[bit, 2] a;", "`bit[n]` register"),
+        ("c[0] = 1;", "parse_dynamic"),
         ("array[duration, 2] a;", "`array[duration, ...]`"),
     ] {
         match parse_err(body) {

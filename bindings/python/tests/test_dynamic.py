@@ -96,6 +96,14 @@ def test_runtime_rotation_and_else():
     assert counts == {"11": 64}
 
 
+def test_write_bits_sets_classical_bits():
+    b = DynamicProgramBuilder(1, 3)
+    b.add_gate(Gate.x(), [0]).add_measure(0, 0)
+    b.write_bits([1, 2], "c[0] + 1")
+    counts = simulate_program(b.build()).seed(1).sample_counts(16).counts()
+    assert counts == {"101": 16}
+
+
 def test_break_and_continue_shape_the_loop():
     b = DynamicProgramBuilder(1, 1)
     b.declare("n", "int[8]")

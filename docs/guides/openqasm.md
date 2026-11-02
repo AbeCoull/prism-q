@@ -64,8 +64,10 @@ OpenQASM 2.0 syntax also works: `qreg q[3];` / `creg c[3];` declarations and
 
 A `bit` declaration can take its value at once. `bit b = measure q[0];` measures
 into it, and `bit[2] f = "00";` or `bit b = 0;` spell out the cleared register it
-starts as anyway. An initializer with a set bit returns `UnsupportedConstruct`, since
-nothing in the instruction list writes a classical bit.
+starts as anyway. A bit string is written most significant bit first. An initializer
+with a set bit, and any assignment to a bit (`c = 2;`, `c[0] = 1;`, `c <<= 1;`), returns
+`UnsupportedConstruct` under `parse`, since nothing in the instruction list writes a
+classical bit; [`parse_dynamic`](#dynamic-programs) writes them.
 
 A name may open with any Unicode letter, so `gate cphase(θ) a, b { ... }` and
 `qubit γ;` parse.
@@ -275,6 +277,9 @@ On top of what `parse` reads, `parse_dynamic` accepts:
   integer (`c`), up to 64 bits.
 - A write to a variable under a measured `if` or `switch`, which is evaluated when the
   program runs rather than declined.
+- A write to classical bits: `bit[2] f = "11";`, `c = c + 1;`, `c[0] = c[1] ^ c[2];`,
+  `c <<= 1;`. A write takes an integer or a bool, and a bit register wider than 64 bits
+  takes one only from a parse-time value.
 - A runtime value as the angle of `rx`, `ry`, `rz`, `p` or `rzz`.
 
 A variable lives at runtime only when it has to: when a measured bit or another runtime
@@ -520,7 +525,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | --- | --- | --- |
 | `OPENQASM 2.x` and `3.x` headers | Parses | Another major version: `UnsupportedConstruct` naming the version. A header that is not a number: `Parse` |
 | `include "..."` | Accepted and ignored | Nothing. The standard gates are built in, so an include adds no names; a gate it would have defined declines later by name |
-| `qubit`, `qreg`, `bit`, `creg` | Parses | A `bit` initializer with a set bit: `UnsupportedConstruct`. A bit string whose length differs from the register: `Parse` |
+| `qubit`, `qreg`, `bit`, `creg` | Parses | A `bit` initializer with a set bit, or an assignment to a bit: `UnsupportedConstruct` under `parse`, written at runtime under `parse_dynamic`. A bit string whose length differs from the register, or a float written to bits: `Parse` |
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
 | `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic` |
 | `array` | Parses; folded at parse time | An element type other than `int`, `uint`, `float`, `angle` or `bool`: `UnsupportedConstruct`. An initializer of the wrong shape, an index out of range, or more than 2^20 elements: `Parse` |

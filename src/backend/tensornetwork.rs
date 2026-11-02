@@ -2932,6 +2932,11 @@ impl Backend for TensorNetworkBackend {
         &self.classical_bits
     }
 
+    fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        self.classical_bits[bit] = value;
+        Ok(())
+    }
+
     fn probabilities(&self) -> Result<Vec<f64>> {
         tensor_probability_len(self.name(), self.num_qubits, &self.limits)?;
         let amplitudes = self.contract_to_statevector()?;

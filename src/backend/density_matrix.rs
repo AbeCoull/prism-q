@@ -1934,6 +1934,11 @@ impl Backend for DensityMatrixBackend {
         &self.classical_bits
     }
 
+    fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        self.classical_bits[bit] = value;
+        Ok(())
+    }
+
     fn probabilities(&self) -> Result<Vec<f64>> {
         let d = self.dim();
         #[cfg(feature = "gpu")]

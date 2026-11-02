@@ -18,7 +18,7 @@ flow never reaches the graph walker at all.
 |------|-------|
 | `BasicBlock` | A `Circuit` over the full register, then a list of `Action`s, then a `Terminator` |
 | `Terminator` | `Jump(block)`, `Branch { condition, then, otherwise }`, or `End`. Block 0 is the entry |
-| `Action` | `Assign { var, value }` stores into a variable; `Rotation { kind, targets, angle }` applies `rx`, `ry`, `rz`, `p` or `rzz` at an angle computed at runtime |
+| `Action` | `Assign { var, value }` stores into a variable; `Rotation { kind, targets, angle }` applies `rx`, `ry`, `rz`, `p` or `rzz` at an angle computed at runtime; `WriteBits { bits, value }` writes the low bits of an integer or bool to classical bits, through `Backend::set_classical_bit` |
 | `Variable` | A name, a `ClassicalType`, and the value every shot starts from |
 | `ClassicalExpr` | Constants, variables, one classical bit, a register of up to 64 bits read as an unsigned integer, and unary and binary operators |
 

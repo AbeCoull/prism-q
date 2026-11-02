@@ -10,7 +10,7 @@
 //! | Header | `OPENQASM 3.0;` | 2.0 also accepted for compat; a later major version is rejected rather than read as 3 |
 //! | Include | `include "stdgates.inc";` | Accepted, ignored (gates built-in) |
 //! | Qubit declaration | `qubit[4] q;` | OQ3 syntax (primary) |
-//! | Bit declaration | `bit[4] c;` `bit b = measure q[0];` `bit[2] f = "00";` | OQ3 syntax (primary). An initializer is a measurement, or a bit string or value of all zeros |
+//! | Bit declaration | `bit[4] c;` `bit b = measure q[0];` `bit[2] f = "00";` | OQ3 syntax (primary). An initializer is a measurement, or a bit string (most significant bit first) or value of all zeros |
 //! | Legacy qreg/creg | `qreg q[4]; creg c[4];` | OQ2 compat |
 //! | Input parameter | `input float[64] theta;` | One named slot; [`parse_parametric`] returns them |
 //! | Output declaration | `output bit[4] c;` | Declares the register; every bit is reported anyway |
@@ -73,8 +73,9 @@
 //!
 //! - `extern`, `opaque`, and `return` outside a `def`
 //! - a call to a gate only a `defcal` names, which has no unitary to run
-//! - a `bit` initializer with a set bit: nothing in the instruction list writes
-//!   a classical bit
+//! - a `bit` initializer with a set bit, and any assignment to classical bits:
+//!   nothing in the instruction list writes a classical bit, and
+//!   [`parse_dynamic`] writes them
 //! - `while`, `break` and `continue`, which [`parse_dynamic`] reads into a
 //!   control-flow graph
 //! - a `def` result of any type but `bit`, a call that drops a `bit` result, and

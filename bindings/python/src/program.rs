@@ -250,6 +250,18 @@ impl PyDynamicProgramBuilder {
         Ok(slf)
     }
 
+    /// Write the low bits of `value`, an integer or a bool, to the classical
+    /// bits `bits`, least significant first.
+    fn write_bits<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        bits: Vec<usize>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyPrismResult<PyRefMut<'py, Self>> {
+        let value = slf.expr(value)?;
+        slf.inner()?.write_bits(&bits, value);
+        Ok(slf)
+    }
+
     /// Open a loop that runs while `condition` holds; `name` labels it in the
     /// step-limit error. Close it with `end()`.
     fn begin_while<'py>(

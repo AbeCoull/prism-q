@@ -2220,6 +2220,10 @@ impl Backend for DistributedStatevectorBackend {
         self.inner.classical_results()
     }
 
+    fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        self.inner.set_classical_bit(bit, value)
+    }
+
     fn probabilities(&self) -> Result<Vec<f64>> {
         let local = self.inner.probabilities()?;
         if self.global_qubits == 0 {

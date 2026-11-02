@@ -373,6 +373,7 @@ exclude = [
 "DynamicProgramBuilder::num_classical_bits" = { rust_only = "read from the built DynamicProgram" }
 "DynamicProgramBuilder::num_qubits" = { rust_only = "read from the built DynamicProgram" }
 "DynamicProgramBuilder::variable" = { rust_only = "Python names variables by string" }
+"DynamicProgramBuilder::write_bits" = "DynamicProgramBuilder.write_bits"
 
 "ThreadPool::install" = "ThreadPool.install"
 "ThreadPool::num_threads" = "ThreadPool.num_threads"

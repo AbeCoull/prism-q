@@ -195,6 +195,15 @@ impl DynamicProgramBuilder {
         self.push_action(Action::Assign { var, value })
     }
 
+    /// Write the low bits of `value`, an integer or a bool, to the classical
+    /// bits `bits`, least significant first.
+    pub fn write_bits(&mut self, bits: &[usize], value: ClassicalExpr) -> &mut Self {
+        self.push_action(Action::WriteBits {
+            bits: SmallVec::from_slice(bits),
+            value,
+        })
+    }
+
     /// Open a loop that runs its body while `condition` is truthy, testing it
     /// before each pass. `name` labels the loop in the step-limit error.
     pub fn begin_while(&mut self, name: impl Into<String>, condition: ClassicalExpr) {

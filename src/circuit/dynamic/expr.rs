@@ -226,6 +226,12 @@ pub enum ClassicalExpr {
         lhs: Box<ClassicalExpr>,
         rhs: Box<ClassicalExpr>,
     },
+    /// `operand` converted to `ty`, as storing it in a variable of that type
+    /// would convert it.
+    Cast {
+        ty: ClassicalType,
+        operand: Box<ClassicalExpr>,
+    },
 }
 
 impl ClassicalExpr {
@@ -241,6 +247,13 @@ impl ClassicalExpr {
             op,
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
+        }
+    }
+
+    pub fn cast(ty: ClassicalType, operand: ClassicalExpr) -> Self {
+        ClassicalExpr::Cast {
+            ty,
+            operand: Box::new(operand),
         }
     }
 
@@ -312,6 +325,11 @@ impl ClassicalExpr {
                     _ => ValueKind::Bool,
                 })
             }
+            ClassicalExpr::Cast { ty, operand } => {
+                ty.check()?;
+                operand.check(variables, num_classical_bits)?;
+                Ok(ty.kind())
+            }
         }
     }
 
@@ -327,16 +345,7 @@ impl ClassicalExpr {
                     .rev()
                     .fold(0i128, |acc, &bit| (acc << 1) | i128::from(bit)),
             ),
-            ClassicalExpr::Unary { op, operand } => {
-                let value = operand.eval(bits, vars)?;
-                match (op, value) {
-                    (UnaryOp::Not, value) => ClassicalValue::Bool(!value.truthy()),
-                    (UnaryOp::Neg, ClassicalValue::Float(value)) => ClassicalValue::Float(-value),
-                    (UnaryOp::Neg, value) => ClassicalValue::Int(value.to_int().wrapping_neg()),
-                    (UnaryOp::BitNot, ClassicalValue::Float(_)) => return Err(float_operand("~")),
-                    (UnaryOp::BitNot, value) => ClassicalValue::Int(!value.to_int()),
-                }
-            }
+            ClassicalExpr::Unary { op, operand } => unary(*op, operand.eval(bits, vars)?)?,
             ClassicalExpr::Binary { op, lhs, rhs } => {
                 let left = lhs.eval(bits, vars)?;
                 match op {
@@ -349,6 +358,7 @@ impl ClassicalExpr {
                 }
                 binary(*op, left, rhs.eval(bits, vars)?)?
             }
+            ClassicalExpr::Cast { ty, operand } => ty.store(operand.eval(bits, vars)?),
         })
     }
 }
@@ -393,7 +403,23 @@ fn float_operand(op: &str) -> PrismError {
     }
 }
 
-fn binary(op: BinaryOp, left: ClassicalValue, right: ClassicalValue) -> Result<ClassicalValue> {
+pub(crate) fn unary(op: UnaryOp, value: ClassicalValue) -> Result<ClassicalValue> {
+    Ok(match (op, value) {
+        (UnaryOp::Not, value) => ClassicalValue::Bool(!value.truthy()),
+        (UnaryOp::Neg, ClassicalValue::Float(value)) => ClassicalValue::Float(-value),
+        (UnaryOp::Neg, value) => ClassicalValue::Int(value.to_int().wrapping_neg()),
+        (UnaryOp::BitNot, ClassicalValue::Float(_)) => return Err(float_operand("~")),
+        (UnaryOp::BitNot, value) => ClassicalValue::Int(!value.to_int()),
+    })
+}
+
+/// `op` over two values, `&&` and `||` excepted: [`ClassicalExpr::eval`] short-circuits
+/// those before reaching here.
+pub(crate) fn binary(
+    op: BinaryOp,
+    left: ClassicalValue,
+    right: ClassicalValue,
+) -> Result<ClassicalValue> {
     use ClassicalValue::{Bool, Float, Int};
     let float = matches!(left, Float(_)) || matches!(right, Float(_));
     if op.is_bitwise() {

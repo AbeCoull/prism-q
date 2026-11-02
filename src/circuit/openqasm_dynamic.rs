@@ -137,11 +137,13 @@ pub(crate) fn builder_expr(text: &str, builder: &DynamicProgramBuilder) -> Resul
                     let [index] = element.indices.as_slice() else {
                         return Err(parse_error(1, "`c` takes one index"));
                     };
-                    let at = syntax_expr::eval(index, 1, None)?;
-                    if at.fract() != 0.0 || at < 0.0 {
-                        return Err(parse_error(1, format!("`c[{at}]` is not a bit")));
+                    match syntax_expr::eval(index, 1, None)? {
+                        ClassicalValue::Int(at) if at >= 0 => Some(ClassicalExpr::Bit(at as usize)),
+                        at => {
+                            let at = at.to_float();
+                            return Err(parse_error(1, format!("`c[{at}]` is not a bit")));
+                        }
                     }
-                    Some(ClassicalExpr::Bit(at as usize))
                 }
                 _ => None,
             })
@@ -159,50 +161,6 @@ fn register_read(offset: usize, size: usize, line: usize) -> Result<ClassicalExp
             construct: format!("a {size}-bit register read as a value, past the 64 a value holds"),
             line,
         }),
-    }
-}
-
-fn constant(value: f64) -> ClassicalExpr {
-    ClassicalExpr::Const(if value.fract() == 0.0 && value.abs() < 9.0e18 {
-        ClassicalValue::Int(value as i128)
-    } else {
-        ClassicalValue::Float(value)
-    })
-}
-
-fn runtime_op(op: BinaryOp) -> dynamic::BinaryOp {
-    use dynamic::BinaryOp as Op;
-    match op {
-        BinaryOp::Add => Op::Add,
-        BinaryOp::Sub => Op::Sub,
-        BinaryOp::Mul => Op::Mul,
-        BinaryOp::Div => Op::Div,
-        BinaryOp::Rem => Op::Rem,
-        BinaryOp::Pow => Op::Pow,
-        BinaryOp::Shl => Op::Shl,
-        BinaryOp::Shr => Op::Shr,
-        BinaryOp::BitAnd => Op::BitAnd,
-        BinaryOp::BitOr => Op::BitOr,
-        BinaryOp::BitXor => Op::BitXor,
-        BinaryOp::Eq => Op::Eq,
-        BinaryOp::Ne => Op::Ne,
-        BinaryOp::Lt => Op::Lt,
-        BinaryOp::Le => Op::Le,
-        BinaryOp::Gt => Op::Gt,
-        BinaryOp::Ge => Op::Ge,
-        BinaryOp::And => Op::And,
-        BinaryOp::Or => Op::Or,
-    }
-}
-
-fn compound_op(op: AssignOp) -> dynamic::BinaryOp {
-    use dynamic::BinaryOp as Op;
-    match op {
-        AssignOp::Add => Op::Add,
-        AssignOp::Sub => Op::Sub,
-        AssignOp::Mul => Op::Mul,
-        AssignOp::Div => Op::Div,
-        AssignOp::Rem => Op::Rem,
     }
 }
 
@@ -225,6 +183,7 @@ fn reads_leaf(expr: &Expr, leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>
             Expr::Call(call) => call.args.iter().try_fold(false, |seen, arg| {
                 Ok::<_, PrismError>(seen || reads_leaf(arg, leaf)?)
             })?,
+            Expr::Cast(cast) => reads_leaf(&cast.value, leaf)?,
         })
     })
 }
@@ -234,11 +193,11 @@ fn lower(
     expr: &Expr,
     line: usize,
     leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>>,
-    fold: &impl Fn(&Expr) -> Result<f64>,
+    fold: &impl Fn(&Expr) -> Result<ClassicalValue>,
 ) -> Result<ClassicalExpr> {
     with_stack(|| {
         if !reads_leaf(expr, leaf)? {
-            return Ok(constant(fold(expr)?));
+            return Ok(ClassicalExpr::Const(fold(expr)?));
         }
         let recurse = |inner: &Expr| lower(inner, line, leaf, fold);
         Ok(match expr {
@@ -255,7 +214,7 @@ fn lower(
             Expr::Not(inner) => ClassicalExpr::unary(UnaryOp::Not, recurse(inner)?),
             Expr::BitNot(inner) => ClassicalExpr::unary(UnaryOp::BitNot, recurse(inner)?),
             Expr::Binary { op, left, right } => {
-                ClassicalExpr::binary(runtime_op(*op), recurse(left)?, recurse(right)?)
+                ClassicalExpr::binary(op.runtime(), recurse(left)?, recurse(right)?)
             }
             Expr::Call(call) => {
                 return Err(PrismError::UnsupportedConstruct {
@@ -266,6 +225,13 @@ fn lower(
                     line,
                 });
             }
+            Expr::Cast(cast) => {
+                let width = match &cast.width {
+                    Some(width) => Some(cast.ty.width(fold(width)?, line)?),
+                    None => None,
+                };
+                ClassicalExpr::cast(cast.ty.runtime(width), recurse(&cast.value)?)
+            }
             Expr::Number(_) | Expr::Duration(_) => unreachable!("a literal reads no runtime leaf"),
         })
     })
@@ -273,7 +239,7 @@ fn lower(
 
 /// The expression a static condition form spells, for a condition over
 /// variables rather than bits.
-fn condition_expr<'a>(condition: &Condition<'a>) -> Result<Expr<'a>> {
+pub(super) fn condition_expr<'a>(condition: &Condition<'a>) -> Result<Expr<'a>> {
     let binary = |op, left, right| Expr::Binary {
         op,
         left: Box::new(left),
@@ -304,7 +270,7 @@ fn condition_expr<'a>(condition: &Condition<'a>) -> Result<Expr<'a>> {
             }
             let parity = parity.expect("a parity names at least two bits");
             match test {
-                None => binary(BinaryOp::Eq, parity, Expr::Number(1.0)),
+                None => binary(BinaryOp::Eq, parity, Expr::Number(ClassicalValue::Int(1))),
                 Some((op, rhs)) => binary(compare(*op), parity, rhs.clone()),
             }
         }
@@ -430,7 +396,7 @@ impl<'a> Parser<'a> {
             .is_some_and(|state| state.loops.contains(&true))
     }
 
-    fn is_bit_name(&self, name: &str) -> bool {
+    pub(super) fn is_bit_name(&self, name: &str) -> bool {
         self.cregs.contains_key(name)
             || self
                 .alias(name)
@@ -470,6 +436,21 @@ impl<'a> Parser<'a> {
                 self.bit_leaf(name, line)
             }
             Expr::Element(element) => {
+                if let Some(var) = self.runtime_var(element.array) {
+                    let Some(at) = self.int_bit(element, line)? else {
+                        return Ok(None);
+                    };
+                    let shifted = ClassicalExpr::binary(
+                        dynamic::BinaryOp::Shr,
+                        ClassicalExpr::Var(var),
+                        ClassicalExpr::Const(ClassicalValue::Int(at.into())),
+                    );
+                    return Ok(Some(ClassicalExpr::binary(
+                        dynamic::BinaryOp::BitAnd,
+                        shifted,
+                        ClassicalExpr::Const(ClassicalValue::Int(1)),
+                    )));
+                }
                 if !self.is_bit_name(element.array) {
                     return Ok(None);
                 }
@@ -514,12 +495,12 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn lower_expr(&self, expr: &Expr, line: usize) -> Result<ClassicalExpr> {
+    pub(super) fn lower_expr(&self, expr: &Expr, line: usize) -> Result<ClassicalExpr> {
         lower(
             expr,
             line,
             &|leaf| self.runtime_leaf(leaf, line),
-            &|folded| self.value_of(folded, line),
+            &|folded| self.typed_of(folded, line),
         )
     }
 
@@ -551,6 +532,30 @@ impl<'a> Parser<'a> {
     }
 
     // ---------------------------------------------------------- declarations
+
+    /// The parse-time type of a `float[n]` or `angle[n]` declaration.
+    pub(super) fn real_type(
+        &self,
+        ty: &str,
+        width: Option<&Expr>,
+        line: usize,
+    ) -> Result<ClassicalType> {
+        let bits = width
+            .map(|width| {
+                let bits = self.integer_of(width, line)?;
+                u32::try_from(bits)
+                    .ok()
+                    .filter(|bits| (1..=64).contains(bits))
+                    .ok_or_else(|| parse_error(line, format!("`{ty}[{bits}]` needs 1 to 64 bits")))
+            })
+            .transpose()?;
+        Ok(match ty {
+            "angle" => ClassicalType::Angle(bits),
+            _ => ClassicalType::Float {
+                single: bits == Some(32),
+            },
+        })
+    }
 
     pub(super) fn runtime_type(
         &self,
@@ -622,13 +627,13 @@ impl<'a> Parser<'a> {
         };
         let kind = match runtime_type {
             RuntimeType::Bool => ClassicalType::Bool,
-            RuntimeType::Float | RuntimeType::Angle => ClassicalType::Float,
+            RuntimeType::Float => ClassicalType::FLOAT,
+            RuntimeType::Angle => ClassicalType::Angle(None),
             integer => ClassicalType::Int(integer),
         };
         let decl = ClassicalDecl {
             ty: kind,
             constant: false,
-            int: 0,
         };
         if Rc::make_mut(&mut self.classical)
             .insert(name, decl)
@@ -650,7 +655,7 @@ impl<'a> Parser<'a> {
         self.require_streaming("a runtime assignment", line)?;
         let mut value = self.lower_expr(value, line)?;
         if let Some(op) = op {
-            value = ClassicalExpr::binary(compound_op(op), ClassicalExpr::Var(var), value);
+            value = ClassicalExpr::binary(op.binary().runtime(), ClassicalExpr::Var(var), value);
         }
         self.state().builder.assign(var, value);
         Ok(())
@@ -886,26 +891,36 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether a `switch` lowers to branches in the graph rather than guards.
-    pub(super) fn switch_needs_graph(&self, stmt: &Stmt, operand: &Operand) -> bool {
+    pub(super) fn switch_needs_graph(&self, stmt: &Stmt, target: &Expr) -> bool {
         let Some(state) = self.dynamic.as_ref() else {
             return false;
         };
+        let runtime_var = |leaf: &Expr| {
+            Ok(match leaf {
+                Expr::Ident(name) => self.runtime_var(name),
+                Expr::Element(element) => self.runtime_var(element.array),
+                _ => None,
+            }
+            .map(ClassicalExpr::Var))
+        };
         state.analysis.branches.contains(&key(stmt))
-            || operand
-                .register()
-                .is_some_and(|name| self.runtime_var(name).is_some())
+            || reads_leaf(target, &runtime_var).unwrap_or(true)
+            || self.lower_expr(target, 0).is_ok_and(|lowered| {
+                !matches!(lowered, ClassicalExpr::Const(_))
+                    && super::eval::register_value(&lowered).is_none()
+            })
     }
 
     /// A `switch` as a chain of branches, one per arm, the `default` in the
     /// last `else`.
     pub(super) fn exec_switch_branches(
         &mut self,
-        operand: &Operand<'a>,
+        target: &Expr<'a>,
         arms: &[ast::SwitchArm<'a>],
         line: usize,
     ) -> Result<()> {
         self.require_streaming("a `switch` over a runtime value", line)?;
-        let value = self.lower_expr(&operand_expr(operand)?, line)?;
+        let value = self.lower_expr(target, line)?;
         let mut seen: Vec<i64> = Vec::new();
         let mut default = None;
         let mut cases = Vec::new();
@@ -1071,6 +1086,7 @@ impl<'a> Walk<'_, 'a> {
             Expr::Call(call) => call.args.iter().fold(Reads::default(), |reads, arg| {
                 reads.or(self.expr_reads(arg))
             }),
+            Expr::Cast(cast) => self.expr_reads(&cast.value),
         })
     }
 
@@ -1228,11 +1244,8 @@ impl<'a> Walk<'_, 'a> {
                 }
                 needs
             }
-            StmtKind::Switch { operand, arms } => {
-                let reads = operand
-                    .register()
-                    .map_or(Reads::default(), |name| self.name_reads(name));
-                let mut needs = reads.runtime;
+            StmtKind::Switch { target, arms } => {
+                let mut needs = self.expr_reads(target).runtime;
                 for arm in arms {
                     needs |= self.scoped(&arm.body, depth + 1);
                 }

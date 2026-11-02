@@ -84,6 +84,11 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     if stream.eat(Kind::Semicolon) {
         return Ok(StmtKind::Empty);
     }
+    if opens_expression(stream) {
+        let value = expr::parse(stream)?;
+        stream.expect(Kind::Semicolon)?;
+        return Ok(StmtKind::Expr(value));
+    }
     if stream.kind() != Kind::Ident {
         return Err(stream.expected("a statement"));
     }
@@ -142,6 +147,63 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         other if DECLARATION_TYPES.contains(&other) => declaration(stream),
         _ => call_or_assignment(stream),
     }
+}
+
+/// Whether the statement at the cursor is an expression statement: one that
+/// opens with a literal, a parenthesis or a unary operator, or a name whose call
+/// or index groups an operator follows. A gate call never puts an operator
+/// there, so `rx(0.5) q;` stays a call without being read twice.
+fn opens_expression(stream: &Stream<'_, '_>) -> bool {
+    match stream.kind() {
+        Kind::Int
+        | Kind::Float
+        | Kind::Duration
+        | Kind::LParen
+        | Kind::Minus
+        | Kind::Plus
+        | Kind::Bang
+        | Kind::Tilde => return true,
+        Kind::Ident => {}
+        _ => return false,
+    }
+    let mut ahead = 1;
+    while matches!(stream.peek_at(ahead).kind, Kind::LParen | Kind::LBracket) {
+        let mut depth = 0usize;
+        loop {
+            match stream.peek_at(ahead).kind {
+                Kind::LParen | Kind::LBracket => depth += 1,
+                Kind::RParen | Kind::RBracket => depth -= 1,
+                Kind::Eof => return false,
+                _ => {}
+            }
+            ahead += 1;
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+    matches!(
+        stream.peek_at(ahead).kind,
+        Kind::EqEq
+            | Kind::NotEq
+            | Kind::Lt
+            | Kind::Le
+            | Kind::Gt
+            | Kind::Ge
+            | Kind::Plus
+            | Kind::Minus
+            | Kind::Star
+            | Kind::Slash
+            | Kind::Percent
+            | Kind::Pow
+            | Kind::Amp
+            | Kind::Pipe
+            | Kind::Caret
+            | Kind::AndAnd
+            | Kind::OrOr
+            | Kind::Shl
+            | Kind::Shr
+    )
 }
 
 fn version<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
@@ -534,15 +596,10 @@ fn conditional<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     })))
 }
 
-/// `(condition)`. A dynamic parse reads the condition forms a static one does
-/// first, and any other expression when none of them spans the parentheses.
+/// `(condition)`: one of the bit and register forms when one spans the
+/// parentheses, any other expression otherwise.
 fn parenthesized_condition<'a>(stream: &mut Stream<'_, 'a>) -> Result<Condition<'a>> {
     stream.expect(Kind::LParen)?;
-    if !stream.is_dynamic() {
-        let condition = parse_condition(stream)?;
-        stream.expect(Kind::RParen)?;
-        return Ok(condition);
-    }
     let mark = stream.mark();
     if let Ok(condition) = parse_condition(stream)
         && stream.eat(Kind::RParen)
@@ -697,7 +754,7 @@ fn for_range<'a>(stream: &mut Stream<'_, 'a>) -> Result<ForRange<'a>> {
 fn switch<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     stream.advance();
     stream.expect(Kind::LParen)?;
-    let operand = operand(stream)?;
+    let target = expr::parse(stream)?;
     stream.expect(Kind::RParen)?;
     stream.expect(Kind::LBrace)?;
     let mut arms = Vec::new();
@@ -729,7 +786,7 @@ fn switch<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
             });
         }
     }
-    Ok(StmtKind::Switch { operand, arms })
+    Ok(StmtKind::Switch { target, arms })
 }
 
 fn gate_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
@@ -910,7 +967,11 @@ fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>
 
     // A call standing alone on the right may hand over qubits and bits, which
     // no expression can hold, so it keeps the call's own argument grammar.
-    if op.is_none() && stream.kind() == Kind::Ident && stream.peek_at(1).kind == Kind::LParen {
+    if op.is_none()
+        && stream.kind() == Kind::Ident
+        && stream.peek_at(1).kind == Kind::LParen
+        && expr::CastType::named(stream.peek().text).is_none()
+    {
         let value_mark = stream.mark();
         let name = stream.advance().text;
         stream.advance();
@@ -962,6 +1023,12 @@ fn assign_op(kind: Kind) -> Option<Option<AssignOp>> {
         Kind::MulAssign => Some(Some(AssignOp::Mul)),
         Kind::DivAssign => Some(Some(AssignOp::Div)),
         Kind::ModAssign => Some(Some(AssignOp::Rem)),
+        Kind::PowAssign => Some(Some(AssignOp::Pow)),
+        Kind::AndAssign => Some(Some(AssignOp::BitAnd)),
+        Kind::OrAssign => Some(Some(AssignOp::BitOr)),
+        Kind::XorAssign => Some(Some(AssignOp::BitXor)),
+        Kind::ShlAssign => Some(Some(AssignOp::Shl)),
+        Kind::ShrAssign => Some(Some(AssignOp::Shr)),
         _ => None,
     }
 }

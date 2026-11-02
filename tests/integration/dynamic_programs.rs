@@ -297,6 +297,46 @@ fn a_switch_over_a_runtime_value_branches() {
 }
 
 #[test]
+fn a_runtime_integer_reads_one_bit_per_index() {
+    let source = "OPENQASM 3.0;
+        qubit[4] q;
+        bit[4] c;
+        uint[2] k = 0;
+        h q[0];
+        x q[1];
+        c[0] = measure q[0];
+        c[1] = measure q[1];
+        k = c;
+        if (k[0] == 1) x q[2];
+        if (bool(k[-1])) x q[3];
+        c[2] = measure q[2];
+        c[3] = measure q[3];";
+    let runs = shots(&parse(source), 200);
+    assert!(runs.iter().all(|shot| shot[2] == shot[0] && shot[3]));
+    assert!(runs.iter().any(|shot| shot[0]) && runs.iter().any(|shot| !shot[0]));
+}
+
+#[test]
+fn a_switch_over_a_signed_cast_compares_the_signed_value() {
+    let source = "OPENQASM 3.0;
+        qubit[3] q;
+        bit[2] c;
+        bit[1] d;
+        h q[0];
+        x q[1];
+        c[0] = measure q[0];
+        c[1] = measure q[1];
+        switch (int[2](c)) {
+          case -2 { x q[2]; }
+          case -1 { }
+          default { x q[2]; x q[2]; x q[2]; }
+        }
+        d[0] = measure q[2];";
+    let runs = shots(&parse(source), 200);
+    assert!(runs.iter().all(|shot| shot[2] != shot[0]));
+}
+
+#[test]
 fn an_else_may_follow_an_if_that_measures_its_own_condition() {
     let program = parse(
         "OPENQASM 3.0;

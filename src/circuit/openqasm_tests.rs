@@ -11,7 +11,12 @@ fn eval_expr(source: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Re
     if !stream.at_end() {
         return Err(stream.expected("the end of the expression"));
     }
-    qasm_expr::eval(&expr, line, vars)
+    let vars = vars.map(|vars| {
+        vars.iter()
+            .map(|(name, value)| (*name, ClassicalValue::Float(*value)))
+            .collect::<HashMap<_, _>>()
+    });
+    Ok(qasm_expr::eval(&expr, line, vars.as_ref())?.to_float())
 }
 
 fn assert_complex_close(actual: num_complex::Complex64, expected: num_complex::Complex64) {
@@ -3670,4 +3675,306 @@ fn an_empty_def_is_a_call_that_does_nothing() {
     assert_eq!(c.instructions.len(), 1);
     let err = parse("OPENQASM 3.0;\nqubit[1] q;\ndef f(qubit a) -> bit { }").unwrap_err();
     assert!(err.to_string().contains("body is empty"), "{err}");
+}
+
+/// The angle of the `rx` that `body` applies, after a two-qubit, four-bit header.
+fn rx_angle(body: &str) -> f64 {
+    let source = format!("OPENQASM 3.0;\nqubit[2] q;\nbit[4] c;\n{body}");
+    let circuit = parse(&source).unwrap_or_else(|e| panic!("{body}: {e}"));
+    match circuit.instructions.as_slice() {
+        [
+            Instruction::Gate {
+                gate: Gate::Rx(angle),
+                ..
+            },
+        ] => *angle,
+        other => panic!("{body}: expected one rx, got {other:?}"),
+    }
+}
+
+/// The guard `body`'s one conditional gate carries, after the same header.
+fn guard_of(body: &str) -> ClassicalCondition {
+    let source = format!("OPENQASM 3.0;\nqubit[2] q;\nbit[4] c;\n{body}");
+    let circuit = parse(&source).unwrap_or_else(|e| panic!("{body}: {e}"));
+    match circuit.instructions.as_slice() {
+        [Instruction::Conditional { condition, .. }] => condition.clone(),
+        other => panic!("{body}: expected one conditional, got {other:?}"),
+    }
+}
+
+fn parse_error_of(body: &str) -> PrismError {
+    parse(&format!("OPENQASM 3.0;\nqubit[2] q;\nbit[4] c;\n{body}"))
+        .err()
+        .unwrap_or_else(|| panic!("{body}: parsed"))
+}
+
+#[test]
+fn integer_division_truncates_toward_zero() {
+    assert_eq!(rx_angle("rx(1 / 2) q[0];"), 0.0);
+    assert_eq!(rx_angle("int a = 7; int b = -2; rx(a / b) q[0];"), -3.0);
+    assert_eq!(rx_angle("rx(7 % -2) q[0];"), 1.0);
+    assert_eq!(rx_angle("rx(1.0 / 2) q[0];"), 0.5);
+    assert_eq!(rx_angle("rx(pi / 2) q[0];"), std::f64::consts::FRAC_PI_2);
+}
+
+#[test]
+fn integer_arithmetic_stays_exact_past_double_precision() {
+    let body = "int x = 9007199254740993; rx(x - 9007199254740992) q[0];";
+    assert_eq!(rx_angle(body), 1.0);
+    assert_eq!(rx_angle("rx(0x10 + 0b11 + 0o7 + 1_000) q[0];"), 1026.0);
+}
+
+#[test]
+fn a_zero_divisor_is_a_parse_error() {
+    for (body, wanted) in [
+        ("rx(1 / 0) q[0];", "division by zero"),
+        ("rx(1 % 0) q[0];", "modulo by zero"),
+        ("int a = 3; a /= 0; rx(a) q[0];", "division by zero"),
+    ] {
+        let err = parse_error_of(body);
+        assert!(err.to_string().contains(wanted), "{body}: {err}");
+    }
+}
+
+#[test]
+fn casts_convert_to_their_type() {
+    for (body, want) in [
+        ("rx(int(2.7)) q[0];", 2.0),
+        ("rx(int(-2.7)) q[0];", -2.0),
+        ("rx(int[8](300)) q[0];", 44.0),
+        ("rx(int[8](200)) q[0];", -56.0),
+        ("rx(uint[4](-1)) q[0];", 15.0),
+        ("rx(bit[2](7)) q[0];", 3.0),
+        ("rx(bool(5)) q[0];", 1.0),
+        ("rx(bool(0.0)) q[0];", 0.0),
+        ("rx(float[32](0.1)) q[0];", f64::from(0.1f32)),
+        ("rx(angle[3](pi / 3)) q[0];", std::f64::consts::FRAC_PI_4),
+        ("array[int[8], 2] a = {3, 4}; rx(int(a[1])) q[0];", 4.0),
+    ] {
+        assert_eq!(rx_angle(body), want, "{body}");
+    }
+}
+
+#[test]
+fn a_cast_width_is_checked() {
+    for (body, wanted) in [
+        ("rx(bool[2](1)) q[0];", "takes no width"),
+        ("rx(int[0](1)) q[0];", "needs 1 to 64 bits"),
+        ("rx(uint[65](1)) q[0];", "needs 1 to 64 bits"),
+    ] {
+        let err = parse_error_of(body);
+        assert!(err.to_string().contains(wanted), "{body}: {err}");
+    }
+}
+
+#[test]
+fn a_typed_variable_holds_what_its_type_can() {
+    let tau = std::f64::consts::TAU;
+    for (body, want) in [
+        ("float[32] f = 0.1; rx(f) q[0];", f64::from(0.1f32)),
+        ("angle[2] a = 1.0; rx(a) q[0];", tau / 4.0),
+        ("angle a = -pi / 2; rx(a) q[0];", 3.0 * tau / 4.0),
+        ("angle[1] a = 3 * pi / 2; rx(a) q[0];", 0.0),
+        ("int[4] n = 7; n += 1; rx(n) q[0];", -8.0),
+        ("angle[2] a = 0; a = angle(pi / 3); rx(a) q[0];", tau / 4.0),
+        ("uint[3] n = 5; n *= 2; rx(n) q[0];", 2.0),
+    ] {
+        assert_eq!(rx_angle(body), want, "{body}");
+    }
+}
+
+#[test]
+fn every_compound_assignment_applies_its_operator() {
+    for (update, want) in [
+        ("**= 2", 36.0),
+        ("&= 3", 2.0),
+        ("|= 3", 7.0),
+        ("^= 3", 5.0),
+        ("<<= 2", 24.0),
+        (">>= 2", 1.0),
+    ] {
+        let body = format!("int a = 6; a {update}; rx(a) q[0];");
+        assert_eq!(rx_angle(&body), want, "{body}");
+    }
+}
+
+#[test]
+fn an_expression_statement_is_evaluated_and_discarded() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[1] q;\nint a = 2;\na == 2;\n(a + 1) * 3;\n-a;\nx q[0];",
+        "OPENQASM 3.0;\nqubit[1] q;\nx q[0];",
+    );
+    let err = parse(
+        "OPENQASM 3.0;\nqubit[1] q;\ndef f(qubit a) -> bit { bit r = measure a; return r; }\n\
+         f(q[0]) == 1;",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, PrismError::UnsupportedConstruct { construct, .. }
+            if construct.contains("def `f`")),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_if_on_a_parse_time_value_keeps_the_arm_it_takes() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[1] q;\nint n = 3;\nif (n > 2 && n != 5) x q[0]; else y q[0];",
+        "OPENQASM 3.0;\nqubit[1] q;\nx q[0];",
+    );
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[1] q;\nif (1 == 2) { x q[0]; } else { y q[0]; }",
+        "OPENQASM 3.0;\nqubit[1] q;\ny q[0];",
+    );
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[1] q;\nif (false) x q[0];\nz q[0];",
+        "OPENQASM 3.0;\nqubit[1] q;\nz q[0];",
+    );
+}
+
+#[test]
+fn a_condition_over_classical_bits_lowers_to_its_guard() {
+    for (body, want) in [
+        ("if (!c[0]) x q[0];", ClassicalCondition::BitIsZero(0)),
+        ("if (c[2] == 1) x q[0];", ClassicalCondition::BitIsOne(2)),
+        (
+            "if (bool(c)) x q[0];",
+            ClassicalCondition::RegisterNotEquals {
+                offset: 0,
+                size: 4,
+                value: 0,
+            },
+        ),
+        (
+            "if (c == 1 + 2) x q[0];",
+            ClassicalCondition::RegisterEquals {
+                offset: 0,
+                size: 4,
+                value: 3,
+            },
+        ),
+        (
+            "if (uint[2](c) != 3) x q[0];",
+            ClassicalCondition::RegisterNotEquals {
+                offset: 0,
+                size: 2,
+                value: 3,
+            },
+        ),
+        (
+            "if (int[8](c) == 5) x q[0];",
+            ClassicalCondition::RegisterEquals {
+                offset: 0,
+                size: 4,
+                value: 5,
+            },
+        ),
+        (
+            "if (int[4](c) == -1) x q[0];",
+            ClassicalCondition::RegisterEquals {
+                offset: 0,
+                size: 4,
+                value: 15,
+            },
+        ),
+        (
+            "if (int[3](c) == -4) x q[0];",
+            ClassicalCondition::RegisterEquals {
+                offset: 0,
+                size: 3,
+                value: 4,
+            },
+        ),
+    ] {
+        assert_eq!(
+            format!("{:?}", guard_of(body)),
+            format!("{want:?}"),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_condition_no_guard_spells_points_at_the_dynamic_parse() {
+    for body in [
+        "if (c[0] && c[1]) x q[0];",
+        "if (int[4](c) == 8) x q[0];",
+        "if (c + 1 == 2) x q[0];",
+    ] {
+        let err = parse_error_of(body);
+        assert!(
+            matches!(&err, PrismError::UnsupportedConstruct { construct, .. }
+                if construct.contains("parse_dynamic")),
+            "{body}: {err}"
+        );
+        let source = format!("OPENQASM 3.0;\nqubit[2] q;\nbit[4] c;\n{body}");
+        parse_dynamic(&source).unwrap_or_else(|e| panic!("{body}: {e}"));
+    }
+}
+
+#[test]
+fn an_integer_reads_one_bit_per_index() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[4] q;\nuint[4] a = 5;\n\
+         for int i in [0:3] { if (bool(a[i])) x q[i]; }",
+        "OPENQASM 3.0;\nqubit[4] q;\nx q[0];\nx q[2];",
+    );
+    assert_eq!(rx_angle("uint[4] a = 6; rx(a[1]) q[0];"), 1.0);
+    assert_eq!(rx_angle("int[4] a = -2; rx(a[-1] + 2 * a[0]) q[0];"), 1.0);
+    let err = parse_error_of("uint[4] a = 5; rx(a[4]) q[0];");
+    assert!(err.to_string().contains("outside `a`"), "{err}");
+}
+
+#[test]
+fn a_switch_takes_any_value_its_guards_can_compare() {
+    for (body, want) in [
+        (
+            "switch (int(c)) { case 1 { x q[0]; } }",
+            ClassicalCondition::RegisterEquals {
+                offset: 0,
+                size: 4,
+                value: 1,
+            },
+        ),
+        (
+            "switch (uint[2](c)) { case 3 { x q[0]; } }",
+            ClassicalCondition::RegisterEquals {
+                offset: 0,
+                size: 2,
+                value: 3,
+            },
+        ),
+        (
+            "switch (c[1]) { case 1 { x q[0]; } }",
+            ClassicalCondition::RegisterEquals {
+                offset: 1,
+                size: 1,
+                value: 1,
+            },
+        ),
+    ] {
+        assert_eq!(
+            format!("{:?}", guard_of(body)),
+            format!("{want:?}"),
+            "{body}"
+        );
+    }
+    let err = parse_error_of("switch (int[2](c)) { case 1 { x q[0]; } }");
+    assert!(err.to_string().contains("parse_dynamic"), "{err}");
+}
+
+#[test]
+fn a_switch_on_a_parse_time_value_keeps_one_arm() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[1] q;\nint i = 2;\n\
+         switch (i * 2) { case 3 { x q[0]; } case 4, 5 { y q[0]; } }",
+        "OPENQASM 3.0;\nqubit[1] q;\ny q[0];",
+    );
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[1] q;\nswitch (5) { case 3 { x q[0]; } default { z q[0]; } }",
+        "OPENQASM 3.0;\nqubit[1] q;\nz q[0];",
+    );
+    let err =
+        parse("OPENQASM 3.0;\nqubit[1] q;\nswitch (1) { case 1 { } case 1 { } }").unwrap_err();
+    assert!(err.to_string().contains("appears twice"), "{err}");
 }

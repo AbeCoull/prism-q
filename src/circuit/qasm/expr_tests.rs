@@ -10,7 +10,12 @@ fn value_with(source: &str, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
     if !stream.at_end() {
         return Err(stream.expected("the end of the expression"));
     }
-    eval(&expr, 1, vars)
+    let vars = vars.map(|vars| {
+        vars.iter()
+            .map(|(name, value)| (*name, ClassicalValue::Float(*value)))
+            .collect::<HashMap<_, _>>()
+    });
+    Ok(eval(&expr, 1, vars.as_ref())?.to_float())
 }
 
 fn value(source: &str) -> f64 {
@@ -96,8 +101,11 @@ fn one_tree_evaluates_against_many_bindings() {
     let expr = parse(&mut stream).unwrap();
     for k in 0..4i64 {
         let mut vars = HashMap::new();
-        vars.insert("k", k as f64);
-        assert_eq!(eval(&expr, 1, Some(&vars)).unwrap(), (k * 2 + 1) as f64);
+        vars.insert("k", ClassicalValue::from(k));
+        assert_eq!(
+            eval(&expr, 1, Some(&vars)).unwrap(),
+            ClassicalValue::Int(i128::from(k * 2 + 1))
+        );
     }
 }
 

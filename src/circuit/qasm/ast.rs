@@ -7,7 +7,7 @@ use std::fmt;
 
 use smallvec::SmallVec;
 
-use super::expr::Expr;
+use super::expr::{BinaryOp, Expr};
 
 pub(crate) type Block<'a> = Vec<Stmt<'a>>;
 
@@ -72,6 +72,8 @@ pub(crate) enum StmtKind<'a> {
     Measure(Box<Measure<'a>>),
     /// A lone `;`.
     Empty,
+    /// `a == b;`, an expression whose value is discarded.
+    Expr(Expr<'a>),
     Reset {
         targets: Vec<Operand<'a>>,
     },
@@ -95,7 +97,7 @@ pub(crate) enum StmtKind<'a> {
         body: Block<'a>,
     },
     Switch {
-        operand: Operand<'a>,
+        target: Expr<'a>,
         arms: Vec<SwitchArm<'a>>,
     },
     /// `while (cond) { ... }`, read only by `parse_dynamic`.
@@ -223,6 +225,30 @@ pub(crate) enum AssignOp {
     Mul,
     Div,
     Rem,
+    Pow,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+impl AssignOp {
+    pub(crate) fn binary(self) -> BinaryOp {
+        match self {
+            AssignOp::Add => BinaryOp::Add,
+            AssignOp::Sub => BinaryOp::Sub,
+            AssignOp::Mul => BinaryOp::Mul,
+            AssignOp::Div => BinaryOp::Div,
+            AssignOp::Rem => BinaryOp::Rem,
+            AssignOp::Pow => BinaryOp::Pow,
+            AssignOp::BitAnd => BinaryOp::BitAnd,
+            AssignOp::BitOr => BinaryOp::BitOr,
+            AssignOp::BitXor => BinaryOp::BitXor,
+            AssignOp::Shl => BinaryOp::Shl,
+            AssignOp::Shr => BinaryOp::Shr,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

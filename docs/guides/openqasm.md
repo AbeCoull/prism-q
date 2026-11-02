@@ -124,6 +124,14 @@ cursor += 2;
 h q[cursor];
 ```
 
+Each type holds what the language says it holds. An `int` or `uint` is an exact
+integer that wraps at its width, 64 bits when none is given, and `/` or `%` between two
+integers truncates toward zero, so `1 / 2` is `0` while `1.0 / 2` is `0.5`. A
+`float[32]` rounds to single precision. An `angle[n]` holds the nearest multiple of
+`2 pi / 2^n`, taken modulo `2 pi`. A cast such as `int[8](x)`, `uint[2](c)`, `bool(x)` or
+`angle[3](t)` converts the same way, and `a[i]` on an integer reads one of its bits.
+An expression on its own, `a == 2;`, is evaluated and discarded.
+
 A declaration inside a `for` body binds for that pass only: the scope the body
 opened is dropped at the end of each iteration, while a write to a name declared
 outside the loop carries on to the next pass and past the loop.
@@ -255,9 +263,8 @@ let shots = simulate_program(&program).seed(42).shots(1000)?;
 On top of what `parse` reads, `parse_dynamic` accepts:
 
 - `while (condition) { ... }`, with `break` and `continue`.
-- Conditions and values over the full classical operator set: `&&`, `||`, `!`, the
-  comparisons `<`, `<=`, `>`, `>=`, `==`, `!=`, and `&`, `|`, `^`, `~`, `<<`, `>>`,
-  with C precedence.
+- Any condition or `switch` target over classical bits, where `parse` takes only those
+  a bit or register guard spells: `c[0] && c[1]` and `c + 1 == 2` run here.
 - A classical bit read as a value (`c[0]`) and a bit register read as an unsigned
   integer (`c`), up to 64 bits.
 - A write to a variable under a measured `if` or `switch`, which is evaluated when the
@@ -269,7 +276,8 @@ variable reaches it, or when a loop or a measured branch writes it from outside 
 scope it was declared in. Every other variable folds at parse time as it does under
 `parse`, so a program `parse` accepts gives the same circuit under `parse_dynamic`, and
 runs with the same seeded shots. Runtime `int` and `uint` variables wrap at their
-declared width, 64 bits when none is given, and integer `/` truncates.
+declared width as folded ones do. A runtime `float` or `angle` holds a double whatever
+its width, so `float[32]` rounding and `angle[n]` steps apply only to folded values.
 
 A shot that runs more than a million blocks stops with `PrismError::StepLimit` naming
 its loop, rather than hanging; `SimulateProgram::max_steps` sets another bound. The
@@ -516,8 +524,10 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |
 | `nop` | Parses; emits nothing | |
-| `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
-| `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present: `UnsupportedConstruct` |
+| Casts, `int[8](x)`, `bool(c)` | Parses | A width on `bool`, or outside 1 to 64 bits (128 for `float`): `Parse` |
+| Expression statements, `a == 2;` | Evaluated and discarded | A call to a `def` inside one: `UnsupportedConstruct` |
+| `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. A condition over classical bits that no bit or register guard spells: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
+| `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present, or a target over classical bits that no register guard spells: `UnsupportedConstruct` |
 | `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
 | `while`, `break`, `continue` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list. `break` or `continue` inside a `for`: `UnsupportedConstruct` |
 | `def` | Inlines its body at the call site, with `bit` parameters and a `bit` result | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width: `Parse` |
@@ -570,7 +580,7 @@ hold. The backend it then runs on may still decline the circuit; those limits ar
 
   `pow(k)` takes any real `k`. On a single-qubit gate it is the principal
   matrix power, read from the eigenvalues with each angle on `(-pi, pi]`, so
-  `pow(0.5) @ x` is `sx` and `pow(1/3)` applied three times is the gate again.
+  `pow(0.5) @ x` is `sx` and `pow(1.0/3)` applied three times is the gate again.
   The principal branch is what decides between the two square roots of a gate,
   and it follows the eigenvalue rather than the written angle: `p(1.5*pi)` and
   `p(-0.5*pi)` are the same matrix, so they take the same root. A whole
@@ -593,7 +603,8 @@ hold. The backend it then runs on may still decline the circuit; those limits ar
   the IR.
 - Parity conditions, `if (c[0] ^ c[2])` or `if ((c[0] ^ c[2]) == 0)`.
 - Multi-register broadcast, `barrier`, and block comments.
-- An expression evaluator over `+ - * / %` and `**`, the constants `pi`, `tau`
+- An expression evaluator over `+ - * / %`, `**`, the comparisons, `&&`, `||`,
+  `!`, and `&`, `|`, `^`, `~`, `<<`, `>>` with C precedence, the constants `pi`, `tau`
   and `euler`, and the OpenQASM builtins (`arcsin`, `arccos`, `arctan`,
   `ceiling`, `cos`, `exp`, `floor`, `log`, `mod`, `popcount`, `pow`, `sin`,
   `sqrt`, `tan`). `**` is right associative and binds tighter than unary minus,

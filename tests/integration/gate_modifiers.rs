@@ -189,7 +189,7 @@ fn a_fractional_power_composes_back_to_the_gate() {
     ] {
         for parts in [2usize, 3, 5] {
             let repeated: String = (0..parts)
-                .map(|_| format!("pow(1/{parts}) @ {call} q[0];\n"))
+                .map(|_| format!("pow(1.0/{parts}) @ {call} q[0];\n"))
                 .collect();
             common::assert_unitary_close(
                 &unitary(1, &repeated),
@@ -450,7 +450,7 @@ fn a_fractional_power_of_a_wider_gate_composes_back() {
     ] {
         for parts in [2usize, 3] {
             let repeated: String = (0..parts)
-                .map(|_| format!("pow(1/{parts}) @ {call}\n"))
+                .map(|_| format!("pow(1.0/{parts}) @ {call}\n"))
                 .collect();
             common::assert_unitary_close(
                 &unitary(qubits, &repeated),

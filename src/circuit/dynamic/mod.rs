@@ -9,8 +9,8 @@ mod builder;
 mod expr;
 
 pub use builder::DynamicProgramBuilder;
-pub(crate) use expr::check_bit;
 pub use expr::{BinaryOp, ClassicalExpr, ClassicalType, ClassicalValue, UnaryOp, VarId};
+pub(crate) use expr::{binary, check_bit, unary};
 
 use super::{Circuit, ClassicalCondition, Instruction, SmallVec};
 use crate::error::{PrismError, Result};

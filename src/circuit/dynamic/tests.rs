@@ -129,7 +129,7 @@ fn construction_rejects_a_save_point_and_a_bitwise_float() {
 
     let variables = vec![Variable {
         name: "t".into(),
-        ty: ClassicalType::Float,
+        ty: ClassicalType::Float { width: 64 },
         initial: ClassicalValue::Float(0.5),
     }];
     let branch = block(
@@ -140,7 +140,35 @@ fn construction_rejects_a_save_point_and_a_bitwise_float() {
             otherwise: BlockId::new(0),
         },
     );
-    assert!(DynamicProgram::new(1, 0, variables, vec![branch]).is_err());
+    assert!(DynamicProgram::new(1, 0, variables.clone(), vec![branch]).is_err());
+
+    let remainder = block(
+        Circuit::new(1, 0),
+        Terminator::Branch {
+            condition: ClassicalExpr::binary(BinaryOp::Rem, VarId::new(0).into(), 2i64.into()),
+            then: BlockId::new(0),
+            otherwise: BlockId::new(0),
+        },
+    );
+    assert!(DynamicProgram::new(1, 0, variables, vec![remainder]).is_err());
+}
+
+#[test]
+fn a_float_holds_the_precision_of_its_width() {
+    let store =
+        |width, value| match (ClassicalType::Float { width }).store(ClassicalValue::Float(value)) {
+            ClassicalValue::Float(held) => held,
+            other => panic!("float[{width}] held {other:?}"),
+        };
+    assert_eq!(store(16, 0.1), 0.0999755859375);
+    assert_eq!(store(16, 65519.0), 65504.0);
+    assert_eq!(store(16, -65520.0), f64::NEG_INFINITY);
+    assert_eq!(store(16, 1e-8), 0.0);
+    assert_eq!(store(16, 6e-8), 2f64.powi(-24));
+    assert_eq!(store(32, 0.1), f64::from(0.1f32));
+    assert_eq!(store(64, 0.1), 0.1);
+    assert_eq!(store(128, 0.1), 0.1);
+    assert!((ClassicalType::Float { width: 8 }).check().is_err());
 }
 
 #[test]

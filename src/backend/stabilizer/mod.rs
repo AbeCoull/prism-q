@@ -1245,6 +1245,11 @@ impl Backend for StabilizerBackend {
         &self.classical_bits
     }
 
+    fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        self.classical_bits[bit] = value;
+        Ok(())
+    }
+
     fn probabilities(&self) -> Result<Vec<f64>> {
         #[cfg(feature = "gpu")]
         if self.gpu_tableau.is_some() {

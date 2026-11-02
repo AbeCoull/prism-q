@@ -347,6 +347,95 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `target = value` or `target op= value` where `target` names classical
+    /// bits, which only a dynamic program can write.
+    pub(super) fn assign_bits(
+        &mut self,
+        target: &Operand<'a>,
+        op: Option<AssignOp>,
+        value: &Expr<'a>,
+        line: usize,
+    ) -> Result<()> {
+        if self.dynamic.is_none() {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "a write to classical bits `{}`; the instruction list has no classical \
+                     write, and `openqasm::parse_dynamic` carries one",
+                    target.describe()
+                ),
+                line,
+            });
+        }
+        let bits = self.bits_of(target)?;
+        let mut lowered = self.lower_expr(value, line)?;
+        if let Some(op) = op {
+            let current = self.lower_expr(&operand_expr(target)?, line)?;
+            lowered = ClassicalExpr::binary(op.binary().runtime(), current, lowered);
+        }
+        match lowered {
+            ClassicalExpr::Const(ClassicalValue::Float(_)) => Err(parse_error(
+                line,
+                format!(
+                    "`{}` holds bits and takes an integer or a bool, not `{value}`",
+                    target.describe()
+                ),
+            )),
+            ClassicalExpr::Const(value) if bits.len() > 64 => {
+                let word = value.to_int();
+                let values: Vec<bool> = (0..bits.len())
+                    .map(|at| {
+                        if at < 128 {
+                            (word >> at) & 1 == 1
+                        } else {
+                            word < 0
+                        }
+                    })
+                    .collect();
+                self.write_constant_bits(&bits, &values, line)
+            }
+            lowered => self.write_classical_bits(&bits, lowered, line),
+        }
+    }
+
+    /// Write the low bits of `value` to `bits`, least significant first.
+    pub(super) fn write_classical_bits(
+        &mut self,
+        bits: &[usize],
+        value: ClassicalExpr,
+        line: usize,
+    ) -> Result<()> {
+        self.require_streaming("a write to a classical bit", line)?;
+        if bits.len() > 64 {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "a write of {} bits from a runtime value, past the 64 a value holds",
+                    bits.len()
+                ),
+                line,
+            });
+        }
+        self.state().builder.write_bits(bits, value);
+        Ok(())
+    }
+
+    /// Write `values` to `bits`, one write per 64 bits.
+    pub(super) fn write_constant_bits(
+        &mut self,
+        bits: &[usize],
+        values: &[bool],
+        line: usize,
+    ) -> Result<()> {
+        for (bits, values) in bits.chunks(64).zip(values.chunks(64)) {
+            let word = values
+                .iter()
+                .rev()
+                .fold(0u64, |acc, &bit| (acc << 1) | u64::from(bit));
+            let value = ClassicalExpr::Const(ClassicalValue::Int(word.into()));
+            self.write_classical_bits(bits, value, line)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn is_runtime_decl(&self, stmt: &Stmt) -> bool {
         self.dynamic
             .as_ref()
@@ -540,20 +629,28 @@ impl<'a> Parser<'a> {
         width: Option<&Expr>,
         line: usize,
     ) -> Result<ClassicalType> {
+        let float = ty != "angle";
         let bits = width
             .map(|width| {
                 let bits = self.integer_of(width, line)?;
-                u32::try_from(bits)
-                    .ok()
-                    .filter(|bits| (1..=64).contains(bits))
-                    .ok_or_else(|| parse_error(line, format!("`{ty}[{bits}]` needs 1 to 64 bits")))
+                let fits = if float {
+                    matches!(bits, 16 | 32 | 64 | 128)
+                } else {
+                    (1..=64).contains(&bits)
+                };
+                let range = if float {
+                    "16, 32, 64 or 128"
+                } else {
+                    "1 to 64"
+                };
+                fits.then_some(bits as u32)
+                    .ok_or_else(|| parse_error(line, format!("`{ty}[{bits}]` needs {range} bits")))
             })
             .transpose()?;
-        Ok(match ty {
-            "angle" => ClassicalType::Angle(bits),
-            _ => ClassicalType::Float {
-                single: bits == Some(32),
-            },
+        Ok(if float {
+            ClassicalType::Float(bits.unwrap_or(64))
+        } else {
+            ClassicalType::Angle(bits)
         })
     }
 
@@ -563,6 +660,12 @@ impl<'a> Parser<'a> {
         width: Option<&Expr>,
         line: usize,
     ) -> Result<RuntimeType> {
+        if matches!(ty, "float" | "angle") {
+            return Ok(match self.real_type(ty, width, line)? {
+                ClassicalType::Float(width) => RuntimeType::Float { width },
+                _ => RuntimeType::Angle,
+            });
+        }
         let bits = match width {
             None => 64,
             Some(width) => {
@@ -579,8 +682,6 @@ impl<'a> Parser<'a> {
             "int" => RuntimeType::Int { width: bits },
             "uint" => RuntimeType::Uint { width: bits },
             "bool" => RuntimeType::Bool,
-            "float" => RuntimeType::Float,
-            "angle" => RuntimeType::Angle,
             other => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!("a `{other}` whose value a measurement or a loop decides"),
@@ -627,7 +728,7 @@ impl<'a> Parser<'a> {
         };
         let kind = match runtime_type {
             RuntimeType::Bool => ClassicalType::Bool,
-            RuntimeType::Float => ClassicalType::FLOAT,
+            RuntimeType::Float { width } => ClassicalType::Float(width),
             RuntimeType::Angle => ClassicalType::Angle(None),
             integer => ClassicalType::Int(integer),
         };
@@ -1150,13 +1251,24 @@ impl<'a> Walk<'_, 'a> {
 
     fn stmt(&mut self, stmt: &Stmt<'a>, depth: usize) -> bool {
         match &stmt.kind {
-            StmtKind::RegisterDecl { kind, name, .. } => {
+            StmtKind::RegisterDecl {
+                kind, name, init, ..
+            } => {
                 let binding = match kind {
                     ast::RegisterKind::Classical => Binding::Bits,
                     ast::RegisterKind::Qubit => Binding::Other,
                 };
                 self.bind(name, binding);
-                false
+                match init.as_deref() {
+                    Some(ast::BitInit::Bits(text)) => text.contains('1'),
+                    Some(ast::BitInit::Value(value)) => !matches!(
+                        value,
+                        Expr::Number(
+                            dynamic::ClassicalValue::Int(0) | dynamic::ClassicalValue::Bool(false)
+                        )
+                    ),
+                    None => false,
+                }
             }
             StmtKind::OutputDecl { name, .. } => {
                 self.bind(name, Binding::Bits);
@@ -1186,10 +1298,13 @@ impl<'a> Walk<'_, 'a> {
                 self.bind(name, Binding::Var { decl, depth });
                 self.runtime.contains(&decl)
             }
-            StmtKind::Assign { target, value, .. } => {
-                let reads = self.expr_reads(value);
-                self.write(self.lookup(target), depth, reads)
-            }
+            StmtKind::Assign { target, value, .. } => match self.lookup(target) {
+                Binding::Bits => true,
+                binding => {
+                    let reads = self.expr_reads(value);
+                    self.write(binding, depth, reads)
+                }
+            },
             StmtKind::CallAssign(assign) if assign.target.index.is_none() => {
                 let Some(target) = assign.target.register() else {
                     return false;
@@ -1208,6 +1323,11 @@ impl<'a> Walk<'_, 'a> {
                     },
                 );
                 false
+            }
+            StmtKind::ElementAssign(assign)
+                if matches!(self.lookup(assign.array), Binding::Bits) =>
+            {
+                true
             }
             StmtKind::ElementAssign(assign) => {
                 let reads = assign

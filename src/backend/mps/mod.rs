@@ -3204,6 +3204,11 @@ impl Backend for MpsBackend {
         &self.classical_bits
     }
 
+    fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        self.classical_bits[bit] = value;
+        Ok(())
+    }
+
     fn probabilities(&self) -> Result<Vec<f64>> {
         let dim = dense_probability_len(self.name(), self.num_qubits, &self.limits)?;
         let mut probs = Vec::new();

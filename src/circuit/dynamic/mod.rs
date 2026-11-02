@@ -10,7 +10,7 @@ mod expr;
 
 pub use builder::DynamicProgramBuilder;
 pub use expr::{BinaryOp, ClassicalExpr, ClassicalType, ClassicalValue, UnaryOp, VarId};
-pub(crate) use expr::{binary, check_bit, unary};
+pub(crate) use expr::{ValueKind, binary, check_bit, real, unary};
 
 use super::{Circuit, ClassicalCondition, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
@@ -85,6 +85,13 @@ pub enum Action {
         kind: RotationKind,
         targets: SmallVec<[usize; 4]>,
         angle: ClassicalExpr,
+    },
+    /// Write the low bits of `value`, an integer or a bool, to the classical
+    /// bits `bits`, least significant first. `value` is read once, before any
+    /// bit changes.
+    WriteBits {
+        bits: SmallVec<[usize; 4]>,
+        value: ClassicalExpr,
     },
 }
 
@@ -208,6 +215,26 @@ impl DynamicProgram {
                             )));
                         }
                         angle.check(&types, num_classical_bits)?;
+                    }
+                    Action::WriteBits { bits, value } => {
+                        if bits.is_empty() || bits.len() > 64 {
+                            return Err(invalid(format!(
+                                "block {at} writes {} classical bits; a write takes 1 to 64",
+                                bits.len()
+                            )));
+                        }
+                        if let Some(&bit) = bits.iter().find(|&&bit| bit >= num_classical_bits) {
+                            return Err(PrismError::InvalidClassicalBit {
+                                index: bit,
+                                register_size: num_classical_bits,
+                            });
+                        }
+                        if value.check(&types, num_classical_bits)? == ValueKind::Float {
+                            return Err(invalid(format!(
+                                "block {at} writes a float to classical bits; a write takes \
+                                 an integer or a bool"
+                            )));
+                        }
                     }
                 }
             }

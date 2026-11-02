@@ -216,7 +216,7 @@ impl ProgramNoise {
                     Action::Rotation { kind, targets, .. } => {
                         rotation_events(program, rules, *kind, targets)?
                     }
-                    Action::Assign { .. } => Vec::new(),
+                    Action::Assign { .. } | Action::WriteBits { .. } => Vec::new(),
                 });
             }
             let rotations = NoiseModel {
@@ -605,6 +605,12 @@ impl<'p> Prepared<'p> {
                             rng,
                         )?,
                         None => backend.apply(&rotation)?,
+                    }
+                }
+                Action::WriteBits { bits, value } => {
+                    let word = value.eval(backend.classical_results(), vars)?.to_int();
+                    for (at, &bit) in bits.iter().enumerate() {
+                        backend.set_classical_bit(bit, (word >> at) & 1 == 1)?;
                     }
                 }
             }

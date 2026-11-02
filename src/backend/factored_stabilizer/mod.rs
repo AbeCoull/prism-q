@@ -918,6 +918,11 @@ impl Backend for FactoredStabilizerBackend {
         &self.classical_bits
     }
 
+    fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        self.classical_bits[bit] = value;
+        Ok(())
+    }
+
     fn probabilities(&self) -> Result<Vec<f64>> {
         dense_probability_len(self.name(), self.num_qubits, &self.limits)?;
         let active: Vec<&SubTableau> = self.subs.iter().filter_map(|s| s.as_ref()).collect();

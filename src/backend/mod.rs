@@ -584,6 +584,16 @@ pub trait Backend: sealed::Sealed {
     /// Classical bits by index, `true` for a measured |1⟩.
     fn classical_results(&self) -> &[bool];
 
+    /// Set classical bit `bit`, as a dynamic program's classical write does.
+    /// `bit` is in range, checked when the program was built.
+    fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        let _ = (bit, value);
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "a classical bit write".to_string(),
+        })
+    }
+
     /// Probability of each basis state, length `2^n`. A backend that cannot
     /// expand its state returns `BackendUnsupported`.
     fn probabilities(&self) -> Result<Vec<f64>>;

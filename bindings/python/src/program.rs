@@ -127,7 +127,9 @@ fn classical_type(text: &str) -> PyPrismResult<ClassicalType> {
     };
     match (base, width) {
         ("bool", None) => Ok(ClassicalType::Bool),
-        ("float", None) => Ok(ClassicalType::Float),
+        ("float", width) => Ok(ClassicalType::Float {
+            width: width.unwrap_or(64),
+        }),
         ("angle", None) => Ok(ClassicalType::Angle),
         ("int", width) => Ok(ClassicalType::Int {
             width: width.unwrap_or(64),
@@ -136,7 +138,7 @@ fn classical_type(text: &str) -> PyPrismResult<ClassicalType> {
             width: width.unwrap_or(64),
         }),
         _ => Err(invalid(format!(
-            "unknown type `{text}`; expected bool, int[n], uint[n], float or angle"
+            "unknown type `{text}`; expected bool, int[n], uint[n], float[n] or angle"
         ))),
     }
 }
@@ -165,8 +167,8 @@ impl PyDynamicProgramBuilder {
     }
 
     /// Declare a runtime variable every shot starts at `initial`. `ty` is one of
-    /// `"bool"`, `"int[n]"`, `"uint[n]"` (64 bits without `[n]`), `"float"` or
-    /// `"angle"`.
+    /// `"bool"`, `"int[n]"`, `"uint[n]"`, `"float[n]"` (64 bits without `[n]`)
+    /// or `"angle"`.
     #[pyo3(signature = (name, ty, initial = None))]
     fn declare<'py>(
         mut slf: PyRefMut<'py, Self>,
@@ -179,7 +181,7 @@ impl PyDynamicProgramBuilder {
             Some(value) => constant(value)?,
             None => match ty {
                 ClassicalType::Bool => ClassicalValue::Bool(false),
-                ClassicalType::Float | ClassicalType::Angle => ClassicalValue::Float(0.0),
+                ClassicalType::Float { .. } | ClassicalType::Angle => ClassicalValue::Float(0.0),
                 _ => ClassicalValue::from(0i64),
             },
         };
@@ -245,6 +247,18 @@ impl PyDynamicProgramBuilder {
             .ok_or_else(|| invalid(format!("no variable named `{name}`")))?;
         let value = slf.expr(value)?;
         slf.inner()?.assign(var, value);
+        Ok(slf)
+    }
+
+    /// Write the low bits of `value`, an integer or a bool, to the classical
+    /// bits `bits`, least significant first.
+    fn write_bits<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        bits: Vec<usize>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyPrismResult<PyRefMut<'py, Self>> {
+        let value = slf.expr(value)?;
+        slf.inner()?.write_bits(&bits, value);
         Ok(slf)
     }
 

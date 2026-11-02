@@ -7,6 +7,7 @@ use prism_q::circuit::dynamic::{
     BinaryOp, ClassicalExpr, ClassicalType, DynamicProgramBuilder, RotationKind, Terminator,
 };
 use prism_q::circuit::openqasm;
+use prism_q::circuit::{ClassicalCondition, Instruction, SmallVec};
 use prism_q::{BackendKind, Circuit, DynamicProgram, Gate, PrismError, simulate, simulate_program};
 
 const SEED: u64 = 42;
@@ -519,6 +520,160 @@ fn every_per_shot_backend_runs_a_loop() {
 }
 
 #[test]
+fn every_per_shot_backend_writes_classical_bits() {
+    let mut b = DynamicProgramBuilder::new(2, 5);
+    b.add_gate(Gate::H, &[0]).add_measure(0, 0);
+    b.write_bits(
+        &[1, 2],
+        ClassicalExpr::binary(
+            BinaryOp::Add,
+            ClassicalExpr::Bit(0),
+            ClassicalExpr::from(2i64),
+        ),
+    );
+    b.begin_if(ClassicalExpr::Bit(1));
+    b.add_gate(Gate::X, &[1]);
+    b.end().unwrap();
+    b.add_instruction(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(2),
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[0]),
+    });
+    b.add_measure(0, 3).add_measure(1, 4);
+    let program = b.build().unwrap();
+    for kind in [
+        BackendKind::Auto,
+        BackendKind::Statevector,
+        BackendKind::Stabilizer,
+        BackendKind::Sparse,
+        BackendKind::Mps { max_bond_dim: 8 },
+        BackendKind::Factored,
+        BackendKind::FactoredStabilizer,
+        BackendKind::TensorNetwork,
+        BackendKind::DensityMatrix,
+        BackendKind::ProductState,
+    ] {
+        let label = format!("{kind:?}");
+        let runs = simulate_program(&program)
+            .backend(kind)
+            .seed(SEED)
+            .shots(40)
+            .unwrap_or_else(|err| panic!("{label}: {err}"));
+        assert!(
+            runs.shots.iter().all(|shot| shot[1] == shot[0]
+                && shot[2]
+                && shot[3] != shot[0]
+                && shot[4] == shot[0]),
+            "{label}"
+        );
+        assert!(runs.shots.iter().any(|shot| shot[0]), "{label}");
+    }
+}
+
+#[test]
+fn a_write_of_a_float_is_rejected_when_the_program_is_built() {
+    let mut b = DynamicProgramBuilder::new(1, 1);
+    b.write_bits(&[0], ClassicalExpr::from(0.5));
+    let err = b.build().unwrap_err();
+    assert!(err.to_string().contains("integer or a bool"), "{err}");
+    let mut b = DynamicProgramBuilder::new(1, 1);
+    b.write_bits(&[1], ClassicalExpr::from(1i64));
+    assert!(matches!(
+        b.build().unwrap_err(),
+        PrismError::InvalidClassicalBit { index: 1, .. }
+    ));
+}
+
+#[test]
+fn a_bit_initializer_writes_its_bits() {
+    let source = "OPENQASM 3.0;
+        qubit[1] q;
+        bit[3] f = \"110\";
+        bit[3] g = 5;
+        bit[2] z = \"00\";
+        bit[1] h;
+        x q[0];
+        h[0] = measure q[0];
+        bit[2] r = h[0] + 2 * h[0];";
+    let runs = shots(&parse(source), 4);
+    for shot in &runs {
+        assert_eq!(
+            shot,
+            &[
+                false, true, true, true, false, true, false, false, true, true, true
+            ]
+        );
+    }
+}
+
+#[test]
+fn an_assignment_to_classical_bits_writes_them() {
+    let source = "OPENQASM 3.0;
+        qubit[2] q;
+        bit[4] c;
+        x q[0];
+        c[0] = measure q[0];
+        c <<= 1;
+        c[3] = c[1] ^ c[0];
+        c[2] ^= 1;";
+    let runs = shots(&parse(source), 4);
+    for shot in &runs {
+        assert_eq!(shot, &[false, true, true, true]);
+    }
+}
+
+#[test]
+fn a_write_under_a_measured_if_branches() {
+    let source = "OPENQASM 3.0;
+        qubit[1] q;
+        bit[3] c;
+        h q[0];
+        c[0] = measure q[0];
+        if (c[0]) { c[1] = 1; } else { c[2] = true; }";
+    let runs = shots(&parse(source), 200);
+    assert!(
+        runs.iter()
+            .all(|shot| shot[1] == shot[0] && shot[2] != shot[0])
+    );
+    assert!(runs.iter().any(|shot| shot[0]) && runs.iter().any(|shot| !shot[0]));
+}
+
+#[test]
+fn a_constant_write_wider_than_a_value_spans_several_writes() {
+    let source = "OPENQASM 3.0;
+        qubit[1] q;
+        bit[70] w;
+        w = -1;
+        w[69] = 0;";
+    let runs = shots(&parse(source), 2);
+    for shot in &runs {
+        assert!(shot[..69].iter().all(|&bit| bit) && !shot[69]);
+    }
+}
+
+#[test]
+fn a_classical_bit_write_needs_the_dynamic_parse() {
+    for body in [
+        "bit[2] f = \"01\";",
+        "bit[2] c; c = 2;",
+        "bit[2] c; c[0] = 1;",
+    ] {
+        let source = format!("OPENQASM 3.0;\nqubit[1] q;\n{body}");
+        let err = openqasm::parse(&source).unwrap_err();
+        assert!(
+            matches!(&err, PrismError::UnsupportedConstruct { construct, .. }
+                if construct.contains("parse_dynamic")),
+            "{body}: {err}"
+        );
+    }
+    let err = openqasm::parse_dynamic("OPENQASM 3.0;\nbit[2] c;\nc = 0.5;").unwrap_err();
+    assert!(
+        err.to_string().contains("takes an integer or a bool"),
+        "{err}"
+    );
+}
+
+#[test]
 fn engines_without_a_per_shot_state_decline() {
     let program = rus_program(2);
     for kind in [
@@ -545,7 +700,7 @@ fn engines_without_a_per_shot_state_decline() {
 #[test]
 fn a_runtime_rotation_keeps_auto_off_the_tableau() {
     let mut b = DynamicProgramBuilder::new(2, 2);
-    let t = b.declare("t", ClassicalType::Float, 0.3f64.into());
+    let t = b.declare("t", ClassicalType::Float { width: 64 }, 0.3f64.into());
     b.add_gate(Gate::H, &[0]).add_gate(Gate::Cx, &[0, 1]);
     b.add_measure(0, 0);
     b.add_rotation(RotationKind::Ry, &[1], t.into());

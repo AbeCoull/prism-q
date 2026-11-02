@@ -39,7 +39,7 @@ fn precedence_matches_the_language() {
         // power and not the square of a negative.
         ("-2 ** 2", -4.0),
         ("2 ** -1", 0.5),
-        ("2 ** -1 % 3", 0.5),
+        ("2 ** 3 % 5", 3.0),
         ("7 % 3", 1.0),
         ("-  -3", 3.0),
         ("+3", 3.0),

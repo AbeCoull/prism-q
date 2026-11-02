@@ -545,7 +545,7 @@ impl<'a> Parser<'a> {
                 }
                 self.declare_register(*kind, name, size.as_ref(), line)?;
                 if let Some(init) = init {
-                    self.check_bit_init(name, size.as_ref(), init, line)?;
+                    self.init_bits(name, size.as_ref(), init, line)?;
                 }
                 Ok(())
             }
@@ -588,6 +588,14 @@ impl<'a> Parser<'a> {
                 }
                 self.declare_classical(*constant, ty, width.as_ref(), name, value.as_ref(), line)?;
                 Ok(())
+            }
+            StmtKind::Assign { target, op, value } if self.is_bit_name(target) => {
+                let target = Operand {
+                    name: OperandName::Register(target),
+                    index: None,
+                    line,
+                };
+                self.assign_bits(&target, *op, value, line)
             }
             StmtKind::Assign { target, op, value } => {
                 self.assign_classical(target, *op, value, line)?;
@@ -748,6 +756,20 @@ impl<'a> Parser<'a> {
                 })
             }
             StmtKind::ArrayDecl(decl) => self.declare_array(decl, line),
+            StmtKind::ElementAssign(assign) if self.is_bit_name(assign.array) => {
+                let [index] = assign.indices.as_slice() else {
+                    return Err(parse_error(
+                        line,
+                        format!("`{}` holds bits and takes one index", assign.array),
+                    ));
+                };
+                let target = Operand {
+                    name: OperandName::Register(assign.array),
+                    index: Some(Index::Single(index.clone())),
+                    line,
+                };
+                self.assign_bits(&target, assign.op, &assign.value, line)
+            }
             StmtKind::ElementAssign(assign) => self.assign_element(assign, line),
             StmtKind::Box { duration, body } => {
                 // A box and Braket's verbatim pragma both direct a scheduler or
@@ -1418,7 +1440,7 @@ impl<'a> Parser<'a> {
         self.register_indices(&self.qregs, ast::RegisterKind::Qubit, name, operand)
     }
 
-    fn bits_of(&self, operand: &Operand) -> Result<SmallVec<[usize; 4]>> {
+    pub(super) fn bits_of(&self, operand: &Operand) -> Result<SmallVec<[usize; 4]>> {
         let Some(name) = operand.register() else {
             return Err(parse_error(
                 operand.line,
@@ -1789,11 +1811,11 @@ impl<'a> Parser<'a> {
         Ok(count as usize)
     }
 
-    /// Check a `bit` declaration's initializer against its width. The register
-    /// starts cleared and nothing in the instruction list writes a classical
-    /// bit, so only an initializer of all zeros has a form here.
-    fn check_bit_init(
-        &self,
+    /// Initialize a fresh `bit` register from a bit string, written most
+    /// significant first, or a value. The register starts cleared, so only an
+    /// initializer that sets a bit writes one, which only a dynamic program can.
+    fn init_bits(
+        &mut self,
         name: &str,
         size: Option<&Expr<'a>>,
         init: &ast::BitInit<'a>,
@@ -1803,7 +1825,12 @@ impl<'a> Parser<'a> {
             Some(size) => self.integer_of(size, line)?,
             None => 1,
         };
-        let set = match init {
+        let bits = self.bits_of(&Operand {
+            name: OperandName::Register(name),
+            index: None,
+            line,
+        })?;
+        let values: Vec<bool> = match init {
             ast::BitInit::Bits(text) => {
                 let digits: Vec<char> = text.chars().filter(|c| *c != '_').collect();
                 if let Some(bad) = digits.iter().find(|c| !matches!(c, '0' | '1')) {
@@ -1821,20 +1848,38 @@ impl<'a> Parser<'a> {
                         ),
                     ));
                 }
-                digits.contains(&'1')
+                digits.iter().rev().map(|digit| *digit == '1').collect()
             }
-            ast::BitInit::Value(expr) => self.integer_of(expr, line)? != 0,
+            ast::BitInit::Value(expr) if self.reads_runtime(expr) => {
+                let value = self.lower_expr(expr, line)?;
+                return self.write_classical_bits(&bits, value, line);
+            }
+            ast::BitInit::Value(expr) => {
+                let word = self.int_of(expr, line)?;
+                (0..bits.len())
+                    .map(|at| {
+                        if at < 128 {
+                            (word >> at) & 1 == 1
+                        } else {
+                            word < 0
+                        }
+                    })
+                    .collect()
+            }
         };
-        if set {
+        if !values.contains(&true) {
+            return Ok(());
+        }
+        if self.dynamic.is_none() {
             return Err(PrismError::UnsupportedConstruct {
                 construct: format!(
                     "`{name}` initialized with a set bit; the instruction list has no classical \
-                     write"
+                     write, and `openqasm::parse_dynamic` carries one"
                 ),
                 line,
             });
         }
-        Ok(())
+        self.write_constant_bits(&bits, &values, line)
     }
 
     /// Evaluate a call's angle arguments, reporting the one `input` slot they

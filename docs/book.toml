@@ -1,18 +1,18 @@
 [book]
-title = "PRISM-Q: Rust quantum circuit simulator"
+title = "PRISM-Q documentation"
 description = "Performance-first Rust quantum circuit simulator. OpenQASM 3.0 input, nine CPU backends, SIMD kernels, optional CUDA and MPI paths, Python bindings."
 authors = ["A. Coull"]
 language = "en"
 src = "."
 
 [output.html]
-default-theme = "rust"
-preferred-dark-theme = "ayu"
+default-theme = "light"
+preferred-dark-theme = "coal"
 git-repository-url = "https://github.com/AbeCoull/prism-q"
 git-repository-icon = "fa-github"
 edit-url-template = "https://github.com/AbeCoull/prism-q/edit/main/docs/{path}"
 additional-css = ["theme/custom.css", "mdbook-admonish.css"]
-additional-js = ["mermaid.min.js", "mermaid-init.js"]
+additional-js = ["mermaid.min.js", "mermaid-init.js", "theme/circuit-scroll.js"]
 mathjax-support = false
 
 [output.html.fold]

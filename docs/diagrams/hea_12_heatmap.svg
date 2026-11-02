@@ -1,248 +1,289 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 292 172" role="img" aria-label="Gate density heatmap: 12 qubits, 25 moments">
-<style>:root{--bg:#ffffff;--wire:#c4c8cc;--text:#2b2f33;--stripe:#f6f7f8;--ctrl-dot:#2b2f33;--ctrl-bdr:#ffffff;--swap:#6b7075;--barrier:#dcdfe2;--shadow-filter:drop-shadow(0 0.5px 0.5px rgba(0,0,0,0.05));--hover-filter:drop-shadow(0 0 3px #5a5e6350);--std-top:#dce8f6;--std-fill:#c8daf0;--std-str:#3872a8;--std-txt:#1e4d7a;--par-top:#e6d8f4;--par-fill:#d8c8ee;--par-str:#6840a0;--par-txt:#42267a;--pha-top:#d4eedf;--pha-fill:#c0e4d0;--pha-str:#2d7a52;--pha-txt:#1a5438;--ctrl-top:#f2e4cc;--ctrl-fill:#ecd8b8;--ctrl-str:#98682e;--ctrl-txt:#6a4418;--meas-top:#f2d8da;--meas-fill:#eac8ca;--meas-str:#a03840;--meas-txt:#701820;--mfus-top:#ddd4f0;--mfus-fill:#d0c4e8;--mfus-str:#5c40a0;--mfus-txt:#3a2070;}@media(prefers-color-scheme:dark){:root{--bg:#000000;--wire:#2a2d31;--text:#b0b4ba;--stripe:#07080a;--ctrl-dot:#d0d3d8;--ctrl-bdr:#000000;--swap:#6b7075;--barrier:#2a2d31;--shadow-filter:drop-shadow(0 0.5px 0.5px rgba(0,0,0,0.30));--hover-filter:drop-shadow(0 0 3px #7a7e8450);--std-top:#1a3858;--std-fill:#122844;--std-str:#5a9ed6;--std-txt:#90c4ec;--par-top:#2e1e50;--par-fill:#20123a;--par-str:#9868d0;--par-txt:#c4a0ec;--pha-top:#183c28;--pha-fill:#0e2818;--pha-str:#40b878;--pha-txt:#80e0b0;--ctrl-top:#382c14;--ctrl-fill:#281c08;--ctrl-str:#d09848;--ctrl-txt:#ecc888;--meas-top:#381c22;--meas-fill:#281014;--meas-str:#c85060;--meas-txt:#ec9098;--mfus-top:#261c44;--mfus-fill:#1a1030;--mfus-str:#8860c8;--mfus-txt:#b898e8;}}text{font-family:Inter,-apple-system,system-ui,sans-serif;text-rendering:optimizeLegibility;}.hm rect{stroke:var(--bg);stroke-width:0.5;transition:filter 0.1s ease;}.hm rect:hover{stroke:var(--text);stroke-width:1;filter:brightness(1.15);cursor:crosshair;}</style>
+<svg xmlns="http://www.w3.org/2000/svg" width="622" height="356" viewBox="0 0 622 356" class="pq-circuit" role="img" aria-label="Gate activity counts: 12 qubits, 25 moments">
+<style>.pq-circuit{--bg:#ffffff;--wire:#626262;--text:#252525;--ctrl-dot:#252525;--ctrl-bdr:#ffffff;--swap:#454545;--barrier:#b0b0b0;--std-fill:#ffffff;--std-str:#363636;--std-txt:#252525;--par-fill:#ffffff;--par-str:#4c6775;--par-txt:#252525;--pha-fill:#ffffff;--pha-str:#5d6e64;--pha-txt:#252525;--ctrl-fill:#ffffff;--ctrl-str:#303030;--ctrl-txt:#252525;--meas-fill:#f2f2f2;--meas-str:#7b6650;--meas-txt:#54432f;--mfus-fill:#ffffff;--mfus-str:#707070;--mfus-txt:#454545;}@media(prefers-color-scheme:dark){.pq-circuit{--bg:#181818;--wire:#858585;--text:#dddddd;--ctrl-dot:#dddddd;--ctrl-bdr:#181818;--swap:#cccccc;--barrier:#777777;--std-fill:#181818;--std-str:#cccccc;--std-txt:#dddddd;--par-fill:#181818;--par-str:#8fa7b5;--par-txt:#dddddd;--pha-fill:#181818;--pha-str:#9aafa2;--pha-txt:#dddddd;--ctrl-fill:#181818;--ctrl-str:#dddddd;--ctrl-txt:#dddddd;--meas-fill:#242424;--meas-str:#ab9986;--meas-txt:#c5b5a2;--mfus-fill:#181818;--mfus-str:#a2a2a2;--mfus-txt:#cccccc;}}.pq-circuit text{font-family:Arial,Helvetica,sans-serif;text-rendering:optimizeLegibility;}.pq-circuit .hm rect{stroke:var(--bg);stroke-width:0.5;transition:filter 0.1s ease;}.pq-circuit .hm rect:hover{stroke:var(--text);stroke-width:1;filter:brightness(1.15);cursor:crosshair;}
+.pq-circuit .hm rect,.pq-circuit .hm-key .hm-active{fill:var(--hm-light);}.pq-circuit .hm-scale stop{stop-color:var(--hm-light);}@media(prefers-color-scheme:dark){.pq-circuit .hm rect,.pq-circuit .hm-key .hm-active{fill:var(--hm-dark);}.pq-circuit .hm-scale stop{stop-color:var(--hm-dark);}}</style>
 <rect width="100%" height="100%" fill="var(--bg)"/>
-<text x="70" y="20" font-size="14" font-weight="600" fill="var(--text)">Gate density heatmap</text>
-<text x="70" y="36" font-size="11" font-weight="300" fill="var(--wire)">12 qubits × 25 moments · max density 1</text>
+<text x="70" y="20" font-size="14" font-weight="600" fill="var(--text)">Gate activity counts</text>
+<text x="70" y="36" font-size="11" fill="var(--text)">12 qubits × 25 moments · active/idle</text>
 <g class="hm">
-<rect x="70.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[0..0]: 1</title></rect>
-<rect x="74.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[1..1]: 1</title></rect>
-<rect x="78.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[2..2]: 1</title></rect>
-<rect x="82.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[3..3]: 1</title></rect>
-<rect x="86.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[4..4]: 1</title></rect>
-<rect x="94.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[6..6]: 1</title></rect>
-<rect x="98.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[7..7]: 1</title></rect>
-<rect x="102.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[8..8]: 1</title></rect>
-<rect x="110.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[10..10]: 1</title></rect>
-<rect x="114.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[11..11]: 1</title></rect>
-<rect x="118.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[12..12]: 1</title></rect>
-<rect x="126.0" y="50.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[0..0] m[14..14]: 1</title></rect>
-<rect x="70.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[0..0]: 1</title></rect>
-<rect x="74.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[1..1]: 1</title></rect>
-<rect x="78.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[2..2]: 1</title></rect>
-<rect x="82.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[3..3]: 1</title></rect>
-<rect x="86.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[4..4]: 1</title></rect>
-<rect x="90.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[5..5]: 1</title></rect>
-<rect x="94.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[6..6]: 1</title></rect>
-<rect x="98.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[7..7]: 1</title></rect>
-<rect x="102.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[8..8]: 1</title></rect>
-<rect x="106.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[9..9]: 1</title></rect>
-<rect x="110.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[10..10]: 1</title></rect>
-<rect x="114.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[11..11]: 1</title></rect>
-<rect x="118.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[12..12]: 1</title></rect>
-<rect x="122.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[13..13]: 1</title></rect>
-<rect x="126.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[14..14]: 1</title></rect>
-<rect x="130.0" y="54.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[1..1] m[15..15]: 1</title></rect>
-<rect x="70.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[0..0]: 1</title></rect>
-<rect x="74.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[1..1]: 1</title></rect>
-<rect x="82.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[3..3]: 1</title></rect>
-<rect x="86.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[4..4]: 1</title></rect>
-<rect x="90.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[5..5]: 1</title></rect>
-<rect x="94.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[6..6]: 1</title></rect>
-<rect x="98.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[7..7]: 1</title></rect>
-<rect x="102.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[8..8]: 1</title></rect>
-<rect x="106.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[9..9]: 1</title></rect>
-<rect x="110.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[10..10]: 1</title></rect>
-<rect x="114.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[11..11]: 1</title></rect>
-<rect x="118.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[12..12]: 1</title></rect>
-<rect x="122.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[13..13]: 1</title></rect>
-<rect x="126.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[14..14]: 1</title></rect>
-<rect x="130.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[15..15]: 1</title></rect>
-<rect x="134.0" y="58.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[2..2] m[16..16]: 1</title></rect>
-<rect x="70.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[0..0]: 1</title></rect>
-<rect x="74.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[1..1]: 1</title></rect>
-<rect x="86.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[4..4]: 1</title></rect>
-<rect x="90.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[5..5]: 1</title></rect>
-<rect x="94.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[6..6]: 1</title></rect>
-<rect x="98.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[7..7]: 1</title></rect>
-<rect x="102.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[8..8]: 1</title></rect>
-<rect x="106.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[9..9]: 1</title></rect>
-<rect x="110.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[10..10]: 1</title></rect>
-<rect x="114.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[11..11]: 1</title></rect>
-<rect x="118.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[12..12]: 1</title></rect>
-<rect x="122.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[13..13]: 1</title></rect>
-<rect x="126.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[14..14]: 1</title></rect>
-<rect x="130.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[15..15]: 1</title></rect>
-<rect x="134.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[16..16]: 1</title></rect>
-<rect x="138.0" y="62.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[3..3] m[17..17]: 1</title></rect>
-<rect x="70.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[0..0]: 1</title></rect>
-<rect x="74.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[1..1]: 1</title></rect>
-<rect x="90.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[5..5]: 1</title></rect>
-<rect x="94.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[6..6]: 1</title></rect>
-<rect x="98.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[7..7]: 1</title></rect>
-<rect x="102.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[8..8]: 1</title></rect>
-<rect x="106.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[9..9]: 1</title></rect>
-<rect x="110.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[10..10]: 1</title></rect>
-<rect x="114.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[11..11]: 1</title></rect>
-<rect x="118.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[12..12]: 1</title></rect>
-<rect x="122.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[13..13]: 1</title></rect>
-<rect x="126.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[14..14]: 1</title></rect>
-<rect x="130.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[15..15]: 1</title></rect>
-<rect x="134.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[16..16]: 1</title></rect>
-<rect x="138.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[17..17]: 1</title></rect>
-<rect x="142.0" y="66.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[4..4] m[18..18]: 1</title></rect>
-<rect x="70.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[0..0]: 1</title></rect>
-<rect x="74.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[1..1]: 1</title></rect>
-<rect x="94.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[6..6]: 1</title></rect>
-<rect x="98.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[7..7]: 1</title></rect>
-<rect x="102.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[8..8]: 1</title></rect>
-<rect x="106.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[9..9]: 1</title></rect>
-<rect x="110.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[10..10]: 1</title></rect>
-<rect x="114.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[11..11]: 1</title></rect>
-<rect x="118.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[12..12]: 1</title></rect>
-<rect x="122.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[13..13]: 1</title></rect>
-<rect x="126.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[14..14]: 1</title></rect>
-<rect x="130.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[15..15]: 1</title></rect>
-<rect x="134.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[16..16]: 1</title></rect>
-<rect x="138.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[17..17]: 1</title></rect>
-<rect x="142.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[18..18]: 1</title></rect>
-<rect x="146.0" y="70.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[5..5] m[19..19]: 1</title></rect>
-<rect x="70.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[0..0]: 1</title></rect>
-<rect x="74.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[1..1]: 1</title></rect>
-<rect x="98.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[7..7]: 1</title></rect>
-<rect x="102.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[8..8]: 1</title></rect>
-<rect x="106.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[9..9]: 1</title></rect>
-<rect x="110.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[10..10]: 1</title></rect>
-<rect x="114.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[11..11]: 1</title></rect>
-<rect x="118.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[12..12]: 1</title></rect>
-<rect x="122.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[13..13]: 1</title></rect>
-<rect x="126.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[14..14]: 1</title></rect>
-<rect x="130.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[15..15]: 1</title></rect>
-<rect x="134.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[16..16]: 1</title></rect>
-<rect x="138.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[17..17]: 1</title></rect>
-<rect x="142.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[18..18]: 1</title></rect>
-<rect x="146.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[19..19]: 1</title></rect>
-<rect x="150.0" y="74.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[6..6] m[20..20]: 1</title></rect>
-<rect x="70.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[0..0]: 1</title></rect>
-<rect x="74.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[1..1]: 1</title></rect>
-<rect x="102.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[8..8]: 1</title></rect>
-<rect x="106.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[9..9]: 1</title></rect>
-<rect x="110.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[10..10]: 1</title></rect>
-<rect x="114.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[11..11]: 1</title></rect>
-<rect x="118.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[12..12]: 1</title></rect>
-<rect x="122.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[13..13]: 1</title></rect>
-<rect x="126.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[14..14]: 1</title></rect>
-<rect x="130.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[15..15]: 1</title></rect>
-<rect x="134.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[16..16]: 1</title></rect>
-<rect x="138.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[17..17]: 1</title></rect>
-<rect x="142.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[18..18]: 1</title></rect>
-<rect x="146.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[19..19]: 1</title></rect>
-<rect x="150.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[20..20]: 1</title></rect>
-<rect x="154.0" y="78.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[7..7] m[21..21]: 1</title></rect>
-<rect x="70.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[0..0]: 1</title></rect>
-<rect x="74.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[1..1]: 1</title></rect>
-<rect x="106.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[9..9]: 1</title></rect>
-<rect x="110.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[10..10]: 1</title></rect>
-<rect x="114.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[11..11]: 1</title></rect>
-<rect x="118.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[12..12]: 1</title></rect>
-<rect x="122.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[13..13]: 1</title></rect>
-<rect x="126.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[14..14]: 1</title></rect>
-<rect x="130.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[15..15]: 1</title></rect>
-<rect x="134.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[16..16]: 1</title></rect>
-<rect x="138.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[17..17]: 1</title></rect>
-<rect x="142.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[18..18]: 1</title></rect>
-<rect x="146.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[19..19]: 1</title></rect>
-<rect x="150.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[20..20]: 1</title></rect>
-<rect x="154.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[21..21]: 1</title></rect>
-<rect x="158.0" y="82.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[8..8] m[22..22]: 1</title></rect>
-<rect x="70.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[0..0]: 1</title></rect>
-<rect x="74.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[1..1]: 1</title></rect>
-<rect x="110.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[10..10]: 1</title></rect>
-<rect x="114.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[11..11]: 1</title></rect>
-<rect x="118.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[12..12]: 1</title></rect>
-<rect x="122.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[13..13]: 1</title></rect>
-<rect x="126.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[14..14]: 1</title></rect>
-<rect x="130.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[15..15]: 1</title></rect>
-<rect x="134.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[16..16]: 1</title></rect>
-<rect x="138.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[17..17]: 1</title></rect>
-<rect x="142.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[18..18]: 1</title></rect>
-<rect x="146.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[19..19]: 1</title></rect>
-<rect x="150.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[20..20]: 1</title></rect>
-<rect x="154.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[21..21]: 1</title></rect>
-<rect x="158.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[22..22]: 1</title></rect>
-<rect x="162.0" y="86.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[9..9] m[23..23]: 1</title></rect>
-<rect x="70.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[0..0]: 1</title></rect>
-<rect x="74.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[1..1]: 1</title></rect>
-<rect x="114.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[11..11]: 1</title></rect>
-<rect x="118.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[12..12]: 1</title></rect>
-<rect x="122.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[13..13]: 1</title></rect>
-<rect x="126.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[14..14]: 1</title></rect>
-<rect x="130.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[15..15]: 1</title></rect>
-<rect x="134.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[16..16]: 1</title></rect>
-<rect x="138.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[17..17]: 1</title></rect>
-<rect x="142.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[18..18]: 1</title></rect>
-<rect x="146.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[19..19]: 1</title></rect>
-<rect x="150.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[20..20]: 1</title></rect>
-<rect x="154.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[21..21]: 1</title></rect>
-<rect x="158.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[22..22]: 1</title></rect>
-<rect x="162.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[23..23]: 1</title></rect>
-<rect x="166.0" y="90.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[10..10] m[24..24]: 1</title></rect>
-<rect x="70.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[0..0]: 1</title></rect>
-<rect x="74.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[1..1]: 1</title></rect>
-<rect x="118.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[12..12]: 1</title></rect>
-<rect x="122.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[13..13]: 1</title></rect>
-<rect x="126.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[14..14]: 1</title></rect>
-<rect x="134.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[16..16]: 1</title></rect>
-<rect x="138.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[17..17]: 1</title></rect>
-<rect x="142.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[18..18]: 1</title></rect>
-<rect x="150.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[20..20]: 1</title></rect>
-<rect x="154.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[21..21]: 1</title></rect>
-<rect x="158.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[22..22]: 1</title></rect>
-<rect x="166.0" y="94.0" width="3" height="3" rx="0" shape-rendering="crispEdges" fill="#a01e28"><title>q[11..11] m[24..24]: 1</title></rect>
+<rect x="70.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[1..1]: activity 1</title></rect>
+<rect x="102.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[2..2]: activity 1</title></rect>
+<rect x="118.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[3..3]: activity 1</title></rect>
+<rect x="134.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[4..4]: activity 1</title></rect>
+<rect x="166.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[6..6]: activity 1</title></rect>
+<rect x="182.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[7..7]: activity 1</title></rect>
+<rect x="198.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[8..8]: activity 1</title></rect>
+<rect x="230.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[12..12]: activity 1</title></rect>
+<rect x="294.0" y="64.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[0..0] m[14..14]: activity 1</title></rect>
+<rect x="70.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[1..1]: activity 1</title></rect>
+<rect x="102.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[2..2]: activity 1</title></rect>
+<rect x="118.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[3..3]: activity 1</title></rect>
+<rect x="134.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[4..4]: activity 1</title></rect>
+<rect x="150.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[5..5]: activity 1</title></rect>
+<rect x="166.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[6..6]: activity 1</title></rect>
+<rect x="182.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[7..7]: activity 1</title></rect>
+<rect x="198.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[8..8]: activity 1</title></rect>
+<rect x="214.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[9..9]: activity 1</title></rect>
+<rect x="230.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="80.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[1..1] m[15..15]: activity 1</title></rect>
+<rect x="70.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[1..1]: activity 1</title></rect>
+<rect x="118.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[3..3]: activity 1</title></rect>
+<rect x="134.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[4..4]: activity 1</title></rect>
+<rect x="150.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[5..5]: activity 1</title></rect>
+<rect x="166.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[6..6]: activity 1</title></rect>
+<rect x="182.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[7..7]: activity 1</title></rect>
+<rect x="198.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[8..8]: activity 1</title></rect>
+<rect x="214.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[9..9]: activity 1</title></rect>
+<rect x="230.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[15..15]: activity 1</title></rect>
+<rect x="326.0" y="96.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[2..2] m[16..16]: activity 1</title></rect>
+<rect x="70.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[1..1]: activity 1</title></rect>
+<rect x="134.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[4..4]: activity 1</title></rect>
+<rect x="150.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[5..5]: activity 1</title></rect>
+<rect x="166.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[6..6]: activity 1</title></rect>
+<rect x="182.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[7..7]: activity 1</title></rect>
+<rect x="198.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[8..8]: activity 1</title></rect>
+<rect x="214.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[9..9]: activity 1</title></rect>
+<rect x="230.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[15..15]: activity 1</title></rect>
+<rect x="326.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[16..16]: activity 1</title></rect>
+<rect x="342.0" y="112.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[3..3] m[17..17]: activity 1</title></rect>
+<rect x="70.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[1..1]: activity 1</title></rect>
+<rect x="150.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[5..5]: activity 1</title></rect>
+<rect x="166.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[6..6]: activity 1</title></rect>
+<rect x="182.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[7..7]: activity 1</title></rect>
+<rect x="198.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[8..8]: activity 1</title></rect>
+<rect x="214.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[9..9]: activity 1</title></rect>
+<rect x="230.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[15..15]: activity 1</title></rect>
+<rect x="326.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[16..16]: activity 1</title></rect>
+<rect x="342.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[17..17]: activity 1</title></rect>
+<rect x="358.0" y="128.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[4..4] m[18..18]: activity 1</title></rect>
+<rect x="70.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[1..1]: activity 1</title></rect>
+<rect x="166.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[6..6]: activity 1</title></rect>
+<rect x="182.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[7..7]: activity 1</title></rect>
+<rect x="198.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[8..8]: activity 1</title></rect>
+<rect x="214.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[9..9]: activity 1</title></rect>
+<rect x="230.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[15..15]: activity 1</title></rect>
+<rect x="326.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[16..16]: activity 1</title></rect>
+<rect x="342.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[17..17]: activity 1</title></rect>
+<rect x="358.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[18..18]: activity 1</title></rect>
+<rect x="374.0" y="144.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[5..5] m[19..19]: activity 1</title></rect>
+<rect x="70.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[1..1]: activity 1</title></rect>
+<rect x="182.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[7..7]: activity 1</title></rect>
+<rect x="198.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[8..8]: activity 1</title></rect>
+<rect x="214.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[9..9]: activity 1</title></rect>
+<rect x="230.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[15..15]: activity 1</title></rect>
+<rect x="326.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[16..16]: activity 1</title></rect>
+<rect x="342.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[17..17]: activity 1</title></rect>
+<rect x="358.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[18..18]: activity 1</title></rect>
+<rect x="374.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[19..19]: activity 1</title></rect>
+<rect x="390.0" y="160.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[6..6] m[20..20]: activity 1</title></rect>
+<rect x="70.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[1..1]: activity 1</title></rect>
+<rect x="198.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[8..8]: activity 1</title></rect>
+<rect x="214.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[9..9]: activity 1</title></rect>
+<rect x="230.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[15..15]: activity 1</title></rect>
+<rect x="326.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[16..16]: activity 1</title></rect>
+<rect x="342.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[17..17]: activity 1</title></rect>
+<rect x="358.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[18..18]: activity 1</title></rect>
+<rect x="374.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[19..19]: activity 1</title></rect>
+<rect x="390.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[20..20]: activity 1</title></rect>
+<rect x="406.0" y="176.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[7..7] m[21..21]: activity 1</title></rect>
+<rect x="70.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[1..1]: activity 1</title></rect>
+<rect x="214.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[9..9]: activity 1</title></rect>
+<rect x="230.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[15..15]: activity 1</title></rect>
+<rect x="326.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[16..16]: activity 1</title></rect>
+<rect x="342.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[17..17]: activity 1</title></rect>
+<rect x="358.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[18..18]: activity 1</title></rect>
+<rect x="374.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[19..19]: activity 1</title></rect>
+<rect x="390.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[20..20]: activity 1</title></rect>
+<rect x="406.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[21..21]: activity 1</title></rect>
+<rect x="422.0" y="192.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[8..8] m[22..22]: activity 1</title></rect>
+<rect x="70.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[1..1]: activity 1</title></rect>
+<rect x="230.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[10..10]: activity 1</title></rect>
+<rect x="246.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[15..15]: activity 1</title></rect>
+<rect x="326.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[16..16]: activity 1</title></rect>
+<rect x="342.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[17..17]: activity 1</title></rect>
+<rect x="358.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[18..18]: activity 1</title></rect>
+<rect x="374.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[19..19]: activity 1</title></rect>
+<rect x="390.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[20..20]: activity 1</title></rect>
+<rect x="406.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[21..21]: activity 1</title></rect>
+<rect x="422.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[22..22]: activity 1</title></rect>
+<rect x="438.0" y="208.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[9..9] m[23..23]: activity 1</title></rect>
+<rect x="70.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[1..1]: activity 1</title></rect>
+<rect x="246.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[11..11]: activity 1</title></rect>
+<rect x="262.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[14..14]: activity 1</title></rect>
+<rect x="310.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[15..15]: activity 1</title></rect>
+<rect x="326.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[16..16]: activity 1</title></rect>
+<rect x="342.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[17..17]: activity 1</title></rect>
+<rect x="358.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[18..18]: activity 1</title></rect>
+<rect x="374.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[19..19]: activity 1</title></rect>
+<rect x="390.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[20..20]: activity 1</title></rect>
+<rect x="406.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[21..21]: activity 1</title></rect>
+<rect x="422.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[22..22]: activity 1</title></rect>
+<rect x="438.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[23..23]: activity 1</title></rect>
+<rect x="454.0" y="224.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[10..10] m[24..24]: activity 1</title></rect>
+<rect x="70.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[0..0]: activity 1</title></rect>
+<rect x="86.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[1..1]: activity 1</title></rect>
+<rect x="262.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[12..12]: activity 1</title></rect>
+<rect x="278.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[13..13]: activity 1</title></rect>
+<rect x="294.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[14..14]: activity 1</title></rect>
+<rect x="326.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[16..16]: activity 1</title></rect>
+<rect x="342.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[17..17]: activity 1</title></rect>
+<rect x="358.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[18..18]: activity 1</title></rect>
+<rect x="390.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[20..20]: activity 1</title></rect>
+<rect x="406.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[21..21]: activity 1</title></rect>
+<rect x="422.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[22..22]: activity 1</title></rect>
+<rect x="454.0" y="240.0" width="15" height="15" rx="1" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"><title>q[11..11] m[24..24]: activity 1</title></rect>
 </g>
-<rect x="70" y="50" width="100" height="48" fill="none" stroke="var(--wire)" stroke-width="0.5" shape-rendering="crispEdges"/>
-<text x="66" y="52.0" text-anchor="end" font-size="4" fill="var(--text)" dominant-baseline="central">0</text>
-<text x="66" y="60.0" text-anchor="end" font-size="4" fill="var(--text)" dominant-baseline="central">2</text>
-<text x="66" y="68.0" text-anchor="end" font-size="4" fill="var(--text)" dominant-baseline="central">4</text>
-<text x="66" y="76.0" text-anchor="end" font-size="4" fill="var(--text)" dominant-baseline="central">6</text>
-<text x="66" y="84.0" text-anchor="end" font-size="4" fill="var(--text)" dominant-baseline="central">8</text>
-<text x="66" y="92.0" text-anchor="end" font-size="4" fill="var(--text)" dominant-baseline="central">10</text>
-<text x="70.0" y="110" text-anchor="middle" font-size="9" fill="var(--text)">0</text>
-<text x="90.0" y="110" text-anchor="middle" font-size="9" fill="var(--text)">5</text>
-<text x="110.0" y="110" text-anchor="middle" font-size="9" fill="var(--text)">10</text>
-<text x="130.0" y="110" text-anchor="middle" font-size="9" fill="var(--text)">15</text>
-<text x="150.0" y="110" text-anchor="middle" font-size="9" fill="var(--text)">20</text>
-<text x="120" y="124" text-anchor="middle" font-size="10" fill="var(--text)">moment</text>
-<text x="28" y="74" text-anchor="middle" font-size="10" fill="var(--text)" transform="rotate(-90 28 74)">qubit</text>
-<rect x="174.0" y="50.0" width="24.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="54.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="58.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="62.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="66.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="70.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="74.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="78.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="82.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="86.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="90.0" width="32.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="174.0" y="94.0" width="24.0" height="3" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="70.0" y="102.0" width="3" height="24.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="74.0" y="102.0" width="3" height="24.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="78.0" y="122.0" width="3" height="4.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="82.0" y="120.0" width="3" height="6.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="86.0" y="118.0" width="3" height="8.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="90.0" y="118.0" width="3" height="8.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="94.0" y="114.0" width="3" height="12.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="98.0" y="112.0" width="3" height="14.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="102.0" y="110.0" width="3" height="16.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="106.0" y="110.0" width="3" height="16.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="110.0" y="106.0" width="3" height="20.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="114.0" y="104.0" width="3" height="22.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="118.0" y="102.0" width="3" height="24.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="122.0" y="104.0" width="3" height="22.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="126.0" y="102.0" width="3" height="24.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="130.0" y="106.0" width="3" height="20.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="134.0" y="106.0" width="3" height="20.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="138.0" y="108.0" width="3" height="18.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="142.0" y="110.0" width="3" height="16.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="146.0" y="114.0" width="3" height="12.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="150.0" y="114.0" width="3" height="12.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="154.0" y="116.0" width="3" height="10.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="158.0" y="118.0" width="3" height="8.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="162.0" y="122.0" width="3" height="4.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<rect x="166.0" y="122.0" width="3" height="4.0" rx="0.5" fill="var(--wire)" opacity="0.4"/>
-<defs><linearGradient id="hm-legend" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgb(160,30,40)"/><stop offset="25%" stop-color="rgb(220,170,50)"/><stop offset="50%" stop-color="rgb(60,150,100)"/><stop offset="75%" stop-color="rgb(100,170,220)"/><stop offset="100%" stop-color="rgb(240,244,250)"/></linearGradient></defs>
-<rect x="218" y="50" width="14" height="48" rx="2" fill="url(#hm-legend)" stroke="var(--wire)" stroke-width="0.5"/>
-<text x="236" y="56.0" font-size="9" fill="var(--text)">1</text>
-<text x="236" y="77.0" font-size="9" fill="var(--text)">0</text>
-<text x="236" y="98.0" font-size="9" fill="var(--text)">0</text>
+<rect x="70" y="64" width="400" height="192" fill="none" stroke="var(--wire)" stroke-width="0.5" shape-rendering="crispEdges"/>
+<text x="66" y="72.0" text-anchor="end" font-size="10" fill="var(--text)" dominant-baseline="central">0</text>
+<text x="66" y="104.0" text-anchor="end" font-size="10" fill="var(--text)" dominant-baseline="central">2</text>
+<text x="66" y="136.0" text-anchor="end" font-size="10" fill="var(--text)" dominant-baseline="central">4</text>
+<text x="66" y="168.0" text-anchor="end" font-size="10" fill="var(--text)" dominant-baseline="central">6</text>
+<text x="66" y="200.0" text-anchor="end" font-size="10" fill="var(--text)" dominant-baseline="central">8</text>
+<text x="66" y="232.0" text-anchor="end" font-size="10" fill="var(--text)" dominant-baseline="central">10</text>
+<text x="70.0" y="312" text-anchor="middle" font-size="9" fill="var(--text)">0</text>
+<text x="118.0" y="312" text-anchor="middle" font-size="9" fill="var(--text)">3</text>
+<text x="166.0" y="312" text-anchor="middle" font-size="9" fill="var(--text)">6</text>
+<text x="214.0" y="312" text-anchor="middle" font-size="9" fill="var(--text)">9</text>
+<text x="262.0" y="312" text-anchor="middle" font-size="9" fill="var(--text)">12</text>
+<text x="310.0" y="312" text-anchor="middle" font-size="9" fill="var(--text)">15</text>
+<text x="358.0" y="312" text-anchor="middle" font-size="9" fill="var(--text)">18</text>
+<text x="406.0" y="312" text-anchor="middle" font-size="9" fill="var(--text)">21</text>
+<text x="454.0" y="312" text-anchor="middle" font-size="9" fill="var(--text)">24</text>
+<text x="270" y="326" text-anchor="middle" font-size="10" fill="var(--text)">moment</text>
+<text x="18" y="160" text-anchor="middle" font-size="10" fill="var(--text)" transform="rotate(-90 18 160)">qubit</text>
+<text x="474.0" y="56.0" font-size="10" fill="var(--text)">count</text>
+<rect x="474.0" y="64.0" width="24.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[0..0]: activity 12</title></rect>
+<text x="512.0" y="72.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[0..0]: activity 12">12</text>
+<rect x="474.0" y="80.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[1..1]: activity 16</title></rect>
+<text x="512.0" y="88.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[1..1]: activity 16">16</text>
+<rect x="474.0" y="96.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[2..2]: activity 16</title></rect>
+<text x="512.0" y="104.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[2..2]: activity 16">16</text>
+<rect x="474.0" y="112.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[3..3]: activity 16</title></rect>
+<text x="512.0" y="120.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[3..3]: activity 16">16</text>
+<rect x="474.0" y="128.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[4..4]: activity 16</title></rect>
+<text x="512.0" y="136.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[4..4]: activity 16">16</text>
+<rect x="474.0" y="144.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[5..5]: activity 16</title></rect>
+<text x="512.0" y="152.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[5..5]: activity 16">16</text>
+<rect x="474.0" y="160.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[6..6]: activity 16</title></rect>
+<text x="512.0" y="168.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[6..6]: activity 16">16</text>
+<rect x="474.0" y="176.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[7..7]: activity 16</title></rect>
+<text x="512.0" y="184.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[7..7]: activity 16">16</text>
+<rect x="474.0" y="192.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[8..8]: activity 16</title></rect>
+<text x="512.0" y="200.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[8..8]: activity 16">16</text>
+<rect x="474.0" y="208.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[9..9]: activity 16</title></rect>
+<text x="512.0" y="216.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[9..9]: activity 16">16</text>
+<rect x="474.0" y="224.0" width="32.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[10..10]: activity 16</title></rect>
+<text x="512.0" y="232.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[10..10]: activity 16">16</text>
+<rect x="474.0" y="240.0" width="24.0" height="15" rx="0.5" fill="var(--wire)" opacity="0.4"><title>q[11..11]: activity 12</title></rect>
+<text x="512.0" y="248.0" class="hm-row-total" font-size="10" dominant-baseline="central" fill="var(--text)" aria-label="q[11..11]: activity 12">12</text>
+<text x="62.0" y="296.0" text-anchor="end" font-size="10" fill="var(--text)">count</text>
+<rect x="70.0" y="260.0" width="15" height="24.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[0..0]: activity 12</title></rect>
+<text x="78.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[0..0]: activity 12">12</text>
+<rect x="86.0" y="260.0" width="15" height="24.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[1..1]: activity 12</title></rect>
+<text x="94.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[1..1]: activity 12">12</text>
+<rect x="102.0" y="280.0" width="15" height="4.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[2..2]: activity 2</title></rect>
+<text x="110.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[2..2]: activity 2">2</text>
+<rect x="118.0" y="278.0" width="15" height="6.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[3..3]: activity 3</title></rect>
+<text x="126.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[3..3]: activity 3">3</text>
+<rect x="134.0" y="276.0" width="15" height="8.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[4..4]: activity 4</title></rect>
+<text x="142.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[4..4]: activity 4">4</text>
+<rect x="150.0" y="276.0" width="15" height="8.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[5..5]: activity 4</title></rect>
+<text x="158.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[5..5]: activity 4">4</text>
+<rect x="166.0" y="272.0" width="15" height="12.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[6..6]: activity 6</title></rect>
+<text x="174.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[6..6]: activity 6">6</text>
+<rect x="182.0" y="270.0" width="15" height="14.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[7..7]: activity 7</title></rect>
+<text x="190.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[7..7]: activity 7">7</text>
+<rect x="198.0" y="268.0" width="15" height="16.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[8..8]: activity 8</title></rect>
+<text x="206.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[8..8]: activity 8">8</text>
+<rect x="214.0" y="268.0" width="15" height="16.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[9..9]: activity 8</title></rect>
+<text x="222.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[9..9]: activity 8">8</text>
+<rect x="230.0" y="264.0" width="15" height="20.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[10..10]: activity 10</title></rect>
+<text x="238.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[10..10]: activity 10">10</text>
+<rect x="246.0" y="262.0" width="15" height="22.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[11..11]: activity 11</title></rect>
+<text x="254.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[11..11]: activity 11">11</text>
+<rect x="262.0" y="260.0" width="15" height="24.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[12..12]: activity 12</title></rect>
+<text x="270.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[12..12]: activity 12">12</text>
+<rect x="278.0" y="262.0" width="15" height="22.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[13..13]: activity 11</title></rect>
+<text x="286.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[13..13]: activity 11">11</text>
+<rect x="294.0" y="260.0" width="15" height="24.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[14..14]: activity 12</title></rect>
+<text x="302.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[14..14]: activity 12">12</text>
+<rect x="310.0" y="264.0" width="15" height="20.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[15..15]: activity 10</title></rect>
+<text x="318.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[15..15]: activity 10">10</text>
+<rect x="326.0" y="264.0" width="15" height="20.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[16..16]: activity 10</title></rect>
+<text x="334.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[16..16]: activity 10">10</text>
+<rect x="342.0" y="266.0" width="15" height="18.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[17..17]: activity 9</title></rect>
+<text x="350.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[17..17]: activity 9">9</text>
+<rect x="358.0" y="268.0" width="15" height="16.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[18..18]: activity 8</title></rect>
+<text x="366.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[18..18]: activity 8">8</text>
+<rect x="374.0" y="272.0" width="15" height="12.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[19..19]: activity 6</title></rect>
+<text x="382.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[19..19]: activity 6">6</text>
+<rect x="390.0" y="272.0" width="15" height="12.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[20..20]: activity 6</title></rect>
+<text x="398.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[20..20]: activity 6">6</text>
+<rect x="406.0" y="274.0" width="15" height="10.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[21..21]: activity 5</title></rect>
+<text x="414.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[21..21]: activity 5">5</text>
+<rect x="422.0" y="276.0" width="15" height="8.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[22..22]: activity 4</title></rect>
+<text x="430.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[22..22]: activity 4">4</text>
+<rect x="438.0" y="280.0" width="15" height="4.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[23..23]: activity 2</title></rect>
+<text x="446.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[23..23]: activity 2">2</text>
+<rect x="454.0" y="280.0" width="15" height="4.0" rx="0.5" fill="var(--wire)" opacity="0.4"><title>m[24..24]: activity 2</title></rect>
+<text x="462.0" y="296.0" class="hm-col-total" text-anchor="middle" font-size="10" fill="var(--text)" aria-label="m[24..24]: activity 2">2</text>
+<g class="hm-key" aria-label="Cell activity"><rect x="540.0" y="64.0" width="10" height="10" class="hm-active" fill="#245a92" style="--hm-light:#245a92;--hm-dark:#b9e6f3"/><text x="556.0" y="73.0" font-size="11" fill="var(--text)">Active</text><rect x="540.0" y="86.0" width="10" height="10" fill="var(--bg)" stroke="var(--wire)" stroke-width="0.5"/><text x="556.0" y="95.0" font-size="11" fill="var(--text)">Idle</text></g>
+<text x="70.0" y="348.0" class="hm-note" font-size="10" fill="var(--text)">One count per wire touched; CX contributes 2.</text>
 </svg>

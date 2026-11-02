@@ -2,6 +2,7 @@
 //! [`Circuit::to_svg`] and [`Circuit::to_svg_heatmap`], configured through
 //! [`SvgOptions`].
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -10,8 +11,6 @@ use super::draw::{OpKind, PlacedOp, assign_moments, barrier_columns};
 use crate::gates::Gate;
 
 const GATE_CORNER_RADIUS: f64 = 1.0;
-const JUNCTION_DOT_RADIUS: f64 = 1.5;
-const SWAP_CROSS_SIZE: f64 = 7.0;
 const LABEL_GAP: f64 = 8.0;
 const CHAR_WIDTH_FACTOR: f64 = 0.62;
 const LABEL_PADDING: f64 = 16.0;
@@ -59,16 +58,16 @@ pub struct SvgOptions {
 impl Default for SvgOptions {
     fn default() -> Self {
         Self {
-            wire_spacing: 40.0,
-            moment_width: 60.0,
-            gate_height: 28.0,
-            gate_min_width: 36.0,
-            padding_left: 60.0,
-            padding_top: 20.0,
-            padding_right: 20.0,
-            padding_bottom: 20.0,
-            font_size: 13.0,
-            control_radius: 3.5,
+            wire_spacing: 64.0,
+            moment_width: 72.0,
+            gate_height: 46.0,
+            gate_min_width: 46.0,
+            padding_left: 64.0,
+            padding_top: 32.0,
+            padding_right: 24.0,
+            padding_bottom: 32.0,
+            font_size: 20.0,
+            control_radius: 4.2,
             max_moments: None,
             max_qubits: None,
             show_idle_wires: true,
@@ -89,20 +88,16 @@ struct GateStyle {
     fill: &'static str,
     stroke: &'static str,
     text: &'static str,
-    gradient_top: &'static str,
 }
 
 struct Theme {
     bg: &'static str,
     wire: &'static str,
     text: &'static str,
-    stripe: &'static str,
     control_dot: &'static str,
     control_border: &'static str,
     swap_stroke: &'static str,
     barrier: &'static str,
-    glow_color: &'static str,
-    shadow_opacity: f64,
     standard: GateStyle,
     parametric: GateStyle,
     phase: GateStyle,
@@ -113,99 +108,81 @@ struct Theme {
 
 const LIGHT: Theme = Theme {
     bg: "#ffffff",
-    wire: "#c4c8cc",
-    text: "#2b2f33",
-    stripe: "#f6f7f8",
-    control_dot: "#2b2f33",
+    wire: "#626262",
+    text: "#252525",
+    control_dot: "#252525",
     control_border: "#ffffff",
-    swap_stroke: "#6b7075",
-    barrier: "#dcdfe2",
-    glow_color: "#5a5e63",
-    shadow_opacity: 0.05,
+    swap_stroke: "#454545",
+    barrier: "#b0b0b0",
     standard: GateStyle {
-        fill: "#c8daf0",
-        stroke: "#3872a8",
-        text: "#1e4d7a",
-        gradient_top: "#dce8f6",
+        fill: "#ffffff",
+        stroke: "#363636",
+        text: "#252525",
     },
     parametric: GateStyle {
-        fill: "#d8c8ee",
-        stroke: "#6840a0",
-        text: "#42267a",
-        gradient_top: "#e6d8f4",
+        fill: "#ffffff",
+        stroke: "#4c6775",
+        text: "#252525",
     },
     phase: GateStyle {
-        fill: "#c0e4d0",
-        stroke: "#2d7a52",
-        text: "#1a5438",
-        gradient_top: "#d4eedf",
+        fill: "#ffffff",
+        stroke: "#5d6e64",
+        text: "#252525",
     },
     controlled: GateStyle {
-        fill: "#ecd8b8",
-        stroke: "#98682e",
-        text: "#6a4418",
-        gradient_top: "#f2e4cc",
+        fill: "#ffffff",
+        stroke: "#303030",
+        text: "#252525",
     },
     measure: GateStyle {
-        fill: "#eac8ca",
-        stroke: "#a03840",
-        text: "#701820",
-        gradient_top: "#f2d8da",
+        fill: "#f2f2f2",
+        stroke: "#7b6650",
+        text: "#54432f",
     },
     multi: GateStyle {
-        fill: "#d0c4e8",
-        stroke: "#5c40a0",
-        text: "#3a2070",
-        gradient_top: "#ddd4f0",
+        fill: "#ffffff",
+        stroke: "#707070",
+        text: "#454545",
     },
 };
 
 const DARK: Theme = Theme {
-    bg: "#000000",
-    wire: "#2a2d31",
-    text: "#b0b4ba",
-    stripe: "#07080a",
-    control_dot: "#d0d3d8",
-    control_border: "#000000",
-    swap_stroke: "#6b7075",
-    barrier: "#2a2d31",
-    glow_color: "#7a7e84",
-    shadow_opacity: 0.3,
+    bg: "#181818",
+    wire: "#858585",
+    text: "#dddddd",
+    control_dot: "#dddddd",
+    control_border: "#181818",
+    swap_stroke: "#cccccc",
+    barrier: "#777777",
     standard: GateStyle {
-        fill: "#122844",
-        stroke: "#5a9ed6",
-        text: "#90c4ec",
-        gradient_top: "#1a3858",
+        fill: "#181818",
+        stroke: "#cccccc",
+        text: "#dddddd",
     },
     parametric: GateStyle {
-        fill: "#20123a",
-        stroke: "#9868d0",
-        text: "#c4a0ec",
-        gradient_top: "#2e1e50",
+        fill: "#181818",
+        stroke: "#8fa7b5",
+        text: "#dddddd",
     },
     phase: GateStyle {
-        fill: "#0e2818",
-        stroke: "#40b878",
-        text: "#80e0b0",
-        gradient_top: "#183c28",
+        fill: "#181818",
+        stroke: "#9aafa2",
+        text: "#dddddd",
     },
     controlled: GateStyle {
-        fill: "#281c08",
-        stroke: "#d09848",
-        text: "#ecc888",
-        gradient_top: "#382c14",
+        fill: "#181818",
+        stroke: "#dddddd",
+        text: "#dddddd",
     },
     measure: GateStyle {
-        fill: "#281014",
-        stroke: "#c85060",
-        text: "#ec9098",
-        gradient_top: "#381c22",
+        fill: "#242424",
+        stroke: "#ab9986",
+        text: "#c5b5a2",
     },
     multi: GateStyle {
-        fill: "#1a1030",
-        stroke: "#8860c8",
-        text: "#b898e8",
-        gradient_top: "#261c44",
+        fill: "#181818",
+        stroke: "#a2a2a2",
+        text: "#cccccc",
     },
 };
 
@@ -258,21 +235,14 @@ impl Theme {
     fn emit_css_vars(&self, svg: &mut String) {
         let _ = write!(
             svg,
-            "--bg:{};--wire:{};--text:{};--stripe:{};--ctrl-dot:{};--ctrl-bdr:{};--swap:{};--barrier:{};",
+            "--bg:{};--wire:{};--text:{};--ctrl-dot:{};--ctrl-bdr:{};--swap:{};--barrier:{};",
             self.bg,
             self.wire,
             self.text,
-            self.stripe,
             self.control_dot,
             self.control_border,
             self.swap_stroke,
             self.barrier,
-        );
-        let _ = write!(
-            svg,
-            "--shadow-filter:drop-shadow(0 0.5px 0.5px rgba(0,0,0,{:.2}));\
-             --hover-filter:drop-shadow(0 0 3px {}50);",
-            self.shadow_opacity, self.glow_color,
         );
         for (prefix, sty) in [
             ("std", &self.standard),
@@ -284,8 +254,8 @@ impl Theme {
         ] {
             let _ = write!(
                 svg,
-                "--{prefix}-top:{};--{prefix}-fill:{};--{prefix}-str:{};--{prefix}-txt:{};",
-                sty.gradient_top, sty.fill, sty.stroke, sty.text,
+                "--{prefix}-fill:{};--{prefix}-str:{};--{prefix}-txt:{};",
+                sty.fill, sty.stroke, sty.text,
             );
         }
     }
@@ -304,19 +274,19 @@ fn classify_gate(gate: Option<&Gate>) -> GateCategory {
 fn heatmap_stops(dark_mode: bool) -> [(f64, f64, f64); 5] {
     if dark_mode {
         [
-            (8.0, 8.0, 18.0),
-            (20.0, 50.0, 130.0),
-            (50.0, 160.0, 140.0),
-            (230.0, 200.0, 50.0),
-            (252.0, 250.0, 230.0),
+            (24.0, 24.0, 24.0),
+            (33.0, 68.0, 105.0),
+            (50.0, 108.0, 158.0),
+            (92.0, 164.0, 206.0),
+            (185.0, 230.0, 243.0),
         ]
     } else {
         [
-            (240.0, 244.0, 250.0),
-            (100.0, 170.0, 220.0),
-            (60.0, 150.0, 100.0),
-            (220.0, 170.0, 50.0),
-            (160.0, 30.0, 40.0),
+            (241.0, 241.0, 241.0),
+            (199.0, 217.0, 240.0),
+            (143.0, 181.0, 222.0),
+            (77.0, 135.0, 194.0),
+            (36.0, 90.0, 146.0),
         ]
     }
 }
@@ -324,8 +294,8 @@ fn heatmap_stops(dark_mode: bool) -> [(f64, f64, f64); 5] {
 fn heatmap_color(t: f64, dark_mode: bool) -> String {
     let t = t.clamp(0.0, 1.0);
     let stops = heatmap_stops(dark_mode);
-    let idx = (t * 4.0).min(3.999);
-    let i = idx as usize;
+    let idx = t * 4.0;
+    let i = (idx as usize).min(3);
     let f = idx - i as f64;
     let r = (stops[i].0 + f * (stops[i + 1].0 - stops[i].0)).clamp(0.0, 255.0) as u8;
     let g = (stops[i].1 + f * (stops[i + 1].1 - stops[i].1)).clamp(0.0, 255.0) as u8;
@@ -355,6 +325,84 @@ fn label_width(label: &str, font_size: f64) -> f64 {
     label.chars().count() as f64 * font_size * CHAR_WIDTH_FACTOR + LABEL_PADDING
 }
 
+fn parameter_parts(label: &str) -> Option<(&str, &str)> {
+    let (name, value) = label.split_once('(')?;
+    if !matches!(name, "Rx" | "Ry" | "Rz" | "Rzz" | "P") {
+        return None;
+    }
+    Some((name, value.strip_suffix(')')?))
+}
+
+fn display_parameter(value: &str) -> Cow<'_, str> {
+    let Ok(angle) = value.parse::<f64>() else {
+        return Cow::Borrowed(value);
+    };
+    if angle == 0.0 {
+        return Cow::Borrowed("0");
+    }
+    if angle.abs() < 0.001 {
+        return Cow::Owned(format!("{angle:.2e}"));
+    }
+    let rounded = format!("{angle:.3}");
+    Cow::Owned(
+        rounded
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_owned(),
+    )
+}
+
+fn gate_label(op: &PlacedOp) -> Cow<'_, str> {
+    if let Some((name, value)) = parameter_parts(&op.label)
+        && !value.contains('π')
+        && let Some(
+            Gate::Rx(angle) | Gate::Ry(angle) | Gate::Rz(angle) | Gate::P(angle) | Gate::Rzz(angle),
+        ) = op.gate.as_ref()
+    {
+        return Cow::Owned(format!("{name}({angle})"));
+    }
+    Cow::Borrowed(&op.label)
+}
+
+fn conditional_label(op: &PlacedOp, cbit_label: &str) -> String {
+    let label = gate_label(op);
+    if let Some((name, value)) = parameter_parts(&label) {
+        format!("{cbit_label}?{name}({})", display_parameter(value))
+    } else {
+        format!("{cbit_label}?{label}")
+    }
+}
+
+fn gate_width(label: &str, opts: &SvgOptions) -> f64 {
+    let width = if let Some((name, value)) = parameter_parts(label) {
+        label_width(name, opts.font_size).max(label_width(
+            &display_parameter(value),
+            (opts.font_size * 0.6).max(8.0),
+        ))
+    } else {
+        label_width(label, opts.font_size)
+    };
+    width.max(opts.gate_min_width)
+}
+
+fn controlled_target_label(op: &PlacedOp) -> Cow<'_, str> {
+    if let Some(phase) = op.gate.as_ref().and_then(Gate::controlled_phase) {
+        let angle = phase.arg();
+        let label = Gate::P(angle).to_string();
+        return Cow::Owned(if label.contains('π') {
+            label
+        } else {
+            format!("P({angle})")
+        });
+    }
+    Cow::Borrowed(match op.label.as_str() {
+        "CZ" => "Z",
+        "CU" => "U",
+        other if other.starts_with("MCU") => "U",
+        other => other,
+    })
+}
+
 fn emit_theme_vars(svg: &mut String, theme: &Theme, auto_theme: bool) {
     let _ = write!(svg, "<style>.pq-circuit{{");
     if auto_theme {
@@ -372,7 +420,7 @@ fn emit_theme_vars(svg: &mut String, theme: &Theme, auto_theme: bool) {
 
 fn empty_svg(theme: &Theme) -> String {
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 200 60\">\
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"60\" viewBox=\"0 0 200 60\">\
          <rect width=\"100%\" height=\"100%\" fill=\"{}\"/>\
          <text x=\"100\" y=\"35\" text-anchor=\"middle\" \
          font-family=\"monospace\" font-size=\"14\" fill=\"{}\">empty circuit</text>\
@@ -383,12 +431,12 @@ fn empty_svg(theme: &Theme) -> String {
 
 fn tooltip(op: &PlacedOp) -> String {
     let qs: Vec<String> = op.qubits.iter().map(|q| format!("q[{q}]")).collect();
-    match &op.kind {
+    let mut tip = match &op.kind {
         OpKind::Controlled { controls, target } => {
             let ctrls: Vec<String> = controls.iter().map(|c| format!("q[{c}]")).collect();
             format!(
                 "{}: ctrl {} → target q[{}]",
-                op.label,
+                controlled_target_label(op),
                 ctrls.join(", "),
                 target
             )
@@ -396,12 +444,22 @@ fn tooltip(op: &PlacedOp) -> String {
         OpKind::Swap => format!("SWAP {} ↔ {}", qs[0], qs[1]),
         OpKind::Measure { cbit } => format!("Measure {} → c[{}]", qs[0], cbit),
         OpKind::Barrier => format!("Barrier on {}", qs.join(", ")),
-        _ => format!("{} on {}", op.label, qs.join(", ")),
+        _ => format!("{} on {}", gate_label(op), qs.join(", ")),
+    };
+    let angle = match op.gate.as_ref() {
+        Some(
+            Gate::Rx(angle) | Gate::Ry(angle) | Gate::Rz(angle) | Gate::P(angle) | Gate::Rzz(angle),
+        ) => Some(*angle),
+        Some(gate) => gate.controlled_phase().map(|phase| phase.arg()),
+        None => None,
+    };
+    if let Some(angle) = angle {
+        let _ = write!(tip, "; angle {angle} rad");
     }
+    tip
 }
 
 const CLASSICAL_WIRE_SPACING: f64 = 30.0;
-const CLASSICAL_WIRE_GAP: f64 = 20.0;
 
 fn render_svg(
     moments: &[Vec<PlacedOp>],
@@ -412,14 +470,14 @@ fn render_svg(
     let compact_opts;
     let opts = if opts.compact {
         compact_opts = SvgOptions {
-            wire_spacing: 28.0,
+            wire_spacing: 32.0,
             moment_width: 44.0,
-            gate_height: 22.0,
+            gate_height: 26.0,
             gate_min_width: 28.0,
             padding_left: 48.0,
-            padding_top: 14.0,
+            padding_top: 18.0,
             padding_right: 14.0,
-            padding_bottom: 14.0,
+            padding_bottom: 18.0,
             font_size: 11.0,
             control_radius: 3.0,
             ..*opts
@@ -435,8 +493,29 @@ fn render_svg(
         return empty_svg(theme);
     }
 
-    let max_moments = opts.max_moments.unwrap_or(moments.len()).min(moments.len());
-    let moments = &moments[..max_moments];
+    let content_columns: Vec<usize> = moments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, moment)| {
+            moment
+                .iter()
+                .any(|op| !matches!(op.kind, OpKind::Barrier))
+                .then_some(i)
+        })
+        .collect();
+    let max_moments = opts
+        .max_moments
+        .unwrap_or(content_columns.len())
+        .min(content_columns.len());
+    let moment_end = if max_moments < content_columns.len() {
+        max_moments
+            .checked_sub(1)
+            .map_or(0, |i| content_columns[i] + 1)
+    } else {
+        moments.len()
+    };
+    let moments = &moments[..moment_end];
+    let content_columns = &content_columns[..max_moments];
 
     let mut active_qubits = vec![false; num_qubits];
     if !opts.show_idle_wires {
@@ -475,8 +554,14 @@ fn render_svg(
     let num_rows = show_qubits.len();
 
     let ellipsis = opts.ellipsis_mode.and_then(|(first, last)| {
-        if first + last < moments.len() {
-            Some((first, moments.len() - last))
+        if first.saturating_add(last) < content_columns.len() {
+            let first_end = first.checked_sub(1).map_or(0, |i| content_columns[i] + 1);
+            let last_start = if last == 0 {
+                moments.len()
+            } else {
+                content_columns[content_columns.len() - last]
+            };
+            Some((first_end, last_start))
         } else {
             None
         }
@@ -484,14 +569,34 @@ fn render_svg(
 
     let mut col_widths: Vec<f64> = Vec::with_capacity(moments.len());
     for moment in moments {
+        if moment.iter().all(|op| matches!(op.kind, OpKind::Barrier)) {
+            col_widths.push(opts.moment_width * 0.4);
+            continue;
+        }
         let mut max_w = opts.gate_min_width;
         for op in moment {
-            let w = label_width(&op.label, opts.font_size);
+            let w = match &op.kind {
+                OpKind::Conditional { cbit_label } => {
+                    gate_width(&conditional_label(op, cbit_label), opts)
+                }
+                OpKind::Controlled { .. } => gate_width(&controlled_target_label(op), opts),
+                _ => gate_width(&gate_label(op), opts),
+            };
             if w > max_w {
                 max_w = w;
             }
         }
-        col_widths.push(max_w.max(opts.moment_width));
+        let measurements = moment
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Measure { .. }))
+            .count();
+        let shared_lane = usize::from(
+            moment
+                .iter()
+                .any(|op| !matches!(op.kind, OpKind::Measure { .. })),
+        );
+        col_widths
+            .push((max_w + LABEL_GAP).max(opts.moment_width) * (measurements + shared_lane) as f64);
     }
 
     let ellipsis_gap = 40.0;
@@ -513,8 +618,53 @@ fn render_svg(
         cx_pos += w;
     }
 
-    let circuit_width = cx_pos + opts.padding_right;
-    let header_extra = if opts.show_stats_header { 20.0 } else { 0.0 };
+    let stats = if opts.show_stats_header {
+        let gate_count = moments
+            .iter()
+            .flatten()
+            .filter(|op| !matches!(op.kind, OpKind::Barrier | OpKind::Measure { .. }))
+            .count();
+        let depth = moments
+            .iter()
+            .filter(|m| m.iter().any(|op| !matches!(op.kind, OpKind::Barrier)))
+            .count();
+        format!(
+            "{} qubit{} \u{00b7} {} gate{} \u{00b7} depth {}",
+            num_qubits,
+            if num_qubits == 1 { "" } else { "s" },
+            gate_count,
+            if gate_count == 1 { "" } else { "s" },
+            depth,
+        )
+    } else {
+        String::new()
+    };
+    let mut circuit_width = cx_pos + opts.padding_right;
+    if opts.show_stats_header {
+        circuit_width = circuit_width
+            .max(opts.padding_left + label_width(&stats, opts.font_size) + opts.padding_right);
+    }
+    if opts.show_legend {
+        let present: HashSet<_> = moments
+            .iter()
+            .flatten()
+            .filter_map(|op| match op.kind {
+                OpKind::Barrier | OpKind::Swap => None,
+                OpKind::MultiFused => Some(GateCategory::Multi),
+                OpKind::Controlled { .. } => Some(GateCategory::Controlled),
+                OpKind::Measure { .. } | OpKind::Reset => Some(GateCategory::Measure),
+                _ => Some(classify_gate(op.gate.as_ref())),
+            })
+            .collect();
+        let font = opts.font_size * 0.92;
+        let legend_width: f64 = present.iter().map(|cat| legend_item_width(cat, font)).sum();
+        circuit_width = circuit_width.max(opts.padding_left + legend_width + opts.padding_right);
+    }
+    let header_extra = if opts.show_stats_header {
+        opts.font_size + opts.gate_height / 2.0 + LABEL_GAP
+    } else {
+        0.0
+    };
     let legend_extra = if opts.show_legend {
         let swatch_h = opts.font_size * 0.92 * 0.9;
         4.0 + swatch_h + 8.0 + opts.padding_bottom * 0.5
@@ -522,8 +672,9 @@ fn render_svg(
         0.0
     };
     let pad_top = opts.padding_top + header_extra;
+    let classical_gap = opts.gate_height / 2.0 + 24.0;
     let classical_extra = if num_classical_bits > 0 {
-        CLASSICAL_WIRE_GAP + (num_classical_bits as f64 - 1.0) * CLASSICAL_WIRE_SPACING + 10.0
+        classical_gap + (num_classical_bits as f64 - 1.0) * CLASSICAL_WIRE_SPACING + 10.0
     } else {
         0.0
     };
@@ -551,38 +702,20 @@ fn render_svg(
     let wire_y = |row: usize| -> f64 { pad_top + row as f64 * opts.wire_spacing };
     let last_quantum_y = wire_y(num_rows - 1);
     let classical_y = |cbit: usize| -> f64 {
-        last_quantum_y + CLASSICAL_WIRE_GAP + cbit as f64 * CLASSICAL_WIRE_SPACING
+        last_quantum_y + classical_gap + cbit as f64 * CLASSICAL_WIRE_SPACING
     };
 
     let mut svg = String::with_capacity(moments.len() * num_rows * 150 + 4096);
 
     let _ = writeln!(
         svg,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {:.1} {:.1}\" \
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{total_width:.1}\" height=\"{total_height:.1}\" \
+         viewBox=\"0 0 {:.1} {:.1}\" \
          class=\"pq-circuit\" role=\"img\" aria-label=\"Quantum circuit: {} qubits, {} moments\">",
-        total_width,
-        total_height,
-        num_qubits,
-        moments.len(),
+        total_width, total_height, num_qubits, max_moments,
     );
 
     let _ = write!(svg, "<defs>");
-    for (prefix, id) in [
-        ("std", "g-std"),
-        ("par", "g-par"),
-        ("pha", "g-pha"),
-        ("ctrl", "g-ctrl"),
-        ("meas", "g-meas"),
-        ("mfus", "g-mfus"),
-    ] {
-        let _ = write!(
-            svg,
-            "<linearGradient id=\"{id}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\
-             <stop offset=\"0%\" stop-color=\"var(--{prefix}-top)\"/>\
-             <stop offset=\"100%\" stop-color=\"var(--{prefix}-fill)\"/>\
-             </linearGradient>",
-        );
-    }
     let _ = write!(
         svg,
         "<marker id=\"arrow-meas\" viewBox=\"0 0 6 6\" refX=\"3\" refY=\"3\" \
@@ -599,31 +732,21 @@ fn render_svg(
     };
     let _ = write!(
         svg,
-        ".pq-circuit text{{font-family:Inter,-apple-system,system-ui,sans-serif;\
-         font-size:{:.0}px;text-rendering:optimizeLegibility;\
+        ".pq-circuit{{font-size:{:.0}px;}}\
+         .pq-circuit text{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;\
+         text-rendering:optimizeLegibility;\
          font-variant-numeric:tabular-nums;}}\
-         .pq-circuit .gate text{{font-family:'JetBrains Mono','Fira Code',Consolas,monospace;\
-         font-weight:600;letter-spacing:-0.01em;}}\
-         .pq-circuit .gate{{filter:var(--shadow-filter);cursor:pointer;\
-         transition:filter 0.15s ease,opacity 0.1s ease;{anim_gate}}}\
-         .pq-circuit .gate:hover{{filter:var(--hover-filter);opacity:0.92;}}\
-         .pq-circuit .ctrl{{cursor:pointer;transition:r 0.1s ease;{anim_gate}}}\
-         .pq-circuit .ctrl:hover circle{{r:{:.1};}}",
+         .pq-circuit .gate text{{font-family:Cambria,'Times New Roman',serif;}}\
+         .pq-circuit .gate .gate-name{{font-style:italic;}}\
+         .pq-circuit .gate .gate-param{{font-family:Arial,Helvetica,sans-serif;fill:var(--text);opacity:0.85;}}\
+         .pq-circuit .gate,.pq-circuit .ctrl{{{anim_gate}}}",
         opts.font_size,
-        opts.control_radius + 1.5,
     );
-    for (prefix, id) in [
-        ("std", "g-std"),
-        ("par", "g-par"),
-        ("pha", "g-pha"),
-        ("ctrl", "g-ctrl"),
-        ("meas", "g-meas"),
-        ("mfus", "g-mfus"),
-    ] {
+    for prefix in ["std", "par", "pha", "ctrl", "meas", "mfus"] {
         let _ = write!(
             svg,
             ".pq-circuit .gate-{prefix} rect,.pq-circuit .gate-{prefix} circle\
-             {{fill:url(#{id});stroke:var(--{prefix}-str);}}\
+             {{fill:var(--{prefix}-fill);stroke:var(--{prefix}-str);}}\
              .pq-circuit .gate-{prefix} text{{fill:var(--{prefix}-txt);}}",
         );
     }
@@ -634,8 +757,10 @@ fn render_svg(
     );
     let _ = write!(
         svg,
-        ".pq-circuit .qlabel{{font-family:'JetBrains Mono','Fira Code',Consolas,monospace;\
-         font-weight:500;font-size:{:.1}px;letter-spacing:0.02em;fill:var(--text);}}",
+        ".pq-circuit .qlabel{{font-family:Cambria,'Times New Roman',serif;}}\
+         .pq-circuit .stats{{font-family:Arial,Helvetica,sans-serif;}}\
+         .pq-circuit .qlabel{{fill:var(--text);}}\
+         .pq-circuit .qlabel:not([font-size]){{font-size:{:.1}px;}}",
         opts.font_size * 0.92,
     );
     if opts.animate {
@@ -662,57 +787,28 @@ fn render_svg(
     }
     let _ = writeln!(svg, "</style>");
 
-    if opts.show_stats_header {
-        let gate_count: usize = moments
-            .iter()
-            .flat_map(|m| m.iter())
-            .filter(|op| !matches!(op.kind, OpKind::Barrier | OpKind::Measure { .. }))
-            .count();
-        let depth = moments
-            .iter()
-            .filter(|m| m.iter().any(|op| !matches!(op.kind, OpKind::Barrier)))
-            .count();
-        let _ = writeln!(
-            svg,
-            "<text x=\"{:.1}\" y=\"{:.1}\" class=\"qlabel\" \
-             dominant-baseline=\"central\">{} qubit{} \u{00b7} {} gate{} \u{00b7} depth {}</text>",
-            opts.padding_left,
-            opts.padding_top + header_extra / 2.0,
-            num_qubits,
-            if num_qubits == 1 { "" } else { "s" },
-            gate_count,
-            if gate_count == 1 { "" } else { "s" },
-            depth,
-        );
-    }
-
     svg.push_str("<g id=\"layer-bg\" role=\"presentation\">\n");
     let _ = writeln!(
         svg,
         "<rect width=\"100%\" height=\"100%\" fill=\"var(--bg)\"/>",
     );
-    for row in (1..num_rows).step_by(2) {
-        let y = wire_y(row) - opts.wire_spacing / 2.0;
+    svg.push_str("</g>\n");
+
+    if opts.show_stats_header {
         let _ = writeln!(
             svg,
-            "<rect x=\"0\" y=\"{y:.1}\" width=\"100%\" height=\"{:.1}\" \
-             fill=\"var(--stripe)\" shape-rendering=\"crispEdges\"/>",
-            opts.wire_spacing,
+            "<text x=\"{:.1}\" y=\"{:.1}\" class=\"stats\" font-size=\"{:.1}px\" \
+             fill=\"var(--text)\" dominant-baseline=\"central\">{stats}</text>",
+            opts.padding_left,
+            opts.padding_top + opts.font_size / 2.0,
+            opts.font_size,
         );
     }
-    svg.push_str("</g>\n");
 
     svg.push_str("<g id=\"layer-wires\">\n");
     for (row, &q) in show_qubits.iter().enumerate() {
         let y = wire_y(row);
-        let _ = writeln!(
-            svg,
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" \
-             dominant-baseline=\"central\" class=\"qlabel\">q[{}]</text>",
-            opts.padding_left - LABEL_GAP,
-            y,
-            q,
-        );
+        emit_register_label(&mut svg, "q", q, opts.padding_left - LABEL_GAP, y, opts);
     }
     let wire_end = circuit_width - opts.padding_right;
     let wire_extra = if opts.animate {
@@ -732,14 +828,7 @@ fn render_svg(
     }
     for c in 0..num_classical_bits {
         let cy = classical_y(c);
-        let _ = writeln!(
-            svg,
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" \
-             dominant-baseline=\"central\" class=\"qlabel\">c[{}]</text>",
-            opts.padding_left - LABEL_GAP,
-            cy,
-            c,
-        );
+        emit_register_label(&mut svg, "c", c, opts.padding_left - LABEL_GAP, cy, opts);
         let _ = writeln!(
             svg,
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" \
@@ -785,7 +874,18 @@ fn render_svg(
             continue;
         }
         let mw = col_widths[m_idx];
-        let center_x = mx + mw / 2.0;
+        let measurements = moment
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Measure { .. }))
+            .count();
+        let shared_lane = usize::from(
+            moment
+                .iter()
+                .any(|op| !matches!(op.kind, OpKind::Measure { .. })),
+        );
+        let lane_width = mw / (measurements + shared_lane) as f64;
+        let center_x = mx + lane_width / 2.0;
+        let mut measurement_lane = shared_lane;
         let mc = if opts.animate {
             format!(" m{}", m_idx.min(50))
         } else {
@@ -804,7 +904,16 @@ fn render_svg(
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            emit_gate_box(&mut svg, center_x, cy, &op.label, opts, cls, &tip, &mc);
+                            emit_gate_box(
+                                &mut svg,
+                                center_x,
+                                cy,
+                                &gate_label(op),
+                                opts,
+                                cls,
+                                &tip,
+                                &mc,
+                            );
                         }
                     }
                 }
@@ -815,7 +924,16 @@ fn render_svg(
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            emit_gate_box(&mut svg, center_x, cy, &op.label, opts, cls, &tip, &mc);
+                            emit_gate_box(
+                                &mut svg,
+                                center_x,
+                                cy,
+                                &gate_label(op),
+                                opts,
+                                cls,
+                                &tip,
+                                &mc,
+                            );
                         }
                     }
                 }
@@ -840,17 +958,6 @@ fn render_svg(
                              shape-rendering=\"crispEdges\"/>",
                             center_x, min_y, center_x, max_y,
                         );
-                        for row in (min_row + 1)..max_row {
-                            if !all_rows.contains(&row) {
-                                let jy = wire_y(row);
-                                let _ = writeln!(
-                                    svg,
-                                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{JUNCTION_DOT_RADIUS}\" \
-                                     fill=\"var(--wire)\"/>",
-                                    center_x, jy,
-                                );
-                            }
-                        }
                     }
 
                     for &c in controls {
@@ -873,14 +980,9 @@ fn render_svg(
                         if is_cx {
                             emit_cnot_target(&mut svg, center_x, cy, opts, &tip, &mc);
                         } else {
-                            let tgt_label = match op.label.as_str() {
-                                "CZ" => "Z",
-                                "CU" => "U",
-                                other if other.starts_with("MCU") => "U",
-                                other => other,
-                            };
+                            let tgt_label = controlled_target_label(op);
                             let cls = GateCategory::Controlled.css_class();
-                            emit_gate_box(&mut svg, center_x, cy, tgt_label, opts, cls, &tip, &mc);
+                            emit_gate_box(&mut svg, center_x, cy, &tgt_label, opts, cls, &tip, &mc);
                         }
                     }
                 }
@@ -914,7 +1016,16 @@ fn render_svg(
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            emit_gate_box(&mut svg, center_x, cy, &op.label, opts, cls, &tip, &mc);
+                            emit_gate_box(
+                                &mut svg,
+                                center_x,
+                                cy,
+                                &gate_label(op),
+                                opts,
+                                cls,
+                                &tip,
+                                &mc,
+                            );
                         }
                     }
                 }
@@ -934,21 +1045,12 @@ fn render_svg(
                              shape-rendering=\"crispEdges\"/>",
                             center_x, min_y, center_x, max_y,
                         );
-                        for row in (min_row + 1)..max_row {
-                            let jy = wire_y(row);
-                            let _ = writeln!(
-                                svg,
-                                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{JUNCTION_DOT_RADIUS}\" \
-                                 fill=\"var(--wire)\"/>",
-                                center_x, jy,
-                            );
-                        }
                     }
 
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            emit_swap_cross(&mut svg, center_x, cy, &tip, &mc);
+                            emit_swap_cross(&mut svg, center_x, cy, opts, &tip, &mc);
                         }
                     }
                 }
@@ -990,9 +1092,11 @@ fn render_svg(
 
                 OpKind::Measure { cbit } => {
                     present_cats.insert(GateCategory::Measure);
+                    let meter_x = mx + lane_width * (measurement_lane as f64 + 0.5);
+                    measurement_lane += 1;
                     if let Some(row) = op.qubits.first().and_then(|&q| row_of(q)) {
                         let cy = wire_y(row);
-                        emit_measure_box(&mut svg, center_x, cy, opts, &tip, &mc);
+                        emit_measure_box(&mut svg, meter_x, cy, opts, &tip, &mc);
                         if *cbit < num_classical_bits {
                             let cbit_y = classical_y(*cbit);
                             let arrow_top = cy + opts.gate_height / 2.0;
@@ -1001,9 +1105,9 @@ fn render_svg(
                                 "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" \
                                  stroke=\"var(--meas-str)\" stroke-width=\"0.75\" \
                                  stroke-dasharray=\"3,3\" marker-end=\"url(#arrow-meas)\"/>",
-                                center_x,
+                                meter_x,
                                 arrow_top,
-                                center_x,
+                                meter_x,
                                 cbit_y - 1.0,
                             );
                         }
@@ -1016,7 +1120,7 @@ fn render_svg(
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            let lbl = format!("{}?{}", cbit_label, op.label);
+                            let lbl = conditional_label(op, cbit_label);
                             let cls = cat.css_class();
                             emit_gate_box_inner(
                                 &mut svg, center_x, cy, &lbl, opts, cls, &tip, &mc, true,
@@ -1220,7 +1324,7 @@ const LEGEND_ORDER: [GateCategory; 6] = [
 fn legend_item_width(cat: &GateCategory, font_size: f64) -> f64 {
     let swatch = font_size * 0.9;
     let gap = font_size * 0.33;
-    let text_w = cat.display_name().len() as f64 * font_size * 0.52;
+    let text_w = cat.display_name().len() as f64 * font_size * CHAR_WIDTH_FACTOR;
     let spacing = font_size * 1.15;
     swatch + gap + text_w + spacing
 }
@@ -1265,19 +1369,6 @@ fn emit_legend(
     let start_x = ((total_width - total_legend_w) / 2.0).max(opts.padding_left);
 
     svg.push_str("<g id=\"layer-legend\">\n");
-    let pill_pad_x = 8.0;
-    let pill_pad_y = 4.0;
-    let pill_h = swatch_size + pill_pad_y * 2.0;
-    let pill_w = (total_legend_w + pill_pad_x * 2.0).min(total_width - 4.0);
-    let _ = writeln!(
-        svg,
-        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{pill_w:.1}\" height=\"{pill_h:.1}\" \
-         rx=\"{:.1}\" fill=\"var(--bg)\" fill-opacity=\"0.92\" \
-         stroke=\"var(--wire)\" stroke-width=\"0.5\" stroke-opacity=\"0.4\"/>",
-        start_x - pill_pad_x,
-        legend_y - pill_pad_y,
-        pill_h / 2.0,
-    );
     let mut x = start_x;
     for cat in &LEGEND_ORDER {
         if !present.contains(cat) {
@@ -1288,7 +1379,7 @@ fn emit_legend(
             svg,
             "<rect x=\"{x:.1}\" y=\"{:.1}\" width=\"{swatch_size:.1}\" \
              height=\"{swatch_size:.1}\" rx=\"{swatch_r:.1}\" \
-             fill=\"url(#g-{prefix})\" stroke=\"var(--{prefix}-str)\" \
+             fill=\"var(--{prefix}-fill)\" stroke=\"var(--{prefix}-str)\" \
              stroke-width=\"0.75\"/>",
             legend_y,
         );
@@ -1305,6 +1396,24 @@ fn emit_legend(
     svg.push_str("</g>\n");
 }
 
+fn emit_register_label(
+    svg: &mut String,
+    register: &str,
+    index: usize,
+    x: f64,
+    y: f64,
+    opts: &SvgOptions,
+) {
+    let _ = writeln!(
+        svg,
+        "<text x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"end\" \
+         dominant-baseline=\"central\" class=\"qlabel\" aria-label=\"{register}[{index}]\">\
+         <tspan font-style=\"italic\">{register}</tspan>\
+         <tspan baseline-shift=\"sub\" font-size=\"{:.1}px\">{index}</tspan></text>",
+        opts.font_size * 0.64,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_gate_box_inner(
     svg: &mut String,
@@ -1317,16 +1426,8 @@ fn emit_gate_box_inner(
     mc: &str,
     dashed: bool,
 ) {
-    let w = label_width(label, opts.font_size).max(opts.gate_min_width);
+    let w = gate_width(label, opts);
     let h = opts.gate_height;
-    let text_w = label.chars().count() as f64 * opts.font_size * CHAR_WIDTH_FACTOR;
-    let inner = w - LABEL_PADDING * 0.5;
-    let font_attr = if text_w > inner * 0.9 {
-        let shrunk = (opts.font_size * inner * 0.9 / text_w).max(8.0);
-        format!(" font-size=\"{shrunk:.1}px\"")
-    } else {
-        String::new()
-    };
     let dash_attr = if dashed {
         " stroke-dasharray=\"4,2\""
     } else {
@@ -1334,19 +1435,64 @@ fn emit_gate_box_inner(
     };
     let _ = writeln!(
         svg,
-        "<g class=\"gate {cat_class}{mc}\"><title>{tip}</title>\
+        "<g class=\"gate {cat_class}{mc}\" aria-label=\"{}\"><title>{tip}</title>\
          <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" \
-         rx=\"{GATE_CORNER_RADIUS}\" stroke-width=\"1\"{dash_attr}/>\
-         <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" \
-         dominant-baseline=\"central\"{font_attr}>{}</text></g>",
+         rx=\"{GATE_CORNER_RADIUS}\" stroke-width=\"1.25\"{dash_attr}/>",
+        escape_xml(label),
         cx - w / 2.0,
         cy - h / 2.0,
         w,
         h,
-        cx,
-        cy,
-        escape_xml(label),
     );
+    if let Some((name, value)) = parameter_parts(label) {
+        let _ = write!(
+            svg,
+            "<text x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\" \
+             class=\"gate-name\" font-size=\"{:.1}px\" \
+             dominant-baseline=\"central\">{}",
+            cy - h * 0.22,
+            opts.font_size * 0.9,
+            &name[..1],
+        );
+        if name.len() > 1 {
+            let _ = write!(
+                svg,
+                "<tspan baseline-shift=\"sub\" font-style=\"normal\" \
+                 font-size=\"{:.1}px\">{}</tspan>",
+                opts.font_size * 0.6,
+                &name[1..],
+            );
+        }
+        let _ = writeln!(
+            svg,
+            "</text><text x=\"{cx:.1}\" y=\"{:.1}\" text-anchor=\"middle\" \
+             class=\"gate-param\" font-size=\"{:.1}px\" \
+             dominant-baseline=\"central\">{}</text></g>",
+            cy + h * 0.27,
+            (opts.font_size * 0.6).max(8.0),
+            escape_xml(&display_parameter(value)),
+        );
+    } else {
+        let text_w = label.chars().count() as f64 * opts.font_size * CHAR_WIDTH_FACTOR;
+        let inner = w - LABEL_PADDING * 0.5;
+        let font_attr = if text_w > inner * 0.9 {
+            let shrunk = (opts.font_size * inner * 0.9 / text_w).max(8.0);
+            format!(" font-size=\"{shrunk:.1}px\"")
+        } else {
+            String::new()
+        };
+        let class = if label.chars().count() == 1 {
+            "gate-name"
+        } else {
+            "gate-label"
+        };
+        let _ = writeln!(
+            svg,
+            "<text x=\"{cx:.1}\" y=\"{cy:.1}\" text-anchor=\"middle\" \
+             class=\"{class}\" dominant-baseline=\"central\"{font_attr}>{}</text></g>",
+            escape_xml(label),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1364,15 +1510,15 @@ fn emit_gate_box(
 }
 
 fn emit_cnot_target(svg: &mut String, cx: f64, cy: f64, opts: &SvgOptions, tip: &str, mc: &str) {
-    let r = opts.gate_height / 2.0 - 2.0;
+    let r = opts.gate_height * 0.3;
     let _ = writeln!(
         svg,
         "<g class=\"gate gate-ctrl{mc}\"><title>{tip}</title>\
-         <circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.1}\" stroke-width=\"1\"/>\
+         <circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.1}\" stroke-width=\"1.25\"/>\
          <line x1=\"{:.1}\" y1=\"{cy:.1}\" x2=\"{:.1}\" y2=\"{cy:.1}\" \
-         stroke-width=\"1\" shape-rendering=\"crispEdges\"/>\
+         stroke-width=\"1.25\"/>\
          <line x1=\"{cx:.1}\" y1=\"{:.1}\" x2=\"{cx:.1}\" y2=\"{:.1}\" \
-         stroke-width=\"1\" shape-rendering=\"crispEdges\"/></g>",
+         stroke-width=\"1.25\"/></g>",
         cx - r,
         cx + r,
         cy - r,
@@ -1380,15 +1526,15 @@ fn emit_cnot_target(svg: &mut String, cx: f64, cy: f64, opts: &SvgOptions, tip: 
     );
 }
 
-fn emit_swap_cross(svg: &mut String, cx: f64, cy: f64, tip: &str, mc: &str) {
-    let s = SWAP_CROSS_SIZE;
+fn emit_swap_cross(svg: &mut String, cx: f64, cy: f64, opts: &SvgOptions, tip: &str, mc: &str) {
+    let s = opts.gate_height * 0.16;
     let _ = writeln!(
         svg,
         "<g class=\"gate{mc}\"><title>{tip}</title>\
          <line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" \
-         stroke=\"var(--swap)\" stroke-width=\"1.5\" stroke-linecap=\"round\"/>\
+         stroke=\"var(--swap)\" stroke-width=\"1.25\" stroke-linecap=\"round\"/>\
          <line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" \
-         stroke=\"var(--swap)\" stroke-width=\"1.5\" stroke-linecap=\"round\"/></g>",
+         stroke=\"var(--swap)\" stroke-width=\"1.25\" stroke-linecap=\"round\"/></g>",
         cx - s,
         cy - s,
         cx + s,
@@ -1445,6 +1591,7 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
     let row_bucket = n.div_ceil(max_rows).max(1);
     let actual_cols = depth.div_ceil(col_bucket);
     let actual_rows = n.div_ceil(row_bucket);
+    let aggregated = row_bucket > 1 || col_bucket > 1;
 
     let mut grid = vec![vec![0usize; actual_cols]; actual_rows];
     for (m_idx, moment) in moments.iter().enumerate() {
@@ -1466,21 +1613,7 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
         .max()
         .unwrap_or(1)
         .max(1);
-
-    let cell_w = 4.0_f64;
-    let cell_h = 4.0_f64;
-    let label_pad = 70.0;
-    let top_pad = 50.0;
-    let spark_h = 24.0;
-    let spark_w = 32.0;
-    let bottom_pad = 50.0 + spark_h;
-    let right_pad = 90.0 + spark_w;
-
-    let grid_w = actual_cols as f64 * cell_w;
-    let grid_h = actual_rows as f64 * cell_h;
-    let total_w = label_pad + grid_w + right_pad;
-    let total_h = top_pad + grid_h + bottom_pad;
-
+    let binary = max_density == 1;
     let row_totals: Vec<usize> = grid.iter().map(|r| r.iter().sum()).collect();
     let col_totals: Vec<usize> = (0..actual_cols)
         .map(|c| grid.iter().map(|r| r[c]).sum())
@@ -1488,25 +1621,102 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
     let max_row_total = *row_totals.iter().max().unwrap_or(&1).max(&1);
     let max_col_total = *col_totals.iter().max().unwrap_or(&1).max(&1);
 
+    let cell_w = (640.0 / actual_cols as f64).clamp(4.0, 16.0);
+    let cell_h = (320.0 / actual_rows as f64).clamp(4.0, 16.0);
+    let row_digits = (n - 1).to_string().len();
+    let row_label_chars = if row_bucket > 1 {
+        row_digits * 2 + 1
+    } else {
+        row_digits
+    };
+    let label_pad = (row_label_chars as f64 * 6.0 + 34.0).max(70.0);
+    let top_pad = 64.0;
+    let spark_h = 24.0;
+    let spark_w = 32.0;
+    let mut notes = vec![String::from(
+        "One count per wire touched; CX contributes 2.",
+    )];
+    if aggregated {
+        let row_unit = if row_bucket == 1 { "qubit" } else { "qubits" };
+        let col_unit = if col_bucket == 1 { "moment" } else { "moments" };
+        notes.push(format!(
+            "Cells: up to {row_bucket} {row_unit} × {col_bucket} {col_unit}."
+        ));
+        notes.push(String::from(
+            "Counts are sums, not normalized for cell size.",
+        ));
+        let last_rows = n - (actual_rows - 1) * row_bucket;
+        let last_cols = depth - (actual_cols - 1) * col_bucket;
+        if last_rows < row_bucket || last_cols < col_bucket {
+            let mut partial = Vec::new();
+            if last_rows < row_bucket {
+                let unit = if last_rows == 1 { "qubit" } else { "qubits" };
+                let range = if last_rows == 1 {
+                    (n - 1).to_string()
+                } else {
+                    format!("{}–{}", n - last_rows, n - 1)
+                };
+                partial.push(format!("final row q[{range}] ({last_rows} {unit})"));
+            }
+            if last_cols < col_bucket {
+                let unit = if last_cols == 1 { "moment" } else { "moments" };
+                let range = if last_cols == 1 {
+                    (depth - 1).to_string()
+                } else {
+                    format!("{}–{}", depth - last_cols, depth - 1)
+                };
+                partial.push(format!("final column m[{range}] ({last_cols} {unit})"));
+            }
+            notes.push(format!("Partial {}.", partial.join("; ")));
+        }
+    }
+    let bottom_pad = 76.0 + spark_h + (notes.len() - 1) as f64 * 16.0;
+    let count_width = max_row_total.to_string().len() as f64 * 6.0 + 10.0;
+    let right_pad = 98.0 + spark_w + count_width;
+
+    let grid_w = actual_cols as f64 * cell_w;
+    let grid_h = actual_rows as f64 * cell_h;
+    let summary = if binary {
+        format!("{n} qubits × {depth} moments · active/idle")
+    } else {
+        format!("{n} qubits × {depth} moments · max cell count {max_density}")
+    };
+    let mut total_w =
+        (label_pad + grid_w + right_pad).max(label_pad + label_width(&summary, 11.0) + 16.0);
+    for note in &notes {
+        total_w = total_w.max(label_pad + label_width(note, 10.0) + 16.0);
+    }
+    let total_h = top_pad + grid_h + bottom_pad;
+
     let use_tooltips = (actual_rows * actual_cols) < 5000;
 
     let mut svg = String::with_capacity(actual_rows * actual_cols * 90 + 4096);
 
     let _ = writeln!(
         svg,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {:.0} {:.0}\" \
-         class=\"pq-circuit\" role=\"img\" aria-label=\"Gate density heatmap: {n} qubits, {depth} moments\">",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{total_w:.0}\" height=\"{total_h:.0}\" viewBox=\"0 0 {:.0} {:.0}\" \
+         class=\"pq-circuit\" role=\"img\" aria-label=\"Gate activity counts: {n} qubits, {depth} moments\">",
         total_w, total_h,
     );
     emit_theme_vars(&mut svg, theme, opts.auto_theme);
     let _ = writeln!(
         svg,
-        ".pq-circuit text{{font-family:Inter,-apple-system,system-ui,sans-serif;\
+        ".pq-circuit text{{font-family:Arial,Helvetica,sans-serif;\
          text-rendering:optimizeLegibility;}}\
          .pq-circuit .hm rect{{stroke:var(--bg);stroke-width:0.5;transition:filter 0.1s ease;}}\
-         .pq-circuit .hm rect:hover{{stroke:var(--text);stroke-width:1;filter:brightness(1.15);cursor:crosshair;}}\
-         </style>",
+         .pq-circuit .hm rect:hover{{stroke:var(--text);stroke-width:1;filter:brightness(1.15);cursor:crosshair;}}",
     );
+    if opts.auto_theme {
+        let _ = write!(
+            svg,
+            ".pq-circuit .hm rect,.pq-circuit .hm-key .hm-active{{fill:var(--hm-light);}}\
+             .pq-circuit .hm-scale stop{{stop-color:var(--hm-light);}}\
+             @media(prefers-color-scheme:dark){{\
+             .pq-circuit .hm rect,.pq-circuit .hm-key .hm-active{{fill:var(--hm-dark);}}\
+             .pq-circuit .hm-scale stop{{stop-color:var(--hm-dark);}}}}"
+        );
+    }
+    svg.push_str("</style>\n");
     let _ = writeln!(
         svg,
         "<rect width=\"100%\" height=\"100%\" fill=\"var(--bg)\"/>",
@@ -1515,14 +1725,14 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
     let _ = writeln!(
         svg,
         "<text x=\"{:.0}\" y=\"20\" font-size=\"14\" font-weight=\"600\" \
-         fill=\"var(--text)\">Gate density heatmap</text>",
+         fill=\"var(--text)\">Gate activity counts</text>",
         label_pad,
     );
     let _ = writeln!(
         svg,
-        "<text x=\"{:.0}\" y=\"36\" font-size=\"11\" font-weight=\"300\" fill=\"var(--wire)\">\
-         {} qubits × {} moments · max density {}</text>",
-        label_pad, n, depth, max_density,
+        "<text x=\"{:.0}\" y=\"36\" font-size=\"11\" fill=\"var(--text)\">\
+         {summary}</text>",
+        label_pad,
     );
 
     let cw = cell_w - 1.0;
@@ -1540,7 +1750,16 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
                 continue;
             }
             let ratio = count as f64 / max_density as f64;
-            let fill = heatmap_color(ratio, opts.dark_mode);
+            let fill = heatmap_color(ratio, opts.dark_mode && !opts.auto_theme);
+            let theme_style = if opts.auto_theme {
+                format!(
+                    " style=\"--hm-light:{};--hm-dark:{}\"",
+                    heatmap_color(ratio, false),
+                    heatmap_color(ratio, true),
+                )
+            } else {
+                String::new()
+            };
             let x = label_pad + c as f64 * cell_w;
             let y = top_pad + r as f64 * cell_h;
             if use_tooltips {
@@ -1551,14 +1770,14 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
                 let _ = writeln!(
                     svg,
                     "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{cw}\" height=\"{ch}\" \
-                     rx=\"{cell_rx}\"{cell_sr} fill=\"{fill}\">\
-                     <title>q[{q_lo}..{q_hi}] m[{m_lo}..{m_hi}]: {count}</title></rect>",
+                     rx=\"{cell_rx}\"{cell_sr} fill=\"{fill}\"{theme_style}>\
+                     <title>q[{q_lo}..{q_hi}] m[{m_lo}..{m_hi}]: activity {count}</title></rect>",
                 );
             } else {
                 let _ = writeln!(
                     svg,
                     "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{cw}\" height=\"{ch}\" \
-                     rx=\"{cell_rx}\"{cell_sr} fill=\"{fill}\"/>",
+                     rx=\"{cell_rx}\"{cell_sr} fill=\"{fill}\"{theme_style}/>",
                 );
             }
         }
@@ -1573,29 +1792,48 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
         label_pad, top_pad, grid_w, grid_h,
     );
 
-    let label_font = 10.0_f64.min(cell_h * row_bucket as f64);
-    let tick_spacing_rows = (actual_rows / 5).max(1);
+    let label_font = 10.0;
+    let tick_spacing_rows = (18.0 / cell_h).ceil() as usize;
     for r in (0..actual_rows).step_by(tick_spacing_rows) {
         let q_start = r * row_bucket;
+        let q_end = ((r + 1) * row_bucket).min(n) - 1;
+        let label = if q_start == q_end {
+            q_start.to_string()
+        } else {
+            format!("{q_start}–{q_end}")
+        };
         let y = top_pad + r as f64 * cell_h + cell_h / 2.0;
         let _ = writeln!(
             svg,
             "<text x=\"{:.0}\" y=\"{y:.1}\" text-anchor=\"end\" \
              font-size=\"{label_font:.0}\" fill=\"var(--text)\" \
-             dominant-baseline=\"central\">{q_start}</text>",
+             dominant-baseline=\"central\">{label}</text>",
             label_pad - 4.0,
         );
     }
 
-    let tick_spacing_cols = (actual_cols / 5).max(1);
-    let axis_y = top_pad + grid_h + 12.0;
+    let col_digits = (depth - 1).to_string().len();
+    let col_label_chars = if col_bucket > 1 {
+        col_digits * 2 + 1
+    } else {
+        col_digits
+    };
+    let tick_spacing_cols =
+        ((col_label_chars as f64 * 5.4 + 8.0).max(36.0) / cell_w).ceil() as usize;
+    let axis_y = top_pad + grid_h + spark_h + 32.0;
     for c in (0..actual_cols).step_by(tick_spacing_cols) {
         let m = c * col_bucket;
+        let m_end = ((c + 1) * col_bucket).min(depth) - 1;
+        let label = if m == m_end {
+            m.to_string()
+        } else {
+            format!("{m}–{m_end}")
+        };
         let x = label_pad + c as f64 * cell_w;
         let _ = writeln!(
             svg,
             "<text x=\"{x:.1}\" y=\"{axis_y:.0}\" text-anchor=\"middle\" \
-             font-size=\"9\" fill=\"var(--text)\">{m}</text>",
+             font-size=\"9\" fill=\"var(--text)\">{label}</text>",
         );
     }
 
@@ -1606,7 +1844,7 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
         label_pad + grid_w / 2.0,
         axis_y + 14.0,
     );
-    let qx = label_pad - label_pad * 0.6;
+    let qx = 18.0;
     let qy = top_pad + grid_h / 2.0;
     let _ = writeln!(
         svg,
@@ -1616,78 +1854,164 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
     );
 
     let spark_x = label_pad + grid_w + 4.0;
+    let count_spacing_rows = (12.0 / cell_h).ceil() as usize;
+    let _ = writeln!(
+        svg,
+        "<text x=\"{spark_x:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"var(--text)\">count</text>",
+        top_pad - 8.0,
+    );
     for (r, &total) in row_totals.iter().enumerate() {
-        if total == 0 {
-            continue;
-        }
         let bar_w = (total as f64 / max_row_total as f64) * spark_w;
         let y = top_pad + r as f64 * cell_h;
+        let q_lo = r * row_bucket;
+        let q_hi = ((r + 1) * row_bucket).min(n) - 1;
         let _ = writeln!(
             svg,
             "<rect x=\"{spark_x:.1}\" y=\"{y:.1}\" width=\"{bar_w:.1}\" height=\"{ch:.0}\" \
-             rx=\"0.5\" fill=\"var(--wire)\" opacity=\"0.4\"/>",
+             rx=\"0.5\" fill=\"var(--wire)\" opacity=\"0.4\">\
+             <title>q[{q_lo}..{q_hi}]: activity {total}</title></rect>",
         );
+        if r % count_spacing_rows == 0 {
+            let _ = writeln!(
+                svg,
+                "<text x=\"{:.1}\" y=\"{:.1}\" class=\"hm-row-total\" font-size=\"10\" \
+                 dominant-baseline=\"central\" fill=\"var(--text)\" \
+                 aria-label=\"q[{q_lo}..{q_hi}]: activity {total}\">{total}</text>",
+                spark_x + spark_w + 6.0,
+                y + cell_h / 2.0,
+            );
+        }
     }
 
     let spark_y = top_pad + grid_h + 4.0;
+    let _ = writeln!(
+        svg,
+        "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-size=\"10\" \
+         fill=\"var(--text)\">count</text>",
+        label_pad - 8.0,
+        spark_y + spark_h + 12.0,
+    );
+    let count_spacing_cols =
+        ((max_col_total.to_string().len() as f64 * 6.0 + 3.0) / cell_w).ceil() as usize;
     for (c, &total) in col_totals.iter().enumerate() {
-        if total == 0 {
-            continue;
-        }
         let bar_h = (total as f64 / max_col_total as f64) * spark_h;
         let x = label_pad + c as f64 * cell_w;
         let y_bar = spark_y + spark_h - bar_h;
+        let m_lo = c * col_bucket;
+        let m_hi = ((c + 1) * col_bucket).min(depth) - 1;
         let _ = writeln!(
             svg,
             "<rect x=\"{x:.1}\" y=\"{y_bar:.1}\" width=\"{cw:.0}\" height=\"{bar_h:.1}\" \
-             rx=\"0.5\" fill=\"var(--wire)\" opacity=\"0.4\"/>",
+             rx=\"0.5\" fill=\"var(--wire)\" opacity=\"0.4\">\
+             <title>m[{m_lo}..{m_hi}]: activity {total}</title></rect>",
+        );
+        if c % count_spacing_cols == 0 {
+            let _ = writeln!(
+                svg,
+                "<text x=\"{:.1}\" y=\"{:.1}\" class=\"hm-col-total\" text-anchor=\"middle\" \
+                 font-size=\"10\" fill=\"var(--text)\" \
+                 aria-label=\"m[{m_lo}..{m_hi}]: activity {total}\">{total}</text>",
+                x + cell_w / 2.0,
+                spark_y + spark_h + 12.0,
+            );
+        }
+    }
+
+    let legend_x = spark_x + spark_w + count_width + 12.0;
+    let legend_y = top_pad;
+    if binary {
+        let fill = heatmap_color(1.0, opts.dark_mode && !opts.auto_theme);
+        let theme_style = if opts.auto_theme {
+            format!(
+                " style=\"--hm-light:{};--hm-dark:{}\"",
+                heatmap_color(1.0, false),
+                heatmap_color(1.0, true),
+            )
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            svg,
+            "<g class=\"hm-key\" aria-label=\"Cell activity\">\
+             <rect x=\"{legend_x:.1}\" y=\"{legend_y:.1}\" width=\"10\" height=\"10\" \
+             class=\"hm-active\" fill=\"{fill}\"{theme_style}/>\
+             <text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"var(--text)\">Active</text>\
+             <rect x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" \
+             fill=\"var(--bg)\" stroke=\"var(--wire)\" stroke-width=\"0.5\"/>\
+             <text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"var(--text)\">Idle</text></g>",
+            legend_x + 16.0,
+            legend_y + 9.0,
+            legend_y + 22.0,
+            legend_x + 16.0,
+            legend_y + 31.0,
+        );
+    } else {
+        let legend_h = grid_h.clamp(64.0, 120.0);
+        let legend_w = 14.0;
+        let legend_id = "hm-legend";
+        let _ = write!(
+            svg,
+            "<defs><linearGradient id=\"{legend_id}\" class=\"hm-scale\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">"
+        );
+        for i in 0..5 {
+            let offset = i as f64 / 4.0 * 100.0;
+            let ratio = 1.0 - i as f64 / 4.0;
+            let fill = heatmap_color(ratio, opts.dark_mode && !opts.auto_theme);
+            let theme_style = if opts.auto_theme {
+                format!(
+                    " style=\"--hm-light:{};--hm-dark:{}\"",
+                    heatmap_color(ratio, false),
+                    heatmap_color(ratio, true),
+                )
+            } else {
+                String::new()
+            };
+            let _ = write!(
+                svg,
+                "<stop offset=\"{offset:.0}%\" stop-color=\"{fill}\"{theme_style}/>"
+            );
+        }
+        let _ = writeln!(svg, "</linearGradient></defs>");
+        let _ = writeln!(
+            svg,
+            "<rect x=\"{legend_x:.0}\" y=\"{legend_y:.0}\" width=\"{legend_w}\" \
+         height=\"{legend_h:.0}\" rx=\"2\" fill=\"url(#{legend_id})\" \
+         stroke=\"var(--wire)\" stroke-width=\"0.5\"/>",
+        );
+        let _ = writeln!(
+            svg,
+            "<text x=\"{:.0}\" y=\"{:.1}\" font-size=\"9\" fill=\"var(--text)\">{max_density}</text>",
+            legend_x + legend_w + 4.0,
+            legend_y + 6.0,
+        );
+        let mid_val = if max_density % 2 == 0 {
+            (max_density / 2).to_string()
+        } else {
+            format!("{:.1}", max_density as f64 / 2.0)
+        };
+        let _ = writeln!(
+            svg,
+            "<text x=\"{:.0}\" y=\"{:.1}\" font-size=\"9\" fill=\"var(--text)\">{mid_val}</text>",
+            legend_x + legend_w + 4.0,
+            legend_y + legend_h / 2.0 + 3.0,
+        );
+        let _ = writeln!(
+            svg,
+            "<text x=\"{:.0}\" y=\"{:.1}\" font-size=\"9\" fill=\"var(--text)\">0</text>",
+            legend_x + legend_w + 4.0,
+            legend_y + legend_h,
         );
     }
 
-    let legend_x = spark_x + spark_w + 12.0;
-    let legend_y = top_pad;
-    let legend_h = grid_h.min(120.0);
-    let legend_w = 14.0;
-    let legend_id = "hm-legend";
-    let _ = write!(
-        svg,
-        "<defs><linearGradient id=\"{legend_id}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">"
-    );
-    let stops = heatmap_stops(opts.dark_mode);
-    for (i, &(r, g, b)) in stops.iter().rev().enumerate() {
-        let offset = i as f64 / 4.0 * 100.0;
-        let _ = write!(
+    for (i, note) in notes.iter().enumerate() {
+        let _ = writeln!(
             svg,
-            "<stop offset=\"{offset:.0}%\" stop-color=\"rgb({:.0},{:.0},{:.0})\"/>",
-            r, g, b,
+            "<text x=\"{label_pad:.1}\" y=\"{:.1}\" class=\"hm-note\" font-size=\"10\" \
+             fill=\"var(--text)\">{}</text>",
+            axis_y + 36.0 + i as f64 * 16.0,
+            escape_xml(note),
         );
     }
-    let _ = writeln!(svg, "</linearGradient></defs>");
-    let _ = writeln!(
-        svg,
-        "<rect x=\"{legend_x:.0}\" y=\"{legend_y:.0}\" width=\"{legend_w}\" \
-         height=\"{legend_h:.0}\" rx=\"2\" fill=\"url(#{legend_id})\" \
-         stroke=\"var(--wire)\" stroke-width=\"0.5\"/>",
-    );
-    let _ = writeln!(
-        svg,
-        "<text x=\"{:.0}\" y=\"{:.1}\" font-size=\"9\" fill=\"var(--text)\">{max_density}</text>",
-        legend_x + legend_w + 4.0,
-        legend_y + 6.0,
-    );
-    let mid_val = max_density / 2;
-    let _ = writeln!(
-        svg,
-        "<text x=\"{:.0}\" y=\"{:.1}\" font-size=\"9\" fill=\"var(--text)\">{mid_val}</text>",
-        legend_x + legend_w + 4.0,
-        legend_y + legend_h / 2.0 + 3.0,
-    );
-    let _ = writeln!(
-        svg,
-        "<text x=\"{:.0}\" y=\"{:.1}\" font-size=\"9\" fill=\"var(--text)\">0</text>",
-        legend_x + legend_w + 4.0,
-        legend_y + legend_h,
-    );
 
     svg.push_str("</svg>\n");
     svg
@@ -1696,7 +2020,7 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
 impl Circuit {
     /// Render the circuit as a self-contained SVG wire diagram.
     pub fn to_svg(&self, opts: &SvgOptions) -> String {
-        let moments = barrier_columns(assign_moments(self), opts.show_barriers);
+        let moments = barrier_columns(assign_moments(self), true);
         render_svg(&moments, self.num_qubits, self.num_classical_bits, opts)
     }
 

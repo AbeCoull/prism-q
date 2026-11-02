@@ -9,9 +9,15 @@ network is explicit except on an expectation or marginals terminal, where `Auto`
 it for a wide shallow unitary circuit. The task-oriented version of this material is the
 [Backends Deep Dive guide](../guides/backends.md).
 
-The circuit diagrams on this page come from PRISM-Q's own SVG renderer.
+Scroll wide circuit figures horizontally, or focus them and use the arrow keys.
+Open the full SVG for gate tooltips; rotation angles are in radians.
 
-![GHZ state preparation circuit](../diagrams/ghz_5.svg)
+<figure class="circuit-figure">
+<div class="circuit-scroll" role="region" aria-label="GHZ circuit" tabindex="0">
+<img src="../diagrams/ghz_5.svg" alt="A Hadamard followed by a chain of four controlled X gates across five qubits.">
+</div>
+<figcaption>GHZ preparation uses Clifford gates and routes to a stabilizer backend. <a href="../diagrams/ghz_5.svg">Open full SVG</a>.</figcaption>
+</figure>
 
 ## Reset semantics
 
@@ -114,7 +120,12 @@ Normalization is deferred: `pending_norm` accumulates the factors instead of res
 The Quantum Fourier Transform is a representative statevector workload, dense with
 controlled-phase gates that the fusion pipeline batches:
 
-![Quantum Fourier Transform circuit](../diagrams/qft_4.svg)
+<figure class="circuit-figure">
+<div class="circuit-scroll" role="region" aria-label="Quantum Fourier transform circuit" tabindex="0">
+<img src="../diagrams/qft_4.svg" alt="Four-qubit quantum Fourier transform expanded into Hadamards, controlled phase rotations, and swaps.">
+</div>
+<figcaption>Controlled phases span the register; the final swaps reverse qubit order. <a href="../diagrams/qft_4.svg">Open full SVG</a>.</figcaption>
+</figure>
 
 ## Stabilizer
 

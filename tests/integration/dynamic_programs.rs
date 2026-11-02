@@ -545,7 +545,7 @@ fn engines_without_a_per_shot_state_decline() {
 #[test]
 fn a_runtime_rotation_keeps_auto_off_the_tableau() {
     let mut b = DynamicProgramBuilder::new(2, 2);
-    let t = b.declare("t", ClassicalType::Float, 0.3f64.into());
+    let t = b.declare("t", ClassicalType::Float { width: 64 }, 0.3f64.into());
     b.add_gate(Gate::H, &[0]).add_gate(Gate::Cx, &[0, 1]);
     b.add_measure(0, 0);
     b.add_rotation(RotationKind::Ry, &[1], t.into());

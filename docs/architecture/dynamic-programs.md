@@ -30,10 +30,13 @@ what keeps fusion's dependency model intact: fusion orders instructions by the q
 they touch, and the only classical state a circuit reads is still written by a
 measurement on a qubit the same circuit orders.
 
-`ClassicalType` is `bool`, `int[n]` and `uint[n]` for `n` from 1 to 64, `float`, and
-`angle`. A store converts the value to the declared type: integers truncate toward zero
-and then wrap to their width, and an angle reduces into `[0, 2 pi)`. Arithmetic on two
+`ClassicalType` is `bool`, `int[n]` and `uint[n]` for `n` from 1 to 64, `float[n]` for
+`n` of 16, 32, 64 or 128, and `angle`. A store converts the value to the declared type:
+integers truncate toward zero and then wrap to their width, a 16- or 32-bit float rounds
+to half or single precision, and an angle reduces into `[0, 2 pi)`. Arithmetic on two
 integers stays integral, with `/` truncating; a float on either side makes it a float.
+`%` and the bitwise operators take integers only, and construction rejects a float
+operand.
 Comparisons and the logical operators return a `bool`, and `&&` and `||` short-circuit.
 An integer divided by zero fails the run with `InvalidParameter`.
 

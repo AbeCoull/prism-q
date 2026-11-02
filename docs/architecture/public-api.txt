@@ -1048,6 +1048,7 @@ pub fn prism_q::circuit::dynamic::ClassicalExpr::from(prism_q::circuit::dynamic:
 pub prism_q::circuit::dynamic::ClassicalType::Angle
 pub prism_q::circuit::dynamic::ClassicalType::Bool
 pub prism_q::circuit::dynamic::ClassicalType::Float
+pub prism_q::circuit::dynamic::ClassicalType::Float::width: u32
 pub prism_q::circuit::dynamic::ClassicalType::Int
 pub prism_q::circuit::dynamic::ClassicalType::Int::width: u32
 pub prism_q::circuit::dynamic::ClassicalType::Uint

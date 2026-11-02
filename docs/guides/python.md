@@ -1351,8 +1351,9 @@ declared variables and the classical bits, `c[i]` for one bit and `c` for the
 whole register read as an unsigned integer, or plain `bool`, `int`, and `float`
 constants. `begin_while` and `begin_if` open a block that `end()` closes, and
 `begin_else`, `break_loop`, and `continue_loop` work as their OpenQASM keywords
-do. Variable types are `"bool"`, `"int[n]"`, `"uint[n]"`, `"float"`, and
-`"angle"`; integers wrap at their declared width.
+do. Variable types are `"bool"`, `"int[n]"`, `"uint[n]"`, `"float[n]"`, and
+`"angle"`; integers wrap at their declared width, and `float[16]` and `float[32]` round
+to half and single precision.
 
 ```python
 from prism_q import DynamicProgramBuilder, Gate, simulate_program

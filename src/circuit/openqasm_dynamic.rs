@@ -540,20 +540,28 @@ impl<'a> Parser<'a> {
         width: Option<&Expr>,
         line: usize,
     ) -> Result<ClassicalType> {
+        let float = ty != "angle";
         let bits = width
             .map(|width| {
                 let bits = self.integer_of(width, line)?;
-                u32::try_from(bits)
-                    .ok()
-                    .filter(|bits| (1..=64).contains(bits))
-                    .ok_or_else(|| parse_error(line, format!("`{ty}[{bits}]` needs 1 to 64 bits")))
+                let fits = if float {
+                    matches!(bits, 16 | 32 | 64 | 128)
+                } else {
+                    (1..=64).contains(&bits)
+                };
+                let range = if float {
+                    "16, 32, 64 or 128"
+                } else {
+                    "1 to 64"
+                };
+                fits.then_some(bits as u32)
+                    .ok_or_else(|| parse_error(line, format!("`{ty}[{bits}]` needs {range} bits")))
             })
             .transpose()?;
-        Ok(match ty {
-            "angle" => ClassicalType::Angle(bits),
-            _ => ClassicalType::Float {
-                single: bits == Some(32),
-            },
+        Ok(if float {
+            ClassicalType::Float(bits.unwrap_or(64))
+        } else {
+            ClassicalType::Angle(bits)
         })
     }
 
@@ -563,6 +571,12 @@ impl<'a> Parser<'a> {
         width: Option<&Expr>,
         line: usize,
     ) -> Result<RuntimeType> {
+        if matches!(ty, "float" | "angle") {
+            return Ok(match self.real_type(ty, width, line)? {
+                ClassicalType::Float(width) => RuntimeType::Float { width },
+                _ => RuntimeType::Angle,
+            });
+        }
         let bits = match width {
             None => 64,
             Some(width) => {
@@ -579,8 +593,6 @@ impl<'a> Parser<'a> {
             "int" => RuntimeType::Int { width: bits },
             "uint" => RuntimeType::Uint { width: bits },
             "bool" => RuntimeType::Bool,
-            "float" => RuntimeType::Float,
-            "angle" => RuntimeType::Angle,
             other => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!("a `{other}` whose value a measurement or a loop decides"),
@@ -627,7 +639,7 @@ impl<'a> Parser<'a> {
         };
         let kind = match runtime_type {
             RuntimeType::Bool => ClassicalType::Bool,
-            RuntimeType::Float => ClassicalType::FLOAT,
+            RuntimeType::Float { width } => ClassicalType::Float(width),
             RuntimeType::Angle => ClassicalType::Angle(None),
             integer => ClassicalType::Int(integer),
         };

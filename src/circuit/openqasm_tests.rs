@@ -2278,6 +2278,244 @@ fn def_subroutine_basic_inlines() {
 }
 
 #[test]
+fn runtime_def_returned_bits_start_fresh_when_the_target_is_an_argument() {
+    for (body, expected) in [
+        ("bit r; r ^= b; return r;", true),
+        ("bit r = 0; r ^= b; return r;", true),
+        ("return b;", true),
+        ("return b ^ 1;", false),
+        ("return -1;", true),
+    ] {
+        let source = format!("bit c = 1; def f(bit b) -> bit {{ {body} }} c = f(c);");
+        let program = parse_dynamic(&source).unwrap();
+        let shots = crate::simulate_program(&program)
+            .seed(42)
+            .shots(10)
+            .unwrap();
+        assert!(shots.shots.iter().all(|shot| shot == &[expected]), "{body}");
+    }
+    let program = parse_dynamic("bit c = 1; def f() -> bit { bit r; return r; } c = f();").unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(10)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot == &[false]));
+}
+
+#[test]
+fn def_constants_keep_their_lexical_values_under_caller_shadowing() {
+    for (source, reference) in [
+        ("qubit q; const int n = 4;
+          def f() -> int { return n; }
+          def g(int n) -> int { return f(); }
+          for int n in [8:8] { rx(g(16)) q; }", "qubit q; rx(4) q;"),
+        ("qubit q; const duration d = 5ns;
+          def wait() -> duration { return d; }
+          def g(duration d) -> float { duration v = wait(); return v / 1ns; }
+          rx(g(20ns)) q;", "qubit q; rx(5) q;"),
+        ("qubit q; def f(int n) -> int { switch(n) { case 1 { return 3; } default { return 4; } } }
+          rx(f(1)) q;", "qubit q; rx(3) q;"),
+    ] {
+        let expected = parse(reference).unwrap();
+        let circuit = parse(source).unwrap();
+        let program = parse_dynamic(source).unwrap();
+        for actual in [&circuit, program.static_circuit().expect("static call")] {
+            assert_eq!(format!("{:?}", actual.instructions), format!("{:?}", expected.instructions));
+        }
+    }
+}
+
+#[test]
+fn def_scope_cannot_capture_mutable_caller_values_or_registers() {
+    for source in [
+        "bit c; int n = 2; def f(bit b) -> int { return n + int(b); } int v = f(c);",
+        "qubit q; bit c; def f(bit b) -> int { x q; return int(b); } int v = f(c);",
+        "bit c; def f(bit b) -> int { c = 1; return int(b); } int v = f(c);",
+        "def f() { qubit q; } f();",
+    ] {
+        assert!(parse(source).is_err(), "{source}");
+        assert!(parse_dynamic(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn runtime_def_short_circuit_calls_keep_their_gate_effects_conditional() {
+    let program = parse_dynamic(
+        "qubit[2] q; bit[3] c;
+         def flip(qubit a) -> bool { x a; return true; }
+         h q[0]; c[0] = measure q[0];
+         bool a = bool(c[0]) && flip(q[1]);
+         bool b = bool(c[0]) || flip(q[1]);
+         c[1] = measure q[1]; c[2] = a == bool(c[0]) && b;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(100)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot[1] && shot[2]));
+}
+
+#[test]
+fn runtime_def_calls_repeat_in_while_conditions() {
+    let program = parse_dynamic(
+        "qubit q; bit[2] c = 1;
+         def check(bit b, qubit a) -> bool { x a; return bool(b); }
+         while (check(c[0], q)) { c[0] = 0; }
+         c[1] = measure q;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(10)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot == &[false, false]));
+}
+
+#[test]
+fn runtime_def_return_leaves_nested_loops_and_keeps_scalar_locals() {
+    let program = parse_dynamic(
+        "qubit q; bit[2] c;
+         def f(bit b) -> int {
+             int n = 0;
+             while (n < 3) { if (n == int(b)) return n; n += 1; }
+             return -1;
+         }
+         h q; c[0] = measure q;
+         int count = 0; bool correct = true;
+         while (count < 2) {
+             c[0] ^= 1;
+             int n = f(c[0]); correct = correct && n == int(c[0]); count += 1;
+         }
+         c[1] = correct;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(100)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot[1]));
+}
+
+#[test]
+fn runtime_def_bit_parameters_forward_slices_and_keep_writes_local() {
+    let program = parse_dynamic(
+        "bit[4] c = 2;
+         def f(bit[2] b) -> int { b[0] = 1; b[1] ^= 1; return int(b); }
+         def g(bit[2] b) -> int { int n; n = f(b[{1,0}]); return n; }
+         int n; n = g(c[0:1]); c[2] = n == 3; c[3] = (int(c) & 3) == 2;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(10)
+        .unwrap();
+    assert!(
+        shots
+            .shots
+            .iter()
+            .all(|shot| shot == &[false, true, true, true])
+    );
+}
+
+#[test]
+fn runtime_def_results_coerce_and_copy_bit_arguments() {
+    let program = parse_dynamic(
+        "qubit q; bit[2] c;
+         def f(bit b) -> uint[4] { if (b) return 31; return 19; }
+         h q; c[0] = measure q;
+         int n = f(c[0]); c[1] = n == 3 + 12 * int(c[0]);",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(100)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot[1]));
+    assert!(shots.shots.iter().any(|shot| shot[0]));
+    assert!(shots.shots.iter().any(|shot| !shot[0]));
+}
+
+#[test]
+fn runtime_def_return_keeps_the_callers_loop_running() {
+    let program = parse_dynamic(
+        "qubit q; bit[3] c = 1;
+         def f(bit b, qubit a) { if (b) return; x a; }
+         int n = 0;
+         while (n < 2) { n += 1; f(c[0], q); x q; }
+         c[1] = measure q; c[2] = n == 2;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(10)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot == &[true, false, true]));
+}
+
+#[test]
+fn runtime_def_nested_results_keep_distinct_values() {
+    let program = parse_dynamic(
+        "bit[3] c = 2;
+         def f(bit b) -> int { if (b) return 3; return 1; }
+         def g(bit a, bit b) -> int { return f(a) + f(b); }
+         int n = g(c[0], c[1]); c[2] = n == 4;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(10)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot == &[false, true, true]));
+}
+
+#[test]
+fn runtime_def_scalar_parameters_are_values_with_declared_widths() {
+    let program = parse_dynamic(
+        "bit[2] c = 1;
+         def f(uint[4] n) -> uint[4] { if (n > 0) n += 3; return n; }
+         uint[8] n = int(c[0]) * 18;
+         int r = f(n); c[1] = n == 18 && r == 5;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(10)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot == &[true, true]));
+    assert!(matches!(
+        parse_dynamic(
+            "bit c; def f(int n, bit b) -> int { return n + int(b); } int v = f(0.5, c);"
+        ),
+        Err(PrismError::Parse { .. })
+    ));
+}
+
+#[test]
+fn runtime_def_requires_a_result_on_every_reachable_path() {
+    let error =
+        parse_dynamic("bit c; def f(bit b) -> int { if (b) return 1; } int n = f(c);").unwrap_err();
+    assert!(
+        matches!(error, PrismError::Parse { message, .. } if message.contains("without a result"))
+    );
+}
+
+#[test]
+fn runtime_def_call_can_decide_a_branch() {
+    let program = parse_dynamic(
+        "qubit q; bit[2] c = 1;
+         def f(bit b) -> bool { return bool(b); }
+         if (f(c[0])) x q; c[1] = measure q;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(10)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot == &[true, true]));
+}
+
+#[test]
 fn def_scalar_results_coerce_at_the_declared_width() {
     for (signature, value, expected) in [
         ("int[4]", "9", "-7"),
@@ -2304,6 +2542,10 @@ fn def_scalar_results_coerce_at_the_declared_width() {
 #[test]
 fn def_signature_widths_keep_the_declaration_scope() {
     for (source, reference) in [
+        (
+            "qubit q; def ratio(float n, float d) -> float { return n / d; } rx(ratio(3, 5)) q;",
+            "qubit q; rx(0.6) q;",
+        ),
         (
             "qubit q; const int n = 4;
              def f() -> uint[n] { return 31; }
@@ -2501,7 +2743,7 @@ fn def_arguments_read_the_caller_before_parameter_names_are_bound() {
 }
 
 #[test]
-fn def_runtime_result_paths_decline_without_folding_measured_bits() {
+fn def_runtime_result_paths_need_dynamic_programs() {
     for source in [
         "qubit q; bit c; def f(bit b) -> int { if (b) return 1; return 0; }
          c = measure q; int n = f(c);",
@@ -2511,12 +2753,10 @@ fn def_runtime_result_paths_decline_without_folding_measured_bits() {
          if (c && f()) x q;",
     ] {
         assert!(
-            matches!(
-                parse_dynamic(source),
-                Err(PrismError::UnsupportedConstruct { .. })
-            ),
+            matches!(parse(source), Err(PrismError::UnsupportedConstruct { .. })),
             "{source}"
         );
+        parse_dynamic(source).unwrap();
     }
 }
 
@@ -2927,10 +3167,10 @@ fn if_register_compare_with_int_var_in_def() {
         OPENQASM 3.0;
         qubit[1] q;
         bit[4] c;
-        def cond(int n, qubit a) {
-            if (c == n) x a;
+        def cond(int n, bit[4] b, qubit a) {
+            if (b == n) x a;
         }
-        cond(3, q[0]);
+        cond(3, c, q[0]);
     "#;
     let c = parse(qasm).unwrap();
     match &c.instructions[0] {

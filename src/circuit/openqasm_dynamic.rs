@@ -24,7 +24,8 @@ pub(super) struct DynamicState<'a> {
     builder: DynamicProgramBuilder,
     analysis: RuntimeAnalysis,
     /// Runtime variables in scope, by name.
-    vars: HashMap<&'a str, VarId>,
+    pub(super) vars: HashMap<&'a str, VarId>,
+    pub(super) bit_values: HashMap<&'a str, usize>,
     /// Nesting of guarded regions being collected into one instruction, where
     /// nothing may open a block.
     collecting: usize,
@@ -40,6 +41,21 @@ pub(super) struct DynamicState<'a> {
 /// over one body sees unchanged.
 fn key(stmt: &Stmt) -> usize {
     stmt as *const Stmt as usize
+}
+
+fn scalar_runtime_type(kind: ClassicalType, line: usize) -> Result<RuntimeType> {
+    Ok(match kind {
+        ClassicalType::Int(ty) => ty,
+        ClassicalType::Float(width) => RuntimeType::Float { width },
+        ClassicalType::Bool => RuntimeType::Bool,
+        ClassicalType::Angle(None) => RuntimeType::Angle,
+        ClassicalType::Angle(Some(_)) | ClassicalType::Duration | ClassicalType::Stretch => {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "a runtime duration or fixed-width angle in a subroutine".to_string(),
+                line,
+            });
+        }
+    })
 }
 
 /// Parse an OpenQASM 3.0 program that may need runtime control flow into a
@@ -97,6 +113,7 @@ pub(super) fn parse_dynamic_within(input: &str, budget: usize) -> Result<Dynamic
         builder: DynamicProgramBuilder::new(0, 0),
         analysis: RuntimeAnalysis::of(&program),
         vars: HashMap::new(),
+        bit_values: HashMap::new(),
         collecting: 0,
         loops: Vec::new(),
         repeat: 0,
@@ -164,12 +181,37 @@ fn register_read(offset: usize, size: usize, line: usize) -> Result<ClassicalExp
     }
 }
 
+pub(super) fn bits_value(bits: &[usize], line: usize) -> Result<ClassicalExpr> {
+    if bits.is_empty() || bits.len() > 64 {
+        return Err(PrismError::UnsupportedConstruct {
+            construct: "a subroutine bit value wider than 64 bits".to_string(),
+            line,
+        });
+    }
+    if bits.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+        return register_read(bits[0], bits.len(), line);
+    }
+    let mut value = ClassicalExpr::Bit(bits[0]);
+    for (at, &bit) in bits.iter().enumerate().skip(1) {
+        value = ClassicalExpr::binary(
+            dynamic::BinaryOp::BitOr,
+            value,
+            ClassicalExpr::binary(
+                dynamic::BinaryOp::Shl,
+                ClassicalExpr::Bit(bit),
+                ClassicalExpr::Const(ClassicalValue::Int(at as i128)),
+            ),
+        );
+    }
+    Ok(value)
+}
+
 /// Whether some leaf of `expr` is a runtime value according to `leaf`.
 fn reads_leaf(expr: &Expr, leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>>) -> Result<bool> {
     with_stack(|| {
         Ok(match expr {
             Expr::Number(_) | Expr::Duration(_) => false,
-            Expr::Ident(_) => leaf(expr)?.is_some(),
+            Expr::Ident(_) | Expr::Runtime(_) => leaf(expr)?.is_some(),
             Expr::Element(element) => {
                 leaf(expr)?.is_some()
                     || element.indices.iter().try_fold(false, |seen, index| {
@@ -201,7 +243,7 @@ fn lower(
         }
         let recurse = |inner: &Expr| lower(inner, line, leaf, fold);
         Ok(match expr {
-            Expr::Ident(_) | Expr::Element(_) => match leaf(expr)? {
+            Expr::Ident(_) | Expr::Element(_) | Expr::Runtime(_) => match leaf(expr)? {
                 Some(lowered) => lowered,
                 None => {
                     return Err(PrismError::UnsupportedConstruct {
@@ -313,6 +355,370 @@ enum Decided {
 }
 
 impl<'a> Parser<'a> {
+    pub(super) fn resolve_short_circuit(
+        &mut self,
+        op: BinaryOp,
+        left: &Expr<'a>,
+        right: &Expr<'a>,
+        line: usize,
+        out: &mut Vec<Instruction>,
+    ) -> Result<Expr<'a>> {
+        self.require_streaming("a subroutine call under short-circuit evaluation", line)?;
+        self.flush(std::mem::take(out));
+        let left = self.lower_expr(left, line)?;
+        let var = self.state().builder.declare(
+            "short-circuit result",
+            RuntimeType::Bool,
+            ClassicalValue::Bool(false),
+        );
+        self.state()
+            .builder
+            .assign(var, ClassicalExpr::cast(RuntimeType::Bool, left.clone()));
+        let condition = if op == BinaryOp::And {
+            left
+        } else {
+            ClassicalExpr::unary(UnaryOp::Not, left)
+        };
+        self.state().builder.begin_if(condition);
+        let right = self.resolve_calls(right, line, out)?;
+        self.flush(std::mem::take(out));
+        let value = self.lower_expr(&right, line)?;
+        self.state()
+            .builder
+            .assign(var, ClassicalExpr::cast(RuntimeType::Bool, value));
+        self.state().builder.end()?;
+        Ok(Expr::Runtime(var))
+    }
+    pub(super) fn exec_runtime_return(
+        &mut self,
+        value: Option<&ast::ReturnValue<'a>>,
+        line: usize,
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
+        let frame = self.def_result.as_ref().expect("runtime call frame");
+        let var = frame.result_var;
+        let bits = frame.bits.clone();
+        match (value, var) {
+            (Some(ast::ReturnValue::Value(value)), Some(var)) => {
+                let value = self.resolve_calls(value, line, out)?;
+                let value = self.lower_expr(&value, line)?;
+                self.flush(std::mem::take(out));
+                self.state().builder.assign(var, value);
+            }
+            (Some(ast::ReturnValue::Measure(source)), None) => {
+                out.extend(Self::build_measurements(
+                    self.qubits_of(source)?,
+                    bits,
+                    line,
+                )?);
+            }
+            (Some(ast::ReturnValue::Value(value)), None) if !bits.is_empty() => {
+                let value = self.resolve_calls(value, line, out)?;
+                let value = self.lower_expr(&value, line)?;
+                if matches!(value, ClassicalExpr::Const(ClassicalValue::Float(_))) {
+                    return Err(parse_error(line, "a bit result needs an integer or bool"));
+                }
+                self.flush(std::mem::take(out));
+                self.write_classical_bits(&bits, value, line)?;
+            }
+            (Some(ast::ReturnValue::Measure(_)), Some(_)) => {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: "a measurement returned as a classical scalar".to_string(),
+                    line,
+                });
+            }
+            _ => {}
+        }
+        self.flush(std::mem::take(out));
+        self.state().builder.return_from_call()?;
+        self.def_result
+            .as_mut()
+            .expect("runtime call frame")
+            .returned = true;
+        Ok(())
+    }
+
+    pub(super) fn assign_bit_parameter(
+        &mut self,
+        assign: &ast::ElementAssign<'a>,
+        line: usize,
+    ) -> Result<()> {
+        self.require_streaming("a write to a copied bit parameter", line)?;
+        let width = self.state().bit_values[assign.array];
+        let [index] = assign.indices.as_slice() else {
+            return Err(parse_error(line, "a bit parameter takes one index"));
+        };
+        let operand = Operand {
+            name: ast::OperandName::Register(assign.array),
+            index: Some(ast::Index::Single(index.clone())),
+            line,
+        };
+        let picks = self.pick_indices(
+            width,
+            operand.index.as_ref().expect("bit index"),
+            ast::RegisterKind::Classical,
+            &operand,
+        )?;
+        let index = picks[0];
+        let var = self
+            .runtime_var(assign.array)
+            .expect("copied bit parameter");
+        let word = ClassicalExpr::Var(var);
+        let bit = ClassicalExpr::binary(
+            dynamic::BinaryOp::BitAnd,
+            ClassicalExpr::binary(
+                dynamic::BinaryOp::Shr,
+                word.clone(),
+                ClassicalExpr::Const(ClassicalValue::Int(index as i128)),
+            ),
+            ClassicalExpr::Const(ClassicalValue::Int(1)),
+        );
+        let mut value = self.lower_expr(&assign.value, line)?;
+        if let Some(op) = assign.op {
+            value = ClassicalExpr::binary(op.binary().runtime(), bit, value);
+        }
+        let value = ClassicalExpr::binary(
+            dynamic::BinaryOp::BitAnd,
+            value,
+            ClassicalExpr::Const(ClassicalValue::Int(1)),
+        );
+        let value = ClassicalExpr::binary(
+            dynamic::BinaryOp::Shl,
+            value,
+            ClassicalExpr::Const(ClassicalValue::Int(index as i128)),
+        );
+        let cleared = ClassicalExpr::binary(
+            dynamic::BinaryOp::BitAnd,
+            word,
+            ClassicalExpr::Const(ClassicalValue::Int(!(1i128 << index))),
+        );
+        self.state().builder.assign(
+            var,
+            ClassicalExpr::binary(dynamic::BinaryOp::BitOr, cleared, value),
+        );
+        Ok(())
+    }
+    pub(super) fn def_is_runtime(
+        &self,
+        name: &str,
+        params: &[ast::DefParam],
+        args: &[ast::Argument],
+    ) -> bool {
+        self.dynamic.as_ref().is_some_and(|state| {
+            state.analysis.runtime_defs.contains(name)
+                || params.iter().zip(args).any(|(param, arg)| {
+                    matches!(param, ast::DefParam::Value { .. }) && self.argument_is_runtime(arg)
+                })
+                || args.iter().any(|arg| {
+                    match arg {
+                        ast::Argument::Operand(operand) => operand.register(),
+                        ast::Argument::Value(Expr::Ident(name)) => Some(*name),
+                        ast::Argument::Value(Expr::Element(element)) => Some(element.array),
+                        _ => None,
+                    }
+                    .is_some_and(|name| state.bit_values.contains_key(name))
+                })
+        })
+    }
+
+    pub(super) fn runtime_bit_argument(
+        &self,
+        argument: &ast::Argument,
+        line: usize,
+    ) -> Result<Option<(usize, ClassicalExpr)>> {
+        let operand = match argument {
+            ast::Argument::Operand(operand) => std::borrow::Cow::Borrowed(operand),
+            ast::Argument::Value(Expr::Ident(name)) => std::borrow::Cow::Owned(Operand {
+                name: ast::OperandName::Register(name),
+                index: None,
+                line,
+            }),
+            ast::Argument::Value(Expr::Element(element)) if element.indices.len() == 1 => {
+                std::borrow::Cow::Owned(Operand {
+                    name: ast::OperandName::Register(element.array),
+                    index: Some(ast::Index::Single(element.indices[0].clone())),
+                    line,
+                })
+            }
+            _ => return Ok(None),
+        };
+        let Some((name, width)) = operand.register().and_then(|name| {
+            self.dynamic
+                .as_ref()
+                .and_then(|state| state.bit_values.get(name).map(|width| (name, *width)))
+        }) else {
+            return Ok(None);
+        };
+        let value = ClassicalExpr::Var(self.runtime_var(name).expect("bit parameter binding"));
+        let Some(index) = &operand.index else {
+            return Ok(Some((width, value)));
+        };
+        let picks = self.pick_indices(width, index, ast::RegisterKind::Classical, &operand)?;
+        if picks.is_empty() || picks.len() > 64 {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "a subroutine bit value wider than 64 bits".to_string(),
+                line,
+            });
+        }
+        let bit = |index: usize| {
+            ClassicalExpr::binary(
+                dynamic::BinaryOp::BitAnd,
+                ClassicalExpr::binary(
+                    dynamic::BinaryOp::Shr,
+                    value.clone(),
+                    ClassicalExpr::Const(ClassicalValue::Int(index as i128)),
+                ),
+                ClassicalExpr::Const(ClassicalValue::Int(1)),
+            )
+        };
+        let mut selected = bit(picks[0]);
+        for (position, &index) in picks.iter().enumerate().skip(1) {
+            selected = ClassicalExpr::binary(
+                dynamic::BinaryOp::BitOr,
+                selected,
+                ClassicalExpr::binary(
+                    dynamic::BinaryOp::Shl,
+                    bit(index),
+                    ClassicalExpr::Const(ClassicalValue::Int(position as i128)),
+                ),
+            );
+        }
+        Ok(Some((picks.len(), selected)))
+    }
+
+    pub(super) fn execute_runtime_def(
+        &mut self,
+        name: &str,
+        def: &DefDefinition<'a>,
+        mut sub: Parser<'a>,
+        args: Vec<(&'a str, ClassicalType, ClassicalExpr)>,
+        line: usize,
+    ) -> Result<Option<Expr<'a>>> {
+        self.require_streaming("a runtime subroutine call", line)?;
+        self.charge(args.len() + 1, line)?;
+        let runtime_params = args
+            .iter()
+            .filter_map(|(name, _, value)| {
+                (!matches!(value, ClassicalExpr::Const(_))).then_some(*name)
+            })
+            .collect::<Vec<_>>();
+        let state = self.dynamic.as_mut().expect("runtime call");
+        let analysis = RuntimeAnalysis::for_def(
+            &def.body,
+            &def.args,
+            def.result.as_ref().is_some_and(|result| result.ty != "bit"),
+            Rc::clone(&state.analysis.runtime_defs),
+            &runtime_params,
+        );
+        let mut state = self.dynamic.take().expect("runtime call");
+        let caller_analysis = std::mem::replace(&mut state.analysis, analysis);
+        let caller_vars = std::mem::take(&mut state.vars);
+        let caller_bits = std::mem::take(&mut state.bit_values);
+        let caller_loops = std::mem::take(&mut state.loops);
+        let caller_repeat = state.repeat;
+        state.repeat += 1;
+        sub.dynamic = Some(state);
+        let result = (|| {
+            let result_var =
+                if let Some(result) = def.result.as_ref().filter(|result| result.ty != "bit") {
+                    let kind = sub.classical_type(result.ty, result.width.as_ref(), line)?;
+                    let ty = scalar_runtime_type(kind, line)?;
+                    Some(sub.state().builder.declare(
+                        format!("result of {name}"),
+                        ty,
+                        ClassicalValue::Int(0),
+                    ))
+                } else {
+                    None
+                };
+            let frame = sub.def_result.as_mut().expect("call frame");
+            frame.runtime = true;
+            frame.result_var = result_var;
+            sub.state().builder.begin_call();
+            let mutable = def
+                .args
+                .iter()
+                .filter_map(|param| match param {
+                    ast::DefParam::Value { name, .. }
+                        if sub
+                            .state()
+                            .analysis
+                            .runtime
+                            .contains(&(param as *const ast::DefParam as usize)) =>
+                    {
+                        Some(*name)
+                    }
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let bit_params = def
+                .args
+                .iter()
+                .filter_map(|param| match param {
+                    ast::DefParam::Bit { name, .. } => Some(*name),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            for (name, kind, value) in args {
+                Rc::make_mut(&mut sub.cregs).remove(name);
+                Rc::make_mut(&mut sub.aliases).remove(name);
+                sub.params.remove(name);
+                Rc::make_mut(&mut sub.classical).insert(
+                    name,
+                    ClassicalDecl {
+                        ty: kind,
+                        constant: false,
+                        value: None,
+                    },
+                );
+                match value {
+                    ClassicalExpr::Const(value) if !mutable.contains(name) => {
+                        sub.param_vars
+                            .as_mut()
+                            .expect("callee bindings")
+                            .insert(name, kind.store(value));
+                    }
+                    value => {
+                        let ty = scalar_runtime_type(kind, line)?;
+                        let var = sub
+                            .state()
+                            .builder
+                            .declare(name, ty, ClassicalValue::Int(0));
+                        sub.state().builder.assign(var, value);
+                        sub.state().vars.insert(name, var);
+                        if bit_params.contains(name) {
+                            let RuntimeType::Uint { width } = ty else {
+                                unreachable!("bit argument type")
+                            };
+                            sub.state().bit_values.insert(name, width as usize);
+                        }
+                        sub.param_vars
+                            .as_mut()
+                            .expect("callee bindings")
+                            .remove(name);
+                    }
+                }
+            }
+            let instructions = sub.execute(&def.body)?;
+            sub.flush(instructions);
+            let fallthrough = sub.state().builder.end_call()?;
+            if def.result.is_some() && fallthrough {
+                return Err(parse_error(
+                    line,
+                    format!("def `{name}` reaches its end without a result"),
+                ));
+            }
+            Ok(result_var.map(Expr::Runtime))
+        })();
+        let mut state = sub.dynamic.take().expect("callee state");
+        state.analysis = caller_analysis;
+        state.vars = caller_vars;
+        state.bit_values = caller_bits;
+        state.loops = caller_loops;
+        state.repeat = caller_repeat;
+        self.dynamic = Some(state);
+        result
+    }
     pub(super) fn streaming(&self) -> bool {
         self.dynamic
             .as_ref()
@@ -414,6 +820,7 @@ impl<'a> Parser<'a> {
                 line,
             });
         }
+        self.charge(1, line)?;
         self.state().builder.write_bits(bits, value);
         Ok(())
     }
@@ -518,6 +925,7 @@ impl<'a> Parser<'a> {
     /// it folds at parse time.
     fn runtime_leaf(&self, expr: &Expr, line: usize) -> Result<Option<ClassicalExpr>> {
         match expr {
+            Expr::Runtime(var) => Ok(Some(ClassicalExpr::Var(*var))),
             Expr::Ident(name) => {
                 if let Some(var) = self.runtime_var(name) {
                     return Ok(Some(ClassicalExpr::Var(var)));
@@ -703,7 +1111,7 @@ impl<'a> Parser<'a> {
     ) -> Result<()> {
         if constant {
             return Err(PrismError::UnsupportedConstruct {
-                construct: format!("`const {name}` initialized from a runtime value"),
+                construct: format!("`const {name}` initializer needs a parse-time constant"),
                 line,
             });
         }
@@ -735,6 +1143,7 @@ impl<'a> Parser<'a> {
         let decl = ClassicalDecl {
             ty: kind,
             constant: false,
+            value: None,
         };
         if Rc::make_mut(&mut self.classical)
             .insert(name, decl)
@@ -862,7 +1271,11 @@ impl<'a> Parser<'a> {
         let scope = self.open_scope();
         let was_nested = std::mem::replace(&mut self.nested, true);
         self.state().repeat += 1;
+        let returned = self.def_result.as_ref().is_some_and(|frame| frame.returned);
         let result = self.execute(block);
+        if let Some(frame) = self.def_result.as_mut().filter(|frame| frame.runtime) {
+            frame.returned = returned;
+        }
         self.state().repeat -= 1;
         self.nested = was_nested;
         self.close_scope(scope);
@@ -878,10 +1291,25 @@ impl<'a> Parser<'a> {
         line: usize,
     ) -> Result<()> {
         self.require_streaming("`while`", line)?;
-        let condition = self.lower_condition(condition, line)?;
-        self.state()
-            .builder
-            .begin_while(format!("while at line {line}"), condition);
+        if let Ok(expr) = condition_expr(condition)
+            && expr
+                .finds_call(&|name| self.def_defs.contains_key(name))
+                .is_some()
+        {
+            self.state()
+                .builder
+                .begin_while_test(format!("while at line {line}"));
+            let mut instructions = Vec::new();
+            let value = self.resolve_calls(&expr, line, &mut instructions)?;
+            self.flush(instructions);
+            let value = self.lower_expr(&value, line)?;
+            self.state().builder.finish_while_test(value)?;
+        } else {
+            let condition = self.lower_condition(condition, line)?;
+            self.state()
+                .builder
+                .begin_while(format!("while at line {line}"), condition);
+        }
         self.state().loops.push(true);
         let result = self.branch_body(body);
         self.state().loops.pop();
@@ -931,6 +1359,26 @@ impl<'a> Parser<'a> {
         line: usize,
         out: &mut Vec<Instruction>,
     ) -> Result<()> {
+        if let Ok(expr) = condition_expr(&conditional.condition)
+            && expr
+                .finds_call(&|name| self.def_defs.contains_key(name))
+                .is_some()
+        {
+            let value = self.resolve_calls(&expr, line, out)?;
+            let value = self.lower_expr(&value, line)?;
+            if let ClassicalExpr::Const(value) = value {
+                let body = if value.truthy() {
+                    Some(&conditional.then_body)
+                } else {
+                    conditional.else_body.as_ref()
+                };
+                if let Some(body) = body {
+                    out.extend(self.exec_box(body)?);
+                }
+                return Ok(());
+            }
+            return self.branch_on(value, conditional, line);
+        }
         let decided = self.decided(&conditional.condition);
         let needs_graph = self
             .dynamic
@@ -948,15 +1396,6 @@ impl<'a> Parser<'a> {
                 out.extend(self.exec_box(body)?);
             }
             return Ok(());
-        }
-        if condition_expr(&conditional.condition).is_ok_and(|expr| {
-            expr.finds_call(&|name| self.def_defs.contains_key(name))
-                .is_some()
-        }) {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: "a def call in a measurement-dependent condition".to_string(),
-                line,
-            });
         }
         let guard = if decided == Decided::Bits && !needs_graph {
             self.condition_of(&conditional.condition, line).ok()
@@ -990,8 +1429,17 @@ impl<'a> Parser<'a> {
     }
 
     fn branch_if(&mut self, conditional: &ast::Conditional<'a>, line: usize) -> Result<()> {
-        self.require_streaming("an `if` over a runtime value", line)?;
         let condition = self.lower_condition(&conditional.condition, line)?;
+        self.branch_on(condition, conditional, line)
+    }
+
+    fn branch_on(
+        &mut self,
+        condition: ClassicalExpr,
+        conditional: &ast::Conditional<'a>,
+        line: usize,
+    ) -> Result<()> {
+        self.require_streaming("an `if` over a runtime value", line)?;
         self.state().builder.begin_if(condition);
         self.branch_body(&conditional.then_body)?;
         if let Some(else_body) = &conditional.else_body {
@@ -1088,6 +1536,8 @@ impl<'a> Parser<'a> {
 pub(super) struct RuntimeAnalysis {
     runtime: HashSet<usize>,
     branches: HashSet<usize>,
+    runtime_defs: Rc<HashSet<String>>,
+    needs_call: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1104,6 +1554,14 @@ struct Walk<'s, 'a> {
     branches: HashSet<usize>,
     changed: bool,
     scopes: Vec<HashMap<&'a str, Binding>>,
+    functions: &'s HashSet<String>,
+    scalar_return: bool,
+    needs_call: bool,
+    local_bits: HashSet<&'a str>,
+    initialized_bits: HashSet<&'a str>,
+    single_bits: HashSet<&'a str>,
+    early_bit_read: Cell<bool>,
+    conditional: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1129,6 +1587,45 @@ impl RuntimeAnalysis {
     /// Iterate to a fixed point: a variable assigned from a runtime one is
     /// itself runtime, which can make a third one so on a later pass.
     pub(super) fn of(program: &[Stmt]) -> RuntimeAnalysis {
+        let mut functions = Rc::new(HashSet::new());
+        loop {
+            let mut changed = false;
+            for stmt in program {
+                if let StmtKind::DefDef {
+                    name,
+                    args,
+                    result,
+                    body,
+                } = &stmt.kind
+                    && !functions.contains(*name)
+                {
+                    let needs_call = Self::for_def(
+                        body,
+                        args,
+                        result.as_ref().is_some_and(|result| result.ty != "bit"),
+                        Rc::clone(&functions),
+                        &[],
+                    )
+                    .needs_call;
+                    if needs_call {
+                        Rc::make_mut(&mut functions).insert((*name).to_string());
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                return Self::for_def(program, &[], false, functions, &[]);
+            }
+        }
+    }
+
+    pub(super) fn for_def<'a>(
+        program: &[Stmt<'a>],
+        args: &[ast::DefParam<'a>],
+        scalar_return: bool,
+        functions: Rc<HashSet<String>>,
+        runtime_params: &[&str],
+    ) -> RuntimeAnalysis {
         let mut runtime = HashSet::new();
         loop {
             let mut walk = Walk {
@@ -1136,11 +1633,41 @@ impl RuntimeAnalysis {
                 branches: HashSet::new(),
                 changed: false,
                 scopes: vec![HashMap::new()],
+                functions: &functions,
+                scalar_return,
+                needs_call: false,
+                local_bits: HashSet::new(),
+                initialized_bits: HashSet::new(),
+                single_bits: HashSet::new(),
+                early_bit_read: Cell::new(false),
+                conditional: 0,
             };
+            for param in args {
+                match param {
+                    ast::DefParam::Bit { name, .. } => walk.bind(name, Binding::Bits),
+                    ast::DefParam::Value { name, .. } => {
+                        let decl = param as *const ast::DefParam as usize;
+                        if runtime_params.contains(name) {
+                            walk.mark(decl);
+                        }
+                        walk.bind(name, Binding::Var { decl, depth: 0 });
+                    }
+                    ast::DefParam::Duration(name) | ast::DefParam::Qubit { name, .. } => {
+                        walk.bind(name, Binding::Constant);
+                    }
+                }
+            }
             walk.block(program, 0);
             if !walk.changed {
                 let branches = walk.branches;
-                return RuntimeAnalysis { runtime, branches };
+                let initializes_bits = walk.early_bit_read.get();
+                let needs_call = walk.needs_call || initializes_bits || !runtime.is_empty();
+                return RuntimeAnalysis {
+                    runtime,
+                    branches,
+                    runtime_defs: functions,
+                    needs_call,
+                };
             }
         }
     }
@@ -1174,16 +1701,25 @@ impl<'a> Walk<'_, 'a> {
                 runtime: self.runtime.contains(&decl),
                 bits: false,
             },
-            Binding::Bits => Reads {
-                runtime: false,
-                bits: true,
-            },
+            Binding::Bits => {
+                if self.local_bits.contains(name) && !self.initialized_bits.contains(name) {
+                    self.early_bit_read.set(true);
+                }
+                Reads {
+                    runtime: false,
+                    bits: true,
+                }
+            }
             Binding::Constant | Binding::Other => Reads::default(),
         }
     }
 
     fn expr_reads(&self, expr: &Expr) -> Reads {
         with_stack(|| match expr {
+            Expr::Runtime(_) => Reads {
+                runtime: true,
+                bits: false,
+            },
             Expr::Number(_) | Expr::Duration(_) => Reads::default(),
             Expr::Ident(name) => self.name_reads(name),
             Expr::Element(element) => element
@@ -1194,9 +1730,13 @@ impl<'a> Walk<'_, 'a> {
                 }),
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => self.expr_reads(inner),
             Expr::Binary { left, right, .. } => self.expr_reads(left).or(self.expr_reads(right)),
-            Expr::Call(call) => call.args.iter().fold(Reads::default(), |reads, arg| {
-                reads.or(self.expr_reads(arg))
-            }),
+            Expr::Call(call) => call.args.iter().fold(
+                Reads {
+                    runtime: self.functions.contains(call.name),
+                    bits: false,
+                },
+                |reads, arg| reads.or(self.expr_reads(arg)),
+            ),
             Expr::Cast(cast) => self.expr_reads(&cast.value),
         })
     }
@@ -1262,13 +1802,24 @@ impl<'a> Walk<'_, 'a> {
     fn stmt(&mut self, stmt: &Stmt<'a>, depth: usize) -> bool {
         match &stmt.kind {
             StmtKind::RegisterDecl {
-                kind, name, init, ..
+                kind,
+                name,
+                size,
+                init,
             } => {
                 let binding = match kind {
                     ast::RegisterKind::Classical => Binding::Bits,
                     ast::RegisterKind::Qubit => Binding::Other,
                 };
                 self.bind(name, binding);
+                if *kind == ast::RegisterKind::Classical {
+                    self.local_bits.insert(name);
+                    if size.is_none() || matches!(size, Some(Expr::Number(ClassicalValue::Int(1))))
+                    {
+                        self.single_bits.insert(name);
+                    }
+                    self.needs_call |= init.is_some();
+                }
                 match init.as_deref() {
                     Some(ast::BitInit::Bits(text)) => text.contains('1'),
                     Some(ast::BitInit::Value(value)) => !matches!(
@@ -1309,20 +1860,40 @@ impl<'a> Walk<'_, 'a> {
                 self.runtime.contains(&decl)
             }
             StmtKind::Assign { target, value, .. } => match self.lookup(target) {
-                Binding::Bits => true,
+                Binding::Bits => {
+                    self.needs_call = true;
+                    true
+                }
                 binding => {
                     let reads = self.expr_reads(value);
                     self.write(binding, depth, reads)
                 }
             },
+            StmtKind::Measure(measure) => {
+                if depth == 0
+                    && self.conditional == 0
+                    && let Some(name) = measure.target.register()
+                    && self.local_bits.contains(name)
+                    && (measure.target.index.is_none() || self.single_bits.contains(name))
+                {
+                    self.initialized_bits.insert(name);
+                }
+                false
+            }
             StmtKind::CallAssign(assign) if assign.target.index.is_none() => {
                 let Some(target) = assign.target.register() else {
                     return false;
                 };
-                let reads = assign.args.iter().fold(Reads::default(), |reads, arg| {
-                    reads.or(self.argument_reads(arg))
-                });
-                self.write(self.lookup(target), depth, reads)
+                let dynamic_call = self.functions.contains(assign.name);
+                self.needs_call |= dynamic_call;
+                let reads = assign.args.iter().fold(
+                    Reads {
+                        runtime: dynamic_call,
+                        bits: false,
+                    },
+                    |reads, arg| reads.or(self.argument_reads(arg)),
+                );
+                self.write(self.lookup(target), depth, reads) || dynamic_call
             }
             StmtKind::ArrayDecl(decl) => {
                 self.bind(
@@ -1337,6 +1908,7 @@ impl<'a> Walk<'_, 'a> {
             StmtKind::ElementAssign(assign)
                 if matches!(self.lookup(assign.array), Binding::Bits) =>
             {
+                self.needs_call = true;
                 true
             }
             StmtKind::ElementAssign(assign) => {
@@ -1358,10 +1930,30 @@ impl<'a> Walk<'_, 'a> {
                 self.bind(name, if bits { Binding::Bits } else { Binding::Other });
                 false
             }
-            StmtKind::Call { params, .. } => {
-                params.iter().any(|param| self.argument_reads(param).any())
+            StmtKind::Call { name, params, .. } => {
+                let dynamic_call = self.functions.contains(*name);
+                self.needs_call |= dynamic_call;
+                dynamic_call || params.iter().any(|param| self.argument_reads(param).any())
+            }
+            StmtKind::Expr(value) => {
+                let runtime = self.expr_reads(value).runtime;
+                self.needs_call |= runtime;
+                runtime
+            }
+            StmtKind::Return(value) => {
+                let reads = match value {
+                    Some(ast::ReturnValue::Value(value)) => self.expr_reads(value),
+                    _ => Reads::default(),
+                };
+                self.needs_call |= depth > 0
+                    || self.scalar_return && reads.any()
+                    || !self.scalar_return
+                        && matches!(value, Some(ast::ReturnValue::Value(value))
+                        if value.as_ident().is_none_or(|name| !self.local_bits.contains(name)));
+                true
             }
             StmtKind::If(conditional) => {
+                self.conditional += 1;
                 let decided = self.decided(&conditional.condition);
                 let inner = depth + usize::from(decided != Decided::Static);
                 let mut needs = self.scoped(&conditional.then_body, inner);
@@ -1372,28 +1964,35 @@ impl<'a> Walk<'_, 'a> {
                 if needs {
                     self.branches.insert(key(stmt));
                 }
+                self.conditional -= 1;
                 needs
             }
             StmtKind::Switch { target, arms } => {
-                let mut needs = self.expr_reads(target).runtime;
+                self.conditional += 1;
+                let reads = self.expr_reads(target);
+                let mut needs = reads.runtime;
                 for arm in arms {
-                    needs |= self.scoped(&arm.body, depth + 1);
+                    needs |= self.scoped(&arm.body, depth + usize::from(reads.any()));
                 }
                 if needs {
                     self.branches.insert(key(stmt));
                 }
+                self.conditional -= 1;
                 needs
             }
             StmtKind::While { body, .. } => {
+                self.needs_call = true;
                 self.scoped(body, depth + 1);
                 true
             }
             StmtKind::Break | StmtKind::Continue => true,
             StmtKind::For { variable, body, .. } => {
+                self.conditional += 1;
                 self.scopes.push(HashMap::new());
                 self.bind(variable, Binding::Constant);
                 let needs = self.block(body, depth);
                 self.scopes.pop();
+                self.conditional -= 1;
                 needs
             }
             StmtKind::Box { body, .. } => self.scoped(body, depth),

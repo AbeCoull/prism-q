@@ -90,6 +90,17 @@ A `switch` over a runtime variable, or with an arm that opens a block, becomes a
 of branches. Because a program with no runtime control flow never opens a block, it
 lowers to one block holding the instruction list `parse` returns.
 
+Runtime subroutines expand into the same graph. Each call copies its classical
+arguments into local variables and has a separate exit block. A return assigns the
+typed result and jumps to that exit, including from a loop inside the callee. Loop
+exits cannot cross the call boundary. Local variables are initialized whenever the
+call executes, and every reachable path through a typed call must return a result.
+Definitions retain their lexical constants; the caller's variables are not visible.
+
+Calls in a `while` condition expand into its header so their effects repeat at each
+test. A call on the right of a runtime `&&` or `||` expands into a branch, preserving
+short-circuit evaluation. Static calls keep the existing instruction-list path.
+
 ## Running one
 
 `simulate_program(&program).seed(s).shots(n)` returns the same `ShotsResult`, and

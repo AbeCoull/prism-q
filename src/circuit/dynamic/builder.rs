@@ -16,9 +16,14 @@ struct PendingBlock {
 }
 
 enum Frame {
+    Call {
+        entry: usize,
+        exit: usize,
+    },
     While {
         loop_id: usize,
         header: usize,
+        body: usize,
         exit: usize,
     },
     If {
@@ -223,9 +228,32 @@ impl DynamicProgramBuilder {
         self.frames.push(Frame::While {
             loop_id,
             header,
+            body,
             exit,
         });
         self.current = body;
+    }
+
+    pub(crate) fn begin_while_test(&mut self, name: impl Into<String>) {
+        self.begin_while(name, true.into());
+        let Some(Frame::While { header, .. }) = self.frames.last() else {
+            unreachable!("loop frame")
+        };
+        self.current = *header;
+        self.blocks[self.current].terminator = None;
+    }
+
+    pub(crate) fn finish_while_test(&mut self, condition: ClassicalExpr) -> Result<()> {
+        let Some(&Frame::While { body, exit, .. }) = self.frames.last() else {
+            return Err(misuse("unbalanced control flow in a loop condition"));
+        };
+        self.terminate(Terminator::Branch {
+            condition,
+            then: BlockId::new(body),
+            otherwise: BlockId::new(exit),
+        });
+        self.current = body;
+        Ok(())
     }
 
     /// Open a branch whose body runs when `condition` is truthy.
@@ -245,6 +273,66 @@ impl DynamicProgramBuilder {
             in_else: false,
         });
         self.current = then;
+    }
+
+    pub(crate) fn begin_call(&mut self) {
+        self.reopenable = None;
+        let loop_id = self.blocks[self.current].loop_id;
+        let entry = self.new_block(loop_id);
+        let exit = self.new_block(loop_id);
+        self.terminate(Terminator::Jump(BlockId::new(entry)));
+        self.frames.push(Frame::Call { entry, exit });
+        self.current = entry;
+    }
+
+    pub(crate) fn return_from_call(&mut self) -> Result<()> {
+        let exit = self
+            .frames
+            .iter()
+            .rev()
+            .find_map(|frame| match frame {
+                Frame::Call { exit, .. } => Some(*exit),
+                _ => None,
+            })
+            .ok_or_else(|| misuse("`return` outside a subroutine"))?;
+        self.jump_away(exit);
+        Ok(())
+    }
+
+    /// Return whether a path through the call reaches its end without returning.
+    pub(crate) fn end_call(&mut self) -> Result<bool> {
+        let Some(&Frame::Call { entry, exit }) = self.frames.last() else {
+            return Err(misuse("unbalanced control flow at a subroutine exit"));
+        };
+        let mut visited = vec![false; self.blocks.len() - entry];
+        let mut pending = vec![entry];
+        let mut fallthrough = false;
+        while let Some(at) = pending.pop() {
+            if at == exit || visited[at - entry] {
+                continue;
+            }
+            visited[at - entry] = true;
+            if at == self.current {
+                fallthrough = true;
+                break;
+            }
+            match &self.blocks[at].terminator {
+                Some(Terminator::Jump(next)) => pending.push(next.index()),
+                Some(Terminator::Branch {
+                    condition: ClassicalExpr::Const(value),
+                    then,
+                    otherwise,
+                }) => pending.push(if value.truthy() { then } else { otherwise }.index()),
+                Some(Terminator::Branch {
+                    then, otherwise, ..
+                }) => {
+                    pending.extend([then.index(), otherwise.index()]);
+                }
+                _ => {}
+            }
+        }
+        self.end()?;
+        Ok(fallthrough)
     }
 
     /// Switch the innermost open `if` to its `else` arm, or reopen the `if`
@@ -296,6 +384,11 @@ impl DynamicProgramBuilder {
             .pop()
             .ok_or_else(|| misuse("`end` with no open `while` or `if`"))?;
         match frame {
+            Frame::Call { exit, .. } => {
+                self.terminate(Terminator::Jump(BlockId::new(exit)));
+                self.current = exit;
+                self.reopenable = None;
+            }
             Frame::While { header, exit, .. } => {
                 self.terminate(Terminator::Jump(BlockId::new(header)));
                 self.current = exit;
@@ -361,6 +454,7 @@ impl DynamicProgramBuilder {
                     format!("`while` loop `{}`", self.loop_names[*loop_id])
                 }
                 Frame::If { .. } => "`if`".to_string(),
+                Frame::Call { .. } => "subroutine".to_string(),
             };
             return Err(misuse(format!("{what} is still open at `build`")));
         }
@@ -424,10 +518,14 @@ impl DynamicProgramBuilder {
     }
 
     fn innermost_loop(&self) -> Option<(usize, usize)> {
-        self.frames.iter().rev().find_map(|frame| match frame {
-            Frame::While { header, exit, .. } => Some((*header, *exit)),
-            Frame::If { .. } => None,
-        })
+        self.frames
+            .iter()
+            .rev()
+            .take_while(|frame| !matches!(frame, Frame::Call { .. }))
+            .find_map(|frame| match frame {
+                Frame::While { header, exit, .. } => Some((*header, *exit)),
+                _ => None,
+            })
     }
 
     /// End the current block with a jump and continue in a fresh one, which

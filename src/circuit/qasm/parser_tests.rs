@@ -256,13 +256,7 @@ fn definitions_keep_their_signatures() {
     match one("def sub(qubit a, float t) { rx(t) a; }") {
         StmtKind::DefDef { args, .. } => {
             assert!(matches!(args[0], DefParam::Qubit { .. }));
-            assert!(matches!(
-                args[1],
-                DefParam::Value {
-                    integral: false,
-                    ..
-                }
-            ));
+            assert!(matches!(args[1], DefParam::Value { ty: "float", .. }));
         }
         other => panic!("{other:?}"),
     }

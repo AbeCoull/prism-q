@@ -116,7 +116,7 @@ pub(crate) enum StmtKind<'a> {
     DefDef {
         name: &'a str,
         args: Vec<DefParam<'a>>,
-        result: Option<BitResult<'a>>,
+        result: Option<DefType<'a>>,
         body: Block<'a>,
     },
     /// `return;`, `return measure q;` or `return r;`.
@@ -171,9 +171,9 @@ pub(crate) struct CallAssign<'a> {
     pub args: SmallVec<[Argument<'a>; 1]>,
 }
 
-/// A `def` declared `-> bit` or `-> bit[n]`, the only result type it may have.
 #[derive(Clone, Debug)]
-pub(crate) struct BitResult<'a> {
+pub(crate) struct DefType<'a> {
+    pub ty: &'a str,
     pub width: Option<Expr<'a>>,
 }
 
@@ -406,7 +406,10 @@ pub(crate) struct SwitchArm<'a> {
 
 #[derive(Clone, Debug)]
 pub(crate) enum DefParam<'a> {
-    Qubit(&'a str),
+    Qubit {
+        name: &'a str,
+        width: Option<Expr<'a>>,
+    },
     Value {
         name: &'a str,
         integral: bool,

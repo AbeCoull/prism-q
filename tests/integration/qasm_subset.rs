@@ -277,10 +277,9 @@ fn a_def_needing_more_than_a_guarded_region_declines_by_name() {
             "def mx(qubit a) -> bit { return measure a; }\nmx(q[0]);",
             "drops its `bit` result",
         ),
-        ("def f(qubit a) { return; h a; }", "before the end"),
         (
-            "def f(qubit a, bit b) { if (b) { return; } h a; }",
-            "before the end",
+            "def f(qubit a, bit b) { if (b) { return; } h a; } f(q[0], c[0]);",
+            "measurement-dependent return",
         ),
         (
             "def f(qubit a, bit b) { b = measure a; }",
@@ -296,7 +295,6 @@ fn a_def_needing_more_than_a_guarded_region_declines_by_name() {
         ),
         ("def f(bit b) -> bit { return b; }", "bit parameter"),
         ("def f(qubit a) -> bit { return 1; }", "return of `1`"),
-        ("def f(qubit a) -> int { return 1; }", "returning `int`"),
         (
             "def f(bit b, qubit a) -> bit { bit r; r = measure a; if (b) x a; return r; }\n\
              c[0] = f(c[0], q[0]);",
@@ -328,7 +326,7 @@ fn a_def_needing_more_than_a_guarded_region_declines_by_name() {
         ),
         (
             "def f(qubit a) { return measure a; }",
-            "declares no `-> bit`",
+            "inconsistent with its declared result",
         ),
         (
             "def f(bit[2] b, qubit a) { if (b == 1) x a; }\nf(c[0], q[0]);",

@@ -53,8 +53,9 @@
 //! | Hex / binary literals | `if (c == 0xff) ...` | `0x`, `0b`, `0o` integer prefixes with optional `_` separators |
 //! | Boolean literals | `rx(true * pi) ...` | `true` / `false` evaluate to `1.0` / `0.0` |
 //! | Gate definition | `gate rxx(t) a,b { ... }` | User-defined gates |
-//! | Subroutine definition | `def myg(qubit a, float t) { ... }` | Inlined at the call site. Takes `qubit`, `int`, `float`, `angle`, `duration` and `bit[n]` parameters, a bit parameter being a read-only copy |
-//! | Subroutine result | `def mx(qubit a) -> bit { h a; return measure a; }` then `c[0] = mx(q[0]);` | A `bit` or `bit[n]` result lands on the assigned bits; `return` stands last and returns a measurement or a bit the body declares |
+//! | Subroutine definition | `def myg(qubit[2] a, float t) { ... }` | Inlined at the call site. Takes qubits or fixed-width qubit registers, `int`, `float`, `angle`, `duration` and `bit[n]` parameters, a bit parameter being a read-only copy |
+//! | Subroutine result | `def mx(qubit a) -> bit { h a; return measure a; }` then `c[0] = mx(q[0]);` | A `bit` or `bit[n]` result lands on the assigned bits. Return a measurement directly, or end the body by returning a bit it declares |
+//! | Scalar subroutine result | `def f(int n) -> int[8] { if (n > 0) return n; return 0; }` | `int`, `uint`, `bool`, `float`, `angle` and `duration` results fold at parse time. A return exits enclosing static blocks and loops; scalar calls may appear in initializers, assignments, gate arguments and return expressions |
 //! | Static for loop | `for int i in [0:n] { ... }` | Inclusive ranges, optional step, set form `{a,b,c}` |
 //! | Barrier | `barrier q[0], q[1];` | |
 //! | Line comments | `// comment` | |
@@ -78,9 +79,9 @@
 //!   [`parse_dynamic`] writes them
 //! - `while`, `break` and `continue`, which [`parse_dynamic`] reads into a
 //!   control-flow graph
-//! - a `def` result of any type but `bit`, a call that drops a `bit` result, and
-//!   a `return` anywhere but last in the body: each needs control flow or
-//!   classical storage the instruction list does not have
+//! - a measurement-dependent scalar `def` result or early `return`, a call
+//!   that drops a `bit` result, and a `complex` result: each needs classical
+//!   storage or control flow not yet lowered for subroutines
 //! - a `def` body that measures into anything but the bit it returns, or
 //!   declares a `bit` it does not return
 //! - `ctrl @` on a `def` call: a subroutine is not a gate and the language
@@ -303,17 +304,19 @@ struct GateDefinition<'a> {
 #[derive(Clone)]
 struct DefDefinition<'a> {
     args: Vec<DefParam<'a>>,
-    result: Option<ast::BitResult<'a>>,
+    result: Option<ast::DefType<'a>>,
     /// The bit the body declares and returns, when it returns one by name.
     local: Option<&'a str>,
     body: ast::Block<'a>,
 }
 
-/// Where the `def` being expanded writes its result: the caller's target bits,
-/// empty for a call with none, and the name the body gives them.
+/// Result bindings and the folded value of the `def` being expanded.
 struct DefResult<'a> {
     bits: SmallVec<[usize; 4]>,
     local: Option<&'a str>,
+    ty: Option<ClassicalType>,
+    value: Option<syntax_expr::Expr<'a>>,
+    returned: bool,
 }
 
 /// A `let` alias: the qubits or bits it names, in the order it named them.

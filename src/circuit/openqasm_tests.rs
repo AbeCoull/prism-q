@@ -2278,6 +2278,307 @@ fn def_subroutine_basic_inlines() {
 }
 
 #[test]
+fn def_scalar_results_coerce_at_the_declared_width() {
+    for (signature, value, expected) in [
+        ("int[4]", "9", "-7"),
+        ("uint[4]", "19", "3"),
+        ("bool", "2", "1"),
+        ("float[16]", "1.0001", "1.0"),
+        ("float[32]", "16777217", "16777216.0"),
+        ("angle[3]", "pi / 3", "pi / 4"),
+        ("int", "9007199254740993 - 9007199254740992", "1"),
+    ] {
+        let source = format!(
+            "qubit q; def f() -> {signature} {{ return {value}; }} \
+             float v = f(); rx(v) q;"
+        );
+        let actual = parse(&source).unwrap_or_else(|error| panic!("{signature}: {error}"));
+        let reference = parse(&format!("qubit q; rx({expected}) q;")).unwrap();
+        assert_eq!(
+            format!("{:?}", actual.instructions),
+            format!("{:?}", reference.instructions)
+        );
+    }
+}
+
+#[test]
+fn def_signature_widths_keep_the_declaration_scope() {
+    for (source, reference) in [
+        (
+            "qubit q; const int n = 4;
+             def f() -> uint[n] { return 31; }
+             uint[8] r; for int n in [8:8] { r = f(); } rx(r) q;
+             def caller(int n) -> uint[8] { return f(); }
+             r = caller(8); rx(r) q;",
+            "qubit q; rx(15) q; rx(15) q;",
+        ),
+        (
+            "qubit[2] q; const int n = 2;
+             def f(qubit[n] a) { x a[1]; }
+             for int n in [1:1] { f(q); }",
+            "qubit[2] q; x q[1];",
+        ),
+    ] {
+        let expected = parse(reference).unwrap();
+        let circuit = parse(source).unwrap();
+        let program = parse_dynamic(source).unwrap();
+        for actual in [
+            &circuit,
+            program.static_circuit().expect("static signature"),
+        ] {
+            assert_eq!(
+                format!("{:?}", actual.instructions),
+                format!("{:?}", expected.instructions)
+            );
+        }
+    }
+    let wrong_width = "qubit[2] q; const int n = 2;
+        def f(qubit[n] a) { x a; }
+        for int n in [1:1] { f(q[0]); }";
+    assert!(matches!(parse(wrong_width), Err(PrismError::Parse { .. })));
+    assert!(matches!(
+        parse_dynamic(wrong_width),
+        Err(PrismError::Parse { .. })
+    ));
+}
+
+#[test]
+fn if_singleton_bit_selections_keep_guard_lowering() {
+    for (condition, reference) in [
+        ("c[0:0]", "c[0]"),
+        ("c[{0}]", "c[0]"),
+        ("!c[0:0]", "!c[0]"),
+        ("!c[{0}]", "!c[0]"),
+        ("c[0:0] == 1", "c[0] == 1"),
+        ("c[{0}] != 0", "c[0] != 0"),
+    ] {
+        let source = format!("qubit q; bit[2] c; if ({condition}) x q;");
+        let expected = parse(&format!("qubit q; bit[2] c; if ({reference}) x q;")).unwrap();
+        let circuit = parse(&source).unwrap();
+        let program = parse_dynamic(&source).unwrap();
+        for actual in [&circuit, program.static_circuit().expect("bit guard")] {
+            assert_eq!(
+                format!("{:?}", actual.instructions),
+                format!("{:?}", expected.instructions),
+                "{condition}"
+            );
+        }
+    }
+}
+
+#[test]
+fn def_early_return_stops_nested_blocks_and_loop_iterations() {
+    let circuit = parse(
+        "qubit q;
+         def f(qubit a) -> int {
+             for int i in [0:5] {
+                 if (i == 2) { box { return i; } }
+                 x a;
+             }
+             z a;
+             return 7;
+         }
+         int n = f(q);
+         rx(n) q;",
+    )
+    .unwrap();
+    let reference = parse("qubit q; x q; x q; rx(2) q;").unwrap();
+    assert_eq!(
+        format!("{:?}", circuit.instructions),
+        format!("{:?}", reference.instructions)
+    );
+}
+
+#[test]
+fn def_calls_in_expressions_preserve_order_and_exact_results() {
+    let circuit = parse(
+        "qubit q;
+         def a(qubit t) -> int { x t; return 2; }
+         def b(qubit t) -> int { z t; return 3; }
+         def twice(int n) -> int { return n * 2; }
+         int v = twice(a(q)) + b(q);
+         v += twice(2);
+         rx(v) q;",
+    )
+    .unwrap();
+    let reference = parse("qubit q; x q; z q; rx(11) q;").unwrap();
+    assert_eq!(
+        format!("{:?}", circuit.instructions),
+        format!("{:?}", reference.instructions)
+    );
+}
+
+#[test]
+fn def_void_return_skips_the_remaining_gates_and_keeps_the_caller() {
+    let circuit = parse(
+        "qubit q;
+         def f(qubit a) { x a; return; z a; }
+         f(q); h q;",
+    )
+    .unwrap();
+    let reference = parse("qubit q; x q; h q;").unwrap();
+    assert_eq!(
+        format!("{:?}", circuit.instructions),
+        format!("{:?}", reference.instructions)
+    );
+}
+
+#[test]
+fn def_static_short_circuit_does_not_execute_a_skipped_call() {
+    let circuit = parse(
+        "qubit q;
+         def f(qubit a) -> bool { x a; return true; }
+         bool a = false && f(q);
+         bool b = true || f(q);
+         rx(int(a) + int(b)) q;",
+    )
+    .unwrap();
+    let reference = parse("qubit q; rx(1) q;").unwrap();
+    assert_eq!(
+        format!("{:?}", circuit.instructions),
+        format!("{:?}", reference.instructions)
+    );
+}
+
+#[test]
+fn def_duration_result_keeps_its_units() {
+    parse(
+        "qubit q; def wait() -> duration { return 5ns; }
+         duration d = wait(); delay[d] q;",
+    )
+    .unwrap();
+    assert!(parse("def f() -> duration { return 5; } f();").is_err());
+}
+
+#[test]
+fn def_result_requires_a_return_on_the_taken_path() {
+    let error = parse("def f(int n) -> int { if (n > 0) return n; } int v = f(0);").unwrap_err();
+    assert!(matches!(error, PrismError::Parse { message, .. }
+        if message.contains("reaches its end without a result")));
+}
+
+#[test]
+fn def_scalar_calls_keep_the_static_dynamic_program_fast_path() {
+    let source = "qubit q;
+        def f(int n) -> int { if (n > 1) return n; return 0; }
+        if (f(2)) { rx(f(3)) q; }";
+    let reference = parse(source).unwrap();
+    let dynamic = parse_dynamic(source).unwrap();
+    let circuit = dynamic.static_circuit().expect("no runtime values");
+    assert_eq!(
+        format!("{:?}", reference.instructions),
+        format!("{:?}", circuit.instructions)
+    );
+}
+
+#[test]
+fn def_call_gates_precede_runtime_actions_using_the_result() {
+    let program = parse_dynamic(
+        "qubit q; bit c; h q;
+         def f(qubit a) -> float { h a; return pi; }
+         float t = f(q) + int(c) * 0.0;
+         rz(t) q; c = measure q;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(10)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot == &[false]));
+}
+
+#[test]
+fn def_arguments_read_the_caller_before_parameter_names_are_bound() {
+    let source = "qubit q; int a = 3;
+        def f(int a, int b) -> int { return b; }
+        int v = f(1, a); rx(v) q;";
+    same_instructions(source, "qubit q; rx(3) q;");
+    same_instructions(
+        "qubit[2] q; def f(qubit a) -> int { x a; return 2; }
+         int v = f(q[1]); rx(v) q[0];",
+        "qubit[2] q; x q[1]; rx(2) q[0];",
+    );
+}
+
+#[test]
+fn def_runtime_result_paths_decline_without_folding_measured_bits() {
+    for source in [
+        "qubit q; bit c; def f(bit b) -> int { if (b) return 1; return 0; }
+         c = measure q; int n = f(c);",
+        "qubit q; bit c; def f(bit b) -> int { return int(b); }
+         c = measure q; int n = f(c);",
+        "qubit q; bit c; def f() -> bool { return true; }
+         if (c && f()) x q;",
+    ] {
+        assert!(
+            matches!(
+                parse_dynamic(source),
+                Err(PrismError::UnsupportedConstruct { .. })
+            ),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn def_qubit_register_parameters_preserve_sliced_order() {
+    same_instructions(
+        "qubit[4] q;
+         def f(qubit[2] a, qubit b) { cx a[0], b; x a[1]; }
+         f(q[1:2:3], q[0]);",
+        "qubit[4] q; cx q[1], q[0]; x q[3];",
+    );
+    for source in [
+        "qubit[3] q; def f(qubit[2] a) { h a; } f(q);",
+        "qubit[2] q; def f(qubit[2] a, qubit b) {} f(q, q[0]);",
+        "qubit[2] q; def f(qubit[2] a) {} f(q[{0,0}]);",
+    ] {
+        assert!(
+            matches!(parse(source), Err(PrismError::Parse { .. })),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn def_scalar_results_assign_to_arrays_and_classical_bits() {
+    same_instructions(
+        "qubit q; def f() -> int { return 3; }
+         array[int, 2] a; a[1] = f(); a[0] += f() + 1; rx(a[0] + a[1]) q;",
+        "qubit q; rx(7) q;",
+    );
+    same_instructions(
+        "qubit q; def f() -> float { return pi / 2; }
+         float v = 0; v = sin(f()); rx(v) q;",
+        "qubit q; rx(1) q;",
+    );
+    let program =
+        parse_dynamic("bit[3] c; def f() -> int { return 3; } c = f(); c[2] = f();").unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(10)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot == &[true, true, true]));
+}
+
+#[test]
+fn def_register_result_runs_inside_a_repeat_until_success_loop() {
+    let program = parse_dynamic(
+        "qubit[2] q; bit[2] c = 3;
+         def check(qubit[2] a) -> bit[2] {
+             bit[2] r; reset a; h a; measure a -> r; return r;
+         }
+         while (int(c) != 0) { c = check(q); }",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(100)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| shot == &[false, false]));
+}
+
+#[test]
 fn def_subroutine_with_float_parameter() {
     let qasm = r#"
         OPENQASM 3.0;
@@ -3827,6 +4128,10 @@ fn an_expression_statement_is_evaluated_and_discarded() {
     same_instructions(
         "OPENQASM 3.0;\nqubit[1] q;\nint a = 2;\na == 2;\n(a + 1) * 3;\n-a;\nx q[0];",
         "OPENQASM 3.0;\nqubit[1] q;\nx q[0];",
+    );
+    same_instructions(
+        "qubit q; def f(qubit a) -> int { x a; return 3; } f(q) == 3; h q;",
+        "qubit q; x q; h q;",
     );
     let err = parse(
         "OPENQASM 3.0;\nqubit[1] q;\ndef f(qubit a) -> bit { bit r = measure a; return r; }\n\

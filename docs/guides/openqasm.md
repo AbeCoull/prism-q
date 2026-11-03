@@ -481,10 +481,13 @@ rejected: a physical index and a register offset would give `0` two meanings.
 A `def` is inlined at each call. Beside qubits and classical values it takes `bit`
 and `bit[n]` arguments, passed by value as the language specifies: the body reads the
 caller's bits and may branch on them, but cannot write them.
+Qubit parameters may name fixed-width registers, such as `qubit[2] anc`, including
+slices supplied by the caller. Their order is preserved. Arguments may not overlap
+on a qubit. Signature widths are resolved where the subroutine is declared.
 
 A `-> bit` or `-> bit[n]` result lands on the bits the call is assigned to. The body
-ends with `return measure q;`, or with `return r;` for a bit it declared, which it may
-branch on before returning.
+returns a measurement directly with `return measure q;`, or ends with `return r;`
+for a bit it declared, which it may branch on before returning.
 
 ```qasm
 OPENQASM 3.0;
@@ -509,10 +512,31 @@ fix(c[0], q[2]);
 ```
 
 The call expands to exactly the instructions the inlined body would, so `c[1] =
-herald(q[1], q[2]);` is `c[1] = measure q[1]; if (c[1]) x q[2];`. A form that would
-need more than that declines by name: a result of a type other than `bit`, a call that
-discards its result, a `return` before the end of the body, a measurement into a
-bit parameter or a global register, and a `bit` the body declares without returning.
+herald(q[1], q[2]);` is `c[1] = measure q[1]; if (c[1]) x q[2];`.
+
+Scalar results of type `int`, `uint`, `bool`, `float`, `angle` or `duration` fold at
+parse time. The result is converted to its declared width before the caller reads it.
+Calls may appear in initializers, assignments, gate arguments and return expressions:
+
+```qasm
+qubit q;
+def offset(int n) -> int[8] {
+  if (n > 0) return n;
+  return 0;
+}
+int n = offset(2) + offset(3);
+rx(n) q;
+```
+
+A static `return` exits the subroutine, including any enclosing `for`, `box` or
+conditional body. `return;` exits a subroutine with no result. A scalar result may
+be discarded, and a missing result on the path taken by a call is a `Parse` error.
+
+Forms requiring runtime storage still decline by name: a measurement-dependent
+scalar result or early return, a call that discards a bit result, a measurement into
+a bit parameter or a global register, and a bit the body declares without returning.
+Calls under runtime short-circuit evaluation and calls in measurement-dependent
+conditions also decline. The `complex` result type remains outside the subset.
 
 ## The subset
 
@@ -536,13 +560,13 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |
 | `nop` | Parses; emits nothing | |
 | Casts, `int[8](x)`, `bool(c)` | Parses | A width on `bool`, an integer width outside 1 to 64 bits, a float width other than 16, 32, 64 or 128, or a float cast to `bit`: `Parse` |
-| Expression statements, `a == 2;` | Evaluated and discarded | A call to a `def` inside one: `UnsupportedConstruct` |
+| Expression statements, `a == 2;` | Evaluated and discarded; scalar subroutine calls are inlined | See [Subroutines](#subroutines) for call limits |
 | `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. A condition over classical bits that no bit or register guard spells: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
 | `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present, or a target over classical bits that no register guard spells: `UnsupportedConstruct` |
 | `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
 | `while`, `break`, `continue` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list. `break` or `continue` inside a `for`: `UnsupportedConstruct` |
-| `def` | Inlines its body at the call site, with `bit` parameters and a `bit` result | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width: `Parse` |
-| `return` | Parses as the last statement of a `def` | Anywhere else: `UnsupportedConstruct` |
+| `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results folded at parse time | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, or overlapping qubit arguments: `Parse` |
+| `return` | Exits a `def`, including static branches, blocks and loops | Outside a `def` or under a measurement-dependent branch: `UnsupportedConstruct` |
 | `gate` blocks | Parses; an empty body is the identity | |
 | A gate length, `x[100ns] q;` | Parses; the length is dropped | |
 | `defcalgrammar`, `cal`, `defcal` | Parsed and skipped: a calibration says how a gate is pulsed, not what it does | A call to a gate only a `defcal` names: `UnsupportedConstruct` naming it |

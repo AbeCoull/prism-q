@@ -255,7 +255,7 @@ fn definitions_keep_their_signatures() {
     }
     match one("def sub(qubit a, float t) { rx(t) a; }") {
         StmtKind::DefDef { args, .. } => {
-            assert!(matches!(args[0], DefParam::Qubit(_)));
+            assert!(matches!(args[0], DefParam::Qubit { .. }));
             assert!(matches!(
                 args[1],
                 DefParam::Value {
@@ -283,8 +283,11 @@ fn definitions_keep_their_signatures() {
         other => panic!("{other:?}"),
     }
     assert!(matches!(
-        error("def sub(qubit a) -> int { return 1; }"),
-        PrismError::UnsupportedConstruct { .. }
+        one("def sub(qubit a) -> int { return 1; }"),
+        StmtKind::DefDef {
+            result: Some(DefType { ty: "int", .. }),
+            ..
+        }
     ));
     assert!(matches!(
         one("c[0] = sub(c[1], q[0]);"),

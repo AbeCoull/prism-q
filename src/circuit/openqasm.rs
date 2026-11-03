@@ -53,9 +53,9 @@
 //! | Hex / binary literals | `if (c == 0xff) ...` | `0x`, `0b`, `0o` integer prefixes with optional `_` separators |
 //! | Boolean literals | `rx(true * pi) ...` | `true` / `false` evaluate to `1.0` / `0.0` |
 //! | Gate definition | `gate rxx(t) a,b { ... }` | User-defined gates |
-//! | Subroutine definition | `def myg(qubit[2] a, float t) { ... }` | Inlined at the call site. Takes qubits or fixed-width qubit registers, `int`, `float`, `angle`, `duration` and `bit[n]` parameters, a bit parameter being a read-only copy |
-//! | Subroutine result | `def mx(qubit a) -> bit { h a; return measure a; }` then `c[0] = mx(q[0]);` | A `bit` or `bit[n]` result lands on the assigned bits. Return a measurement directly, or end the body by returning a bit it declares |
-//! | Scalar subroutine result | `def f(int n) -> int[8] { if (n > 0) return n; return 0; }` | `int`, `uint`, `bool`, `float`, `angle` and `duration` results fold at parse time. A return exits enclosing static blocks and loops; scalar calls may appear in initializers, assignments, gate arguments and return expressions |
+//! | Subroutine definition | `def myg(qubit[2] a, float t) { ... }` | Inlined at the call site. Takes qubits or fixed-width qubit registers and classical values by value, with declared-width coercion. `parse_dynamic` permits classical writes to copied bit parameters |
+//! | Subroutine result | `def mx(qubit a) -> bit { h a; return measure a; }` then `c[0] = mx(q[0]);` | A `bit` or `bit[n]` result lands on the assigned bits. Return a measurement or a local bit; `parse_dynamic` also accepts computed bit values |
+//! | Scalar subroutine result | `def f(int n) -> int[8] { if (n > 0) return n; return 0; }` | Results fold at parse time when known; `parse_dynamic` supports runtime numerical results and early returns. Calls may appear in expressions, branches and loop tests. Durations remain static |
 //! | Static for loop | `for int i in [0:n] { ... }` | Inclusive ranges, optional step, set form `{a,b,c}` |
 //! | Barrier | `barrier q[0], q[1];` | |
 //! | Line comments | `// comment` | |
@@ -79,9 +79,10 @@
 //!   [`parse_dynamic`] writes them
 //! - `while`, `break` and `continue`, which [`parse_dynamic`] reads into a
 //!   control-flow graph
-//! - a measurement-dependent scalar `def` result or early `return`, a call
-//!   that drops a `bit` result, and a `complex` result: each needs classical
-//!   storage or control flow not yet lowered for subroutines
+//! - a measurement-dependent scalar `def` result or early `return` under
+//!   `parse`; `parse_dynamic` lowers these into the graph
+//! - a dropped `bit` result, a `complex` result, a runtime duration or a
+//!   fixed-width runtime angle in a subroutine, and modifiers on a runtime call
 //! - a `def` body that measures into anything but the bit it returns, or
 //!   declares a `bit` it does not return
 //! - `ctrl @` on a `def` call: a subroutine is not a gate and the language
@@ -305,6 +306,8 @@ struct GateDefinition<'a> {
 struct DefDefinition<'a> {
     args: Vec<DefParam<'a>>,
     result: Option<ast::DefType<'a>>,
+    constants: Rc<HashMap<&'a str, ClassicalDecl>>,
+    arrays: HashMap<&'a str, Rc<ClassicalArray>>,
     /// The bit the body declares and returns, when it returns one by name.
     local: Option<&'a str>,
     body: ast::Block<'a>,
@@ -317,6 +320,8 @@ struct DefResult<'a> {
     ty: Option<ClassicalType>,
     value: Option<syntax_expr::Expr<'a>>,
     returned: bool,
+    runtime: bool,
+    result_var: Option<crate::circuit::dynamic::VarId>,
 }
 
 /// A `let` alias: the qubits or bits it names, in the order it named them.
@@ -367,6 +372,13 @@ impl ClassicalType {
 struct ClassicalDecl {
     ty: ClassicalType,
     constant: bool,
+    value: Option<ConstValue>,
+}
+
+#[derive(Clone, Copy)]
+enum ConstValue {
+    Number(ClassicalValue),
+    Duration(Timed),
 }
 
 /// A classical array, its elements folded at parse time like any classical
@@ -619,7 +631,12 @@ impl<'a> Parser<'a> {
         value: ClassicalValue,
         constant: bool,
     ) {
-        let decl = ClassicalDecl { ty, constant };
+        let value = ty.store(value);
+        let decl = ClassicalDecl {
+            ty,
+            constant,
+            value: constant.then_some(ConstValue::Number(value)),
+        };
         if Rc::make_mut(&mut self.classical)
             .insert(name, decl)
             .is_none()
@@ -628,7 +645,7 @@ impl<'a> Parser<'a> {
         }
         self.param_vars
             .get_or_insert_with(HashMap::new)
-            .insert(name, ty.store(value));
+            .insert(name, value);
     }
 
     fn reject_redeclaration(&self, name: &str, line_num: usize) -> Result<()> {

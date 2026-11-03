@@ -478,9 +478,9 @@ rejected: a physical index and a register offset would give `0` two meanings.
 
 ## Subroutines
 
-A `def` is inlined at each call. Beside qubits and classical values it takes `bit`
-and `bit[n]` arguments, passed by value as the language specifies: the body reads the
-caller's bits and may branch on them, but cannot write them.
+A `def` is inlined at each call. Classical arguments, including `bit` and `bit[n]`,
+are passed by value. Under `parse`, a bit parameter can be read but cannot be
+written. Under `parse_dynamic`, classical assignments update a copy of the argument.
 Qubit parameters may name fixed-width registers, such as `qubit[2] anc`, including
 slices supplied by the caller. Their order is preserved. Arguments may not overlap
 on a qubit. Signature widths are resolved where the subroutine is declared.
@@ -488,6 +488,9 @@ on a qubit. Signature widths are resolved where the subroutine is declared.
 A `-> bit` or `-> bit[n]` result lands on the bits the call is assigned to. The body
 returns a measurement directly with `return measure q;`, or ends with `return r;`
 for a bit it declared, which it may branch on before returning.
+`parse_dynamic` also supports returning a computed bit value or a bit parameter.
+A returned local bit that needs a classical initializer uses `parse_dynamic`, which
+initializes it on every call, after copying the arguments.
 
 ```qasm
 OPENQASM 3.0;
@@ -515,7 +518,9 @@ The call expands to exactly the instructions the inlined body would, so `c[1] =
 herald(q[1], q[2]);` is `c[1] = measure q[1]; if (c[1]) x q[2];`.
 
 Scalar results of type `int`, `uint`, `bool`, `float`, `angle` or `duration` fold at
-parse time. The result is converted to its declared width before the caller reads it.
+parse time when their values are known. Arguments and results are converted to their
+declared widths before use. The body sees global constants from its declaration
+scope, not variables or registers belonging to the caller.
 Calls may appear in initializers, assignments, gate arguments and return expressions:
 
 ```qasm
@@ -528,15 +533,34 @@ int n = offset(2) + offset(3);
 rx(n) q;
 ```
 
-A static `return` exits the subroutine, including any enclosing `for`, `box` or
-conditional body. `return;` exits a subroutine with no result. A scalar result may
-be discarded, and a missing result on the path taken by a call is a `Parse` error.
+A `return` exits the subroutine, including any enclosing loop, `box` or conditional
+body. `return;` exits a subroutine with no result. A scalar result may be discarded.
+Under `parse`, the path taken by a call must return its declared result. Under
+`parse_dynamic`, every reachable path through the call must do so. A missing result
+is a `Parse` error.
 
-Forms requiring runtime storage still decline by name: a measurement-dependent
-scalar result or early return, a call that discards a bit result, a measurement into
-a bit parameter or a global register, and a bit the body declares without returning.
-Calls under runtime short-circuit evaluation and calls in measurement-dependent
-conditions also decline. The `complex` result type remains outside the subset.
+Under `parse_dynamic`, numerical results and scalar locals may depend on measured
+bits. Nested calls keep their own arguments and results. Calls in `while` conditions
+run at each test; calls on the right of `&&` or `||` run only when needed.
+
+```qasm
+qubit q;
+bit[2] c;
+def decode(bit b) -> int {
+  if (b) return 1;
+  return 0;
+}
+h q;
+c[0] = measure q;
+int correction = decode(c[0]);
+rx(correction * pi) q;
+c[1] = measure q;
+```
+
+Forms requiring private measurement storage still decline by name: a call that
+discards a bit result, a measurement into a bit parameter, and a bit the body declares
+without returning. Runtime duration and fixed-width angle values in subroutines,
+modifiers on runtime calls, and the `complex` result type also decline.
 
 ## The subset
 
@@ -565,8 +589,8 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present, or a target over classical bits that no register guard spells: `UnsupportedConstruct` |
 | `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
 | `while`, `break`, `continue` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list. `break` or `continue` inside a `for`: `UnsupportedConstruct` |
-| `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results folded at parse time | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, or overlapping qubit arguments: `Parse` |
-| `return` | Exits a `def`, including static branches, blocks and loops | Outside a `def` or under a measurement-dependent branch: `UnsupportedConstruct` |
+| `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results; `parse_dynamic` supports runtime numerical results | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, overlapping qubit arguments, or a missing result: `Parse` |
+| `return` | Exits a `def`, including nested branches and loops | Outside a `def`: `UnsupportedConstruct`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
 | `gate` blocks | Parses; an empty body is the identity | |
 | A gate length, `x[100ns] q;` | Parses; the length is dropped | |
 | `defcalgrammar`, `cal`, `defcal` | Parsed and skipped: a calibration says how a gate is pulsed, not what it does | A call to a gate only a `defcal` names: `UnsupportedConstruct` naming it |
@@ -586,9 +610,10 @@ and a whole-number `pow` past one million repetitions, which returns `Parse` nam
 count instead.
 
 Gate calls, loops and repetitions multiply, so one parse also stops with `Parse` once it
-expands past 2^24 units of work: an emitted instruction, one per qubit for a runtime
-rotation, or a statement or loop pass that emits none. A `pow` repetition is checked
-against the same bound before it is built.
+expands past 2^24 units of work: an emitted instruction or classical write, one per
+qubit for a runtime rotation, or a statement or loop pass that emits none. Subroutine
+argument binding and copying its constant environment also count. A `pow` repetition
+is checked against the same bound before it is built.
 
 Every decline above happens at parse time, so a program that parses is one the IR can
 hold. The backend it then runs on may still decline the circuit; those limits are on the

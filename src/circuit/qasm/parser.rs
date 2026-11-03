@@ -166,6 +166,12 @@ fn opens_expression(stream: &Stream<'_, '_>) -> bool {
         Kind::Ident => {}
         _ => return false,
     }
+    if matches!(
+        stream.peek().text,
+        "return" | "if" | "while" | "for" | "switch" | "box"
+    ) {
+        return false;
+    }
     let mut ahead = 1;
     while matches!(stream.peek_at(ahead).kind, Kind::LParen | Kind::LBracket) {
         let mut depth = 0usize;
@@ -829,13 +835,10 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
                 name: arg_name,
                 width,
             },
-            "int" | "uint" => DefParam::Value {
+            "int" | "uint" | "bool" | "float" | "angle" | "complex" => DefParam::Value {
                 name: arg_name,
-                integral: true,
-            },
-            "float" | "angle" | "complex" => DefParam::Value {
-                name: arg_name,
-                integral: false,
+                ty,
+                width,
             },
             "duration" | "stretch" => DefParam::Duration(arg_name),
             "bit" => DefParam::Bit {

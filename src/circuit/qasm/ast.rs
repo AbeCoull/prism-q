@@ -412,7 +412,8 @@ pub(crate) enum DefParam<'a> {
     },
     Value {
         name: &'a str,
-        integral: bool,
+        ty: &'a str,
+        width: Option<Expr<'a>>,
     },
     /// A `duration` or `stretch` parameter.
     Duration(&'a str),

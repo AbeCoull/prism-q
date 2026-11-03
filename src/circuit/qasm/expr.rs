@@ -138,6 +138,7 @@ pub(crate) enum Expr<'a> {
     /// A literal, or a value already folded into the tree. An integer literal
     /// stays an exact integer.
     Number(ClassicalValue),
+    Runtime(dynamic::VarId),
     Duration(Duration),
     Ident(&'a str),
     Negate(Box<Expr<'a>>),
@@ -303,7 +304,7 @@ impl<'a> Expr<'a> {
     /// on an `input` slot.
     pub(crate) fn mentions(&self, name: &str) -> bool {
         with_stack(|| match self {
-            Expr::Number(_) | Expr::Duration(_) => false,
+            Expr::Number(_) | Expr::Duration(_) | Expr::Runtime(_) => false,
             Expr::Ident(ident) => *ident == name,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.mentions(name),
             Expr::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
@@ -318,7 +319,7 @@ impl<'a> Expr<'a> {
     /// The first function the expression calls that `wanted` picks out.
     pub(crate) fn finds_call(&self, wanted: &impl Fn(&str) -> bool) -> Option<&'a str> {
         with_stack(|| match self {
-            Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) => None,
+            Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) | Expr::Runtime(_) => None,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => {
                 inner.finds_call(wanted)
             }
@@ -338,7 +339,7 @@ impl<'a> Expr<'a> {
     /// True when the expression reads an array element.
     pub(crate) fn reads_element(&self) -> bool {
         with_stack(|| match self {
-            Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) => false,
+            Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) | Expr::Runtime(_) => false,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.reads_element(),
             Expr::Binary { left, right, .. } => left.reads_element() || right.reads_element(),
             Expr::Call(call) => call.args.iter().any(Expr::reads_element),
@@ -360,6 +361,7 @@ impl<'a> Expr<'a> {
 impl fmt::Display for Expr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Expr::Runtime(var) => write!(f, "runtime value {}", var.index()),
             Expr::Number(ClassicalValue::Int(value)) => write!(f, "{value}"),
             Expr::Number(ClassicalValue::Float(value)) => write!(f, "{value}"),
             Expr::Number(ClassicalValue::Bool(value)) => write!(f, "{value}"),
@@ -788,6 +790,10 @@ fn evaluate(
     vars: Option<&HashMap<&str, ClassicalValue>>,
 ) -> Result<ClassicalValue> {
     with_stack(|| match expr {
+        Expr::Runtime(_) => Err(PrismError::UnsupportedConstruct {
+            construct: "a runtime subroutine value where a constant belongs".to_string(),
+            line,
+        }),
         Expr::Number(value) => Ok(*value),
         Expr::Duration(_) => Err(PrismError::Parse {
             line,
@@ -915,7 +921,7 @@ fn integral(op: &str, value: ClassicalValue, line: usize) -> Result<ClassicalVal
 /// True when the expression reads a duration: a literal, or a name `times` holds.
 pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
     with_stack(|| match expr {
-        Expr::Number(_) => false,
+        Expr::Number(_) | Expr::Runtime(_) => false,
         Expr::Duration(_) => true,
         Expr::Ident(name) => times.contains_key(name),
         Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => is_timed(inner, times),
@@ -973,6 +979,10 @@ pub(crate) fn eval_timed(
             message: format!("`{expr}` casts a duration to `{}`", cast.ty.spelling()),
         }),
         Expr::Number(value) => Ok(Timed::Number(value.to_float())),
+        Expr::Runtime(_) => Err(PrismError::UnsupportedConstruct {
+            construct: "a runtime value in a duration expression".to_string(),
+            line,
+        }),
     }
 }
 

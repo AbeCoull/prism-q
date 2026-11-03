@@ -4,7 +4,8 @@
 //! holds, so a `for` body or a `gate` body is parsed once and run against
 //! fresh bindings rather than rewritten and reparsed.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 use crate::circuit::dynamic::ClassicalExpr;
@@ -451,6 +452,13 @@ impl<'a> Parser<'a> {
                 }
                 self.noise_specs.push((base - 1, spec));
             }
+            if self
+                .def_result
+                .as_ref()
+                .is_some_and(|result| result.returned)
+            {
+                break;
+            }
             if self.streaming() {
                 let produced = std::mem::take(&mut instructions);
                 self.flush(produced);
@@ -483,16 +491,8 @@ impl<'a> Parser<'a> {
         match &stmt.kind {
             StmtKind::Empty | StmtKind::Include => Ok(()),
             StmtKind::Expr(value) => {
-                match value.finds_call(&|name| self.def_defs.contains_key(name)) {
-                    Some(def) => Err(PrismError::UnsupportedConstruct {
-                        construct: format!(
-                            "a call to def `{def}` inside an expression, whose result \
-                             nothing yet carries"
-                        ),
-                        line,
-                    }),
-                    None => Ok(()),
-                }
+                self.resolve_calls(value, line, out)?;
+                Ok(())
             }
             StmtKind::Version(version) => {
                 Self::check_version_number(version, line)?;
@@ -576,6 +576,10 @@ impl<'a> Parser<'a> {
                 name,
                 value,
             } => {
+                let value = value
+                    .as_ref()
+                    .map(|value| self.resolve_calls(value, line, out))
+                    .transpose()?;
                 if self.is_runtime_decl(stmt) {
                     return self.declare_runtime(
                         *constant,
@@ -590,15 +594,17 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             StmtKind::Assign { target, op, value } if self.is_bit_name(target) => {
+                let value = self.resolve_calls(value, line, out)?;
                 let target = Operand {
                     name: OperandName::Register(target),
                     index: None,
                     line,
                 };
-                self.assign_bits(&target, *op, value, line)
+                self.assign_bits(&target, *op, &value, line)
             }
             StmtKind::Assign { target, op, value } => {
-                self.assign_classical(target, *op, value, line)?;
+                let value = self.resolve_calls(value, line, out)?;
+                self.assign_classical(target, *op, &value, line)?;
                 Ok(())
             }
             StmtKind::Alias { name, sources } => {
@@ -732,19 +738,7 @@ impl<'a> Parser<'a> {
                 self.declare_def(name, args, result.as_ref(), body, line)?;
                 Ok(())
             }
-            StmtKind::Return(value) => {
-                let Some(result) = &self.def_result else {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: "`return` outside a def".to_string(),
-                        line,
-                    });
-                };
-                if let Some(ast::ReturnValue::Measure(source)) = value {
-                    let qubits = self.qubits_of(source)?;
-                    out.extend(Self::build_measurements(qubits, result.bits.clone(), line)?);
-                }
-                Ok(())
-            }
+            StmtKind::Return(value) => self.exec_return(value.as_ref(), line, out),
             StmtKind::CallAssign(assign) => with_stack(|| self.exec_call_assign(assign, line, out)),
             StmtKind::ArrayDecl(decl) if self.is_runtime_decl(stmt) => {
                 Err(PrismError::UnsupportedConstruct {
@@ -757,6 +751,7 @@ impl<'a> Parser<'a> {
             }
             StmtKind::ArrayDecl(decl) => self.declare_array(decl, line),
             StmtKind::ElementAssign(assign) if self.is_bit_name(assign.array) => {
+                let value = self.resolve_calls(&assign.value, line, out)?;
                 let [index] = assign.indices.as_slice() else {
                     return Err(parse_error(
                         line,
@@ -768,9 +763,13 @@ impl<'a> Parser<'a> {
                     index: Some(Index::Single(index.clone())),
                     line,
                 };
-                self.assign_bits(&target, assign.op, &assign.value, line)
+                self.assign_bits(&target, assign.op, &value, line)
             }
-            StmtKind::ElementAssign(assign) => self.assign_element(assign, line),
+            StmtKind::ElementAssign(assign) => {
+                let mut resolved = assign.as_ref().clone();
+                resolved.value = self.resolve_calls(&assign.value, line, out)?;
+                self.assign_element(&resolved, line)
+            }
             StmtKind::Box { duration, body } => {
                 // A box and Braket's verbatim pragma both direct a scheduler or
                 // a device compiler, which a simulator has nothing to honour.
@@ -860,16 +859,8 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn declare_classical(
-        &mut self,
-        constant: bool,
-        ty: &str,
-        width: Option<&Expr<'a>>,
-        name: &'a str,
-        value: Option<&Expr<'a>>,
-        line: usize,
-    ) -> Result<()> {
-        let kind = match ty {
+    fn classical_type(&self, ty: &str, width: Option<&Expr>, line: usize) -> Result<ClassicalType> {
+        Ok(match ty {
             "int" | "uint" => ClassicalType::Int(self.runtime_type(ty, width, line)?),
             "bool" => ClassicalType::Bool,
             "float" | "angle" => self.real_type(ty, width, line)?,
@@ -881,7 +872,19 @@ impl<'a> Parser<'a> {
                     line,
                 });
             }
-        };
+        })
+    }
+
+    fn declare_classical(
+        &mut self,
+        constant: bool,
+        ty: &str,
+        width: Option<&Expr<'a>>,
+        name: &'a str,
+        value: Option<&Expr<'a>>,
+        line: usize,
+    ) -> Result<()> {
+        let kind = self.classical_type(ty, width, line)?;
         self.reject_redeclaration(name, line)?;
         let Some(value) = value else {
             if constant {
@@ -1240,21 +1243,43 @@ impl<'a> Parser<'a> {
         &mut self,
         name: &'a str,
         args: &[DefParam<'a>],
-        result: Option<&ast::BitResult<'a>>,
+        result: Option<&ast::DefType<'a>>,
         body: &Block<'a>,
         line: usize,
     ) -> Result<()> {
+        let mut args = args.to_vec();
+        // Freeze signature widths before a caller can shadow their bindings.
+        for param in &mut args {
+            if let DefParam::Qubit {
+                width: Some(width), ..
+            }
+            | DefParam::Bit {
+                width: Some(width), ..
+            } = param
+            {
+                let value = i128::from(self.integer_of(width, line)?);
+                *width = Expr::Number(ClassicalValue::Int(value));
+            }
+        }
+        let mut result = result.cloned();
+        if let Some(width) = result.as_mut().and_then(|result| result.width.as_mut()) {
+            let value = i128::from(self.integer_of(width, line)?);
+            *width = Expr::Number(ClassicalValue::Int(value));
+        }
+        if let Some(result) = result.as_ref().filter(|result| result.ty != "bit") {
+            self.classical_type(result.ty, result.width.as_ref(), line)?;
+        }
         let Some((last, rest)) = body.split_last() else {
             if result.is_some() {
                 return Err(parse_error(
                     line,
-                    format!("def `{name}` declares a `bit` result but its body is empty"),
+                    format!("def `{name}` declares a result but its body is empty"),
                 ));
             }
             Rc::make_mut(&mut self.def_defs).insert(
                 name,
                 DefDefinition {
-                    args: args.to_vec(),
+                    args,
                     result: None,
                     local: None,
                     body: Block::new(),
@@ -1262,33 +1287,269 @@ impl<'a> Parser<'a> {
             );
             return Ok(());
         };
-        // A `return` anywhere but last decides at run time whether the rest of
-        // the body runs, which no guarded region can say.
         let early = return_line(rest).or_else(|| match last.kind {
             StmtKind::Return(_) => None,
             _ => return_line(std::slice::from_ref(last)),
         });
-        if let Some(at) = early {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
-                    "`return` before the end of def `{name}`, which needs control flow \
-                     beyond a guarded region"
-                ),
-                line: at,
-            });
-        }
-        let local = Self::def_result_local(name, args, result.is_some(), last, rest)?;
-        Self::check_def_writes(name, args, local, body, true)?;
+        let local = if result.as_ref().is_some_and(|result| result.ty == "bit") && early.is_none() {
+            Self::def_result_local(name, &args, true, last, rest)?
+        } else {
+            Self::check_returns(name, result.as_ref(), body)?;
+            if result.is_some() && return_line(body).is_none() {
+                return Err(parse_error(
+                    line,
+                    format!("def `{name}` declares a result but does not end by returning one"),
+                ));
+            }
+            None
+        };
+        Self::check_def_writes(name, &args, local, body, true)?;
         Rc::make_mut(&mut self.def_defs).insert(
             name,
             DefDefinition {
-                args: args.to_vec(),
-                result: result.cloned(),
+                args,
+                result,
                 local,
                 body: body.clone(),
             },
         );
         Ok(())
+    }
+
+    fn check_returns(name: &str, result: Option<&ast::DefType>, body: &[Stmt]) -> Result<()> {
+        with_stack(|| {
+            for stmt in body {
+                match &stmt.kind {
+                    StmtKind::Return(value) if value.is_some() != result.is_some() => {
+                        return Err(parse_error(
+                            stmt.line,
+                            format!(
+                                "def `{name}` returns a value inconsistent with its declared result"
+                            ),
+                        ));
+                    }
+                    StmtKind::If(branch) => {
+                        Self::check_returns(name, result, &branch.then_body)?;
+                        if let Some(body) = &branch.else_body {
+                            Self::check_returns(name, result, body)?;
+                        }
+                    }
+                    StmtKind::For { body, .. }
+                    | StmtKind::While { body, .. }
+                    | StmtKind::Box { body, .. } => Self::check_returns(name, result, body)?,
+                    StmtKind::Switch { arms, .. } => {
+                        for arm in arms {
+                            Self::check_returns(name, result, &arm.body)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn exec_return(
+        &mut self,
+        value: Option<&ast::ReturnValue<'a>>,
+        line: usize,
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
+        let Some(frame) = &self.def_result else {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "`return` outside a def".to_string(),
+                line,
+            });
+        };
+        if self.guard.is_some() {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "a measurement-dependent return from a def".to_string(),
+                line,
+            });
+        }
+        let ty = frame.ty;
+        let returned = match (value, ty) {
+            (Some(ast::ReturnValue::Measure(source)), ty) => {
+                if ty.is_some() {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: "a measurement returned as a classical scalar".to_string(),
+                        line,
+                    });
+                }
+                let qubits = self.qubits_of(source)?;
+                out.extend(Self::build_measurements(qubits, frame.bits.clone(), line)?);
+                None
+            }
+            (Some(ast::ReturnValue::Value(value)), Some(ty)) => {
+                let value = self.resolve_calls(value, line, out)?;
+                if ty != ClassicalType::Duration
+                    && self
+                        .lower_expr(&value, line)
+                        .is_ok_and(|value| !matches!(value, ClassicalExpr::Const(_)))
+                {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: "a measurement-dependent scalar returned from a def".to_string(),
+                        line,
+                    });
+                }
+                Some(if ty == ClassicalType::Duration {
+                    match self.duration_of(&value, line)? {
+                        Timed::Duration(duration) => Expr::Duration(duration),
+                        Timed::Stretch => {
+                            return Err(PrismError::UnsupportedConstruct {
+                                construct: "a stretch returned as a duration".to_string(),
+                                line,
+                            });
+                        }
+                        Timed::Number(_) => unreachable!("duration_of rejects numbers"),
+                    }
+                } else {
+                    Expr::Number(ty.store(self.fold_typed(ty, &value, line)?))
+                })
+            }
+            (Some(ast::ReturnValue::Value(value)), None) if frame.local.is_none() => {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!("return of `{value}` as a bit without a classical move"),
+                    line,
+                });
+            }
+            _ => None,
+        };
+        let frame = self.def_result.as_mut().expect("checked above");
+        frame.value = returned;
+        frame.returned = true;
+        Ok(())
+    }
+
+    pub(super) fn resolve_calls(
+        &mut self,
+        expr: &Expr<'a>,
+        line: usize,
+        out: &mut Vec<Instruction>,
+    ) -> Result<Expr<'a>> {
+        with_stack(|| {
+            Ok(match expr {
+                Expr::Call(call) => {
+                    let args = call
+                        .args
+                        .iter()
+                        .map(|arg| self.resolve_calls(arg, line, out))
+                        .collect::<Result<Vec<_>>>()?;
+                    if self.def_defs.contains_key(call.name) {
+                        let args = args
+                            .into_iter()
+                            .map(|arg| match arg {
+                                Expr::Element(element) if element.indices.len() == 1 => {
+                                    Argument::Operand(Operand {
+                                        name: OperandName::Register(element.array),
+                                        index: Some(Index::Single(element.indices[0].clone())),
+                                        line,
+                                    })
+                                }
+                                value => Argument::Value(value),
+                            })
+                            .collect::<Vec<_>>();
+                        let (instructions, value) =
+                            self.expand_def(call.name, &args, None, line)?;
+                        out.extend(instructions);
+                        if self.streaming() {
+                            self.flush(std::mem::take(out));
+                        }
+                        value.ok_or_else(|| {
+                            parse_error(
+                                line,
+                                format!(
+                                    "def `{}` has no scalar result for this expression",
+                                    call.name
+                                ),
+                            )
+                        })?
+                    } else {
+                        Expr::Call(Box::new(syntax_expr::Call {
+                            name: call.name,
+                            args,
+                        }))
+                    }
+                }
+                Expr::Binary { op, left, right } => {
+                    let left = self.resolve_calls(left, line, out)?;
+                    if matches!(op, syntax_expr::BinaryOp::And | syntax_expr::BinaryOp::Or) {
+                        match self.typed_of(&left, line) {
+                            Ok(value) if value.truthy() == (*op == syntax_expr::BinaryOp::Or) => {
+                                return Ok(Expr::Number(ClassicalValue::Bool(value.truthy())));
+                            }
+                            Err(_)
+                                if right
+                                    .finds_call(&|name| self.def_defs.contains_key(name))
+                                    .is_some() =>
+                            {
+                                return Err(PrismError::UnsupportedConstruct {
+                                    construct: "a def call under runtime short-circuit evaluation"
+                                        .to_string(),
+                                    line,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    Expr::Binary {
+                        op: *op,
+                        left: Box::new(left),
+                        right: Box::new(self.resolve_calls(right, line, out)?),
+                    }
+                }
+                Expr::Negate(inner) => {
+                    Expr::Negate(Box::new(self.resolve_calls(inner, line, out)?))
+                }
+                Expr::Not(inner) => Expr::Not(Box::new(self.resolve_calls(inner, line, out)?)),
+                Expr::BitNot(inner) => {
+                    Expr::BitNot(Box::new(self.resolve_calls(inner, line, out)?))
+                }
+                Expr::Cast(cast) => Expr::Cast(Box::new(syntax_expr::Cast {
+                    ty: cast.ty,
+                    width: cast.width.clone(),
+                    value: self.resolve_calls(&cast.value, line, out)?,
+                })),
+                Expr::Element(element) => Expr::Element(Box::new(syntax_expr::Element {
+                    array: element.array,
+                    indices: element
+                        .indices
+                        .iter()
+                        .map(|index| self.resolve_calls(index, line, out))
+                        .collect::<Result<_>>()?,
+                })),
+                _ => expr.clone(),
+            })
+        })
+    }
+
+    fn resolve_arguments<'p>(
+        &mut self,
+        args: &'p [Argument<'a>],
+        line: usize,
+        out: &mut Vec<Instruction>,
+    ) -> Result<Cow<'p, [Argument<'a>]>> {
+        if self.def_defs.is_empty()
+            || !args.iter().any(|arg| {
+                matches!(
+                    arg, Argument::Value(value)
+                        if value.finds_call(&|name| self.def_defs.contains_key(name)).is_some()
+                )
+            })
+        {
+            return Ok(Cow::Borrowed(args));
+        }
+        args.iter()
+            .map(|arg| {
+                Ok(match arg {
+                    Argument::Value(value) => {
+                        Argument::Value(self.resolve_calls(value, line, out)?)
+                    }
+                    Argument::Operand(_) => arg.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Cow::Owned)
     }
 
     /// The bit a `def` body declares and returns by name, after checking that
@@ -1672,18 +1933,20 @@ impl<'a> Parser<'a> {
         &mut self,
         modifiers: &[ast::Modifier],
         name: &str,
-        params: &[Argument],
+        params: &[Argument<'a>],
         operands: &[Operand],
         line: usize,
         out: &mut Vec<Instruction>,
     ) -> Result<()> {
+        let resolved = self.resolve_arguments(params, line, out)?;
+        let params = resolved.as_ref();
         if self.dynamic.is_some() && params.iter().any(|param| self.argument_is_runtime(param)) {
             return self.exec_runtime_rotation(modifiers, name, params, operands, line, out);
         }
         let modifiers = self.fold_modifiers(modifiers, line)?;
 
         if self.def_defs.contains_key(name) {
-            let instrs = self.expand_def(name, params, None, line)?;
+            let (instrs, _) = self.expand_def(name, params, None, line)?;
             out.extend(Self::modify_expansion(instrs, &modifiers, name, line)?);
             return Ok(());
         }
@@ -2030,17 +2293,46 @@ impl<'a> Parser<'a> {
         Ok(Some(sub.execute(&def.body)?))
     }
 
-    /// `target = f(...);`: a `def` call whose `bit` result lands on `target`,
-    /// or a builtin on the right of a classical assignment.
+    /// Assign a subroutine result or a builtin value to the caller's target.
     fn exec_call_assign(
         &mut self,
         assign: &ast::CallAssign<'a>,
         line: usize,
         out: &mut Vec<Instruction>,
     ) -> Result<()> {
-        if self.def_defs.contains_key(assign.name) {
+        let args = self.resolve_arguments(&assign.args, line, out)?;
+        if let Some(def) = self.def_defs.get(assign.name) {
+            if def.result.as_ref().is_some_and(|result| result.ty != "bit") {
+                let (instructions, value) = self.expand_def(assign.name, &args, None, line)?;
+                out.extend(instructions);
+                if self.streaming() {
+                    self.flush(std::mem::take(out));
+                }
+                let value = value.expect("typed result");
+                let target = assign
+                    .target
+                    .register()
+                    .ok_or_else(|| parse_error(line, "a scalar result needs a classical target"))?;
+                if self.is_bit_name(target) {
+                    return self.assign_bits(&assign.target, None, &value, line);
+                }
+                return match &assign.target.index {
+                    None => self.assign_classical(target, None, &value, line),
+                    Some(Index::Single(index)) => self.assign_element(
+                        &ast::ElementAssign {
+                            array: target,
+                            indices: vec![index.clone()],
+                            op: None,
+                            value,
+                        },
+                        line,
+                    ),
+                    _ => Err(parse_error(line, "a scalar result needs one array element")),
+                };
+            }
             let bits = self.bits_of(&assign.target)?;
-            out.extend(self.expand_def(assign.name, &assign.args, Some(&bits), line)?);
+            let (instructions, _) = self.expand_def(assign.name, &args, Some(&bits), line)?;
+            out.extend(instructions);
             return Ok(());
         }
         let Some(target) = assign
@@ -2056,8 +2348,7 @@ impl<'a> Parser<'a> {
                 ),
             ));
         };
-        let args = assign
-            .args
+        let args = args
             .iter()
             .map(|arg| match arg {
                 Argument::Value(expr) => Ok(expr.clone()),
@@ -2085,7 +2376,7 @@ impl<'a> Parser<'a> {
         args: &[Argument],
         result: Option<&[usize]>,
         line: usize,
-    ) -> Result<Vec<Instruction>> {
+    ) -> Result<(Vec<Instruction>, Option<Expr<'a>>)> {
         if self.gate_expansion_depth >= MAX_GATE_EXPANSION_DEPTH {
             return Err(parse_error(
                 line,
@@ -2117,11 +2408,15 @@ impl<'a> Parser<'a> {
         let mut bindings: HashMap<&'a str, ClassicalValue> =
             self.param_vars.clone().unwrap_or_default();
         let mut durations = self.durations.clone();
-        let mut qubit_bindings: Vec<(&'a str, usize)> = Vec::new();
+        let mut qubit_bindings: Vec<(&'a str, SmallVec<[usize; 4]>)> = Vec::new();
+        let mut bound_qubits = HashSet::new();
         let mut bit_bindings: Vec<(&'a str, SmallVec<[usize; 4]>)> = Vec::new();
         for (slot, argument) in def.args.iter().zip(args) {
             match slot {
-                DefParam::Qubit(param_name) => {
+                DefParam::Qubit {
+                    name: param_name,
+                    width,
+                } => {
                     let param_name = *param_name;
                     let operand = match argument {
                         Argument::Operand(operand) => operand.clone(),
@@ -2142,19 +2437,28 @@ impl<'a> Parser<'a> {
                             }
                         }
                     };
-                    match self.qubits_of(&operand)?.as_slice() {
-                        [single] => qubit_bindings.push((param_name, *single)),
-                        _ => {
-                            return Err(parse_error(
-                                line,
-                                format!(
-                                    "def `{name}` qubit parameter `{param_name}` requires a \
-                                     single qubit, got register `{}`",
-                                    operand.describe()
-                                ),
-                            ));
-                        }
+                    let qubits = self.qubits_of(&operand)?;
+                    self.charge(qubits.len(), line)?;
+                    let wanted = match width {
+                        Some(width) => self.integer_of(width, line)?,
+                        None => 1,
+                    };
+                    if wanted <= 0 || qubits.len() as i64 != wanted {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "def `{name}` qubit parameter `{param_name}` takes {wanted} qubit(s), got {}",
+                                qubits.len()
+                            ),
+                        ));
                     }
+                    if qubits.iter().any(|&qubit| !bound_qubits.insert(qubit)) {
+                        return Err(parse_error(
+                            line,
+                            format!("def `{name}` passes a qubit more than once"),
+                        ));
+                    }
+                    qubit_bindings.push((param_name, qubits));
                 }
                 DefParam::Value {
                     name: param_name,
@@ -2181,7 +2485,14 @@ impl<'a> Parser<'a> {
                             line,
                         });
                     }
-                    let value = number_of(expr, line, Some(&bindings), &durations, &self.arrays)?;
+                    self.reject_runtime(expr, line)?;
+                    let value = number_of(
+                        expr,
+                        line,
+                        self.param_vars.as_ref(),
+                        &self.durations,
+                        &self.arrays,
+                    )?;
                     let value = match value {
                         ClassicalValue::Float(float) if *integral && float.fract() != 0.0 => {
                             return Err(parse_error(
@@ -2201,7 +2512,13 @@ impl<'a> Parser<'a> {
                             format!("def `{name}` parameter `{param_name}` takes a duration"),
                         ));
                     };
-                    let value = timed_of(expr, line, Some(&bindings), &durations, &self.arrays)?;
+                    let value = timed_of(
+                        expr,
+                        line,
+                        self.param_vars.as_ref(),
+                        &self.durations,
+                        &self.arrays,
+                    )?;
                     if let Timed::Number(number) = value {
                         return Err(parse_error(
                             line,
@@ -2259,6 +2576,9 @@ impl<'a> Parser<'a> {
             (None, None) => DefResult {
                 bits: SmallVec::new(),
                 local: None,
+                ty: None,
+                value: None,
+                returned: false,
             },
             (None, Some(_)) => {
                 return Err(parse_error(
@@ -2266,6 +2586,13 @@ impl<'a> Parser<'a> {
                     format!("def `{name}` declares no result to assign"),
                 ));
             }
+            (Some(declared), None) if declared.ty != "bit" => DefResult {
+                bits: SmallVec::new(),
+                local: None,
+                ty: Some(self.classical_type(declared.ty, declared.width.as_ref(), line)?),
+                value: None,
+                returned: false,
+            },
             (Some(_), None) => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!(
@@ -2307,6 +2634,9 @@ impl<'a> Parser<'a> {
                 DefResult {
                     bits: bits.iter().copied().collect(),
                     local: def.local,
+                    ty: None,
+                    value: None,
+                    returned: false,
                 }
             }
         };
@@ -2331,12 +2661,12 @@ impl<'a> Parser<'a> {
             .filter(|(_, array)| array.constant)
             .map(|(name, array)| (*name, Rc::clone(array)))
             .collect();
-        for (param_name, qubit) in qubit_bindings {
+        for (param_name, qubits) in qubit_bindings {
             sub.params.insert(
                 param_name,
                 Alias {
                     kind: ast::RegisterKind::Qubit,
-                    indices: vec![qubit],
+                    indices: qubits.into_vec(),
                 },
             );
         }
@@ -2347,7 +2677,15 @@ impl<'a> Parser<'a> {
             sub.bind_bits(local, frame.bits.clone());
         }
         sub.def_result = Some(frame);
-        sub.execute(&def.body)
+        let instructions = sub.execute(&def.body)?;
+        let frame = sub.def_result.expect("installed above");
+        if def.result.is_some() && !frame.returned {
+            return Err(parse_error(
+                line,
+                format!("def `{name}` reaches its end without a result"),
+            ));
+        }
+        Ok((instructions, frame.value))
     }
 
     /// Name `bits` inside an expanded body: as a register when they run
@@ -2428,6 +2766,30 @@ impl<'a> Parser<'a> {
         conditional: &ast::Conditional<'a>,
         line: usize,
     ) -> Result<Vec<Instruction>> {
+        if let Ok(expr) = super::dynamic::condition_expr(&conditional.condition)
+            && expr
+                .finds_call(&|name| self.def_defs.contains_key(name))
+                .is_some()
+        {
+            let mut instructions = Vec::new();
+            let value = self.resolve_calls(&expr, line, &mut instructions)?;
+            let ClassicalExpr::Const(value) = self.lower_expr(&value, line)? else {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: "a def call in a measurement-dependent condition".to_string(),
+                    line,
+                });
+            };
+            let body = if value.truthy() {
+                Some(&conditional.then_body)
+            } else {
+                conditional.else_body.as_ref()
+            };
+            if let Some(body) = body {
+                instructions.extend(self.exec_box(body)?);
+            }
+            return Ok(instructions);
+        }
+
         let general = match &conditional.condition {
             Condition::Expr(_) => true,
             Condition::Truthy(operand)
@@ -2604,7 +2966,16 @@ impl<'a> Parser<'a> {
             self.nested = was_nested;
             self.close_scope(scope);
             match produced {
-                Ok(produced) => out.extend(produced),
+                Ok(produced) => {
+                    out.extend(produced);
+                    if self
+                        .def_result
+                        .as_ref()
+                        .is_some_and(|result| result.returned)
+                    {
+                        break;
+                    }
+                }
                 Err(error) => {
                     result = Err(error);
                     break;

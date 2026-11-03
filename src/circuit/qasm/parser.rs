@@ -4,8 +4,8 @@
 //! find where a statement, a block or an argument ended.
 
 use super::ast::{
-    Argument, ArrayDecl, ArrayInit, AssignOp, BitInit, BitResult, Block, CallAssign, CmpOp,
-    Condition, Conditional, DefParam, ElementAssign, ForRange, Index, Measure, Modifier, Operand,
+    Argument, ArrayDecl, ArrayInit, AssignOp, BitInit, Block, CallAssign, CmpOp, Condition,
+    Conditional, DefParam, DefType, ElementAssign, ForRange, Index, Measure, Modifier, Operand,
     OperandName, Range, RegisterKind, ReturnValue, Stmt, StmtKind, SwitchArm,
 };
 use super::expr::{self, Expr};
@@ -825,7 +825,10 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         let (ty, width) = typename(stream)?;
         let arg_name = stream.expect_ident()?;
         args.push(match ty {
-            "qubit" => DefParam::Qubit(arg_name),
+            "qubit" => DefParam::Qubit {
+                name: arg_name,
+                width,
+            },
             "int" | "uint" => DefParam::Value {
                 name: arg_name,
                 integral: true,
@@ -853,16 +856,16 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     }
     let result = if stream.eat(Kind::Arrow) {
         let (ty, width) = typename(stream)?;
-        if ty != "bit" {
+        if !matches!(
+            ty,
+            "bit" | "int" | "uint" | "bool" | "float" | "angle" | "duration"
+        ) {
             return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
-                    "def `{name}` returning `{ty}`; only a `bit` result has a home in the \
-                     instruction list"
-                ),
+                construct: format!("def `{name}` returning `{ty}`"),
                 line,
             });
         }
-        Some(BitResult { width })
+        Some(DefType { ty, width })
     } else {
         None
     };

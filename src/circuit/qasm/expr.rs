@@ -592,6 +592,16 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
                     line: stream.line(),
                 });
             }
+            if stream.eat(Kind::RParen) {
+                return deeper(
+                    stream,
+                    Expr::Call(Box::new(Call {
+                        name,
+                        args: Vec::new(),
+                    })),
+                    1,
+                );
+            }
             let (first, mut depth) = parse_node(stream)?;
             let mut args = vec![first];
             while stream.eat(Kind::Comma) {

@@ -937,7 +937,8 @@ impl<'a> Parser<'a> {
             .as_ref()
             .is_some_and(|state| state.analysis.branches.contains(&key(stmt)));
         if decided == Decided::Static {
-            let taken = self.value_of(&condition_expr(&conditional.condition)?, line)? != 0.0;
+            let value = self.resolve_calls(&condition_expr(&conditional.condition)?, line, out)?;
+            let taken = self.value_of(&value, line)? != 0.0;
             let body = if taken {
                 Some(&conditional.then_body)
             } else {
@@ -947,6 +948,15 @@ impl<'a> Parser<'a> {
                 out.extend(self.exec_box(body)?);
             }
             return Ok(());
+        }
+        if condition_expr(&conditional.condition).is_ok_and(|expr| {
+            expr.finds_call(&|name| self.def_defs.contains_key(name))
+                .is_some()
+        }) {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "a def call in a measurement-dependent condition".to_string(),
+                line,
+            });
         }
         let guard = if decided == Decided::Bits && !needs_graph {
             self.condition_of(&conditional.condition, line).ok()

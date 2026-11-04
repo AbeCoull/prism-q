@@ -1,0 +1,10 @@
+line-length = 120
+
+[format]
+quote-style = "double"
+
+[lint]
+select = ["E501", "I"]
+
+[lint.isort]
+known-first-party = ["harness", "matrix"]

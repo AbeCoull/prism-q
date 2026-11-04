@@ -19,6 +19,9 @@ comparison/results/*
 !comparison/results/.gitkeep
 !comparison/results/reference-*.json
 !comparison/results/reference-*.md
+!comparison/results/matrix-*/
+comparison/results/matrix-*/figures/
+comparison/results/matrix-smoke-*/
 comparison/.venv/
 
 # Coverage

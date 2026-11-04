@@ -1026,18 +1026,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A square matrix read the other way round, which swaps row-major and
-    /// column-major without changing what it means.
-    fn transposed(matrix: &[Complex64], dim: usize) -> Vec<Complex64> {
-        let mut out = vec![Complex64::new(0.0, 0.0); dim * dim];
-        for row in 0..dim {
-            for column in 0..dim {
-                out[column * dim + row] = matrix[row * dim + column];
-            }
-        }
-        out
-    }
-
     fn ctrl_on_expansion_error(name: &str, line_num: usize) -> PrismError {
         PrismError::UnsupportedConstruct {
             construct: format!(
@@ -1072,9 +1060,9 @@ impl<'a> Parser<'a> {
                 });
             };
             let dim = 1usize << span.len();
-            let powered = spectral::unitary_power(&Self::transposed(&matrix, dim), dim, k);
+            let powered = spectral::unitary_power(&synthesis::transpose(&matrix, dim), dim, k);
             return Ok(synthesis::dense_unitary(
-                &Self::transposed(&powered, dim),
+                &synthesis::transpose(&powered, dim),
                 &span,
             ));
         }

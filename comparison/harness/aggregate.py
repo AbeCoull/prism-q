@@ -29,6 +29,59 @@ from . import stats, validate
 
 COMPARE_GROUPS = ("headline", "sampling", "seeds", "full")
 
+SHORT = {
+    "prismq": "PRISM-Q",
+    "aer-statevector": "Aer statevector",
+    "aer-statevector-f32": "Aer statevector (fp32)",
+    "aer-automatic": "Aer automatic",
+    "aer-stabilizer": "Aer stabilizer",
+    "aer-mps": "Aer MPS",
+    "qsim": "qsim (fp32)",
+    "quest": "QuEST",
+    "spinoza": "Spinoza",
+    "qip": "qip",
+    "stim": "Stim",
+}
+
+
+def label(name: str) -> str:
+    base, _, option = name.partition(":")
+    return SHORT.get(base, base) + (f" ({option})" if option else "")
+
+
+def shots_label(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n // 1_000_000}M shots"
+    if n >= 1000:
+        return f"{n // 1000}k shots"
+    return f"{n} shot" + ("s" if n != 1 else "")
+
+
+def row_label(wl: dict) -> str:
+    p = wl["params"]
+    bits = [wl["family"], f"{wl['num_qubits']}q"]
+    if "depth" in p and wl["family"] in ("rcs", "lowent"):
+        bits.append(f"d{p['depth']}")
+    if wl["family"] == "disjoint":
+        bits.append(p.get("layout", ""))
+    if p.get("measured") == "half":
+        bits.append("half measured")
+    if wl["mode"] == "counts":
+        bits.append(shots_label(wl["shots"]))
+    return " ".join(bits)
+
+
+def family_order(wl: dict) -> tuple:
+    order = ["rcs", "qft", "qv", "clifford", "lowent", "disjoint", "midcircuit", "sampling"]
+    fam = wl["family"]
+    return (
+        order.index(fam) if fam in order else 99,
+        wl["params"].get("depth", 0),
+        wl["num_qubits"],
+        wl["shots"],
+        str(wl["params"].get("layout")),
+    )
+
 
 def load(results_dir: str) -> tuple[dict, list[dict]]:
     with open(os.path.join(results_dir, "manifest.json"), encoding="utf-8") as handle:

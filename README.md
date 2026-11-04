@@ -108,14 +108,10 @@ runs the same circuits through other simulators with a committed harness in
 
 <!-- comparison-preview:start -->
 
-![Comparator time over PRISM-Q time per workload](docs/comparison/figures/fig1-ratio-heatmap.svg)
+[![Comparator time over PRISM-Q time per workload](docs/comparison/figures/ratio-heatmap.svg)](docs/comparison/figures/ratio-heatmap.svg)
 
-Time ratios for 64 validated comparisons (25 workloads, 8 comparator configurations, one
-Intel(R) Core(TM) i7-6700K CPU @ 4.00GHz). The [comparison
-pages](https://abecoull.github.io/prism-q/comparison.html) give every row with its spread,
-peak memory and validation, and the [engineering
-report](https://abecoull.github.io/prism-q/comparison/report.html) discusses what the gaps
-come from and where the measurements stop.
+Time ratios for 64 validated comparisons against 8 comparator configurations on one
+desktop: [comparison pages](https://abecoull.github.io/prism-q/comparison.html).
 
 <!-- comparison-preview:end -->
 

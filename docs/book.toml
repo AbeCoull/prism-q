@@ -12,7 +12,7 @@ git-repository-url = "https://github.com/AbeCoull/prism-q"
 git-repository-icon = "fa-github"
 edit-url-template = "https://github.com/AbeCoull/prism-q/edit/main/docs/{path}"
 additional-css = ["theme/custom.css", "mdbook-admonish.css"]
-additional-js = ["mermaid.min.js", "mermaid-init.js", "theme/circuit-scroll.js"]
+additional-js = ["mermaid.min.js", "mermaid-init.js", "theme/circuit-scroll.js", "theme/figure-zoom.js"]
 mathjax-support = false
 
 [output.html.fold]

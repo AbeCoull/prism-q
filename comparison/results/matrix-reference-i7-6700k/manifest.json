@@ -1,0 +1,424 @@
+{
+  "schema": "prism-q-matrix/1",
+  "run_id": "20261103T090018-b6c9ed",
+  "profile": "reference",
+  "profile_description": "the published subset: every family, sizes that fit an hour on a 4-core host",
+  "started_utc": "2026-11-03T14:00:22+00:00",
+  "command": "comparison\\matrix.py run --profile reference --no-build --out comparison\\results\\matrix-reference-i7-6700k",
+  "order_seed": 42,
+  "memory_method": "largest PeakWorkingSetSize over the child and its descendants, sampled every 20 ms and once more after exit; the counter only rises, so the last sample bounds the peak from below",
+  "timed_region": {
+    "probs": "execute the circuit and materialize the full 2^n probability vector",
+    "counts": "execute the circuit and return the simulator's own shot result (PRISM-Q's count map, Aer's Result, qsim's measurement array)",
+    "excluded": "process start, imports, building the circuit object from the gate list, conversion to the harness file format"
+  },
+  "repetition_policy": "one cold call, then up to `iterations` warm calls in the same process; stop early once the warm calls have used `budget_s`, never below `min_iterations`",
+  "validation": {
+    "probs": "total variation distance against the fp64 reference simulator's vector",
+    "counts": "Correctness checks for every measured output.",
+    "family_alpha": 0.001
+  },
+  "provenance": {
+    "host": {
+      "cpu_model": "Intel(R) Core(TM) i7-6700K CPU @ 4.00GHz",
+      "arch": "AMD64",
+      "logical_cores": 8,
+      "physical_cores": 4,
+      "ram_gb": 31.9,
+      "os": "Windows 10",
+      "cpu_flags": [
+        "AVX",
+        "AVX2",
+        "F16C",
+        "FMA3",
+        "SSE42"
+      ],
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "cpu_freq_mhz": {
+        "current": 4008.0,
+        "max": 4008.0
+      },
+      "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)",
+      "gpu": [
+        "NVIDIA GeForce GTX 1080 Ti, 11264 MiB, 581.42"
+      ],
+      "numpy_blas": "scipy-openblas 0.3.33.112.0",
+      "environment": {
+        "RAYON_NUM_THREADS": null,
+        "OMP_NUM_THREADS": null,
+        "RUSTFLAGS": null,
+        "PRISM_MAX_SV_QUBITS": null,
+        "PRISM_AVX512": null,
+        "PRISM_NO_QFT_BLOCK": null,
+        "OMP_PROC_BIND": null,
+        "KMP_AFFINITY": null
+      },
+      "timer": "time.perf_counter in Python, std::time::Instant in Rust; QuEST, Spinoza, qip use their own monotonic clocks"
+    },
+    "toolchain": {
+      "rustc": "1.99.0",
+      "rustc_peers": "1.99.0-nightly",
+      "cxx_compiler": null,
+      "cargo_profile": "release",
+      "cargo_features": "parallel",
+      "rustflags": "",
+      "git_sha": "fc7e0c96996590ccc69c1cd0fea7322365b9b9b7",
+      "git_dirty": true
+    },
+    "python": {
+      "version": "3.14.0",
+      "implementation": "CPython",
+      "packages": {
+        "qiskit": "2.5.2",
+        "qiskit-aer": "0.17.2",
+        "qsimcirq": "0.22.1",
+        "cirq-core": "1.7.0",
+        "numpy": "2.5.1",
+        "psutil": "7.2.2",
+        "scipy": "1.18.1",
+        "matplotlib": "3.11.2",
+        "stim": "1.16.0"
+      }
+    },
+    "simulators": {
+      "aer-automatic": "0.17.2",
+      "aer-mps": "0.17.2",
+      "aer-stabilizer": "0.17.2",
+      "aer-statevector": "0.17.2",
+      "aer-statevector-f32": "0.17.2",
+      "prismq": "0.37.0",
+      "qip": "1.5.0",
+      "qsim": "0.22.1",
+      "quest": "v4.3.0",
+      "spinoza": "0.5.1 (git f900971)",
+      "stim": "1.16.0"
+    },
+    "threads": {
+      "requested": 8,
+      "rayon_num_threads": null,
+      "omp_num_threads": null
+    }
+  },
+  "machine_warnings": [],
+  "simulators": {
+    "prismq": {
+      "label": "PRISM-Q (auto dispatch)",
+      "kind": "exec",
+      "precision": "double",
+      "representation": "dispatcher picks per circuit",
+      "modes": [
+        "counts",
+        "probs"
+      ],
+      "version": "0.37.0"
+    },
+    "aer-statevector": {
+      "label": "Qiskit Aer (statevector)",
+      "kind": "python",
+      "precision": "double",
+      "representation": "dense statevector",
+      "modes": [
+        "counts",
+        "probs"
+      ],
+      "version": "0.17.2"
+    },
+    "aer-statevector-f32": {
+      "label": "Qiskit Aer (statevector, single)",
+      "kind": "python",
+      "precision": "single",
+      "representation": "dense statevector",
+      "modes": [
+        "counts",
+        "probs"
+      ],
+      "version": "0.17.2"
+    },
+    "aer-automatic": {
+      "label": "Qiskit Aer (automatic)",
+      "kind": "python",
+      "precision": "double",
+      "representation": "Aer picks the method per circuit",
+      "modes": [
+        "counts",
+        "probs"
+      ],
+      "version": "0.17.2"
+    },
+    "aer-stabilizer": {
+      "label": "Qiskit Aer (stabilizer)",
+      "kind": "python",
+      "precision": "exact (tableau)",
+      "representation": "stabilizer tableau",
+      "modes": [
+        "counts"
+      ],
+      "version": "0.17.2"
+    },
+    "aer-mps": {
+      "label": "Qiskit Aer (matrix_product_state)",
+      "kind": "python",
+      "precision": "double",
+      "representation": "matrix product state",
+      "modes": [
+        "counts",
+        "probs"
+      ],
+      "version": "0.17.2"
+    },
+    "qsim": {
+      "label": "qsim (qsimcirq)",
+      "kind": "python",
+      "precision": "single",
+      "representation": "dense statevector",
+      "modes": [
+        "counts",
+        "probs"
+      ],
+      "version": "0.22.1"
+    },
+    "quest": {
+      "label": "QuEST (OpenMP)",
+      "kind": "legacy",
+      "precision": "double",
+      "representation": "dense statevector",
+      "modes": [
+        "probs"
+      ],
+      "version": "v4.3.0"
+    },
+    "spinoza": {
+      "label": "Spinoza",
+      "kind": "legacy",
+      "precision": "double",
+      "representation": "dense statevector",
+      "modes": [
+        "probs"
+      ],
+      "version": "0.5.1 (git f900971)"
+    },
+    "qip": {
+      "label": "RustQIP (qip)",
+      "kind": "legacy",
+      "precision": "double",
+      "representation": "dense statevector",
+      "modes": [
+        "probs"
+      ],
+      "version": "1.5.0"
+    },
+    "stim": {
+      "label": "Stim",
+      "kind": "python",
+      "precision": "exact (tableau)",
+      "representation": "stabilizer tableau, compiled sampler",
+      "modes": [
+        "counts"
+      ],
+      "version": "1.16.0"
+    }
+  },
+  "finished_utc": "2026-11-03T15:30:54+00:00",
+  "wall_minutes": 90.51,
+  "supplementary_runs": [
+    {
+      "run_id": "20261103T103224-246aba",
+      "command": "comparison/matrix.py run --profile reference --no-build --out comparison/results/matrix-reference-i7-6700k --append --replace --drop-other-simulators --groups headline --match clifford/",
+      "started_utc": "2026-11-03T15:32:26+00:00",
+      "machine_warnings": [],
+      "replaced_records": 9,
+      "workloads": [
+        "clifford/n100/depth=8/seed=deadbeef/counts1000",
+        "clifford/n1000/depth=8/seed=deadbeef/counts1000",
+        "clifford/n10000/depth=8/seed=deadbeef/counts1000"
+      ],
+      "finished_utc": "2026-11-03T15:34:45+00:00",
+      "wall_minutes": 2.29
+    },
+    {
+      "run_id": "20261103T103447-8e5ea0",
+      "command": "comparison/matrix.py run --profile reference --no-build --out comparison/results/matrix-reference-i7-6700k --append --replace --drop-other-simulators --groups headline --match midcircuit/",
+      "started_utc": "2026-11-03T15:34:49+00:00",
+      "machine_warnings": [],
+      "replaced_records": 12,
+      "workloads": [
+        "midcircuit/n12/rounds=3/seed=deadbeef/counts1000",
+        "midcircuit/n12/rounds=3/seed=deadbeef/counts10000",
+        "midcircuit/n18/rounds=3/seed=deadbeef/counts1000"
+      ],
+      "finished_utc": "2026-11-03T15:35:15+00:00",
+      "wall_minutes": 0.41
+    },
+    {
+      "run_id": "20261103T103517-c715f0",
+      "command": "comparison/matrix.py run --profile reference --no-build --out comparison/results/matrix-reference-i7-6700k --append --replace --groups headline --match rcs/n24/depth=20 --simulators qsim",
+      "started_utc": "2026-11-03T15:35:19+00:00",
+      "machine_warnings": [],
+      "replaced_records": 1,
+      "workloads": [
+        "rcs/n24/depth=20/seed=deadbeef/probs"
+      ],
+      "finished_utc": "2026-11-03T15:35:47+00:00",
+      "wall_minutes": 0.45
+    },
+    {
+      "run_id": "20261103T104656-d00d02",
+      "command": "comparison/matrix.py run --profile reference --no-build --out comparison/results/matrix-reference-i7-6700k --append --replace --groups headline --match rcs/n24/depth=20 --simulators aer-statevector,qsim",
+      "started_utc": "2026-11-03T15:46:59+00:00",
+      "machine_warnings": [
+        "CPU was 36% busy before the run started; timings will be noisy"
+      ],
+      "replaced_records": 2,
+      "workloads": [
+        "rcs/n24/depth=20/seed=deadbeef/probs"
+      ],
+      "finished_utc": "2026-11-03T15:48:17+00:00",
+      "wall_minutes": 1.27
+    },
+    {
+      "run_id": "20261103T104838-b5c4aa",
+      "command": "comparison/matrix.py run --profile reference --no-build --out comparison/results/matrix-reference-i7-6700k --append --replace --groups headline --match rcs/n24/depth=20 --simulators prismq,aer-statevector,qsim",
+      "started_utc": "2026-11-03T15:48:41+00:00",
+      "machine_warnings": [],
+      "replaced_records": 3,
+      "workloads": [
+        "rcs/n24/depth=20/seed=deadbeef/probs"
+      ],
+      "finished_utc": "2026-11-03T15:50:06+00:00",
+      "wall_minutes": 1.41
+    },
+    {
+      "run_id": "20261103T105026-5ab2ce",
+      "command": "comparison/matrix.py run --profile reference --no-build --out comparison/results/matrix-reference-i7-6700k --append --replace --drop-other-simulators --groups headline --match rcs/n24/depth=20",
+      "started_utc": "2026-11-03T15:50:29+00:00",
+      "machine_warnings": [],
+      "replaced_records": 5,
+      "workloads": [
+        "rcs/n24/depth=20/seed=deadbeef/probs"
+      ],
+      "finished_utc": "2026-11-03T15:56:32+00:00",
+      "wall_minutes": 6.03
+    },
+    {
+      "run_id": "20261103T185850-1959bb",
+      "command": "comparison\\matrix.py run --profile reference --no-build --groups headline,threads,seeds,dispatch --match /probs --out comparison\\results\\matrix-reference-i7-6700k --append --replace --drop-other-simulators --retire qft/n",
+      "started_utc": "2026-11-03T23:58:53+00:00",
+      "machine_warnings": [
+        "CPU was 59% busy before the run started; timings will be noisy"
+      ],
+      "code_sha256": {
+        "compare_runner": "ebeeb0c7453752b8beb04b7368a43ca75d68005d5069c5187b5ca2dc3b6b3264",
+        "peers": "e9ff2b56676beb330cd3e2655d9d05a656ff152d47543b37f35a20b1aae43a3b",
+        "quest_runner": "5d864e5b0ee88bf9174960e9da4e44f9c7edab723d21e3fe3bb05de3c1ae7242",
+        "matrix.py": "c3a7aed341d7c70ffebf435c79f42465edfb56d6eb6dd72fe698f01fc6822262",
+        "harness/__init__.py": "40f44a623bd416b15f676af1a9e056a5aa125f501b7d0fd693944c6c27a6c9c8",
+        "harness/adapters.py": "a863f00e9b016ac07e80d4d44e52574271995269eafd1c446e0ed03070285c53",
+        "harness/aggregate.py": "097b30827bbab73c59f3657a92437a2dd7431355aafd27f31fdb5c2b794dc10c",
+        "harness/corpus.py": "3d96beaa944c82d15be3a6b93d9017fbb23c0afa38482c163dd7970fbc01d9a8",
+        "harness/figures.py": "b79cd97ccf6c54ac20e742ad385539639b75d904c577bb2238df0d914841eedf",
+        "harness/pages.py": "537cd490538c9b4a72faf55f916f4e3eda5a2f9da51eb45fc1e079ecda728f6f",
+        "harness/profiles.py": "6fcefb1234479b6097a80e4ae461a258ff13f0b2d818309d43a1651b8e3781e6",
+        "harness/provenance.py": "e467ae1c5eb9ebeb6e61e387e9f2c4b2a1f991ea8ab61e6f328d49f0e624ea4e",
+        "harness/reference.py": "ad50b028c6b3bd69eda58c15e0f85b30f318c49cd856812dd9b865bd87d16485",
+        "harness/report.py": "2bf5bae5584b9e236a3b02462e2ae20cca3694a182e89b21814ed599fc58b30f",
+        "harness/runners.py": "24932fb07bf4de30bbc132dbaa9e49399b1d27433f9d1e26002d39abfd2c94e7",
+        "harness/stats.py": "05faeaa4d8ef32355ea93e5625b5f764ad987c1f3ccb24698544dfd1bfd3481a",
+        "harness/validate.py": "895ca05e74162314fa5b3d2f696f227715bffe18bea80b4e6eac5414d370a7d9",
+        "harness/worker.py": "5089c8d9fec31e2e4128c91c11dff85dd0d4c65d9362c26877a2d3c5a5ee7b6f",
+        "harness/workloads.py": "5ceed660797258063ee3f77e033bf93bdc20d3b05cf1acc1e54b093503fb1b3b"
+      },
+      "replaced_records": 143,
+      "retired": [
+        "qft/n"
+      ],
+      "workloads": [
+        "rcs/n20/depth=10/seed=deadbeef/probs",
+        "rcs/n20/depth=20/seed=deadbeef/probs",
+        "qft/n20/input=product/seed=deadbeef/probs",
+        "rcs/n24/depth=10/seed=deadbeef/probs",
+        "rcs/n24/depth=20/seed=deadbeef/probs",
+        "qft/n24/input=product/seed=deadbeef/probs",
+        "rcs/n26/depth=10/seed=deadbeef/probs",
+        "rcs/n26/depth=20/seed=deadbeef/probs",
+        "qft/n26/input=product/seed=deadbeef/probs",
+        "qv/n16/seed=deadbeef/probs",
+        "qv/n20/seed=deadbeef/probs",
+        "qv/n24/seed=deadbeef/probs",
+        "rcs/n22/depth=10/seed=deadbeef/probs",
+        "qft/n22/input=product/seed=deadbeef/probs",
+        "qv/n20/seed=deadbeef/probs",
+        "rcs/n20/depth=10/seed=deadbeef/probs",
+        "qft/n20/input=product/seed=deadbeef/probs",
+        "rcs/n20/depth=10/seed=deadbef0/probs",
+        "qv/n20/seed=deadbef0/probs",
+        "rcs/n20/depth=10/seed=deadbef1/probs",
+        "qv/n20/seed=deadbef1/probs"
+      ],
+      "finished_utc": "2026-11-04T01:11:25+00:00",
+      "wall_minutes": 72.5
+    },
+    {
+      "run_id": "20261103T202523-0a42e5",
+      "command": "comparison\\matrix.py run --profile reference --no-build --groups headline,threads,seeds,dispatch --match /probs --out comparison\\results\\matrix-reference-i7-6700k --append --replace --drop-other-simulators",
+      "started_utc": "2026-11-04T01:25:26+00:00",
+      "machine_warnings": [],
+      "code_sha256": {
+        "compare_runner": "ebeeb0c7453752b8beb04b7368a43ca75d68005d5069c5187b5ca2dc3b6b3264",
+        "peers": "e9ff2b56676beb330cd3e2655d9d05a656ff152d47543b37f35a20b1aae43a3b",
+        "quest_runner": "5d864e5b0ee88bf9174960e9da4e44f9c7edab723d21e3fe3bb05de3c1ae7242",
+        "matrix.py": "c3a7aed341d7c70ffebf435c79f42465edfb56d6eb6dd72fe698f01fc6822262",
+        "harness/__init__.py": "40f44a623bd416b15f676af1a9e056a5aa125f501b7d0fd693944c6c27a6c9c8",
+        "harness/adapters.py": "a863f00e9b016ac07e80d4d44e52574271995269eafd1c446e0ed03070285c53",
+        "harness/aggregate.py": "097b30827bbab73c59f3657a92437a2dd7431355aafd27f31fdb5c2b794dc10c",
+        "harness/corpus.py": "3d96beaa944c82d15be3a6b93d9017fbb23c0afa38482c163dd7970fbc01d9a8",
+        "harness/figures.py": "b79cd97ccf6c54ac20e742ad385539639b75d904c577bb2238df0d914841eedf",
+        "harness/pages.py": "537cd490538c9b4a72faf55f916f4e3eda5a2f9da51eb45fc1e079ecda728f6f",
+        "harness/profiles.py": "6fcefb1234479b6097a80e4ae461a258ff13f0b2d818309d43a1651b8e3781e6",
+        "harness/provenance.py": "e467ae1c5eb9ebeb6e61e387e9f2c4b2a1f991ea8ab61e6f328d49f0e624ea4e",
+        "harness/reference.py": "ad50b028c6b3bd69eda58c15e0f85b30f318c49cd856812dd9b865bd87d16485",
+        "harness/report.py": "2bf5bae5584b9e236a3b02462e2ae20cca3694a182e89b21814ed599fc58b30f",
+        "harness/runners.py": "24932fb07bf4de30bbc132dbaa9e49399b1d27433f9d1e26002d39abfd2c94e7",
+        "harness/stats.py": "05faeaa4d8ef32355ea93e5625b5f764ad987c1f3ccb24698544dfd1bfd3481a",
+        "harness/validate.py": "895ca05e74162314fa5b3d2f696f227715bffe18bea80b4e6eac5414d370a7d9",
+        "harness/worker.py": "5089c8d9fec31e2e4128c91c11dff85dd0d4c65d9362c26877a2d3c5a5ee7b6f",
+        "harness/workloads.py": "5ceed660797258063ee3f77e033bf93bdc20d3b05cf1acc1e54b093503fb1b3b"
+      },
+      "replaced_records": 145,
+      "retired": [],
+      "workloads": [
+        "rcs/n20/depth=10/seed=deadbeef/probs",
+        "rcs/n20/depth=20/seed=deadbeef/probs",
+        "qft/n20/input=product/seed=deadbeef/probs",
+        "rcs/n24/depth=10/seed=deadbeef/probs",
+        "rcs/n24/depth=20/seed=deadbeef/probs",
+        "qft/n24/input=product/seed=deadbeef/probs",
+        "rcs/n26/depth=10/seed=deadbeef/probs",
+        "rcs/n26/depth=20/seed=deadbeef/probs",
+        "qft/n26/input=product/seed=deadbeef/probs",
+        "qv/n16/seed=deadbeef/probs",
+        "qv/n20/seed=deadbeef/probs",
+        "qv/n24/seed=deadbeef/probs",
+        "rcs/n22/depth=10/seed=deadbeef/probs",
+        "qft/n22/input=product/seed=deadbeef/probs",
+        "qv/n20/seed=deadbeef/probs",
+        "rcs/n20/depth=10/seed=deadbeef/probs",
+        "qft/n20/input=product/seed=deadbeef/probs",
+        "rcs/n20/depth=10/seed=deadbef0/probs",
+        "qv/n20/seed=deadbef0/probs",
+        "rcs/n20/depth=10/seed=deadbef1/probs",
+        "qv/n20/seed=deadbef1/probs"
+      ],
+      "finished_utc": "2026-11-04T02:10:16+00:00",
+      "wall_minutes": 44.82
+    }
+  ]
+}

@@ -17,7 +17,7 @@ from typing import Any
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-TRACKED_PACKAGES = ("qiskit", "qiskit-aer", "qsimcirq", "cirq-core", "numpy", "psutil")
+TRACKED_PACKAGES = ("qiskit", "qiskit-aer", "qsimcirq", "cirq-core", "numpy", "psutil", "scipy", "matplotlib", "stim")
 
 
 def _run(cmd: list[str], cwd: str | None = None) -> str | None:
@@ -139,6 +139,56 @@ def collect(features: str, threads: int, simulators: dict[str, str | None]) -> d
             "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
         },
     }
+
+
+ENV_KEYS = (
+    "RAYON_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "RUSTFLAGS",
+    "PRISM_MAX_SV_QUBITS",
+    "PRISM_AVX512",
+    "PRISM_NO_QFT_BLOCK",
+    "OMP_PROC_BIND",
+    "KMP_AFFINITY",
+)
+
+
+def host_details() -> dict[str, Any]:
+    """CPU features, affinity, clock, power plan, GPU, NumPy BLAS and the relevant environment."""
+    info: dict[str, Any] = {}
+    try:
+        from numpy._core._multiarray_umath import __cpu_features__
+
+        wanted = ("SSE42", "AVX", "F16C", "FMA3", "AVX2", "AVX512F", "AVX512BW", "AVX512VL", "ASIMD", "SVE")
+        info["cpu_flags"] = sorted(k for k in wanted if __cpu_features__.get(k))
+    except ImportError:
+        info["cpu_flags"] = None
+    try:
+        import psutil
+
+        proc = psutil.Process()
+        info["cpu_affinity"] = proc.cpu_affinity() if hasattr(proc, "cpu_affinity") else None
+        freq = psutil.cpu_freq()
+        info["cpu_freq_mhz"] = {"current": freq.current, "max": freq.max} if freq else None
+    except ImportError:
+        pass
+    if sys.platform == "win32":
+        info["power_plan"] = _run(["powercfg", "/getactivescheme"])
+    gpu = _run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"])
+    info["gpu"] = gpu.splitlines() if gpu else None
+    try:
+        import numpy as np
+
+        config = np.show_config(mode="dicts")
+        blas = config.get("Build Dependencies", {}).get("blas", {})
+        info["numpy_blas"] = f"{blas.get('name')} {blas.get('version')}"
+    except Exception:  # noqa: BLE001
+        info["numpy_blas"] = None
+    info["environment"] = {k: os.environ.get(k) for k in ENV_KEYS}
+    info["timer"] = (
+        "time.perf_counter in Python, std::time::Instant in Rust; QuEST, Spinoza, qip use their own monotonic clocks"
+    )
+    return info
 
 
 def quiet_machine_warnings() -> list[str]:

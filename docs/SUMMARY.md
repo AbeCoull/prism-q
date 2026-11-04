@@ -51,6 +51,10 @@
 
 - [Benchmarks](./benchmarks.md)
 - [Comparative Measurements](./comparison.md)
+  - [Methodology](./comparison/methodology.md)
+  - [Full Results](./comparison/results.md)
+  - [Engineering Report](./comparison/report.md)
+  - [Probability-Vector Comparison](./comparison/probability-vector.md)
 - [Circuit Builders](./reference/builders.md)
 - [Glossary](./glossary.md)
 - [Roadmap](./roadmap.md)

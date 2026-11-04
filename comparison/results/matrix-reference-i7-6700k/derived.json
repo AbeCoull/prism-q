@@ -1,0 +1,2583 @@
+{
+  "run_id": "20261103T090018-b6c9ed",
+  "profile": "reference",
+  "observations": 275,
+  "status_counts": {
+    "oom": 10,
+    "ok": 238,
+    "timeout": 2,
+    "not-applicable": 6,
+    "error": 16,
+    "crash": 3
+  },
+  "validation_failures": [
+    {
+      "workload_id": "qft/n20/input=product/seed=deadbeef/probs",
+      "simulator": "spinoza",
+      "validation": {
+        "method": "total variation distance against the reference vector",
+        "reference": "aer-statevector",
+        "tvd": 0.8623969793892441,
+        "classical_fidelity": 0.553685827707299,
+        "tolerance": 1e-08,
+        "pass": false
+      }
+    },
+    {
+      "workload_id": "qft/n20/input=product/seed=deadbeef/probs",
+      "simulator": "prismq:mps-64",
+      "validation": {
+        "method": "total variation distance against the reference vector",
+        "reference": "aer-statevector",
+        "tvd": 1.278996883503485e-07,
+        "classical_fidelity": 0.9999999999999312,
+        "tolerance": 1e-08,
+        "pass": false
+      }
+    }
+  ],
+  "ratios": [
+    {
+      "workload_id": "clifford/n100/depth=8/seed=deadbeef/counts1000",
+      "family": "clifford",
+      "num_qubits": 100,
+      "group": "headline",
+      "run_id": "20261103T103224-246aba",
+      "threads": 8,
+      "comparator": "stim",
+      "validated": true,
+      "precision": "exact (tableau)",
+      "prismq_median_ms": 0.6159,
+      "comparator_median_ms": 0.40409999928670004,
+      "ratio": 0.6561130041998702,
+      "ci95_low": 0.5775332275070745,
+      "ci95_high": 0.6851485150727127
+    },
+    {
+      "workload_id": "clifford/n1000/depth=8/seed=deadbeef/counts1000",
+      "family": "clifford",
+      "num_qubits": 1000,
+      "group": "headline",
+      "run_id": "20261103T103224-246aba",
+      "threads": 8,
+      "comparator": "stim",
+      "validated": true,
+      "precision": "exact (tableau)",
+      "prismq_median_ms": 4.8658,
+      "comparator_median_ms": 7.13990000076592,
+      "ratio": 1.4673640512898023,
+      "ci95_low": 1.206308711354653,
+      "ci95_high": 1.5954014257738967
+    },
+    {
+      "workload_id": "clifford/n10000/depth=8/seed=deadbeef/counts1000",
+      "family": "clifford",
+      "num_qubits": 10000,
+      "group": "headline",
+      "run_id": "20261103T103224-246aba",
+      "threads": 8,
+      "comparator": "stim",
+      "validated": true,
+      "precision": "exact (tableau)",
+      "prismq_median_ms": 376.2409,
+      "comparator_median_ms": 464.17160000055446,
+      "ratio": 1.2337085096292149,
+      "ci95_low": 1.1323780149105263,
+      "ci95_high": 1.2966132497853209
+    },
+    {
+      "workload_id": "disjoint/n100/block=10/depth=10/layout=contiguous/seed=deadbeef/counts1000",
+      "family": "disjoint",
+      "num_qubits": 100,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 203.0481,
+      "comparator_median_ms": 512.2212999995099,
+      "ratio": 2.5226599017647047,
+      "ci95_low": 2.461143443350192,
+      "ci95_high": 2.582063560307105
+    },
+    {
+      "workload_id": "disjoint/n200/block=10/depth=10/layout=contiguous/seed=deadbeef/counts1000",
+      "family": "disjoint",
+      "num_qubits": 200,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 405.0682,
+      "comparator_median_ms": 926.0527999995247,
+      "ratio": 2.2861651445349813,
+      "ci95_low": 2.238685714215526,
+      "ci95_high": 2.2959205388110795
+    },
+    {
+      "workload_id": "disjoint/n40/block=10/depth=10/layout=contiguous/seed=deadbeef/counts1000",
+      "family": "disjoint",
+      "num_qubits": 40,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 2.0863,
+      "comparator_median_ms": 222.68330000042624,
+      "ratio": 106.73599194767111,
+      "ci95_low": 102.42550940638712,
+      "ci95_high": 116.42704846294012
+    },
+    {
+      "workload_id": "disjoint/n40/block=10/depth=10/layout=strided/seed=deadbeef/counts1000",
+      "family": "disjoint",
+      "num_qubits": 40,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 2.4561,
+      "comparator_median_ms": 223.7593999998353,
+      "ratio": 91.10353812948792,
+      "ci95_low": 79.03899682085316,
+      "ci95_high": 106.16283152243456
+    },
+    {
+      "workload_id": "lowent/n100/depth=4/seed=deadbeef/counts1000",
+      "family": "lowent",
+      "num_qubits": 100,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 6.5485,
+      "comparator_median_ms": 324.9427000009746,
+      "ratio": 49.62093609238369,
+      "ci95_low": 44.59093725345594,
+      "ci95_high": 55.1108650834989
+    },
+    {
+      "workload_id": "lowent/n100/depth=8/seed=deadbeef/counts1000",
+      "family": "lowent",
+      "num_qubits": 100,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 49.599,
+      "comparator_median_ms": 529.0256000007503,
+      "ratio": 10.666053751098818,
+      "ci95_low": 10.363053681561126,
+      "ci95_high": 11.691618111226182
+    },
+    {
+      "workload_id": "lowent/n200/depth=4/seed=deadbeef/counts1000",
+      "family": "lowent",
+      "num_qubits": 200,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 13.0876,
+      "comparator_median_ms": 606.6609000008611,
+      "ratio": 46.35386931147507,
+      "ci95_low": 45.24469727072639,
+      "ci95_high": 50.05586484621296
+    },
+    {
+      "workload_id": "lowent/n200/depth=8/seed=deadbeef/counts1000",
+      "family": "lowent",
+      "num_qubits": 200,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 104.5323,
+      "comparator_median_ms": 1044.432599999709,
+      "ratio": 9.991482058652771,
+      "ci95_low": 9.711171531197758,
+      "ci95_high": 10.571335367160046
+    },
+    {
+      "workload_id": "lowent/n50/depth=4/seed=deadbeef/counts1000",
+      "family": "lowent",
+      "num_qubits": 50,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 3.8253,
+      "comparator_median_ms": 174.71309999928053,
+      "ratio": 45.67304525116475,
+      "ci95_low": 42.252555355059755,
+      "ci95_high": 50.8566979097865
+    },
+    {
+      "workload_id": "lowent/n50/depth=8/seed=deadbeef/counts1000",
+      "family": "lowent",
+      "num_qubits": 50,
+      "group": "headline",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-mps",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 23.8781,
+      "comparator_median_ms": 297.57319999953324,
+      "ratio": 12.462180826763154,
+      "ci95_low": 11.140374985412167,
+      "ci95_high": 12.639394105742946
+    },
+    {
+      "workload_id": "qft/n20/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 17.3655,
+      "comparator_median_ms": 164.59089999989374,
+      "ratio": 9.478039791534579,
+      "ci95_low": 8.99053362118175,
+      "ci95_high": 9.823272775012757
+    },
+    {
+      "workload_id": "qft/n20/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qip",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 17.3655,
+      "comparator_median_ms": 2838.3207,
+      "ratio": 163.44595318303533,
+      "ci95_low": 157.30067993792358,
+      "ci95_high": 169.39939242742554
+    },
+    {
+      "workload_id": "qft/n20/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 17.3655,
+      "comparator_median_ms": 89.10060000198428,
+      "ratio": 5.130897469234072,
+      "ci95_low": 4.771460654769209,
+      "ci95_high": 5.436969853884182
+    },
+    {
+      "workload_id": "qft/n20/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "quest",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 17.3655,
+      "comparator_median_ms": 232.8626,
+      "ratio": 13.409495839451786,
+      "ci95_low": 12.885649848716604,
+      "ci95_high": 14.442595951743398
+    },
+    {
+      "workload_id": "qft/n24/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 268.8023,
+      "comparator_median_ms": 3468.7161999972886,
+      "ratio": 12.904339732202025,
+      "ci95_low": 12.428851705084325,
+      "ci95_high": 13.441670931802246
+    },
+    {
+      "workload_id": "qft/n24/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 268.8023,
+      "comparator_median_ms": 3974.4608999972115,
+      "ratio": 14.785814332679488,
+      "ci95_low": 14.19816064388463,
+      "ci95_high": 15.101677140472292
+    },
+    {
+      "workload_id": "qft/n24/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "quest",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 268.8023,
+      "comparator_median_ms": 6676.9590499999995,
+      "ratio": 24.839664876379405,
+      "ci95_low": 23.919152332272446,
+      "ci95_high": 25.52050914943797
+    },
+    {
+      "workload_id": "qft/n26/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 26,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 1112.8729,
+      "comparator_median_ms": 14075.412699996377,
+      "ratio": 12.647816925002285,
+      "ci95_low": 12.537238916868098,
+      "ci95_high": 12.837561504797089
+    },
+    {
+      "workload_id": "qft/n26/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 26,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 1112.8729,
+      "comparator_median_ms": 18220.755800000916,
+      "ratio": 16.372719472278384,
+      "ci95_low": 16.229575187559536,
+      "ci95_high": 16.519603386397186
+    },
+    {
+      "workload_id": "qv/n16/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 16,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 4.5423,
+      "comparator_median_ms": 89.87340000021504,
+      "ratio": 19.785879400351153,
+      "ci95_low": 15.955612126103667,
+      "ci95_high": 22.118871825215358
+    },
+    {
+      "workload_id": "qv/n16/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 16,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 4.5423,
+      "comparator_median_ms": 88.34040000510868,
+      "ratio": 19.448385180439132,
+      "ci95_low": 15.69878632617416,
+      "ci95_high": 21.986679787079368
+    },
+    {
+      "workload_id": "qv/n16/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 16,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qip",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 4.5423,
+      "comparator_median_ms": 217.3773,
+      "ratio": 47.856218215441515,
+      "ci95_low": 38.84840377778576,
+      "ci95_high": 53.49904016538688
+    },
+    {
+      "workload_id": "qv/n16/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 16,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 4.5423,
+      "comparator_median_ms": 56.09499999991385,
+      "ratio": 12.349470532530624,
+      "ci95_low": 9.97886377080852,
+      "ci95_high": 13.872637330107422
+    },
+    {
+      "workload_id": "qv/n16/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 16,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "quest",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 4.5423,
+      "comparator_median_ms": 90.8095,
+      "ratio": 19.991964423309778,
+      "ci95_low": 16.257058855165738,
+      "ci95_high": 22.419127781059263
+    },
+    {
+      "workload_id": "qv/n16/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 16,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "spinoza",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 4.5423,
+      "comparator_median_ms": 321.3691,
+      "ratio": 70.7503027100808,
+      "ci95_low": 57.48661730696832,
+      "ci95_high": 79.09261173459342
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 60.45,
+      "comparator_median_ms": 428.5283999997773,
+      "ratio": 7.088972704710956,
+      "ci95_low": 6.907793978383052,
+      "ci95_high": 7.190753173738815
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 60.45,
+      "comparator_median_ms": 287.88660000282107,
+      "ratio": 4.7623920596000175,
+      "ci95_low": 4.506707956266018,
+      "ci95_high": 5.103958643481021
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qip",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 60.45,
+      "comparator_median_ms": 4685.5604,
+      "ratio": 77.51133829611248,
+      "ci95_low": 76.24636754327298,
+      "ci95_high": 78.39867328370555
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 60.45,
+      "comparator_median_ms": 144.3622000006144,
+      "ratio": 2.3881257237487907,
+      "ci95_low": 2.298934656695861,
+      "ci95_high": 2.420936310972912
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "quest",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 60.45,
+      "comparator_median_ms": 1921.1723,
+      "ratio": 31.781179487179486,
+      "ci95_low": 31.254651625225236,
+      "ci95_high": 31.93555997494571
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "spinoza",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 60.45,
+      "comparator_median_ms": 6673.154500000001,
+      "ratio": 110.39130686517784,
+      "ci95_low": 108.16318207334257,
+      "ci95_high": 111.42501574200065
+    },
+    {
+      "workload_id": "qv/n24/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 1234.1641,
+      "comparator_median_ms": 7433.386000004248,
+      "ratio": 6.023012660961576,
+      "ci95_low": 5.966810719028909,
+      "ci95_high": 6.0742860694172265
+    },
+    {
+      "workload_id": "qv/n24/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 1234.1641,
+      "comparator_median_ms": 4708.040400000755,
+      "ratio": 3.8147604520345024,
+      "ci95_low": 3.7641549459448913,
+      "ci95_high": 3.8792799109917486
+    },
+    {
+      "workload_id": "qv/n24/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 1234.1641,
+      "comparator_median_ms": 3877.2870000029798,
+      "ratio": 3.1416300312113923,
+      "ci95_low": 3.1093265843004443,
+      "ci95_high": 3.1652929298468413
+    },
+    {
+      "workload_id": "qv/n24/seed=deadbeef/probs",
+      "family": "qv",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "quest",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 1234.1641,
+      "comparator_median_ms": 59080.9179,
+      "ratio": 47.87120116360539,
+      "ci95_low": 47.425293599988635,
+      "ci95_high": 47.929331539139746
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 29.6346,
+      "comparator_median_ms": 211.77149999857647,
+      "ratio": 7.146089368460397,
+      "ci95_low": 6.542599040369267,
+      "ci95_high": 7.655421531481668
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 29.6346,
+      "comparator_median_ms": 151.8973999991431,
+      "ratio": 5.12567741758428,
+      "ci95_low": 4.692811749813647,
+      "ci95_high": 5.265058411344954
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qip",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 29.6346,
+      "comparator_median_ms": 1914.4084,
+      "ratio": 64.60044677505348,
+      "ci95_low": 59.1449111934281,
+      "ci95_high": 65.83917204479948
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 29.6346,
+      "comparator_median_ms": 79.17950000410201,
+      "ratio": 2.671859920636756,
+      "ci95_low": 2.446220198408372,
+      "ci95_high": 3.020172366068512
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "quest",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 29.6346,
+      "comparator_median_ms": 855.4336,
+      "ratio": 28.86604172150122,
+      "ci95_low": 26.428292052978087,
+      "ci95_high": 29.427312880019826
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "spinoza",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 29.6346,
+      "comparator_median_ms": 5475.0028,
+      "ratio": 184.7503526283466,
+      "ci95_low": 169.14810569665815,
+      "ci95_high": 190.11068818205746
+    },
+    {
+      "workload_id": "rcs/n20/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 56.4348,
+      "comparator_median_ms": 411.9065999984741,
+      "ratio": 7.298804992637063,
+      "ci95_low": 7.041162533862921,
+      "ci95_high": 7.571937482870643
+    },
+    {
+      "workload_id": "rcs/n20/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 56.4348,
+      "comparator_median_ms": 301.03029999736464,
+      "ratio": 5.334125397757494,
+      "ci95_low": 5.011845528013483,
+      "ci95_high": 5.520717713170088
+    },
+    {
+      "workload_id": "rcs/n20/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qip",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 56.4348,
+      "comparator_median_ms": 3765.5234,
+      "ratio": 66.72342951512188,
+      "ci95_low": 64.36814142954334,
+      "ci95_high": 69.20566742506396
+    },
+    {
+      "workload_id": "rcs/n20/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 56.4348,
+      "comparator_median_ms": 135.84899999841582,
+      "ratio": 2.407184928420333,
+      "ci95_low": 2.2921121097789108,
+      "ci95_high": 2.572733141537998
+    },
+    {
+      "workload_id": "rcs/n20/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "quest",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 56.4348,
+      "comparator_median_ms": 1763.778,
+      "ratio": 31.253375576771777,
+      "ci95_low": 30.150154359502086,
+      "ci95_high": 31.973916803107304
+    },
+    {
+      "workload_id": "rcs/n20/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "spinoza",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 56.4348,
+      "comparator_median_ms": 11146.5213,
+      "ratio": 197.5114875927619,
+      "ci95_low": 190.53947705804123,
+      "ci95_high": 201.56421597790964
+    },
+    {
+      "workload_id": "rcs/n24/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 490.1491,
+      "comparator_median_ms": 3229.091700006393,
+      "ratio": 6.587978433514196,
+      "ci95_low": 6.447975394536882,
+      "ci95_high": 6.711494930831955
+    },
+    {
+      "workload_id": "rcs/n24/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 490.1491,
+      "comparator_median_ms": 2091.3892000025953,
+      "ratio": 4.266842885160037,
+      "ci95_low": 4.1763467483659795,
+      "ci95_high": 4.332962969838713
+    },
+    {
+      "workload_id": "rcs/n24/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 490.1491,
+      "comparator_median_ms": 1745.2587999941898,
+      "ratio": 3.5606691922808587,
+      "ci95_low": 3.52275798734231,
+      "ci95_high": 3.6030248754882663
+    },
+    {
+      "workload_id": "rcs/n24/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "quest",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 490.1491,
+      "comparator_median_ms": 22160.86,
+      "ratio": 45.21248738394093,
+      "ci95_low": 44.960291013261354,
+      "ci95_high": 45.57280281191378
+    },
+    {
+      "workload_id": "rcs/n24/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 884.3043,
+      "comparator_median_ms": 6457.971499999985,
+      "ratio": 7.30288374714449,
+      "ci95_low": 7.179671345702907,
+      "ci95_high": 7.464588829884497
+    },
+    {
+      "workload_id": "rcs/n24/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 884.3043,
+      "comparator_median_ms": 4138.94319999963,
+      "ratio": 4.680451288091249,
+      "ci95_low": 4.60148390164455,
+      "ci95_high": 4.8101047343143915
+    },
+    {
+      "workload_id": "rcs/n24/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 884.3043,
+      "comparator_median_ms": 3242.0659999988857,
+      "ratio": 3.6662334447529945,
+      "ci95_low": 3.6043776843966704,
+      "ci95_high": 3.68666385541846
+    },
+    {
+      "workload_id": "rcs/n24/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 24,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "quest",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 884.3043,
+      "comparator_median_ms": 44081.4414,
+      "ratio": 49.84872447188146,
+      "ci95_low": 49.007689441934296,
+      "ci95_high": 49.99779040982648
+    },
+    {
+      "workload_id": "rcs/n26/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 26,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 2021.1538,
+      "comparator_median_ms": 11819.854399996984,
+      "ratio": 5.848072719650026,
+      "ci95_low": 5.75516449601958,
+      "ci95_high": 5.859349962520769
+    },
+    {
+      "workload_id": "rcs/n26/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 26,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 2021.1538,
+      "comparator_median_ms": 7757.627299997694,
+      "ratio": 3.8382172103863117,
+      "ci95_low": 3.7727666397890265,
+      "ci95_high": 3.874087019007886
+    },
+    {
+      "workload_id": "rcs/n26/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 26,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 2021.1538,
+      "comparator_median_ms": 7288.233699997363,
+      "ratio": 3.605976794045739,
+      "ci95_low": 3.5486887071069964,
+      "ci95_high": 3.6181884822411927
+    },
+    {
+      "workload_id": "rcs/n26/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 26,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 3873.1507,
+      "comparator_median_ms": 24197.60729999689,
+      "ratio": 6.247525380305209,
+      "ci95_low": 6.182685690030627,
+      "ci95_high": 6.280496623574018
+    },
+    {
+      "workload_id": "rcs/n26/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 26,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 3873.1507,
+      "comparator_median_ms": 15417.883100002655,
+      "ratio": 3.980708290024102,
+      "ci95_low": 3.91446846284561,
+      "ci95_high": 4.008855302145935
+    },
+    {
+      "workload_id": "rcs/n26/depth=20/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 26,
+      "group": "headline",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 3873.1507,
+      "comparator_median_ms": 13745.903800001543,
+      "ratio": 3.5490237444160235,
+      "ci95_low": 3.5121903445725424,
+      "ci95_high": 3.567753676368409
+    },
+    {
+      "workload_id": "sampling/n16/depth=10/measured=all/seed=deadbeef/counts1",
+      "family": "sampling",
+      "num_qubits": 16,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": false,
+      "precision": "double",
+      "prismq_median_ms": 4.0606,
+      "comparator_median_ms": 49.082800000178395,
+      "ratio": 12.087573265078657,
+      "ci95_low": 10.203674340993787,
+      "ci95_high": 14.455425306670492
+    },
+    {
+      "workload_id": "sampling/n16/depth=10/measured=all/seed=deadbeef/counts1",
+      "family": "sampling",
+      "num_qubits": 16,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": false,
+      "precision": "single",
+      "prismq_median_ms": 4.0606,
+      "comparator_median_ms": 52.02880000069854,
+      "ratio": 12.813081810741895,
+      "ci95_low": 10.97395403913552,
+      "ci95_high": 13.93829048310666
+    },
+    {
+      "workload_id": "sampling/n16/depth=10/measured=all/seed=deadbeef/counts1",
+      "family": "sampling",
+      "num_qubits": 16,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": false,
+      "precision": "single",
+      "prismq_median_ms": 4.0606,
+      "comparator_median_ms": 32.77429999980086,
+      "ratio": 8.071294882480633,
+      "ci95_low": 6.928880996131341,
+      "ci95_high": 29.75700635389981
+    },
+    {
+      "workload_id": "sampling/n16/depth=10/measured=all/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 16,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 50.278,
+      "comparator_median_ms": 1698.4096000014688,
+      "ratio": 33.78037312545187,
+      "ci95_low": 32.05822695453225,
+      "ci95_high": 43.982433668792346
+    },
+    {
+      "workload_id": "sampling/n16/depth=10/measured=all/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 16,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 50.278,
+      "comparator_median_ms": 1631.7662000001292,
+      "ratio": 32.45487489558314,
+      "ci95_low": 30.240156728581884,
+      "ci95_high": 41.02510046552179
+    },
+    {
+      "workload_id": "sampling/n16/depth=10/measured=all/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 16,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 50.278,
+      "comparator_median_ms": 3629.950500000632,
+      "ratio": 72.19759139187383,
+      "ci95_low": 68.51690956212062,
+      "ci95_high": 85.12656430246851
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": false,
+      "precision": "double",
+      "prismq_median_ms": 33.4826,
+      "comparator_median_ms": 210.94629999970493,
+      "ratio": 6.300176808243832,
+      "ci95_low": 6.196023746892576,
+      "ci95_high": 6.583390029389522
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": false,
+      "precision": "single",
+      "prismq_median_ms": 33.4826,
+      "comparator_median_ms": 150.36460000010266,
+      "ratio": 4.490828071897124,
+      "ci95_low": 4.356331161686733,
+      "ci95_high": 4.7782022471771635
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": false,
+      "precision": "single",
+      "prismq_median_ms": 33.4826,
+      "comparator_median_ms": 60.548900000867434,
+      "ratio": 1.8083691230928136,
+      "ci95_low": 1.6833818162278469,
+      "ci95_high": 2.123125093631108
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 32.5246,
+      "comparator_median_ms": 225.5390999998781,
+      "ratio": 6.934415796039862,
+      "ci95_low": 6.522165735499824,
+      "ci95_high": 7.487901465346932
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 32.5246,
+      "comparator_median_ms": 158.93340000002354,
+      "ratio": 4.886559711726617,
+      "ci95_low": 4.596054412326739,
+      "ci95_high": 5.08932623306683
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 32.5246,
+      "comparator_median_ms": 84.68170000014652,
+      "ratio": 2.6036200291516733,
+      "ci95_low": 2.4488351783133373,
+      "ci95_high": 2.647426870763172
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts100000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 50.2096,
+      "comparator_median_ms": 453.9844999999332,
+      "ratio": 9.041786829608943,
+      "ci95_low": 8.321760680720043,
+      "ci95_high": 9.235162200063899
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts100000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 50.2096,
+      "comparator_median_ms": 412.96429999965767,
+      "ratio": 8.224807606506678,
+      "ci95_low": 7.56984010308443,
+      "ci95_high": 8.410600761620971
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts100000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 50.2096,
+      "comparator_median_ms": 523.0972000008478,
+      "ratio": 10.418270609621423,
+      "ci95_low": 9.58863069369647,
+      "ci95_high": 10.720362241483492
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 144.1761,
+      "comparator_median_ms": 2289.210400000229,
+      "ratio": 15.877877123879959,
+      "ci95_low": 15.031382431775544,
+      "ci95_high": 16.217253997592145
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 144.1761,
+      "comparator_median_ms": 2291.724599999725,
+      "ratio": 15.895315520392943,
+      "ci95_low": 15.047891137878917,
+      "ci95_high": 16.13390639519955
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 144.1761,
+      "comparator_median_ms": 4319.335199999841,
+      "ratio": 29.95874628319008,
+      "ci95_low": 28.361560493618594,
+      "ci95_high": 30.64876985722278
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=half/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 79.9826,
+      "comparator_median_ms": 1616.0276999999041,
+      "ratio": 20.204740781118694,
+      "ci95_low": 19.61275977397866,
+      "ci95_high": 21.111075448330713
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=half/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 79.9826,
+      "comparator_median_ms": 1593.7492000011844,
+      "ratio": 19.926198948286057,
+      "ci95_low": 19.64222458989735,
+      "ci95_high": 20.32480189441985
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=half/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 79.9826,
+      "comparator_median_ms": 4200.434700000187,
+      "ratio": 52.51685616621849,
+      "ci95_low": 51.33775400225112,
+      "ci95_high": 54.02655116082445
+    },
+    {
+      "workload_id": "sampling/n24/depth=10/measured=all/seed=deadbeef/counts1",
+      "family": "sampling",
+      "num_qubits": 24,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": false,
+      "precision": "double",
+      "prismq_median_ms": 581.0415,
+      "comparator_median_ms": 3167.2460999998293,
+      "ratio": 5.450980867975574,
+      "ci95_low": 4.700202610924888,
+      "ci95_high": 6.006248607028119
+    },
+    {
+      "workload_id": "sampling/n24/depth=10/measured=all/seed=deadbeef/counts1",
+      "family": "sampling",
+      "num_qubits": 24,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": false,
+      "precision": "single",
+      "prismq_median_ms": 581.0415,
+      "comparator_median_ms": 2288.187599999219,
+      "ratio": 3.9380794659232063,
+      "ci95_low": 3.395677188394947,
+      "ci95_high": 4.4669736144318675
+    },
+    {
+      "workload_id": "sampling/n24/depth=10/measured=all/seed=deadbeef/counts1",
+      "family": "sampling",
+      "num_qubits": 24,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": false,
+      "precision": "single",
+      "prismq_median_ms": 581.0415,
+      "comparator_median_ms": 2088.9401999993424,
+      "ratio": 3.595165233463259,
+      "ci95_low": 3.099993455545938,
+      "ci95_high": 4.293705871268566
+    },
+    {
+      "workload_id": "sampling/n24/depth=10/measured=all/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 24,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 795.7364,
+      "comparator_median_ms": 10610.262899999725,
+      "ratio": 13.333891600283366,
+      "ci95_low": 13.00053152599757,
+      "ci95_high": 13.778762323797208
+    },
+    {
+      "workload_id": "sampling/n24/depth=10/measured=all/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 24,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "aer-statevector-f32",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 795.7364,
+      "comparator_median_ms": 7996.900849999292,
+      "ratio": 10.049685863307614,
+      "ci95_low": 9.798434081279481,
+      "ci95_high": 10.56744817703444
+    },
+    {
+      "workload_id": "sampling/n24/depth=10/measured=all/seed=deadbeef/counts1000000",
+      "family": "sampling",
+      "num_qubits": 24,
+      "group": "sampling",
+      "run_id": "20261103T090018-b6c9ed",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 795.7364,
+      "comparator_median_ms": 6928.248099999109,
+      "ratio": 8.706712549531616,
+      "ci95_low": 8.068862377038409,
+      "ci95_high": 9.117011389078318
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbef0/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "seeds",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 61.0769,
+      "comparator_median_ms": 415.29910000099335,
+      "ratio": 6.799609999868909,
+      "ci95_low": 6.447632473300306,
+      "ci95_high": 7.052245611712208
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbef0/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "seeds",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 61.0769,
+      "comparator_median_ms": 134.21150000067428,
+      "ratio": 2.1974183365670865,
+      "ci95_low": 2.0836703611749257,
+      "ci95_high": 2.3527356496209784
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbef1/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "seeds",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 54.8644,
+      "comparator_median_ms": 415.23980000056326,
+      "ratio": 7.568474274767668,
+      "ci95_low": 7.416877758495078,
+      "ci95_high": 7.794537688240773
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbef1/probs",
+      "family": "qv",
+      "num_qubits": 20,
+      "group": "seeds",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 54.8644,
+      "comparator_median_ms": 139.0017000012449,
+      "ratio": 2.533549988722102,
+      "ci95_low": 2.408953711359833,
+      "ci95_high": 2.8244799906065094
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbef0/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "seeds",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 29.8887,
+      "comparator_median_ms": 216.97440000571078,
+      "ratio": 7.259412420269559,
+      "ci95_low": 7.036444652180608,
+      "ci95_high": 7.501958934431026
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbef0/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "seeds",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 29.8887,
+      "comparator_median_ms": 81.31940000021132,
+      "ratio": 2.72074061435296,
+      "ci95_low": 2.5737423924539002,
+      "ci95_high": 3.0653892606827977
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbef1/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "seeds",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "aer-statevector",
+      "validated": true,
+      "precision": "double",
+      "prismq_median_ms": 30.1733,
+      "comparator_median_ms": 219.80749999784166,
+      "ratio": 7.284834605357772,
+      "ci95_low": 6.517418466190757,
+      "ci95_high": 8.36738440929827
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbef1/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "group": "seeds",
+      "run_id": "20261103T202523-0a42e5",
+      "threads": 8,
+      "comparator": "qsim",
+      "validated": true,
+      "precision": "single",
+      "prismq_median_ms": 30.1733,
+      "comparator_median_ms": 87.22120000311406,
+      "ratio": 2.8906748682813634,
+      "ci95_low": 2.6029412252231277,
+      "ci95_high": 3.0475320897592133
+    }
+  ],
+  "dispatch": [
+    {
+      "workload_id": "clifford/n1000/depth=8/seed=deadbeef/counts1000",
+      "family": "clifford",
+      "num_qubits": 1000,
+      "auto_backend": "CompiledStabilizer",
+      "auto_route": "CompiledCliffordSampler",
+      "auto_median_ms": 4.3695,
+      "plan_median_us": 205.0,
+      "best_forced": "prismq:stabilizer",
+      "best_forced_median_ms": 4.6018,
+      "forced": {
+        "prismq:tensor-network": {
+          "status": "timeout",
+          "reason": null
+        },
+        "prismq:statevector": {
+          "status": "not-applicable",
+          "reason": "dense state of 2^1000 amplitudes needs 1.6e+293 GiB"
+        },
+        "prismq:factored-stabilizer": {
+          "median_ms": 4.8698,
+          "backend": "CompiledStabilizer"
+        },
+        "prismq:mps-64": {
+          "median_ms": 84.8381,
+          "backend": "Mps"
+        },
+        "prismq:sparse": {
+          "status": "error",
+          "reason": "simulation error: backend `sparse`: the basis index of the circuit needs 1000 qubits, exceeding the cap of 64 on this machine"
+        },
+        "prismq:factored": {
+          "status": "error",
+          "reason": "simulation error: backend `factored`: the dense block of merged sub-states needs 30 qubits, exceeding the cap of 29 on this machine (override with Limits::max_factored_merge_qubits or PRISM_MAX_FACTORED_MERGE_QUBITS)"
+        },
+        "prismq:stabilizer": {
+          "median_ms": 4.6018,
+          "backend": "CompiledStabilizer"
+        }
+      },
+      "auto_over_best": {
+        "ratio": 0.9495197531400758,
+        "ci95_low": 0.8495371376417924,
+        "ci95_high": 1.0144749356282912
+      }
+    },
+    {
+      "workload_id": "disjoint/n100/block=10/depth=10/layout=contiguous/seed=deadbeef/counts1000",
+      "family": "disjoint",
+      "num_qubits": 100,
+      "auto_backend": "Decomposed",
+      "auto_route": "PerShot",
+      "auto_median_ms": 209.2093,
+      "plan_median_us": 2443.5,
+      "best_forced": "prismq:factored",
+      "best_forced_median_ms": 211.2701,
+      "forced": {
+        "prismq:sparse": {
+          "median_ms": 4564.57135,
+          "backend": "Decomposed"
+        },
+        "prismq:mps-64": {
+          "median_ms": 2930.2289,
+          "backend": "Decomposed"
+        },
+        "prismq:statevector": {
+          "status": "not-applicable",
+          "reason": "dense state of 2^100 amplitudes needs 1.89e+22 GiB"
+        },
+        "prismq:tensor-network": {
+          "median_ms": 16247.0169,
+          "backend": "Decomposed"
+        },
+        "prismq:factored": {
+          "median_ms": 211.2701,
+          "backend": "Decomposed"
+        },
+        "prismq:stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        },
+        "prismq:factored-stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        }
+      },
+      "auto_over_best": {
+        "ratio": 0.990245661832886,
+        "ci95_low": 0.980506470153609,
+        "ci95_high": 1.0058186840379446
+      }
+    },
+    {
+      "workload_id": "lowent/n100/depth=4/seed=deadbeef/counts1000",
+      "family": "lowent",
+      "num_qubits": 100,
+      "auto_backend": "Mps",
+      "auto_route": "NativeSampling",
+      "auto_median_ms": 6.9177,
+      "plan_median_us": 633.4,
+      "best_forced": "prismq:mps-64",
+      "best_forced_median_ms": 6.5738,
+      "forced": {
+        "prismq:statevector": {
+          "status": "not-applicable",
+          "reason": "dense state of 2^100 amplitudes needs 1.89e+22 GiB"
+        },
+        "prismq:tensor-network": {
+          "status": "timeout",
+          "reason": null
+        },
+        "prismq:mps-64": {
+          "median_ms": 6.5738,
+          "backend": "Mps"
+        },
+        "prismq:factored-stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        },
+        "prismq:sparse": {
+          "status": "error",
+          "reason": "simulation error: backend `sparse`: the basis index of the circuit needs 100 qubits, exceeding the cap of 64 on this machine"
+        },
+        "prismq:factored": {
+          "status": "error",
+          "reason": "simulation error: backend `factored`: the dense block of merged sub-states needs 30 qubits, exceeding the cap of 29 on this machine (override with Limits::max_factored_merge_qubits or PRISM_MAX_FACTORED_MERGE_QUBITS)"
+        },
+        "prismq:stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        }
+      },
+      "auto_over_best": {
+        "ratio": 1.0523137302625574,
+        "ci95_low": 0.9191857452264846,
+        "ci95_high": 1.1639234537101828
+      }
+    },
+    {
+      "workload_id": "midcircuit/n12/rounds=3/seed=deadbeef/counts1000",
+      "family": "midcircuit",
+      "num_qubits": 12,
+      "auto_backend": "Statevector",
+      "auto_route": "PerShot",
+      "auto_median_ms": 9.5845,
+      "plan_median_us": 27.6,
+      "best_forced": "prismq:statevector",
+      "best_forced_median_ms": 9.6162,
+      "forced": {
+        "prismq:factored-stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        },
+        "prismq:stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        },
+        "prismq:factored": {
+          "median_ms": 37.6627,
+          "backend": "Factored"
+        },
+        "prismq:sparse": {
+          "median_ms": 21.8756,
+          "backend": "Sparse"
+        },
+        "prismq:tensor-network": {
+          "median_ms": 762.1207,
+          "backend": "TensorNetwork"
+        },
+        "prismq:statevector": {
+          "median_ms": 9.6162,
+          "backend": "Statevector"
+        },
+        "prismq:mps-64": {
+          "median_ms": 36.9883,
+          "backend": "Mps"
+        }
+      },
+      "auto_over_best": {
+        "ratio": 0.9967034795449347,
+        "ci95_low": 0.9086642838858919,
+        "ci95_high": 1.0876801628639803
+      }
+    },
+    {
+      "workload_id": "qft/n20/input=product/seed=deadbeef/probs",
+      "family": "qft",
+      "num_qubits": 20,
+      "auto_backend": "Statevector",
+      "auto_route": "Default",
+      "auto_median_ms": 17.9474,
+      "plan_median_us": 33.1,
+      "best_forced": "prismq:statevector",
+      "best_forced_median_ms": 17.4586,
+      "forced": {
+        "prismq:statevector": {
+          "median_ms": 17.4586,
+          "backend": "Statevector"
+        },
+        "prismq:stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        },
+        "prismq:factored-stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        },
+        "prismq:sparse": {
+          "median_ms": 2924.9726,
+          "backend": "Sparse"
+        },
+        "prismq:tensor-network": {
+          "median_ms": 17747.0199,
+          "backend": "TensorNetwork"
+        },
+        "prismq:mps-64": {
+          "status": "invalid",
+          "reason": null
+        },
+        "prismq:factored": {
+          "median_ms": 154.5468,
+          "backend": "Factored"
+        }
+      },
+      "auto_over_best": {
+        "ratio": 1.0279976630428556,
+        "ci95_low": 0.9523615868397236,
+        "ci95_high": 1.1006533217982757
+      }
+    },
+    {
+      "workload_id": "rcs/n20/depth=10/seed=deadbeef/probs",
+      "family": "rcs",
+      "num_qubits": 20,
+      "auto_backend": "Statevector",
+      "auto_route": "Default",
+      "auto_median_ms": 30.1334,
+      "plan_median_us": 158.1,
+      "best_forced": "prismq:statevector",
+      "best_forced_median_ms": 30.0241,
+      "forced": {
+        "prismq:statevector": {
+          "median_ms": 30.0241,
+          "backend": "Statevector"
+        },
+        "prismq:tensor-network": {
+          "median_ms": 58.2232,
+          "backend": "TensorNetwork"
+        },
+        "prismq:mps-64": {
+          "median_ms": 53.227,
+          "backend": "Mps"
+        },
+        "prismq:factored": {
+          "median_ms": 67.103,
+          "backend": "Factored"
+        },
+        "prismq:sparse": {
+          "median_ms": 14745.1686,
+          "backend": "Sparse"
+        },
+        "prismq:stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        },
+        "prismq:factored-stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        }
+      },
+      "auto_over_best": {
+        "ratio": 1.0036404088715398,
+        "ci95_low": 0.9822742396941124,
+        "ci95_high": 1.2434211183682442
+      }
+    },
+    {
+      "workload_id": "sampling/n20/depth=10/measured=all/seed=deadbeef/counts100000",
+      "family": "sampling",
+      "num_qubits": 20,
+      "auto_backend": "Statevector",
+      "auto_route": "TerminalStatevector",
+      "auto_median_ms": 53.8101,
+      "plan_median_us": 184.6,
+      "best_forced": "prismq:statevector",
+      "best_forced_median_ms": 54.3788,
+      "forced": {
+        "prismq:tensor-network": {
+          "median_ms": 110.2412,
+          "backend": "TensorNetwork"
+        },
+        "prismq:mps-64": {
+          "median_ms": 1375.2331,
+          "backend": "Mps"
+        },
+        "prismq:factored": {
+          "median_ms": 108.0504,
+          "backend": "Factored"
+        },
+        "prismq:stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        },
+        "prismq:factored-stabilizer": {
+          "status": "error",
+          "reason": "simulation error: backend `stabilizer` is incompatible: circuit contains non-Clifford gates"
+        },
+        "prismq:statevector": {
+          "median_ms": 54.3788,
+          "backend": "Statevector"
+        },
+        "prismq:sparse": {
+          "median_ms": 15846.4968,
+          "backend": "Sparse"
+        }
+      },
+      "auto_over_best": {
+        "ratio": 0.9895418802915842,
+        "ci95_low": 0.9203310849080892,
+        "ci95_high": 1.0482409108993427
+      }
+    }
+  ],
+  "scaling": [
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 1,
+      "median_ms": 2202.311099994404,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 2,
+      "median_ms": 1214.8035999998683,
+      "speedup_vs_1": 1.8128947757437026,
+      "efficiency": 0.9064473878718513
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 4,
+      "median_ms": 774.3650000047637,
+      "speedup_vs_1": 2.8440220051020586,
+      "efficiency": 0.7110055012755147
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 8,
+      "median_ms": 741.3035000063246,
+      "speedup_vs_1": 2.9708629461153415,
+      "efficiency": 0.3713578682644177
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 1,
+      "median_ms": 148.4092,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 2,
+      "median_ms": 91.9374,
+      "speedup_vs_1": 1.6142418645730683,
+      "efficiency": 0.8071209322865341
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 4,
+      "median_ms": 64.3922,
+      "speedup_vs_1": 2.3047698323710013,
+      "efficiency": 0.5761924580927503
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 8,
+      "median_ms": 64.0654,
+      "speedup_vs_1": 2.316526549432299,
+      "efficiency": 0.28956581867903736
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 1,
+      "median_ms": 946.3188000008813,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 2,
+      "median_ms": 756.3769000043976,
+      "speedup_vs_1": 1.251120704499806,
+      "efficiency": 0.625560352249903
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 4,
+      "median_ms": 742.174500002875,
+      "speedup_vs_1": 1.2750624010892526,
+      "efficiency": 0.31876560027231315
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 8,
+      "median_ms": 815.9778999979608,
+      "speedup_vs_1": 1.1597358212805104,
+      "efficiency": 0.1449669776600638
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 1,
+      "median_ms": 2770.617,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 2,
+      "median_ms": 1726.6477,
+      "speedup_vs_1": 1.6046220662153607,
+      "efficiency": 0.8023110331076804
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 4,
+      "median_ms": 1442.3499,
+      "speedup_vs_1": 1.9209049066388124,
+      "efficiency": 0.4802262266597031
+    },
+    {
+      "workload_id": "qft/n22/input=product/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 8,
+      "median_ms": 1341.0387,
+      "speedup_vs_1": 2.0660231505623217,
+      "efficiency": 0.2582528938202902
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 1,
+      "median_ms": 1324.7207000022172,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 2,
+      "median_ms": 803.3116000005975,
+      "speedup_vs_1": 1.649074530980546,
+      "efficiency": 0.824537265490273
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 4,
+      "median_ms": 529.2517999987467,
+      "speedup_vs_1": 2.5030065084433426,
+      "efficiency": 0.6257516271108357
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 8,
+      "median_ms": 442.20710000081453,
+      "speedup_vs_1": 2.9957020138296673,
+      "efficiency": 0.3744627517287084
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 1,
+      "median_ms": 182.2125,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 2,
+      "median_ms": 120.3202,
+      "speedup_vs_1": 1.5143965851120593,
+      "efficiency": 0.7571982925560297
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 4,
+      "median_ms": 69.3119,
+      "speedup_vs_1": 2.6288775809060208,
+      "efficiency": 0.6572193952265052
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 8,
+      "median_ms": 61.0997,
+      "speedup_vs_1": 2.9822159519604843,
+      "efficiency": 0.37277699399506053
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 1,
+      "median_ms": 194.91479999851435,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 2,
+      "median_ms": 136.47329999366775,
+      "speedup_vs_1": 1.4282266202074563,
+      "efficiency": 0.7141133101037281
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 4,
+      "median_ms": 123.90139999479288,
+      "speedup_vs_1": 1.5731444520135034,
+      "efficiency": 0.39328611300337585
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 8,
+      "median_ms": 155.72800000518328,
+      "speedup_vs_1": 1.2516361861195595,
+      "efficiency": 0.15645452326494494
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 1,
+      "median_ms": 4416.1495,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 2,
+      "median_ms": 2722.9339,
+      "speedup_vs_1": 1.6218349993732866,
+      "efficiency": 0.8109174996866433
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 4,
+      "median_ms": 2091.0015,
+      "speedup_vs_1": 2.1119781597478533,
+      "efficiency": 0.5279945399369633
+    },
+    {
+      "workload_id": "qv/n20/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 8,
+      "median_ms": 1930.8841,
+      "speedup_vs_1": 2.2871126754837334,
+      "efficiency": 0.2858890844354667
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 1,
+      "median_ms": 2626.8261000004713,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 2,
+      "median_ms": 1534.1530999940005,
+      "speedup_vs_1": 1.7122320451659903,
+      "efficiency": 0.8561160225829951
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 4,
+      "median_ms": 987.6166000030935,
+      "speedup_vs_1": 2.659763009240877,
+      "efficiency": 0.6649407523102192
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "aer-statevector",
+      "threads": 8,
+      "median_ms": 750.2046000008704,
+      "speedup_vs_1": 3.5014795963626772,
+      "efficiency": 0.43768494954533466
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 1,
+      "median_ms": 417.6,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 2,
+      "median_ms": 229.2672,
+      "speedup_vs_1": 1.8214554894899926,
+      "efficiency": 0.9107277447449963
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 4,
+      "median_ms": 155.8403,
+      "speedup_vs_1": 2.679666299410358,
+      "efficiency": 0.6699165748525895
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "prismq",
+      "threads": 8,
+      "median_ms": 113.644,
+      "speedup_vs_1": 3.674633064658055,
+      "efficiency": 0.45932913308225687
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 1,
+      "median_ms": 444.6484000000055,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 2,
+      "median_ms": 380.28859999758424,
+      "speedup_vs_1": 1.169239361902592,
+      "efficiency": 0.584619680951296
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 4,
+      "median_ms": 378.7822000012966,
+      "speedup_vs_1": 1.1738893749455055,
+      "efficiency": 0.2934723437363764
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "qsim",
+      "threads": 8,
+      "median_ms": 433.2758000018657,
+      "speedup_vs_1": 1.0262479464537155,
+      "efficiency": 0.12828099330671444
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 1,
+      "median_ms": 8108.2882,
+      "speedup_vs_1": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 2,
+      "median_ms": 5213.0047,
+      "speedup_vs_1": 1.555396295729409,
+      "efficiency": 0.7776981478647045
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 4,
+      "median_ms": 4517.3546,
+      "speedup_vs_1": 1.7949195752753173,
+      "efficiency": 0.44872989381882933
+    },
+    {
+      "workload_id": "rcs/n22/depth=10/seed=deadbeef/probs",
+      "simulator": "quest",
+      "threads": 8,
+      "median_ms": 4823.3578,
+      "speedup_vs_1": 1.681046386399118,
+      "efficiency": 0.21013079829988976
+    }
+  ],
+  "sampling": [
+    {
+      "num_qubits": 16,
+      "measured": "all",
+      "simulator": "aer-statevector",
+      "by_shots": {
+        "1": 49.082800000178395,
+        "1000000": 1698.4096000014688
+      },
+      "one_shot_ms": 49.082800000178395,
+      "per_million_shots_ms": 1649.3284493297397
+    },
+    {
+      "num_qubits": 16,
+      "measured": "all",
+      "simulator": "aer-statevector-f32",
+      "by_shots": {
+        "1": 52.02880000069854,
+        "1000000": 1631.7662000001292
+      },
+      "one_shot_ms": 52.02880000069854,
+      "per_million_shots_ms": 1579.7389797384105
+    },
+    {
+      "num_qubits": 16,
+      "measured": "all",
+      "simulator": "prismq",
+      "by_shots": {
+        "1": 4.0606,
+        "1000000": 50.278
+      },
+      "one_shot_ms": 4.0606,
+      "per_million_shots_ms": 46.217446217446216
+    },
+    {
+      "num_qubits": 16,
+      "measured": "all",
+      "simulator": "qsim",
+      "by_shots": {
+        "1": 32.77429999980086,
+        "1000000": 3629.950500000632
+      },
+      "one_shot_ms": 32.77429999980086,
+      "per_million_shots_ms": 3597.179797180628
+    },
+    {
+      "num_qubits": 20,
+      "measured": "all",
+      "simulator": "aer-statevector",
+      "by_shots": {
+        "1": 210.94629999970493,
+        "1000": 225.5390999998781,
+        "100000": 453.9844999999332,
+        "1000000": 2289.210400000229
+      },
+      "one_shot_ms": 210.94629999970493,
+      "per_million_shots_ms": 2078.266178266703
+    },
+    {
+      "num_qubits": 20,
+      "measured": "all",
+      "simulator": "aer-statevector-f32",
+      "by_shots": {
+        "1": 150.36460000010266,
+        "1000": 158.93340000002354,
+        "100000": 412.96429999965767,
+        "1000000": 2291.724599999725
+      },
+      "one_shot_ms": 150.36460000010266,
+      "per_million_shots_ms": 2141.3621413617634
+    },
+    {
+      "num_qubits": 20,
+      "measured": "all",
+      "simulator": "prismq",
+      "by_shots": {
+        "1": 33.4826,
+        "1000": 32.5246,
+        "100000": 50.2096,
+        "1000000": 144.1761
+      },
+      "one_shot_ms": 33.4826,
+      "per_million_shots_ms": 110.6936106936107
+    },
+    {
+      "num_qubits": 20,
+      "measured": "all",
+      "simulator": "qsim",
+      "by_shots": {
+        "1": 60.548900000867434,
+        "1000": 84.68170000014652,
+        "100000": 523.0972000008478,
+        "1000000": 4319.335199999841
+      },
+      "one_shot_ms": 60.548900000867434,
+      "per_million_shots_ms": 4258.790558789533
+    },
+    {
+      "num_qubits": 20,
+      "measured": "half",
+      "simulator": "aer-statevector",
+      "by_shots": {
+        "1000000": 1616.0276999999041
+      }
+    },
+    {
+      "num_qubits": 20,
+      "measured": "half",
+      "simulator": "aer-statevector-f32",
+      "by_shots": {
+        "1000000": 1593.7492000011844
+      }
+    },
+    {
+      "num_qubits": 20,
+      "measured": "half",
+      "simulator": "prismq",
+      "by_shots": {
+        "1000000": 79.9826
+      }
+    },
+    {
+      "num_qubits": 20,
+      "measured": "half",
+      "simulator": "qsim",
+      "by_shots": {
+        "1000000": 4200.434700000187
+      }
+    },
+    {
+      "num_qubits": 24,
+      "measured": "all",
+      "simulator": "aer-statevector",
+      "by_shots": {
+        "1": 3167.2460999998293,
+        "1000000": 10610.262899999725
+      },
+      "one_shot_ms": 3167.2460999998293,
+      "per_million_shots_ms": 7443.024243024139
+    },
+    {
+      "num_qubits": 24,
+      "measured": "all",
+      "simulator": "aer-statevector-f32",
+      "by_shots": {
+        "1": 2288.187599999219,
+        "1000000": 7996.900849999292
+      },
+      "one_shot_ms": 2288.187599999219,
+      "per_million_shots_ms": 5708.718958719032
+    },
+    {
+      "num_qubits": 24,
+      "measured": "all",
+      "simulator": "prismq",
+      "by_shots": {
+        "1": 581.0415,
+        "1000000": 795.7364
+      },
+      "one_shot_ms": 581.0415,
+      "per_million_shots_ms": 214.69511469511468
+    },
+    {
+      "num_qubits": 24,
+      "measured": "all",
+      "simulator": "qsim",
+      "by_shots": {
+        "1": 2088.9401999993424,
+        "1000000": 6928.248099999109
+      },
+      "one_shot_ms": 2088.9401999993424,
+      "per_million_shots_ms": 4839.312739312506
+    }
+  ],
+  "seeds": [
+    {
+      "family": "qv",
+      "simulator": "aer-statevector",
+      "seeds": 3,
+      "medians_ms": [
+        428.5283999997773,
+        415.29910000099335,
+        415.23980000056326
+      ],
+      "across_seed_rel_range": 0.03199766144251762,
+      "within_seed_rel_iqr_median": 0.025473473378332175
+    },
+    {
+      "family": "qv",
+      "simulator": "prismq",
+      "seeds": 3,
+      "medians_ms": [
+        60.45,
+        61.0769,
+        54.8644
+      ],
+      "across_seed_rel_range": 0.10277088502894952,
+      "within_seed_rel_iqr_median": 0.01746123169122415
+    },
+    {
+      "family": "qv",
+      "simulator": "qsim",
+      "seeds": 3,
+      "medians_ms": [
+        144.3622000006144,
+        134.21150000067428,
+        139.0017000012449
+      ],
+      "across_seed_rel_range": 0.07302572558356629,
+      "within_seed_rel_iqr_median": 0.03872830331074187
+    },
+    {
+      "family": "rcs",
+      "simulator": "aer-statevector",
+      "seeds": 3,
+      "medians_ms": [
+        211.77149999857647,
+        216.97440000571078,
+        219.80749999784166
+      ],
+      "across_seed_rel_range": 0.037036627358129244,
+      "within_seed_rel_iqr_median": 0.057962001456649315
+    },
+    {
+      "family": "rcs",
+      "simulator": "prismq",
+      "seeds": 3,
+      "medians_ms": [
+        29.6346,
+        29.8887,
+        30.1733
+      ],
+      "across_seed_rel_range": 0.018023533977724094,
+      "within_seed_rel_iqr_median": 0.0071197475969179465
+    },
+    {
+      "family": "rcs",
+      "simulator": "qsim",
+      "seeds": 3,
+      "medians_ms": [
+        79.17950000410201,
+        81.31940000021132,
+        87.22120000311406
+      ],
+      "across_seed_rel_range": 0.09889030168681957,
+      "within_seed_rel_iqr_median": 0.0562707054634351
+    }
+  ]
+}

@@ -6,14 +6,98 @@ numbers and check them. The results are intended to make performance
 characteristics reproducible and transparent across representative workloads,
 not to rank projects.
 
-Every run emits a machine-readable file carrying the circuits it ran (by content
-hash), the host, the version of everything involved, and an equivalence check
-showing the simulators computed the same distribution. The rendered page is
-[Comparative Measurements](https://abecoull.github.io/prism-q/comparison.html)
-in the documentation; the controls behind it are in
+Two harnesses live here and share the adapters:
+
+- `matrix.py`, the benchmark matrix: eight workload families (dense random
+  brickwork, QFT, quantum volume, wide Clifford, shallow wide, disconnected,
+  sampling-heavy, mid-circuit), thread scaling, PRISM-Q's automatic dispatch
+  against every forced backend, and an accuracy study under a bond cap. Its
+  pages are [Comparative Measurements](https://abecoull.github.io/prism-q/comparison.html)
+  and the methodology, results and report pages beneath it.
+- `run_comparison.py`, the earlier probability-vector comparison of four
+  families at 16 to 24 qubits, with a `--check` mode against its committed
+  reference. Its page is
+  [Probability-Vector Comparison](https://abecoull.github.io/prism-q/comparison/probability-vector.html).
+
+## Benchmark matrix
+
+```bash
+comparison/.venv/Scripts/python comparison/matrix.py list --profile reference      # what would run, and what is skipped and why
+comparison/.venv/Scripts/python comparison/matrix.py run --profile smoke --out comparison/results/my-smoke
+comparison/.venv/Scripts/python comparison/matrix.py run --profile reference --out comparison/results/my-run
+comparison/.venv/Scripts/python comparison/matrix.py report comparison/results/my-run   --docs docs/comparison --landing docs/comparison.md --readme README.md
+```
+
+| Profile | Contents | Wall time on the reference host |
+| --- | --- | --- |
+| `smoke` | every family and adapter at a small size, a few seconds per row | about 3 minutes |
+| `reference` | the published subset: 52 workloads, 269 measurements and 6 not-applicable cells | about 90 minutes |
+| `full` | adds 28-qubit dense rows, QuEST at 26 qubits, Spinoza and qip at every size, threads up to 16 | most of a day; 32 GB RAM |
+
+`--groups headline,dispatch` and `--match qft` narrow a profile; `--append`
+adds to an existing results directory, and `--replace` with it moves the records
+being re-measured to `superseded.jsonl` (`--retire TEXT` also moves records whose
+workload id contains `TEXT`, for a workload whose definition changed). Run a long
+profile from a scheduled task or another detached shell, on an otherwise idle
+machine, never beside a build.
+
+The harness is formatted with `ruff format` and checked with `ruff check` under
+`comparison/ruff.toml`; its tests run with
+`comparison/.venv/Scripts/python -m unittest discover -s comparison/tests`.
+
+### Layout
+
+| File | Role |
+| --- | --- |
+| `harness/workloads.py` | canonical workload generators and the gate list format |
+| `harness/profiles.py` | the matrices: which workloads, simulators, thread counts, repetition policy |
+| `harness/runners.py` | simulator registry, applicability rules, one process per measurement, peak memory, failure classification |
+| `harness/worker.py` | Aer, qsim and Stim behind the same `exec` protocol as `examples/compare_runner.rs` |
+| `harness/reference.py` | independent exact reference for measurement statistics (past-cone extraction, branching NumPy statevector) |
+| `harness/validate.py` | TVD for dense outputs, Bonferroni-corrected exact binomial tests for sampled outputs |
+| `harness/stats.py` | medians, IQR, seeded bootstrap intervals for medians and ratios |
+| `harness/aggregate.py`, `figures.py`, `pages.py` | CSV and JSON tables, SVG figures, and the documentation pages, all from the raw files |
+
+### Results directory
+
+| File | Contents |
+| --- | --- |
+| `manifest.json` | run id, profile, host (CPU, flags, affinity, clock, power plan, GPU, RAM, OS), toolchains, package versions, environment, timed-region and policy statements, SHA-256 of the runner binaries and harness scripts, and every supplementary run |
+| `observations.jsonl` | one record per simulator, workload and thread count: status (`ok`, `not-applicable`, `timeout`, `oom`, `crash`, `error`) and reason, phases, warm samples, statistics, peak memory, resolved backend and route, validation result, seed reproducibility |
+| `superseded.jsonl` | records a supplementary run re-measured or retired, each tagged with the run that superseded it |
+| `fusion.json` | PRISM-Q's fused instruction counts for the dense headline circuits, from `matrix.py fusion-counts` |
+| `samples.csv`, `summary.csv`, `derived.json` | written by `aggregate`: long-form samples, one row per observation, and the derived ratio, dispatch, scaling, sampling and seed tables |
+| `circuits.jsonl.gz` | every gate list, one JSON line each with its SHA-256 |
+
+### Environment variables
+
+| Variable | Default |
+| --- | --- |
+| `PRISMQ_CMP_RUNNER` | `target/release/examples/compare_runner` |
+| `PRISMQ_CMP_PEERS` | `comparison/peers/target/release/peers` |
+| `PRISMQ_CMP_QUEST` | `comparison/quest/build/[Release/]quest_runner` |
+| `PRISMQ_CMP_PYTHON` | the interpreter running `matrix.py` |
+
+The overrides let a worktree reuse comparator builds from another checkout.
+
+### Not measured
+
+GPU paths (the comparators' GPU builds are Linux-only on this host; PRISM-Q's
+`gpu` feature would need `--features "parallel gpu"` and a CUDA toolkit), 16
+threads (the reference host has 8), ISA variants (PRISM-Q has no switch to force
+its scalar kernels), Qulacs (no wheel for Python 3.14 on Windows), noise, and
+sampling or mid-circuit rows on QuEST, Spinoza and qip (their adapters implement
+the dense output only). The methodology page lists each with its reason.
+
+## Probability-vector comparison
+
+The rest of this file describes `run_comparison.py`. Every run emits a
+machine-readable file carrying the circuits it ran (by content hash), the host,
+the version of everything involved, and an equivalence check showing the
+simulators computed the same distribution. The controls behind it are in
 [Benchmark Methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html).
 
-## Simulators
+### Simulators
 
 | Adapter | Simulator | How it runs | Threads |
 | --- | --- | --- | --- |
@@ -30,7 +114,7 @@ qsim, whose amplitudes are single precision because that is the only precision
 it offers; the equivalence tolerance is set to pass float32 rounding and fail a
 wrong answer, and the measured distance is printed per row.
 
-## Setup
+### Setup
 
 ```bash
 python -m venv comparison/.venv
@@ -50,7 +134,7 @@ current. A comparator whose executable is missing fails the run with the path it
 expected, so a partial setup is reported rather than silently narrowed; pass
 `--simulators` to run a subset.
 
-## Running
+### Running
 
 ```bash
 comparison/.venv/Scripts/python comparison/run_comparison.py \
@@ -68,7 +152,7 @@ comparison/.venv/Scripts/python comparison/run_comparison.py --check comparison/
 an output that diverges, or a verdict that flips. Absolute times are not checked
 because they do not transfer across hardware; ratios and verdicts are.
 
-## What is measured
+### What is measured
 
 The timed region is the same on every side: execute the circuit and materialize
 the full `2^n` probability vector. Building the circuit from the gate list is
@@ -93,7 +177,7 @@ backend) from the part that comes from the kernels.
 Nothing here covers the CUDA, MPI or distributed paths of any simulator. The
 comparison is CPU against CPU on one host.
 
-## Corpus
+### Corpus
 
 The four families of the published [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html)
 page, from the `prism_q::circuits` generators with circuit seed `0xDEAD_BEEF`:
@@ -109,7 +193,7 @@ The gate list is hashed with SHA-256 and the hash is stored in the results file.
 A circuit is never dropped for how it performs; a size the generator cannot
 produce is listed with the reason.
 
-## Results file
+### Results file
 
 One JSON file per run, `schema_version` 1. The fields that matter for
 verification:
@@ -128,7 +212,7 @@ verification:
 documentation page from the same data. Both are generated, never hand edited,
 and print rows where PRISM-Q is slower the same as rows where it is faster.
 
-## Generating a reference
+### Generating a reference
 
 Reference results are committed per host so a verifier has something to diff
 against. Generate one on a quiet machine, with nothing else running, never
@@ -138,7 +222,7 @@ alongside `cargo bench`:
 comparison/.venv/Scripts/python comparison/run_comparison.py --iterations 5 --qubits 16,20,24 \
   --out comparison/results/reference-<host>.json \
   --markdown comparison/results/reference-<host>.md \
-  --docs docs/comparison.md
+  --docs docs/comparison/probability-vector.md
 ```
 
 A reference is only meaningful when the run it came from passed its equivalence

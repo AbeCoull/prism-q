@@ -83,10 +83,9 @@ def render(results: dict[str, Any]) -> str:
         "Every simulator replays the same gate list for each circuit, built from the "
         "`prism_q::circuits` generators and hashed so a rerun can prove it did the same work. "
         f"The timed region is: {run['timed_region']}. "
-        f"Ratios are the comparator's median over PRISM-Q's median, so a ratio above 1.00x "
-        f"means PRISM-Q finished sooner and below 1.00x means the comparator did; a ratio "
-        f"within {run['tie_band_pct']:.0f}% of 1.00x is reported as within band, because "
-        "cross-process timing noise on one host is of that order."
+        "Ratios are the comparator's median over PRISM-Q's median. Cross-process timing on "
+        f"one host varies by about {run['tie_band_pct']:.0f}%, so ratios closer to 1.00x than "
+        "that are not distinguishable."
     )
     lines.append("")
 
@@ -197,18 +196,15 @@ def render(results: dict[str, Any]) -> str:
         "A row where the comparator did not run is not counted."
     )
     lines.append("")
-    lines.append("| Comparator | PRISM-Q sooner | Within band | Comparator sooner | Median ratio | Range |")
-    lines.append("| --- | --- | --- | --- | --- | --- |")
+    lines.append("| Comparator | Median ratio | Range |")
+    lines.append("| --- | --- | --- |")
     for name, stats in results["summary"]["per_comparator"].items():
         rng = (
             f"{_fmt_ratio(stats['min_ratio'])} to {_fmt_ratio(stats['max_ratio'])}"
             if stats["min_ratio"] is not None
             else "n/a"
         )
-        lines.append(
-            f"| {name} | {stats['faster']} | {stats['within_band']} | {stats['slower']} | "
-            f"{_fmt_ratio(stats['median_ratio'])} | {rng} |"
-        )
+        lines.append(f"| {name} | {_fmt_ratio(stats['median_ratio'])} | {rng} |")
     lines.append("")
 
     failures = results["summary"]["equivalence_failures"]
@@ -261,9 +257,7 @@ def render(results: dict[str, Any]) -> str:
         lines.append("Listed so the selection can be audited; a row is never dropped for how it performs.")
         lines.append("")
         for item in errors:
-            lines.append(
-                f"- {item['benchmark']} at {item['num_qubits']} qubits, {item['simulator']}: {item['error']}"
-            )
+            lines.append(f"- {item['benchmark']} at {item['num_qubits']} qubits, {item['simulator']}: {item['error']}")
         lines.append("")
 
     skipped = results["corpus"]["skipped"]

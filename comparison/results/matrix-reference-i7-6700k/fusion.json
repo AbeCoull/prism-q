@@ -1,0 +1,107 @@
+{
+  "rcs/n20/depth=10/seed=deadbeef/probs": {
+    "num_qubits": 20,
+    "input_instructions": 695,
+    "fused_instructions": 5,
+    "kinds": {
+      "Multi2q": 5
+    }
+  },
+  "rcs/n20/depth=20/seed=deadbeef/probs": {
+    "num_qubits": 20,
+    "input_instructions": 1390,
+    "fused_instructions": 9,
+    "kinds": {
+      "Fused2q": 1,
+      "Multi2q": 8
+    }
+  },
+  "qft/n20/input=product/seed=deadbeef/probs": {
+    "num_qubits": 20,
+    "input_instructions": 260,
+    "fused_instructions": 6,
+    "kinds": {
+      "DiagonalBatch": 2,
+      "Multi2q": 4
+    }
+  },
+  "rcs/n24/depth=10/seed=deadbeef/probs": {
+    "num_qubits": 24,
+    "input_instructions": 835,
+    "fused_instructions": 7,
+    "kinds": {
+      "Multi2q": 7
+    }
+  },
+  "rcs/n24/depth=20/seed=deadbeef/probs": {
+    "num_qubits": 24,
+    "input_instructions": 1670,
+    "fused_instructions": 11,
+    "kinds": {
+      "Multi2q": 11
+    }
+  },
+  "qft/n24/input=product/seed=deadbeef/probs": {
+    "num_qubits": 24,
+    "input_instructions": 360,
+    "fused_instructions": 13,
+    "kinds": {
+      "BatchPhase": 2,
+      "DiagonalBatch": 4,
+      "Multi2q": 6,
+      "MultiFused": 1
+    }
+  },
+  "rcs/n26/depth=10/seed=deadbeef/probs": {
+    "num_qubits": 26,
+    "input_instructions": 905,
+    "fused_instructions": 7,
+    "kinds": {
+      "Multi2q": 7
+    }
+  },
+  "rcs/n26/depth=20/seed=deadbeef/probs": {
+    "num_qubits": 26,
+    "input_instructions": 1810,
+    "fused_instructions": 13,
+    "kinds": {
+      "Multi2q": 13
+    }
+  },
+  "qft/n26/input=product/seed=deadbeef/probs": {
+    "num_qubits": 26,
+    "input_instructions": 416,
+    "fused_instructions": 15,
+    "kinds": {
+      "BatchPhase": 4,
+      "DiagonalBatch": 4,
+      "Multi2q": 6,
+      "MultiFused": 1
+    }
+  },
+  "qv/n16/seed=deadbeef/probs": {
+    "num_qubits": 16,
+    "input_instructions": 1024,
+    "fused_instructions": 9,
+    "kinds": {
+      "Fused2q": 1,
+      "Multi2q": 8
+    }
+  },
+  "qv/n20/seed=deadbeef/probs": {
+    "num_qubits": 20,
+    "input_instructions": 1600,
+    "fused_instructions": 14,
+    "kinds": {
+      "Multi2q": 14
+    }
+  },
+  "qv/n24/seed=deadbeef/probs": {
+    "num_qubits": 24,
+    "input_instructions": 2304,
+    "fused_instructions": 23,
+    "kinds": {
+      "Multi2q": 23
+    }
+  }
+}

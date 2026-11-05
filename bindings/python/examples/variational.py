@@ -36,5 +36,5 @@ print(f"energy after 100 steps: {energy:.6f}")
 prepared = PreparedCircuit(circuit, params, BackendKind.statevector())
 rng = np.random.default_rng(42)
 points = rng.uniform(-np.pi, np.pi, size=(256, params.num_slots))
-energies = [r.mean for r in prepared.observable_expectation_many(points, hamiltonian, seed=42)]
+energies = [r.mean for r in prepared.expectation_many(points, hamiltonian, seed=42)]
 print(f"lowest of 256 random points: {min(energies):.6f}")

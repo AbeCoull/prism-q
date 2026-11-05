@@ -168,7 +168,7 @@ exclude = [
 # CircuitBuilder
 "CircuitBuilder::barrier" = "CircuitBuilder.barrier"
 "CircuitBuilder::build" = "CircuitBuilder.build"
-"CircuitBuilder::build_parametric" = { rust_only = "Python reads build() and parameters() separately" }
+"CircuitBuilder::build_parametric" = "CircuitBuilder.build_parametric"
 "CircuitBuilder::ccx" = "CircuitBuilder.ccx"
 "CircuitBuilder::ch" = "CircuitBuilder.ch"
 "CircuitBuilder::circuit" = { rust_only = "borrow of the circuit in progress; Python's build() returns a copy and keeps the builder" }
@@ -300,11 +300,11 @@ exclude = [
 "Parameters::with_names" = "Parameters.with_names"
 "PreparedCircuit::bind" = "PreparedCircuit.bind"
 "PreparedCircuit::bind_fused" = { rust_only = "returns the fused circuit the engine replays" }
-"PreparedCircuit::expectation_values" = "PreparedCircuit.expectation_values"
-"PreparedCircuit::expectation_values_many" = "PreparedCircuit.expectation_values_many"
+"PreparedCircuit::expectation_values" = "PreparedCircuit.expectation"
+"PreparedCircuit::expectation_values_many" = "PreparedCircuit.expectation_many"
 "PreparedCircuit::new" = "PreparedCircuit"
-"PreparedCircuit::observable_expectation" = "PreparedCircuit.observable_expectation"
-"PreparedCircuit::observable_expectation_many" = "PreparedCircuit.observable_expectation_many"
+"PreparedCircuit::observable_expectation" = "PreparedCircuit.expectation"
+"PreparedCircuit::observable_expectation_many" = "PreparedCircuit.expectation_many"
 "PreparedCircuit::parameters" = "PreparedCircuit.parameters"
 "PreparedCircuit::reuses_fusion_plan" = "PreparedCircuit.reuses_fusion_plan"
 "PreparedCircuit::run" = "PreparedCircuit.run"

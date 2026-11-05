@@ -277,7 +277,8 @@ impl PySimulation {
     /// A `PauliObservable` returns an `ObservableExpectation` instead: the
     /// weighted mean, with the grouped-measurement variance on the statevector
     /// family. Both carry the provenance of the run. The circuit must be
-    /// unitary. With a noise model attached the value is the exact
+    /// unitary, except that `BackendKind.density_matrix()` evolves a reset as a
+    /// channel. With a noise model attached the value is the exact
     /// `Tr(rho P)`, which requires `BackendKind.density_matrix()`.
     #[pyo3(signature = (observables))]
     fn expectation<'py>(
@@ -286,6 +287,9 @@ impl PySimulation {
         observables: Observables<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let owned_noise = self.owned_noise(py);
+        if matches!(self.kind, Some(BackendKind::DensityMatrix)) && self.circuit.has_resets() {
+            return self.reset_mixture_expectation(py, observables, owned_noise.as_ref());
+        }
         match observables {
             Observables::Weighted(held) => {
                 let observable = &held.get().0;
@@ -506,6 +510,22 @@ pub(crate) fn parse_pauli_string(factors: &[(usize, String)]) -> PyPrismResult<V
         .collect()
 }
 
+/// Provenance of a value read off the CPU density matrix. `RunMetadata` has no
+/// public constructor, so it is read from an empty one-qubit run on that route.
+fn exact_mixture_metadata() -> PyPrismResult<RunMetadata> {
+    let probe = Circuit::new(1, 0);
+    let noise = NoiseModel {
+        after_gate: Vec::new(),
+        readout: Vec::new(),
+    };
+    Ok(core_simulate(&probe)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(DEFAULT_SEED)
+        .expectation_values_reported(&[])?
+        .metadata)
+}
+
 /// The `expectation()` argument: a held weighted observable, or a list of
 /// unweighted Pauli strings.
 pub(crate) enum Observables<'py> {
@@ -658,6 +678,66 @@ impl PySimulation {
             sim = sim.limits(limits);
         }
         sim.seed(self.seed.unwrap_or(DEFAULT_SEED))
+    }
+
+    /// `expectation()` on the density matrix of a circuit with resets, which
+    /// `Simulate` rejects as non-unitary and the free
+    /// `density_matrix_expectation_values` evolves as channels.
+    fn reset_mixture_expectation<'py>(
+        &self,
+        py: Python<'py>,
+        observables: Observables<'py>,
+        noise: Option<&NoiseModel>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if self.initial_state.is_some() || self.initial_density_matrix.is_some() {
+            return Err(invalid(
+                "expectation() on a circuit with resets does not accept a start state; a \
+                 density-matrix start state needs a unitary circuit",
+            )
+            .into());
+        }
+        let (strings, weighted) = match observables {
+            Observables::Weighted(held) => {
+                let terms = held.get().0.terms();
+                (terms.iter().map(|(_, s)| s.clone()).collect(), Some(held))
+            }
+            Observables::Strings(strings) => (parse_observables(strings)?, None),
+        };
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let values = py
+            .detach(|| {
+                prism_q::density_matrix_expectation_values(&self.circuit, &strings, noise, seed)
+            })
+            .map_err(PyPrismError::from)?;
+        let metadata = PyRunMetadata::new(exact_mixture_metadata()?);
+        match weighted {
+            Some(held) => {
+                let mean = held
+                    .get()
+                    .0
+                    .terms()
+                    .iter()
+                    .zip(&values)
+                    .map(|((coefficient, _), value)| coefficient * value)
+                    .sum();
+                let result = PyObservableExpectation {
+                    mean,
+                    variance: None,
+                    group_variances: None,
+                    std_error: None,
+                    metadata,
+                };
+                Ok(Bound::new(py, result)?.into_any())
+            }
+            None => {
+                let result = PyExpectationResult {
+                    values,
+                    std_errors: None,
+                    metadata,
+                };
+                Ok(Bound::new(py, result)?.into_any())
+            }
+        }
     }
 
     /// Borrow the attached noise model and produce an owned copy, so the GIL can

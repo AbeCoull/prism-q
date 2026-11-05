@@ -31,7 +31,7 @@ circuit = (
 | Arbitrary unitary | `cu(matrix, control, target)`, `mcu(matrix, controls, target)`, `gate(gate, targets)` |
 | Non-unitary | `measure(qubit, bit)`, `measure_all()`, `measure_in_basis(qubit, axis, bit)`, `measure_pauli_product(factors, bit)`, `reset(qubit)`, `barrier(qubits)` |
 | Classical control | `conditional(condition, gate, targets)`, `guarded(condition, body, else_body=None)` |
-| Parameters | `param(slot)`, `parameters()`, `parameter_links()` |
+| Parameters | `param(slot)`, `parameters()`, `parameter_links()`, `build_parametric()` |
 
 `pauli_rotation(theta, factors)` appends `exp(-i * theta * P / 2)` for the Pauli
 string `P` given as `(qubit, axis)` factors with `axis` one of `"X"`, `"Y"`,
@@ -218,30 +218,31 @@ for values in [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]:
 ```
 
 `run(values, seed=42)` returns the `RunOutcome` that `simulate(...).run()` would.
-`expectation_values(values, observables)` returns the `.values` of
-`Simulation.expectation()` on the bound circuit, and `observable_expectation(values,
-hamiltonian)` the `ObservableExpectation` it returns for a `PauliObservable`, without
-dispatching or fusing again. `bind(values)` returns the bound `Circuit`, for
-`simulate(...)` with other options or any other consumer.
+`expectation(values, observables)` reads `Simulation.expectation()` on the bound circuit
+without dispatching or fusing again: a list of Pauli strings returns the `.values` array,
+and a `PauliObservable` returns the `ObservableExpectation`. `bind(values)` returns the
+bound `Circuit`, for `simulate(...)` with other options or any other consumer.
 
-`run_many`, `expectation_values_many` and `observable_expectation_many` take a
-`(points, num_slots)` array and cross into Rust once. Up to 16 qubits the rows split
-across cores, as in `run_batch`; each result matches the single call with the same seed.
-
-```python
-energies = prepared.observable_expectation_many(points, hamiltonian, seed=42)
-```
-
-A term list is parsed, and its terms regrouped into qubit-wise commuting sets, on every
-call. `PauliObservable` parses once and keeps the grouping after first use. Every
-Hamiltonian argument accepts one, the gradients included:
+`run_many` and `expectation_many` take a `(points, num_slots)` array and cross into Rust
+once. `expectation_many` returns a `(points, observables)` array for a list of strings
+and one `ObservableExpectation` per point for a `PauliObservable`. Up to 16 qubits the
+rows split across cores, as in `run_batch`; each result matches the single call with the
+same seed.
 
 ```python
 from prism_q import PauliObservable
 
+energies = prepared.expectation_many(points, PauliObservable(hamiltonian), seed=42)
+```
+
+A term list is parsed, and its terms regrouped into qubit-wise commuting sets, on every
+call. `PauliObservable` parses once and keeps the grouping after first use. Every
+Hamiltonian argument accepts one, the gradients included, so build it outside the loop:
+
+```python
 h = PauliObservable(hamiltonian)
 for values in points:
-    mean = prepared.observable_expectation(values, h, seed=42).mean
+    mean = prepared.expectation(values, h, seed=42).mean
 ```
 
 Automatic dispatch reads the template, so build it at angles typical of the sweep. A

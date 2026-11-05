@@ -870,11 +870,6 @@ impl PyCircuitBuilder {
         Ok(slf)
     }
 
-    /// Deprecated alias of `param`, to be removed in the next minor release.
-    fn trainable(slf: PyRefMut<'_, Self>, slot: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
-        Self::param(slf, slot)
-    }
-
     /// The `(instruction_index, parameter_slot)` links recorded by `param`, for
     /// passing to `Simulation.expectation_gradient`.
     fn parameter_links(&self) -> Vec<(usize, usize)> {
@@ -1270,6 +1265,12 @@ impl PyCircuitBuilder {
     /// Return a copy of the circuit so far. The builder stays usable afterward.
     fn build(&self) -> PyCircuit {
         PyCircuit(self.inner.circuit().clone())
+    }
+
+    /// `build()` and `parameter_links()` in one call, for
+    /// `Simulation.expectation_gradient`. The builder stays usable afterward.
+    fn build_parametric(&self) -> (PyCircuit, Vec<(usize, usize)>) {
+        (self.build(), self.parameter_links())
     }
 }
 

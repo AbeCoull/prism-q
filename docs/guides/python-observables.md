@@ -14,7 +14,8 @@ list, and Hamiltonian terms take either as `(coefficient, observable)`.
 `.std_errors` the standard errors of a sampling route (else `None`), and `.metadata` the
 route that served them. A `PauliObservable` returns an `ObservableExpectation` for the
 weighted sum. Weighted terms must be wrapped in `PauliObservable`; a bare
-`(coefficient, observable)` list raises `TypeError`. The circuit must be unitary.
+`(coefficient, observable)` list raises `TypeError`. The circuit must be unitary, except
+on the density matrix below.
 
 ```python
 observables = ["Z", "ZZ", [(0, "X"), (1, "X")]]
@@ -24,8 +25,8 @@ energy = simulate(circuit).seed(42).expectation(PauliObservable([(1.0, "ZZ"), (0
 
 On `BackendKind.density_matrix()` the circuit and any attached noise model evolve the
 density matrix, and the values are exact `Tr(rho P)`, with none of the variance of
-averaging trajectories. A circuit with a measurement or a reset raises `PrismError`, so
-strip them first:
+averaging trajectories. A reset evolves as a channel there, while a circuit with a
+measurement raises `PrismError`, so strip measurements first:
 
 ```python
 model = NoiseModel.empty(circuit)
@@ -44,7 +45,8 @@ asserting exact equality.
 
 `expectation_gradient` computes `⟨H⟩` and its exact gradient over the bound parameters
 by the adjoint method, at a cost independent of the parameter count. Mark parameters
-with `param(slot)` while building and pass `parameter_links()`.
+with `param(slot)` while building; `build_parametric()` returns the circuit with its
+`parameter_links()`.
 
 ```python
 import numpy as np
@@ -54,7 +56,7 @@ builder = CircuitBuilder(2)
 builder.ry(0.3, 0).param(0)
 builder.cx(0, 1)
 builder.rz(0.7, 1).param(1)
-circuit, links = builder.build(), builder.parameter_links()
+circuit, links = builder.build_parametric()
 
 hamiltonian = [(1.0, [(0, "Z")]), (0.5, [(0, "Z"), (1, "Z")])]
 result = simulate(circuit).seed(42).expectation_gradient(hamiltonian, links)

@@ -409,6 +409,14 @@ def test_rxx_and_ryy_are_bindable():
     assert builder.parameter_links() == [(0, 0), (1, 1)]
 
 
+def test_build_parametric_returns_the_circuit_and_its_links():
+    builder = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).rz(0.7, 1).param(1)
+    circuit, links = builder.build_parametric()
+    assert links == builder.parameter_links() == [(0, 0), (2, 1)]
+    assert circuit.gate_count() == builder.build().gate_count() == 3
+    assert not hasattr(builder, "trainable")
+
+
 def test_run_qasm_seed_defaults_to_42():
     default = run_qasm(BELL_QASM)
     explicit = run_qasm(BELL_QASM, 42)

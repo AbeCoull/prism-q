@@ -118,6 +118,35 @@ def test_measured_circuit_is_rejected():
         simulate(circuit).seed(SEED).backend(DM).expectation([[(0, "X")]])
     assert excinfo.value.kind == "incompatible_backend"
 
+def test_reset_evolves_as_a_channel():
+    # Resetting half of a Bell pair leaves |0><0| on qubit 0 and I/2 on qubit 1.
+    circuit = CircuitBuilder(2).h(0).cx(0, 1).reset(0).build()
+    result = simulate(circuit).seed(SEED).backend(DM).expectation(["Z", "IZ", "XI", "ZZ"])
+    np.testing.assert_allclose(result.values, [1.0, 0.0, 0.0, 0.0], atol=DM_EPS)
+    assert result.std_errors is None
+    assert result.metadata.backend == "DensityMatrix"
+    assert result.metadata.is_exact
+
+    energy = simulate(circuit).seed(SEED).backend(DM).expectation(
+        prism_q.PauliObservable([(1.0, "Z"), (0.5, "IZ"), (-0.25, "")])
+    )
+    assert math.isclose(energy.mean, 0.75, abs_tol=DM_EPS)
+    assert energy.variance is None
+
+    model = NoiseModel.empty(circuit)
+    model.add_event(1, NoiseChannel.amplitude_damping(1.0), [1])
+    (z1,) = simulate(circuit).seed(SEED).noise(model).backend(DM).expectation(["IZ"]).values
+    assert math.isclose(z1, 1.0, abs_tol=DM_EPS)
+
+    with pytest.raises(prism_q.PrismError, match="start state"):
+        simulate(circuit).backend(DM).initial_state([1, 0, 0, 0]).expectation(["Z"])
+    with pytest.raises(prism_q.PrismError, match="without measurements"):
+        measured = CircuitBuilder(1, 1).reset(0).measure(0, 0).build()
+        simulate(measured).seed(SEED).backend(DM).expectation(["Z"])
+    with pytest.raises(prism_q.PrismError):
+        simulate(circuit).seed(SEED).expectation(["Z"])
+
+
 def test_noisy_shots_sample_the_exact_distribution():
     circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
     model = NoiseModel.uniform_depolarizing(circuit, 0.01)

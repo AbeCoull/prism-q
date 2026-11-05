@@ -389,6 +389,26 @@ pub(super) fn inspect<S>(
     {
         return inspect_shift(request, hamiltonian, parameters, limits);
     }
+    if matches!(query, Query::Expectation(_) | Query::Observable(_))
+        && evolves_resets_as_channels(kind, circuit)
+    {
+        if let Some(model) = request.noise_model {
+            reject_readout_at(circuit, model, "the planned terminal")?;
+        }
+        noise::validate_mixture_inputs(circuit, request.noise_model, request.initial_state)?;
+        let rule = if request.noise_model.is_some() {
+            RouteRule::ExactMixture
+        } else {
+            RouteRule::ExplicitBackend
+        };
+        return Ok(backend_plan(
+            &plan_for_family(kind, Family::DensityMatrix, n, limits),
+            kind,
+            circuit,
+            limits,
+            rule,
+        ));
+    }
     if matches!(
         query,
         Query::Expectation(_)
@@ -610,7 +630,7 @@ pub(super) fn inspect<S>(
         ),
         Query::Observable(observable) => {
             if grouped_statevector(kind, circuit, limits) {
-                require_unitary_circuit(kind, circuit, "expectation values require")?;
+                require_unitary_expectation_circuit(kind, circuit)?;
                 Ok(backend_plan(
                     &plan_for_family(kind, Family::Statevector, n, limits),
                     kind,

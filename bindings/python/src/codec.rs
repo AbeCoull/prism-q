@@ -33,6 +33,7 @@ pub(crate) enum Kind {
     Condition = b'D',
     RecordRef = b'R',
     QecNoise = b'E',
+    ExpectationGradient = b'X',
 }
 
 pub(crate) struct Writer(Vec<u8>);
@@ -1350,7 +1351,9 @@ pub(crate) fn decode_qec_program(data: &[u8]) -> PyPrismResult<QecProgram> {
     Ok(QecProgram::from_ops(num_qubits, options, ops)?)
 }
 
-pub(crate) fn encode_observable(observable: &PauliObservable) -> Vec<u8> {
+/// `text_width` is the longest Pauli text the observable was built from, which
+/// the canonical terms do not record.
+pub(crate) fn encode_observable(observable: &PauliObservable, text_width: usize) -> Vec<u8> {
     let mut w = Writer::new(Kind::PauliObservable);
     w.usize(observable.terms().len());
     for (coefficient, factors) in observable.terms() {
@@ -1361,10 +1364,11 @@ pub(crate) fn encode_observable(observable: &PauliObservable) -> Vec<u8> {
             w.u8(axis_tag(term.axis));
         }
     }
+    w.usize(text_width);
     w.finish()
 }
 
-pub(crate) fn decode_observable(data: &[u8]) -> PyPrismResult<PauliObservable> {
+pub(crate) fn decode_observable(data: &[u8]) -> PyPrismResult<(PauliObservable, usize)> {
     let mut r = Reader::new(data, Kind::PauliObservable)?;
     let len = r.len(16)?;
     let mut terms = Vec::with_capacity(len);
@@ -1376,6 +1380,23 @@ pub(crate) fn decode_observable(data: &[u8]) -> PyPrismResult<PauliObservable> {
             .collect::<PyPrismResult<Vec<_>>>()?;
         terms.push((coefficient, factors));
     }
+    // Payloads written before the text width existed end after the terms.
+    let text_width = if r.at_end() { 0 } else { r.usize()? };
     r.finish()?;
-    Ok(PauliObservable::from_terms(terms)?)
+    Ok((PauliObservable::from_terms(terms)?, text_width))
+}
+
+pub(crate) fn encode_gradient(value: f64, gradient: &[f64]) -> Vec<u8> {
+    let mut w = Writer::new(Kind::ExpectationGradient);
+    w.f64(value);
+    w.f64s(gradient);
+    w.finish()
+}
+
+pub(crate) fn decode_gradient(data: &[u8]) -> PyPrismResult<(f64, Vec<f64>)> {
+    let mut r = Reader::new(data, Kind::ExpectationGradient)?;
+    let value = r.f64()?;
+    let gradient = r.f64s()?;
+    r.finish()?;
+    Ok((value, gradient))
 }

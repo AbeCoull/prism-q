@@ -276,7 +276,7 @@ pub(super) fn decide_expectations(
     observables: &[Vec<PauliTerm>],
     limits: &ResolvedLimits,
 ) -> Result<ExpectationRoute> {
-    require_unitary_circuit(kind, circuit, "expectation values require")?;
+    require_unitary_expectation_circuit(kind, circuit)?;
     for observable in observables {
         validate_observable(observable, circuit.num_qubits)?;
     }

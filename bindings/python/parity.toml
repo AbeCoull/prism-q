@@ -168,7 +168,7 @@ exclude = [
 # CircuitBuilder
 "CircuitBuilder::barrier" = "CircuitBuilder.barrier"
 "CircuitBuilder::build" = "CircuitBuilder.build"
-"CircuitBuilder::build_parametric" = "CircuitBuilder.build_parametric"
+"CircuitBuilder::build_parametric" = "CircuitBuilder.build_parametric"  # Rust resets the builder; Python keeps it, as build() does
 "CircuitBuilder::ccx" = "CircuitBuilder.ccx"
 "CircuitBuilder::ch" = "CircuitBuilder.ch"
 "CircuitBuilder::circuit" = { rust_only = "borrow of the circuit in progress; Python's build() returns a copy and keeps the builder" }

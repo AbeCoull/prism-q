@@ -219,9 +219,10 @@ for values in [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]:
 
 `run(values, seed=42)` returns the `RunOutcome` that `simulate(...).run()` would.
 `expectation(values, observables)` reads `Simulation.expectation()` on the bound circuit
-without dispatching or fusing again: a list of Pauli strings returns the `.values` array,
-and a `PauliObservable` returns the `ObservableExpectation`. `bind(values)` returns the
-bound `Circuit`, for `simulate(...)` with other options or any other consumer.
+without dispatching or fusing again: a list of Pauli strings returns a `float64` ndarray,
+one value per string, and a `PauliObservable` returns the `ObservableExpectation`.
+`bind(values)` returns the bound `Circuit`, for `simulate(...)` with other options or any
+other consumer.
 
 `run_many` and `expectation_many` take a `(points, num_slots)` array and cross into Rust
 once. `expectation_many` returns a `(points, observables)` array for a list of strings

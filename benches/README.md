@@ -149,7 +149,7 @@ gate described under [Instruction-count gate](#instruction-count-gate). Linux on
 `bindings/python/benches/energy_sweep.py` times the `prepared/hea_l2_energy` sweep
 through the installed wheel at 10, 12 and 14 qubits, with the Hamiltonian passed as a
 term list and as a `PauliObservable`, per point and through
-`observable_expectation_many`. It is a plain `perf_counter` script rather than a
+`PreparedCircuit.expectation_many`. It is a plain `perf_counter` script rather than a
 Criterion target, so read its rows beside `prepared/hea_l2_energy/prepared` for the
 cost the binding adds, not as a gate.
 

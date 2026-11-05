@@ -1100,3 +1100,126 @@ fn observable_expectation_rejects_readout_error() {
         .unwrap();
     assert!(result.mean.is_finite());
 }
+
+// ===== resets on the density matrix =====
+
+/// `H q0; CX q0 q1; reset q0`: the reset leaves q0 in |0> and q1 maximally mixed.
+fn reset_bell() -> (Circuit, Circuit) {
+    let without_reset = bell();
+    let mut with_reset = bell();
+    with_reset.add_reset(0);
+    (with_reset, without_reset)
+}
+
+fn assert_same_provenance(got: &prism_q::RunMetadata, want: &prism_q::RunMetadata) {
+    assert_eq!(got.reason, want.reason);
+    assert_eq!(got.backend, want.backend);
+    assert_eq!(got.engine, want.engine);
+    assert_eq!(got.exactness, want.exactness);
+    assert_eq!(got.placement, want.placement);
+}
+
+#[test]
+fn density_matrix_reset_reports_the_reset_free_metadata() {
+    let (circuit, reference) = reset_bell();
+    let observables = [vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]];
+    let reported = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    let baseline = simulate(&reference)
+        .backend(BackendKind::DensityMatrix)
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert_close(&reported.values, &[1.0, 0.0], TOL);
+    assert_eq!(
+        reported.metadata.reason,
+        prism_q::RouteRule::ExplicitBackend
+    );
+    assert_same_provenance(&reported.metadata, &baseline.metadata);
+    let plan = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(42)
+        .plan(prism_q::Query::Expectation(&observables))
+        .unwrap();
+    assert_eq!(
+        (plan.backend, plan.rule),
+        (reported.metadata.backend, reported.metadata.reason)
+    );
+
+    let observable =
+        PauliObservable::from_terms([(0.5, vec![PauliTerm::z(0)]), (2.0, vec![PauliTerm::z(1)])])
+            .unwrap();
+    let weighted = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(42)
+        .require_exact()
+        .observable_expectation(&observable)
+        .unwrap();
+    let weighted_baseline = simulate(&reference)
+        .backend(BackendKind::DensityMatrix)
+        .seed(42)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!((weighted.mean - 0.5).abs() < TOL, "mean {}", weighted.mean);
+    assert_same_provenance(&weighted.metadata, &weighted_baseline.metadata);
+
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    let noisy = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert_eq!(noisy.metadata.reason, prism_q::RouteRule::ExactMixture);
+}
+
+#[test]
+fn density_matrix_reset_honours_limits() {
+    let (circuit, _) = reset_bell();
+    let err = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .limits(prism_q::Limits::new().max_density_matrix_qubits(1))
+        .seed(42)
+        .expectation_values(&[vec![PauliTerm::z(0)]])
+        .unwrap_err();
+    assert!(
+        matches!(err, prism_q::PrismError::ResourceLimit(_)),
+        "expected the request limit to reject the run, got {err:?}"
+    );
+}
+
+#[test]
+fn density_matrix_reset_starts_from_the_initial_state() {
+    use num_complex::Complex64;
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_reset(0);
+    let mut start = vec![Complex64::new(0.0, 0.0); 4];
+    start[2] = Complex64::new(1.0, 0.0);
+    let values = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .initial_state(&start)
+        .seed(42)
+        .expectation_values(&[vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]])
+        .unwrap();
+    assert_close(&values, &[1.0, -1.0], TOL);
+}
+
+#[test]
+fn reset_rejection_names_the_density_matrix() {
+    let (circuit, _) = reset_bell();
+    let err = simulate(&circuit)
+        .seed(42)
+        .expectation_values(&[vec![PauliTerm::z(0)]])
+        .unwrap_err();
+    match err {
+        prism_q::PrismError::IncompatibleBackend { reason, .. } => assert!(
+            reason.contains("`BackendKind::DensityMatrix` evolves resets"),
+            "got {reason}"
+        ),
+        other => panic!("expected IncompatibleBackend, got {other:?}"),
+    }
+}

@@ -32,8 +32,8 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 
 **Simulation:**
 `simulate`, `Simulate`, `Unseeded`, `Seeded`, `run_on`, `run_on_state`, `run_qasm`,
-`PauliObservable`, `ObservableExpectation`, `ObservableVariance`, `ExpectationResult`, `OverlapResult`,
-`bitstring`
+`PauliObservable`, `ObservableExpectation`, `ObservableVariance`, `ExpectationResult`,
+`OverlapResult`, `bitstring`
 
 **Save points:** `Circuit::add_save` appends an `Instruction::Save` recording a
 `SaveSpec`, and `Simulate::run` returns one `SaveRecord` per point in `RunOutcome::saves`,

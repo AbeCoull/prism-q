@@ -245,6 +245,7 @@ impl PyPreparedCircuit {
         observables: Observables<'py>,
         seed: u64,
     ) -> PyResult<Bound<'py, PyAny>> {
+        observables.check_width(self.locked().template().num_qubits)?;
         match observables {
             Observables::Weighted(held) => {
                 let observable = &held.get().0;
@@ -298,6 +299,7 @@ impl PyPreparedCircuit {
         seed: u64,
     ) -> PyResult<Bound<'py, PyAny>> {
         let rows = binding_rows(bindings)?;
+        observables.check_width(self.locked().template().num_qubits)?;
         match observables {
             Observables::Weighted(held) => {
                 let observable = &held.get().0;

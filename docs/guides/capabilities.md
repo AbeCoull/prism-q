@@ -160,6 +160,11 @@ reject a model that carries readout error: readout acts on the measurement recor
 the state, and is indexed by classical bit where a marginal is indexed by qubit. `shots`
 and `sample_counts` apply it.
 
+Expectation terminals need a unitary circuit, except on `BackendKind::DensityMatrix` and its
+device sibling, which evolve a reset as a channel, with or without a noise model. The run
+honours `.limits()`, `.require_exact()` and a start state, and reports the same metadata
+as the circuit without its resets. A measurement or conditional is still rejected there.
+
 `simulate(...).run()` is the one terminal that needs the whole distribution, so on the
 distributed backend it rejects a register past the dense cap before running.
 

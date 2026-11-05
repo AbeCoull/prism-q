@@ -409,10 +409,12 @@ def test_rxx_and_ryy_are_bindable():
     assert builder.parameter_links() == [(0, 0), (1, 1)]
 
 
-def test_build_parametric_returns_the_circuit_and_its_links():
+def test_build_parametric_returns_the_circuit_and_its_parameters():
     builder = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).rz(0.7, 1).param(1)
-    circuit, links = builder.build_parametric()
-    assert links == builder.parameter_links() == [(0, 0), (2, 1)]
+    circuit, params = builder.build_parametric()
+    assert isinstance(params, prism_q.Parameters)
+    assert params.links() == builder.parameter_links() == [(0, 0), (2, 1)]
+    assert params.values(circuit) == [0.3, 0.7]
     assert circuit.gate_count() == builder.build().gate_count() == 3
     assert not hasattr(builder, "trainable")
 
@@ -573,3 +575,38 @@ def test_expectation_rejects_weighted_terms_outside_an_observable():
     circuit = CircuitBuilder(1).h(0).build()
     with pytest.raises(TypeError, match="PauliObservable"):
         simulate(circuit).seed(42).expectation([(1.0, "Z")])
+    with pytest.raises(TypeError, match=r"\[\[\(0, \"Z\"\)\]\]"):
+        simulate(circuit).seed(42).expectation([(0, "Z")])
+
+
+def test_pauli_string_longer_than_the_register_is_rejected():
+    circuit = CircuitBuilder(2).h(0).cx(0, 1).build()
+    sim = simulate(circuit).seed(42)
+    assert sim.expectation(["ZZ", "Z"]).values == pytest.approx([1.0, 0.0], abs=1e-12)
+    for too_long in (["ZIII"], ["IIZ"]):
+        with pytest.raises(prism_q.PrismError, match="3 characters|4 characters"):
+            sim.expectation(too_long)
+    with pytest.raises(prism_q.PrismError, match="2 qubits"):
+        sim.expectation(PauliObservable([(1.0, "ZII")]))
+    with pytest.raises(prism_q.PrismError, match="2 qubits"):
+        sim.observable_variance([(1.0, "IIX")])
+    params = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).build_parametric()[1]
+    with pytest.raises(prism_q.PrismError, match="2 qubits"):
+        sim.expectation_gradient([(1.0, "ZIZ")], params.links())
+    prepared = prism_q.PreparedCircuit(circuit, prism_q.Parameters(0))
+    with pytest.raises(prism_q.PrismError, match="2 qubits"):
+        prepared.expectation([], ["XXX"])
+
+
+def test_expectation_result_reads_as_its_values():
+    circuit = CircuitBuilder(2).x(0).build()
+    result = simulate(circuit).seed(42).expectation(["ZI", "IZ", "ZZ"])
+    assert len(result) == 3
+    assert result[0] == pytest.approx(-1.0) and result[-1] == pytest.approx(-1.0)
+    assert list(result) == pytest.approx([-1.0, 1.0, -1.0])
+    with pytest.raises(IndexError):
+        result[3]
+    array = np.asarray(result)
+    assert array.dtype == np.float64 and array.shape == (3,)
+    assert np.array_equal(array, result.values)
+    assert np.asarray(result, dtype=np.float32).dtype == np.float32

@@ -138,13 +138,38 @@ def test_reset_evolves_as_a_channel():
     (z1,) = simulate(circuit).seed(SEED).noise(model).backend(DM).expectation(["IZ"]).values
     assert math.isclose(z1, 1.0, abs_tol=DM_EPS)
 
-    with pytest.raises(prism_q.PrismError, match="start state"):
-        simulate(circuit).backend(DM).initial_state([1, 0, 0, 0]).expectation(["Z"])
     with pytest.raises(prism_q.PrismError, match="without measurements"):
         measured = CircuitBuilder(1, 1).reset(0).measure(0, 0).build()
         simulate(measured).seed(SEED).backend(DM).expectation(["Z"])
-    with pytest.raises(prism_q.PrismError):
+    with pytest.raises(prism_q.PrismError, match=r"BackendKind\.density_matrix\(\)"):
         simulate(circuit).seed(SEED).expectation(["Z"])
+
+
+def test_reset_on_the_density_matrix_reports_the_backend_route():
+    circuit = CircuitBuilder(2).h(0).cx(0, 1).reset(0).build()
+    reference = CircuitBuilder(2).h(0).cx(0, 1).build()
+    got = simulate(circuit).seed(SEED).backend(DM).expectation(["Z"]).metadata
+    want = simulate(reference).seed(SEED).backend(DM).expectation(["Z"]).metadata
+    assert got.reason == want.reason == "explicit_backend"
+    assert (got.backend, got.placement, got.is_exact) == (want.backend, want.placement, want.is_exact)
+
+
+def test_reset_on_the_density_matrix_honours_limits_and_start_state():
+    circuit = CircuitBuilder(2).h(0).reset(0).build()
+    with pytest.raises(prism_q.PrismError) as excinfo:
+        (
+            simulate(circuit)
+            .seed(SEED)
+            .backend(DM)
+            .limits(prism_q.Limits(max_density_matrix_qubits=1))
+            .expectation(["Z"])
+        )
+    assert excinfo.value.kind == "resource_limit"
+    assert excinfo.value.limit_source == "request"
+
+    start = [0, 0, 1, 0]
+    values = simulate(circuit).seed(SEED).backend(DM).initial_state(start).expectation(["ZI", "IZ"])
+    np.testing.assert_allclose(values.values, [1.0, -1.0], atol=DM_EPS)
 
 
 def test_noisy_shots_sample_the_exact_distribution():

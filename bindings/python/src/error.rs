@@ -55,7 +55,11 @@ fn limit_source_name(source: prism_q::LimitSource) -> &'static str {
 impl From<PyPrismError> for PyErr {
     fn from(err: PyPrismError) -> PyErr {
         let kind = error_kind(&err.0);
-        let py_err = PrismError::new_err(err.0.to_string());
+        let message = err.0.to_string().replace(
+            "`BackendKind::DensityMatrix`",
+            "`BackendKind.density_matrix()`",
+        );
+        let py_err = PrismError::new_err(message);
         Python::attach(|py| {
             // Failing to annotate must not displace the error being reported.
             let value = py_err.value(py);

@@ -1,6 +1,8 @@
 import math
+import pickle
 
 import numpy as np
+import pytest
 
 from prism_q import CircuitBuilder, ExpectationGradient, simulate
 
@@ -162,3 +164,25 @@ def test_gradient_result_names_its_fields_and_unpacks():
     shift = simulate(circuit).seed(42).expectation_gradient_shift([(1.0, "Z")], links)
     assert isinstance(shift, ExpectationGradient)
     assert np.allclose(shift.gradient, result.gradient, atol=1e-9)
+
+
+def test_gradient_result_indexes_and_pickles_as_the_pair():
+    builder = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).rz(0.7, 1).param(1)
+    circuit, params = builder.build_parametric()
+    result = simulate(circuit).seed(42).expectation_gradient([(1.0, "ZZ")], params.links())
+
+    assert len(result) == 2
+    assert result[0] == result[-2] == result.value
+    assert np.array_equal(result[1], result.gradient)
+    assert np.array_equal(result[-1], result.gradient)
+    for index in (2, -3):
+        with pytest.raises(IndexError):
+            result[index]
+
+    restored = pickle.loads(pickle.dumps(result))
+    assert isinstance(restored, ExpectationGradient)
+    assert restored.value == result.value
+    assert np.array_equal(restored.gradient, result.gradient)
+    value, grad = restored
+    assert value == result.value
+    assert np.array_equal(grad, result.gradient)

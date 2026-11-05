@@ -27,9 +27,10 @@ yields a stabilizer state only from one. So `auto()` resolves to the statevector
 GPU and distributed statevectors and `density_matrix()` are the only other backends
 that accept a start state, and any other choice raises `PrismError` naming itself.
 Terminals carry it where the [terminal table](python-running.md#running-a-simulation)
-says so; `expectation_gradient()` rejects it, as do `shots()` and `sample_counts()` with a noise model, since trajectory replay
-reinitializes a pure state per shot. Under noise, read the exact mixture with `run()`,
-`marginals()`, or `expectation()` on `density_matrix()`.
+says so; `expectation_gradient()` rejects it, as do `shots()` and `sample_counts()` with
+a noise model, since trajectory replay reinitializes a pure state per shot. Under noise,
+read the exact mixture with `run()`, `marginals()`, or `expectation()` on
+`density_matrix()`.
 
 ## Starting from a mixture
 

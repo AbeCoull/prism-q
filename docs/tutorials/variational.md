@@ -50,8 +50,8 @@ print(hamiltonian.num_terms, hamiltonian.num_groups)   # 7 2
 
 `expectation_gradient` uses the adjoint method: one forward and one backward pass at any
 parameter count. `expectation_gradient_shift` uses the parameter-shift rule, two extra
-circuit runs per parameter, and works on backends with no adjoint pass. Both return
-`(value, gradient)`, one gradient entry per slot.
+circuit runs per parameter, and works on backends with no adjoint pass. Both return an
+`ExpectationGradient`, which unpacks as `(value, gradient)`, one gradient entry per slot.
 
 ```python
 from prism_q import simulate

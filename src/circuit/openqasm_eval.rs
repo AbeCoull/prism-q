@@ -425,7 +425,11 @@ impl<'a> Parser<'a> {
             let base = instructions.len();
             let left = self.expansion_left.get();
             self.pending_input_slot = None;
-            self.exec_stmt(stmt, &mut instructions)?;
+            if let Err(err) = self.exec_stmt(stmt, &mut instructions)
+                && !self.unwinds_end()
+            {
+                return Err(err);
+            }
             // Nested blocks charged what they emitted as they ran; this
             // statement owes only what it added on top.
             let nested = left - self.expansion_left.get();
@@ -452,10 +456,11 @@ impl<'a> Parser<'a> {
                 }
                 self.noise_specs.push((base - 1, spec));
             }
-            if self
-                .def_result
-                .as_ref()
-                .is_some_and(|result| result.returned)
+            if self.exit.is_some()
+                || self
+                    .def_result
+                    .as_ref()
+                    .is_some_and(|result| result.returned)
             {
                 break;
             }
@@ -703,17 +708,15 @@ impl<'a> Parser<'a> {
                 self.exec_if_dynamic(stmt, conditional, line, out)
             }
             StmtKind::If(conditional) => {
-                out.extend(self.exec_if(conditional, line)?);
+                let instructions = self.exec_if(conditional, line, out)?;
+                out.extend(instructions);
                 Ok(())
             }
             StmtKind::For {
                 variable,
                 range,
                 body,
-            } => {
-                out.extend(self.exec_for(variable, range, body, line)?);
-                Ok(())
-            }
+            } => self.exec_for(stmt, variable, range, body, line, out),
             StmtKind::Switch { target, arms } if self.switch_needs_graph(stmt, target) => {
                 self.exec_switch_branches(target, arms, line)
             }
@@ -724,20 +727,13 @@ impl<'a> Parser<'a> {
             StmtKind::While { condition, body } if self.dynamic.is_some() => {
                 self.exec_while(condition, body, line)
             }
-            StmtKind::Break | StmtKind::Continue if self.dynamic.is_some() => {
-                self.exec_loop_exit(matches!(stmt.kind, StmtKind::Break), line)
-            }
-            StmtKind::While { .. } | StmtKind::Break | StmtKind::Continue => {
-                let construct = match stmt.kind {
-                    StmtKind::While { .. } => "while",
-                    StmtKind::Break => "break",
-                    _ => "continue",
-                };
-                Err(PrismError::UnsupportedConstruct {
-                    construct: construct.to_string(),
-                    line,
-                })
-            }
+            StmtKind::While { .. } => Err(PrismError::UnsupportedConstruct {
+                construct: "while".to_string(),
+                line,
+            }),
+            StmtKind::Break => self.exec_loop_exit(Exit::Break, line),
+            StmtKind::Continue => self.exec_loop_exit(Exit::Continue, line),
+            StmtKind::End => self.exec_end(line),
             StmtKind::GateDef {
                 name,
                 params,
@@ -1492,6 +1488,18 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Whether a def call in the running statement reached `end` under `parse`,
+    /// so nothing after the call in that statement may run. `parse_dynamic`
+    /// leaves the rest to the halt block it emitted.
+    fn unwinds_end(&self) -> bool {
+        self.exit == Some(Exit::End) && self.dynamic.is_none()
+    }
+
+    /// The error that carries an `end` out of an expression; `execute_block` drops it.
+    fn end_unwind() -> PrismError {
+        parse_error(0, String::new())
+    }
+
     pub(super) fn resolve_calls(
         &mut self,
         expr: &Expr<'a>,
@@ -1526,6 +1534,9 @@ impl<'a> Parser<'a> {
                         let (instructions, value) =
                             self.expand_def(call.name, &args, None, line)?;
                         out.extend(instructions);
+                        if self.unwinds_end() {
+                            return Err(Self::end_unwind());
+                        }
                         if self.streaming() {
                             self.flush(std::mem::take(out));
                         }
@@ -2398,6 +2409,9 @@ impl<'a> Parser<'a> {
             if def.result.as_ref().is_some_and(|result| result.ty != "bit") {
                 let (instructions, value) = self.expand_def(assign.name, &args, None, line)?;
                 out.extend(instructions);
+                if self.unwinds_end() {
+                    return Ok(());
+                }
                 if self.streaming() {
                     self.flush(std::mem::take(out));
                 }
@@ -2826,6 +2840,15 @@ impl<'a> Parser<'a> {
         }
         let instructions = sub.execute(&def.body)?;
         let frame = sub.def_result.expect("installed above");
+        if sub.exit == Some(Exit::End) {
+            self.exec_end(line)?;
+            let value = frame.value.or_else(|| {
+                def.result
+                    .is_some()
+                    .then_some(Expr::Number(ClassicalValue::Int(0)))
+            });
+            return Ok((instructions, value));
+        }
         if def.local.is_some() {
             self.charge(frame.bits.len(), line)?;
             let mut initialized = frame.bits.iter().map(|&bit| (bit, false)).collect();
@@ -2956,6 +2979,8 @@ impl<'a> Parser<'a> {
             arrays: HashMap::new(),
             declared: Vec::new(),
             def_result: None,
+            loops: Vec::new(),
+            exit: None,
             guard: None,
             dynamic: None,
             expansion_left: Rc::clone(&self.expansion_left),
@@ -2969,14 +2994,14 @@ impl<'a> Parser<'a> {
         &mut self,
         conditional: &ast::Conditional<'a>,
         line: usize,
+        out: &mut Vec<Instruction>,
     ) -> Result<Vec<Instruction>> {
         if let Ok(expr) = super::dynamic::condition_expr(&conditional.condition)
             && expr
                 .finds_call(&|name| self.def_defs.contains_key(name))
                 .is_some()
         {
-            let mut instructions = Vec::new();
-            let value = self.resolve_calls(&expr, line, &mut instructions)?;
+            let value = self.resolve_calls(&expr, line, out)?;
             let ClassicalExpr::Const(value) = self.lower_expr(&value, line)? else {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: "a def call in a measurement-dependent condition".to_string(),
@@ -2988,10 +3013,7 @@ impl<'a> Parser<'a> {
             } else {
                 conditional.else_body.as_ref()
             };
-            if let Some(body) = body {
-                instructions.extend(self.exec_box(body)?);
-            }
-            return Ok(instructions);
+            return body.map_or(Ok(Vec::new()), |body| self.exec_box(body));
         }
 
         let general = match &conditional.condition {
@@ -3130,11 +3152,13 @@ impl<'a> Parser<'a> {
 
     fn exec_for(
         &mut self,
+        stmt: &Stmt<'a>,
         variable: &'a str,
         range: &ForRange<'a>,
         body: &Block<'a>,
         line: usize,
-    ) -> Result<Vec<Instruction>> {
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
         let values = self.for_values(range, line)?;
         if values.len() as i64 > MAX_FOR_ITERATIONS {
             return Err(parse_error(
@@ -3145,7 +3169,6 @@ impl<'a> Parser<'a> {
                 ),
             ));
         }
-        let mut out = Vec::new();
         // The loop variable may shadow an outer name, whose value comes back
         // once the loop ends.
         let shadowed = self
@@ -3171,8 +3194,26 @@ impl<'a> Parser<'a> {
         let scope = self.open_scope();
         let mut result = Ok(());
         self.enter_static_loop();
-        for value in values {
+        let graph = self.unrolls_into_graph(stmt);
+        if graph {
+            self.flush(std::mem::take(out));
+            self.begin_unrolled();
+        }
+        self.loops.push(Loop::For {
+            region_depth: self.region_depth,
+            frames: self.graph_depth(),
+            graph,
+        });
+        for (pass, value) in values.into_iter().enumerate() {
             if let Err(error) = self.charge(1, line) {
+                result = Err(error);
+                break;
+            }
+            let mark = if graph { self.pass_mark() } else { (0, 0) };
+            if graph
+                && pass > 0
+                && let Err(error) = self.next_pass()
+            {
                 result = Err(error);
                 break;
             }
@@ -3187,13 +3228,39 @@ impl<'a> Parser<'a> {
             self.close_scope(scope);
             match produced {
                 Ok(produced) => {
-                    out.extend(produced);
-                    if self
-                        .def_result
-                        .as_ref()
-                        .is_some_and(|result| result.returned)
-                    {
-                        break;
+                    if graph {
+                        self.flush(produced);
+                        if let Err(error) = self.charge_pass_blocks(mark, line) {
+                            result = Err(error);
+                            break;
+                        }
+                    } else {
+                        out.extend(produced);
+                    }
+                    // A path a runtime `continue` sent to the next pass still
+                    // needs that pass, so a parse-time exit after one jumps
+                    // instead of ending the unrolling.
+                    let continued = graph && self.pass_continued();
+                    match self.exit {
+                        Some(Exit::Break) => {
+                            self.exit = None;
+                            if !continued {
+                                break;
+                            }
+                            if let Err(error) = self.break_unrolled() {
+                                result = Err(error);
+                                break;
+                            }
+                        }
+                        Some(Exit::Continue) => self.exit = None,
+                        Some(Exit::End) => break,
+                        None => {}
+                    }
+                    if let Some(frame) = self.def_result.as_mut().filter(|frame| frame.returned) {
+                        if !continued {
+                            break;
+                        }
+                        frame.returned = false;
                     }
                 }
                 Err(error) => {
@@ -3201,6 +3268,17 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+        }
+        self.loops.pop();
+        if graph && result.is_ok() {
+            // Paths a runtime `break` sent to the exit go on past the loop,
+            // whatever `return` the rest took.
+            if self.loop_broke()
+                && let Some(frame) = self.def_result.as_mut()
+            {
+                frame.returned = false;
+            }
+            result = self.end_unrolled();
         }
         self.leave_static_loop();
         if let Some(state) = self.dynamic.as_mut() {
@@ -3225,7 +3303,7 @@ impl<'a> Parser<'a> {
                 None => vars.remove(variable),
             };
         }
-        result.map(|()| out)
+        result
     }
 
     fn for_values(&self, range: &ForRange, line: usize) -> Result<Vec<i64>> {

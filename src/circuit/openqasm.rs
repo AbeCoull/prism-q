@@ -324,6 +324,30 @@ struct DefResult<'a> {
     result_var: Option<crate::circuit::dynamic::VarId>,
 }
 
+/// A loop the statement being run sits in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Loop {
+    While,
+    /// A `for` unrolled at parse time, with the guarded-region depth and the count
+    /// of open graph constructs at its entry. An exit reached at the same depths
+    /// is taken at parse time; one reached deeper is decided at runtime, and
+    /// `graph` says the passes are blocks it can jump between.
+    For {
+        region_depth: usize,
+        frames: usize,
+        graph: bool,
+    },
+}
+
+/// A `break`, `continue` or `end` taken at parse time, which stops the blocks
+/// running until the construct it leaves takes it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Exit {
+    Break,
+    Continue,
+    End,
+}
+
 /// A `let` alias: the qubits or bits it names, in the order it named them.
 #[derive(Clone)]
 struct Alias {
@@ -467,6 +491,9 @@ pub(crate) struct Parser<'a> {
     declared: Vec<&'a str>,
     /// The `def` body being expanded; `None` outside one.
     def_result: Option<DefResult<'a>>,
+    /// Enclosing loops of the body being run, innermost last.
+    loops: Vec<Loop>,
+    exit: Option<Exit>,
     /// Length of `declared` where the innermost runtime guard opened. Its body
     /// may write only the names declared past it; `None` outside a guard.
     guard: Option<usize>,
@@ -589,6 +616,8 @@ impl<'a> Parser<'a> {
             arrays: HashMap::new(),
             declared: Vec::new(),
             def_result: None,
+            loops: Vec::new(),
+            exit: None,
             guard: None,
             dynamic: None,
             expansion_left: Rc::new(Cell::new(MAX_EXPANSION)),

@@ -292,7 +292,7 @@ fn definitions_keep_their_signatures() {
 
 #[test]
 fn unimplemented_keywords_are_rejected_by_name() {
-    for keyword in ["extern", "opaque", "while", "break"] {
+    for keyword in ["extern", "opaque", "while"] {
         let source = format!("{keyword} x;");
         match error(&source) {
             PrismError::UnsupportedConstruct { construct, .. } => {
@@ -384,4 +384,12 @@ fn conditions_take_every_shape_the_language_allows() {
         },
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn loop_exits_and_end_parse_on_both_paths() {
+    assert!(matches!(one("break;"), StmtKind::Break));
+    assert!(matches!(one("continue;"), StmtKind::Continue));
+    assert!(matches!(one("end;"), StmtKind::End));
+    assert!(matches!(one("end q[0];"), StmtKind::Call { .. }));
 }

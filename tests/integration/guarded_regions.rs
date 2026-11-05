@@ -307,25 +307,14 @@ switch (c) {
 }
 
 #[test]
-fn while_and_break_still_reject_by_name() {
-    for (source, construct, line) in [
-        (
-            "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\nwhile (c[0]) { x q[0]; }",
-            "while",
-            4,
-        ),
-        ("OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\nbreak;", "break", 4),
-    ] {
-        match openqasm::parse(source).expect_err("unsupported") {
-            PrismError::UnsupportedConstruct {
-                construct: got,
-                line: at,
-            } => {
-                assert_eq!(got, construct);
-                assert_eq!(at, line);
-            }
-            other => panic!("expected UnsupportedConstruct for {construct}, got {other:?}"),
+fn while_still_rejects_by_name() {
+    let source = "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\nwhile (c[0]) { x q[0]; }";
+    match openqasm::parse(source).expect_err("unsupported") {
+        PrismError::UnsupportedConstruct { construct, line } => {
+            assert_eq!(construct, "while");
+            assert_eq!(line, 4);
         }
+        other => panic!("expected UnsupportedConstruct for while, got {other:?}"),
     }
 }
 

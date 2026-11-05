@@ -251,3 +251,23 @@ fn builder_expressions_read_variables_and_bits() {
     assert!(b.expr("m + 1").is_err());
     assert!(b.expr("sin(n)").is_err());
 }
+
+#[test]
+fn every_halt_continues_in_one_unreachable_block() {
+    let mut b = DynamicProgramBuilder::new(1, 1);
+    b.begin_if(ClassicalExpr::Bit(0));
+    b.halt();
+    let blocks = b.block_count();
+    b.halt();
+    b.add_gate(crate::Gate::X, &[0]);
+    b.halt();
+    b.end().unwrap();
+    assert_eq!(b.block_count(), blocks);
+    let program = b.build().unwrap();
+    assert!(
+        program
+            .blocks()
+            .iter()
+            .all(|block| block.circuit.instructions.is_empty())
+    );
+}

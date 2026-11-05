@@ -570,7 +570,6 @@ fn classical_control_constructs_parse_or_reject_by_name() {
 
     let rejected = [
         ("while", "while (c[0]) { x q[0]; }", "while"),
-        ("break", "break;", "break"),
         ("opaque", "opaque foo q;", "opaque"),
         ("extern", "extern foo(int);", "extern"),
         ("return", "return;", "`return` outside a def"),

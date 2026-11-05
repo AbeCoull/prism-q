@@ -3887,6 +3887,64 @@ fn a_runtime_rotation_is_charged_per_qubit() {
 }
 
 #[test]
+fn nested_fors_with_measured_exits_walk_in_linear_time() {
+    let nested = |depth: usize| {
+        let mut source = String::from(
+            "OPENQASM 3.0;
+qubit[2] q;
+bit[2] c;
+c[0] = measure q[0];
+",
+        );
+        for level in 0..depth {
+            source += &format!("for int i{level} in [0:0] {{ if (c[0]) {{ break; }} ");
+        }
+        source += "x q[1];";
+        source += &" }".repeat(depth);
+        source
+    };
+    let walked = |depth: usize| {
+        super::dynamic::WALKED.with(|walked| walked.set(0));
+        parse_dynamic(&nested(depth)).unwrap();
+        super::dynamic::WALKED.with(Cell::get)
+    };
+    let (shallow, deep) = (walked(8), walked(16));
+    assert!(
+        deep <= shallow * 3,
+        "{shallow} statements walked at depth 8, {deep} at 16"
+    );
+    let (shallow, deep) = (walked(8), walked(120));
+    assert!(
+        deep * 8 <= shallow * 120 * 2,
+        "{shallow} walked at 8, {deep} at 120"
+    );
+}
+
+#[test]
+fn a_pass_of_blocks_costs_more_budget_than_a_pass_of_instructions() {
+    let head = "OPENQASM 3.0;
+qubit[2] q;
+bit[2] c;
+c[0] = measure q[0];
+";
+    let needs = |body: &str| {
+        let source = format!("{head}for int j in [0:99] {{ if (c[0]) {{ {body} }} }}");
+        let fits = |budget| super::dynamic::parse_dynamic_within(&source, budget).is_ok();
+        let (mut low, mut high) = (1, 1 << 16);
+        while low < high {
+            let mid = (low + high) / 2;
+            if fits(mid) { high = mid } else { low = mid + 1 }
+        }
+        low
+    };
+    let (plain, exits) = (needs("x q[0];"), needs("break;"));
+    assert!(
+        exits > 2 * plain,
+        "a pass of blocks needs {exits}, one of instructions {plain}"
+    );
+}
+
+#[test]
 fn nested_boxes_just_inside_the_limit_fit_a_small_stack() {
     let depth = MAX_NESTING - 8;
     let source = format!(
@@ -4546,4 +4604,136 @@ fn a_switch_on_a_parse_time_value_keeps_one_arm() {
     let err =
         parse("OPENQASM 3.0;\nqubit[1] q;\nswitch (1) { case 1 { } case 1 { } }").unwrap_err();
     assert!(err.to_string().contains("appears twice"), "{err}");
+}
+
+#[test]
+fn break_and_continue_stop_an_unrolled_for() {
+    let head = "OPENQASM 3.0;\nqubit[4] q;\nbit[4] c;\n";
+    same_instructions(
+        &format!("{head}for int i in [0:3] {{ if (i == 2) break; x q[i]; }} h q[3];"),
+        &format!("{head}x q[0]; x q[1]; h q[3];"),
+    );
+    same_instructions(
+        &format!("{head}for int i in [0:3] {{ if (i == 1) {{ continue; }} h q[i]; }}"),
+        &format!("{head}h q[0]; h q[2]; h q[3];"),
+    );
+    same_instructions(
+        &format!("{head}for int i in [0:3] {{ if (i % 2 == 1) continue; c[i] = measure q[i]; }}"),
+        &format!("{head}c[0] = measure q[0]; c[2] = measure q[2];"),
+    );
+    same_instructions(
+        &format!(
+            "{head}for int i in [0:1] {{ for int j in [0:3] {{ if (j == 2) break; cx q[i], q[j + 2]; }} z q[i]; }}"
+        ),
+        &format!(
+            "{head}cx q[0], q[2]; cx q[0], q[3]; z q[0]; cx q[1], q[2]; cx q[1], q[3]; z q[1];"
+        ),
+    );
+    // A `switch` is not a loop, so its `break` leaves the enclosing `for`.
+    same_instructions(
+        &format!(
+            "{head}for int i in [0:3] {{ switch (i) {{ case 1 {{ break; }} default {{ x q[i]; }} }} }}"
+        ),
+        &format!("{head}x q[0];"),
+    );
+    same_instructions(
+        &format!(
+            "{head}int n = 0; for int i in [0:3] {{ n += 1; if (n == 2) break; }} rx(n) q[0];"
+        ),
+        &format!("{head}rx(2) q[0];"),
+    );
+}
+
+#[test]
+fn end_stops_the_program_from_any_scope() {
+    let head = "OPENQASM 3.0;\nqubit[4] q;\n";
+    same_instructions(
+        &format!("{head}x q[0];\nend;\nx q[1];"),
+        &format!("{head}x q[0];"),
+    );
+    same_instructions(
+        &format!("{head}for int i in [0:3] {{ x q[i]; if (i == 1) end; }} h q[0];"),
+        &format!("{head}x q[0]; x q[1];"),
+    );
+    same_instructions(
+        &format!("{head}def f(qubit a) {{ x a; end; }} f(q[2]); h q[0];"),
+        &format!("{head}x q[2];"),
+    );
+}
+
+#[test]
+fn loop_exits_outside_a_loop_are_parse_errors() {
+    let head = "OPENQASM 3.0;\nqubit[2] q;\n";
+    for body in [
+        "break;",
+        "if (true) { continue; }",
+        "def f() { continue; } for int i in [0:1] { f(); }",
+        "gate g a { break; } g q[0];",
+    ] {
+        match parse(&format!("{head}{body}")) {
+            Err(PrismError::Parse { message, .. }) => {
+                assert!(message.contains("outside a loop"), "`{body}`: {message}")
+            }
+            other => panic!("`{body}` should be a parse error, got {other:?}"),
+        }
+    }
+    match parse(&format!("{head}gate g a {{ end; }} g q[0];")) {
+        Err(PrismError::Parse { message, .. }) => {
+            assert!(message.contains("gate `g`"), "{message}")
+        }
+        other => panic!("`end` in a gate should be a parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_measured_exit_under_parse_points_at_parse_dynamic() {
+    let head = "OPENQASM 3.0;\nqubit[2] q;\nbit[2] c;\nc[0] = measure q[0];\n";
+    for body in [
+        "for int i in [0:1] { if (c[0]) break; x q[1]; }",
+        "for int i in [0:1] { if (c[0]) { continue; } x q[1]; }",
+        "if (c[0]) end;",
+        "for int i in [0:1] { if (c[0]) end; }",
+    ] {
+        match parse(&format!("{head}{body}")) {
+            Err(PrismError::UnsupportedConstruct { construct, line }) => {
+                assert!(construct.contains("parse_dynamic"), "`{body}`: {construct}");
+                assert_eq!(line, 5, "`{body}`");
+            }
+            other => panic!("`{body}` should decline, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn end_is_still_a_gate_name_when_it_takes_operands() {
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[1] q;\ngate end a { x a; }\nend q[0];",
+        "OPENQASM 3.0;\nqubit[1] q;\nx q[0];",
+    );
+}
+
+#[test]
+fn end_in_a_def_call_stops_the_rest_of_its_statement() {
+    let head = "OPENQASM 3.0;\nqubit[4] q;\nbit[4] c;\n\
+                def f(qubit a) -> int { x a; end; return 1; }\n\
+                def g(qubit a) -> int { h a; return 2; }\n\
+                def k(int a, int b, qubit w) -> int { z w; return a; }\n";
+    for body in [
+        "if (f(q[0]) == 0) { c[1] = measure q[1]; }",
+        "if (f(q[0]) == 5) { } else { y q[1]; }",
+        "int n = f(q[0]) + g(q[3]);",
+        "int n = 0; n = f(q[0]) + g(q[3]);",
+        "bool b = f(q[0]) == 0 && g(q[3]) == 2;",
+        "rx(f(q[0])) q[1];",
+        "int m = k(f(q[0]), g(q[3]), q[2]);",
+        "def r(qubit u, qubit v) -> int { return f(u) + g(v); } int n = r(q[0], q[3]);",
+        "if (true) { int n = f(q[0]) + g(q[3]); } y q[1];",
+    ] {
+        same_instructions(&format!("{head}{body} y q[2];"), &format!("{head}x q[0];"));
+    }
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[4] q;\nbit[1] o;\ndef f() -> int { end; return 1; }\n\
+         x q[3];\nif (f() == 0) { o[0] = measure q[3]; }",
+        "OPENQASM 3.0;\nqubit[4] q;\nx q[3];",
+    );
 }

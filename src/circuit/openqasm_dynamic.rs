@@ -19,6 +19,16 @@ use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Expr};
 use crate::circuit::qasm::stream::{Stream, with_stack};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
+/// Budget units a block of an unrolled loop costs, sized so a pass of blocks
+/// holds about the memory per unit of an ordinary unrolled pass.
+const BLOCK_UNITS: usize = 2;
+
+#[cfg(test)]
+thread_local! {
+    /// Statements the runtime analysis has walked on this thread.
+    pub(super) static WALKED: Cell<usize> = const { Cell::new(0) };
+}
+
 /// What the evaluator carries while lowering into a control-flow graph.
 pub(super) struct DynamicState<'a> {
     builder: DynamicProgramBuilder,
@@ -29,12 +39,11 @@ pub(super) struct DynamicState<'a> {
     /// Nesting of guarded regions being collected into one instruction, where
     /// nothing may open a block.
     collecting: usize,
-    /// Enclosing loops, innermost last: `true` for a `while`, `false` for a
-    /// `for` unrolled at parse time.
-    loops: Vec<bool>,
     /// Constructs a declaration may run under other than once per shot: loop
     /// bodies and branches decided at runtime.
     repeat: usize,
+    /// Blocks the passes of unrolled loops have charged to the budget.
+    charged_blocks: usize,
 }
 
 /// Statement keys: the address of the statement in the tree, which every pass
@@ -61,8 +70,8 @@ fn scalar_runtime_type(kind: ClassicalType, line: usize) -> Result<RuntimeType> 
 /// Parse an OpenQASM 3.0 program that may need runtime control flow into a
 /// [`DynamicProgram`].
 ///
-/// Reads everything [`parse`] reads, plus `while` loops with `break` and
-/// `continue`, conditions and assignments over the full classical operator set
+/// Reads everything [`parse`] reads, plus `while` loops, `break`, `continue` and
+/// `end` under a measured branch, conditions and assignments over the full classical operator set
 /// (`&&`, `||`, `!`, comparisons, `&`, `|`, `^`, `~`, shifts), classical bits
 /// and registers read as values, writes to a variable under a measured `if`,
 /// and a runtime value as the angle of `rx`, `ry`, `rz`, `p` or `rzz`. A
@@ -74,8 +83,8 @@ fn scalar_runtime_type(kind: ClassicalType, line: usize) -> Result<RuntimeType> 
 /// parameters, a register or array whose contents a loop or measurement
 /// decides, a runtime value where a parse-time constant belongs (an index, a
 /// loop bound, a gate angle outside the five above, a `def` argument), a
-/// builtin function over a runtime value, `break` or `continue` inside a `for`,
-/// and a measurement into a variable rather than a bit.
+/// builtin function over a runtime value, and a measurement into a variable
+/// rather than a bit.
 ///
 /// # Errors
 ///
@@ -115,8 +124,8 @@ pub(super) fn parse_dynamic_within(input: &str, budget: usize) -> Result<Dynamic
         vars: HashMap::new(),
         bit_values: HashMap::new(),
         collecting: 0,
-        loops: Vec::new(),
         repeat: 0,
+        charged_blocks: 0,
     }));
     if let Some(width) = super::eval::physical_width(&program)? {
         parser.physical = true;
@@ -614,10 +623,10 @@ impl<'a> Parser<'a> {
         let caller_analysis = std::mem::replace(&mut state.analysis, analysis);
         let caller_vars = std::mem::take(&mut state.vars);
         let caller_bits = std::mem::take(&mut state.bit_values);
-        let caller_loops = std::mem::take(&mut state.loops);
         let caller_repeat = state.repeat;
         state.repeat += 1;
         sub.dynamic = Some(state);
+        let mut ended = false;
         let result = (|| {
             let result_var =
                 if let Some(result) = def.result.as_ref().filter(|result| result.ty != "bit") {
@@ -701,6 +710,7 @@ impl<'a> Parser<'a> {
             }
             let instructions = sub.execute(&def.body)?;
             sub.flush(instructions);
+            ended = sub.exit == Some(Exit::End);
             let fallthrough = sub.state().builder.end_call()?;
             if def.result.is_some() && fallthrough {
                 return Err(parse_error(
@@ -714,9 +724,11 @@ impl<'a> Parser<'a> {
         state.analysis = caller_analysis;
         state.vars = caller_vars;
         state.bit_values = caller_bits;
-        state.loops = caller_loops;
         state.repeat = caller_repeat;
         self.dynamic = Some(state);
+        if ended {
+            self.exit = Some(Exit::End);
+        }
         result
     }
     pub(super) fn streaming(&self) -> bool {
@@ -874,22 +886,82 @@ impl<'a> Parser<'a> {
     /// Enter a `for` body, which runs its declarations once per pass.
     pub(super) fn enter_static_loop(&mut self) {
         if let Some(state) = self.dynamic.as_mut() {
-            state.loops.push(false);
             state.repeat += 1;
         }
     }
 
     pub(super) fn leave_static_loop(&mut self) {
         if let Some(state) = self.dynamic.as_mut() {
-            state.loops.pop();
             state.repeat -= 1;
         }
     }
 
     pub(super) fn in_while(&self) -> bool {
+        self.loops.contains(&Loop::While)
+    }
+
+    /// Whether a `for` needs its passes as blocks of the graph, because a
+    /// measurement decides whether one of them breaks or continues.
+    pub(super) fn unrolls_into_graph(&self, stmt: &Stmt) -> bool {
+        self.streaming()
+            && self
+                .dynamic
+                .as_ref()
+                .is_some_and(|state| state.analysis.unrolled.contains(&key(stmt)))
+    }
+
+    pub(super) fn graph_depth(&self) -> usize {
         self.dynamic
             .as_ref()
-            .is_some_and(|state| state.loops.contains(&true))
+            .map_or(0, |state| state.builder.depth())
+    }
+
+    pub(super) fn begin_unrolled(&mut self) {
+        self.state().builder.begin_unrolled();
+    }
+
+    pub(super) fn next_pass(&mut self) -> Result<()> {
+        self.state().builder.next_pass()
+    }
+
+    pub(super) fn end_unrolled(&mut self) -> Result<()> {
+        self.state().builder.end()
+    }
+
+    /// Whether a runtime `continue` has jumped from the pass being built to the
+    /// next one, so a parse-time exit cannot stop the unrolling.
+    pub(super) fn pass_continued(&self) -> bool {
+        self.dynamic
+            .as_ref()
+            .is_some_and(|state| state.builder.pass_continued())
+    }
+
+    /// Whether a runtime `break` has jumped out of the innermost unrolled loop,
+    /// so its exit is reached even where a parse-time `return` ended a pass.
+    pub(super) fn loop_broke(&self) -> bool {
+        self.dynamic
+            .as_ref()
+            .is_some_and(|state| state.builder.loop_broke())
+    }
+
+    pub(super) fn break_unrolled(&mut self) -> Result<()> {
+        self.state().builder.break_loop()
+    }
+
+    /// The block count and the blocks charged so far, read at the start of a pass.
+    pub(super) fn pass_mark(&self) -> (usize, usize) {
+        self.dynamic.as_ref().map_or((0, 0), |state| {
+            (state.builder.block_count(), state.charged_blocks)
+        })
+    }
+
+    /// Charge the blocks created since `mark` that an inner pass has not charged.
+    pub(super) fn charge_pass_blocks(&mut self, mark: (usize, usize), line: usize) -> Result<()> {
+        let state = self.state();
+        let created = state.builder.block_count() - mark.0;
+        let own = created - (state.charged_blocks - mark.1);
+        state.charged_blocks += own;
+        self.charge(own * BLOCK_UNITS, line)
     }
 
     pub(super) fn is_bit_name(&self, name: &str) -> bool {
@@ -1310,42 +1382,83 @@ impl<'a> Parser<'a> {
                 .builder
                 .begin_while(format!("while at line {line}"), condition);
         }
-        self.state().loops.push(true);
+        self.loops.push(Loop::While);
         let result = self.branch_body(body);
-        self.state().loops.pop();
+        self.loops.pop();
         result?;
         self.state().builder.end()
     }
 
-    pub(super) fn exec_loop_exit(&mut self, exit: bool, line: usize) -> Result<()> {
-        let word = if exit { "break" } else { "continue" };
-        let innermost = self
-            .dynamic
-            .as_ref()
-            .and_then(|state| state.loops.last().copied());
-        match innermost {
-            Some(true) => {}
-            Some(false) => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
-                        "`{word}` in a `for` loop, which unrolls at parse time; use `while`"
-                    ),
-                    line,
-                });
+    /// A `break` or `continue`. One every path through the innermost `for`
+    /// reaches stops the unrolling there; one under a measured branch jumps in
+    /// the graph.
+    pub(super) fn exec_loop_exit(&mut self, exit: Exit, line: usize) -> Result<()> {
+        let word = if exit == Exit::Break {
+            "break"
+        } else {
+            "continue"
+        };
+        let Some(&innermost) = self.loops.last() else {
+            return Err(parse_error(line, format!("`{word}` outside a loop")));
+        };
+        if let Loop::For {
+            region_depth,
+            frames,
+            graph,
+        } = innermost
+        {
+            if region_depth == self.region_depth && frames == self.graph_depth() {
+                self.exit = Some(exit);
+                return Ok(());
             }
-            None => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("`{word}` outside a loop"),
-                    line,
-                });
+            if !graph {
+                return Err(self.decided_by_measurement(word, line));
             }
         }
         self.require_streaming(&format!("`{word}`"), line)?;
         let builder = &mut self.state().builder;
-        if exit {
+        if exit == Exit::Break {
             builder.break_loop()
         } else {
             builder.continue_loop()
+        }
+    }
+
+    /// `end`: the program stops at parse time when every path reaches it, and
+    /// at a halting block of the graph when a measurement decides that.
+    pub(super) fn exec_end(&mut self, line: usize) -> Result<()> {
+        if self.dynamic.is_none() {
+            if self.region_depth > 0 {
+                return Err(self.decided_by_measurement("end", line));
+            }
+            self.exit = Some(Exit::End);
+            return Ok(());
+        }
+        self.require_streaming("`end`", line)?;
+        if self.graph_depth() > 0 {
+            // An `end` every path reaches, inside calls and unrolled passes no
+            // path has left, stops the parse there as it does at the top level.
+            if self.state().builder.on_every_path() {
+                self.exit = Some(Exit::End);
+            }
+            self.state().builder.halt();
+        } else if self.region_depth > 0 {
+            return Err(self.decided_by_measurement("end", line));
+        } else {
+            self.exit = Some(Exit::End);
+        }
+        Ok(())
+    }
+
+    fn decided_by_measurement(&self, word: &str, line: usize) -> PrismError {
+        let remedy = if self.dynamic.is_none() {
+            "parse the program with `openqasm::parse_dynamic` to lower it into the graph"
+        } else {
+            "give the branch a condition over a runtime value to make it a branch"
+        };
+        PrismError::UnsupportedConstruct {
+            construct: format!("`{word}` under a measurement-dependent branch; {remedy}"),
+            line,
         }
     }
 
@@ -1462,9 +1575,19 @@ impl<'a> Parser<'a> {
             }
             .map(ClassicalExpr::Var))
         };
+        let lowered = self.lower_expr(target, 0);
+        // A target known at parse time selects its arm the way a folded `if`
+        // takes its body, whatever runtime work that arm holds.
+        if matches!(lowered, Ok(ClassicalExpr::Const(_)))
+            && target
+                .finds_call(&|name| self.def_defs.contains_key(name))
+                .is_none()
+        {
+            return false;
+        }
         state.analysis.branches.contains(&key(stmt))
             || reads_leaf(target, &runtime_var).unwrap_or(true)
-            || self.lower_expr(target, 0).is_ok_and(|lowered| {
+            || lowered.is_ok_and(|lowered| {
                 !matches!(lowered, ClassicalExpr::Const(_))
                     && super::eval::register_value(&lowered).is_none()
             })
@@ -1536,6 +1659,8 @@ impl<'a> Parser<'a> {
 pub(super) struct RuntimeAnalysis {
     runtime: HashSet<usize>,
     branches: HashSet<usize>,
+    /// `for` loops a measurement may break or continue.
+    unrolled: HashSet<usize>,
     runtime_defs: Rc<HashSet<String>>,
     needs_call: bool,
 }
@@ -1562,6 +1687,13 @@ struct Walk<'s, 'a> {
     single_bits: HashSet<&'a str>,
     early_bit_read: Cell<bool>,
     conditional: usize,
+    /// Runtime depth of each enclosing loop body, innermost last.
+    loops: Vec<usize>,
+    /// `for` loops found to hold a measured exit, kept across passes of the
+    /// fixed point so each body is walked once per pass.
+    unrolled: &'s mut HashSet<usize>,
+    /// The innermost `for` holds a `break` or `continue` a measurement decides.
+    runtime_exit: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1627,6 +1759,7 @@ impl RuntimeAnalysis {
         runtime_params: &[&str],
     ) -> RuntimeAnalysis {
         let mut runtime = HashSet::new();
+        let mut unrolled = HashSet::new();
         loop {
             let mut walk = Walk {
                 runtime: &mut runtime,
@@ -1641,6 +1774,9 @@ impl RuntimeAnalysis {
                 single_bits: HashSet::new(),
                 early_bit_read: Cell::new(false),
                 conditional: 0,
+                loops: Vec::new(),
+                unrolled: &mut unrolled,
+                runtime_exit: false,
             };
             for param in args {
                 match param {
@@ -1665,6 +1801,7 @@ impl RuntimeAnalysis {
                 return RuntimeAnalysis {
                     runtime,
                     branches,
+                    unrolled,
                     runtime_defs: functions,
                     needs_call,
                 };
@@ -1800,6 +1937,8 @@ impl<'a> Walk<'_, 'a> {
     }
 
     fn stmt(&mut self, stmt: &Stmt<'a>, depth: usize) -> bool {
+        #[cfg(test)]
+        WALKED.with(|walked| walked.set(walked.get() + 1));
         match &stmt.kind {
             StmtKind::RegisterDecl {
                 kind,
@@ -1982,16 +2121,48 @@ impl<'a> Walk<'_, 'a> {
             }
             StmtKind::While { body, .. } => {
                 self.needs_call = true;
+                self.loops.push(depth + 1);
+                let outer_exit = std::mem::replace(&mut self.runtime_exit, false);
                 self.scoped(body, depth + 1);
+                self.runtime_exit = outer_exit;
+                self.loops.pop();
                 true
             }
-            StmtKind::Break | StmtKind::Continue => true,
+            StmtKind::Break | StmtKind::Continue => {
+                let runtime = self.loops.last().is_some_and(|&home| depth > home);
+                self.runtime_exit |= runtime;
+                runtime
+            }
+            StmtKind::End => {
+                // A def that may end the program runs as a call, so its `end`
+                // halts the shot wherever a measurement decides the call.
+                self.needs_call = true;
+                depth > 0
+            }
             StmtKind::For { variable, body, .. } => {
                 self.conditional += 1;
+                // A pass a measurement may cut short leaves every write in the
+                // body, and every pass after it, decided at runtime. A loop
+                // found to hold such an exit is walked one level down from the
+                // next pass of the fixed point on.
+                let unrolled = self.unrolled.contains(&key(stmt));
+                let inner = depth + usize::from(unrolled);
+                self.loops.push(inner);
+                let outer_exit = std::mem::replace(&mut self.runtime_exit, false);
                 self.scopes.push(HashMap::new());
                 self.bind(variable, Binding::Constant);
-                let needs = self.block(body, depth);
+                let mut needs = self.block(body, inner);
                 self.scopes.pop();
+                if self.runtime_exit {
+                    if !unrolled {
+                        self.unrolled.insert(key(stmt));
+                        self.changed = true;
+                    }
+                    self.needs_call = true;
+                    needs = true;
+                }
+                self.runtime_exit = outer_exit;
+                self.loops.pop();
                 self.conditional -= 1;
                 needs
             }

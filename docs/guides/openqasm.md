@@ -257,6 +257,8 @@ let shots = simulate_program(&program).seed(42).shots(1000)?;
 Beyond what `parse` reads, `parse_dynamic` accepts:
 
 - `while (condition) { ... }`, with `break` and `continue`.
+- `break`, `continue` and `end` under a measured `if` or `switch`. A `for` still unrolls,
+  and an exit a measurement decides jumps between its passes.
 - Any condition or `switch` target over classical bits, where `parse` takes only those a
   bit or register guard spells: `c[0] && c[1]` and `c + 1 == 2` run here.
 - A classical bit read as a value (`c[0]`) and a bit register read as an unsigned integer
@@ -306,7 +308,7 @@ Declined under `parse_dynamic`, all `UnsupportedConstruct`: a runtime value wher
 parse-time constant belongs (an index, a loop bound, a `def` argument, the angle of any
 other gate), a builtin function over a runtime value, a register declared inside a `while`
 body, an `array` a loop or measurement writes, a measurement into a variable rather than a
-bit, `break` or `continue` inside a `for`, and `input` parameters.
+bit, and `input` parameters.
 
 ## Supported gates
 
@@ -560,7 +562,9 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. A condition over classical bits that no bit or register guard spells: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
 | `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present, or a target over classical bits that no register guard spells: `UnsupportedConstruct` |
 | `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
-| `while`, `break`, `continue` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list. `break` or `continue` inside a `for`: `UnsupportedConstruct` |
+| `while` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list |
+| `break`, `continue` | Parses inside `for` and `while` | Outside a loop, or at the top level of a `def` or `gate` body: `Parse`. In a `for` under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
+| `end` | Stops the program; nothing after it runs | Inside a `gate` body, called or not: `Parse`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
 | `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results; `parse_dynamic` supports runtime numerical results | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, overlapping qubit arguments, or a missing result: `Parse` |
 | `return` | Exits a `def`, including nested branches and loops | Outside a `def`: `UnsupportedConstruct`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
 | `gate` blocks | Parses; an empty body is the identity | |

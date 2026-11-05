@@ -22,6 +22,13 @@
 # Guides
 
 - [Python Bindings](./guides/python.md)
+  - [Circuits and Parameters](./guides/python-circuits.md)
+  - [Running Simulations](./guides/python-running.md)
+  - [Observables and Gradients](./guides/python-observables.md)
+  - [Noise and Shots](./guides/python-noise.md)
+  - [Quantum Error Correction](./guides/python-qec.md)
+  - [Advanced State Handling](./guides/python-state.md)
+  - [Rust and Python Names](./guides/python-names.md)
 - [Backends Deep Dive](./guides/backends.md)
 - [Capability and Support Matrix](./guides/capabilities.md)
 - [Performance and SIMD](./guides/performance.md)

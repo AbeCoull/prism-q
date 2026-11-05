@@ -1,7 +1,7 @@
 # Simulate and Sample
 
-Goal: build a three-qubit GHZ circuit, read its exact distribution, sample it like
-hardware would, and run it on a backend of your choosing.
+Goal: build a three-qubit GHZ circuit, read its exact distribution, sample it as
+hardware would, and run it on a backend you pick.
 
 ## Build and run
 
@@ -17,8 +17,8 @@ print(outcome.metadata.backend)    # Stabilizer
 `probabilities` is a NumPy array over the `2**3` basis states, with qubit 0 as the least
 significant bit of the index. Half the weight sits on `|000>` and half on `|111>`.
 
-`metadata.backend` names the engine that ran. Nothing asked for a stabilizer tableau: the
-default `BackendKind.auto()` saw only Clifford gates and picked one.
+`metadata.backend` names the engine that ran: the default `BackendKind.auto()` saw only
+Clifford gates and picked a stabilizer tableau.
 
 ## Sample shots
 
@@ -34,8 +34,8 @@ shots = simulate(measured).seed(42).shots(5).shots
 print(shots.shape, shots.dtype)    # (5, 3) bool
 ```
 
-The seed fixes the draw, so the same seed gives the same counts on every run. In a count
-key, character `i` is classical bit `i`, so a key reads with bit 0 on the left:
+The same seed gives the same counts on every run. Character `i` of a count key is
+classical bit `i`, so keys read with bit 0 on the left:
 
 ```python
 flipped = CircuitBuilder(3, 3).x(0).measure_all().build()
@@ -44,7 +44,7 @@ print(simulate(flipped).seed(42).sample_counts(10).counts())   # {'100': 10}
 
 ## Choose a backend
 
-Pass a `BackendKind` to override the automatic choice. The answer stays the same; the
+A `BackendKind` overrides the automatic choice. The answer is the same; the
 representation, and so the cost, changes:
 
 ```python
@@ -58,8 +58,8 @@ for kind in [BackendKind.statevector(), BackendKind.mps(16), BackendKind.sparse(
 # Sparse [0.5 0.5]
 ```
 
-A backend that cannot hold the circuit says so instead of guessing. The product-state
-backend keeps one state per qubit and declines anything entangling:
+A backend that cannot hold the circuit raises. The product-state backend keeps one
+state per qubit and declines anything entangling:
 
 ```python
 from prism_q import PrismError

@@ -22,14 +22,14 @@ Under the `parallel` feature, gate kernels have `_par` variants built on
 below that, thread-pool overhead exceeds the work. Each task covers at least
 `MIN_PAR_ELEMS = 4096` amplitudes, 64 KiB.
 
-The pool defaults to every logical core, and `RAYON_NUM_THREADS` overrides it.
-Hyperthreads help at 24 qubits and above by hiding memory latency.
+The pool is the process-wide Rayon pool, sized on the first simulation call to every
+logical core; `RAYON_NUM_THREADS` overrides it. Hyperthreads help at 24 qubits and above
+by hiding memory latency.
 
-That pool is the process-wide Rayon pool, sized on the first simulation call. An
-application that owns it can hand PRISM-Q a bounded one instead:
+An application that owns the global pool can hand PRISM-Q a bounded one instead:
 `ThreadPool::with_threads(n)` builds it and `install` runs a closure on it, leaving the
-global pool unbuilt and unresized. Calls made outside `install` take the global path.
-Pool width can change results; see [Determinism](#determinism).
+global pool unbuilt and unresized. Calls outside `install` take the global path. Pool
+width can change results; see [Determinism](#determinism).
 
 ## SIMD
 
@@ -44,30 +44,29 @@ One `Complex64` fills a 128-bit register. Single-qubit gate kernels use `Prepare
 
 `_pext_u64` is not a tier. BatchPhase, BatchRzz and DiagonalBatch use it for LUT
 indexing where BMI2 is present, one bit extraction in place of a shift-and-or loop, and
-fall back to that loop where it is not.
+use the loop otherwise.
 
 Two structs broadcast the matrix into registers once, at construction, so the per-element loop does no dispatch:
 
 - `PreparedGate1q`: the 2×2 matrix. Methods: `apply_full_sequential` (full state), `apply_tiled` (cache-resident tile, no AVX2 throttle guard), `apply_slice_pairs` (MPS bond-dimension slices), `apply_pair_ptr` (Cu/Mcu parallel).
 - `PreparedGate2q`: the 4×4 matrix. Methods: `apply_full` (mask-based iteration), `apply_tiled` (cache-resident Multi2q tiles, AVX2 paired-group kernel when available), `apply_group_ptr` (4 scattered indices).
 
-The 2q tiled AVX2 path processes paired `k` and `k + 1` groups when the lower target qubit is above 0, which makes each row load contiguous. It falls back to the 128-bit FMA kernel for `lo == 0` and when AVX2+FMA is unavailable. Set `PRISM_NO_AVX2_2Q` to compare against the 128-bit FMA path, or `PRISM_NO_REORDER` to disable the `Fused2q` reordering that fills each tile for A/B timing.
+The 2q tiled AVX2 path processes paired `k` and `k + 1` groups when the lower target qubit is above 0, so each row load is contiguous. It falls back to the 128-bit FMA kernel for `lo == 0` or without AVX2+FMA. For A/B timing, `PRISM_NO_AVX2_2Q` forces the 128-bit FMA path and `PRISM_NO_REORDER` disables the `Fused2q` reordering that fills each tile.
 
 ## Determinism
 
 Reproducibility is stated per path. Gate application never reduces across tasks, so it
-is exactly reproducible; everything that sums floating-point values in parallel is
-reproducible to the last ulp only; the batched compiled sampler is reproducible only at
-a fixed thread count. `tests/determinism.rs` pins the dense unitary,
-terminal sampling, per-shot replay, reduction, and compiled-sampler claims below by running the same
-seeded circuits in scoped 1-thread and 4-thread pools; the trajectory, SPD, and
-stabilizer bullets stand on the mechanisms they state.
+is exactly reproducible. Anything that sums floating-point values in parallel is stable
+only to about the last ulp, and the batched compiled sampler only at a fixed thread
+count. `tests/determinism.rs` pins the dense unitary, terminal sampling, per-shot replay,
+reduction and compiled-sampler claims below by running the same seeded circuits in
+scoped 1-thread and 4-thread pools; the trajectory, SPD and stabilizer bullets rest on
+the mechanisms they state.
 
-Every clause turns on thread count, not on which pool supplied the threads, so a
+Every clause depends on thread count, not on which pool supplied the threads, so a
 caller-supplied `ThreadPool` moves exactly the results a different `RAYON_NUM_THREADS`
-would: the bitwise claims survive it, the reduction bound holds across it, and compiled
-shot payloads change with it whenever the pool is narrower or wider than the one the
-comparison run used.
+would: bitwise claims survive it, the reduction bound holds across it, and compiled shot
+payloads change whenever its width differs from the comparison run's.
 
 - **Unitary evolution on the dense kernels: bitwise, at any thread count.** Gate kernels
   partition the state into index-derived disjoint ranges (fixed chunk boundaries, index
@@ -82,14 +81,13 @@ comparison run used.
 - **Noisy trajectory shots: bitwise for a given seed, at any thread count.** Each shot's
   generator is seeded from the run seed and the shot index, not the worker, and results
   are collected in shot order. Pauli-noise runs that simulate each distinct error pattern
-  once keep the rule: a shot's pattern, outcome and readout flips all draw from its own
-  seed, so the group a worker picks up moves no record. So do damping runs that walk
-  the shared no-jump state once: a shot copies the walk where its own draws leave it,
-  so which worker walked that far moves no record.
+  once keep the rule, since a shot's pattern, outcome and readout flips all draw from its
+  own seed. So do damping runs that walk the shared no-jump state once: a shot copies the
+  walk where its own draws leave it, whichever worker walked that far.
 - **Native block sampling: bitwise for a given seed, at any thread count.** The sparse,
   factored and product-state samplers draw shots in blocks of 256, each block from its
-  own ChaCha8 stream keyed on the block index, and the blocks depend on the shot count
-  alone, so whether they fill in parallel moves no bit. The dense sampler over factored
+  own ChaCha8 stream keyed on the block index. The blocks depend on the shot count
+  alone, so filling them in parallel moves no bit. The dense sampler over factored
   block probabilities walks the same blocks. Pinned for all three backends.
 - **Per-shot replay: bitwise for a given seed, at any thread count.** A circuit with a
   mid-circuit measurement, a condition or a region runs once per shot off the host
@@ -97,17 +95,17 @@ comparison run used.
   those runs split across workers: 15 qubits for dense engines, 128 for a tableau, any
   width for a product state. Noisy trajectories follow the same rule, on every engine.
   Shot `i` runs on a seed hashed from the run seed and `i` with SplitMix64, and results
-  fold in shot order. Runs on adjacent seeds draw unrelated shots rather than the same
-  shots offset by one. Pinned for decomposed, tableau and product-state circuits, and
+  fold in shot order. Adjacent run seeds draw unrelated shots, not the same shots offset
+  by one. Pinned for decomposed, tableau and product-state circuits, and
   for tableau trajectories.
 - **Outcome branching: bitwise for a given seed, at any thread count.** A noiseless
   circuit of that kind on the host statevector evolves once per distinct outcome
   history instead: at each measurement the shots on a branch split by a binomial draw
   from a generator seeded by the run seed and the branch's outcome path, and from 10
   qubits up to the dense floor the two sides of a split run on separate workers. Rows
-  are laid out in record order and then shuffled from the run seed, so the schedule
-  reaches neither. The split compares a draw against a collapse probability, which
-  above the dense floor is a parallel reduction and carries the caveat below. Once
+  are laid out in record order, then shuffled from the run seed, so the schedule reaches
+  neither. The split compares a draw against a collapse probability, which above the
+  dense floor is a parallel reduction and carries the caveat below. Once
   only measurements remain, a branch draws its readout from its own state through
   the terminal sampler, seeded from its outcome path. A dynamic program on the host
   statevector walks its graph the same way. Pinned for 8-, 12- and 16-qubit circuits and
@@ -124,12 +122,12 @@ comparison run used.
   pools.
 - **Compiled (BTS) sampling: reproducible at a fixed thread count, on any ISA.** The
   batched sampler derives one RNG stream per worker and splits shots by
-  `rayon::current_num_threads()`, so a different pool width yields a different, equally
-  distributed shot set. Pin the width when byte-identical shot payloads matter across
-  machines, through `RAYON_NUM_THREADS` on the global path or through the width passed to
-  `ThreadPool::with_threads` on the scoped one. Within a stream, the AVX-512, AVX2, NEON
-  and scalar kernels lay the same four xoshiro lanes over the shot words, so an x86 host
-  and an Apple or Graviton host draw the same shots from one seed;
+  `rayon::current_num_threads()`, so another pool width yields a different, equally
+  distributed shot set. Pin the width when byte-identical payloads matter across
+  machines: `RAYON_NUM_THREADS` on the global path, the `ThreadPool::with_threads` width
+  on the scoped one. Within a stream the AVX-512, AVX2, NEON and scalar kernels lay the
+  same four xoshiro lanes over the shot words, so an x86 host and an Apple or Graviton
+  host draw the same shots from one seed;
   `tests/integration/qec_ir.rs` pins the noiseless fingerprint on every CI platform.
   Noise draws go through the platform's `exp` and `ln`, so a noisy payload is bitwise on
   one platform and can differ across C libraries on the rare draw that lands within an

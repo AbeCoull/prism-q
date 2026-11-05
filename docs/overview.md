@@ -22,19 +22,16 @@ let probs = result.probabilities.unwrap();
 
 ## Simulation
 
-PRISM-Q matches each circuit to a simulation strategy. It dispatches across nine CPU
-backends plus optional CUDA and MPI-distributed paths, runs circuits through a
-multi-pass gate fusion pipeline, and uses AVX2, FMA and BMI2 SIMD in the inner loop
-(NEON on ARM64). Input is OpenQASM 3.0, with backward-compatible 2.0 syntax, and
-Python bindings expose the same engine with NumPy output. A two-qubit Bell pair and a
-thousand-qubit Clifford circuit go through the same entry point.
+A two-qubit Bell pair and a thousand-qubit Clifford circuit go through the same entry
+point, which picks a backend from the circuit's structure. Circuits pass through a
+multi-pass gate fusion pipeline, and the inner loops use AVX2, FMA and BMI2 (NEON on
+ARM64). Input is OpenQASM 3.0 with backward-compatible 2.0 syntax.
 
 - Nine CPU backends: statevector, stabilizer, factored stabilizer, sparse, MPS, product
   state, tensor network (on expectation and marginal queries) and dynamic factored
-  split-state, each picked from the circuit's structure, plus an exact density matrix
-  selected by name.
-- Compiled shot samplers that do not rebuild the statevector for every shot, including
-  the noisy and detector/QEC paths.
+  split-state, picked automatically, plus an exact density matrix selected by name.
+- Compiled shot samplers that do not rebuild the statevector per shot, including the
+  noisy and detector/QEC paths.
 - Clifford+T engines (stabilizer rank, stochastic and deterministic Pauli propagation)
   for circuits a dense statevector cannot hold.
 - An optional CUDA path for statevector, stabilizer and density-matrix execution, and

@@ -1,10 +1,9 @@
 # Roadmap
 
-Open work on PRISM-Q, grouped by theme, with what each item waits on. These are
-intentions rather than commitments, and the page carries no dates. Themes run roughly in
-priority order. An item leaves the page when it ships; the
-[changelog](https://github.com/AbeCoull/prism-q/blob/main/CHANGELOG.md) records it from
-there.
+Open work on PRISM-Q, grouped by theme in rough priority order, with what each item
+waits on. These are intentions, not commitments, and carry no dates. A shipped item
+leaves the page for the
+[changelog](https://github.com/AbeCoull/prism-q/blob/main/CHANGELOG.md).
 
 1.0 has no date. Until then, [Compatibility](./guides/capabilities.md#compatibility)
 says what each release promises.
@@ -79,9 +78,9 @@ says what each release promises.
 
 ## Hardware that would help
 
-The thresholds and tile sizes were tuned on one desktop, an Intel i7-6700K with a GTX
-1080 Ti (see [Benchmarks](./benchmarks.md)). The Needs hardware items wait on access to
-one of these:
+Thresholds and tile sizes were tuned on one desktop, an Intel i7-6700K with a GTX
+1080 Ti (see [Benchmarks](./benchmarks.md)). The Needs hardware items wait on one of
+these:
 
 - an x86-64 CPU with AVX-512
 - an Apple silicon Mac or another ARM64 machine
@@ -92,7 +91,7 @@ one of these:
 
 If you have one, say so in
 [Discussions](https://github.com/AbeCoull/prism-q/discussions).
-`scripts/tile_sweep.sh` runs the cache-tile sweep the CPU items need from a single bench
+`scripts/tile_sweep.sh` runs the cache-tile sweep the CPU items need from one bench
 binary.
 
 ## Not planned

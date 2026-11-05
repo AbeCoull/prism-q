@@ -1,6 +1,6 @@
 # Your First Circuit
 
-Build a circuit with the fluent `CircuitBuilder` API, or parse it from OpenQASM text.
+Build a circuit with `CircuitBuilder`, or parse it from OpenQASM text.
 
 ## With the builder
 
@@ -34,12 +34,11 @@ for i in 0..probs.len() {
 <figcaption>H creates a superposition; CX correlates the two qubits. <a href="../diagrams/bell_2.svg">Open full SVG</a>.</figcaption>
 </figure>
 
-Measurement is in the Z basis by default. `measure_in_basis(qubit, axis, bit)` measures
-along X, Y or Z, and `measure_pauli_product(&terms, bit)` records the parity of a Pauli
-string such as `X0 Z1`. Both lower onto gates every backend already runs. A basis
-measurement leaves the qubit in the Z eigenstate of the recorded bit instead of rotating
-back. A Pauli product accumulates its parity on one extra qubit past the declared
-register:
+Measurement defaults to the Z basis. `measure_in_basis(qubit, axis, bit)` measures along
+X, Y or Z, and `measure_pauli_product(&terms, bit)` records the parity of a Pauli string
+such as `X0 Z1`. Both lower onto gates every backend runs. A basis measurement leaves
+the qubit in the Z eigenstate of the recorded bit rather than rotating back, and a Pauli
+product accumulates its parity on one extra qubit past the declared register:
 
 ```rust
 use prism_q::{CircuitBuilder, PauliAxis, PauliTerm};

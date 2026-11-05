@@ -1,7 +1,7 @@
 # Shots and Sampling
 
-Probabilities are the exact distribution. Shots are sampled measurement outcomes, the
-way hardware reports results, and a fixed seed makes them deterministic.
+Probabilities are the exact distribution. Shots are sampled outcomes, as hardware reports
+them, and a fixed seed makes them deterministic.
 
 ## Sampling shots
 

@@ -1,8 +1,8 @@
 # Tutorials
 
-Each tutorial starts from an empty file and ends at a number you can check, in a few
-minutes. Code is Python first, with the Rust equivalent where the two differ in more
-than syntax. Every Python block on these pages runs in CI, as does every Rust block.
+Each tutorial goes from an empty file to a number you can check in a few minutes. Code
+is Python first, with Rust where the two differ in more than syntax. CI runs every
+Python and Rust block on these pages.
 
 | Tutorial | You end with |
 |----------|--------------|
@@ -19,7 +19,7 @@ Install the package first:
 pip install prism-q
 ```
 
-Each tutorial has a runnable script in
+Each tutorial has a script in
 [`bindings/python/examples/`](https://github.com/AbeCoull/prism-q/tree/main/bindings/python/examples),
 and the Rust programs in
 [`examples/`](https://github.com/AbeCoull/prism-q/tree/main/examples) cover the same

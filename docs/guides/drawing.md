@@ -2,7 +2,7 @@
 
 A `Circuit` renders three ways from Rust: a Unicode wire diagram for the terminal, a
 gate-density heatmap for circuits too large to read gate by gate, and self-contained SVG
-of either. None of them simulate anything; they read the instruction list.
+of either. All three read the instruction list and simulate nothing.
 
 ## Text diagrams
 
@@ -33,7 +33,7 @@ q[1]: ────X───Rz(0.2500)──@───────Z────�
 q[2]: ────────────────────X───Ry(0.5000)──T─M2─
 ```
 
-Gates are packed into moments, the columns, so gates on disjoint qubits share one. `@`
+Gates pack into moments, the columns, so gates on disjoint qubits share one. `@`
 marks a control, `X` the target of a CX, and `Mk` a measurement into classical bit `k`.
 Angles print to four decimals, or as a fraction of π when they are one.
 
@@ -105,10 +105,9 @@ connectivity, a depth profile, qubit activity, a heatmap, and a classification s
 
 ## Heatmaps
 
-`heatmap(&TextOptions)` shows where the gates are rather than what they are: one row per
-qubit, one column per moment, a filled cell where a gate acts. Rows and columns are
-bucketed to fit within `fold_width`, and the legend gives the gate count each shade
-stands for. A hardware-efficient ansatz shows its CX ladder as a diagonal band:
+`heatmap(&TextOptions)` shows where the gates are, not what they are: one row per qubit,
+one column per moment, a filled cell where a gate acts. Rows and columns are bucketed to
+fit `fold_width`, and the legend gives the gate count each shade stands for. A hardware-efficient ansatz shows its CX ladder as a diagonal band:
 
 ```rust
 use prism_q::TextOptions;
@@ -135,10 +134,10 @@ q[7]: ██      ███ ███ █
 ## SVG
 
 `to_svg(&SvgOptions)` returns a complete `<svg>` document as a `String`, ready to write
-to a file or embed in HTML or Markdown. `to_svg_heatmap` does the same for the heatmap,
-adding marginal activity bars and a color key. Each operation contributes one count
-on every qubit it touches. A CX contributes two to its moment total. The bars sum these
-counts by qubit and moment.
+to a file or embed in HTML or Markdown. `to_svg_heatmap` does the same for the heatmap and
+adds marginal activity bars and a color key. Each operation counts once on every qubit it
+touches, so a CX adds two to its moment total; the bars sum these counts by qubit and by
+moment.
 
 ```rust,no_run
 use prism_q::SvgOptions;
@@ -157,16 +156,16 @@ std::fs::write(
 .unwrap();
 ```
 
-Gates read from left to right. A filled dot marks a control; a circled plus marks the
-target of a CX. Qubit `q[0]` is the least significant bit.
+Gates read left to right. A filled dot marks a control and a circled plus the target of
+a CX. `q[0]` is the least significant bit.
 
-Subscripts identify wires and rotation axes. Angles appear below gate names in radians.
-Decimal angles use up to three decimal places, with scientific notation for small values.
-Open a figure's full SVG to inspect gate tooltips with full angle values. Tooltips are
-also available when SVG is embedded inline, but not when embedded as an image.
+Subscripts identify wires and rotation axes. Angles appear below gate names in radians,
+to at most three decimal places, with scientific notation for small values. Gate tooltips
+show full angle values when the SVG is opened directly or embedded inline, not when it is
+embedded as an image; each figure below links its full SVG.
 
-Scroll wide figures horizontally, or focus them and use the arrow keys. Images follow
-the book theme.
+Wide figures scroll horizontally, or with the arrow keys once focused. Images follow the
+book theme.
 
 <figure class="circuit-figure">
 <div class="circuit-scroll" role="region" aria-label="GHZ circuit" tabindex="0">
@@ -208,7 +207,7 @@ let svg = qaoa_circuit(6, 3, 42).to_svg(&opts);
 assert!(svg.starts_with("<svg"));
 ```
 
-[`examples/gen_doc_diagrams.rs`](https://github.com/AbeCoull/prism-q/blob/main/examples/gen_doc_diagrams.rs)
+[`tools/gen_doc_diagrams.rs`](https://github.com/AbeCoull/prism-q/blob/main/tools/gen_doc_diagrams.rs)
 regenerates the circuit images on this site with fixed seeds:
 
 ```bash
@@ -217,8 +216,8 @@ cargo run --features parallel --example gen_doc_diagrams
 
 ### Examples
 
-Measurements add classical wires beneath the qubits. A double line denotes a
-classical bit; a dashed arrow connects a measurement to its destination bit.
+Measurements add classical wires beneath the qubits: a double line is a classical bit,
+and a dashed arrow joins a measurement to the bit it writes.
 
 <figure class="circuit-figure">
 <div class="circuit-scroll" role="region" aria-label="Measured Bell pair circuit" tabindex="0">
@@ -227,8 +226,8 @@ classical bit; a dashed arrow connects a measurement to its destination bit.
 <figcaption>Each measurement writes to the corresponding classical bit. <a href="../diagrams/bell_2_measured.svg">Open full SVG</a>.</figcaption>
 </figure>
 
-Barriers align authored layers. With `show_barriers: false`, each boundary leaves a
-small gap without a marker:
+Barriers align authored layers. With `show_barriers: false` each boundary leaves a small
+gap and no marker:
 
 <figure class="circuit-figure">
 <div class="circuit-scroll" role="region" aria-label="Parameterized ansatz circuit" tabindex="0">

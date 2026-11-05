@@ -96,6 +96,7 @@ function sourcePaths(revision = null) {
     "rust-toolchain.toml",
     ".cargo/config.toml",
     "examples/atlas_trace.rs",
+    "tools/atlas_trace.rs",
     "docs/atlas/scripts/generate-traces.mjs",
     "docs/atlas/scripts/generate-fusion-traces.mjs",
     "docs/atlas/scripts/recording-provenance.mjs",
@@ -126,7 +127,7 @@ export function recordingProvenance(environmentOverrides = {}) {
         "Cargo.toml",
         "Cargo.lock",
         "build.rs",
-        "examples/atlas_trace.rs",
+        "tools/atlas_trace.rs",
       ]).trim().length > 0,
     auditComparison:
       "Canonical source audit hashes; only the cfg(test) atlas module registration is excluded from the fusion.rs comparison. Full recording hashes include it and all current src files, including test counter visibility.",

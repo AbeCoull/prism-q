@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("Rz", Gate::Rz(theta)),
     ];
     let mut output = format!(
-        "{{\"schemaVersion\":1,\"provenance\":{{\"sourceRevision\":\"{revision}\",\"crateVersion\":\"{}\",\"backend\":\"StatevectorBackend\",\"execution\":\"native\",\"precision\":\"complex128\",\"seed\":42,\"features\":[\"parallel\"],\"exporter\":\"examples/atlas_trace.rs\",\"instruction\":\"Gate::Fused\",\"timing\":null}},\"traces\":[",
+        "{{\"schemaVersion\":1,\"provenance\":{{\"sourceRevision\":\"{revision}\",\"crateVersion\":\"{}\",\"backend\":\"StatevectorBackend\",\"execution\":\"native\",\"precision\":\"complex128\",\"seed\":42,\"features\":[\"parallel\"],\"exporter\":\"tools/atlas_trace.rs\",\"instruction\":\"Gate::Fused\",\"timing\":null}},\"traces\":[",
         env!("CARGO_PKG_VERSION")
     );
     let mut first = true;

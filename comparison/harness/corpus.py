@@ -85,5 +85,5 @@ def descriptor() -> dict[str, Any]:
         "families": dict(FAMILIES),
         "gate_set": list(GATE_SET),
         "circuit_seed": CIRCUIT_SEED,
-        "source": "examples/compare_runner.rs export, from the prism_q::circuits generators",
+        "source": "tools/compare_runner.rs export, from the prism_q::circuits generators",
     }

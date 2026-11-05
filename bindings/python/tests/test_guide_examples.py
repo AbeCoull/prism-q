@@ -1,10 +1,10 @@
-"""Execute the Python examples in docs/guides/python.md, docs/tutorials and the READMEs.
+"""Execute the Python examples in docs/guides/python*.md, docs/tutorials and the READMEs.
 
-Blocks fenced as ``python`` run in order in one namespace, so an example may use
-what an earlier one defined. ``python,ignore`` marks a block that needs hardware
-or a launcher CI does not have. A block whose last line ends in ``# raises`` must
-raise ``PrismError``. A tutorial or README page starts from an empty namespace,
-so its blocks import what they use, as a reader copying them would.
+Blocks fenced as ``python`` in the guide pages run in book order in one namespace,
+so an example may use what an earlier one defined. ``python,ignore`` marks a block
+that needs hardware or a launcher CI does not have. A block whose last line ends in
+``# raises`` must raise ``PrismError``. A tutorial or README page starts from an empty
+namespace, so its blocks import what they use, as a reader copying them would.
 """
 
 import re
@@ -16,7 +16,19 @@ import pytest
 import prism_q
 
 ROOT = Path(__file__).resolve().parents[3]
-GUIDE = ROOT / "docs" / "guides" / "python.md"
+GUIDES = [
+    ROOT / "docs" / "guides" / f"{name}.md"
+    for name in (
+        "python",
+        "python-circuits",
+        "python-running",
+        "python-observables",
+        "python-noise",
+        "python-state",
+        "python-qec",
+        "python-names",
+    )
+]
 TUTORIALS = ROOT / "docs" / "tutorials"
 READMES = [ROOT / "README.md", ROOT / "bindings" / "python" / "README.md"]
 
@@ -56,6 +68,7 @@ SETUP = {
         "for s in range(3)]"
     ),
     "observable_expectation_many(points": (
+        "import numpy as np\n"
         "points = np.array([[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]])\n"
         'hamiltonian = [(1.0, [(0, "Z")]), (0.5, [(0, "Z"), (1, "Z")])]'
     ),
@@ -97,21 +110,26 @@ def fenced_blocks(text):
     return blocks
 
 
-@pytest.mark.skipif(not GUIDE.exists(), reason="needs the repository checkout")
+@pytest.mark.skipif(not GUIDES[0].exists(), reason="needs the repository checkout")
 def test_python_guide_examples_run(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     namespace = {name: getattr(prism_q, name) for name in prism_q.__all__}
     namespace["prism_q"] = prism_q
     unused = set(SETUP)
     ran = 0
-    for line, info, code in fenced_blocks(GUIDE.read_text(encoding="utf-8")):
+    blocks = [
+        (guide, line, info, code)
+        for guide in GUIDES
+        for line, info, code in fenced_blocks(guide.read_text(encoding="utf-8"))
+    ]
+    for guide, line, info, code in blocks:
         if info != "python":
             continue
         for fragment, setup in SETUP.items():
             if fragment in code and fragment in unused:
                 exec(setup, namespace)
                 unused.discard(fragment)
-        source = compile(code, f"{GUIDE.name}:{line}", "exec")
+        source = compile(code, f"{guide.name}:{line}", "exec")
         if code.rstrip().endswith("# raises"):
             with pytest.raises(prism_q.PrismError):
                 exec(source, namespace)
@@ -119,7 +137,7 @@ def test_python_guide_examples_run(tmp_path, monkeypatch):
             try:
                 exec(source, namespace)
             except Exception as exc:
-                pytest.fail(f"python.md block at line {line} failed: {exc!r}")
+                pytest.fail(f"{guide.name} block at line {line} failed: {exc!r}")
         ran += 1
     assert unused == set(), f"setup keys matched no block: {sorted(unused)}"
     assert ran > 0

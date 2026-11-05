@@ -3,13 +3,13 @@
 Goal: run three circuits too wide for a dense statevector, each on the engine its
 structure allows, and read from the result metadata whether the answer is exact.
 
-A dense statevector holds `2**n` complex amplitudes, 16 bytes each, so 30 qubits take
-16 GiB. Past that, the structure of the circuit decides what can run.
+A dense statevector holds `2**n` complex amplitudes at 16 bytes each, so 30 qubits take
+16 GiB. Past that, circuit structure decides what can run.
 
 ## Clifford circuits: thousands of qubits
 
 A circuit of only Clifford gates (H, S, CX, CZ and the Paulis) runs on a stabilizer
-tableau in polynomial time. Automatic dispatch notices and picks it.
+tableau in polynomial time, and automatic dispatch picks it.
 
 ```python
 from prism_q import CircuitBuilder, simulate
@@ -30,9 +30,9 @@ compiles the measurement record once and draws every shot from it.
 
 ## Clifford plus a few T gates
 
-One T gate takes a circuit out of the stabilizer formalism, but a few of them can still be
-handled exactly. This chain applies `h t h` to every sixth qubit, ten T gates in all, then
-entangles the whole register with a CX ladder:
+One T gate takes a circuit out of the stabilizer formalism, but a few can still be handled
+exactly. This chain applies `h t h` to every sixth qubit, ten T gates in all, then
+entangles the register with a CX ladder:
 
 ```python
 def kicked_chain(n, measure):
@@ -67,9 +67,9 @@ values = (
 print(round(values.values[0], 6), values.metadata.is_exact)   # 0.03125 True
 ```
 
-`expectation_values_reported` returns the values with the metadata of the run. Shot
-sampling on the measured version goes to the stabilizer-rank engine on its own, which
-tracks a sum of stabilizer states that grows with the T count rather than the width:
+`expectation_values_reported` returns the values with the run's metadata. Shot sampling
+on the measured version goes to the stabilizer-rank engine unprompted; it tracks a sum
+of stabilizer states that grows with the T count, not the width:
 
 ```python
 shots = simulate(kicked_chain(60, measure=True)).seed(42).shots(2000)
@@ -96,8 +96,8 @@ print(meta.backend, meta.is_exact, meta.fidelity_lower_bound)   # Mps False 1.0
 print(meta.bond.peak, meta.bond.cap, meta.bond.saturated)       # 4 256 False
 ```
 
-`is_exact` is `False` because the MPS engine can truncate. Whether it did is in the bond
-report: the widest bond the run needed was 4, well under the cap, so nothing was cut, and
+`is_exact` is `False` because the MPS engine can truncate. The bond report says whether
+it did: the widest bond needed was 4, under the cap of 256, so nothing was cut and
 `fidelity_lower_bound` is 1.0. With the cap forced down to 2, the bond saturates:
 
 ```python
@@ -108,13 +108,12 @@ print(round(result.values[0], 4), round(tight.values[0], 4))   # 0.3301 0.4464
 print(tight.metadata.bond.saturated)                           # True
 ```
 
-A saturated bond means the cap bound the run, so truncation may have moved the answer.
-Here it did, by 0.12. The fidelity bound drops to 0.0, the worst case it can certify.
+A saturated bond means truncation may have moved the answer. Here it moved it by 0.12,
+and the fidelity bound drops to 0.0, the worst case it can certify.
 
 ## Refusing approximate answers
 
-When an approximation is worse than no answer, `require_exact()` turns a route that could
-truncate into an error naming it:
+`require_exact()` turns a route that could truncate into an error naming it:
 
 ```python
 from prism_q import PrismError
@@ -125,12 +124,11 @@ except PrismError as exc:
     print(exc.kind)                 # incompatible_backend
 ```
 
-The check is made from the circuit and the requested backend, before anything runs. The
-1000-qubit Clifford sample passes it under automatic dispatch. The Clifford+T shots pass
-only with `.backend(BackendKind.stabilizer_rank())` named, because automatic dispatch
-cannot promise in advance that it will find the exact route, and deterministic Pauli
-propagation is rejected outright because it truncates once the term count passes its
-budget.
+The check uses the circuit and the requested backend, before anything runs. The
+1000-qubit Clifford sample passes under automatic dispatch. The Clifford+T shots pass
+only with `.backend(BackendKind.stabilizer_rank())`, because automatic dispatch cannot
+promise the exact route in advance. Deterministic Pauli propagation is always rejected,
+since it truncates once the term count passes its budget.
 
 ## In Rust
 

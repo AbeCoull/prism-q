@@ -52,7 +52,7 @@ The harness is formatted with `ruff format` and checked with `ruff check` under
 | `harness/workloads.py` | canonical workload generators and the gate list format |
 | `harness/profiles.py` | the matrices: which workloads, simulators, thread counts, repetition policy |
 | `harness/runners.py` | simulator registry, applicability rules, one process per measurement, peak memory, failure classification |
-| `harness/worker.py` | Aer, qsim and Stim behind the same `exec` protocol as `examples/compare_runner.rs` |
+| `harness/worker.py` | Aer, qsim and Stim behind the same `exec` protocol as `tools/compare_runner.rs` |
 | `harness/reference.py` | independent exact reference for measurement statistics (past-cone extraction, branching NumPy statevector) |
 | `harness/validate.py` | TVD for dense outputs, Bonferroni-corrected exact binomial tests for sampled outputs |
 | `harness/stats.py` | medians, IQR, seeded bootstrap intervals for medians and ratios |
@@ -101,7 +101,7 @@ simulators computed the same distribution. The controls behind it are in
 
 | Adapter | Simulator | How it runs | Threads |
 | --- | --- | --- | --- |
-| `prismq` | PRISM-Q, `BackendKind::Auto` | `examples/compare_runner.rs`, built by the harness | `RAYON_NUM_THREADS` |
+| `prismq` | PRISM-Q, `BackendKind::Auto` | `tools/compare_runner.rs`, built by the harness | `RAYON_NUM_THREADS` |
 | `aer-statevector`, `aer-automatic` | Qiskit Aer | in-process through `qiskit_aer.AerSimulator` | `max_parallel_threads` |
 | `qsim` | qsim through qsimcirq | in-process through `qsimcirq.QSimSimulator` | `QSimOptions.cpu_threads` |
 | `quest` | QuEST, OpenMP build | `quest/quest_runner`, built with CMake | `OMP_NUM_THREADS` |

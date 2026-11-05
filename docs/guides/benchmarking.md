@@ -1,28 +1,27 @@
 # Benchmark Methodology
 
 How PRISM-Q's numbers are produced, what they include, and how to reproduce them or
-run a like-for-like comparison against another quantum circuit simulator. The
-[Benchmarks](../benchmarks.md) page holds the published timings; this page holds the
-rules behind them. The mechanisms being measured (fusion, tiling, SIMD dispatch,
-threading) are in [Performance and SIMD](./performance.md).
+compare like for like against another simulator. [Benchmarks](../benchmarks.md) holds
+the published timings, and [Performance and SIMD](./performance.md) the mechanisms being
+measured (fusion, tiling, SIMD dispatch, threading).
 
 ## Two kinds of measurement
 
 | Purpose | Tool | Output |
 |---------|------|--------|
-| Published wall-clock timings per circuit family | `examples/bench_suite.rs` | Rewrites `docs/benchmarks.md` |
+| Published wall-clock timings per circuit family | `tools/bench_suite.rs` | Rewrites `docs/benchmarks.md` |
 | Per-kernel and per-family rows held to a regression gate | Criterion targets under `benches/` and `scripts/bench_ab.sh` | Criterion estimates and an A/B report |
 
 The suite answers "how long does this circuit take end to end on this host". The
 Criterion rows answer "did this change move this code path", which needs the
-adjacent-binary A/B described below rather than two runs minutes apart.
+adjacent-binary A/B below, not two runs minutes apart.
 
 ## The published suite
 
 `cargo run --release --features parallel --example bench_suite` builds four circuit
-families from the `prism_q::circuits` generators the library ships, times each size,
-and rewrites the Benchmarks page with a Setup section naming the date, CPU, thread
-count, compiler and crate version of that run.
+families from the `prism_q::circuits` generators, times each size, and rewrites the
+Benchmarks page with a Setup section naming the run's date, CPU, thread count, compiler
+and crate version.
 
 | Family | Generator | Circuit | Sizes |
 |--------|-----------|---------|-------|
@@ -37,23 +36,21 @@ Rules the generator fixes, so a rerun on another host differs only in the host:
 - Backend `Auto`. GHZ is Clifford and lands on the stabilizer backend, which is why it
   runs to 4096 qubits; the dense families land on the statevector backend up to the
   memory cap. A size that fails to allocate is skipped, not reported.
-- The timed region is the full `simulate(&circuit).seed(42).run()` call: the fusion
-  pass, gate application, and the probability extraction at the end. Circuit
-  construction happens once per size, outside the timer.
-- Warmup and repeat counts follow the size, because a 28-qubit run costs tens of
-  seconds: up to 18 qubits, 2 warmup runs then 7 timed; 19 to 22, 1 then 5; 23 to 25,
-  1 then 3; 26 and above, no warmup and 1 timed run. The reported value is the median
-  of the timed runs.
-- Build: the `release` profile, which sets `opt-level = 3`, fat LTO,
-  `codegen-units = 1` and `panic = "abort"`, with the `parallel` feature.
-- Threads: every logical core, unless `RAYON_NUM_THREADS` caps the Rayon pool. The
-  page records both the host's logical core count and the pool width used.
-- Precision: amplitudes are `Complex<f64>` on every backend. There is no single
-  precision mode.
+- The timed region is the full `simulate(&circuit).seed(42).run()` call: fusion, gate
+  application and the final probability extraction. Circuit construction happens once
+  per size, outside the timer.
+- Warmup and repeats scale with size, since a 28-qubit run takes tens of seconds: up to
+  18 qubits, 2 warmup runs then 7 timed; 19 to 22, 1 then 5; 23 to 25, 1 then 3; 26 and
+  above, no warmup and 1 timed run. The reported value is the median of the timed runs.
+- Build: the `release` profile (`opt-level = 3`, fat LTO, `codegen-units = 1`,
+  `panic = "abort"`) with the `parallel` feature.
+- Threads: every logical core, unless `RAYON_NUM_THREADS` caps the Rayon pool. The page
+  records the host's logical core count and the pool width used.
+- Precision: `Complex<f64>` amplitudes on every backend, with no single precision mode.
 
-A number on that page describes the crate version and host named in its Setup
-section. Dispatch rules and kernels change between releases, so compare numbers only
-within one run.
+A number on that page describes the crate version and host in its Setup section.
+Dispatch rules and kernels change between releases, so compare numbers only within one
+run.
 
 ## Criterion targets
 
@@ -67,11 +64,11 @@ within one run.
 | `bench_gpu` | The CPU sweeps on the device path, Pauli expectations, statevector readback | `parallel gpu`; skipped without a device |
 | `bench_distributed` | Rank exchanges and sampling over the thread loopback transport | `parallel distributed bench-internal` |
 
-`cargo bench --bench <target> -- --list` prints a target's rows. The group-by-group
-description, including which rows the development host cannot resolve to the gate, is
-in `benches/README.md`.
+`cargo bench --bench <target> -- --list` prints a target's rows. `benches/README.md`
+describes each group, including the rows the development host cannot resolve to the
+gate.
 
-Which category each need maps to:
+Rows by question:
 
 | Question | Rows |
 |----------|------|
@@ -87,58 +84,54 @@ Which category each need maps to:
 | Fused versus unfused | `density_matrix/fused_layers` and `rzz_layers_fused` against `unitary_layers`; the `PRISM_NO_REORDER` and `PRISM_NO_QFT_BLOCK` flags in [Performance and SIMD](./performance.md#tuning-environment-variables) switch individual passes off for any row |
 | Thread scaling | Any row rerun under `RAYON_NUM_THREADS=1,2,4,...`; no target sweeps threads on its own |
 | Memory scaling | The qubit ladders inside each family; the memory caps are in [Backends](../architecture/backends.md#memory-budget) |
-| CPU versus GPU | `bench_gpu` groups beside their CPU twins, or `examples/bench_gpu_vs_cpu.rs` for a per-gate comparison with fusion disabled on both sides |
+| CPU versus GPU | `bench_gpu` groups beside their CPU twins, or `tools/bench_gpu_vs_cpu.rs` for a per-gate comparison with fusion disabled on both sides |
 | Distributed execution | `bench_distributed`, and `scripts/test-mpi.sh --timed` for real ranks across hosts |
 
 ## Reading a number
 
 Criterion reports the mean of `PRISM_BENCH_SAMPLES` samples (default 30) per row. The
-`bench-fast` feature drops to 10 samples for triage and is what the CI gate runs; a
-`bench-fast` table is triage, not a claim. `PRISM_BENCH_PLOTS` turns the HTML report
-on; it is off by default because rendering cost more than measuring.
+`bench-fast` feature drops to 10 samples and is what the CI gate runs; a `bench-fast`
+table is triage, not a claim. `PRISM_BENCH_PLOTS` turns the HTML report on; it is off by
+default because rendering cost more than measuring.
 
-Sample count sets the precision of one run's mean. It does not remove drift between
-runs: on the reference host, back-to-back runs of identical code moved up to about 10%
-either way, from rebuilds landing between runs, code layout, and host load. Two
-`cargo bench` invocations are therefore not a comparison. `scripts/bench_ab.sh` builds
-the reference and working-tree binaries side by side, checks the tree did not move
-between the builds, runs the two binaries back to back, and reports each row against
-a same-code control pair. A delta inside its own control spread is noise, and the
-report says so rather than rounding it to a win.
+Sample count sets the precision of one run's mean, not the drift between runs: on the
+reference host, back-to-back runs of identical code moved up to about 10% either way,
+from rebuilds landing between runs, code layout and host load. Two `cargo bench`
+invocations are therefore not a comparison. `scripts/bench_ab.sh` builds the reference
+and working-tree binaries side by side, checks the tree did not change between the
+builds, runs the two back to back, and reports each row against a same-code control
+pair. A delta inside its own control spread is noise, and the report says so.
 
 ```bash
 ./scripts/bench_ab.sh --filter '^statevector/qft_textbook/' --ref main
 ```
 
-`REGRESSION_THRESHOLD` (default 5, in percent) is the gate every PR that touches a hot
-path must clear; CI runs the same A/B against the PR base at the `bench-fast` tier.
-Run one benchmark process at a time, with no other load on the host: competing Rayon
-pools and a busy GPU have both produced swings larger than the gate.
+`REGRESSION_THRESHOLD` (default 5, in percent) is the gate every PR touching a hot path
+must clear; CI runs the same A/B against the PR base at the `bench-fast` tier. Run one
+benchmark process at a time on an otherwise idle host: competing Rayon pools and a busy
+GPU have both produced swings larger than the gate.
 
 ## Comparative measurements
 
-Comparative performance measurements against commonly used quantum simulators are
-intended to make performance characteristics reproducible and transparent across
-representative workloads, not to rank projects. Each simulator makes different
-trade-offs in precision, optimization, output and scope, and a measurement is only
-meaningful where those are held equal and stated. The
-[Comparative Measurements](../comparison.md) page carries the numbers, generated by the
-harness in `comparison/` under the controls below; this page carries the rules.
+Comparisons against other simulators are there to make performance reproducible across
+representative workloads, not to rank projects. Simulators trade off precision,
+optimization, output and scope differently, and a measurement means something only
+where those are held equal and stated. [Comparative Measurements](../comparison.md)
+carries the numbers, generated by the harness in `comparison/` under these controls:
 
 - Same program. Hand every simulator one gate list and replay it through each native
-  API, which is what the harness in `comparison/` does; parsing OpenQASM into the other
-  simulator is the alternative, and then its importer's transpilation sits inside its
-  measurement. The QFT generator's `QftBlock` has no gate-level spelling, so the shared
-  list is the textbook sequence. PRISM-Q folds that exact sequence back into its block
-  FFT, as it does for any QFT that arrives as gates, so the comparison times the path a
-  user's expanded QFT takes; `PRISM_NO_QFT_BLOCK` restores gate-by-gate replay. Record
-  the gate count after each simulator's own optimization, since fusion changes what runs.
+  API, as the harness does. Parsing OpenQASM into the other simulator instead puts its
+  importer's transpilation inside its measurement. The QFT generator's `QftBlock` has
+  no gate-level spelling, so the shared list is the textbook sequence. PRISM-Q folds
+  that exact sequence back into its block FFT, as it does for any QFT that arrives as
+  gates, so the comparison times the path a user's expanded QFT takes;
+  `PRISM_NO_QFT_BLOCK` restores gate-by-gate replay. Record the gate count after each
+  simulator's own optimization, since fusion changes what runs.
 - Same output. The suite times `run()`, which ends with a `2^n` probability vector.
   Time the other simulator to the same observable, or time both to the final state
   only; mixing the two moves a 26-qubit row by the cost of a full pass over the state.
-- Same precision. PRISM-Q is `f64` complex throughout. A simulator run in single
-  precision moves half the memory traffic, which is a different measurement rather
-  than a worse or better one.
+- Same precision. PRISM-Q is `f64` complex throughout. A single precision run moves half
+  the memory traffic, which makes it a different measurement, not a worse or better one.
 - Same thread budget. Pin both with their own variable (`RAYON_NUM_THREADS` here,
   `OMP_NUM_THREADS` or an API call there) and report the count. Report the physical
   and logical core counts of the host.
@@ -151,10 +144,10 @@ harness in `comparison/` under the controls below; this page carries the rules.
 - Versions. Name the release of each simulator and the commit when a release is not
   enough.
 
-A results table that names the version, hardware, compiler, qubit count, circuit,
-shot count, thread count, timing and memory for every row can be reproduced by its
-readers. Where a workload favors one simulator's design, say which design choice
-explains it; a difference without its mechanism is not yet a finding.
+A results table that names the version, hardware, compiler, qubit count, circuit, shot
+count, thread count, timing and memory for every row can be reproduced by its readers.
+Where a workload favors one simulator's design, name the design choice that explains it;
+a difference without its mechanism is not yet a finding.
 
 ## Profiling
 
@@ -163,6 +156,6 @@ explains it; a difference without its mechanism is not yet a finding.
 .\scripts\flamegraph.ps1 "qft_textbook/16"    # windows
 ```
 
-The script header lists the platform profiler it needs and where the SVG lands.
-The `bench` profile keeps function names and line tables, so the flamegraph resolves
-kernel names while the build stays close to release.
+The script header lists the platform profiler it needs and where the SVG lands. The
+`bench` profile keeps function names and line tables, so the flamegraph resolves kernel
+names while the build stays close to release.

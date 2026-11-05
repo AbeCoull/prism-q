@@ -1,47 +1,47 @@
 # Performance and SIMD
 
-The mechanisms behind PRISM-Q's speed and the knobs that tune them. The internals live in
-the architecture reference under [Fusion Pipeline](../architecture/fusion.md) and
+The execution mechanisms and the knobs that tune them. Internals are in
+[Fusion Pipeline](../architecture/fusion.md) and
 [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
 
 ## The three levers
 
-1. **Fusion** collapses many small gate passes into fewer, larger ones before execution,
-   reducing memory traffic over the statevector. It is qubit-count gated and zero-cost
-   when it does not apply.
-2. **Cache-resident tiling** keeps batched gates working on data that stays hot across
-   a pass, in two shapes. Both size their tiles from one budget read off the cache
-   topology at startup: the smaller of the L2 per core and a quarter of the last-level
-   cache per logical CPU sharing it, floored at 256 KB and capped at 1 MB, so every
-   concurrent tile and the lines it gathers fit half that cache. On the i7-6700K the
-   kernels were measured on, that is 256 KB; a 1 MB tile ran 2x slower there at 22 and
-   24 qubits. `MultiFused` splits its gates by target: targets whose period fits the
-   budget run on budget-sized tiles (bit 13 and below at 256 KB), bits 14 through 16
-   on 2 MB ones when those fit the last-level cache, and higher targets run untiled.
-   A `Multi2q` tile is a contiguous run of the low index bits plus gathered high
-   qubits, 64 amplitudes per run and up to eight high qubits in a 2^14 tile, so a
-   batch of gates on any qubits costs one pass over the state as long as it spans at
-   most eight qubits above bit 6. A `MultiPauliRot` batch of Pauli rotations uses the
-   same tile, counting only the qubits that carry an X or Y letter, since a Z letter
-   outside the tile fixes one sign per tile.
-   `PRISM_TILE_KB` overrides the budget for every tile,
-   and `PRISM_MULTI_2Q_TILE_BITS` and `PRISM_MULTI_2Q_LOW_BITS` set the `Multi2q`
-   shape by hand. Budgets past 256 KB are derived, not measured, so a core with a
-   larger cache is worth a sweep of `PRISM_TILE_KB`.
+1. **Fusion** merges many small gate passes into fewer, larger ones before execution,
+   cutting memory traffic over the statevector. It is gated on qubit count and costs
+   nothing when it does not apply.
+2. **Cache-resident tiling** keeps batched gates on data that stays hot across a pass,
+   in two shapes. Both size tiles from one budget read off the cache topology at
+   startup: the smaller of the L2 per core and a quarter of the last-level cache per
+   logical CPU sharing it, floored at 256 KB and capped at 1 MB, so every concurrent
+   tile and the lines it gathers fit half that cache. On the i7-6700K used for
+   measurement that is 256 KB; a 1 MB tile ran 2x slower there at 22 and 24 qubits.
+
+   `MultiFused` splits its gates by target: targets whose period fits the budget run on
+   budget-sized tiles (bit 13 and below at 256 KB), bits 14 through 16 on 2 MB tiles
+   when those fit the last-level cache, and higher targets run untiled. A `Multi2q`
+   tile is a contiguous run of the low index bits plus gathered high qubits, 64
+   amplitudes per run and up to eight high qubits in a 2^14 tile, so a batch of gates
+   costs one pass over the state as long as it spans at most eight qubits above bit 6.
+   A `MultiPauliRot` batch uses the same tile, counting only qubits that carry an X or
+   Y letter, since a Z letter outside the tile fixes one sign per tile.
+
+   `PRISM_TILE_KB` overrides the budget for every tile, and `PRISM_MULTI_2Q_TILE_BITS`
+   and `PRISM_MULTI_2Q_LOW_BITS` set the `Multi2q` shape by hand. Budgets past 256 KB
+   are derived, not measured, so a core with a larger cache is worth a sweep of
+   `PRISM_TILE_KB`.
 3. **SIMD** vectorizes the inner complex-arithmetic loop. The tier is picked at
    runtime: AVX-512 (opt-in, see `PRISM_AVX512` below), AVX2+FMA, FMA or SSE2 on x86_64,
    NEON on aarch64, scalar elsewhere.
 
-The levers are ordered, and lever 3 comes after a prior question: whether the arithmetic
-can be removed rather than issued faster. A kernel whose operations an algebraic identity or an
-operator structure deletes is bounded by its memory floor; vectorizing what remains is
-bounded by the complex-arithmetic issue ceiling, near 23% of FMA peak in the interleaved
-layout.
+Before lever 3 comes a prior question: can the arithmetic be removed rather than issued
+faster? A kernel whose operations an algebraic identity or operator structure deletes is
+bounded by its memory floor; vectorizing what remains is bounded by the
+complex-arithmetic issue ceiling, near 23% of FMA peak in the interleaved layout.
 
 ## Threading
 
-Rayon parallel kernels engage at 15 qubits and above (below that, thread-pool overhead
-dominates), with `MIN_PAR_ELEMS = 4096` per task. The pool defaults to all logical cores.
+Rayon parallel kernels engage at 15 qubits (below that, pool overhead dominates), with
+`MIN_PAR_ELEMS = 4096` per task. The pool defaults to all logical cores.
 
 ```admonish tip title="Control the thread pool"
 Set `RAYON_NUM_THREADS` to cap parallelism. Hyperthreading helps at 24+ qubits by hiding
@@ -56,27 +56,26 @@ left unbuilt on that path.
 
 Deterministic partitioning makes unitary evolution and seeded terminal sampling on the
 dense backends bitwise reproducible at any thread count. Parallel reductions (norms,
-collapse probabilities, expectation values) are stable to about 1e-12 but not bitwise,
-and the batched compiled sampler seeds one RNG stream per worker, so its shots reproduce
-only at a fixed thread count. At that width the stream is the same on x86 and aarch64:
-the vector and scalar kernels draw from one four-lane layout. The per-path contract is in
-[Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
+collapse probabilities, expectation values) are stable to about 1e-12 but not bitwise.
+The batched compiled sampler seeds one RNG stream per worker, so its shots reproduce
+only at a fixed thread count; at that width the stream matches across x86 and aarch64,
+since the vector and scalar kernels draw from one four-lane layout. The per-path
+contract is in [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
 
 ## Tuning environment variables
 
-Every knob is read once per process, on first use, and cached. A value that
-does not parse, or falls below the knob's minimum, prints a warning on stderr
-naming the variable and behaves as if the variable were unset: a typo never
-fails a run and never passes silently. Flags are presence-only: setting the
-variable to anything switches the path off.
+Every knob is read once per process, on first use, and cached. A value that does not
+parse, or falls below the knob's minimum, prints a stderr warning naming the variable
+and is treated as unset, so a typo neither fails a run nor passes silently. Flags are
+presence-only: any value switches the path off.
 
 ### Limits (also settable in code)
 
-Each cap below is a `Limits` field as well as a variable. `Simulate::limits` (Python
+Each cap below is both a `Limits` field and a variable. `Simulate::limits` (Python
 `Simulation.limits`) sets it for one request and `set_default_limits` for every later
 call in the process; a request value beats the process default, which beats the
-variable. `memory_budget_bytes` sets the budget every cap derives from, half of physical
-memory by default, and a layer that sets it discards the per-cap values below it.
+variable. `memory_budget_bytes` sets the budget every cap derives from (half of physical
+memory by default), and a layer that sets it discards the per-cap values below it.
 `auto_mps_bond_dim` (default 256) has no variable.
 
 | `Limits` field | Variable | Default | Effect |
@@ -129,7 +128,7 @@ cargo bench --bench circuits --features parallel       # circuit macrobenchmarks
 cargo bench --bench bench_driver --features parallel   # gate microbenchmarks
 ```
 
-For current wall-clock numbers across the circuit suite, see the
-[Benchmarks](../benchmarks.md) page. What those numbers include, how the Criterion
-rows are held to the regression gate, and the controls for a comparison against
-another simulator are in [Benchmark Methodology](./benchmarking.md).
+Current wall-clock numbers are on [Benchmarks](../benchmarks.md).
+[Benchmark Methodology](./benchmarking.md) covers what they include, how Criterion rows
+are held to the regression gate, and the controls for a comparison against another
+simulator.

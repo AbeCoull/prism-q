@@ -1,11 +1,10 @@
 # Fusion Pipeline
 
 Rewrites of the gate stream before execution, each pass gated on a qubit count. The count
-is the width of the buffer the backend sweeps, not the circuit's: the density matrix
-holds `n` qubits as a `2n`-qubit statevector and so reaches each floor at half the
-circuit width (`fuse_circuit_for_width` in `src/circuit/fusion.rs`). Every pass returns
-`Cow<Circuit>` and stays `Borrowed` when it changes nothing, so a circuit no pass
-touches is never cloned.
+is the width of the buffer the backend sweeps: the density matrix holds `n` qubits as a
+`2n`-qubit statevector, so it reaches each floor at half the circuit width
+(`fuse_circuit_for_width` in `src/circuit/fusion.rs`). Every pass returns `Cow<Circuit>`
+and stays `Borrowed` when it changes nothing, so an untouched circuit is never cloned.
 
 ```mermaid
 flowchart TD
@@ -53,25 +52,25 @@ flowchart TD
 ## Stage planner
 
 Once the statevector outgrows the last-level cache every pass is a sweep of main memory,
-and `plan_stages` (`src/circuit/fusion_stage.rs`) replaces the batching passes from
+so `plan_stages` (`src/circuit/fusion_stage.rs`) replaces the batching passes from
 `fuse_multi_1q_gates` on. It splits the stream at measurements, resets, conditionals,
-regions, barriers, saves and gates no batch carries, then schedules each segment as a
-sequence of stages over the dependency frontier. A stage is one gathered tile: the low
-`multi_2q_low_bits` qubits plus up to the `Multi2q` high budget of others. Its high
-qubits grow greedily from the frontier, each step adding the qubits that let the stage
-take the most moving gates per qubit added, ties to the gate with the longest dependency
-chain behind it. Gates commute when every qubit they share is acted on diagonally by
-both, so diagonal gates never block each other.
+regions, barriers, saves and gates no batch carries, then schedules each segment as
+stages over the dependency frontier. A stage is one gathered tile: the low
+`multi_2q_low_bits` qubits plus up to the `Multi2q` high budget of others. High qubits
+grow greedily from the frontier, each step adding the qubits that take the most moving
+gates per qubit added, ties going to the gate with the longest dependency chain behind
+it. Gates commute when both act diagonally on every qubit they share, so diagonal gates
+never block each other.
 
 Each stage leaves as one existing batch: a `Multi2q` with every 1q gate folded into a
 2q entry on its qubit, a `MultiFused` when it holds no 2q gate, or a `MultiPauliRot`,
 whose Z letters cost no tile slot. Diagonal gates ride in a tile when a later gate needs
 them; the rest wait for a diagonal stage (`BatchRzz` or `DiagonalBatch`), taken when no
 tile moves anything or when clearing them first doubles what the next tile moves. The
-schedule reads only the stream and the tile geometry, which comes from the hardware and
-never from the Rayon pool, so results stay bitwise equal across thread counts. The
-planner records provenance like the passes it replaces, so a `PreparedCircuit` replays
-its stages. The density matrix keeps the batching passes.
+schedule reads only the stream and the tile geometry, which comes from the hardware, not
+the Rayon pool, so results are bitwise equal across thread counts. The planner records
+provenance like the passes it replaces, so a `PreparedCircuit` replays its stages. The
+density matrix keeps the batching passes.
 
 ## Device profile
 
@@ -83,71 +82,69 @@ keeps the host pipeline above. The device profile stops after the 1q passes and 
 volume blocks), where the run's leading 1q gates fold in as well. A lone CX keeps its
 neighbours as 1q gates. Neither the batching passes nor the stage planner run.
 
-The device then lowers each run of gates between measurements, resets, conditionals,
-regions and saves itself (`src/gpu/tiles.rs`): 1q matrices, diagonals and
-antidiagonals, CX, swap and two-qubit diagonals become ops of `apply_mixed_tile`, and a
-planner built like the stage planner schedules them into shared-memory tiles of 11
-qubits, each one pass. A dense 4x4 and every other gate launch on their own kernels.
-The stage planner's tiles would not serve the device: its `Multi2q` folds every 1q gate
-into a dense 4x4 entry, which the device launches one entry at a time, so a
-five-layer ansatz at 24 qubits ran 115 dense passes from either stream. A dense 4x4
-also stays out of the mixed tile, where it ran 7% slower than on its own kernel on a
-GTX 1080 Ti, whose FP64 rate makes the 4x4 compute bound.
+The device lowers each run of gates between measurements, resets, conditionals, regions
+and saves itself (`src/gpu/tiles.rs`). 1q matrices, diagonals and antidiagonals, CX,
+swap and two-qubit diagonals become ops of `apply_mixed_tile`, and a planner built like
+the stage planner schedules them into shared-memory tiles of 11 qubits, one pass each. A
+dense 4x4 and every other gate launch on their own kernels. The stage planner's tiles
+would not serve the device: its `Multi2q` folds every 1q gate into a dense 4x4 entry,
+which the device launches one entry at a time, so a five-layer ansatz at 24 qubits ran
+115 dense passes from either stream. A dense 4x4 stays out of the mixed tile too, where
+it ran 7% slower than on its own kernel on a GTX 1080 Ti, whose FP64 rate makes the 4x4
+compute bound.
 
 The lowering runs after binding and reads only the bound stream, so a `PreparedCircuit`
 captures and replays its plan under the profile of the backend it holds.
 
 ## Mixed CPU tiles
 
-Past the last-level cache floor, the CPU statevector lowers the fused instruction
-slice into a private schedule. Each stage admits operations whose moving qubits fit
-one cache tile and whose dependencies are satisfied. Diagonal qubits and Pauli Z
-letters outside the tile are constant within a subcube and consume no tile slots.
-The planner examines at most four times the state width in skipped operations per
-scan and candidate seeds per growth step.
+Past the last-level cache floor, the CPU statevector lowers the fused instruction slice
+into a private schedule. A stage admits operations whose moving qubits fit one cache tile
+and whose dependencies are met. Diagonal qubits and Pauli Z letters outside the tile are
+constant within a subcube and take no tile slot. The planner examines at most four times
+the state width in skipped operations per scan, and in candidate seeds per growth step.
 
 Homogeneous stages use the existing 1q, 2q, Pauli or diagonal batch kernels. Mixed
 stages gather once, execute their operations in order, and scatter once. Controlled X
 and swap keep their permutation operations. Measurements, resets, conditionals,
 regions, barriers and QFT blocks end a stage. No schedule enters the gate enum.
 
-A statevector slice whose operations all lower to one batch kind (dense 1q, dense 2q
-or Pauli rotations) skips the schedule and applies its staged instructions directly.
-The stage planner already batched that stream for the same kernel, and regrouping it
-only moves stage boundaries: on `statevector/random_d10/24` it left one 2q gate as a
-pass of its own. The density matrix keeps its doubled schedule for every slice.
+A statevector slice whose operations all lower to one batch kind (dense 1q, dense 2q or
+Pauli rotations) skips the schedule and applies its staged instructions directly. The
+stage planner already batched that stream for the same kernel, and regrouping only moves
+stage boundaries: on `statevector/random_d10/24` it left one 2q gate as a pass of its
+own. The density matrix keeps its doubled schedule for every slice.
 
-The backend retains only stage indices and operation shapes across applications.
-Every application reloads its numerical payloads from the current instruction slice.
-A changed state width, gate family or dependency mask rebuilds the schedule. Scheduling
-uses state width and cache geometry, independent of the Rayon pool width.
+Across applications the backend keeps only stage indices and operation shapes, and
+reloads numerical payloads from the current slice each time. A changed state width, gate
+family or dependency mask rebuilds the schedule. Scheduling reads state width and cache
+geometry, not the Rayon pool width.
 
-The density matrix schedules a doubled stream over its `2n`-qubit buffer: ket gates
-on `q+n` and conjugated bra gates on `q`. Dependencies within each register retain
-circuit order while commuting work from the other register can share a tile. An
-unsupported operation ends the segment and runs through the density matrix backend.
-The device execution path keeps its own fusion profile and kernels. The static
-density-matrix census accepts only supported gate streams; unsupported kernels have
-their own ket, bra and conjugation passes and are excluded from that count.
+The density matrix schedules a doubled stream over its `2n`-qubit buffer: ket gates on
+`q+n`, conjugated bra gates on `q`. Each register keeps circuit order internally, while
+commuting work from the other register can share a tile. An unsupported operation ends
+the segment and runs through the density matrix backend. The device path keeps its own
+fusion profile and kernels. The static density-matrix census accepts only supported gate
+streams; unsupported kernels have their own ket, bra and conjugation passes and are
+excluded from that count.
 
 ## QFT recognition
 
 Before this pipeline runs, a backend with a native `QftBlock` kernel (the statevector,
-on the host or the device) has `recognize_qft_blocks` (`src/circuit/qft_recognition.rs`) fold each
+host or device) has `recognize_qft_blocks` (`src/circuit/qft_recognition.rs`) fold each
 expanded QFT back into one block, so a QFT parsed from OpenQASM runs as the FFT rather
 than as `n^2 / 2` controlled phases. It matches every sequence `qft_textbook_steps`
-emits: forward or inverse, with or without the bit-reversal swaps, and in either label
-order. The phases of one column may come in any order with either qubit as control, and
-the swaps in any order, which covers the gate order Qiskit's QFT decomposes to. Each
-phase must equal `e^{±iπ/2^d}` to within `1e-12`, so an approximate QFT stays as gates.
+emits: forward or inverse, with or without the bit-reversal swaps, in either label order.
+The phases of one column may come in any order with either qubit as control, and the
+swaps in any order, which covers the gate order Qiskit's QFT decomposes to. Each phase
+must equal `e^{±iπ/2^d}` to within `1e-12`, so an approximate QFT stays as gates.
 
 Only ranges the FFT runs natively fold: blocks starting at `q[0]` that span the register
-or at least 10 qubits (`MIN_SUBRANGE_QFT_QUBITS`). A narrower QFT stays as gates, which
-the tiled passes run in a sweep or two. The gates must be consecutive top-level
+or cover at least 10 qubits (`MIN_SUBRANGE_QFT_QUBITS`). A narrower QFT stays as gates,
+which the tiled passes run in a sweep or two. The gates must be consecutive top-level
 instructions, so a QFT with another gate inside it, or on non-contiguous qubits, is left
-alone. The scan allocates nothing until it finds a match and returns the circuit
-borrowed when there is none. `PRISM_NO_QFT_BLOCK` turns off the kernel and the
-recognition together.
+alone. The scan allocates nothing until it finds a match and returns the circuit borrowed
+when there is none. `PRISM_NO_QFT_BLOCK` turns off kernel and recognition together.
 
 The kernel runs the DIF network over each `2^num` amplitude chunk, with conjugate
 twiddles for the inverse, and reaches every form by adding a bit reversal of the chunk
@@ -155,11 +152,11 @@ index before the network, after it, or both.
 
 ## Payload capacities
 
-The batched gates carry a lookup table sized at compile time, so the pass that emits
-them is what keeps the payload inside it. Both caps are declared on the gate payload
-(`BatchRzzData::MAX_EDGES`, `BatchPhaseData::MAX_PHASES`) and pinned to the kernel
-table shape by a compile-time assertion; the kernels assert on entry in release builds
-as well, so a producer that outgrows a table fails loudly instead of dropping work.
+The batched gates carry a lookup table sized at compile time, and the pass that emits
+them keeps the payload inside it. Both caps are declared on the payload
+(`BatchRzzData::MAX_EDGES`, `BatchPhaseData::MAX_PHASES`) and pinned to the kernel table
+shape by a compile-time assertion. The kernels also assert on entry in release builds, so
+a producer that outgrows a table fails loudly instead of dropping work.
 
 | Payload         | Cap                   | Producer behavior past the cap                                     |
 |-----------------|-----------------------|--------------------------------------------------------------------|
@@ -168,13 +165,12 @@ as well, so a producer that outgrows a table fails loudly instead of dropping wo
 | `DiagonalBatch` | 4 tables of 10 qubits | `fuse_diagonal_batch` closes the run and opens a new one           |
 
 Splitting the first two is sound because both hold mutually commuting diagonal terms. A
-repeated `(control, target)` pair folds into the entry already present. That keeps the
-BMI2 and fallback paths in agreement, since the BMI2 kernel indexes one bit per distinct
-qubit and a repeated target has no bit of its own, and it bounds a chain by the qubit
-count.
+repeated `(control, target)` pair folds into the existing entry. That keeps the BMI2 and
+fallback paths in agreement (the BMI2 kernel indexes one bit per distinct qubit, and a
+repeated target has no bit of its own) and bounds a chain by the qubit count.
 
-A `DiagonalBatch` kernel table covers the qubits its two-qubit entries join, so the cap
-is on those components rather than on the entry count: they must pack into
+A `DiagonalBatch` table covers the qubits its two-qubit entries join, so the cap is on
+those components, not the entry count: they must pack into
 `DiagonalBatchData::MAX_GROUPS` tables of `MAX_QUBITS_PER_GROUP` qubits. The producer runs
 the kernel's first-fit packing on every gate it admits and closes the run before a gate
 breaks it. A hand-built batch that does not fit still runs, on the per-element path.
@@ -195,22 +191,22 @@ powers of phase estimation all share the eigenstate qubit and run as one batch.
 
 ## Plan capture and replay
 
-A variational sweep holds one gate sequence and varies only the angles. Fusion
-decides the same block structure at every point, so `PreparedCircuit` settles it once
-and rebinds against it. Capture gates the floors on the buffer width of the backend the
+A variational sweep holds one gate sequence and varies only the angles, so fusion
+decides the same block structure at every point. `PreparedCircuit` settles it once and
+rebinds against it. Capture gates the floors on the buffer width of the backend the
 prepared circuit holds, so a prepared density matrix fuses at `2n` as a direct run does.
 
-The plan is reusable and the matrices are not, since a changed angle changes every fused
+The plan is reusable; the matrices are not, since a changed angle changes every fused
 matrix it feeds. `FusionPlan` records a recipe per angle-derived payload: a list of
 template instructions and how each one's matrix enters the product. Replay recomputes
-the products and never caches them. Nested recipes splice by rewriting a
-placement flag rather than by materializing the inner product, which is sound because
-both widening to a pair and SWAP conjugation are multiplicative.
+the products and never caches them. Nested recipes splice by rewriting a placement flag
+instead of materializing the inner product, which is sound because widening to a pair
+and SWAP conjugation are both multiplicative.
 
-The passes record this under a `Tracer` that is inactive on the ordinary path, so a
-fusion outside the prepared form allocates what it always did.
+The passes record under a `Tracer` that is inactive on the ordinary path, so fusion
+outside the prepared form allocates what it always did.
 
-The plan cannot assume the decisions that read a matrix rather than the gate sequence:
+Decisions that read a matrix rather than the gate sequence are guarded:
 
 | Decision | Read by | Recorded as |
 |----------|---------|-------------|
@@ -222,28 +218,27 @@ The plan cannot assume the decisions that read a matrix rather than the gate seq
 
 Each guard is re-tested per binding, and a binding that flips one falls back to running
 the pipeline, so the stream matches an independently fused circuit either way. The 1q
-diagonality guard has to live on the run rather than on a payload site: the block is
-often absorbed into a `Fused2q` and keeps no 2x2 of its own, while the reorder it
-steered has already happened.
+diagonality guard lives on the run, not a payload site: the block is often absorbed into
+a `Fused2q` with no 2x2 of its own, and the reorder it steered has already happened.
 
 `DiagonalBatch` records one recipe per phase or parity entry. A diagonal pair is
-decomposed after rebuilding its complete matrix product, since its factors need not
-be diagonal individually. `BatchPhase` retains source products through repeated-pair
-merging, batch splitting and changes of control qubit. The stage planner carries this
+decomposed after rebuilding its full matrix product, since its factors need not be
+diagonal individually. `BatchPhase` keeps source products through repeated-pair merging,
+batch splitting and changes of control qubit. The stage planner carries this
 provenance through its nested diagonal passes.
 
-A rewritten `CX Rz CX` records an `Rzz` matrix derived from the source angle, so both
+A rewritten `CX Rz CX` records an `Rzz` matrix derived from the source angle, so
 standalone parity batches and later pair fusion replay the same operation.
 
 A gate the passes leave untouched still needs a site when it carries an angle. `PauliRot`
-holds its angle in a boxed payload rather than in the enum slot, and replay patches it
-exactly as it patches an `Rz`; without that site a bound rotation would keep the
+holds its angle in a boxed payload, not the enum slot, and replay patches it as it
+patches an `Rz`; without that site a bound rotation would keep the
 template's angle while every other payload moved.
 
 ## Fusion cost against apply cost
 
-Fusion cost tracks instruction count and is close to flat in qubit count, while gate
-application is `2^n`. For `hardware_efficient_ansatz(n, 5, seed)` on this project's
+Fusion cost tracks instruction count and is nearly flat in qubit count; gate application
+is `2^n`. For `hardware_efficient_ansatz(n, 5, seed)` on this project's
 reference host, fusion is about 22% of a run at 12 qubits and about 0.3% at 20.
 
 ```admonish tip

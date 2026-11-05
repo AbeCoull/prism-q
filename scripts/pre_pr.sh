@@ -17,7 +17,7 @@
 #                      external simulator.
 #   fmt                a .rs file
 #   clippy, nextest    a Rust input: .rs, Cargo manifests, src/, tests/, benches/,
-#                      examples/, bindings/, lint or toolchain config
+#                      examples/, tools/, bindings/, lint or toolchain config
 #   doctest            src/, the manifests, or a page src/lib.rs includes for doctests
 #   doc-build          a `///` or `//!` line under src/
 #   public-api, semver, parity, clippy-py
@@ -345,7 +345,7 @@ run_if audit-changelog "$(first_file '^CHANGELOG\.md$')" "CHANGELOG.md untouched
 
 RS_FILE="$(first_file '\.rs$')"
 RUST_INPUT="$(printf '%s\n' "${CHANGED[@]}" | grep -v -E '\.md$' \
-    | grep -m1 -E '\.rs$|(^|/)Cargo\.(toml|lock)$|^(src|tests|benches|examples|bindings)/|^(clippy|rustfmt|rust-toolchain)\.toml$|^\.cargo/|^\.config/')"
+    | grep -m1 -E '\.rs$|(^|/)Cargo\.(toml|lock)$|^(src|tests|benches|examples|tools|bindings)/|^(clippy|rustfmt|rust-toolchain)\.toml$|^\.cargo/|^\.config/')"
 mapfile -t DOC_PAGES < <(sed -n 's/.*include_str!("\.\.\/\([^"]*\.md\)").*/\1/p' src/lib.rs)
 DOCTEST_INPUT="$(first_file '^src/|(^|/)Cargo\.(toml|lock)$')"
 if [[ -z "$DOCTEST_INPUT" ]]; then
@@ -379,7 +379,7 @@ for target in x86_64-unknown-linux-gnu aarch64-apple-darwin; do
         add "$name" run "$CROSS_HIT" check_cross "$target"
     fi
 done
-CROSS_UNBUILT="$(first_hit '^[+-]$' '^(examples|tests|benches|bindings)/' 'target_(os|arch)')"
+CROSS_UNBUILT="$(first_hit '^[+-]$' '^(examples|tools|tests|benches|bindings)/' 'target_(os|arch)')"
 
 GPU_DIST_HIT="$(first_file '^src/sim/dispatch\.rs$')"
 GPU_DIST_HIT="${GPU_DIST_HIT:-$(first_hit '^[+-]$' '\.rs$' 'cfg(_attr)?!?\(.*feature')}"
@@ -451,7 +451,7 @@ run_if sh-syntax "${SH_FILES[0]:-}" "no shell script changed" check_sh_syntax
 GPU_HIT="$(first_file '^src/gpu/')"
 [[ -n "$GPU_HIT" ]] && add owed-gpu owed "$GPU_HIT" \
     "scripts/test-gpu.ps1 on a host with a card; a run without one skips the GPU goldens"
-MPI_HIT="$(first_file '^src/.*mpi[^/]*$|^examples/dist_mpi_check\.rs$')"
+MPI_HIT="$(first_file '^src/.*mpi[^/]*$|^tools/dist_mpi_check\.rs$')"
 MPI_HIT="${MPI_HIT:-$(first_hit '^[+-]$' '\.(rs|toml)$' 'MpiComm|distributed-mpi')}"
 [[ -n "$MPI_HIT" ]] && add owed-mpi owed "$MPI_HIT" \
     "--all-features clippy and nextest after . scripts/mpi-env.ps1, then scripts/test-mpi.ps1"

@@ -26,7 +26,7 @@ fixture.provenance = {
   profile: "dev",
 };
 fixture.provenance.exporterSource = readFileSync(
-  new URL("../../../examples/atlas_trace.rs", import.meta.url),
+  new URL("../../../tools/atlas_trace.rs", import.meta.url),
   "utf8",
 );
 const directory = new URL("../fixtures/", import.meta.url);

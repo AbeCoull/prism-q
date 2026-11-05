@@ -15,7 +15,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 SNAPSHOT = REPO / "docs" / "architecture" / "public-api.txt"
 MANIFEST = REPO / "bindings" / "python" / "parity.toml"
-GUIDE = REPO / "docs" / "guides" / "python.md"
+GUIDE = REPO / "docs" / "guides" / "python-names.md"
 
 DECL = re.compile(r"^(?:#\[[^\]]*\] )?pub (struct|enum|trait|mod|static|use|union) ")
 

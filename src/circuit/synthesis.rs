@@ -52,7 +52,7 @@ pub(crate) fn controlled_dense(
     debug_assert!(!controls.is_empty(), "a controlled gate needs a control");
     let dim = 1usize << targets.len();
     let (values, vectors) = unitary_eigen(&transpose(matrix, dim), dim);
-    let basis = from_columns(&vectors, dim);
+    let basis = transpose(&vectors, dim);
     let mut out = dense_unitary(&adjoint(&basis, dim), targets);
     out.extend(controlled_diagonal(&values, controls, targets));
     out.extend(dense_unitary(&basis, targets));
@@ -334,22 +334,12 @@ fn instruction(gate: Gate, targets: &[usize]) -> Instruction {
     }
 }
 
-fn transpose(matrix: &[Complex64], dim: usize) -> Vec<Complex64> {
+/// Swap row-major and column-major storage without conjugating entries.
+pub(super) fn transpose(matrix: &[Complex64], dim: usize) -> Vec<Complex64> {
     let mut out = vec![Complex64::new(0.0, 0.0); dim * dim];
     for row in 0..dim {
         for column in 0..dim {
             out[column * dim + row] = matrix[row * dim + column];
-        }
-    }
-    out
-}
-
-/// Row-major matrix whose columns are the column-major `vectors`.
-fn from_columns(vectors: &[Complex64], dim: usize) -> Vec<Complex64> {
-    let mut out = vec![Complex64::new(0.0, 0.0); dim * dim];
-    for column in 0..dim {
-        for row in 0..dim {
-            out[row * dim + column] = vectors[column * dim + row];
         }
     }
     out

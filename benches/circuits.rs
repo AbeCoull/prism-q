@@ -4367,6 +4367,32 @@ fn bench_qasm_parse(c: &mut Criterion) {
         });
     }
 
+    for (name, qubits, calls, call) in [
+        (
+            "controlled_matrix_64",
+            3,
+            64,
+            "ctrl @ ecr q[0], q[1], q[2];\n",
+        ),
+        (
+            "fractional_matrix_64",
+            2,
+            64,
+            "pow(0.5) @ ecr q[0], q[1];\n",
+        ),
+        (
+            "fractional_matrix_3q_32",
+            3,
+            32,
+            "pow(0.5) @ ccx q[0], q[1], q[2];\n",
+        ),
+    ] {
+        let text = format!("OPENQASM 3.0;\nqubit[{qubits}] q;\n{}", call.repeat(calls));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &text, |b, text| {
+            b.iter(|| black_box(prism_q::circuit::openqasm::parse(black_box(text)).unwrap()));
+        });
+    }
+
     let text = gate_library_source(100, 2000, 16);
     group.bench_with_input(
         BenchmarkId::from_parameter("gate_library_100x2000"),

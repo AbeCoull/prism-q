@@ -87,7 +87,7 @@ exclude = [
 "compile_noisy" = "CompiledSampler"
 "compile_qec_program_rows" = { rust_only = "QEC compiler internals" }
 "default_limits" = "default_limits"
-"density_matrix_expectation_values" = "Simulation.density_matrix_expectation_values"
+"density_matrix_expectation_values" = "Simulation.expectation"
 "gpu::is_available" = "GpuContext.is_available"
 "gpu::min_qubits" = { rust_only = "crossover read from PRISM_GPU_MIN_QUBITS, which Python sets directly" }
 "gpu::nvrtc_available" = { rust_only = "gpu_info reports why a device is unusable" }
@@ -95,10 +95,6 @@ exclude = [
 "inverse_light_cone" = { rust_only = "analysis helper of the Pauli propagation engines" }
 "noisy_marginals_analytical" = "noisy_marginals_analytical"
 "parse_qec_program" = "QecProgram.from_text"
-"run_expectation_gradient" = "Simulation.expectation_gradient"
-"run_expectation_gradient_shift" = "Simulation.expectation_gradient_shift"
-"run_expectation_values" = "Simulation.expectation_values"
-"run_observable_expectation" = "Simulation.observable_expectation"
 "run_on" = { rust_only = "runs on a caller-held Backend trait object" }
 "run_on_state" = { rust_only = "runs on a caller-held Backend trait object" }
 "run_qasm" = "run_qasm"
@@ -110,19 +106,23 @@ exclude = [
 "run_shots_compiled_with_gpu" = { rust_only = "Python selects BackendKind.stabilizer_gpu(context) for device shots" }
 "run_shots_noisy" = "Simulation.shots"
 "run_spd" = "BackendKind.deterministic_pauli"
-"run_spd_observable" = { rust_only = "same engine through Simulation.expectation_values with BackendKind.deterministic_pauli()" }
-"run_spd_observable_budgeted" = { rust_only = "same engine through Simulation.expectation_values with BackendKind.deterministic_pauli_budget()" }
+"run_spd_observable" = { rust_only = "same engine through Simulation.expectation with BackendKind.deterministic_pauli()" }
+"run_spd_observable_budgeted" = { rust_only = "same engine through Simulation.expectation with BackendKind.deterministic_pauli_budget()" }
 "run_spd_observable_light_cone" = { rust_only = "light-cone pruned SPD for research runs" }
 "run_spd_with" = "BackendKind.deterministic_pauli_budget"
 "run_spp" = "BackendKind.stochastic_pauli"
-"run_spp_observable" = { rust_only = "same engine through Simulation.expectation_values with BackendKind.stochastic_pauli()" }
+"run_spp_observable" = { rust_only = "same engine through Simulation.expectation with BackendKind.stochastic_pauli()" }
 "run_stabilizer_rank" = "BackendKind.stabilizer_rank"
 "run_stabilizer_rank_approx" = { rust_only = "pruned stabilizer-rank expansion for research runs" }
 "set_default_limits" = "set_default_limits"
 "sim::calibration::presets::neutral_atom" = "DeviceCalibration.neutral_atom"
 "sim::calibration::presets::superconducting_transmon" = "DeviceCalibration.superconducting_transmon"
 "sim::calibration::presets::trapped_ion" = "DeviceCalibration.trapped_ion"
+"sim::gradient::run_expectation_gradient" = "Simulation.expectation_gradient"
+"sim::gradient::run_expectation_gradient_shift" = "Simulation.expectation_gradient_shift"
 "sim::run_batch" = "run_batch"
+"sim::run_expectation_values" = "Simulation.expectation"
+"sim::run_observable_expectation" = "Simulation.expectation"
 "sim::stabilizer_rank::run_stabilizer_rank_shots" = { rust_only = "shot sampling of the stabilizer-rank expansion; Simulation.shots reaches it under BackendKind.auto()" }
 "sim::unified_pauli::run_pauli_path_observable" = "BackendKind.pauli_path"
 "simulate" = "simulate"
@@ -138,8 +138,8 @@ exclude = [
 "Simulate::entanglement_entropy" = "Simulation.entanglement_entropy"
 "Simulate::expectation_gradient" = "Simulation.expectation_gradient"
 "Simulate::expectation_gradient_shift" = "Simulation.expectation_gradient_shift"
-"Simulate::expectation_values" = "Simulation.expectation_values"
-"Simulate::expectation_values_reported" = "Simulation.expectation_values_reported"
+"Simulate::expectation_values" = "Simulation.expectation"
+"Simulate::expectation_values_reported" = "Simulation.expectation"
 "Simulate::gpu" = { rust_only = "Python selects BackendKind.statevector_gpu(context)" }
 "Simulate::gpu_auto" = { rust_only = "Python selects BackendKind.auto_gpu(context)" }
 "Simulate::initial_density_matrix" = "Simulation.initial_density_matrix"
@@ -147,7 +147,7 @@ exclude = [
 "Simulate::limits" = "Simulation.limits"
 "Simulate::marginals" = "Simulation.marginals"
 "Simulate::noise" = "Simulation.noise"
-"Simulate::observable_expectation" = "Simulation.observable_expectation"
+"Simulate::observable_expectation" = "Simulation.expectation"
 "Simulate::observable_variance" = "Simulation.observable_variance"
 "Simulate::overlap" = "Simulation.overlap"
 "Simulate::probabilities_of" = "Simulation.probabilities_of"

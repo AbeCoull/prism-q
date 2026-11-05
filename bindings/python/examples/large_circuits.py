@@ -27,7 +27,7 @@ values = (
     simulate(chain)
     .backend(BackendKind.deterministic_pauli())
     .seed(42)
-    .expectation_values_reported([[(59, "Z")]])
+    .expectation([[(59, "Z")]])
 )
 print(f"{chain.t_count()} T gates, <Z59> = {values.values[0]:.5f}, exact: {values.metadata.is_exact}")
 shots = simulate(kicked_chain(60, measure=True)).seed(42).shots(2000)
@@ -35,7 +35,7 @@ print(f"shots on {shots.metadata.backend}: P(q59 = 1) = {shots.shots[:, 59].mean
 
 wide = circuits.hardware_efficient_ansatz(60, 2)
 for kind in [BackendKind.auto(), BackendKind.mps(2)]:
-    result = simulate(wide).backend(kind).seed(42).expectation_values_reported([[(0, "Z")]])
+    result = simulate(wide).backend(kind).seed(42).expectation([[(0, "Z")]])
     meta = result.metadata
     print(
         f"{meta.backend}: <Z0> = {result.values[0]:.4f}, exact {meta.is_exact}, "
@@ -44,6 +44,6 @@ for kind in [BackendKind.auto(), BackendKind.mps(2)]:
     )
 
 try:
-    simulate(wide).seed(42).require_exact().expectation_values([[(0, "Z")]])
+    simulate(wide).seed(42).require_exact().expectation([[(0, "Z")]])
 except PrismError as exc:
     print("require_exact:", exc.kind)

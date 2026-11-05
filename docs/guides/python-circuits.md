@@ -54,7 +54,7 @@ from prism_q import CircuitBuilder, PauliObservable, simulate
 
 ising = PauliObservable([(1.0, [(0, "Z"), (1, "Z")]), (0.5, [(0, "X")]), (0.5, [(1, "X")])])
 evolved = CircuitBuilder(2).h(0).h(1).trotter(ising, 1.0, steps=8, order=2).build()
-energy = simulate(evolved).seed(42).observable_expectation(ising).mean
+energy = simulate(evolved).seed(42).expectation(ising).mean
 assert abs(energy - 1.0) < 1e-2  # <H> is conserved up to the Trotter error
 ```
 
@@ -218,9 +218,10 @@ for values in [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]:
 ```
 
 `run(values, seed=42)` returns the `RunOutcome` that `simulate(...).run()` would.
-`expectation_values(values, observables)` and `observable_expectation(values,
-hamiltonian)` match the `Simulation` terminals of the same names on the bound circuit,
-without dispatching or fusing again. `bind(values)` returns the bound `Circuit`, for
+`expectation_values(values, observables)` returns the `.values` of
+`Simulation.expectation()` on the bound circuit, and `observable_expectation(values,
+hamiltonian)` the `ObservableExpectation` it returns for a `PauliObservable`, without
+dispatching or fusing again. `bind(values)` returns the bound `Circuit`, for
 `simulate(...)` with other options or any other consumer.
 
 `run_many`, `expectation_values_many` and `observable_expectation_many` take a

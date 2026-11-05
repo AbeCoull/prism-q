@@ -110,13 +110,13 @@ def test_pauli_path_matches_the_density_matrix_under_noise():
         .backend(BackendKind.density_matrix())
         .noise(noise)
         .seed(1)
-        .expectation_values(observables)
+        .expectation(observables).values
     )
     path = (
         simulate(circuit)
         .backend(BackendKind.pauli_path(max_terms=0))
         .noise(noise)
         .seed(1)
-        .expectation_values(observables)
+        .expectation(observables).values
     )
     assert np.allclose(path, exact, atol=1e-10)

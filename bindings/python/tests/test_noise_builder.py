@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from prism_q import (
+    BackendKind,
     Circuit,
     CircuitBuilder,
     Gate,
@@ -21,9 +22,9 @@ def _counts(circuit, model):
 
 
 def _expectations(circuit, model):
-    return simulate(circuit).seed(42).noise(model).density_matrix_expectation_values(
+    return simulate(circuit).seed(42).noise(model).backend(BackendKind.density_matrix()).expectation(
         [[(qubit, "Z")] for qubit in range(circuit.num_qubits)]
-    )
+    ).values
 
 
 def test_gate_filters_combine_and_capture_their_registration_state():

@@ -3183,7 +3183,8 @@ fn execute_marginals(
 /// # Examples
 ///
 /// ```
-/// use prism_q::{Circuit, Gate, PauliTerm, run_expectation_values};
+/// use prism_q::sim::run_expectation_values;
+/// use prism_q::{Circuit, Gate, PauliTerm};
 ///
 /// let mut bell = Circuit::new(2, 0);
 /// bell.add_gate(Gate::H, &[0]);
@@ -3295,7 +3296,8 @@ fn execute_expectations(
 /// # Examples
 ///
 /// ```
-/// use prism_q::{Circuit, Gate, PauliObservable, PauliTerm, run_observable_expectation};
+/// use prism_q::sim::run_observable_expectation;
+/// use prism_q::{Circuit, Gate, PauliObservable, PauliTerm};
 ///
 /// let mut circuit = Circuit::new(2, 0);
 /// circuit.add_gate(Gate::H, &[0]);

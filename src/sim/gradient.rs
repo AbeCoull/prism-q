@@ -50,7 +50,8 @@ pub struct ExpectationGradient {
 /// # Examples
 ///
 /// ```
-/// use prism_q::{Circuit, Gate, Parameters, PauliTerm, run_expectation_gradient};
+/// use prism_q::sim::gradient::run_expectation_gradient;
+/// use prism_q::{Circuit, Gate, Parameters, PauliTerm};
 ///
 /// let theta = 0.5_f64;
 /// let mut circuit = Circuit::new(2, 0);
@@ -724,7 +725,8 @@ fn build_lambda_and_value(
 /// # Examples
 ///
 /// ```
-/// use prism_q::{Circuit, Gate, Parameters, PauliTerm, run_expectation_gradient_shift};
+/// use prism_q::sim::gradient::run_expectation_gradient_shift;
+/// use prism_q::{Circuit, Gate, Parameters, PauliTerm};
 ///
 /// let theta = 0.5_f64;
 /// let mut circuit = Circuit::new(2, 0);

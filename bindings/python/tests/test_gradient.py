@@ -98,7 +98,7 @@ def test_parameter_shift_reads_a_noisy_mixture_on_the_density_matrix():
         c = circuit(theta)
         noise = NoiseModel.uniform_depolarizing(c, 0.05)
         sim = simulate(c).backend(BackendKind.density_matrix()).noise(noise).seed(42)
-        return sim.expectation_values([[(0, "Z"), (1, "Z")]])[0]
+        return sim.expectation([[(0, "Z"), (1, "Z")]]).values[0]
 
     theta = 0.7
     template = circuit(theta)

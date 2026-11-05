@@ -458,7 +458,7 @@ impl PyCircuit {
     /// `dt = t / steps` through `add_pauli_rotation`. `order` is 1 (Lie-Trotter),
     /// 2 (symmetric), or an even `2k` (Suzuki, costing `5^(k - 1)` second-order
     /// substeps). Identity terms are dropped as a global phase. `hamiltonian`
-    /// takes the `Simulation.observable_expectation` term shape or a
+    /// takes the `Simulation.expectation_gradient` term shape or a
     /// `PauliObservable`.
     #[pyo3(signature = (hamiltonian, t, steps=1, order=2))]
     fn add_trotter(

@@ -4,10 +4,10 @@
 use crate::common;
 
 use prism_q::gates::Gate;
+use prism_q::sim::{run_expectation_values, run_observable_expectation};
 use prism_q::{
     BackendKind, Circuit, NoiseModel, PauliAxis, PauliObservable, PauliTerm, ResolvedBackend,
-    SpdTruncation, density_matrix_expectation_values, run_expectation_values,
-    run_observable_expectation, simulate,
+    SpdTruncation, density_matrix_expectation_values, simulate,
 };
 
 const TOL: f64 = 1e-10;

@@ -7,10 +7,9 @@ use crate::common;
 use common::{SEED, shift_slot};
 use num_complex::Complex64;
 use prism_q::circuits;
-use prism_q::{
-    BackendKind, Circuit, Gate, Instruction, Parameters, PauliTerm, run_expectation_gradient,
-    run_expectation_gradient_shift, run_expectation_values, simulate,
-};
+use prism_q::sim::gradient::{run_expectation_gradient, run_expectation_gradient_shift};
+use prism_q::sim::run_expectation_values;
+use prism_q::{BackendKind, Circuit, Gate, Instruction, Parameters, PauliTerm, simulate};
 
 type Hamiltonian = Vec<(f64, Vec<PauliTerm>)>;
 

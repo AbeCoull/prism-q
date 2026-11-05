@@ -32,8 +32,7 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 
 **Simulation:**
 `simulate`, `Simulate`, `Unseeded`, `Seeded`, `run_on`, `run_on_state`, `run_qasm`,
-`run_expectation_values`, `run_observable_expectation`, `PauliObservable`,
-`ObservableExpectation`, `ObservableVariance`, `ExpectationResult`, `OverlapResult`,
+`PauliObservable`, `ObservableExpectation`, `ObservableVariance`, `ExpectationResult`, `OverlapResult`,
 `bitstring`
 
 **Save points:** `Circuit::add_save` appends an `Instruction::Save` recording a
@@ -70,7 +69,8 @@ answer each.
 [Dynamic Programs](./dynamic-programs.md).
 
 **Gradients:**
-`run_expectation_gradient`, `run_expectation_gradient_shift`, `ExpectationGradient`
+`ExpectationGradient`, returned by `Simulate::expectation_gradient` and
+`Simulate::expectation_gradient_shift`
 
 **Parameters and binding:**
 `Parameters`, `ParamLink`, `PreparedCircuit`. The gradient path reads the links and
@@ -107,8 +107,7 @@ it across cores where `run_batch` would.
 `TextOptions`, `Gate`, `GeneratorKind`, `BackendKind`, `RunOutcome`, `CountsResult`,
 `MarginalsResult`, `ReducedDensityMatrix`, `EntropyResult`, `Probabilities`,
 `FactoredBlock`, `ShotsResult`, `PrismError`, `ResourceLimit`, `ResourceKind`, `Result`,
-`MultiFusedData`,
-`BatchPhaseData`, `McuData`, `Multi2qData`, `UnitaryData`, `RunMetadata`, `BondReport`,
+`McuData`, `UnitaryData`, `RunMetadata`, `BondReport`,
 `Engine`, `Exactness`, `Placement`, `ResolvedBackend`
 
 **Backends:**

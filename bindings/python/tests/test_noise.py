@@ -3,6 +3,7 @@ import pytest
 
 import prism_q
 from prism_q import (
+    BackendKind,
     CircuitBuilder,
     DeviceCalibration,
     NoiseChannel,
@@ -128,7 +129,7 @@ def test_two_qubit_kraus_channel_is_exact_on_the_density_matrix():
         simulate(circuit)
         .seed(1)
         .noise(model)
-        .density_matrix_expectation_values([[(0, "X")], [(0, "X"), (1, "X")]])
+        .backend(BackendKind.density_matrix()).expectation([[(0, "X")], [(0, "X"), (1, "X")]]).values
     )
     assert values[0] == pytest.approx(0.8, abs=1e-12)
     assert values[1] == pytest.approx(1.0, abs=1e-12)

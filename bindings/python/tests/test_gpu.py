@@ -112,8 +112,8 @@ def test_gpu_density_matrix_matches_host_mixture():
     np.testing.assert_allclose(device.run().probabilities, host.run().probabilities, atol=1e-12)
     observables = [[(0, "Z")], [(1, "X"), (2, "Z")]]
     np.testing.assert_allclose(
-        device.expectation_values(observables),
-        host.expectation_values(observables),
+        device.expectation(observables).values,
+        host.expectation(observables).values,
         atol=1e-12,
     )
 

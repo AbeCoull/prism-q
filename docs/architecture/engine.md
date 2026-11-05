@@ -225,7 +225,7 @@ count, so the engine does not choose silently.
 
 ### Adjoint method
 
-`run_expectation_gradient(circuit, hamiltonian, params, seed)` and
+`sim::gradient::run_expectation_gradient(circuit, hamiltonian, params, seed)` and
 `simulate(circuit).seed(seed).expectation_gradient(hamiltonian, params)` compute `⟨H⟩`
 and the exact gradient `d⟨H⟩/dθ` for a weighted Pauli sum `H = Σ c_k P_k`, at a cost
 independent of the parameter count. Implementation in `src/sim/gradient.rs`.
@@ -271,7 +271,7 @@ the statevector backend is supported.
 
 ### Parameter shift (fallback)
 
-`run_expectation_gradient_shift(circuit, hamiltonian, params, seed)` and
+`sim::gradient::run_expectation_gradient_shift(circuit, hamiltonian, params, seed)` and
 `simulate(circuit).backend(kind).seed(seed).expectation_gradient_shift(hamiltonian,
 params)` evaluate `d⟨H⟩/dθ = (f(θ+π/2) - f(θ-π/2)) / 2` per trainable gate, exactly, from
 forward `expectation_values` calls. It inherits whatever the selected backend can

@@ -17,11 +17,11 @@ use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
+use prism_q::sim::gradient::{run_expectation_gradient, run_expectation_gradient_shift};
+use prism_q::sim::{run_expectation_values, run_observable_expectation};
 use prism_q::{
     BackendKind, ClassicalCondition, DynamicProgram, DynamicProgramBuilder, Instruction,
     MpsBackend, Parameters, PauliAxis, PauliObservable, PauliTerm, PreparedCircuit, TrotterOrder,
-    run_expectation_gradient, run_expectation_gradient_shift, run_expectation_values,
-    run_observable_expectation,
 };
 use rand::RngExt;
 use rand::SeedableRng;

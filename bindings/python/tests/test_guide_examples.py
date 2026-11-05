@@ -60,7 +60,7 @@ SETUP = {
     "NoiseModel.uniform_depolarizing(circuit, 0.01)": (
         "circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()"
     ),
-    "values = simulate(circuit).seed(42).expectation_values(": (
+    "values = simulate(circuit).seed(42).expectation(": (
         "circuit = CircuitBuilder(2).h(0).cx(0, 1).build()"
     ),
     "run_batch(circuits": (

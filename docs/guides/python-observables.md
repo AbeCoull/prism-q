@@ -7,26 +7,31 @@ character `i` acts on qubit `i`, so `"ZIX"` is `Z0 ⊗ I1 ⊗ X2`: the order cou
 and the reverse of Qiskit's labels. A short string leaves the remaining qubits as
 identity. The factor form names only non-identity qubits, so `[(0, "Z"), (2, "X")]` is
 the same observable and the shorter spelling on a wide register. Both forms mix in one
-list, and Hamiltonian terms take either as `(coefficient, observable)`. Both expectation
-terminals take a list of observables and return one float each.
+list, and Hamiltonian terms take either as `(coefficient, observable)`.
+
+`expectation()` is the one expectation terminal. A list of observables returns an
+`ExpectationResult`: `.values` holds one `⟨ψ|P|ψ⟩` per observable as a `float64` array,
+`.std_errors` the standard errors of a sampling route (else `None`), and `.metadata` the
+route that served them. A `PauliObservable` returns an `ObservableExpectation` for the
+weighted sum. Weighted terms must be wrapped in `PauliObservable`; a bare
+`(coefficient, observable)` list raises `TypeError`. The circuit must be unitary.
 
 ```python
 observables = ["Z", "ZZ", [(0, "X"), (1, "X")]]
-values = simulate(circuit).seed(42).expectation_values(observables)
+values = simulate(circuit).seed(42).expectation(observables).values
+energy = simulate(circuit).seed(42).expectation(PauliObservable([(1.0, "ZZ"), (0.5, "XI")])).mean
 ```
 
-`expectation_values` requires a unitary circuit and gives `⟨ψ|P|ψ⟩`.
-`density_matrix_expectation_values` evolves the density matrix through the circuit and
-any attached noise model and gives exact `Tr(rho P)`, with none of the variance of
-averaging trajectories. A circuit with a measurement raises `PrismError`, so strip
-measurements first:
+On `BackendKind.density_matrix()` the circuit and any attached noise model evolve the
+density matrix, and the values are exact `Tr(rho P)`, with none of the variance of
+averaging trajectories. A circuit with a measurement or a reset raises `PrismError`, so
+strip them first:
 
 ```python
 model = NoiseModel.empty(circuit)
 model.add_event(0, NoiseChannel.amplitude_damping(0.3), [0])
-exact = simulate(circuit).seed(42).noise(model).density_matrix_expectation_values(
-    [[(0, "Z")]]
-)
+dm = BackendKind.density_matrix()
+exact = simulate(circuit).seed(42).noise(model).backend(dm).expectation([[(0, "Z")]]).values
 ```
 
 ```admonish note title="Compare with a tolerance"

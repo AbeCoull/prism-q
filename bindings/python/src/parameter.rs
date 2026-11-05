@@ -234,7 +234,7 @@ impl PyPreparedCircuit {
     }
 
     /// Bind `values` and compute each joint Pauli observable, as
-    /// `Simulation.expectation_values()` does on the bound circuit.
+    /// `Simulation.expectation()` reads its values on the bound circuit.
     #[pyo3(signature = (values, observables, seed = DEFAULT_SEED))]
     fn expectation_values(
         &self,
@@ -250,7 +250,7 @@ impl PyPreparedCircuit {
         })?)
     }
 
-    /// Bind `values` and compute `⟨H⟩`, as `Simulation.observable_expectation()`
+    /// Bind `values` and compute `⟨H⟩`, as `Simulation.expectation()`
     /// does on the bound circuit.
     #[pyo3(signature = (values, hamiltonian, seed = DEFAULT_SEED))]
     fn observable_expectation(

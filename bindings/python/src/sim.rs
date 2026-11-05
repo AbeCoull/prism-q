@@ -13,14 +13,14 @@ use prism_q::{
     PauliObservable, PauliTerm, Placement, Probabilities, ReducedDensityMatrix, RunMetadata,
     RunOutcome, SaveRecord, SavedValue, Seeded, ShotsResult, Simulate, simulate as core_simulate,
 };
-use pyo3::exceptions::{PyIndexError, PyNotImplementedError};
+use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyIterator, PyList, PyString};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
 use crate::codec;
-use crate::error::{PyPrismResult, invalid};
+use crate::error::{PyPrismError, PyPrismResult, invalid};
 use crate::limits::PyLimits;
 use crate::noise::PyNoiseModel;
 use crate::numpy_util::{bool_matrix, complex_array, complex_matrix, f64_array};
@@ -78,7 +78,7 @@ impl PySimulation {
     /// Attach a noise model.
     ///
     /// `.shots()` and `.sample_counts()` average trajectories. `.run()`,
-    /// `.marginals()`, and `.expectation_values()` answer from the exact
+    /// `.marginals()`, and `.expectation()` answer from the exact
     /// mixture, which requires `BackendKind.density_matrix()`. Readout error
     /// is not part of that mixture, so `.run()` and `.marginals()` reject a
     /// model carrying it and `.sample_counts()` is the terminal that applies it.
@@ -94,9 +94,7 @@ impl PySimulation {
     /// be `2 ** num_qubits` and the vector must be normalized. A start state
     /// runs on the statevector (dense, GPU, or distributed) or density-matrix
     /// backend only. `.shots()` and `.sample_counts()` reject one with a noise
-    /// model attached, and
-    /// `.expectation_gradient()` and `.density_matrix_expectation_values()`
-    /// reject one outright.
+    /// model attached, and `.expectation_gradient()` rejects one outright.
     fn initial_state(
         mut slf: PyRefMut<'_, Self>,
         amplitudes: Vec<Complex64>,
@@ -270,27 +268,51 @@ impl PySimulation {
         Ok(PyExpectationGradient::from(result))
     }
 
-    /// Compute `⟨ψ|P|ψ⟩` for each joint Pauli observable on the circuit's
-    /// output state, honoring the selected backend.
+    /// Expectation values on the circuit's output state, honoring the selected
+    /// backend.
     ///
-    /// Each observable is a Pauli string such as `"ZZI"`, whose character `i`
-    /// acts on qubit `i`, or a list of `(qubit, axis)` factors with identities
-    /// omitted, `axis` one of `"X"`, `"Y"`, `"Z"`. The circuit must
-    /// be unitary. With a noise model attached the value is the exact
+    /// `observables` is a list of Pauli strings, each text such as `"ZZI"`
+    /// (character `i` on qubit `i`) or `(qubit, axis)` factors with identities
+    /// omitted, and returns an `ExpectationResult` with one value per string.
+    /// A `PauliObservable` returns an `ObservableExpectation` instead: the
+    /// weighted mean, with the grouped-measurement variance on the statevector
+    /// family. Both carry the provenance of the run. The circuit must be
+    /// unitary. With a noise model attached the value is the exact
     /// `Tr(rho P)`, which requires `BackendKind.density_matrix()`.
     #[pyo3(signature = (observables))]
-    fn expectation_values(
+    fn expectation<'py>(
         &self,
-        py: Python<'_>,
-        observables: Vec<PauliString>,
-    ) -> PyPrismResult<Vec<f64>> {
-        let observables = parse_observables(observables)?;
+        py: Python<'py>,
+        observables: Observables<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let owned_noise = self.owned_noise(py);
-        let values = py.detach(|| {
-            self.core(owned_noise.as_ref())
-                .expectation_values(&observables)
-        })?;
-        Ok(values)
+        match observables {
+            Observables::Weighted(held) => {
+                let observable = &held.get().0;
+                let result = py
+                    .detach(|| {
+                        self.core(owned_noise.as_ref())
+                            .observable_expectation(observable)
+                    })
+                    .map_err(PyPrismError::from)?;
+                Ok(Bound::new(py, PyObservableExpectation::from_result(result))?.into_any())
+            }
+            Observables::Strings(strings) => {
+                let observables = parse_observables(strings)?;
+                let result = py
+                    .detach(|| {
+                        self.core(owned_noise.as_ref())
+                            .expectation_values_reported(&observables)
+                    })
+                    .map_err(PyPrismError::from)?;
+                let result = PyExpectationResult {
+                    values: result.values,
+                    std_errors: result.std_errors,
+                    metadata: PyRunMetadata::new(result.metadata),
+                };
+                Ok(Bound::new(py, result)?.into_any())
+            }
+        }
     }
 
     /// Joint probability distribution over `qubits`, `2 ** len(qubits)` entries
@@ -368,7 +390,7 @@ impl PySimulation {
     /// This is the spread of the operator itself, not
     /// `ObservableExpectation.variance`, which sums per-group variances and so
     /// drops the covariance between measurement groups. `hamiltonian` takes the
-    /// `observable_expectation()` term shape.
+    /// `expectation_gradient()` term shape.
     #[pyo3(signature = (hamiltonian))]
     fn observable_variance(
         &self,
@@ -384,29 +406,6 @@ impl PySimulation {
         Ok(PyObservableVariance {
             variance: result.variance,
             mean: result.mean,
-            metadata: PyRunMetadata::new(result.metadata),
-        })
-    }
-
-    /// `expectation_values()` with the provenance of the run that served it.
-    /// Under `BackendKind.auto()` a wide shallow circuit can be answered by a
-    /// tensor contraction rather than by the state vector, and only the
-    /// metadata says which ran.
-    #[pyo3(signature = (observables))]
-    fn expectation_values_reported(
-        &self,
-        py: Python<'_>,
-        observables: Vec<PauliString>,
-    ) -> PyPrismResult<PyExpectationResult> {
-        let observables = parse_observables(observables)?;
-        let owned_noise = self.owned_noise(py);
-        let result = py.detach(|| {
-            self.core(owned_noise.as_ref())
-                .expectation_values_reported(&observables)
-        })?;
-        Ok(PyExpectationResult {
-            values: result.values,
-            std_errors: result.std_errors,
             metadata: PyRunMetadata::new(result.metadata),
         })
     }
@@ -433,66 +432,6 @@ impl PySimulation {
             left: PyRunMetadata::new(result.left),
             right: PyRunMetadata::new(result.right),
         })
-    }
-
-    /// Compute `⟨H⟩` and its grouped-measurement variance for a weighted Pauli
-    /// observable on the circuit's output state.
-    ///
-    /// `hamiltonian` takes the `expectation_gradient()` term shape: a list of
-    /// `(coefficient, pauli)` pairs, an empty or all-identity `pauli` acting as
-    /// a constant offset. Identical strings merge by summing coefficients.
-    /// The statevector family reports the variance (see
-    /// `ObservableExpectation.variance` for the contract); every other route
-    /// returns the weighted mean with `variance` of `None`.
-    #[pyo3(signature = (hamiltonian))]
-    fn observable_expectation(
-        &self,
-        py: Python<'_>,
-        hamiltonian: Hamiltonian<'_>,
-    ) -> PyPrismResult<PyObservableExpectation> {
-        let observable = hamiltonian.observable()?;
-        let owned_noise = self.owned_noise(py);
-        let result = py.detach(|| {
-            self.core(owned_noise.as_ref())
-                .observable_expectation(&observable)
-        })?;
-        Ok(PyObservableExpectation::from_result(result))
-    }
-
-    /// Exact `Tr(rho P)` for each joint Pauli observable, evolving the
-    /// density-matrix backend through the circuit and the attached noise model.
-    ///
-    /// Observables take the same `(qubit, axis)` form as
-    /// `expectation_values()`. The zero-variance analogue of trajectory-averaged
-    /// expectation values; a circuit containing a measurement raises `PrismError`.
-    /// Always uses the density-matrix backend regardless of `.backend(...)`, so the
-    /// circuit must fit that backend's qubit cap.
-    #[pyo3(signature = (observables))]
-    fn density_matrix_expectation_values(
-        &self,
-        py: Python<'_>,
-        observables: Vec<PauliString>,
-    ) -> PyPrismResult<Vec<f64>> {
-        if self.initial_state.is_some() || self.initial_density_matrix.is_some() {
-            return Err(invalid(
-                "density_matrix_expectation_values() does not accept a start state; call \
-                 expectation_values() with BackendKind.density_matrix(), which takes one on a \
-                 unitary circuit",
-            ));
-        }
-        let observables = parse_observables(observables)?;
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let circuit = &self.circuit;
-        let owned_noise = self.owned_noise(py);
-        let values = py.detach(|| {
-            prism_q::density_matrix_expectation_values(
-                circuit,
-                &observables,
-                owned_noise.as_ref(),
-                seed,
-            )
-        })?;
-        Ok(values)
     }
 }
 
@@ -565,6 +504,29 @@ pub(crate) fn parse_pauli_string(factors: &[(usize, String)]) -> PyPrismResult<V
         .iter()
         .map(|(qubit, axis)| Ok(PauliTerm::new(*qubit, parse_axis(axis)?)))
         .collect()
+}
+
+/// The `expectation()` argument: a held weighted observable, or a list of
+/// unweighted Pauli strings.
+pub(crate) enum Observables<'py> {
+    Weighted(Bound<'py, PyPauliObservable>),
+    Strings(Vec<PauliString>),
+}
+
+impl<'py> FromPyObject<'_, 'py> for Observables<'py> {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        if let Ok(held) = obj.cast::<PyPauliObservable>() {
+            return Ok(Self::Weighted(held.to_owned()));
+        }
+        obj.extract().map(Self::Strings).map_err(|_| {
+            PyTypeError::new_err(
+                "expectation() takes a list of Pauli strings or a PauliObservable; wrap \
+                 weighted (coefficient, pauli) terms in PauliObservable(...)",
+            )
+        })
+    }
 }
 
 type WeightedStrings = [(f64, Vec<PauliTerm>)];

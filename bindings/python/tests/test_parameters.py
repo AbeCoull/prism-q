@@ -74,13 +74,13 @@ def test_expectation_terminals_agree_with_a_rebuilt_circuit():
         fresh = simulate(_ansatz(values).build()).seed(42)
         np.testing.assert_allclose(
             prepared.expectation_values(values, OBSERVABLES),
-            fresh.expectation_values(OBSERVABLES),
+            fresh.expectation(OBSERVABLES).values,
             atol=1e-12,
         )
         held = prepared.observable_expectation(values, HAMILTONIAN)
-        expected = simulate(_ansatz(values).build()).seed(42).observable_expectation(
+        expected = simulate(_ansatz(values).build()).seed(42).expectation(PauliObservable(
             HAMILTONIAN
-        )
+        ))
         assert math.isclose(held.mean, expected.mean, abs_tol=1e-12)
         assert math.isclose(held.variance, expected.variance, abs_tol=1e-12)
 
@@ -119,9 +119,9 @@ def test_held_observable_matches_the_term_list():
         assert (a.mean, a.variance) == (b.mean, b.variance)
 
         sim = simulate(_ansatz(values).build()).seed(42)
-        assert sim.observable_expectation(held).mean == sim.observable_expectation(
+        assert sim.expectation(held).mean == sim.expectation(PauliObservable(
             HAMILTONIAN
-        ).mean
+        )).mean
         assert sim.observable_variance(held).variance == pytest.approx(
             sim.observable_variance(HAMILTONIAN).variance, abs=1e-12
         )
@@ -344,16 +344,16 @@ def test_pauli_rotation_gradient_reaches_the_native_gate():
     for slot in range(2):
         shifted = [0.6, 0.25]
         shifted[slot] += eps
-        up = simulate(_pauli_ansatz(shifted).build()).seed(42).expectation_values(
+        up = simulate(_pauli_ansatz(shifted).build()).seed(42).expectation(
             [[(0, "Z")]]
-        )[0]
+        ).values[0]
         shifted[slot] -= 2 * eps
-        down = simulate(_pauli_ansatz(shifted).build()).seed(42).expectation_values(
+        down = simulate(_pauli_ansatz(shifted).build()).seed(42).expectation(
             [[(0, "Z")]]
-        )[0]
+        ).values[0]
         assert math.isclose(grad[slot], (up - down) / (2 * eps), abs_tol=1e-5)
     assert math.isclose(
-        value, simulate(circuit).seed(42).expectation_values([[(0, "Z")]])[0], abs_tol=1e-12
+        value, simulate(circuit).seed(42).expectation([[(0, "Z")]]).values[0], abs_tol=1e-12
     )
 
 

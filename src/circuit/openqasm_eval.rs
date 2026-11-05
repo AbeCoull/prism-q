@@ -425,7 +425,11 @@ impl<'a> Parser<'a> {
             let base = instructions.len();
             let left = self.expansion_left.get();
             self.pending_input_slot = None;
-            self.exec_stmt(stmt, &mut instructions)?;
+            if let Err(err) = self.exec_stmt(stmt, &mut instructions)
+                && !self.unwinds_end()
+            {
+                return Err(err);
+            }
             // Nested blocks charged what they emitted as they ran; this
             // statement owes only what it added on top.
             let nested = left - self.expansion_left.get();
@@ -704,7 +708,8 @@ impl<'a> Parser<'a> {
                 self.exec_if_dynamic(stmt, conditional, line, out)
             }
             StmtKind::If(conditional) => {
-                out.extend(self.exec_if(conditional, line)?);
+                let instructions = self.exec_if(conditional, line, out)?;
+                out.extend(instructions);
                 Ok(())
             }
             StmtKind::For {
@@ -1483,6 +1488,18 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Whether a def call in the running statement reached `end` under `parse`,
+    /// so nothing after the call in that statement may run. `parse_dynamic`
+    /// leaves the rest to the halt block it emitted.
+    fn unwinds_end(&self) -> bool {
+        self.exit == Some(Exit::End) && self.dynamic.is_none()
+    }
+
+    /// The error that carries an `end` out of an expression; `execute_block` drops it.
+    fn end_unwind() -> PrismError {
+        parse_error(0, String::new())
+    }
+
     pub(super) fn resolve_calls(
         &mut self,
         expr: &Expr<'a>,
@@ -1517,6 +1534,9 @@ impl<'a> Parser<'a> {
                         let (instructions, value) =
                             self.expand_def(call.name, &args, None, line)?;
                         out.extend(instructions);
+                        if self.unwinds_end() {
+                            return Err(Self::end_unwind());
+                        }
                         if self.streaming() {
                             self.flush(std::mem::take(out));
                         }
@@ -2389,6 +2409,9 @@ impl<'a> Parser<'a> {
             if def.result.as_ref().is_some_and(|result| result.ty != "bit") {
                 let (instructions, value) = self.expand_def(assign.name, &args, None, line)?;
                 out.extend(instructions);
+                if self.unwinds_end() {
+                    return Ok(());
+                }
                 if self.streaming() {
                     self.flush(std::mem::take(out));
                 }
@@ -2971,14 +2994,14 @@ impl<'a> Parser<'a> {
         &mut self,
         conditional: &ast::Conditional<'a>,
         line: usize,
+        out: &mut Vec<Instruction>,
     ) -> Result<Vec<Instruction>> {
         if let Ok(expr) = super::dynamic::condition_expr(&conditional.condition)
             && expr
                 .finds_call(&|name| self.def_defs.contains_key(name))
                 .is_some()
         {
-            let mut instructions = Vec::new();
-            let value = self.resolve_calls(&expr, line, &mut instructions)?;
+            let value = self.resolve_calls(&expr, line, out)?;
             let ClassicalExpr::Const(value) = self.lower_expr(&value, line)? else {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: "a def call in a measurement-dependent condition".to_string(),
@@ -2990,10 +3013,7 @@ impl<'a> Parser<'a> {
             } else {
                 conditional.else_body.as_ref()
             };
-            if let Some(body) = body {
-                instructions.extend(self.exec_box(body)?);
-            }
-            return Ok(instructions);
+            return body.map_or(Ok(Vec::new()), |body| self.exec_box(body));
         }
 
         let general = match &conditional.condition {

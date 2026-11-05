@@ -4711,3 +4711,29 @@ fn end_is_still_a_gate_name_when_it_takes_operands() {
         "OPENQASM 3.0;\nqubit[1] q;\nx q[0];",
     );
 }
+
+#[test]
+fn end_in_a_def_call_stops_the_rest_of_its_statement() {
+    let head = "OPENQASM 3.0;\nqubit[4] q;\nbit[4] c;\n\
+                def f(qubit a) -> int { x a; end; return 1; }\n\
+                def g(qubit a) -> int { h a; return 2; }\n\
+                def k(int a, int b, qubit w) -> int { z w; return a; }\n";
+    for body in [
+        "if (f(q[0]) == 0) { c[1] = measure q[1]; }",
+        "if (f(q[0]) == 5) { } else { y q[1]; }",
+        "int n = f(q[0]) + g(q[3]);",
+        "int n = 0; n = f(q[0]) + g(q[3]);",
+        "bool b = f(q[0]) == 0 && g(q[3]) == 2;",
+        "rx(f(q[0])) q[1];",
+        "int m = k(f(q[0]), g(q[3]), q[2]);",
+        "def r(qubit u, qubit v) -> int { return f(u) + g(v); } int n = r(q[0], q[3]);",
+        "if (true) { int n = f(q[0]) + g(q[3]); } y q[1];",
+    ] {
+        same_instructions(&format!("{head}{body} y q[2];"), &format!("{head}x q[0];"));
+    }
+    same_instructions(
+        "OPENQASM 3.0;\nqubit[4] q;\nbit[1] o;\ndef f() -> int { end; return 1; }\n\
+         x q[3];\nif (f() == 0) { o[0] = measure q[3]; }",
+        "OPENQASM 3.0;\nqubit[4] q;\nx q[3];",
+    );
+}

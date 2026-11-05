@@ -1575,9 +1575,19 @@ impl<'a> Parser<'a> {
             }
             .map(ClassicalExpr::Var))
         };
+        let lowered = self.lower_expr(target, 0);
+        // A target known at parse time selects its arm the way a folded `if`
+        // takes its body, whatever runtime work that arm holds.
+        if matches!(lowered, Ok(ClassicalExpr::Const(_)))
+            && target
+                .finds_call(&|name| self.def_defs.contains_key(name))
+                .is_none()
+        {
+            return false;
+        }
         state.analysis.branches.contains(&key(stmt))
             || reads_leaf(target, &runtime_var).unwrap_or(true)
-            || self.lower_expr(target, 0).is_ok_and(|lowered| {
+            || lowered.is_ok_and(|lowered| {
                 !matches!(lowered, ClassicalExpr::Const(_))
                     && super::eval::register_value(&lowered).is_none()
             })

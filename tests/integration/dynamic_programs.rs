@@ -360,6 +360,39 @@ fn end_in_a_def_called_under_a_measured_if_stops_the_shot() {
 }
 
 #[test]
+fn a_switch_on_a_parse_time_target_takes_its_arm_like_an_if() {
+    let program = |select: &str| {
+        format!(
+            "OPENQASM 3.0;
+            qubit[2] q;
+            bit[2] r;
+            x q[1];
+            h q[0];
+            r[0] = measure q[0];
+            for int i in [0:1] {{ {select} }}
+            r[1] = measure q[1];"
+        )
+    };
+    let switched = shots(
+        &parse(&program(
+            "switch (i) { case 0 { if (r[0]) { end; } break; } default { } }",
+        )),
+        400,
+    );
+    let branched = shots(
+        &parse(&program("if (i == 0) { if (r[0]) { end; } break; }")),
+        400,
+    );
+    assert_eq!(switched, branched);
+    let counts = histogram(&values(&switched, 0..2));
+    assert!(
+        counts.keys().all(|&value| value == 1 || value == 2),
+        "{counts:?}"
+    );
+    assert_eq!(counts.len(), 2, "{counts:?}");
+}
+
+#[test]
 fn a_parse_time_return_after_a_measured_break_keeps_what_follows_the_loop() {
     let head = "OPENQASM 3.0;
         qubit[2] q;

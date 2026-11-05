@@ -23,18 +23,13 @@ const DECLARATION_TYPES: &[&str] = &[
 /// Keywords the language has and this parser declines, with the text each decline
 /// carries. Declining by name returns `UnsupportedConstruct` where the operands
 /// would otherwise give a bare syntax error (`while (c[0]) { }` reads as a
-/// malformed gate call). A dynamic parse reads the [`LOOP_KEYWORDS`] instead.
+/// malformed gate call). A dynamic parse reads `while` instead.
 const UNSUPPORTED: &[(&str, &str)] = &[
     ("extern", "extern"),
     ("opaque", "opaque"),
     ("while", "while"),
-    ("break", "break"),
-    ("continue", "continue"),
     ("else", "else"),
 ];
-
-/// The keywords only a dynamic parse reads.
-const LOOP_KEYWORDS: &[&str] = &["while", "break", "continue"];
 
 /// Deepest nesting an array initializer may have, which bounds the recursion
 /// that reads it.
@@ -44,7 +39,7 @@ pub(crate) fn parse_program<'a>(tokens: &[Token<'a>]) -> Result<Block<'a>> {
     program(Stream::new(tokens), tokens.len())
 }
 
-/// [`parse_program`] with `while`, `break` and `continue`, and conditions and
+/// [`parse_program`] with `while`, and conditions and
 /// values over the full classical operator set.
 pub(crate) fn parse_dynamic_program<'a>(tokens: &[Token<'a>]) -> Result<Block<'a>> {
     program(Stream::dynamic(tokens), tokens.len())
@@ -94,7 +89,7 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     }
 
     let word = stream.peek().text;
-    let reads_loops = stream.is_dynamic() && LOOP_KEYWORDS.contains(&word);
+    let reads_loops = stream.is_dynamic() && word == "while";
     if let Some((_, construct)) = UNSUPPORTED
         .iter()
         .find(|(keyword, _)| *keyword == word && !reads_loops)
@@ -136,6 +131,11 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
             } else {
                 StmtKind::Continue
             })
+        }
+        "end" if stream.peek_at(1).kind == Kind::Semicolon => {
+            stream.advance();
+            stream.advance();
+            Ok(StmtKind::End)
         }
         "switch" => switch(stream),
         "gate" => gate_def(stream),

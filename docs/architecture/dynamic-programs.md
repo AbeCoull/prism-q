@@ -61,9 +61,9 @@ so fusion sees the longest straight-line circuits the control flow allows.
 ## Lowering OpenQASM
 
 `openqasm::parse_dynamic` reads everything `openqasm::parse` reads plus `while`,
-`break`, `continue`, the full classical operator set, and classical bits read as
-values. It walks the same statement tree with the same evaluator, plus the graph being
-built.
+measured `break`, `continue` and `end`, the full classical operator set, and classical
+bits read as values. It walks the same statement tree with the same evaluator, plus the
+graph being built.
 
 A pass before the walk decides which classical variables live at runtime: those
 assigned from a measured bit or another runtime variable, or written under a `while`
@@ -72,6 +72,13 @@ point, which settles chains of assignments. Every other variable folds at parse 
 `parse` folds it. A variable declared and written inside one loop body stays a
 parse-time value, because each pass re-declares it, and so does one written only in an
 unrolled `for`.
+
+A `for` still unrolls when a measurement decides a `break` or `continue` in it, but its
+passes become blocks in sequence: `continue` jumps to the next pass and `break` past the
+last. The pass over the tree marks such a loop, and every variable its body writes from
+outside lives at runtime, since a pass may stop before the write. An exit every path
+reaches stops the unrolling at parse time, as under `parse`. A measured `end` jumps to a
+block that ends the shot.
 
 The evaluator streams each statement's instructions into the current block. An `if`
 takes one of three forms:
@@ -184,7 +191,6 @@ runs as that circuit does under `Simulate::noise`, mixture routes included.
 - A `bit` or `qubit` register declared inside a `while` body, and an `array` a loop or
   measurement writes.
 - A measurement straight into a variable; measure into a bit and assign the bit.
-- `break` and `continue` inside a `for`, which unrolls at parse time.
 - `input` parameters. A dynamic program has no parameter binding.
 
 ## Cost

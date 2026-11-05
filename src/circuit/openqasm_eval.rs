@@ -452,10 +452,11 @@ impl<'a> Parser<'a> {
                 }
                 self.noise_specs.push((base - 1, spec));
             }
-            if self
-                .def_result
-                .as_ref()
-                .is_some_and(|result| result.returned)
+            if self.exit.is_some()
+                || self
+                    .def_result
+                    .as_ref()
+                    .is_some_and(|result| result.returned)
             {
                 break;
             }
@@ -710,10 +711,7 @@ impl<'a> Parser<'a> {
                 variable,
                 range,
                 body,
-            } => {
-                out.extend(self.exec_for(variable, range, body, line)?);
-                Ok(())
-            }
+            } => self.exec_for(stmt, variable, range, body, line, out),
             StmtKind::Switch { target, arms } if self.switch_needs_graph(stmt, target) => {
                 self.exec_switch_branches(target, arms, line)
             }
@@ -724,20 +722,13 @@ impl<'a> Parser<'a> {
             StmtKind::While { condition, body } if self.dynamic.is_some() => {
                 self.exec_while(condition, body, line)
             }
-            StmtKind::Break | StmtKind::Continue if self.dynamic.is_some() => {
-                self.exec_loop_exit(matches!(stmt.kind, StmtKind::Break), line)
-            }
-            StmtKind::While { .. } | StmtKind::Break | StmtKind::Continue => {
-                let construct = match stmt.kind {
-                    StmtKind::While { .. } => "while",
-                    StmtKind::Break => "break",
-                    _ => "continue",
-                };
-                Err(PrismError::UnsupportedConstruct {
-                    construct: construct.to_string(),
-                    line,
-                })
-            }
+            StmtKind::While { .. } => Err(PrismError::UnsupportedConstruct {
+                construct: "while".to_string(),
+                line,
+            }),
+            StmtKind::Break => self.exec_loop_exit(Exit::Break, line),
+            StmtKind::Continue => self.exec_loop_exit(Exit::Continue, line),
+            StmtKind::End => self.exec_end(line),
             StmtKind::GateDef {
                 name,
                 params,
@@ -2380,7 +2371,14 @@ impl<'a> Parser<'a> {
                 },
             );
         }
-        Ok(Some(sub.execute(&def.body)?))
+        let body = sub.execute(&def.body)?;
+        if sub.exit == Some(Exit::End) {
+            return Err(parse_error(
+                line,
+                format!("`end` inside the body of gate `{name}`"),
+            ));
+        }
+        Ok(Some(body))
     }
 
     /// Assign a subroutine result or a builtin value to the caller's target.
@@ -2826,6 +2824,15 @@ impl<'a> Parser<'a> {
         }
         let instructions = sub.execute(&def.body)?;
         let frame = sub.def_result.expect("installed above");
+        if sub.exit == Some(Exit::End) {
+            self.exec_end(line)?;
+            let value = frame.value.or_else(|| {
+                def.result
+                    .is_some()
+                    .then_some(Expr::Number(ClassicalValue::Int(0)))
+            });
+            return Ok((instructions, value));
+        }
         if def.local.is_some() {
             self.charge(frame.bits.len(), line)?;
             let mut initialized = frame.bits.iter().map(|&bit| (bit, false)).collect();
@@ -2956,6 +2963,8 @@ impl<'a> Parser<'a> {
             arrays: HashMap::new(),
             declared: Vec::new(),
             def_result: None,
+            loops: Vec::new(),
+            exit: None,
             guard: None,
             dynamic: None,
             expansion_left: Rc::clone(&self.expansion_left),
@@ -3130,11 +3139,13 @@ impl<'a> Parser<'a> {
 
     fn exec_for(
         &mut self,
+        stmt: &Stmt<'a>,
         variable: &'a str,
         range: &ForRange<'a>,
         body: &Block<'a>,
         line: usize,
-    ) -> Result<Vec<Instruction>> {
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
         let values = self.for_values(range, line)?;
         if values.len() as i64 > MAX_FOR_ITERATIONS {
             return Err(parse_error(
@@ -3145,7 +3156,6 @@ impl<'a> Parser<'a> {
                 ),
             ));
         }
-        let mut out = Vec::new();
         // The loop variable may shadow an outer name, whose value comes back
         // once the loop ends.
         let shadowed = self
@@ -3171,8 +3181,25 @@ impl<'a> Parser<'a> {
         let scope = self.open_scope();
         let mut result = Ok(());
         self.enter_static_loop();
-        for value in values {
+        let graph = self.unrolls_into_graph(stmt);
+        if graph {
+            self.flush(std::mem::take(out));
+            self.begin_unrolled();
+        }
+        self.loops.push(Loop::For {
+            region_depth: self.region_depth,
+            frames: self.graph_depth(),
+            graph,
+        });
+        for (pass, value) in values.into_iter().enumerate() {
             if let Err(error) = self.charge(1, line) {
+                result = Err(error);
+                break;
+            }
+            if graph
+                && pass > 0
+                && let Err(error) = self.next_pass()
+            {
                 result = Err(error);
                 break;
             }
@@ -3187,7 +3214,20 @@ impl<'a> Parser<'a> {
             self.close_scope(scope);
             match produced {
                 Ok(produced) => {
-                    out.extend(produced);
+                    if graph {
+                        self.flush(produced);
+                    } else {
+                        out.extend(produced);
+                    }
+                    match self.exit {
+                        Some(Exit::Break) => {
+                            self.exit = None;
+                            break;
+                        }
+                        Some(Exit::Continue) => self.exit = None,
+                        Some(Exit::End) => break,
+                        None => {}
+                    }
                     if self
                         .def_result
                         .as_ref()
@@ -3201,6 +3241,10 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+        }
+        self.loops.pop();
+        if graph && result.is_ok() {
+            result = self.end_unrolled();
         }
         self.leave_static_loop();
         if let Some(state) = self.dynamic.as_mut() {
@@ -3225,7 +3269,7 @@ impl<'a> Parser<'a> {
                 None => vars.remove(variable),
             };
         }
-        result.map(|()| out)
+        result
     }
 
     fn for_values(&self, range: &ForRange, line: usize) -> Result<Vec<i64>> {

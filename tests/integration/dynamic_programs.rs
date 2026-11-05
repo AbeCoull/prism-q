@@ -188,6 +188,165 @@ fn break_leaves_only_the_innermost_loop() {
 }
 
 #[test]
+fn a_measured_break_leaves_an_unrolled_for() {
+    let program = parse(
+        "OPENQASM 3.0;
+        qubit[3] q;
+        bit[3] c;
+        for int i in [0:2] {
+          h q[i];
+          c[i] = measure q[i];
+          if (c[i]) break;
+        }",
+    );
+    let num_shots = 8000;
+    let runs = shots(&program, num_shots);
+    assert_distribution(
+        &histogram(&values(&runs, 0..3)),
+        &[(1, 0.5), (2, 0.25), (4, 0.125), (0, 0.125)],
+        num_shots,
+    );
+}
+
+#[test]
+fn a_measured_continue_skips_the_rest_of_its_pass() {
+    let program = parse(
+        "OPENQASM 3.0;
+        qubit[2] q;
+        bit[3] f;
+        bit[3] c;
+        x q[1];
+        for int i in [0:2] {
+          h q[0];
+          f[i] = measure q[0];
+          reset q[0];
+          if (f[i]) { continue; }
+          c[i] = measure q[1];
+        }",
+    );
+    let runs = shots(&program, 400);
+    let flags = values(&runs, 0..3);
+    assert!(flags.iter().any(|&f| f != 0) && flags.iter().any(|&f| f != 7));
+    for (f, c) in flags.into_iter().zip(values(&runs, 3..6)) {
+        assert_eq!(c, !f & 7, "a pass that continued measured nothing");
+    }
+}
+
+#[test]
+fn a_measured_break_in_a_nested_for_leaves_only_the_inner_one() {
+    let source = format!(
+        "OPENQASM 3.0;
+        qubit[6] q;
+        bit[6] c;
+        uint[4] outer = 0;
+        uint[4] passes = 0;
+        for int i in [0:1] {{
+          outer += 1;
+          for int j in [0:2] {{
+            passes += 1;
+            reset q[0];
+            h q[0];
+            c[0] = measure q[0];
+            if (c[0]) break;
+          }}
+        }}
+        {}{}",
+        readout("outer", 1, 2),
+        readout("passes", 3, 3)
+    );
+    let num_shots = 8000;
+    let runs = shots(&parse(&source), num_shots);
+    assert!(values(&runs, 1..3).iter().all(|&outer| outer == 2));
+    // Each inner loop runs one to three passes, with probabilities 1/2, 1/4, 1/4.
+    let one = [(1, 0.5), (2, 0.25), (3, 0.25)];
+    let mut expected: Vec<(u64, f64)> = (2..=6).map(|total| (total, 0.0)).collect();
+    for (a, pa) in one {
+        for (b, pb) in one {
+            expected[(a + b - 2) as usize].1 += pa * pb;
+        }
+    }
+    assert_distribution(&histogram(&values(&runs, 3..6)), &expected, num_shots);
+}
+
+#[test]
+fn a_measured_end_stops_the_shot() {
+    let program = parse(
+        "OPENQASM 3.0;
+        qubit[4] q;
+        bit[4] c;
+        for int i in [0:2] {
+          h q[i];
+          c[i] = measure q[i];
+          if (c[i]) end;
+        }
+        x q[3];
+        c[3] = measure q[3];",
+    );
+    let runs = shots(&program, 400);
+    for value in values(&runs, 0..4) {
+        let reached_the_end = value & 7 == 0;
+        assert_eq!(value & 8 != 0, reached_the_end, "{value:04b}");
+    }
+}
+
+#[test]
+fn a_variable_a_measured_break_cuts_short_is_runtime() {
+    let source = format!(
+        "OPENQASM 3.0;
+        qubit[3] q;
+        bit[3] c;
+        uint[2] n = 0;
+        for int i in [0:2] {{
+          reset q[0];
+          h q[0];
+          c[0] = measure q[0];
+          if (c[0]) break;
+          n += 1;
+        }}
+        {}",
+        readout("n", 1, 2)
+    );
+    let num_shots = 8000;
+    let runs = shots(&parse(&source), num_shots);
+    assert_distribution(
+        &histogram(&values(&runs, 1..3)),
+        &[(0, 0.5), (1, 0.25), (2, 0.125), (3, 0.125)],
+        num_shots,
+    );
+}
+
+#[test]
+fn a_parse_time_exit_keeps_one_block() {
+    let program = parse(
+        "OPENQASM 3.0; qubit[4] q; bit[4] c;
+         for int i in [0:3] { if (i == 2) break; x q[i]; }
+         c = measure q;
+         end;
+         h q[0];",
+    );
+    assert_eq!(program.blocks().len(), 1);
+    let runs = shots(&program, 4);
+    assert!(values(&runs, 0..4).iter().all(|&value| value == 3));
+}
+
+#[test]
+fn a_loop_exit_outside_a_loop_is_a_parse_error() {
+    for body in [
+        "break;",
+        "def f() { continue; } while (true) { f(); }",
+        "bit b; b = measure q[0]; if (b) break;",
+    ] {
+        let source = format!("OPENQASM 3.0; qubit[1] q; {body}");
+        match openqasm::parse_dynamic(&source) {
+            Err(PrismError::Parse { message, .. }) => {
+                assert!(message.contains("outside a loop"), "`{body}`: {message}")
+            }
+            other => panic!("`{body}` should be a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_runaway_loop_stops_at_the_step_bound_naming_the_loop() {
     let program = parse(
         "OPENQASM 3.0;
@@ -751,8 +910,6 @@ fn parse_dynamic_declines_what_has_no_runtime_form() {
     for (body, needle) in [
         ("h q[n];", "parse-time constant"),
         ("float t = sin(n);", "builtin `sin`"),
-        ("for int i in [0:1] { break; }", "`for` loop"),
-        ("break;", "outside a loop"),
         ("n = measure q[1];", "measurement into variable"),
         (
             "while (n < 2) { bit[1] d; n += 1; }",

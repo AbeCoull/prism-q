@@ -107,6 +107,7 @@ pub(crate) enum StmtKind<'a> {
     },
     Break,
     Continue,
+    End,
     GateDef {
         name: &'a str,
         params: Vec<&'a str>,

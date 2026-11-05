@@ -684,3 +684,111 @@ fn a_rotation_merges_each_flip_into_a_term_already_present() {
     assert!((split.mean - joined.mean).abs() < 1e-12);
     assert!((split.mean - (a + b).cos()).abs() < 1e-12);
 }
+
+fn near_clifford_rotations(n: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::Rz(0.3 + 0.1 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        circuit.add_gate(Gate::T, &[q + 1]);
+        circuit.add_gate(Gate::Rzz(0.7), &[q, q + 1]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    circuit
+}
+
+#[test]
+fn one_pass_over_a_weighted_sum_matches_the_per_term_values() {
+    let circuit = near_clifford_rotations(6);
+    let terms: Vec<(f64, Vec<PauliTerm>)> = vec![
+        (0.5, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (-1.25, vec![PauliTerm::x(2)]),
+        (2.0, vec![PauliTerm::y(3), PauliTerm::z(5)]),
+        (0.75, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+    ];
+    let exact = SpdTruncation::Threshold {
+        epsilon: 0.0,
+        max_terms: 0,
+    };
+    let per_term: f64 = terms
+        .iter()
+        .map(|(w, obs)| w * run_spd_observable_with(&circuit, obs, &exact).unwrap().mean)
+        .sum();
+    let merged = run_spd_weighted_observable_with(
+        &circuit,
+        &terms
+            .iter()
+            .map(|(w, obs)| (*w, obs.as_slice()))
+            .collect::<Vec<_>>(),
+        &exact,
+    )
+    .unwrap();
+    assert!((merged.mean - per_term).abs() < 1e-12);
+    assert_eq!(merged.total_discarded, 0.0);
+}
+
+#[test]
+fn a_term_budget_caps_the_merged_sum_as_a_whole() {
+    let circuit = near_clifford_rotations(8);
+    let terms: Vec<(f64, Vec<PauliTerm>)> = (0..8).map(|q| (1.0, vec![PauliTerm::x(q)])).collect();
+    let budget = SpdTruncation::Budget { max_terms: 16 };
+    let merged = run_spd_weighted_observable_with(
+        &circuit,
+        &terms
+            .iter()
+            .map(|(w, obs)| (*w, obs.as_slice()))
+            .collect::<Vec<_>>(),
+        &budget,
+    )
+    .unwrap();
+    assert!(merged.peak_terms <= 16);
+    assert!(merged.total_discarded > 0.0);
+    let exact = run_spd_weighted_observable_with(
+        &circuit,
+        &terms
+            .iter()
+            .map(|(w, obs)| (*w, obs.as_slice()))
+            .collect::<Vec<_>>(),
+        &SpdTruncation::Threshold {
+            epsilon: 0.0,
+            max_terms: 0,
+        },
+    )
+    .unwrap();
+    assert!((merged.mean - exact.mean).abs() <= merged.total_discarded + 1e-12);
+}
+
+#[test]
+fn a_merged_sum_past_the_term_ceiling_falls_back_to_one_pass_per_term() {
+    let n = 21;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::Rz(0.3), &[q]);
+    }
+    let wide: Vec<PauliTerm> = (0..20).map(PauliTerm::x).collect();
+    let narrow = vec![PauliTerm::x(20)];
+    let exact = SpdTruncation::Threshold {
+        epsilon: 0.0,
+        max_terms: 0,
+    };
+    let wide_alone = run_spd_observable_with(&circuit, &wide, &exact).unwrap();
+    let narrow_alone = run_spd_observable_with(&circuit, &narrow, &exact).unwrap();
+    assert_eq!(wide_alone.peak_terms, SPD_MAX_TERMS_CEILING);
+
+    let merged = run_spd_weighted_observable_with(
+        &circuit,
+        &[(0.5, wide.as_slice()), (2.0, narrow.as_slice())],
+        &exact,
+    )
+    .unwrap();
+    let expected = 0.5 * wide_alone.mean + 2.0 * narrow_alone.mean;
+    assert!((merged.mean - expected).abs() < 1e-12);
+    assert_eq!(merged.peak_terms, SPD_MAX_TERMS_CEILING);
+}

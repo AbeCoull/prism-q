@@ -127,6 +127,12 @@ the binding constraint. A budget of zero is rejected.
 Both report the discarded coefficient magnitude on the engine result, and it bounds the
 error: `|error| <= sum |discarded|`. It is not a fidelity bound.
 
+`observable_expectation` propagates a weighted `PauliObservable` as one sum, with each
+term's weight on its coefficient. `max_terms` caps that whole sum rather than each term,
+`epsilon` compares weighted coefficients (so a term weighted below `epsilon` can drop
+whole), and the bound applies to the weighted value. The same holds on `PauliPath`. A
+merged sum past the internal ceiling falls back to one propagation per term.
+
 ## Pauli path propagation under noise (`src/sim/unified_pauli.rs`)
 
 The same weighted Pauli sum, carried through a noise model. Select

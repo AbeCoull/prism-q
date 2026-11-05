@@ -432,8 +432,8 @@ exclude = [
 "BondReport::cap" = "BondReport.cap"
 "BondReport::peak" = "BondReport.peak"
 "BondReport::saturated" = "BondReport.saturated"
-"ExpectationGradient::gradient" = "Simulation.expectation_gradient"
-"ExpectationGradient::value" = "Simulation.expectation_gradient"
+"ExpectationGradient::gradient" = "ExpectationGradient.gradient"
+"ExpectationGradient::value" = "ExpectationGradient.value"
 
 # QEC programs and results
 "QecProgram::color_memory" = "QecProgram.color_memory"

@@ -2,12 +2,16 @@
 
 ## Expectation values
 
-An observable is a list of `(qubit, axis)` factors, `axis` one of `"X"`, `"Y"`, `"Z"`,
-with identity factors omitted: `[(0, "Z"), (2, "X")]` is `Z0 ⊗ I1 ⊗ X2`. Both
-expectation terminals take a list of observables and return one float each.
+An observable is a Pauli string or a list of `(qubit, axis)` factors. In a string,
+character `i` acts on qubit `i`, so `"ZIX"` is `Z0 ⊗ I1 ⊗ X2`: the order count keys use,
+and the reverse of Qiskit's labels. A short string leaves the remaining qubits as
+identity. The factor form names only non-identity qubits, so `[(0, "Z"), (2, "X")]` is
+the same observable and the shorter spelling on a wide register. Both forms mix in one
+list, and Hamiltonian terms take either as `(coefficient, observable)`. Both expectation
+terminals take a list of observables and return one float each.
 
 ```python
-observables = [[(0, "Z")], [(0, "Z"), (1, "Z")]]
+observables = ["Z", "ZZ", [(0, "X"), (1, "X")]]
 values = simulate(circuit).seed(42).expectation_values(observables)
 ```
 
@@ -48,9 +52,12 @@ builder.rz(0.7, 1).param(1)
 circuit, links = builder.build(), builder.parameter_links()
 
 hamiltonian = [(1.0, [(0, "Z")]), (0.5, [(0, "Z"), (1, "Z")])]
-value, gradient = simulate(circuit).seed(42).expectation_gradient(hamiltonian, links)
+result = simulate(circuit).seed(42).expectation_gradient(hamiltonian, links)
+energy, gradient = result.value, result.gradient
 ```
 
-A Hamiltonian term is `(coefficient, observable)`. Gates sharing a slot accumulate their
+The result is an `ExpectationGradient` holding `value` and a `float64` `gradient` with
+one entry per slot; it unpacks as `value, gradient`. A Hamiltonian term is
+`(coefficient, observable)`. Gates sharing a slot accumulate their
 gradients. `param()` accepts only differentiable gates (`rx`, `ry`, `rz`, `rzz`, `p`,
 `pauli_rotation`), and the circuit must be unitary.

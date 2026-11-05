@@ -68,7 +68,7 @@ impl PyQuery {
         Self(OwnedQuery::Marginals)
     }
     #[staticmethod]
-    fn expectation(observables: Vec<Vec<(usize, String)>>) -> PyPrismResult<Self> {
+    fn expectation(observables: Vec<crate::sim::PauliString>) -> PyPrismResult<Self> {
         Ok(Self(OwnedQuery::Expectation(parse_observables(
             observables,
         )?)))

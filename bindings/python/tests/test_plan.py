@@ -62,3 +62,12 @@ def test_conditional_fallback_error_does_not_reject_primary():
     assert fallback["exactness"] == "exact"
     assert fallback["bound_reported"] is False
     assert fallback["samples"] is None
+
+
+def test_expectation_query_takes_pauli_strings():
+    circuit = CircuitBuilder(2).h(0).cx(0, 1).build()
+    request = simulate(circuit).seed(42)
+    by_string = request.plan(Query.expectation(["ZZ", "XI"]))
+    by_factors = request.plan(Query.expectation([[(0, "Z"), (1, "Z")], [(0, "X")]]))
+    assert by_string.backend == by_factors.backend
+    assert by_string.rule == by_factors.rule

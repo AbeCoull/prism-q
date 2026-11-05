@@ -29,8 +29,8 @@ outcome = sim.run()
 | `observable_variance(obs)` | `ObservableVariance`: `<H^2> - <H>^2` beside the mean | density matrix only | yes |
 | `observable_expectation(h)` | `ObservableExpectation`: the weighted mean with its variance, group variances and standard error | density matrix only | yes |
 | `density_matrix_expectation_values(obs)` | `list[float]`, exact `Tr(rho P)` | yes | no |
-| `expectation_gradient(h, params)` | `(value, gradient)` via the adjoint method | no | no |
-| `expectation_gradient_shift(h, params)` | `(value, gradient)` via the parameter-shift rule | density matrix or `pauli_path()` | yes |
+| `expectation_gradient(h, params)` | `ExpectationGradient`: `.value` and `.gradient` via the adjoint method | no | no |
+| `expectation_gradient_shift(h, params)` | `ExpectationGradient` via the parameter-shift rule | density matrix or `pauli_path()` | yes |
 | `overlap(other)` | `OverlapResult`: `\|<a\|b>\|^2` against a second seeded builder, with one `.metadata` per side | no | yes |
 
 Use `expectation_values_reported()` when the route matters: under `auto()` a wide

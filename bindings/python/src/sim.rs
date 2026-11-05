@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use num_complex::Complex64;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
-    BackendKind, BondReport, Circuit, CountsResult, Exactness, Limits, MarginalsResult, NoiseModel,
-    ObservableExpectation, ParamLink, Parameters, PauliAxis, PauliObservable, PauliTerm, Placement,
-    Probabilities, ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue, Seeded,
-    ShotsResult, Simulate, simulate as core_simulate,
+    BackendKind, BondReport, Circuit, CountsResult, Exactness, ExpectationGradient, Limits,
+    MarginalsResult, NoiseModel, ObservableExpectation, ParamLink, Parameters, PauliAxis,
+    PauliObservable, PauliTerm, Placement, Probabilities, ReducedDensityMatrix, RunMetadata,
+    RunOutcome, SaveRecord, SavedValue, Seeded, ShotsResult, Simulate, simulate as core_simulate,
 };
 use pyo3::exceptions::{PyIndexError, PyNotImplementedError};
 use pyo3::prelude::*;
@@ -212,11 +212,10 @@ impl PySimulation {
     }
 
     /// Compute `⟨H⟩` and its exact gradient with respect to the trainable
-    /// parameters via the adjoint method, returning `(value, gradient)` with
-    /// the gradient as a `float64` array.
+    /// parameters via the adjoint method.
     ///
-    /// `hamiltonian` is a list of `(coefficient, [(qubit, axis), ...])` terms,
-    /// where `axis` is one of `"X"`, `"Y"`, `"Z"` (identity factors omitted).
+    /// `hamiltonian` is a `PauliObservable` or a list of `(coefficient, pauli)`
+    /// terms, each `pauli` a string such as `"ZZI"` or `(qubit, axis)` factors.
     /// `parameters` is a list of `(instruction_index, parameter_slot)` links,
     /// as returned by `CircuitBuilder.parameter_links()`. Runs on the
     /// statevector backend; the circuit must be unitary.
@@ -226,7 +225,7 @@ impl PySimulation {
         py: Python<'py>,
         hamiltonian: Hamiltonian<'py>,
         parameters: Vec<(usize, usize)>,
-    ) -> PyPrismResult<(f64, Bound<'py, PyArray1<f64>>)> {
+    ) -> PyPrismResult<PyExpectationGradient> {
         if self.noise.is_some() {
             return Err(invalid("expectation_gradient() does not support noise"));
         }
@@ -238,13 +237,13 @@ impl PySimulation {
         let num_slots = links.iter().map(|l| l.slot + 1).max().unwrap_or(0);
         let params = Parameters::from_links(links, num_slots);
         let result = py.detach(|| self.core(None).expectation_gradient(&terms, &params))?;
-        Ok((result.value, f64_array(py, result.gradient)))
+        Ok(PyExpectationGradient::from(result))
     }
 
     /// Same gradient by the parameter-shift rule: two extra circuit runs per
     /// parameter instead of one backward sweep, and the only route for a
     /// backend with no adjoint pass. Takes the `expectation_gradient()`
-    /// argument shape and returns the same pair.
+    /// argument shape and returns the same result type.
     ///
     /// Honours `.initial_state()`. With a noise model attached every evaluation
     /// reads the exact mixture, so the backend must be
@@ -255,7 +254,7 @@ impl PySimulation {
         py: Python<'py>,
         hamiltonian: Hamiltonian<'py>,
         parameters: Vec<(usize, usize)>,
-    ) -> PyPrismResult<(f64, Bound<'py, PyArray1<f64>>)> {
+    ) -> PyPrismResult<PyExpectationGradient> {
         let terms = hamiltonian.terms()?;
         let links: Vec<ParamLink> = parameters
             .into_iter()
@@ -268,21 +267,22 @@ impl PySimulation {
             self.core(owned_noise.as_ref())
                 .expectation_gradient_shift(&terms, &params)
         })?;
-        Ok((result.value, f64_array(py, result.gradient)))
+        Ok(PyExpectationGradient::from(result))
     }
 
     /// Compute `⟨ψ|P|ψ⟩` for each joint Pauli observable on the circuit's
     /// output state, honoring the selected backend.
     ///
-    /// Each observable is a list of `(qubit, axis)` factors, where `axis` is one
-    /// of `"X"`, `"Y"`, `"Z"` and identity factors are omitted. The circuit must
+    /// Each observable is a Pauli string such as `"ZZI"`, whose character `i`
+    /// acts on qubit `i`, or a list of `(qubit, axis)` factors with identities
+    /// omitted, `axis` one of `"X"`, `"Y"`, `"Z"`. The circuit must
     /// be unitary. With a noise model attached the value is the exact
     /// `Tr(rho P)`, which requires `BackendKind.density_matrix()`.
     #[pyo3(signature = (observables))]
     fn expectation_values(
         &self,
         py: Python<'_>,
-        observables: Vec<Vec<(usize, String)>>,
+        observables: Vec<PauliString>,
     ) -> PyPrismResult<Vec<f64>> {
         let observables = parse_observables(observables)?;
         let owned_noise = self.owned_noise(py);
@@ -396,7 +396,7 @@ impl PySimulation {
     fn expectation_values_reported(
         &self,
         py: Python<'_>,
-        observables: Vec<Vec<(usize, String)>>,
+        observables: Vec<PauliString>,
     ) -> PyPrismResult<PyExpectationResult> {
         let observables = parse_observables(observables)?;
         let owned_noise = self.owned_noise(py);
@@ -439,9 +439,8 @@ impl PySimulation {
     /// observable on the circuit's output state.
     ///
     /// `hamiltonian` takes the `expectation_gradient()` term shape: a list of
-    /// `(coefficient, [(qubit, axis), ...])` pairs with `axis` one of `"X"`,
-    /// `"Y"`, `"Z"`, identity factors omitted, and an empty factor list acting
-    /// as a constant offset. Identical strings merge by summing coefficients.
+    /// `(coefficient, pauli)` pairs, an empty or all-identity `pauli` acting as
+    /// a constant offset. Identical strings merge by summing coefficients.
     /// The statevector family reports the variance (see
     /// `ObservableExpectation.variance` for the contract); every other route
     /// returns the weighted mean with `variance` of `None`.
@@ -472,7 +471,7 @@ impl PySimulation {
     fn density_matrix_expectation_values(
         &self,
         py: Python<'_>,
-        observables: Vec<Vec<(usize, String)>>,
+        observables: Vec<PauliString>,
     ) -> PyPrismResult<Vec<f64>> {
         if self.initial_state.is_some() || self.initial_density_matrix.is_some() {
             return Err(invalid(
@@ -498,22 +497,67 @@ impl PySimulation {
 }
 
 pub(crate) fn parse_observables(
-    observables: Vec<Vec<(usize, String)>>,
+    observables: Vec<PauliString>,
 ) -> PyPrismResult<Vec<Vec<PauliTerm>>> {
-    observables.iter().map(|f| parse_pauli_string(f)).collect()
+    observables.iter().map(PauliString::terms).collect()
 }
 
-fn parse_terms(
-    hamiltonian: &[(f64, Vec<(usize, String)>)],
-) -> PyPrismResult<Vec<(f64, Vec<PauliTerm>)>> {
+fn parse_terms(hamiltonian: &[(f64, PauliString)]) -> PyPrismResult<Vec<(f64, Vec<PauliTerm>)>> {
     hamiltonian
         .iter()
-        .map(|(coefficient, factors)| Ok((*coefficient, parse_pauli_string(factors)?)))
+        .map(|(coefficient, string)| Ok((*coefficient, string.terms()?)))
         .collect()
 }
 
-fn build_observable(hamiltonian: &[(f64, Vec<(usize, String)>)]) -> PyPrismResult<PauliObservable> {
+fn build_observable(hamiltonian: &[(f64, PauliString)]) -> PyPrismResult<PauliObservable> {
     Ok(PauliObservable::from_terms(parse_terms(hamiltonian)?)?)
+}
+
+/// One Pauli string argument: text such as `"ZIX"`, whose character `i` acts on
+/// qubit `i`, or a list of `(qubit, axis)` factors with identities omitted.
+pub(crate) enum PauliString {
+    Text(String),
+    Factors(Vec<(usize, String)>),
+}
+
+impl<'py> FromPyObject<'_, 'py> for PauliString {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        match obj.cast::<PyString>() {
+            Ok(text) => Ok(Self::Text(text.to_str()?.to_owned())),
+            Err(_) => obj.extract().map(Self::Factors),
+        }
+    }
+}
+
+impl PauliString {
+    fn terms(&self) -> PyPrismResult<Vec<PauliTerm>> {
+        match self {
+            Self::Factors(factors) => parse_pauli_string(factors),
+            Self::Text(text) => parse_pauli_text(text),
+        }
+    }
+}
+
+fn parse_pauli_text(text: &str) -> PyPrismResult<Vec<PauliTerm>> {
+    let mut terms = Vec::new();
+    for (qubit, letter) in text.chars().enumerate() {
+        let axis = match letter.to_ascii_uppercase() {
+            'I' => continue,
+            'X' => PauliAxis::X,
+            'Y' => PauliAxis::Y,
+            'Z' => PauliAxis::Z,
+            other => {
+                return Err(invalid(format!(
+                    "Pauli string {text:?} has {other:?} at position {qubit}; each \
+                     character must be one of I, X, Y, Z"
+                )));
+            }
+        };
+        terms.push(PauliTerm::new(qubit, axis));
+    }
+    Ok(terms)
 }
 
 pub(crate) fn parse_pauli_string(factors: &[(usize, String)]) -> PyPrismResult<Vec<PauliTerm>> {
@@ -529,7 +573,7 @@ type WeightedStrings = [(f64, Vec<PauliTerm>)];
 /// every call.
 pub(crate) enum Hamiltonian<'py> {
     Held(Bound<'py, PyPauliObservable>),
-    Terms(Vec<(f64, Vec<(usize, String)>)>),
+    Terms(Vec<(f64, PauliString)>),
 }
 
 impl<'py> FromPyObject<'_, 'py> for Hamiltonian<'py> {
@@ -563,8 +607,9 @@ impl Hamiltonian<'_> {
 
 /// Weighted Pauli sum parsed once, for reuse across expectation calls.
 ///
-/// Takes the `(coefficient, [(qubit, axis), ...])` terms a Hamiltonian argument
-/// takes, and every such argument accepts one in its place. The
+/// Takes the `(coefficient, pauli)` terms a Hamiltonian argument takes, each
+/// `pauli` a string such as `"XZ"` (character `i` on qubit `i`) or `(qubit, axis)`
+/// factors, and every such argument accepts one in its place. The
 /// qubit-wise-commuting grouping is computed on first use and kept.
 #[pyclass(name = "PauliObservable", module = "prism_q", frozen)]
 pub struct PyPauliObservable(pub(crate) PauliObservable);
@@ -572,7 +617,7 @@ pub struct PyPauliObservable(pub(crate) PauliObservable);
 #[pymethods]
 impl PyPauliObservable {
     #[new]
-    fn new(terms: Vec<(f64, Vec<(usize, String)>)>) -> PyPrismResult<Self> {
+    fn new(terms: Vec<(f64, PauliString)>) -> PyPrismResult<Self> {
         Ok(Self(build_observable(&terms)?))
     }
 
@@ -1032,6 +1077,51 @@ impl PyExpectationResult {
 
     fn __repr__(&self) -> String {
         format!("ExpectationResult(values={} terms)", self.values.len())
+    }
+}
+
+/// `⟨H⟩` and its gradient, one entry per parameter slot. Unpacks as
+/// `value, gradient`.
+#[pyclass(name = "ExpectationGradient", module = "prism_q", frozen)]
+pub struct PyExpectationGradient {
+    value: f64,
+    gradient: Vec<f64>,
+}
+
+impl From<ExpectationGradient> for PyExpectationGradient {
+    fn from(result: ExpectationGradient) -> Self {
+        Self {
+            value: result.value,
+            gradient: result.gradient,
+        }
+    }
+}
+
+#[pymethods]
+impl PyExpectationGradient {
+    #[getter]
+    fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// `d⟨H⟩/dθ` per parameter slot as a `float64` array.
+    #[getter]
+    fn gradient<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        f64_array(py, self.gradient.clone())
+    }
+
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyIterator>> {
+        (self.value, self.gradient(py))
+            .into_pyobject(py)?
+            .try_iter()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExpectationGradient(value={}, num_slots={})",
+            self.value,
+            self.gradient.len()
+        )
     }
 }
 

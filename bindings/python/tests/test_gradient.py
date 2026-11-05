@@ -2,7 +2,7 @@ import math
 
 import numpy as np
 
-from prism_q import CircuitBuilder, simulate
+from prism_q import CircuitBuilder, ExpectationGradient, simulate
 
 
 def test_single_rx_gradient_matches_analytic():
@@ -140,3 +140,25 @@ def test_parameter_shift_honours_the_initial_state():
     )
     assert math.isclose(value, -math.cos(theta), abs_tol=1e-12)
     assert math.isclose(grad[0], math.sin(theta), abs_tol=1e-9)
+
+
+def test_gradient_result_names_its_fields_and_unpacks():
+    theta = 0.6
+    builder = CircuitBuilder(1)
+    builder.rx(theta, 0).param(0)
+    circuit = builder.build()
+    links = builder.parameter_links()
+
+    result = simulate(circuit).seed(42).expectation_gradient([(1.0, "Z")], links)
+    assert isinstance(result, ExpectationGradient)
+    assert math.isclose(result.value, math.cos(theta), abs_tol=1e-9)
+    assert result.gradient.shape == (1,)
+    assert math.isclose(result.gradient[0], -math.sin(theta), abs_tol=1e-9)
+
+    value, grad = result
+    assert value == result.value
+    assert np.array_equal(grad, result.gradient)
+
+    shift = simulate(circuit).seed(42).expectation_gradient_shift([(1.0, "Z")], links)
+    assert isinstance(shift, ExpectationGradient)
+    assert np.allclose(shift.gradient, result.gradient, atol=1e-9)

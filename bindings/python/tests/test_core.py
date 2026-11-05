@@ -518,3 +518,47 @@ def test_expectation_result_reports_std_errors_only_when_sampled():
     )
     assert sampled.std_errors.shape == (2,)
     assert np.all(sampled.std_errors >= 0.0)
+
+
+def test_pauli_strings_put_qubit_zero_first():
+    # x q[0] flips qubit 0 only, so Z reads -1 in the first character and +1 in
+    # the second, the order count keys use.
+    flipped = CircuitBuilder(2).x(0).build()
+    values = simulate(flipped).seed(42).expectation_values(["ZI", "IZ", "ZZ", "II", ""])
+    assert values == pytest.approx([-1.0, 1.0, -1.0, 1.0, 1.0], abs=1e-12)
+
+
+def test_pauli_strings_match_factor_lists():
+    circuit = circuits.hardware_efficient_ansatz(4, 2, 42)
+    strings = ["ZIII", "IZIZ", "XIXI", "iyiy", "XYZI"]
+    factors = [
+        [(0, "Z")],
+        [(1, "Z"), (3, "Z")],
+        [(0, "X"), (2, "X")],
+        [(1, "Y"), (3, "Y")],
+        [(0, "X"), (1, "Y"), (2, "Z")],
+    ]
+    from_strings = simulate(circuit).seed(42).expectation_values(strings)
+    from_factors = simulate(circuit).seed(42).expectation_values(factors)
+    assert from_strings == pytest.approx(from_factors, abs=1e-12)
+
+    mixed = simulate(circuit).seed(42).expectation_values(["ZIII", [(1, "Z"), (3, "Z")]])
+    assert mixed == pytest.approx(from_factors[:2], abs=1e-12)
+
+
+def test_weighted_pauli_strings_build_the_same_observable():
+    circuit = circuits.hardware_efficient_ansatz(3, 2, 42)
+    held = prism_q.PauliObservable([(0.5, "ZZI"), (-1.0, "IXX"), (0.25, "III")])
+    factors = prism_q.PauliObservable(
+        [(0.5, [(0, "Z"), (1, "Z")]), (-1.0, [(1, "X"), (2, "X")]), (0.25, [])]
+    )
+    assert held.terms() == factors.terms()
+    by_terms = simulate(circuit).seed(42).observable_expectation([(0.5, "ZZI"), (-1.0, "IXX")])
+    by_held = simulate(circuit).seed(42).observable_expectation(held)
+    assert by_held.mean == pytest.approx(by_terms.mean + 0.25, abs=1e-12)
+
+
+def test_pauli_string_with_an_unknown_letter_is_rejected():
+    circuit = CircuitBuilder(2).h(0).build()
+    with pytest.raises(prism_q.PrismError, match="position 1"):
+        simulate(circuit).seed(42).expectation_values(["ZW"])

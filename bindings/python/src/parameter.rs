@@ -240,7 +240,7 @@ impl PyPreparedCircuit {
         &self,
         py: Python<'_>,
         values: Vec<f64>,
-        observables: Vec<Vec<(usize, String)>>,
+        observables: Vec<crate::sim::PauliString>,
         seed: u64,
     ) -> PyPrismResult<Vec<f64>> {
         let observables = parse_observables(observables)?;
@@ -292,7 +292,7 @@ impl PyPreparedCircuit {
         &self,
         py: Python<'py>,
         bindings: &Bound<'py, PyAny>,
-        observables: Vec<Vec<(usize, String)>>,
+        observables: Vec<crate::sim::PauliString>,
         seed: u64,
     ) -> PyPrismResult<Bound<'py, PyArray2<f64>>> {
         let rows = binding_rows(bindings)?;

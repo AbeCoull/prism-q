@@ -157,8 +157,10 @@ def test_held_observable_rejects_bad_terms():
         PauliObservable([(1.0, [(0, "X"), (0, "Z")])])
     with pytest.raises(PrismError):
         PauliObservable([(math.inf, [(0, "Z")])])
-    with pytest.raises(TypeError):
+    with pytest.raises(PrismError, match="position 1"):
         PauliObservable([(1.0, "Z0")])
+    with pytest.raises(TypeError):
+        PauliObservable([(1.0, 5)])
     out_of_range = PauliObservable([(1.0, [(9, "Z")])])
     with pytest.raises(PrismError):
         _prepared_ansatz().observable_expectation(POINTS[0], out_of_range)
@@ -365,3 +367,12 @@ def test_pauli_rotation_rejects_bad_factors():
         circuit.add_pauli_rotation(0.5, [(0, "X"), (7, "Z")])
     with pytest.raises(PrismError):
         circuit.add_pauli_rotation(0.5, [(0, "Q")])
+
+
+def test_prepared_terminals_take_pauli_strings():
+    prepared = _prepared_ansatz()
+    strings = ["ZIII", "IXYI", "ZIIZ"]
+    for values in POINTS:
+        assert prepared.expectation_values(values, strings) == pytest.approx(
+            prepared.expectation_values(values, OBSERVABLES), abs=1e-12
+        )

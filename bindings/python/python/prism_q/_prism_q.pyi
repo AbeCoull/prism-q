@@ -8,7 +8,8 @@ import numpy.typing as npt
 
 __version__: str
 
-_Hamiltonian: TypeAlias = PauliObservable | list[tuple[float, list[tuple[int, str]]]]
+_PauliString: TypeAlias = str | list[tuple[int, str]]
+_Hamiltonian: TypeAlias = PauliObservable | list[tuple[float, _PauliString]]
 _ShotRows: TypeAlias = npt.NDArray[np.bool_] | npt.NDArray[np.uint8]
 _T = TypeVar("_T")
 
@@ -281,7 +282,7 @@ class PreparedCircuit:
     def expectation_values(
         self,
         values: Sequence[float],
-        observables: list[list[tuple[int, str]]],
+        observables: list[_PauliString],
         seed: int = ...,
     ) -> list[float]: ...
     def observable_expectation(
@@ -296,7 +297,7 @@ class PreparedCircuit:
     def expectation_values_many(
         self,
         bindings: npt.ArrayLike,
-        observables: list[list[tuple[int, str]]],
+        observables: list[_PauliString],
         seed: int = ...,
     ) -> npt.NDArray[np.float64]: ...
     def observable_expectation_many(
@@ -609,6 +610,14 @@ class ExpectationResult:
     def metadata(self) -> RunMetadata: ...
 
 @final
+class ExpectationGradient:
+    @property
+    def value(self) -> float: ...
+    @property
+    def gradient(self) -> npt.NDArray[np.float64]: ...
+    def __iter__(self) -> Iterator[float | npt.NDArray[np.float64]]: ...
+
+@final
 class OverlapResult:
     @property
     def fidelity(self) -> float: ...
@@ -630,7 +639,7 @@ class EntropyResult:
 
 @final
 class PauliObservable:
-    def __new__(cls, terms: list[tuple[float, list[tuple[int, str]]]]) -> Self: ...
+    def __new__(cls, terms: list[tuple[float, _PauliString]]) -> Self: ...
     def terms(self) -> list[tuple[float, list[tuple[int, str]]]]: ...
     @property
     def num_terms(self) -> int: ...
@@ -744,24 +753,24 @@ class Simulation:
         self,
         hamiltonian: _Hamiltonian,
         parameters: list[tuple[int, int]],
-    ) -> tuple[float, npt.NDArray[np.float64]]: ...
+    ) -> ExpectationGradient: ...
     def expectation_gradient_shift(
         self,
         hamiltonian: _Hamiltonian,
         parameters: list[tuple[int, int]],
-    ) -> tuple[float, npt.NDArray[np.float64]]: ...
+    ) -> ExpectationGradient: ...
     def expectation_values(
-        self, observables: list[list[tuple[int, str]]]
+        self, observables: list[_PauliString]
     ) -> list[float]: ...
     def expectation_values_reported(
-        self, observables: list[list[tuple[int, str]]]
+        self, observables: list[_PauliString]
     ) -> ExpectationResult: ...
     def overlap(self, other: Simulation) -> OverlapResult: ...
     def observable_expectation(
         self, hamiltonian: _Hamiltonian
     ) -> ObservableExpectation: ...
     def density_matrix_expectation_values(
-        self, observables: list[list[tuple[int, str]]]
+        self, observables: list[_PauliString]
     ) -> list[float]: ...
 
 @final
@@ -1211,7 +1220,7 @@ class Query:
     @staticmethod
     def marginals() -> Query: ...
     @staticmethod
-    def expectation(observables: list[list[tuple[int, str]]]) -> Query: ...
+    def expectation(observables: list[_PauliString]) -> Query: ...
     @staticmethod
     def observable(observable: PauliObservable) -> Query: ...
     @staticmethod
@@ -1221,9 +1230,9 @@ class Query:
     @staticmethod
     def entropy(qubits: list[int]) -> Query: ...
     @staticmethod
-    def gradient(hamiltonian: list[tuple[float, list[tuple[int, str]]]] | PauliObservable, parameters: list[tuple[int, int]]) -> Query: ...
+    def gradient(hamiltonian: _Hamiltonian, parameters: list[tuple[int, int]]) -> Query: ...
     @staticmethod
-    def gradient_shift(hamiltonian: list[tuple[float, list[tuple[int, str]]]] | PauliObservable, parameters: list[tuple[int, int]]) -> Query: ...
+    def gradient_shift(hamiltonian: _Hamiltonian, parameters: list[tuple[int, int]]) -> Query: ...
 
 @final
 class Plan:

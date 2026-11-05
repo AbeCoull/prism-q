@@ -466,8 +466,13 @@ fn shift_gradient_bitwise_equal_across_thread_counts() {
         .collect();
     let gradient = |threads: usize| {
         in_pool(threads, || {
-            prism_q::run_expectation_gradient_shift(&circuit, &hamiltonian, &params, SEED)
-                .expect("shift gradient")
+            prism_q::sim::gradient::run_expectation_gradient_shift(
+                &circuit,
+                &hamiltonian,
+                &params,
+                SEED,
+            )
+            .expect("shift gradient")
         })
     };
     let base = gradient(1);

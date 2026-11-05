@@ -10,9 +10,9 @@
 use num_complex::Complex64;
 use prism_q::circuit::{Circuit, Instruction};
 use prism_q::gates::Gate;
+use prism_q::sim::{run_expectation_values, run_observable_expectation};
 use prism_q::{
-    BackendKind, DensityMatrixBackend, NoiseModel, PauliObservable, PauliTerm, circuits,
-    run_expectation_values, run_observable_expectation, sim,
+    BackendKind, DensityMatrixBackend, NoiseModel, PauliObservable, PauliTerm, circuits, sim,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;

@@ -73,14 +73,14 @@ def test_expectation_terminals_agree_with_a_rebuilt_circuit():
     for values in POINTS:
         fresh = simulate(_ansatz(values).build()).seed(42)
         np.testing.assert_allclose(
-            prepared.expectation_values(values, OBSERVABLES),
-            fresh.expectation_values(OBSERVABLES),
+            prepared.expectation(values, OBSERVABLES),
+            fresh.expectation(OBSERVABLES).values,
             atol=1e-12,
         )
-        held = prepared.observable_expectation(values, HAMILTONIAN)
-        expected = simulate(_ansatz(values).build()).seed(42).observable_expectation(
+        held = prepared.expectation(values, PauliObservable(HAMILTONIAN))
+        expected = simulate(_ansatz(values).build()).seed(42).expectation(PauliObservable(
             HAMILTONIAN
-        )
+        ))
         assert math.isclose(held.mean, expected.mean, abs_tol=1e-12)
         assert math.isclose(held.variance, expected.variance, abs_tol=1e-12)
 
@@ -89,8 +89,9 @@ def test_many_terminals_match_a_loop():
     prepared = _prepared_ansatz()
     bindings = np.array(POINTS * 4)
     runs = prepared.run_many(bindings, seed=7)
-    values = prepared.expectation_values_many(bindings, OBSERVABLES, seed=7)
-    energies = prepared.observable_expectation_many(bindings.tolist(), HAMILTONIAN)
+    held = PauliObservable(HAMILTONIAN)
+    values = prepared.expectation_many(bindings, OBSERVABLES, seed=7)
+    energies = prepared.expectation_many(bindings.tolist(), held)
     assert len(runs) == len(bindings)
     assert values.shape == (len(bindings), len(OBSERVABLES))
     for row, point in enumerate(bindings):
@@ -98,9 +99,9 @@ def test_many_terminals_match_a_loop():
             runs[row].probabilities, prepared.run(point, seed=7).probabilities
         )
         np.testing.assert_array_equal(
-            values[row], prepared.expectation_values(point, OBSERVABLES, seed=7)
+            values[row], prepared.expectation(point, OBSERVABLES, seed=7)
         )
-        assert energies[row].mean == prepared.observable_expectation(point, HAMILTONIAN).mean
+        assert energies[row].mean == prepared.expectation(point, held).mean
     with pytest.raises(PrismError):
         prepared.run_many(np.zeros((2, 7)))
 
@@ -108,20 +109,13 @@ def test_many_terminals_match_a_loop():
 def test_held_observable_matches_the_term_list():
     held = PauliObservable(HAMILTONIAN)
     prepared = _prepared_ansatz()
-    bindings = np.array(POINTS)
-    listed = prepared.observable_expectation_many(bindings, HAMILTONIAN)
-    for row, result in enumerate(prepared.observable_expectation_many(bindings, held)):
-        assert result.mean == listed[row].mean
-        assert result.variance == listed[row].variance
+    with pytest.raises(TypeError, match="PauliObservable"):
+        prepared.expectation(POINTS[0], HAMILTONIAN)
     for values in POINTS:
-        a = prepared.observable_expectation(values, held)
-        b = prepared.observable_expectation(values, HAMILTONIAN)
-        assert (a.mean, a.variance) == (b.mean, b.variance)
-
         sim = simulate(_ansatz(values).build()).seed(42)
-        assert sim.observable_expectation(held).mean == sim.observable_expectation(
+        assert sim.expectation(held).mean == sim.expectation(PauliObservable(
             HAMILTONIAN
-        ).mean
+        )).mean
         assert sim.observable_variance(held).variance == pytest.approx(
             sim.observable_variance(HAMILTONIAN).variance, abs=1e-12
         )
@@ -144,9 +138,9 @@ def test_held_observable_is_canonical_and_reused():
     assert held.terms() == [(0.5, [(0, "X")]), (3.0, [(0, "Z"), (1, "Z")])]
     assert held.num_groups == 2
     prepared = _prepared_ansatz()
-    first = prepared.observable_expectation(POINTS[0], held).mean
-    prepared.observable_expectation(POINTS[1], held)
-    assert prepared.observable_expectation(POINTS[0], held).mean == first
+    first = prepared.expectation(POINTS[0], held).mean
+    prepared.expectation(POINTS[1], held)
+    assert prepared.expectation(POINTS[0], held).mean == first
     assert held.num_terms == 2
 
 
@@ -157,11 +151,13 @@ def test_held_observable_rejects_bad_terms():
         PauliObservable([(1.0, [(0, "X"), (0, "Z")])])
     with pytest.raises(PrismError):
         PauliObservable([(math.inf, [(0, "Z")])])
-    with pytest.raises(TypeError):
+    with pytest.raises(PrismError, match="position 1"):
         PauliObservable([(1.0, "Z0")])
+    with pytest.raises(TypeError):
+        PauliObservable([(1.0, 5)])
     out_of_range = PauliObservable([(1.0, [(9, "Z")])])
     with pytest.raises(PrismError):
-        _prepared_ansatz().observable_expectation(POINTS[0], out_of_range)
+        _prepared_ansatz().expectation(POINTS[0], out_of_range)
 
 
 def test_run_reuses_one_object_across_a_sweep():
@@ -342,16 +338,16 @@ def test_pauli_rotation_gradient_reaches_the_native_gate():
     for slot in range(2):
         shifted = [0.6, 0.25]
         shifted[slot] += eps
-        up = simulate(_pauli_ansatz(shifted).build()).seed(42).expectation_values(
+        up = simulate(_pauli_ansatz(shifted).build()).seed(42).expectation(
             [[(0, "Z")]]
-        )[0]
+        ).values[0]
         shifted[slot] -= 2 * eps
-        down = simulate(_pauli_ansatz(shifted).build()).seed(42).expectation_values(
+        down = simulate(_pauli_ansatz(shifted).build()).seed(42).expectation(
             [[(0, "Z")]]
-        )[0]
+        ).values[0]
         assert math.isclose(grad[slot], (up - down) / (2 * eps), abs_tol=1e-5)
     assert math.isclose(
-        value, simulate(circuit).seed(42).expectation_values([[(0, "Z")]])[0], abs_tol=1e-12
+        value, simulate(circuit).seed(42).expectation([[(0, "Z")]]).values[0], abs_tol=1e-12
     )
 
 
@@ -365,3 +361,14 @@ def test_pauli_rotation_rejects_bad_factors():
         circuit.add_pauli_rotation(0.5, [(0, "X"), (7, "Z")])
     with pytest.raises(PrismError):
         circuit.add_pauli_rotation(0.5, [(0, "Q")])
+
+
+def test_prepared_terminals_take_pauli_strings():
+    prepared = _prepared_ansatz()
+    strings = ["ZIII", "IXYI", "ZIIZ"]
+    for values in POINTS:
+        np.testing.assert_allclose(
+            prepared.expectation(values, strings),
+            prepared.expectation(values, OBSERVABLES),
+            atol=1e-12,
+        )

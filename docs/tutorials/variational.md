@@ -50,8 +50,8 @@ print(hamiltonian.num_terms, hamiltonian.num_groups)   # 7 2
 
 `expectation_gradient` uses the adjoint method: one forward and one backward pass at any
 parameter count. `expectation_gradient_shift` uses the parameter-shift rule, two extra
-circuit runs per parameter, and works on backends with no adjoint pass. Both return
-`(value, gradient)`, one gradient entry per slot.
+circuit runs per parameter, and works on backends with no adjoint pass. Both return an
+`ExpectationGradient`, which unpacks as `(value, gradient)`, one gradient entry per slot.
 
 ```python
 from prism_q import simulate
@@ -90,15 +90,16 @@ from prism_q import BackendKind, PreparedCircuit
 prepared = PreparedCircuit(circuit, params, BackendKind.statevector())
 rng = np.random.default_rng(42)
 points = rng.uniform(-np.pi, np.pi, size=(256, params.num_slots))
-results = prepared.observable_expectation_many(points, hamiltonian, seed=42)
+results = prepared.expectation_many(points, hamiltonian, seed=42)
 energies = np.array([r.mean for r in results])
 print(energies.shape, round(energies.min(), 4))  # (256,) -2.5401
 ```
 
-`run_many` and `expectation_values_many` do the same for full runs and lists of single
-observables. Pass the backend explicitly when the template angles are not typical: with
-every rotation at zero the template reads as Clifford, and automatic dispatch would pick
-a stabilizer backend that then rejects the bound circuit.
+`run_many` does the same for full runs, and `expectation_many` with a list of Pauli
+strings returns a `(points, observables)` array. Pass the backend explicitly when the
+template angles are not typical: with every rotation at zero the template reads as
+Clifford, and automatic dispatch would pick a stabilizer backend that then rejects the
+bound circuit.
 
 ## In Rust
 

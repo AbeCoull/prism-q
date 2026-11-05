@@ -97,9 +97,7 @@ pub use distributed::{DistributedContext, RankComm, SerialComm};
 #[cfg(feature = "bench-internal")]
 pub use env_knobs::{bench_variant, bench_variant_b};
 pub use error::{PrismError, ResourceKind, ResourceLimit, Result};
-pub use gates::{
-    BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData, UnitaryData,
-};
+pub use gates::{Gate, GeneratorKind, McuData, UnitaryData};
 pub use limits::{LimitKnob, LimitSource, Limits, default_limits, set_default_limits};
 pub use qec::{
     BpMethod, BpOsdDecoder, BpOsdOptions, DetectorErrorModel, ErrorMechanism, MatchingDecoder,
@@ -118,9 +116,7 @@ pub use sim::compiled::{
     PauliExpectationAccumulator, ShotAccumulator, ShotLayout, compile_detector_sampler,
     compile_forward, compile_measurements, run_shots_compiled,
 };
-pub use sim::gradient::{
-    ExpectationGradient, run_expectation_gradient, run_expectation_gradient_shift,
-};
+pub use sim::gradient::ExpectationGradient;
 pub use sim::homological::{ErrorChainComplex, noisy_marginals_analytical};
 pub use sim::noise::{
     DriftDistribution, GateFilter, NoiseBuilder, NoiseChannel, NoiseEvent, NoiseModel,
@@ -142,8 +138,7 @@ pub use sim::{
     ObservableVariance, OverlapResult, PauliObservable, Placement, Plan, PlanFallback,
     PlannedExactness, Probabilities, Query, ReducedDensityMatrix, RejectReason, ResolvedBackend,
     RouteRule, RunMetadata, RunOutcome, Seeded, ShotsResult, Simulate, SimulateProgram, Unseeded,
-    bitstring, run_expectation_values, run_observable_expectation, run_on, run_on_state, run_qasm,
-    simulate, simulate_program,
+    bitstring, run_on, run_on_state, run_qasm, simulate, simulate_program,
 };
 #[cfg(feature = "parallel")]
 pub use threading::ThreadPool;

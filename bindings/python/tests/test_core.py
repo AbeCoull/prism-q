@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import prism_q
-from prism_q import CircuitBuilder, circuits, parse_qasm, run_qasm, simulate
+from prism_q import CircuitBuilder, PauliObservable, circuits, parse_qasm, run_qasm, simulate
 
 BELL_QASM = """
 OPENQASM 3.0;
@@ -220,7 +220,7 @@ def test_initial_state_validation_and_backend_limits():
         )
 
 
-def test_observable_expectation_matches_weighted_expectation_values():
+def test_weighted_expectation_matches_per_string_values():
     circuit = circuits.hardware_efficient_ansatz(6, 2, 42)
     hamiltonian = [
         (0.5, [(0, "Z")]),
@@ -229,8 +229,8 @@ def test_observable_expectation_matches_weighted_expectation_values():
         (0.75, [(1, "Y"), (4, "Y")]),
         (0.25, []),
     ]
-    result = simulate(circuit).seed(42).observable_expectation(hamiltonian)
-    values = simulate(circuit).seed(42).expectation_values([t for _, t in hamiltonian])
+    result = simulate(circuit).seed(42).expectation(PauliObservable(hamiltonian))
+    values = simulate(circuit).seed(42).expectation([t for _, t in hamiltonian]).values
     weighted = sum(c * v for (c, _), v in zip(hamiltonian, values))
     assert result.mean == pytest.approx(weighted, abs=1e-12)
     assert result.variance is not None
@@ -239,7 +239,7 @@ def test_observable_expectation_matches_weighted_expectation_values():
     assert result.metadata.backend == "Statevector"
 
 
-def test_observable_expectation_variance_matches_hand_value():
+def test_weighted_expectation_variance_matches_hand_value():
     # |+>: Var(2 Z0) = 4 and Var(X0) = 0 in two commuting groups; forced onto
     # the statevector so the Clifford route cannot serve it.
     from prism_q import BackendKind
@@ -249,19 +249,19 @@ def test_observable_expectation_variance_matches_hand_value():
         simulate(plus)
         .backend(BackendKind.statevector())
         .seed(42)
-        .observable_expectation([(2.0, [(0, "Z")]), (1.0, [(0, "X")])])
+        .expectation(PauliObservable([(2.0, [(0, "Z")]), (1.0, [(0, "X")])]))
     )
     assert result.mean == pytest.approx(1.0, abs=1e-12)
     assert result.variance == pytest.approx(4.0, abs=1e-12)
     assert len(result.group_variances) == 2
 
 
-def test_observable_expectation_clifford_route_has_no_variance():
+def test_weighted_expectation_clifford_route_has_no_variance():
     bell = CircuitBuilder(2).h(0).cx(0, 1).build()
     result = (
         simulate(bell)
         .seed(42)
-        .observable_expectation([(2.0, [(0, "Z"), (1, "Z")]), (-1.0, [(0, "X"), (1, "X")])])
+        .expectation(PauliObservable([(2.0, [(0, "Z"), (1, "Z")]), (-1.0, [(0, "X"), (1, "X")])]))
     )
     assert result.mean == pytest.approx(1.0, abs=1e-12)
     assert result.variance is None
@@ -318,17 +318,14 @@ def test_overlap_of_two_states():
     assert np.isclose(mixed.fidelity, 0.5)
 
 
-def test_expectation_values_reported_names_its_backend():
+def test_expectation_names_its_backend():
     circuit = prism_q.parse_qasm(
         "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ncnot q[0], q[1];"
     )
     observables = [[(0, "Z"), (1, "Z")], [(0, "X")]]
-    reported = (
-        prism_q.simulate(circuit).seed(42).expectation_values_reported(observables)
-    )
-    bare = prism_q.simulate(circuit).seed(42).expectation_values(observables)
+    reported = prism_q.simulate(circuit).seed(42).expectation(observables)
 
-    assert np.allclose(reported.values, bare)
+    assert isinstance(reported, prism_q.ExpectationResult)
     assert np.allclose(reported.values, [1.0, 0.0])
     assert reported.metadata.backend
     assert reported.metadata.is_exact
@@ -342,7 +339,7 @@ def test_observable_variance_is_the_operator_spread():
     )
     terms = [(1.0, [(0, "X")]), (1.0, [(0, "Z")])]
     operator = prism_q.simulate(circuit).seed(42).observable_variance(terms)
-    grouped = prism_q.simulate(circuit).seed(42).observable_expectation(terms)
+    grouped = prism_q.simulate(circuit).seed(42).expectation(PauliObservable(terms))
     assert np.isclose(operator.variance, 0.0, atol=1e-9)
     assert np.isclose(grouped.variance, 1.0)
     assert np.isclose(operator.mean, grouped.mean)
@@ -410,6 +407,16 @@ def test_builder_standard_gates_reject_bad_qubits():
 def test_rxx_and_ryy_are_bindable():
     builder = CircuitBuilder(2).rxx(0.2, 0, 1).param(0).ryy(0.3, 0, 1).param(1)
     assert builder.parameter_links() == [(0, 0), (1, 1)]
+
+
+def test_build_parametric_returns_the_circuit_and_its_parameters():
+    builder = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).rz(0.7, 1).param(1)
+    circuit, params = builder.build_parametric()
+    assert isinstance(params, prism_q.Parameters)
+    assert params.links() == builder.parameter_links() == [(0, 0), (2, 1)]
+    assert params.values(circuit) == [0.3, 0.7]
+    assert circuit.gate_count() == builder.build().gate_count() == 3
+    assert not hasattr(builder, "trainable")
 
 
 def test_run_qasm_seed_defaults_to_42():
@@ -508,13 +515,108 @@ def test_expectation_result_reports_std_errors_only_when_sampled():
 
     circuit = CircuitBuilder(2).h(0).t(0).cx(0, 1).build()
     observables = [[(0, "Z")], [(0, "X"), (1, "X")]]
-    exact = simulate(circuit).seed(3).expectation_values_reported(observables)
+    exact = simulate(circuit).seed(3).expectation(observables)
     assert exact.std_errors is None
     sampled = (
         simulate(circuit)
         .backend(BackendKind.stochastic_pauli(num_samples=500))
         .seed(3)
-        .expectation_values_reported(observables)
+        .expectation(observables)
     )
     assert sampled.std_errors.shape == (2,)
     assert np.all(sampled.std_errors >= 0.0)
+
+
+def test_pauli_strings_put_qubit_zero_first():
+    # x q[0] flips qubit 0 only, so Z reads -1 in the first character and +1 in
+    # the second, the order count keys use.
+    flipped = CircuitBuilder(2).x(0).build()
+    values = simulate(flipped).seed(42).expectation(["ZI", "IZ", "ZZ", "II", ""]).values
+    assert values == pytest.approx([-1.0, 1.0, -1.0, 1.0, 1.0], abs=1e-12)
+
+
+def test_pauli_strings_match_factor_lists():
+    circuit = circuits.hardware_efficient_ansatz(4, 2, 42)
+    strings = ["ZIII", "IZIZ", "XIXI", "iyiy", "XYZI"]
+    factors = [
+        [(0, "Z")],
+        [(1, "Z"), (3, "Z")],
+        [(0, "X"), (2, "X")],
+        [(1, "Y"), (3, "Y")],
+        [(0, "X"), (1, "Y"), (2, "Z")],
+    ]
+    from_strings = simulate(circuit).seed(42).expectation(strings).values
+    from_factors = simulate(circuit).seed(42).expectation(factors).values
+    assert from_strings == pytest.approx(from_factors, abs=1e-12)
+
+    mixed = simulate(circuit).seed(42).expectation(["ZIII", [(1, "Z"), (3, "Z")]]).values
+    assert mixed == pytest.approx(from_factors[:2], abs=1e-12)
+
+
+def test_weighted_pauli_strings_build_the_same_observable():
+    circuit = circuits.hardware_efficient_ansatz(3, 2, 42)
+    held = prism_q.PauliObservable([(0.5, "ZZI"), (-1.0, "IXX"), (0.25, "III")])
+    factors = prism_q.PauliObservable(
+        [(0.5, [(0, "Z"), (1, "Z")]), (-1.0, [(1, "X"), (2, "X")]), (0.25, [])]
+    )
+    assert held.terms() == factors.terms()
+    by_terms = simulate(circuit).seed(42).expectation(PauliObservable([(0.5, "ZZI"), (-1.0, "IXX")]))
+    by_held = simulate(circuit).seed(42).expectation(held)
+    assert by_held.mean == pytest.approx(by_terms.mean + 0.25, abs=1e-12)
+
+
+def test_pauli_string_with_an_unknown_letter_is_rejected():
+    circuit = CircuitBuilder(2).h(0).build()
+    with pytest.raises(prism_q.PrismError, match="position 1"):
+        simulate(circuit).seed(42).expectation(["ZW"])
+
+
+def test_expectation_rejects_weighted_terms_outside_an_observable():
+    circuit = CircuitBuilder(1).h(0).build()
+    with pytest.raises(TypeError, match="PauliObservable"):
+        simulate(circuit).seed(42).expectation([(1.0, "Z")])
+    with pytest.raises(TypeError, match=r"\[\[\(0, \"Z\"\)\]\]"):
+        simulate(circuit).seed(42).expectation([(0, "Z")])
+
+
+def test_pauli_string_longer_than_the_register_is_rejected():
+    circuit = CircuitBuilder(2).h(0).cx(0, 1).build()
+    sim = simulate(circuit).seed(42)
+    assert sim.expectation(["ZZ", "Z"]).values == pytest.approx([1.0, 0.0], abs=1e-12)
+    for too_long in (["ZIII"], ["IIZ"]):
+        with pytest.raises(prism_q.PrismError, match="3 characters|4 characters"):
+            sim.expectation(too_long)
+    with pytest.raises(prism_q.PrismError, match="2 qubits"):
+        sim.expectation(PauliObservable([(1.0, "ZII")]))
+    with pytest.raises(prism_q.PrismError, match="2 qubits"):
+        sim.observable_variance([(1.0, "IIX")])
+    params = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).build_parametric()[1]
+    with pytest.raises(prism_q.PrismError, match="2 qubits"):
+        sim.expectation_gradient([(1.0, "ZIZ")], params.links())
+    prepared = prism_q.PreparedCircuit(circuit, prism_q.Parameters(0))
+    with pytest.raises(prism_q.PrismError, match="2 qubits"):
+        prepared.expectation([], ["XXX"])
+
+
+def test_expectation_result_reads_as_its_values():
+    circuit = CircuitBuilder(2).x(0).build()
+    result = simulate(circuit).seed(42).expectation(["ZI", "IZ", "ZZ"])
+    assert len(result) == 3
+    assert result[0] == pytest.approx(-1.0) and result[-1] == pytest.approx(-1.0)
+    assert list(result) == pytest.approx([-1.0, 1.0, -1.0])
+    with pytest.raises(IndexError):
+        result[3]
+    array = np.asarray(result)
+    assert array.dtype == np.float64 and array.shape == (3,)
+    assert np.array_equal(array, result.values)
+    assert np.asarray(result, dtype=np.float32).dtype == np.float32
+
+
+def test_expectation_result_slices_to_an_array():
+    circuit = CircuitBuilder(2).x(0).build()
+    result = simulate(circuit).seed(42).expectation(["ZI", "IZ", "ZZ"])
+    head = result[0:1]
+    assert isinstance(head, np.ndarray) and head.dtype == np.float64
+    assert np.array_equal(head, result.values[0:1])
+    assert np.array_equal(result[::-1], result.values[::-1])
+    assert result[5:].shape == (0,)

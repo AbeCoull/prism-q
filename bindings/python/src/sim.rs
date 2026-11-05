@@ -8,19 +8,19 @@ use std::collections::HashMap;
 use num_complex::Complex64;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
-    BackendKind, BondReport, Circuit, CountsResult, Exactness, Limits, MarginalsResult, NoiseModel,
-    ObservableExpectation, ParamLink, Parameters, PauliAxis, PauliObservable, PauliTerm, Placement,
-    Probabilities, ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue, Seeded,
-    ShotsResult, Simulate, simulate as core_simulate,
+    BackendKind, BondReport, Circuit, CountsResult, Exactness, ExpectationGradient, Limits,
+    MarginalsResult, NoiseModel, ObservableExpectation, ParamLink, Parameters, PauliAxis,
+    PauliObservable, PauliTerm, Placement, Probabilities, ReducedDensityMatrix, RunMetadata,
+    RunOutcome, SaveRecord, SavedValue, Seeded, ShotsResult, Simulate, simulate as core_simulate,
 };
-use pyo3::exceptions::{PyIndexError, PyNotImplementedError};
+use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyIterator, PyList, PyString};
+use pyo3::types::{PyDict, PyIterator, PyList, PySlice, PyString, PyTuple};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
 use crate::codec;
-use crate::error::{PyPrismResult, invalid};
+use crate::error::{PyPrismError, PyPrismResult, invalid};
 use crate::limits::PyLimits;
 use crate::noise::PyNoiseModel;
 use crate::numpy_util::{bool_matrix, complex_array, complex_matrix, f64_array};
@@ -78,7 +78,7 @@ impl PySimulation {
     /// Attach a noise model.
     ///
     /// `.shots()` and `.sample_counts()` average trajectories. `.run()`,
-    /// `.marginals()`, and `.expectation_values()` answer from the exact
+    /// `.marginals()`, and `.expectation()` answer from the exact
     /// mixture, which requires `BackendKind.density_matrix()`. Readout error
     /// is not part of that mixture, so `.run()` and `.marginals()` reject a
     /// model carrying it and `.sample_counts()` is the terminal that applies it.
@@ -94,9 +94,7 @@ impl PySimulation {
     /// be `2 ** num_qubits` and the vector must be normalized. A start state
     /// runs on the statevector (dense, GPU, or distributed) or density-matrix
     /// backend only. `.shots()` and `.sample_counts()` reject one with a noise
-    /// model attached, and
-    /// `.expectation_gradient()` and `.density_matrix_expectation_values()`
-    /// reject one outright.
+    /// model attached, and `.expectation_gradient()` rejects one outright.
     fn initial_state(
         mut slf: PyRefMut<'_, Self>,
         amplitudes: Vec<Complex64>,
@@ -151,15 +149,25 @@ impl PySimulation {
     }
 
     /// Inspect a terminal without consuming the request or executing its circuit.
+    /// A Pauli string wider than the circuit is reported in `would_fail`, as the
+    /// terminal raises it.
     fn plan(
         &self,
         py: Python<'_>,
         query: &crate::plan::PyQuery,
     ) -> PyPrismResult<crate::plan::PyPlan> {
         let owned_noise = self.owned_noise(py);
-        Ok(crate::plan::PyPlan(py.detach(|| {
-            self.core(owned_noise.as_ref()).plan(query.as_query())
-        })?))
+        let too_wide = check_text_width(query.text_width(), self.circuit.num_qubits).err();
+        let empty = PauliObservable::new();
+        let planned = match too_wide {
+            Some(_) => query.as_query_without_terms(&empty),
+            None => query.as_query(),
+        };
+        let mut plan = py.detach(|| self.core(owned_noise.as_ref()).plan(planned))?;
+        if let Some(error) = too_wide {
+            plan.would_fail = Some(error.0);
+        }
+        Ok(crate::plan::PyPlan(plan))
     }
 
     /// Run once and return classical bits plus the probability distribution.
@@ -212,11 +220,10 @@ impl PySimulation {
     }
 
     /// Compute `⟨H⟩` and its exact gradient with respect to the trainable
-    /// parameters via the adjoint method, returning `(value, gradient)` with
-    /// the gradient as a `float64` array.
+    /// parameters via the adjoint method.
     ///
-    /// `hamiltonian` is a list of `(coefficient, [(qubit, axis), ...])` terms,
-    /// where `axis` is one of `"X"`, `"Y"`, `"Z"` (identity factors omitted).
+    /// `hamiltonian` is a `PauliObservable` or a list of `(coefficient, pauli)`
+    /// terms, each `pauli` a string such as `"ZZI"` or `(qubit, axis)` factors.
     /// `parameters` is a list of `(instruction_index, parameter_slot)` links,
     /// as returned by `CircuitBuilder.parameter_links()`. Runs on the
     /// statevector backend; the circuit must be unitary.
@@ -226,10 +233,11 @@ impl PySimulation {
         py: Python<'py>,
         hamiltonian: Hamiltonian<'py>,
         parameters: Vec<(usize, usize)>,
-    ) -> PyPrismResult<(f64, Bound<'py, PyArray1<f64>>)> {
+    ) -> PyPrismResult<PyExpectationGradient> {
         if self.noise.is_some() {
             return Err(invalid("expectation_gradient() does not support noise"));
         }
+        hamiltonian.check_width(self.circuit.num_qubits)?;
         let terms = hamiltonian.terms()?;
         let links: Vec<ParamLink> = parameters
             .into_iter()
@@ -238,13 +246,13 @@ impl PySimulation {
         let num_slots = links.iter().map(|l| l.slot + 1).max().unwrap_or(0);
         let params = Parameters::from_links(links, num_slots);
         let result = py.detach(|| self.core(None).expectation_gradient(&terms, &params))?;
-        Ok((result.value, f64_array(py, result.gradient)))
+        Ok(PyExpectationGradient::from(result))
     }
 
     /// Same gradient by the parameter-shift rule: two extra circuit runs per
     /// parameter instead of one backward sweep, and the only route for a
     /// backend with no adjoint pass. Takes the `expectation_gradient()`
-    /// argument shape and returns the same pair.
+    /// argument shape and returns the same result type.
     ///
     /// Honours `.initial_state()`. With a noise model attached every evaluation
     /// reads the exact mixture, so the backend must be
@@ -255,7 +263,8 @@ impl PySimulation {
         py: Python<'py>,
         hamiltonian: Hamiltonian<'py>,
         parameters: Vec<(usize, usize)>,
-    ) -> PyPrismResult<(f64, Bound<'py, PyArray1<f64>>)> {
+    ) -> PyPrismResult<PyExpectationGradient> {
+        hamiltonian.check_width(self.circuit.num_qubits)?;
         let terms = hamiltonian.terms()?;
         let links: Vec<ParamLink> = parameters
             .into_iter()
@@ -268,29 +277,58 @@ impl PySimulation {
             self.core(owned_noise.as_ref())
                 .expectation_gradient_shift(&terms, &params)
         })?;
-        Ok((result.value, f64_array(py, result.gradient)))
+        Ok(PyExpectationGradient::from(result))
     }
 
-    /// Compute `⟨ψ|P|ψ⟩` for each joint Pauli observable on the circuit's
-    /// output state, honoring the selected backend.
+    /// Expectation values on the circuit's output state, honoring the selected
+    /// backend.
     ///
-    /// Each observable is a list of `(qubit, axis)` factors, where `axis` is one
-    /// of `"X"`, `"Y"`, `"Z"` and identity factors are omitted. The circuit must
-    /// be unitary. With a noise model attached the value is the exact
-    /// `Tr(rho P)`, which requires `BackendKind.density_matrix()`.
+    /// `observables` is a list of Pauli strings, each text such as `"ZZI"`
+    /// (character `i` on qubit `i`) or `(qubit, axis)` factors with identities
+    /// omitted, and returns an `ExpectationResult` with one value per string.
+    /// A `PauliObservable` returns an `ObservableExpectation` instead: the
+    /// weighted mean, with the grouped-measurement variance on the statevector
+    /// family. Both carry the provenance of the run. Weighted terms go in a
+    /// `PauliObservable`; a bare `(coefficient, pauli)` list raises `TypeError`.
+    /// The circuit must be unitary, except that `BackendKind.density_matrix()`
+    /// and its GPU sibling evolve a reset as a channel. With a noise model
+    /// attached the value is the exact `Tr(rho P)`, which requires
+    /// `BackendKind.density_matrix()`.
     #[pyo3(signature = (observables))]
-    fn expectation_values(
+    fn expectation<'py>(
         &self,
-        py: Python<'_>,
-        observables: Vec<Vec<(usize, String)>>,
-    ) -> PyPrismResult<Vec<f64>> {
-        let observables = parse_observables(observables)?;
+        py: Python<'py>,
+        observables: Observables<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        observables.check_width(self.circuit.num_qubits)?;
         let owned_noise = self.owned_noise(py);
-        let values = py.detach(|| {
-            self.core(owned_noise.as_ref())
-                .expectation_values(&observables)
-        })?;
-        Ok(values)
+        match observables {
+            Observables::Weighted(held) => {
+                let observable = &held.get().0;
+                let result = py
+                    .detach(|| {
+                        self.core(owned_noise.as_ref())
+                            .observable_expectation(observable)
+                    })
+                    .map_err(PyPrismError::from)?;
+                Ok(Bound::new(py, PyObservableExpectation::from_result(result))?.into_any())
+            }
+            Observables::Strings(strings) => {
+                let observables = parse_observables(strings)?;
+                let result = py
+                    .detach(|| {
+                        self.core(owned_noise.as_ref())
+                            .expectation_values_reported(&observables)
+                    })
+                    .map_err(PyPrismError::from)?;
+                let result = PyExpectationResult {
+                    values: result.values,
+                    std_errors: result.std_errors,
+                    metadata: PyRunMetadata::new(result.metadata),
+                };
+                Ok(Bound::new(py, result)?.into_any())
+            }
+        }
     }
 
     /// Joint probability distribution over `qubits`, `2 ** len(qubits)` entries
@@ -367,14 +405,16 @@ impl PySimulation {
     ///
     /// This is the spread of the operator itself, not
     /// `ObservableExpectation.variance`, which sums per-group variances and so
-    /// drops the covariance between measurement groups. `hamiltonian` takes the
-    /// `observable_expectation()` term shape.
+    /// drops the covariance between measurement groups. `hamiltonian` is a
+    /// `PauliObservable` or a list of `(coefficient, pauli)` terms, each `pauli` a
+    /// string such as `"ZZI"` or `(qubit, axis)` factors.
     #[pyo3(signature = (hamiltonian))]
     fn observable_variance(
         &self,
         py: Python<'_>,
         hamiltonian: Hamiltonian<'_>,
     ) -> PyPrismResult<PyObservableVariance> {
+        hamiltonian.check_width(self.circuit.num_qubits)?;
         let observable = hamiltonian.observable()?;
         let owned_noise = self.owned_noise(py);
         let result = py.detach(|| {
@@ -384,29 +424,6 @@ impl PySimulation {
         Ok(PyObservableVariance {
             variance: result.variance,
             mean: result.mean,
-            metadata: PyRunMetadata::new(result.metadata),
-        })
-    }
-
-    /// `expectation_values()` with the provenance of the run that served it.
-    /// Under `BackendKind.auto()` a wide shallow circuit can be answered by a
-    /// tensor contraction rather than by the state vector, and only the
-    /// metadata says which ran.
-    #[pyo3(signature = (observables))]
-    fn expectation_values_reported(
-        &self,
-        py: Python<'_>,
-        observables: Vec<Vec<(usize, String)>>,
-    ) -> PyPrismResult<PyExpectationResult> {
-        let observables = parse_observables(observables)?;
-        let owned_noise = self.owned_noise(py);
-        let result = py.detach(|| {
-            self.core(owned_noise.as_ref())
-                .expectation_values_reported(&observables)
-        })?;
-        Ok(PyExpectationResult {
-            values: result.values,
-            std_errors: result.std_errors,
             metadata: PyRunMetadata::new(result.metadata),
         })
     }
@@ -434,86 +451,106 @@ impl PySimulation {
             right: PyRunMetadata::new(result.right),
         })
     }
-
-    /// Compute `⟨H⟩` and its grouped-measurement variance for a weighted Pauli
-    /// observable on the circuit's output state.
-    ///
-    /// `hamiltonian` takes the `expectation_gradient()` term shape: a list of
-    /// `(coefficient, [(qubit, axis), ...])` pairs with `axis` one of `"X"`,
-    /// `"Y"`, `"Z"`, identity factors omitted, and an empty factor list acting
-    /// as a constant offset. Identical strings merge by summing coefficients.
-    /// The statevector family reports the variance (see
-    /// `ObservableExpectation.variance` for the contract); every other route
-    /// returns the weighted mean with `variance` of `None`.
-    #[pyo3(signature = (hamiltonian))]
-    fn observable_expectation(
-        &self,
-        py: Python<'_>,
-        hamiltonian: Hamiltonian<'_>,
-    ) -> PyPrismResult<PyObservableExpectation> {
-        let observable = hamiltonian.observable()?;
-        let owned_noise = self.owned_noise(py);
-        let result = py.detach(|| {
-            self.core(owned_noise.as_ref())
-                .observable_expectation(&observable)
-        })?;
-        Ok(PyObservableExpectation::from_result(result))
-    }
-
-    /// Exact `Tr(rho P)` for each joint Pauli observable, evolving the
-    /// density-matrix backend through the circuit and the attached noise model.
-    ///
-    /// Observables take the same `(qubit, axis)` form as
-    /// `expectation_values()`. The zero-variance analogue of trajectory-averaged
-    /// expectation values; a circuit containing a measurement raises `PrismError`.
-    /// Always uses the density-matrix backend regardless of `.backend(...)`, so the
-    /// circuit must fit that backend's qubit cap.
-    #[pyo3(signature = (observables))]
-    fn density_matrix_expectation_values(
-        &self,
-        py: Python<'_>,
-        observables: Vec<Vec<(usize, String)>>,
-    ) -> PyPrismResult<Vec<f64>> {
-        if self.initial_state.is_some() || self.initial_density_matrix.is_some() {
-            return Err(invalid(
-                "density_matrix_expectation_values() does not accept a start state; call \
-                 expectation_values() with BackendKind.density_matrix(), which takes one on a \
-                 unitary circuit",
-            ));
-        }
-        let observables = parse_observables(observables)?;
-        let seed = self.seed.unwrap_or(DEFAULT_SEED);
-        let circuit = &self.circuit;
-        let owned_noise = self.owned_noise(py);
-        let values = py.detach(|| {
-            prism_q::density_matrix_expectation_values(
-                circuit,
-                &observables,
-                owned_noise.as_ref(),
-                seed,
-            )
-        })?;
-        Ok(values)
-    }
 }
 
 pub(crate) fn parse_observables(
-    observables: Vec<Vec<(usize, String)>>,
+    observables: Vec<PauliString>,
 ) -> PyPrismResult<Vec<Vec<PauliTerm>>> {
-    observables.iter().map(|f| parse_pauli_string(f)).collect()
+    observables.iter().map(PauliString::terms).collect()
 }
 
-fn parse_terms(
-    hamiltonian: &[(f64, Vec<(usize, String)>)],
-) -> PyPrismResult<Vec<(f64, Vec<PauliTerm>)>> {
+fn parse_terms(hamiltonian: &[(f64, PauliString)]) -> PyPrismResult<Vec<(f64, Vec<PauliTerm>)>> {
     hamiltonian
         .iter()
-        .map(|(coefficient, factors)| Ok((*coefficient, parse_pauli_string(factors)?)))
+        .map(|(coefficient, string)| Ok((*coefficient, string.terms()?)))
         .collect()
 }
 
-fn build_observable(hamiltonian: &[(f64, Vec<(usize, String)>)]) -> PyPrismResult<PauliObservable> {
+fn build_observable(hamiltonian: &[(f64, PauliString)]) -> PyPrismResult<PauliObservable> {
     Ok(PauliObservable::from_terms(parse_terms(hamiltonian)?)?)
+}
+
+/// One Pauli string argument: text such as `"ZIX"`, whose character `i` acts on
+/// qubit `i`, or a list of `(qubit, axis)` factors with identities omitted.
+pub(crate) enum PauliString {
+    Text(String),
+    Factors(Vec<(usize, String)>),
+}
+
+impl<'py> FromPyObject<'_, 'py> for PauliString {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        match obj.cast::<PyString>() {
+            Ok(text) => Ok(Self::Text(text.to_str()?.to_owned())),
+            Err(_) => obj.extract().map(Self::Factors),
+        }
+    }
+}
+
+impl PauliString {
+    fn terms(&self) -> PyPrismResult<Vec<PauliTerm>> {
+        match self {
+            Self::Factors(factors) => parse_pauli_string(factors),
+            Self::Text(text) => parse_pauli_text(text),
+        }
+    }
+
+    /// Characters of a text string, `0` for factors. Trailing identities parse to
+    /// no factor, so the qubit range check alone would let `"ZIII"` pass on two
+    /// qubits; [`check_text_width`] compares this against the register instead.
+    fn text_width(&self) -> usize {
+        match self {
+            Self::Text(text) => text.chars().count(),
+            Self::Factors(_) => 0,
+        }
+    }
+}
+
+pub(crate) fn check_text_width(text_width: usize, num_qubits: usize) -> PyPrismResult<()> {
+    if text_width > num_qubits {
+        return Err(invalid(format!(
+            "a Pauli string has {text_width} characters but the circuit has {num_qubits} \
+             qubits; give at most one character per qubit"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn widest_string(strings: &[PauliString]) -> usize {
+    strings
+        .iter()
+        .map(PauliString::text_width)
+        .max()
+        .unwrap_or(0)
+}
+
+fn widest_term(terms: &[(f64, PauliString)]) -> usize {
+    terms
+        .iter()
+        .map(|(_, string)| string.text_width())
+        .max()
+        .unwrap_or(0)
+}
+
+fn parse_pauli_text(text: &str) -> PyPrismResult<Vec<PauliTerm>> {
+    let mut terms = Vec::new();
+    for (qubit, letter) in text.chars().enumerate() {
+        let axis = match letter.to_ascii_uppercase() {
+            'I' => continue,
+            'X' => PauliAxis::X,
+            'Y' => PauliAxis::Y,
+            'Z' => PauliAxis::Z,
+            other => {
+                return Err(invalid(format!(
+                    "Pauli string {text:?} has {other:?} at position {qubit}; each \
+                     character must be one of I, X, Y, Z"
+                )));
+            }
+        };
+        terms.push(PauliTerm::new(qubit, axis));
+    }
+    Ok(terms)
 }
 
 pub(crate) fn parse_pauli_string(factors: &[(usize, String)]) -> PyPrismResult<Vec<PauliTerm>> {
@@ -523,13 +560,47 @@ pub(crate) fn parse_pauli_string(factors: &[(usize, String)]) -> PyPrismResult<V
         .collect()
 }
 
+/// The `expectation()` argument: a held weighted observable, or a list of
+/// unweighted Pauli strings.
+pub(crate) enum Observables<'py> {
+    Weighted(Bound<'py, PyPauliObservable>),
+    Strings(Vec<PauliString>),
+}
+
+impl<'py> FromPyObject<'_, 'py> for Observables<'py> {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        if let Ok(held) = obj.cast::<PyPauliObservable>() {
+            return Ok(Self::Weighted(held.to_owned()));
+        }
+        obj.extract().map(Self::Strings).map_err(|_| {
+            PyTypeError::new_err(
+                "expectation() takes PauliObservable([(coefficient, pauli), ...]) for a \
+                 weighted sum, or a list of Pauli strings, each text such as \"ZZI\" or a \
+                 list of (qubit, axis) factors: [\"ZI\", [(0, \"Z\"), (1, \"Z\")]]. One \
+                 factor-list string is [[(0, \"Z\")]], not [(0, \"Z\")]",
+            )
+        })
+    }
+}
+
+impl Observables<'_> {
+    pub(crate) fn check_width(&self, num_qubits: usize) -> PyPrismResult<()> {
+        match self {
+            Self::Weighted(held) => held.get().check_width(num_qubits),
+            Self::Strings(strings) => check_text_width(widest_string(strings), num_qubits),
+        }
+    }
+}
+
 type WeightedStrings = [(f64, Vec<PauliTerm>)];
 
 /// A Hamiltonian argument: a held `PauliObservable`, or a term list parsed on
 /// every call.
 pub(crate) enum Hamiltonian<'py> {
     Held(Bound<'py, PyPauliObservable>),
-    Terms(Vec<(f64, Vec<(usize, String)>)>),
+    Terms(Vec<(f64, PauliString)>),
 }
 
 impl<'py> FromPyObject<'_, 'py> for Hamiltonian<'py> {
@@ -544,6 +615,18 @@ impl<'py> FromPyObject<'_, 'py> for Hamiltonian<'py> {
 }
 
 impl Hamiltonian<'_> {
+    pub(crate) fn check_width(&self, num_qubits: usize) -> PyPrismResult<()> {
+        check_text_width(self.text_width(), num_qubits)
+    }
+
+    /// Characters in the longest Pauli text, the width [`check_text_width`] takes.
+    pub(crate) fn text_width(&self) -> usize {
+        match self {
+            Self::Held(held) => held.get().1,
+            Self::Terms(terms) => widest_term(terms),
+        }
+    }
+
     pub(crate) fn observable(&self) -> PyPrismResult<Cow<'_, PauliObservable>> {
         match self {
             Self::Held(held) => Ok(Cow::Borrowed(&held.get().0)),
@@ -563,17 +646,26 @@ impl Hamiltonian<'_> {
 
 /// Weighted Pauli sum parsed once, for reuse across expectation calls.
 ///
-/// Takes the `(coefficient, [(qubit, axis), ...])` terms a Hamiltonian argument
-/// takes, and every such argument accepts one in its place. The
+/// Takes the `(coefficient, pauli)` terms a Hamiltonian argument takes, each
+/// `pauli` a string such as `"XZ"` (character `i` on qubit `i`) or `(qubit, axis)`
+/// factors, and every such argument accepts one in its place. The
 /// qubit-wise-commuting grouping is computed on first use and kept.
 #[pyclass(name = "PauliObservable", module = "prism_q", frozen)]
-pub struct PyPauliObservable(pub(crate) PauliObservable);
+pub struct PyPauliObservable(pub(crate) PauliObservable, pub(crate) usize);
+
+impl PyPauliObservable {
+    /// Reject a register narrower than the longest Pauli text the observable was
+    /// built from.
+    pub(crate) fn check_width(&self, num_qubits: usize) -> PyPrismResult<()> {
+        check_text_width(self.1, num_qubits)
+    }
+}
 
 #[pymethods]
 impl PyPauliObservable {
     #[new]
-    fn new(terms: Vec<(f64, Vec<(usize, String)>)>) -> PyPrismResult<Self> {
-        Ok(Self(build_observable(&terms)?))
+    fn new(terms: Vec<(f64, PauliString)>) -> PyPrismResult<Self> {
+        Ok(Self(build_observable(&terms)?, widest_term(&terms)))
     }
 
     /// Canonical terms: factors sorted by qubit, identical strings merged,
@@ -604,11 +696,13 @@ impl PyPauliObservable {
 
     #[staticmethod]
     fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
-        Ok(Self(codec::decode_observable(data)?))
+        let (observable, text_width) = codec::decode_observable(data)?;
+        Ok(Self(observable, text_width))
     }
 
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
-        reduce(slf.as_any(), codec::encode_observable(&slf.get().0))
+        let held = slf.get();
+        reduce(slf.as_any(), codec::encode_observable(&held.0, held.1))
     }
 
     fn __repr__(&self) -> String {
@@ -1030,8 +1124,155 @@ impl PyExpectationResult {
         self.metadata.clone()
     }
 
+    fn __len__(&self) -> usize {
+        self.values.len()
+    }
+
+    /// A slice returns a `float64` array, as slicing `values` does.
+    fn __getitem__<'py>(&self, py: Python<'py>, index: Index<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let index = match index {
+            Index::Int(index) => index,
+            Index::Slice(slice) => return self.values(py).as_any().get_item(slice),
+        };
+        let len = self.values.len() as isize;
+        let resolved = if index < 0 { index + len } else { index };
+        if !(0..len).contains(&resolved) {
+            return Err(PyIndexError::new_err("expectation index out of range"));
+        }
+        Ok(self.values[resolved as usize].into_pyobject(py)?.into_any())
+    }
+
+    /// `values` for `np.asarray(result)`. Each call builds a fresh array, so
+    /// `copy` changes nothing.
+    #[pyo3(signature = (dtype = None, copy = None))]
+    fn __array__<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<Bound<'py, PyAny>>,
+        copy: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        let values = self.values(py).into_any();
+        match dtype {
+            Some(dtype) => values.call_method1("astype", (dtype,)),
+            None => Ok(values),
+        }
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let (values, std_errors, metadata) = codec::decode_expectation_result(data)?;
+        Ok(Self {
+            values,
+            std_errors,
+            metadata: PyRunMetadata::new(metadata),
+        })
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let this = slf.borrow();
+        let data = codec::encode_expectation_result(
+            &this.values,
+            this.std_errors.as_deref(),
+            &this.metadata.inner,
+        )?;
+        reduce(slf.as_any(), data)
+    }
+
     fn __repr__(&self) -> String {
         format!("ExpectationResult(values={} terms)", self.values.len())
+    }
+}
+
+/// A `__getitem__` argument on the sequence-like results.
+#[derive(FromPyObject)]
+enum Index<'py> {
+    Int(isize),
+    Slice(Bound<'py, PySlice>),
+}
+
+/// `⟨H⟩` and its gradient, one entry per parameter slot. Unpacks as
+/// `value, gradient`.
+#[pyclass(name = "ExpectationGradient", module = "prism_q", frozen)]
+pub struct PyExpectationGradient {
+    value: f64,
+    gradient: Vec<f64>,
+}
+
+impl From<ExpectationGradient> for PyExpectationGradient {
+    fn from(result: ExpectationGradient) -> Self {
+        Self {
+            value: result.value,
+            gradient: result.gradient,
+        }
+    }
+}
+
+#[pymethods]
+impl PyExpectationGradient {
+    #[getter]
+    fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// `d⟨H⟩/dθ` per parameter slot as a `float64` array.
+    #[getter]
+    fn gradient<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        f64_array(py, self.gradient.clone())
+    }
+
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyIterator>> {
+        (self.value, self.gradient(py))
+            .into_pyobject(py)?
+            .try_iter()
+    }
+
+    fn __len__(&self) -> usize {
+        2
+    }
+
+    /// `0` (or `-2`) is `value` and `1` (or `-1`) is `gradient`, as on the pair;
+    /// a slice returns a tuple of the selected items.
+    fn __getitem__<'py>(&self, py: Python<'py>, index: Index<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match index {
+            Index::Int(0 | -2) => Ok(self.value.into_pyobject(py)?.into_any()),
+            Index::Int(1 | -1) => Ok(self.gradient(py).into_any()),
+            Index::Int(_) => Err(PyIndexError::new_err(
+                "ExpectationGradient index out of range; it holds (value, gradient)",
+            )),
+            Index::Slice(slice) => {
+                let pair = PyTuple::new(
+                    py,
+                    [
+                        self.value.into_pyobject(py)?.into_any(),
+                        self.gradient(py).into_any(),
+                    ],
+                )?;
+                pair.as_any().get_item(slice)
+            }
+        }
+    }
+
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let (value, gradient) = codec::decode_gradient(data)?;
+        Ok(Self { value, gradient })
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let this = slf.get();
+        reduce(
+            slf.as_any(),
+            codec::encode_gradient(this.value, &this.gradient),
+        )
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExpectationGradient(value={}, num_slots={})",
+            self.value,
+            self.gradient.len()
+        )
     }
 }
 

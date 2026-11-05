@@ -60,14 +60,14 @@ SETUP = {
     "NoiseModel.uniform_depolarizing(circuit, 0.01)": (
         "circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()"
     ),
-    "values = simulate(circuit).seed(42).expectation_values(": (
+    "values = simulate(circuit).seed(42).expectation(": (
         "circuit = CircuitBuilder(2).h(0).cx(0, 1).build()"
     ),
     "run_batch(circuits": (
         "circuits = [prism_q.circuits.hardware_efficient_ansatz(4, 2, seed=s) "
         "for s in range(3)]"
     ),
-    "observable_expectation_many(points": (
+    "expectation_many(points": (
         "import numpy as np\n"
         "points = np.array([[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]])\n"
         'hamiltonian = [(1.0, [(0, "Z")]), (0.5, [(0, "Z"), (1, "Z")])]'

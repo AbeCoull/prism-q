@@ -24,16 +24,13 @@ outcome = sim.run()
 | `probabilities_of(qubits)` | `float64` joint distribution over a subset, `qubits[0]` the lowest bit | density matrix only | yes |
 | `reduced_density_matrix(qubits)` | `ReducedDensityMatrix`: `.matrix` over a subset with `qubits[0]` the lowest bit, `.purity`, `.metadata` | density matrix only | yes |
 | `entanglement_entropy(subsystem)` | `EntropyResult`: von Neumann and Renyi-2 entropy of the cut | density matrix only | yes |
-| `expectation_values(obs)` | `list[float]`, `⟨ψ\|P\|ψ⟩` per observable | density matrix only | yes |
-| `expectation_values_reported(obs)` | `ExpectationResult`: the same values with `.metadata` naming the backend that served them and `.std_errors` from a sampling route | density matrix only | yes |
+| `expectation(obs)` | `ExpectationResult` for a list of observables: `.values` per observable, `.std_errors` from a sampling route, `.metadata` naming the backend; `ObservableExpectation` for a `PauliObservable`: the weighted mean with its variance, group variances and standard error | density matrix only | yes |
 | `observable_variance(obs)` | `ObservableVariance`: `<H^2> - <H>^2` beside the mean | density matrix only | yes |
-| `observable_expectation(h)` | `ObservableExpectation`: the weighted mean with its variance, group variances and standard error | density matrix only | yes |
-| `density_matrix_expectation_values(obs)` | `list[float]`, exact `Tr(rho P)` | yes | no |
-| `expectation_gradient(h, params)` | `(value, gradient)` via the adjoint method | no | no |
-| `expectation_gradient_shift(h, params)` | `(value, gradient)` via the parameter-shift rule | density matrix or `pauli_path()` | yes |
+| `expectation_gradient(h, params)` | `ExpectationGradient`: `.value` and `.gradient` via the adjoint method | no | no |
+| `expectation_gradient_shift(h, params)` | `ExpectationGradient` via the parameter-shift rule | density matrix or `pauli_path()` | yes |
 | `overlap(other)` | `OverlapResult`: `\|<a\|b>\|^2` against a second seeded builder, with one `.metadata` per side | no | yes |
 
-Use `expectation_values_reported()` when the route matters: under `auto()` a wide
+Read `expectation().metadata` when the route matters: under `auto()` a wide
 shallow circuit may be answered by tensor contraction instead of the state vector, and
 only the metadata says which ran. `expectation_gradient_shift()` gives the same gradient
 as `expectation_gradient()` at two extra circuit runs per parameter, and is the only
@@ -49,15 +46,14 @@ pure state. Rows marked "density matrix only" read the exact mixed state and nee
 is evolved once and every terminal reads it, so probabilities are seed independent and
 observables carry no sampling error. With `.noise()` attached, that route rejects
 mid-circuit measurement and classical conditioning, since the mixture holds every
-measurement branch at once; `density_matrix_expectation_values()` rejects them too.
+measurement branch at once.
 Without a noise model the density-matrix backend runs them as the statevector does: each
 measurement samples and collapses, so `run()` returns one branch's probabilities and
 `sample_counts()` draws a fresh branch per shot.
 
 Terminals that cannot honor a model raise `PrismError` naming the reason.
 `state_vector()` honors `.backend(...)` and declines on a backend holding no pure state
-rather than substituting one; `density_matrix_expectation_values()` always uses the
-density-matrix backend.
+rather than substituting one.
 
 `ShotsResult` and `CountsResult` both expose `counts()`, a dict keyed by bitstring.
 `ShotsResult.shots` is a `bool` array of shape `(shots, bits)`; call `.tolist()` for

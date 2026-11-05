@@ -45,14 +45,10 @@ manifest gives the reason for each one left out):
 | `compile_measurements` | `CompiledSampler` |
 | `compile_noisy` | `CompiledSampler` |
 | `default_limits` | `default_limits` |
-| `density_matrix_expectation_values` | `Simulation.density_matrix_expectation_values` |
+| `density_matrix_expectation_values` | `Simulation.expectation` |
 | `gpu::is_available` | `GpuContext.is_available` |
 | `noisy_marginals_analytical` | `noisy_marginals_analytical` |
 | `parse_qec_program` | `QecProgram.from_text` |
-| `run_expectation_gradient` | `Simulation.expectation_gradient` |
-| `run_expectation_gradient_shift` | `Simulation.expectation_gradient_shift` |
-| `run_expectation_values` | `Simulation.expectation_values` |
-| `run_observable_expectation` | `Simulation.observable_expectation` |
 | `run_qasm` | `run_qasm` |
 | `run_qec_program` | `QecProgram.run` |
 | `run_qec_program_reference` | `QecProgram.run_reference` |
@@ -66,7 +62,11 @@ manifest gives the reason for each one left out):
 | `sim::calibration::presets::neutral_atom` | `DeviceCalibration.neutral_atom` |
 | `sim::calibration::presets::superconducting_transmon` | `DeviceCalibration.superconducting_transmon` |
 | `sim::calibration::presets::trapped_ion` | `DeviceCalibration.trapped_ion` |
+| `sim::gradient::run_expectation_gradient` | `Simulation.expectation_gradient` |
+| `sim::gradient::run_expectation_gradient_shift` | `Simulation.expectation_gradient_shift` |
 | `sim::run_batch` | `run_batch` |
+| `sim::run_expectation_values` | `Simulation.expectation` |
+| `sim::run_observable_expectation` | `Simulation.expectation` |
 | `sim::unified_pauli::run_pauli_path_observable` | `BackendKind.pauli_path` |
 | `simulate` | `simulate` |
 | `simulate_program` | `simulate_program` |

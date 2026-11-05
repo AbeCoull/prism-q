@@ -75,7 +75,7 @@ raises `prism_q.PrismError` with the Rust error's message:
 import prism_q
 
 try:
-    simulate(huge).density_matrix_expectation_values([[(0, "Z")]])
+    simulate(huge).backend(prism_q.BackendKind.density_matrix()).expectation([[(0, "Z")]])
 except prism_q.PrismError as exc:
     print(exc)   # backend `density_matrix` is incompatible: circuit has ... qubits
 ```

@@ -62,3 +62,42 @@ def test_conditional_fallback_error_does_not_reject_primary():
     assert fallback["exactness"] == "exact"
     assert fallback["bound_reported"] is False
     assert fallback["samples"] is None
+
+
+def test_expectation_query_takes_pauli_strings():
+    circuit = CircuitBuilder(2).h(0).cx(0, 1).build()
+    request = simulate(circuit).seed(42)
+    by_string = request.plan(Query.expectation(["ZZ", "XI"]))
+    by_factors = request.plan(Query.expectation([[(0, "Z"), (1, "Z")], [(0, "X")]]))
+    assert by_string.backend == by_factors.backend
+    assert by_string.rule == by_factors.rule
+
+
+def test_plan_reports_a_pauli_string_wider_than_the_circuit():
+    from prism_q import PauliObservable
+
+    circuit, params = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).build_parametric()
+    request = simulate(circuit).seed(42)
+    links = params.links()
+    cases = [
+        (Query.expectation(["ZIII"]), lambda: request.expectation(["ZIII"])),
+        (
+            Query.observable(PauliObservable([(1.0, "ZII")])),
+            lambda: request.expectation(PauliObservable([(1.0, "ZII")])),
+        ),
+        (
+            Query.gradient([(1.0, "ZIZ")], links),
+            lambda: request.expectation_gradient([(1.0, "ZIZ")], links),
+        ),
+        (
+            Query.gradient_shift([(1.0, "ZIZ")], links),
+            lambda: request.expectation_gradient_shift([(1.0, "ZIZ")], links),
+        ),
+    ]
+    for query, run in cases:
+        failure = request.plan(query).would_fail
+        assert isinstance(failure, PrismError)
+        with pytest.raises(PrismError) as raised:
+            run()
+        assert str(failure) == str(raised.value)
+    assert request.plan(Query.expectation(["ZI"])).would_fail is None

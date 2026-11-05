@@ -8,6 +8,7 @@ from prism_q import BackendKind, CircuitBuilder, NoiseChannel, NoiseModel, simul
 
 SEED = 42
 DM_EPS = 1e-12
+DM = BackendKind.density_matrix()
 
 
 def test_density_matrix_backend_matches_statevector():
@@ -27,8 +28,8 @@ def test_noiseless_expectation_matches_statevector():
         [(0, "Z"), (1, "Z")],
         [(0, "Y"), (2, "X")],
     ]
-    reference = simulate(circuit).seed(SEED).expectation_values(observables)
-    values = simulate(circuit).seed(SEED).density_matrix_expectation_values(observables)
+    reference = simulate(circuit).seed(SEED).expectation(observables).values
+    values = simulate(circuit).seed(SEED).backend(DM).expectation(observables).values
     assert len(values) == len(observables)
     for i, (a, b) in enumerate(zip(values, reference)):
         assert abs(a - b) < DM_EPS, f"observable {i}: dm {a} vs statevector {b}"
@@ -41,7 +42,7 @@ def test_amplitude_damping_expectation_is_analytic():
     model = NoiseModel.empty(circuit)
     model.add_event(0, NoiseChannel.amplitude_damping(gamma), [0])
     (value,) = (
-        simulate(circuit).seed(SEED).noise(model).density_matrix_expectation_values([[(0, "Z")]])
+        simulate(circuit).seed(SEED).noise(model).backend(DM).expectation([[(0, "Z")]]).values
     )
     assert math.isclose(value, 2.0 * gamma - 1.0, abs_tol=DM_EPS)
 
@@ -64,7 +65,7 @@ def test_thermal_relaxation_walks_toward_its_excited_population():
             index, NoiseChannel.thermal_relaxation(t1, t2, gate_time, excited), [0]
         )
     (value,) = (
-        simulate(circuit).seed(SEED).noise(model).density_matrix_expectation_values([[(0, "Z")]])
+        simulate(circuit).seed(SEED).noise(model).backend(DM).expectation([[(0, "Z")]]).values
     )
     gamma = 1.0 - math.exp(-gate_time / t1)
     expected = (1.0 - 2.0 * excited) + 2.0 * excited * (1.0 - gamma) ** steps
@@ -79,7 +80,7 @@ def test_depolarizing_expectation_is_analytic():
     model = NoiseModel.empty(circuit)
     model.add_event(0, NoiseChannel.depolarizing(p), [0])
     (value,) = (
-        simulate(circuit).seed(SEED).noise(model).density_matrix_expectation_values([[(0, "X")]])
+        simulate(circuit).seed(SEED).noise(model).backend(DM).expectation([[(0, "X")]]).values
     )
     assert math.isclose(value, 1.0 - 4.0 * p / 3.0, abs_tol=DM_EPS)
 
@@ -94,7 +95,7 @@ def test_bell_parity_under_depolarizing_is_analytic():
         simulate(circuit)
         .seed(SEED)
         .noise(model)
-        .density_matrix_expectation_values([[(0, "Z"), (1, "Z")]])
+        .backend(DM).expectation([[(0, "Z"), (1, "Z")]]).values
     )
     assert math.isclose(value, 1.0 - 4.0 * p / 3.0, abs_tol=DM_EPS)
 
@@ -102,7 +103,7 @@ def test_bell_parity_under_depolarizing_is_analytic():
 def test_oversize_circuit_reports_the_qubit_cap():
     circuit = CircuitBuilder(40).h(0).build()
     with pytest.raises(prism_q.PrismError) as excinfo:
-        simulate(circuit).seed(SEED).density_matrix_expectation_values([[(0, "Z")]])
+        simulate(circuit).seed(SEED).backend(DM).expectation([[(0, "Z")]])
     message = str(excinfo.value)
     assert "density_matrix" in message
     assert "exceeding the cap" in message
@@ -113,9 +114,63 @@ def test_oversize_circuit_reports_the_qubit_cap():
 
 def test_measured_circuit_is_rejected():
     circuit = CircuitBuilder(1, 1).h(0).measure(0, 0).build()
-    with pytest.raises(prism_q.PrismError, match="remove the measurements") as excinfo:
-        simulate(circuit).seed(SEED).density_matrix_expectation_values([[(0, "X")]])
+    with pytest.raises(prism_q.PrismError, match="without measurements") as excinfo:
+        simulate(circuit).seed(SEED).backend(DM).expectation([[(0, "X")]])
     assert excinfo.value.kind == "incompatible_backend"
+
+def test_reset_evolves_as_a_channel():
+    # Resetting half of a Bell pair leaves |0><0| on qubit 0 and I/2 on qubit 1.
+    circuit = CircuitBuilder(2).h(0).cx(0, 1).reset(0).build()
+    result = simulate(circuit).seed(SEED).backend(DM).expectation(["Z", "IZ", "XI", "ZZ"])
+    np.testing.assert_allclose(result.values, [1.0, 0.0, 0.0, 0.0], atol=DM_EPS)
+    assert result.std_errors is None
+    assert result.metadata.backend == "DensityMatrix"
+    assert result.metadata.is_exact
+
+    energy = simulate(circuit).seed(SEED).backend(DM).expectation(
+        prism_q.PauliObservable([(1.0, "Z"), (0.5, "IZ"), (-0.25, "")])
+    )
+    assert math.isclose(energy.mean, 0.75, abs_tol=DM_EPS)
+    assert energy.variance is None
+
+    model = NoiseModel.empty(circuit)
+    model.add_event(1, NoiseChannel.amplitude_damping(1.0), [1])
+    (z1,) = simulate(circuit).seed(SEED).noise(model).backend(DM).expectation(["IZ"]).values
+    assert math.isclose(z1, 1.0, abs_tol=DM_EPS)
+
+    with pytest.raises(prism_q.PrismError, match="without measurements"):
+        measured = CircuitBuilder(1, 1).reset(0).measure(0, 0).build()
+        simulate(measured).seed(SEED).backend(DM).expectation(["Z"])
+    with pytest.raises(prism_q.PrismError, match=r"BackendKind\.density_matrix\(\)"):
+        simulate(circuit).seed(SEED).expectation(["Z"])
+
+
+def test_reset_on_the_density_matrix_reports_the_backend_route():
+    circuit = CircuitBuilder(2).h(0).cx(0, 1).reset(0).build()
+    reference = CircuitBuilder(2).h(0).cx(0, 1).build()
+    got = simulate(circuit).seed(SEED).backend(DM).expectation(["Z"]).metadata
+    want = simulate(reference).seed(SEED).backend(DM).expectation(["Z"]).metadata
+    assert got.reason == want.reason == "explicit_backend"
+    assert (got.backend, got.placement, got.is_exact) == (want.backend, want.placement, want.is_exact)
+
+
+def test_reset_on_the_density_matrix_honours_limits_and_start_state():
+    circuit = CircuitBuilder(2).h(0).reset(0).build()
+    with pytest.raises(prism_q.PrismError) as excinfo:
+        (
+            simulate(circuit)
+            .seed(SEED)
+            .backend(DM)
+            .limits(prism_q.Limits(max_density_matrix_qubits=1))
+            .expectation(["Z"])
+        )
+    assert excinfo.value.kind == "resource_limit"
+    assert excinfo.value.limit_source == "request"
+
+    start = [0, 0, 1, 0]
+    values = simulate(circuit).seed(SEED).backend(DM).initial_state(start).expectation(["ZI", "IZ"])
+    np.testing.assert_allclose(values.values, [1.0, -1.0], atol=DM_EPS)
+
 
 def test_noisy_shots_sample_the_exact_distribution():
     circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
@@ -151,21 +206,21 @@ def test_mismatched_noise_model_is_rejected():
     other = CircuitBuilder(1).h(0).t(0).build()
     model = NoiseModel.uniform_depolarizing(other, 0.01)
     with pytest.raises(prism_q.PrismError) as excinfo:
-        simulate(circuit).seed(SEED).noise(model).density_matrix_expectation_values([[(0, "Z")]])
+        simulate(circuit).seed(SEED).noise(model).backend(DM).expectation([[(0, "Z")]])
     assert "2 event slots for 1 instructions" in str(excinfo.value)
 
 
-def test_expectation_values_rejects_noise_without_a_mixture():
+def test_expectation_rejects_noise_without_a_mixture():
     circuit = CircuitBuilder(1).h(0).build()
     model = NoiseModel.uniform_depolarizing(circuit, 0.01)
     with pytest.raises(prism_q.PrismError):
-        simulate(circuit).seed(SEED).noise(model).expectation_values([[(0, "X")]])
+        simulate(circuit).seed(SEED).noise(model).expectation([[(0, "X")]])
 
 
 def test_unknown_pauli_axis_is_rejected():
     circuit = CircuitBuilder(1).h(0).build()
     with pytest.raises(prism_q.PrismError):
-        simulate(circuit).seed(SEED).density_matrix_expectation_values([[(0, "W")]])
+        simulate(circuit).seed(SEED).backend(DM).expectation([[(0, "W")]])
 
 
 def test_initial_density_matrix_continues_an_exported_mixture():

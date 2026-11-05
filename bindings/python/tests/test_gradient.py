@@ -1,8 +1,10 @@
 import math
+import pickle
 
 import numpy as np
+import pytest
 
-from prism_q import CircuitBuilder, simulate
+from prism_q import CircuitBuilder, ExpectationGradient, simulate
 
 
 def test_single_rx_gradient_matches_analytic():
@@ -98,7 +100,7 @@ def test_parameter_shift_reads_a_noisy_mixture_on_the_density_matrix():
         c = circuit(theta)
         noise = NoiseModel.uniform_depolarizing(c, 0.05)
         sim = simulate(c).backend(BackendKind.density_matrix()).noise(noise).seed(42)
-        return sim.expectation_values([[(0, "Z"), (1, "Z")]])[0]
+        return sim.expectation([[(0, "Z"), (1, "Z")]]).values[0]
 
     theta = 0.7
     template = circuit(theta)
@@ -140,3 +142,62 @@ def test_parameter_shift_honours_the_initial_state():
     )
     assert math.isclose(value, -math.cos(theta), abs_tol=1e-12)
     assert math.isclose(grad[0], math.sin(theta), abs_tol=1e-9)
+
+
+def test_gradient_result_names_its_fields_and_unpacks():
+    theta = 0.6
+    builder = CircuitBuilder(1)
+    builder.rx(theta, 0).param(0)
+    circuit = builder.build()
+    links = builder.parameter_links()
+
+    result = simulate(circuit).seed(42).expectation_gradient([(1.0, "Z")], links)
+    assert isinstance(result, ExpectationGradient)
+    assert math.isclose(result.value, math.cos(theta), abs_tol=1e-9)
+    assert result.gradient.shape == (1,)
+    assert math.isclose(result.gradient[0], -math.sin(theta), abs_tol=1e-9)
+
+    value, grad = result
+    assert value == result.value
+    assert np.array_equal(grad, result.gradient)
+
+    shift = simulate(circuit).seed(42).expectation_gradient_shift([(1.0, "Z")], links)
+    assert isinstance(shift, ExpectationGradient)
+    assert np.allclose(shift.gradient, result.gradient, atol=1e-9)
+
+
+def test_gradient_result_indexes_and_pickles_as_the_pair():
+    builder = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).rz(0.7, 1).param(1)
+    circuit, params = builder.build_parametric()
+    result = simulate(circuit).seed(42).expectation_gradient([(1.0, "ZZ")], params.links())
+
+    assert len(result) == 2
+    assert result[0] == result[-2] == result.value
+    assert np.array_equal(result[1], result.gradient)
+    assert np.array_equal(result[-1], result.gradient)
+    for index in (2, -3):
+        with pytest.raises(IndexError):
+            result[index]
+
+    restored = pickle.loads(pickle.dumps(result))
+    assert isinstance(restored, ExpectationGradient)
+    assert restored.value == result.value
+    assert np.array_equal(restored.gradient, result.gradient)
+    value, grad = restored
+    assert value == result.value
+    assert np.array_equal(grad, result.gradient)
+
+
+def test_gradient_result_slices_as_the_pair():
+    builder = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).rz(0.7, 1).param(1)
+    circuit, params = builder.build_parametric()
+    result = simulate(circuit).seed(42).expectation_gradient([(1.0, "ZZ")], params.links())
+
+    whole = result[:]
+    assert isinstance(whole, tuple) and len(whole) == 2
+    assert whole[0] == result.value
+    assert np.array_equal(whole[1], result.gradient)
+    tail = result[1:]
+    assert len(tail) == 1 and np.array_equal(tail[0], result.gradient)
+    assert result[:1] == (result.value,)
+    assert result[5:] == ()

@@ -43,9 +43,10 @@ use qec::{
 };
 use sampler::PyCompiledSampler;
 use sim::{
-    PyBondReport, PyCountsResult, PyEntropyResult, PyExpectationResult, PyMarginalsResult,
-    PyObservableExpectation, PyObservableVariance, PyOverlapResult, PyPauliObservable,
-    PyReducedDensityMatrix, PyRunMetadata, PyRunOutcome, PyShotsResult, PySimulation,
+    PyBondReport, PyCountsResult, PyEntropyResult, PyExpectationGradient, PyExpectationResult,
+    PyMarginalsResult, PyObservableExpectation, PyObservableVariance, PyOverlapResult,
+    PyPauliObservable, PyReducedDensityMatrix, PyRunMetadata, PyRunOutcome, PyShotsResult,
+    PySimulation,
 };
 use threading::PyThreadPool;
 
@@ -85,6 +86,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyObservableExpectation>()?;
     m.add_class::<PyObservableVariance>()?;
     m.add_class::<PyEntropyResult>()?;
+    m.add_class::<PyExpectationGradient>()?;
     m.add_class::<PyExpectationResult>()?;
     m.add_class::<PyMarginalsResult>()?;
     m.add_class::<PyOverlapResult>()?;

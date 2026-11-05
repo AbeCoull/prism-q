@@ -2,9 +2,9 @@
 
 The Python counterpart of the ``prepared/hea_l2_energy/prepared`` Criterion row: a
 two-layer hardware-efficient ansatz held in a ``PreparedCircuit``, twenty bindings
-per sweep, and an energy evaluated at each. ``list`` passes the term list, which
-the bindings parse and group on every call; ``held`` passes a ``PauliObservable``
-built once. The ``many`` modes make the same sweep one ``observable_expectation_many``
+per sweep, and an energy evaluated at each. ``list`` wraps the term list in a fresh
+``PauliObservable`` on every call, so it is parsed and grouped each time; ``held``
+passes one built once. The ``many`` modes make the same sweep one ``expectation_many``
 call. Build the wheel with the ``python-release`` profile and run on an idle host.
 
     python bindings/python/benches/energy_sweep.py --repeats 30
@@ -52,18 +52,18 @@ HAMILTONIANS = {"tfim": tfim, "heisenberg": heisenberg}
 def sweeps(prepared, points, terms):
     held = PauliObservable(terms)
 
-    def loop(h):
+    def loop(observable):
         for values in points:
-            prepared.observable_expectation(values, h, SEED)
+            prepared.expectation(values, observable(), SEED)
 
-    def many(h):
-        prepared.observable_expectation_many(points, h, SEED)
+    def many(observable):
+        prepared.expectation_many(points, observable(), SEED)
 
     return {
-        "list": lambda: loop(terms),
-        "held": lambda: loop(held),
-        "many_list": lambda: many(terms),
-        "many_held": lambda: many(held),
+        "list": lambda: loop(lambda: PauliObservable(terms)),
+        "held": lambda: loop(lambda: held),
+        "many_list": lambda: many(lambda: PauliObservable(terms)),
+        "many_held": lambda: many(lambda: held),
     }
 
 

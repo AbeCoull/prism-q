@@ -2660,6 +2660,7 @@ pub prism_q::sim::RunMetadata::shots: core::option::Option<usize>
 impl prism_q::RunMetadata
 pub fn prism_q::RunMetadata::fidelity_lower_bound(&self) -> core::option::Option<f64>
 pub fn prism_q::RunMetadata::is_exact(&self) -> bool
+pub fn prism_q::RunMetadata::new(prism_q::ResolvedBackend, prism_q::Exactness, prism_q::Placement) -> Self
 pub struct prism_q::sim::RunOutcome
 pub prism_q::sim::RunOutcome::classical_bits: alloc::vec::Vec<bool>
 pub prism_q::sim::RunOutcome::metadata: prism_q::RunMetadata
@@ -3177,11 +3178,6 @@ pub enum prism_q::TrotterOrder
 pub prism_q::TrotterOrder::First
 pub prism_q::TrotterOrder::Second
 pub prism_q::TrotterOrder::Suzuki(usize)
-pub struct prism_q::BatchPhaseData
-impl prism_q::gates::BatchPhaseData
-pub const prism_q::gates::BatchPhaseData::MAX_PHASES: usize
-pub fn prism_q::gates::BatchPhaseData::new(impl core::iter::traits::collect::IntoIterator<Item = (usize, num_complex::Complex64)>) -> Self
-pub fn prism_q::gates::BatchPhaseData::phases(&self) -> &[(usize, num_complex::Complex64)]
 pub struct prism_q::BondReport
 pub prism_q::BondReport::cap: usize
 pub prism_q::BondReport::peak: usize
@@ -3775,15 +3771,6 @@ pub fn prism_q::backend::mps::MpsBackend::supports_pauli_expectation(&self) -> b
 pub fn prism_q::backend::mps::MpsBackend::supports_pauli_rotation(&self) -> bool
 pub fn prism_q::backend::mps::MpsBackend::supports_qft_block(&self) -> bool
 pub fn prism_q::backend::mps::MpsBackend::supports_two_qubit_kraus(&self) -> bool
-pub struct prism_q::Multi2qData
-impl prism_q::gates::Multi2qData
-pub fn prism_q::gates::Multi2qData::gates(&self) -> &[(usize, usize, [[num_complex::Complex64; 4]; 4])]
-pub fn prism_q::gates::Multi2qData::new(alloc::vec::Vec<(usize, usize, [[num_complex::Complex64; 4]; 4])>) -> Self
-pub struct prism_q::MultiFusedData
-impl prism_q::gates::MultiFusedData
-pub fn prism_q::gates::MultiFusedData::all_diagonal(&self) -> bool
-pub fn prism_q::gates::MultiFusedData::gates(&self) -> &[(usize, [[num_complex::Complex64; 2]; 2])]
-pub fn prism_q::gates::MultiFusedData::new(alloc::vec::Vec<(usize, [[num_complex::Complex64; 2]; 2])>) -> Self
 pub struct prism_q::NoiseBuilder
 impl prism_q::sim::noise::builder::NoiseBuilder
 pub fn prism_q::sim::noise::builder::NoiseBuilder::after_gates(self, prism_q::sim::noise::builder::GateFilter, prism_q::sim::noise::NoiseChannel) -> Self
@@ -4189,6 +4176,7 @@ pub prism_q::RunMetadata::shots: core::option::Option<usize>
 impl prism_q::RunMetadata
 pub fn prism_q::RunMetadata::fidelity_lower_bound(&self) -> core::option::Option<f64>
 pub fn prism_q::RunMetadata::is_exact(&self) -> bool
+pub fn prism_q::RunMetadata::new(prism_q::ResolvedBackend, prism_q::Exactness, prism_q::Placement) -> Self
 pub struct prism_q::RunOutcome
 pub prism_q::RunOutcome::classical_bits: alloc::vec::Vec<bool>
 pub prism_q::RunOutcome::metadata: prism_q::RunMetadata
@@ -4573,10 +4561,6 @@ pub fn prism_q::density_matrix_expectation_values(&prism_q::circuit::Circuit, &[
 pub fn prism_q::inverse_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm]) -> alloc::vec::Vec<bool>
 pub fn prism_q::noisy_marginals_analytical(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::parse_qec_program(&str) -> prism_q::error::Result<prism_q::qec::QecProgram>
-pub fn prism_q::run_expectation_gradient(&prism_q::circuit::Circuit, &[(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)], &prism_q::circuit::parameter::Parameters, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::run_expectation_gradient_shift(&prism_q::circuit::Circuit, &[(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)], &prism_q::circuit::parameter::Parameters, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::run_expectation_values(&prism_q::circuit::Circuit, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::run_observable_expectation(&prism_q::circuit::Circuit, &prism_q::PauliObservable, u64) -> prism_q::error::Result<prism_q::ObservableExpectation>
 pub fn prism_q::run_on(&mut dyn prism_q::backend::Backend, &prism_q::circuit::Circuit) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::run_on_state(&mut dyn prism_q::backend::Backend, &prism_q::circuit::Circuit, &[num_complex::Complex64]) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::run_qasm(&str, u64) -> prism_q::error::Result<prism_q::sim::RunOutcome>

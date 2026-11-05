@@ -457,9 +457,9 @@ impl PyCircuit {
     /// `hamiltonian = sum c P`, each term as the rotation `exp(-i c P dt)` with
     /// `dt = t / steps` through `add_pauli_rotation`. `order` is 1 (Lie-Trotter),
     /// 2 (symmetric), or an even `2k` (Suzuki, costing `5^(k - 1)` second-order
-    /// substeps). Identity terms are dropped as a global phase. `hamiltonian`
-    /// takes the `Simulation.observable_expectation` term shape or a
-    /// `PauliObservable`.
+    /// substeps). Identity terms are dropped as a global phase. `hamiltonian` is a
+    /// `PauliObservable` or a list of `(coefficient, pauli)` terms, each `pauli` a
+    /// string such as `"ZZI"` or `(qubit, axis)` factors.
     #[pyo3(signature = (hamiltonian, t, steps=1, order=2))]
     fn add_trotter(
         &mut self,
@@ -468,6 +468,7 @@ impl PyCircuit {
         steps: usize,
         order: usize,
     ) -> PyPrismResult<()> {
+        hamiltonian.check_width(self.0.num_qubits)?;
         let observable = hamiltonian.observable()?;
         let order = check_trotter(self.0.num_qubits, &observable, steps, order)?;
         self.0.add_trotter(&observable, t, steps, order);
@@ -846,6 +847,7 @@ impl PyCircuitBuilder {
         steps: usize,
         order: usize,
     ) -> PyPrismResult<PyRefMut<'py, Self>> {
+        hamiltonian.check_width(slf.inner.circuit().num_qubits)?;
         let observable = hamiltonian.observable()?;
         let order = check_trotter(slf.inner.circuit().num_qubits, &observable, steps, order)?;
         slf.inner.trotter(&observable, t, steps, order);
@@ -868,11 +870,6 @@ impl PyCircuitBuilder {
         }
         slf.inner.param(slot);
         Ok(slf)
-    }
-
-    /// Deprecated alias of `param`, to be removed in the next minor release.
-    fn trainable(slf: PyRefMut<'_, Self>, slot: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
-        Self::param(slf, slot)
     }
 
     /// The `(instruction_index, parameter_slot)` links recorded by `param`, for
@@ -1270,6 +1267,12 @@ impl PyCircuitBuilder {
     /// Return a copy of the circuit so far. The builder stays usable afterward.
     fn build(&self) -> PyCircuit {
         PyCircuit(self.inner.circuit().clone())
+    }
+
+    /// `build()` and `parameters()` in one call, as `parse_qasm_parametric` returns
+    /// them. The builder stays usable afterward.
+    fn build_parametric(&self) -> (PyCircuit, PyParameters) {
+        (self.build(), self.parameters())
     }
 }
 

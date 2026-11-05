@@ -6,10 +6,9 @@ mod common;
 
 use common::{SEED, caps};
 use prism_q::gates::Gate;
-use prism_q::{
-    BackendKind, Circuit, Parameters, PauliTerm, PrismError, ResolvedBackend,
-    run_expectation_gradient, run_expectation_values, simulate,
-};
+use prism_q::sim::gradient::run_expectation_gradient;
+use prism_q::sim::run_expectation_values;
+use prism_q::{BackendKind, Circuit, Parameters, PauliTerm, PrismError, ResolvedBackend, simulate};
 
 const CAP: usize = 4;
 const TOL: f64 = 1e-9;

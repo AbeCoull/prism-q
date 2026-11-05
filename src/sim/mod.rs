@@ -635,7 +635,8 @@ impl<'c> Simulate<'c, Seeded> {
     /// output state, honoring the selected backend.
     ///
     /// Each observable is a product of single-qubit Paulis (identity factors
-    /// omitted). The circuit must be unitary. Clifford circuits propagate each
+    /// omitted). The circuit must be unitary, except that the density-matrix
+    /// backends evolve a reset as a channel. Clifford circuits propagate each
     /// observable exactly. Non-Clifford circuits use the state vector while they
     /// fit it; above that cap the selected backend evaluates the observable on
     /// its own representation, and a backend without one reports
@@ -678,9 +679,22 @@ impl<'c> Simulate<'c, Seeded> {
                 max_terms,
             );
         }
+        if evolves_resets_as_channels(&self.kind, self.circuit) {
+            let result = reset_channel_expectations(
+                &self.kind,
+                self.circuit,
+                observables,
+                self.noise_model,
+                self.initial_state,
+                seed,
+                limits,
+            )?;
+            ensure_exact_result(self.require_exact, &result.metadata)?;
+            return Ok(result);
+        }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "expectation values")?;
-            require_unitary_circuit(&self.kind, self.circuit, "expectation values require")?;
+            require_unitary_expectation_circuit(&self.kind, self.circuit)?;
             let values = noise::dm_expectation_values(
                 &self.kind,
                 self.circuit,
@@ -696,7 +710,7 @@ impl<'c> Simulate<'c, Seeded> {
             ));
         }
         if let Some(state) = self.initial_state {
-            require_unitary_circuit(&self.kind, self.circuit, "expectation values require")?;
+            require_unitary_expectation_circuit(&self.kind, self.circuit)?;
             return expectation_values_from_initial_state(
                 &self.kind,
                 self.circuit,
@@ -766,9 +780,27 @@ impl<'c> Simulate<'c, Seeded> {
                 metadata,
             ));
         }
+        if evolves_resets_as_channels(&self.kind, self.circuit) {
+            let result = reset_channel_expectations(
+                &self.kind,
+                self.circuit,
+                &observable_vecs(observable),
+                self.noise_model,
+                self.initial_state,
+                seed,
+                limits,
+            )?;
+            ensure_exact_result(self.require_exact, &result.metadata)?;
+            return Ok(weighted_observable_result(
+                observable,
+                &result.values,
+                None,
+                result.metadata,
+            ));
+        }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "expectation values")?;
-            require_unitary_circuit(&self.kind, self.circuit, "expectation values require")?;
+            require_unitary_expectation_circuit(&self.kind, self.circuit)?;
             let values = noise::dm_expectation_values(
                 &self.kind,
                 self.circuit,
@@ -786,7 +818,7 @@ impl<'c> Simulate<'c, Seeded> {
             ));
         }
         if let Some(state) = self.initial_state {
-            require_unitary_circuit(&self.kind, self.circuit, "expectation values require")?;
+            require_unitary_expectation_circuit(&self.kind, self.circuit)?;
             let result = expectation_values_from_initial_state(
                 &self.kind,
                 self.circuit,
@@ -1680,6 +1712,80 @@ fn require_unitary_circuit(kind: &BackendKind, circuit: &Circuit, subject: &str)
         });
     }
     Ok(())
+}
+
+/// [`require_unitary_circuit`] for the expectation terminals. When resets are the
+/// only obstacle on another backend, the error names the density matrix, which
+/// evolves them as channels.
+fn require_unitary_expectation_circuit(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
+    let checked = require_unitary_circuit(kind, circuit, "expectation values require");
+    if checked.is_err()
+        && !kind.is_density_matrix()
+        && evolves_resets_as_channels(&BackendKind::DensityMatrix, circuit)
+    {
+        return Err(PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "expectation values require a unitary circuit without measurements, \
+                     resets, or conditionals; `BackendKind::DensityMatrix` evolves resets as \
+                     channels"
+                .into(),
+        });
+    }
+    checked
+}
+
+/// Whether the expectation terminals evolve `circuit` on the density matrix with
+/// its resets as channels: a density-matrix `kind`, a reset, and no measurement,
+/// conditional, or region, each of which the unitary check still rejects.
+fn evolves_resets_as_channels(kind: &BackendKind, circuit: &Circuit) -> bool {
+    kind.is_density_matrix()
+        && circuit.has_resets()
+        && !circuit.instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                Instruction::Measure { .. }
+                    | Instruction::Conditional { .. }
+                    | Instruction::Region(_)
+            )
+        })
+}
+
+/// Expectation values on the evolved density matrix of a circuit with resets,
+/// with the provenance the same circuit without its resets reports: the exact
+/// mixture's with noise, otherwise the start state's or the explicit backend's.
+fn reset_channel_expectations(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    noise_model: Option<&noise::NoiseModel>,
+    initial_state: Option<StartState<'_>>,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<ExpectationResult> {
+    let masks = observables
+        .iter()
+        .map(|obs| pauli_masks(obs, circuit.num_qubits))
+        .collect::<Result<Vec<_>>>()?;
+    let rule = if initial_state.is_some() {
+        RouteRule::StartState
+    } else {
+        RouteRule::ExplicitBackend
+    };
+    let dm = noise::evolve_density_matrix(kind, circuit, noise_model, initial_state, seed, limits)?;
+    let metadata = match noise_model {
+        Some(_) => exact_mixture_metadata(kind),
+        None => {
+            let expected_device = !matches!(
+                accel_for(kind, Family::DensityMatrix, circuit.num_qubits),
+                dispatch::Accel::Cpu
+            );
+            route_metadata(&dm, expected_device, rule)
+        }
+    };
+    Ok(analytic_expectations(
+        dm.expectations_pauli(&masks),
+        metadata,
+    ))
 }
 
 /// Provenance of a result read off the exact mixture: the density matrix,
@@ -3183,7 +3289,8 @@ fn execute_marginals(
 /// # Examples
 ///
 /// ```
-/// use prism_q::{Circuit, Gate, PauliTerm, run_expectation_values};
+/// use prism_q::sim::run_expectation_values;
+/// use prism_q::{Circuit, Gate, PauliTerm};
 ///
 /// let mut bell = Circuit::new(2, 0);
 /// bell.add_gate(Gate::H, &[0]);
@@ -3295,7 +3402,8 @@ fn execute_expectations(
 /// # Examples
 ///
 /// ```
-/// use prism_q::{Circuit, Gate, PauliObservable, PauliTerm, run_observable_expectation};
+/// use prism_q::sim::run_observable_expectation;
+/// use prism_q::{Circuit, Gate, PauliObservable, PauliTerm};
 ///
 /// let mut circuit = Circuit::new(2, 0);
 /// circuit.add_gate(Gate::H, &[0]);
@@ -3331,7 +3439,7 @@ fn run_observable_expectation_reported(
     seed: u64,
     limits: &ResolvedLimits,
 ) -> Result<ObservableExpectation> {
-    require_unitary_circuit(&kind, circuit, "expectation values require")?;
+    require_unitary_expectation_circuit(&kind, circuit)?;
 
     let grouped_statevector = grouped_statevector(&kind, circuit, limits);
     if grouped_statevector {
@@ -3399,7 +3507,7 @@ fn grouped_expectation_statevector(
     seed: u64,
     limits: &ResolvedLimits,
 ) -> Result<ObservableExpectation> {
-    require_unitary_circuit(kind, circuit, "expectation values require")?;
+    require_unitary_expectation_circuit(kind, circuit)?;
     let terms = observable.terms();
     // Validate before the 2^n simulation so bad observables fail cheaply. The
     // mask reduction shifts by qubit index, so it follows the `init` that

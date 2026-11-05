@@ -62,12 +62,12 @@ values = (
     simulate(chain)
     .backend(BackendKind.deterministic_pauli())
     .seed(42)
-    .expectation_values_reported([[(59, "Z")]])
+    .expectation([[(59, "Z")]])
 )
 print(round(values.values[0], 6), values.metadata.is_exact)   # 0.03125 True
 ```
 
-`expectation_values_reported` returns the values with the run's metadata. Shot sampling
+`expectation` returns the values with the run's metadata. Shot sampling
 on the measured version goes to the stabilizer-rank engine unprompted; it tracks a sum
 of stabilizer states that grows with the T count, not the width:
 
@@ -90,7 +90,7 @@ cap of 256:
 from prism_q import circuits
 
 wide = circuits.hardware_efficient_ansatz(60, 2)
-result = simulate(wide).seed(42).expectation_values_reported([[(0, "Z")]])
+result = simulate(wide).seed(42).expectation([[(0, "Z")]])
 meta = result.metadata
 print(meta.backend, meta.is_exact, meta.fidelity_lower_bound)   # Mps False 1.0
 print(meta.bond.peak, meta.bond.cap, meta.bond.saturated)       # 4 256 False
@@ -101,7 +101,7 @@ it did: the widest bond needed was 4, under the cap of 256, so nothing was cut a
 `fidelity_lower_bound` is 1.0. With the cap forced down to 2, the bond saturates:
 
 ```python
-tight = simulate(wide).backend(BackendKind.mps(2)).seed(42).expectation_values_reported(
+tight = simulate(wide).backend(BackendKind.mps(2)).seed(42).expectation(
     [[(0, "Z")]]
 )
 print(round(result.values[0], 4), round(tight.values[0], 4))   # 0.3301 0.4464
@@ -119,7 +119,7 @@ and the fidelity bound drops to 0.0, the worst case it can certify.
 from prism_q import PrismError
 
 try:
-    simulate(wide).seed(42).require_exact().expectation_values([[(0, "Z")]])
+    simulate(wide).seed(42).require_exact().expectation([[(0, "Z")]])
 except PrismError as exc:
     print(exc.kind)                 # incompatible_backend
 ```

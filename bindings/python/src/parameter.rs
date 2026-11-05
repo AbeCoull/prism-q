@@ -3,18 +3,18 @@
 
 use std::sync::Mutex;
 
-use numpy::{PyArray2, PyReadonlyArray2};
+use numpy::PyReadonlyArray2;
 use prism_q::{BackendKind, Circuit, Instruction, Parameters, PreparedCircuit, RunOutcome};
 use pyo3::prelude::*;
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
 use crate::codec::{Pin, decode_parameters, encode_parameters, restore_parameters};
-use crate::error::{PyPrismResult, invalid};
-use crate::numpy_util::f64_matrix;
+use crate::error::{PyPrismError, PyPrismResult, invalid};
+use crate::numpy_util::{f64_array, f64_matrix};
 use crate::pickle::{Reduced, reduce};
 use crate::sim::{
-    DEFAULT_SEED, Hamiltonian, PyObservableExpectation, PyRunOutcome, parse_observables,
+    DEFAULT_SEED, Observables, PyObservableExpectation, PyRunOutcome, parse_observables,
 };
 
 /// Parameter slots over the rotation angles of a circuit.
@@ -233,39 +233,41 @@ impl PyPreparedCircuit {
         Ok(PyRunOutcome::from_outcome(outcome))
     }
 
-    /// Bind `values` and compute each joint Pauli observable, as
-    /// `Simulation.expectation_values()` does on the bound circuit.
+    /// Bind `values` and evaluate `observables` as `Simulation.expectation()` does on
+    /// the bound circuit, without dispatching or fusing again. A list of Pauli strings
+    /// returns a `float64` array, one value per string; a `PauliObservable` returns an
+    /// `ObservableExpectation`.
     #[pyo3(signature = (values, observables, seed = DEFAULT_SEED))]
-    fn expectation_values(
+    fn expectation<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         values: Vec<f64>,
-        observables: Vec<Vec<(usize, String)>>,
+        observables: Observables<'py>,
         seed: u64,
-    ) -> PyPrismResult<Vec<f64>> {
-        let observables = parse_observables(observables)?;
-        Ok(py.detach(|| {
-            self.locked()
-                .expectation_values(&values, &observables, seed)
-        })?)
-    }
-
-    /// Bind `values` and compute `⟨H⟩`, as `Simulation.observable_expectation()`
-    /// does on the bound circuit.
-    #[pyo3(signature = (values, hamiltonian, seed = DEFAULT_SEED))]
-    fn observable_expectation(
-        &self,
-        py: Python<'_>,
-        values: Vec<f64>,
-        hamiltonian: Hamiltonian<'_>,
-        seed: u64,
-    ) -> PyPrismResult<PyObservableExpectation> {
-        let observable = hamiltonian.observable()?;
-        let result = py.detach(|| {
-            self.locked()
-                .observable_expectation(&values, &observable, seed)
-        })?;
-        Ok(PyObservableExpectation::from_result(result))
+    ) -> PyResult<Bound<'py, PyAny>> {
+        observables.check_width(self.locked().template().num_qubits)?;
+        match observables {
+            Observables::Weighted(held) => {
+                let observable = &held.get().0;
+                let result = py
+                    .detach(|| {
+                        self.locked()
+                            .observable_expectation(&values, observable, seed)
+                    })
+                    .map_err(PyPrismError::from)?;
+                Ok(Bound::new(py, PyObservableExpectation::from_result(result))?.into_any())
+            }
+            Observables::Strings(strings) => {
+                let observables = parse_observables(strings)?;
+                let result = py
+                    .detach(|| {
+                        self.locked()
+                            .expectation_values(&values, &observables, seed)
+                    })
+                    .map_err(PyPrismError::from)?;
+                Ok(f64_array(py, result).into_any())
+            }
+        }
     }
 
     /// `run` on each row of `bindings`, a `(points, num_slots)` array, in one call
@@ -285,45 +287,45 @@ impl PyPreparedCircuit {
             .collect())
     }
 
-    /// `expectation_values` on each row of `bindings`, split as `run_many` splits.
-    /// Returns a `(points, observables)` array.
+    /// `expectation` on each row of `bindings`, split as `run_many` splits. A list of
+    /// Pauli strings returns a `(points, observables)` array; a `PauliObservable` returns
+    /// one `ObservableExpectation` per row.
     #[pyo3(signature = (bindings, observables, seed = DEFAULT_SEED))]
-    fn expectation_values_many<'py>(
+    fn expectation_many<'py>(
         &self,
         py: Python<'py>,
         bindings: &Bound<'py, PyAny>,
-        observables: Vec<Vec<(usize, String)>>,
+        observables: Observables<'py>,
         seed: u64,
-    ) -> PyPrismResult<Bound<'py, PyArray2<f64>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let rows = binding_rows(bindings)?;
-        let observables = parse_observables(observables)?;
-        let values = py.detach(|| {
-            self.locked()
-                .expectation_values_many(&rows, &observables, seed)
-        })?;
-        f64_matrix(py, rows.len(), observables.len(), values.concat())
-    }
-
-    /// `observable_expectation` on each row of `bindings`, split as `run_many`
-    /// splits.
-    #[pyo3(signature = (bindings, hamiltonian, seed = DEFAULT_SEED))]
-    fn observable_expectation_many(
-        &self,
-        py: Python<'_>,
-        bindings: &Bound<'_, PyAny>,
-        hamiltonian: Hamiltonian<'_>,
-        seed: u64,
-    ) -> PyPrismResult<Vec<PyObservableExpectation>> {
-        let rows = binding_rows(bindings)?;
-        let observable = hamiltonian.observable()?;
-        let results = py.detach(|| {
-            self.locked()
-                .observable_expectation_many(&rows, &observable, seed)
-        })?;
-        Ok(results
-            .into_iter()
-            .map(PyObservableExpectation::from_result)
-            .collect())
+        observables.check_width(self.locked().template().num_qubits)?;
+        match observables {
+            Observables::Weighted(held) => {
+                let observable = &held.get().0;
+                let results = py
+                    .detach(|| {
+                        self.locked()
+                            .observable_expectation_many(&rows, observable, seed)
+                    })
+                    .map_err(PyPrismError::from)?;
+                let results: Vec<PyObservableExpectation> = results
+                    .into_iter()
+                    .map(PyObservableExpectation::from_result)
+                    .collect();
+                Ok(results.into_pyobject(py)?.into_any())
+            }
+            Observables::Strings(strings) => {
+                let observables = parse_observables(strings)?;
+                let values = py
+                    .detach(|| {
+                        self.locked()
+                            .expectation_values_many(&rows, &observables, seed)
+                    })
+                    .map_err(PyPrismError::from)?;
+                Ok(f64_matrix(py, rows.len(), observables.len(), values.concat())?.into_any())
+            }
+        }
     }
 
     /// The unbound template this was built from.

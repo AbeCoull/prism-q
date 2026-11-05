@@ -12,7 +12,7 @@ Two feature flags. `distributed` adds the backend and the single-rank and thread
 loopback transports, with no external dependency. `distributed-mpi` adds the MPI
 transport over `rsmpi`, which needs a system MPI installation and libclang for its
 bindgen step. The published Python wheels carry neither; build from source to enable
-them (see [Python Bindings](./python.md#distributed-backend)).
+them (see [Python Bindings](./python-running.md#distributed-backend)).
 ```
 
 ## Running
@@ -126,7 +126,7 @@ cargo nextest run --features "parallel distributed" -E 'test(distributed)'
 ```
 
 `scripts/test-mpi.ps1` (Windows, MS-MPI) and `scripts/test-mpi.sh` (Linux, Open MPI
-flags) build `examples/dist_mpi_check.rs` with the `distributed-mpi` feature and launch
+flags) build `tools/dist_mpi_check.rs` with the `distributed-mpi` feature and launch
 it at 1, 2 and 4 ranks under three configurations (default, tiled exchange, relabeling
 off). Rank 0 compares the gathered result against a one-process statevector and fails on
 mismatch, and a three-rank launch checks that the power-of-two rule is enforced. The

@@ -8,7 +8,7 @@ workload; the structured families (QFT, QV) come from the `prism_q::circuits`
 generators through `compare_runner export`, the same circuits as the published
 benchmark suite.
 
-Gate list format (see `examples/compare_runner.rs`): `qubits N`, an optional
+Gate list format (see `tools/compare_runner.rs`): `qubits N`, an optional
 `clbits M`, then one instruction per line. `h x z s sdg ry rz` act on one qubit,
 `cx cz swap cp` on two, `measure q c` writes classical bit `c`, `reset q`
 returns a qubit to |0>, and `if c v <gate>` applies a gate when bit `c` reads `v`.

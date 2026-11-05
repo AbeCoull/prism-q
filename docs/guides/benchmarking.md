@@ -10,7 +10,7 @@ threading) are in [Performance and SIMD](./performance.md).
 
 | Purpose | Tool | Output |
 |---------|------|--------|
-| Published wall-clock timings per circuit family | `examples/bench_suite.rs` | Rewrites `docs/benchmarks.md` |
+| Published wall-clock timings per circuit family | `tools/bench_suite.rs` | Rewrites `docs/benchmarks.md` |
 | Per-kernel and per-family rows held to a regression gate | Criterion targets under `benches/` and `scripts/bench_ab.sh` | Criterion estimates and an A/B report |
 
 The suite answers "how long does this circuit take end to end on this host". The
@@ -87,7 +87,7 @@ Which category each need maps to:
 | Fused versus unfused | `density_matrix/fused_layers` and `rzz_layers_fused` against `unitary_layers`; the `PRISM_NO_REORDER` and `PRISM_NO_QFT_BLOCK` flags in [Performance and SIMD](./performance.md#tuning-environment-variables) switch individual passes off for any row |
 | Thread scaling | Any row rerun under `RAYON_NUM_THREADS=1,2,4,...`; no target sweeps threads on its own |
 | Memory scaling | The qubit ladders inside each family; the memory caps are in [Backends](../architecture/backends.md#memory-budget) |
-| CPU versus GPU | `bench_gpu` groups beside their CPU twins, or `examples/bench_gpu_vs_cpu.rs` for a per-gate comparison with fusion disabled on both sides |
+| CPU versus GPU | `bench_gpu` groups beside their CPU twins, or `tools/bench_gpu_vs_cpu.rs` for a per-gate comparison with fusion disabled on both sides |
 | Distributed execution | `bench_distributed`, and `scripts/test-mpi.sh --timed` for real ranks across hosts |
 
 ## Reading a number

@@ -49,14 +49,15 @@ cargo build --release
 ## Running the test suite
 
 ```bash
-cargo nextest run --all-features                          # unit + integration tests
-cargo test --doc --all-features                           # doctests
-cargo clippy --all-targets --all-features -- -D warnings  # lint
+cargo nextest run --features parallel                          # unit + integration tests
+cargo test --doc --features parallel                           # doctests
+cargo clippy --all-targets --features parallel -- -D warnings  # lint
 ```
 
-Use `cargo test --all-features` if `cargo-nextest` is unavailable. `--all-features`
-includes `distributed-mpi`, which needs a system MPI installation and libclang for its
-bindgen step; without those, name the features instead, for example
-`--features "parallel gpu"`.
+Use `cargo test --features parallel` if `cargo-nextest` is unavailable. These need only
+a Rust toolchain. The GPU, distributed and MPI arms are covered in the
+[contributing guide](https://github.com/AbeCoull/prism-q/blob/main/CONTRIBUTING.md#test-and-lint);
+its `--all-features` runs add `distributed-mpi`, which needs a system MPI installation
+and libclang.
 
 Next: build [Your First Circuit](./first-circuit.md).

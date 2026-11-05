@@ -208,7 +208,7 @@ let svg = qaoa_circuit(6, 3, 42).to_svg(&opts);
 assert!(svg.starts_with("<svg"));
 ```
 
-[`examples/gen_doc_diagrams.rs`](https://github.com/AbeCoull/prism-q/blob/main/examples/gen_doc_diagrams.rs)
+[`tools/gen_doc_diagrams.rs`](https://github.com/AbeCoull/prism-q/blob/main/tools/gen_doc_diagrams.rs)
 regenerates the circuit images on this site with fixed seeds:
 
 ```bash

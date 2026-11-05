@@ -53,7 +53,14 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 
 ## Guides
 
-- [Python bindings](https://abecoull.github.io/prism-q/guides/python.html): the wheel surface, which Rust terminals it exposes, and numpy interop.
+- [Python bindings](https://abecoull.github.io/prism-q/guides/python.html): install, a quick start, errors and typing, and an index of the Python pages.
+- [Python: circuits and parameters](https://abecoull.github.io/prism-q/guides/python-circuits.html): `CircuitBuilder`, classical control, export and drawing, parameter sweeps, pickling, and dynamic programs.
+- [Python: running simulations](https://abecoull.github.io/prism-q/guides/python-running.html): the terminal methods, result metadata, memory caps, backend selection, and the GPU and MPI backends.
+- [Python: observables and gradients](https://abecoull.github.io/prism-q/guides/python-observables.html): expectation values, exact noisy expectations, and adjoint gradients.
+- [Python: noise and shots](https://abecoull.github.io/prism-q/guides/python-noise.html): noise models and rules, leakage, timed noise, and compiled samplers.
+- [Python: quantum error correction](https://abecoull.github.io/prism-q/guides/python-qec.html): `QecProgram`, detector error models, decoders, and feedforward.
+- [Python: advanced state handling](https://abecoull.github.io/prism-q/guides/python-state.html): start states and mixtures, tableau hand-off, mid-circuit saves, and route inspection.
+- [Python: Rust and Python names](https://abecoull.github.io/prism-q/guides/python-names.html): which Python name reaches each Rust function.
 - [Backends deep dive](https://abecoull.github.io/prism-q/guides/backends.html): memory layout, gate support, and applicability per backend.
 - [Capability and support matrix](https://abecoull.github.io/prism-q/guides/capabilities.html): which gates, channels, and terminals each backend answers, CPU and GPU.
 - [Performance and SIMD](https://abecoull.github.io/prism-q/guides/performance.html): parallel thresholds, kernel dispatch, and the tuning knobs.

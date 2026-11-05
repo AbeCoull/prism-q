@@ -1,6 +1,6 @@
 //! Rust comparators for the cross-simulator comparison harness: Spinoza and
 //! RustQIP (`qip`), driven through the same gate-list protocol as
-//! `examples/compare_runner.rs`.
+//! `tools/compare_runner.rs`.
 //!
 //! ```text
 //! peers <spinoza|qip> time <iterations> [--threads N]   (gate list on stdin)

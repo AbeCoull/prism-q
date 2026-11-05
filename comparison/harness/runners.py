@@ -1,7 +1,7 @@
 """Simulator registry and process execution for the benchmark matrix.
 
 Every measurement is one child process speaking the `exec` protocol (see
-`examples/compare_runner.rs` and `worker.py`), so each observation carries its
+`tools/compare_runner.rs` and `worker.py`), so each observation carries its
 own peak memory, startup cost and failure mode. The three native peers that
 predate `exec` (QuEST, Spinoza, qip) are driven through their `probabilities`
 and `time` commands, which gives the same timed region without the phase split.

@@ -267,7 +267,7 @@ fn throughput_sizes() -> &'static [usize] {
 
 const THROUGHPUT_CIRCUITS: [&str; 5] = ["qft", "hea_l5", "qv", "random_d10", "diag_mixed_l6"];
 
-/// The circuit rows of `gpu/throughput`; `examples/gpu_pass_census.rs` counts the same
+/// The circuit rows of `gpu/throughput`; `tools/gpu_pass_census.rs` counts the same
 /// set.
 fn throughput_circuit(name: &str, n: usize) -> Circuit {
     match name {

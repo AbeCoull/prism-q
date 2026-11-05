@@ -153,20 +153,62 @@ name = "bench_distributed"
 harness = false
 required-features = ["distributed", "bench-internal"]
 
+# Development tools: built as examples so `cargo run --example <name>` works, kept out of
+# examples/ so that directory holds only usage examples.
 [[example]]
-name = "dist_mpi_check"
-required-features = ["distributed-mpi"]
+name = "atlas_trace"
+path = "tools/atlas_trace.rs"
 
 [[example]]
 name = "bench_gpu_dispatch"
+path = "tools/bench_gpu_dispatch.rs"
 required-features = ["gpu"]
 
 [[example]]
+name = "bench_gpu_vs_cpu"
+path = "tools/bench_gpu_vs_cpu.rs"
+
+[[example]]
+name = "bench_sparse_det"
+path = "tools/bench_sparse_det.rs"
+
+[[example]]
+name = "bench_stabilizer"
+path = "tools/bench_stabilizer.rs"
+
+[[example]]
+name = "bench_suite"
+path = "tools/bench_suite.rs"
+
+[[example]]
+name = "compare_runner"
+path = "tools/compare_runner.rs"
+
+[[example]]
+name = "dist_mpi_check"
+path = "tools/dist_mpi_check.rs"
+required-features = ["distributed-mpi"]
+
+[[example]]
+name = "gen_doc_diagrams"
+path = "tools/gen_doc_diagrams.rs"
+
+[[example]]
 name = "gpu_pass_census"
+path = "tools/gpu_pass_census.rs"
 required-features = ["gpu", "bench-internal"]
 
 [[example]]
+name = "profile_chunked_memory"
+path = "tools/profile_chunked_memory.rs"
+
+[[example]]
+name = "profile_circuit"
+path = "tools/profile_circuit.rs"
+
+[[example]]
 name = "sweep_census"
+path = "tools/sweep_census.rs"
 required-features = ["bench-internal"]
 
 [[bench]]

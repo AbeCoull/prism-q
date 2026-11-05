@@ -1,5 +1,5 @@
 // QuEST comparator for the cross-simulator comparison harness, driven through
-// the same gate-list protocol as examples/compare_runner.rs:
+// the same gate-list protocol as tools/compare_runner.rs:
 //
 //   quest_runner time <iterations>        (gate list on stdin)
 //   quest_runner probabilities <out_path> (gate list on stdin)

@@ -44,7 +44,7 @@ print(round(ghz_fraction(noisy), 4))          # 0.9273
 `after_gates_joint` adds one channel across all of a gate's targets, here a two-qubit
 depolarizing channel after every `cx`. `uniform_readout_error(p01, p10)` flips reported
 bits after sampling: `p01` is the chance a measured 0 reads as 1. The
-[Python guide](../guides/python.md#noise) lists the other rules: crosstalk,
+[Python guide](../guides/python-noise.md#noise) lists the other rules: crosstalk,
 over-rotation, idle noise, and noise after resets or before measurement.
 
 A model is tied to the circuit it was built from. Build a new one for a different circuit.

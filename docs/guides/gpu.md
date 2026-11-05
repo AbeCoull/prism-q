@@ -89,7 +89,7 @@ free memory.
 
 The four `BackendKind` entry points are also reachable from Python. The Linux and
 Windows wheels carry the `gpu` feature, and `pip install "prism-q[cuda12]"` adds
-NVRTC from PyPI. See [Python Bindings](python.md#gpu-backends).
+NVRTC from PyPI. See [Python Bindings](python-running.md#gpu-backends).
 
 ## Module layout (`src/gpu/`)
 

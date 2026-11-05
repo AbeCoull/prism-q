@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::error::{PyPrismError, PyPrismResult};
-use crate::sim::{PyPauliObservable, parse_observables};
+use crate::sim::{PyPauliObservable, parse_observables, widest_string};
 
 enum OwnedQuery {
     Run,
@@ -23,9 +23,33 @@ enum OwnedQuery {
 
 /// Non-consuming terminal description for `Simulation.plan`.
 #[pyclass(name = "Query", module = "prism_q")]
-pub(crate) struct PyQuery(OwnedQuery);
+pub(crate) struct PyQuery(OwnedQuery, usize);
 
 impl PyQuery {
+    /// Characters in the longest Pauli text the query was built from, which the
+    /// parsed terms do not record; `Simulation.plan` checks it against the circuit.
+    pub(crate) fn text_width(&self) -> usize {
+        self.1
+    }
+
+    /// The query with its Pauli terms dropped, for planning the route of a query
+    /// whose terms the circuit cannot hold.
+    pub(crate) fn as_query_without_terms<'a>(&'a self, empty: &'a PauliObservable) -> Query<'a> {
+        match &self.0 {
+            OwnedQuery::Expectation(_) => Query::Expectation(&[]),
+            OwnedQuery::Observable(_) => Query::Observable(empty),
+            OwnedQuery::Gradient(_, parameters) => Query::Gradient {
+                hamiltonian: &[],
+                parameters,
+            },
+            OwnedQuery::GradientShift(_, parameters) => Query::GradientShift {
+                hamiltonian: &[],
+                parameters,
+            },
+            _ => self.as_query(),
+        }
+    }
+
     pub(crate) fn as_query(&self) -> Query<'_> {
         match &self.0 {
             OwnedQuery::Run => Query::Run,
@@ -53,61 +77,69 @@ impl PyQuery {
 impl PyQuery {
     #[staticmethod]
     fn run() -> Self {
-        Self(OwnedQuery::Run)
+        Self(OwnedQuery::Run, 0)
     }
     #[staticmethod]
     fn shots(num_shots: usize) -> Self {
-        Self(OwnedQuery::Shots(num_shots))
+        Self(OwnedQuery::Shots(num_shots), 0)
     }
     #[staticmethod]
     fn counts(num_shots: usize) -> Self {
-        Self(OwnedQuery::Counts(num_shots))
+        Self(OwnedQuery::Counts(num_shots), 0)
     }
     #[staticmethod]
     fn marginals() -> Self {
-        Self(OwnedQuery::Marginals)
+        Self(OwnedQuery::Marginals, 0)
     }
     #[staticmethod]
     fn expectation(observables: Vec<crate::sim::PauliString>) -> PyPrismResult<Self> {
-        Ok(Self(OwnedQuery::Expectation(parse_observables(
-            observables,
-        )?)))
+        let text_width = widest_string(&observables);
+        Ok(Self(
+            OwnedQuery::Expectation(parse_observables(observables)?),
+            text_width,
+        ))
     }
     #[staticmethod]
     fn observable(observable: &PyPauliObservable) -> Self {
-        Self(OwnedQuery::Observable(observable.0.clone()))
+        Self(OwnedQuery::Observable(observable.0.clone()), observable.1)
     }
     #[staticmethod]
     fn state_vector() -> Self {
-        Self(OwnedQuery::StateVector)
+        Self(OwnedQuery::StateVector, 0)
     }
     #[staticmethod]
     fn reduced_density_matrix(qubits: Vec<usize>) -> Self {
-        Self(OwnedQuery::ReducedDensityMatrix(qubits))
+        Self(OwnedQuery::ReducedDensityMatrix(qubits), 0)
     }
     #[staticmethod]
     fn entropy(qubits: Vec<usize>) -> Self {
-        Self(OwnedQuery::Entropy(qubits))
+        Self(OwnedQuery::Entropy(qubits), 0)
     }
     #[staticmethod]
     fn gradient(
         hamiltonian: crate::sim::Hamiltonian<'_>,
         parameters: Vec<(usize, usize)>,
     ) -> PyPrismResult<Self> {
-        Ok(Self(OwnedQuery::Gradient(
-            hamiltonian.terms()?.into_owned(),
-            parameter_links(parameters)?,
-        )))
+        Ok(Self(
+            OwnedQuery::Gradient(
+                hamiltonian.terms()?.into_owned(),
+                parameter_links(parameters)?,
+            ),
+            hamiltonian.text_width(),
+        ))
     }
     #[staticmethod]
     fn gradient_shift(
         hamiltonian: crate::sim::Hamiltonian<'_>,
         parameters: Vec<(usize, usize)>,
     ) -> PyPrismResult<Self> {
-        Ok(Self(OwnedQuery::GradientShift(
-            hamiltonian.terms()?.into_owned(),
-            parameter_links(parameters)?,
-        )))
+        Ok(Self(
+            OwnedQuery::GradientShift(
+                hamiltonian.terms()?.into_owned(),
+                parameter_links(parameters)?,
+            ),
+            hamiltonian.text_width(),
+        ))
     }
 }
 

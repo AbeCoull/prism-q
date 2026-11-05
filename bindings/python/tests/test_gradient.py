@@ -186,3 +186,18 @@ def test_gradient_result_indexes_and_pickles_as_the_pair():
     value, grad = restored
     assert value == result.value
     assert np.array_equal(grad, result.gradient)
+
+
+def test_gradient_result_slices_as_the_pair():
+    builder = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).rz(0.7, 1).param(1)
+    circuit, params = builder.build_parametric()
+    result = simulate(circuit).seed(42).expectation_gradient([(1.0, "ZZ")], params.links())
+
+    whole = result[:]
+    assert isinstance(whole, tuple) and len(whole) == 2
+    assert whole[0] == result.value
+    assert np.array_equal(whole[1], result.gradient)
+    tail = result[1:]
+    assert len(tail) == 1 and np.array_equal(tail[0], result.gradient)
+    assert result[:1] == (result.value,)
+    assert result[5:] == ()

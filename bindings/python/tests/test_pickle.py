@@ -230,3 +230,31 @@ def test_a_record_ref_pickled_under_its_old_name_still_loads():
     with pytest.warns(DeprecationWarning):
         restored = pickle.loads(legacy)
     assert pickle.dumps(restored, protocol=0) == payload
+
+
+def test_expectation_result_round_trips_with_its_metadata():
+    circuit = CircuitBuilder(2).h(0).cx(0, 1).build()
+    result = simulate(circuit).seed(42).expectation(["ZI", "ZZ"])
+    restored = _round_trip(result)
+    assert np.array_equal(restored.values, result.values)
+    assert restored.std_errors is None
+    for field in ("reason", "backend", "engine", "is_exact", "placement", "shots", "blocks"):
+        assert getattr(restored.metadata, field) == getattr(result.metadata, field)
+    assert repr(restored.metadata) == repr(result.metadata)
+
+    mps = simulate(circuit).backend(prism_q.BackendKind.mps(4)).seed(42).expectation(["ZZ"])
+    restored = _round_trip(mps)
+    assert restored.metadata.bond.peak == mps.metadata.bond.peak
+    assert restored.metadata.bond.cap == mps.metadata.bond.cap
+    assert restored.metadata.fidelity_lower_bound == mps.metadata.fidelity_lower_bound
+
+    sampled = (
+        simulate(CircuitBuilder(2).h(0).t(0).cx(0, 1).build())
+        .backend(prism_q.BackendKind.stochastic_pauli(100))
+        .seed(42)
+        .expectation(["ZZ", "XI"])
+    )
+    restored = _round_trip(sampled)
+    assert np.array_equal(restored.std_errors, sampled.std_errors)
+    assert restored.metadata.shots == sampled.metadata.shots == 100
+    assert restored.metadata.is_exact == sampled.metadata.is_exact

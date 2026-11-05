@@ -610,3 +610,13 @@ def test_expectation_result_reads_as_its_values():
     assert array.dtype == np.float64 and array.shape == (3,)
     assert np.array_equal(array, result.values)
     assert np.asarray(result, dtype=np.float32).dtype == np.float32
+
+
+def test_expectation_result_slices_to_an_array():
+    circuit = CircuitBuilder(2).x(0).build()
+    result = simulate(circuit).seed(42).expectation(["ZI", "IZ", "ZZ"])
+    head = result[0:1]
+    assert isinstance(head, np.ndarray) and head.dtype == np.float64
+    assert np.array_equal(head, result.values[0:1])
+    assert np.array_equal(result[::-1], result.values[::-1])
+    assert result[5:].shape == (0,)

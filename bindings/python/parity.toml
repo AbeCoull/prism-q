@@ -427,6 +427,7 @@ exclude = [
 "RunMetadata::exactness" = { rust_only = "Python reads the same fact through is_exact and fidelity_lower_bound" }
 "RunMetadata::fidelity_lower_bound" = "RunMetadata.fidelity_lower_bound"
 "RunMetadata::is_exact" = "RunMetadata.is_exact"
+"RunMetadata::new" = { rust_only = "Python receives metadata from a run or an unpickled result" }
 "RunMetadata::placement" = "RunMetadata.placement"
 "RunMetadata::shots" = "RunMetadata.shots"
 "BondReport::cap" = "BondReport.cap"

@@ -321,8 +321,9 @@ assert simulate(restored).seed(1).shots(100).counts() == simulate(circuit).seed(
 ```
 
 A payload from a newer format version raises `PrismError` naming the version.
-Builders, results, samplers, backends, and contexts do not pickle; return arrays or
-counts from a worker instead.
+Of the results, only `ExpectationResult` and `ExpectationGradient` pickle. Builders, other
+results, samplers, backends, and contexts do not; return arrays or counts from a worker
+instead.
 
 ## Dynamic programs
 

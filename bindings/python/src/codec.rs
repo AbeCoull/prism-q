@@ -5,13 +5,16 @@
 //! integers as little-endian `u64`. A newer version or another kind is
 //! rejected rather than misread.
 
+use std::fmt::Debug;
+
 use num_complex::Complex64;
 use prism_q::circuit::GuardedRegion;
 use prism_q::{
-    Circuit, ClassicalCondition, Gate, Instruction, McuData, NoiseChannel, NoiseEvent, NoiseModel,
-    Parameters, PauliAxis, PauliObservable, PauliTerm, QecBasis, QecCorrelatedBranch,
-    QecDetectorReference, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef,
-    ReadoutError, SaveSpec,
+    BondReport, Circuit, ClassicalCondition, Engine, Exactness, Gate, Instruction, McuData,
+    NoiseChannel, NoiseEvent, NoiseModel, Parameters, PauliAxis, PauliObservable, PauliTerm,
+    Placement, QecBasis, QecCorrelatedBranch, QecDetectorReference, QecNoise, QecOp, QecOptions,
+    QecPauli, QecProgram, QecRecordRef, ReadoutError, ResolvedBackend, RouteRule, RunMetadata,
+    SaveSpec,
 };
 use smallvec::SmallVec;
 
@@ -34,6 +37,7 @@ pub(crate) enum Kind {
     RecordRef = b'R',
     QecNoise = b'E',
     ExpectationGradient = b'X',
+    ExpectationResult = b'V',
 }
 
 pub(crate) struct Writer(Vec<u8>);
@@ -1399,4 +1403,185 @@ pub(crate) fn decode_gradient(data: &[u8]) -> PyPrismResult<(f64, Vec<f64>)> {
     let gradient = r.f64s()?;
     r.finish()?;
     Ok((value, gradient))
+}
+
+pub(crate) fn encode_expectation_result(
+    values: &[f64],
+    std_errors: Option<&[f64]>,
+    metadata: &RunMetadata,
+) -> PyPrismResult<Vec<u8>> {
+    let mut w = Writer::new(Kind::ExpectationResult);
+    w.f64s(values);
+    w.bool(std_errors.is_some());
+    if let Some(std_errors) = std_errors {
+        w.f64s(std_errors);
+    }
+    write_metadata(&mut w, metadata)?;
+    Ok(w.finish())
+}
+
+pub(crate) fn decode_expectation_result(
+    data: &[u8],
+) -> PyPrismResult<(Vec<f64>, Option<Vec<f64>>, RunMetadata)> {
+    let mut r = Reader::new(data, Kind::ExpectationResult)?;
+    let values = r.f64s()?;
+    let std_errors = if r.bool()? { Some(r.f64s()?) } else { None };
+    let metadata = read_metadata(&mut r)?;
+    r.finish()?;
+    Ok((values, std_errors, metadata))
+}
+
+const BACKENDS: &[ResolvedBackend] = &[
+    ResolvedBackend::ProductState,
+    ResolvedBackend::Stabilizer,
+    ResolvedBackend::FactoredStabilizer,
+    ResolvedBackend::Sparse,
+    ResolvedBackend::Mps,
+    ResolvedBackend::Factored,
+    ResolvedBackend::TensorNetwork,
+    ResolvedBackend::Statevector,
+    ResolvedBackend::DensityMatrix,
+    ResolvedBackend::Distributed,
+    ResolvedBackend::StabilizerRank,
+    ResolvedBackend::StochasticPauli,
+    ResolvedBackend::DeterministicPauli,
+    ResolvedBackend::PauliPath,
+    ResolvedBackend::CompiledStabilizer,
+    ResolvedBackend::Decomposed,
+];
+
+const ENGINES: &[Engine] = &[
+    Engine::CompiledSampler,
+    Engine::NoisyCompiledSampler,
+    Engine::FrameSampler,
+];
+
+const RULES: &[RouteRule] = &[
+    RouteRule::ExplicitBackend,
+    RouteRule::NoEntanglingGates,
+    RouteRule::CliffordOnly,
+    RouteRule::LargeCliffordBlocks,
+    RouteRule::IndependentBlocks,
+    RouteRule::PartialIndependence,
+    RouteRule::OverStatevectorCapSparse,
+    RouteRule::OverStatevectorCapMps,
+    RouteRule::TemporalCliffordPrefix,
+    RouteRule::CompiledCliffordSampler,
+    RouteRule::CliffordRegister,
+    RouteRule::TerminalStatevector,
+    RouteRule::NativeSampling,
+    RouteRule::PerShot,
+    RouteRule::SpdExact,
+    RouteRule::TensorExpectation,
+    RouteRule::TensorOverMps,
+    RouteRule::StartState,
+    RouteRule::ExactMixture,
+    RouteRule::DiagnosticReroute,
+    RouteRule::SpdBudgetFallback,
+    RouteRule::DeviceInitializationFallback,
+    RouteRule::ParameterShift,
+    RouteRule::PreparedBackend,
+    RouteRule::Default,
+];
+
+/// Write a variant by its `Debug` name, which survives reordering in the core
+/// enum; [`read_named`] looks it up in the same table.
+fn write_named<T: Debug>(w: &mut Writer, what: &str, table: &[T], value: &T) -> PyPrismResult<()> {
+    let name = format!("{value:?}");
+    if !table.iter().any(|known| format!("{known:?}") == name) {
+        return Err(invalid(format!(
+            "this build cannot pickle the {what} {name}"
+        )));
+    }
+    w.str(&name);
+    Ok(())
+}
+
+fn read_named<T: Debug + Copy>(r: &mut Reader<'_>, what: &str, table: &[T]) -> PyPrismResult<T> {
+    let name = r.str()?;
+    table
+        .iter()
+        .copied()
+        .find(|known| format!("{known:?}") == name)
+        .ok_or_else(|| invalid(format!("pickle payload has unknown {what} {name:?}")))
+}
+
+fn write_metadata(w: &mut Writer, metadata: &RunMetadata) -> PyPrismResult<()> {
+    write_named(w, "route rule", RULES, &metadata.reason)?;
+    write_named(w, "backend", BACKENDS, &metadata.backend)?;
+    w.bool(metadata.engine.is_some());
+    if let Some(engine) = &metadata.engine {
+        write_named(w, "engine", ENGINES, engine)?;
+    }
+    match metadata.exactness {
+        Exactness::Exact => w.u8(0),
+        Exactness::Approximate {
+            fidelity_lower_bound,
+        } => {
+            w.u8(1);
+            w.bool(fidelity_lower_bound.is_some());
+            w.f64(fidelity_lower_bound.unwrap_or(0.0));
+        }
+        _ => return Err(invalid("this build cannot pickle the run's exactness")),
+    }
+    w.u8(match metadata.placement {
+        Placement::Host => 0,
+        Placement::Device => 1,
+        _ => return Err(invalid("this build cannot pickle the run's placement")),
+    });
+    w.bool(metadata.shots.is_some());
+    w.usize(metadata.shots.unwrap_or(0));
+    w.bool(metadata.bond.is_some());
+    if let Some(bond) = metadata.bond {
+        w.usize(bond.peak);
+        w.usize(bond.cap);
+    }
+    w.usize(metadata.blocks.len());
+    for block in &metadata.blocks {
+        write_named(w, "backend", BACKENDS, block)?;
+    }
+    Ok(())
+}
+
+fn read_metadata(r: &mut Reader<'_>) -> PyPrismResult<RunMetadata> {
+    let reason = read_named(r, "route rule", RULES)?;
+    let backend = read_named(r, "backend", BACKENDS)?;
+    let engine = if r.bool()? {
+        Some(read_named(r, "engine", ENGINES)?)
+    } else {
+        None
+    };
+    let exactness = match r.u8()? {
+        0 => Exactness::Exact,
+        1 => {
+            let bounded = r.bool()?;
+            let bound = r.f64()?;
+            Exactness::Approximate {
+                fidelity_lower_bound: bounded.then_some(bound),
+            }
+        }
+        other => return Err(bad_tag("exactness", other)),
+    };
+    let placement = match r.u8()? {
+        0 => Placement::Host,
+        1 => Placement::Device,
+        other => return Err(bad_tag("placement", other)),
+    };
+    let mut metadata = RunMetadata::new(backend, exactness, placement);
+    metadata.reason = reason;
+    metadata.engine = engine;
+    let counted = r.bool()?;
+    let shots = r.usize()?;
+    metadata.shots = counted.then_some(shots);
+    if r.bool()? {
+        metadata.bond = Some(BondReport {
+            peak: r.usize()?,
+            cap: r.usize()?,
+        });
+    }
+    let blocks = r.len(9)?;
+    metadata.blocks = (0..blocks)
+        .map(|_| read_named(r, "backend", BACKENDS))
+        .collect::<PyPrismResult<_>>()?;
+    Ok(metadata)
 }

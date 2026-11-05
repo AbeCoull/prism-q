@@ -13,8 +13,8 @@ take either as `(coefficient, observable)`.
 `expectation()` is the one expectation terminal. A list of observables returns an
 `ExpectationResult`: `.values` holds one `⟨ψ|P|ψ⟩` per observable as a `float64` array,
 `.std_errors` the standard errors of a sampling route (else `None`), and `.metadata` the
-route that served them. The result also indexes, has a length, and converts with
-`np.asarray` as its `.values`. A `PauliObservable` returns an `ObservableExpectation` for
+route that served them. The result also indexes, slices to a `float64` array, has a
+length, converts with `np.asarray` as its `.values`, and pickles with its metadata. A `PauliObservable` returns an `ObservableExpectation` for
 the weighted sum. Weighted terms must be wrapped in `PauliObservable([...])`; a bare
 `(coefficient, observable)` list raises `TypeError`, as does a single factor list such as
 `[(0, "Z")]`, which is written `[[(0, "Z")]]`. The circuit must be unitary, except on the
@@ -68,7 +68,7 @@ energy, gradient = result.value, result.gradient
 ```
 
 The result is an `ExpectationGradient` holding `value` and a `float64` `gradient` with
-one entry per slot. It unpacks and indexes as the pair `(value, gradient)` and pickles.
-A Hamiltonian term is `(coefficient, observable)`. Gates sharing a slot accumulate their
-gradients. `param()` accepts only differentiable gates (`rx`, `ry`, `rz`, `rzz`, `p`,
+one entry per slot. It unpacks, indexes and slices as the pair `(value, gradient)`, and
+pickles. A Hamiltonian term is `(coefficient, observable)`. Gates sharing a slot accumulate
+their gradients. `param()` accepts only differentiable gates (`rx`, `ry`, `rz`, `rzz`, `p`,
 `pauli_rotation`), and the circuit must be unitary.

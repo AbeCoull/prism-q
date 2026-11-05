@@ -153,11 +153,11 @@ pub struct RunMetadata {
 }
 
 impl RunMetadata {
-    pub(crate) fn new(
-        backend: ResolvedBackend,
-        exactness: Exactness,
-        placement: Placement,
-    ) -> Self {
+    /// Metadata with the [`RouteRule::Default`] rule and no engine, shots, bond or
+    /// blocks; set the public fields for the rest.
+    ///
+    /// [`RouteRule::Default`]: crate::sim::RouteRule::Default
+    pub fn new(backend: ResolvedBackend, exactness: Exactness, placement: Placement) -> Self {
         Self {
             backend,
             reason: super::RouteRule::Default,

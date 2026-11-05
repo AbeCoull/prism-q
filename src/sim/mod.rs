@@ -1750,9 +1750,9 @@ fn evolves_resets_as_channels(kind: &BackendKind, circuit: &Circuit) -> bool {
         })
 }
 
-/// Expectation values on the evolved density matrix of a circuit with resets.
-/// Without noise the provenance is the explicit backend's, as for the same
-/// circuit without its resets; with noise it is the exact mixture's.
+/// Expectation values on the evolved density matrix of a circuit with resets,
+/// with the provenance the same circuit without its resets reports: the exact
+/// mixture's with noise, otherwise the start state's or the explicit backend's.
 fn reset_channel_expectations(
     kind: &BackendKind,
     circuit: &Circuit,
@@ -1766,6 +1766,11 @@ fn reset_channel_expectations(
         .iter()
         .map(|obs| pauli_masks(obs, circuit.num_qubits))
         .collect::<Result<Vec<_>>>()?;
+    let rule = if initial_state.is_some() {
+        RouteRule::StartState
+    } else {
+        RouteRule::ExplicitBackend
+    };
     let dm = noise::evolve_density_matrix(kind, circuit, noise_model, initial_state, seed, limits)?;
     let metadata = match noise_model {
         Some(_) => exact_mixture_metadata(kind),
@@ -1774,7 +1779,7 @@ fn reset_channel_expectations(
                 accel_for(kind, Family::DensityMatrix, circuit.num_qubits),
                 dispatch::Accel::Cpu
             );
-            route_metadata(&dm, expected_device, RouteRule::ExplicitBackend)
+            route_metadata(&dm, expected_device, rule)
         }
     };
     Ok(analytic_expectations(

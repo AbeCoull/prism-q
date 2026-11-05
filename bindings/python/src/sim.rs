@@ -15,7 +15,7 @@ use prism_q::{
 };
 use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyIterator, PyList, PyString};
+use pyo3::types::{PyDict, PyIterator, PyList, PySlice, PyString, PyTuple};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
@@ -149,15 +149,25 @@ impl PySimulation {
     }
 
     /// Inspect a terminal without consuming the request or executing its circuit.
+    /// A Pauli string wider than the circuit is reported in `would_fail`, as the
+    /// terminal raises it.
     fn plan(
         &self,
         py: Python<'_>,
         query: &crate::plan::PyQuery,
     ) -> PyPrismResult<crate::plan::PyPlan> {
         let owned_noise = self.owned_noise(py);
-        Ok(crate::plan::PyPlan(py.detach(|| {
-            self.core(owned_noise.as_ref()).plan(query.as_query())
-        })?))
+        let too_wide = check_text_width(query.text_width(), self.circuit.num_qubits).err();
+        let empty = PauliObservable::new();
+        let planned = match too_wide {
+            Some(_) => query.as_query_without_terms(&empty),
+            None => query.as_query(),
+        };
+        let mut plan = py.detach(|| self.core(owned_noise.as_ref()).plan(planned))?;
+        if let Some(error) = too_wide {
+            plan.would_fail = Some(error.0);
+        }
+        Ok(crate::plan::PyPlan(plan))
     }
 
     /// Run once and return classical bits plus the probability distribution.
@@ -497,7 +507,7 @@ impl PauliString {
     }
 }
 
-fn check_text_width(text_width: usize, num_qubits: usize) -> PyPrismResult<()> {
+pub(crate) fn check_text_width(text_width: usize, num_qubits: usize) -> PyPrismResult<()> {
     if text_width > num_qubits {
         return Err(invalid(format!(
             "a Pauli string has {text_width} characters but the circuit has {num_qubits} \
@@ -507,9 +517,12 @@ fn check_text_width(text_width: usize, num_qubits: usize) -> PyPrismResult<()> {
     Ok(())
 }
 
-fn check_pauli_widths(strings: &[PauliString], num_qubits: usize) -> PyPrismResult<()> {
-    let widest = strings.iter().map(PauliString::text_width).max();
-    check_text_width(widest.unwrap_or(0), num_qubits)
+pub(crate) fn widest_string(strings: &[PauliString]) -> usize {
+    strings
+        .iter()
+        .map(PauliString::text_width)
+        .max()
+        .unwrap_or(0)
 }
 
 fn widest_term(terms: &[(f64, PauliString)]) -> usize {
@@ -576,7 +589,7 @@ impl Observables<'_> {
     pub(crate) fn check_width(&self, num_qubits: usize) -> PyPrismResult<()> {
         match self {
             Self::Weighted(held) => held.get().check_width(num_qubits),
-            Self::Strings(strings) => check_pauli_widths(strings, num_qubits),
+            Self::Strings(strings) => check_text_width(widest_string(strings), num_qubits),
         }
     }
 }
@@ -603,9 +616,14 @@ impl<'py> FromPyObject<'_, 'py> for Hamiltonian<'py> {
 
 impl Hamiltonian<'_> {
     pub(crate) fn check_width(&self, num_qubits: usize) -> PyPrismResult<()> {
+        check_text_width(self.text_width(), num_qubits)
+    }
+
+    /// Characters in the longest Pauli text, the width [`check_text_width`] takes.
+    pub(crate) fn text_width(&self) -> usize {
         match self {
-            Self::Held(held) => held.get().check_width(num_qubits),
-            Self::Terms(terms) => check_text_width(widest_term(terms), num_qubits),
+            Self::Held(held) => held.get().1,
+            Self::Terms(terms) => widest_term(terms),
         }
     }
 
@@ -633,7 +651,7 @@ impl Hamiltonian<'_> {
 /// factors, and every such argument accepts one in its place. The
 /// qubit-wise-commuting grouping is computed on first use and kept.
 #[pyclass(name = "PauliObservable", module = "prism_q", frozen)]
-pub struct PyPauliObservable(pub(crate) PauliObservable, usize);
+pub struct PyPauliObservable(pub(crate) PauliObservable, pub(crate) usize);
 
 impl PyPauliObservable {
     /// Reject a register narrower than the longest Pauli text the observable was
@@ -1110,13 +1128,18 @@ impl PyExpectationResult {
         self.values.len()
     }
 
-    fn __getitem__(&self, index: isize) -> PyResult<f64> {
+    /// A slice returns a `float64` array, as slicing `values` does.
+    fn __getitem__<'py>(&self, py: Python<'py>, index: Index<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let index = match index {
+            Index::Int(index) => index,
+            Index::Slice(slice) => return self.values(py).as_any().get_item(slice),
+        };
         let len = self.values.len() as isize;
         let resolved = if index < 0 { index + len } else { index };
         if !(0..len).contains(&resolved) {
             return Err(PyIndexError::new_err("expectation index out of range"));
         }
-        Ok(self.values[resolved as usize])
+        Ok(self.values[resolved as usize].into_pyobject(py)?.into_any())
     }
 
     /// `values` for `np.asarray(result)`. Each call builds a fresh array, so
@@ -1136,9 +1159,36 @@ impl PyExpectationResult {
         }
     }
 
+    #[staticmethod]
+    fn _from_pickle(data: &[u8]) -> PyPrismResult<Self> {
+        let (values, std_errors, metadata) = codec::decode_expectation_result(data)?;
+        Ok(Self {
+            values,
+            std_errors,
+            metadata: PyRunMetadata::new(metadata),
+        })
+    }
+
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Reduced<'py>> {
+        let this = slf.borrow();
+        let data = codec::encode_expectation_result(
+            &this.values,
+            this.std_errors.as_deref(),
+            &this.metadata.inner,
+        )?;
+        reduce(slf.as_any(), data)
+    }
+
     fn __repr__(&self) -> String {
         format!("ExpectationResult(values={} terms)", self.values.len())
     }
+}
+
+/// A `__getitem__` argument on the sequence-like results.
+#[derive(FromPyObject)]
+enum Index<'py> {
+    Int(isize),
+    Slice(Bound<'py, PySlice>),
 }
 
 /// `⟨H⟩` and its gradient, one entry per parameter slot. Unpacks as
@@ -1181,14 +1231,25 @@ impl PyExpectationGradient {
         2
     }
 
-    /// `0` (or `-2`) is `value` and `1` (or `-1`) is `gradient`, as on the pair.
-    fn __getitem__<'py>(&self, py: Python<'py>, index: isize) -> PyResult<Bound<'py, PyAny>> {
+    /// `0` (or `-2`) is `value` and `1` (or `-1`) is `gradient`, as on the pair;
+    /// a slice returns a tuple of the selected items.
+    fn __getitem__<'py>(&self, py: Python<'py>, index: Index<'py>) -> PyResult<Bound<'py, PyAny>> {
         match index {
-            0 | -2 => Ok(self.value.into_pyobject(py)?.into_any()),
-            1 | -1 => Ok(self.gradient(py).into_any()),
-            _ => Err(PyIndexError::new_err(
+            Index::Int(0 | -2) => Ok(self.value.into_pyobject(py)?.into_any()),
+            Index::Int(1 | -1) => Ok(self.gradient(py).into_any()),
+            Index::Int(_) => Err(PyIndexError::new_err(
                 "ExpectationGradient index out of range; it holds (value, gradient)",
             )),
+            Index::Slice(slice) => {
+                let pair = PyTuple::new(
+                    py,
+                    [
+                        self.value.into_pyobject(py)?.into_any(),
+                        self.gradient(py).into_any(),
+                    ],
+                )?;
+                pair.as_any().get_item(slice)
+            }
         }
     }
 

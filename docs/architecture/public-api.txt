@@ -2660,6 +2660,7 @@ pub prism_q::sim::RunMetadata::shots: core::option::Option<usize>
 impl prism_q::RunMetadata
 pub fn prism_q::RunMetadata::fidelity_lower_bound(&self) -> core::option::Option<f64>
 pub fn prism_q::RunMetadata::is_exact(&self) -> bool
+pub fn prism_q::RunMetadata::new(prism_q::ResolvedBackend, prism_q::Exactness, prism_q::Placement) -> Self
 pub struct prism_q::sim::RunOutcome
 pub prism_q::sim::RunOutcome::classical_bits: alloc::vec::Vec<bool>
 pub prism_q::sim::RunOutcome::metadata: prism_q::RunMetadata
@@ -4175,6 +4176,7 @@ pub prism_q::RunMetadata::shots: core::option::Option<usize>
 impl prism_q::RunMetadata
 pub fn prism_q::RunMetadata::fidelity_lower_bound(&self) -> core::option::Option<f64>
 pub fn prism_q::RunMetadata::is_exact(&self) -> bool
+pub fn prism_q::RunMetadata::new(prism_q::ResolvedBackend, prism_q::Exactness, prism_q::Placement) -> Self
 pub struct prism_q::RunOutcome
 pub prism_q::RunOutcome::classical_bits: alloc::vec::Vec<bool>
 pub prism_q::RunOutcome::metadata: prism_q::RunMetadata

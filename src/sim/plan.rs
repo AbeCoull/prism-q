@@ -398,6 +398,8 @@ pub(super) fn inspect<S>(
         noise::validate_mixture_inputs(circuit, request.noise_model, request.initial_state)?;
         let rule = if request.noise_model.is_some() {
             RouteRule::ExactMixture
+        } else if request.initial_state.is_some() {
+            RouteRule::StartState
         } else {
             RouteRule::ExplicitBackend
         };

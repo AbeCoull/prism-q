@@ -1209,6 +1209,47 @@ fn density_matrix_reset_starts_from_the_initial_state() {
 }
 
 #[test]
+fn density_matrix_reset_from_a_start_state_reports_the_reset_free_rule() {
+    use num_complex::Complex64;
+    let (circuit, reference) = reset_bell();
+    let mut start = vec![Complex64::new(0.0, 0.0); 4];
+    start[2] = Complex64::new(1.0, 0.0);
+    let observables = [vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]];
+    let reported = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .initial_state(&start)
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    let baseline = simulate(&reference)
+        .backend(BackendKind::DensityMatrix)
+        .initial_state(&start)
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert_eq!(reported.metadata.reason, prism_q::RouteRule::StartState);
+    assert_same_provenance(&reported.metadata, &baseline.metadata);
+
+    let plan = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .initial_state(&start)
+        .seed(42)
+        .plan(prism_q::Query::Expectation(&observables))
+        .unwrap();
+    let reference_plan = simulate(&reference)
+        .backend(BackendKind::DensityMatrix)
+        .initial_state(&start)
+        .seed(42)
+        .plan(prism_q::Query::Expectation(&observables))
+        .unwrap();
+    assert_eq!(plan.rule, prism_q::RouteRule::StartState);
+    assert_eq!(
+        (plan.backend, plan.rule),
+        (reference_plan.backend, reference_plan.rule)
+    );
+}
+
+#[test]
 fn reset_rejection_names_the_density_matrix() {
     let (circuit, _) = reset_bell();
     let err = simulate(&circuit)

@@ -2371,14 +2371,7 @@ impl<'a> Parser<'a> {
                 },
             );
         }
-        let body = sub.execute(&def.body)?;
-        if sub.exit == Some(Exit::End) {
-            return Err(parse_error(
-                line,
-                format!("`end` inside the body of gate `{name}`"),
-            ));
-        }
-        Ok(Some(body))
+        Ok(Some(sub.execute(&def.body)?))
     }
 
     /// Assign a subroutine result or a builtin value to the caller's target.
@@ -3258,6 +3251,13 @@ impl<'a> Parser<'a> {
         }
         self.loops.pop();
         if graph && result.is_ok() {
+            // Paths a runtime `break` sent to the exit go on past the loop,
+            // whatever `return` the rest took.
+            if self.loop_broke()
+                && let Some(frame) = self.def_result.as_mut()
+            {
+                frame.returned = false;
+            }
             result = self.end_unrolled();
         }
         self.leave_static_loop();

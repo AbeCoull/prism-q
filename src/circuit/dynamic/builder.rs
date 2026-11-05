@@ -16,9 +16,11 @@ struct PendingBlock {
 }
 
 enum Frame {
+    /// A subroutine call; `returned` records a jump to `exit` from its body.
     Call {
         entry: usize,
         exit: usize,
+        returned: bool,
     },
     While {
         loop_id: usize,
@@ -33,11 +35,13 @@ enum Frame {
     },
     /// A loop unrolled pass by pass: `continue` jumps to `next`, the start of
     /// the pass after the one being built, and `break` to `exit`. `continued`
-    /// records a jump to `next` from the pass being built.
+    /// records a jump to `next` from the pass being built, and `broke` a jump
+    /// to `exit` from any pass.
     Unrolled {
         next: usize,
         exit: usize,
         continued: bool,
+        broke: bool,
     },
 }
 
@@ -292,17 +296,24 @@ impl DynamicProgramBuilder {
         let entry = self.new_block(loop_id);
         let exit = self.new_block(loop_id);
         self.terminate(Terminator::Jump(BlockId::new(entry)));
-        self.frames.push(Frame::Call { entry, exit });
+        self.frames.push(Frame::Call {
+            entry,
+            exit,
+            returned: false,
+        });
         self.current = entry;
     }
 
     pub(crate) fn return_from_call(&mut self) -> Result<()> {
         let exit = self
             .frames
-            .iter()
+            .iter_mut()
             .rev()
             .find_map(|frame| match frame {
-                Frame::Call { exit, .. } => Some(*exit),
+                Frame::Call { exit, returned, .. } => {
+                    *returned = true;
+                    Some(*exit)
+                }
                 _ => None,
             })
             .ok_or_else(|| misuse("`return` outside a subroutine"))?;
@@ -321,6 +332,7 @@ impl DynamicProgramBuilder {
             next,
             exit,
             continued: false,
+            broke: false,
         });
     }
 
@@ -353,6 +365,28 @@ impl DynamicProgramBuilder {
         )
     }
 
+    /// Whether a path through the innermost open construct, an unrolled loop,
+    /// has jumped to its exit.
+    pub(crate) fn loop_broke(&self) -> bool {
+        matches!(
+            self.frames.last(),
+            Some(Frame::Unrolled { broke: true, .. })
+        )
+    }
+
+    /// Whether every path the program has taken reaches the block being built:
+    /// no branch, runtime loop, `return`, or jump out of an unrolled pass is
+    /// open around it.
+    pub(crate) fn on_every_path(&self) -> bool {
+        self.frames.iter().all(|frame| match frame {
+            Frame::Call { returned, .. } => !returned,
+            Frame::Unrolled {
+                continued, broke, ..
+            } => !continued && !broke,
+            Frame::While { .. } | Frame::If { .. } => false,
+        })
+    }
+
     /// End every path through the current block here, and continue in a block
     /// nothing reaches, shared by every halt.
     pub(crate) fn halt(&mut self) {
@@ -379,7 +413,7 @@ impl DynamicProgramBuilder {
 
     /// Return whether a path through the call reaches its end without returning.
     pub(crate) fn end_call(&mut self) -> Result<bool> {
-        let Some(&Frame::Call { entry, exit }) = self.frames.last() else {
+        let Some(&Frame::Call { entry, exit, .. }) = self.frames.last() else {
             return Err(misuse("unbalanced control flow at a subroutine exit"));
         };
         let mut visited = vec![false; self.blocks.len() - entry];
@@ -502,7 +536,18 @@ impl DynamicProgramBuilder {
     /// [`PrismError::InvalidParameter`] outside a loop.
     pub fn break_loop(&mut self) -> Result<()> {
         let exit = self
-            .innermost_exit()
+            .frames
+            .iter_mut()
+            .rev()
+            .take_while(|frame| !matches!(frame, Frame::Call { .. }))
+            .find_map(|frame| match frame {
+                Frame::While { exit, .. } => Some(*exit),
+                Frame::Unrolled { exit, broke, .. } => {
+                    *broke = true;
+                    Some(*exit)
+                }
+                _ => None,
+            })
             .ok_or_else(|| misuse("`break` outside a `while` loop"))?;
         self.jump_away(exit);
         Ok(())
@@ -611,17 +656,6 @@ impl DynamicProgramBuilder {
         self.reopenable = None;
         self.blocks[self.current].actions.push(action);
         self
-    }
-
-    fn innermost_exit(&self) -> Option<usize> {
-        self.frames
-            .iter()
-            .rev()
-            .take_while(|frame| !matches!(frame, Frame::Call { .. }))
-            .find_map(|frame| match frame {
-                Frame::While { exit, .. } | Frame::Unrolled { exit, .. } => Some(*exit),
-                _ => None,
-            })
     }
 
     /// End the current block with a jump and continue in a fresh one, which

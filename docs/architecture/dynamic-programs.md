@@ -79,8 +79,11 @@ last. The pass over the tree marks such a loop, and every variable its body writ
 outside lives at runtime, since a pass may stop before the write. An exit every path
 reaches stops the unrolling at parse time, as under `parse`, unless a measured `continue`
 earlier in the pass sent some paths on to the next one; then the exit jumps and the
-unrolling goes on. A measured `end` jumps to a block that ends the shot, and a `def`
-holding an `end` runs as a call so that the same holds inside it.
+unrolling goes on. A `return` likewise leaves the code after the loop in place when a
+measured `break` reached the loop's exit. A measured `end` jumps to a block that ends the
+shot, and a `def` holding an `end` runs as a call so that the same holds inside it. An
+`end` no branch, `return` or measured exit separates from the program top still stops
+the parse there, through every call.
 
 The evaluator streams each statement's instructions into the current block. An `if`
 takes one of three forms:

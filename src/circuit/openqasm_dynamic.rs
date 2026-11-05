@@ -626,6 +626,7 @@ impl<'a> Parser<'a> {
         let caller_repeat = state.repeat;
         state.repeat += 1;
         sub.dynamic = Some(state);
+        let mut ended = false;
         let result = (|| {
             let result_var =
                 if let Some(result) = def.result.as_ref().filter(|result| result.ty != "bit") {
@@ -709,6 +710,7 @@ impl<'a> Parser<'a> {
             }
             let instructions = sub.execute(&def.body)?;
             sub.flush(instructions);
+            ended = sub.exit == Some(Exit::End);
             let fallthrough = sub.state().builder.end_call()?;
             if def.result.is_some() && fallthrough {
                 return Err(parse_error(
@@ -724,6 +726,9 @@ impl<'a> Parser<'a> {
         state.bit_values = caller_bits;
         state.repeat = caller_repeat;
         self.dynamic = Some(state);
+        if ended {
+            self.exit = Some(Exit::End);
+        }
         result
     }
     pub(super) fn streaming(&self) -> bool {
@@ -929,6 +934,14 @@ impl<'a> Parser<'a> {
         self.dynamic
             .as_ref()
             .is_some_and(|state| state.builder.pass_continued())
+    }
+
+    /// Whether a runtime `break` has jumped out of the innermost unrolled loop,
+    /// so its exit is reached even where a parse-time `return` ended a pass.
+    pub(super) fn loop_broke(&self) -> bool {
+        self.dynamic
+            .as_ref()
+            .is_some_and(|state| state.builder.loop_broke())
     }
 
     pub(super) fn break_unrolled(&mut self) -> Result<()> {
@@ -1423,6 +1436,11 @@ impl<'a> Parser<'a> {
         }
         self.require_streaming("`end`", line)?;
         if self.graph_depth() > 0 {
+            // An `end` every path reaches, inside calls and unrolled passes no
+            // path has left, stops the parse there as it does at the top level.
+            if self.state().builder.on_every_path() {
+                self.exit = Some(Exit::End);
+            }
             self.state().builder.halt();
         } else if self.region_depth > 0 {
             return Err(self.decided_by_measurement("end", line));

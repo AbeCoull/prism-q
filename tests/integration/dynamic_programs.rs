@@ -360,6 +360,116 @@ fn end_in_a_def_called_under_a_measured_if_stops_the_shot() {
 }
 
 #[test]
+fn a_parse_time_return_after_a_measured_break_keeps_what_follows_the_loop() {
+    let head = "OPENQASM 3.0;
+        qubit[2] q;
+        bit[2] c;";
+    let tail = "h q[0];
+        c[0] = measure q[0];
+        f(q[1], c[0]);
+        c[1] = measure q[1];";
+    let one_deep = "def f(qubit a, bit b) {
+          for int i in [0:2] { if (b) { break; } return; }
+          x a;
+        }";
+    let two_deep = "def f(qubit a, bit b) {
+          for int i in [0:1] { for int j in [0:1] { if (b) { break; } return; } }
+          x a;
+        }";
+    let with_result = "def g(bit b) -> uint[8] {
+          uint[8] k = 0;
+          for int i in [0:2] { k += 1; if (b) { break; } return k + 10; }
+          return k + 20;
+        }
+        def f(qubit a, bit b) {
+          uint[8] r = g(b);
+          if (r == 21) { x a; } else if (r != 11) { x a; x a; x a; }
+        }";
+    for def in [one_deep, two_deep, with_result] {
+        let source = format!("{head}\n{def}\n{tail}");
+        let counts = histogram(&values(&shots(&parse(&source), 400), 0..2));
+        assert!(
+            counts.keys().all(|&value| value == 0 || value == 3),
+            "{counts:?}\n{source}"
+        );
+        assert_eq!(counts.len(), 2, "{counts:?}\n{source}");
+        assert!(
+            matches!(
+                openqasm::parse(&source),
+                Err(PrismError::UnsupportedConstruct { .. })
+            ),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn an_end_every_path_reaches_in_a_def_stops_the_parse() {
+    let recursion = "OPENQASM 3.0;
+        qubit[2] q;
+        bit[2] c;
+        def r(int[8] d, qubit a) { if (d == 0) { end; } x a; r(d - 1, a); }
+        x q[0];
+        c[0] = measure q[0];
+        r(2, q[1]);
+        c[1] = measure q[1];";
+    assert_eq!(openqasm::parse(recursion).unwrap().instructions.len(), 4);
+    assert!(
+        values(&shots(&parse(recursion), 64), 0..2)
+            .iter()
+            .all(|&value| value == 1)
+    );
+    // Statements after the `end` are not examined, so a name the def cannot
+    // see goes unreported on both paths.
+    let after_end = "OPENQASM 3.0;
+        qubit[2] q;
+        def stop() { end; }
+        def g() { stop(); x q[1]; }
+        x q[0];
+        g();";
+    assert_eq!(openqasm::parse(after_end).unwrap().instructions.len(), 1);
+    parse(after_end);
+    // Paths a measured break sent past the call still run what follows it.
+    let diverted = "OPENQASM 3.0;
+        qubit[2] q;
+        bit[2] c;
+        def stop() { end; }
+        h q[0];
+        c[0] = measure q[0];
+        for int i in [0:1] { if (c[0]) { break; } stop(); }
+        x q[1];
+        c[1] = measure q[1];";
+    let counts = histogram(&values(&shots(&parse(diverted), 400), 0..2));
+    assert!(
+        counts.keys().all(|&value| value == 0 || value == 3),
+        "{counts:?}"
+    );
+    assert_eq!(counts.len(), 2, "{counts:?}");
+}
+
+#[test]
+fn end_in_a_gate_body_is_a_parse_error_where_the_gate_is_defined() {
+    let head = "OPENQASM 3.0;
+        qubit[2] q;
+        bit[2] c;
+        gate g a { x a; for int i in [0:1] { if (i == 1) { end; } } }";
+    for tail in ["", "g q[1];", "c[0] = measure q[0]; if (c[0]) { g q[1]; }"] {
+        let source = format!("{head}\n{tail}");
+        for result in [
+            openqasm::parse(&source).map(drop),
+            openqasm::parse_dynamic(&source).map(drop),
+        ] {
+            match result {
+                Err(PrismError::Parse { message, .. }) => {
+                    assert!(message.contains("gate `g`"), "{message}")
+                }
+                other => panic!("expected a parse error, got {other:?}\n{source}"),
+            }
+        }
+    }
+}
+
+#[test]
 fn a_variable_a_measured_break_cuts_short_is_runtime() {
     let source = format!(
         "OPENQASM 3.0;

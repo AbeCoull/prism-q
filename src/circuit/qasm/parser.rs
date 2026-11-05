@@ -813,12 +813,42 @@ fn gate_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         qubits.push(stream.expect_ident()?);
     }
     let body = braced_block(stream)?;
+    if let Some(line) = end_line(&body) {
+        return Err(PrismError::Parse {
+            line,
+            message: format!("`end` inside the body of gate `{name}`"),
+        });
+    }
     Ok(StmtKind::GateDef {
         name,
         params,
         qubits,
         body,
     })
+}
+
+/// The line of the first `end` anywhere in `body`, searched without recursion.
+fn end_line(body: &Block) -> Option<usize> {
+    let mut pending = vec![body];
+    while let Some(block) = pending.pop() {
+        for stmt in block {
+            match &stmt.kind {
+                StmtKind::End => return Some(stmt.line),
+                StmtKind::If(conditional) => {
+                    pending.push(&conditional.then_body);
+                    pending.extend(&conditional.else_body);
+                }
+                StmtKind::For { body, .. }
+                | StmtKind::While { body, .. }
+                | StmtKind::Box { body, .. }
+                | StmtKind::DefDef { body, .. }
+                | StmtKind::GateDef { body, .. } => pending.push(body),
+                StmtKind::Switch { arms, .. } => pending.extend(arms.iter().map(|arm| &arm.body)),
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {

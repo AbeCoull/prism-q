@@ -665,3 +665,22 @@ fn spd_lowers_general_matrices_and_controlled_targets() {
     circuit.add_gate(Gate::cu(Gate::Rz(1.3).matrix_2x2()), &[2, 0]);
     assert_spd_matches_statevector(&circuit, 1e-10);
 }
+
+#[test]
+fn a_rotation_merges_each_flip_into_a_term_already_present() {
+    let (a, b) = (0.37, 1.1);
+    let mut split = Circuit::new(1, 0);
+    split.add_gate(Gate::H, &[0]);
+    split.add_gate(Gate::Rz(a), &[0]);
+    split.add_gate(Gate::Rz(b), &[0]);
+    let mut joined = Circuit::new(1, 0);
+    joined.add_gate(Gate::H, &[0]);
+    joined.add_gate(Gate::Rz(a + b), &[0]);
+
+    let obs = [PauliTerm::x(0)];
+    let split = run_spd_observable(&split, &obs, 0.0, 0).unwrap();
+    let joined = run_spd_observable(&joined, &obs, 0.0, 0).unwrap();
+    assert_eq!(split.peak_terms, 2);
+    assert!((split.mean - joined.mean).abs() < 1e-12);
+    assert!((split.mean - (a + b).cos()).abs() < 1e-12);
+}

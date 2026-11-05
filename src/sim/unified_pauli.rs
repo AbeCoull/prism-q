@@ -643,7 +643,7 @@ fn spp_to_probabilities(result: &SppResult) -> Vec<f64> {
 
 // ---- Deterministic Sparse Pauli Dynamics (SPD) ----
 
-use std::collections::HashMap;
+use crate::hash::{FxBuildHasher, FxHashMap};
 
 #[inline(always)]
 fn pv_get_bit(words: &[u64], qubit: usize) -> bool {
@@ -732,37 +732,158 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
     }
 }
 
+/// Weighted Pauli sum held as a list of distinct Pauli strings.
+///
+/// Clifford conjugation is a bijection on Pauli strings, so a Clifford step
+/// rewrites each term in place and never merges two. A rotation flips z bits
+/// only, so the flip of an anticommuting term can land only on another
+/// anticommuting term; those are the only terms a rotation hashes.
 struct WeightedPauliSum {
-    terms: HashMap<PauliVec, Complex64>,
-    scratch: Vec<(PauliVec, Complex64)>,
+    terms: Vec<(PauliVec, Complex64)>,
+    in_support: Vec<usize>,
+    partner: Vec<usize>,
+    probe: PauliVec,
 }
 
 impl WeightedPauliSum {
     fn new() -> Self {
         Self {
-            terms: HashMap::new(),
-            scratch: Vec::new(),
+            terms: Vec::new(),
+            in_support: Vec::new(),
+            partner: Vec::new(),
+            probe: PauliVec {
+                x: Vec::new(),
+                z: Vec::new(),
+            },
         }
     }
 
+    /// Append a term whose Pauli string is not already in the sum.
     fn insert(&mut self, pauli: PauliVec, coeff: Complex64) {
-        let entry = self.terms.entry(pauli).or_insert(Complex64::new(0.0, 0.0));
-        *entry += coeff;
+        self.terms.push((pauli, coeff));
     }
 
     fn conjugate_all_backward_phased(&mut self, gate: &Gate, targets: &[usize]) {
-        // Clifford conjugation is a bijection on Pauli strings: the symplectic
-        // action on the (x, z) bits is invertible, so distinct keys map to
-        // distinct keys and no coefficient merging occurs. Reuse `scratch` to
-        // avoid a per-gate heap allocation, drain into it (which keeps the
-        // map's bucket capacity), then re-insert directly without the
-        // accumulate path.
-        self.scratch.clear();
-        self.scratch.extend(self.terms.drain());
-        for (mut pauli, coeff) in self.scratch.drain(..) {
-            let phase = clifford_conjugation_phase(gate, targets, &pauli);
-            propagate_backward(&mut pauli, gate, targets);
-            self.terms.insert(pauli, coeff * phase);
+        for (pauli, coeff) in self.terms.iter_mut() {
+            let phase = clifford_conjugation_phase(gate, targets, pauli);
+            propagate_backward(pauli, gate, targets);
+            *coeff *= phase;
+        }
+    }
+
+    /// Split every anticommuting term `P` into `cos P` and `-i sin` times its
+    /// flip. A term whose flip is already present pairs with it and both update
+    /// in place; an unpaired term appends its flip, or becomes it when `cos` is
+    /// zero.
+    #[inline(always)]
+    fn branch(
+        &mut self,
+        sin: f64,
+        cos: f64,
+        anticommutes: impl Fn(&PauliVec) -> bool,
+        flip: impl Fn(&mut PauliVec),
+    ) {
+        self.in_support.clear();
+        self.in_support.extend(
+            self.terms
+                .iter()
+                .enumerate()
+                .filter(|(_, (pauli, _))| anticommutes(pauli))
+                .map(|(i, _)| i),
+        );
+        if sin == 0.0 {
+            for &i in &self.in_support {
+                self.terms[i].1 *= cos;
+            }
+            return;
+        }
+
+        self.partner.clear();
+        if self.in_support.len() > 1 {
+            let mut index: FxHashMap<&PauliVec, usize> =
+                FxHashMap::with_capacity_and_hasher(self.in_support.len(), FxBuildHasher);
+            for &i in &self.in_support {
+                index.insert(&self.terms[i].0, i);
+            }
+            for &i in &self.in_support {
+                self.probe.clone_from(&self.terms[i].0);
+                flip(&mut self.probe);
+                self.partner
+                    .push(index.get(&self.probe).copied().unwrap_or(usize::MAX));
+            }
+        } else {
+            self.partner.resize(self.in_support.len(), usize::MAX);
+        }
+
+        let flipped_coeff = |c: Complex64| Complex64::new(c.im * sin, -c.re * sin);
+        for k in 0..self.in_support.len() {
+            let i = self.in_support[k];
+            let j = self.partner[k];
+            if j != usize::MAX {
+                if i < j {
+                    let (ci, cj) = (self.terms[i].1, self.terms[j].1);
+                    self.terms[i].1 = ci * cos + flipped_coeff(cj);
+                    self.terms[j].1 = cj * cos + flipped_coeff(ci);
+                }
+            } else if cos == 0.0 {
+                let (pauli, coeff) = &mut self.terms[i];
+                flip(pauli);
+                *coeff = flipped_coeff(*coeff);
+            } else {
+                let mut pauli = self.terms[i].0.clone();
+                flip(&mut pauli);
+                let coeff = self.terms[i].1;
+                self.terms[i].1 = coeff * cos;
+                self.terms.push((pauli, flipped_coeff(coeff)));
+            }
+        }
+    }
+
+    /// Add `weight` times the identity branch of every term with a `Z` on
+    /// `qubit`, from coefficients not yet scaled by the channel. The branch
+    /// clears the qubit's z bit, so it can land only on a term with the identity
+    /// letter there; those are probed against the `Z` terms.
+    fn add_identity_branches(&mut self, qubit: usize, weight: f64) {
+        self.in_support.clear();
+        self.in_support.extend(
+            self.terms
+                .iter()
+                .enumerate()
+                .filter(|(_, (pauli, _))| pauli_letter(pauli, qubit) == Some(2))
+                .map(|(i, _)| i),
+        );
+        if self.in_support.is_empty() {
+            return;
+        }
+        self.partner.clear();
+        self.partner.resize(self.in_support.len(), usize::MAX);
+        {
+            let mut index: FxHashMap<&PauliVec, usize> =
+                FxHashMap::with_capacity_and_hasher(self.in_support.len(), FxBuildHasher);
+            for (k, &i) in self.in_support.iter().enumerate() {
+                index.insert(&self.terms[i].0, k);
+            }
+            for (i, (pauli, _)) in self.terms.iter().enumerate() {
+                if pauli_letter(pauli, qubit).is_none() {
+                    self.probe.clone_from(pauli);
+                    flip_bit(&mut self.probe.z, qubit);
+                    if let Some(&k) = index.get(&self.probe) {
+                        self.partner[k] = i;
+                    }
+                }
+            }
+        }
+        for k in 0..self.in_support.len() {
+            let i = self.in_support[k];
+            let branch = self.terms[i].1 * weight;
+            match self.partner[k] {
+                usize::MAX => {
+                    let mut identity = self.terms[i].0.clone();
+                    flip_bit(&mut identity.z, qubit);
+                    self.terms.push((identity, branch));
+                }
+                j => self.terms[j].1 += branch,
+            }
         }
     }
 
@@ -773,21 +894,12 @@ impl WeightedPauliSum {
     /// coefficient is exactly zero is not inserted, so `Rz(0)` and `P(0)` leave
     /// the term count alone.
     fn branch_z_rotation(&mut self, qubit: usize, sin: f64, cos: f64) {
-        let mut flips = std::mem::take(&mut self.scratch);
-        flips.clear();
-        self.terms.retain(|pauli, coeff| {
-            if !pauli.has_x_or_y(qubit) {
-                return true;
-            }
-            if sin != 0.0 {
-                let mut pauli_flip = pauli.clone();
-                flip_bit(&mut pauli_flip.z, qubit);
-                flips.push((pauli_flip, Complex64::new(coeff.im * sin, -coeff.re * sin)));
-            }
-            *coeff *= cos;
-            cos != 0.0
-        });
-        self.merge_flips(flips);
+        self.branch(
+            sin,
+            cos,
+            |pauli| pauli.has_x_or_y(qubit),
+            |pauli| flip_bit(&mut pauli.z, qubit),
+        );
     }
 
     /// Two-qubit analogue of [`branch_z_rotation`](Self::branch_z_rotation)
@@ -796,31 +908,15 @@ impl WeightedPauliSum {
     /// flip branch right-multiplies by `Z_a Z_b`, a pure z-bit flip on both
     /// qubits in the ordered `X^x Z^z` letter convention.
     fn branch_zz_rotation(&mut self, a: usize, b: usize, sin: f64, cos: f64) {
-        let mut flips = std::mem::take(&mut self.scratch);
-        flips.clear();
-        self.terms.retain(|pauli, coeff| {
-            if pauli.has_x_or_y(a) == pauli.has_x_or_y(b) {
-                return true;
-            }
-            if sin != 0.0 {
-                let mut pauli_flip = pauli.clone();
-                flip_bit(&mut pauli_flip.z, a);
-                flip_bit(&mut pauli_flip.z, b);
-                flips.push((pauli_flip, Complex64::new(coeff.im * sin, -coeff.re * sin)));
-            }
-            *coeff *= cos;
-            cos != 0.0
-        });
-        self.merge_flips(flips);
-    }
-
-    /// Accumulate the flip branches of a rotation after the in-place cos scaling,
-    /// so a flip landing on a surviving key adds to its already scaled coefficient.
-    fn merge_flips(&mut self, mut flips: Vec<(PauliVec, Complex64)>) {
-        for (pauli, coeff) in flips.drain(..) {
-            self.insert(pauli, coeff);
-        }
-        self.scratch = flips;
+        self.branch(
+            sin,
+            cos,
+            |pauli| pauli.has_x_or_y(a) != pauli.has_x_or_y(b),
+            |pauli| {
+                flip_bit(&mut pauli.z, a);
+                flip_bit(&mut pauli.z, b);
+            },
+        );
     }
 
     /// Backward-apply one gate: a single discriminant match, so the Clifford
@@ -848,7 +944,7 @@ impl WeightedPauliSum {
 
     fn truncate(&mut self, epsilon: f64) -> f64 {
         let mut discarded = 0.0;
-        self.terms.retain(|_, coeff| {
+        self.terms.retain(|(_, coeff)| {
             if coeff.norm() < epsilon {
                 discarded += coeff.norm();
                 false
@@ -861,7 +957,7 @@ impl WeightedPauliSum {
 
     /// Drop exactly the smallest-magnitude surplus terms until at most
     /// `max_terms` remain, returning the 1-norm of what was dropped. Ties at
-    /// the cut fall to map order, so which of two equal-magnitude terms
+    /// the cut fall to term order, so which of two equal-magnitude terms
     /// survives is not stable across runs; the returned bound holds either
     /// way.
     fn truncate_to_budget(&mut self, max_terms: usize) -> f64 {
@@ -869,17 +965,12 @@ impl WeightedPauliSum {
         if surplus == 0 {
             return 0.0;
         }
-        self.scratch.clear();
-        self.scratch.extend(self.terms.drain());
-        self.scratch.select_nth_unstable_by(surplus - 1, |a, b| {
+        self.terms.select_nth_unstable_by(surplus - 1, |a, b| {
             a.1.norm_sqr().total_cmp(&b.1.norm_sqr())
         });
         let mut discarded = 0.0;
-        for (_, coeff) in self.scratch.drain(..surplus) {
+        for (_, coeff) in self.terms.drain(..surplus) {
             discarded += coeff.norm();
-        }
-        for (pauli, coeff) in self.scratch.drain(..) {
-            self.terms.insert(pauli, coeff);
         }
         discarded
     }
@@ -1373,8 +1464,7 @@ impl WeightedPauliSum {
     /// Backward-apply one noise channel.
     ///
     /// The unital part scales coefficients in place. The amplitude-damping
-    /// identity branch adds a term, and that term can collide with one already
-    /// present, so the non-unital case drains and re-accumulates instead.
+    /// identity branch merges into a term already present or appends one.
     fn apply_backward_channel(&mut self, action: &ChannelAction, qubits: &[usize]) {
         match *action {
             ChannelAction::Local {
@@ -1382,34 +1472,15 @@ impl WeightedPauliSum {
                 z_to_identity,
             } => {
                 let q = qubits[0];
-                if z_to_identity == 0.0 {
-                    for (pauli, coeff) in self.terms.iter_mut() {
-                        if let Some(letter) = pauli_letter(pauli, q) {
-                            *coeff *= lambda[letter];
-                        }
-                    }
-                    return;
+                let len = self.terms.len();
+                if z_to_identity != 0.0 {
+                    self.add_identity_branches(q, z_to_identity);
                 }
-                // The identity branch can land on a key already present, so the
-                // pass accumulates through `insert` rather than writing the map
-                // directly. `scratch` moves out for the walk because `insert`
-                // needs the whole struct back.
-                let mut scratch = std::mem::take(&mut self.scratch);
-                scratch.clear();
-                scratch.extend(self.terms.drain());
-                for (pauli, coeff) in scratch.drain(..) {
-                    match pauli_letter(&pauli, q) {
-                        None => self.insert(pauli, coeff),
-                        Some(2) => {
-                            let mut identity = pauli.clone();
-                            flip_bit(&mut identity.z, q);
-                            self.insert(pauli, coeff * lambda[2]);
-                            self.insert(identity, coeff * z_to_identity);
-                        }
-                        Some(letter) => self.insert(pauli, coeff * lambda[letter]),
+                for (pauli, coeff) in self.terms[..len].iter_mut() {
+                    if let Some(letter) = pauli_letter(pauli, q) {
+                        *coeff *= lambda[letter];
                     }
                 }
-                self.scratch = scratch;
             }
             ChannelAction::Depolarizing2q { lambda } => {
                 let (a, b) = (qubits[0], qubits[1]);

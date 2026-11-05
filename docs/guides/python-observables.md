@@ -2,10 +2,9 @@
 
 ## Expectation values
 
-An observable is a list of `(qubit, axis)` factors with `axis` one of `"X"`,
-`"Y"`, `"Z"`. Identity factors are omitted, so `[(0, "Z"), (2, "X")]` means
-`Z0 ⊗ I1 ⊗ X2`. Both expectation terminals take a list of observables and return
-one float each.
+An observable is a list of `(qubit, axis)` factors, `axis` one of `"X"`, `"Y"`, `"Z"`,
+with identity factors omitted: `[(0, "Z"), (2, "X")]` is `Z0 ⊗ I1 ⊗ X2`. Both
+expectation terminals take a list of observables and return one float each.
 
 ```python
 observables = [[(0, "Z")], [(0, "Z"), (1, "Z")]]
@@ -13,10 +12,10 @@ values = simulate(circuit).seed(42).expectation_values(observables)
 ```
 
 `expectation_values` requires a unitary circuit and gives `⟨ψ|P|ψ⟩`.
-`density_matrix_expectation_values` evolves the density matrix through the
-circuit and any attached noise model and gives exact `Tr(rho P)`, the
-zero-variance analogue of averaging over trajectories. A circuit containing a
-measurement raises `PrismError`, so strip the measurements before the call:
+`density_matrix_expectation_values` evolves the density matrix through the circuit and
+any attached noise model and gives exact `Tr(rho P)`, with none of the variance of
+averaging trajectories. A circuit with a measurement raises `PrismError`, so strip
+measurements first:
 
 ```python
 model = NoiseModel.empty(circuit)
@@ -34,10 +33,9 @@ asserting exact equality.
 
 ## Gradients
 
-`expectation_gradient` computes `⟨H⟩` and its exact gradient with respect to the
-bound parameters by the adjoint method, at a cost independent of the
-parameter count. Mark parameters with `param(slot)` while building, then
-pass `parameter_links()` through.
+`expectation_gradient` computes `⟨H⟩` and its exact gradient over the bound parameters
+by the adjoint method, at a cost independent of the parameter count. Mark parameters
+with `param(slot)` while building and pass `parameter_links()`.
 
 ```python
 import numpy as np
@@ -53,7 +51,6 @@ hamiltonian = [(1.0, [(0, "Z")]), (0.5, [(0, "Z"), (1, "Z")])]
 value, gradient = simulate(circuit).seed(42).expectation_gradient(hamiltonian, links)
 ```
 
-A Hamiltonian term is `(coefficient, observable)`. Several gates may share a
-slot, in which case their gradients accumulate. `param()` rejects anything
-but a differentiable gate (`rx`, `ry`, `rz`, `rzz`, `p`, `pauli_rotation`), and
-the circuit must be unitary.
+A Hamiltonian term is `(coefficient, observable)`. Gates sharing a slot accumulate their
+gradients. `param()` accepts only differentiable gates (`rx`, `ry`, `rz`, `rzz`, `p`,
+`pauli_rotation`), and the circuit must be unitary.

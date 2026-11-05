@@ -1,9 +1,9 @@
 # PRISM-Q for Python
 
-A quantum circuit simulator with a Rust core. PRISM-Q reads the structure of each
-circuit and picks how to store its state: a stabilizer tableau for Clifford circuits, a
-dense statevector for general ones, and a sparse map, matrix product state, product state
-or factored form where the circuit allows. The result reports which one ran.
+A quantum circuit simulator with a Rust core. PRISM-Q picks a state representation from
+each circuit's structure: a stabilizer tableau for Clifford circuits, a dense statevector
+for general ones, and a sparse map, matrix product state, product state or factored form
+where the circuit allows. The result names the backend that ran.
 
 - Source, issues and discussions: <https://github.com/AbeCoull/prism-q>
 - Documentation: <https://abecoull.github.io/prism-q/>
@@ -61,12 +61,12 @@ for q in range(59):
 print(backend(ghz_t.t(0).build()))  # Sparse
 ```
 
-A 1,000-qubit GHZ circuit is all Clifford gates, so a stabilizer tableau holds it. Add
-one T gate to a 60-qubit GHZ circuit and the tableau no longer applies, but only two of
-its 2^60 basis states are ever nonzero, so a sparse map does. The selection follows
-structural rules and the host's memory, not timed trials, so naming a backend with
+A 1,000-qubit GHZ circuit is all Clifford, so a stabilizer tableau holds it. One T gate
+on a 60-qubit GHZ circuit rules out the tableau, but only two of its 2^60 basis states
+are ever nonzero, so a sparse map holds it. Selection follows structural rules and host
+memory, not timed trials, so naming a backend with
 `.backend(prism_q.BackendKind.statevector())` and its siblings can beat it on a circuit
-the rules misjudge. `metadata.reason` says which rule fired.
+the rules misjudge. `metadata.reason` names the rule that fired.
 
 ## What the package covers
 
@@ -84,31 +84,31 @@ the rules misjudge. `metadata.reason` says which rule fired.
   correlators, plus analytic noisy marginals (`noisy_marginals_analytical`).
 - QEC programs (`QecProgram`) with detector and observable sampling and feed-forward
   corrections.
-- NumPy output for probabilities, statevectors and QEC bit matrices, and pickling for
-  circuits, parameters, noise models and QEC programs, so they cross `multiprocessing`,
-  Ray and Dask boundaries.
+- NumPy output for probabilities, statevectors and QEC bit matrices. Circuits,
+  parameters, noise models and QEC programs pickle, so they cross `multiprocessing`, Ray
+  and Dask boundaries.
 
 ## GPU
 
-The Linux and Windows wheels include the CUDA backends; the macOS wheel does not. Nothing
-CUDA-related loads at import, so the package runs on the CPU on any machine. A GPU run
-needs an NVIDIA device with a CUDA 12 driver, installed through the system, and NVRTC,
-which the `cuda12` extra installs from PyPI:
+The Linux and Windows wheels include the CUDA backends; the macOS wheel does not.
+Nothing CUDA loads at import, so the package runs on the CPU anywhere. A GPU run needs an
+NVIDIA device with a system-installed CUDA 12 driver, and NVRTC, which the `cuda12` extra
+installs from PyPI:
 
 ```bash
 pip install "prism-q[cuda12]"
 ```
 
 Without a driver or NVRTC, only `GpuContext(...)` raises. `prism_q.gpu_info()` reports
-the device, or why it cannot be used. MPI-distributed execution is a Rust feature and is
+the device or why it cannot be used. MPI-distributed execution is a Rust feature and is
 not in the wheels.
 
 ## Bit ordering
 
-Count keys and measurement bit indices are LSB-first: in a bitstring key the leftmost
-character is classical bit 0, and `q[0]` is the least significant qubit of a statevector
-index. This is the reverse of Qiskit. Measuring `q[i]` into `c[i]`, the state where only
-`q[0]` is set reads as `"10..."`, not `"...01"`.
+Count keys and measurement bit indices are LSB-first: the leftmost character of a key
+is classical bit 0, and `q[0]` is the least significant qubit of a statevector index,
+the reverse of Qiskit. Measuring `q[i]` into `c[i]`, the state with only `q[0]` set reads
+`"10..."`, not `"...01"`.
 
 ## Documentation
 
@@ -124,9 +124,8 @@ index. This is the reverse of Qiskit. Measuring `q[i]` into `c[i]`, the state wh
 
 ## Contributing
 
-Bug reports, questions and pull requests are welcome on
-[GitHub](https://github.com/AbeCoull/prism-q). If the package is useful in your work, a
-star on the repository helps other people find it.
+Bug reports, questions and pull requests go to
+[GitHub](https://github.com/AbeCoull/prism-q).
 
 ## License
 

@@ -5,8 +5,8 @@ ansatz, using exact gradients, then evaluate a batch of parameter points in one 
 
 ## Mark the parameters
 
-`param(slot)` tags the gate just appended as trainable and assigns it a slot. Several
-gates may share a slot.
+`param(slot)` marks the gate just appended as trainable in that slot; several gates may
+share a slot.
 
 ```python
 import numpy as np
@@ -32,9 +32,9 @@ feeds which slot.
 
 ## The observable
 
-A Hamiltonian is a list of `(coefficient, [(qubit, axis), ...])` terms. Here
-`H = -sum Z_i Z_{i+1} - 0.5 sum X_i`. Wrapping it in `PauliObservable` parses it once and
-caches the grouping of commuting terms, which pays off inside a loop.
+A Hamiltonian is a list of `(coefficient, [(qubit, axis), ...])` terms, here
+`H = -sum Z_i Z_{i+1} - 0.5 sum X_i`. `PauliObservable` parses it once and caches the
+grouping of commuting terms for reuse inside a loop.
 
 ```python
 from prism_q import PauliObservable
@@ -48,10 +48,10 @@ print(hamiltonian.num_terms, hamiltonian.num_groups)   # 7 2
 
 ## Adjoint and parameter-shift gradients
 
-`expectation_gradient` uses the adjoint method: one forward and one backward pass, whatever
-the parameter count. `expectation_gradient_shift` uses the parameter-shift rule, two extra
-circuit runs per parameter, and works on backends that have no adjoint pass. Both return
-`(value, gradient)`, with one gradient entry per slot.
+`expectation_gradient` uses the adjoint method: one forward and one backward pass at any
+parameter count. `expectation_gradient_shift` uses the parameter-shift rule, two extra
+circuit runs per parameter, and works on backends with no adjoint pass. Both return
+`(value, gradient)`, one gradient entry per slot.
 
 ```python
 from prism_q import simulate
@@ -75,14 +75,14 @@ for step in range(100):
 print(round(energy, 6))                         # -3.377401
 ```
 
-The exact ground energy of this chain is -3.4270. Two layers of `ry` rotations get within
-1.5% of it; a third layer closes more of the gap.
+The exact ground energy is -3.4270. Two layers of `ry` rotations get within 1.5% of it; a
+third layer closes more of the gap.
 
 ## Sweep many points at once
 
 `PreparedCircuit` settles fusion and backend selection once and replays them for every
 binding. The `*_many` calls take a `(points, num_slots)` array and cross into Rust once;
-up to 16 qubits the rows split across cores.
+up to 16 qubits, rows split across cores.
 
 ```python
 from prism_q import BackendKind, PreparedCircuit
@@ -95,10 +95,10 @@ energies = np.array([r.mean for r in results])
 print(energies.shape, round(energies.min(), 4))  # (256,) -2.5401
 ```
 
-`run_many` and `expectation_values_many` do the same for full runs and for lists of
-single observables. Pass the backend explicitly when the template angles are not
-representative: a template with every rotation at zero reads as Clifford, and automatic
-dispatch would settle on a stabilizer backend that then rejects the bound circuit.
+`run_many` and `expectation_values_many` do the same for full runs and lists of single
+observables. Pass the backend explicitly when the template angles are not typical: with
+every rotation at zero the template reads as Clifford, and automatic dispatch would pick
+a stabilizer backend that then rejects the bound circuit.
 
 ## In Rust
 

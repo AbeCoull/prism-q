@@ -22,7 +22,7 @@ pip install "prism-q[cuda12]"
 ```
 
 Without a driver or NVRTC the package runs on the CPU and only `GpuContext(...)` raises.
-The package is covered in [Python Bindings](../guides/python.md).
+[Python Bindings](../guides/python.md) covers the package.
 
 ## Feature flags
 
@@ -55,9 +55,9 @@ cargo clippy --all-targets --features parallel -- -D warnings  # lint
 ```
 
 Use `cargo test --features parallel` if `cargo-nextest` is unavailable. These need only
-a Rust toolchain. The GPU, distributed and MPI arms are covered in the
-[contributing guide](https://github.com/AbeCoull/prism-q/blob/main/CONTRIBUTING.md#test-and-lint);
-its `--all-features` runs add `distributed-mpi`, which needs a system MPI installation
-and libclang.
+a Rust toolchain. The
+[contributing guide](https://github.com/AbeCoull/prism-q/blob/main/CONTRIBUTING.md#test-and-lint)
+covers the GPU, distributed and MPI arms; its `--all-features` runs add
+`distributed-mpi`, which needs a system MPI installation and libclang.
 
 Next: build [Your First Circuit](./first-circuit.md).

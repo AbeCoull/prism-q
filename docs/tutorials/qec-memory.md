@@ -4,16 +4,16 @@ Goal: protect one bit in a distance-d repetition code for d rounds of noisy synd
 extraction, decode the detector record, and report the logical error rate at three
 distances.
 
-The code stores a logical 0 in `d` data qubits. Between each pair of data qubits sits an
-ancilla that measures their parity `Z_i Z_{i+1}`. Before every round each data qubit
-suffers a bit flip with probability `p`. A logical error is a majority of data qubits
-flipped at the end, which the decoder has to infer from parity changes alone.
+The code stores a logical 0 in `d` data qubits, with an ancilla between each pair
+measuring their parity `Z_i Z_{i+1}`. Before every round each data qubit flips with
+probability `p`. A logical error is a majority of data qubits flipped at the end, which
+the decoder must infer from parity changes alone.
 
 ## Build the program
 
-`QecProgram` is a measurement-record program: every `measure_z` returns the index of the
-record it writes, and detectors and observables are parities over records. Data qubits
-take the even indices and ancillas the odd ones.
+In a `QecProgram`, every `measure_z` returns the index of the record it writes, and
+detectors and observables are parities over records. Data qubits take the even indices,
+ancillas the odd ones.
 
 ```python
 from prism_q import Gate, QecBasis, QecNoise, QecProgram, QecRecordRef
@@ -51,19 +51,19 @@ def repetition_memory(distance, rounds, p, shots):
     return qp
 ```
 
-Three kinds of detector appear. In the first round an ancilla outcome is compared with the
-noiseless value 0, so the detector is that one record. In later rounds it is the change
-since the previous round. After the last round the data qubits are measured directly and
+There are three kinds of detector. In the first round an ancilla outcome is compared with
+the noiseless value 0, so the detector is that one record. In later rounds it is the
+change since the previous round. After the last round the data qubits are measured and
 each final detector checks their parity against the last ancilla outcome. Every detector
 reads 0 when nothing went wrong.
 
-The observable is data qubit 0. Each ancilla is reset after it is measured, since a
-program may not reuse a measured qubit before a reset.
+The observable is data qubit 0. Each ancilla is reset after measurement, since a program
+may not reuse a measured qubit before a reset.
 
 ## Sample and decode
 
-`detector_error_model()` derives, from the noise annotations, which detectors and
-observables each error flips and with what probability. The built-in union-find decoder
+`detector_error_model()` derives from the noise annotations which detectors and
+observables each error flips, and with what probability. The built-in union-find decoder
 needs the graphlike form, where each mechanism flips at most two detectors.
 
 ```python
@@ -81,8 +81,8 @@ print(failures / result.total_shots)             # 0.00545
 ```
 
 `result.detectors` and `result.observables` are `bool` arrays with one row per shot.
-`decode` returns the predicted observable flips in the same shape as `observables`, and
-a shot fails when the prediction disagrees with what happened.
+`decode` returns predicted observable flips in the shape of `observables`; a shot fails
+when the prediction disagrees with what happened.
 
 ## Compare distances
 
@@ -102,8 +102,7 @@ for distance in (3, 5, 7):
 
 `logical_error_rates()` counts shots whose observable flipped with no correction, so the
 raw rate grows with distance: more rounds, more chances for qubit 0 to flip. The decoded
-rate falls by a factor of four to seven per step in distance, which is what a code
-operating below threshold looks like.
+rate falls four to sevenfold per step in distance, as expected below threshold.
 
 `model.to_text()` writes the model in the common detector error model text format, for
 an external matching or belief-propagation decoder. The
@@ -112,8 +111,8 @@ and the other noise channels.
 
 ## In Rust
 
-The program builder has the same shape, with `Result` returns. Decoding works on the
-packed shot records directly:
+The Rust builder has the same shape, with `Result` returns. Decoding works on the packed
+shot records directly:
 
 ```rust
 use prism_q::{UnionFindDecoder, parse_qec_program, run_qec_program};

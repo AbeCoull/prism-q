@@ -2,8 +2,7 @@
 
 ## Building circuits
 
-`CircuitBuilder` is a fluent API. Every gate method returns the builder, and
-`build()` produces the `Circuit` that simulation consumes.
+Every `CircuitBuilder` gate method returns the builder; `build()` returns the `Circuit`.
 
 ```python
 from prism_q import CircuitBuilder
@@ -36,22 +35,19 @@ circuit = (
 
 `pauli_rotation(theta, factors)` appends `exp(-i * theta * P / 2)` for the Pauli
 string `P` given as `(qubit, axis)` factors with `axis` one of `"X"`, `"Y"`,
-`"Z"`; identity factors are omitted. A weight-1 string lowers to `rx`, `ry`, or
-`rz` and a two-qubit `ZZ` string to `rzz`, so fusion and Clifford recognition
-keep firing on them. `Circuit.add_pauli_rotation` is the imperative spelling.
+`"Z"`; omit identity factors. A weight-1 string lowers to `rx`, `ry`, or `rz` and a
+two-qubit `ZZ` string to `rzz`, so fusion and Clifford recognition still see them. `Circuit.add_pauli_rotation` is the imperative spelling.
 
 ```python
 builder.pauli_rotation(0.4, [(0, "X"), (1, "Y"), (3, "Z")]).param(0)
 ```
 
-`trotter(hamiltonian, t, steps=1, order=2)` appends a product-formula
-approximation of `exp(-i H t)`: `steps` steps of length `t / steps`, each term
-`c P` of the Hamiltonian as the rotation `exp(-i c P dt)` through
-`pauli_rotation`. `order` is 1 for the Lie-Trotter formula, 2 for the symmetric
-one, or an even `2k` for the Suzuki formula of that order, which costs
-`5 ** (k - 1)` second-order substeps. The Hamiltonian is the term list the
-expectation terminals take or a `PauliObservable`; identity terms are dropped as
-a global phase. `Circuit.add_trotter` is the imperative spelling.
+`trotter(hamiltonian, t, steps=1, order=2)` approximates `exp(-i H t)` with `steps`
+steps of length `t / steps`, each term `c P` appended as the `pauli_rotation`
+`exp(-i c P dt)`. `order` is 1 for Lie-Trotter, 2 for the symmetric formula, or an even
+`2k` for the Suzuki formula of that order, costing `5 ** (k - 1)` second-order substeps.
+The Hamiltonian is a term list, as the expectation terminals take, or a
+`PauliObservable`; identity terms drop out as a global phase. `Circuit.add_trotter` is the imperative spelling.
 
 ```python
 from prism_q import CircuitBuilder, PauliObservable, simulate
@@ -62,15 +58,14 @@ energy = simulate(evolved).seed(42).observable_expectation(ising).mean
 assert abs(energy - 1.0) < 1e-2  # <H> is conserved up to the Trotter error
 ```
 
-The standard gates lower as the OpenQASM parser lowers the same names, so a builder
-circuit equals the parsed one instruction for instruction: `crx`, `cy` and the
-other controlled gates become one controlled-unitary, `rxx` and `ryy` become Pauli
+Standard gates lower exactly as the OpenQASM parser lowers them, so a builder circuit
+matches the parsed one instruction for instruction: `crx`, `cy` and the other
+controlled gates become one controlled-unitary, `rxx` and `ryy` become Pauli
 rotations that `.param(slot)` can bind, `u` becomes one fused matrix, and `iswap`
 and `cswap` expand to Clifford gates and a Toffoli.
 
-`cu` and `mcu` take a 2x2 matrix as nested Python sequences of complex numbers.
-Out-of-range or repeated qubits raise `PrismError` at build time rather than at
-simulation time.
+`cu` and `mcu` take a 2x2 matrix as nested sequences of complex numbers. Out-of-range
+or repeated qubits raise `PrismError` at build time.
 
 Three other routes produce a `Circuit`:
 
@@ -93,11 +88,10 @@ The `circuits` submodule mirrors the Rust builders documented in
 
 `measure_in_basis(qubit, axis, bit)` rotates `axis` onto Z and measures, recording
 the `+1` eigenvalue as `0`. The qubit is left in the Z eigenstate, not the `axis` one.
-`measure_pauli_product(factors, bit)` measures a multi-qubit Pauli product such as
-`X0 X1` without measuring its factors one by one. The parity collects on one extra
-qubit appended past the register on the first call, so the built circuit is one qubit
-wider; a second call resets that qubit, which takes the circuit off the compiled
-sampling route.
+`measure_pauli_product(factors, bit)` measures a product such as `X0 X1` without
+measuring its factors. The first call appends one ancilla past the register to collect
+the parity, so the circuit is one qubit wider; a second call resets that ancilla, which
+takes the circuit off the compiled sampling route.
 
 ```python
 from prism_q import CircuitBuilder, simulate
@@ -132,9 +126,9 @@ assert not received.shots[:, 2].any()
 ```
 
 `guarded(condition, body, else_body=None)` calls `body` with a fresh `CircuitBuilder` of
-the same width and turns whatever it appends, measurements and resets included, into a
-region that runs only when the condition holds. `else_body` builds a second region for
-the shots where it does not:
+the same width and turns what it appends, measurements and resets included, into a
+region that runs when the condition holds. `else_body` builds the region for the other
+shots:
 
 ```python
 coin = CircuitBuilder(2, 2).h(0).measure(0, 0)
@@ -147,19 +141,18 @@ coin.measure(1, 1)
 print(simulate(coin.build()).seed(3).shots(1000).counts())   # {'00': 507, '11': 493}
 ```
 
-The else region reads the condition again after the first has run, so a `body` that
-measures into a bit the condition reads cannot take an `else_body` and raises
-`PrismError`. A body cannot widen the circuit, which rules out `measure_pauli_product`
-and `measure_all` inside one. Regions nest. A noise model built for a circuit with a
-region carries slots for the body's gates, and their events fire only on the shots that
-take the branch. `NoiseModel.empty(circuit)` sizes the model to those slots too: index
+The else region rereads the condition after the first region runs, so a `body` that
+measures into a bit the condition reads cannot take an `else_body` (`PrismError`). A
+body cannot widen the circuit, which rules out `measure_pauli_product` and
+`measure_all`. Regions nest. A noise model for a circuit with regions carries slots for
+the body gates, and their events fire only on shots that take the branch. `NoiseModel.empty(circuit)` sizes the model to those slots too: index
 `i` below the instruction count is top-level instruction `i`, and the body slots follow
 in region order.
 
 ## Exporting and drawing circuits
 
-`to_qasm()` writes OpenQASM 3.0 that `parse_qasm` reads back to the same instruction
-stream, with inline angles exact:
+`to_qasm()` writes OpenQASM 3.0 that `parse_qasm` reads back to the same instructions,
+inline angles exact:
 
 ```python
 from prism_q import CircuitBuilder, parse_qasm
@@ -178,15 +171,14 @@ portable = circuit.to_qasm(expand_pauli_rotations=True)
 ```
 
 A multi-letter Pauli rotation keeps its `rxyz(0.3)` spelling, which only PRISM-Q
-parses. `expand_pauli_rotations=True` lowers it to basis changes around a CNOT ladder so
-other toolchains read the file. Guarded regions export as `if` blocks. Save points and
+parses. `expand_pauli_rotations=True` lowers it to basis changes around a CNOT ladder that
+other toolchains read. Guarded regions export as `if` blocks. Save points and
 dense unitaries on three or more qubits have no OpenQASM spelling and raise `PrismError`
 with `kind == "export_unsupported"`.
 
-`print(circuit)` draws the text wire diagram. `draw()` takes the layout options
-`fold_width`, `show_idle_wires`, `show_barriers`, `max_qubits`, and `max_moments`, and
-past 64 qubits or 500 moments returns `summary()` instead: gate counts, connectivity,
-and the depth profile. `heatmap()` draws gate density by qubit and moment.
+`print(circuit)` draws the text wire diagram. `draw()` takes `fold_width`,
+`show_idle_wires`, `show_barriers`, `max_qubits`, and `max_moments`; past 64 qubits or
+500 moments it returns `summary()` instead (gate counts, connectivity, depth profile). `heatmap()` draws gate density by qubit and moment.
 
 ```python
 print(circuit)
@@ -195,22 +187,21 @@ with open("circuit.svg", "w", encoding="utf-8") as f:
     f.write(circuit.to_svg(dark_mode=True, show_legend=True))
 ```
 
-`to_svg()` writes a self-contained SVG. Its keyword options cover the theme
+`to_svg()` writes a standalone SVG. Its keyword options cover the theme
 (`dark_mode`, or `auto_theme` to embed both and follow the viewer's color scheme),
 `animate`, `compact`, the `show_legend`, `show_stats_header`, and `show_topology`
 layers, truncation (`max_qubits`, `max_moments`, and `ellipsis=(first, last)` to keep
 only the leading and trailing moments), and geometry in SVG units (`wire_spacing`,
 `moment_width`, `gate_height`, `gate_min_width`, `font_size`, `control_radius`, and
 `padding` as `(left, top, right, bottom)`). `to_svg_heatmap()` renders the density
-heatmap. In Jupyter a circuit displays as its diagram, static and following the page
-theme, cut to 64 wires and 200 moments.
+heatmap. In Jupyter a circuit displays as a static diagram in the page theme, cut to 64 wires
+and 200 moments.
 
 ## Parameter sweeps
 
-A variational loop rebinds angles while the gate sequence stays fixed.
-`Parameters` names the slots those angles land in, and `PreparedCircuit` holds
-the circuit across bindings so fusion and backend selection are settled once
-rather than per point.
+`Parameters` names the angle slots a variational loop rebinds. `PreparedCircuit` holds
+the circuit across bindings, so fusion and backend selection happen once rather than
+per point.
 
 ```python
 from prism_q import CircuitBuilder, PreparedCircuit
@@ -226,27 +217,23 @@ for values in [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]:
     outcome = prepared.run(values, seed=42)
 ```
 
-`run(values, seed=42)` returns the same `RunOutcome` as `simulate(...).run()`.
-`expectation_values(values, observables)` and
-`observable_expectation(values, hamiltonian)` return what the `Simulation`
-terminals of the same name return on the bound circuit, without planning
-dispatch or fusing again. `bind(values)` returns the bound `Circuit` instead, for
-handing to `simulate(...)` with different options or to any other consumer of a
-circuit.
+`run(values, seed=42)` returns the `RunOutcome` that `simulate(...).run()` would.
+`expectation_values(values, observables)` and `observable_expectation(values,
+hamiltonian)` match the `Simulation` terminals of the same names on the bound circuit,
+without dispatching or fusing again. `bind(values)` returns the bound `Circuit`, for
+`simulate(...)` with other options or any other consumer.
 
 `run_many`, `expectation_values_many` and `observable_expectation_many` take a
-`(points, num_slots)` array and cross into Rust once. Up to 16 qubits the rows
-split across cores, as `run_batch` does, and every result matches the single
-call with the same seed.
+`(points, num_slots)` array and cross into Rust once. Up to 16 qubits the rows split
+across cores, as in `run_batch`; each result matches the single call with the same seed.
 
 ```python
 energies = prepared.observable_expectation_many(points, hamiltonian, seed=42)
 ```
 
-A term list is parsed on every call, and the grouping of its terms into
-qubit-wise-commuting sets is recomputed with it. `PauliObservable` parses the
-list once and keeps the grouping after its first use. Every argument that takes
-a Hamiltonian accepts one in place of the list, the gradients included:
+A term list is parsed, and its terms regrouped into qubit-wise commuting sets, on every
+call. `PauliObservable` parses once and keeps the grouping after first use. Every
+Hamiltonian argument accepts one, the gradients included:
 
 ```python
 from prism_q import PauliObservable
@@ -256,23 +243,21 @@ for values in points:
     mean = prepared.observable_expectation(values, h, seed=42).mean
 ```
 
-Automatic dispatch reads the template, so build it at angles representative of
-the sweep. A template whose rotations are all zero reads as Clifford and settles
-on a backend that then rejects the bound circuit. Pass an explicit backend as
-the third argument to decide it yourself:
+Automatic dispatch reads the template, so build it at angles typical of the sweep. A
+template with all rotations at zero reads as Clifford and picks a backend that then
+rejects the bound circuit. An explicit backend as the third argument avoids this:
 
 ```python
 prepared = PreparedCircuit(circuit, params, BackendKind.statevector())
 ```
 
-`reuses_fusion_plan` reports whether the recorded fused structure is being
-replayed. Results agree either way; only the speed differs.
+`reuses_fusion_plan` reports whether the recorded fused structure is replayed. Results
+agree either way; only speed differs.
 
-Build a `Parameters` three ways. `builder.parameters()` returns the set recorded
-by `param(slot)`; `Parameters.all_rotations(circuit)` gives every bindable gate
-its own slot in circuit order; `Parameters(n)` plus `link(instruction, slot)`
-declares the slots up front. Several gates may share a slot, in which case
-binding writes one angle to each.
+`builder.parameters()` returns the slots recorded by `param(slot)`;
+`Parameters.all_rotations(circuit)` gives every bindable gate its own slot in circuit
+order; `Parameters(n)` plus `link(instruction, slot)` declares slots up front. Gates
+sharing a slot all receive its angle.
 
 `parse_qasm_parametric` returns a template and the named slots declared by OpenQASM
 `input` statements, in declaration order:
@@ -293,10 +278,10 @@ qasm_sweep = PreparedCircuit(template, parameters, BackendKind.statevector())
 outcomes = qasm_sweep.run_many([[0.2], [0.7]], seed=42)
 ```
 
-Input angles start at zero, so bind the template before simulation and choose an
-explicit backend when preparing it. Each input must occupy a whole angle argument
-of a supported gate at the top level; expressions such as `2 * theta` and inputs in
-control-flow bodies raise `PrismError`. `parse_qasm` continues to reject unbound inputs.
+Input angles start at zero, so bind the template before simulating and give
+`PreparedCircuit` an explicit backend. Each input must be a whole angle argument of a
+supported gate at top level; expressions such as `2 * theta` and inputs inside control
+flow raise `PrismError`. `parse_qasm` still rejects unbound inputs.
 
 | Method | Returns |
 |--------|---------|
@@ -315,9 +300,9 @@ that carries no angle all raise `PrismError`.
 `Circuit`, `Gate`, `Parameters`, `NoiseChannel`, `NoiseModel`, `QecProgram`,
 `PauliObservable`, `ClassicalCondition`, `QecRecordRef`, `QecNoise`, `SaveSpec`, and
 `QecBasis` pickle, so they cross `multiprocessing`, `concurrent.futures`, Ray, and Dask
-boundaries. The payload is a versioned binary encoding that carries every float as its
-IEEE bits, so an unpickled value is identical to the original rather than close to it,
-and a `Parameters` set keeps the edit guard it was pinned with.
+boundaries. The payload is a versioned binary encoding with every float as its IEEE
+bits, so an unpickled value is identical to the original, and a `Parameters` set keeps
+the edit guard it was pinned with.
 
 ```python
 import pickle
@@ -332,19 +317,17 @@ assert simulate(restored).seed(1).shots(100).counts() == simulate(circuit).seed(
 ).counts()
 ```
 
-A payload from a newer format version raises `PrismError` naming the version rather
-than decoding wrongly. Builders, results, samplers, backends, and contexts do not
-pickle: return a result's arrays or counts from a worker instead.
+A payload from a newer format version raises `PrismError` naming the version.
+Builders, results, samplers, backends, and contexts do not pickle; return arrays or
+counts from a worker instead.
 
 ## Dynamic programs
 
-A `Circuit` is a finite instruction list, so it cannot hold a loop that repeats
-until a measurement comes up, or a counter a measurement increments.
-`parse_qasm_dynamic` reads OpenQASM with `while`, `break`, `continue`, and
-classical values decided at runtime, and returns a `DynamicProgram`: circuits
-joined by branches on classical expressions, run once per shot.
-`simulate_program` runs one and returns the same `ShotsResult` and
-`CountsResult` a circuit run returns.
+A `Circuit` is a finite instruction list and cannot hold a loop that repeats until a
+measurement comes up. `parse_qasm_dynamic` reads OpenQASM with `while`, `break`,
+`continue`, and runtime classical values, and returns a `DynamicProgram`: circuits
+joined by branches on classical expressions, run once per shot. `simulate_program`
+returns the same `ShotsResult` and `CountsResult` as a circuit run.
 
 ```python
 from prism_q import parse_qasm_dynamic, simulate_program
@@ -365,9 +348,9 @@ counts = simulate_program(program).seed(42).sample_counts(1000).counts()
 assert counts == {"0": 1000}
 ```
 
-`DynamicProgramBuilder` builds the same structure directly. Conditions,
-assigned values, and rotation angles are OpenQASM expression strings over the
-declared variables and the classical bits, `c[i]` for one bit and `c` for the
+`DynamicProgramBuilder` builds the same structure directly. Conditions, assigned
+values, and rotation angles are OpenQASM expression strings over declared variables and
+classical bits, `c[i]` for one bit and `c` for the
 whole register read as an unsigned integer, or plain `bool`, `int`, and `float`
 constants. `begin_while` and `begin_if` open a block that `end()` closes, and
 `begin_else`, `break_loop`, and `continue_loop` work as their OpenQASM keywords
@@ -391,8 +374,8 @@ shots = simulate_program(program).seed(7).shots(500)
 ```
 
 A shot that runs more blocks than its bound, one million by default, raises
-`PrismError` with `kind == "step_limit"` and the loop's name, rather than
-hanging. `.max_steps(n)` sets another bound:
+`PrismError` with `kind == "step_limit"` and the loop's name. `.max_steps(n)` changes
+the bound:
 
 ```python
 b = DynamicProgramBuilder(1, 0)
@@ -400,12 +383,11 @@ b.begin_while("forever", True).add_gate(Gate.x(), [0]).end()
 simulate_program(b.build()).max_steps(100).shots(1)  # raises
 ```
 
-`.noise(rules)` takes a `NoiseBuilder` rather than a `NoiseModel`, since a program
-holds one circuit per block and a model is laid out against one circuit. The rules
-compile against every block and every runtime rotation, and each shot runs one
-noisy trajectory. Readout error flips the returned record, not the bits a branch
-reads, as on a circuit. Leak flags and quasi-static draws last the whole shot, so a
-qubit leaked in one block stays leaked in the next. The density matrix and an
+`.noise(rules)` takes a `NoiseBuilder`, not a `NoiseModel`: a model is laid out against
+one circuit and a program holds one per block. The rules compile against every block and
+runtime rotation, and each shot runs one noisy trajectory. Readout error flips the
+returned record, not the bits a branch reads. Leak flags and quasi-static draws last the
+whole shot, so a qubit leaked in one block stays leaked in the next. The density matrix and an
 over-rotation rule matching a runtime rotation raise `incompatible_backend`.
 
 ```python
@@ -417,8 +399,7 @@ rules = NoiseBuilder().after_gates(
 noisy = simulate_program(program).noise(rules).seed(42).shots(1000)
 ```
 
-A program with no runtime control flow runs as its circuit, with the same seeded
-shots. Statevector, stabilizer, sparse, MPS, product-state, factored, tensor
+A program without runtime control flow runs as its circuit, with the same seeded shots. Statevector, stabilizer, sparse, MPS, product-state, factored, tensor
 network, and density-matrix backends run dynamic programs; the stabilizer-rank
 and Pauli propagation engines keep no per-shot state and raise
 `incompatible_backend`.

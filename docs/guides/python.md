@@ -1,12 +1,10 @@
 # Python Bindings
 
-`prism-q` ships Python bindings built with PyO3. They are a thin wrapper over the
-Rust crate: the compiled extension is `prism_q._prism_q` and the pure-Python
-`prism_q` package re-exports it. Simulation runs in Rust with the GIL released,
-so the wrapper adds no per-gate overhead.
+The PyO3 extension `prism_q._prism_q` is re-exported by the pure-Python `prism_q`
+package. Simulation runs in Rust with the GIL released, so the wrapper adds no per-gate
+overhead.
 
-Wheels are `abi3` for Python 3.11 and newer, so one wheel per platform covers
-every supported interpreter. PyPI carries wheels for Linux x86_64 and aarch64
+Wheels are `abi3` for Python 3.11 and newer, one per platform: Linux x86_64 and aarch64
 (manylinux), macOS arm64 and Windows x64. Other platforms build from the source
 distribution, which needs a Rust toolchain.
 
@@ -24,8 +22,8 @@ NVRTC, the CUDA runtime compiler. The `cuda12` extra installs NVRTC from PyPI:
 pip install "prism-q[cuda12]"
 ```
 
-Neither is loaded at import, so on a host without them the package runs on the CPU
-as usual and only `GpuContext(...)` raises. The macOS wheel has no CUDA paths.
+Neither is loaded at import: without them the package runs on the CPU and only
+`GpuContext(...)` raises. The macOS wheel has no CUDA paths.
 
 Building from a source checkout needs [maturin](https://www.maturin.rs/):
 
@@ -34,11 +32,10 @@ pip install maturin
 maturin develop --manifest-path bindings/python/Cargo.toml
 ```
 
-The bindings enable the `parallel` feature by default. `gpu` and `distributed-mpi`
-are optional. `--features gpu` adds the CUDA paths to a source build and needs no
-CUDA toolkit to compile. The sharded statevector (see
-[Distributed backend](python-running.md#distributed-backend)) is in no wheel, so `distributed-mpi` always
-means a source build.
+`parallel` is on by default; `gpu` and `distributed-mpi` are optional. `--features gpu`
+adds the CUDA paths to a source build and compiles without a CUDA toolkit. No wheel
+carries the sharded statevector ([Distributed backend](python-running.md#distributed-backend)),
+so `distributed-mpi` always means a source build.
 
 ## Quick start
 
@@ -71,9 +68,8 @@ A Bell pair gives `'00'` and `'11'`, which look the same either way, but
 
 ## Errors and typing
 
-Every failure surfaces as `prism_q.PrismError`, carrying the message from the
-Rust error. Backend limits, unsupported operations, and invalid arguments all
-raise it:
+Every failure, from backend limits to unsupported operations and invalid arguments,
+raises `prism_q.PrismError` with the Rust error's message:
 
 ```python
 import prism_q
@@ -84,12 +80,11 @@ except prism_q.PrismError as exc:
     print(exc)   # backend `density_matrix` is incompatible: circuit has ... qubits
 ```
 
-The package ships type stubs (`prism_q/_prism_q.pyi`) and a `py.typed` marker,
-so mypy and Pyright see the full surface.
+Type stubs (`prism_q/_prism_q.pyi`) and a `py.typed` marker give mypy and Pyright the
+full surface.
 
-`PrismError` carries a `kind` string naming the variant it came from, so a
-caller can branch on the failure without matching its message. A run over a memory
-cap raises kind `"resource_limit"` with the numbers attached: `resource` names the
+`PrismError.kind` names the Rust variant, so a caller can branch without matching the
+message. A run over a memory cap raises kind `"resource_limit"` with the numbers attached: `resource` names the
 unit (`"qubits"`, `"amplitudes"`, `"entries"`, `"elements"` or
 `"bytes of device memory"`), `required` and `limit` are integers in that unit, and
 `env_var` names the variable that overrides the cap, or is `None`. `knob` names the

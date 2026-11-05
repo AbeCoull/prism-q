@@ -7,17 +7,17 @@
 > statevector. Input is OpenQASM 3.0 with backward-compatible 2.0 syntax, and
 > circuits export back to OpenQASM 3.0.
 
-PRISM-Q picks the state representation from the circuit. A circuit with no
-entangling gates runs as a product state, a Clifford circuit on a stabilizer
-tableau, a circuit that splits into independent registers on per-block
-backends, and everything else on a dense statevector. Past the statevector
-memory cap, a circuit that keeps few basis states goes to a sparse map and the
-rest to matrix product states. Shots on a Clifford+T circuit with few T gates
-can take the stabilizer-rank sampler, and its marginals deterministic Pauli
-propagation. `BackendKind::Auto` is the default; every backend can also be
-named, and the run metadata reports which one ran. The rules read circuit
-structure and the memory cap, with cost estimates only on a few expectation and
-marginal routes, so `Auto` does not promise the fastest backend.
+PRISM-Q picks the state representation from the circuit: a product state with
+no entangling gates, a stabilizer tableau for Clifford circuits, per-block
+backends for circuits that split into independent registers, and a dense
+statevector otherwise. Past the statevector memory cap, a circuit that keeps
+few basis states goes to a sparse map and the rest to matrix product states.
+Shots on a Clifford+T circuit with few T gates can take the stabilizer-rank
+sampler, and its marginals deterministic Pauli propagation.
+`BackendKind::Auto` is the default; every backend can also be named, and the
+run metadata reports which one ran. The rules read circuit structure and the
+memory cap, with cost estimates only on a few expectation and marginal routes,
+so `Auto` does not promise the fastest backend.
 
 Backend kinds: Statevector, Stabilizer, Sparse, Mps, ProductState,
 TensorNetwork, Factored, FactoredStabilizer, DensityMatrix, and the Clifford+T
@@ -88,7 +88,7 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 ## Reference
 
 - [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html): wall-clock timings on a fixed circuit suite, with the command that reproduces them.
-- [Comparative measurements](https://abecoull.github.io/prism-q/comparison.html): a benchmark matrix of eight workload families (dense random, QFT, quantum volume, wide Clifford, shallow wide, disconnected, sampling-heavy, mid-circuit) timed beside Qiskit Aer, qsim, QuEST, Spinoza and RustQIP on one host, with fp32 and fp64 kept apart, peak memory, thread scaling, an automatic-dispatch study, per-row validation against an independent reference, and a committed harness that regenerates every table and figure from the raw observations.
+- [Comparative measurements](https://abecoull.github.io/prism-q/comparison.html): eight workload families (dense random, QFT, quantum volume, wide Clifford, shallow wide, disconnected, sampling-heavy, mid-circuit) timed beside Qiskit Aer, qsim, QuEST, Spinoza and RustQIP on one host. Covers fp32 and fp64 separately, peak memory, thread scaling and automatic dispatch, validates each row against an independent reference, and regenerates every table and figure from raw observations with a committed harness.
 - [Circuit builders](https://abecoull.github.io/prism-q/reference/builders.html): the prebuilt circuit generators.
 - [Glossary](https://abecoull.github.io/prism-q/glossary.html)
 - [Roadmap](https://abecoull.github.io/prism-q/roadmap.html): open work by theme, each item tagged with what it waits on, and what is not planned.

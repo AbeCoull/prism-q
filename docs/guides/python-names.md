@@ -1,23 +1,21 @@
 # Rust and Python Names
 
-Python names follow the Rust ones, written in Python's own conventions: a Rust
-constructor such as `CircuitBuilder::new_with_classical` is the class call, a builder
-consumed by value is a method chain on a mutable object, and a result field is a
-property. Two names differ for the reader's sake: `simulate()` returns a `Simulation`
-where Rust has the `Simulate` typestate builder (and `simulate_program()` a
-`ProgramSimulation`), and the `circuits` generators drop the `_circuit` suffix their
-module already states. `bindings/python/parity.toml` records, for every Rust function,
-method and result field in the user-facing surface, the Python name that reaches it or
-the reason it stays Rust-only, and a test keeps that record complete as the Rust API
-grows.
+Python names follow the Rust ones in Python conventions: a Rust constructor such as
+`CircuitBuilder::new_with_classical` is the class call, a builder consumed by value is
+a method chain on a mutable object, and a result field is a property. Two names differ:
+`simulate()` returns a `Simulation` where Rust has the `Simulate` typestate builder (and
+`simulate_program()` a `ProgramSimulation`), and the `circuits` generators drop the
+`_circuit` suffix. `bindings/python/parity.toml` records, for every user-facing Rust
+function, method and result field, the Python name that reaches it or why it stays
+Rust-only; a test keeps the record complete as the Rust API grows.
 
 Three classes have taken their Rust names: `Decoder` is now `UnionFindDecoder`,
 `QecResult` is `QecSampleResult`, and `RecordRef` is `QecRecordRef`. The old names
 still resolve, with a `DeprecationWarning`, until the next minor release, and pickles
 written under the old names load.
 
-Free functions with a Python counterpart map as follows, with Rust paths relative to
-the crate root. The manifest gives the reason for each function left out.
+Free functions with a Python counterpart, Rust paths relative to the crate root (the
+manifest gives the reason for each one left out):
 
 <!-- parity-table:start -->
 | Rust | Python |

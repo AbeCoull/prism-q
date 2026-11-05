@@ -2,12 +2,10 @@
 
 PRISM-Q has nine backends, each holding a different kind of state, plus four Clifford+T
 and Pauli-propagation engines that hold no state and answer observables directly (see
-[Clifford+T Simulation](./clifford-t.md)). This page covers scaling and when to reach for
-each backend; the [architecture reference](../architecture/backends.md) covers the
-kernels. To select a backend in code, see
-[Choosing a Backend](../getting-started/choosing-a-backend.md). For the CPU and GPU
-architectures each backend supports, see the
-[Capability and Support Matrix](./capabilities.md).
+[Clifford+T Simulation](./clifford-t.md)). This page covers scaling and when each backend
+fits. The kernels are in the [architecture reference](../architecture/backends.md),
+selection in code in [Choosing a Backend](../getting-started/choosing-a-backend.md), and
+CPU and GPU support per backend in the [Capability and Support Matrix](./capabilities.md).
 
 ## Scaling at a glance
 
@@ -23,15 +21,16 @@ architectures each backend supports, see the
 | Factored | $O(2^n)$ worst case | Partially independent | Block-bound |
 | Density Matrix | $O(4^n)$ | Exact noisy evolution | ~14 qubits (RAM-bound) |
 
-The distributed statevector backend (behind the `distributed` feature) shards the dense
-state across MPI ranks with exact results; see
-[Distributed Statevector and MPI](./distributed.md) for the layout and limits and the
-[Capability and Support Matrix](./capabilities.md) for its status.
+The distributed statevector backend (`distributed` feature) shards the dense state
+across MPI ranks with exact results. [Distributed Statevector and MPI](./distributed.md)
+has the layout and limits, and the [Capability and Support Matrix](./capabilities.md)
+its status.
 
 ## Statevector
 
-The default for dense circuits: exact and fully general. The memory cap is derived from system RAM (override with
-`PRISM_MAX_SV_QUBITS`). Above it, auto-dispatch falls back to Sparse or MPS.
+The default for dense circuits: exact and fully general. The memory cap is derived from
+system RAM (override with `PRISM_MAX_SV_QUBITS`); above it, auto-dispatch falls back to
+Sparse or MPS.
 
 ## Stabilizer
 
@@ -49,18 +48,17 @@ backend no longer applies. For a small number of such gates, see
 
 ## Sparse, MPS, Product, Tensor Network, Factored, Density Matrix
 
-- **Sparse** wins when the state stays concentrated in a handful of computational-basis
-  states (amplitude pruning keeps the map small).
+- **Sparse** fits a state that stays in a handful of basis states; amplitude pruning
+  keeps the map small.
 - **MPS** trades exactness for memory polynomial in the bond dimension, for
   low-entanglement circuits over many qubits.
 - **Product** is the entanglement-free case: $O(n)$ memory, $O(1)$ per 1q gate.
 - **Tensor Network** defers contraction until measurement, for shallow or structured
   circuits.
 - **Factored** detects partial independence and simulates sub-registers separately,
-  merging lazily via a Kronecker product computed on demand.
+  merging them by a Kronecker product on demand.
 - **Density Matrix** evolves the full mixed state exactly, for noise studies below the
-  $4^n$ memory ceiling. Explicit dispatch only; `Auto` never selects it.
+  $4^n$ memory ceiling. `Auto` never selects it.
 
-The kernels behind each are in the
-[architecture reference](../architecture/backends.md), and the speed mechanics in
-[Performance and SIMD](./performance.md).
+Kernels are in the [architecture reference](../architecture/backends.md), and speed
+mechanics in [Performance and SIMD](./performance.md).

@@ -1,10 +1,8 @@
 # Noisy Simulation
 
-Goal: watch a GHZ state degrade under gate noise and readout error, first from rules you
-write and then from a device calibration table, and compare sampled and exact answers.
-
-The figure of merit throughout is the GHZ fraction: the share of shots reading `000` or
-`111`.
+Goal: degrade a GHZ state with gate noise and readout error, from hand-written rules and
+then from a device calibration table, and compare sampled and exact answers. The figure
+of merit is the GHZ fraction, the share of shots reading `000` or `111`.
 
 ```python
 from prism_q import CircuitBuilder, simulate
@@ -22,9 +20,9 @@ print(ghz_fraction(ideal))                    # 1.0
 
 ## Noise from rules
 
-`NoiseBuilder` attaches channels by rule. Each rule pairs a `GateFilter`, which picks the
-gates, with a `NoiseChannel`. `build(circuit)` lowers the rules onto that circuit and
-validates the result.
+`NoiseBuilder` attaches channels by rule, each pairing a `GateFilter` that picks gates
+with a `NoiseChannel`. `build(circuit)` lowers the rules onto the circuit and validates
+the result.
 
 ```python
 from prism_q import GateFilter, NoiseBuilder, NoiseChannel
@@ -41,19 +39,19 @@ print(round(ghz_fraction(noisy), 4))          # 0.9273
 ```
 
 `after_gates` adds a one-qubit channel on each target of a matching gate.
-`after_gates_joint` adds one channel across all of a gate's targets, here a two-qubit
-depolarizing channel after every `cx`. `uniform_readout_error(p01, p10)` flips reported
-bits after sampling: `p01` is the chance a measured 0 reads as 1. The
+`after_gates_joint` adds one channel across all of a gate's targets, here two-qubit
+depolarizing after every `cx`. `uniform_readout_error(p01, p10)` flips reported bits
+after sampling; `p01` is the chance a measured 0 reads as 1. The
 [Python guide](../guides/python-noise.md#noise) lists the other rules: crosstalk,
 over-rotation, idle noise, and noise after resets or before measurement.
 
-A model is tied to the circuit it was built from. Build a new one for a different circuit.
+A model is tied to the circuit it was built from; build a new one for another circuit.
 
 ## Noise from a device calibration
 
-`DeviceCalibration` reads what a device's calibration page reports: `t1`, `t2` and
-readout rates per qubit, a duration and error per gate family, and optional per-pair
-overrides. `to_noise_model` turns it into thermal relaxation over each gate's duration,
+`DeviceCalibration` reads what a calibration page reports: `t1`, `t2` and readout rates
+per qubit, a duration and error per gate family, and optional per-pair overrides.
+`to_noise_model` turns it into thermal relaxation over each gate's duration,
 depolarizing error per gate, and readout error per measured qubit.
 
 ```python
@@ -74,17 +72,17 @@ sampled = simulate(circuit).seed(42).noise(device).sample_counts(10_000).counts(
 print(round(ghz_fraction(sampled), 4))        # 0.9028
 ```
 
-Times are in seconds. The last line overrides the two-qubit family on the pair `(1, 2)`,
-in either order. `DeviceCalibration.superconducting_transmon(n)`, `trapped_ion(n)` and
+Times are in seconds. The last line overrides the two-qubit family on pair `(1, 2)`, in
+either order. `DeviceCalibration.superconducting_transmon(n)`, `trapped_ion(n)` and
 `neutral_atom(n)` are presets with illustrative magnitudes for a technology class, not a
 measured device.
 
 ## Exact answers from the density matrix
 
-Sampling carries shot noise. The density-matrix backend evolves the mixed state itself,
-so `run()` returns exact probabilities under the model. It never runs by default, since it
-stores `4**n` entries; select it by name. Measurements and readout error are left off here
-to read the state before measurement:
+The density-matrix backend evolves the mixed state itself, so `run()` returns exact
+probabilities under the model with no shot noise. It stores `4**n` entries and never runs
+by default; select it by name. Measurements and readout error are left off here to read
+the state before measurement:
 
 ```python
 from prism_q import BackendKind
@@ -101,8 +99,7 @@ exact = (
 print(round(exact[0] + exact[7], 4))          # 0.9712
 ```
 
-The gap between this and the sampled 0.90 is mostly readout error, which acts only on the
-reported bits.
+The gap to the sampled 0.90 is mostly readout error, which acts only on reported bits.
 
 ## In Rust
 

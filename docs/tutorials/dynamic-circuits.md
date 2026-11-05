@@ -6,9 +6,9 @@ OpenQASM 3.
 
 ## Teleportation
 
-Qubit 0 holds `ry(1.2)|0>`. Qubits 1 and 2 share a Bell pair. Measuring qubits 0 and 1
-mid-circuit and applying `x` and `z` to qubit 2 on those outcomes moves the state onto
-qubit 2, so measuring it gives 1 with probability `sin(0.6)**2`.
+Qubit 0 holds `ry(1.2)|0>` and qubits 1 and 2 share a Bell pair. Measuring qubits 0 and
+1 and applying `x` and `z` to qubit 2 on those outcomes moves the state onto qubit 2,
+which then measures 1 with probability `sin(0.6)**2`.
 
 ```python
 import math
@@ -37,19 +37,18 @@ print(round(shots[:, 2].mean(), 4))           # 0.3208
 print(round(math.sin(theta / 2) ** 2, 4))     # 0.3188
 ```
 
-The sampled rate is 0.002 from the exact one, where one standard error at 100,000 shots
-is 0.0015.
-`shots` is a `(shots, bits)` bool array, so column 2 is classical bit `c[2]`.
+The sampled rate is 0.002 from the exact one; one standard error at 100,000 shots is
+0.0015. `shots` is a `(shots, bits)` bool array, so column 2 is classical bit `c[2]`.
 
-A circuit with feed-forward has no single final state, so the per-shot terminals,
-`shots()` and `sample_counts()`, are the ones to use. `run()` follows one sampled branch:
-`classical_bits` holds that shot's outcomes and `probabilities` the state it ended in.
-`state_vector()` declines any circuit that measures, resets or branches.
+A circuit with feed-forward has no single final state, so use the per-shot terminals,
+`shots()` and `sample_counts()`. `run()` follows one sampled branch: `classical_bits`
+holds that shot's outcomes and `probabilities` the state it ended in. `state_vector()`
+declines any circuit that measures, resets or branches.
 
 ## Reset and if/else
 
-`reset` returns a measured qubit to `|0>` so it can be used again. An `if` body can hold
-any supported statement, and `else` takes the other branch:
+`reset` returns a measured qubit to `|0>` for reuse. An `if` body can hold any supported
+statement, and `else` takes the other branch:
 
 ```python
 branch = parse_qasm("""
@@ -80,8 +79,8 @@ branch, so they read `110`. The other half took `h`, which leaves `c[1]` a fair 
 Conditions can also test a parity, `if (c[0] ^ c[1])`, and `switch` with `case` arms
 lowers to the same guards. `parse_qasm` declines `while`, since a loop that exits on a
 measurement has no fixed instruction list. `parse_qasm_dynamic` reads it, with `break`
-and `continue`, and `simulate_program` runs the result once per shot; a shot that runs
-past a million blocks stops with a step-limit error unless `max_steps` raises the bound.
+and `continue`, and `simulate_program` runs the result once per shot; past a million
+blocks a shot stops with a step-limit error unless `max_steps` raises the bound.
 The [OpenQASM guide](../guides/openqasm.md#dynamic-programs) covers what the dynamic
 parser reads, and [the subset](../guides/openqasm.md#the-subset) has the rest.
 

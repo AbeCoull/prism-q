@@ -77,8 +77,10 @@ A `for` still unrolls when a measurement decides a `break` or `continue` in it, 
 passes become blocks in sequence: `continue` jumps to the next pass and `break` past the
 last. The pass over the tree marks such a loop, and every variable its body writes from
 outside lives at runtime, since a pass may stop before the write. An exit every path
-reaches stops the unrolling at parse time, as under `parse`. A measured `end` jumps to a
-block that ends the shot.
+reaches stops the unrolling at parse time, as under `parse`, unless a measured `continue`
+earlier in the pass sent some paths on to the next one; then the exit jumps and the
+unrolling goes on. A measured `end` jumps to a block that ends the shot, and a `def`
+holding an `end` runs as a call so that the same holds inside it.
 
 The evaluator streams each statement's instructions into the current block. An `if`
 takes one of three forms:

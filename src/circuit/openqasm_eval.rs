@@ -3196,6 +3196,7 @@ impl<'a> Parser<'a> {
                 result = Err(error);
                 break;
             }
+            let mark = if graph { self.pass_mark() } else { (0, 0) };
             if graph
                 && pass > 0
                 && let Err(error) = self.next_pass()
@@ -3216,24 +3217,37 @@ impl<'a> Parser<'a> {
                 Ok(produced) => {
                     if graph {
                         self.flush(produced);
+                        if let Err(error) = self.charge_pass_blocks(mark, line) {
+                            result = Err(error);
+                            break;
+                        }
                     } else {
                         out.extend(produced);
                     }
+                    // A path a runtime `continue` sent to the next pass still
+                    // needs that pass, so a parse-time exit after one jumps
+                    // instead of ending the unrolling.
+                    let continued = graph && self.pass_continued();
                     match self.exit {
                         Some(Exit::Break) => {
                             self.exit = None;
-                            break;
+                            if !continued {
+                                break;
+                            }
+                            if let Err(error) = self.break_unrolled() {
+                                result = Err(error);
+                                break;
+                            }
                         }
                         Some(Exit::Continue) => self.exit = None,
                         Some(Exit::End) => break,
                         None => {}
                     }
-                    if self
-                        .def_result
-                        .as_ref()
-                        .is_some_and(|result| result.returned)
-                    {
-                        break;
+                    if let Some(frame) = self.def_result.as_mut().filter(|frame| frame.returned) {
+                        if !continued {
+                            break;
+                        }
+                        frame.returned = false;
                     }
                 }
                 Err(error) => {

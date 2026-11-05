@@ -32,10 +32,12 @@ enum Frame {
         in_else: bool,
     },
     /// A loop unrolled pass by pass: `continue` jumps to `next`, the start of
-    /// the pass after the one being built, and `break` to `exit`.
+    /// the pass after the one being built, and `break` to `exit`. `continued`
+    /// records a jump to `next` from the pass being built.
     Unrolled {
         next: usize,
         exit: usize,
+        continued: bool,
     },
 }
 
@@ -84,6 +86,8 @@ pub struct DynamicProgramBuilder {
     /// The `if` frame [`Self::end`] just closed, which [`Self::begin_else`] may
     /// reopen until anything else is appended.
     reopenable: Option<Frame>,
+    /// The block nothing reaches that every [`Self::halt`] continues in.
+    halted: Option<usize>,
 }
 
 impl DynamicProgramBuilder {
@@ -102,6 +106,7 @@ impl DynamicProgramBuilder {
             frames: Vec::new(),
             loop_names: Vec::new(),
             reopenable: None,
+            halted: None,
         }
     }
 
@@ -312,15 +317,23 @@ impl DynamicProgramBuilder {
         let loop_id = self.blocks[self.current].loop_id;
         let next = self.new_block(loop_id);
         let exit = self.new_block(loop_id);
-        self.frames.push(Frame::Unrolled { next, exit });
+        self.frames.push(Frame::Unrolled {
+            next,
+            exit,
+            continued: false,
+        });
     }
 
     pub(crate) fn next_pass(&mut self) -> Result<()> {
         let loop_id = self.blocks[self.current].loop_id;
         let fresh = self.new_block(loop_id);
-        let Some(Frame::Unrolled { next, .. }) = self.frames.last_mut() else {
+        let Some(Frame::Unrolled {
+            next, continued, ..
+        }) = self.frames.last_mut()
+        else {
             return Err(misuse("a loop pass outside an unrolled loop"));
         };
+        *continued = false;
         let start = std::mem::replace(next, fresh);
         self.reopenable = None;
         self.terminate(Terminator::Jump(BlockId::new(start)));
@@ -328,17 +341,40 @@ impl DynamicProgramBuilder {
         Ok(())
     }
 
-    /// End every path through the current block here, and continue in a fresh
-    /// block nothing reaches.
+    /// Whether a path through the pass of the innermost open construct, an
+    /// unrolled loop, has jumped to the start of the next pass.
+    pub(crate) fn pass_continued(&self) -> bool {
+        matches!(
+            self.frames.last(),
+            Some(Frame::Unrolled {
+                continued: true,
+                ..
+            })
+        )
+    }
+
+    /// End every path through the current block here, and continue in a block
+    /// nothing reaches, shared by every halt.
     pub(crate) fn halt(&mut self) {
         self.reopenable = None;
         self.terminate(Terminator::End);
-        self.current = self.new_block(self.blocks[self.current].loop_id);
+        self.current = match self.halted {
+            Some(dead) => dead,
+            None => {
+                let dead = self.new_block(None);
+                self.halted = Some(dead);
+                dead
+            }
+        };
     }
 
     /// Open constructs, counted the way [`Self::end`] closes them.
     pub(crate) fn depth(&self) -> usize {
         self.frames.len()
+    }
+
+    pub(crate) fn block_count(&self) -> usize {
+        self.blocks.len()
     }
 
     /// Return whether a path through the call reaches its end without returning.
@@ -436,7 +472,7 @@ impl DynamicProgramBuilder {
                 self.current = exit;
                 self.reopenable = None;
             }
-            Frame::Unrolled { next, exit } => {
+            Frame::Unrolled { next, exit, .. } => {
                 self.terminate(Terminator::Jump(BlockId::new(next)));
                 self.blocks[next].terminator = Some(Terminator::Jump(BlockId::new(exit)));
                 self.current = exit;
@@ -466,8 +502,7 @@ impl DynamicProgramBuilder {
     /// [`PrismError::InvalidParameter`] outside a loop.
     pub fn break_loop(&mut self) -> Result<()> {
         let exit = self
-            .innermost_loop()
-            .map(|(_, exit)| exit)
+            .innermost_exit()
             .ok_or_else(|| misuse("`break` outside a `while` loop"))?;
         self.jump_away(exit);
         Ok(())
@@ -480,8 +515,20 @@ impl DynamicProgramBuilder {
     /// [`PrismError::InvalidParameter`] outside a loop.
     pub fn continue_loop(&mut self) -> Result<()> {
         let header = self
-            .innermost_loop()
-            .map(|(header, _)| header)
+            .frames
+            .iter_mut()
+            .rev()
+            .take_while(|frame| !matches!(frame, Frame::Call { .. }))
+            .find_map(|frame| match frame {
+                Frame::While { header, .. } => Some(*header),
+                Frame::Unrolled {
+                    next, continued, ..
+                } => {
+                    *continued = true;
+                    Some(*next)
+                }
+                _ => None,
+            })
             .ok_or_else(|| misuse("`continue` outside a `while` loop"))?;
         self.jump_away(header);
         Ok(())
@@ -566,14 +613,13 @@ impl DynamicProgramBuilder {
         self
     }
 
-    fn innermost_loop(&self) -> Option<(usize, usize)> {
+    fn innermost_exit(&self) -> Option<usize> {
         self.frames
             .iter()
             .rev()
             .take_while(|frame| !matches!(frame, Frame::Call { .. }))
             .find_map(|frame| match frame {
-                Frame::While { header, exit, .. } => Some((*header, *exit)),
-                Frame::Unrolled { next, exit } => Some((*next, *exit)),
+                Frame::While { exit, .. } | Frame::Unrolled { exit, .. } => Some(*exit),
                 _ => None,
             })
     }

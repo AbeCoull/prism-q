@@ -3887,6 +3887,64 @@ fn a_runtime_rotation_is_charged_per_qubit() {
 }
 
 #[test]
+fn nested_fors_with_measured_exits_walk_in_linear_time() {
+    let nested = |depth: usize| {
+        let mut source = String::from(
+            "OPENQASM 3.0;
+qubit[2] q;
+bit[2] c;
+c[0] = measure q[0];
+",
+        );
+        for level in 0..depth {
+            source += &format!("for int i{level} in [0:0] {{ if (c[0]) {{ break; }} ");
+        }
+        source += "x q[1];";
+        source += &" }".repeat(depth);
+        source
+    };
+    let walked = |depth: usize| {
+        super::dynamic::WALKED.with(|walked| walked.set(0));
+        parse_dynamic(&nested(depth)).unwrap();
+        super::dynamic::WALKED.with(Cell::get)
+    };
+    let (shallow, deep) = (walked(8), walked(16));
+    assert!(
+        deep <= shallow * 3,
+        "{shallow} statements walked at depth 8, {deep} at 16"
+    );
+    let (shallow, deep) = (walked(8), walked(120));
+    assert!(
+        deep * 8 <= shallow * 120 * 2,
+        "{shallow} walked at 8, {deep} at 120"
+    );
+}
+
+#[test]
+fn a_pass_of_blocks_costs_more_budget_than_a_pass_of_instructions() {
+    let head = "OPENQASM 3.0;
+qubit[2] q;
+bit[2] c;
+c[0] = measure q[0];
+";
+    let needs = |body: &str| {
+        let source = format!("{head}for int j in [0:99] {{ if (c[0]) {{ {body} }} }}");
+        let fits = |budget| super::dynamic::parse_dynamic_within(&source, budget).is_ok();
+        let (mut low, mut high) = (1, 1 << 16);
+        while low < high {
+            let mid = (low + high) / 2;
+            if fits(mid) { high = mid } else { low = mid + 1 }
+        }
+        low
+    };
+    let (plain, exits) = (needs("x q[0];"), needs("break;"));
+    assert!(
+        exits > 2 * plain,
+        "a pass of blocks needs {exits}, one of instructions {plain}"
+    );
+}
+
+#[test]
 fn nested_boxes_just_inside_the_limit_fit_a_small_stack() {
     let depth = MAX_NESTING - 8;
     let source = format!(

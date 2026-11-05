@@ -19,6 +19,16 @@ use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Expr};
 use crate::circuit::qasm::stream::{Stream, with_stack};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
+/// Budget units a block of an unrolled loop costs, sized so a pass of blocks
+/// holds about the memory per unit of an ordinary unrolled pass.
+const BLOCK_UNITS: usize = 2;
+
+#[cfg(test)]
+thread_local! {
+    /// Statements the runtime analysis has walked on this thread.
+    pub(super) static WALKED: Cell<usize> = const { Cell::new(0) };
+}
+
 /// What the evaluator carries while lowering into a control-flow graph.
 pub(super) struct DynamicState<'a> {
     builder: DynamicProgramBuilder,
@@ -32,6 +42,8 @@ pub(super) struct DynamicState<'a> {
     /// Constructs a declaration may run under other than once per shot: loop
     /// bodies and branches decided at runtime.
     repeat: usize,
+    /// Blocks the passes of unrolled loops have charged to the budget.
+    charged_blocks: usize,
 }
 
 /// Statement keys: the address of the statement in the tree, which every pass
@@ -113,6 +125,7 @@ pub(super) fn parse_dynamic_within(input: &str, budget: usize) -> Result<Dynamic
         bit_values: HashMap::new(),
         collecting: 0,
         repeat: 0,
+        charged_blocks: 0,
     }));
     if let Some(width) = super::eval::physical_width(&program)? {
         parser.physical = true;
@@ -910,6 +923,34 @@ impl<'a> Parser<'a> {
         self.state().builder.end()
     }
 
+    /// Whether a runtime `continue` has jumped from the pass being built to the
+    /// next one, so a parse-time exit cannot stop the unrolling.
+    pub(super) fn pass_continued(&self) -> bool {
+        self.dynamic
+            .as_ref()
+            .is_some_and(|state| state.builder.pass_continued())
+    }
+
+    pub(super) fn break_unrolled(&mut self) -> Result<()> {
+        self.state().builder.break_loop()
+    }
+
+    /// The block count and the blocks charged so far, read at the start of a pass.
+    pub(super) fn pass_mark(&self) -> (usize, usize) {
+        self.dynamic.as_ref().map_or((0, 0), |state| {
+            (state.builder.block_count(), state.charged_blocks)
+        })
+    }
+
+    /// Charge the blocks created since `mark` that an inner pass has not charged.
+    pub(super) fn charge_pass_blocks(&mut self, mark: (usize, usize), line: usize) -> Result<()> {
+        let state = self.state();
+        let created = state.builder.block_count() - mark.0;
+        let own = created - (state.charged_blocks - mark.1);
+        state.charged_blocks += own;
+        self.charge(own * BLOCK_UNITS, line)
+    }
+
     pub(super) fn is_bit_name(&self, name: &str) -> bool {
         self.cregs.contains_key(name)
             || self
@@ -1381,10 +1422,12 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         self.require_streaming("`end`", line)?;
-        if self.graph_depth() == 0 {
-            self.exit = Some(Exit::End);
-        } else {
+        if self.graph_depth() > 0 {
             self.state().builder.halt();
+        } else if self.region_depth > 0 {
+            return Err(self.decided_by_measurement("end", line));
+        } else {
+            self.exit = Some(Exit::End);
         }
         Ok(())
     }
@@ -1618,7 +1661,9 @@ struct Walk<'s, 'a> {
     conditional: usize,
     /// Runtime depth of each enclosing loop body, innermost last.
     loops: Vec<usize>,
-    unrolled: HashSet<usize>,
+    /// `for` loops found to hold a measured exit, kept across passes of the
+    /// fixed point so each body is walked once per pass.
+    unrolled: &'s mut HashSet<usize>,
     /// The innermost `for` holds a `break` or `continue` a measurement decides.
     runtime_exit: bool,
 }
@@ -1686,6 +1731,7 @@ impl RuntimeAnalysis {
         runtime_params: &[&str],
     ) -> RuntimeAnalysis {
         let mut runtime = HashSet::new();
+        let mut unrolled = HashSet::new();
         loop {
             let mut walk = Walk {
                 runtime: &mut runtime,
@@ -1701,7 +1747,7 @@ impl RuntimeAnalysis {
                 early_bit_read: Cell::new(false),
                 conditional: 0,
                 loops: Vec::new(),
-                unrolled: HashSet::new(),
+                unrolled: &mut unrolled,
                 runtime_exit: false,
             };
             for param in args {
@@ -1722,7 +1768,6 @@ impl RuntimeAnalysis {
             walk.block(program, 0);
             if !walk.changed {
                 let branches = walk.branches;
-                let unrolled = walk.unrolled;
                 let initializes_bits = walk.early_bit_read.get();
                 let needs_call = walk.needs_call || initializes_bits || !runtime.is_empty();
                 return RuntimeAnalysis {
@@ -1864,6 +1909,8 @@ impl<'a> Walk<'_, 'a> {
     }
 
     fn stmt(&mut self, stmt: &Stmt<'a>, depth: usize) -> bool {
+        #[cfg(test)]
+        WALKED.with(|walked| walked.set(walked.get() + 1));
         match &stmt.kind {
             StmtKind::RegisterDecl {
                 kind,
@@ -2059,27 +2106,31 @@ impl<'a> Walk<'_, 'a> {
                 runtime
             }
             StmtKind::End => {
-                self.needs_call |= depth > 0;
+                // A def that may end the program runs as a call, so its `end`
+                // halts the shot wherever a measurement decides the call.
+                self.needs_call = true;
                 depth > 0
             }
             StmtKind::For { variable, body, .. } => {
                 self.conditional += 1;
-                self.loops.push(depth);
+                // A pass a measurement may cut short leaves every write in the
+                // body, and every pass after it, decided at runtime. A loop
+                // found to hold such an exit is walked one level down from the
+                // next pass of the fixed point on.
+                let unrolled = self.unrolled.contains(&key(stmt));
+                let inner = depth + usize::from(unrolled);
+                self.loops.push(inner);
                 let outer_exit = std::mem::replace(&mut self.runtime_exit, false);
                 self.scopes.push(HashMap::new());
                 self.bind(variable, Binding::Constant);
-                let mut needs = self.block(body, depth);
+                let mut needs = self.block(body, inner);
                 self.scopes.pop();
                 if self.runtime_exit {
-                    // A pass a measurement may cut short leaves every write in
-                    // the body, and every pass after it, decided at runtime.
-                    self.unrolled.insert(key(stmt));
+                    if !unrolled {
+                        self.unrolled.insert(key(stmt));
+                        self.changed = true;
+                    }
                     self.needs_call = true;
-                    *self.loops.last_mut().expect("pushed above") = depth + 1;
-                    self.scopes.push(HashMap::new());
-                    self.bind(variable, Binding::Constant);
-                    self.block(body, depth + 1);
-                    self.scopes.pop();
                     needs = true;
                 }
                 self.runtime_exit = outer_exit;

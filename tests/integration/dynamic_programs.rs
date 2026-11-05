@@ -290,6 +290,76 @@ fn a_measured_end_stops_the_shot() {
 }
 
 #[test]
+fn a_parse_time_break_after_a_measured_continue_still_builds_the_next_pass() {
+    let program = parse(
+        "OPENQASM 3.0;
+        qubit[2] q;
+        bit[2] c;
+        x q[0];
+        for int i in [0:1] {
+          c[0] = measure q[0];
+          if (c[0]) { x q[0]; continue; }
+          x q[1];
+          break;
+        }
+        c[1] = measure q[1];",
+    );
+    assert!(
+        values(&shots(&program, 64), 0..2)
+            .iter()
+            .all(|&value| value == 2)
+    );
+}
+
+#[test]
+fn a_parse_time_return_after_a_measured_continue_still_builds_the_next_pass() {
+    let program = parse(
+        "OPENQASM 3.0;
+        qubit[2] q;
+        bit[2] c;
+        def f(qubit b, bit r) {
+          for int i in [0:1] {
+            if (r && i == 0) { continue; }
+            x b;
+            return;
+          }
+        }
+        h q[0];
+        c[0] = measure q[0];
+        f(q[1], c[0]);
+        c[1] = measure q[1];",
+    );
+    let counts = histogram(&values(&shots(&program, 400), 0..2));
+    assert!(counts.keys().all(|&value| value >= 2), "{counts:?}");
+    assert_eq!(counts.len(), 2, "{counts:?}");
+}
+
+#[test]
+fn end_in_a_def_called_under_a_measured_if_stops_the_shot() {
+    let source = "OPENQASM 3.0;
+        qubit[2] q;
+        bit[2] c;
+        def stop() { end; }
+        h q[0];
+        c[0] = measure q[0];
+        if (c[0]) { stop(); }
+        x q[1];
+        c[1] = measure q[1];";
+    let counts = histogram(&values(&shots(&parse(source), 400), 0..2));
+    assert!(
+        counts.keys().all(|&value| value == 1 || value == 2),
+        "{counts:?}"
+    );
+    assert_eq!(counts.len(), 2, "{counts:?}");
+    match openqasm::parse(source) {
+        Err(PrismError::UnsupportedConstruct { construct, .. }) => {
+            assert!(construct.contains("parse_dynamic"), "{construct}")
+        }
+        other => panic!("`parse` should decline, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_variable_a_measured_break_cuts_short_is_runtime() {
     let source = format!(
         "OPENQASM 3.0;

@@ -2913,7 +2913,8 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
 
     let rank_words = m_words;
     let total_rows = 2 * n;
-    let mut gen_dep: Vec<Vec<u64>> = vec![vec![0u64; rank_words]; total_rows + 1];
+    let mut gen_dep: Vec<u64> = vec![0u64; (total_rows + 1) * rank_words];
+    let dep_row = |r: usize| r * rank_words..(r + 1) * rank_words;
     let mut ref_bits: Vec<bool> = vec![false; m];
     let mut rank = 0usize;
 
@@ -2946,7 +2947,7 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
             let p_base = p_row * stride;
             p_data.copy_from_slice(&xz[p_base..p_base + stride]);
             let p_phase = phase[p_row];
-            p_dep.copy_from_slice(&gen_dep[p_row][..rank_words]);
+            p_dep.copy_from_slice(&gen_dep[dep_row(p_row)]);
 
             hits.copy_from_slice(columns.column(bit));
             hits[p_row / 64] &= !(1u64 << (p_row % 64));
@@ -2965,13 +2966,14 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
                 use rayon::prelude::*;
                 xz.par_chunks_mut(64 * stride)
                     .zip(phase.par_chunks_mut(64))
-                    .zip(gen_dep[..total_rows].par_chunks_mut(64))
+                    .zip(gen_dep[..total_rows * rank_words].par_chunks_mut(64 * rank_words))
                     .zip(hits.par_iter())
                     .with_min_len(crate::backend::chunk_min_len(64 * stride))
                     .for_each(|(((rows, signs), deps), word_hits)| {
                         for_each_row(std::slice::from_ref(word_hits), signs.len(), |i| {
                             let row = &mut rows[i * stride..(i + 1) * stride];
-                            collapse(row, &mut signs[i], &mut deps[i]);
+                            let dep = &mut deps[i * rank_words..(i + 1) * rank_words];
+                            collapse(row, &mut signs[i], dep);
                         });
                     });
                 true
@@ -2983,7 +2985,7 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
             if !done_parallel {
                 for_each_row(&hits, total_rows, |r| {
                     let row = &mut xz[r * stride..(r + 1) * stride];
-                    collapse(row, &mut phase[r], &mut gen_dep[r]);
+                    collapse(row, &mut phase[r], &mut gen_dep[dep_row(r)]);
                 });
             }
             // Every multiplied row's X word moved by the pivot's.
@@ -2998,15 +3000,15 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
             columns.update(dest_idx, xz[dest_base + word], p_data[word]);
             xz.copy_within(p_base..p_base + stride, dest_base);
             phase[dest_idx] = p_phase;
-            gen_dep[dest_idx][..rank_words].copy_from_slice(&p_dep);
+            gen_dep[dep_row(dest_idx)].copy_from_slice(&p_dep);
 
             columns.update(p_row, p_data[word], 0);
             xz[p_base..p_base + stride].fill(0);
             xz[p_base + nw + word] |= bit_mask;
             phase[p_row] = false;
 
-            gen_dep[p_row][..rank_words].fill(0);
-            gen_dep[p_row][k / 64] |= 1u64 << (k % 64);
+            gen_dep[dep_row(p_row)].fill(0);
+            gen_dep[p_row * rank_words + k / 64] |= 1u64 << (k % 64);
 
             ref_bits[meas_idx] = false;
             held_valid = false;
@@ -3034,7 +3036,7 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
             if !held_valid || changed > direct {
                 scratch[..stride].fill(0);
                 scratch_phase = false;
-                gen_dep[scratch_idx][..live].fill(0);
+                gen_dep[scratch_idx * rank_words..][..live].fill(0);
                 hits[..destab_words].copy_from_slice(&held);
             }
             held_valid = true;
@@ -3045,15 +3047,18 @@ pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<Comp
                 scratch_phase =
                     rowmul_phase_into(&xz, s_base, &mut scratch, nw, s_phase, scratch_phase);
 
-                let (lo, hi) = gen_dep.split_at_mut(scratch_idx);
-                for (dst, &src) in hi[0][..live].iter_mut().zip(&lo[g + n][..live]) {
+                let (lo, hi) = gen_dep.split_at_mut(scratch_idx * rank_words);
+                for (dst, &src) in hi[..live]
+                    .iter_mut()
+                    .zip(&lo[(g + n) * rank_words..][..live])
+                {
                     *dst ^= src;
                 }
             });
 
             ref_bits[meas_idx] = scratch_phase;
 
-            for_each_row(&gen_dep[scratch_idx][..live], rank, |k| {
+            for_each_row(&gen_dep[scratch_idx * rank_words..][..live], rank, |k| {
                 flip_rows[k][meas_idx / 64] |= 1u64 << (meas_idx % 64);
             });
         }

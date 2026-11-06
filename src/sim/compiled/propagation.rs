@@ -1915,7 +1915,7 @@ pub(super) fn colmajor_forward_sim(
     let mut phase_vec = vec![false; total_rows];
 
     let mut block = [0u64; 64];
-    for (cols, offset) in [(&x_cols, 0), (&z_cols, nw)] {
+    for (cols, offset) in [(x_cols, 0), (z_cols, nw)] {
         for qw in 0..nw {
             let qubits = &cols[qw * 64 * row_words..n.min(qw * 64 + 64) * row_words];
             let count = qubits.len() / row_words;

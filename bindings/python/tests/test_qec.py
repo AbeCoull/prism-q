@@ -83,6 +83,18 @@ def test_from_text_parses():
     assert qp.num_detectors == 1
 
 
+def test_from_stim_parses():
+    qp = QecProgram.from_stim("R 0 1\nM !0\nCX rec[-1] 1\nM 1\nDETECTOR rec[-1]\n")
+    assert qp.num_qubits == 2
+    assert qp.num_measurements == 2
+    assert qp.num_detectors == 1
+
+    import pytest
+
+    with pytest.raises(prism_q.PrismError, match="native QEC extension"):
+        QecProgram.from_stim("T 0")
+
+
 def test_lookback_zero_raises():
     import pytest
 

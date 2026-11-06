@@ -28,12 +28,54 @@ const MAX_QEC_EXPANDED_LINES: usize = 1_000_000;
 /// `CY`, and swap-family gates lower to `H`, `S`, `SQRT_X`, `CX`, and `CZ` sequences, so
 /// a `SQRT_Y` reads back as `S_DAG`, `SQRT_X`, `S` and a `SWAP` as three `CX`.
 pub fn parse_qec_program(input: &str) -> Result<QecProgram> {
+    parse_program(input, Dialect::Native)
+}
+
+/// Parse a circuit in the Stim circuit file format (`.stim` text) into a QEC program.
+///
+/// Reads the instructions [`parse_qec_program`] lists except the native extensions
+/// (`T`, `T_DAG`, `LEAK`, `SEEP`, `LEAK_TRANSPORT`, `POSTSELECT`, `EXP_VAL`), and adds
+/// the Stim semantics native text lacks: inverted measurement targets (`M !0`,
+/// `MPP !X0*Z1`), record-controlled Paulis (`CX rec[-1] 2`, `CY`, `CZ`), and
+/// `SHIFT_COORDS` offsets on `DETECTOR` coordinates. Any other instruction, `sweep[k]`
+/// targets, and noise arguments on `MPP`, `MXX`/`MYY`/`MZZ` and `MPAD` are a
+/// [`PrismError::Parse`] naming the line.
+///
+/// `M(p)` flips the qubit before measuring rather than flipping only the record, which
+/// matches Stim when the qubit is reset or not measured again.
+pub fn parse_stim_circuit(input: &str) -> Result<QecProgram> {
+    parse_program(input, Dialect::Stim)
+}
+
+fn parse_program(input: &str, dialect: Dialect) -> Result<QecProgram> {
     let lines = instruction_lines(input)?;
     check_repeats(&lines)?;
-    let mut parser = QecTextParser::default();
+    let mut parser = QecTextParser {
+        dialect,
+        ..QecTextParser::default()
+    };
     parser.parse_block(&lines, &mut 0)?;
     let num_qubits = parser.max_qubit.map_or(0, |qubit| qubit + 1);
     QecProgram::from_ops(num_qubits, QecOptions::default(), parser.ops)
+}
+
+const NATIVE_ONLY_INSTRUCTIONS: [&str; 9] = [
+    "T",
+    "T_DAG",
+    "TDG",
+    "SDAG",
+    "LEAK",
+    "SEEP",
+    "LEAK_TRANSPORT",
+    "POSTSELECT",
+    "EXP_VAL",
+];
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Dialect {
+    #[default]
+    Native,
+    Stim,
 }
 
 #[derive(Default)]
@@ -41,6 +83,10 @@ struct QecTextParser {
     ops: Vec<QecOp>,
     measurement_count: usize,
     max_qubit: Option<usize>,
+    dialect: Dialect,
+    coord_shift: Vec<f64>,
+    pending_flips: Vec<Option<Gate>>,
+    applied_flips: usize,
 }
 
 impl QecTextParser {
@@ -64,7 +110,8 @@ impl QecTextParser {
 
     /// Parse a `REPEAT` body once and append `count - 1` copies of its ops with record
     /// references shifted. A body whose first op joins the op before the block
-    /// (`ELSE_CORRELATED_ERROR`) is parsed again per copy, since each copy joins the last.
+    /// (`ELSE_CORRELATED_ERROR`), moves the coordinate shift, or touches a deferred
+    /// result flip is parsed again per copy, since copies then differ.
     fn parse_repeat(
         &mut self,
         lines: &[(usize, String)],
@@ -82,9 +129,15 @@ impl QecTextParser {
             _ => 0,
         };
         let branches_before = joined_branches(&self.ops);
+        let shift_before = self.coord_shift.clone();
+        let flips_before = self.applied_flips;
         let records_before = self.measurement_count;
         self.parse_block(lines, index)?;
-        if joined_branches(&self.ops) != branches_before {
+        if joined_branches(&self.ops) != branches_before
+            || self.coord_shift != shift_before
+            || self.applied_flips != flips_before
+            || self.pending_flips.iter().any(Option::is_some)
+        {
             for _ in 1..count {
                 *index = body_start;
                 self.parse_block(lines, index)?;
@@ -112,6 +165,12 @@ impl QecTextParser {
 
     fn parse_line(&mut self, line_num: usize, line: &str) -> Result<()> {
         let (name, args, targets) = split_instruction(line, line_num)?;
+        if self.dialect == Dialect::Stim && NATIVE_ONLY_INSTRUCTIONS.contains(&name.as_str()) {
+            return Err(qec_parse_error(
+                line_num,
+                format!("`{name}` is a native QEC extension, not a Stim circuit instruction"),
+            ));
+        }
         match name.as_str() {
             "I" | "X" | "Y" | "Z" | "H" | "S" | "S_DAG" | "SDAG" | "T" | "T_DAG" | "TDG"
             | "SQRT_X" | "SQRT_X_DAG" | "SQRT_Y" | "SQRT_Y_DAG" | "SQRT_Z" | "SQRT_Z_DAG"
@@ -122,7 +181,7 @@ impl QecTextParser {
             "MXX" | "MYY" | "MZZ" => {
                 self.parse_pair_measurement(&name, args.as_deref(), &targets, line_num)
             }
-            "MPAD" => self.parse_pad(&targets, line_num),
+            "MPAD" => self.parse_pad(args.as_deref(), &targets, line_num),
             "E" | "CORRELATED_ERROR" => {
                 self.parse_correlated_error(&name, args.as_deref(), &targets, line_num, false)
             }
@@ -157,14 +216,17 @@ impl QecTextParser {
                 self.parse_noise(&name, args.as_deref(), &targets, line_num)
             }
             "QUBIT_COORDS" => self.parse_qubit_coords(&targets, line_num),
-            "SHIFT_COORDS" => Ok(()),
+            "SHIFT_COORDS" => self.parse_shift_coords(args.as_deref(), line_num),
             "TICK" => {
                 self.ops.push(QecOp::Tick);
                 Ok(())
             }
             _ => Err(qec_parse_error(
                 line_num,
-                format!("unsupported QEC instruction `{name}`"),
+                match self.dialect {
+                    Dialect::Native => format!("unsupported QEC instruction `{name}`"),
+                    Dialect::Stim => format!("unsupported Stim instruction `{name}`"),
+                },
             )),
         }
     }
@@ -196,7 +258,7 @@ impl QecTextParser {
         let qubits = parse_qubit_targets(targets, line_num)?;
         require_non_empty_targets(&qubits, name, line_num)?;
         for qubit in qubits {
-            self.note_qubit(qubit);
+            self.use_qubit(qubit);
             for gate in gates {
                 self.ops.push(QecOp::Gate {
                     gate: gate.clone(),
@@ -213,11 +275,14 @@ impl QecTextParser {
         targets: &[String],
         line_num: usize,
     ) -> Result<()> {
+        if self.dialect == Dialect::Stim && targets.iter().any(|t| is_classical_target(t)) {
+            return self.parse_controlled_paulis(name, targets, line_num);
+        }
         let qubits = parse_qubit_pairs(targets, name, line_num)?;
         for pair in qubits.as_chunks::<2>().0 {
             let (a, b) = (pair[0], pair[1]);
-            self.note_qubit(a);
-            self.note_qubit(b);
+            self.use_qubit(a);
+            self.use_qubit(b);
             let ops = &mut self.ops;
             let mut push = |gate: Gate, targets: &[usize]| {
                 ops.push(QecOp::Gate {
@@ -261,6 +326,66 @@ impl QecTextParser {
         Ok(())
     }
 
+    /// Lower record-controlled `CX`/`CY`/`CZ` pairs into feed-forward Paulis, leaving
+    /// qubit pairs on the same line as gates.
+    fn parse_controlled_paulis(
+        &mut self,
+        name: &str,
+        targets: &[String],
+        line_num: usize,
+    ) -> Result<()> {
+        if !targets.len().is_multiple_of(2) {
+            return Err(qec_parse_error(
+                line_num,
+                format!("`{name}` requires an even number of qubit targets"),
+            ));
+        }
+        for pair in targets.as_chunks::<2>().0 {
+            if let Some(sweep) = pair.iter().find(|t| t.starts_with("sweep[")) {
+                return Err(qec_parse_error(
+                    line_num,
+                    format!("sweep target `{sweep}` is not supported"),
+                ));
+            }
+            let control_first = matches!(name, "CX" | "CNOT" | "CY" | "CZ");
+            let (record, qubit) =
+                match (is_classical_target(&pair[0]), is_classical_target(&pair[1])) {
+                    (false, false) => {
+                        self.parse_two_qubit_gate(name, pair, line_num)?;
+                        continue;
+                    }
+                    (true, false) if control_first => (&pair[0], &pair[1]),
+                    (false, true) if name == "CZ" => (&pair[1], &pair[0]),
+                    _ => {
+                        return Err(qec_parse_error(
+                            line_num,
+                            format!(
+                                "`{name}` does not support the record-controlled pair `{} {}`",
+                                pair[0], pair[1]
+                            ),
+                        ));
+                    }
+                };
+            let record = parse_record_ref(record, self.measurement_count, line_num)?;
+            let qubit = parse_qubit_target(qubit, line_num)?;
+            self.use_qubit(qubit);
+            let gate = match name {
+                "CY" => Gate::Y,
+                "CZ" => Gate::Z,
+                _ => Gate::X,
+            };
+            self.ops.push(QecOp::Feedforward {
+                records: vec![record],
+                expected: true,
+                body: vec![QecOp::Gate {
+                    gate,
+                    targets: vec![qubit],
+                }],
+            });
+        }
+        Ok(())
+    }
+
     fn parse_pair_measurement(
         &mut self,
         name: &str,
@@ -275,19 +400,40 @@ impl QecTextParser {
             ));
         }
         let basis = measurement_basis(name);
-        let qubits = parse_qubit_pairs(targets, name, line_num)?;
+        let qubits = self.parse_measured_targets(targets, line_num)?;
+        require_non_empty_targets(&qubits, name, line_num)?;
+        if !qubits.len().is_multiple_of(2) {
+            return Err(qec_parse_error(
+                line_num,
+                format!("`{name}` requires an even number of qubit targets"),
+            ));
+        }
         for pair in qubits.as_chunks::<2>().0 {
-            self.note_qubit(pair[0]);
-            self.note_qubit(pair[1]);
+            let ((a, invert_a), (b, invert_b)) = (pair[0], pair[1]);
+            self.use_qubit(a);
+            self.use_qubit(b);
+            let inverted = invert_a != invert_b;
+            if inverted {
+                self.push_result_flip(basis, a);
+            }
             self.ops.push(QecOp::MeasurePauliProduct {
-                terms: vec![QecPauli::new(basis, pair[0]), QecPauli::new(basis, pair[1])],
+                terms: vec![QecPauli::new(basis, a), QecPauli::new(basis, b)],
             });
             self.measurement_count += 1;
+            if inverted {
+                self.defer_result_flip(basis, a);
+            }
         }
         Ok(())
     }
 
-    fn parse_pad(&mut self, targets: &[String], line_num: usize) -> Result<()> {
+    fn parse_pad(&mut self, args: Option<&str>, targets: &[String], line_num: usize) -> Result<()> {
+        if !parse_f64_args(args, line_num)?.is_empty() {
+            return Err(qec_parse_error(
+                line_num,
+                "`MPAD` does not support a flip-probability argument",
+            ));
+        }
         if targets.is_empty() {
             return Err(qec_parse_error(
                 line_num,
@@ -373,6 +519,9 @@ impl QecTextParser {
         require_non_empty_targets(&qubits, "reset", line_num)?;
         for qubit in qubits {
             self.note_qubit(qubit);
+            if let Some(flip) = self.pending_flips.get_mut(qubit) {
+                *flip = None;
+            }
             self.ops.push(QecOp::Reset { basis, qubit });
         }
         Ok(())
@@ -386,10 +535,13 @@ impl QecTextParser {
         line_num: usize,
     ) -> Result<()> {
         let measurement_error = parse_optional_probability_arg(args, "measurement", line_num)?;
-        let qubits = parse_qubit_targets(targets, line_num)?;
+        let qubits = self.parse_measured_targets(targets, line_num)?;
         require_non_empty_targets(&qubits, "measurement", line_num)?;
-        for qubit in qubits {
-            self.note_qubit(qubit);
+        for (qubit, inverted) in qubits {
+            self.use_qubit(qubit);
+            if inverted {
+                self.push_result_flip(basis, qubit);
+            }
             if let Some(p) = measurement_error.filter(|&p| p > 0.0) {
                 self.ops.push(QecOp::Noise {
                     channel: measurement_error_channel(basis, p),
@@ -398,6 +550,9 @@ impl QecTextParser {
             }
             self.ops.push(QecOp::Measure { basis, qubit });
             self.measurement_count += 1;
+            if inverted {
+                self.defer_result_flip(basis, qubit);
+            }
         }
         Ok(())
     }
@@ -410,10 +565,13 @@ impl QecTextParser {
         line_num: usize,
     ) -> Result<()> {
         let measurement_error = parse_optional_probability_arg(args, "measure-reset", line_num)?;
-        let qubits = parse_qubit_targets(targets, line_num)?;
+        let qubits = self.parse_measured_targets(targets, line_num)?;
         require_non_empty_targets(&qubits, "measure-reset", line_num)?;
-        for qubit in qubits {
-            self.note_qubit(qubit);
+        for (qubit, inverted) in qubits {
+            self.use_qubit(qubit);
+            if inverted {
+                self.push_result_flip(basis, qubit);
+            }
             if let Some(p) = measurement_error.filter(|&p| p > 0.0) {
                 self.ops.push(QecOp::Noise {
                     channel: measurement_error_channel(basis, p),
@@ -441,12 +599,19 @@ impl QecTextParser {
             ));
         }
         for target in targets {
-            let terms = parse_pauli_product(target, line_num)?;
+            let (terms, inverted) = self.parse_measured_product(target, line_num)?;
             for term in &terms {
-                self.note_qubit(term.qubit);
+                self.use_qubit(term.qubit);
+            }
+            let flip = inverted.then(|| terms[0]);
+            if let Some(term) = flip {
+                self.push_result_flip(term.basis, term.qubit);
             }
             self.ops.push(QecOp::MeasurePauliProduct { terms });
             self.measurement_count += 1;
+            if let Some(term) = flip {
+                self.defer_result_flip(term.basis, term.qubit);
+            }
         }
         Ok(())
     }
@@ -457,9 +622,27 @@ impl QecTextParser {
         targets: &[String],
         line_num: usize,
     ) -> Result<()> {
-        let coords = parse_f64_args(args, line_num)?;
+        let mut coords = parse_f64_args(args, line_num)?;
+        for (coord, shift) in coords.iter_mut().zip(&self.coord_shift) {
+            *coord += shift;
+        }
         let records = self.parse_record_targets(targets, line_num)?;
         self.ops.push(QecOp::Detector { records, coords });
+        Ok(())
+    }
+
+    /// Accumulate a Stim `SHIFT_COORDS` offset; native text ignores the instruction.
+    fn parse_shift_coords(&mut self, args: Option<&str>, line_num: usize) -> Result<()> {
+        let shift = parse_f64_args(args, line_num)?;
+        if self.dialect == Dialect::Native {
+            return Ok(());
+        }
+        if self.coord_shift.len() < shift.len() {
+            self.coord_shift.resize(shift.len(), 0.0);
+        }
+        for (total, delta) in self.coord_shift.iter_mut().zip(shift) {
+            *total += delta;
+        }
         Ok(())
     }
 
@@ -590,9 +773,93 @@ impl QecTextParser {
             .collect()
     }
 
+    /// Measurement qubit targets, each with whether Stim's `!` inverts its result.
+    fn parse_measured_targets(
+        &self,
+        targets: &[String],
+        line_num: usize,
+    ) -> Result<Vec<(usize, bool)>> {
+        targets
+            .iter()
+            .map(|target| match target.strip_prefix('!') {
+                Some(qubit) if self.dialect == Dialect::Stim => {
+                    Ok((parse_qubit_target(qubit, line_num)?, true))
+                }
+                _ => Ok((parse_qubit_target(target, line_num)?, false)),
+            })
+            .collect()
+    }
+
+    /// An `MPP` product and whether an odd number of its terms carry Stim's `!`.
+    fn parse_measured_product(
+        &self,
+        target: &str,
+        line_num: usize,
+    ) -> Result<(Vec<QecPauli>, bool)> {
+        if self.dialect == Dialect::Native {
+            return Ok((parse_pauli_product(target, line_num)?, false));
+        }
+        let mut inverted = false;
+        let terms = target
+            .split('*')
+            .map(|term| {
+                let term = term.strip_prefix('!').map_or(term, |rest| {
+                    inverted = !inverted;
+                    rest
+                });
+                parse_pauli_term(term, line_num)
+            })
+            .collect::<Result<_>>()?;
+        Ok((terms, inverted))
+    }
+
+    /// Apply a Pauli that anticommutes with `basis` on `qubit`, so the measurement after
+    /// it records the inverted result.
+    fn push_result_flip(&mut self, basis: QecBasis, qubit: usize) {
+        self.ops.push(QecOp::Gate {
+            gate: result_flip_gate(basis),
+            targets: vec![qubit],
+        });
+    }
+
+    /// Hold the flip that undoes [`Self::push_result_flip`] until `qubit` is next used.
+    /// A reset drops it, as does the end of the program, so a qubit measured once and
+    /// never reused stays valid for the compiled runner. Pauli noise in between commutes
+    /// with the flip up to phase.
+    fn defer_result_flip(&mut self, basis: QecBasis, qubit: usize) {
+        if self.pending_flips.len() <= qubit {
+            self.pending_flips.resize(qubit + 1, None);
+        }
+        self.pending_flips[qubit] = Some(result_flip_gate(basis));
+    }
+
+    /// Note `qubit` for an op that acts on its state, first applying any deferred flip.
+    fn use_qubit(&mut self, qubit: usize) {
+        self.note_qubit(qubit);
+        if let Some(gate) = self.pending_flips.get_mut(qubit).and_then(Option::take) {
+            self.ops.push(QecOp::Gate {
+                gate,
+                targets: vec![qubit],
+            });
+            self.applied_flips += 1;
+        }
+    }
+
     fn note_qubit(&mut self, qubit: usize) {
         self.max_qubit = Some(self.max_qubit.map_or(qubit, |max| max.max(qubit)));
     }
+}
+
+fn result_flip_gate(basis: QecBasis) -> Gate {
+    if basis == QecBasis::X {
+        Gate::Z
+    } else {
+        Gate::X
+    }
+}
+
+fn is_classical_target(target: &str) -> bool {
+    target.starts_with("rec[") || target.starts_with("sweep[")
 }
 
 fn measurement_basis(name: &str) -> QecBasis {
@@ -1047,13 +1314,13 @@ fn reject_inverted_target(target: &str, line_num: usize) -> Result<()> {
     if target.starts_with('!') {
         return Err(qec_parse_error(
             line_num,
-            format!("inverted target `{target}` is not supported in native QEC text"),
+            format!("inverted target `{target}` is not supported on this instruction"),
         ));
     }
     Ok(())
 }
 
-fn require_non_empty_targets(targets: &[usize], name: &str, line_num: usize) -> Result<()> {
+fn require_non_empty_targets<T>(targets: &[T], name: &str, line_num: usize) -> Result<()> {
     if targets.is_empty() {
         return Err(qec_parse_error(
             line_num,

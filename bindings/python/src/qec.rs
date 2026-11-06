@@ -247,6 +247,14 @@ impl PyQecProgram {
         })
     }
 
+    /// Parse a circuit in the Stim circuit file format.
+    #[staticmethod]
+    fn from_stim(text: &str) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: QecProgram::from_stim(text)?,
+        })
+    }
+
     /// Render the program in the native QEC text format that `from_text` reads.
     fn to_text(&self) -> PyPrismResult<String> {
         Ok(self.inner.to_text()?)

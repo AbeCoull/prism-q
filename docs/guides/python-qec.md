@@ -7,7 +7,8 @@
 `bool_` matrices, plus `logical_error_rates()` and `survivor_rate()` with
 `logical_error_rate_wilson_intervals(z_score)` and
 `survivor_rate_wilson_interval(z_score)` (the default `z_score` gives a two-sided 95
-percent interval). `QecProgram.from_text` parses the text form. The
+percent interval). `QecProgram.from_text` parses the text form and
+`QecProgram.from_stim` reads Stim circuit files. The
 [Noise and QEC guide](./qec.md) describes the model.
 
 `expectation_value(terms, coefficient=1.0)` appends the text format's `EXP_VAL` op over

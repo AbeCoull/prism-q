@@ -46,7 +46,7 @@ pub use decoder::UnionFindDecoder;
 pub use dem::{DetectorErrorModel, ErrorMechanism};
 pub use generators::QecCircuitNoise;
 pub use matching::MatchingDecoder;
-pub use parse::parse_qec_program;
+pub use parse::{parse_qec_program, parse_stim_circuit};
 pub use result::{QecObservableEstimate, QecSampleResult};
 #[cfg(feature = "bench-internal")]
 pub use runner::{QecProfiledCounts, QecProfiledSampler, compile_qec_profiled_sampler};
@@ -654,6 +654,11 @@ impl QecProgram {
     /// Parse a native measurement-record QEC program.
     pub fn from_text(input: &str) -> Result<Self> {
         parse_qec_program(input)
+    }
+
+    /// Parse a circuit in the Stim circuit file format; see [`parse_stim_circuit`].
+    pub fn from_stim(input: &str) -> Result<Self> {
+        parse_stim_circuit(input)
     }
 
     pub fn num_qubits(&self) -> usize {

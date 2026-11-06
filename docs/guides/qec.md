@@ -221,6 +221,44 @@ The [QEC IR reference](../architecture/qec-ir.md) has the full grammar;
 V1 reset requirement, and the `EXP_VAL` placement rules.
 ```
 
+### Reading Stim circuit files
+
+`parse_stim_circuit` (or `QecProgram::from_stim`, `QecProgram.from_stim` in Python)
+reads `.stim` circuit text, such as the surface, repetition and color code memory
+circuits other QEC tooling generates, into the same program:
+
+```rust
+use prism_q::{parse_stim_circuit, run_qec_program};
+
+let program = parse_stim_circuit("
+    R 0 1 2
+    X_ERROR(0.01) 0 1 2
+    CX 0 1 2 1
+    MR 1
+    DETECTOR(1, 0) rec[-1]
+    M !0 2
+    OBSERVABLE_INCLUDE(0) rec[-2]
+").unwrap();
+let result = run_qec_program(&program).unwrap();
+```
+
+It accepts the instruction set above apart from the native additions (`T`, `T_DAG`,
+`LEAK`, `SEEP`, `LEAK_TRANSPORT`, `POSTSELECT`, `EXP_VAL`), and adds three Stim
+behaviours the native parser rejects or ignores:
+
+- inverted measurement targets (`M !0`, `MR !0`, `MXX !0 1`, `MPP !X0*Z1`), lowered as
+  a Pauli on either side of the measurement so only the record flips; the second Pauli
+  waits for the qubit's next use and is dropped at a reset, so a qubit measured once
+  stays on the compiled sampler;
+- record-controlled Paulis (`CX rec[-1] 2`, `CY rec[-1] 2`, `CZ rec[-1] 2`), lowered to
+  feed-forward corrections;
+- `SHIFT_COORDS`, which offsets later `DETECTOR` coordinates.
+
+Any other instruction, `sweep[k]` targets, and noise arguments on `MPP`, the pair
+measurements and `MPAD` are parse errors naming the line. `M(p)` flips the qubit before
+measuring, so it matches Stim's record-only flip when the qubit is reset or not measured
+again; generated memory circuits spell measurement noise as a separate `X_ERROR`.
+
 ### Detector reference
 
 A detector reports 1 when its records disagree with the noiseless reference run of the

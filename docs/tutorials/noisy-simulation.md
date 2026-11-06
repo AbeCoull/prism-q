@@ -101,6 +101,54 @@ print(round(exact[0] + exact[7], 4))          # 0.9712
 
 The gap to the sampled 0.90 is mostly readout error, which acts only on reported bits.
 
+## Leakage and drift
+
+Leakage and drift both carry state from one gate to the next within a shot, so they run
+as one trajectory per shot. A leakage channel moves a qubit out of the computational
+space: a leaked qubit ignores gates and reads 1, and `leaked` marks which qubits leaked
+in each shot:
+
+```python
+leaky = (
+    NoiseBuilder()
+    .after_gates_joint(GateFilter.all().named("cx"), NoiseChannel.leakage_transport(0.05))
+    .after_gates(GateFilter.all(), NoiseChannel.leakage(0.01))
+    .build(circuit)
+)
+result = simulate(circuit).backend(BackendKind.statevector()).seed(42).noise(leaky).shots(1000)
+print(result.leaked.shape)                    # (1000, 3)
+```
+
+Drift is a parameter that holds still within a shot and wanders between shots. Here
+`schedule` gives the gates durations in seconds, `scheduled_idle` relaxes each qubit
+over its idle time from its `(t1, t2)`, and `quasi_static_detuning` draws a frequency
+offset per qubit for every shot from widths set by `t2*`:
+
+```python
+from prism_q import DriftDistribution, GateTimes
+
+timed = (
+    NoiseBuilder()
+    .schedule(GateTimes(35e-9, 300e-9).with_measure(1e-6))
+    .scheduled_idle([(120e-6, 80e-6), (95e-6, 110e-6), (60e-6, 50e-6)])
+    .quasi_static_detuning(DriftDistribution.from_t2_star([40e-6, 55e-6, 30e-6]))
+    .build(circuit)
+)
+drifting = (
+    simulate(circuit)
+    .backend(BackendKind.statevector())
+    .seed(42)
+    .noise(timed)
+    .sample_counts(10_000)
+    .counts()
+)
+```
+
+The density-matrix backend declines both, since a mixture evolved one channel at a time
+cannot carry that state.
+The [Python noise guide](../guides/python-noise.md#leakage) lists the other leakage
+channels, correlated drift between neighbouring qubits, and over-rotation drift.
+
 ## In Rust
 
 ```rust

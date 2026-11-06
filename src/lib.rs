@@ -154,8 +154,8 @@ pub use sim::compiled::{DevicePackedShots, run_shots_compiled_with_gpu};
 mod guide_examples {
     #[doc = include_str!("../README.md")]
     struct Readme;
-    #[doc = include_str!("../docs/guides/backends.md")]
-    struct Backends;
+    #[doc = include_str!("../docs/guides/braket.md")]
+    struct Braket;
     #[doc = include_str!("../docs/guides/capabilities.md")]
     struct Capabilities;
     #[doc = include_str!("../docs/guides/clifford-t.md")]
@@ -164,6 +164,10 @@ mod guide_examples {
     struct Drawing;
     #[doc = include_str!("../docs/guides/gpu.md")]
     struct Gpu;
+    #[doc = include_str!("../docs/guides/hamiltonians.md")]
+    struct Hamiltonians;
+    #[doc = include_str!("../docs/guides/noise.md")]
+    struct Noise;
     #[doc = include_str!("../docs/guides/openqasm.md")]
     struct OpenQasm;
     #[doc = include_str!("../docs/guides/performance.md")]

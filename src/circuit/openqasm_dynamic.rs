@@ -71,20 +71,20 @@ fn scalar_runtime_type(kind: ClassicalType, line: usize) -> Result<RuntimeType> 
 /// [`DynamicProgram`].
 ///
 /// Reads everything [`parse`] reads, plus `while` loops, `break`, `continue` and
-/// `end` under a measured branch, conditions and assignments over the full classical operator set
-/// (`&&`, `||`, `!`, comparisons, `&`, `|`, `^`, `~`, shifts), classical bits
-/// and registers read as values, writes to a variable under a measured `if`,
-/// and a runtime value as the angle of `rx`, `ry`, `rz`, `p` or `rzz`. A
-/// variable written only where its value is known at parse time still folds
-/// there, so a program `parse` accepts lowers to one block holding the same
-/// circuit.
+/// `end` under a measured branch, conditions and assignments over the full
+/// classical operator set (`&&`, `||`, `!`, comparisons, `&`, `|`, `^`, `~`,
+/// shifts), classical bits and registers read as values, writes to a variable
+/// under a measured `if`, a runtime value as the angle of `rx`, `ry`, `rz`, `p`
+/// or `rzz`, and runtime arguments and return values in `def` calls. A variable
+/// written only where its value is known at parse time still folds there, so a
+/// program `parse` accepts lowers to one block holding the same circuit.
 ///
 /// Declined, each with [`PrismError::UnsupportedConstruct`]: `input`
 /// parameters, a register or array whose contents a loop or measurement
 /// decides, a runtime value where a parse-time constant belongs (an index, a
-/// loop bound, a gate angle outside the five above, a `def` argument), a
-/// builtin function over a runtime value, and a measurement into a variable
-/// rather than a bit.
+/// loop bound, a gate angle outside the five above), a runtime argument to a
+/// `def` written as a gate application rather than a call, a builtin function
+/// over a runtime value, and a measurement into a variable rather than a bit.
 ///
 /// # Errors
 ///

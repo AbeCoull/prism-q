@@ -168,6 +168,55 @@ fn chunked_runs_draw_the_same_records_and_heralds() {
 }
 
 #[test]
+fn chunked_heralds_detectors_and_records_match_unchunked() {
+    let text = "R 0 1 2 3
+        X 0
+        CX 0 1 1 2
+        LEAK(0.1) 0 1 2
+        DEPOLARIZE2(0.05) 1 2
+        CX 1 3 2 3
+        LEAK(0.05) 3
+        X_ERROR(0.02) 3
+        SEEP(0.3) 1
+        M 0 1 2 3
+        DETECTOR rec[-1] rec[-2]
+        DETECTOR rec[-2] rec[-3]
+        OBSERVABLE_INCLUDE(0) rec[-4]";
+    let shots = 10_000;
+    let whole = run_qec_program(&program(text, shots, None)).unwrap();
+    let whole_heralds = whole.heralds.as_ref().unwrap();
+    assert_eq!(whole_heralds.num_measurements(), 4);
+    for chunk_size in [100, 777, 4_097] {
+        let other = run_qec_program(&program(text, shots, Some(chunk_size))).unwrap();
+        let heralds = other.heralds.as_ref().unwrap();
+        assert_eq!(heralds.layout(), whole_heralds.layout());
+        assert_eq!(
+            heralds.raw_data(),
+            whole_heralds.raw_data(),
+            "chunk {chunk_size}"
+        );
+        assert_eq!(other.accepted_shots, whole.accepted_shots);
+        assert_eq!(other.logical_errors, whole.logical_errors);
+        for (label, a, b) in [
+            ("record", &whole.measurements, &other.measurements),
+            ("detector", &whole.detectors, &other.detectors),
+            ("observable", &whole.observables, &other.observables),
+        ] {
+            assert_eq!(a.num_measurements(), b.num_measurements());
+            for shot in 0..shots {
+                for column in 0..a.num_measurements() {
+                    assert_eq!(
+                        a.get_bit(shot, column),
+                        b.get_bit(shot, column),
+                        "chunk {chunk_size} shot {shot} {label} {column}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn engines_without_leak_flags_decline_leakage() {
     let program = program("R 0\nLEAK(0.1) 0\nM 0\nDETECTOR rec[-1]", 16, None);
     assert!(program.detector_error_model().is_err());

@@ -1,181 +1,48 @@
-# Noise and QEC
+# Quantum Error Correction
 
-PRISM-Q models noise and quantum error correction through the
-[compiled samplers](../architecture/samplers.md) and the
-[native QEC program IR](../architecture/qec-ir.md), without a dense statevector per shot.
-
-## Noisy shot sampling
-
-Attach a `NoiseModel` and sample:
-
-```rust
-use prism_q::{simulate, BackendKind, NoiseModel};
-
-# let circuit = prism_q::CircuitBuilder::new_with_classical(3, 3).h(0).cx(0, 1).cx(1, 2).measure_all().build();
-let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-let result = simulate(&circuit)
-    .backend(BackendKind::Statevector)
-    .noise(&noise)
-    .seed(42)
-    .shots(1024)
-    .unwrap();
-```
-
-`NoiseModel` holds a list of `NoiseEvent { channel, qubits }` per instruction, each channel
-a `NoiseChannel`: Pauli, depolarizing, readout error, amplitude damping and others. On
-Clifford circuits the noisy compiled sampler propagates noise sensitivity rows and XORs the
-fired channels into each sample, with no per-shot state evolution.
-
-## Device calibration import
-
-A `DeviceCalibration` holds what a calibration page reports: `t1`, `t2` and readout rates
-per qubit, a duration and depolarizing error per gate family, and optional two-qubit
-entries per pair. `to_noise_model(&circuit)` lowers it onto a circuit. After every gate,
-each target gets a `ThermalRelaxation` channel with its own `t1` and `t2` over the family's
-duration; a nonzero family error adds `Depolarizing` on a one-qubit target or
-`TwoQubitDepolarizing` on the pair; each measurement takes its classical bit's readout
-error from the measured qubit. Gates on more than two qubits are rejected, so decompose
-them first.
-
-The text form has one record per line, `key=value` fields in any order, and `#`
-comments:
-
-| Record | Fields | Notes |
-| --- | --- | --- |
-| `qubit <n> ...` | `t1`, `t2` in seconds; `p01`, `p10` (default 0) | one per qubit, indices `0..N` in any order |
-| `gate1q ...` | `time` in seconds, `error` | exactly once |
-| `gate2q ...` | `time`, `error` | exactly once |
-| `gate2q <a> <b> ...` | `time`, `error` | optional; replaces the family on that pair in either order |
-
-Values are checked on read (`t2 <= 2 t1`, probabilities in `[0, 1]`, durations
-positive), and an error names the line and the field.
-
-```rust
-use prism_q::{simulate, BackendKind, DeviceCalibration};
-
-# let circuit = prism_q::CircuitBuilder::new_with_classical(2, 2).h(0).cx(0, 1).measure_all().build();
-let calibration = DeviceCalibration::parse(
-    "qubit 0 t1=120e-6 t2=80e-6 p01=0.02 p10=0.03
-     qubit 1 t1=95e-6 t2=110e-6 p01=0.01 p10=0.02
-     gate1q time=35e-9 error=3e-4
-     gate2q time=300e-9 error=8e-3
-     gate2q 0 1 time=250e-9 error=5e-3",
-)
-.unwrap();
-let noise = calibration.to_noise_model(&circuit).unwrap();
-let result = simulate(&circuit)
-    .backend(BackendKind::DensityMatrix)
-    .noise(&noise)
-    .seed(42)
-    .shots(1024)
-    .unwrap();
-```
-
-`prism_q::sim::calibration::presets` has `superconducting_transmon(n)`, `trapped_ion(n)`
-and `neutral_atom(n)`: illustrative magnitudes for a technology class, the same on every
-qubit, not a measured device. Write the text form for a specific device.
-
-`to_noise_model` charges decoherence only to the qubits a gate touches.
-`to_scheduled_noise_model(&circuit)` also decays the qubits that wait, using the table's
-gate durations: the circuit is laid out as soon as possible in the greedy layers
-`Circuit::depth` counts, each layer as long as its longest gate, and at the end of each
-layer every qubit relaxes with its own `t1` and `t2` over the part of the layer it spent
-idle. `gate_times()` returns those durations as a `GateTimes` for a builder.
-
-## Leakage
-
-A leakage channel moves a qubit out of the computational subspace. The trajectory
-engines carry it as a per-qubit flag:
-
-| Channel | Effect |
-| --- | --- |
-| `Leakage { p }` | An unleaked qubit leaks with probability `p` |
-| `Seepage { p }` | A leaked qubit returns with probability `p`, to a uniformly random basis state |
-| `LeakageTransport { p }` | Two-qubit: when exactly one qubit is leaked, the other leaks with probability `p` |
-
-Gates on a leaked qubit do not act, and a gate pairing it with unleaked qubits applies a
-uniformly random Pauli to each of those instead. Measuring a leaked qubit reports 1, a
-reset clears the flag, and every other channel skips it. `ShotsResult::leaked` holds, per
-shot, the qubits that leaked at any point: an erasure herald for a decoder.
-
-```rust
-use prism_q::{simulate, BackendKind, GateFilter, NoiseBuilder, NoiseChannel};
-
-# let circuit = prism_q::CircuitBuilder::new_with_classical(3, 3).h(0).cx(0, 1).cx(1, 2).measure_all().build();
-let noise = NoiseBuilder::new()
-    .after_gates_joint(GateFilter::all().arity(2), NoiseChannel::LeakageTransport { p: 0.1 })
-    .after_gates(GateFilter::all(), NoiseChannel::Leakage { p: 1e-3 })
-    .after_gates(GateFilter::all(), NoiseChannel::Seepage { p: 0.05 })
-    .build(&circuit)
-    .unwrap();
-let result = simulate(&circuit)
-    .backend(BackendKind::Statevector)
-    .noise(&noise)
-    .seed(42)
-    .shots(1024)
-    .unwrap();
-let heralds = result.leaked.as_ref().unwrap();
-assert_eq!(heralds[0].len(), 3);
-```
-
-A transport event reads the flags when it fires, so declare it before the leakage rule on
-the same gates to spread only the leakage the gate itself saw. The density matrix rejects
-leakage, since a mixture evolved event by event has no flag to carry.
-
-## Correlated and time-dependent noise
-
-`NoiseBuilder::schedule(GateTimes)` times the circuit for the rules that act over elapsed
-time. `GateTimes::new(one_qubit, two_qubit)` takes family durations in seconds;
-`with_gate(name, t)` overrides one gate (an `"id"` entry turns identities into delays),
-`with_pair(a, b, t)` one qubit pair, and `with_measure` and `with_reset` the non-gate
-instructions.
-
-- `scheduled_idle(coherence)` relaxes each qubit from its `(t1, t2)` over the idle part
-  of every layer. It replaces `on_idle_qubits`; declaring both is an error.
-- `quasi_static_detuning(drift)` draws one frequency offset per qubit per shot, in
-  radians per second, and turns each qubit about `Z` by its offset times every layer's
-  duration. A qubit left for time `t` then dephases on average as `exp(-(sigma t)^2 / 2)`.
-- `over_rotation_drift(filter, sigma)` draws one fractional angle error per shot, shared
-  by every matching `rx`, `ry`, `rz` or `p` gate; `over_rotation_drift_per_qubit(filter,
-  drift)` draws one per qubit.
-
-A `DriftDistribution` is a zero-mean Gaussian over per-qubit offsets:
-`independent(sigmas)`, `from_t2_star(t2_star)` for widths `sqrt(2) / t2_star`, a full
-`from_covariance(matrix)`, or `with_neighbour_correlation(coupling, rho)` to correlate the
-qubits of each coupling edge. Each shot draws standard normals and correlates them through
-the covariance's Cholesky factor; a covariance that is not positive semidefinite is
-rejected at `build`.
-
-```rust
-use prism_q::{DriftDistribution, GateFilter, GateTimes, NoiseBuilder};
-
-# let circuit = prism_q::CircuitBuilder::new_with_classical(3, 3).rx(0.4, 0).cx(0, 1).cx(1, 2).measure_all().build();
-let detuning = DriftDistribution::from_t2_star([40e-6, 55e-6, 30e-6])
-    .with_neighbour_correlation([(0, 1), (1, 2)], 0.3);
-let noise = NoiseBuilder::new()
-    .schedule(GateTimes::new(35e-9, 300e-9).with_measure(1e-6))
-    .scheduled_idle([(100e-6, 80e-6); 3])
-    .quasi_static_detuning(detuning)
-    .over_rotation_drift(GateFilter::all().named("rx"), 0.01)
-    .build(&circuit)
-    .unwrap();
-```
-
-The drift rules lower onto `NoiseChannel::QuasiStatic` events, which make each shot a
-different unitary, so they run on the per-shot trajectory engines only. A model without
-them keeps the shared-evolution fast paths.
+Two routes sample error correction experiments without a dense statevector per shot. A
+Clifford `Circuit` with reset reuse compiles into a detector sampler, and the
+[native QEC program IR](../architecture/qec-programs.md) adds detectors, logical observables,
+postselection and noise annotations as operations. Noise on ordinary circuits
+is on [Noise Models](noise.md). The [QEC memory tutorial](../tutorials/qec-memory.md)
+runs a decoded experiment end to end, and [QEC from Python](python-qec.md) covers the
+Python surface.
 
 ## Detector sampling
 
-`compile_detector_sampler` compiles a Clifford circuit with measurement and reset reuse,
-the shape of repeated syndrome extraction, into a packed sampler, and derives detector and
-observable records as parity rows over the measurement record. Reset reuse becomes fresh
-qubit aliases, so no shot replays the tableau.
+`compile_detector_sampler(&circuit, detector_rows, observable_rows, seed)` compiles a
+Clifford circuit with measurement and reset reuse, the shape of repeated syndrome
+extraction, into a packed sampler. Each detector and observable is a row of measurement
+record indices, in circuit measurement order, and samples as the parity of those records.
+Reset reuse becomes fresh qubit aliases, so no shot replays the tableau.
+
+```rust
+use prism_q::{CircuitBuilder, compile_detector_sampler};
+
+let mut builder = CircuitBuilder::new_with_classical(3, 4);
+builder.h(0).cx(0, 2);
+for round in 0..2 {
+    builder.cx(0, 1).cx(2, 1).measure(1, round).reset(1);
+}
+let circuit = builder.measure(0, 2).measure(2, 3).build();
+
+let mut sampler =
+    compile_detector_sampler(&circuit, vec![vec![0], vec![0, 1]], vec![vec![2, 3]], 42)?;
+let batch = sampler.sample_packed(1000)?;
+assert!((0..1000).all(|shot| !batch.detectors.get_bit(shot, 1)));
+assert!((0..1000).all(|shot| !batch.observables.get_bit(shot, 0)));
+# Ok::<(), prism_q::PrismError>(())
+```
+
+Qubit 1 checks the `ZZ` parity of qubits 0 and 2 twice. The data qubits read random but
+equal values, so the observable over both data records never fires, and neither does the
+detector comparing the two rounds. `sample_packed` draws the measurements once and derives
+both parity sets from the same shots; `sample_detector_counts` streams a histogram.
 
 ## Native QEC programs
 
-For detectors, logical observables, postselection and Pauli-noise annotations as
-first-class constructs, use the native QEC program IR instead of a `Circuit`. Its text
+A `QecProgram` holds detectors, logical observables, postselection and Pauli noise
+annotations as operations of their own, where a `Circuit` has none. Its text
 format follows the Stim circuit language for the instructions listed below; `LEAK`,
 `SEEP`, `LEAK_TRANSPORT` and `EXP_VAL` are additions, and any other instruction is a
 parse error.
@@ -197,7 +64,7 @@ let program = parse_qec_program(qec_text).unwrap();
 let result = run_qec_program(&program).unwrap();
 ```
 
-`run_qec_program` lowers Clifford-compatible programs into the packed compiled sampler;
+`run_qec_program` lowers Clifford programs into the packed compiled sampler;
 `run_qec_program_reference` is the per-shot statevector oracle for validating small
 programs. `program.to_text()` writes the same text format back, so a program built in code
 can be saved and parsed again.
@@ -205,20 +72,21 @@ can be saved and parsed again.
 ```admonish info title="What QEC programs support"
 Clifford gates (including the `SQRT_*`, `C_XYZ` / `C_ZYX`, `CY`, `SWAP`, `ISWAP`,
 `CXSWAP`, and `SWAPCX` spellings), basis resets and measurements, `MPP` and
-`MXX` / `MYY` / `MZZ` Pauli-product measurements, `MPAD` constant records,
+`MXX` / `MYY` / `MZZ` Pauli product measurements, `MPAD` constant records,
 detectors, observables, postselection, `X_ERROR` / `Y_ERROR` / `Z_ERROR` /
 `DEPOLARIZE1` / `DEPOLARIZE2` / `PAULI_CHANNEL_1` / `PAULI_CHANNEL_2` noise,
 `E` / `CORRELATED_ERROR` chains with `ELSE_CORRELATED_ERROR`, `HERALDED_ERASE`,
 `LEAK` / `SEEP` / `LEAK_TRANSPORT` leakage, and terminal `EXP_VAL` final-state
 expectation estimates.
-A noiseless `EXP_VAL` uses the analytical T strategies, with any detector records
-still sampled by the packed runner. A noisy one is computed exactly on the density
+A noiseless `EXP_VAL` runs under a `QecTStrategy`: `Auto` tries exact light-cone SPD,
+then CAMPS, then a tensor network scalar, and `run_qec_program_with_strategy` picks
+`Spd`, `Camps` or `Reference` directly. Detector records are still sampled by the packed
+runner. A noisy `EXP_VAL` is computed exactly on the density
 matrix when it fits, and falls to the per-shot reference runner when the program
-carries measurement records or postselection or exceeds the density-matrix cap.
+carries measurement records or postselection or exceeds the density matrix cap.
 The packed sampling path rejects non-Clifford gates.
-The [QEC IR reference](../architecture/qec-ir.md) has the full grammar;
-[QEC program execution](../architecture/qec-programs.md) has the runner routing, the
-V1 reset requirement, and the `EXP_VAL` placement rules.
+[QEC programs](../architecture/qec-programs.md) has the full grammar, the runner
+routing, the V1 reset requirement, and the `EXP_VAL` placement rules.
 ```
 
 ### Detector reference
@@ -287,16 +155,6 @@ and `sample` takes `&mut self`, so share one behind a lock or compile one per th
 Programs that need the per-shot or analytical runners (`EXP_VAL`, non-Clifford gates)
 return an error from `compile_sampler`.
 
-In Python, `QecProgram.compile_sampler()` returns a `QecCompiledSampler`.
-`sample(shots, *, seed=None, bit_packed=True, separate_observables=True)` returns a
-`(detectors, observables)` pair of `(shots, ceil(n / 8))` little-endian byte arrays; bool
-arrays with `bit_packed=False`; or, with `separate_observables=False`, one array whose
-columns are the detectors followed by the observables. `sample_result` returns a full
-`QecSampleResult`. Sampling releases the GIL, and calls on one sampler from several
-threads run one at a time. Measurement records are dropped unless
-`compile_sampler(keep_measurements=True)` asks for them, which `sample_result` then
-reports.
-
 ### Leakage as heralded erasure
 
 `LEAK(p) q ...` leaks each target with probability `p`, `SEEP(p) q ...` returns each
@@ -306,12 +164,12 @@ leaked target to a random basis state with probability `p`, and
 frame, a two-qubit gate meeting a leaked qubit fully depolarizes both its qubits, other
 noise annotations naming a leaked qubit are skipped, and the leaked qubit's own
 measurement reports 1. On a Clifford program this matches the trajectory leakage model
-above in distribution.
+in [Noise Models](noise.md#leakage) in distribution.
 
 Each `LEAK` target adds one column to `QecSampleResult::heralds`, set when that qubit is
 leaked just after the annotation; `LEAK(0)` reads the flags without changing them. An
 `MPP` over a leaked qubit reports a random parity. The detector error model and the
-reference runner have no leak flag and reject these programs, and the memory-experiment
+reference runner have no leak flag and reject these programs, and the memory experiment
 generators below emit no leakage.
 
 ```rust
@@ -358,13 +216,12 @@ let failures = (0..result.total_shots)
 The repetition code protects a Z memory; the rotated surface and triangular 6.6.6 color
 codes take an X or Z memory basis. A zero rate adds no annotation, so
 `QecCircuitNoise::default()` gives the noiseless program, whose detectors and observable
-never fire. In Python the generators are static methods of `QecProgram` with an optional
-`QecCircuitNoise`. The [QEC IR reference](../architecture/qec-ir.md) has the layouts and
-schedules.
+never fire. [QEC programs](../architecture/qec-programs.md#memory-experiment-generators) has the
+layouts and schedules.
 
 ## Detector error model export
 
-Matching and belief-propagation decoders read an error model, not raw detector samples.
+Matching and belief propagation decoders read an error model, not raw detector samples.
 `QecProgram::detector_error_model` derives one from the program's noise annotations,
 detectors and observables, and `to_text` writes it in the detector error model text
 format external decoders read:
@@ -386,18 +243,16 @@ std::fs::write("memory_d3.dem", model.to_text()).unwrap();
 ```
 
 Each mechanism carries a probability and the detector and observable indices it flips;
-detector coordinates pass through from the program. In Python the model also exposes
-`probabilities()`, `detector_matrix()` and `observable_matrix()`, the check-matrix triple
-in-process decoder libraries accept. Matching decoders need at most two detectors per
-mechanism: `decompose_graphlike` splits each hypergraph mechanism across existing
-graphlike ones and returns an error when no split exists, and `to_text` writes the splits
-as `^`-separated components. Every detector and observable must be deterministic in the
-noiseless program, since a random one has no error mechanism to describe it;
-`detector_error_model` names it in the error.
+detector coordinates pass through from the program. Matching decoders need at most two
+detectors per mechanism: `decompose_graphlike` splits each hypergraph mechanism across
+existing graphlike ones and returns an error when no split exists, and `to_text` writes
+the splits as components separated by `^`. Every detector and observable must be
+deterministic in the noiseless program, since a random one has no error mechanism to
+describe it; `detector_error_model` names it in the error.
 
 `DetectorErrorModel::from_text` reads the same format, `repeat` blocks and
-`shift_detectors` included, so a model written by another tool can drive the in-crate
-decoder:
+`shift_detectors` included, so a model written by another tool can drive the decoders in
+the crate:
 
 ```rust
 use prism_q::{DetectorErrorModel, UnionFindDecoder};
@@ -415,8 +270,8 @@ let decoder = UnionFindDecoder::from_model(&model)?;
 # Ok::<(), prism_q::PrismError>(())
 ```
 
-[QEC program execution](../architecture/qec-programs.md) has the derivation semantics and
-the grammar in both directions.
+[QEC decoding](../architecture/qec-decoding.md) has the derivation semantics and the
+grammar in both directions.
 
 ## Decoding
 
@@ -449,7 +304,7 @@ let failures = (0..result.total_shots)
 The decoder is weighted union-find with peeling: edges weigh `ln((1-p)/p)`, one-detector
 mechanisms are boundary edges, and mechanisms that flip no detector set a floor under the
 achievable logical error rate. Construction rejects hypergraph models and points to
-`decompose_graphlike`. Decoding is deterministic and allocation-free per shot, and large
+`decompose_graphlike`. Decoding is deterministic and allocates nothing per shot, and large
 batches decode in parallel.
 
 Two more decoders take the same model and expose the same `decode_packed` and
@@ -458,8 +313,8 @@ Two more decoders take the same model and expose the same `decode_packed` and
 - `MatchingDecoder` is exact minimum-weight perfect matching over the same graphlike
   model. It finds the least-weight correction for every shot, so it fails no more often
   than union-find on hard noise, at a higher per-shot cost.
-- `BpOsdDecoder` runs belief propagation with ordered-statistics post-processing on the
-  check matrix and accepts hypergraph models directly, which color codes and qLDPC codes
+- `BpOsdDecoder` runs belief propagation with ordered statistics decoding on the check
+  matrix and accepts hypergraph models directly, which color codes and qLDPC codes
   need. `BpOsdOptions` picks the BP rule (`MinSum { scaling }` or `ProductSum`), the
   iteration cap, and the OSD search (`Zero`, `CombinationSweep { order }`, or
   `Exhaustive { order }`).
@@ -491,14 +346,5 @@ let bposd_rate = bposd.logical_error_rate(&result.detectors, &result.observables
 # Ok::<(), prism_q::PrismError>(())
 ```
 
-The decoding section of [QEC program execution](../architecture/qec-programs.md) covers
-each algorithm, its complexity, and its validation against brute force and the exact ML
-rate.
-
-## Error chain complex
-
-`ErrorChainComplex` models the GF(2) chain complex over noise locations and identifies
-undetectable error cycles. `noisy_marginals_analytical` computes marginals in closed form
-from the parity matrix and noise rates, with no Monte Carlo. Readout error is part of that
-closed form: a reported 1 is either a measured 1 that did not flip or a measured 0 that
-did. Any non-Pauli channel, and any channel naming two qubits, is rejected.
+[QEC decoding](../architecture/qec-decoding.md#decoders) covers each algorithm, its
+complexity, and its validation against brute force and the exact ML rate.

@@ -22,7 +22,8 @@ pip install "prism-q[cuda12]"
 ```
 
 Without a driver or NVRTC the package runs on the CPU and only `GpuContext(...)` raises.
-[Python Bindings](../guides/python.md) covers the package.
+[Python Bindings](../guides/python.md) covers the package. The getting-started pages
+show each step in Rust and in Python.
 
 ## Feature flags
 
@@ -34,8 +35,8 @@ Without a driver or NVRTC the package runs on the CPU and only `GpuContext(...)`
 | `distributed-mpi` | no | `distributed` plus the MPI transport |
 
 ```admonish tip title="Keep parallel on for performance"
-The published benchmarks were taken with `parallel` enabled. Without it, 16+ qubit runs
-use single-threaded kernels and are not comparable to the baselines.
+The published benchmarks were taken with `parallel` enabled. Without it, runs from 15
+qubits up use single-threaded kernels and are not comparable to the baselines.
 ```
 
 ## Building from source
@@ -49,15 +50,15 @@ cargo build --release
 ## Running the test suite
 
 ```bash
-cargo nextest run --features parallel                          # unit + integration tests
+cargo nextest run --features parallel                          # unit and integration tests
 cargo test --doc --features parallel                           # doctests
 cargo clippy --all-targets --features parallel -- -D warnings  # lint
 ```
 
-Use `cargo test --features parallel` if `cargo-nextest` is unavailable. These need only
-a Rust toolchain. The
+These need only a Rust toolchain; use `cargo test --features parallel` if
+`cargo-nextest` is unavailable. The
 [contributing guide](https://github.com/AbeCoull/prism-q/blob/main/CONTRIBUTING.md#test-and-lint)
-covers the GPU, distributed and MPI arms; its `--all-features` runs add
-`distributed-mpi`, which needs a system MPI installation and libclang.
+covers the GPU, distributed and MPI arms. Its `--all-features` runs add
+`distributed-mpi`, which also needs a system MPI installation and libclang.
 
 Next: build [Your First Circuit](./first-circuit.md).

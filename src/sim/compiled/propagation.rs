@@ -1869,6 +1869,49 @@ pub(super) fn forward_as_backward_gate(gate: &Gate) -> Result<&Gate> {
     }
 }
 
+/// [`batch_propagate_backward_flat`] restricted to words `lo..hi` of each column and of
+/// `phase`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn propagate_col_words(
+    x: &mut [u64],
+    z: &mut [u64],
+    phase: &mut [u64],
+    row_words: usize,
+    gate: &Gate,
+    cols: &[usize],
+    lo: usize,
+    hi: usize,
+) {
+    let sign = &mut phase[lo..hi];
+    match *cols {
+        [q] => {
+            let base = q * row_words;
+            propagate_rows_1q(
+                gate,
+                &mut x[base + lo..base + hi],
+                &mut z[base + lo..base + hi],
+                sign,
+                hi - lo,
+            );
+        }
+        [a, b] => {
+            let (x0, x1) = pair_rows_mut(x, a, b, row_words);
+            let (z0, z1) = pair_rows_mut(z, a, b, row_words);
+            propagate_rows_2q(
+                gate,
+                &mut x0[lo..hi],
+                &mut z0[lo..hi],
+                &mut x1[lo..hi],
+                &mut z1[lo..hi],
+                sign,
+                hi - lo,
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Column-major forward stabilizer simulation.
 ///
 /// Stores x_cols[qubit][row_word] and z_cols[qubit][row_word] so gate
@@ -1893,21 +1936,55 @@ pub(super) fn colmajor_forward_sim(
         z_cols[q * row_words + stab_row / 64] |= 1u64 << (stab_row % 64);
     }
 
+    // Qubits at or above `touched` still hold their initial rows, so every column is
+    // zero outside destabilizer rows [0, touched) and stabilizer rows [n, n + touched).
+    let mut touched = 0usize;
+    let stab_start = n / 64;
     for inst in instructions {
         let (gate, targets) = match inst {
             Instruction::Gate { gate, targets } => (gate, targets.as_slice()),
             Instruction::Conditional { gate, targets, .. } => (gate, targets.as_slice()),
             _ => continue,
         };
-
-        batch_propagate_backward_flat(
-            &mut x_cols,
-            &mut z_cols,
-            &mut phase,
-            row_words,
-            forward_as_backward_gate(gate)?,
-            targets,
-        );
+        let gate = forward_as_backward_gate(gate)?;
+        for &t in targets {
+            touched = touched.max(t + 1);
+        }
+        let destab_end = touched.div_ceil(64);
+        let stab_end = (n + touched).div_ceil(64);
+        if stab_start <= destab_end {
+            propagate_col_words(
+                &mut x_cols,
+                &mut z_cols,
+                &mut phase,
+                row_words,
+                gate,
+                targets,
+                0,
+                stab_end,
+            );
+        } else {
+            propagate_col_words(
+                &mut x_cols,
+                &mut z_cols,
+                &mut phase,
+                row_words,
+                gate,
+                targets,
+                0,
+                destab_end,
+            );
+            propagate_col_words(
+                &mut x_cols,
+                &mut z_cols,
+                &mut phase,
+                row_words,
+                gate,
+                targets,
+                stab_start,
+                stab_end,
+            );
+        }
     }
 
     let stride = 2 * nw;

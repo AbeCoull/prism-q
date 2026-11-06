@@ -24,12 +24,14 @@ let context = DistributedContext::world()?;
 let result = simulate(&circuit).distributed(context).seed(42).run()?;
 ```
 
-`DistributedContext::world()` calls `MPI_Init` at `MPI_THREAD_FUNNELED` and captures
-the world communicator; dropping the context on the thread that created it runs
-`MPI_Finalize`. When another component already owns MPI (such as an embedding
-interpreter with mpi4py), `DistributedContext::attached_world()` attaches without owning
-the MPI lifetime. `DistributedContext::serial()` gives a single rank with no MPI, which
-is how the tests and the `distributed`-only build run.
+`DistributedContext::world()` and `attached_world()` need the `distributed-mpi` feature.
+`world()` calls `MPI_Init` at `MPI_THREAD_FUNNELED` and captures the world communicator;
+dropping the context on the thread that created it runs `MPI_Finalize`. When another
+component already owns MPI, such as an embedding interpreter with mpi4py,
+`attached_world()` attaches without taking over the MPI lifetime. It returns `Ok(None)`
+when MPI is not initialized, and an error when MPI runs below the thread level the
+backend needs. `DistributedContext::serial()` gives a single rank with no MPI, which is
+how the tests and a build with `distributed` alone run.
 
 `simulate(&circuit).distributed(context)` is shorthand for
 `.backend(BackendKind::StatevectorDistributed { context })`. Automatic dispatch never
@@ -44,6 +46,27 @@ mpiexec -n 4 ./target/release/my_simulation
 The contract is SPMD: every rank runs the same program and enters every collective
 inside the backend, so branching on `context.rank()` before a simulation call deadlocks
 the other ranks.
+
+## Other transports
+
+`DistributedContext::from_comm(Arc<dyn RankComm>)` wraps any transport. `RankComm`
+(`prism_q::distributed::RankComm`) is the whole contract the backend uses: `rank`,
+`size`, allgathers of `Complex64`, `f64` and `u64` blocks, a scalar `allreduce_sum_f64`,
+a paired `sendrecv_c64` exchange, and `barrier`. Every rank must issue the same sequence
+of calls, as under MPI. `SerialComm` is the single-rank implementation and `MpiComm` the
+MPI one.
+
+The thread loopback in `prism_q::distributed::loopback`, compiled under `bench-internal`,
+runs ranks as threads in one process. `run_ranks(size, f)` calls `f` once per rank with a
+context whose transport reaches the others and returns the results in rank order:
+
+```rust,ignore
+use prism_q::{distributed::loopback::run_ranks, simulate};
+
+let probabilities = run_ranks(4, |context| {
+    simulate(&circuit).distributed(context).seed(42).run().unwrap().probabilities
+});
+```
 
 ## Memory layout
 

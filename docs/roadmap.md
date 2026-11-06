@@ -5,7 +5,7 @@ waits on. These are intentions, not commitments, and carry no dates. A shipped i
 leaves the page for the
 [changelog](https://github.com/AbeCoull/prism-q/blob/main/CHANGELOG.md).
 
-1.0 has no date. Until then, [Compatibility](./guides/capabilities.md#compatibility)
+1.0 has no date. Until then, [Compatibility and Versioning](./guides/compatibility.md)
 says what each release promises.
 
 | Status | Meaning |

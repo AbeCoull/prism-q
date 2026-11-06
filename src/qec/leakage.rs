@@ -149,14 +149,17 @@ impl QecLeakageSampler {
         self.cached_unit = None;
     }
 
-    /// Sample shots `first_shot..first_shot + num_shots` of a `total_shots`-shot run:
-    /// the measurement records and the herald columns, both measurement-major.
+    /// Sample shots `first_shot..first_shot + num_shots` of a `total_shots`-shot run,
+    /// returning the measurement records measurement-major. Herald columns land at their
+    /// shot positions in `heralds`, which holds every column of the whole run as
+    /// `total_shots.div_ceil(64)` words each and starts zeroed.
     pub(super) fn sample(
         &mut self,
         first_shot: usize,
         num_shots: usize,
         total_shots: usize,
-    ) -> Result<(PackedShots, PackedShots)> {
+        heralds: &mut [u64],
+    ) -> Result<PackedShots> {
         let num_measurements = self.deferred.measurement_qubits.len();
         let s_words = num_shots.div_ceil(64);
         let mut records = if num_measurements == 0 {
@@ -166,7 +169,8 @@ impl QecLeakageSampler {
                 .try_sample_bulk_packed(num_shots)?
                 .into_meas_major_data()
         };
-        let mut heralds = vec![0u64; self.num_heralds * s_words];
+        let herald_words = total_shots.div_ceil(64);
+        debug_assert_eq!(heralds.len(), self.num_heralds * herald_words);
         if num_shots > 0 {
             let end_shot = first_shot + num_shots;
             let first_unit = first_shot / LEAK_UNIT_SHOTS;
@@ -206,9 +210,9 @@ impl QecLeakageSampler {
                     land_bits(row, dst, &unit.forced[unit_row], src, count, |a, b| a | b);
                 }
                 for herald in 0..self.num_heralds {
-                    let row = &mut heralds[herald * s_words..(herald + 1) * s_words];
+                    let row = &mut heralds[herald * herald_words..(herald + 1) * herald_words];
                     let unit_row = &unit.heralds[herald * words..(herald + 1) * words];
-                    land_bits(row, dst, unit_row, src, count, |a, b| a | b);
+                    land_bits(row, lo, unit_row, src, count, |a, b| a | b);
                 }
             }
             if let Some(last) = units.pop()
@@ -217,9 +221,10 @@ impl QecLeakageSampler {
                 self.cached_unit = Some((total_shots, last));
             }
         }
-        Ok((
-            PackedShots::from_meas_major(records, num_shots, num_measurements),
-            PackedShots::from_meas_major(heralds, num_shots, self.num_heralds),
+        Ok(PackedShots::from_meas_major(
+            records,
+            num_shots,
+            num_measurements,
         ))
     }
 

@@ -2,8 +2,14 @@
 
 ## Backend trait
 
+`Backend` in `src/backend/mod.rs` is sealed: only the crate's own backends implement it,
+so a method can be added without a breaking release. Six methods are required and about
+35 more have defaults. The sketch below shows the required set; the
+[rustdoc page](https://docs.rs/prism-q/latest/prism_q/backend/trait.Backend.html) lists
+every method.
+
 ```rust
-pub trait Backend {
+pub trait Backend: sealed::Sealed {
     fn name(&self) -> &'static str;
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()>;
     fn apply(&mut self, instruction: &Instruction) -> Result<()>;
@@ -11,42 +17,41 @@ pub trait Backend {
     fn probabilities(&self) -> Result<Vec<f64>>;
     fn num_qubits(&self) -> usize;
 
-    // Optional overrides:
-    fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()>;  // batch apply
-    fn supports_fused_gates(&self) -> bool;   // false for symbolic backends (stabilizer)
-    fn export_statevector(&self) -> Result<Vec<Complex64>>;  // for backend transitions
+    // Defaulted: provenance (resolved, exactness, placement, bond_report), start
+    // states, batch and region apply, fusion profile, native sampling, Pauli
+    // expectations, reduced density matrices, entropy, overlap, reset.
 }
 ```
 
-Contract: `init` before `apply`. Instructions arrive in circuit order. Measurement is destructive. Deterministic given same RNG seed.
+Contract: `init` before `apply`. Instructions arrive in circuit order. Measurement is
+destructive. Results are deterministic for a given RNG seed.
 
 ## Entry points
 
-Orchestration layer in `src/sim/mod.rs`.
+The orchestration layer is `src/sim/mod.rs`. `simulate(&circuit)` returns a `Simulate`
+builder; `.backend(kind)`, `.noise(&model)`, `.limits(limits)`, `.initial_state(..)` and
+`.require_exact()` configure it, `.seed(seed)` arms it, and one terminal runs it.
 
-| Function | Description |
-|----------|-------------|
-| `simulate(circuit).seed(seed).run()` | Auto-dispatch, full output |
-| `simulate(circuit).backend(kind).seed(seed).run()` | Explicit backend selection |
-| `simulate(circuit).seed(seed).shots(shots)` | Multi-shot sampling |
-| `simulate(circuit).backend(kind).seed(seed).shots(shots)` | Multi-shot with backend selection |
-| `simulate(circuit).backend(kind).noise(noise).seed(seed).shots(shots)` | Noisy multi-shot |
-| `simulate(circuit).backend(density_matrix).noise(noise).seed(seed).run()` | Exact noisy distribution |
-| `simulate(circuit).backend(density_matrix).noise(noise).seed(seed).marginals()` | Exact noisy marginals |
-| `simulate(circuit).backend(density_matrix).noise(noise).seed(seed).expectation_values(obs)` | Exact `Tr(rho P_k)` |
-| `simulate(circuit).seed(seed).sample_counts(shots)` | Auto-dispatched frequency histogram |
-| `simulate(circuit).backend(kind).seed(seed).sample_counts(shots)` | Frequency histogram with backend selection |
-| `simulate(circuit).seed(seed).marginals()` | Auto-dispatched per-qubit marginal probabilities |
-| `simulate(circuit).backend(kind).seed(seed).marginals()` | Per-qubit marginal probabilities with backend selection |
-| `simulate(circuit).seed(seed).expectation_values(observables)` | `⟨P_k⟩` per Pauli string |
-| `simulate(circuit).seed(seed).expectation_gradient(hamiltonian, params)` | `⟨H⟩` and adjoint gradient |
-| `simulate(circuit).backend(kind).seed(seed).expectation_gradient_shift(hamiltonian, params)` | `⟨H⟩` and parameter-shift gradient |
-| `run_on(backend, circuit)` | Pre-constructed backend |
-| `run_qasm(qasm, seed)` | Parse + simulate |
+| Terminal or function | Returns |
+|----------------------|---------|
+| `run()` | `RunOutcome`: probabilities, classical bits, save records, metadata |
+| `shots(n)`, `sample_counts(n)` | Per-shot records, or a histogram |
+| `marginals()` | P(1) per qubit |
+| `expectation_values(obs)` | `⟨P_k⟩` per Pauli string |
+| `observable_expectation(h)`, `observable_variance(h)` | Weighted Pauli sum, see [weighted observables](#weighted-observables) |
+| `expectation_gradient(h, params)` | `⟨H⟩` and the adjoint gradient |
+| `expectation_gradient_shift(h, params)` | `⟨H⟩` and the parameter shift gradient |
+| `reduced_density_matrix(qubits)`, `entanglement_entropy(qubits)`, `overlap(other)` | State diagnostics, see [Backends](./backends.md#state-diagnostics) |
+| `state_vector()`, `probabilities_of(qubits)` | Dense amplitudes, or a marginal distribution |
+| `plan(query)` | The route a terminal would take, without running it; see [query route inspection](#query-route-inspection) |
+| `run_on(backend, circuit)`, `run_on_state(backend, circuit, amps)` | A run on a backend the caller built, from `|0...0>` or from given amplitudes |
+| `sim::run_batch(circuits, kind, seed)` | One result per circuit, holding one backend where widths match |
+| `run_qasm(qasm, seed)` | Parse and run |
+| `simulate_program(&program)` | The builder for a `DynamicProgram`; see [Dynamic Programs](./dynamic-programs.md) |
 
 `RunOutcome::probabilities` is `None` only when the backend has no dense probability
 terminal for the circuit: sparse, MPS, stabilizer, factored or product above
-`PRISM_MAX_PROB_QUBITS`, or a register too wide to index. A statevector or tensor-network
+`PRISM_MAX_PROB_QUBITS`, or a register too wide to index. A statevector or tensor network
 run above that cap is an error naming it, since the register already fits the state.
 Other extraction failures propagate as errors too.
 
@@ -63,12 +68,13 @@ selection.
 
 ## Noise across the terminals
 
-The selected backend, not the terminal, fixes how a noise model is applied.
+The selected backend, not the terminal, fixes how a noise model is applied. How a model
+compiles into events is on [Noise Compilation](./noise.md).
 
-Backends holding a pure state per shot average trajectories: each shot re-evolves the
-circuit with sampled channels, and a distribution converges as `1/sqrt(shots)`. Only
-`shots` and `sample_counts` take that route, since one trajectory is not an answer to
-`run`, `marginals` or `expectation_values`.
+Backends holding a pure state per shot average trajectories: each shot evolves the
+circuit again with sampled channels, and a distribution converges as `1/sqrt(shots)`.
+Only `shots` and `sample_counts` take that route, since one trajectory is not an answer
+to `run`, `marginals` or `expectation_values`.
 
 The density matrix holds the mixture, so `shots` means one exact evolution followed by a
 draw per shot. Every terminal reads that evolution: `run` and `marginals` return the exact
@@ -87,22 +93,17 @@ serves as the mixture oracle.
 
 `expectation_gradient` rejects a noise model on every backend, because the adjoint method
 backpropagates through a pure state. `expectation_gradient_shift` accepts one on the
-density-matrix kinds: the channels do not depend on the shifted angle, so the shift rule
+density matrix kinds: the channels do not depend on the shifted angle, so the shift rule
 holds and each of the `1 + 2 * links` evaluations reads the exact mixture. Other backends
 reject the pair, naming the density matrix.
 
 ## Result provenance
 
-Every terminal's result carries a `RunMetadata`: the resolved engine, whether it is
-exact, where the state lived, and the shot count for a sampled result. An approximate
-backend chosen by `Auto` is reported as such and refused only through `require_exact()`,
-because refusing by default would remove the only route an oversize non-sparse circuit
-has.
-
-An MPS run also carries `bond`, a `BondReport` of the peak bond dimension any cut kept
-against the configured cap; `saturated()` says the cap bound the run.
-`Exactness::Approximate` marks the route whether or not the cap was reached. Other
-backends leave `bond` as `None`.
+Every terminal's result carries a `RunMetadata`. The
+[Capability and Support Matrix](../guides/capabilities.md#what-kind-of-answer-a-result-is)
+lists its fields and what `Approximate` means, and
+[Backends](./backends.md#what-a-backend-reports-about-its-own-result) how a backend fills
+them.
 
 `require_exact()` resolves the route from the circuit and errors before allocating.
 Exactness depends on route and circuit together: an oversize circuit of diagonal and
@@ -113,55 +114,95 @@ checks run in every terminal.
 
 ## Auto-dispatch decision tree
 
+`BackendKind::Auto` resolves in `src/sim/route.rs` and `src/sim/dispatch.rs`
+(`plan_probability_route`, then `select_auto_backend_choice`). Terminal routes come
+first; the rest of the tree is the state route every terminal falls back to.
+
 ```mermaid
 flowchart TD
-    A[BackendKind::Auto] --> E{Entangling gates?}
-    E -- none --> PS["ProductState (O(n))"]
+    A[BackendKind::Auto] --> Q{"Terminal route applies?<br/>(table below)"}
+    Q -- yes --> QR["Compiled Clifford sampler, stabilizer rank,<br/>SPD or tensor contraction"]
+    Q -- no --> D{"Independent blocks, 8+ qubits,<br/>largest block 3+ below n?"}
+    D -- "Clifford, 16+ qubits, a block of 2+" --> FS[FactoredStabilizer]
+    D -- yes --> DEC["Decomposed: each block re-enters the tree"]
+    D -- no --> T{"Not all Clifford, fits the cap,<br/>Clifford prefix of max(2n, 16) gates?"}
+    T -- yes --> TC["Stabilizer prefix, then Statevector tail"]
+    T -- no --> E{Entangling gates?}
+    E -- none --> PS["ProductState, O(n)"]
     E -- yes --> CL{All Clifford?}
-    CL -- yes --> STB["Stabilizer (O(n^2))"]
-    CL -- no --> MEM{Above memory limit?}
-    MEM -- "yes, at most 128 entries" --> SPR["Sparse (O(k))"]
-    MEM -- "yes, otherwise" --> MPS["MPS (bond dim 256)"]
-    MEM -- no --> IND{Partial independence?}
-    IND -- yes --> FAC["Factored (split-state)"]
-    IND -- no --> SV["Statevector (exact)"]
+    CL -- yes --> STB["Stabilizer, O(n^2)"]
+    CL -- no --> MEM{Above the statevector cap?}
+    MEM -- "yes, sparse friendly or at most 128 entries" --> SPR["Sparse, O(k)"]
+    MEM -- "yes, otherwise" --> MPS["MPS, bond dim 256"]
+    MEM -- no --> IND{"Some qubits independent?"}
+    IND -- yes --> FAC["Factored"]
+    IND -- no --> SV["Statevector"]
 ```
 
-The memory limit comes from detected physical memory: half of it is the budget,
-and the cap is the widest register whose `2^n` `Complex64` amplitudes fit, so 29
-qubits on a 16 GiB host and 30 on 32 GiB. `PRISM_MAX_SV_QUBITS` overrides it with
-a qubit count, and an unparseable value warns and leaves detection in charge
-rather than disabling the cap. When detection itself fails the cap is disabled,
-with a warning on stderr: a register too wide for the machine then aborts on
-allocation rather than routing to another backend, since there is no figure left
-to route against. `src/backend/memory.rs` holds the derivation and the other
-dense caps that share it.
+The statevector cap is half of physical memory, about 29 qubits on a 16 GiB host, and
+`PRISM_MAX_SV_QUBITS` overrides it. [Backends](./backends.md#memory-budget) holds the
+derivation and the other caps.
 
-Past the limit, dispatch runs the gates on a sparse map and takes it when the map never
-holds more than 128 entries, as a W state does. A sparse gate costs about 8 ns per
-entry and an MPS gate about 2 us even at bond 2, so the MPS wins past that on a
-circuit that barely entangles. A circuit whose gates only permute or phase basis
-states stays on one entry and skips the run.
+A circuit with no entangling gate at 8 qubits or more meets the block split first and
+runs as one product state block per qubit; shots skip the split and sample the product
+state directly (see [Compiled Samplers](./samplers.md)).
 
-For a user-facing version of this decision, see [Choosing a Backend](../getting-started/choosing-a-backend.md).
+Past the cap, dispatch runs the gates on a sparse map and takes it when the map never
+holds more than 128 entries, as a W state does. A sparse gate costs about 8 ns per entry
+and an MPS gate about 2 us even at bond 2, so the MPS wins past that on a circuit that
+barely entangles. A circuit whose gates only permute or phase basis states stays on one
+entry and skips the probe.
+
+For a user-facing version of this decision, see
+[Choosing a Backend](../getting-started/choosing-a-backend.md).
 
 ### Routes the tree does not show
 
-The tree is the family choice for a state terminal. Five more routes are reachable under
-`Auto`, each tested before the tree and each with its own constants, in
-`src/sim/dispatch.rs` and `src/sim/mod.rs`:
+Each of these is tested before the state route, with its own constants in
+`src/sim/dispatch.rs`, `src/sim/route.rs` and `src/sim/mod.rs`:
 
 | Route | Taken when |
 | --- | --- |
-| Factored stabilizer | Clifford only, the circuit splits into independent components, at least 16 qubits, and the largest component is at least 2 |
-| Stabilizer rank, sampled | Shots with terminal measurements only on a Clifford+T circuit, in two cases: from 16 qubits with no reset and fewer T gates than qubits, at most 20 (the Clifford register, tested ahead of the statevector), or above 25 qubits once the statevector declines, with T count at most 40 and at most `n - 2⌈log2 n⌉`. Per-shot runs with mid-circuit measurement take it inside the second T bound at any width |
+| Compiled Clifford sampler | Shots on a Clifford circuit whose measurements are terminal or rewrite to terminal; see [Compiled Samplers](./samplers.md) |
+| Clifford register (stabilizer rank) | Shots on a Clifford+T circuit with terminal measurements only and no reset, at least 16 qubits, T count at most 20 and below the qubit count |
+| Stabilizer rank, sampled | Shots with terminal measurements only, above 25 qubits, T count at most 40 and at most `n - 2⌈log2 n⌉`; also runs per shot with mid-circuit measurement inside the same T bound |
 | Deterministic Pauli marginals | A marginals terminal on a unitary Clifford+T circuit of at least 12 qubits. The propagation is exact, and at or below the statevector cap it hands over to the tree once its summed term count passes the dense run's amplitude updates divided by 64 |
-| Scalar tensor contraction | An expectation or marginals terminal whose planned contraction stays inside the peak bound |
-| Temporal Clifford split | A circuit at or below the statevector cap that is not Clifford only and opens with a Clifford prefix long enough to pay for the handover |
+| Deterministic Pauli expectations | An expectation terminal on a Clifford circuit |
+| Scalar tensor contraction | An expectation or marginals terminal on a unitary circuit whose bounded greedy plan for every observable stays under `2^12` elements: from 18 qubits under the statevector cap, and above it when the plan costs less than an estimate of the MPS run `Auto` would take |
 
 Each answers where the tree would have said statevector or stabilizer, so the backend a
 result reports is the only reliable record of what ran. See
-[what a backend reports](backends.md#what-a-backend-reports-about-its-own-result).
+[what a backend reports](./backends.md#what-a-backend-reports-about-its-own-result).
+
+`marginals()` on a route that goes straight to the resolved backend's observable path is
+not held to the dense output cap: a Clifford circuit with measurements reads its
+marginals off the tableau at any width, and the dense statevector reads them off its
+amplitudes without building the `2^n` distribution. It falls back to the dense
+distribution on a circuit that splits into independent blocks, unless those blocks run
+as product states, and under a noise model, where the mixture is read densely and the
+density-matrix cap applies.
+
+### Auto dispatch policy
+
+Routing constants are static values in `src/sim/dispatch.rs`, except the dense memory
+caps, which `src/backend/memory.rs` derives from detected physical memory.
+
+Capability limits are detected: a wrong one means a failed allocation or a swapping
+host, and physical memory is cheap to read and hard to misread. `PRISM_MAX_SV_QUBITS`
+and its siblings override the derivation.
+
+Performance thresholds stay static, with an environment override where the value is
+worth sweeping. The device crossover is the worked case: a default of 14 qubits with
+`PRISM_GPU_MIN_QUBITS` beside it, not a figure read off the installed card. Detecting
+cache geometry or device throughput wrongly is a silent slowdown no test catches, while
+a wrong static default is the same slowdown on every host and shows in one measurement.
+Runtime detection waits for a host that can validate it.
+
+Changing a threshold takes a measurement. The `auto/crossover` group in
+`benches/circuits.rs` holds both arms either side of the factored-stabilizer floor, the
+exact stabilizer-rank budget and the Pauli marginals floor. The fusion floors and the
+parallel threshold have no such pair, since nothing selects between them at run time:
+moving one means building both values and comparing the binaries.
 
 ## Start states other than |0...0>
 
@@ -181,7 +222,7 @@ arbitrary start returns a wrong answer, not an error, so `initial_state_plan` in
 
 The vector is validated first: `2^n` entries for the circuit's `n` qubits, all finite,
 unit norm to 1e-9. An unnormalized vector is rejected, not rescaled, because the load
-resets the statevector's deferred-normalization factor to 1 and a silent rescale would
+resets the statevector's deferred normalization factor to 1 and a silent rescale would
 hide the error inside it.
 
 `Simulate::initial_density_matrix` is the mixed-state counterpart. It takes the `4^n`
@@ -195,8 +236,8 @@ before sizing the register: `4^n` entries, all finite, each entry pair Hermitian
 `InvalidParameter` naming the failed check. Positive semidefiniteness is not checked,
 because that needs an eigendecomposition the backend does not carry, so a mixture with a
 negative eigenvalue evolves without complaint. The host backend takes ownership of the
-buffer; the device uploads it in one transfer instead of forming the pure-state outer
-product.
+buffer; the device uploads it in one transfer instead of forming the outer product of a
+pure state.
 
 ## Subsystem decomposition
 
@@ -215,91 +256,56 @@ parallelism.
 
 ## Temporal Clifford decomposition
 
-Under `Auto`, a circuit that is not Clifford only and opens with a Clifford prefix of at least `max(2n, 16)` gates (`min_clifford_prefix_gates` in `src/sim/dispatch.rs`) runs that prefix on the stabilizer backend and exports the state to the statevector for the tail. The saving is the dense cost of the prefix, not memory: the route requires the register to fit the statevector cap.
+Under `Auto`, a circuit that is not Clifford only and opens with a Clifford prefix of at
+least `max(2n, 16)` gates (`min_clifford_prefix_gates` in `src/sim/dispatch.rs`) runs
+that prefix on the stabilizer backend and exports the state to the statevector for the
+tail. The saving is the dense cost of the prefix, not memory: the route requires the
+register to fit the statevector cap.
+
+## Weighted observables
+
+`PauliObservable` (`src/sim/observable.rs`) carries a weighted Pauli sum
+`H = Σ c_k P_k` in the `(f64, Vec<PauliTerm>)` term shape the gradient surface takes.
+Terms are canonical: factors sorted by qubit, identical strings merged. Qubit-wise
+commuting (QWC) groups come from greedy first-fit-decreasing coloring, cached in the
+observable and invalidated on mutation. Two strings qubit-wise commute when every shared
+qubit carries the same axis, so a group has one axis per qubit it touches.
+
+`observable_expectation` computes `Var(H_g) = ⟨H_g²⟩ - ⟨H_g⟩²` per group on the
+statevector family. Small groups share one batched traversal
+(`pauli_expectations_from_masks`). Two strings in a QWC group multiply without a phase,
+so each `P_i P_j` is another Pauli string, and a small group's `⟨H_g²⟩` expands into
+pairwise product masks appended to the traversal that serves the term means.
+
+A group past the pair budget (`MAX_PAIR_MASKS_PER_GROUP`, set where the quadratic
+expansion would cost more than a state sweep) takes one moment pass of its own: on the
+state as run when the group is Z only, otherwise on a copy rotated by H on qubits
+assigned X and by Sdg then H on qubits assigned Y, after which members are Z strings
+with a plus sign. Both moments come from that pass. `h(j)` is built 64 indices at a
+time: with the high index bits fixed, each member reduces to a signed coefficient on its
+low bit pattern, and a Walsh-Hadamard transform over those patterns gives `h` across the
+block, at one scalar step per member per block and six butterflies per index.
+
+The pass is a fallback because it loses on molecular shapes: a 2000-string
+Jordan-Wigner Hamiltonian groups into about 850 groups of mean size 2.3, and a copy,
+rotation and sweep per group costs more than the single ungrouped traversal that
+already yields the mean. Grouping buys the variance.
+
+The reported variance is `Σ_g Var(H_g)`: the variance of a grouped estimate drawing one
+shot per group, and the input to shot allocation through the vector per group. It
+excludes covariances across groups, so it equals `Var(H)` only when one group covers
+every term. Routes without the grouped evaluator (Clifford and SPD, the native paths of
+other backends, a run with a noise model or start state) report the weighted mean with
+no variance.
 
 ## Expectation-value gradients
 
-The caller picks the method: the adjoint is the default and the reference, parameter
-shift covers what it declines. The two differ by a factor of `2 * links` in evaluation
-count, so the engine does not choose silently.
-
-### Adjoint method
-
-`sim::gradient::run_expectation_gradient(circuit, hamiltonian, params, seed)` and
-`simulate(circuit).seed(seed).expectation_gradient(hamiltonian, params)` compute `⟨H⟩`
-and the exact gradient `d⟨H⟩/dθ` for a weighted Pauli sum `H = Σ c_k P_k`, at a cost
-independent of the parameter count. Implementation in `src/sim/gradient.rs`.
-
-Two statevectors are propagated backwards. With `U = U_L…U_1` and `|φ⟩ = U|0⟩`:
-
-1. Forward pass (fused) keeps `|φ⟩`. Build `|λ⟩ = H|φ⟩`; the value is
-   `Re⟨φ|λ⟩`.
-2. Sweep `i = L…1`. For a trainable gate with generator `G_i`, accumulate
-   `Im⟨λ|G_i|φ⟩` (projector form for `P`), then step both states back through
-   `U_i†` (`Gate::inverse()`).
-
-The sweep is not gate by gate. A gate can be inverted once every gate above it that it
-does not commute with has been, and a trainable gate's sandwich can be read once every
-gate still above it commutes with its generator. A planner assigns each gate its earliest
-such step, so one sandwich pass serves every gate ready at the same time (an Rz layer,
-then an Ry layer of a hardware-efficient ansatz, instead of one pass per qubit). Gates
-inverted between two steps go through the fusion pipeline at the state width and apply to
-both states as one stretch. Commutation is structural: exact between two Pauli rotations,
-and per qubit otherwise, with each gate acting on a qubit as Z, X, Y, or anything.
-
-The sandwich `⟨λ|G|φ⟩` is the forward `pauli_expectation_from_masks` kernel generalized
-to two vectors (`pauli_sandwich`, Rayon-parallel at 16+ qubits).
-
-Differentiable gates are `Rx`, `Ry`, `Rz`, `Rzz`, `P` and `PauliRot`, identified by the
-method `Gate::pauli_generator` so `Gate` stays 16 bytes. A multi-qubit Pauli rotation is
-`exp(-iθP/2)`, so its generator is the string itself: `GeneratorKind::RotPauli` borrows
-the letters off the gate and the sandwich takes the masks they imply. Trainable links on
-other gates, non-unitary instructions and `QftBlock` are rejected. Parameters are an
-index-based side table (`Parameters`, instruction to slot links recorded by
-`CircuitBuilder::param`); many gates may share a slot.
-
-The planner reads the unfused instruction stream so each gate keeps its 1:1 link to its
-generator, which fusion would erase along with the stored angle. Only the forward pass and
-the inverted stretches are fused. Three prunings cut work without changing results: the
-sweep stops at the earliest trainable gate in the cone, so a non-trainable prefix costs
-no inverse applications; a gate no trainable gate below it waits on is never inverted;
-and a trainable gate outside the Hamiltonian's inverse light cone has a zero gradient, so
-its sandwich is skipped.
-
-Memory is two statevectors, so the qubit ceiling is about one below a single run. Only
-the statevector backend is supported.
-
-### Parameter shift (fallback)
-
-`sim::gradient::run_expectation_gradient_shift(circuit, hamiltonian, params, seed)` and
-`simulate(circuit).backend(kind).seed(seed).expectation_gradient_shift(hamiltonian,
-params)` evaluate `d⟨H⟩/dθ = (f(θ+π/2) - f(θ-π/2)) / 2` per trainable gate, exactly, from
-forward `expectation_values` calls. It inherits whatever the selected backend can
-represent: Sparse, MPS, Factored, ProductState, DensityMatrix and Distributed, widths past
-the statevector cap, and circuits containing `QftBlock`. A backend with no native
-observable path reports `BackendUnsupported` naming itself.
-
-The rule is exact because each differentiable gate is `exp(-iθG/2)` with `G` of
-eigenvalues `±1`, so `⟨H⟩` is a degree-1 trigonometric polynomial in that angle. `P(θ)`
-has the projector `|1⟩⟨1|` as generator, eigenvalues `{0, 1}`, but `P(θ) = e^{iθ/2}
-Rz(θ)` and the scalar cancels against its conjugate in `⟨ψ|H|ψ⟩` wherever the gate sits,
-so the same shift applies.
-
-The gate set is the adjoint's: `Rx`, `Ry`, `Rz`, `Rzz`, `P` and `PauliRot` are the `Gate`
-variants carrying an angle, so parameter shift reaches no gate the adjoint rejects. It
-extends the backends and circuit shapes, not the gates. A `PauliRot` on a backend without
-the native kernel is shifted in place, because the ladder expansion happens below the
-forward evaluation.
-
-Gates sharing a slot are shifted one at a time and their contributions summed. Shifting
-them together gives a different quantity: two `Rx(θ)` on one qubit under `⟨Z⟩` give
-`cos 2θ`, whose joint ±π/2 shift is zero rather than `-2 sin 2θ`.
-
-Cost is `1 + 2 * links` evaluations against the adjoint's one, with no light-cone pruning:
-a trainable gate with a zero gradient is still evaluated twice. Evaluations run in
-sequence, because each already drives a Rayon-parallel backend run and several in flight
-would multiply peak state memory by the parameter count, the resource this path exists to
-stay under.
+The caller picks the method. `expectation_gradient` runs the adjoint method on the
+statevector at a cost independent of the parameter count; `expectation_gradient_shift`
+runs `1 + 2 * links` forward evaluations on any backend with an observable path, the
+density matrix and noise models included. Both read the links a `Parameters` table
+records. The algorithms, the gate set and the binding they share are on
+[Parameters, Binding and Gradients](./parameters.md).
 
 ## Backend dispatch variants
 
@@ -310,25 +316,24 @@ The `BackendKind` variants outside feature gates. `AutoGpu`, `StatevectorGpu`,
 | Variant | Backend | Selection |
 |---------|---------|-----------|
 | `Auto` | Decision tree (see above) | Default |
-| `Statevector` | Full state-vector | Explicit |
+| `Statevector` | Full state vector | Explicit |
 | `Stabilizer` | Aaronson-Gottesman tableau | Explicit or auto (all Clifford) |
-| `FactoredStabilizer` | Per-cluster tableaux | Explicit or auto (large independent Clifford blocks) |
-| `Sparse` | HashMap state | Explicit or auto (above memory limit, at most 128 entries) |
-| `Mps { max_bond_dim }` | Matrix Product State | Explicit or auto (above memory limit) |
-| `ProductState` | Per-qubit product | Explicit or auto (no entangling) |
-| `TensorNetwork` | Deferred contraction | Explicit, or auto for an expectation or marginals terminal on a unitary circuit when a bounded greedy plan for every observable stays under `2^12` elements: from 18 qubits under the statevector cap, and above it when `Auto` would take MPS and the plan costs less than an estimate of the MPS run |
+| `FactoredStabilizer` | One tableau per cluster | Explicit or auto (large independent Clifford blocks) |
+| `Sparse` | Hash map state | Explicit or auto (above the cap, sparse friendly or at most 128 entries) |
+| `Mps { max_bond_dim }` | Matrix product state | Explicit or auto (above the cap) |
+| `ProductState` | Product of qubit states | Explicit or auto (no entangling gates) |
+| `TensorNetwork` | Deferred contraction | Explicit, or auto for an expectation or marginals terminal (see the routes table) |
 | `TensorNetworkBounded { tolerance }` | Deferred contraction with truncation past the peak cap | Explicit |
-| `Factored` | Dynamic split-state | Explicit or auto (partial independence) |
+| `Factored` | Dynamic split state | Explicit or auto (partial independence) |
 | `DensityMatrix` | Exact mixed state | Explicit |
-| `StabilizerRank` | Weighted stabilizer sum, or a Clifford tableau over a dense T register for terminal shots | Explicit, or auto for shots (Clifford+T from 16 qubits with fewer T gates than qubits and at most 20, or above 25 qubits once the statevector declines, with at most 40 T gates inside the size-derived T budget); never auto for probabilities |
+| `StabilizerRank` | Weighted stabilizer sum, or a Clifford tableau over a dense T register for terminal shots | Explicit, or auto for shots (see the routes table); never auto for probabilities |
 | `StochasticPauli { num_samples }` | SPP | Explicit |
-| `DeterministicPauli { truncation }` | SPD | Explicit, or auto for marginals on a unitary Clifford+T circuit of at least 12 qubits and for expectation values on a Clifford circuit |
+| `DeterministicPauli { truncation }` | SPD | Explicit, or auto for marginals and expectations (see the routes table) |
 | `PauliPath { epsilon, max_terms }` | Noisy Heisenberg Pauli sum | Explicit |
-
 
 ## Query route inspection
 
-`Simulate::plan(Query)` and terminal execution share the shot, noisy-trajectory,
+`Simulate::plan(Query)` and terminal execution share the shot, noisy trajectory,
 marginal, expectation and diagnostic decisions in `sim::route`. A decision holds backend
 plans and bounded tensor contraction plans, which execution consumes. Backend sampling
 capabilities are readable before a backend is constructed.
@@ -337,10 +342,10 @@ The report separates the selected route from runtime alternatives: bounded SPD w
 decline at execution, and soft GPU initialization can lose device residency.
 `Plan::fallbacks` declares those possibilities and `RunMetadata::reason` records one
 actually taken. `would_fail` reports predictable failures; malformed query inputs return
-an error. Query-specific exactness checks admit exact marginal and expectation routes
-even where the full-state tree would choose MPS.
+an error. Exactness checks per query admit exact marginal and expectation routes even
+where the full-state tree would choose MPS.
 
-Gradient queries carry their Hamiltonian and parameter links. Parameter-shift plans reuse
-the prepared-family decision when execution does, and report each evaluation in baseline,
+Gradient queries carry their Hamiltonian and parameter links. Parameter shift plans reuse
+the prepared family decision when execution does, and report each evaluation in baseline,
 plus, minus order. Deterministic differences between shifted evaluations are not reported
 as runtime fallbacks.

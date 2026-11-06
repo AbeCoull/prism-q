@@ -1349,6 +1349,8 @@ fn block_detection_independent_pairs() {
     for b in &blocks {
         assert_eq!(b.len(), 2);
     }
+    let firsts: Vec<usize> = blocks.iter().map(|b| b[0]).collect();
+    assert!(firsts.is_sorted(), "blocks out of row order: {firsts:?}");
 }
 
 #[test]

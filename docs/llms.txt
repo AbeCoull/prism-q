@@ -8,22 +8,28 @@
 > circuits export back to OpenQASM 3.0.
 
 PRISM-Q picks the state representation from the circuit: a product state with
-no entangling gates, a stabilizer tableau for Clifford circuits, per-block
-backends for circuits that split into independent registers, and a dense
+no entangling gates, a stabilizer tableau for Clifford circuits, one
+backend per block for circuits that split into independent registers, and a dense
 statevector otherwise. Past the statevector memory cap, a circuit that keeps
 few basis states goes to a sparse map and the rest to matrix product states.
 Shots on a Clifford+T circuit with few T gates can take the stabilizer-rank
-sampler, and its marginals deterministic Pauli propagation.
+sampler, and its marginals deterministic Pauli propagation. Expectation and
+marginal queries go to the tensor network when its contraction plan fits.
 `BackendKind::Auto` is the default; every backend can also be named, and the
 run metadata reports which one ran. The rules read circuit structure and the
 memory cap, with cost estimates only on a few expectation and marginal routes,
 so `Auto` does not promise the fastest backend.
 
 Backend kinds: Statevector, Stabilizer, Sparse, Mps, ProductState,
-TensorNetwork, Factored, FactoredStabilizer, DensityMatrix, and the Clifford+T
+TensorNetwork, TensorNetworkBounded, Factored, FactoredStabilizer, DensityMatrix, and the Clifford+T
 engines StabilizerRank, StochasticPauli, DeterministicPauli and PauliPath, plus
 GPU variants (StatevectorGpu, StabilizerGpu, DensityMatrixGpu, AutoGpu) behind
 the `gpu` feature and StatevectorDistributed behind the `distributed` feature.
+
+Noise models come from rules (`NoiseBuilder`) or a device calibration table
+(`DeviceCalibration`), and cover Kraus channels, readout error, leakage with
+erasure heralds, timed idle relaxation, and drift that changes per shot. QEC
+programs add detectors, detector error models and decoders.
 
 Install: `cargo add prism-q` (Rust, crates.io) or `pip install prism-q`
 (Python wheels for Linux x86_64 and aarch64, macOS arm64, Windows x64; Python
@@ -37,40 +43,43 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 
 - [Overview](https://abecoull.github.io/prism-q/overview.html): what the library does and where to start.
 - [Installation](https://abecoull.github.io/prism-q/getting-started/install.html): cargo and pip install, and the feature flags.
-- [Your first circuit](https://abecoull.github.io/prism-q/getting-started/first-circuit.html): building a circuit in Rust, from the builder or from OpenQASM.
-- [Shots and sampling](https://abecoull.github.io/prism-q/getting-started/shots.html): measurement records, shot counts, and seeding.
-- [Choosing a backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html): the automatic dispatch tree and when to override it.
+- [Your first circuit](https://abecoull.github.io/prism-q/getting-started/first-circuit.html): building a circuit in Rust or Python, from the builder or from OpenQASM.
+- [Shots and sampling](https://abecoull.github.io/prism-q/getting-started/shots.html): measurement records, shot counts, and seeding, in Rust and Python.
+- [Choosing a backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html): how automatic dispatch picks a backend, the routes outside its tree, and when to override it.
 
 ## Tutorials
 
 - [Tutorials](https://abecoull.github.io/prism-q/tutorials/index.html): task-shaped walkthroughs in Python with Rust equivalents, each tested in CI.
 - [Simulate and sample](https://abecoull.github.io/prism-q/tutorials/simulate-and-sample.html): exact probabilities, shot counts, and choosing a backend.
 - [Variational circuits and gradients](https://abecoull.github.io/prism-q/tutorials/variational.html): adjoint and parameter-shift gradients, `Parameters`, `PreparedCircuit`, and batched sweeps.
-- [Noisy simulation](https://abecoull.github.io/prism-q/tutorials/noisy-simulation.html): `NoiseBuilder` rules, device calibrations, and exact density-matrix answers.
+- [Noisy simulation](https://abecoull.github.io/prism-q/tutorials/noisy-simulation.html): `NoiseBuilder` rules, device calibrations, exact density-matrix answers, leakage, and drift.
 - [A QEC memory experiment](https://abecoull.github.io/prism-q/tutorials/qec-memory.html): a repetition code built with `QecProgram`, its detector error model, and union-find decoding.
-- [Dynamic circuits](https://abecoull.github.io/prism-q/tutorials/dynamic-circuits.html): mid-circuit measurement, reset, and `if`/`else` from OpenQASM 3.
+- [Dynamic circuits](https://abecoull.github.io/prism-q/tutorials/dynamic-circuits.html): mid-circuit measurement, reset, `if`/`else`, and a subroutine returning a value from OpenQASM 3.
 - [Large and structured circuits](https://abecoull.github.io/prism-q/tutorials/large-circuits.html): stabilizer, stabilizer rank, Pauli propagation, and MPS runs past the statevector limit, with `require_exact()` and result metadata.
 
 ## Guides
 
-- [Python bindings](https://abecoull.github.io/prism-q/guides/python.html): install, a quick start, errors and typing, and an index of the Python pages.
-- [Python: circuits and parameters](https://abecoull.github.io/prism-q/guides/python-circuits.html): `CircuitBuilder`, classical control, export and drawing, parameter sweeps, pickling, and dynamic programs.
-- [Python: running simulations](https://abecoull.github.io/prism-q/guides/python-running.html): the terminal methods, result metadata, memory caps, backend selection, and the GPU and MPI backends.
+- [Python bindings](https://abecoull.github.io/prism-q/guides/python.html): install, a quick start, pickling, threads, and an index of the Python pages.
+- [Python: circuits and parameters](https://abecoull.github.io/prism-q/guides/python-circuits.html): `CircuitBuilder`, circuit counts, classical control, export and drawing, parameter sweeps, and dynamic programs.
+- [Python: running simulations](https://abecoull.github.io/prism-q/guides/python-running.html): the terminal methods, result metadata, memory caps, route inspection, backend selection, and the GPU and MPI backends.
 - [Python: observables and gradients](https://abecoull.github.io/prism-q/guides/python-observables.html): expectation values, exact noisy expectations, and adjoint gradients.
 - [Python: noise and shots](https://abecoull.github.io/prism-q/guides/python-noise.html): noise models and rules, leakage, timed noise, and compiled samplers.
 - [Python: quantum error correction](https://abecoull.github.io/prism-q/guides/python-qec.html): `QecProgram`, detector error models, decoders, and feedforward.
-- [Python: advanced state handling](https://abecoull.github.io/prism-q/guides/python-state.html): start states and mixtures, tableau hand-off, mid-circuit saves, and route inspection.
-- [Python: Rust and Python names](https://abecoull.github.io/prism-q/guides/python-names.html): which Python name reaches each Rust function.
-- [Backends deep dive](https://abecoull.github.io/prism-q/guides/backends.html): memory layout, gate support, and applicability per backend.
+- [Python: advanced state handling](https://abecoull.github.io/prism-q/guides/python-state.html): start states and mixtures, tableau hand-off, mid-circuit saves, entropy, overlap, and reduced states.
+- [Python: errors, typing and names](https://abecoull.github.io/prism-q/guides/python-names.html): `PrismError` kinds, type stubs, and naming rules.
 - [Capability and support matrix](https://abecoull.github.io/prism-q/guides/capabilities.html): which gates, channels, and terminals each backend answers, CPU and GPU.
 - [Performance and SIMD](https://abecoull.github.io/prism-q/guides/performance.html): parallel thresholds, kernel dispatch, and the tuning knobs.
 - [Benchmark methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html): what the published timings include, the warmup and timing rules, the Criterion targets, and the controls for a fair comparison against another simulator.
-- [OpenQASM support](https://abecoull.github.io/prism-q/guides/openqasm.html): the accepted subset, the Braket dialect, gate modifiers, and export.
+- [OpenQASM support](https://abecoull.github.io/prism-q/guides/openqasm.html): the accepted subset, gate modifiers, subroutines, dynamic programs, and export.
+- [Amazon Braket programs](https://abecoull.github.io/prism-q/guides/braket.html): the Braket dialect and its result pragmas.
 - [Drawing circuits](https://abecoull.github.io/prism-q/guides/drawing.html): text diagrams, gate-density heatmaps, and SVG output from Rust.
-- [Clifford+T simulation](https://abecoull.github.io/prism-q/guides/clifford-t.html): stabilizer rank, sparse Pauli propagation, and their exactness contracts.
-- [Noise and QEC](https://abecoull.github.io/prism-q/guides/qec.html): noise channels, trajectory and exact mixture routes, detectors, and decoding.
+- [Clifford+T simulation](https://abecoull.github.io/prism-q/guides/clifford-t.html): the four engines (stabilizer rank, stochastic and deterministic Pauli propagation, Pauli path) and their exactness contracts.
+- [Hamiltonian evolution](https://abecoull.github.io/prism-q/guides/hamiltonians.html): Trotter evolution and Pauli rotations.
+- [Noise models](https://abecoull.github.io/prism-q/guides/noise.html): `NoiseBuilder` rules, device calibration, leakage, correlated and timed noise, and exact noisy marginals.
+- [Quantum error correction](https://abecoull.github.io/prism-q/guides/qec.html): QEC programs, detectors, detector error models, and decoding.
 - [GPU backend](https://abecoull.github.io/prism-q/guides/gpu.html): the CUDA path, what it accelerates, and how to enable it.
 - [Distributed statevector and MPI](https://abecoull.github.io/prism-q/guides/distributed.html): the rank layout, qubit relabeling, launch scripts, and limits.
+- [Compatibility and versioning](https://abecoull.github.io/prism-q/guides/compatibility.html): MSRV, feature flags, version policy, and seeded output.
 
 ## Architecture
 
@@ -78,10 +87,12 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 - [Parser and circuit IR](https://abecoull.github.io/prism-q/architecture/ir.html)
 - [Fusion pipeline](https://abecoull.github.io/prism-q/architecture/fusion.html): the multi-pass gate fusion chain and its width thresholds.
 - [Simulation engine and dispatch](https://abecoull.github.io/prism-q/architecture/engine.html): how `BackendKind::Auto` resolves a circuit to a backend.
-- [Backends](https://abecoull.github.io/prism-q/architecture/backends.html): each backend's position in the design.
+- [Backends](https://abecoull.github.io/prism-q/architecture/backends.html): memory layout, gate support, and applicability per backend.
+- [Parameters, binding and gradients](https://abecoull.github.io/prism-q/architecture/parameters.html): parameter binding, plan replay, and the adjoint method.
 - [Compiled samplers](https://abecoull.github.io/prism-q/architecture/samplers.html)
-- [Native QEC program IR](https://abecoull.github.io/prism-q/architecture/qec-ir.html)
-- [QEC program execution](https://abecoull.github.io/prism-q/architecture/qec-programs.html)
+- [Noise compilation](https://abecoull.github.io/prism-q/architecture/noise.html): how noise models compile per engine, leakage, and drift.
+- [QEC programs](https://abecoull.github.io/prism-q/architecture/qec-programs.html): the QEC program IR, its text format, runner routing, lowering, and expectation values.
+- [QEC decoding](https://abecoull.github.io/prism-q/architecture/qec-decoding.html): detector error models, the text format, and the decoders.
 - [Threading, SIMD, and memory layout](https://abecoull.github.io/prism-q/architecture/threading-simd.html)
 - [Error model and public API](https://abecoull.github.io/prism-q/architecture/api-surface.html): the error type, the panic policy, and what is public surface.
 
@@ -89,7 +100,8 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 
 - [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html): wall-clock timings on a fixed circuit suite, with the command that reproduces them.
 - [Comparative measurements](https://abecoull.github.io/prism-q/comparison.html): eight workload families (dense random, QFT, quantum volume, wide Clifford, shallow wide, disconnected, sampling-heavy, mid-circuit) timed beside Qiskit Aer, qsim, QuEST, Spinoza and RustQIP on one host. Covers fp32 and fp64 separately, peak memory, thread scaling and automatic dispatch, validates each row against an independent reference, and regenerates every table and figure from raw observations with a committed harness.
-- [Circuit builders](https://abecoull.github.io/prism-q/reference/builders.html): the prebuilt circuit generators.
+- [Circuit builders](https://abecoull.github.io/prism-q/reference/builders.html): the prebuilt circuit generators and the Jordan-Wigner Hamiltonian generator.
+- [Python API](https://abecoull.github.io/prism-q/reference/python-api.html): the Rust-to-Python name table.
 - [Glossary](https://abecoull.github.io/prism-q/glossary.html)
 - [Roadmap](https://abecoull.github.io/prism-q/roadmap.html): open work by theme, each item tagged with what it waits on, and what is not planned.
 

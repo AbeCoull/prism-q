@@ -19,7 +19,18 @@ let circuit = openqasm::parse(qasm_str).expect("parse error");
 let result = simulate(&circuit).seed(42).run().unwrap();
 ```
 
-`run_qasm(qasm, seed)` parses and simulates in one call.
+`run_qasm(qasm, seed)` parses and simulates in one call. The other entry points in
+`openqasm` differ in what they return:
+
+| Function | Returns |
+| --- | --- |
+| `parse`, `parse_with(source, dialect)` | A `Circuit` |
+| `parse_parametric`, `parse_parametric_with(source, dialect)` | The template `Circuit` and the `Parameters` its `input` declarations name (see [Input parameters](#input-parameters)) |
+| `parse_dynamic` | A `DynamicProgram` with loops and runtime classical values (see [Dynamic programs](#dynamic-programs)) |
+| `parse_braket` | A `BraketProgram`: circuit, parameters, result requests and noise (see [Amazon Braket Programs](./braket.md)) |
+
+`Dialect::Native`, the default, reads `gpi`, `gpi2` and `ms` angles in turns;
+`Dialect::Braket` reads them in radians and accepts `#pragma braket` lines.
 
 ## Exporting
 
@@ -56,8 +67,7 @@ cx q[0], q[1];
 c[0] = measure q[0]; // OQ3 measurement
 ```
 
-OpenQASM 2.0 `qreg q[3];` / `creg c[3];` declarations and `measure q[0] -> c[0];` also
-work.
+OpenQASM 2.0 `qreg q[3];`, `creg c[3];` and `measure q[0] -> c[0];` also work.
 
 A `bit` declaration may take a value: `bit b = measure q[0];` measures into it, and
 `bit[2] f = "00";` or `bit b = 0;` spell out the cleared register it starts as anyway. Bit
@@ -72,6 +82,23 @@ indices included; past that the parse fails with `PrismError::Parse`.
 
 `output bit[3] c;` declares the register and marks it as the program's result. The mark
 changes nothing, since every classical bit is reported either way.
+
+### Physical qubits
+
+A program may name physical qubits directly instead of declaring a register:
+
+```qasm
+OPENQASM 3.0;
+bit[2] c;
+h $0;
+cx $0, $1;
+c[0] = measure $0;
+c[1] = measure $1;
+```
+
+The indices are absolute, so the register is as wide as the highest one named. A `qubit`
+or `qreg` declaration in the same program is rejected, since a physical index and a
+register offset would give `0` two meanings.
 
 ### Slices and aliases
 
@@ -185,149 +212,22 @@ SI units or both in `dt`, since only a backend's sample period relates the two. 
 `stretch` is sized by a scheduler: it may stand wherever a delay takes a length and is
 rejected where its value would be read.
 
-## Input parameters
-
-An `input` declaration names a parameter slot. `openqasm::parse_parametric` returns the
-template circuit with the `Parameters` that bind it, in declaration order and under the
-declared names:
-
-```qasm
-OPENQASM 3.0;
-input float[64] theta;
-input float[64] phi;
-qubit[2] q;
-h q[0];
-rx(theta) q[0];
-cx q[0], q[1];
-rz(phi) q[1];
-```
-
-```rust
-# use prism_q::circuit::{openqasm, qasm_export::to_qasm3};
-# let qasm = "OPENQASM 3.0; input float[64] theta; input float[64] phi; qubit[2] q;
-#     h q[0]; rx(theta) q[0]; cx q[0], q[1]; rz(phi) q[1];";
-let (template, params) = openqasm::parse_parametric(qasm)?;
-let bound = params.bind(&template, &[0.41, 1.27])?;
-let text = to_qasm3(&bound)?;   // angles written out, no `input` line
-# Ok::<(), prism_q::PrismError>(())
-```
-
-Several gates may read one input, the weight sharing `Parameters` already models:
-`rx(theta) q;` over a register links every gate it produces to one slot, and binding
-writes one angle to each.
-
-`parse` rejects a program that declares an input, since it has no value to take and a zero
-would be a quiet wrong answer. Use `parse_parametric`, or `PreparedCircuit` for a sweep.
-
-An input binds an angle whole, so it may only be the entire angle argument of a directly
-named parametric gate at the top level. `rx(2 * theta)`, an input on a gate with no
-rotation angle, one reaching a `gate`, `def`, `for` or guarded body, and one on a modified
-gate all return `UnsupportedConstruct` naming the reason.
-
-## Dynamic programs
-
-`openqasm::parse` returns a `Circuit`, a finite instruction list, so it declines `while`
-and any classical value a measurement decides. `openqasm::parse_dynamic` reads both and
-returns a `DynamicProgram`: basic blocks of ordinary circuits joined by branches on
-classical expressions, run once per shot by `simulate_program`.
-
-```rust
-use prism_q::circuit::openqasm;
-use prism_q::simulate_program;
-
-let source = "
-    OPENQASM 3.0;
-    qubit[1] q;
-    bit[1] c;
-    uint[8] tries = 1;
-    h q[0];
-    c[0] = measure q[0];
-    while (c[0]) {
-        reset q[0];
-        h q[0];
-        c[0] = measure q[0];
-        tries += 1;
-        if (tries == 10) break;
-    }";
-let program = openqasm::parse_dynamic(source)?;
-let shots = simulate_program(&program).seed(42).shots(1000)?;
-# Ok::<(), prism_q::PrismError>(())
-```
-
-Beyond what `parse` reads, `parse_dynamic` accepts:
-
-- `while (condition) { ... }`, with `break` and `continue`.
-- `break`, `continue` and `end` under a measured `if` or `switch`. A `for` still unrolls,
-  and an exit a measurement decides jumps between its passes.
-- Any condition or `switch` target over classical bits, where `parse` takes only those a
-  bit or register guard spells: `c[0] && c[1]` and `c + 1 == 2` run here.
-- A classical bit read as a value (`c[0]`) and a bit register read as an unsigned integer
-  (`c`), up to 64 bits.
-- A write to a variable under a measured `if` or `switch`, evaluated when the program
-  runs.
-- A write to classical bits: `bit[2] f = "11";`, `c = c + 1;`, `c[0] = c[1] ^ c[2];`,
-  `c <<= 1;`. A write takes an integer or a bool, and a bit register wider than 64 bits
-  takes one only from a parse-time value.
-- A runtime value as the angle of `rx`, `ry`, `rz`, `p` or `rzz`.
-
-A variable lives at runtime only when it has to: when a measured bit or another runtime
-variable reaches it, or when a loop or a measured branch writes it from outside the scope
-it was declared in. Every other variable folds as under `parse`, so a program `parse`
-accepts gives the same circuit under `parse_dynamic` and the same seeded shots. Runtime
-`int` and `uint` variables wrap at their declared width, and runtime floats round to their
-width. A runtime `angle` holds a double at any width, so `angle[n]` steps apply only to
-folded values.
-
-A shot that runs more than a million blocks stops with `PrismError::StepLimit` naming its
-loop; `SimulateProgram::max_steps` sets another bound. The
-[dynamic programs](../architecture/dynamic-programs.md) architecture page covers the block
-structure, the backends that run it, and its cost.
-
-`SimulateProgram::noise` takes `NoiseBuilder` rules, compiles them against every block and
-runtime rotation, and runs one noisy trajectory per shot. The loop above with amplitude
-damping after each `h`:
-
-```rust
-# use prism_q::circuit::openqasm;
-# use prism_q::simulate_program;
-# let program = openqasm::parse_dynamic(
-#     "OPENQASM 3.0; qubit[1] q; bit[1] c; h q[0]; c[0] = measure q[0];
-#      while (c[0]) { reset q[0]; h q[0]; c[0] = measure q[0]; }",
-# )?;
-use prism_q::{GateFilter, NoiseBuilder, NoiseChannel};
-
-let rules = NoiseBuilder::new().after_gates(
-    GateFilter::all().named("h"),
-    NoiseChannel::AmplitudeDamping { gamma: 0.4 },
-);
-let noisy = simulate_program(&program).noise(&rules).seed(42).shots(1000)?;
-# Ok::<(), prism_q::PrismError>(())
-```
-
-Declined under `parse_dynamic`, all `UnsupportedConstruct`: a runtime value where a
-parse-time constant belongs (an index, a loop bound, a `def` argument, the angle of any
-other gate), a builtin function over a runtime value, a register declared inside a `while`
-body, an `array` a loop or measurement writes, a measurement into a variable rather than a
-bit, and `input` parameters.
-
 ## Supported gates
 
-- **Standard / aliases**: x, y, z, h, s, sdg, t, tdg, sx, rx, ry, rz, p/phase, cx/CX/cnot,
-  cy, cz, cp/cphase, crx, cry, crz, ch, swap, ccx/toffoli, cswap/fredkin, cu, u1, u2,
-  u3/u/U.
-- **Braket spellings**: i, si, ti, v, vi, phaseshift, cphaseshift, cphaseshift00,
+- Standard names and aliases: id/i, x, y, z, h, s, sdg, t, tdg, sx, rx, ry, rz, p/phase,
+  cx/CX/cnot, cy, cz, cp/cphase, crx, cry, crz, ch, swap, ccx/toffoli, cswap/fredkin, cu,
+  u1, u2, u3/u/U.
+- Braket spellings: si, ti, v, vi, phaseshift, cphaseshift, cphaseshift00,
   cphaseshift01, cphaseshift10, cv, ccnot, prx, pswap, xy, xx, yy, zz. Most name a gate
   the list above carries; `cphaseshift00/01/10`, `pswap` and `xy` are their own matrices.
-- **Qiskit / exporter**: sxdg, cs, csdg, csx, ccz, r, xx_plus_yy,
-  xx_minus_yy, ecr, iswap, dcx, c3x, c4x, mcx, rccx, rc3x/rcccx.
-- **Hardware-native**: gpi, gpi2, ms, syc, sqrt_iswap, sqrt_iswap_inv.
-
-  `gpi`, `gpi2` and `ms` take angles in turns, matching IonQ's transpiler output. Amazon
-  Braket spells the same three gates in radians; `openqasm::parse_with(source,
-  Dialect::Braket)` reads them that way and changes nothing else.
-
-- **Pauli rotations**: `r` followed by one Pauli letter per qubit argument. `rxx`, `ryy`
-  and `rzz` are the two-letter cases; `rxyz(0.7) q[0], q[1], q[2];` is
+- Qiskit and exporter names: sxdg, cs, csdg, csx, ccz, r, xx_plus_yy, xx_minus_yy, ecr,
+  iswap, dcx, c3x, c4x, mcx, rccx, rc3x/rcccx.
+- Hardware-native: gpi, gpi2, ms, syc, sqrt_iswap, sqrt_iswap_inv. `gpi`, `gpi2` and `ms`
+  take angles in turns, matching IonQ's transpiler output. Amazon Braket spells the same
+  three gates in radians; `openqasm::parse_with(source, Dialect::Braket)` reads them that
+  way and changes nothing else.
+- Pauli rotations: `r` followed by one Pauli letter per qubit argument. `rxx`, `ryy` and
+  `rzz` are the two-letter cases; `rxyz(0.7) q[0], q[1], q[2];` is
   `exp(-i * 0.7 * (X⊗Y⊗Z) / 2)` with `x` on `q[0]`. `rzz` resolves to the native
   two-qubit rotation and a one-letter name to `rx`/`ry`/`rz`; wider strings build the
   native multi-qubit gate, which the statevector applies in one pass and every other
@@ -337,120 +237,85 @@ bit, and `input` parameters.
   it so a round trip keeps the gate. For output another toolchain reads, run
   `circuit::expand_pauli_rotations` before exporting.
 
-## Amazon Braket programs
+`gphase(theta)` multiplies the state by `e^(i theta)`. It is carried, not dropped: a
+`state_vector` result shows it, and under a control `ctrl @ gphase(theta) q[0]` is a
+phase gate on `q[0]`.
 
-`openqasm::parse_braket` reads a program under Braket's dialect and returns a
-`BraketProgram`: the circuit, its `input` parameters, the result requests from
-`#pragma braket result` lines, and the noise model from `#pragma braket noise` lines.
-`parse` reads the native dialect, where a pragma is an unsupported construct. `parse_with`
-under `Dialect::Braket` reads the pragmas but returns only the circuit, dropping what they
-declared. Use `parse_braket` whenever a result request has to survive.
+User `gate` blocks define new gates; an empty body is the identity. A gate applied to
+whole registers broadcasts across them, and a gate length such as `x[100ns] q;` parses
+and is dropped.
 
-```qasm
-OPENQASM 3.0;
-qubit[2] q;
-h q[0];
-cnot q[0], q[1];
-#pragma braket noise bit_flip(0.1) q[0]
-#pragma braket result probability all
-#pragma braket result expectation z(q[0]) @ z(q[1])
-```
+## Gate modifiers
 
-- **Result requests**: `state_vector`, `density_matrix`, `amplitude`, `probability`,
-  `expectation`, `variance`, `sample`. Observables are `x`, `y`, `z`, `h`, `i` and
-  `hermitian([[...]])`, joined into tensor products with `@`. A target list may be `all`,
-  omitted (the same thing), or named qubits. `adjoint_gradient` is declined: Braket
-  serves it on SV1 only.
-- **Noise channels**: `bit_flip`, `phase_flip`, `pauli_channel`, `depolarizing`,
-  `amplitude_damping`, `generalized_amplitude_damping`, `phase_damping`,
-  `two_qubit_depolarizing`, `two_qubit_dephasing`, and `kraus` with explicit operators.
-  Each attaches after the instruction it follows, so a pragma before every instruction is
-  an error. Probabilities are checked against Braket's own bounds.
-- **Inline unitaries**: `#pragma braket unitary([[...]]) q[0]` on one or two targets. A
-  wider matrix has no gate variant to carry it and says so.
-- **Verbatim boxes**: `#pragma braket verbatim` followed by `box { ... }`. The body runs as
-  written: verbatim directs a device compiler, and a simulator has nothing to honour. A
-  `box` without the pragma runs the same way; the pragma without a box is rejected.
+`ctrl @`, `negctrl @`, `inv @` and `pow(k) @` chain in any order. `ctrl(n) @` and
+`negctrl(n) @` stand for `n` controls. Each control consumes one qubit from the front of
+the argument list, in the order the modifiers are written, and `negctrl` differs from
+`ctrl` only in firing on `|0>`.
 
-Matrix entries take Braket's complex notation: a real (`0`, `-1.5`), an imaginary (`1im`,
-`-1im`), or their sum (`0.7 + 0.7im`).
+A control applies to what the gate expands to, not to its name, since
+`ctrl(U1 U2 ... Un)` is `ctrl(U1) ctrl(U2) ... ctrl(Un)`. That reaches a user `gate` body,
+a gate that lowers to a sequence, and `swap`, which becomes the Fredkin lowering rather
+than three controlled CNOTs. The two-qubit gates carried as a matrix (`ecr`, `xy`,
+`pswap`, `cphaseshift00`/`01`/`10`, `ms`, `syc`, `sqrt_iswap`, `sqrt_iswap_inv`,
+`xx_plus_yy`, `xx_minus_yy`) take a control through their eigenbasis:
+`ctrl(V D V-dagger)` is `V ctrl(D) V-dagger`, and a controlled diagonal costs one phase per
+entry at any control count. A `def` call declines, being a subroutine, and so does a call
+spanning more than four qubits, where the dense reduction stops.
 
-### Computing the results
+`pow(k)` takes any real `k`. On a single-qubit gate it is the principal matrix power, read
+from the eigenvalues with each angle on `(-pi, pi]`, so `pow(0.5) @ x` is `sx` and
+`pow(1.0/3)` applied three times is the gate again. The branch follows the eigenvalue, not
+the written angle: `p(1.5*pi)` and `p(-0.5*pi)` are the same matrix and take the same
+root. A whole number is repetition at any width, rejected past a million; a fraction on a
+wider call is the principal power of the matrix the whole call composes to, up to four
+qubits. `inv @` and `pow(k) @` commute with a control, so a chain reads the same either
+way.
 
-`Simulate::braket_results` evaluates the requests in Braket's conventions, which differ
-from the native terminals in one way: Braket writes qubit 0 as the most significant bit of
-a basis index, so `x q[0]` lands at index 2 of a two-qubit result, not index 1.
+The declines are listed under [The subset](#the-subset).
 
-```rust
-use prism_q::circuit::openqasm;
-use prism_q::simulate;
+## Expressions
 
-# let qasm_str = "OPENQASM 3.0; qubit[2] q; h q[0]; cnot q[0], q[1];
-#     #pragma braket result probability all
-#     #pragma braket result expectation z(q[0]) @ z(q[1])";
-let program = openqasm::parse_braket(qasm_str).expect("parse error");
-let values = simulate(&program.circuit)
-    .seed(42)
-    .braket_results(&program.results)
-    .unwrap();
-```
+Expressions take `+ - * / %`, `**`, the comparisons, `&&`, `||`, `!`, and `&`, `|`, `^`,
+`~`, `<<`, `>>` with C precedence; the constants `pi`, `tau` and `euler`; and the
+OpenQASM builtins `arcsin`, `arccos`, `arctan`, `ceiling`, `cos`, `exp`, `floor`, `log`,
+`mod`, `popcount`, `pow`, `sin`, `sqrt` and `tan`. `**` is right associative and binds
+tighter than unary minus, so `-2 ** 2` is `-4`. The constants, `true` and `false` cannot
+be redeclared in the global scope; a gate or `def` parameter may shadow a constant. Line
+and block comments are accepted.
 
-One traversal serves every `expectation` and `variance` request: the observables lower to
-weighted Pauli sums, the distinct strings across all of them are evaluated together, and
-each value is a weighted sum over that evaluation. `h` expands as `(X + Z)/sqrt(2)` and a
-Hermitian matrix by its Pauli decomposition, so no observable needs a second path.
+Statements, conditions and expressions nest at most 256 levels, an operator chain such as
+`a + b + c` counting one level per operator, and a deeper source fails with
+`PrismError::Parse`. The bound also covers the gate and `def` bodies a call expands,
+counted together with the blocks around it. Separately, gate and `def` calls nest at most
+32 deep inside one another's bodies, which stops a recursive definition with a `Parse`
+error naming the gate or subroutine.
 
-An observable with no target list applies to each qubit separately and reports one value
-per qubit, so an expectation value is a list rather than a number. `variance` is the
-spread of the operator itself, `<O^2> - <O>^2`, not the grouped-measurement variance
-`ObservableExpectation` reports beside a mean. `sample` has no exact reading and is
-declined here.
+## Conditions
 
-### Shot-based results
-
-`Simulate::braket_results_sampled` answers the same requests from a measurement record, as
-Braket does above zero shots:
-
-```rust
-# use prism_q::{circuit::openqasm, simulate};
-# let program = openqasm::parse_braket("OPENQASM 3.0; qubit[2] q; h q[0]; cnot q[0], q[1];
-#     #pragma braket result probability all
-#     #pragma braket result expectation z(q[0]) @ z(q[1])").unwrap();
-let values = simulate(&program.circuit)
-    .seed(42)
-    .braket_results_sampled(&program.results, 1000)
-    .unwrap();
-```
-
-Each observable is diagonalized and the rotation onto the computational basis is appended
-once, so one pass serves every `sample`, `expectation` and `variance` request. `sample`
-reports the eigenvalue each shot read, `expectation` its mean and `variance` its
-population variance. Pauli and `h` observables take a named rotation; a Hermitian matrix
-is diagonalized numerically, which needs a gate wide enough to carry the result, so it
-stops at two qubits.
-
-Two observables reading one qubit in different bases cannot share a measurement and are
-rejected. The identity reads no basis, so it shares a qubit with anything. A `probability`
-request reads the computational basis and takes its own unrotated pass whenever a rotation
-was applied. `state_vector`, `amplitude` and `density_matrix` report the state itself and
-are declined above zero shots, as `sample` is at zero.
-
-## Physical qubits
-
-A program may name physical qubits directly instead of declaring a register:
+An `if` guards a single statement or a braced body. A braced body admits any supported
+statement, `measure` and `reset` included, and may nest.
 
 ```qasm
-OPENQASM 3.0;
 bit[2] c;
-h $0;
-cx $0, $1;
-c[0] = measure $0;
-c[1] = measure $1;
+qubit[3] q;
+c[0] = measure q[0];
+if (c[0]) {
+  x q[1];
+  c[1] = measure q[1];
+  if (c[1]) { reset q[2]; }
+}
 ```
 
-The indices are absolute, so the register is as wide as the highest one named. A `qubit`
-or `qreg` declaration in the same program is rejected, since a physical index and a
-register offset would give `0` two meanings.
+`else`, `else if` and `switch` with `case` and `default` arms lower to guards on the
+existing condition language rather than new IR syntax. A condition may test a bit, a
+register against a value, or a parity such as `if (c[0] ^ c[2])` or
+`if ((c[0] ^ c[2]) == 0)`. Under `parse`, anything else over classical bits declines;
+[`parse_dynamic`](#dynamic-programs) evaluates it at runtime.
+
+Because the guards re-read the classical bits, `else` is rejected when the `if` body
+measures into a bit the condition reads, and `switch` when any arm measures into the
+switched register: such a source could take two arms of one choice. An `else` body may
+write freely, since nothing re-reads after it.
 
 ## Subroutines
 
@@ -533,8 +398,147 @@ c[1] = measure q;
 
 Forms that need private measurement storage decline by name: a call that discards a bit
 result, a measurement into a bit parameter, and a bit the body declares without returning.
-So do runtime duration and fixed-width angle values in subroutines, modifiers on runtime
-calls, and the `complex` result type.
+So do a measurement returned as a scalar result, a `stretch` returned as a `duration`,
+runtime duration and fixed-width angle values, modifiers on runtime calls, and the
+`complex` result type. Under `parse`, a scalar result that depends on a measurement and a
+call inside a measurement-dependent condition decline too; `parse_dynamic` takes both.
+Under `parse_dynamic`, a bit argument or bit result read at runtime declines past 64
+bits, the width a runtime value holds.
+
+## Input parameters
+
+An `input` declaration names a parameter slot. `openqasm::parse_parametric` returns the
+template circuit with the `Parameters` that bind it, in declaration order and under the
+declared names; `parse_parametric_with` does the same under a chosen `Dialect`.
+
+```qasm
+OPENQASM 3.0;
+input float[64] theta;
+input float[64] phi;
+qubit[2] q;
+h q[0];
+rx(theta) q[0];
+cx q[0], q[1];
+rz(phi) q[1];
+```
+
+```rust
+# use prism_q::circuit::{openqasm, qasm_export::to_qasm3};
+# let qasm = "OPENQASM 3.0; input float[64] theta; input float[64] phi; qubit[2] q;
+#     h q[0]; rx(theta) q[0]; cx q[0], q[1]; rz(phi) q[1];";
+let (template, params) = openqasm::parse_parametric(qasm)?;
+let bound = params.bind(&template, &[0.41, 1.27])?;
+let text = to_qasm3(&bound)?;   // angles written out, no `input` line
+# Ok::<(), prism_q::PrismError>(())
+```
+
+Several gates may read one input, the weight sharing `Parameters` already models:
+`rx(theta) q;` over a register links every gate it produces to one slot, and binding
+writes one angle to each.
+
+`parse` rejects a program that declares an input, since it has no value to take and a zero
+would be a quiet wrong answer. Use `parse_parametric`, or `PreparedCircuit` for a sweep.
+
+An input binds an angle whole, so it may only be the entire angle argument of a directly
+named parametric gate at the top level, and one gate takes at most one. `rx(2 * theta)`,
+two inputs on one gate, an input on a gate with no rotation angle, one reaching a `gate`,
+`def`, `for` or guarded body, and one on a modified gate all return
+`UnsupportedConstruct` naming the reason.
+
+## Dynamic programs
+
+`openqasm::parse` returns a `Circuit`, a finite instruction list, so it declines `while`
+and any classical value a measurement decides. `openqasm::parse_dynamic` reads both and
+returns a `DynamicProgram`: basic blocks of ordinary circuits joined by branches on
+classical expressions, run once per shot by `simulate_program`.
+
+```rust
+use prism_q::circuit::openqasm;
+use prism_q::simulate_program;
+
+let source = "
+    OPENQASM 3.0;
+    qubit[1] q;
+    bit[1] c;
+    uint[8] tries = 1;
+    h q[0];
+    c[0] = measure q[0];
+    while (c[0]) {
+        reset q[0];
+        h q[0];
+        c[0] = measure q[0];
+        tries += 1;
+        if (tries == 10) break;
+    }";
+let program = openqasm::parse_dynamic(source)?;
+let shots = simulate_program(&program).seed(42).shots(1000)?;
+# Ok::<(), prism_q::PrismError>(())
+```
+
+Beyond what `parse` reads, `parse_dynamic` accepts:
+
+- `while (condition) { ... }`, with `break` and `continue`.
+- `break`, `continue` and `end` under a measured `if` or `switch`. A `for` still unrolls,
+  and an exit a measurement decides jumps between its passes.
+- Any condition or `switch` target over classical bits, where `parse` takes only those a
+  bit or register guard spells: `c[0] && c[1]` and `c + 1 == 2` run here.
+- A classical bit read as a value (`c[0]`) and a bit register read as an unsigned integer
+  (`c`), up to 64 bits.
+- A write to a variable under a measured `if` or `switch`, evaluated when the program
+  runs.
+- A write to classical bits: `bit[2] f = "11";`, `c = c + 1;`, `c[0] = c[1] ^ c[2];`,
+  `c <<= 1;`. A write takes an integer or a bool, and a bit register wider than 64 bits
+  takes one only from a parse-time value.
+- A runtime value as the angle of `rx`, `ry`, `rz`, `p` or `rzz`.
+
+A variable lives at runtime only when a measured bit or another runtime variable reaches
+it, or when a loop or a measured branch writes it from outside its scope. Every other
+variable folds as under `parse`, so a program `parse` accepts gives the same circuit
+under `parse_dynamic` and the same seeded shots. Runtime `int` and `uint` variables wrap
+at their declared width, and runtime floats round to their width. A runtime `angle`
+holds a double at any width, so `angle[n]` steps apply only to folded values.
+
+A shot that runs more than a million blocks stops with `PrismError::StepLimit` naming its
+loop; `SimulateProgram::max_steps` sets another bound. The
+[dynamic programs](../architecture/dynamic-programs.md) architecture page covers the block
+structure, the backends that run it, and its cost.
+
+`SimulateProgram::noise` takes `NoiseBuilder` rules, compiles them against every block and
+runtime rotation, and runs one noisy trajectory per shot. The loop above with amplitude
+damping after each `h`:
+
+```rust
+# use prism_q::circuit::openqasm;
+# use prism_q::simulate_program;
+# let program = openqasm::parse_dynamic(
+#     "OPENQASM 3.0; qubit[1] q; bit[1] c; h q[0]; c[0] = measure q[0];
+#      while (c[0]) { reset q[0]; h q[0]; c[0] = measure q[0]; }",
+# )?;
+use prism_q::{GateFilter, NoiseBuilder, NoiseChannel};
+
+let rules = NoiseBuilder::new().after_gates(
+    GateFilter::all().named("h"),
+    NoiseChannel::AmplitudeDamping { gamma: 0.4 },
+);
+let noisy = simulate_program(&program).noise(&rules).seed(42).shots(1000)?;
+# Ok::<(), prism_q::PrismError>(())
+```
+
+### Dynamic declines
+
+`parse_dynamic` returns `UnsupportedConstruct` for:
+
+- A runtime value where a parse-time constant belongs: a qubit index, a loop bound, a
+  register size, a duration, and the angle of any gate but the five rotations above.
+- A runtime argument to a `def` written as a gate application, `f(x) q;`. Called as a
+  function, `f(x, q)`, the same `def` takes it.
+- A slice read as a runtime value.
+- A builtin function (`sin`, `sqrt` and the rest) over a runtime value. Only operators
+  run at runtime.
+- A `bit` or `qubit` register declared inside a `while` body, and an `array` a loop or
+  measurement writes.
+- A measurement straight into a variable. Measure into a bit and assign the bit.
+- `input` parameters, since a dynamic program has no parameter binding.
 
 ## The subset
 
@@ -552,8 +556,8 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic` |
 | `array` | Parses; folded at parse time | An element type other than `int`, `uint`, `float`, `angle` or `bool`: `UnsupportedConstruct`. An initializer of the wrong shape, an index out of range, or more than 2^20 elements: `Parse` |
 | `box`, `box[d]` | Runs its body in place | A length that is not a duration or is negative: `Parse` |
-| `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, and `durationof`: `UnsupportedConstruct` |
-| `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |
+| `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, a runtime value in a duration under `parse_dynamic`, and `durationof`: `UnsupportedConstruct` |
+| `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, two inputs on one gate, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |
 | `nop` | Parses; emits nothing | |
@@ -565,15 +569,15 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `while` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list |
 | `break`, `continue` | Parses inside `for` and `while` | Outside a loop, or at the top level of a `def` or `gate` body: `Parse`. In a `for` under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
 | `end` | Stops the program; nothing after it runs | Inside a `gate` body, called or not: `Parse`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
-| `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results; `parse_dynamic` supports runtime numerical results | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, overlapping qubit arguments, or a missing result: `Parse` |
+| `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results; `parse_dynamic` supports runtime numerical results | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, overlapping qubit arguments, a missing result, or calls nested past 32 deep: `Parse` |
 | `return` | Exits a `def`, including nested branches and loops | Outside a `def`: `UnsupportedConstruct`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
-| `gate` blocks | Parses; an empty body is the identity | |
+| `gate` blocks | Parses; an empty body is the identity | Calls nested past 32 deep: `Parse` |
 | A gate length, `x[100ns] q;` | Parses; the length is dropped | |
 | `defcalgrammar`, `cal`, `defcal` | Parsed and skipped: a calibration says how a gate is pulsed, not what it does | A call to a gate only a `defcal` names: `UnsupportedConstruct` naming it |
 | `extern`, `opaque` | Declines | `UnsupportedConstruct`. A call out of the program has nothing to run against here |
-| `ctrl`, `negctrl`, `ctrl(n)`, `negctrl(n)`, `inv`, `pow(k)` | Parses, chainable in any order | See [Other supported constructs](#other-supported-constructs) for the reach of each, and below for the declines |
+| `ctrl`, `negctrl`, `ctrl(n)`, `negctrl(n)`, `inv`, `pow(k)` | Parses, chainable in any order | See [Gate modifiers](#gate-modifiers) for the reach of each, and below for the declines |
 | `gphase(theta)` | Parses and is carried | |
-| `#pragma braket ...`, `pragma braket ...` | Parses under `Dialect::Braket` | Any other dialect, or a `braket` pragma this crate does not read: `UnsupportedConstruct` naming it |
+| `#pragma braket ...`, `pragma braket ...` | Parses under `Dialect::Braket` | Any other dialect, a `braket` pragma inside a braced body, or one this crate does not read: `UnsupportedConstruct` naming it |
 | Any other pragma, and annotations (`@ns.tag ...`) | Ignored, as the language asks of a pass that does not read them | |
 | A gate name the crate does not implement | Declines | `UnsupportedConstruct` naming it |
 | A gate call at the wrong width | Declines | `GateArity` naming the gate, the arity it wanted, and what it got |
@@ -594,76 +598,11 @@ Every decline above happens at parse time, so a program that parses is one the I
 hold. The backend it runs on may still decline the circuit; the
 [Capabilities](capabilities.md) page lists those limits.
 
-## Other supported constructs
+## Amazon Braket programs
 
-- Gate modifiers `ctrl @`, `negctrl @`, `inv @` and `pow(k) @`, chainable in any order.
-  `ctrl(n) @` and `negctrl(n) @` stand for `n` controls. Each control consumes one qubit
-  from the front of the argument list, in the order the modifiers are written, and
-  `negctrl` differs from `ctrl` only in firing on `|0>`.
-
-  A control applies to what the gate expands to, not to its name, since
-  `ctrl(U1 U2 ... Un)` is `ctrl(U1) ctrl(U2) ... ctrl(Un)`. That reaches a user `gate`
-  body, a gate that lowers to a sequence, and `swap`, which becomes the Fredkin lowering
-  rather than three controlled CNOTs. The two-qubit gates carried as a matrix (`ecr`,
-  `xy`, `pswap`, `cphaseshift00`/`01`/`10`, `ms`, `syc`, `sqrt_iswap`, `sqrt_iswap_inv`,
-  `xx_plus_yy`, `xx_minus_yy`) take a control through their eigenbasis:
-  `ctrl(V D V-dagger)` is `V ctrl(D) V-dagger`, and a controlled diagonal costs one phase
-  per entry at any control count. A `def` call declines, being a subroutine, and so does
-  a call spanning more than four qubits, where the dense reduction stops.
-
-  `pow(k)` takes any real `k`. On a single-qubit gate it is the principal matrix power,
-  read from the eigenvalues with each angle on `(-pi, pi]`, so `pow(0.5) @ x` is `sx` and
-  `pow(1.0/3)` applied three times is the gate again. The branch follows the eigenvalue,
-  not the written angle: `p(1.5*pi)` and `p(-0.5*pi)` are the same matrix and take the
-  same root. A whole number is repetition at any width, rejected past a million; a
-  fraction on a wider call is the principal power of the matrix the whole call composes
-  to, up to four qubits. `inv @` and `pow(k) @` commute with a control, so a chain reads
-  the same either way.
-- `gphase(theta)` multiplies the state by `e^(i theta)`. It is carried, not dropped: a
-  `state_vector` result shows it, and under a control `ctrl @ gphase(theta) q[0]` is a
-  phase gate on `q[0]`.
-- Classical `int`, `uint`, `bool`, `float` and `angle` declarations with assignment, and
-  `let` aliases over sliced registers. See
-  [Declarations and measurement](#declarations-and-measurement).
-- User-defined `gate` blocks.
-- Classical `if` guarding a single statement or a braced body. A braced body admits any
-  supported statement, `measure` and `reset` included, and may nest.
-- `else` and `else if` arms, and `switch` with `case` and `default` arms, lowered to guards
-  on the existing condition language rather than new IR syntax.
-- Parity conditions, `if (c[0] ^ c[2])` or `if ((c[0] ^ c[2]) == 0)`.
-- Multi-register broadcast, `barrier`, and block comments.
-- An expression evaluator over `+ - * / %`, `**`, the comparisons, `&&`, `||`, `!`, and
-  `&`, `|`, `^`, `~`, `<<`, `>>` with C precedence; the constants `pi`, `tau` and `euler`;
-  and the OpenQASM builtins (`arcsin`, `arccos`, `arctan`, `ceiling`, `cos`, `exp`,
-  `floor`, `log`, `mod`, `popcount`, `pow`, `sin`, `sqrt`, `tan`). `**` is right
-  associative and binds tighter than unary minus, so `-2 ** 2` is `-4`. The constants,
-  `true` and `false` cannot be redeclared in the global scope; a gate or `def` parameter
-  may shadow a constant. Statements, conditions and expressions nest at most 256 levels,
-  an operator chain such as `a + b + c` counting one level per operator, and a deeper
-  source fails with `PrismError::Parse`. The bound also covers the gate and `def` bodies a
-  call expands, counted together with the blocks around it.
-
-```qasm
-bit[2] c;
-qubit[3] q;
-c[0] = measure q[0];
-if (c[0]) {
-  x q[1];
-  c[1] = measure q[1];
-  if (c[1]) { reset q[2]; }
-}
-```
-
-```admonish warning title="Not supported"
-[The subset](#the-subset) has the full list. Two declines need the reasoning: `else` is
-rejected when the `if` body measures into a bit the condition reads, and `switch` when any
-arm measures into the switched register. Both lower to a chain of guards that re-read the
-classical bits, so such a source could take two arms of one choice. An `else` body may
-write freely, since nothing re-reads after it.
-
-Under `parse`, `while` and classical expressions beyond the condition language are outside
-the subset; [`parse_dynamic`](#dynamic-programs) reads both.
-```
+`parse_braket` reads Braket's result, noise, unitary and verbatim pragmas, and
+`Simulate::braket_results` answers the requests in Braket's conventions. See
+[Amazon Braket Programs](./braket.md).
 
 ```admonish note title="Qubit ordering"
 `q[0]` is the least significant bit, so `x q[0]` produces state index 1, not 2.

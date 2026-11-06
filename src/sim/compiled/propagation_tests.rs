@@ -299,6 +299,72 @@ fn colmajor_forward_sim_matches_stabilizer_tableau() {
     }
 }
 
+#[test]
+fn colmajor_forward_sim_matches_stabilizer_tableau_with_late_fresh_qubits() {
+    use crate::backend::Backend;
+    use crate::backend::stabilizer::StabilizerBackend;
+    use rand::{RngExt, SeedableRng};
+
+    let one_qubit = [Gate::H, Gate::S, Gate::Sdg, Gate::Y, Gate::SX, Gate::SXdg];
+    let two_qubit = [Gate::Cx, Gate::Cz, Gate::Swap];
+
+    // Qubits enter in shuffled order, so the touched bound jumps ahead of qubits still
+    // fresh below it. At 300 and 600 the destabilizer and stabilizer word ranges stay
+    // apart for most of the circuit and the stabilizer range starts off a vector boundary.
+    for n in [5, 97, 130, 300, 600] {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+        let mut order: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            order.swap(i, rng.random_range(0..=i));
+        }
+        let mut c = Circuit::new(n, 0);
+        c.add_gate(Gate::H, &[order[0]]);
+        for k in 1..n {
+            let fresh = order[k];
+            let old = order[rng.random_range(0..k)];
+            c.add_gate(
+                two_qubit[rng.random_range(0..two_qubit.len())].clone(),
+                &[old, fresh],
+            );
+            for _ in 0..3 {
+                let a = order[rng.random_range(0..=k)];
+                if rng.random_range(0..2) == 0 {
+                    let b = order[rng.random_range(0..=k)];
+                    if a != b {
+                        c.add_gate(
+                            two_qubit[rng.random_range(0..two_qubit.len())].clone(),
+                            &[a, b],
+                        );
+                    }
+                } else {
+                    c.add_gate(
+                        one_qubit[rng.random_range(0..one_qubit.len())].clone(),
+                        &[a],
+                    );
+                }
+            }
+        }
+
+        let (xz, phase, nw) = colmajor_forward_sim(n, &c.instructions).unwrap();
+
+        let mut reference = StabilizerBackend::new(42);
+        reference.init(n, 0).unwrap();
+        reference.apply_gates_only(&c.instructions).unwrap();
+        let (ref_xz, ref_phase) = reference.export_tableau().unwrap();
+
+        assert_eq!(
+            xz[..],
+            ref_xz[..2 * n * 2 * nw],
+            "tableau bits differ at n={n}"
+        );
+        assert_eq!(
+            phase[..],
+            ref_phase[..2 * n],
+            "tableau signs differ at n={n}"
+        );
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn rowmul_phase_masks_match_the_ag_phase_rule() {

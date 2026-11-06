@@ -21,10 +21,12 @@ fn main() {
     let (circuit, params) = builder.build_parametric();
 
     // Transverse-field Ising chain: -sum Z_i Z_{i+1} - 0.5 sum X_i.
-    let mut hamiltonian: Vec<(f64, Vec<PauliTerm>)> = (0..n - 1)
-        .map(|q| (-1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
-        .collect();
-    hamiltonian.extend((0..n).map(|q| (-0.5, vec![PauliTerm::x(q)])));
+    let hamiltonian = PauliObservable::from_terms(
+        (0..n - 1)
+            .map(|q| (-1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
+            .chain((0..n).map(|q| (-0.5, vec![PauliTerm::x(q)]))),
+    )
+    .expect("invalid observable");
 
     let adjoint = simulate(&circuit)
         .seed(42)
@@ -43,13 +45,12 @@ fn main() {
     println!("energy at the template angles: {:.6}", adjoint.value);
     println!("largest adjoint and parameter-shift gap: {max_gap:.2e}");
 
-    let mut theta = vec![0.1; params.num_slots()];
+    let mut prepared = PreparedCircuit::new(circuit, params).expect("prepare failed");
+    let mut theta = vec![0.1; prepared.parameters().num_slots()];
     let mut energy = adjoint.value;
     for _ in 0..100 {
-        let bound = params.bind(&circuit, &theta).expect("bind failed");
-        let step = simulate(&bound)
-            .seed(42)
-            .expectation_gradient(&hamiltonian, &params)
+        let step = prepared
+            .expectation_gradient(&theta, &hamiltonian, 42)
             .expect("adjoint gradient failed");
         energy = step.value;
         for (t, g) in theta.iter_mut().zip(&step.gradient) {
@@ -58,14 +59,12 @@ fn main() {
     }
     println!("energy after 100 steps: {energy:.6}");
 
-    let observable = PauliObservable::from_terms(hamiltonian).expect("invalid observable");
-    let mut prepared = PreparedCircuit::new(circuit, params).expect("prepare failed");
     let mut rng = ChaCha8Rng::seed_from_u64(42);
     let points: Vec<Vec<f64>> = (0..256)
         .map(|_| (0..2 * n).map(|_| rng.random_range(-PI..PI)).collect())
         .collect();
     let lowest = prepared
-        .observable_expectation_many(&points, &observable, 42)
+        .observable_expectation_many(&points, &hamiltonian, 42)
         .expect("batch failed")
         .iter()
         .map(|e| e.mean)

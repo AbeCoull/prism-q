@@ -651,7 +651,7 @@ fn noisy_expectation_gradient_is_rejected_naming_the_adjoint() {
         .noise(&noise)
         .seed(SEED)
         .expectation_gradient(
-            &[(1.0, vec![PauliTerm::z(0)])],
+            &prism_q::PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap(),
             &prism_q::Parameters::new(0),
         )
         .unwrap_err();

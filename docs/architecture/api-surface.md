@@ -69,15 +69,18 @@ answer each.
 [Dynamic Programs](./dynamic-programs.md).
 
 **Gradients:**
-`ExpectationGradient`, returned by `Simulate::expectation_gradient` and
-`Simulate::expectation_gradient_shift`
+`ExpectationGradient`, returned by `Simulate::expectation_gradient`,
+`Simulate::expectation_gradient_shift` and the `PreparedCircuit` methods of the same names.
+All of them take the Hamiltonian as a `PauliObservable`
 
 **Parameters and binding:**
 `Parameters`, `ParamLink`, `PreparedCircuit`. The gradient path reads the links and
-binding writes through them. `PreparedCircuit` carries `run`, `expectation_values` and
-`observable_expectation`, each answering as the `Simulate` terminal of that name does on
-the bound circuit, plus a `_many` form of each that takes a list of bindings and splits
-it across cores where `run_batch` would.
+binding writes through them. `PreparedCircuit` carries `run`, `expectation_values`,
+`observable_expectation`, `expectation_gradient` and `expectation_gradient_shift`, each
+answering as the `Simulate` terminal of that name does on the bound circuit, plus a
+`_many` form of each that takes a list of bindings and splits it across cores where
+`run_batch` would. Gradient batches split only below the statevector kernels' parallel
+width, 15 qubits, and run in order above it.
 
 **Compiled sampling:**
 `compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`,

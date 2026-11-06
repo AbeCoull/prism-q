@@ -1,8 +1,8 @@
 use super::*;
 use crate::sim::unified_pauli::PauliTerm;
 
-fn z_obs(qubit: usize) -> Vec<(f64, Vec<PauliTerm>)> {
-    vec![(1.0, vec![PauliTerm::z(qubit)])]
+fn z_obs(qubit: usize) -> PauliObservable {
+    PauliObservable::from_terms([(1.0, vec![PauliTerm::z(qubit)])]).unwrap()
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn phase_projector_gradient() {
     let mut params = Parameters::new(1);
     params.link(1, 0);
 
-    let obs = vec![(1.0, vec![PauliTerm::x(0)])];
+    let obs = PauliObservable::from_terms([(1.0, vec![PauliTerm::x(0)])]).unwrap();
     let g = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
     assert!((g.value - theta.cos()).abs() < 1e-12);
     assert!((g.gradient[0] - (-theta.sin())).abs() < 1e-9);
@@ -60,7 +60,9 @@ fn shared_parameter_accumulates() {
     params.link(0, 0);
     params.link(1, 0);
 
-    let obs = vec![(1.0, vec![PauliTerm::z(0)]), (1.0, vec![PauliTerm::z(1)])];
+    let obs =
+        PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)]), (1.0, vec![PauliTerm::z(1)])])
+            .unwrap();
     let g = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
     assert_eq!(g.gradient.len(), 1);
     assert!((g.gradient[0] - (-2.0 * theta.sin())).abs() < 1e-9);
@@ -112,11 +114,12 @@ fn weighted_energy(ham: &[(f64, Vec<PauliTerm>)], per_term: Vec<f64>) -> f64 {
 #[test]
 fn shift_gradient_matches_a_sequential_sum_bit_for_bit() {
     let (circuit, params) = hea_with_shared_slots(10);
-    let ham = vec![
+    let ham = PauliObservable::from_terms([
         (0.5, vec![PauliTerm::z(0), PauliTerm::z(1)]),
         (1.5, vec![PauliTerm::x(3)]),
-    ];
-    let observables: Vec<Vec<PauliTerm>> = ham.iter().map(|(_, t)| t.clone()).collect();
+    ])
+    .unwrap();
+    let observables: Vec<Vec<PauliTerm>> = ham.terms().iter().map(|(_, t)| t.clone()).collect();
     let links = params.links();
     let sites = slot_per_link(&params);
     let base = sites.values(&circuit).unwrap();
@@ -124,7 +127,7 @@ fn shift_gradient_matches_a_sequential_sum_bit_for_bit() {
     assert!(prepared.reuses_fusion_plan());
     let mut energy = |values: &[f64]| {
         weighted_energy(
-            &ham,
+            ham.terms(),
             prepared
                 .expectation_values(values, &observables, 42)
                 .unwrap(),
@@ -155,14 +158,16 @@ fn shift_gradient_matches_fresh_fusion_on_degenerate_shifts() {
         for link in params.links().iter().step_by(2) {
             *angle_mut(&mut circuit.instructions[link.instruction]) = std::f64::consts::FRAC_PI_2;
         }
-        let ham: Vec<(f64, Vec<PauliTerm>)> = (0..n - 1)
-            .map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
-            .chain([(0.7, vec![PauliTerm::x(2)])])
-            .collect();
-        let observables: Vec<Vec<PauliTerm>> = ham.iter().map(|(_, t)| t.clone()).collect();
+        let ham = PauliObservable::from_terms(
+            (0..n - 1)
+                .map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
+                .chain([(0.7, vec![PauliTerm::x(2)])]),
+        )
+        .unwrap();
+        let observables: Vec<Vec<PauliTerm>> = ham.terms().iter().map(|(_, t)| t.clone()).collect();
         let energy = |c: &Circuit| {
             weighted_energy(
-                &ham,
+                ham.terms(),
                 super::super::run_expectation_values_with(
                     BackendKind::Auto,
                     c,
@@ -244,7 +249,7 @@ fn single_term_hamiltonian_matches_analytic() {
     c.add_gate(Gate::Ry(theta), &[0]);
     let params = Parameters::all_rotations(&c);
 
-    let obs = vec![(1.0, vec![PauliTerm::x(0)])];
+    let obs = PauliObservable::from_terms([(1.0, vec![PauliTerm::x(0)])]).unwrap();
     let g = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
     assert!((g.value - theta.sin()).abs() < 1e-12);
     assert!((g.gradient[0] - theta.cos()).abs() < 1e-12);
@@ -260,11 +265,12 @@ fn diagonal_hamiltonian_matches_analytic() {
     c.add_gate(Gate::Ry(b), &[1]);
     let params = Parameters::all_rotations(&c);
 
-    let obs = vec![
+    let obs = PauliObservable::from_terms([
         (1.0, vec![PauliTerm::z(0)]),
         (0.5, vec![PauliTerm::z(1)]),
         (0.25, vec![PauliTerm::z(0), PauliTerm::z(1)]),
-    ];
+    ])
+    .unwrap();
     let g = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
     let value = a.cos() + 0.5 * b.cos() + 0.25 * a.cos() * b.cos();
     assert!((g.value - value).abs() < 1e-12);
@@ -284,12 +290,13 @@ fn grouped_x_mask_terms_match_parameter_shift() {
     c.add_gate(Gate::Rz(0.3), &[2]);
     let params = Parameters::all_rotations(&c);
 
-    let obs = vec![
+    let obs = PauliObservable::from_terms([
         (1.0, vec![PauliTerm::x(0)]),
         (-0.5, vec![PauliTerm::y(0)]),
         (0.75, vec![PauliTerm::x(0), PauliTerm::z(1)]),
         (0.25, vec![PauliTerm::y(0), PauliTerm::z(2)]),
-    ];
+    ])
+    .unwrap();
     let adjoint = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
     let shift = run_expectation_gradient_shift(&c, &obs, &params, 42).unwrap();
     assert!((adjoint.value - shift.value).abs() < 1e-12);
@@ -309,12 +316,13 @@ fn parallel_threshold_width_matches_parameter_shift() {
     c.add_gate(Gate::Rz(0.5), &[14]);
     let params = Parameters::all_rotations(&c);
 
-    let obs = vec![
+    let obs = PauliObservable::from_terms([
         (1.0, vec![PauliTerm::z(0)]),
         (0.5, vec![PauliTerm::x(7)]),
         (-0.25, vec![PauliTerm::y(7), PauliTerm::z(14)]),
         (0.75, vec![PauliTerm::x(7), PauliTerm::z(0)]),
-    ];
+    ])
+    .unwrap();
     let adjoint = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
     let shift = run_expectation_gradient_shift(&c, &obs, &params, 42).unwrap();
     assert!((adjoint.value - shift.value).abs() < 1e-12);
@@ -474,11 +482,7 @@ fn the_plan_never_inverts_the_earliest_trainable_gate_or_an_idle_one() {
     assert_eq!(plan.last_step, 1);
 }
 
-fn assert_adjoint_matches_shift(
-    circuit: &Circuit,
-    ham: &[(f64, Vec<PauliTerm>)],
-    params: &Parameters,
-) {
+fn assert_adjoint_matches_shift(circuit: &Circuit, ham: &PauliObservable, params: &Parameters) {
     let adjoint = run_expectation_gradient(circuit, ham, params, 42).unwrap();
     let shift = run_expectation_gradient_shift(circuit, ham, params, 42).unwrap();
     let n = circuit.num_qubits;
@@ -491,19 +495,21 @@ fn assert_adjoint_matches_shift(
     }
 }
 
-fn mixed_hamiltonian(n: usize) -> Vec<(f64, Vec<PauliTerm>)> {
-    (0..n - 1)
-        .map(|q| {
-            (
-                0.5 + 0.1 * q as f64,
-                vec![PauliTerm::z(q), PauliTerm::z(q + 1)],
-            )
-        })
-        .chain([
-            (0.7, vec![PauliTerm::x(1)]),
-            (-0.4, vec![PauliTerm::y(0), PauliTerm::x(n - 1)]),
-        ])
-        .collect()
+fn mixed_hamiltonian(n: usize) -> PauliObservable {
+    PauliObservable::from_terms(
+        (0..n - 1)
+            .map(|q| {
+                (
+                    0.5 + 0.1 * q as f64,
+                    vec![PauliTerm::z(q), PauliTerm::z(q + 1)],
+                )
+            })
+            .chain([
+                (0.7, vec![PauliTerm::x(1)]),
+                (-0.4, vec![PauliTerm::y(0), PauliTerm::x(n - 1)]),
+            ]),
+    )
+    .unwrap()
 }
 
 // Widths on both sides of the fusion floors, so the inverted stretches run

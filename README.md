@@ -206,7 +206,7 @@ Mark angles as parameters while building, then rebind without rebuilding.
 binding changes what fusion would emit.
 
 ```rust
-use prism_q::{simulate, CircuitBuilder, PauliTerm, PreparedCircuit};
+use prism_q::{simulate, CircuitBuilder, PauliObservable, PauliTerm, PreparedCircuit};
 
 let (template, params) = CircuitBuilder::new(2)
     .ry(0.0, 0)
@@ -222,12 +222,15 @@ let result = simulate(&bound).seed(42).run().unwrap();
 let mut prepared = PreparedCircuit::new(template, params.clone()).unwrap();
 let fused = prepared.bind_fused(&[0.4, 1.2]).unwrap();
 
-let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+let hamiltonian = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
 let g = simulate(&bound)
     .seed(42)
     .expectation_gradient(&hamiltonian, &params)
     .unwrap();
 println!("<H> = {}, gradient = {:?}", g.value, g.gradient);
+
+let step = prepared.expectation_gradient(&[0.3, 1.1], &hamiltonian, 42).unwrap();
+assert!((step.value - g.value).abs() < 1e-12);
 ```
 
 `expectation_gradient` uses the adjoint method on the statevector backend.

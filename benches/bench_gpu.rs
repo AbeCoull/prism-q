@@ -1156,9 +1156,10 @@ fn bench_gpu_dm_gradient(c: &mut Criterion) {
         let mut params = Parameters::new(2);
         params.link(0, 0);
         params.link(1, 1);
-        let ham: Vec<(f64, Vec<PauliTerm>)> = (0..n - 1)
-            .map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
-            .collect();
+        let ham = prism_q::PauliObservable::from_terms(
+            (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)])),
+        )
+        .unwrap();
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 black_box(

@@ -48,8 +48,8 @@ asserting exact equality.
 
 `expectation_gradient` computes `⟨H⟩` and its exact gradient over the bound parameters
 by the adjoint method, at a cost independent of the parameter count. Mark parameters
-with `param(slot)` while building; `build_parametric()` returns the circuit with its
-`Parameters`, whose `links()` the gradient takes.
+with `param(slot)` while building; `build_parametric()` returns the circuit with the
+`Parameters` the gradient takes.
 
 ```python
 import numpy as np
@@ -60,10 +60,9 @@ builder.ry(0.3, 0).param(0)
 builder.cx(0, 1)
 builder.rz(0.7, 1).param(1)
 circuit, params = builder.build_parametric()
-links = params.links()
 
 hamiltonian = [(1.0, [(0, "Z")]), (0.5, [(0, "Z"), (1, "Z")])]
-result = simulate(circuit).seed(42).expectation_gradient(hamiltonian, links)
+result = simulate(circuit).seed(42).expectation_gradient(hamiltonian, params)
 energy, gradient = result.value, result.gradient
 ```
 

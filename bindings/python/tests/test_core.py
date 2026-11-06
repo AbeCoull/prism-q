@@ -592,7 +592,7 @@ def test_pauli_string_longer_than_the_register_is_rejected():
         sim.observable_variance([(1.0, "IIX")])
     params = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).build_parametric()[1]
     with pytest.raises(prism_q.PrismError, match="2 qubits"):
-        sim.expectation_gradient([(1.0, "ZIZ")], params.links())
+        sim.expectation_gradient([(1.0, "ZIZ")], params)
     prepared = prism_q.PreparedCircuit(circuit, prism_q.Parameters(0))
     with pytest.raises(prism_q.PrismError, match="2 qubits"):
         prepared.expectation([], ["XXX"])

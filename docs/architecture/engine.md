@@ -227,8 +227,10 @@ count, so the engine does not choose silently.
 
 `sim::gradient::run_expectation_gradient(circuit, hamiltonian, params, seed)` and
 `simulate(circuit).seed(seed).expectation_gradient(hamiltonian, params)` compute `⟨H⟩`
-and the exact gradient `d⟨H⟩/dθ` for a weighted Pauli sum `H = Σ c_k P_k`, at a cost
-independent of the parameter count. Implementation in `src/sim/gradient.rs`.
+and the exact gradient `d⟨H⟩/dθ` for a weighted Pauli sum `H = Σ c_k P_k`, given as a
+`PauliObservable`, at a cost independent of the parameter count. Implementation in
+`src/sim/gradient.rs`. `PreparedCircuit::expectation_gradient` runs the same pass on a
+held template, applying its replayed fusion plan as the forward pass.
 
 Two statevectors are propagated backwards. With `U = U_L…U_1` and `|φ⟩ = U|0⟩`:
 

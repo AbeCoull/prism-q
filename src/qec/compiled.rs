@@ -296,34 +296,16 @@ fn sample_leaky(
     shots: usize,
     chunk_size: usize,
 ) -> Result<QecSampleResult> {
-    if chunk_size >= shots {
-        let (measurements, heralds) = sampler.sample(0, shots, shots)?;
-        return Ok(
-            qec_result_from_measurement_rows(shape, shots, measurements)?.with_heralds(heralds),
-        );
-    }
     let num_heralds = sampler.num_heralds();
-    let mut herald_chunks: Vec<(usize, PackedShots)> = Vec::new();
-    let result = qec_result_from_measurement_chunks(shape, shots, chunk_size, |first, chunk| {
-        let (measurements, heralds) = sampler.sample(first, chunk, shots)?;
-        herald_chunks.push((first, heralds));
-        Ok(measurements)
-    })?;
-    let s_words = shots.div_ceil(64);
-    let mut heralds = vec![0u64; num_heralds * s_words];
-    for (first_shot, chunk) in herald_chunks {
-        let chunk_words = chunk.num_shots().div_ceil(64);
-        for herald in 0..num_heralds {
-            super::leakage::land_bits(
-                &mut heralds[herald * s_words..(herald + 1) * s_words],
-                first_shot,
-                &chunk.raw_data()[herald * chunk_words..(herald + 1) * chunk_words],
-                0,
-                chunk.num_shots(),
-                |a, b| a | b,
-            );
-        }
-    }
+    let mut heralds = vec![0u64; num_heralds * shots.div_ceil(64)];
+    let result = if chunk_size >= shots {
+        let measurements = sampler.sample(0, shots, shots, &mut heralds)?;
+        qec_result_from_measurement_rows(shape, shots, measurements)?
+    } else {
+        qec_result_from_measurement_chunks(shape, shots, chunk_size, |first, chunk| {
+            sampler.sample(first, chunk, shots, &mut heralds)
+        })?
+    };
     Ok(result.with_heralds(PackedShots::from_meas_major(heralds, shots, num_heralds)))
 }
 

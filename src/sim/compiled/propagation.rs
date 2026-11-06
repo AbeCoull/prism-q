@@ -15,25 +15,36 @@ use crate::gates::Gate;
 /// Heisenberg-picture backward propagation of a Pauli through a Clifford gate,
 /// `P <- U†·P·U`, up to sign: the frame carries no phase, so `HYH = -Y` lands
 /// as `Y`.
+#[inline]
 pub fn propagate_backward(pauli: &mut PauliVec, gate: &Gate, targets: &[usize]) {
+    propagate_backward_words(&mut pauli.x, &mut pauli.z, gate, targets);
+}
+
+/// [`propagate_backward`] on a Pauli held as bare `x` and `z` word slices.
+pub(crate) fn propagate_backward_words(
+    x: &mut [u64],
+    z: &mut [u64],
+    gate: &Gate,
+    targets: &[usize],
+) {
     match gate {
         Gate::H => {
             let q = targets[0];
-            let xb = get_bit(&pauli.x, q);
-            let zb = get_bit(&pauli.z, q);
-            set_bit(&mut pauli.x, q, zb);
-            set_bit(&mut pauli.z, q, xb);
+            let xb = get_bit(x, q);
+            let zb = get_bit(z, q);
+            set_bit(x, q, zb);
+            set_bit(z, q, xb);
         }
         Gate::S => {
             let q = targets[0];
-            if get_bit(&pauli.x, q) {
-                flip_bit(&mut pauli.z, q);
+            if get_bit(x, q) {
+                flip_bit(z, q);
             }
         }
         Gate::Sdg => {
             let q = targets[0];
-            if get_bit(&pauli.x, q) {
-                flip_bit(&mut pauli.z, q);
+            if get_bit(x, q) {
+                flip_bit(z, q);
             }
         }
         Gate::X => {}
@@ -41,49 +52,49 @@ pub fn propagate_backward(pauli: &mut PauliVec, gate: &Gate, targets: &[usize]) 
         Gate::Z => {}
         Gate::SX => {
             let q = targets[0];
-            if get_bit(&pauli.z, q) {
-                flip_bit(&mut pauli.x, q);
+            if get_bit(z, q) {
+                flip_bit(x, q);
             }
         }
         Gate::SXdg => {
             let q = targets[0];
-            if get_bit(&pauli.z, q) {
-                flip_bit(&mut pauli.x, q);
+            if get_bit(z, q) {
+                flip_bit(x, q);
             }
         }
         Gate::Cx => {
             let ctrl = targets[0];
             let tgt = targets[1];
-            if get_bit(&pauli.x, ctrl) {
-                flip_bit(&mut pauli.x, tgt);
+            if get_bit(x, ctrl) {
+                flip_bit(x, tgt);
             }
-            if get_bit(&pauli.z, tgt) {
-                flip_bit(&mut pauli.z, ctrl);
+            if get_bit(z, tgt) {
+                flip_bit(z, ctrl);
             }
         }
         Gate::Cz => {
             let q0 = targets[0];
             let q1 = targets[1];
-            let x0 = get_bit(&pauli.x, q0);
-            let x1 = get_bit(&pauli.x, q1);
+            let x0 = get_bit(x, q0);
+            let x1 = get_bit(x, q1);
             if x1 {
-                flip_bit(&mut pauli.z, q0);
+                flip_bit(z, q0);
             }
             if x0 {
-                flip_bit(&mut pauli.z, q1);
+                flip_bit(z, q1);
             }
         }
         Gate::Swap => {
             let q0 = targets[0];
             let q1 = targets[1];
-            let x0 = get_bit(&pauli.x, q0);
-            let x1 = get_bit(&pauli.x, q1);
-            set_bit(&mut pauli.x, q0, x1);
-            set_bit(&mut pauli.x, q1, x0);
-            let z0 = get_bit(&pauli.z, q0);
-            let z1 = get_bit(&pauli.z, q1);
-            set_bit(&mut pauli.z, q0, z1);
-            set_bit(&mut pauli.z, q1, z0);
+            let x0 = get_bit(x, q0);
+            let x1 = get_bit(x, q1);
+            set_bit(x, q0, x1);
+            set_bit(x, q1, x0);
+            let z0 = get_bit(z, q0);
+            let z1 = get_bit(z, q1);
+            set_bit(z, q0, z1);
+            set_bit(z, q1, z0);
         }
         Gate::Id => {}
         _ => {}

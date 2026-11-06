@@ -866,10 +866,10 @@ where
         }
 
         if keep_measurements {
-            measurement_data.extend(measurements.into_shot_major_data());
+            measurements.append_shot_major_to(&mut measurement_data);
         }
-        detector_data.extend(detectors.into_shot_major_data());
-        observable_data.extend(observables.into_shot_major_data());
+        detectors.append_shot_major_to(&mut detector_data);
+        observables.append_shot_major_to(&mut observable_data);
         sampled_shots += this_chunk;
     }
 

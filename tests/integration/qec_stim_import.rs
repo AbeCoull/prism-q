@@ -3,7 +3,7 @@
 //! errors for instructions outside the supported subset.
 
 use prism_q::{
-    Gate, PrismError, QecNoise, QecOp, QecProgram, QecRecordRef, QecSampleResult,
+    Gate, PrismError, QecBasis, QecNoise, QecOp, QecProgram, QecRecordRef, QecSampleResult,
     parse_qec_program, parse_stim_circuit, run_qec_program, run_qec_program_reference,
 };
 
@@ -277,5 +277,139 @@ fn stim_reader_rejects_unsupported_instructions_with_the_line() {
     ] {
         let (_, message) = parse_error(text);
         assert!(message.contains(expected), "{text}: {message}");
+    }
+}
+
+fn record_rates(result: &QecSampleResult) -> Vec<f64> {
+    let shots = result.measurements.to_shots();
+    (0..shots[0].len())
+        .map(|record| shots.iter().filter(|s| s[record]).count() as f64 / shots.len() as f64)
+        .collect()
+}
+
+fn reference(text: &str, shots: usize) -> QecSampleResult {
+    let mut program = parse_stim_circuit(text).unwrap();
+    program.set_options(qec_common::qec_options(shots, shots, true));
+    run_qec_program_reference(&program).unwrap()
+}
+
+#[test]
+fn stim_measurement_error_flips_only_the_record() {
+    assert_eq!(
+        parse_stim_circuit("M(0.2) 0\nM 0").unwrap().ops(),
+        [
+            QecOp::Measure {
+                basis: QecBasis::Z,
+                qubit: 0
+            },
+            QecOp::RecordFlip { probability: 0.2 },
+            QecOp::Measure {
+                basis: QecBasis::Z,
+                qubit: 0
+            },
+        ]
+    );
+
+    // 4000 shots put one standard deviation of the 0.2 rate at 0.0063.
+    let shots = 4000;
+    for text in ["M(0.2) 0\nM 0", "M(0.2) 0\nH 0\nMX 0", "M(0.2) !0\nM 0"] {
+        let rates = record_rates(&reference(text, shots));
+        let first = if text.contains('!') { 0.8 } else { 0.2 };
+        assert!((rates[0] - first).abs() < 0.03, "{text}: {rates:?}");
+        assert_eq!(rates[1], 0.0, "{text}: the qubit itself was never flipped");
+    }
+}
+
+#[test]
+fn stim_measure_reset_and_basis_errors_flip_the_record() {
+    let program = parse_stim_circuit("MR(0.2) 0\nM 0").unwrap();
+    assert_eq!(
+        program.ops()[1..3],
+        [
+            QecOp::RecordFlip { probability: 0.2 },
+            QecOp::Reset {
+                basis: QecBasis::Z,
+                qubit: 0
+            },
+        ]
+    );
+
+    let shots = 4000;
+    for text in [
+        "MR(0.2) 0\nM 0",
+        "RX 0\nMX(0.2) 0\nRY 1\nMY(0.2) 1",
+        "RX 0\nMRX(0.2) 0\nMX 0",
+    ] {
+        let compiled = record_rates(&sample(parse_stim_circuit(text).unwrap(), shots));
+        let reference = record_rates(&reference(text, shots));
+        for rates in [&compiled, &reference] {
+            assert!((rates[0] - 0.2).abs() < 0.03, "{text}: {rates:?}");
+            let second = if text.contains("MY(") { 0.2 } else { 0.0 };
+            assert!((rates[1] - second).abs() < 0.03, "{text}: {rates:?}");
+        }
+    }
+}
+
+#[test]
+fn stim_measurement_error_is_a_detector_error_model_mechanism() {
+    let program = parse_stim_circuit(
+        "M(0.125) 0 1
+         DETECTOR rec[-2]
+         DETECTOR rec[-1] rec[-2]
+         OBSERVABLE_INCLUDE(0) rec[-1]",
+    )
+    .unwrap();
+    let model = program.detector_error_model().unwrap();
+    let mechanisms: Vec<_> = model
+        .mechanisms()
+        .iter()
+        .map(|m| {
+            (
+                m.detectors().to_vec(),
+                m.observables().to_vec(),
+                m.probability(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        mechanisms,
+        [(vec![0, 1], vec![], 0.125), (vec![1], vec![0], 0.125),]
+    );
+}
+
+#[test]
+fn stim_measurement_error_samples_like_a_flip_before_a_last_measurement() {
+    let noisy = SURFACE_D2_MEMORY
+        .replace("MR 4 5 6", "MR(0.02) 4 5 6")
+        .replace("M 0 1 2 3", "M(0.02) 0 1 2 3");
+    let stim = parse_stim_circuit(&noisy).unwrap();
+    let native = parse_qec_program(&noisy).unwrap();
+    assert_ne!(without_coords(&stim), without_coords(&native));
+    assert_eq!(
+        stim.detector_error_model().unwrap().mechanisms(),
+        native.detector_error_model().unwrap().mechanisms()
+    );
+    assert_same_samples(&sample(stim, 4096), &sample(native, 4096));
+}
+
+#[test]
+fn stim_measurement_error_agrees_between_compiled_and_reference_runners() {
+    let text = "R 0 1
+                H 0
+                CX 0 1
+                MR(0.1) 0
+                M(0.2) 1
+                DETECTOR rec[-1] rec[-2]
+                OBSERVABLE_INCLUDE(0) rec[-1]";
+    let shots = 4000;
+    let compiled = sample(parse_stim_circuit(text).unwrap(), shots);
+    let reference = reference(text, shots);
+    for result in [&compiled, &reference] {
+        let fired = result.detectors.to_shots().iter().filter(|s| s[0]).count();
+        let rate = fired as f64 / shots as f64;
+        assert!(
+            (rate - 0.26).abs() < 0.03,
+            "detector fired at {rate}, expected 0.1 + 0.2 - 2 * 0.02"
+        );
     }
 }

@@ -148,6 +148,9 @@ impl QecProgram {
                     writeln!(w, "MPAD {}", u8::from(*value)).expect("String write");
                     records += 1;
                 }
+                QecOp::RecordFlip { probability } => {
+                    writeln!(w, "RECORD_FLIP({probability})").expect("String write");
+                }
                 QecOp::Tick => w.push_str("TICK\n"),
                 QecOp::Feedforward { .. } => {
                     return Err(PrismError::InvalidParameter {

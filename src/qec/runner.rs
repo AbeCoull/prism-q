@@ -526,6 +526,13 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
                     backend.classical_bits[next_record] = *value;
                     next_record += 1;
                 }
+                QecOp::RecordFlip { probability } => {
+                    if *probability > 0.0 && noise_rng.random::<f64>() < *probability {
+                        let record = next_record - 1;
+                        measurement_data[shot * m_words + record / 64] ^= 1 << (record % 64);
+                        backend.classical_bits[record] ^= true;
+                    }
+                }
                 QecOp::Feedforward { .. } => {
                     backend.apply(&feedforward_regions[next_feedforward])?;
                     next_feedforward += 1;
@@ -1402,7 +1409,10 @@ pub(super) fn validate_qec_compiled_program(program: &QecProgram) -> Result<(boo
                         .to_string(),
                 });
             }
-            QecOp::Noise { .. } | QecOp::CorrelatedError { .. } | QecOp::HeraldedErase { .. } => {
+            QecOp::Noise { .. }
+            | QecOp::CorrelatedError { .. }
+            | QecOp::HeraldedErase { .. }
+            | QecOp::RecordFlip { .. } => {
                 has_noise |= op.is_active_noise();
             }
             QecOp::Feedforward { body, .. } => {
@@ -1473,6 +1483,7 @@ pub(super) fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Res
             }
             QecOp::Noise { .. }
             | QecOp::CorrelatedError { .. }
+            | QecOp::RecordFlip { .. }
             | QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }
             | QecOp::Postselect { .. }

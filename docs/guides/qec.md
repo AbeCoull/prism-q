@@ -111,8 +111,8 @@ let result = run_qec_program(&program).unwrap();
 ```
 
 It accepts the instruction set above apart from the native additions (`T`, `T_DAG`,
-`LEAK`, `SEEP`, `LEAK_TRANSPORT`, `POSTSELECT`, `EXP_VAL`), and adds three Stim
-behaviours the native parser rejects or ignores:
+`LEAK`, `SEEP`, `LEAK_TRANSPORT`, `POSTSELECT`, `EXP_VAL`, `RECORD_FLIP`), and adds
+four Stim behaviours the native parser rejects, ignores or reads differently:
 
 - inverted measurement targets (`M !0`, `MR !0`, `MXX !0 1`, `MPP !X0*Z1`), lowered as
   a Pauli on either side of the measurement so only the record flips; the second Pauli
@@ -120,12 +120,17 @@ behaviours the native parser rejects or ignores:
   stays on the compiled sampler;
 - record-controlled Paulis (`CX rec[-1] 2`, `CY rec[-1] 2`, `CZ rec[-1] 2`), lowered to
   feed-forward corrections;
-- `SHIFT_COORDS`, which offsets later `DETECTOR` coordinates.
+- `SHIFT_COORDS`, which offsets later `DETECTOR` coordinates;
+- measurement error on `M(p)`, `MR(p)` and the X and Y variants, which flips only the
+  record with probability `p` and leaves the qubit alone, so `M(0.2) 0` then `M 0`
+  gives a second record that is always 0. Native text reads `M(p)` as a Pauli flip
+  before the measurement, which differs only when the qubit is measured again without a
+  reset.
 
 Any other instruction, `sweep[k]` targets, and noise arguments on `MPP`, the pair
-measurements and `MPAD` are parse errors naming the line. `M(p)` flips the qubit before
-measuring, so it matches Stim's record-only flip when the qubit is reset or not measured
-again; generated memory circuits spell measurement noise as a separate `X_ERROR`.
+measurements and `MPAD` are parse errors naming the line. A record flip lowers to
+`QecOp::RecordFlip`, which every runner and `detector_error_model` honour; `to_text`
+writes it as the native `RECORD_FLIP(p)` line after the measurement.
 
 ### Detector reference
 

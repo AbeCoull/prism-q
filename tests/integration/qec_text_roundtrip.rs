@@ -148,3 +148,55 @@ fn unspellable_ops_are_rejected() {
         .unwrap();
     assert!(program.to_text().is_err());
 }
+
+#[test]
+fn record_flips_round_trip_as_native_record_flip_lines() {
+    let program = prism_q::parse_stim_circuit("M(0.2) 0 1\nMR(0.1) 2\nMPP Z0*Z1\nM !3").unwrap();
+    let text = program.to_text().unwrap();
+    assert_eq!(
+        text,
+        "M 0\nRECORD_FLIP(0.2)\nM 1\nRECORD_FLIP(0.2)\nM 2\nRECORD_FLIP(0.1)\nR 2\nMPP Z0*Z1\n\
+         X 3\nM 3\n"
+    );
+    let parsed = parse_qec_program(&text).unwrap();
+    assert_eq!(parsed.ops(), program.ops());
+    assert_eq!(
+        parse_qec_program("MPP Z0\nRECORD_FLIP(0.25)\nRECORD_FLIP(0)")
+            .unwrap()
+            .ops()[1],
+        prism_q::QecOp::RecordFlip { probability: 0.25 }
+    );
+}
+
+#[test]
+fn record_flips_must_follow_their_record() {
+    for (text, expected) in [
+        ("RECORD_FLIP(0.1)", "must directly follow"),
+        ("M 0\nH 0\nRECORD_FLIP(0.1)", "must directly follow"),
+        ("M 0\nRECORD_FLIP(0.1) 0", "takes no targets"),
+        ("M 0\nRECORD_FLIP(1.5)", "probability"),
+    ] {
+        match parse_qec_program(text).unwrap_err() {
+            prism_q::PrismError::Parse { message, .. } => {
+                assert!(message.contains(expected), "{text}: {message}")
+            }
+            other => panic!("{text}: expected a parse error, got {other}"),
+        }
+    }
+    assert!(prism_q::parse_stim_circuit("M 0\nRECORD_FLIP(0.1)").is_err());
+
+    let flip = prism_q::QecOp::RecordFlip { probability: 0.1 };
+    let mut program = QecProgram::new(1);
+    assert!(program.push_op(flip.clone()).is_err());
+    program.measure_z(0).unwrap();
+    program.push_op(flip.clone()).unwrap();
+    program.push_op(flip.clone()).unwrap();
+    program.push_gate(Gate::X, &[0]).unwrap();
+    assert!(program.push_op(flip).is_err());
+    program.measure_z(0).unwrap();
+    assert!(
+        program
+            .push_op(prism_q::QecOp::RecordFlip { probability: -0.1 })
+            .is_err()
+    );
+}

@@ -1802,6 +1802,8 @@ pub prism_q::qec::QecOp::Pad::value: bool
 pub prism_q::qec::QecOp::Postselect
 pub prism_q::qec::QecOp::Postselect::expected: bool
 pub prism_q::qec::QecOp::Postselect::records: alloc::vec::Vec<prism_q::qec::QecRecordRef>
+pub prism_q::qec::QecOp::RecordFlip
+pub prism_q::qec::QecOp::RecordFlip::probability: f64
 pub prism_q::qec::QecOp::Reset
 pub prism_q::qec::QecOp::Reset::basis: prism_q::qec::QecBasis
 pub prism_q::qec::QecOp::Reset::qubit: usize
@@ -3082,6 +3084,8 @@ pub prism_q::QecOp::Pad::value: bool
 pub prism_q::QecOp::Postselect
 pub prism_q::QecOp::Postselect::expected: bool
 pub prism_q::QecOp::Postselect::records: alloc::vec::Vec<prism_q::qec::QecRecordRef>
+pub prism_q::QecOp::RecordFlip
+pub prism_q::QecOp::RecordFlip::probability: f64
 pub prism_q::QecOp::Reset
 pub prism_q::QecOp::Reset::basis: prism_q::qec::QecBasis
 pub prism_q::QecOp::Reset::qubit: usize

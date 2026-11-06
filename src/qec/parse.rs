@@ -19,9 +19,10 @@ const MAX_QEC_EXPANDED_LINES: usize = 1_000_000;
 /// `DETECTOR`, `OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, `X_ERROR`, `Y_ERROR`,
 /// `Z_ERROR`, `DEPOLARIZE1`, `DEPOLARIZE2`, `PAULI_CHANNEL_1`, `PAULI_CHANNEL_2`,
 /// `E`/`CORRELATED_ERROR`, `ELSE_CORRELATED_ERROR`, `HERALDED_ERASE`, `TICK`,
-/// `QUBIT_COORDS`, `SHIFT_COORDS` (ignored), flattened `REPEAT` blocks, and the leakage
+/// `QUBIT_COORDS`, `SHIFT_COORDS` (ignored), flattened `REPEAT` blocks, the leakage
 /// annotations `LEAK(p)`, `SEEP(p)`, and `LEAK_TRANSPORT(p)` (pairs) described on
-/// [`QecNoise`]. Comments use `#`.
+/// [`QecNoise`], and `RECORD_FLIP(p)`, a [`QecOp::RecordFlip`] of the record just
+/// produced. Comments use `#`.
 ///
 /// `M(p)` and `MR(p)` lower `p` into a Pauli flip before the measurement; `MPP` and the
 /// pair measurements take no measurement-error argument. The square-root, axis-cycling,
@@ -34,15 +35,15 @@ pub fn parse_qec_program(input: &str) -> Result<QecProgram> {
 /// Parse a circuit in the Stim circuit file format (`.stim` text) into a QEC program.
 ///
 /// Reads the instructions [`parse_qec_program`] lists except the native extensions
-/// (`T`, `T_DAG`, `LEAK`, `SEEP`, `LEAK_TRANSPORT`, `POSTSELECT`, `EXP_VAL`), and adds
-/// the Stim semantics native text lacks: inverted measurement targets (`M !0`,
-/// `MPP !X0*Z1`), record-controlled Paulis (`CX rec[-1] 2`, `CY`, `CZ`), and
-/// `SHIFT_COORDS` offsets on `DETECTOR` coordinates. Any other instruction, `sweep[k]`
-/// targets, and noise arguments on `MPP`, `MXX`/`MYY`/`MZZ` and `MPAD` are a
+/// (`T`, `T_DAG`, `LEAK`, `SEEP`, `LEAK_TRANSPORT`, `POSTSELECT`, `EXP_VAL`,
+/// `RECORD_FLIP`), and adds the Stim semantics native text lacks: inverted measurement
+/// targets (`M !0`, `MPP !X0*Z1`), record-controlled Paulis (`CX rec[-1] 2`, `CY`,
+/// `CZ`), and `SHIFT_COORDS` offsets on `DETECTOR` coordinates. Any other instruction,
+/// `sweep[k]` targets, and noise arguments on `MPP`, `MXX`/`MYY`/`MZZ` and `MPAD` are a
 /// [`PrismError::Parse`] naming the line.
 ///
-/// `M(p)` flips the qubit before measuring rather than flipping only the record, which
-/// matches Stim when the qubit is reset or not measured again.
+/// `M(p)`, `MR(p)` and their basis variants flip only the record with probability `p`,
+/// through a [`QecOp::RecordFlip`] after the measurement, and leave the qubit alone.
 pub fn parse_stim_circuit(input: &str) -> Result<QecProgram> {
     parse_program(input, Dialect::Stim)
 }
@@ -59,7 +60,7 @@ fn parse_program(input: &str, dialect: Dialect) -> Result<QecProgram> {
     QecProgram::from_ops(num_qubits, QecOptions::default(), parser.ops)
 }
 
-const NATIVE_ONLY_INSTRUCTIONS: [&str; 9] = [
+const NATIVE_ONLY_INSTRUCTIONS: [&str; 10] = [
     "T",
     "T_DAG",
     "TDG",
@@ -69,6 +70,7 @@ const NATIVE_ONLY_INSTRUCTIONS: [&str; 9] = [
     "LEAK_TRANSPORT",
     "POSTSELECT",
     "EXP_VAL",
+    "RECORD_FLIP",
 ];
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -189,6 +191,7 @@ impl QecTextParser {
                 self.parse_correlated_error(&name, args.as_deref(), &targets, line_num, true)
             }
             "HERALDED_ERASE" => self.parse_heralded_erase(args.as_deref(), &targets, line_num),
+            "RECORD_FLIP" => self.parse_record_flip(args.as_deref(), &targets, line_num),
             "R" | "RZ" | "RX" | "RY" => {
                 self.parse_reset(measurement_basis(&name), &targets, line_num)
             }
@@ -514,6 +517,40 @@ impl QecTextParser {
         Ok(())
     }
 
+    fn parse_record_flip(
+        &mut self,
+        args: Option<&str>,
+        targets: &[String],
+        line_num: usize,
+    ) -> Result<()> {
+        let probability = parse_probability_arg(args, "RECORD_FLIP", line_num)?;
+        if !targets.is_empty() {
+            return Err(qec_parse_error(
+                line_num,
+                "`RECORD_FLIP` takes no targets: it flips the record just produced",
+            ));
+        }
+        let follows_record = self
+            .ops
+            .last()
+            .is_some_and(|last| last.produces_record() || matches!(last, QecOp::RecordFlip { .. }));
+        if !follows_record {
+            return Err(qec_parse_error(
+                line_num,
+                "`RECORD_FLIP` must directly follow a measurement or another `RECORD_FLIP`",
+            ));
+        }
+        self.push_record_flip(Some(probability));
+        Ok(())
+    }
+
+    /// Flip the record just produced with probability `p`; zero or `None` adds nothing.
+    fn push_record_flip(&mut self, p: Option<f64>) {
+        if let Some(probability) = p.filter(|&p| p > 0.0) {
+            self.ops.push(QecOp::RecordFlip { probability });
+        }
+    }
+
     fn parse_reset(&mut self, basis: QecBasis, targets: &[String], line_num: usize) -> Result<()> {
         let qubits = parse_qubit_targets(targets, line_num)?;
         require_non_empty_targets(&qubits, "reset", line_num)?;
@@ -542,19 +579,29 @@ impl QecTextParser {
             if inverted {
                 self.push_result_flip(basis, qubit);
             }
-            if let Some(p) = measurement_error.filter(|&p| p > 0.0) {
-                self.ops.push(QecOp::Noise {
-                    channel: measurement_error_channel(basis, p),
-                    targets: vec![qubit],
-                });
-            }
-            self.ops.push(QecOp::Measure { basis, qubit });
-            self.measurement_count += 1;
+            self.push_measurement(basis, qubit, measurement_error);
             if inverted {
                 self.defer_result_flip(basis, qubit);
             }
         }
         Ok(())
+    }
+
+    /// Measure `qubit`, with measurement error `p` as a Pauli flip before the measurement
+    /// in native text and as a flip of the record alone in a Stim circuit.
+    fn push_measurement(&mut self, basis: QecBasis, qubit: usize, p: Option<f64>) {
+        let native_error = p.filter(|&p| p > 0.0 && self.dialect == Dialect::Native);
+        if let Some(p) = native_error {
+            self.ops.push(QecOp::Noise {
+                channel: measurement_error_channel(basis, p),
+                targets: vec![qubit],
+            });
+        }
+        self.ops.push(QecOp::Measure { basis, qubit });
+        self.measurement_count += 1;
+        if self.dialect == Dialect::Stim {
+            self.push_record_flip(p);
+        }
     }
 
     fn parse_measure_reset(
@@ -572,14 +619,7 @@ impl QecTextParser {
             if inverted {
                 self.push_result_flip(basis, qubit);
             }
-            if let Some(p) = measurement_error.filter(|&p| p > 0.0) {
-                self.ops.push(QecOp::Noise {
-                    channel: measurement_error_channel(basis, p),
-                    targets: vec![qubit],
-                });
-            }
-            self.ops.push(QecOp::Measure { basis, qubit });
-            self.measurement_count += 1;
+            self.push_measurement(basis, qubit, measurement_error);
             self.ops.push(QecOp::Reset { basis, qubit });
         }
         Ok(())
@@ -998,7 +1038,8 @@ fn shift_records(op: &mut QecOp, by: usize) {
         | QecOp::Tick
         | QecOp::CorrelatedError { .. }
         | QecOp::HeraldedErase { .. }
-        | QecOp::Pad { .. } => return,
+        | QecOp::Pad { .. }
+        | QecOp::RecordFlip { .. } => return,
     };
     for record in records {
         if let QecRecordRef::Absolute(index) = record {

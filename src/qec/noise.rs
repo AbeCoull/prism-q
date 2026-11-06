@@ -1689,7 +1689,8 @@ pub(super) fn lower_qec_program_to_density_matrix(
             QecOp::Measure { .. }
             | QecOp::MeasurePauliProduct { .. }
             | QecOp::HeraldedErase { .. }
-            | QecOp::Pad { .. } => {
+            | QecOp::Pad { .. }
+            | QecOp::RecordFlip { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC density-matrix estimator".to_string(),
                     reason: "the density matrix holds no measurement records; \
@@ -2027,6 +2028,22 @@ fn lower_qec_program_to_deferred_circuit_inner(
                 deferred_measurements.push((scratch_alias, next_record));
                 measured_aliases[scratch_alias] = true;
                 next_record += 1;
+            }
+            QecOp::RecordFlip { probability } => {
+                if *probability > 0.0 {
+                    // The record's alias is measured and no later gate touches it, so an
+                    // X here reaches its terminal Z measurement and nothing else.
+                    let &(alias, _) = deferred_measurements
+                        .last()
+                        .expect("validation places a record flip after a record");
+                    let position = gates.len();
+                    noise_events.push(QecDeferredNoiseEvent {
+                        channel: QecDeferredChannel::Single([*probability, 0.0, 0.0]),
+                        targets: vec![alias],
+                        position,
+                    });
+                    last_use[alias] = Some(position);
+                }
             }
             QecOp::Feedforward {
                 records,

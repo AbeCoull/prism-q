@@ -20,7 +20,7 @@ in a Pauli product, branch probabilities summing to at most 1, and target pairin
 | `QecOp` variant | Payload | Semantics |
 | --- | --- | --- |
 | `Gate` | `gate`, `targets` | Standard gate. The compiled runner requires Clifford gates; the reference runner accepts any gate the statevector backend supports. |
-| `Measure` | `basis`, `qubit` | Single-qubit measurement in the requested basis. One record. The qubit is left in the Z frame: the basis rotation is not undone. After a non-Z basis, reusing the qubit before a `Reset` is rejected, so the frame it is left in is never observable. |
+| `Measure` | `basis`, `qubit` | Single-qubit measurement in the requested basis. One record. The qubit is left in the Z frame: the basis rotation is not undone. Reusing a measured qubit before a `Reset` is rejected (see the reset requirement below); after a non-Z basis the reference runner rejects it too, so the frame it is left in is never observable. |
 | `MeasurePauliProduct` | `terms` | One record equal to the parity of the listed Pauli terms. Unlike `Measure`, the per-term basis rotations are undone before the record is taken. |
 | `Reset` | `basis`, `qubit` | Reset to the `+1` eigenstate of the requested basis. |
 | `Detector` | `records`, `coords` | Parity over the listed records. `coords` is passthrough metadata with no effect on sampling. |

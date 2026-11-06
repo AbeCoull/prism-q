@@ -213,7 +213,7 @@ lowering it.
 device kind with no crossover and no host fallback. `auto_gpu` never selects it, every
 noisy terminal that `density_matrix()` serves answers from the device buffer, and a
 width whose `4^n` buffer exceeds free device memory raises `PrismError` before
-allocating (13 qubits on an 11 GiB card).
+allocating (14 qubits fit on an 11 GiB card).
 
 The Linux and Windows wheels carry CUDA support; the macOS wheel and a default source
 build do not. There the constructors still exist and `GpuContext(...)` raises

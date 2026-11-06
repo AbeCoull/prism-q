@@ -8,9 +8,9 @@
 //! `U` on the ket register gives `U rho`, and `conj(U)` on the bra register gives
 //! `rho U^dagger`. At 16 bytes per entry the ceiling is about 14 qubits on a
 //! 16 GiB host and 15 on 32 GiB. With [`DensityMatrixBackend::with_gpu`] the
-//! buffer lives in VRAM, where an 11 GiB card holds 13 qubits (1 GiB at 13,
-//! 4 GiB at 14 plus scratch) and every sweep runs as a kernel over the embedded
-//! buffer. Explicit dispatch only; `Auto` never picks it.
+//! buffer lives in VRAM, where an 11 GiB card holds 14 qubits (4 GiB at 14
+//! plus a `2^n` diagonal scratch; 15 needs 16 GiB) and every sweep runs as a
+//! kernel over the embedded buffer. Explicit dispatch only; `Auto` never picks it.
 //!
 //! # Gate support
 //!

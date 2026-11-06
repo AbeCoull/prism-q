@@ -56,10 +56,10 @@ sampling, through seven entry points:
 - **`BackendKind::DensityMatrixGpu { context }`**. The exact mixture in device memory.
   Explicit only: neither `Auto` nor `AutoGpu` selects it, and it has no crossover and
   no host fallback. `init` budgets the `4^n` buffer against free VRAM and errors before
-  allocating when it does not fit, so an 11 GiB card holds 13 qubits (1 GiB at 13,
-  4 GiB at 14 plus scratch). The unitary half reuses the dense statevector kernels on
-  the embedded `2n`-qubit buffer; every channel, measurement and readout sweep has a
-  kernel of its own. The noisy `Simulate` terminals answer from the device mixture
+  allocating when it does not fit, so an 11 GiB card holds 14 qubits (4 GiB at 14
+  plus a `2^n` diagonal scratch; 15 needs 16 GiB). The unitary half reuses the dense
+  statevector kernels on the embedded `2n`-qubit buffer; every channel, measurement and
+  readout sweep has a kernel of its own. The noisy `Simulate` terminals answer from the device mixture
   exactly as `DensityMatrix` does. `DensityMatrixBackend::new(seed).with_gpu(ctx)` is
   the direct form.
 - **`StatevectorBackend::new(seed).with_gpu(ctx)`**. Direct statevector opt-in: every

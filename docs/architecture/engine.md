@@ -154,7 +154,7 @@ The tree is the family choice for a state terminal. Five more routes are reachab
 | Route | Taken when |
 | --- | --- |
 | Factored stabilizer | Clifford only, the circuit splits into independent components, at least 16 qubits, and the largest component is at least 2 |
-| Stabilizer rank, sampled | Shots with terminal measurements only, above 25 qubits, T count at most 40 and at most `n - 2⌈log2 n⌉`; also per-shot runs with mid-circuit measurement inside the same T bound |
+| Stabilizer rank, sampled | Shots with terminal measurements only on a Clifford+T circuit, in two cases: from 16 qubits with no reset and fewer T gates than qubits, at most 20 (the Clifford register, tested ahead of the statevector), or above 25 qubits once the statevector declines, with T count at most 40 and at most `n - 2⌈log2 n⌉`. Per-shot runs with mid-circuit measurement take it inside the second T bound at any width |
 | Deterministic Pauli marginals | A marginals terminal on a unitary Clifford+T circuit of at least 12 qubits. The propagation is exact, and at or below the statevector cap it hands over to the tree once its summed term count passes the dense run's amplitude updates divided by 64 |
 | Scalar tensor contraction | An expectation or marginals terminal whose planned contraction stays inside the peak bound |
 | Temporal Clifford split | A circuit at or below the statevector cap that is not Clifford only and opens with a Clifford prefix long enough to pay for the handover |
@@ -320,7 +320,7 @@ The `BackendKind` variants outside feature gates. `AutoGpu`, `StatevectorGpu`,
 | `TensorNetworkBounded { tolerance }` | Deferred contraction with truncation past the peak cap | Explicit |
 | `Factored` | Dynamic split-state | Explicit or auto (partial independence) |
 | `DensityMatrix` | Exact mixed state | Explicit |
-| `StabilizerRank` | Weighted stabilizer sum, or a Clifford tableau over a dense T register for terminal shots | Explicit, or auto for shots (Clifford+T from 16 qubits with fewer T gates than qubits and at most 20, or past the statevector cap inside the size-derived T budget); never auto for probabilities |
+| `StabilizerRank` | Weighted stabilizer sum, or a Clifford tableau over a dense T register for terminal shots | Explicit, or auto for shots (Clifford+T from 16 qubits with fewer T gates than qubits and at most 20, or above 25 qubits once the statevector declines, with at most 40 T gates inside the size-derived T budget); never auto for probabilities |
 | `StochasticPauli { num_samples }` | SPP | Explicit |
 | `DeterministicPauli { truncation }` | SPD | Explicit, or auto for marginals on a unitary Clifford+T circuit of at least 12 qubits and for expectation values on a Clifford circuit |
 | `PauliPath { epsilon, max_terms }` | Noisy Heisenberg Pauli sum | Explicit |

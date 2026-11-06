@@ -282,8 +282,8 @@ its constituents one at a time keeps the per-constituent route.
 Memory is `16 * 4^n` bytes: about 14 qubits on a 16 GiB host and 15 on 32 GiB
 (`PRISM_MAX_DM_QUBITS` moves it within the statevector budget). With a device attached
 (`BackendKind::DensityMatrixGpu`, or `with_gpu` on the backend) the buffer lives in VRAM,
-budgeted against free memory at `init`. An 11 GiB card holds 13 qubits, so the device
-adds about one qubit and is for throughput, not width. On the device the unitary half
+budgeted against free memory at `init`. An 11 GiB card holds 14 qubits, the same as a
+16 GiB host, so the device is for throughput, not width. On the device the unitary half
 runs the dense statevector kernels over the embedded buffer; channels, projection, reset
 and the diagonal and Pauli readouts have their own kernels. Both kinds are explicit only:
 `Auto` and `AutoGpu` never select them, and the device kind has no host fallback.

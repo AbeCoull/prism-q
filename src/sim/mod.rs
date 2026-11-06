@@ -735,11 +735,13 @@ impl<'c> Simulate<'c, Seeded> {
     ///
     /// The statevector family evaluates one traversal per qubit-wise-commuting
     /// group and reports the variance; see [`ObservableExpectation::variance`]
-    /// for what the number means. Every other route, including runs with a
-    /// noise model or start state attached, evaluates term by term through
-    /// [`Simulate::expectation_values`] semantics and reports the weighted
-    /// mean with no variance. A noise model carrying readout error is rejected
-    /// for the same reason as there.
+    /// for what the number means. The deterministic Pauli and Pauli path routes
+    /// propagate the weighted sum once, so their truncation applies to the
+    /// merged sum. Every other route, including runs with a noise model or
+    /// start state attached, evaluates term by term through
+    /// [`Simulate::expectation_values`] semantics. Neither reports a variance.
+    /// A noise model carrying readout error is rejected for the same reason as
+    /// there.
     pub fn observable_expectation(
         self,
         observable: &PauliObservable,
@@ -765,20 +767,13 @@ impl<'c> Simulate<'c, Seeded> {
                 reject_approximate_route(&self.kind, self.circuit, limits)?;
             }
             reject_pauli_path_initial_state(self.initial_state)?;
-            let result = pauli_path_expectations(
+            return pauli_path_observable(
                 self.circuit,
                 self.noise_model,
-                &observable_vecs(observable),
+                observable,
                 epsilon,
                 max_terms,
-            )?;
-            let metadata = result.metadata;
-            return Ok(weighted_observable_result(
-                observable,
-                &result.values,
-                None,
-                metadata,
-            ));
+            );
         }
         if evolves_resets_as_channels(&self.kind, self.circuit) {
             let result = reset_channel_expectations(
@@ -842,14 +837,15 @@ impl<'c> Simulate<'c, Seeded> {
             if self.require_exact {
                 plan::require_exact_expectation(&route, &self.kind, self.circuit, limits)?;
             }
-            let result =
-                execute_expectations(route, &self.kind, self.circuit, &observables, seed, limits)?;
-            weighted_observable_result(
+            execute_observable(
+                route,
+                &self.kind,
+                self.circuit,
                 observable,
-                &result.values,
-                result.std_errors.as_deref(),
-                result.metadata,
-            )
+                &observables,
+                seed,
+                limits,
+            )?
         };
         ensure_exact_result(self.require_exact, &result.metadata)?;
         Ok(result)
@@ -1352,6 +1348,43 @@ fn pauli_path_expectations(
         RunMetadata::exact(ResolvedBackend::PauliPath).with_reason(RouteRule::ExplicitBackend)
     };
     Ok(analytic_expectations(values, metadata))
+}
+
+/// [`pauli_path_expectations`] for a weighted observable, propagated as one sum.
+fn pauli_path_observable(
+    circuit: &Circuit,
+    noise: Option<&NoiseModel>,
+    observable: &PauliObservable,
+    epsilon: f64,
+    max_terms: usize,
+) -> Result<ObservableExpectation> {
+    let empty;
+    let noise = match noise {
+        Some(model) => model,
+        None => {
+            empty = NoiseModel {
+                after_gate: vec![Vec::new(); circuit.instructions.len()],
+                readout: vec![None; circuit.num_classical_bits],
+            };
+            &empty
+        }
+    };
+    let result = unified_pauli::run_pauli_path_weighted_observable(
+        circuit,
+        noise,
+        &weighted_terms(observable),
+        epsilon,
+        max_terms,
+    )?;
+    let metadata = if result.total_discarded > 0.0 {
+        RunMetadata::approximate(ResolvedBackend::PauliPath)
+    } else {
+        RunMetadata::exact(ResolvedBackend::PauliPath)
+    };
+    Ok(analytic_observable(
+        result.mean,
+        metadata.with_reason(RouteRule::ExplicitBackend),
+    ))
 }
 
 fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {
@@ -3446,14 +3479,65 @@ fn run_observable_expectation_reported(
         return grouped_expectation_statevector(&kind, circuit, observable, seed, limits);
     }
 
-    let result =
-        run_expectation_values_reported(kind, circuit, &observable_vecs(observable), seed, limits)?;
+    let observables = observable_vecs(observable);
+    let route = decide_expectations(&kind, circuit, &observables, limits)?;
+    execute_observable(
+        route,
+        &kind,
+        circuit,
+        observable,
+        &observables,
+        seed,
+        limits,
+    )
+}
+
+/// Evaluate a weighted observable on its expectation route. The deterministic
+/// Pauli route propagates the whole sum once; every other route evaluates each
+/// term and folds the values.
+fn execute_observable(
+    route: ExpectationRoute,
+    kind: &BackendKind,
+    circuit: &Circuit,
+    observable: &PauliObservable,
+    observables: &[Vec<PauliTerm>],
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<ObservableExpectation> {
+    if let ExpectationRoute::Deterministic(truncation) = &route {
+        let result = unified_pauli::run_spd_weighted_observable_with(
+            circuit,
+            &weighted_terms(observable),
+            truncation,
+        )?;
+        let metadata = spd_metadata(truncation).with_reason(expectation_rule(&route, kind));
+        return Ok(analytic_observable(result.mean, metadata));
+    }
+    let result = execute_expectations(route, kind, circuit, observables, seed, limits)?;
     Ok(weighted_observable_result(
         observable,
         &result.values,
         result.std_errors.as_deref(),
         result.metadata,
     ))
+}
+
+fn weighted_terms(observable: &PauliObservable) -> Vec<(f64, &[PauliTerm])> {
+    observable
+        .terms()
+        .iter()
+        .map(|(weight, factors)| (*weight, factors.as_slice()))
+        .collect()
+}
+
+fn analytic_observable(mean: f64, metadata: RunMetadata) -> ObservableExpectation {
+    ObservableExpectation {
+        mean,
+        variance: None,
+        group_variances: None,
+        std_error: None,
+        metadata,
+    }
 }
 
 fn observable_vecs(observable: &PauliObservable) -> Vec<Vec<PauliTerm>> {

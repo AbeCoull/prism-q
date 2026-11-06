@@ -35,15 +35,19 @@ const SPD_MAX_TERMS_CEILING: usize = 1 << 20;
 #[inline]
 fn check_spd_term_ceiling(len: usize, backend: &str) -> Result<()> {
     if len > SPD_MAX_TERMS_CEILING {
-        return Err(PrismError::BackendUnsupported {
-            backend: backend.into(),
-            operation: format!(
-                "weighted-Pauli sum exceeded {SPD_MAX_TERMS_CEILING} terms; pass a nonzero \
-                 max_terms for bounded approximate truncation"
-            ),
-        });
+        return Err(spd_term_ceiling_error(backend));
     }
     Ok(())
+}
+
+fn spd_term_ceiling_error(backend: &str) -> PrismError {
+    PrismError::BackendUnsupported {
+        backend: backend.into(),
+        operation: format!(
+            "weighted-Pauli sum exceeded {SPD_MAX_TERMS_CEILING} terms; pass a nonzero \
+             max_terms for bounded approximate truncation"
+        ),
+    }
 }
 
 /// Rotation angle of the Z-axis rotation a gate lowers to, if any.
@@ -839,6 +843,16 @@ impl WeightedPauliSum {
         }
     }
 
+    /// Merge terms that share a Pauli string.
+    fn coalesce(&mut self) {
+        let mut merged: FxHashMap<PauliVec, Complex64> =
+            FxHashMap::with_capacity_and_hasher(self.terms.len(), FxBuildHasher);
+        for (pauli, coeff) in self.terms.drain(..) {
+            *merged.entry(pauli).or_insert(Complex64::new(0.0, 0.0)) += coeff;
+        }
+        self.terms.extend(merged);
+    }
+
     /// Add `weight` times the identity branch of every term with a `Z` on
     /// `qubit`, from coefficients not yet scaled by the channel. The branch
     /// clears the qubit's z bit, so it can land only on a term with the identity
@@ -1130,15 +1144,72 @@ pub(crate) fn run_spd_observable_with(
     observable: &[PauliTerm],
     truncation: &SpdTruncation,
 ) -> Result<SpdObservableResult> {
+    run_spd_weighted_observable_with(circuit, &[(1.0, observable)], truncation)
+}
+
+/// Seed a sum with `Σ weight · observable`, merging terms that share a Pauli
+/// string.
+fn weighted_sum(num_qubits: usize, terms: &[(f64, &[PauliTerm])]) -> Result<WeightedPauliSum> {
+    let mut sum = WeightedPauliSum::new();
+    for &(weight, observable) in terms {
+        let (pauli, phase) = pauli_vec_from_terms(num_qubits, observable)?;
+        sum.insert(pauli, phase * weight);
+    }
+    if sum.terms.len() > 1 {
+        sum.coalesce();
+    }
+    Ok(sum)
+}
+
+/// `⟨Σ weight · P⟩` by one backward propagation of the whole weighted sum.
+///
+/// Truncation applies to the merged sum: a term budget caps the whole sum,
+/// `epsilon` compares weighted coefficients, and `total_discarded` bounds the
+/// error on the weighted value. A merged sum that outgrows the term ceiling
+/// falls back to one propagation per term, so an exact run fails only where a
+/// single term would.
+pub(crate) fn run_spd_weighted_observable_with(
+    circuit: &Circuit,
+    terms: &[(f64, &[PauliTerm])],
+    truncation: &SpdTruncation,
+) -> Result<SpdObservableResult> {
     truncation.validate()?;
     let lowered = validate_and_lower(circuit, "SPD observable")?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let t_count = count_branching_gates(circuit);
-    let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
 
-    let mut sum = WeightedPauliSum::new();
-    sum.insert(obs, obs_coeff);
+    let merged = |terms: &[(f64, &[PauliTerm])]| -> Result<Option<SpdObservableResult>> {
+        Ok(propagate_spd(circuit, weighted_sum(n, terms)?, truncation))
+    };
+    if let Some(result) = merged(terms)? {
+        return Ok(SpdObservableResult { t_count, ..result });
+    }
+    if terms.len() < 2 {
+        return Err(spd_term_ceiling_error("SPD"));
+    }
+    let mut folded = SpdObservableResult {
+        mean: 0.0,
+        t_count,
+        peak_terms: 0,
+        total_discarded: 0.0,
+    };
+    for &(weight, observable) in terms {
+        let result = merged(&[(1.0, observable)])?.ok_or_else(|| spd_term_ceiling_error("SPD"))?;
+        folded.mean += weight * result.mean;
+        folded.peak_terms = folded.peak_terms.max(result.peak_terms);
+        folded.total_discarded += weight.abs() * result.total_discarded;
+    }
+    Ok(folded)
+}
+
+/// Backward-propagate `sum` through a lowered circuit, or `None` once it
+/// outgrows the term ceiling. The caller fills `t_count`.
+fn propagate_spd(
+    circuit: &Circuit,
+    mut sum: WeightedPauliSum,
+    truncation: &SpdTruncation,
+) -> Option<SpdObservableResult> {
     let mut peak_terms = sum.terms.len();
     let mut total_discarded = 0.0;
 
@@ -1147,7 +1218,9 @@ pub(crate) fn run_spd_observable_with(
             sum.apply_backward(gate, targets);
         }
         truncation.enforce(&mut sum, &mut total_discarded);
-        check_spd_term_ceiling(sum.terms.len(), "SPD")?;
+        if sum.terms.len() > SPD_MAX_TERMS_CEILING {
+            return None;
+        }
         if sum.terms.len() > peak_terms {
             peak_terms = sum.terms.len();
         }
@@ -1155,9 +1228,9 @@ pub(crate) fn run_spd_observable_with(
 
     truncation.final_sweep(&mut sum, &mut total_discarded);
 
-    Ok(SpdObservableResult {
+    Some(SpdObservableResult {
         mean: sum.diagonal_expectation(),
-        t_count,
+        t_count: 0,
         peak_terms,
         total_discarded,
     })
@@ -1599,12 +1672,56 @@ pub fn run_pauli_path_observable(
     epsilon: f64,
     max_terms: usize,
 ) -> Result<PauliPathResult> {
-    let ops = pauli_path_ops(circuit, noise, "PauliPath")?;
-    let (obs, obs_coeff) = pauli_vec_from_terms(circuit.num_qubits, observable)?;
-    let truncation = SpdTruncation::Threshold { epsilon, max_terms };
+    run_pauli_path_weighted_observable(circuit, noise, &[(1.0, observable)], epsilon, max_terms)
+}
 
-    let mut sum = WeightedPauliSum::new();
-    sum.insert(obs, obs_coeff);
+/// [`run_pauli_path_observable`] on `Σ weight · P`, propagated as one sum, with
+/// truncation and `total_discarded` applying to the merged sum. Falls back to
+/// one propagation per term when the merged sum outgrows the term ceiling.
+pub(crate) fn run_pauli_path_weighted_observable(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    terms: &[(f64, &[PauliTerm])],
+    epsilon: f64,
+    max_terms: usize,
+) -> Result<PauliPathResult> {
+    let ops = pauli_path_ops(circuit, noise, "PauliPath")?;
+    let truncation = SpdTruncation::Threshold { epsilon, max_terms };
+    let n = circuit.num_qubits;
+
+    let merged = |terms: &[(f64, &[PauliTerm])]| -> Result<Option<PauliPathResult>> {
+        Ok(propagate_pauli_path(
+            &ops,
+            weighted_sum(n, terms)?,
+            &truncation,
+        ))
+    };
+    if let Some(result) = merged(terms)? {
+        return Ok(result);
+    }
+    if terms.len() < 2 {
+        return Err(spd_term_ceiling_error("PauliPath"));
+    }
+    let mut folded = PauliPathResult {
+        mean: 0.0,
+        peak_terms: 0,
+        total_discarded: 0.0,
+    };
+    for &(weight, observable) in terms {
+        let result =
+            merged(&[(1.0, observable)])?.ok_or_else(|| spd_term_ceiling_error("PauliPath"))?;
+        folded.mean += weight * result.mean;
+        folded.peak_terms = folded.peak_terms.max(result.peak_terms);
+        folded.total_discarded += weight.abs() * result.total_discarded;
+    }
+    Ok(folded)
+}
+
+fn propagate_pauli_path(
+    ops: &[PathOp],
+    mut sum: WeightedPauliSum,
+    truncation: &SpdTruncation,
+) -> Option<PauliPathResult> {
     let mut peak_terms = sum.terms.len();
     let mut total_discarded = 0.0;
 
@@ -1614,13 +1731,15 @@ pub fn run_pauli_path_observable(
             PathOp::Channel(action, qubits) => sum.apply_backward_channel(action, qubits),
         }
         truncation.enforce(&mut sum, &mut total_discarded);
-        check_spd_term_ceiling(sum.terms.len(), "PauliPath")?;
+        if sum.terms.len() > SPD_MAX_TERMS_CEILING {
+            return None;
+        }
         peak_terms = peak_terms.max(sum.terms.len());
     }
 
     truncation.final_sweep(&mut sum, &mut total_discarded);
 
-    Ok(PauliPathResult {
+    Some(PauliPathResult {
         mean: sum.diagonal_expectation(),
         peak_terms,
         total_discarded,

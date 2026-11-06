@@ -484,12 +484,13 @@ from that one executable, so there is one fat-LTO build instead of two and no co
 binary for a slow lane to land in.
 
 Wire the switch at the branch point, behind `bench-internal`, and remove it once the
-numbers are in:
+numbers are in. Variant B carries the new code and A the old, because the report reads B
+slower than A as a regression:
 
 ```rust
 #[cfg(feature = "bench-internal")]
 if crate::bench_variant_b() {
-    return old_path(..);
+    return new_path(..);
 }
 ```
 

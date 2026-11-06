@@ -95,6 +95,7 @@ exclude = [
 "inverse_light_cone" = { rust_only = "analysis helper of the Pauli propagation engines" }
 "noisy_marginals_analytical" = "noisy_marginals_analytical"
 "parse_qec_program" = "QecProgram.from_text"
+"parse_stim_circuit" = "QecProgram.from_stim"
 "run_on" = { rust_only = "runs on a caller-held Backend trait object" }
 "run_on_state" = { rust_only = "runs on a caller-held Backend trait object" }
 "run_qasm" = "run_qasm"
@@ -448,6 +449,7 @@ exclude = [
 "QecProgram::expectation_value_ops" = { rust_only = "op-level view" }
 "QecProgram::feedforward" = "QecProgram.feedforward"
 "QecProgram::from_ops" = { rust_only = "op-level construction; Python builds through methods or from_text" }
+"QecProgram::from_stim" = "QecProgram.from_stim"
 "QecProgram::from_text" = "QecProgram.from_text"
 "QecProgram::has_leakage" = { rust_only = "router predicate" }
 "QecProgram::measure" = "QecProgram.measure"

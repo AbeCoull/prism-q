@@ -38,6 +38,7 @@ renamed classes are on [Errors, Typing and Names](../guides/python-names.md#name
 | `gpu::is_available` | `GpuContext.is_available` |
 | `noisy_marginals_analytical` | `noisy_marginals_analytical` |
 | `parse_qec_program` | `QecProgram.from_text` |
+| `parse_stim_circuit` | `QecProgram.from_stim` |
 | `run_qasm` | `run_qasm` |
 | `run_qec_program` | `QecProgram.run` |
 | `run_qec_program_reference` | `QecProgram.run_reference` |

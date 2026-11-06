@@ -1932,6 +1932,7 @@ pub fn prism_q::qec::QecProgram::expectation_value(&mut self, &[prism_q::qec::Qe
 pub fn prism_q::qec::QecProgram::expectation_value_ops(&self) -> alloc::vec::Vec<(&[prism_q::qec::QecPauli], f64)>
 pub fn prism_q::qec::QecProgram::feedforward(&mut self, &[prism_q::qec::QecRecordRef], bool, alloc::vec::Vec<prism_q::qec::QecOp>) -> prism_q::error::Result<()>
 pub fn prism_q::qec::QecProgram::from_ops(usize, prism_q::qec::QecOptions, alloc::vec::Vec<prism_q::qec::QecOp>) -> prism_q::error::Result<Self>
+pub fn prism_q::qec::QecProgram::from_stim(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::from_text(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::has_leakage(&self) -> bool
 pub fn prism_q::qec::QecProgram::measure(&mut self, prism_q::qec::QecBasis, usize) -> prism_q::error::Result<usize>
@@ -1991,6 +1992,7 @@ pub fn prism_q::UnionFindDecoder::num_detectors(&self) -> usize
 pub fn prism_q::UnionFindDecoder::num_observables(&self) -> usize
 pub fn prism_q::qec::compile_qec_program_rows(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::qec::QecCompiledRows>
 pub fn prism_q::qec::parse_qec_program(&str) -> prism_q::error::Result<prism_q::qec::QecProgram>
+pub fn prism_q::qec::parse_stim_circuit(&str) -> prism_q::error::Result<prism_q::qec::QecProgram>
 pub fn prism_q::qec::run_qec_program(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::QecSampleResult>
 pub fn prism_q::qec::run_qec_program_reference(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::QecSampleResult>
 pub fn prism_q::qec::run_qec_program_spd_rerouted(&prism_q::qec::QecProgram, &[prism_q::QecObservableReroute]) -> prism_q::error::Result<prism_q::QecSampleResult>
@@ -4089,6 +4091,7 @@ pub fn prism_q::qec::QecProgram::expectation_value(&mut self, &[prism_q::qec::Qe
 pub fn prism_q::qec::QecProgram::expectation_value_ops(&self) -> alloc::vec::Vec<(&[prism_q::qec::QecPauli], f64)>
 pub fn prism_q::qec::QecProgram::feedforward(&mut self, &[prism_q::qec::QecRecordRef], bool, alloc::vec::Vec<prism_q::qec::QecOp>) -> prism_q::error::Result<()>
 pub fn prism_q::qec::QecProgram::from_ops(usize, prism_q::qec::QecOptions, alloc::vec::Vec<prism_q::qec::QecOp>) -> prism_q::error::Result<Self>
+pub fn prism_q::qec::QecProgram::from_stim(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::from_text(&str) -> prism_q::error::Result<Self>
 pub fn prism_q::qec::QecProgram::has_leakage(&self) -> bool
 pub fn prism_q::qec::QecProgram::measure(&mut self, prism_q::qec::QecBasis, usize) -> prism_q::error::Result<usize>
@@ -4561,6 +4564,7 @@ pub fn prism_q::density_matrix_expectation_values(&prism_q::circuit::Circuit, &[
 pub fn prism_q::inverse_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm]) -> alloc::vec::Vec<bool>
 pub fn prism_q::noisy_marginals_analytical(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::parse_qec_program(&str) -> prism_q::error::Result<prism_q::qec::QecProgram>
+pub fn prism_q::parse_stim_circuit(&str) -> prism_q::error::Result<prism_q::qec::QecProgram>
 pub fn prism_q::run_on(&mut dyn prism_q::backend::Backend, &prism_q::circuit::Circuit) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::run_on_state(&mut dyn prism_q::backend::Backend, &prism_q::circuit::Circuit, &[num_complex::Complex64]) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::run_qasm(&str, u64) -> prism_q::error::Result<prism_q::sim::RunOutcome>

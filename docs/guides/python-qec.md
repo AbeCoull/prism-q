@@ -34,8 +34,9 @@ plain parity instead of its flip against the noiseless reference run
 
 ## Building a program
 
-`QecProgram(num_qubits)` starts empty, and `from_text` parses the text form that
-`to_text` writes. Operations append in order:
+`QecProgram(num_qubits)` starts empty, `from_text` parses the text form that
+`to_text` writes, and `from_stim` reads Stim circuit files
+([Reading Stim circuit files](qec.md#reading-stim-circuit-files)). Operations append in order:
 
 | Method | Appends |
 |--------|---------|

@@ -308,7 +308,8 @@ pub enum BackendKind {
     /// [`BackendKind::AutoGpu`] selects it. There is no crossover and no host
     /// fallback: every run allocates the `4^n` mixture on the device, after a
     /// budget check against the free VRAM that errors before allocating. An
-    /// 11 GiB card holds 13 qubits (1 GiB at 13, 4 GiB at 14 plus scratch).
+    /// 11 GiB card holds 14 qubits (4 GiB at 14 plus a `2^n` diagonal scratch;
+    /// 15 needs 16 GiB).
     /// Every channel, measurement, and readout sweep runs as a kernel; the
     /// noisy terminals answer from the exact mixture as
     /// [`BackendKind::DensityMatrix`] does.

@@ -244,7 +244,7 @@ together.
 Memory is `16 * 4^n` bytes: about 14 qubits on a 16 GiB host and 15 on 32 GiB
 (`PRISM_MAX_DM_QUBITS` moves it within the statevector budget). With a device attached
 (`BackendKind::DensityMatrixGpu`, or `with_gpu` on the backend) the buffer lives in VRAM,
-budgeted against free memory at `init`; an 11 GiB card holds 13 qubits, so the device is
+budgeted against free memory at `init`; an 11 GiB card holds 14 qubits, so the device is
 for throughput, not width. Both kinds are explicit only: `Auto` and `AutoGpu` never
 select them, and the device kind has no host fallback.
 

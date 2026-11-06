@@ -1,12 +1,12 @@
 # Drawing Circuits
 
-A `Circuit` renders three ways from Rust: a Unicode wire diagram for the terminal, a
-gate-density heatmap for circuits too large to read gate by gate, and self-contained SVG
-of either. All three read the instruction list and simulate nothing.
+A `Circuit` renders as a Unicode wire diagram for the terminal, as a heatmap of gate
+density for circuits too large to read gate by gate, or as self-contained SVG of either.
+Rendering reads the instruction list and simulates nothing.
 
 ## Text diagrams
 
-`Display` draws the circuit with default options, so `println!` is enough:
+`Display` draws the circuit with default options:
 
 ```rust
 use prism_q::CircuitBuilder;
@@ -101,13 +101,14 @@ q[2]: ────────X───@──
 
 Past 64 qubits or 500 moments, `draw` returns `summary()` instead: gate counts,
 connectivity, a depth profile, qubit activity, a heatmap, and a classification such as
-`Clifford-only`. Call `summary()` directly to get it for any circuit.
+`Clifford-only`. `summary()` works on a circuit of any size.
 
 ## Heatmaps
 
 `heatmap(&TextOptions)` shows where the gates are, not what they are: one row per qubit,
 one column per moment, a filled cell where a gate acts. Rows and columns are bucketed to
-fit `fold_width`, and the legend gives the gate count each shade stands for. A hardware-efficient ansatz shows its CX ladder as a diagonal band:
+fit `fold_width`, and the legend gives the gate count each shade stands for. A
+hardware-efficient ansatz shows its CX ladder as a diagonal band:
 
 ```rust
 use prism_q::TextOptions;
@@ -133,8 +134,8 @@ q[7]: ██      ███ ███ █
 
 ## SVG
 
-`to_svg(&SvgOptions)` returns a complete `<svg>` document as a `String`, ready to write
-to a file or embed in HTML or Markdown. `to_svg_heatmap` does the same for the heatmap and
+`to_svg(&SvgOptions)` returns a complete `<svg>` document as a `String`, to write to a
+file or embed in HTML or Markdown. `to_svg_heatmap` does the same for the heatmap and
 adds marginal activity bars and a color key. Each operation counts once on every qubit it
 touches, so a CX adds two to its moment total; the bars sum these counts by qubit and by
 moment.
@@ -186,7 +187,7 @@ The `SvgOptions` fields fall into four groups. Lengths are in SVG user units.
 | Group | Fields | Default |
 |-------|--------|---------|
 | Theme | `dark_mode`, `auto_theme` | light; `auto_theme` embeds both themes and follows `prefers-color-scheme`, overriding `dark_mode` |
-| Annotations | `show_legend`, `show_stats_header`, `show_topology` | all off: a gate-category legend, a qubit, gate and depth line on top, and a qubit connectivity graph beside the circuit |
+| Annotations | `show_legend`, `show_stats_header`, `show_topology` | all off: a legend of gate categories, a qubit, gate and depth line on top, and a qubit connectivity graph beside the circuit |
 | Content | `show_idle_wires`, `show_barriers`, `max_qubits`, `max_moments`, `ellipsis_mode` | everything drawn; `ellipsis_mode: Some((first, last))` keeps the first and last moments with a gap between |
 | Layout | `wire_spacing`, `moment_width`, `gate_height`, `gate_min_width`, `padding_*`, `font_size`, `control_radius`, `compact` | 64, 72, 46, 46, padding 64/32/24/32, 20 px, 4.2; `compact` shrinks spacing and fonts for dense embedding |
 

@@ -70,8 +70,8 @@ except PrismError as exc:
     print(exc.kind)                # incompatible_backend
 ```
 
-[Choosing a Backend](../getting-started/choosing-a-backend.md) has the dispatch tree and
-a table from circuit shape to backend.
+[Choosing a Backend](../getting-started/choosing-a-backend.md) explains how automatic
+dispatch picks, with a table from circuit shape to backend.
 
 ## In Rust
 

@@ -77,7 +77,7 @@ print(shots.metadata.backend, shots.metadata.is_exact)   # StabilizerRank True
 print(round(shots.shots[:, 59].mean(), 4))              # 0.4855, expected 31/64 = 0.4844
 ```
 
-The [Clifford+T guide](../guides/clifford-t.md) covers the three Clifford+T engines and
+The [Clifford+T guide](../guides/clifford-t.md) covers the four Clifford+T engines and
 their limits.
 
 ## Low entanglement: matrix product states

@@ -12,7 +12,7 @@ flowchart TD
     PR --> P0["cancel_self_inverse_pairs (always)"]
     P0 --> P0r["fuse_rzz (always): CX&middot;Rz&middot;CX to Rzz"]
     P0r --> D{"FusionProfile::Device?"}
-    D -- yes --> PD["1q fusion and reorder (>=10q), same-pair 2q runs (>=12q)"]
+    D -- yes --> PD["1q fusion and reorder (>=10q), 2q runs on one pair (>=12q)"]
     PD --> OUT
     D -- no --> P0b["fuse_batch_rzz (>=14q): N&times;Rzz to BatchRzz"]
     P0b --> G{"qubits >= MIN_QUBITS_FOR_FUSION (10)?"}
@@ -32,7 +32,7 @@ flowchart TD
     Pm2q --> Ppr["fuse_pauli_rot_batches (>=16q) to MultiPauliRot"]
     Ppr --> Pcp["fuse_controlled_phases (>=14q) to BatchPhase"]
     Pcp --> Pdb["fuse_diagonal_batch (>=14q) to DiagonalBatch"]
-    Pdb --> Ppp["batch_post_phase_1q (>=18q)"]
+    Pdb --> Ppp["batch_post_phase_1q (>=14q; >=18 on the density matrix buffer)"]
     Ppp --> OUT
 ```
 
@@ -42,9 +42,9 @@ flowchart TD
 |----------|-------|-----------|
 | `MIN_QUBITS_FOR_FUSION` | 10 | Below this, clone cost exceeds simulation savings |
 | `MIN_QUBITS_FOR_MULTI_FUSION` | 14 | MultiFused tiling overhead vs benefit |
-| `MIN_QUBITS_FOR_DIAG_BATCH` | 14 | Diagonal batch, cphase, and Rzz batching, and the 1q rebatch on a buffer as wide as the circuit |
-| `MIN_QUBITS_FOR_POST_PHASE_BATCH` | 18 | Post-phase 1q re-batching |
-| `MIN_QUBITS_FOR_2Q_FUSION` | 12 | Benchmarked QV and random sweeps show memory-pass reduction wins from 12q |
+| `MIN_QUBITS_FOR_DIAG_BATCH` | 14 | Diagonal batch, cphase, and Rzz batching, and the 1q rebatch after phase fusion on a buffer as wide as the circuit (the statevector) |
+| `MIN_QUBITS_FOR_POST_PHASE_BATCH` | 18 | The 1q rebatch after phase fusion on a wider buffer (the density matrix's `2n`) |
+| `MIN_QUBITS_FOR_2Q_FUSION` | 12 | QV and random sweeps make fewer memory passes from 12q |
 | `MIN_QUBITS_FOR_MULTI_2Q_FUSION` | 12 | Same as 2q fusion |
 | `MIN_QUBITS_FOR_PAULI_ROT_BATCH` | 16 | At 15q a parallel subcube pass has tiles for half of an eight-thread pool |
 | Stage floor | derived, 20 on an 8 MB L3 | First width whose statevector outgrows the last-level cache; 20 when the OS reports none, never below 16 |
@@ -88,18 +88,21 @@ swap and two-qubit diagonals become ops of `apply_mixed_tile`, and a planner bui
 the stage planner schedules them into shared-memory tiles of 11 qubits, one pass each. A
 dense 4x4 and every other gate launch on their own kernels. The stage planner's tiles
 would not serve the device: its `Multi2q` folds every 1q gate into a dense 4x4 entry,
-which the device launches one entry at a time, so a five-layer ansatz at 24 qubits ran
-115 dense passes from either stream. A dense 4x4 stays out of the mixed tile too, where
-it ran 7% slower than on its own kernel on a GTX 1080 Ti, whose FP64 rate makes the 4x4
-compute bound.
+which the device launches one entry at a time. A dense 4x4 stays out of the mixed tile
+as well: on a card with a low FP64 rate it is compute bound and runs faster on its own
+kernel.
 
 The lowering runs after binding and reads only the bound stream, so a `PreparedCircuit`
 captures and replays its plan under the profile of the backend it holds.
 
 ## Mixed CPU tiles
 
+The stage planner runs at fusion time and emits ordinary batch gates into the circuit.
+Mixed tiles run at apply time, inside the backend, over whatever stream fusion handed
+over: they regroup operations the batches left apart, without adding a gate variant.
+
 Past the last-level cache floor, the CPU statevector lowers the fused instruction slice
-into a private schedule. A stage admits operations whose moving qubits fit one cache tile
+into a schedule of its own. A stage admits operations whose moving qubits fit one cache tile
 and whose dependencies are met. Diagonal qubits and Pauli Z letters outside the tile are
 constant within a subcube and take no tile slot. The planner examines at most four times
 the state width in skipped operations per scan, and in candidate seeds per growth step.
@@ -110,10 +113,9 @@ and swap keep their permutation operations. Measurements, resets, conditionals,
 regions, barriers and QFT blocks end a stage. No schedule enters the gate enum.
 
 A statevector slice whose operations all lower to one batch kind (dense 1q, dense 2q or
-Pauli rotations) skips the schedule and applies its staged instructions directly. The
-stage planner already batched that stream for the same kernel, and regrouping only moves
-stage boundaries: on `statevector/random_d10/24` it left one 2q gate as a pass of its
-own. The density matrix keeps its doubled schedule for every slice.
+Pauli rotations) skips the schedule and applies its staged instructions directly, since
+the stage planner already batched that stream for the same kernel. The density matrix
+keeps its doubled schedule for every slice.
 
 Across applications the backend keeps only stage indices and operation shapes, and
 reloads numerical payloads from the current slice each time. A changed state width, gate
@@ -173,7 +175,7 @@ A `DiagonalBatch` table covers the qubits its two-qubit entries join, so the cap
 those components, not the entry count: they must pack into
 `DiagonalBatchData::MAX_GROUPS` tables of `MAX_QUBITS_PER_GROUP` qubits. The producer runs
 the kernel's first-fit packing on every gate it admits and closes the run before a gate
-breaks it. A hand-built batch that does not fit still runs, on the per-element path.
+breaks it. A hand-built batch that does not fit still runs, element by element.
 
 ## Diagonal batching
 
@@ -191,49 +193,10 @@ powers of phase estimation all share the eigenstate qubit and run as one batch.
 
 ## Plan capture and replay
 
-A variational sweep holds one gate sequence and varies only the angles, so fusion
-decides the same block structure at every point. `PreparedCircuit` settles it once and
-rebinds against it. Capture gates the floors on the buffer width of the backend the
-prepared circuit holds, so a prepared density matrix fuses at `2n` as a direct run does.
-
-The plan is reusable; the matrices are not, since a changed angle changes every fused
-matrix it feeds. `FusionPlan` records a recipe per angle-derived payload: a list of
-template instructions and how each one's matrix enters the product. Replay recomputes
-the products and never caches them. Nested recipes splice by rewriting a placement flag
-instead of materializing the inner product, which is sound because widening to a pair
-and SWAP conjugation are both multiplicative.
-
-The passes record under a `Tracer` that is inactive on the ordinary path, so fusion
-outside the prepared form allocates what it always did.
-
-Decisions that read a matrix rather than the gate sequence are guarded:
-
-| Decision | Read by | Recorded as |
-|----------|---------|-------------|
-| A 1q run collapsing to the identity | `flush`, which elides it | `Guard::Fuses1q` |
-| A 1q run matching a named gate | `Gate::recognize_matrix` | `Guard::Fuses1q` |
-| Whether a 1q block is diagonal | `reorder_1q_gates`, commuting it past a control | `Guard::Fuses1q` |
-| Whether a 2q block is diagonal | `PairRun::should_fuse` | `Guard::Diag4q` |
-| Whether a pair is a controlled phase | `fuse_controlled_phases` | `Guard::Phase2q` |
-
-Each guard is re-tested per binding, and a binding that flips one falls back to running
-the pipeline, so the stream matches an independently fused circuit either way. The 1q
-diagonality guard lives on the run, not a payload site: the block is often absorbed into
-a `Fused2q` with no 2x2 of its own, and the reorder it steered has already happened.
-
-`DiagonalBatch` records one recipe per phase or parity entry. A diagonal pair is
-decomposed after rebuilding its full matrix product, since its factors need not be
-diagonal individually. `BatchPhase` keeps source products through repeated-pair merging,
-batch splitting and changes of control qubit. The stage planner carries this
-provenance through its nested diagonal passes.
-
-A rewritten `CX Rz CX` records an `Rzz` matrix derived from the source angle, so
-standalone parity batches and later pair fusion replay the same operation.
-
-A gate the passes leave untouched still needs a site when it carries an angle. `PauliRot`
-holds its angle in a boxed payload, not the enum slot, and replay patches it as it
-patches an `Rz`; without that site a bound rotation would keep the
-template's angle while every other payload moved.
+`PreparedCircuit` records the block structure these passes choose and rebuilds only the
+matrices a new binding changes, under guards that fall back to the full pipeline when a
+binding flips a decision read from a matrix. The recipes and guards are on
+[Parameters, Binding and Gradients](./parameters.md#plan-capture-and-replay).
 
 ## Fusion cost against apply cost
 
@@ -241,8 +204,6 @@ Fusion cost tracks instruction count and is nearly flat in qubit count; gate app
 is `2^n`. For `hardware_efficient_ansatz(n, 5, seed)` on this project's
 reference host, fusion is about 22% of a run at 12 qubits and about 0.3% at 20.
 
-```admonish tip
-At 16 qubits and above, fusion is not on the hot path, and these passes are tuned for
-correctness and clarity rather than for their own runtime. Below that it is worth
-amortizing, which is what plan capture exists for.
-```
+From 16 qubits fusion is off the hot path, and these passes are written for
+correctness and clarity rather than their own runtime. Below that, plan capture
+amortizes it.

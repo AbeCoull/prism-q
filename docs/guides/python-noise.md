@@ -1,13 +1,18 @@
 # Noise and Shots
 
+This page covers the Python calls; [Noise Models](noise.md) describes what each rule and
+channel does, and the [Noisy Simulation tutorial](../tutorials/noisy-simulation.md) works
+through a GHZ state under gate noise, readout error and a device calibration.
+
 ## Noise
 
 A `NoiseModel` is built from a circuit and sized to it; attaching it to a different
 circuit raises `PrismError`.
 
 ```python
-from prism_q import NoiseChannel, NoiseModel, simulate
+from prism_q import CircuitBuilder, NoiseChannel, NoiseModel, simulate
 
+circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
 model = NoiseModel.uniform_depolarizing(circuit, 0.01)
 counts = simulate(circuit).seed(42).noise(model).sample_counts(4000).counts()
 ```
@@ -35,24 +40,12 @@ so later filter edits leave it unchanged, and `build` leaves the builder reusabl
 `GateFilter()` and `GateFilter.all()` start unrestricted; `named`, `arity`, `on_qubits`
 and `on_targets` add restrictions. `on_qubits` selects an unordered set of targets,
 while `on_targets([0, 1])` matches the full ordered target list and excludes
-`cx(1, 0)`. Build against the original circuit, since fusion changes gate names. Gate
-rules skip conditional instructions.
+`cx(1, 0)`. Build against the original circuit, since fusion changes gate names.
 
-| Rule | Effect |
-|------|--------|
-| `after_gates(filter, channel)` | One single-qubit event per matching target |
-| `after_gates_joint(filter, channel)` | One event on the complete target list when its arity matches the channel |
-| `crosstalk(filter, coupling, channel)` | Spectator noise along undirected coupling edges; two-qubit channels put the gate target first |
-| `over_rotation(filter, relative)` | An extra `relative * theta` rotation after `rx`, `ry`, `rz` or `p` |
-| `on_idle_qubits(channel)` | One single-qubit event per idle qubit per greedy circuit layer |
-| `after_resets(channel)` | One single-qubit event on each reset qubit |
-| `before_measurements(channel)` | Damage the measured state, including outcomes used by feed-forward |
-| `readout_error(bit, p01, p10)` | Override the uniform readout rates on one classical bit |
-
-Within an instruction slot, events follow rule registration order. Idle events attach
-to the highest-indexed instruction in their layer. Pre-measurement events attach to the
-preceding instruction, so a measurement at instruction zero needs a barrier before it.
-Readout error flips reported bits after sampling and leaves the state intact.
+The rules are `after_gates`, `after_gates_joint`, `crosstalk`, `over_rotation`,
+`on_idle_qubits`, `after_resets`, `before_measurements`, `readout_error` and
+`uniform_readout_error`, with the effects and event ordering listed under
+[Rules](noise.md#rules).
 
 For explicit slots, start from `NoiseModel.empty(circuit)` and add events:
 
@@ -65,8 +58,8 @@ model.validate()
 ```
 
 A device calibration table lowers onto a circuit in one call. `DeviceCalibration.parse`
-reads the text form in the [Noise and QEC guide](./qec.md); the presets carry
-illustrative magnitudes for a technology class, not a measured device:
+reads the text form in [Device calibration](noise.md#device-calibration); the presets
+carry illustrative magnitudes for a technology class, not a measured device:
 
 ```python
 from prism_q import DeviceCalibration
@@ -77,13 +70,16 @@ model = calibration.to_noise_model(circuit)
 
 Channels are `pauli(px, py, pz)`, `depolarizing(p)`, `amplitude_damping(gamma)`,
 `phase_damping(gamma)`, `thermal_relaxation(t1, t2, gate_time, excited_population=0.0)`,
-`two_qubit_depolarizing(p)`, `custom(kraus)` for an explicit list of 2x2
-Kraus operators, and `custom_2q(kraus)` for 4x4 operators on two qubits, indexed with
-the first target as the high bit. `validate()` checks probabilities and Kraus
-completeness. `is_pauli_only()` is true only for single-qubit Pauli channels with no
-readout error; a model with readout error or `two_qubit_depolarizing` reports `False`
-yet still runs on the stabilizer samplers, which apply readout to the record and draw
-the pair channel jointly over its 15 branches.
+`two_qubit_depolarizing(p)`, `custom(kraus)` for an explicit list of 2x2 Kraus operators,
+`custom_2q(kraus)` for 4x4 operators on two qubits, indexed with the first target as the
+high bit, the leakage channels below, and `quasi_static(axis, weights)`, a rotation about
+`"x"`, `"y"` or `"z"` by `sum(w * z[source])` over `(source, w)` pairs, with `z` standard
+normal draws made once per shot; the drift rules below lower onto it. `num_qubits` is the
+number of targets an event with the channel names. `validate()` checks probabilities and
+Kraus completeness. `is_pauli_only()` is true only for single-qubit Pauli channels with no
+readout error; a model with readout error or `two_qubit_depolarizing` reports `False` yet
+still runs on the stabilizer samplers, which apply readout to the record and draw the pair
+channel jointly over its 15 branches.
 
 A two-qubit Kraus channel models correlated noise, here `ZZ` dephasing:
 
@@ -123,11 +119,12 @@ result = simulate(circuit).backend(BackendKind.statevector()).seed(42).noise(lea
 assert result.leaked.shape == (1000, circuit.num_qubits)
 ```
 
-Leakage needs a per-shot trajectory, so the density-matrix backend rejects it. QEC
+Leakage needs a per-shot trajectory, so the density matrix backend rejects it. QEC
 programs take `QecNoise.leak(p)`, `seep(p)` and `leak_transport(p)` (text form
 `LEAK(p)`, `SEEP(p)`, `LEAK_TRANSPORT(p)`), sampled as heralded erasures with one
-`QecSampleResult.heralds` column per `LEAK` target. The [Noise and QEC guide](./qec.md)
-covers both models.
+`QecSampleResult.heralds` column per `LEAK` target. [Leakage](noise.md#leakage) and
+[Leakage as heralded erasure](qec.md#leakage-as-heralded-erasure) describe the two
+models.
 
 ### Timed and correlated noise
 

@@ -1,8 +1,9 @@
 # Capability and Support Matrix
 
-Which CPU and GPU architectures each backend supports, and where distributed execution
-stands. CPU backends are portable Rust. A SIMD kernel (AVX2/FMA/BMI2 on x86-64, NEON on
-ARM64) is selected at runtime where one exists, and a scalar path runs otherwise.
+Which CPU and GPU architectures each backend supports, what each answers past the dense
+memory cap, and which limits decline by name. CPU backends are portable Rust. A SIMD
+kernel (AVX2/FMA/BMI2 on x86-64, NEON on ARM64) is selected at runtime where one exists,
+and a scalar path runs otherwise.
 
 ## Legend
 
@@ -10,7 +11,7 @@ ARM64) is selected at runtime where one exists, and a scalar path runs otherwise
 | --- | --- |
 | Yes | Supported |
 | SIMD | Supported with a dedicated SIMD-accelerated kernel on this architecture |
-| Scalar | Runs, but without a dedicated SIMD kernel (portable fallback) |
+| Scalar | Runs on the portable path, with no dedicated SIMD kernel |
 | No | Not available for this backend |
 | Roadmap | Not implemented yet; the [roadmap](../roadmap.md) carries it and says what it waits on |
 
@@ -35,8 +36,8 @@ carries no distributed execution for any backend but the statevector.
 | Factored | Yes | SIMD | Yes | SIMD | No | No | No |
 | Density Matrix | Yes | SIMD | Yes | SIMD | Yes | No | No |
 
-The Clifford+T engines are not `Backend` implementations; they serve probability, shot
-and observable queries through their own routes (see
+The four Clifford+T engines are not `Backend` implementations; they serve probability,
+shot and observable queries through their own routes (see
 [Clifford+T Simulation](./clifford-t.md)).
 
 | Engine | x86-64 | AVX2/FMA/BMI2 | ARM64 | NEON | CUDA (NVIDIA) | ROCm (AMD) | Distributed |
@@ -44,6 +45,7 @@ and observable queries through their own routes (see
 | Stabilizer Rank | Yes | SIMD | Yes | SIMD | No | No | No |
 | Stochastic Pauli | Yes | Scalar | Yes | Scalar | No | No | No |
 | Deterministic Pauli | Yes | Scalar | Yes | Scalar | No | No | No |
+| Pauli Path | Yes | Scalar | Yes | Scalar | No | No | No |
 
 Notes:
 
@@ -83,39 +85,11 @@ gate, so the table covers the dense form alone.
 | Sparse | Declines, the gate is dense by construction |
 | Product State | Declines, it entangles its targets |
 | Stabilizer, Factored Stabilizer | Decline, not Clifford |
-| Stabilizer Rank, Stochastic Pauli, Deterministic Pauli | Decline, no Clifford+T lowering |
+| Stabilizer Rank, Stochastic Pauli, Deterministic Pauli, Pauli Path | Decline, no Clifford+T lowering |
 | Distributed statevector | Native once the targets are relabelled local; declines when they cannot be, since no exchange path carries a dense `k`-qubit gate |
 
 Every decline is a `BackendUnsupported` naming the backend and the gate. The gate has no
 OpenQASM spelling either: exporting a circuit that holds one raises `ExportUnsupported`.
-
-## Hamiltonian evolution
-
-`Circuit::add_trotter` and `CircuitBuilder::trotter` append a product-formula
-approximation of `exp(-i H t)` for a `PauliObservable` `H = sum c_j P_j`: `steps` steps of
-length `dt = t / steps`, each term as the rotation `exp(-i c_j P_j dt)` through
-`add_pauli_rotation`. Weight-1 strings and `ZZ` land as named rotations and the rest as
-native `PauliRot`, which fusion batches at 16 qubits and above. `TrotterOrder::First` is
-the Lie-Trotter formula, `Second` the symmetric one, and `Suzuki(k)` the recursive formula
-of order `2k` at `5^(k - 1)` second-order substeps per step. Identity terms are dropped,
-since they contribute only a global phase.
-
-```rust
-# use prism_q::{CircuitBuilder, PauliObservable, PauliTerm, TrotterOrder, simulate};
-let ising = PauliObservable::from_terms([
-    (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
-    (0.5, vec![PauliTerm::x(0)]),
-    (0.5, vec![PauliTerm::x(1)]),
-])?;
-let evolved = CircuitBuilder::new(2)
-    .h(0)
-    .h(1)
-    .trotter(&ising, 1.0, 8, TrotterOrder::Second)
-    .build();
-let energy = simulate(&evolved).seed(42).observable_expectation(&ising)?.mean;
-assert!((energy - 1.0).abs() < 1e-2); // <H> is conserved up to the Trotter error
-# Ok::<(), prism_q::PrismError>(())
-```
 
 ## Shot and observable queries above the dense cap
 
@@ -123,7 +97,8 @@ assert!((energy - 1.0).abs() < 1e-2); // <H> is conserved up to the Trotter erro
 dense `2^n` vector unless the backend has its own path. System memory caps the dense route
 (roughly 29 qubits on a 16 GiB host; see `Limits::max_statevector_qubits` or
 `PRISM_MAX_SV_QUBITS`). Backends marked `Native` answer without it and are bounded only by
-their own representation.
+their own representation. Which engine `Auto` picks for each terminal is in
+[routes the tree does not show](../architecture/engine.md#routes-the-tree-does-not-show).
 
 | Backend | Shots and counts | Expectation values |
 | --- | --- | --- |
@@ -131,10 +106,10 @@ their own representation.
 | MPS | Native, sequential conditional sampling | Native, one contraction over each observable's span between shared identity environments |
 | Factored | Native, one draw per sub-state | Native, product over the blocks |
 | Product State | Native, one Bernoulli draw per qubit | Native, one closed-form factor per qubit |
-| Distributed Statevector | Native, rank-local CDF plus one scalar per rank | Native, rank-local sandwich plus one `Allreduce` |
+| Distributed Statevector | Native, a CDF on each rank plus one scalar per rank | Native, a sandwich on each rank plus one `Allreduce` |
 | Statevector | Dense (streams from amplitudes, no probability vector) | Dense |
 | Stabilizer, Factored Stabilizer | Compiled Clifford sampler | Sparse Pauli Dynamics, exact |
-| Stochastic / Deterministic Pauli | Not applicable | Native Pauli propagation |
+| Stochastic, Deterministic Pauli, Pauli Path | Not applicable | Native Pauli propagation |
 | Tensor Network | Dense below `PRISM_MAX_PROB_QUBITS`, then native conditional sampling, one doubled-network contraction per qubit per shot | Native, one doubled-network contraction per observable over its backward light cone |
 | Density Matrix | Dense | Native, `Tr(rho P)` per observable |
 
@@ -142,29 +117,24 @@ Native sampling is deterministic from the seed alone: the same seed and shot cou
 the same bitstrings at any thread count. It does not match the dense route shot for shot,
 since that route consumes its randomness on a different schedule; the distributions agree.
 
-Every backend the crate ships has an observable path. The trait default returns
-`BackendUnsupported` naming the backend, so a backend added later without the path
-declines loudly, and the error names the engine rather than the route that selected it.
+Every backend the crate ships has an observable path. One added later without it declines
+with `BackendUnsupported` naming the engine, not the route that selected it.
 
-`simulate(...).marginals()` reads per-qubit Z expectations instead of a distribution when
-the circuit routes straight to the resolved backend's observable path, and the dense
-output cap does not apply there: a Clifford circuit with measurements reads its marginals
-off the tableau at any width, and the dense statevector reads them off its amplitudes
-without building the `2^n` distribution. It falls back to the dense distribution on a
-circuit that splits into independent blocks, unless those blocks run as product states,
-and under a noise model, where the mixture is read densely and the density-matrix memory
-limit applies.
+`simulate(...).marginals()` escapes the dense output cap when the circuit routes straight
+to an observable path, so a Clifford circuit with measurements reads its marginals off the
+tableau at any width. The cases that fall back to the dense distribution are listed with
+the [routing rules](../architecture/engine.md#routes-the-tree-does-not-show).
 
 Under a noise model `run()` and `marginals()` answer from the exact mixture, so both
 reject a model that carries readout error: readout acts on the measurement record, not
 the state, and is indexed by classical bit where a marginal is indexed by qubit. `shots`
 and `sample_counts` apply it.
 
-Expectation terminals need a unitary circuit, except on `BackendKind::DensityMatrix` and its
-device sibling, which evolve a reset as a channel, with or without a noise model. The run
-honours `.limits()`, `.require_exact()` and a start state, and reports the same metadata
-as the circuit without its resets. A measurement, conditional or `Region` is still rejected
-there.
+Expectation terminals need a unitary circuit, except on `BackendKind::DensityMatrix` and
+its device sibling, which evolve a reset as a channel, with or without a noise model. The
+run honours `.limits()`, `.require_exact()` and a start state, and reports the same
+metadata as the circuit without its resets. A measurement, conditional or `Region` is
+still rejected there.
 
 `simulate(...).run()` is the one terminal that needs the whole distribution, so on the
 distributed backend it rejects a register past the dense cap before running.
@@ -194,7 +164,9 @@ The bound describes the normalized state, which every read returns. A truncating
 not renormalize its chain, but expectation values, shot sampling, the probability vector
 and the exported statevector all rescale on read, so probabilities sum to 1 at any bond
 cap. The discarded weight the bound reports is error in that state, not weight missing
-from it.
+from it. How the MPS computes the bound, and how a decomposed run merges its blocks'
+claims, is on
+[Backends](../architecture/backends.md#what-a-backend-reports-about-its-own-result).
 
 Two tensor-network kinds decide what happens at the tensor-network memory cap. Under
 `BackendKind::TensorNetwork` a contraction over the cap is sliced: legs are fixed, the
@@ -206,13 +178,12 @@ squared weight allows, then slices whatever is still over the cap. It reports
 `Approximate`, with a bound of 1 minus the summed per-cut discarded weights, and
 `require_exact()` rejects it by name.
 
-`Auto` sends a circuit past the statevector cap to an MPS at a bounded bond dimension.
-Expectation and marginals terminals first weigh the exact scalar tensor route, which
-contracts each observable's light cone, against an estimate of the MPS run from its bond
-growth, and take it when the MPS bond would grow faster than the cones. Otherwise MPS is
-the only route; it is taken by default and the result says so.
-`simulate(...).require_exact()` rejects that route with an error naming the engine it
-would have used.
+Past the statevector cap `Auto` takes an MPS at a bounded bond dimension, unless an
+expectation or marginals terminal finds the exact tensor route cheaper. The MPS route is
+taken by default and the result says so, since refusing it would leave an oversize circuit
+that is not sparse with no route at all. `simulate(...).require_exact()` rejects it with
+an error naming the engine it would have used; the
+[engine page](../architecture/engine.md#result-provenance) says when that check runs.
 
 `Simulate::expectation_values_reported` returns a standard error per value on a route that
 estimates rather than evaluates. An evaluated route reports `Exact` and no interval, so a
@@ -252,63 +223,3 @@ process default or the request set it.
 | ROCm (AMD GPU) | Roadmap, needs hardware | No AMD device kernels; the GPU path is CUDA-only |
 | Distributed GPU | Roadmap, research | No multi-node GPU execution; it follows multi-GPU on one host |
 | Multi-GPU | Roadmap, needs hardware | A GPU context binds a single device; sharding one statevector across devices also needs peer access between them to stay ahead of the host path |
-
-## Compatibility
-
-The minimum supported Rust version is 1.89.0, pinned in three places updated together:
-`rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`, and the `CI_MSRV` variable the
-`msrv` CI job builds against. That job checks the library with `parallel`, `gpu` and
-`distributed`; `distributed-mpi` needs a system MPI to build and is not checked at the
-floor. Raising the MSRV is a minor bump while the crate is below 1.0. The development
-toolchain is separate: `rust-toolchain.toml` pins an exact stable release (see
-[Contributing](https://github.com/AbeCoull/prism-q/blob/main/CONTRIBUTING.md#build)).
-
-Four feature flags are part of the surface: `parallel`, on by default, and `gpu`,
-`distributed` and `distributed-mpi`, each off. `bench-fast` and `bench-internal` are not:
-they shape benchmark runs, gate items no caller should reach for, and may change or
-disappear in any release.
-
-The crate and the Python wheel carry one version. A release bumps the crate, writes the
-same version into the bindings manifest and tags the wheel `py-v<version>`, so a wheel and
-a crate with the same number were built from one commit. Below 1.0 the minor position is
-the compatibility boundary: Cargo reads `0.32.0` as `^0.32.0`, so `0.32` to `0.33` already
-signals a break to every caret requirement, and the release tooling resolves a breaking
-change to a minor bump rather than 1.0.0.
-
-A version promises the surface tabulated in [API surface](../architecture/api-surface.md)
-and the Python package. Which backend `Auto` picks for a circuit, where the fusion
-thresholds sit, how fast a kernel runs and what the benchmark rows are named are
-implementation, and they move without a bump. Public enums are `#[non_exhaustive]` apart
-from a few that mirror a closed set, which that page names, so a new variant is additive
-and a `match` outside the crate keeps a wildcard arm. The `Backend` trait is sealed, so
-only the crate implements it and a new method is additive. Items hidden from the rendered
-API docs, such as `prism_q::circuit::fusion`, are reachable for tests and tooling but are
-not part of the surface.
-
-### Seeded output
-
-A seed reproduces a result within a version, under the thread-count rules each path
-states in [Determinism](../architecture/threading-simd.md#determinism). Across versions it
-does not: a minor release may change what a seed draws, and its release notes say so. Such
-a change moves which bits a seed lands on, not the distribution they come from; the
-distribution changes only to fix a bug.
-
-Seeded output has changed in these releases:
-
-- 0.33.0 seeds shot `i` with a SplitMix64 hash of the run seed and `i` instead of
-  `seed + i`. That covers per-shot replay of circuits with mid-circuit measurements, the
-  distributed per-shot loop, noise trajectories (serial and parallel, noisy stabilizer
-  trajectories included), the block seeds of a decomposed run, and the per-qubit and
-  per-observable seeds of Stochastic Pauli Propagation. Fixed-seed results on those routes
-  changed, and on a replay route `shots(1)` with seed `x` no longer reproduces `run()`
-  with seed `x`.
-- 0.35.0 changes three sampling routes and fixes a fourth. Product-state and factored
-  terminal shots and counts draw in blocks of 256 shots, one stream per block, so they
-  fill in parallel; the dense sampler over factored block probabilities, which also serves
-  decomposed terminal shots, draws the same blocks so the two still agree shot for shot.
-  Noiseless circuits with mid-circuit measurements on the host statevector evolve once per
-  outcome history and split shots binomially, so a shot no longer corresponds to a run on
-  its own seed; once only measurements remain, each branch draws its readout from its own
-  state in one pass. Dynamic programs on the host statevector branch the same way, so
-  their shots no longer follow `mix_seed(seed, i)`. Compiled Clifford counts at high shot
-  counts draw from a corrected binomial sampler, which also fixes their spread.

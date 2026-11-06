@@ -1,22 +1,36 @@
 # Clifford+T Simulation
 
 Circuits that mix Clifford gates with a modest number of `T` gates sit between the
-polynomial stabilizer regime and the exponential statevector regime. Three strategies
-cover them, chosen by T-count, qubit count, and whether Monte Carlo error is acceptable.
+polynomial stabilizer regime and the exponential statevector regime. Four engines cover
+them, chosen by T count, qubit count, whether Monte Carlo error is acceptable, and
+whether the circuit carries noise.
 
-```admonish tip title="Which strategy?"
-- **Few T gates, exact result needed**: stabilizer rank (`run_stabilizer_rank`).
-- **Many T gates, marginals only**: stochastic Pauli propagation (`run_spp`).
-- **Moderate T-count, exact or bounded-error expectation values**: deterministic sparse
-  Pauli dynamics (`run_spd`).
+```admonish tip title="Which engine?"
+- Few T gates and an exact result: stabilizer rank (`run_stabilizer_rank`).
+- Many T gates, marginals only: stochastic Pauli propagation, SPP (`run_spp`).
+- Moderate T count, exact or bounded-error expectation values: deterministic Pauli
+  propagation, SPD (`run_spd`).
+- Expectation values under a noise model: Pauli path (`BackendKind::PauliPath`).
 ```
 
-When the T-count permits, these run before the standard
-[dispatch tree](../architecture/engine.md).
+`Auto` reaches three of them ahead of the
+[dispatch tree](../architecture/engine.md#auto-dispatch-decision-tree):
+
+- Terminal shots go to stabilizer rank on a circuit of 16 qubits or more with fewer T
+  gates than qubits and at most 20 (the Clifford register form below). Past the
+  statevector cap, it takes terminal shots with a T count of at most 40, inside a bound
+  derived from the width. Shots with mid-circuit measurements take it inside the same T
+  bound.
+- Marginals on a unitary Clifford+T circuit of 12 qubits or more go to SPD.
+- Expectation values on a Clifford circuit go to SPD.
+
+SPP and Pauli path run only when selected.
+[Routes the tree does not show](../architecture/engine.md#routes-the-tree-does-not-show)
+has the exact conditions.
 
 ## Accepted gate forms
 
-All three strategies take Clifford gates, `T`, `Tdg`, `Rz`, `P` and `Rzz` as they are,
+All four engines take Clifford gates, `T`, `Tdg`, `Rz`, `P` and `Rzz` as they are,
 and lower `Rx`, `Ry` and `PauliRot` to Clifford conjugation around one `Rz`. A `Fused`
 matrix (the parser's `u`, `u3`, `u2`, `r`, `gpi` and `gpi2`) lowers to the named gate or
 `Rz` it equals up to a global phase, or else to its Rz-Ry-Rz Euler triple. A `cu` lowers
@@ -99,10 +113,11 @@ let result = run_spd_with(&circuit, &truncation)?;   // SpdResult, any policy
 # Ok::<(), prism_q::PrismError>(())
 ```
 
-Both truncation policies are available from the builder as well as the free functions:
+The builder takes both truncation policies too:
 
 ```rust
-# use prism_q::{BackendKind, PauliTerm, SpdTruncation, circuits::clifford_t_circuit, simulate};
+# use prism_q::{BackendKind, PauliTerm, SpdTruncation, simulate};
+# use prism_q::circuits::clifford_t_circuit;
 # let circuit = clifford_t_circuit(8, 10, 0.1, 42);
 # let observables = vec![vec![PauliTerm::z(0)], vec![PauliTerm::z(0), PauliTerm::z(1)]];
 let values = simulate(&circuit)
@@ -120,7 +135,7 @@ passes `max_terms`, and `max_terms = 0` disables pruning for an exact run. With 
 and the run errors there rather than returning an over-truncated value.
 
 `SpdTruncation::Budget { max_terms }` instead drops exactly enough of the
-smallest-magnitude terms to return to the budget. There is no threshold to guess, and
+smallest terms to return to the budget. There is no threshold to guess, and
 growth the budget caps cannot reach the ceiling, so it suits runs where the term count is
 the binding constraint. A budget of zero is rejected.
 
@@ -140,7 +155,8 @@ The same weighted Pauli sum, carried through a noise model. Select
 answers `expectation_values` and `observable_expectation` and nothing else.
 
 ```rust
-# use prism_q::{BackendKind, NoiseModel, PauliTerm, circuits::clifford_t_circuit, simulate};
+# use prism_q::{BackendKind, NoiseModel, PauliTerm, simulate};
+# use prism_q::circuits::clifford_t_circuit;
 # let circuit = clifford_t_circuit(8, 10, 0.1, 42);
 # let observables = vec![vec![PauliTerm::z(0)], vec![PauliTerm::z(0), PauliTerm::z(1)]];
 let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
@@ -152,9 +168,8 @@ let values = simulate(&circuit)
 # Ok::<(), prism_q::PrismError>(())
 ```
 
-The error has two independent parts, and only the truncation is approximate.
-
-The channels are exact. Each is applied as its adjoint on the Pauli basis, not as a twirl,
+Of the two sources of error, only the truncation is approximate. The channels are
+exact. Each is applied as its adjoint on the Pauli basis, not as a twirl,
 so depolarizing, dephasing, thermal relaxation and amplitude damping reproduce the density
 matrix to machine precision at `max_terms = 0`. Amplitude damping is not unital, and the
 identity term its adjoint produces from `Z` is carried. A channel with no Pauli-basis form
@@ -180,4 +195,4 @@ it at 20 and returns a discarded mass larger than the observable's own norm, whi
 the answer as unusable instead of returning a wrong one quietly. Check the reported
 discarded mass against the precision needed before trusting a truncated run.
 
-[`clifford_t_circuit`](../reference/builders.md) builds Clifford+T test circuits directly.
+[`clifford_t_circuit`](../reference/builders.md) builds random Clifford+T test circuits.

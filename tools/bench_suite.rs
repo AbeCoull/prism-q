@@ -223,7 +223,12 @@ fn render(rows: &[Row], threads: usize) -> String {
          cap; GHZ is Clifford and runs into the thousands of qubits on the \
          stabilizer backend. QV uses square depth, so its gate count grows with \
          the qubit count and it is compute-bound earlier than the fixed-depth \
-         families.\n"
+         families."
+    );
+    let _ = writeln!(
+        s,
+        "- QFT is `qft_circuit`, one `QftBlock` that the statevector runs on its \
+         native FFT kernel.\n"
     );
 
     for (family, _) in FAMILIES {

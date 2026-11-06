@@ -106,8 +106,8 @@ rate falls four to sevenfold per step in distance, as expected below threshold.
 
 `model.to_text()` writes the model in the common detector error model text format, for
 an external matching or belief-propagation decoder. The
-[Noise and QEC guide](../guides/qec.md) covers the text program format, postselection,
-and the other noise channels.
+[QEC guide](../guides/qec.md) covers the text program format, postselection, and the
+other QEC noise channels.
 
 ## In Rust
 

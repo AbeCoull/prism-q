@@ -2344,13 +2344,13 @@ fn bench_tn_sliced_contraction(_c: &mut Criterion) {}
 /// The same contraction with the peak cap set below its largest intermediate,
 /// so index slicing runs instead of the cap rejecting.
 ///
-/// `tn/scalar_hea_l7` at 50 qubits peaks at 8388608 elements, 128 MB in one
-/// intermediate. A cap of `2^22` halves that, which the search meets with four
-/// slices, so the row prices the slice loop against the whole contraction the
-/// tree-quality group runs. Slices near the cap run one or two at a time,
-/// since only as many run at once as fit under it together. Deeper caps are not pricable here:
-/// at `2^20` the same contraction takes the whole 1024-slice budget and one
-/// iteration runs for minutes. The cap and budget are arguments rather than
+/// `tn/scalar_hea_l7` at 50 qubits peaks at 2097152 elements, 32 MB in one
+/// intermediate. A cap of `2^20` halves that, which the search meets with four
+/// slices at 2.3x the whole contraction's planned multiply-adds, so the row
+/// prices the slice loop against the whole contraction the tree-quality group
+/// runs. Each slice peaks at the cap, so the slices run one at a time. Deeper
+/// caps multiply the work: `2^19` takes 16 slices at 5.6x and `2^18` takes 128
+/// at 23x. The cap and budget are arguments rather than
 /// environment variables so the rest of the process keeps the real ceiling.
 #[cfg(feature = "bench-internal")]
 fn bench_tn_sliced_contraction(c: &mut Criterion) {
@@ -2363,7 +2363,7 @@ fn bench_tn_sliced_contraction(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
         b.iter(|| {
             black_box(
-                scalar_expectation_capped(circ, &observable, 1 << 22, 1 << 10, None).unwrap(),
+                scalar_expectation_capped(circ, &observable, 1 << 20, 1 << 10, None).unwrap(),
             );
         });
     });
@@ -2378,7 +2378,8 @@ fn bench_tn_bounded_contraction(_c: &mut Criterion) {}
 ///
 /// Pairs with `tn/sliced_hea_l7`: same circuit, same cap, same budget, and
 /// the tolerance is the only difference, so the row prices what truncation
-/// costs and how much of the slice loop it removes.
+/// costs and how much of the slice loop it removes. At `2^20` it discards a
+/// weight near `1e-30` and leaves eight slices against the sliced row's four.
 #[cfg(feature = "bench-internal")]
 fn bench_tn_bounded_contraction(c: &mut Criterion) {
     let mut group = c.benchmark_group("tn/bounded_hea_l7");
@@ -2390,7 +2391,7 @@ fn bench_tn_bounded_contraction(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
         b.iter(|| {
             black_box(
-                scalar_expectation_capped(circ, &observable, 1 << 22, 1 << 10, Some(1e-3)).unwrap(),
+                scalar_expectation_capped(circ, &observable, 1 << 20, 1 << 10, Some(1e-3)).unwrap(),
             );
         });
     });

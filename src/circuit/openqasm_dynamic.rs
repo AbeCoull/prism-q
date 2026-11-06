@@ -281,6 +281,12 @@ fn lower(
                     Some(width) => Some(cast.ty.width(fold(width)?, line)?),
                     None => None,
                 };
+                if cast.ty == syntax_expr::CastType::Angle && width.is_some() {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: "a fixed-width runtime angle cast".to_string(),
+                        line,
+                    });
+                }
                 ClassicalExpr::cast(cast.ty.runtime(width), recurse(&cast.value)?)
             }
             Expr::Number(_) | Expr::Duration(_) => unreachable!("a literal reads no runtime leaf"),
@@ -1143,6 +1149,12 @@ impl<'a> Parser<'a> {
         if matches!(ty, "float" | "angle") {
             return Ok(match self.real_type(ty, width, line)? {
                 ClassicalType::Float(width) => RuntimeType::Float { width },
+                ClassicalType::Angle(Some(_)) => {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: "a fixed-width runtime angle".to_string(),
+                        line,
+                    });
+                }
                 _ => RuntimeType::Angle,
             });
         }

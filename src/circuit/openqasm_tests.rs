@@ -4336,6 +4336,66 @@ fn a_zero_divisor_is_a_parse_error() {
 }
 
 #[test]
+fn fixed_width_runtime_angles_decline_without_losing_precision() {
+    for width in [1, 2, 64] {
+        for body in [
+            format!("angle[{width}] a = pi * int(c); rx(a) q;"),
+            format!("angle[{width}] a = 0; if (c) a = pi / 3; rx(a) q;"),
+            format!("angle[{width}] a = 0; while (c) {{ a += pi / 3; c = 0; }} rx(a) q;"),
+            format!("rx(angle[{width}](pi * int(c))) q;"),
+            format!("float a = angle[{width}](pi * int(c)); rx(a) q;"),
+            format!("def f(bit b) -> angle[{width}] {{ return pi * int(b); }} rx(f(c)) q;"),
+        ] {
+            let source = format!("qubit q; bit c; h q; c = measure q; {body}");
+            assert!(
+                matches!(parse_dynamic(&source),
+                Err(PrismError::UnsupportedConstruct { construct, .. })
+                if construct.contains("fixed-width") && construct.contains("angle")),
+                "{body}"
+            );
+        }
+    }
+    for body in ["angle[65] a = int(c);", "rx(angle[65](int(c))) q;"] {
+        let source = format!("qubit q; bit c; c = measure q; {body}");
+        assert!(
+            matches!(parse_dynamic(&source), Err(PrismError::Parse { .. })),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn folded_angle_precision_and_widthless_runtime_angles_are_preserved() {
+    for body in [
+        "angle[1] a = 3 * pi / 2; rx(a) q;",
+        "angle[2] a = 0; a = pi / 3; rx(a) q;",
+        "angle[64] a = -pi / 2; rx(a) q;",
+        "rx(angle[2](pi / 3)) q;",
+    ] {
+        let source = format!("qubit q; {body}");
+        let expected = parse(&source).unwrap();
+        let program = parse_dynamic(&source).unwrap();
+        assert_eq!(
+            format!("{:?}", program.static_circuit().unwrap().instructions),
+            format!("{:?}", expected.instructions),
+            "{body}"
+        );
+    }
+    let program = parse_dynamic(
+        "qubit q; bit[2] c; h q; c[0] = measure q;
+         angle a = -pi * int(c[0]); rx(angle(a)) q; c[1] = measure q;",
+    )
+    .unwrap();
+    let shots = crate::simulate_program(&program)
+        .seed(42)
+        .shots(100)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| !shot[1]));
+    assert!(shots.shots.iter().any(|shot| shot[0]));
+    assert!(shots.shots.iter().any(|shot| !shot[0]));
+}
+
+#[test]
 fn casts_convert_to_their_type() {
     for (body, want) in [
         ("rx(int(2.7)) q[0];", 2.0),

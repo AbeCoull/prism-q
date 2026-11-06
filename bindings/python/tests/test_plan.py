@@ -27,8 +27,8 @@ def test_plan_exposes_resource_error_without_raising_it():
 
 
 def test_gradient_query_has_nested_evaluation_reports():
-    circuit = CircuitBuilder(1).ry(0.3, 0).build()
-    query = Query.gradient_shift([(1.0, [(0, "Z")])], [(0, 0)])
+    circuit, params = CircuitBuilder(1).ry(0.3, 0).param(0).build_parametric()
+    query = Query.gradient_shift([(1.0, [(0, "Z")])], params)
     plan = simulate(circuit).plan(query)
     assert plan.rule == "parameter_shift"
     assert len(plan.evaluations) == 3
@@ -36,12 +36,11 @@ def test_gradient_query_has_nested_evaluation_reports():
     assert plan.peak_memory["kind"] == "unknown"
 
 
-def test_gradient_query_rejects_overflowing_parameter_slot():
-    import struct
-
-    maximum = (1 << (8 * struct.calcsize("P"))) - 1
-    with pytest.raises(PrismError):
-        Query.gradient([(1.0, [(0, "Z")])], [(0, maximum)])
+def test_gradient_query_takes_parameters_not_links():
+    _, params = CircuitBuilder(1).ry(0.3, 0).param(0).build_parametric()
+    for build in (Query.gradient, Query.gradient_shift):
+        with pytest.raises(TypeError):
+            build([(1.0, [(0, "Z")])], params.links())
 
 
 def test_conditional_fallback_error_does_not_reject_primary():
@@ -78,7 +77,6 @@ def test_plan_reports_a_pauli_string_wider_than_the_circuit():
 
     circuit, params = CircuitBuilder(2).ry(0.3, 0).param(0).cx(0, 1).build_parametric()
     request = simulate(circuit).seed(42)
-    links = params.links()
     cases = [
         (Query.expectation(["ZIII"]), lambda: request.expectation(["ZIII"])),
         (
@@ -86,11 +84,11 @@ def test_plan_reports_a_pauli_string_wider_than_the_circuit():
             lambda: request.expectation(PauliObservable([(1.0, "ZII")])),
         ),
         (
-            Query.gradient([(1.0, "ZIZ")], links),
+            Query.gradient([(1.0, "ZIZ")], params),
             lambda: request.expectation_gradient([(1.0, "ZIZ")], params),
         ),
         (
-            Query.gradient_shift([(1.0, "ZIZ")], links),
+            Query.gradient_shift([(1.0, "ZIZ")], params),
             lambda: request.expectation_gradient_shift([(1.0, "ZIZ")], params),
         ),
     ]

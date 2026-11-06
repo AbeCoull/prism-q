@@ -1,8 +1,8 @@
 # Dynamic Circuits
 
-Goal: teleport a qubit using mid-circuit measurement and feed-forward, then reuse a
-measured qubit with `reset` and branch on an outcome with `if`/`else`, all written in
-OpenQASM 3.
+Goal: teleport a qubit using mid-circuit measurement and feed-forward, reuse a measured
+qubit with `reset`, branch on an outcome with `if`/`else`, and decode an outcome in a
+subroutine, all written in OpenQASM 3.
 
 ## Teleportation
 
@@ -40,7 +40,7 @@ print(round(math.sin(theta / 2) ** 2, 4))     # 0.3188
 The sampled rate is 0.002 from the exact one; one standard error at 100,000 shots is
 0.0015. `shots` is a `(shots, bits)` bool array, so column 2 is classical bit `c[2]`.
 
-A circuit with feed-forward has no single final state, so use the per-shot terminals,
+A circuit with feed-forward has no single final state, so use the shot terminals,
 `shots()` and `sample_counts()`. `run()` follows one sampled branch: `classical_bits`
 holds that shot's outcomes and `probabilities` the state it ended in. `state_vector()`
 declines any circuit that measures, resets or branches.
@@ -84,6 +84,41 @@ blocks a shot stops with a step-limit error unless `max_steps` raises the bound.
 The [OpenQASM guide](../guides/openqasm.md#dynamic-programs) covers what the dynamic
 parser reads, and [the subset](../guides/openqasm.md#the-subset) has the rest.
 
+## Subroutines and classical values
+
+Under `parse_qasm_dynamic`, a `def` can compute a value from a measured bit, typed
+variables hold it, and assignments write classical bits. Here `decode` turns the first
+outcome into an `int`, an `if` on that value undoes the flip, and the last line writes a
+check bit:
+
+```python
+from prism_q import parse_qasm_dynamic, simulate_program
+
+program = parse_qasm_dynamic("""
+OPENQASM 3.0;
+include "stdgates.inc";
+qubit q;
+bit[3] c;
+def decode(bit b) -> int {
+  if (b) return 1;
+  return 0;
+}
+h q;
+c[0] = measure q;
+int correction = decode(c[0]);
+if (correction == 1) x q;
+c[1] = measure q;
+c[2] = correction == int(c[0]);
+""")
+
+counts = simulate_program(program).seed(42).sample_counts(1000).counts()
+print(sorted(counts))   # ['001', '101']
+```
+
+`c[0]` is a fair coin. The correction always returns the qubit to `|0>`, so `c[1]` reads
+0 and `c[2]` is always 1. The [Subroutines section](../guides/openqasm.md#subroutines) of the OpenQASM guide lists the
+result types and the forms that decline.
+
 ## In Rust
 
 The same OpenQASM source parses with `openqasm::parse`. `CircuitBuilder` also has
@@ -119,6 +154,7 @@ assert_eq!(keys, ["000", "010", "110"]);
 ```
 
 [`examples/dynamic_circuits.rs`](https://github.com/AbeCoull/prism-q/blob/main/examples/dynamic_circuits.rs)
-runs both circuits.
+runs both circuits. The subroutine program goes through `openqasm::parse_dynamic` and
+`simulate_program` in the same way.
 
 Next: [Large and Structured Circuits](./large-circuits.md).

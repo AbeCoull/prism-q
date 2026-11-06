@@ -9,11 +9,14 @@ For which SIMD tiers and architectures each backend supports, see the
 |---------|---------------------|--------|----------------|
 | Statevector | `Vec<Complex64>` (2^n) | $O(2^n)$ | Strided pair iteration |
 | Stabilizer | Bit-packed `Vec<u64>` tableau | $O(n^2/2)$ bytes | Sequential row iteration |
-| Sparse | `HashMap<usize, Complex64>` | $O(k)$, $k$ = nonzero | Hash-based random access |
+| Factored Stabilizer | One bit-packed tableau per cluster | $O(\sum_i n_i^2)$ bits | Merge on a bridging gate, split on measurement |
+| Sparse | `FxHashMap<usize, Complex64>` | $O(k)$, $k$ = nonzero | Hashed random access |
 | MPS | Chain of rank-3 tensors | $O(n\chi^2)$ | Sequential site access |
-| Product | `Vec<[Complex64; 2]>` | $O(n)$ | Per-qubit independent |
-| Tensor Network | Network of dense tensors | $O(\text{gates} \times \text{local dim})$ | Contraction-order dependent |
-| Factored | `Vec<Option<SubState>>` | $O(2^n)$ worst case | Dispatch per substate |
+| Product | `Vec<[Complex64; 2]>` | $O(n)$ | Each qubit independent |
+| Tensor Network | Network of dense tensors | $O(\text{gates} \times \text{local dim})$ | Set by the contraction order |
+| Factored | `Vec<Option<SubState>>` | $O(2^n)$ worst case | Dispatch per block state |
+| Density Matrix | `Vec<Complex64>` ($4^n$), a $2n$-qubit statevector | $O(4^n)$ | Strided pairs on the ket and bra registers |
+| Distributed statevector | $2^{n-p}$ amplitudes on each of $2^p$ ranks | $O(2^{n-p})$ per rank | Local pairs; a pairwise exchange on a rank qubit |
 
 ## Threading
 
@@ -23,7 +26,7 @@ below that, thread-pool overhead exceeds the work. Each task covers at least
 `MIN_PAR_ELEMS = 4096` amplitudes, 64 KiB.
 
 The pool is the process-wide Rayon pool, sized on the first simulation call to every
-logical core; `RAYON_NUM_THREADS` overrides it. Hyperthreads help at 24 qubits and above
+logical core; `RAYON_NUM_THREADS` overrides it. Hyperthreads help from 24 qubits
 by hiding memory latency.
 
 An application that owns the global pool can hand PRISM-Q a bounded one instead:
@@ -33,25 +36,42 @@ width can change results; see [Determinism](#determinism).
 
 ## SIMD
 
-One `Complex64` fills a 128-bit register. Single-qubit gate kernels use `PreparedGate1q` with runtime CPU detection and tiered dispatch:
+One `Complex64` fills a 128-bit register. Single-qubit gate kernels use `PreparedGate1q`
+with runtime CPU detection and tiered dispatch:
 
-1. **AVX-512** (512-bit): 4 complex pairs per iteration, with masked tails. Opt-in through `PRISM_AVX512=1` on CPUs with `avx512f` and `avx512vpopcntdq`, and kept to the same `MAX_AVX2_STATE` and tile rules as AVX2. Verified under emulation, not yet timed on AVX-512 hardware.
-2. **AVX2+FMA** (256-bit): 2 complex pairs per iteration. Gated by `MAX_AVX2_STATE` for full-state passes (Skylake frequency throttling), but used freely within MultiFused L2 tiles where data is cache-resident.
-3. **FMA** (128-bit): Default for larger states. 3-op complex multiply (permute + mul + fmaddsub).
-4. **SSE2** (128-bit): x86_64 baseline, 2 mul plus shuffle, xor and add.
-5. **NEON** (128-bit): the aarch64 baseline, 1 mul plus 1 fma against a pre-negated matrix.
-6. **Scalar**: no intrinsics, for everything that is neither x86_64 nor aarch64.
+1. AVX-512 (512-bit): 4 complex pairs per iteration, with masked tails. Opt in through
+   `PRISM_AVX512=1` on CPUs with `avx512f` and `avx512vpopcntdq`; it follows the same
+   `MAX_AVX2_STATE` and tile rules as AVX2. Verified under emulation, not yet timed on
+   AVX-512 hardware.
+2. AVX2+FMA (256-bit): 2 complex pairs per iteration. Held back by `MAX_AVX2_STATE` on
+   passes over the full state (Skylake frequency throttling), and used freely inside
+   MultiFused L2 tiles, where the data sits in cache.
+3. FMA (128-bit): the default for larger states. A complex multiply in three ops
+   (permute, mul, fmaddsub).
+4. SSE2 (128-bit): the x86_64 baseline, 2 mul plus shuffle, xor and add.
+5. NEON (128-bit): the aarch64 baseline, 1 mul plus 1 fma against a negated matrix
+   prepared in advance.
+6. Scalar: no intrinsics, for everything that is neither x86_64 nor aarch64.
 
 `_pext_u64` is not a tier. BatchPhase, BatchRzz and DiagonalBatch use it for LUT
 indexing where BMI2 is present, one bit extraction in place of a shift-and-or loop, and
 use the loop otherwise.
 
-Two structs broadcast the matrix into registers once, at construction, so the per-element loop does no dispatch:
+Two structs broadcast the matrix into registers once, at construction, so the loop over
+elements does no dispatch:
 
-- `PreparedGate1q`: the 2×2 matrix. Methods: `apply_full_sequential` (full state), `apply_tiled` (cache-resident tile, no AVX2 throttle guard), `apply_slice_pairs` (MPS bond-dimension slices), `apply_pair_ptr` (Cu/Mcu parallel).
-- `PreparedGate2q`: the 4×4 matrix. Methods: `apply_full` (mask-based iteration), `apply_tiled` (cache-resident Multi2q tiles, AVX2 paired-group kernel when available), `apply_group_ptr` (4 scattered indices).
+- `PreparedGate1q`, the 2×2 matrix: `apply_full_sequential` (full state), `apply_tiled`
+  (a tile in cache, no AVX2 throttle guard), `apply_slice_pairs` (MPS bond slices),
+  `apply_pair_ptr` (Cu and Mcu in parallel).
+- `PreparedGate2q`, the 4×4 matrix: `apply_full` (iteration by mask), `apply_tiled`
+  (Multi2q tiles in cache, with the AVX2 kernel over paired groups when available),
+  `apply_group_ptr` (4 scattered indices).
 
-The 2q tiled AVX2 path processes paired `k` and `k + 1` groups when the lower target qubit is above 0, so each row load is contiguous. It falls back to the 128-bit FMA kernel for `lo == 0` or without AVX2+FMA. For A/B timing, `PRISM_NO_AVX2_2Q` forces the 128-bit FMA path and `PRISM_NO_REORDER` disables the `Fused2q` reordering that fills each tile.
+The 2q tiled AVX2 path processes groups `k` and `k + 1` together when the lower target
+qubit is above 0, so each row load is contiguous. It falls back to the 128-bit FMA
+kernel for `lo == 0` or without AVX2+FMA. For A/B timing, `PRISM_NO_AVX2_2Q` forces the
+128-bit FMA path and `PRISM_NO_REORDER` disables the `Fused2q` reordering that fills
+each tile.
 
 ## Determinism
 

@@ -14,13 +14,21 @@ take either as `(coefficient, observable)`.
 `ExpectationResult`: `.values` holds one `⟨ψ|P|ψ⟩` per observable as a `float64` array,
 `.std_errors` the standard errors of a sampling route (else `None`), and `.metadata` the
 route that served them. The result also indexes, slices to a `float64` array, has a
-length, converts with `np.asarray` as its `.values`, and pickles with its metadata. A `PauliObservable` returns an `ObservableExpectation` for
-the weighted sum. Weighted terms must be wrapped in `PauliObservable([...])`; a bare
-`(coefficient, observable)` list raises `TypeError`, as does a single factor list such as
-`[(0, "Z")]`, which is written `[[(0, "Z")]]`. The circuit must be unitary, except on the
-density matrix below.
+length, converts with `np.asarray` as its `.values`, and pickles with its metadata.
+
+A `PauliObservable` returns an `ObservableExpectation` for the weighted sum. `mean` is
+`<H>`; `group_variances` holds `Var(H_g)` for each commuting group and `variance` their
+sum, the variance of an estimate drawing one shot per group, or `None` on a route without
+grouping; `std_error` is set only when a sampling route estimated the terms. Weighted
+terms must be wrapped in `PauliObservable([...])`; a bare `(coefficient, observable)` list
+raises `TypeError`, as does a single factor list such as `[(0, "Z")]`, which is written
+`[[(0, "Z")]]`. The circuit must be unitary, except on the density matrix below.
+`observable_variance(hamiltonian)` returns `<H^2> - <H>^2` with the mean.
 
 ```python
+from prism_q import CircuitBuilder, PauliObservable, simulate
+
+circuit = CircuitBuilder(2).h(0).cx(0, 1).build()
 observables = ["Z", "ZZ", [(0, "X"), (1, "X")]]
 values = simulate(circuit).seed(42).expectation(observables).values
 energy = simulate(circuit).seed(42).expectation(PauliObservable([(1.0, "ZZ"), (0.5, "XI")])).mean
@@ -45,6 +53,9 @@ asserting exact equality.
 ```
 
 ## Gradients
+
+The [variational tutorial](../tutorials/variational.md) uses these gradients to
+optimize an Ising energy.
 
 `expectation_gradient` computes `⟨H⟩` and its exact gradient over the bound parameters
 by the adjoint method, at a cost independent of the parameter count. Mark parameters

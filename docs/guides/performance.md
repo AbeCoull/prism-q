@@ -1,15 +1,15 @@
 # Performance and SIMD
 
-The execution mechanisms and the knobs that tune them. Internals are in
+The mechanisms that make a run fast and the variables that tune them. Internals are in
 [Fusion Pipeline](../architecture/fusion.md) and
 [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
 
-## The three levers
+## Fusion, tiling and SIMD
 
-1. **Fusion** merges many small gate passes into fewer, larger ones before execution,
+1. Fusion merges many small gate passes into fewer, larger ones before execution,
    cutting memory traffic over the statevector. It is gated on qubit count and costs
    nothing when it does not apply.
-2. **Cache-resident tiling** keeps batched gates on data that stays hot across a pass,
+2. Cache-resident tiling keeps batched gates on data that stays hot across a pass,
    in two shapes. Both size tiles from one budget read off the cache topology at
    startup: the smaller of the L2 per core and a quarter of the last-level cache per
    logical CPU sharing it, floored at 256 KB and capped at 1 MB, so every concurrent
@@ -17,7 +17,7 @@ The execution mechanisms and the knobs that tune them. Internals are in
    measurement that is 256 KB; a 1 MB tile ran 2x slower there at 22 and 24 qubits.
 
    `MultiFused` splits its gates by target: targets whose period fits the budget run on
-   budget-sized tiles (bit 13 and below at 256 KB), bits 14 through 16 on 2 MB tiles
+   tiles of the budget size (bit 13 and below at 256 KB), bits 14 through 16 on 2 MB tiles
    when those fit the last-level cache, and higher targets run untiled. A `Multi2q`
    tile is a contiguous run of the low index bits plus gathered high qubits, 64
    amplitudes per run and up to eight high qubits in a 2^14 tile, so a batch of gates
@@ -29,18 +29,17 @@ The execution mechanisms and the knobs that tune them. Internals are in
    and `PRISM_MULTI_2Q_LOW_BITS` set the `Multi2q` shape by hand. Budgets past 256 KB
    are derived, not measured, so a core with a larger cache is worth a sweep of
    `PRISM_TILE_KB`.
-3. **SIMD** vectorizes the inner complex-arithmetic loop. The tier is picked at
+3. SIMD vectorizes the inner complex-arithmetic loop. The tier is picked at
    runtime: AVX-512 (opt-in, see `PRISM_AVX512` below), AVX2+FMA, FMA or SSE2 on x86_64,
    NEON on aarch64, scalar elsewhere.
 
-Before lever 3 comes a prior question: can the arithmetic be removed rather than issued
-faster? A kernel whose operations an algebraic identity or operator structure deletes is
-bounded by its memory floor; vectorizing what remains is bounded by the
-complex-arithmetic issue ceiling, near 23% of FMA peak in the interleaved layout.
+Removing arithmetic beats issuing it faster. A kernel whose operations an algebraic
+identity or the operator's structure deletes is bounded by its memory floor, while a
+vectorized kernel is still bounded by complex-arithmetic issue.
 
 ## Threading
 
-Rayon parallel kernels engage at 15 qubits (below that, pool overhead dominates), with
+Rayon parallel kernels engage at 15 qubits, below which pool overhead dominates, with
 `MIN_PAR_ELEMS = 4096` per task. The pool defaults to all logical cores.
 
 ```admonish tip title="Control the thread pool"
@@ -54,20 +53,17 @@ left unbuilt on that path.
 
 ## Determinism
 
-Deterministic partitioning makes unitary evolution and seeded terminal sampling on the
-dense backends bitwise reproducible at any thread count. Parallel reductions (norms,
-collapse probabilities, expectation values) are stable to about 1e-12 but not bitwise.
-The batched compiled sampler seeds one RNG stream per worker, so its shots reproduce
-only at a fixed thread count; at that width the stream matches across x86 and aarch64,
-since the vector and scalar kernels draw from one four-lane layout. The per-path
-contract is in [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
+Unitary evolution and seeded terminal sampling on the dense backends are bitwise
+reproducible at any thread count; parallel reductions and the batched compiled sampler
+are not. [Determinism](../architecture/threading-simd.md#determinism) states the
+contract per path.
 
 ## Tuning environment variables
 
 Every knob is read once per process, on first use, and cached. A value that does not
 parse, or falls below the knob's minimum, prints a stderr warning naming the variable
-and is treated as unset, so a typo neither fails a run nor passes silently. Flags are
-presence-only: any value switches the path off.
+and is treated as unset, so a typo neither fails a run nor passes silently. A flag needs
+only to be present: any value switches the path off.
 
 ### Limits (also settable in code)
 
@@ -108,6 +104,7 @@ memory by default), and a layer that sets it discards the per-cap values below i
 | `PRISM_DIST_RELABEL` | `1` | `0`/`false` disables qubit relabeling in the distributed backend |
 | `RAYON_NUM_THREADS` | all cores | Rayon thread count, read by Rayon itself |
 | `PRISM_NO_AVX2_2Q` | unset | Flag: force the 128-bit FMA two-qubit kernel |
+| `PRISM_MIN_TILES_PER_CPU` | `1` | Fewest tiles a parallel tiled pass gives each hardware thread; the tile shrinks to reach the count. `0` keeps every pass at its budget tile |
 | `PRISM_TILE_KB` | detected | Cache-resident tile budget in KB, rounded down to a power of two, 128 to 2048; derived from the cache topology when unset (256 on a 256 KB L2) |
 | `PRISM_MULTI_2Q_TILE_BITS` | detected | Log2 of the `Multi2q` tile in amplitudes, 13 to 18; the tile budget when unset (14 at 256 KB) |
 | `PRISM_MULTI_2Q_LOW_BITS` | 6 | Log2 of the contiguous run a `Multi2q` tile gathers, 6 to one below the tile bits; fewer means more high qubits per pass |
@@ -117,18 +114,6 @@ memory by default), and a layer that sets it discards the per-cap values below i
 
 ## Benchmarking
 
-```admonish warning title="Benchmark with the parallel feature"
-Always run benchmarks with `--features parallel`. The baselines were taken with Rayon
-enabled; without it, large circuits run single-threaded and are not comparable. Never run
-two `cargo bench` processes at once: competing Rayon pools cause large swings.
-```
-
-```bash
-cargo bench --bench circuits --features parallel       # circuit macrobenchmarks
-cargo bench --bench bench_driver --features parallel   # gate microbenchmarks
-```
-
-Current wall-clock numbers are on [Benchmarks](../benchmarks.md).
-[Benchmark Methodology](./benchmarking.md) covers what they include, how Criterion rows
-are held to the regression gate, and the controls for a comparison against another
-simulator.
+Run benchmarks with `--features parallel`, one process at a time.
+[Benchmark Methodology](./benchmarking.md) has the targets, the A/B gate and the
+comparison controls, and [Benchmarks](../benchmarks.md) the current numbers.

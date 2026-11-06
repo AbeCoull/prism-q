@@ -12,7 +12,8 @@ declines, and which error each decline returns.
 
 ## Circuit IR
 
-`Circuit` holds `num_qubits`, `num_classical_bits`, and `Vec<Instruction>`. Instructions are an enum:
+`Circuit` holds `num_qubits`, `num_classical_bits`, and `Vec<Instruction>`. Instructions
+are an enum:
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
@@ -24,7 +25,8 @@ declines, and which error each decline returns.
 | `Region` | `Box<GuardedRegion>` | Classical-controlled span of instructions |
 | `Save` | `spec`, `qubits`, `label` | Record the state at this point |
 
-Targets are a `SmallVec<[usize; 4]>`, stored inline up to 4 qubits, so a typical gate allocates nothing.
+Targets are a `SmallVec<[usize; 4]>`, stored inline up to 4 qubits, so a typical gate
+allocates nothing.
 
 ### Save points
 
@@ -57,8 +59,7 @@ boundary because a region is not an `Instruction::Gate`.
 
 `fuse_region_bodies` runs the same pipeline over each body as an ordinary instruction
 list on the same register, nested bodies included. Fusion stays inside the body, and
-fusing it as a unit is sound because it executes as a unit. Leaving bodies unfused cost
-73.5% of `dynamic/guarded_region/20`.
+fusing it as a unit is sound because it executes as a unit.
 
 `Conditional` is the single-gate lowering of the same construct. `if (c) x q[0];` keeps
 that form, so the common guarded gate allocates nothing; anything else becomes a
@@ -79,9 +80,8 @@ routes holding one state per shot serve such a model.
 `Circuit::fold_static_guards` runs once per shots or counts call and resolves guards that
 cannot depend on a measurement. A condition reading only bits no earlier measurement
 writes depends only on the initial classical state, which every backend zeroes, so the
-guard is dropped or inlined. A circuit whose only guard can never fire returns to the
-terminal-measurement sampling path, 252x faster on `dynamic/dead_region/16` at 1000
-shots. A circuit with no guard borrows through unchanged.
+guard is dropped or inlined, and a circuit whose only guard can never fire returns to
+terminal sampling. A circuit with no guard borrows through unchanged.
 
 ### Condition language
 
@@ -100,7 +100,8 @@ into a bit its own guard reads.
 
 ## Gate enum
 
-`Gate` is a `Clone` enum kept at 16 bytes. Simple variants carry parameters inline; composite variants `Box` their payload.
+`Gate` is a `Clone` enum kept at 16 bytes. Simple variants carry parameters inline;
+composite variants `Box` their payload.
 
 ```admonish warning title="Keep the enum at 16 bytes"
 Adding inline data larger than 16 bytes pollutes cache lines and has caused 40-130%

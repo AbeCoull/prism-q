@@ -1051,20 +1051,25 @@ fn prepared_gradient_batches_match_single_calls() {
                     .unwrap()
             })
             .collect();
-        assert_eq!(
-            prepared
-                .expectation_gradient_many(&points, &hamiltonian, SEED)
-                .unwrap(),
-            adjoint,
-            "{n}q adjoint"
-        );
-        assert_eq!(
-            prepared
-                .expectation_gradient_shift_many(&points, &hamiltonian, SEED)
-                .unwrap(),
-            shift,
-            "{n}q shift"
-        );
+        let adjoint_many = prepared
+            .expectation_gradient_many(&points, &hamiltonian, SEED)
+            .unwrap();
+        let shift_many = prepared
+            .expectation_gradient_shift_many(&points, &hamiltonian, SEED)
+            .unwrap();
+        // From 15 qubits the kernels reduce in parallel, so the sum order follows work
+        // stealing and only the 1e-12 stability bound holds.
+        if n < 15 {
+            assert_eq!(adjoint_many, adjoint, "{n}q adjoint");
+            assert_eq!(shift_many, shift, "{n}q shift");
+        } else {
+            for (p, (got, want)) in adjoint_many.iter().zip(&adjoint).enumerate() {
+                assert_gradients_close(&format!("{n}q point {p} adjoint"), got, want);
+            }
+            for (p, (got, want)) in shift_many.iter().zip(&shift).enumerate() {
+                assert_gradients_close(&format!("{n}q point {p} shift"), got, want);
+            }
+        }
     }
 }
 

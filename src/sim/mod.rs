@@ -2807,12 +2807,14 @@ pub(super) fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> O
 
 fn prepare_terminal_statevector_backend(
     kind: &BackendKind,
-    circuit: &Circuit,
+    terminal: TerminalCircuit,
     seed: u64,
     limits: &ResolvedLimits,
 ) -> Result<TerminalStatevector> {
-    let meas_map = circuit.measurement_map();
-    let stripped = circuit.without_measurements();
+    let TerminalCircuit {
+        circuit: stripped,
+        meas_map,
+    } = terminal;
     let accel = accel_for(kind, Family::Statevector, stripped.num_qubits);
     let mut backend = build_statevector(&accel, seed, limits);
     let expanded = expand_for_backend(&backend, &stripped);
@@ -2981,31 +2983,31 @@ fn prepare_shot_source(
             })
         }
         ShotRoute::StabilizerRank => Ok(ShotSource::StabilizerRank),
-        ShotRoute::TerminalStatevector => {
+        ShotRoute::TerminalStatevector(terminal) => {
             let (backend, meas_map, expected_device) =
-                prepare_terminal_statevector_backend(kind, circuit, seed, limits)?;
+                prepare_terminal_statevector_backend(kind, terminal, seed, limits)?;
             Ok(ShotSource::TerminalStatevector {
                 backend: Box::new(backend),
                 expected_device,
                 meas_map,
             })
         }
-        ShotRoute::Native(plan) => {
+        ShotRoute::Native(plan, terminal) => {
             let mut backend = plan.build(seed, limits);
             execute(
                 &mut *backend,
-                &circuit.without_measurements(),
+                &terminal.circuit,
                 &SimOptions::classical_only(),
             )?;
             Ok(ShotSource::Native {
                 backend,
-                meas_map: circuit.measurement_map(),
+                meas_map: terminal.meas_map,
             })
         }
-        ShotRoute::TerminalProbabilities => {
+        ShotRoute::TerminalProbabilities(terminal) => {
             let result = run_with_internal(
                 kind.clone(),
-                &circuit.without_measurements(),
+                &terminal.circuit,
                 seed,
                 SimOptions::default(),
                 limits,
@@ -3013,7 +3015,7 @@ fn prepare_shot_source(
             Ok(match result.probabilities {
                 Some(probs) => ShotSource::TerminalProbabilities {
                     probs,
-                    meas_map: circuit.measurement_map(),
+                    meas_map: terminal.meas_map,
                     metadata: result.metadata,
                 },
                 None => ShotSource::PerShot,

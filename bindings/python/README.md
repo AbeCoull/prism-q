@@ -106,9 +106,9 @@ not in the wheels.
 ## Bit ordering
 
 Count keys and measurement bit indices are LSB-first: the leftmost character of a key
-is classical bit 0, and `q[0]` is the least significant qubit of a statevector index,
-the reverse of Qiskit. Measuring `q[i]` into `c[i]`, the state with only `q[0]` set reads
-`"10..."`, not `"...01"`.
+is classical bit 0, and `q[0]` is the least significant qubit of a statevector index.
+Measuring `q[i]` into `c[i]`, the state with only `q[0]` set reads `"10..."`, not
+`"...01"`.
 
 ## Documentation
 

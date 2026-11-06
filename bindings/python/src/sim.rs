@@ -1581,7 +1581,8 @@ impl PyShotsResult {
     }
 
     /// Frequency histogram keyed by bitstring, character `i` being classical
-    /// bit `i`. Bit 0 is leftmost, so keys read reversed relative to Qiskit.
+    /// bit `i`. Bit 0 is leftmost: a shot with only `c[0]` set reads `"10..."`, not
+    /// `"...01"`.
     fn counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         counts_to_dict(py, &self.inner.counts(), self.inner.num_classical_bits())
     }
@@ -1639,7 +1640,8 @@ impl PyCountsResult {
     }
 
     /// Frequency histogram keyed by bitstring, character `i` being classical
-    /// bit `i`. Bit 0 is leftmost, so keys read reversed relative to Qiskit.
+    /// bit `i`. Bit 0 is leftmost: a shot with only `c[0]` set reads `"10..."`, not
+    /// `"...01"`.
     fn counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         counts_to_dict(py, &self.counts, self.num_classical_bits)
     }

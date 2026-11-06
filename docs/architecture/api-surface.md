@@ -30,26 +30,54 @@ the condition under `# Panics`. `debug_assert!` is used for internal invariants 
 Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 [docs.rs](https://docs.rs/prism-q).
 
-**Simulation:**
-`simulate`, `Simulate`, `Unseeded`, `Seeded`, `run_on`, `run_on_state`, `run_qasm`,
-`PauliObservable`, `ObservableExpectation`, `ObservableVariance`, `ExpectationResult`,
-`OverlapResult`, `bitstring`
+| Area | Items |
+| --- | --- |
+| Simulation | `simulate`, `Simulate`, `Unseeded`, `Seeded`, `run_on`, `run_on_state`, `run_qasm`, `PauliObservable`, `ObservableExpectation`, `ObservableVariance`, `ExpectationResult`, `OverlapResult`, `bitstring` |
+| Route inspection | `Query`, `Plan`, `PlanFallback`, `PlannedExactness`, `RejectReason`, `RouteRule`, `MemoryEstimate`, `MemoryEstimateKind` |
+| Limits | `Limits`, `LimitKnob`, `LimitSource`, `default_limits`, `set_default_limits` |
+| Dynamic programs | `DynamicProgram`, `DynamicProgramBuilder`, `simulate_program`, `SimulateProgram` |
+| Gradients | `ExpectationGradient`, returned by `Simulate::expectation_gradient`, `Simulate::expectation_gradient_shift` and the `PreparedCircuit` methods of the same names, all taking the Hamiltonian as a `PauliObservable` |
+| Parameters | `Parameters`, `ParamLink`, `PreparedCircuit` |
+| Compiled sampling | `compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`, `run_shots_compiled`, `run_shots_noisy`, `noisy_marginals_analytical`, `density_matrix_expectation_values`, `CompiledSampler`, `CompiledDetectorSampler`, `DetectorSampleBatch`; with `gpu`: `run_shots_compiled_with_gpu`, `DevicePackedShots` |
+| Accumulators | `ShotAccumulator`, `HistogramAccumulator`, `MarginalsAccumulator`, `PauliExpectationAccumulator`, `CorrelatorAccumulator`, `NullAccumulator`, `PackedShots`, `ShotLayout`, `ParityStats` |
+| Noise | `NoiseModel`, `NoiseBuilder`, `NoiseChannel`, `NoiseEvent`, `GateFilter`, `ReadoutError`, `DriftDistribution`, `NoisyCompiledSampler`, `DeviceCalibration`, `QubitCalibration`, `GateCalibration`, `GateTimes`, `ErrorChainComplex` |
+| Native QEC | `parse_qec_program`, `compile_qec_program_rows`, `run_qec_program`, `run_qec_program_reference`, `run_qec_program_with_strategy`, `run_qec_program_spd_rerouted`, `QecProgram`, `QecOp`, `QecOptions`, `QecSampleResult`, `QecBasis`, `QecPauli`, `QecRecordRef`, `QecNoise`, `QecCorrelatedBranch`, `QecCircuitNoise`, `QecDetectorReference`, `QecMeasurementRow`, `QecCompiledRows`, `QecCompiledSampler`, `QecObservableEstimate`, `QecObservableReroute`, `QecTStrategy` |
+| QEC decoding | `DetectorErrorModel`, `ErrorMechanism`, `UnionFindDecoder`, `MatchingDecoder`, `BpOsdDecoder`, `BpOsdOptions`, `BpMethod`, `OsdMethod` |
+| Clifford+T | `run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`, `stabilizer_inner_product`, `StabRankResult`, `run_spp`, `run_spp_observable`, `run_spd`, `run_spd_with`, `run_spd_observable`, `run_spd_observable_budgeted`, `run_spd_observable_light_cone`, `inverse_light_cone`, `PauliAxis`, `PauliTerm`, `SppResult`, `SppObservableResult`, `SpdResult`, `SpdObservableResult`, `SpdTruncation` |
+| Circuits and gates | `Circuit`, `CircuitBuilder`, `TrotterOrder`, `Instruction`, `ClassicalCondition`, `SaveSpec`, `SaveRecord`, `SavedValue`, `SvgOptions`, `TextOptions`, `Gate`, `GeneratorKind`, `McuData`, `UnitaryData` |
+| Results and provenance | `BackendKind`, `RunOutcome`, `CountsResult`, `MarginalsResult`, `ShotsResult`, `ReducedDensityMatrix`, `EntropyResult`, `Probabilities`, `FactoredBlock`, `RunMetadata`, `BondReport`, `Engine`, `Exactness`, `Placement`, `ResolvedBackend` |
+| Errors | `PrismError`, `ResourceLimit`, `ResourceKind`, `Result` |
+| Backends | `StatevectorBackend`, `StabilizerBackend`, `SparseBackend`, `MpsBackend`, `ProductStateBackend`, `TensorNetworkBackend`, `FactoredBackend`, `FactoredStabilizerBackend`, `DensityMatrixBackend`; with `distributed`: `DistributedStatevectorBackend`, `DistributedContext`, `RankComm`, `SerialComm`; with `distributed-mpi`: `MpiComm` |
+| Threading | with `parallel`: `ThreadPool`, a Rayon pool the caller supplies, which simulation runs inside instead of sizing the process-wide one; see [Threading, SIMD, and Memory Layout](./threading-simd.md) |
 
-**Save points:** `Circuit::add_save` appends an `Instruction::Save` recording a
-`SaveSpec`, and `Simulate::run` returns one `SaveRecord` per point in `RunOutcome::saves`,
-carrying a `SavedValue`. All three types are re-exported. See [Circuit IR](./ir.md) for
-what a save does to fusion and which routes decline one.
+Not re-exported at the root but part of the documented surface: the `Backend` trait and
+`BasisSamples` at `prism_q::backend`, `run_batch` at `prism_q::sim`, `parse_dynamic` and
+the IR types under `prism_q::circuit::openqasm` and `prism_q::circuit::dynamic`, and the
+accumulator chunk size helpers (`default_chunk_size`, `optimal_chunk_size`) at
+`prism_q::sim::compiled`. `Backend` is sealed: only the crate implements it, so a new
+method is additive. Items behind the `bench-internal` feature (`bench_variant`, the sweep
+profile helpers, `QecProfiledSampler`) are benchmark tooling, not public API.
 
-**Batches:** `prism_q::sim::run_batch` runs a list of circuits, holding one backend
-across those of the same width that draw no randomness. Results match running each
-circuit alone with the same seed. Under `parallel`, batches up to 16 qubits split across
-cores. On a four-core host a 200-point sweep at 4 to 12 qubits, single-threaded inside
-each run, ran 3.2x to 4.8x faster than a loop, and one circuit per core beat the kernels'
-own threads by 5.5x at 14 qubits and 1.9x at 16. At 18 qubits the split took 10% longer,
-so wider batches run one circuit at a time. On one thread the held backend is the only
-saving, within about 10% of a loop.
+The complete item list is checked in as [`public-api.txt`](public-api.txt), generated by
+`cargo public-api` with `--features "parallel gpu distributed"`. CI regenerates it and
+fails on a difference, so every surface change shows in review as a diff to that file.
 
-**State diagnostics:**
+### Save points
+
+`Circuit::add_save` appends an `Instruction::Save` recording a `SaveSpec`, and
+`Simulate::run` returns one `SaveRecord` per point in `RunOutcome::saves`, carrying a
+`SavedValue`. See [Circuit IR](./ir.md) for what a save does to fusion and which routes
+decline one.
+
+### Batches
+
+`prism_q::sim::run_batch` runs a list of circuits, holding one backend across those of
+the same width that draw no randomness. Results match running each circuit alone with
+the same seed. Under `parallel`, batches of circuits up to 16 qubits split across cores,
+one circuit per core with each run single threaded; wider batches run one circuit at a
+time on the kernels' own threads.
+
+### State diagnostics
 
 - `Simulate::reduced_density_matrix` returns a `ReducedDensityMatrix` (row major, side
   `2^k`, `qubits[0]` the lowest bit of the row index) with `purity` for `Tr(rho^2)`.
@@ -60,90 +88,17 @@ saving, within about 10% of a loop.
   returns an `OverlapResult`: the squared inner product and the provenance of both runs.
 
 All three require a unitary circuit, and under `BackendKind::Auto` a route that cannot
-answer falls back to the statevector. [Backends](./backends.md) tabulates which backends
-answer each.
+answer falls back to the statevector. [Backends](./backends.md#state-diagnostics)
+tabulates which backends answer each.
 
-**Dynamic programs:**
-`DynamicProgram`, `DynamicProgramBuilder`, `simulate_program`, `SimulateProgram`,
-`openqasm::parse_dynamic`, and the IR types under `circuit::dynamic`. See
-[Dynamic Programs](./dynamic-programs.md).
+### Prepared circuits
 
-**Gradients:**
-`ExpectationGradient`, returned by `Simulate::expectation_gradient`,
-`Simulate::expectation_gradient_shift` and the `PreparedCircuit` methods of the same names.
-All of them take the Hamiltonian as a `PauliObservable`
-
-**Parameters and binding:**
-`Parameters`, `ParamLink`, `PreparedCircuit`. The gradient path reads the links and
-binding writes through them. `PreparedCircuit` carries `run`, `expectation_values`,
-`observable_expectation`, `expectation_gradient` and `expectation_gradient_shift`, each
-answering as the `Simulate` terminal of that name does on the bound circuit, plus a
-`_many` form of each that takes a list of bindings and splits it across cores where
-`run_batch` would. Gradient batches split only below the statevector kernels' parallel
-width, 15 qubits, and run in order above it.
-
-**Compiled sampling:**
-`compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`,
-`run_shots_compiled`, `run_shots_noisy`, `noisy_marginals_analytical`,
-`density_matrix_expectation_values`; with the `gpu` feature: `run_shots_compiled_with_gpu`,
-`DevicePackedShots`
-
-**Native QEC:**
-`parse_qec_program`, `compile_qec_program_rows`, `run_qec_program`,
-`run_qec_program_reference`, `run_qec_program_with_strategy`,
-`run_qec_program_spd_rerouted`, `QecProgram`, `QecOp`, `QecOptions`, `QecSampleResult`,
-`QecBasis`, `QecPauli`, `QecRecordRef`, `QecNoise`, `QecMeasurementRow`,
-`QecCompiledRows`, `QecObservableEstimate`, `QecObservableReroute`, `QecTStrategy`,
-`DetectorErrorModel`, `ErrorMechanism`, `UnionFindDecoder`, `MatchingDecoder`,
-`BpOsdDecoder`, `BpOsdOptions`, `BpMethod`, `OsdMethod`
-
-**Clifford+T:**
-`run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`,
-`stabilizer_inner_product`, `StabRankResult`, `run_spp`, `run_spp_observable`,
-`run_spd`, `run_spd_with`, `run_spd_observable`, `run_spd_observable_budgeted`,
-`run_spd_observable_light_cone`, `inverse_light_cone`, `PauliAxis`, `PauliTerm`,
-`SppResult`, `SppObservableResult`, `SpdResult`, `SpdObservableResult`,
-`SpdTruncation`
-
-**Types:**
-`Circuit`, `CircuitBuilder`, `TrotterOrder`, `Instruction`, `ClassicalCondition`, `SvgOptions`,
-`TextOptions`, `Gate`, `GeneratorKind`, `BackendKind`, `RunOutcome`, `CountsResult`,
-`MarginalsResult`, `ReducedDensityMatrix`, `EntropyResult`, `Probabilities`,
-`FactoredBlock`, `ShotsResult`, `PrismError`, `ResourceLimit`, `ResourceKind`, `Result`,
-`McuData`, `UnitaryData`, `RunMetadata`, `BondReport`,
-`Engine`, `Exactness`, `Placement`, `ResolvedBackend`
-
-**Backends:**
-`StatevectorBackend`, `StabilizerBackend`, `SparseBackend`, `MpsBackend`,
-`ProductStateBackend`, `TensorNetworkBackend`, `FactoredBackend`,
-`FactoredStabilizerBackend`, `DensityMatrixBackend`; with the `distributed` feature:
-`DistributedStatevectorBackend`, `DistributedContext`, `RankComm`, `SerialComm`; with
-the `distributed-mpi` feature: `MpiComm`
-
-**Threading:** with the `parallel` feature: `ThreadPool`, a caller-supplied Rayon pool
-that simulation runs inside instead of sizing the process-wide one. See
-[Threading, SIMD, and Memory Layout](./threading-simd.md).
-
-**Accumulators:**
-`ShotAccumulator`, `HistogramAccumulator`, `MarginalsAccumulator`,
-`PauliExpectationAccumulator`, `CorrelatorAccumulator`, `NullAccumulator`,
-`PackedShots`, `ShotLayout`, `ParityStats`
-
-**Data types:**
-`CompiledSampler`, `CompiledDetectorSampler`, `DetectorSampleBatch`,
-`NoisyCompiledSampler`, `NoiseChannel`, `NoiseEvent`, `NoiseModel`, `NoiseBuilder`,
-`GateFilter`, `ReadoutError`, `DeviceCalibration`, `QubitCalibration`, `GateCalibration`,
-`ErrorChainComplex`
-
-Not re-exported at the root but part of the documented surface: the `Backend` trait and
-`BasisSamples` at `prism_q::backend`, `run_batch` at `prism_q::sim`, and the accumulator
-chunk-size helpers (`default_chunk_size`, `optimal_chunk_size`) at
-`prism_q::sim::compiled`. `Backend` is sealed: only the crate implements it, so a new
-method is additive.
-
-The complete item list is checked in as [`public-api.txt`](public-api.txt), generated by
-`cargo public-api` with `--features "parallel gpu distributed"`. CI regenerates it and
-fails on a difference, so every surface change shows in review as a diff to that file.
+`PreparedCircuit` carries `run`, `expectation_values`, `observable_expectation`,
+`expectation_gradient` and `expectation_gradient_shift`, each answering as the `Simulate`
+terminal of that name does on the bound circuit, plus a `_many` form of each that takes
+a list of bindings and splits it across cores where `run_batch` would. Gradient batches
+split only below the statevector kernels' parallel width, 15 qubits, and run in order
+above it. See [Parameters, Binding and Gradients](./parameters.md).
 
 ## Growth of the public enums
 

@@ -64,30 +64,14 @@ Clifford, so a 2n × 2n bit tableau holds it in place of 2^1000 amplitudes. One 
 a 60-qubit GHZ circuit rules out the tableau, but only two of its 2^60 basis states are
 ever nonzero, so it runs on a sparse map.
 
-`BackendKind::Auto` walks this tree:
-
-```mermaid
-flowchart TD
-    A[Auto] --> E{Entangling gates?}
-    E -- none --> PS[ProductState]
-    E -- yes --> CL{All Clifford?}
-    CL -- yes --> STB[Stabilizer]
-    CL -- no --> MEM{Above memory limit?}
-    MEM -- "yes, at most 128 entries" --> SPR[Sparse]
-    MEM -- "yes, otherwise" --> MPS[MPS bond 256]
-    MEM -- no --> IND{Partial independence?}
-    IND -- yes --> FAC[Factored]
-    IND -- no --> SV[Statevector]
-```
-
-Some routes sit outside the tree: circuits that split into independent blocks run per
-block, Clifford shots go through compiled samplers, Clifford+T circuits with few T gates
-can sample by stabilizer rank, and some expectation and marginal queries go to Pauli
-propagation or tensor contraction. [Choosing a backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html)
-lists them with their thresholds. The rules read circuit structure and the memory limit
-and do not time the alternatives, so naming a backend can beat `Auto` on a circuit they
-misjudge. The density matrix and distributed backends are never picked automatically,
-and the GPU runs only when a device context is passed in.
+`BackendKind::Auto` reads the circuit's structure and the statevector memory cap and
+does not time the alternatives, so naming a backend can beat it on a circuit it
+misjudges. [Simulation Engine and Dispatch](https://abecoull.github.io/prism-q/architecture/engine.html#auto-dispatch-decision-tree)
+draws the decision tree and lists the routes outside it: one backend per block for circuits
+that split, compiled samplers for Clifford shots, stabilizer rank for Clifford+T shots
+with few T gates, and Pauli propagation or tensor contraction for some expectation and
+marginal queries. The density matrix and distributed statevector are never picked
+automatically, and the GPU runs only when a device context is passed in.
 
 ## Performance
 
@@ -122,10 +106,11 @@ desktop: [comparison pages](https://abecoull.github.io/prism-q/comparison.html).
 | Use the simulator from Python | [Python Bindings](https://abecoull.github.io/prism-q/guides/python.html) |
 | Look up the Rust API | [docs.rs/prism-q](https://docs.rs/prism-q) |
 | Let the dispatcher pick a backend, or override it | [Choosing a Backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html) |
-| Compare the backends' memory and scaling | [Backends Deep Dive](https://abecoull.github.io/prism-q/guides/backends.html) |
+| Compare the backends' memory and scaling | [Choosing a Backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html#scaling) |
 | Check what runs where, and what is experimental | [Capability Matrix](https://abecoull.github.io/prism-q/guides/capabilities.html) |
 | Check which OpenQASM constructs parse | [OpenQASM Support](https://abecoull.github.io/prism-q/guides/openqasm.html) |
-| Add noise, detectors and decoding | [Noise and QEC](https://abecoull.github.io/prism-q/guides/qec.html) |
+| Add noise models, leakage and drift | [Noise Models](https://abecoull.github.io/prism-q/guides/noise.html) |
+| Build QEC programs, detectors and decoders | [Quantum Error Correction](https://abecoull.github.io/prism-q/guides/qec.html) |
 | Simulate Clifford+T circuits past the dense limit | [Clifford+T Simulation](https://abecoull.github.io/prism-q/guides/clifford-t.html) |
 | Tune threads, tiles and memory caps | [Performance and SIMD](https://abecoull.github.io/prism-q/guides/performance.html) |
 | Run on a CUDA device | [GPU Backend](https://abecoull.github.io/prism-q/guides/gpu.html) |
@@ -248,31 +233,33 @@ cargo run --release --example qec_memory
 
 ## Backends
 
-| Backend | Best for | Scaling | Key property |
-| --- | --- | --- | --- |
-| Statevector | General circuits | O(2ⁿ) | SIMD, tiled L2/L3 kernels, optional CUDA path |
-| Stabilizer | Clifford only | O(n²) | SIMD, thousands of qubits |
-| Factored Stabilizer | Clifford with independent blocks | O(n²) per cluster | Per-cluster tableaux, dynamic merge and split |
-| Sparse | Few live amplitudes | O(k) | HashMap with parallel measurement |
-| MPS | Low entanglement or 1D | O(nχ²) | Hybrid faer / Jacobi SVD |
-| Product State | No entanglement | O(n) | Per qubit |
-| Tensor Network | Low treewidth | Depends on contraction order | Greedy min size heuristic |
-| Factored | Partial entanglement | Dynamic | Tracks independent sub-states |
-| Density Matrix | Exact noisy evolution | O(4ⁿ) | Explicit dispatch only, reuses statevector kernels |
-| Distributed Statevector | Beyond single-host memory | O(2ⁿ) over MPI ranks | `distributed` feature, exact results |
+| Backend | Best for | Scaling |
+| --- | --- | --- |
+| Statevector | General circuits | O(2ⁿ) |
+| Stabilizer | Clifford only | O(n²) |
+| Factored Stabilizer | Clifford with independent blocks | O(n²) per block |
+| Sparse | Few live amplitudes | O(k) |
+| MPS | Low entanglement or 1D | O(nχ²) |
+| Product State | No entanglement | O(n) |
+| Tensor Network | Low treewidth, expectation and marginal queries | Depends on contraction order |
+| Factored | Partial entanglement | O(2ᵏ) per block of k qubits |
+| Density Matrix | Exact noisy evolution, selected by name | O(4ⁿ) |
 
-Beside them sit Clifford+T engines (stabilizer rank and Pauli propagation) and a native
-quantum error-correction program path with detector sampling and decoding.
+The distributed statevector is an optional path outside these nine: the `distributed`
+feature shards one exact statevector over MPI ranks. Beside them sit four Clifford+T
+engines (stabilizer rank, stochastic and deterministic Pauli propagation, Pauli path)
+and a native quantum error-correction program path with detector sampling and decoding.
+The [backends reference](https://abecoull.github.io/prism-q/architecture/backends.html) covers
+memory layout and when each one wins.
 
 The statevector memory budget is half the machine's physical memory, read once and
-cached. `Limits` overrides it or any single cap, per request with `.limits(...)` or per
-process with `set_default_limits`; the `PRISM_MAX_*` variables set the same caps from
-the environment.
+cached, which is about 29 qubits on a 16 GiB host. `Limits` overrides it or any single
+cap, per request with `.limits(...)` or per process with `set_default_limits`; the
+`PRISM_MAX_*` variables set the same caps from the environment.
 
 To pick a backend yourself, call `.backend(BackendKind::Stabilizer)` (or
 `BackendKind::Mps { max_bond_dim: 64 }`, `BackendKind::Sparse`, and so on) on the
-`simulate` builder. The [backends deep dive](https://abecoull.github.io/prism-q/guides/backends.html)
-covers when each one wins.
+`simulate` builder.
 
 ## OpenQASM
 

@@ -20,7 +20,7 @@ except in the MSRV job and the nightly jobs (Miri, ThreadSanitizer, fuzzing, pub
 API), so lints and codegen move only with the pin. Bump it in its own change: update the
 channel and the `dtolnay/rust-toolchain@<version>` steps in `.github/workflows/`, then
 fix the new lints. The supported floor is a separate number; see
-[Compatibility](docs/guides/capabilities.md#compatibility).
+[Compatibility](docs/guides/compatibility.md).
 
 ### From source
 
@@ -217,7 +217,7 @@ and release from there.
 The wheel follows in the same run: the workflow writes the new version into
 `bindings/python/Cargo.toml` and tags it `py-v<version>`, so the two never drift. What a
 version promises, which feature flags are part of the surface, and the MSRV pin are in
-[Compatibility](docs/guides/capabilities.md#compatibility).
+[Compatibility](docs/guides/compatibility.md).
 
 ## CI
 

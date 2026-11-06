@@ -21,6 +21,7 @@ Wall-clock simulation time for PRISM-Q on a fixed circuit suite built from the `
 - Timed region is simulation only. Circuit construction happens once per circuit outside the timer.
 - Timings use the full `simulate().run()` path, including the fusion pass and probability extraction.
 - `auto` lets backend dispatch choose a specialized backend per circuit. The dense families (QFT, HEA, QV) are bounded by the statevector memory cap; GHZ is Clifford and runs into the thousands of qubits on the stabilizer backend. QV uses square depth, so its gate count grows with the qubit count and it is compute-bound earlier than the fixed-depth families.
+- QFT is `qft_circuit`, one `QftBlock` that the statevector runs on its native FFT kernel.
 
 ## GHZ
 
@@ -33,6 +34,11 @@ Wall-clock simulation time for PRISM-Q on a fixed circuit suite built from the `
 | 4096 | 3.16 ms |
 
 ## QFT
+
+These rows predate 0.35.0, which runs the high QFT stages as gathered passes. The 1.01 s
+at 24 qubits on [Probability-Vector Comparison](./comparison/probability-vector.md) is
+slower because that harness hands every simulator the expanded textbook gate list, which
+0.33.0 ran gate by gate.
 
 | Qubits | auto |
 |---|---|

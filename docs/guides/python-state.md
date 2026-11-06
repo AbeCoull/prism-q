@@ -34,15 +34,17 @@ read the exact mixture with `run()`, `marginals()`, or `expectation()` on
 
 ## Starting from a mixture
 
-`.initial_density_matrix(rho)` starts the density-matrix backend from a mixed state: a
+`.initial_density_matrix(rho)` starts the density matrix backend from a mixed state: a
 square `complex128` NumPy array or a sequence of rows, in the layout
 `reduced_density_matrix()` returns over the whole register (row major, `2 ** n` by
 `2 ** n`, qubit 0 the least significant bit of both indices). A noisy run can be
 paused, its mixture stored, and resumed later:
 
 ```python
-from prism_q import BackendKind, NoiseModel, simulate
+from prism_q import BackendKind, CircuitBuilder, NoiseModel, simulate
 
+first = CircuitBuilder(2).h(0).cx(0, 1).build()
+second = CircuitBuilder(2).rx(0.3, 0).cz(0, 1).build()
 dm = BackendKind.density_matrix()
 rho = (
     simulate(first)
@@ -68,6 +70,26 @@ mixture; every other backend, `auto()` included, raises `PrismError` naming itse
 [terminal table](python-running.md#running-a-simulation) applies unchanged. A mixture
 clears an earlier `.initial_state()`, and the reverse.
 
+## Entropy, overlap and reduced states
+
+```python
+bell = CircuitBuilder(2).h(0).cx(0, 1).build()
+cut = simulate(bell).entanglement_entropy([0])
+print(cut.entropy, cut.schmidt_values)          # 0.6931... [0.7071 0.7071]
+print(simulate(bell).reduced_density_matrix([0]).purity)   # 0.5
+plus = CircuitBuilder(2).h(0).h(1).build()
+print(simulate(bell).overlap(simulate(plus)).fidelity)     # 0.5
+```
+
+`entanglement_entropy(subsystem)` returns the von Neumann entropy of the cut in nats and
+`schmidt_values`, the Schmidt coefficients in descending order with squares summing to 1.
+`schmidt_values` is `None` where the backend holds the entropy without the spectrum, as
+a stabilizer cut past the export cap does. The cut must leave qubits on both sides.
+`reduced_density_matrix(qubits)` returns `.matrix` with `qubits[0]` the lowest bit, its
+`.purity`, and `.qubits`. `overlap(other)` compares two pure states and reports only
+`fidelity`, `|<a|b>|^2`, since a tableau keeps no global phase and truncation moves one;
+`.left` and `.right` carry each side's route.
+
 ## Handing a Clifford state to a second run
 
 `StabilizerBackend` holds a tableau across calls. `run(circuit)` resets it to the
@@ -80,6 +102,8 @@ raw tableau serves as a checkpoint for a Clifford prefix that is expensive to re
 ```python
 from prism_q import StabilizerBackend
 
+clifford_prefix = CircuitBuilder(4).h(0).cx(0, 1).cx(1, 2).s(3).build()
+measurement_suffix = CircuitBuilder(4, 8).h(3).measure_all().build()
 prep = StabilizerBackend(seed=42)
 prep.run(clifford_prefix)
 words, phases = prep.export_tableau()
@@ -123,50 +147,3 @@ A save is a barrier across the whole register, so no gate is fused or reordered 
 it. Only `run` returns the records: `shots`, `marginals` and the other terminals decline
 a circuit with a save point instead of dropping what it recorded. So do routes that
 hold no state to read, and OpenQASM export, which has no save syntax.
-
-## Inspect a terminal before execution
-
-`Simulation.plan(Query)` reports the route a terminal would take and leaves the request
-ready to run. The query can change the route: an expectation may use an exact scalar
-tensor contraction where a full-state run would pick a bounded MPS.
-
-```python
-from prism_q import CircuitBuilder, Query, simulate
-
-circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure(0, 0).measure(1, 1).build()
-request = simulate(circuit).seed(42)
-plan = request.plan(Query.counts(1000))
-assert plan.would_fail is None
-result = request.sample_counts(1000)
-assert result.metadata.reason == plan.rule
-```
-
-`Plan.backend`, `engine`, `placement`, and `rule` describe the selected route.
-`RunMetadata.reason` gives its snake_case decision name after execution. A bounded SPD
-attempt or soft GPU initialization can take a runtime fallback, listed in
-`Plan.fallbacks`; the result names the fallback when it happens. A fallback's own
-`would_fail` says nothing about the primary route.
-
-`Plan.exactness` is `"exact"`, `"approximate"`, or `"estimated"`. `bound_reported` says
-whether an approximate route reports a bound, and `samples` gives an estimator's sample
-count. `require_exact()` rejects an approximate fallback only if execution needs it.
-
-`would_fail` is a `PrismError` instance for a predictable resource or capability
-failure; malformed query inputs raise `PrismError` directly. `alternatives` lists
-explicit backend selections rejected by the validation execution uses, without ranking
-accepted backends by speed.
-
-`peak_memory` holds `bytes` and `kind`. Known bounds cover the state and terminal buffer
-payload, not circuit or fusion storage, allocator overhead, or process memory. Other
-routes return `{"bytes": None, "kind": "unknown"}`; state size alone is not reported as
-a peak bound. Inspection may run bounded sparse-support or tensor-contraction planning
-probes but does not execute the terminal.
-
-Query constructors are `run()`, `shots(n)`, `counts(n)`, `marginals()`,
-`expectation(observables)`, `observable(hamiltonian)`, `state_vector()`,
-`reduced_density_matrix(qubits)`, and `entropy(qubits)`. The gradient constructors,
-`gradient(hamiltonian, parameters)` and `gradient_shift(hamiltonian, parameters)`,
-take the same Hamiltonian and `(instruction, slot)` links as the execution terminals.
-A shift plan's `evaluations` lists its baseline, then the plus and minus evaluations in
-link order. The top-level backend names the baseline; child reports keep any different
-route chosen for another evaluation, including prepared backend reuse.

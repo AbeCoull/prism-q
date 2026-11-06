@@ -2191,22 +2191,38 @@ impl PackedShots {
         self.meas_major_to_shot_major_words()
     }
 
+    /// Append the shot-major words of this matrix to `out`, transposing in place.
+    pub(crate) fn append_shot_major_to(&self, out: &mut Vec<u64>) {
+        if self.layout == ShotLayout::ShotMajor {
+            out.extend_from_slice(&self.data);
+            return;
+        }
+        let start = out.len();
+        out.resize(start + self.num_shots * self.m_words, 0);
+        self.transpose_into_shot_major(&mut out[start..]);
+    }
+
     fn meas_major_to_shot_major_words(&self) -> Vec<u64> {
+        let mut shot_major = vec![0u64; self.num_shots * self.m_words];
+        self.transpose_into_shot_major(&mut shot_major);
+        shot_major
+    }
+
+    /// Write the shot-major words of this measurement-major matrix into zeroed `out`.
+    fn transpose_into_shot_major(&self, out: &mut [u64]) {
         debug_assert_eq!(self.layout, ShotLayout::MeasMajor);
         let m_words = self.m_words;
-        let mut shot_major = vec![0u64; self.num_shots * m_words];
         transpose_meas_major_blocks(
             &self.data,
             self.num_shots,
             self.num_measurements,
-            &mut shot_major,
+            out,
             m_words,
             |block, shot, measurement| {
                 block[shot * m_words + measurement / 64] |= 1 << (measurement % 64);
             },
             |block, shot, meas_word, word| block[shot * m_words + meas_word] = word,
         );
-        shot_major
     }
 
     /// Copy of this matrix in [`ShotLayout::ShotMajor`].

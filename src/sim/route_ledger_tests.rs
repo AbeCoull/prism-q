@@ -1862,14 +1862,16 @@ fn gradients_match_finite_differences() {
     let circuit = dense(n);
     let params = Parameters::all_rotations(&circuit);
     let values = params.values(&circuit).unwrap();
-    let hamiltonian = vec![
+    let hamiltonian = PauliObservable::from_terms([
         (0.8, vec![PauliTerm::z(0), PauliTerm::z(1)]),
         (-0.5, vec![PauliTerm::x(2)]),
-    ];
+    ])
+    .unwrap();
     let energy = |values: &[f64]| -> f64 {
         let bound = params.bind(&circuit, values).unwrap();
         let state = unfused_state(&bound);
         hamiltonian
+            .terms()
             .iter()
             .map(|(c, factors)| c * pauli_value(&state, factors))
             .sum()

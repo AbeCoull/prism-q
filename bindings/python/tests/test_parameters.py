@@ -122,10 +122,10 @@ def test_held_observable_matches_the_term_list():
 
     builder = _ansatz(POINTS[1])
     sim = simulate(builder.build()).seed(42)
-    links = builder.parameter_links()
+    params = builder.parameters()
     for gradient in ("expectation_gradient", "expectation_gradient_shift"):
-        value, grad = getattr(sim, gradient)(held, links)
-        expected_value, expected_grad = getattr(sim, gradient)(HAMILTONIAN, links)
+        value, grad = getattr(sim, gradient)(held, params)
+        expected_value, expected_grad = getattr(sim, gradient)(HAMILTONIAN, params)
         assert value == pytest.approx(expected_value, abs=1e-12)
         np.testing.assert_allclose(grad, expected_grad, atol=1e-12)
 
@@ -329,9 +329,9 @@ def test_pauli_rotation_binds_through_a_prepared_circuit():
 def test_pauli_rotation_gradient_reaches_the_native_gate():
     builder = _pauli_ansatz([0.6, 0.25])
     circuit = builder.build()
-    links = builder.parameter_links()
+    params = builder.parameters()
     hamiltonian = [(1.0, [(0, "Z")])]
-    value, grad = simulate(circuit).seed(42).expectation_gradient(hamiltonian, links)
+    value, grad = simulate(circuit).seed(42).expectation_gradient(hamiltonian, params)
     assert grad.shape == (2,)
 
     eps = 1e-6

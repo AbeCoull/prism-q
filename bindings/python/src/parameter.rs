@@ -3,8 +3,10 @@
 
 use std::sync::Mutex;
 
-use numpy::PyReadonlyArray2;
-use prism_q::{BackendKind, Circuit, Instruction, Parameters, PreparedCircuit, RunOutcome};
+use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
+use prism_q::{
+    BackendKind, Circuit, ExpectationGradient, Instruction, Parameters, PreparedCircuit, RunOutcome,
+};
 use pyo3::prelude::*;
 
 use crate::backend::PyBackendKind;
@@ -14,7 +16,8 @@ use crate::error::{PyPrismError, PyPrismResult, invalid};
 use crate::numpy_util::{f64_array, f64_matrix};
 use crate::pickle::{Reduced, reduce};
 use crate::sim::{
-    DEFAULT_SEED, Observables, PyObservableExpectation, PyRunOutcome, parse_observables,
+    DEFAULT_SEED, Hamiltonian, Observables, PyExpectationGradient, PyObservableExpectation,
+    PyRunOutcome, parse_observables,
 };
 
 /// Parameter slots over the rotation angles of a circuit.
@@ -328,6 +331,85 @@ impl PyPreparedCircuit {
         }
     }
 
+    /// Bind `values` and compute `⟨H⟩` and its adjoint gradient as
+    /// `Simulation.expectation_gradient()` does on the bound circuit with the held
+    /// parameters, reusing the fusion plan for the forward pass.
+    #[pyo3(signature = (values, hamiltonian, seed = DEFAULT_SEED))]
+    fn expectation_gradient<'py>(
+        &self,
+        py: Python<'py>,
+        values: Vec<f64>,
+        hamiltonian: Hamiltonian<'py>,
+        seed: u64,
+    ) -> PyPrismResult<PyExpectationGradient> {
+        hamiltonian.check_width(self.locked().template().num_qubits)?;
+        let observable = hamiltonian.observable()?;
+        let result = py.detach(|| {
+            self.locked()
+                .expectation_gradient(&values, &observable, seed)
+        })?;
+        Ok(PyExpectationGradient::from(result))
+    }
+
+    /// `expectation_gradient` by the parameter-shift rule, as
+    /// `Simulation.expectation_gradient_shift()` computes it.
+    #[pyo3(signature = (values, hamiltonian, seed = DEFAULT_SEED))]
+    fn expectation_gradient_shift<'py>(
+        &self,
+        py: Python<'py>,
+        values: Vec<f64>,
+        hamiltonian: Hamiltonian<'py>,
+        seed: u64,
+    ) -> PyPrismResult<PyExpectationGradient> {
+        hamiltonian.check_width(self.locked().template().num_qubits)?;
+        let observable = hamiltonian.observable()?;
+        let result = py.detach(|| {
+            self.locked()
+                .expectation_gradient_shift(&values, &observable, seed)
+        })?;
+        Ok(PyExpectationGradient::from(result))
+    }
+
+    /// `expectation_gradient` on each row of `bindings`, a `(points, num_slots)`
+    /// array. Returns `(values, gradients)`: `float64` arrays of shape `(points,)`
+    /// and `(points, num_slots)`. Up to 14 qubits the rows split across cores.
+    #[pyo3(signature = (bindings, hamiltonian, seed = DEFAULT_SEED))]
+    fn expectation_gradient_many<'py>(
+        &self,
+        py: Python<'py>,
+        bindings: &Bound<'py, PyAny>,
+        hamiltonian: Hamiltonian<'py>,
+        seed: u64,
+    ) -> PyPrismResult<GradientArrays<'py>> {
+        let rows = binding_rows(bindings)?;
+        hamiltonian.check_width(self.locked().template().num_qubits)?;
+        let observable = hamiltonian.observable()?;
+        let results = py.detach(|| {
+            self.locked()
+                .expectation_gradient_many(&rows, &observable, seed)
+        })?;
+        self.gradient_arrays(py, results)
+    }
+
+    /// `expectation_gradient_many` by the parameter-shift rule.
+    #[pyo3(signature = (bindings, hamiltonian, seed = DEFAULT_SEED))]
+    fn expectation_gradient_shift_many<'py>(
+        &self,
+        py: Python<'py>,
+        bindings: &Bound<'py, PyAny>,
+        hamiltonian: Hamiltonian<'py>,
+        seed: u64,
+    ) -> PyPrismResult<GradientArrays<'py>> {
+        let rows = binding_rows(bindings)?;
+        hamiltonian.check_width(self.locked().template().num_qubits)?;
+        let observable = hamiltonian.observable()?;
+        let results = py.detach(|| {
+            self.locked()
+                .expectation_gradient_shift_many(&rows, &observable, seed)
+        })?;
+        self.gradient_arrays(py, results)
+    }
+
     /// The unbound template this was built from.
     #[getter]
     fn template(&self) -> PyCircuit {
@@ -355,6 +437,25 @@ impl PyPreparedCircuit {
             inner.parameters().num_slots(),
             inner.reuses_fusion_plan()
         )
+    }
+}
+
+type GradientArrays<'py> = (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>);
+
+impl PyPreparedCircuit {
+    fn gradient_arrays<'py>(
+        &self,
+        py: Python<'py>,
+        results: Vec<ExpectationGradient>,
+    ) -> PyPrismResult<GradientArrays<'py>> {
+        let num_slots = self.locked().parameters().num_slots();
+        let rows = results.len();
+        let values = results.iter().map(|g| g.value).collect();
+        let gradients = results.into_iter().flat_map(|g| g.gradient).collect();
+        Ok((
+            f64_array(py, values),
+            f64_matrix(py, rows, num_slots, gradients)?,
+        ))
     }
 }
 

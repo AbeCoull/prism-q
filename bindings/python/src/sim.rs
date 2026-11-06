@@ -9,9 +9,9 @@ use num_complex::Complex64;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
     BackendKind, BondReport, Circuit, CountsResult, Exactness, ExpectationGradient, Limits,
-    MarginalsResult, NoiseModel, ObservableExpectation, ParamLink, Parameters, PauliAxis,
-    PauliObservable, PauliTerm, Placement, Probabilities, ReducedDensityMatrix, RunMetadata,
-    RunOutcome, SaveRecord, SavedValue, Seeded, ShotsResult, Simulate, simulate as core_simulate,
+    MarginalsResult, NoiseModel, ObservableExpectation, PauliAxis, PauliObservable, PauliTerm,
+    Placement, Probabilities, ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord,
+    SavedValue, Seeded, ShotsResult, Simulate, simulate as core_simulate,
 };
 use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyTypeError};
 use pyo3::prelude::*;
@@ -24,6 +24,7 @@ use crate::error::{PyPrismError, PyPrismResult, invalid};
 use crate::limits::PyLimits;
 use crate::noise::PyNoiseModel;
 use crate::numpy_util::{bool_matrix, complex_array, complex_matrix, f64_array};
+use crate::parameter::PyParameters;
 use crate::pickle::{Reduced, reduce};
 
 pub(crate) const DEFAULT_SEED: u64 = 42;
@@ -224,28 +225,23 @@ impl PySimulation {
     ///
     /// `hamiltonian` is a `PauliObservable` or a list of `(coefficient, pauli)`
     /// terms, each `pauli` a string such as `"ZZI"` or `(qubit, axis)` factors.
-    /// `parameters` is a list of `(instruction_index, parameter_slot)` links,
-    /// as returned by `CircuitBuilder.parameter_links()`. Runs on the
-    /// statevector backend; the circuit must be unitary.
+    /// `parameters` is a `Parameters` set over the circuit, such as the one
+    /// `CircuitBuilder.build_parametric()` returns. Runs on the statevector
+    /// backend; the circuit must be unitary.
     #[pyo3(signature = (hamiltonian, parameters))]
     fn expectation_gradient<'py>(
         &self,
         py: Python<'py>,
         hamiltonian: Hamiltonian<'py>,
-        parameters: Vec<(usize, usize)>,
+        parameters: &PyParameters,
     ) -> PyPrismResult<PyExpectationGradient> {
         if self.noise.is_some() {
             return Err(invalid("expectation_gradient() does not support noise"));
         }
         hamiltonian.check_width(self.circuit.num_qubits)?;
-        let terms = hamiltonian.terms()?;
-        let links: Vec<ParamLink> = parameters
-            .into_iter()
-            .map(|(instruction, slot)| ParamLink { instruction, slot })
-            .collect();
-        let num_slots = links.iter().map(|l| l.slot + 1).max().unwrap_or(0);
-        let params = Parameters::from_links(links, num_slots);
-        let result = py.detach(|| self.core(None).expectation_gradient(&terms, &params))?;
+        let observable = hamiltonian.observable()?;
+        let params = &parameters.0;
+        let result = py.detach(|| self.core(None).expectation_gradient(&observable, params))?;
         Ok(PyExpectationGradient::from(result))
     }
 
@@ -262,20 +258,15 @@ impl PySimulation {
         &self,
         py: Python<'py>,
         hamiltonian: Hamiltonian<'py>,
-        parameters: Vec<(usize, usize)>,
+        parameters: &PyParameters,
     ) -> PyPrismResult<PyExpectationGradient> {
         hamiltonian.check_width(self.circuit.num_qubits)?;
-        let terms = hamiltonian.terms()?;
-        let links: Vec<ParamLink> = parameters
-            .into_iter()
-            .map(|(instruction, slot)| ParamLink { instruction, slot })
-            .collect();
-        let num_slots = links.iter().map(|l| l.slot + 1).max().unwrap_or(0);
-        let params = Parameters::from_links(links, num_slots);
+        let observable = hamiltonian.observable()?;
+        let params = &parameters.0;
         let owned_noise = self.owned_noise(py);
         let result = py.detach(|| {
             self.core(owned_noise.as_ref())
-                .expectation_gradient_shift(&terms, &params)
+                .expectation_gradient_shift(&observable, params)
         })?;
         Ok(PyExpectationGradient::from(result))
     }
@@ -594,8 +585,6 @@ impl Observables<'_> {
     }
 }
 
-type WeightedStrings = [(f64, Vec<PauliTerm>)];
-
 /// A Hamiltonian argument: a held `PauliObservable`, or a term list parsed on
 /// every call.
 pub(crate) enum Hamiltonian<'py> {
@@ -631,15 +620,6 @@ impl Hamiltonian<'_> {
         match self {
             Self::Held(held) => Ok(Cow::Borrowed(&held.get().0)),
             Self::Terms(terms) => Ok(Cow::Owned(build_observable(terms)?)),
-        }
-    }
-
-    /// Terms for the gradient terminals, which take a term list as given rather
-    /// than merged into canonical form.
-    pub(crate) fn terms(&self) -> PyPrismResult<Cow<'_, WeightedStrings>> {
-        match self {
-            Self::Held(held) => Ok(Cow::Borrowed(held.get().0.terms())),
-            Self::Terms(terms) => Ok(Cow::Owned(parse_terms(terms)?)),
         }
     }
 }
@@ -1195,8 +1175,8 @@ enum Index<'py> {
 /// `value, gradient`.
 #[pyclass(name = "ExpectationGradient", module = "prism_q", frozen)]
 pub struct PyExpectationGradient {
-    value: f64,
-    gradient: Vec<f64>,
+    pub(crate) value: f64,
+    pub(crate) gradient: Vec<f64>,
 }
 
 impl From<ExpectationGradient> for PyExpectationGradient {

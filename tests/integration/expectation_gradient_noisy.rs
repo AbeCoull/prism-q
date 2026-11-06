@@ -6,25 +6,27 @@ use crate::common;
 
 use common::{SEED, shift_slot};
 use prism_q::circuits;
-use prism_q::{BackendKind, Circuit, Instruction, NoiseModel, Parameters, PauliTerm, simulate};
+use prism_q::{
+    BackendKind, Circuit, Instruction, NoiseModel, Parameters, PauliObservable, PauliTerm, simulate,
+};
 
-type Hamiltonian = Vec<(f64, Vec<PauliTerm>)>;
-
-fn fixture() -> (Circuit, NoiseModel, Parameters, Hamiltonian) {
+fn fixture() -> (Circuit, NoiseModel, Parameters, PauliObservable) {
     let circuit = circuits::hardware_efficient_ansatz(6, 2, SEED);
     let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
     let params = Parameters::all_rotations(&circuit);
-    let hamiltonian = vec![
+    let hamiltonian = PauliObservable::from_terms([
         (0.7, vec![PauliTerm::z(0), PauliTerm::z(1)]),
         (-0.3, vec![PauliTerm::x(2)]),
         (0.5, vec![PauliTerm::y(3), PauliTerm::z(4)]),
         (0.2, vec![PauliTerm::z(5)]),
-    ];
+    ])
+    .unwrap();
     (circuit, noise, params, hamiltonian)
 }
 
-fn noisy_expval(circuit: &Circuit, noise: &NoiseModel, hamiltonian: &Hamiltonian) -> f64 {
-    let observables: Vec<Vec<PauliTerm>> = hamiltonian.iter().map(|(_, p)| p.clone()).collect();
+fn noisy_expval(circuit: &Circuit, noise: &NoiseModel, hamiltonian: &PauliObservable) -> f64 {
+    let observables: Vec<Vec<PauliTerm>> =
+        hamiltonian.terms().iter().map(|(_, p)| p.clone()).collect();
     let per_term = simulate(circuit)
         .backend(BackendKind::DensityMatrix)
         .noise(noise)
@@ -32,6 +34,7 @@ fn noisy_expval(circuit: &Circuit, noise: &NoiseModel, hamiltonian: &Hamiltonian
         .expectation_values(&observables)
         .unwrap();
     hamiltonian
+        .terms()
         .iter()
         .zip(per_term)
         .map(|((c, _), v)| c * v)

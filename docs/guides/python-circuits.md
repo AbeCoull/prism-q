@@ -264,6 +264,16 @@ for values in points:
     mean = prepared.expectation(values, h, seed=42).mean
 ```
 
+`expectation_gradient(values, h)` and `expectation_gradient_shift(values, h)` return the
+`ExpectationGradient` that `Simulation.expectation_gradient()` and its shift twin give on
+the bound circuit with the held `Parameters`. The `_many` forms return a `(points,)`
+array of values and a `(points, num_slots)` array of gradients; rows split across cores up
+to 14 qubits.
+
+```python
+values, gradients = prepared.expectation_gradient_many(points, h, seed=42)
+```
+
 Automatic dispatch reads the template, so build it at angles typical of the sweep. A
 template with all rotations at zero reads as Clifford and picks a backend that then
 rejects the bound circuit. An explicit backend as the third argument avoids this:

@@ -77,10 +77,12 @@ standalone parity batches and later pair fusion replay the same operation. A gat
 passes leave untouched still needs a site when it carries an angle: `PauliRot` holds its
 angle in a boxed payload, not the enum slot, and replay patches it as it patches an `Rz`.
 
-`PreparedCircuit` carries `run`, `expectation_values` and `observable_expectation`, each
-answering as the `Simulate` terminal of that name does on the bound circuit, plus a
-`_many` form of each that takes a list of bindings and splits it across cores where
-`run_batch` would. Where the held backend would answer differently, the call binds and
+`PreparedCircuit` carries `run`, `expectation_values`, `observable_expectation`,
+`expectation_gradient` and `expectation_gradient_shift`, each answering as the `Simulate`
+terminal of that name does on the bound circuit, plus a `_many` form of each that takes
+a list of bindings and splits it across cores where `run_batch` would. Gradient batches
+split only below the statevector kernels' parallel width, 15 qubits, and run in order
+above it. Where the held backend would answer differently, the call binds and
 hands the circuit to `simulate`.
 
 Fusion cost tracks instruction count and is nearly flat in qubit count, while gate
@@ -90,8 +92,10 @@ application is `2^n`, so capture pays most on narrow circuits.
 
 `simulate(circuit).seed(seed).expectation_gradient(hamiltonian, params)` and
 `sim::gradient::run_expectation_gradient` compute `⟨H⟩` and the exact gradient
-`d⟨H⟩/dθ` for a weighted Pauli sum `H = Σ c_k P_k`, at a cost independent of the
-parameter count (`src/sim/gradient.rs`).
+`d⟨H⟩/dθ` for a weighted Pauli sum `H = Σ c_k P_k`, given as a `PauliObservable`, at a
+cost independent of the parameter count (`src/sim/gradient.rs`).
+`PreparedCircuit::expectation_gradient` runs the same pass on a held template, applying
+its replayed fusion plan as the forward pass.
 
 Two statevectors are propagated backwards. With `U = U_L…U_1` and `|φ⟩ = U|0⟩`:
 

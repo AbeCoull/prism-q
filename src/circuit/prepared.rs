@@ -3,10 +3,11 @@
 
 use super::Circuit;
 use super::fusion::{FusionProfile, fuse_circuit_for_profile};
-use super::parameter::Parameters;
+use super::parameter::{Parameters, angle_mut};
 use super::plan::FusionPlan;
 use crate::error::Result;
-use crate::limits::Limits;
+use crate::limits::{Limits, ResolvedLimits};
+use crate::sim::gradient::{self, ExpectationGradient};
 use crate::sim::unified_pauli::PauliTerm;
 use crate::sim::{
     BackendKind, ObservableExpectation, PauliObservable, PreparedRoute, RunOutcome, Simulate,
@@ -157,21 +158,25 @@ impl PreparedCircuit {
     pub fn bind_fused(&mut self, values: &[f64]) -> Result<&Circuit> {
         self.params.check_values(values)?;
         self.params.write_angles(&mut self.bound, values);
+        self.fuse_bound();
+        Ok(&self.fused)
+    }
 
+    /// Rebuild `fused` from `bound`, replaying the plan where its guards hold.
+    fn fuse_bound(&mut self) {
         if let Some(plan) = &self.plan {
             if self.fused_off_plan {
                 self.fused.clone_from(&self.skeleton);
                 self.fused_off_plan = false;
             }
             if plan.replay(&self.bound, &mut self.fused) {
-                return Ok(&self.fused);
+                return;
             }
             self.fused_off_plan = true;
         }
         let width = fusion_state_qubits(self.route.as_ref(), &self.template);
         let profile = fusion_profile(self.route.as_ref());
         self.fused = fuse_circuit_for_profile(&self.bound, true, width, profile).into_owned();
-        Ok(&self.fused)
     }
 
     /// Bind `values` and execute, reusing the settled backend choice and, where
@@ -209,17 +214,20 @@ impl PreparedCircuit {
         observables: &[Vec<PauliTerm>],
         seed: u64,
     ) -> Result<Vec<f64>> {
-        self.expectation_values_checked(values, observables, seed, false)
+        self.expectation_values_shifted(values, None, observables, seed, false)
     }
 
-    pub(crate) fn expectation_values_checked(
+    /// [`expectation_values`](Self::expectation_values) with the angle of one
+    /// linked instruction moved by a delta after binding.
+    pub(crate) fn expectation_values_shifted(
         &mut self,
         values: &[f64],
+        shift: Option<(usize, f64)>,
         observables: &[Vec<PauliTerm>],
         seed: u64,
         require_exact: bool,
     ) -> Result<Vec<f64>> {
-        let fused = self.bind_for_route(values)?;
+        let fused = self.bind_shifted_for_route(values, shift)?;
         let Self {
             kind,
             limits,
@@ -325,35 +333,212 @@ impl PreparedCircuit {
         })
     }
 
+    /// Bind `values` and compute `⟨H⟩` and its exact gradient by the adjoint method, as
+    /// [`Simulate::expectation_gradient`](crate::sim::Simulate::expectation_gradient)
+    /// does on the bound circuit with the held parameters. The forward pass applies the
+    /// replayed fusion plan where the statevector fuses as the held route does.
+    ///
+    /// # Errors
+    /// Same arity and finiteness conditions as [`Parameters::bind`], plus whatever that
+    /// terminal reports.
+    pub fn expectation_gradient(
+        &mut self,
+        values: &[f64],
+        observable: &PauliObservable,
+        seed: u64,
+    ) -> Result<ExpectationGradient> {
+        if self.template.save_count() != 0
+            || !(self.kind.is_auto() || matches!(self.kind, BackendKind::Statevector))
+        {
+            self.bind(values)?;
+            return request(&self.bound, &self.kind, self.limits)
+                .seed(seed)
+                .expectation_gradient(observable, &self.params);
+        }
+        let reuse = fusion_state_qubits(self.route.as_ref(), &self.template)
+            == self.template.num_qubits
+            && fusion_profile(self.route.as_ref()) == FusionProfile::Host;
+        if reuse {
+            self.bind_fused(values)?;
+        } else {
+            self.bind(values)?;
+        }
+        gradient::expectation_gradient_within(
+            &self.bound,
+            observable.terms(),
+            &self.params,
+            seed,
+            &ResolvedLimits::resolve(self.limits.as_ref()),
+            reuse.then_some(&self.fused),
+        )
+    }
+
+    /// Bind `values` and compute `⟨H⟩` and its gradient by the parameter-shift rule, as
+    /// [`Simulate::expectation_gradient_shift`](crate::sim::Simulate::expectation_gradient_shift)
+    /// does on the bound circuit with the held parameters. Every shifted evaluation
+    /// reuses the held route and fusion plan.
+    ///
+    /// # Errors
+    /// Same arity and finiteness conditions as [`Parameters::bind`], plus whatever that
+    /// terminal reports.
+    pub fn expectation_gradient_shift(
+        &mut self,
+        values: &[f64],
+        observable: &PauliObservable,
+        seed: u64,
+    ) -> Result<ExpectationGradient> {
+        let split = self.splits_runs();
+        self.shift_gradient(values, observable, seed, split)
+    }
+
+    /// [`expectation_gradient`](Self::expectation_gradient) on each binding in order,
+    /// under one seed.
+    ///
+    /// Under the `parallel` feature the bindings split across Rayon workers below the
+    /// width where the statevector kernels parallelize on their own, and run in order
+    /// from it. Results are identical to calling `expectation_gradient` in a loop
+    /// either way.
+    ///
+    /// # Errors
+    /// The error of the first failing binding in list order.
+    pub fn expectation_gradient_many<V: AsRef<[f64]> + Sync>(
+        &mut self,
+        bindings: &[V],
+        observable: &PauliObservable,
+        seed: u64,
+    ) -> Result<Vec<ExpectationGradient>> {
+        let split = self.splits_gradient_rows();
+        self.map_split_if(split, bindings, |prepared, values| {
+            prepared.expectation_gradient(values.as_ref(), observable, seed)
+        })
+    }
+
+    /// [`expectation_gradient_shift`](Self::expectation_gradient_shift) on each binding
+    /// in order, split as [`expectation_gradient_many`](Self::expectation_gradient_many)
+    /// splits. Bindings that run in order spread their shifted evaluations instead.
+    ///
+    /// # Errors
+    /// The error of the first failing binding in list order.
+    pub fn expectation_gradient_shift_many<V: AsRef<[f64]> + Sync>(
+        &mut self,
+        bindings: &[V],
+        observable: &PauliObservable,
+        seed: u64,
+    ) -> Result<Vec<ExpectationGradient>> {
+        let rows = self.splits_gradient_rows() && bindings.len() > 1;
+        let links = !rows && self.splits_runs();
+        self.map_split_if(rows, bindings, |prepared, values| {
+            prepared.shift_gradient(values.as_ref(), observable, seed, links)
+        })
+    }
+
+    fn shift_gradient(
+        &mut self,
+        values: &[f64],
+        observable: &PauliObservable,
+        seed: u64,
+        split: bool,
+    ) -> Result<ExpectationGradient> {
+        if self.template.save_count() != 0 {
+            self.bind(values)?;
+            return request(&self.bound, &self.kind, self.limits)
+                .seed(seed)
+                .expectation_gradient_shift(observable, &self.params);
+        }
+        self.params.check_values(values)?;
+        let links = self.params.links().to_vec();
+        let num_slots = self.params.num_slots();
+        gradient::prepared_shift(
+            self,
+            values,
+            &links,
+            num_slots,
+            observable.terms(),
+            seed,
+            false,
+            split,
+        )
+    }
+
     /// Bind `values` in the form the held route applies, returning true when that
     /// is the fused stream.
     fn bind_for_route(&mut self, values: &[f64]) -> Result<bool> {
+        self.bind_shifted_for_route(values, None)
+    }
+
+    /// [`bind_for_route`](Self::bind_for_route), moving the angle of the instruction
+    /// `shift` names by its delta before fusing. That instruction must be linked, so
+    /// the next binding restores it.
+    fn bind_shifted_for_route(
+        &mut self,
+        values: &[f64],
+        shift: Option<(usize, f64)>,
+    ) -> Result<bool> {
+        self.params.check_values(values)?;
+        self.params.write_angles(&mut self.bound, values);
+        if let Some((instruction, delta)) = shift {
+            *angle_mut(&mut self.bound.instructions[instruction]) += delta;
+        }
         let fused = self
             .route
             .as_ref()
             .is_some_and(PreparedRoute::supports_fused);
         if fused {
-            self.bind_fused(values)?;
-        } else {
-            self.bind(values)?;
+            self.fuse_bound();
         }
         Ok(fused)
     }
 
+    /// Whether a batch of runs splits across Rayon workers, as
+    /// [`run_many`](Self::run_many) splits it.
+    pub(crate) fn splits_runs(&self) -> bool {
+        #[cfg(feature = "parallel")]
+        {
+            crate::sim::runs_split_across_workers(&self.kind, self.template.num_qubits)
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            false
+        }
+    }
+
+    /// Whether gradient rows split across Rayon workers: where runs split, and only
+    /// below the width where the kernels inside one row parallelize.
+    fn splits_gradient_rows(&self) -> bool {
+        self.splits_runs() && self.template.num_qubits < crate::backend::PARALLEL_THRESHOLD_QUBITS
+    }
+
     /// Evaluate `eval` per item, in order, splitting the items across Rayon workers
-    /// where [`run_many`](Self::run_many) splits. A worker copy starts from the
-    /// settled parts rather than from `self`, whose held backend is not `Sync`;
-    /// results do not depend on binding history, so the copy answers as `self` would.
-    pub(crate) fn map_split<I, T, F>(&mut self, items: &[I], eval: F) -> Result<Vec<T>>
+    /// where [`run_many`](Self::run_many) splits.
+    fn map_split<I, T, F>(&mut self, items: &[I], eval: F) -> Result<Vec<T>>
     where
         I: Sync,
         T: Send,
         F: Fn(&mut Self, &I) -> Result<T> + Sync,
     {
+        let split = self.splits_runs();
+        self.map_split_if(split, items, eval)
+    }
+
+    /// Evaluate `eval` per item, in order, splitting the items across Rayon workers
+    /// when `split` is set. A worker copy starts from the settled parts rather than
+    /// from `self`, whose held backend is not `Sync`; results do not depend on binding
+    /// history, so the copy answers as `self` would.
+    pub(crate) fn map_split_if<I, T, F>(
+        &mut self,
+        split: bool,
+        items: &[I],
+        eval: F,
+    ) -> Result<Vec<T>>
+    where
+        I: Sync,
+        T: Send,
+        F: Fn(&mut Self, &I) -> Result<T> + Sync,
+    {
+        #[cfg(not(feature = "parallel"))]
+        let _ = split;
         #[cfg(feature = "parallel")]
-        if items.len() > 1
-            && crate::sim::runs_split_across_workers(&self.kind, self.template.num_qubits)
-        {
+        if split && items.len() > 1 {
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicUsize, Ordering};
             let Self {

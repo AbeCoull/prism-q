@@ -762,12 +762,13 @@ fn dm_gpu_noisy_shift_gradient_matches_cpu() {
     let circuit = circuits::hardware_efficient_ansatz(8, 1, 7);
     let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
     let params = Parameters::all_rotations(&circuit);
-    let hamiltonian: Vec<(f64, Vec<PauliTerm>)> = vec![
+    let hamiltonian = prism_q::PauliObservable::from_terms([
         (0.7, vec![PauliTerm::z(0), PauliTerm::z(1)]),
         (-0.3, vec![PauliTerm::x(2)]),
         (0.5, vec![PauliTerm::y(3), PauliTerm::z(4)]),
         (0.2, vec![PauliTerm::z(7)]),
-    ];
+    ])
+    .unwrap();
     let gradient = |kind: BackendKind| {
         sim::simulate(&circuit)
             .backend(kind)

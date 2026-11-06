@@ -449,6 +449,45 @@ fn run_batch_bitwise_equal_across_thread_counts() {
     }
 }
 
+// Twelve-qubit gradient rows split across workers, one prepared copy per worker,
+// so the rows each worker claims move with the thread count.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn prepared_gradient_batches_bitwise_equal_across_thread_counts() {
+    let template = prism_q::circuits::hardware_efficient_ansatz(12, 2, SEED);
+    let params = Parameters::all_rotations(&template);
+    let hamiltonian = PauliObservable::from_terms((0..11).map(|q| {
+        (
+            0.5 + 0.1 * q as f64,
+            vec![PauliTerm::z(q), PauliTerm::x(q + 1)],
+        )
+    }))
+    .unwrap();
+    let points: Vec<Vec<f64>> = (0..6)
+        .map(|p| {
+            (0..params.num_slots())
+                .map(|k| 0.1 + 0.07 * (p * 31 + k) as f64)
+                .collect()
+        })
+        .collect();
+    let batch = |threads: usize| {
+        in_pool(threads, || {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            let adjoint = prepared
+                .expectation_gradient_many(&points, &hamiltonian, SEED)
+                .unwrap();
+            let shift = prepared
+                .expectation_gradient_shift_many(&points[..2], &hamiltonian, SEED)
+                .unwrap();
+            (adjoint, shift)
+        })
+    };
+    let base = batch(1);
+    for threads in [3, THREADS_HI] {
+        assert_eq!(base, batch(threads), "{threads} threads");
+    }
+}
+
 // A parameter-shift gradient below the parallel floor splits its links into one
 // chunk per worker, so the chunk boundaries move with the thread count.
 #[test]
@@ -456,14 +495,13 @@ fn run_batch_bitwise_equal_across_thread_counts() {
 fn shift_gradient_bitwise_equal_across_thread_counts() {
     let circuit = prism_q::circuits::hardware_efficient_ansatz(10, 2, SEED);
     let params = Parameters::all_rotations(&circuit);
-    let hamiltonian: Vec<(f64, Vec<PauliTerm>)> = (0..9)
-        .map(|q| {
-            (
-                0.5 + 0.1 * q as f64,
-                vec![PauliTerm::z(q), PauliTerm::x(q + 1)],
-            )
-        })
-        .collect();
+    let hamiltonian = prism_q::PauliObservable::from_terms((0..9).map(|q| {
+        (
+            0.5 + 0.1 * q as f64,
+            vec![PauliTerm::z(q), PauliTerm::x(q + 1)],
+        )
+    }))
+    .unwrap();
     let gradient = |threads: usize| {
         in_pool(threads, || {
             prism_q::sim::gradient::run_expectation_gradient_shift(

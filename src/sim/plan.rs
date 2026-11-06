@@ -16,11 +16,11 @@ pub enum Query<'a> {
     ReducedDensityMatrix(&'a [usize]),
     Entropy(&'a [usize]),
     Gradient {
-        hamiltonian: &'a [(f64, Vec<PauliTerm>)],
+        hamiltonian: &'a PauliObservable,
         parameters: &'a crate::circuit::Parameters,
     },
     GradientShift {
-        hamiltonian: &'a [(f64, Vec<PauliTerm>)],
+        hamiltonian: &'a PauliObservable,
         parameters: &'a crate::circuit::Parameters,
     },
 }
@@ -162,12 +162,7 @@ impl<SeedState> Simulate<'_, SeedState> {
                 parameters,
             } => {
                 parameters.validate(self.circuit)?;
-                for (coefficient, obs) in hamiltonian {
-                    if !coefficient.is_finite() {
-                        return Err(PrismError::InvalidParameter {
-                            message: "Hamiltonian coefficients must be finite".into(),
-                        });
-                    }
+                for (_, obs) in hamiltonian.terms() {
                     validate_observable(obs, self.circuit.num_qubits)?;
                 }
             }
@@ -387,7 +382,7 @@ pub(super) fn inspect<S>(
         parameters,
     } = query
     {
-        return inspect_shift(request, hamiltonian, parameters, limits);
+        return inspect_shift(request, hamiltonian.terms(), parameters, limits);
     }
     if matches!(query, Query::Expectation(_) | Query::Observable(_))
         && evolves_resets_as_channels(kind, circuit)

@@ -17,8 +17,8 @@ enum OwnedQuery {
     StateVector,
     ReducedDensityMatrix(Vec<usize>),
     Entropy(Vec<usize>),
-    Gradient(Vec<(f64, Vec<PauliTerm>)>, prism_q::Parameters),
-    GradientShift(Vec<(f64, Vec<PauliTerm>)>, prism_q::Parameters),
+    Gradient(PauliObservable, prism_q::Parameters),
+    GradientShift(PauliObservable, prism_q::Parameters),
 }
 
 /// Non-consuming terminal description for `Simulation.plan`.
@@ -39,11 +39,11 @@ impl PyQuery {
             OwnedQuery::Expectation(_) => Query::Expectation(&[]),
             OwnedQuery::Observable(_) => Query::Observable(empty),
             OwnedQuery::Gradient(_, parameters) => Query::Gradient {
-                hamiltonian: &[],
+                hamiltonian: empty,
                 parameters,
             },
             OwnedQuery::GradientShift(_, parameters) => Query::GradientShift {
-                hamiltonian: &[],
+                hamiltonian: empty,
                 parameters,
             },
             _ => self.as_query(),
@@ -122,7 +122,7 @@ impl PyQuery {
     ) -> PyPrismResult<Self> {
         Ok(Self(
             OwnedQuery::Gradient(
-                hamiltonian.terms()?.into_owned(),
+                hamiltonian.observable()?.into_owned(),
                 parameter_links(parameters)?,
             ),
             hamiltonian.text_width(),
@@ -135,7 +135,7 @@ impl PyQuery {
     ) -> PyPrismResult<Self> {
         Ok(Self(
             OwnedQuery::GradientShift(
-                hamiltonian.terms()?.into_owned(),
+                hamiltonian.observable()?.into_owned(),
                 parameter_links(parameters)?,
             ),
             hamiltonian.text_width(),

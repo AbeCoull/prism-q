@@ -36,7 +36,7 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 | Route inspection | `Query`, `Plan`, `PlanFallback`, `PlannedExactness`, `RejectReason`, `RouteRule`, `MemoryEstimate`, `MemoryEstimateKind` |
 | Limits | `Limits`, `LimitKnob`, `LimitSource`, `default_limits`, `set_default_limits` |
 | Dynamic programs | `DynamicProgram`, `DynamicProgramBuilder`, `simulate_program`, `SimulateProgram` |
-| Gradients | `ExpectationGradient`, returned by `Simulate::expectation_gradient` and `Simulate::expectation_gradient_shift` |
+| Gradients | `ExpectationGradient`, returned by `Simulate::expectation_gradient`, `Simulate::expectation_gradient_shift` and the `PreparedCircuit` methods of the same names, all taking the Hamiltonian as a `PauliObservable` |
 | Parameters | `Parameters`, `ParamLink`, `PreparedCircuit` |
 | Compiled sampling | `compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`, `run_shots_compiled`, `run_shots_noisy`, `noisy_marginals_analytical`, `density_matrix_expectation_values`, `CompiledSampler`, `CompiledDetectorSampler`, `DetectorSampleBatch`; with `gpu`: `run_shots_compiled_with_gpu`, `DevicePackedShots` |
 | Accumulators | `ShotAccumulator`, `HistogramAccumulator`, `MarginalsAccumulator`, `PauliExpectationAccumulator`, `CorrelatorAccumulator`, `NullAccumulator`, `PackedShots`, `ShotLayout`, `ParityStats` |
@@ -93,10 +93,12 @@ tabulates which backends answer each.
 
 ### Prepared circuits
 
-`PreparedCircuit` carries `run`, `expectation_values` and `observable_expectation`, each
-answering as the `Simulate` terminal of that name does on the bound circuit, plus a
-`_many` form of each that takes a list of bindings and splits it across cores where
-`run_batch` would. See [Parameters, Binding and Gradients](./parameters.md).
+`PreparedCircuit` carries `run`, `expectation_values`, `observable_expectation`,
+`expectation_gradient` and `expectation_gradient_shift`, each answering as the `Simulate`
+terminal of that name does on the bound circuit, plus a `_many` form of each that takes
+a list of bindings and splits it across cores where `run_batch` would. Gradient batches
+split only below the statevector kernels' parallel width, 15 qubits, and run in order
+above it. See [Parameters, Binding and Gradients](./parameters.md).
 
 ## Growth of the public enums
 

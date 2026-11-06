@@ -32,7 +32,8 @@ Every function in the table returns a `Circuit` ready for `simulate(&circuit)`.
 | `sparse_walk_circuit(n, k, depth, seed)` | Walk that keeps roughly `k` amplitudes live |
 
 `jordan_wigner_hamiltonian(n, max_terms, seed)` returns a Hamiltonian instead, a
-`Vec<(f64, Vec<PauliTerm>)>` in the form `expectation_gradient` takes: the Jordan-Wigner
+`Vec<(f64, Vec<PauliTerm>)>` that `PauliObservable::from_terms` turns into the
+observable `expectation_gradient` takes: the Jordan-Wigner
 transform of a seeded random fermionic operator on `n` modes, cut to the `max_terms`
 largest coefficients.
 

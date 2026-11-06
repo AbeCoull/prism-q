@@ -326,7 +326,10 @@ fn the_adjoint_gradient_declines_a_start_state() {
     let err = simulate(&circuit)
         .initial_state(&tilted())
         .seed(SEED)
-        .expectation_gradient(&[(1.0, vec![PauliTerm::z(0)])], &params)
+        .expectation_gradient(
+            &prism_q::PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap(),
+            &params,
+        )
         .expect_err("the adjoint pass initializes its own state");
     assert!(
         matches!(err, PrismError::IncompatibleBackend { .. }),

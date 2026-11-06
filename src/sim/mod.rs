@@ -1167,15 +1167,14 @@ impl<'c> Simulate<'c, Seeded> {
     /// Compute `⟨H⟩` and its exact gradient with respect to the bound
     /// parameters using the adjoint method.
     ///
-    /// `hamiltonian` is a weighted Pauli sum `Σ c_k P_k` with real
-    /// coefficients. `params` declares which gate instructions carry parameters.
+    /// `params` declares which gate instructions carry parameters.
     /// Runs on the statevector backend; the selected backend must be `Auto` or
     /// `Statevector`. The circuit must be unitary. See
     /// [`gradient::run_expectation_gradient`].
     #[inline]
     pub fn expectation_gradient(
         self,
-        hamiltonian: &[(f64, Vec<PauliTerm>)],
+        hamiltonian: &PauliObservable,
         params: &crate::circuit::Parameters,
     ) -> Result<gradient::ExpectationGradient> {
         self.reject_saves("expectation_gradient")?;
@@ -1206,7 +1205,14 @@ impl<'c> Simulate<'c, Seeded> {
                         .into(),
             });
         }
-        gradient::expectation_gradient_within(self.circuit, hamiltonian, params, seed, limits)
+        gradient::expectation_gradient_within(
+            self.circuit,
+            hamiltonian.terms(),
+            params,
+            seed,
+            limits,
+            None,
+        )
     }
 
     /// Compute `⟨H⟩` and its gradient by the parameter-shift rule on the
@@ -1226,7 +1232,7 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     pub fn expectation_gradient_shift(
         self,
-        hamiltonian: &[(f64, Vec<PauliTerm>)],
+        hamiltonian: &PauliObservable,
         params: &crate::circuit::Parameters,
     ) -> Result<gradient::ExpectationGradient> {
         self.reject_saves("expectation_gradient_shift")?;
@@ -1247,7 +1253,7 @@ impl<'c> Simulate<'c, Seeded> {
         gradient::shift_gradient(
             &self.kind,
             self.circuit,
-            hamiltonian,
+            hamiltonian.terms(),
             params,
             self.noise_model,
             self.initial_state,

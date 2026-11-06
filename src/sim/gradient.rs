@@ -28,7 +28,7 @@ use crate::limits::{Limits, ResolvedLimits};
 
 use super::noise::NoiseModel;
 use super::unified_pauli::PauliTerm;
-use super::{BackendKind, i_pow, pauli_masks, pauli_sandwiches_from_masks};
+use super::{BackendKind, PauliObservable, i_pow, pauli_masks, pauli_sandwiches_from_masks};
 
 /// Expectation value and its gradient with respect to each parameter slot.
 #[derive(Debug, Clone, PartialEq)]
@@ -42,22 +42,20 @@ pub struct ExpectationGradient {
 /// Compute `⟨H⟩` and its exact gradient with respect to the trainable
 /// parameters using the adjoint method on the statevector backend.
 ///
-/// `hamiltonian` is a weighted Pauli sum `Σ c_k P_k` with real coefficients;
-/// each `P_k` is a joint Pauli string (identity factors omitted). `params`
-/// declares which gate instructions are trainable and how they map to the
-/// gradient vector. The returned gradient has length `params.num_slots()`.
+/// `params` declares which gate instructions are trainable and how they map to
+/// the gradient vector. The returned gradient has length `params.num_slots()`.
 ///
 /// # Examples
 ///
 /// ```
 /// use prism_q::sim::gradient::run_expectation_gradient;
-/// use prism_q::{Circuit, Gate, Parameters, PauliTerm};
+/// use prism_q::{Circuit, Gate, Parameters, PauliObservable, PauliTerm};
 ///
 /// let theta = 0.5_f64;
 /// let mut circuit = Circuit::new(2, 0);
 /// circuit.add_gate(Gate::Rx(theta), &[0]);
 ///
-/// let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+/// let hamiltonian = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])])?;
 /// let params = Parameters::all_rotations(&circuit);
 /// let g = run_expectation_gradient(&circuit, &hamiltonian, &params, 42)?;
 /// // <Z0> = cos(theta), d<Z0>/dtheta = -sin(theta).
@@ -67,26 +65,32 @@ pub struct ExpectationGradient {
 /// ```
 pub fn run_expectation_gradient(
     circuit: &Circuit,
-    hamiltonian: &[(f64, Vec<PauliTerm>)],
+    hamiltonian: &PauliObservable,
     params: &Parameters,
     seed: u64,
 ) -> Result<ExpectationGradient> {
     expectation_gradient_within(
         circuit,
-        hamiltonian,
+        hamiltonian.terms(),
         params,
         seed,
         &ResolvedLimits::process_default(),
+        None,
     )
 }
 
 /// [`run_expectation_gradient`] under `limits`.
-pub(super) fn expectation_gradient_within(
+///
+/// `fused_forward`, when given, is `circuit` already fused for the statevector at
+/// its own width and profile; the forward pass applies it in place of fusing again
+/// whenever every gate lies in the observable's light cone.
+pub(crate) fn expectation_gradient_within(
     circuit: &Circuit,
     hamiltonian: &[(f64, Vec<PauliTerm>)],
     params: &Parameters,
     seed: u64,
     limits: &ResolvedLimits,
+    fused_forward: Option<&Circuit>,
 ) -> Result<ExpectationGradient> {
     if super::has_nonunitary_or_classical_ops(circuit) {
         return Err(PrismError::IncompatibleBackend {
@@ -150,7 +154,14 @@ pub(super) fn expectation_gradient_within(
     phi.init(circuit.num_qubits, circuit.num_classical_bits)?;
     let forward = kept_subcircuit(circuit, &kept);
     let expanded = super::expand_for_backend(&phi, &forward);
-    let fused = super::fuse_for_backend(&phi, &expanded);
+    let fused = match fused_forward {
+        Some(fused)
+            if kept.len() == circuit.instructions.len() && matches!(expanded, Cow::Borrowed(_)) =>
+        {
+            Cow::Borrowed(fused)
+        }
+        _ => super::fuse_for_backend(&phi, &expanded),
+    };
     phi.apply_instructions(&fused.instructions)?;
 
     let (value, lambda_state) = build_lambda_and_value(phi.state_vector(), &masked)?;
@@ -726,13 +737,13 @@ fn build_lambda_and_value(
 ///
 /// ```
 /// use prism_q::sim::gradient::run_expectation_gradient_shift;
-/// use prism_q::{Circuit, Gate, Parameters, PauliTerm};
+/// use prism_q::{Circuit, Gate, Parameters, PauliObservable, PauliTerm};
 ///
 /// let theta = 0.5_f64;
 /// let mut circuit = Circuit::new(2, 0);
 /// circuit.add_gate(Gate::Rx(theta), &[0]);
 ///
-/// let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+/// let hamiltonian = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])])?;
 /// let params = Parameters::all_rotations(&circuit);
 /// let g = run_expectation_gradient_shift(&circuit, &hamiltonian, &params, 42)?;
 /// assert!((g.gradient[0] + theta.sin()).abs() < 1e-9);
@@ -740,14 +751,14 @@ fn build_lambda_and_value(
 /// ```
 pub fn run_expectation_gradient_shift(
     circuit: &Circuit,
-    hamiltonian: &[(f64, Vec<PauliTerm>)],
+    hamiltonian: &PauliObservable,
     params: &Parameters,
     seed: u64,
 ) -> Result<ExpectationGradient> {
     shift_gradient(
         &BackendKind::Auto,
         circuit,
-        hamiltonian,
+        hamiltonian.terms(),
         params,
         None,
         None,
@@ -934,10 +945,9 @@ fn prepared_shift_gradient(
     request: Option<&Limits>,
     require_exact: bool,
 ) -> Result<ExpectationGradient> {
-    // One slot per linked instruction rather than per parameter slot, since a
-    // shift moves one gate even where its slot drives several.
-    let links = params.links();
-    let mut sites: Vec<usize> = links.iter().map(|link| link.instruction).collect();
+    // One slot per linked instruction rather than per parameter slot, so each
+    // gate starts from its own angle even where its slot drives several.
+    let mut sites: Vec<usize> = params.links().iter().map(|link| link.instruction).collect();
     sites.sort_unstable();
     sites.dedup();
     let base: Vec<f64> = sites
@@ -953,11 +963,49 @@ fn prepared_shift_gradient(
         sites.len(),
     );
 
+    let mut prepared =
+        PreparedCircuit::with_limits(circuit.clone(), site_params, kind.clone(), request.copied())?;
+    let split = prepared.splits_runs();
+    prepared_shift(
+        &mut prepared,
+        &base,
+        params.links(),
+        params.num_slots(),
+        hamiltonian,
+        seed,
+        require_exact,
+        split,
+    )
+}
+
+/// Parameter-shift gradient of `prepared` bound at `values`, with one pair of
+/// shifted evaluations per entry of `links` summed into `num_slots` slots.
+///
+/// A shift moves the angle of `link.instruction` alone, which must be linked in
+/// `prepared`'s own parameters so the next binding restores it. With `split` the
+/// links spread across Rayon workers; terms are summed in link order either way,
+/// so the gradient does not depend on the thread count.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepared_shift(
+    prepared: &mut PreparedCircuit,
+    values: &[f64],
+    links: &[ParamLink],
+    num_slots: usize,
+    hamiltonian: &[(f64, Vec<PauliTerm>)],
+    seed: u64,
+    require_exact: bool,
+    split: bool,
+) -> Result<ExpectationGradient> {
     let observables: Vec<Vec<PauliTerm>> =
         hamiltonian.iter().map(|(_, terms)| terms.clone()).collect();
-    let energy = |prepared: &mut PreparedCircuit, values: &[f64]| -> Result<f64> {
-        let per_term =
-            prepared.expectation_values_checked(values, &observables, seed, require_exact)?;
+    let energy = |prepared: &mut PreparedCircuit, shift: Option<(usize, f64)>| -> Result<f64> {
+        let per_term = prepared.expectation_values_shifted(
+            values,
+            shift,
+            &observables,
+            seed,
+            require_exact,
+        )?;
         Ok(hamiltonian
             .iter()
             .zip(per_term)
@@ -965,26 +1013,16 @@ fn prepared_shift_gradient(
             .sum())
     };
 
-    let mut prepared =
-        PreparedCircuit::with_limits(circuit.clone(), site_params, kind.clone(), request.copied())?;
-    let value = energy(&mut prepared, &base)?;
-    let mut gradient = vec![0.0; params.num_slots()];
-    if params.is_empty() {
+    let value = energy(prepared, None)?;
+    let mut gradient = vec![0.0; num_slots];
+    if links.is_empty() {
         return Ok(ExpectationGradient { value, gradient });
     }
 
-    // Terms are summed into their slots in link order however the links were
-    // split, so the gradient does not depend on the thread count.
     let shift = std::f64::consts::FRAC_PI_2;
-    let terms = prepared.map_split(links, |worker, link| {
-        let site = sites
-            .binary_search(&link.instruction)
-            .expect("every link names a site");
-        let mut values = base.clone();
-        values[site] = base[site] + shift;
-        let plus = energy(worker, &values)?;
-        values[site] = base[site] - shift;
-        let minus = energy(worker, &values)?;
+    let terms = prepared.map_split_if(split, links, |worker, link| {
+        let plus = energy(worker, Some((link.instruction, shift)))?;
+        let minus = energy(worker, Some((link.instruction, -shift)))?;
         Ok(0.5 * (plus - minus))
     })?;
     for (link, term) in links.iter().zip(terms) {

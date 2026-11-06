@@ -163,7 +163,7 @@ fn gradient_plans_include_actual_inputs_and_shifted_evaluations() {
     let mut circuit = Circuit::new(2, 0);
     circuit.add_gate(Gate::Ry(0.3), &[0]);
     let parameters = prism_q::Parameters::all_rotations(&circuit);
-    let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+    let hamiltonian = prism_q::PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
     let request = simulate(&circuit);
     let plan = request
         .plan(Query::GradientShift {
@@ -325,7 +325,7 @@ fn malformed_gradient_slots_are_rejected_by_plan_and_execution() {
         }],
         0,
     );
-    let hamiltonian = [(1.0, vec![PauliTerm::z(0)])];
+    let hamiltonian = prism_q::PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
     assert!(
         simulate(&circuit)
             .plan(Query::Gradient {
@@ -467,7 +467,7 @@ fn device_plan_matches_execution_and_adjoint_keeps_host_limits() {
     let mut circuit = Circuit::new(24, 0);
     circuit.add_gate(Gate::Ry(0.2), &[0]);
     let parameters = prism_q::Parameters::all_rotations(&circuit);
-    let hamiltonian = [(1.0, vec![PauliTerm::z(0)])];
+    let hamiltonian = prism_q::PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
     let request = || {
         simulate(&circuit)
             .backend(BackendKind::AutoGpu {

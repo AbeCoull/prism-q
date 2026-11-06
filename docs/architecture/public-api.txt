@@ -1196,6 +1196,10 @@ pub struct prism_q::circuit::prepared::PreparedCircuit
 impl prism_q::circuit::prepared::PreparedCircuit
 pub fn prism_q::circuit::prepared::PreparedCircuit::bind(&mut self, &[f64]) -> prism_q::error::Result<&prism_q::circuit::Circuit>
 pub fn prism_q::circuit::prepared::PreparedCircuit::bind_fused(&mut self, &[f64]) -> prism_q::error::Result<&prism_q::circuit::Circuit>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient(&mut self, &[f64], &prism_q::PauliObservable, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient_many<V: core::convert::AsRef<[f64]> + core::marker::Sync>(&mut self, &[V], &prism_q::PauliObservable, u64) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::gradient::ExpectationGradient>>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient_shift(&mut self, &[f64], &prism_q::PauliObservable, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient_shift_many<V: core::convert::AsRef<[f64]> + core::marker::Sync>(&mut self, &[V], &prism_q::PauliObservable, u64) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::gradient::ExpectationGradient>>
 pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_values(&mut self, &[f64], &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_values_many<V: core::convert::AsRef<[f64]> + core::marker::Sync>(&mut self, &[V], &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], u64) -> prism_q::error::Result<alloc::vec::Vec<alloc::vec::Vec<f64>>>
 pub fn prism_q::circuit::prepared::PreparedCircuit::new(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<Self>
@@ -1340,6 +1344,10 @@ pub struct prism_q::circuit::PreparedCircuit
 impl prism_q::circuit::prepared::PreparedCircuit
 pub fn prism_q::circuit::prepared::PreparedCircuit::bind(&mut self, &[f64]) -> prism_q::error::Result<&prism_q::circuit::Circuit>
 pub fn prism_q::circuit::prepared::PreparedCircuit::bind_fused(&mut self, &[f64]) -> prism_q::error::Result<&prism_q::circuit::Circuit>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient(&mut self, &[f64], &prism_q::PauliObservable, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient_many<V: core::convert::AsRef<[f64]> + core::marker::Sync>(&mut self, &[V], &prism_q::PauliObservable, u64) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::gradient::ExpectationGradient>>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient_shift(&mut self, &[f64], &prism_q::PauliObservable, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient_shift_many<V: core::convert::AsRef<[f64]> + core::marker::Sync>(&mut self, &[V], &prism_q::PauliObservable, u64) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::gradient::ExpectationGradient>>
 pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_values(&mut self, &[f64], &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_values_many<V: core::convert::AsRef<[f64]> + core::marker::Sync>(&mut self, &[V], &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], u64) -> prism_q::error::Result<alloc::vec::Vec<alloc::vec::Vec<f64>>>
 pub fn prism_q::circuit::prepared::PreparedCircuit::new(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<Self>
@@ -2186,8 +2194,8 @@ pub mod prism_q::sim::gradient
 pub struct prism_q::sim::gradient::ExpectationGradient
 pub prism_q::sim::gradient::ExpectationGradient::gradient: alloc::vec::Vec<f64>
 pub prism_q::sim::gradient::ExpectationGradient::value: f64
-pub fn prism_q::sim::gradient::run_expectation_gradient(&prism_q::circuit::Circuit, &[(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)], &prism_q::circuit::parameter::Parameters, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::gradient::run_expectation_gradient_shift(&prism_q::circuit::Circuit, &[(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)], &prism_q::circuit::parameter::Parameters, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::sim::gradient::run_expectation_gradient(&prism_q::circuit::Circuit, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::sim::gradient::run_expectation_gradient_shift(&prism_q::circuit::Circuit, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
 pub mod prism_q::sim::homological
 pub struct prism_q::sim::homological::ErrorChainComplex
 impl prism_q::sim::homological::ErrorChainComplex
@@ -2487,10 +2495,10 @@ pub prism_q::sim::Query::Counts(usize)
 pub prism_q::sim::Query::Entropy(&'a [usize])
 pub prism_q::sim::Query::Expectation(&'a [alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>])
 pub prism_q::sim::Query::Gradient
-pub prism_q::sim::Query::Gradient::hamiltonian: &'a [(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)]
+pub prism_q::sim::Query::Gradient::hamiltonian: &'a prism_q::PauliObservable
 pub prism_q::sim::Query::Gradient::parameters: &'a prism_q::circuit::parameter::Parameters
 pub prism_q::sim::Query::GradientShift
-pub prism_q::sim::Query::GradientShift::hamiltonian: &'a [(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)]
+pub prism_q::sim::Query::GradientShift::hamiltonian: &'a prism_q::PauliObservable
 pub prism_q::sim::Query::GradientShift::parameters: &'a prism_q::circuit::parameter::Parameters
 pub prism_q::sim::Query::Marginals
 pub prism_q::sim::Query::Observable(&'a prism_q::PauliObservable)
@@ -2695,8 +2703,8 @@ pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results(self, &[
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
 impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient(self, &[(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)], &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient_shift(self, &[(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)], &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
@@ -3096,10 +3104,10 @@ pub prism_q::Query::Counts(usize)
 pub prism_q::Query::Entropy(&'a [usize])
 pub prism_q::Query::Expectation(&'a [alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>])
 pub prism_q::Query::Gradient
-pub prism_q::Query::Gradient::hamiltonian: &'a [(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)]
+pub prism_q::Query::Gradient::hamiltonian: &'a prism_q::PauliObservable
 pub prism_q::Query::Gradient::parameters: &'a prism_q::circuit::parameter::Parameters
 pub prism_q::Query::GradientShift
-pub prism_q::Query::GradientShift::hamiltonian: &'a [(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)]
+pub prism_q::Query::GradientShift::hamiltonian: &'a prism_q::PauliObservable
 pub prism_q::Query::GradientShift::parameters: &'a prism_q::circuit::parameter::Parameters
 pub prism_q::Query::Marginals
 pub prism_q::Query::Observable(&'a prism_q::PauliObservable)
@@ -3953,6 +3961,10 @@ pub struct prism_q::PreparedCircuit
 impl prism_q::circuit::prepared::PreparedCircuit
 pub fn prism_q::circuit::prepared::PreparedCircuit::bind(&mut self, &[f64]) -> prism_q::error::Result<&prism_q::circuit::Circuit>
 pub fn prism_q::circuit::prepared::PreparedCircuit::bind_fused(&mut self, &[f64]) -> prism_q::error::Result<&prism_q::circuit::Circuit>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient(&mut self, &[f64], &prism_q::PauliObservable, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient_many<V: core::convert::AsRef<[f64]> + core::marker::Sync>(&mut self, &[V], &prism_q::PauliObservable, u64) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::gradient::ExpectationGradient>>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient_shift(&mut self, &[f64], &prism_q::PauliObservable, u64) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_gradient_shift_many<V: core::convert::AsRef<[f64]> + core::marker::Sync>(&mut self, &[V], &prism_q::PauliObservable, u64) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::gradient::ExpectationGradient>>
 pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_values(&mut self, &[f64], &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::circuit::prepared::PreparedCircuit::expectation_values_many<V: core::convert::AsRef<[f64]> + core::marker::Sync>(&mut self, &[V], &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], u64) -> prism_q::error::Result<alloc::vec::Vec<alloc::vec::Vec<f64>>>
 pub fn prism_q::circuit::prepared::PreparedCircuit::new(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<Self>
@@ -4226,8 +4238,8 @@ pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results(self, &[
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
 impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient(self, &[(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)], &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient_shift(self, &[(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)], &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
 pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>

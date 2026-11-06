@@ -3135,10 +3135,11 @@ fn bench_decomposition(c: &mut Criterion) {
 // ---- Adjoint gradient benchmarks ----
 
 /// A small weighted Z-chain Hamiltonian over the first few qubits.
-fn z_chain_hamiltonian(n: usize) -> Vec<(f64, Vec<PauliTerm>)> {
-    (0..n - 1)
-        .map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
-        .collect()
+fn z_chain_hamiltonian(n: usize) -> PauliObservable {
+    PauliObservable::from_terms(
+        (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)])),
+    )
+    .unwrap()
 }
 
 /// Add `delta` to the angle of every gate bound to parameter `slot`.
@@ -3160,9 +3161,10 @@ fn shift_slot(circuit: &Circuit, params: &Parameters, slot: usize, delta: f64) -
 /// alternative to the adjoint method (two forward expectation runs per slot).
 fn finite_diff_gradient(
     circuit: &Circuit,
-    hamiltonian: &[(f64, Vec<PauliTerm>)],
+    hamiltonian: &PauliObservable,
     params: &Parameters,
 ) -> Vec<f64> {
+    let hamiltonian = hamiltonian.terms();
     let observables: Vec<Vec<PauliTerm>> = hamiltonian.iter().map(|(_, p)| p.clone()).collect();
     let eps = 1e-5;
     let expval = |c: &Circuit| -> f64 {
@@ -3282,7 +3284,7 @@ fn bench_gradient_prefix(c: &mut Criterion) {
     for &n in &[16, 18, 20] {
         let circuit = prefix_local_circuit(n, 6);
         let params = Parameters::all_rotations(&circuit);
-        let ham = vec![(1.0, vec![PauliTerm::z(0)])];
+        let ham = PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
 
         group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {
             b.iter(|| black_box(run_expectation_gradient(circ, &ham, &params, 42).unwrap()));
@@ -3519,7 +3521,7 @@ fn bench_vqe_loop(c: &mut Criterion) {
 
         let iteration = |circuit: &Circuit| {
             let energy = run_observable_expectation(circuit, &observable, 42).unwrap();
-            let grad = run_expectation_gradient(circuit, &terms, &params, 42).unwrap();
+            let grad = run_expectation_gradient(circuit, &observable, &params, 42).unwrap();
             let stepped: Vec<f64> = values
                 .iter()
                 .zip(&grad.gradient)

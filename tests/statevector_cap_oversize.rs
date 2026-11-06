@@ -8,7 +8,10 @@ use common::{SEED, caps};
 use prism_q::gates::Gate;
 use prism_q::sim::gradient::run_expectation_gradient;
 use prism_q::sim::run_expectation_values;
-use prism_q::{BackendKind, Circuit, Parameters, PauliTerm, PrismError, ResolvedBackend, simulate};
+use prism_q::{
+    BackendKind, Circuit, Parameters, PauliObservable, PauliTerm, PrismError, ResolvedBackend,
+    simulate,
+};
 
 const CAP: usize = 4;
 const TOL: f64 = 1e-9;
@@ -170,7 +173,7 @@ fn require_exact_still_rejects_a_wide_superposing_circuit() {
 struct Fixture {
     circuit: Circuit,
     params: Parameters,
-    hamiltonian: Vec<(f64, Vec<PauliTerm>)>,
+    hamiltonian: PauliObservable,
     want: Vec<f64>,
 }
 
@@ -189,10 +192,11 @@ fn fixture(n: usize) -> Fixture {
     circuit.add_gate(Gate::Cx, &[2, 3]);
 
     let params = Parameters::all_rotations(&circuit);
-    let hamiltonian = vec![
+    let hamiltonian = PauliObservable::from_terms([
         (1.0, vec![PauliTerm::z(0)]),
         (0.5, vec![PauliTerm::z(0), PauliTerm::z(1)]),
-    ];
+    ])
+    .unwrap();
     let mut want = vec![0.0; n];
     want[0] = -angles[0].sin();
     want[1] = -0.5 * angles[1].sin();

@@ -87,11 +87,11 @@ def test_plan_reports_a_pauli_string_wider_than_the_circuit():
         ),
         (
             Query.gradient([(1.0, "ZIZ")], links),
-            lambda: request.expectation_gradient([(1.0, "ZIZ")], links),
+            lambda: request.expectation_gradient([(1.0, "ZIZ")], params),
         ),
         (
             Query.gradient_shift([(1.0, "ZIZ")], links),
-            lambda: request.expectation_gradient_shift([(1.0, "ZIZ")], links),
+            lambda: request.expectation_gradient_shift([(1.0, "ZIZ")], params),
         ),
     ]
     for query, run in cases:

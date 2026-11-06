@@ -450,44 +450,34 @@ fn build_sparse_from_filtered_blocks(
 }
 
 fn build_filtered_parity_blocks(
-    block_samplers: &[CompiledSampler],
-    local_to_global: &[Vec<usize>],
+    block_samplers: Vec<CompiledSampler>,
+    local_to_global: Vec<Vec<usize>>,
 ) -> Option<ParityBlocks> {
     let mut blocks = Vec::new();
 
-    for (block_idx, sampler) in block_samplers.iter().enumerate() {
-        let mapping = &local_to_global[block_idx];
+    for (sampler, mapping) in block_samplers.into_iter().zip(local_to_global) {
         if mapping.is_empty() {
             continue;
         }
 
-        if let Some(parity_blocks) = &sampler.parity_blocks {
-            for block in &parity_blocks.blocks {
-                let meas_indices = block
-                    .meas_indices
-                    .iter()
-                    .map(|&local_m| mapping[local_m])
-                    .collect();
-                blocks.push(ParityBlock {
-                    meas_indices,
-                    sparse: block.sparse.clone(),
-                    block_rank: block.block_rank,
-                    ref_bits_packed: block.ref_bits_packed.clone(),
-                });
+        if let Some(parity_blocks) = sampler.parity_blocks {
+            for mut block in parity_blocks.blocks {
+                for local_m in &mut block.meas_indices {
+                    *local_m = mapping[*local_m];
+                }
+                blocks.push(block);
             }
             continue;
         }
 
         let sparse = sampler
             .sparse
-            .as_ref()
-            .expect("filtered block samplers must retain sparse parity")
-            .clone();
+            .expect("filtered block samplers must retain sparse parity");
         blocks.push(ParityBlock {
-            meas_indices: mapping.clone(),
+            meas_indices: mapping,
             sparse,
             block_rank: sampler.rank,
-            ref_bits_packed: sampler.ref_bits_packed.clone(),
+            ref_bits_packed: sampler.ref_bits_packed,
         });
     }
 
@@ -3261,7 +3251,7 @@ fn compile_measurements_filtered(
         num_global_measurements,
     );
     let parity_blocks =
-        build_filtered_parity_blocks(&block_samplers, &local_to_global).map(|mut blocks| {
+        build_filtered_parity_blocks(block_samplers, local_to_global).map(|mut blocks| {
             blocks.direct_scatter = true;
             blocks
         });

@@ -803,6 +803,48 @@ fn filtered_product_h_matches_monolithic() {
 }
 
 #[test]
+fn filtered_component_parity_blocks_map_to_global_rows() {
+    let mut c = Circuit::new(8, 8);
+    for base in [0, 4] {
+        c.add_gate(Gate::H, &[base]);
+        c.add_gate(Gate::Cx, &[base, base + 1]);
+        c.add_gate(Gate::H, &[base + 2]);
+        c.add_gate(Gate::Cx, &[base + 2, base + 3]);
+        c.add_gate(Gate::Cz, &[base + 1, base + 2]);
+    }
+    for i in 0..8 {
+        c.add_measure(i, i);
+    }
+    assert_eq!(c.independent_subsystems().len(), 2);
+
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    let parity_blocks = sampler.parity_blocks.as_ref().unwrap();
+    assert!(parity_blocks.direct_scatter);
+    let mut groups: Vec<Vec<usize>> = parity_blocks
+        .blocks
+        .iter()
+        .map(|block| {
+            let mut meas = block.meas_indices.clone();
+            meas.sort_unstable();
+            meas
+        })
+        .collect();
+    groups.sort_unstable();
+    assert_eq!(groups, vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6, 7]]);
+
+    let shots = sampler.sample_bulk(2_000);
+    for shot in &shots {
+        for pair in 0..4 {
+            assert_eq!(shot[2 * pair], shot[2 * pair + 1], "pair {pair}");
+        }
+    }
+    for pair in 0..4 {
+        let ones = shots.iter().filter(|s| s[2 * pair]).count();
+        assert!((800..1200).contains(&ones), "pair {pair}: {ones} ones");
+    }
+}
+
+#[test]
 fn packed_shots_roundtrip_ghz() {
     let mut c = circuits::ghz_circuit(10);
     c.num_classical_bits = 10;

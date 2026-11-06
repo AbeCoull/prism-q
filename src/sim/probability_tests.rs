@@ -88,6 +88,23 @@ fn extract_block_bits_scalar_via_get() {
     assert!(p.get(0b1000).abs() < 1e-12);
 }
 
+#[test]
+fn factored_get_packs_scattered_mask_with_top_bit() {
+    let mask = (1u64 << 3) | (1 << 30) | (1 << 63);
+    let probs: Vec<f64> = (0..8).map(|k| k as f64).collect();
+    let p = Probabilities::Factored {
+        blocks: vec![FactoredBlock { probs, mask }],
+        total_qubits: 64,
+    };
+    assert_eq!(p.get(0), 0.0);
+    assert_eq!(p.get(1 << 3), 1.0);
+    assert_eq!(p.get(1 << 30), 2.0);
+    assert_eq!(p.get(1 << 63), 4.0);
+    assert_eq!(p.get((1 << 3) | (1 << 63)), 5.0);
+    assert_eq!(p.get(usize::MAX), 7.0);
+    assert_eq!(p.get(!(mask as usize)), 0.0);
+}
+
 #[cfg(feature = "parallel")]
 #[test]
 fn factored_to_vec_parallel_path() {

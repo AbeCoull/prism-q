@@ -5,9 +5,6 @@
 
 use std::collections::HashMap;
 
-#[cfg(target_arch = "x86_64")]
-use std::sync::OnceLock;
-
 use num_complex::Complex64;
 use rand::RngExt;
 use rand::SeedableRng;
@@ -17,6 +14,7 @@ use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 
 use super::shots::{build_cdf, sample_from_cdf};
+use crate::backend::simd::pack_masked_bits;
 use crate::limits::ResolvedLimits;
 
 #[cfg(not(prism_lowered_thresholds))]
@@ -87,7 +85,7 @@ impl CompactMeasurementMap {
             return state_idx & ((1usize << bits) - 1);
         }
         if let Some(mask) = self.pext_mask {
-            return extract_masked_bits(state_idx, mask);
+            return pack_masked_bits(state_idx, mask);
         }
 
         let mut key = 0usize;
@@ -130,36 +128,6 @@ impl CompactMeasurementMap {
         }
         packed
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-fn bmi2_available() -> bool {
-    static BMI2: OnceLock<bool> = OnceLock::new();
-    *BMI2.get_or_init(|| is_x86_feature_detected!("bmi2"))
-}
-
-#[inline]
-fn extract_masked_bits(index: usize, mask: u64) -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if bmi2_available() {
-            // SAFETY: BMI2 availability is checked immediately before this call.
-            return unsafe { core::arch::x86_64::_pext_u64(index as u64, mask) as usize };
-        }
-    }
-
-    let mut result = 0usize;
-    let mut bit = 0;
-    let mut m = mask;
-    while m != 0 {
-        let pos = m.trailing_zeros() as usize;
-        if index & (1usize << pos) != 0 {
-            result |= 1usize << bit;
-        }
-        bit += 1;
-        m &= m.wrapping_sub(1);
-    }
-    result
 }
 
 fn build_outcome_distribution<T: Sync>(

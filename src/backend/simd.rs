@@ -1357,6 +1357,38 @@ pub(crate) fn has_bmi2() -> bool {
     *CACHED.get_or_init(|| is_x86_feature_detected!("bmi2"))
 }
 
+/// Pack the bits of `index` selected by `mask` into the low bits, lowest mask bit first.
+///
+/// Uses PEXT when [`has_bmi2`] reports BMI2; otherwise [`pack_masked_bits_scalar`].
+#[inline]
+pub(crate) fn pack_masked_bits(index: usize, mask: u64) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_bmi2() {
+            // SAFETY: BMI2 detected
+            return unsafe { _pext_u64(index as u64, mask) as usize };
+        }
+    }
+    pack_masked_bits_scalar(index, mask)
+}
+
+/// Portable form of [`pack_masked_bits`], bit-identical to PEXT.
+#[inline(always)]
+pub(crate) fn pack_masked_bits_scalar(index: usize, mask: u64) -> usize {
+    let mut result = 0usize;
+    let mut bit = 0;
+    let mut m = mask;
+    while m != 0 {
+        let pos = m.trailing_zeros() as usize;
+        if index & (1usize << pos) != 0 {
+            result |= 1usize << bit;
+        }
+        bit += 1;
+        m &= m.wrapping_sub(1);
+    }
+    result
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn negate_slice_avx2(slice: &mut [Complex64]) {

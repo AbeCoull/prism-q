@@ -101,3 +101,24 @@ fn merged_counts_match_searched_counts_end_to_end() {
         assert_eq!(counts, searched, "{shots} shots");
     }
 }
+
+#[test]
+fn compact_key_on_scattered_qubits_packs_in_cbit_order() {
+    let meas_map = [(2, 0), (7, 1), (40, 2), (63, 3)];
+    let map = CompactMeasurementMap::new(&meas_map, 4);
+    assert_eq!(map.prefix_bits, None);
+    assert!(map.pext_mask.is_some());
+    for state_idx in [
+        0usize,
+        1 << 2,
+        1 << 63,
+        (1 << 7) | (1 << 40),
+        usize::MAX,
+        0x0123_4567_89AB_CDEF,
+    ] {
+        let want = meas_map.iter().fold(0usize, |key, &(qubit, cbit)| {
+            key | (((state_idx >> qubit) & 1) << cbit)
+        });
+        assert_eq!(map.compact_key(state_idx), want, "{state_idx:#x}");
+    }
+}

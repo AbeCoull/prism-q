@@ -366,6 +366,21 @@ fn bench_run_counts_terminal(c: &mut Criterion) {
         );
     }
 
+    // Odd qubits only: increasing but not a prefix, so each shot key goes through masked
+    // bit packing instead of the prefix mask.
+    let mut scattered = non_clifford_terminal_circuit(20, 0);
+    scattered.num_classical_bits = 10;
+    for (cbit, qubit) in (1..20).step_by(2).enumerate() {
+        scattered.add_measure(qubit, cbit);
+    }
+    group.bench_with_input(
+        BenchmarkId::new("nonclifford_scattered_20q_10m", 100_000),
+        &scattered,
+        |b, circ| {
+            b.iter(|| run_counts_with(BackendKind::Auto, circ, 100_000, SEED).unwrap());
+        },
+    );
+
     // Long-range random pairs keep every qubit live to the readout, so the forward
     // compile takes the whole-register tableau and its collapse passes are the cost;
     // 100 shots leave sampling a small share. 4000 is left out at about 3 s per

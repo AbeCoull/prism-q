@@ -854,6 +854,76 @@ fn avx512_prepared_2q_matches_avx2() {
     }
 }
 
+fn assert_packs(index: usize, mask: u64, want: usize) {
+    assert_eq!(
+        pack_masked_bits_scalar(index, mask),
+        want,
+        "scalar {index:#x} {mask:#x}"
+    );
+    assert_eq!(
+        pack_masked_bits(index, mask),
+        want,
+        "dispatch {index:#x} {mask:#x}"
+    );
+}
+
+#[test]
+fn pack_masked_bits_empty_mask_is_zero() {
+    for index in [0usize, 1, 0xDEAD_BEEF, usize::MAX] {
+        assert_packs(index, 0, 0);
+    }
+}
+
+#[test]
+fn pack_masked_bits_contiguous_mask_shifts_down() {
+    let mask = 0xFu64 << 8;
+    for index in [0usize, 0x0A00, 0x0F00, 0xFFFF, 0x1234_5678] {
+        assert_packs(index, mask, (index >> 8) & 0xF);
+    }
+    assert_packs(0x1234_5678, 0xFFFF, 0x5678);
+}
+
+#[test]
+fn pack_masked_bits_scattered_mask_keeps_bit_order() {
+    let mask = (1u64 << 1) | (1 << 5) | (1 << 17) | (1 << 40);
+    assert_packs(1 << 1, mask, 0b0001);
+    assert_packs(1 << 5, mask, 0b0010);
+    assert_packs(1 << 17, mask, 0b0100);
+    assert_packs(1 << 40, mask, 0b1000);
+    assert_packs((1 << 1) | (1 << 40), mask, 0b1001);
+    assert_packs(!(mask as usize), mask, 0);
+    assert_packs(usize::MAX, mask, 0b1111);
+}
+
+#[test]
+fn pack_masked_bits_top_bit() {
+    assert_packs(1 << 63, 1 << 63, 1);
+    assert_packs(!(1usize << 63), 1 << 63, 0);
+    assert_packs((1 << 63) | 1, (1 << 63) | 1, 0b11);
+    assert_packs(1 << 63, (1 << 63) | (1 << 2), 0b10);
+    assert_packs(0xDEAD_BEEF_0BAD_F00D, u64::MAX, 0xDEAD_BEEF_0BAD_F00D);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn pack_masked_bits_scalar_matches_pext() {
+    if !has_bmi2() {
+        return;
+    }
+    use rand::RngExt;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    for _ in 0..4096 {
+        let index: u64 = rng.random();
+        let mask: u64 = rng.random::<u64>() & rng.random::<u64>();
+        // SAFETY: BMI2 detected
+        let want = unsafe { _pext_u64(index, mask) } as usize;
+        assert_eq!(pack_masked_bits_scalar(index as usize, mask), want);
+        assert_eq!(pack_masked_bits(index as usize, mask), want);
+    }
+}
+
 // Completeness tripwire: pin the count of `#[target_feature]` kernels so adding
 // one without a paired per-tier test fails here. Reads source text only, so it
 // runs on every arch.

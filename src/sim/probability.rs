@@ -3,6 +3,8 @@
 //! [`Probabilities`] serves dense vectors and lazily factored per-block
 //! marginals through one interface.
 
+use crate::backend::simd::pack_masked_bits_scalar;
+
 /// Marginal distribution of one independent subsystem: `mask` marks its global
 /// qubit positions and `probs` holds its `2^k` entries.
 #[derive(Debug, Clone)]
@@ -290,8 +292,8 @@ impl Iterator for ProbabilitiesIter<'_> {
 
 impl ExactSizeIterator for ProbabilitiesIter<'_> {}
 
-/// Extract the bits of `global_index` at positions set in `mask`,
-/// packing them into contiguous low bits.
+/// Form of [`crate::backend::simd::pack_masked_bits`] that runs the std BMI2 detection
+/// macro per call instead of the cached check.
 #[inline]
 fn extract_block_bits(global_index: usize, mask: u64) -> usize {
     #[cfg(target_arch = "x86_64")]
@@ -301,18 +303,7 @@ fn extract_block_bits(global_index: usize, mask: u64) -> usize {
             return unsafe { core::arch::x86_64::_pext_u64(global_index as u64, mask) as usize };
         }
     }
-    let mut result = 0usize;
-    let mut bit = 0;
-    let mut m = mask;
-    while m != 0 {
-        let pos = m.trailing_zeros() as usize;
-        if global_index & (1 << pos) != 0 {
-            result |= 1 << bit;
-        }
-        bit += 1;
-        m &= m.wrapping_sub(1);
-    }
-    result
+    pack_masked_bits_scalar(global_index, mask)
 }
 
 #[cfg(test)]

@@ -241,7 +241,7 @@ fn pair_measurements_lower_to_pauli_products() {
     );
 
     let err = parse_qec_program("MZZ(0.1) 0 1").unwrap_err();
-    assert!(format!("{err}").contains("measurement-error"));
+    assert!(format!("{err}").contains("RECORD_FLIP"));
     let err = parse_qec_program("MXX 0 1 2").unwrap_err();
     assert!(format!("{err}").contains("even number"));
     let err = parse_qec_program("MXX 0 0").unwrap_err();

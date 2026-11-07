@@ -266,8 +266,6 @@ fn stim_reader_rejects_unsupported_instructions_with_the_line() {
     for (text, expected) in [
         ("M 0\nCX sweep[0] 1", "sweep target `sweep[0]`"),
         ("M 0\nCX 1 rec[-1]", "record-controlled pair `1 rec[-1]`"),
-        ("MPP(0.01) Z0", "measurement-error"),
-        ("MPAD(0.1) 0", "flip-probability"),
         ("M 0\nDETECTOR !rec[-1]", "inverted target"),
         ("H !0", "inverted target"),
         (
@@ -411,5 +409,189 @@ fn stim_measurement_error_agrees_between_compiled_and_reference_runners() {
             (rate - 0.26).abs() < 0.03,
             "detector fired at {rate}, expected 0.1 + 0.2 - 2 * 0.02"
         );
+    }
+}
+
+#[test]
+fn stim_product_and_pad_errors_lower_to_a_record_flip_per_record() {
+    for (stim, native) in [
+        (
+            "MPP(0.1) Z0*Z1 X2",
+            "MPP Z0*Z1
+RECORD_FLIP(0.1)
+MPP X2
+RECORD_FLIP(0.1)",
+        ),
+        (
+            "MZZ(0.1) 0 1 2 3",
+            "MPP Z0*Z1
+RECORD_FLIP(0.1)
+MPP Z2*Z3
+RECORD_FLIP(0.1)",
+        ),
+        (
+            "MXX(0.1) 0 1",
+            "MPP X0*X1
+RECORD_FLIP(0.1)",
+        ),
+        (
+            "MYY(0.1) 0 1",
+            "MPP Y0*Y1
+RECORD_FLIP(0.1)",
+        ),
+        (
+            "MPAD(0.1) 0 1",
+            "MPAD 0
+RECORD_FLIP(0.1)
+MPAD 1
+RECORD_FLIP(0.1)",
+        ),
+        (
+            "MPP(0.1) !Z0*Z1
+M 0",
+            "X 0
+MPP Z0*Z1
+RECORD_FLIP(0.1)
+X 0
+M 0",
+        ),
+        (
+            "MZZ(0.1) !0 1
+M 0",
+            "X 0
+MPP Z0*Z1
+RECORD_FLIP(0.1)
+X 0
+M 0",
+        ),
+        (
+            "REPEAT 2 {
+    MPP(0.1) Z0
+    DETECTOR rec[-1]
+}",
+            "MPP Z0
+RECORD_FLIP(0.1)
+DETECTOR rec[-1]
+MPP Z0
+RECORD_FLIP(0.1)
+             DETECTOR rec[-1]",
+        ),
+        (
+            "MPP(0) Z0
+MZZ(0) 0 1
+MPAD(0) 1",
+            "MPP Z0 Z0*Z1
+MPAD 1",
+        ),
+    ] {
+        let program = parse_stim_circuit(stim).unwrap();
+        assert_eq!(
+            program.ops(),
+            parse_qec_program(native).unwrap().ops(),
+            "{stim}"
+        );
+        let text = program.to_text().unwrap();
+        assert_eq!(
+            parse_qec_program(&text).unwrap().ops(),
+            program.ops(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn stim_product_errors_are_independent_detector_error_model_mechanisms() {
+    let program = parse_stim_circuit(
+        "MPP(0.125) Z0*Z1 Z1*Z2
+         MPAD(0.25) 0
+         DETECTOR rec[-3]
+         DETECTOR rec[-2] rec[-3]
+         DETECTOR rec[-1]",
+    )
+    .unwrap();
+    let mechanisms: Vec<_> = program
+        .detector_error_model()
+        .unwrap()
+        .mechanisms()
+        .iter()
+        .map(|m| (m.detectors().to_vec(), m.probability()))
+        .collect();
+    assert_eq!(
+        mechanisms,
+        [(vec![0, 1], 0.125), (vec![1], 0.125), (vec![2], 0.25)]
+    );
+}
+
+#[test]
+fn stim_product_and_pad_errors_flip_only_the_records() {
+    // 4000 shots put one standard deviation of a 0.2 rate at 0.0063.
+    let shots = 4000;
+    for (text, expected) in [
+        (
+            "MPP(0.2) Z0*Z1 Z1*Z2
+M 0 1 2",
+            [0.2, 0.2, 0.0, 0.0, 0.0],
+        ),
+        (
+            "MZZ(0.2) 0 1 1 2
+M 0 1 2",
+            [0.2, 0.2, 0.0, 0.0, 0.0],
+        ),
+        (
+            "RX 0 1 2
+MXX(0.2) 0 1 1 2
+MX 0 1 2",
+            [0.2, 0.2, 0.0, 0.0, 0.0],
+        ),
+        (
+            "RY 0 1 2
+MYY(0.2) !0 1 1 2
+MY 0 1 2",
+            [0.8, 0.2, 0.0, 0.0, 0.0],
+        ),
+        (
+            "MPAD(0.2) 0 1
+X 0
+M 0 1 2",
+            [0.2, 0.8, 1.0, 0.0, 0.0],
+        ),
+    ] {
+        let compiled = record_rates(&sample(parse_stim_circuit(text).unwrap(), shots));
+        let reference = record_rates(&reference(text, shots));
+        for rates in [&compiled, &reference] {
+            for (rate, want) in rates.iter().zip(expected) {
+                assert!((rate - want).abs() < 0.03, "{text}: {rates:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn stim_product_and_pad_errors_reject_bad_probabilities() {
+    for (text, expected) in [
+        (
+            "MPP(1.5) Z0",
+            "`MPP` probability must be finite and in [0, 1]",
+        ),
+        ("MZZ(-0.1) 0 1", "`MZZ` probability must be finite"),
+        ("MXX(inf) 0 1", "`MXX` probability must be finite"),
+        (
+            "MYY(0.1, 0.2) 0 1",
+            "`MYY` accepts zero or one numeric argument",
+        ),
+        ("MPAD(2) 0", "`MPAD` probability must be finite"),
+        ("MPAD(x) 0", "expected numeric argument"),
+    ] {
+        let (line, message) = parse_error(text);
+        assert_eq!(line, 1, "{text}");
+        assert!(message.contains(expected), "{text}: {message}");
+    }
+    for text in ["MPP(0.1) Z0", "MZZ(0.1) 0 1", "MPAD(0.1) 0"] {
+        match parse_qec_program(text).unwrap_err() {
+            PrismError::Parse { message, .. } => {
+                assert!(message.contains("RECORD_FLIP"), "{text}: {message}")
+            }
+            other => panic!("expected a parse error, got {other}"),
+        }
     }
 }

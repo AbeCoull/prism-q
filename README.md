@@ -157,8 +157,9 @@ for (bits, count) in counts.into_counts() {
 ```
 
 Count keys and measurement bits are LSB-first: the leftmost character is classical bit
-0, and `q[0]` is the least significant qubit of a statevector index. This is the reverse
-of Qiskit's order. `run_qasm(source, seed)` parses and runs in one call.
+0, and `q[0]` is the least significant qubit of a statevector index. Measuring `q[i]` into
+`c[i]`, the state with only `q[0]` set reads `"10..."`, not `"...01"`.
+`run_qasm(source, seed)` parses and runs in one call.
 
 ### Expectation values and marginals
 

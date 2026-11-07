@@ -50,7 +50,7 @@ print(counts)          # {'00': 507, '11': 493}
 
 ```admonish warning title="q[0] is the least significant qubit"
 `x q[0]` produces state index 1, not 2. In a counts key, character `i` is
-classical bit `i` with bit 0 leftmost, so keys read reversed relative to Qiskit.
+classical bit `i` with bit 0 leftmost.
 A Bell pair gives `'00'` and `'11'`, which look the same either way, but
 `CircuitBuilder(2, 2).x(0).measure_all()` gives `'10'`, not `'01'`.
 ```

@@ -80,8 +80,12 @@ fn scalar_runtime_type(kind: ClassicalType, line: usize) -> Result<RuntimeType> 
 /// written only where its value is known at parse time still folds there, so a
 /// program `parse` accepts lowers to one block holding the same circuit.
 ///
-/// Declined, each with [`PrismError::UnsupportedConstruct`]: `input`
-/// parameters, a register or array whose contents a loop or measurement
+/// An `input` needs a value from [`parse_dynamic_with_inputs`]: a program
+/// holds no slot to bind, so an unsupplied `float` or `angle` input returns
+/// [`PrismError::UnsupportedConstruct`].
+///
+/// Declined, each with [`PrismError::UnsupportedConstruct`]: a register or
+/// array whose contents a loop or measurement
 /// decides, a runtime value where a parse-time constant belongs (an index, a
 /// loop bound, a gate angle outside the five above), a runtime argument to a
 /// `def` written as a gate application rather than a call, a builtin function
@@ -110,14 +114,35 @@ fn scalar_runtime_type(kind: ClassicalType, line: usize) -> Result<RuntimeType> 
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn parse_dynamic(input: &str) -> Result<DynamicProgram> {
-    with_stack(|| parse_dynamic_within(input, MAX_EXPANSION))
+    with_stack(|| parse_dynamic_within(input, &[], MAX_EXPANSION))
 }
 
-/// [`parse_dynamic`] with `budget` units of expansion in place of the default.
-pub(super) fn parse_dynamic_within(input: &str, budget: usize) -> Result<DynamicProgram> {
+/// [`parse_dynamic`] with values for the program's `input` declarations, by
+/// name, each folded as a declaration of its type initialized to the value.
+///
+/// # Errors
+///
+/// Same conditions as [`parse_dynamic`], plus [`PrismError::InvalidParameter`]
+/// for a name supplied twice or matching no `input`, and for an unsupplied
+/// `input` of a type other than `float` and `angle`.
+pub fn parse_dynamic_with_inputs(
+    input: &str,
+    inputs: &[(&str, ClassicalValue)],
+) -> Result<DynamicProgram> {
+    with_stack(|| parse_dynamic_within(input, inputs, MAX_EXPANSION))
+}
+
+/// [`parse_dynamic_with_inputs`] with `budget` units of expansion in place of
+/// the default.
+pub(super) fn parse_dynamic_within(
+    input: &str,
+    inputs: &[(&str, ClassicalValue)],
+    budget: usize,
+) -> Result<DynamicProgram> {
     let tokens = lexer::tokenize(input)?;
     let program = syntax::parse_dynamic_program(&tokens)?;
     let mut parser = Parser::new_with(input, Dialect::Native);
+    parser.supply(inputs)?;
     parser.expansion_left.set(budget);
     parser.dynamic = Some(Box::new(DynamicState {
         builder: DynamicProgramBuilder::new(0, 0),
@@ -133,6 +158,7 @@ pub(super) fn parse_dynamic_within(input: &str, budget: usize) -> Result<Dynamic
         parser.total_qubits = width;
     }
     let tail = parser.execute(&program)?;
+    parser.check_supplied()?;
     parser.flush(tail);
     let state = parser.dynamic.take().expect("installed above");
     let mut builder = state.builder;
@@ -2021,9 +2047,17 @@ impl<'a> Walk<'_, 'a> {
                 self.bind(name, Binding::Bits);
                 false
             }
+            StmtKind::InputDecl {
+                ty: "bit", name, ..
+            } => {
+                self.bind(name, Binding::Bits);
+                self.local_bits.insert(name);
+                true
+            }
             StmtKind::InputDecl { name, .. } => {
-                self.bind(name, Binding::Other);
-                false
+                let decl = key(stmt);
+                self.bind(name, Binding::Var { decl, depth });
+                self.runtime.contains(&decl)
             }
             StmtKind::ClassicalDecl {
                 constant,

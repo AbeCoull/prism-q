@@ -26,7 +26,8 @@ let result = simulate(&circuit).seed(42).run().unwrap();
 | --- | --- |
 | `parse`, `parse_with(source, dialect)` | A `Circuit` |
 | `parse_parametric`, `parse_parametric_with(source, dialect)` | The template `Circuit` and the `Parameters` its `input` declarations name (see [Input parameters](#input-parameters)) |
-| `parse_dynamic` | A `DynamicProgram` with loops and runtime classical values (see [Dynamic programs](#dynamic-programs)) |
+| `parse_parametric_with_inputs(source, inputs)` | The same, with values supplied for some `input` declarations by name |
+| `parse_dynamic`, `parse_dynamic_with_inputs(source, inputs)` | A `DynamicProgram` with loops and runtime classical values (see [Dynamic programs](#dynamic-programs)) |
 | `parse_braket` | A `BraketProgram`: circuit, parameters, result requests and noise (see [Amazon Braket Programs](./braket.md)) |
 
 `Dialect::Native`, the default, reads `gpi`, `gpi2` and `ms` angles in turns;
@@ -483,11 +484,35 @@ writes one angle to each.
 `parse` rejects a program that declares an input, since it has no value to take and a zero
 would be a quiet wrong answer. Use `parse_parametric`, or `PreparedCircuit` for a sweep.
 
-An input binds an angle whole, so it may only be the entire angle argument of a directly
-named parametric gate at the top level, and one gate takes at most one. `rx(2 * theta)`,
-two inputs on one gate, an input on a gate with no rotation angle, one reaching a `gate`,
-`def`, `for` or guarded body, and one on a modified gate all return
-`UnsupportedConstruct` naming the reason.
+A gate angle may be affine in one input: `rx(-theta / 2)` and `rz(2 * theta + pi)` link
+their gates with that scale and offset, so binding writes `scale * value + offset` and a
+gradient picks up the factor `scale`. The template holds each angle at an input of zero.
+An input reaches a gate through a `for` body, or as the argument of a `gate` or `def`
+whose body uses it in an angle; an `angle` parameter keeps it unwrapped, as a bound
+`input angle` is. A `float[32]` or fixed-width `angle` parameter would round it and
+declines.
+
+These return `UnsupportedConstruct` naming the reason: an angle over two inputs or not
+affine in one (`sin(theta)`, `theta * theta`), two inputs on one gate, an input on a gate
+that lowers to a sequence or has no rotation angle, a modified gate or `gphase`, a guarded
+body, and an input read as a classical value (an index, a loop bound, a declaration).
+
+`parse_parametric_with_inputs` takes values for some inputs by name. A supplied input
+folds as a declaration of its type initialized to the value would, so `input int[8] n;`
+reads as a loop bound and `input bit[2] mask;` as bits. A supplied `float` or `angle` is a
+constant and takes no slot; the unsupplied ones keep theirs. An unsupplied input of any
+other type, a name supplied twice, and a name no `input` declares return
+`InvalidParameter`.
+
+```rust
+# use prism_q::circuit::{dynamic::ClassicalValue, openqasm};
+let qasm = "OPENQASM 3.0; input int[8] n; input float theta; qubit[4] q;
+    for int i in [0:n] { rx(theta / 2) q[i]; }";
+let (template, params) =
+    openqasm::parse_parametric_with_inputs(qasm, &[("n", ClassicalValue::Int(3))])?;
+let bound = params.bind(&template, &[0.8])?;
+# Ok::<(), prism_q::PrismError>(())
+```
 
 ## Dynamic programs
 
@@ -583,7 +608,9 @@ let noisy = simulate_program(&program).noise(&rules).seed(42).shots(1000)?;
 - A `bit` or `qubit` register declared inside a `while` body, and an `array` a loop or
   measurement writes.
 - A measurement straight into a variable. Measure into a bit and assign the bit.
-- `input` parameters, since a dynamic program has no parameter binding.
+- An unsupplied `float` or `angle` input, since a dynamic program has no parameter
+  binding. `parse_dynamic_with_inputs` takes a value for every input by name, as
+  `parse_parametric_with_inputs` does, and a supplied `bit` input may set bits.
 
 ## The subset
 
@@ -602,7 +629,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `array` | Parses; folded at parse time, with slices, `++`, `sizeof` and array arguments | An element type other than `int`, `uint`, `float`, `angle` or `bool`, or a compound assignment to a slice: `UnsupportedConstruct`. An initializer or assignment of the wrong shape, an index out of range, an index set on an array, or more than 2^20 elements: `Parse` |
 | `box`, `box[d]` | Runs its body in place | A length that is not a duration or is negative: `Parse` |
 | `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, a runtime value in a duration under `parse_dynamic`, and `durationof`: `UnsupportedConstruct` |
-| `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, two inputs on one gate, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |
+| `input`, `output` | Parses; an unsupplied `float` or `angle` input is a slot that gate angles affine in it link to | An unsupplied input of another type: `InvalidParameter`. `output` of a type other than `bit`, two inputs on one gate, or an unsupplied input anywhere but in an angle affine in it: `UnsupportedConstruct` |
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |
 | `nop` | Parses; emits nothing | |

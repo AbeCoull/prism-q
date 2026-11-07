@@ -35,6 +35,7 @@ pub(crate) enum StmtKind<'a> {
     InputDecl {
         ty: &'a str,
         name: &'a str,
+        size: Option<Expr<'a>>,
     },
     /// `output bit[3] c;`, which declares a classical register of that width.
     OutputDecl {

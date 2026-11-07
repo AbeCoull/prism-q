@@ -568,6 +568,13 @@ fn return_line(block: &[Stmt]) -> Option<usize> {
     })
 }
 
+fn non_affine(expr: &Expr, line: usize) -> PrismError {
+    PrismError::UnsupportedConstruct {
+        construct: format!("the angle `{expr}`, which is not affine in the `input` it reads"),
+        line,
+    }
+}
+
 impl<'a> Parser<'a> {
     /// Lex, parse, and run the source.
     pub(super) fn parse_program(
@@ -579,29 +586,118 @@ impl<'a> Parser<'a> {
             self.physical = true;
             self.total_qubits = width;
         }
-        let instructions = self.execute(&program)?;
+        let mut instructions = self.execute(&program)?;
         if self.verbatim_pending {
             return Err(parse_error(
                 program.last().map_or(1, |stmt| stmt.line),
                 "a verbatim pragma must be followed by a `box`",
             ));
         }
+        self.check_supplied()?;
+        let links = self.link_tags(&mut instructions);
 
         let circuit = Circuit {
             num_qubits: self.total_qubits,
             num_classical_bits: self.total_cbits,
             instructions,
         };
-        let params =
-            Parameters::from_links(std::mem::take(&mut self.links), self.input_names.len())
-                .with_names(std::mem::take(&mut self.input_names))
-                .pinned_to(&circuit);
+        let params = Parameters::from_links(links, self.input_names.len())
+            .with_names(std::mem::take(&mut self.input_names))
+            .pinned_to(&circuit);
         let noise = self.build_noise_model(&circuit)?;
         Ok((circuit, params, std::mem::take(&mut self.results), noise))
     }
 
-    /// Run a block, threading the parameter link and noise event each statement
-    /// may leave behind onto the instruction index they belong to.
+    /// Link each gate holding a tag to the slot it reads, leaving the angle the
+    /// slot gives it at a value of zero in its place.
+    fn link_tags(&self, instructions: &mut [Instruction]) -> Vec<ParamLink> {
+        let tags = self.tags.borrow();
+        let mut links = Vec::new();
+        for (at, instr) in instructions.iter_mut().enumerate() {
+            let Some(id) = gate_angle(instr).and_then(tag_id) else {
+                continue;
+            };
+            let form = tags[id];
+            let slot = form.slot.expect("a tag reads a slot");
+            *angle_mut(instr) = form.offset;
+            links.push(ParamLink {
+                instruction: at,
+                slot,
+                scale: form.scale,
+                offset: form.offset,
+            });
+        }
+        links
+    }
+
+    /// Take the caller's `input` values, which each declaration reads as it runs.
+    pub(super) fn supply(&mut self, inputs: &[(&str, ClassicalValue)]) -> Result<()> {
+        for &(name, value) in inputs {
+            if self.supplied.iter().any(|(seen, _)| seen == name) {
+                return Err(PrismError::InvalidParameter {
+                    message: format!("input `{name}` is supplied twice"),
+                });
+            }
+            self.supplied.push((name.to_string(), Some(value)));
+        }
+        Ok(())
+    }
+
+    /// Reject a supplied value that no `input` declaration took.
+    pub(super) fn check_supplied(&self) -> Result<()> {
+        match self.supplied.iter().find(|(_, value)| value.is_some()) {
+            Some((name, _)) => Err(PrismError::InvalidParameter {
+                message: format!("a value is supplied for `{name}`, which no `input` declares"),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Allocate the tag that stands for `form` in an angle.
+    fn tag(&self, form: Linear) -> f64 {
+        let mut tags = self.tags.borrow_mut();
+        tags.push(form);
+        f64::from_bits(TAG | (tags.len() - 1) as u64)
+    }
+
+    /// The affine form `name` holds when its value is a tag.
+    fn symbol(&self, name: &str) -> Option<Linear> {
+        match self.param_vars.as_ref()?.get(name)? {
+            ClassicalValue::Float(value) => tag_id(*value).map(|id| self.tags.borrow()[id]),
+            _ => None,
+        }
+    }
+
+    /// A name `expr` reads whose value is a tag.
+    fn symbol_in(&self, expr: &Expr) -> Option<&'a str> {
+        self.symbolic
+            .iter()
+            .copied()
+            .find(|name| expr.mentions(name) && self.symbol(name).is_some())
+    }
+
+    fn symbol_error(&self, name: &str, place: &str, line: usize) -> PrismError {
+        let what = if self.inputs.contains_key(name) {
+            format!("input `{name}`")
+        } else {
+            format!("`{name}`, which an `input` reaches,")
+        };
+        PrismError::UnsupportedConstruct {
+            construct: format!("{what} {place}"),
+            line,
+        }
+    }
+
+    /// Decline `expr` when it reads a tagged name, which only a gate angle may.
+    fn reject_symbol(&self, expr: &Expr, line: usize) -> Result<()> {
+        match self.symbol_in(expr) {
+            Some(name) => Err(self.symbol_error(name, "outside a gate angle", line)),
+            None => Ok(()),
+        }
+    }
+
+    /// Run a block, threading the noise event each statement may leave behind
+    /// onto the instruction index it belongs to.
     pub(super) fn execute(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
         if self.exec_depth >= MAX_NESTING {
             return Err(parse_error(
@@ -623,7 +719,6 @@ impl<'a> Parser<'a> {
         for stmt in block {
             let base = instructions.len();
             let left = self.expansion_left.get();
-            self.pending_input_slot = None;
             if let Err(err) = self.exec_stmt(stmt, &mut instructions)
                 && !self.unwinds_end()
             {
@@ -636,14 +731,6 @@ impl<'a> Parser<'a> {
                 (instructions.len() - base).saturating_sub(nested).max(1),
                 stmt.line,
             )?;
-            if let Some(slot) = self.pending_input_slot.take() {
-                for offset in 0..instructions.len() - base {
-                    self.links.push(ParamLink {
-                        instruction: base + offset,
-                        slot,
-                    });
-                }
-            }
             if let Some(spec) = self.pending_noise.take() {
                 // A channel acts at the point the pragma stands, which is after
                 // everything emitted so far.
@@ -774,15 +861,8 @@ impl<'a> Parser<'a> {
                 }
                 Ok(())
             }
-            StmtKind::InputDecl { ty, name } => {
-                if self.dynamic.is_some() {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!("input `{name}` in a dynamic program"),
-                        line,
-                    });
-                }
-                self.declare_input(ty, name, line)?;
-                Ok(())
+            StmtKind::InputDecl { ty, name, size } => {
+                self.declare_input(stmt, ty, size.as_ref(), name, line)
             }
             StmtKind::OutputDecl { ty, name, size } => {
                 if *ty != "bit" {
@@ -1075,18 +1155,62 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn declare_input(&mut self, ty: &str, name: &'a str, line: usize) -> Result<()> {
-        if !matches!(ty, "float" | "angle") {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("`input {ty}` (only float and angle inputs bind to an angle)"),
-                line,
-            });
-        }
+    /// Declare an `input`: a supplied one as a variable holding its value, an
+    /// unsupplied `float` or `angle` as the next slot, read through a tag.
+    fn declare_input(
+        &mut self,
+        stmt: &Stmt<'a>,
+        ty: &'a str,
+        size: Option<&Expr<'a>>,
+        name: &'a str,
+        line: usize,
+    ) -> Result<()> {
         if self.inputs.contains_key(name) {
             return Err(parse_error(line, format!("input `{name}` declared twice")));
         }
-        self.inputs.insert(name, self.input_names.len());
+        let supplied = self
+            .supplied
+            .iter_mut()
+            .find(|(supplied, _)| supplied == name)
+            .and_then(|(_, value)| value.take());
+        if let Some(value) = supplied {
+            let value = Expr::Number(value);
+            if ty == "bit" {
+                self.declare_register(ast::RegisterKind::Classical, name, size, line)?;
+                return self.init_bits(name, size, &ast::BitInit::Value(value), line);
+            }
+            if self.is_runtime_decl(stmt) {
+                return self.declare_runtime(false, ty, size, name, Some(&value), line);
+            }
+            return self.declare_classical(false, ty, size, name, Some(&value), line);
+        }
+        if !matches!(ty, "float" | "angle") {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "input `{name}` is `{ty}`, which binds no gate angle; supply its value"
+                ),
+            });
+        }
+        if self.dynamic.is_some() {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "unsupplied input `{name}` in a dynamic program, which has no slot to bind"
+                ),
+                line,
+            });
+        }
+        let slot = self.input_names.len();
+        self.inputs.insert(name, slot);
         self.input_names.push(name.to_string());
+        let tag = self.tag(Linear {
+            slot: Some(slot),
+            scale: 1.0,
+            offset: 0.0,
+        });
+        self.param_vars
+            .get_or_insert_with(HashMap::new)
+            .insert(name, ClassicalValue::Float(tag));
+        self.symbolic.push(name);
         Ok(())
     }
 
@@ -1208,11 +1332,8 @@ impl<'a> Parser<'a> {
         if self.reads_runtime(expr) {
             return Err(super::dynamic::runtime_complex(line));
         }
-        if let Some(name) = self.input_names.iter().find(|name| expr.mentions(name)) {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("input `{name}` in a `complex` value"),
-                line,
-            });
+        if let Some(name) = self.symbol_in(expr) {
+            return Err(self.symbol_error(name, "in a `complex` value", line));
         }
         let vars = self.param_vars.as_ref();
         let expr = self.with_complex(expr)?;
@@ -1246,6 +1367,7 @@ impl<'a> Parser<'a> {
 
     /// Fold an expression that has to be a duration or a stretch.
     fn duration_of(&self, expr: &Expr, line: usize) -> Result<Timed> {
+        self.reject_symbol(expr, line)?;
         let vars = self.param_vars.as_ref();
         match timed_of(expr, line, vars, &self.durations, &self.arrays)? {
             Timed::Number(value) => Err(parse_error(
@@ -1620,6 +1742,7 @@ impl<'a> Parser<'a> {
                 ),
             ));
         }
+        self.reject_symbol(value, line)?;
         let value = timed_of(
             value,
             line,
@@ -1648,17 +1771,15 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Fold an initializer to the value its declared type holds, naming an
-    /// `input` rather than leaving it to read as an unknown identifier. An
-    /// integer or `bool` takes a whole number, which a fractional float is not.
+    /// Fold an initializer to the value its declared type holds. An integer or
+    /// `bool` takes a whole number, which a fractional float is not.
     fn fold_typed(&self, kind: ClassicalType, value: &Expr, line: usize) -> Result<ClassicalValue> {
-        if let Some(name) = self.input_names.iter().find(|name| value.mentions(name)) {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
-                    "input `{name}` in a classical declaration; an input binds an angle whole"
-                ),
+        if let Some(name) = self.symbol_in(value) {
+            return Err(self.symbol_error(
+                name,
+                "in a classical value; an unsupplied input binds only a gate angle",
                 line,
-            });
+            ));
         }
         Ok(kind.store(match kind {
             ClassicalType::Int(_) | ClassicalType::Bool => {
@@ -2405,6 +2526,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn typed_of(&self, expr: &Expr, line: usize) -> Result<ClassicalValue> {
         self.reject_runtime(expr, line)?;
+        self.reject_symbol(expr, line)?;
         let expr = self.with_complex(expr)?;
         let vars = self.param_vars.as_ref();
         if !self.classical.is_empty() && expr.reads_element() {
@@ -2541,11 +2663,33 @@ impl<'a> Parser<'a> {
                 self.flush(std::mem::take(out));
             }
             let (instrs, _) = self.expand_def(name, params, None, line)?;
+            if !modifiers.is_empty()
+                && instrs
+                    .iter()
+                    .any(|instr| gate_angle(instr).and_then(tag_id).is_some())
+            {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!("modifier on `{name}` reading an `input`"),
+                    line,
+                });
+            }
             out.extend(Self::modify_expansion(instrs, &modifiers, name, line)?);
             return Ok(());
         }
 
-        let (values, input_slot) = self.fold_params(params, line)?;
+        let values = self.fold_params(params, line)?;
+        let has_input = values.iter().any(|value| tag_id(*value).is_some());
+        if has_input && (name == "gphase" || !modifiers.is_empty()) {
+            let what = if name == "gphase" {
+                "`gphase`".to_string()
+            } else {
+                format!("modifier on `{name}`")
+            };
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("{what} reading an `input`"),
+                line,
+            });
+        }
         if name == "gphase" {
             let qubits = operands
                 .iter()
@@ -2563,12 +2707,6 @@ impl<'a> Parser<'a> {
             out.extend(self.resolve_global_phase(&values, &modifiers, &qubits, line)?);
             return Ok(());
         }
-        if input_slot.is_some() && !modifiers.is_empty() {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("modifier on `{name}` reading an `input`"),
-                line,
-            });
-        }
 
         let resolved: SmallVec<[SmallVec<[usize; 4]>; 4]> = operands
             .iter()
@@ -2576,7 +2714,6 @@ impl<'a> Parser<'a> {
             .collect::<Result<_>>()?;
         let width = self.broadcast_length(&resolved, name, line)?;
 
-        let base = out.len();
         for at in 0..width {
             let qubits: SmallVec<[usize; 4]> = resolved
                 .iter()
@@ -2589,19 +2726,9 @@ impl<'a> Parser<'a> {
                 })
                 .collect();
             self.resolve_gate_application_once(
-                name,
-                &values,
-                &modifiers,
-                &qubits,
-                input_slot.is_some(),
-                line,
-                out,
+                name, &values, &modifiers, &qubits, has_input, line, out,
             )?;
         }
-        if input_slot.is_some() {
-            Self::check_every_instruction_is_bindable(&out[base..], name, line)?;
-        }
-        self.pending_input_slot = input_slot;
         Ok(())
     }
 
@@ -2744,12 +2871,11 @@ impl<'a> Parser<'a> {
         self.write_constant_bits(&bits, &values, line)
     }
 
-    /// Evaluate a call's angle arguments, reporting the one `input` slot they
-    /// read. Two inputs on one gate are rejected: a slot is written onto the
-    /// single angle a bindable gate carries.
-    fn fold_params(&self, params: &[Argument], line: usize) -> Result<(Vec<f64>, Option<usize>)> {
+    /// Evaluate a call's angle arguments. Two reading an `input` are rejected: a
+    /// slot is written onto the single angle a bindable gate carries.
+    fn fold_params(&self, params: &[Argument], line: usize) -> Result<Vec<f64>> {
         let mut values = Vec::with_capacity(params.len());
-        let mut input_slot = None;
+        let mut tagged = false;
         for param in params {
             let element = self.element_argument(param);
             let expr = match (param, &element) {
@@ -2762,17 +2888,19 @@ impl<'a> Parser<'a> {
                     ));
                 }
             };
-            let (value, slot) = self.fold_angle(expr, line)?;
-            if slot.is_some() && input_slot.is_some() {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: "two `input` parameters on one gate".to_string(),
-                    line,
-                });
+            let value = self.fold_angle(expr, line)?;
+            if tag_id(value).is_some() {
+                if tagged {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: "two `input` parameters on one gate".to_string(),
+                        line,
+                    });
+                }
+                tagged = true;
             }
-            input_slot = input_slot.or(slot);
             values.push(value);
         }
-        Ok((values, input_slot))
+        Ok(values)
     }
 
     /// An argument written `a[i]` parses as a qubit or bit reference; read it
@@ -2802,29 +2930,70 @@ impl<'a> Parser<'a> {
         })))
     }
 
-    /// One angle argument, reporting the slot when it is exactly an `input`.
-    fn fold_angle(&self, expr: &Expr, line: usize) -> Result<(f64, Option<usize>)> {
-        if let Some((name, &slot)) = expr
-            .as_ident()
-            .and_then(|name| self.inputs.get(name).map(|slot| (name, slot)))
-        {
-            if self.nested {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("input `{name}` inside a block body"),
-                    line,
-                });
-            }
-            return Ok((0.0, Some(slot)));
+    /// One angle argument. One that reads an `input` comes back as a tag for its
+    /// affine form, or as a number when that form is constant.
+    fn fold_angle(&self, expr: &Expr, line: usize) -> Result<f64> {
+        if self.symbol_in(expr).is_none() {
+            return self.value_of(expr, line);
         }
-        if let Some(name) = self.input_names.iter().find(|name| expr.mentions(name)) {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!(
-                    "an expression over input `{name}`; an input binds an angle whole"
-                ),
-                line,
+        let form = self.affine_of(expr, line)?;
+        Ok(match form.slot {
+            Some(_) if form.scale != 0.0 => self.tag(form),
+            _ => form.offset,
+        })
+    }
+
+    /// `expr` as an affine form over the one slot its tagged names read.
+    fn affine_of(&self, expr: &Expr, line: usize) -> Result<Linear> {
+        if self.symbol_in(expr).is_none() {
+            return Ok(Linear {
+                slot: None,
+                scale: 0.0,
+                offset: self.value_of(expr, line)?,
             });
         }
-        Ok((self.value_of(expr, line)?, None))
+        let scaled = |form: Linear, by: f64| Linear {
+            scale: form.scale * by,
+            offset: form.offset * by,
+            ..form
+        };
+        with_stack(|| match expr {
+            Expr::Ident(name) => Ok(self.symbol(name).expect("symbol_in found it")),
+            Expr::Negate(inner) => Ok(scaled(self.affine_of(inner, line)?, -1.0)),
+            Expr::Binary { op, left, right } => {
+                let (left, right) = (self.affine_of(left, line)?, self.affine_of(right, line)?);
+                let sign = match op {
+                    syntax_expr::BinaryOp::Add => 1.0,
+                    syntax_expr::BinaryOp::Sub => -1.0,
+                    syntax_expr::BinaryOp::Mul if left.slot.is_none() => {
+                        return Ok(scaled(right, left.offset));
+                    }
+                    syntax_expr::BinaryOp::Mul if right.slot.is_none() => {
+                        return Ok(scaled(left, right.offset));
+                    }
+                    syntax_expr::BinaryOp::Div if right.slot.is_none() && right.offset != 0.0 => {
+                        return Ok(Linear {
+                            scale: left.scale / right.offset,
+                            offset: left.offset / right.offset,
+                            ..left
+                        });
+                    }
+                    _ => return Err(non_affine(expr, line)),
+                };
+                if left.slot.is_some() && right.slot.is_some() && left.slot != right.slot {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!("the angle `{expr}`, which reads two `input`s"),
+                        line,
+                    });
+                }
+                Ok(Linear {
+                    slot: left.slot.or(right.slot),
+                    scale: left.scale + sign * right.scale,
+                    offset: left.offset + sign * right.offset,
+                })
+            }
+            _ => Err(non_affine(expr, line)),
+        })
     }
 
     /// Expand a user `gate` by binding its qubit names to the call's qubits and
@@ -2879,6 +3048,9 @@ impl<'a> Parser<'a> {
             )
             .collect();
         let mut sub = self.expansion_parser(bindings);
+        if call_params.iter().any(|value| tag_id(*value).is_some()) {
+            sub.symbolic = def.params.clone();
+        }
         if let Some(&first) = call_qubits.first() {
             sub.phase_qubit = first;
         }
@@ -3006,6 +3178,7 @@ impl<'a> Parser<'a> {
         let copied = 2 * def.constants.len() + def.arrays.len() + args.len();
         self.charge(copied, line)?;
         let mut bindings = HashMap::new();
+        let mut symbolic = Vec::new();
         let runtime = self.def_is_runtime(name, &def.args, args);
         let mut scalar_args = Vec::new();
         let mut durations = HashMap::new();
@@ -3094,16 +3267,30 @@ impl<'a> Parser<'a> {
                             ));
                         }
                     };
-                    // The body reads the argument's value, so an input bound
-                    // later would never reach it.
-                    if let Some(input) = self.input_names.iter().find(|input| expr.mentions(input))
-                    {
-                        return Err(PrismError::UnsupportedConstruct {
-                            construct: format!("input `{input}` as an argument to `def {name}`"),
-                            line,
-                        });
-                    }
                     let kind = self.classical_type(ty, width.as_ref(), line)?;
+                    // An `input` passes through as its tag, which the body reads
+                    // only as a gate angle. An angle parameter keeps it unwrapped,
+                    // as a bound `input angle` is.
+                    if let Some(input) = self.symbol_in(expr) {
+                        if !matches!(
+                            kind,
+                            ClassicalType::Float(64 | 128) | ClassicalType::Angle(None)
+                        ) {
+                            return Err(self.symbol_error(
+                                input,
+                                &format!(
+                                    "as `def {name}` parameter `{param_name}`, whose type rounds it"
+                                ),
+                                line,
+                            ));
+                        }
+                        bindings.insert(
+                            param_name,
+                            ClassicalValue::Float(self.fold_angle(expr, line)?),
+                        );
+                        symbolic.push(param_name);
+                        continue;
+                    }
                     if let ClassicalType::Complex(_) = kind {
                         if runtime {
                             return Err(super::dynamic::runtime_complex(line));
@@ -3386,6 +3573,7 @@ impl<'a> Parser<'a> {
         };
 
         let mut sub = self.expansion_parser(bindings);
+        sub.symbolic = symbolic;
         // The body runs in a parser of its own, so a write it made to an outer
         // variable would be dropped on return; only the constants it may read
         // stay declared, and a write to anything else is rejected.
@@ -3584,8 +3772,9 @@ impl<'a> Parser<'a> {
             param_vars: Some(bindings),
             inputs: HashMap::new(),
             input_names: Vec::new(),
-            links: Vec::new(),
-            pending_input_slot: None,
+            tags: Rc::clone(&self.tags),
+            symbolic: Vec::new(),
+            supplied: Vec::new(),
             nested: true,
             results: Vec::new(),
             noise_specs: Vec::new(),
@@ -3734,7 +3923,18 @@ impl<'a> Parser<'a> {
         let outer_guard = self.guard.replace(scope);
         let was_nested = std::mem::replace(&mut self.nested, true);
         self.enter_collecting();
-        let body = self.execute(block);
+        let body = self.execute(block).and_then(|body| {
+            if body
+                .iter()
+                .any(|instr| gate_angle(instr).and_then(tag_id).is_some())
+            {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: "an angle reading an `input` inside a guarded region".to_string(),
+                    line: block.first().map_or(1, |stmt| stmt.line),
+                });
+            }
+            Ok(body)
+        });
         self.leave_collecting();
         self.nested = was_nested;
         self.guard = outer_guard;

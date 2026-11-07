@@ -1,6 +1,8 @@
 //! Dynamic programs: a control-flow graph of circuits with runtime classical
 //! variables, built here or parsed from OpenQASM, and run once per shot.
 
+use std::collections::BTreeMap;
+
 use prism_q::circuit::dynamic::{ClassicalExpr, ClassicalType, ClassicalValue, RotationKind};
 use prism_q::circuit::openqasm;
 use prism_q::{
@@ -398,9 +400,38 @@ impl PyProgramSimulation {
 
 /// Parse OpenQASM 3.0 with `while`, `break`, `continue` and runtime classical
 /// values into a `DynamicProgram`.
+///
+/// `inputs` maps `input` names to bool, int or float values. A program holds no
+/// slot to bind, so every `input` it declares needs one.
 #[pyfunction]
-pub fn parse_qasm_dynamic(source: &str) -> PyPrismResult<PyDynamicProgram> {
-    Ok(PyDynamicProgram(openqasm::parse_dynamic(source)?))
+#[pyo3(signature = (source, inputs = None))]
+pub fn parse_qasm_dynamic(
+    source: &str,
+    inputs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
+) -> PyPrismResult<PyDynamicProgram> {
+    let inputs = input_values(inputs)?;
+    let inputs: Vec<(&str, ClassicalValue)> = inputs
+        .iter()
+        .map(|(name, value)| (name.as_str(), *value))
+        .collect();
+    Ok(PyDynamicProgram(openqasm::parse_dynamic_with_inputs(
+        source, &inputs,
+    )?))
+}
+
+/// The values an OpenQASM `inputs` mapping holds, in name order.
+pub(crate) fn input_values(
+    inputs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
+) -> PyPrismResult<Vec<(String, ClassicalValue)>> {
+    inputs
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| {
+            let value = constant(&value)
+                .map_err(|_| invalid(format!("input `{name}` takes a bool, int or float")))?;
+            Ok((name, value))
+        })
+        .collect()
 }
 
 /// Start a `ProgramSimulation` for `program`.

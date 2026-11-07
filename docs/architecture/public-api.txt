@@ -1166,13 +1166,19 @@ pub prism_q::circuit::openqasm::BraketProgram::results: alloc::vec::Vec<prism_q:
 pub fn prism_q::circuit::openqasm::parse(&str) -> prism_q::error::Result<prism_q::circuit::Circuit>
 pub fn prism_q::circuit::openqasm::parse_braket(&str) -> prism_q::error::Result<prism_q::circuit::openqasm::BraketProgram>
 pub fn prism_q::circuit::openqasm::parse_dynamic(&str) -> prism_q::error::Result<prism_q::circuit::dynamic::DynamicProgram>
+pub fn prism_q::circuit::openqasm::parse_dynamic_with_inputs(&str, &[(&str, prism_q::circuit::dynamic::ClassicalValue)]) -> prism_q::error::Result<prism_q::circuit::dynamic::DynamicProgram>
 pub fn prism_q::circuit::openqasm::parse_parametric(&str) -> prism_q::error::Result<(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)>
 pub fn prism_q::circuit::openqasm::parse_parametric_with(&str, prism_q::circuit::openqasm::Dialect) -> prism_q::error::Result<(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)>
+pub fn prism_q::circuit::openqasm::parse_parametric_with_inputs(&str, &[(&str, prism_q::circuit::dynamic::ClassicalValue)]) -> prism_q::error::Result<(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)>
 pub fn prism_q::circuit::openqasm::parse_with(&str, prism_q::circuit::openqasm::Dialect) -> prism_q::error::Result<prism_q::circuit::Circuit>
 pub mod prism_q::circuit::parameter
 pub struct prism_q::circuit::parameter::ParamLink
 pub prism_q::circuit::parameter::ParamLink::instruction: usize
+pub prism_q::circuit::parameter::ParamLink::offset: f64
+pub prism_q::circuit::parameter::ParamLink::scale: f64
 pub prism_q::circuit::parameter::ParamLink::slot: usize
+impl prism_q::circuit::parameter::ParamLink
+pub fn prism_q::circuit::parameter::ParamLink::new(usize, usize) -> Self
 pub struct prism_q::circuit::parameter::Parameters
 impl prism_q::circuit::parameter::Parameters
 pub fn prism_q::circuit::parameter::Parameters::all_rotations(&prism_q::circuit::Circuit) -> Self
@@ -1181,6 +1187,7 @@ pub fn prism_q::circuit::parameter::Parameters::bind_into(&self, &prism_q::circu
 pub fn prism_q::circuit::parameter::Parameters::from_links(alloc::vec::Vec<prism_q::circuit::parameter::ParamLink>, usize) -> Self
 pub fn prism_q::circuit::parameter::Parameters::is_empty(&self) -> bool
 pub fn prism_q::circuit::parameter::Parameters::link(&mut self, usize, usize)
+pub fn prism_q::circuit::parameter::Parameters::link_affine(&mut self, usize, usize, f64, f64)
 pub fn prism_q::circuit::parameter::Parameters::links(&self) -> &[prism_q::circuit::parameter::ParamLink]
 pub fn prism_q::circuit::parameter::Parameters::name_of(&self, usize) -> core::option::Option<&str>
 pub fn prism_q::circuit::parameter::Parameters::new(usize) -> Self
@@ -1321,7 +1328,11 @@ pub fn prism_q::circuit::GuardedRegion::new(prism_q::circuit::ClassicalCondition
 pub fn prism_q::circuit::GuardedRegion::qubits(&self) -> &[usize]
 pub struct prism_q::circuit::ParamLink
 pub prism_q::circuit::ParamLink::instruction: usize
+pub prism_q::circuit::ParamLink::offset: f64
+pub prism_q::circuit::ParamLink::scale: f64
 pub prism_q::circuit::ParamLink::slot: usize
+impl prism_q::circuit::parameter::ParamLink
+pub fn prism_q::circuit::parameter::ParamLink::new(usize, usize) -> Self
 pub struct prism_q::circuit::Parameters
 impl prism_q::circuit::parameter::Parameters
 pub fn prism_q::circuit::parameter::Parameters::all_rotations(&prism_q::circuit::Circuit) -> Self
@@ -1330,6 +1341,7 @@ pub fn prism_q::circuit::parameter::Parameters::bind_into(&self, &prism_q::circu
 pub fn prism_q::circuit::parameter::Parameters::from_links(alloc::vec::Vec<prism_q::circuit::parameter::ParamLink>, usize) -> Self
 pub fn prism_q::circuit::parameter::Parameters::is_empty(&self) -> bool
 pub fn prism_q::circuit::parameter::Parameters::link(&mut self, usize, usize)
+pub fn prism_q::circuit::parameter::Parameters::link_affine(&mut self, usize, usize, f64, f64)
 pub fn prism_q::circuit::parameter::Parameters::links(&self) -> &[prism_q::circuit::parameter::ParamLink]
 pub fn prism_q::circuit::parameter::Parameters::name_of(&self, usize) -> core::option::Option<&str>
 pub fn prism_q::circuit::parameter::Parameters::new(usize) -> Self
@@ -3882,7 +3894,11 @@ pub fn prism_q::sim::compiled::PackedShots::try_from_meas_major(alloc::vec::Vec<
 pub fn prism_q::sim::compiled::PackedShots::try_from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
 pub struct prism_q::ParamLink
 pub prism_q::ParamLink::instruction: usize
+pub prism_q::ParamLink::offset: f64
+pub prism_q::ParamLink::scale: f64
 pub prism_q::ParamLink::slot: usize
+impl prism_q::circuit::parameter::ParamLink
+pub fn prism_q::circuit::parameter::ParamLink::new(usize, usize) -> Self
 pub struct prism_q::Parameters
 impl prism_q::circuit::parameter::Parameters
 pub fn prism_q::circuit::parameter::Parameters::all_rotations(&prism_q::circuit::Circuit) -> Self
@@ -3891,6 +3907,7 @@ pub fn prism_q::circuit::parameter::Parameters::bind_into(&self, &prism_q::circu
 pub fn prism_q::circuit::parameter::Parameters::from_links(alloc::vec::Vec<prism_q::circuit::parameter::ParamLink>, usize) -> Self
 pub fn prism_q::circuit::parameter::Parameters::is_empty(&self) -> bool
 pub fn prism_q::circuit::parameter::Parameters::link(&mut self, usize, usize)
+pub fn prism_q::circuit::parameter::Parameters::link_affine(&mut self, usize, usize, f64, f64)
 pub fn prism_q::circuit::parameter::Parameters::links(&self) -> &[prism_q::circuit::parameter::ParamLink]
 pub fn prism_q::circuit::parameter::Parameters::name_of(&self, usize) -> core::option::Option<&str>
 pub fn prism_q::circuit::parameter::Parameters::new(usize) -> Self

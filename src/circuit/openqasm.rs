@@ -12,7 +12,8 @@
 //! | Qubit declaration | `qubit[4] q;` | OQ3 syntax (primary) |
 //! | Bit declaration | `bit[4] c;` `bit b = measure q[0];` `bit[2] f = "00";` | OQ3 syntax (primary). An initializer is a measurement, or a bit string (most significant bit first) or value of all zeros |
 //! | Legacy qreg/creg | `qreg q[4]; creg c[4];` | OQ2 compat |
-//! | Input parameter | `input float[64] theta;` | One named slot; [`parse_parametric`] returns them |
+//! | Input parameter | `input float[64] theta;` `rx(-theta / 2) q[0];` | One named slot; [`parse_parametric`] returns them. An angle may be affine in one input, and an input may reach a gate or `def` body as an argument |
+//! | Input value | `input int[8] n;` | [`parse_parametric_with_inputs`] folds a supplied value as a declaration of that type would; a supplied `float` or `angle` is a constant rather than a slot |
 //! | Output declaration | `output bit[4] c;` | Declares the register; every bit is reported anyway |
 //! | 1-qubit gates | `h q[0]; x q[1];` | id/i, x, y, z, h, s, sdg/si, t, tdg/ti, sx/v, sxdg/vi, p/phase/phaseshift, r/prx, gpi, gpi2, u/U forms |
 //! | Parametric gates | `rx(pi/4) q[0];` | rx, ry, rz, cu, ms, arithmetic expressions with `pi`, math functions |
@@ -105,12 +106,12 @@
 //!   type, and a compound assignment to an array slice
 //! - `durationof`, a ratio over a `stretch`, and a ratio mixing `dt` with SI
 //!   units: nothing here sizes a stretch or knows a backend's sample period
-//! - `input` of any type but `float` and `angle`, and `output` of any type but
-//!   `bit`
-//! - an `input` anywhere but as the whole angle argument of a top-level
-//!   parametric gate: an expression over one, two on one gate, a modified gate,
-//!   a gate carrying no rotation angle, and a use inside a `gate`, `def`,
-//!   `for`, or guarded-region body all reject
+//! - `output` of any type but `bit`
+//! - an unsupplied `input` anywhere but in a gate angle affine in it: an angle
+//!   over two inputs or not affine in one, a modified gate or `gphase`, a gate
+//!   that lowers to a sequence or carries no rotation angle, a guarded region,
+//!   and any classical value all reject. An unsupplied input of any type but
+//!   `float` and `angle` returns [`PrismError::InvalidParameter`]
 //!
 //! # Error behaviour
 //!
@@ -126,6 +127,7 @@ use num_complex::Complex64;
 
 use super::braket::{self, NoiseSpec, ResultSpec};
 use crate::circuit::dynamic::{ClassicalType as RuntimeType, ClassicalValue};
+use crate::circuit::parameter::{angle_mut, angle_of};
 use crate::circuit::qasm::ast::{self, DefParam};
 use crate::circuit::qasm::expr::{self as syntax_expr, Timed};
 use crate::circuit::qasm::stream::with_stack;
@@ -138,7 +140,7 @@ use crate::error::{PrismError, Result};
 use crate::gates::{Gate, spectral};
 use crate::sim::noise::{NoiseEvent, NoiseModel};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -210,19 +212,47 @@ pub fn parse_with(input: &str, dialect: Dialect) -> Result<Circuit> {
 ///
 /// Slots are ordered by declaration and carry the declared names, so
 /// [`Parameters::slot_of`] resolves an angle by the name the source used. The
-/// returned circuit is a template holding zero for every input; bind it before
-/// running, since dispatch reads the angles it is given.
+/// returned circuit is a template holding each linked angle at an input value of
+/// zero; bind it before running, since dispatch reads the angles it is given.
 ///
-/// An `input` may only be the whole angle argument of a directly named
-/// parametric gate at the top level. An expression over one, a use inside a
-/// gate, `def`, `for`, or guarded-region body, and a use on a gate carrying no
-/// rotation angle all return [`PrismError::UnsupportedConstruct`].
+/// A gate angle may be affine in one `float` or `angle` input, `-theta / 2` or
+/// `2 * theta + pi`, and its link carries that scale and offset. The input may
+/// reach the angle through a `for` body or as an argument to a `gate` or `def`.
+/// An angle over two inputs or not affine in one, a modified gate, a gate that
+/// lowers to a sequence or carries no rotation angle, a guarded region, and a
+/// classical value read from an input all return
+/// [`PrismError::UnsupportedConstruct`]. An `input` of any other type needs a
+/// value from [`parse_parametric_with_inputs`].
 ///
 /// # Errors
 ///
 /// Same conditions as [`parse`], less the `input` rejection.
 pub fn parse_parametric(input: &str) -> Result<(Circuit, Parameters)> {
     parse_parametric_with(input, Dialect::Native)
+}
+
+/// [`parse_parametric`] with values for some `input` declarations, by name.
+///
+/// A supplied input folds as a declaration of its type initialized to the
+/// value would, so an `int`, `uint`, `bool` or `bit[n]` input reads as an index,
+/// a loop bound or a condition operand. A supplied `float` or `angle` input is
+/// a constant and takes no slot; the unsupplied ones keep theirs.
+///
+/// # Errors
+///
+/// Same conditions as [`parse_parametric`], plus
+/// [`PrismError::InvalidParameter`] for a name supplied twice or matching no
+/// `input`, and for an unsupplied `input` of a type other than `float` and
+/// `angle`.
+pub fn parse_parametric_with_inputs(
+    input: &str,
+    inputs: &[(&str, ClassicalValue)],
+) -> Result<(Circuit, Parameters)> {
+    with_stack(|| {
+        let mut parser = Parser::new_with(input, Dialect::Native);
+        parser.supply(inputs)?;
+        parser.parse()
+    })
 }
 
 /// Parse an OpenQASM 3.0 string plus its `input` [`Parameters`] under an
@@ -440,6 +470,37 @@ fn invalid_index(kind: ast::RegisterKind, index: usize, register_size: usize) ->
     }
 }
 
+/// `scale * slot + offset` over one `input` slot, or the constant `offset` when
+/// `slot` is `None`.
+#[derive(Clone, Copy)]
+struct Linear {
+    slot: Option<usize>,
+    scale: f64,
+    offset: f64,
+}
+
+/// High word of the quiet NaN that stands for an angle reading an `input`; the
+/// low word indexes `Parser::tags`. A tag reaches no arithmetic: every read of
+/// a tagged name outside a gate angle is declined before it is evaluated.
+const TAG: u64 = 0x7FFC_0000_0000_0000;
+const TAG_MASK: u64 = 0xFFFF_FFFF_0000_0000;
+
+/// Stand-in for a tagged angle while a call resolves.
+const PROBE: f64 = 0.618_033_988_749_894_8;
+
+fn tag_id(value: f64) -> Option<usize> {
+    let bits = value.to_bits();
+    (bits & TAG_MASK == TAG).then_some((bits & !TAG_MASK) as usize)
+}
+
+/// Angle of a bindable gate, `None` for any other instruction.
+fn gate_angle(instr: &Instruction) -> Option<f64> {
+    match instr {
+        Instruction::Gate { gate, .. } if gate.pauli_generator().is_some() => Some(angle_of(instr)),
+        _ => None,
+    }
+}
+
 pub(crate) struct Parser<'a> {
     input: &'a str,
     /// Shared with the expansion parsers below this one, like `gate_defs`.
@@ -460,12 +521,16 @@ pub(crate) struct Parser<'a> {
     /// `input` slot per declared name, and the names in slot order.
     inputs: HashMap<&'a str, usize>,
     input_names: Vec<String>,
-    links: Vec<ParamLink>,
-    /// Slot the statement just run reads, handed up to the block walk, which
-    /// is the only place that knows the instruction index the link needs.
-    pending_input_slot: Option<usize>,
+    /// The affine form each tagged angle stands for, indexed by the tag and
+    /// shared with every expansion parser below this one.
+    tags: Rc<RefCell<Vec<Linear>>>,
+    /// Names that may hold a tagged angle: the unsupplied inputs, or the gate
+    /// and `def` parameters an expansion bound to one.
+    symbolic: Vec<&'a str>,
+    /// Caller-supplied `input` values, each taken when its declaration runs.
+    supplied: Vec<(String, Option<ClassicalValue>)>,
     /// True while parsing a block body, whose instruction indices are local to
-    /// that body and so cannot carry a top-level parameter link.
+    /// that body.
     nested: bool,
     dialect: Dialect,
     /// `#pragma braket result` requests, in declaration order.
@@ -610,8 +675,9 @@ impl<'a> Parser<'a> {
             param_vars: None,
             inputs: HashMap::new(),
             input_names: Vec::new(),
-            links: Vec::new(),
-            pending_input_slot: None,
+            tags: Rc::default(),
+            symbolic: Vec::new(),
+            supplied: Vec::new(),
             nested: false,
             results: Vec::new(),
             noise_specs: Vec::new(),
@@ -855,25 +921,41 @@ impl<'a> Parser<'a> {
         Ok(Instruction::Gate { gate, targets })
     }
 
-    /// A slot writes one angle onto each instruction it links, so every
-    /// instruction a gate reading an `input` produced has to carry one.
-    fn check_every_instruction_is_bindable(
-        instrs: &[Instruction],
+    /// Resolve a call whose one tagged angle has to land unchanged on a single
+    /// bindable gate, then put the tag on that gate.
+    ///
+    /// The call resolves with [`PROBE`] in place of the tag, so a gate that
+    /// derives its stored angle from the argument reads back something else.
+    fn resolve_tagged(
+        &self,
         gate_name: &str,
+        params: &[f64],
+        qubits: &SmallVec<[usize; 4]>,
         line_num: usize,
+        out: &mut Vec<Instruction>,
     ) -> Result<()> {
-        let bindable = instrs.iter().all(|instr| {
-            matches!(instr, Instruction::Gate { gate, .. } if gate.pauli_generator().is_some())
-        });
-        if !bindable {
-            return Err(PrismError::UnsupportedConstruct {
+        let at = params
+            .iter()
+            .position(|value| tag_id(*value).is_some())
+            .expect("the caller saw a tag");
+        let mut probed = params.to_vec();
+        probed[at] = PROBE;
+        let start = out.len();
+        self.resolve_gate_body(gate_name, &probed, &[], qubits, false, line_num, out)?;
+        match &mut out[start..] {
+            [instr]
+                if gate_angle(instr).is_some_and(|angle| angle.to_bits() == PROBE.to_bits()) =>
+            {
+                *angle_mut(instr) = params[at];
+                Ok(())
+            }
+            _ => Err(PrismError::UnsupportedConstruct {
                 construct: format!(
                     "`input` on `{gate_name}`, which carries no rotation angle to bind"
                 ),
                 line: line_num,
-            });
+            }),
         }
-        Ok(())
     }
 
     /// Build what one gate call names, splitting off the control qubits a
@@ -955,18 +1037,13 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(instrs) = self.expand_user_gate(gate_name, params, qubits, line_num)? {
-            // Expansion substitutes the numeric value into the body, so a body
-            // writing `rx(2 * a)` would take a bound angle whole.
-            if has_input {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("`input` on user-defined gate `{gate_name}`"),
-                    line: line_num,
-                });
-            }
             out.extend(Self::modify_expansion(
                 instrs, modifiers, gate_name, line_num,
             )?);
             return Ok(());
+        }
+        if has_input {
+            return self.resolve_tagged(gate_name, params, qubits, line_num, out);
         }
 
         if let Some(axes) = pauli_rotation_axes(bare_pauli_rotation(gate_name).unwrap_or(gate_name))
@@ -1939,7 +2016,7 @@ mod eval;
 mod dynamic;
 
 pub(crate) use dynamic::builder_expr;
-pub use dynamic::parse_dynamic;
+pub use dynamic::{parse_dynamic, parse_dynamic_with_inputs};
 
 #[cfg(test)]
 #[path = "openqasm_tests.rs"]

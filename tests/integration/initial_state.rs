@@ -315,13 +315,7 @@ fn noisy_shots_decline_a_start_state() {
 fn the_adjoint_gradient_declines_a_start_state() {
     let mut circuit = Circuit::new(1, 0);
     circuit.add_gate(Gate::Rz(0.3), &[0]);
-    let params = Parameters::from_links(
-        vec![ParamLink {
-            instruction: 0,
-            slot: 0,
-        }],
-        1,
-    );
+    let params = Parameters::from_links(vec![ParamLink::new(0, 0)], 1);
 
     let err = simulate(&circuit)
         .initial_state(&tilted())

@@ -1,6 +1,6 @@
 """Type stubs for the compiled ``prism_q._prism_q`` extension module."""
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, ClassVar, Literal, Optional, Self, TypeAlias, TypeVar, final, overload
 
 import numpy as np
@@ -1187,8 +1187,12 @@ class ProgramSimulation:
     def sample_counts(self, num_shots: int) -> CountsResult: ...
 
 def parse_qasm(source: str) -> Circuit: ...
-def parse_qasm_dynamic(source: str) -> DynamicProgram: ...
-def parse_qasm_parametric(source: str) -> tuple[Circuit, Parameters]: ...
+def parse_qasm_dynamic(
+    source: str, inputs: Optional[Mapping[str, bool | int | float]] = None
+) -> DynamicProgram: ...
+def parse_qasm_parametric(
+    source: str, inputs: Optional[Mapping[str, bool | int | float]] = None
+) -> tuple[Circuit, Parameters]: ...
 def run_batch(
     circuits: Sequence[Circuit],
     backend: Optional[BackendKind] = None,

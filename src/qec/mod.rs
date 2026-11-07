@@ -361,16 +361,22 @@ pub enum QecOp {
     HeraldedErase { probability: f64, qubit: usize },
     /// Constant measurement record holding `value`. Produces one record.
     Pad { value: bool },
+    /// Readout error: with probability `probability`, flip the record of the op directly
+    /// before it and leave the state alone. Must directly follow an op that produces a
+    /// record, or another `RecordFlip` of that record.
+    RecordFlip { probability: f64 },
 }
 
 impl QecOp {
-    /// True for a noise op that can fire: a Pauli annotation, correlated error, or
-    /// heralded erasure with a nonzero probability.
+    /// True for a noise op that can fire: a Pauli annotation, correlated error, heralded
+    /// erasure, or record flip with a nonzero probability.
     pub(crate) fn is_active_noise(&self) -> bool {
         match self {
             Self::Noise { channel, .. } => channel.probability() > 0.0,
             Self::CorrelatedError { branches } => branches.iter().any(|b| b.probability > 0.0),
-            Self::HeraldedErase { probability, .. } => *probability > 0.0,
+            Self::HeraldedErase { probability, .. } | Self::RecordFlip { probability } => {
+                *probability > 0.0
+            }
             _ => false,
         }
     }
@@ -1011,6 +1017,19 @@ impl QecProgram {
                 validate_probability(*probability, "heralded erasure")?;
                 validate_qubit(*qubit, self.num_qubits)?;
             }
+            QecOp::RecordFlip { probability } => {
+                validate_probability(*probability, "record flip")?;
+                let follows_record = self.ops.last().is_some_and(|last| {
+                    last.produces_record() || matches!(last, QecOp::RecordFlip { .. })
+                });
+                if !follows_record {
+                    return Err(PrismError::InvalidParameter {
+                        message: "a record flip must directly follow the op that produced its \
+                                  record"
+                            .to_string(),
+                    });
+                }
+            }
             QecOp::Pad { .. } | QecOp::Tick => {}
         }
         Ok(())
@@ -1045,6 +1064,7 @@ fn qec_op_name(op: &QecOp) -> &'static str {
         QecOp::CorrelatedError { .. } => "E",
         QecOp::HeraldedErase { .. } => "HERALDED_ERASE",
         QecOp::Pad { .. } => "MPAD",
+        QecOp::RecordFlip { .. } => "RECORD_FLIP",
         QecOp::Tick => "TICK",
     }
 }
@@ -1115,8 +1135,9 @@ pub fn compile_qec_program_rows(program: &QecProgram) -> Result<QecCompiledRows>
             | QecOp::ObservableInclude { .. }
             | QecOp::Postselect { .. }
             | QecOp::Tick => {}
-            QecOp::Noise { .. } | QecOp::CorrelatedError { .. } if !op.is_active_noise() => {}
-            QecOp::Noise { .. } | QecOp::CorrelatedError { .. } => {
+            QecOp::Noise { .. } | QecOp::CorrelatedError { .. } | QecOp::RecordFlip { .. }
+                if !op.is_active_noise() => {}
+            QecOp::Noise { .. } | QecOp::CorrelatedError { .. } | QecOp::RecordFlip { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC row compiler".to_string(),
                     reason: "QEC row compilation does not support active noise annotations yet"
@@ -1255,7 +1276,7 @@ pub(crate) fn validate_qec_exp_val_placement(program: &QecProgram) -> Result<()>
                     return Err(terminal_violation("E"));
                 }
             }
-            QecOp::HeraldedErase { .. } | QecOp::Pad { .. } => {
+            QecOp::HeraldedErase { .. } | QecOp::Pad { .. } | QecOp::RecordFlip { .. } => {
                 if seen_exp_val {
                     return Err(terminal_violation(qec_op_name(op)));
                 }

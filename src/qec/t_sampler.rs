@@ -221,12 +221,17 @@ fn lower_qec_program_for_pauli_observable(
                     ),
                 });
             }
-            QecOp::CorrelatedError { .. } | QecOp::HeraldedErase { .. } if op.is_active_noise() => {
+            QecOp::CorrelatedError { .. }
+            | QecOp::HeraldedErase { .. }
+            | QecOp::RecordFlip { .. }
+                if op.is_active_noise() =>
+            {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC SPD / CAMPS".to_string(),
                     reason: "analytical strategies evaluate pure-state expectations and \
-                             cannot absorb correlated errors or heralded erasures; route noisy \
-                             QEC programs through `run_qec_program_reference`"
+                             cannot absorb correlated errors, heralded erasures or record \
+                             flips; route noisy QEC programs through \
+                             `run_qec_program_reference`"
                         .to_string(),
                 });
             }

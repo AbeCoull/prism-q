@@ -1234,6 +1234,10 @@ fn write_ops(w: &mut Writer, ops: &[QecOp]) -> PyPrismResult<()> {
                 w.u8(13);
                 w.bool(*value);
             }
+            QecOp::RecordFlip { probability } => {
+                w.u8(14);
+                w.f64(*probability);
+            }
             other => {
                 return Err(invalid(format!("QEC op {other:?} has no pickle encoding")));
             }
@@ -1305,6 +1309,9 @@ fn read_ops(r: &mut Reader<'_>) -> PyPrismResult<Vec<QecOp>> {
                 qubit: r.usize()?,
             },
             13 => QecOp::Pad { value: r.bool()? },
+            14 => QecOp::RecordFlip {
+                probability: r.f64()?,
+            },
             other => return Err(bad_tag("QEC op", other)),
         });
     }

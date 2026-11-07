@@ -34,6 +34,7 @@ in a Pauli product, branch probabilities summing to at most 1, and target pairin
 | `CorrelatedError` | `branches` | Mutually exclusive Pauli products: branch `i` fires with its probability only when no earlier branch fired. The text chain `E` / `ELSE_CORRELATED_ERROR` is one op. |
 | `HeraldedErase` | `probability`, `qubit` | One record: 1 with the given probability, in which case a uniformly random Pauli (identity included) hits the qubit; 0 otherwise. |
 | `Pad` | `value` | One constant record. |
+| `RecordFlip` | `probability` | Readout error: flips the record of the op directly before it with the given probability, leaving the state alone. Must directly follow a record-producing op or another `RecordFlip`, so no feed-forward reads the record before the flip. The compiled runner and the detector error model lower it to an X on the record's measured alias, which no later gate touches. |
 | `Tick` | | Scheduling separator with no semantic effect. |
 
 Record references are `QecRecordRef::Absolute` indices or `QecRecordRef::Lookback`
@@ -113,6 +114,7 @@ targets are rejected; instruction tags such as `X_ERROR[tag](p)` are ignored.
 | `E(p)` / `CORRELATED_ERROR(p) P ...` | A `CorrelatedError` with one branch: the Pauli product fires with probability `p`. |
 | `ELSE_CORRELATED_ERROR(p) P ...` | Appends a branch to the chain it directly follows, fired only when no earlier branch fired. |
 | `HERALDED_ERASE(p) q ...` | A `HeraldedErase` op per target: one record, 1 when the qubit is erased, with a uniformly random Pauli applied on erasure. |
+| `RECORD_FLIP(p)` | A `RecordFlip` of the record just produced. No targets; it must directly follow a record-producing instruction or another `RECORD_FLIP`. |
 | `LEAK(p)` / `SEEP(p)` / `LEAK_TRANSPORT(p)` | `QecNoise::Leak`, `Seep` and `LeakTransport` annotations; see [leakage on the compiled QEC path](./noise.md#leakage-on-the-compiled-qec-path). |
 
 `QecProgram::to_text` writes the same subset back, and parsing its output reproduces

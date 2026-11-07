@@ -257,6 +257,7 @@ pub(super) fn forced_tableau_records(program: &QecProgram) -> Result<Option<Vec<
             }
             QecOp::Noise { .. }
             | QecOp::CorrelatedError { .. }
+            | QecOp::RecordFlip { .. }
             | QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }
             | QecOp::Postselect { .. }

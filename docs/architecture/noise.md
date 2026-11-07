@@ -98,7 +98,10 @@ An event in a guarded body fires only on shots whose guard holds, which no fixed
 map expresses. The compiled sampler draws every shot's records under the unguarded
 events. Each guarded event then draws at its rate on every shot, in execution order,
 and lands its precomputed record flips on the shots whose guard parity holds; readout
-comes last. Such a circuit always takes the compiled sampler, not the frame sampler.
+comes last. Readout error on a bit a guard reads is not left to the end: the rewrite
+places an `X` of that rate on each alias measured into the bit, which the guard's
+controls and the record then both see. Only a rate equal both ways is such a Pauli, so
+asymmetric readout on a guarded bit declines the rewrite. Such a circuit always takes the compiled sampler, not the frame sampler.
 
 ## Slots for guarded instructions
 
@@ -149,6 +152,14 @@ kernel would draw the two qubits independently. The noiseless parity sample and 
 transpose still run on the device.
 
 ## Readout and validation
+
+Readout error flips a classical bit when a measurement writes it, so a condition reads
+the noisy bit and each measurement into the bit draws its own flip. The state is never
+touched. When no condition reads a bit carrying readout error, only each bit's last
+write reaches the record, and flipping the finished record draws the same distribution;
+every route then keeps doing that, with the seeded shots it always drew. A trajectory
+whose conditions read such a bit, the brute-force stabilizer replay included, flips
+each bit on the shot's noise stream right after the measurement instead.
 
 The frame and compiled samplers apply readout error to the packed measurement record
 after the reference outcomes are folded in, so a set bit is a measured one. Records are

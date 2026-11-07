@@ -325,7 +325,7 @@ fn trajectory_expectations_converge_to_density_matrix_within_5_sigma() {
     let mut sums = vec![0.0f64; observables.len()];
     let mut sq_sums = vec![0.0f64; observables.len()];
     let mut backend = StatevectorBackend::new(42);
-    let readout = crate::sim::trajectory::written_readout(&circuit, &noise.readout);
+    let readout = crate::sim::trajectory::ShotReadout::new(&circuit, &noise.readout);
     let prepared = crate::sim::trajectory::PreparedNoise::new(&noise);
     for i in 0..shots {
         let mut shot_rng = ChaCha8Rng::seed_from_u64(42u64.wrapping_add(i as u64));
@@ -1997,12 +1997,13 @@ fn guarded_paulis_compile_to_the_records_stabilizer_replay_reads() {
     }
 }
 
-// q0 reads a fair coin into c0, whose readout always reports 1. The guard on c0 copies
-// the true value onto q1, and onto q2 an X that a certain X in the guarded slot undoes,
-// so c1 is the hidden coin and c2 is always 0: the guarded event lands only where the
-// guard holds, and the guard reads the record before readout.
+// q0 reads a fair coin into c0, whose readout always inverts it. The guard on c0 copies
+// the reported value onto q1, and onto q2 an X that a certain X in the guarded slot
+// undoes, so c1 matches c0 and c2 is always 0: the guarded event lands only where the
+// guard holds, and the guard reads the bit readout flipped. Asymmetric readout on the
+// guarded bit leaves the compiled sampler and keeps the same law.
 #[test]
-fn a_guarded_event_lands_where_its_guard_holds_before_readout() {
+fn a_guarded_event_lands_where_its_guard_reads_the_flipped_bit() {
     use crate::circuit::ClassicalCondition as C;
     let mut circuit = Circuit::new(3, 3);
     circuit.add_gate(Gate::H, &[0]);
@@ -2020,29 +2021,42 @@ fn a_guarded_event_lands_where_its_guard_holds_before_readout() {
         readout: vec![None; 3],
     };
     noise.after_gate[circuit.instructions.len() + 1] = vec![NoiseEvent::pauli(2, 1.0, 0.0, 0.0)];
-    noise.set_bit_readout_error(0, 1.0, 0.0);
 
     let shots = 4000;
-    let compiled = crate::sim::simulate(&circuit)
-        .noise(&noise)
-        .seed(42)
-        .shots(shots)
-        .unwrap();
-    assert_eq!(compiled.metadata.engine, Some(Engine::NoisyCompiledSampler));
-    for (label, result) in [
-        ("compiled", &compiled),
-        ("replay", &replay(&circuit, &noise, shots)),
-    ] {
-        assert!(
-            result.shots.iter().all(|shot| shot[0] && !shot[2]),
-            "{label}: {:?}",
-            result.shots.iter().find(|shot| !shot[0] || shot[2])
+    for (p01, p10, compiled) in [(1.0, 1.0, true), (1.0, 0.0, false)] {
+        noise.set_bit_readout_error(0, p01, p10);
+        let routed = crate::sim::simulate(&circuit)
+            .noise(&noise)
+            .seed(42)
+            .shots(shots)
+            .unwrap();
+        assert_eq!(
+            routed.metadata.engine == Some(Engine::NoisyCompiledSampler),
+            compiled,
+            "p01 {p01}, p10 {p10}"
         );
-        let ones = result.shots.iter().filter(|shot| shot[1]).count() as f64;
-        assert!(
-            (ones / shots as f64 - 0.5).abs() < 0.05,
-            "{label}: the hidden coin read one on {ones} of {shots} shots"
-        );
+        for (label, result) in [
+            ("routed", &routed),
+            ("replay", &replay(&circuit, &noise, shots)),
+        ] {
+            assert!(
+                result
+                    .shots
+                    .iter()
+                    .all(|shot| shot[1] == shot[0] && !shot[2]),
+                "{label}, p10 {p10}: {:?}",
+                result
+                    .shots
+                    .iter()
+                    .find(|shot| shot[1] != shot[0] || shot[2])
+            );
+            let ones = result.shots.iter().filter(|shot| shot[0]).count() as f64;
+            let want = if p10 == 1.0 { 0.5 } else { 1.0 };
+            assert!(
+                (ones / shots as f64 - want).abs() < 0.05,
+                "{label}, p10 {p10}: c0 read one on {ones} of {shots} shots"
+            );
+        }
     }
 }
 
@@ -2096,15 +2110,15 @@ fn outcome_frequencies(shots: &[Vec<bool>]) -> Vec<f64> {
         .collect()
 }
 
-// Depolarizing noise on every gate, guarded ones included, and readout error on the
-// check bit the corrections read. Each outcome's compiled and replayed frequencies
+// Depolarizing noise on every gate, guarded ones included, and symmetric readout error
+// on the check bit the corrections read, which the deferral lands as an X on its alias. Each outcome's compiled and replayed frequencies
 // agree within five two-sample binomial standard errors at the pooled rate, plus one
 // count.
 #[test]
 fn noisy_feedforward_counts_follow_stabilizer_replay() {
     let circuit = noisy_feedforward_round();
     let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.05);
-    noise.set_bit_readout_error(0, 0.08, 0.03);
+    noise.set_bit_readout_error(0, 0.08, 0.08);
     let shots = 40_000;
 
     let compiled = crate::sim::simulate(&circuit)

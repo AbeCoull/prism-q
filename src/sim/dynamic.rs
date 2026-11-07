@@ -75,8 +75,9 @@ impl<'p, SeedState> SimulateProgram<'p, SeedState> {
     }
 
     /// Sample one noisy trajectory per shot, `rules` compiled against each block's
-    /// circuit and each runtime rotation. Readout error flips the returned record,
-    /// not the bits a branch reads. Leak flags and quasi-static draws last the
+    /// circuit and each runtime rotation. Readout error flips a bit as a
+    /// measurement writes it, so a branch reads the noisy bit and a classical write
+    /// stores its value unflipped. Leak flags and quasi-static draws last the
     /// whole shot, across every block it enters, and [`ShotsResult::leaked`]
     /// records the qubits each shot leaked.
     pub fn noise(mut self, rules: &'p NoiseBuilder) -> Self {
@@ -191,6 +192,7 @@ struct ProgramNoise {
     blocks: Vec<PreparedNoise>,
     /// Each block's events with one slot per action, empty but for rotations.
     actions: Vec<PreparedNoise>,
+    /// Flipped as each measurement writes its bit.
     readout: Vec<Option<ReadoutError>>,
     /// What each shot keeps from block to block: leak flags, quasi-static draws.
     memory: Option<MemorySpec>,
@@ -199,11 +201,7 @@ struct ProgramNoise {
 impl ProgramNoise {
     /// Compile `rules` for `program`, also returning every event in one model
     /// for the route to read.
-    fn compile(
-        program: &DynamicProgram,
-        summary: &Circuit,
-        rules: &NoiseBuilder,
-    ) -> Result<(Self, NoiseModel)> {
+    fn compile(program: &DynamicProgram, rules: &NoiseBuilder) -> Result<(Self, NoiseModel)> {
         let mut blocks = Vec::with_capacity(program.blocks().len());
         let mut actions = Vec::with_capacity(program.blocks().len());
         let mut channels = Vec::new();
@@ -236,7 +234,7 @@ impl ProgramNoise {
         let compiled = Self {
             blocks,
             actions,
-            readout: trajectory::written_readout(summary, &readout),
+            readout: trajectory::flippable_readout(&readout),
             memory: MemorySpec::of(&channels),
         };
         Ok((compiled, channels))
@@ -366,7 +364,7 @@ impl<'p> Prepared<'p> {
                  matrix holds the mixture instead of a trajectory",
             ));
         }
-        let (noise, channels) = ProgramNoise::compile(program, summary, rules)?;
+        let (noise, channels) = ProgramNoise::compile(program, rules)?;
         let plan = decide_noisy_program(kind, summary, &channels, limits)?;
         #[cfg(feature = "distributed")]
         if matches!(plan, BackendPlan::Distributed(_)) {
@@ -476,7 +474,7 @@ impl<'p> Prepared<'p> {
     }
 
     /// [`Prepared::run_shot`] past the entry's step count, firing each block's
-    /// events after their instructions and readout error on the finished record.
+    /// events after their instructions and readout error as each measurement writes.
     /// Leak flags and quasi-static draws carry from each block to the next, so a
     /// shot draws them in the order a circuit trajectory over the same
     /// instructions does.
@@ -496,10 +494,15 @@ impl<'p> Prepared<'p> {
             let circuit = &self.blocks[at].block.circuit;
             let events = &noise.blocks[at];
             match &mut memory {
-                Some(memory) => {
-                    trajectory::evolve_with_memory(backend, circuit, events, memory, rng)?
-                }
-                None => trajectory::evolve_noisy(backend, circuit, events, 0, rng)?,
+                Some(memory) => trajectory::evolve_with_memory(
+                    backend,
+                    circuit,
+                    events,
+                    memory,
+                    &noise.readout,
+                    rng,
+                )?,
+                None => trajectory::evolve_noisy(backend, circuit, events, 0, &noise.readout, rng)?,
             }
             let rotations = Some((&noise.actions[at], memory.as_mut(), &mut *rng));
             let Some(next) = self.finish_block_with(at, backend, vars, rotations)? else {
@@ -508,8 +511,7 @@ impl<'p> Prepared<'p> {
             self.count_step(next, &mut steps)?;
             at = next;
         }
-        let mut bits = backend.classical_results().to_vec();
-        trajectory::apply_readout_errors(&mut bits, &noise.readout, rng);
+        let bits = backend.classical_results().to_vec();
         let leaked = memory.map(ShotMemory::into_ever_leaked).unwrap_or_default();
         Ok((bits, leaked))
     }

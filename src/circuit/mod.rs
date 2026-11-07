@@ -389,6 +389,25 @@ impl Circuit {
         out
     }
 
+    /// Which classical bits a condition reads, region bodies included, one flag per bit.
+    pub(crate) fn condition_bits(&self) -> Vec<bool> {
+        let mut read = vec![false; self.num_classical_bits];
+        any_instruction(&self.instructions, &mut |inst| {
+            let condition = match inst {
+                Instruction::Conditional { condition, .. } => condition,
+                Instruction::Region(region) => region.condition(),
+                _ => return false,
+            };
+            condition.for_each_bit(|bit| {
+                if let Some(flag) = read.get_mut(bit) {
+                    *flag = true;
+                }
+            });
+            false
+        });
+        read
+    }
+
     /// Classical bit each measurement writes, in record order; the bit half of
     /// [`Circuit::measurement_map`], with the same region descent.
     pub(crate) fn classical_bit_order(&self) -> Vec<usize> {
@@ -1165,6 +1184,17 @@ impl ClassicalCondition {
                 bits: bits.clone(),
                 expected: !expected,
             },
+        }
+    }
+
+    fn for_each_bit(&self, mut f: impl FnMut(usize)) {
+        match self {
+            ClassicalCondition::BitIsOne(bit) | ClassicalCondition::BitIsZero(bit) => f(*bit),
+            ClassicalCondition::RegisterEquals { offset, size, .. }
+            | ClassicalCondition::RegisterNotEquals { offset, size, .. } => {
+                (*offset..offset + size).for_each(f)
+            }
+            ClassicalCondition::Parity { bits, .. } => bits.iter().copied().for_each(f),
         }
     }
 

@@ -496,7 +496,8 @@ it, or when a loop or a measured branch writes it from outside its scope. Every 
 variable folds as under `parse`, so a program `parse` accepts gives the same circuit
 under `parse_dynamic` and the same seeded shots. Runtime `int` and `uint` variables wrap
 at their declared width, and runtime floats round to their width. A runtime `angle`
-holds a double at any width, so `angle[n]` steps apply only to folded values.
+holds a double. Fixed-width runtime `angle[n]` declarations and casts return
+`UnsupportedConstruct`; their precision is supported only when the value folds at parse time.
 
 A shot that runs more than a million blocks stops with `PrismError::StepLimit` naming its
 loop; `SimulateProgram::max_steps` sets another bound. The

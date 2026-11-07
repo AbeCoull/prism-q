@@ -81,8 +81,8 @@
 //!   control-flow graph
 //! - a measurement-dependent scalar `def` result or early `return` under
 //!   `parse`; `parse_dynamic` lowers these into the graph
-//! - a dropped `bit` result, a `complex` result, a runtime duration or a
-//!   fixed-width runtime angle in a subroutine, and modifiers on a runtime call
+//! - a dropped `bit` result, a `complex` result, a runtime duration in a
+//!   subroutine, a fixed-width runtime angle, and modifiers on a runtime call
 //! - a `def` body that measures into anything but the bit it returns, or
 //!   declares a `bit` it does not return
 //! - `ctrl @` on a `def` call: a subroutine is not a gate and the language

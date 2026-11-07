@@ -168,7 +168,7 @@ fn clifford_t_marginal_circuit(n_qubits: usize) -> Circuit {
 
 fn bench_api_queries(c: &mut Criterion) {
     let mut group = c.benchmark_group("api_queries");
-    group.sample_size(10);
+    group.sample_size(common::sample_size());
     group.warm_up_time(Duration::from_millis(500));
     group.measurement_time(Duration::from_secs(3));
 
@@ -203,6 +203,28 @@ fn bench_api_queries(c: &mut Criterion) {
         b.iter(|| {
             sim::simulate(&small_circuit)
                 .seed(42)
+                .sample_counts(100)
+                .unwrap()
+        });
+    });
+
+    group.bench_function("sample_counts_sparse_6q_100", |b| {
+        b.iter(|| {
+            sim::simulate(&small_circuit)
+                .backend(BackendKind::Sparse)
+                .seed(SEED)
+                .sample_counts(100)
+                .unwrap()
+        });
+    });
+
+    let mut mixed_circuit = prism_q::circuits::hardware_efficient_ansatz(4, 2, SEED);
+    mixed_circuit.measure_all();
+    group.bench_function("sample_counts_density_matrix_4q_100", |b| {
+        b.iter(|| {
+            sim::simulate(&mixed_circuit)
+                .backend(BackendKind::DensityMatrix)
+                .seed(SEED)
                 .sample_counts(100)
                 .unwrap()
         });

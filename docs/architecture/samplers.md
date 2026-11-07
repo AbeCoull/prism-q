@@ -76,13 +76,11 @@ and the bits do not depend on the thread count. The dense sampler over factored 
 probabilities walks the same blocks in the same order, so it matches the factored
 backend's native draws shot for shot.
 
-`run_shots_with` picks the native path through `try_native_terminal_backend`, which
-requires the route to land on a single backend and probes the capability before
-`init`, so a backend without one costs an allocation and nothing else.
-`run_counts_with` shares that setup but has its own native arm that counts
-`sample_basis_states` directly instead of materializing shots, so seeded counts from
-the two can differ at a finite shot count. Only the distributed branch delegates to
-`run_shots_with(..).counts()`.
+`run_shots_with` and `run_counts_with` share `prepare_shot_source`. Terminal route
+selection builds the circuit without measurements and its measurement map once,
+then passes both to preparation. A native sampler requires a single backend whose
+capability is checked before initialization. The counts path aggregates its draws
+without materializing a `ShotsResult`.
 
 Drawing every shot from one evolved state needs
 `Circuit::has_terminal_measurements_only`, which counts a reset as a measurement unless

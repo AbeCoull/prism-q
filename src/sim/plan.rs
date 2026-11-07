@@ -577,22 +577,22 @@ pub(super) fn inspect<S>(
                     ResolvedBackend::StabilizerRank,
                     RouteRule::CliffordRegister,
                 )),
-                ShotRoute::TerminalStatevector => Ok(backend_plan(
+                ShotRoute::TerminalStatevector(_) => Ok(backend_plan(
                     &plan_for_family(kind, Family::Statevector, n, limits),
                     kind,
                     circuit,
                     limits,
                     RouteRule::TerminalStatevector,
                 )),
-                ShotRoute::Native(backend) => Ok(backend_plan(
+                ShotRoute::Native(backend, _) => Ok(backend_plan(
                     &backend,
                     kind,
                     circuit,
                     limits,
                     RouteRule::NativeSampling,
                 )),
-                ShotRoute::TerminalProbabilities => {
-                    let mut p = inspect_probability(kind, &circuit.without_measurements(), limits)?;
+                ShotRoute::TerminalProbabilities(terminal) => {
+                    let mut p = inspect_probability(kind, &terminal.circuit, limits)?;
                     p.fallbacks.push(PlanFallback {
                         backend: p.backend,
                         rule: RouteRule::PerShot,

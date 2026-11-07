@@ -180,11 +180,16 @@ pub(super) fn contract_tensor(
     })
 }
 
+pub(super) struct TerminalCircuit {
+    pub(super) circuit: Circuit,
+    pub(super) meas_map: Vec<(usize, usize)>,
+}
+
 pub(super) enum ShotRoute {
     Compiled(Option<Circuit>),
-    TerminalStatevector,
-    Native(BackendPlan),
-    TerminalProbabilities,
+    TerminalStatevector(TerminalCircuit),
+    Native(BackendPlan, TerminalCircuit),
+    TerminalProbabilities(TerminalCircuit),
     StabilizerRank,
     PerShot,
 }
@@ -236,25 +241,40 @@ pub(super) fn decide_shots(
     if kind.is_auto() && auto_prefers_clifford_register(circuit) {
         return Ok(ShotRoute::StabilizerRank);
     }
-    if circuit.has_terminal_measurements_only()
-        && !circuit.measurement_map().is_empty()
-        && terminal_statevector_candidate(kind, &circuit.without_measurements(), limits)
-    {
-        return Ok(ShotRoute::TerminalStatevector);
-    }
+    let terminal_only = circuit.has_terminal_measurements_only();
+    let terminal = if terminal_only {
+        let meas_map = circuit.measurement_map();
+        (!meas_map.is_empty()).then(|| TerminalCircuit {
+            circuit: circuit.without_measurements(),
+            meas_map,
+        })
+    } else {
+        None
+    };
+    let terminal = match terminal {
+        Some(terminal) if terminal_statevector_candidate(kind, &terminal.circuit, limits) => {
+            return Ok(ShotRoute::TerminalStatevector(terminal));
+        }
+        terminal => terminal,
+    };
     if matches!(kind, BackendKind::StabilizerRank) && circuit.has_t_gates()
         || kind.is_auto() && auto_samples_wide_by_stabilizer_rank(circuit)
     {
         return Ok(ShotRoute::StabilizerRank);
     }
-    if circuit.has_terminal_measurements_only()
+    if terminal_only
         || kind.is_density_matrix() && circuit.has_terminal_measurements_under_reset_channel()
     {
-        let stripped = circuit.without_measurements();
-        return Ok(match decide_native(kind, &stripped, true, limits)? {
-            Some(plan) => ShotRoute::Native(plan),
-            None => ShotRoute::TerminalProbabilities,
+        let terminal = terminal.unwrap_or_else(|| TerminalCircuit {
+            circuit: circuit.without_measurements(),
+            meas_map: circuit.measurement_map(),
         });
+        return Ok(
+            match decide_native(kind, &terminal.circuit, true, limits)? {
+                Some(plan) => ShotRoute::Native(plan, terminal),
+                None => ShotRoute::TerminalProbabilities(terminal),
+            },
+        );
     }
     Ok(ShotRoute::PerShot)
 }

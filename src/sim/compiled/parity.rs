@@ -134,14 +134,17 @@ impl SparseParity {
             }
         }
 
-        let mut block_map: std::collections::HashMap<usize, Vec<usize>> =
-            std::collections::HashMap::new();
+        let mut block_of_root = vec![usize::MAX; self.num_rows];
+        let mut blocks: Vec<Vec<usize>> = Vec::new();
         for m in 0..self.num_rows {
             let root = find(&mut parent, m);
-            block_map.entry(root).or_default().push(m);
+            if block_of_root[root] == usize::MAX {
+                block_of_root[root] = blocks.len();
+                blocks.push(Vec::new());
+            }
+            blocks[block_of_root[root]].push(m);
         }
 
-        let blocks: Vec<Vec<usize>> = block_map.into_values().collect();
         if blocks.len() <= 1 {
             return None;
         }

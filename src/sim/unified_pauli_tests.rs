@@ -792,3 +792,73 @@ fn a_merged_sum_past_the_term_ceiling_falls_back_to_one_pass_per_term() {
     assert!((merged.mean - expected).abs() < 1e-12);
     assert_eq!(merged.peak_terms, SPD_MAX_TERMS_CEILING);
 }
+
+fn rotation_mesh_on(num_qubits: usize, qubits: &[usize; 6]) -> Circuit {
+    let mut c = Circuit::new(num_qubits, 0);
+    for (layer, angle) in [0.31f64, -0.47, 0.73].into_iter().enumerate() {
+        for (k, &q) in qubits.iter().enumerate() {
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::Ry(angle + 0.05 * k as f64), &[q]);
+            c.add_gate(Gate::T, &[q]);
+            c.add_gate(Gate::Rz(angle * 1.3), &[q]);
+            if (layer + k) % 2 == 0 {
+                c.add_gate(Gate::SX, &[q]);
+            }
+        }
+        for k in 0..5 {
+            c.add_gate(Gate::Cx, &[qubits[k], qubits[k + 1]]);
+            c.add_gate(
+                Gate::Rzz(0.21 * (k + 1) as f64),
+                &[qubits[k + 1], qubits[(k + 3) % 6]],
+            );
+        }
+        c.add_gate(Gate::Cz, &[qubits[5], qubits[0]]);
+        c.add_gate(Gate::S, &[qubits[layer]]);
+    }
+    c
+}
+
+#[test]
+fn spd_engines_agree_across_key_widths() {
+    let layouts: [(usize, [usize; 6]); 3] = [
+        (6, [0, 1, 2, 3, 4, 5]),
+        (128, [62, 63, 64, 65, 126, 127]),
+        (200, [63, 64, 127, 128, 129, 199]),
+    ];
+    let mut reference: Option<[f64; 5]> = None;
+    for (n, qubits) in layouts {
+        let circuit = rotation_mesh_on(n, &qubits);
+        let obs = [
+            PauliTerm::x(qubits[2]),
+            PauliTerm::z(qubits[4]),
+            PauliTerm::y(qubits[5]),
+        ];
+        let exact = run_spd_observable(&circuit, &obs, 0.0, 0).unwrap().mean;
+        let cone = run_spd_observable_light_cone(&circuit, &obs, 0.0, 0)
+            .unwrap()
+            .mean;
+        let noise = NoiseModel::with_amplitude_damping(&circuit, 0.03);
+        let path = run_pauli_path_observable(&circuit, &noise, &obs, 0.0, 0)
+            .unwrap()
+            .mean;
+        let marginals = run_spd(&circuit, 0.0, 0).unwrap().expectations;
+        let values = [
+            exact,
+            cone,
+            path,
+            marginals[qubits[1]],
+            marginals[qubits[3]],
+        ];
+        assert!((exact - cone).abs() < 1e-12, "{n} qubits");
+        match reference {
+            None => reference = Some(values),
+            Some(expected) => {
+                for (got, want) in values.iter().zip(expected) {
+                    assert!((got - want).abs() < 1e-12, "{n} qubits: {got} vs {want}");
+                }
+            }
+        }
+    }
+    let values = reference.unwrap();
+    assert!(values[..3].iter().all(|v| v.abs() > 1e-6));
+}

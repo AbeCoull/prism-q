@@ -16,12 +16,15 @@ use rand::{Rng, RngExt};
 use rand_chacha::ChaCha8Rng;
 
 use std::borrow::Cow;
+use std::hash::{Hash, Hasher};
 
 use crate::circuit::clifford_t::{is_pauli_native, lower_to_pauli_forms};
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
-use crate::sim::compiled::{PauliVec, flip_bit, get_bit, propagate_backward};
+use crate::sim::compiled::{
+    PauliVec, flip_bit, get_bit, propagate_backward, propagate_backward_words,
+};
 use crate::sim::noise::{NoiseChannel, NoiseModel, thermal_relaxation_rates};
 
 /// Absolute ceiling on the weighted-Pauli term count, enforced even in exact
@@ -277,7 +280,7 @@ fn backward_propagate_coalesced(
                     // SPD path (`conjugate_all_backward_phased`); the
                     // bare `propagate_backward` is Pauli-frame only
                     // and drops the `-1` from e.g. `HYH = -Y`.
-                    weight *= clifford_conjugation_phase(gate, targets, &pauli);
+                    weight *= clifford_conjugation_phase(gate, targets, &pauli.x, &pauli.z);
                     propagate_backward(&mut pauli, gate, targets);
                 }
             }
@@ -655,11 +658,11 @@ fn pv_get_bit(words: &[u64], qubit: usize) -> bool {
 }
 
 #[inline(always)]
-fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) -> Complex64 {
+fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], x: &[u64], z: &[u64]) -> Complex64 {
     match gate {
         Gate::H => {
             let q = targets[0];
-            if pv_get_bit(&pauli.x, q) && pv_get_bit(&pauli.z, q) {
+            if pv_get_bit(x, q) && pv_get_bit(z, q) {
                 Complex64::new(-1.0, 0.0)
             } else {
                 Complex64::new(1.0, 0.0)
@@ -667,7 +670,7 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
         }
         Gate::S => {
             let q = targets[0];
-            if pv_get_bit(&pauli.x, q) {
+            if pv_get_bit(x, q) {
                 Complex64::new(0.0, -1.0)
             } else {
                 Complex64::new(1.0, 0.0)
@@ -675,7 +678,7 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
         }
         Gate::Sdg => {
             let q = targets[0];
-            if pv_get_bit(&pauli.x, q) {
+            if pv_get_bit(x, q) {
                 Complex64::new(0.0, 1.0)
             } else {
                 Complex64::new(1.0, 0.0)
@@ -683,7 +686,7 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
         }
         Gate::X => {
             let q = targets[0];
-            if pv_get_bit(&pauli.z, q) {
+            if pv_get_bit(z, q) {
                 Complex64::new(-1.0, 0.0)
             } else {
                 Complex64::new(1.0, 0.0)
@@ -691,8 +694,8 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
         }
         Gate::Y => {
             let q = targets[0];
-            let xq = pv_get_bit(&pauli.x, q);
-            let zq = pv_get_bit(&pauli.z, q);
+            let xq = pv_get_bit(x, q);
+            let zq = pv_get_bit(z, q);
             if xq ^ zq {
                 Complex64::new(-1.0, 0.0)
             } else {
@@ -701,7 +704,7 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
         }
         Gate::Z => {
             let q = targets[0];
-            if pv_get_bit(&pauli.x, q) {
+            if pv_get_bit(x, q) {
                 Complex64::new(-1.0, 0.0)
             } else {
                 Complex64::new(1.0, 0.0)
@@ -709,7 +712,7 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
         }
         Gate::SX => {
             let q = targets[0];
-            if pv_get_bit(&pauli.z, q) {
+            if pv_get_bit(z, q) {
                 Complex64::new(0.0, 1.0)
             } else {
                 Complex64::new(1.0, 0.0)
@@ -717,7 +720,7 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
         }
         Gate::SXdg => {
             let q = targets[0];
-            if pv_get_bit(&pauli.z, q) {
+            if pv_get_bit(z, q) {
                 Complex64::new(0.0, -1.0)
             } else {
                 Complex64::new(1.0, 0.0)
@@ -726,7 +729,7 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
         Gate::Cz => {
             let q0 = targets[0];
             let q1 = targets[1];
-            if pv_get_bit(&pauli.x, q0) && pv_get_bit(&pauli.x, q1) {
+            if pv_get_bit(x, q0) && pv_get_bit(x, q1) {
                 Complex64::new(-1.0, 0.0)
             } else {
                 Complex64::new(1.0, 0.0)
@@ -736,41 +739,142 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
     }
 }
 
+/// Pauli string as `x` and `z` words in the [`PauliVec`] letter convention: the term key
+/// of a [`WeightedPauliSum`].
+trait SpdKey: Clone + Eq + Hash {
+    fn from_words(x: &[u64], z: &[u64]) -> Self;
+    fn x(&self) -> &[u64];
+    fn z(&self) -> &[u64];
+    fn words_mut(&mut self) -> (&mut [u64], &mut [u64]);
+}
+
+/// Pauli string on at most `64 * W` qubits, held inline so a term owns no heap block.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct InlinePauli<const W: usize> {
+    x: [u64; W],
+    z: [u64; W],
+}
+
+impl<const W: usize> Hash for InlinePauli<W> {
+    #[inline(always)]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for w in 0..W {
+            state.write_u64(self.x[w]);
+            state.write_u64(self.z[w]);
+        }
+    }
+}
+
+impl<const W: usize> SpdKey for InlinePauli<W> {
+    #[inline(always)]
+    fn from_words(x: &[u64], z: &[u64]) -> Self {
+        let mut key = Self {
+            x: [0; W],
+            z: [0; W],
+        };
+        key.x[..x.len()].copy_from_slice(x);
+        key.z[..z.len()].copy_from_slice(z);
+        key
+    }
+
+    #[inline(always)]
+    fn x(&self) -> &[u64] {
+        &self.x
+    }
+
+    #[inline(always)]
+    fn z(&self) -> &[u64] {
+        &self.z
+    }
+
+    #[inline(always)]
+    fn words_mut(&mut self) -> (&mut [u64], &mut [u64]) {
+        (&mut self.x, &mut self.z)
+    }
+}
+
+impl SpdKey for PauliVec {
+    fn from_words(x: &[u64], z: &[u64]) -> Self {
+        Self {
+            x: x.to_vec(),
+            z: z.to_vec(),
+        }
+    }
+
+    #[inline(always)]
+    fn x(&self) -> &[u64] {
+        &self.x
+    }
+
+    #[inline(always)]
+    fn z(&self) -> &[u64] {
+        &self.z
+    }
+
+    #[inline(always)]
+    fn words_mut(&mut self) -> (&mut [u64], &mut [u64]) {
+        (&mut self.x, &mut self.z)
+    }
+}
+
+/// Bind `$key` to the narrowest [`SpdKey`] for `$num_qubits` and evaluate `$body`, so the
+/// key width is chosen once per run. Past 128 qubits a term falls back to heap words.
+macro_rules! with_spd_key {
+    ($num_qubits:expr, $key:ident => $body:expr) => {
+        match usize::div_ceil($num_qubits, 64) {
+            0 | 1 => {
+                type $key = InlinePauli<1>;
+                $body
+            }
+            2 => {
+                type $key = InlinePauli<2>;
+                $body
+            }
+            _ => {
+                type $key = PauliVec;
+                $body
+            }
+        }
+    };
+}
+
 /// Weighted Pauli sum held as a list of distinct Pauli strings.
 ///
 /// Clifford conjugation is a bijection on Pauli strings, so a Clifford step
 /// rewrites each term in place and never merges two. A rotation flips z bits
 /// only, so the flip of an anticommuting term can land only on another
 /// anticommuting term; those are the only terms a rotation hashes.
-struct WeightedPauliSum {
-    terms: Vec<(PauliVec, Complex64)>,
+struct WeightedPauliSum<K> {
+    terms: Vec<(K, Complex64)>,
     in_support: Vec<usize>,
     partner: Vec<usize>,
-    probe: PauliVec,
+    probe: K,
+    /// Pauli string to term position, cleared per rotation but kept across them so the
+    /// table is allocated once per run.
+    index: FxHashMap<K, usize>,
 }
 
-impl WeightedPauliSum {
+impl<K: SpdKey> WeightedPauliSum<K> {
     fn new() -> Self {
         Self {
             terms: Vec::new(),
             in_support: Vec::new(),
             partner: Vec::new(),
-            probe: PauliVec {
-                x: Vec::new(),
-                z: Vec::new(),
-            },
+            probe: K::from_words(&[], &[]),
+            index: FxHashMap::default(),
         }
     }
 
     /// Append a term whose Pauli string is not already in the sum.
-    fn insert(&mut self, pauli: PauliVec, coeff: Complex64) {
+    fn insert(&mut self, pauli: K, coeff: Complex64) {
         self.terms.push((pauli, coeff));
     }
 
     fn conjugate_all_backward_phased(&mut self, gate: &Gate, targets: &[usize]) {
         for (pauli, coeff) in self.terms.iter_mut() {
-            let phase = clifford_conjugation_phase(gate, targets, pauli);
-            propagate_backward(pauli, gate, targets);
+            let phase = clifford_conjugation_phase(gate, targets, pauli.x(), pauli.z());
+            let (x, z) = pauli.words_mut();
+            propagate_backward_words(x, z, gate, targets);
             *coeff *= phase;
         }
     }
@@ -784,8 +888,8 @@ impl WeightedPauliSum {
         &mut self,
         sin: f64,
         cos: f64,
-        anticommutes: impl Fn(&PauliVec) -> bool,
-        flip: impl Fn(&mut PauliVec),
+        anticommutes: impl Fn(&K) -> bool,
+        flip: impl Fn(&mut K),
     ) {
         self.in_support.clear();
         self.in_support.extend(
@@ -804,16 +908,16 @@ impl WeightedPauliSum {
 
         self.partner.clear();
         if self.in_support.len() > 1 {
-            let mut index: FxHashMap<&PauliVec, usize> =
-                FxHashMap::with_capacity_and_hasher(self.in_support.len(), FxBuildHasher);
+            self.index.clear();
+            self.index.reserve(self.in_support.len());
             for &i in &self.in_support {
-                index.insert(&self.terms[i].0, i);
+                self.index.insert(self.terms[i].0.clone(), i);
             }
             for &i in &self.in_support {
                 self.probe.clone_from(&self.terms[i].0);
                 flip(&mut self.probe);
                 self.partner
-                    .push(index.get(&self.probe).copied().unwrap_or(usize::MAX));
+                    .push(self.index.get(&self.probe).copied().unwrap_or(usize::MAX));
             }
         } else {
             self.partner.resize(self.in_support.len(), usize::MAX);
@@ -845,7 +949,7 @@ impl WeightedPauliSum {
 
     /// Merge terms that share a Pauli string.
     fn coalesce(&mut self) {
-        let mut merged: FxHashMap<PauliVec, Complex64> =
+        let mut merged: FxHashMap<K, Complex64> =
             FxHashMap::with_capacity_and_hasher(self.terms.len(), FxBuildHasher);
         for (pauli, coeff) in self.terms.drain(..) {
             *merged.entry(pauli).or_insert(Complex64::new(0.0, 0.0)) += coeff;
@@ -871,19 +975,17 @@ impl WeightedPauliSum {
         }
         self.partner.clear();
         self.partner.resize(self.in_support.len(), usize::MAX);
-        {
-            let mut index: FxHashMap<&PauliVec, usize> =
-                FxHashMap::with_capacity_and_hasher(self.in_support.len(), FxBuildHasher);
-            for (k, &i) in self.in_support.iter().enumerate() {
-                index.insert(&self.terms[i].0, k);
-            }
-            for (i, (pauli, _)) in self.terms.iter().enumerate() {
-                if pauli_letter(pauli, qubit).is_none() {
-                    self.probe.clone_from(pauli);
-                    flip_bit(&mut self.probe.z, qubit);
-                    if let Some(&k) = index.get(&self.probe) {
-                        self.partner[k] = i;
-                    }
+        self.index.clear();
+        self.index.reserve(self.in_support.len());
+        for (k, &i) in self.in_support.iter().enumerate() {
+            self.index.insert(self.terms[i].0.clone(), k);
+        }
+        for (i, (pauli, _)) in self.terms.iter().enumerate() {
+            if pauli_letter(pauli, qubit).is_none() {
+                self.probe.clone_from(pauli);
+                flip_bit(self.probe.words_mut().1, qubit);
+                if let Some(&k) = self.index.get(&self.probe) {
+                    self.partner[k] = i;
                 }
             }
         }
@@ -893,7 +995,7 @@ impl WeightedPauliSum {
             match self.partner[k] {
                 usize::MAX => {
                     let mut identity = self.terms[i].0.clone();
-                    flip_bit(&mut identity.z, qubit);
+                    flip_bit(identity.words_mut().1, qubit);
                     self.terms.push((identity, branch));
                 }
                 j => self.terms[j].1 += branch,
@@ -911,8 +1013,8 @@ impl WeightedPauliSum {
         self.branch(
             sin,
             cos,
-            |pauli| pauli.has_x_or_y(qubit),
-            |pauli| flip_bit(&mut pauli.z, qubit),
+            |pauli| get_bit(pauli.x(), qubit),
+            |pauli| flip_bit(pauli.words_mut().1, qubit),
         );
     }
 
@@ -925,10 +1027,11 @@ impl WeightedPauliSum {
         self.branch(
             sin,
             cos,
-            |pauli| pauli.has_x_or_y(a) != pauli.has_x_or_y(b),
+            |pauli| get_bit(pauli.x(), a) != get_bit(pauli.x(), b),
             |pauli| {
-                flip_bit(&mut pauli.z, a);
-                flip_bit(&mut pauli.z, b);
+                let z = pauli.words_mut().1;
+                flip_bit(z, a);
+                flip_bit(z, b);
             },
         );
     }
@@ -992,7 +1095,7 @@ impl WeightedPauliSum {
     fn diagonal_expectation(&self) -> f64 {
         let mut sum = Complex64::new(0.0, 0.0);
         for (pauli, coeff) in &self.terms {
-            if pauli.is_diagonal() {
+            if pauli.x().iter().all(|&w| w == 0) {
                 sum += coeff;
             }
         }
@@ -1061,7 +1164,7 @@ impl SpdTruncation {
     /// Mid-run enforcement after one instruction. Discarded mass accumulates
     /// into `total_discarded` only when a drop fires, so the exact path keeps
     /// no unconditional float add in the per-instruction loop.
-    fn enforce(&self, sum: &mut WeightedPauliSum, total_discarded: &mut f64) {
+    fn enforce<K: SpdKey>(&self, sum: &mut WeightedPauliSum<K>, total_discarded: &mut f64) {
         match *self {
             SpdTruncation::Threshold { epsilon, max_terms } => {
                 if max_terms > 0 && sum.terms.len() > max_terms {
@@ -1077,7 +1180,7 @@ impl SpdTruncation {
     }
 
     /// Terminal sweep after the backward pass.
-    fn final_sweep(&self, sum: &mut WeightedPauliSum, total_discarded: &mut f64) {
+    fn final_sweep<K: SpdKey>(&self, sum: &mut WeightedPauliSum<K>, total_discarded: &mut f64) {
         if let SpdTruncation::Threshold { epsilon, .. } = *self
             && epsilon > 0.0
         {
@@ -1149,11 +1252,14 @@ pub(crate) fn run_spd_observable_with(
 
 /// Seed a sum with `Σ weight · observable`, merging terms that share a Pauli
 /// string.
-fn weighted_sum(num_qubits: usize, terms: &[(f64, &[PauliTerm])]) -> Result<WeightedPauliSum> {
+fn weighted_sum<K: SpdKey>(
+    num_qubits: usize,
+    terms: &[(f64, &[PauliTerm])],
+) -> Result<WeightedPauliSum<K>> {
     let mut sum = WeightedPauliSum::new();
     for &(weight, observable) in terms {
         let (pauli, phase) = pauli_vec_from_terms(num_qubits, observable)?;
-        sum.insert(pauli, phase * weight);
+        sum.insert(K::from_words(&pauli.x, &pauli.z), phase * weight);
     }
     if sum.terms.len() > 1 {
         sum.coalesce();
@@ -1180,7 +1286,7 @@ pub(crate) fn run_spd_weighted_observable_with(
     let t_count = count_branching_gates(circuit);
 
     let merged = |terms: &[(f64, &[PauliTerm])]| -> Result<Option<SpdObservableResult>> {
-        Ok(propagate_spd(circuit, weighted_sum(n, terms)?, truncation))
+        with_spd_key!(n, K => Ok(propagate_spd(circuit, weighted_sum::<K>(n, terms)?, truncation)))
     };
     if let Some(result) = merged(terms)? {
         return Ok(SpdObservableResult { t_count, ..result });
@@ -1205,9 +1311,9 @@ pub(crate) fn run_spd_weighted_observable_with(
 
 /// Backward-propagate `sum` through a lowered circuit, or `None` once it
 /// outgrows the term ceiling. The caller fills `t_count`.
-fn propagate_spd(
+fn propagate_spd<K: SpdKey>(
     circuit: &Circuit,
-    mut sum: WeightedPauliSum,
+    mut sum: WeightedPauliSum<K>,
     truncation: &SpdTruncation,
 ) -> Option<SpdObservableResult> {
     let mut peak_terms = sum.terms.len();
@@ -1280,10 +1386,20 @@ fn run_spd_bounded(
 ) -> Result<Option<SpdResult>> {
     let lowered = validate_and_lower(circuit, "SPD")?;
     let circuit = lowered.as_ref();
+    with_spd_key!(circuit.num_qubits, K => run_spd_lowered::<K>(circuit, truncation, work_budget))
+}
+
+fn run_spd_lowered<K: SpdKey>(
+    circuit: &Circuit,
+    truncation: &SpdTruncation,
+    work_budget: Option<usize>,
+) -> Result<Option<SpdResult>> {
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_branching_gates(circuit);
 
+    let zeros = vec![0u64; num_words];
+    let identity = K::from_words(&zeros, &zeros);
     let mut expectations = Vec::with_capacity(n);
     let mut peak_terms = 0usize;
     let mut total_discarded = 0.0;
@@ -1312,7 +1428,9 @@ fn run_spd_bounded(
 
     for q in 0..n {
         let mut sum = WeightedPauliSum::new();
-        sum.insert(PauliVec::z_on_qubit(num_words, q), Complex64::new(1.0, 0.0));
+        let mut z_q = identity.clone();
+        flip_bit(z_q.words_mut().1, q);
+        sum.insert(z_q, Complex64::new(1.0, 0.0));
 
         for (idx, inst) in circuit.instructions.iter().enumerate().rev() {
             if let Instruction::Gate { gate, targets } = inst {
@@ -1402,9 +1520,28 @@ pub fn run_spd_observable_light_cone(
     let t_count = count_branching_gates(circuit);
     let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
     let keep = inverse_light_cone(circuit, observable);
+    with_spd_key!(n, K => propagate_light_cone(
+        circuit,
+        &keep,
+        K::from_words(&obs.x, &obs.z),
+        obs_coeff,
+        epsilon,
+        max_terms,
+        t_count,
+    ))
+}
 
+fn propagate_light_cone<K: SpdKey>(
+    circuit: &Circuit,
+    keep: &[bool],
+    observable: K,
+    coeff: Complex64,
+    epsilon: f64,
+    max_terms: usize,
+    t_count: usize,
+) -> Result<SpdObservableResult> {
     let mut sum = WeightedPauliSum::new();
-    sum.insert(obs, obs_coeff);
+    sum.insert(observable, coeff);
     let mut peak_terms = sum.terms.len();
     let mut total_discarded = 0.0;
 
@@ -1524,8 +1661,8 @@ fn channel_action(channel: &NoiseChannel) -> Option<ChannelAction> {
 /// Index into [`ChannelAction::Local`]'s eigenvalue triple for the letter on
 /// `qubit`, or `None` for the identity letter.
 #[inline]
-fn pauli_letter(pauli: &PauliVec, qubit: usize) -> Option<usize> {
-    match (get_bit(&pauli.x, qubit), get_bit(&pauli.z, qubit)) {
+fn pauli_letter<K: SpdKey>(pauli: &K, qubit: usize) -> Option<usize> {
+    match (get_bit(pauli.x(), qubit), get_bit(pauli.z(), qubit)) {
         (false, false) => None,
         (true, false) => Some(0),
         (true, true) => Some(1),
@@ -1533,7 +1670,7 @@ fn pauli_letter(pauli: &PauliVec, qubit: usize) -> Option<usize> {
     }
 }
 
-impl WeightedPauliSum {
+impl<K: SpdKey> WeightedPauliSum<K> {
     /// Backward-apply one noise channel.
     ///
     /// The unital part scales coefficients in place. The amplitude-damping
@@ -1690,11 +1827,11 @@ pub(crate) fn run_pauli_path_weighted_observable(
     let n = circuit.num_qubits;
 
     let merged = |terms: &[(f64, &[PauliTerm])]| -> Result<Option<PauliPathResult>> {
-        Ok(propagate_pauli_path(
+        with_spd_key!(n, K => Ok(propagate_pauli_path(
             &ops,
-            weighted_sum(n, terms)?,
+            weighted_sum::<K>(n, terms)?,
             &truncation,
-        ))
+        )))
     };
     if let Some(result) = merged(terms)? {
         return Ok(result);
@@ -1717,9 +1854,9 @@ pub(crate) fn run_pauli_path_weighted_observable(
     Ok(folded)
 }
 
-fn propagate_pauli_path(
+fn propagate_pauli_path<K: SpdKey>(
     ops: &[PathOp],
-    mut sum: WeightedPauliSum,
+    mut sum: WeightedPauliSum<K>,
     truncation: &SpdTruncation,
 ) -> Option<PauliPathResult> {
     let mut peak_terms = sum.terms.len();

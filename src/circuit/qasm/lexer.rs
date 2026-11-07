@@ -11,6 +11,8 @@ pub(crate) enum Kind {
     /// A number with its time unit attached, `10ns` or `4dt`. The token text
     /// keeps the unit.
     Duration,
+    /// An imaginary literal, `1.5im` or `2 im`. The token text keeps the suffix.
+    Imaginary,
     /// A double-quoted literal. The token text is the content without quotes.
     Str,
     /// `$0`, a hardware qubit. The token text is the digits.
@@ -21,6 +23,8 @@ pub(crate) enum Kind {
     /// The braced body of a `cal` or `defcal`, written in a calibration grammar
     /// this crate does not read. The token text is the content inside the braces.
     Calibration,
+    /// `#dim`, which sizes an array parameter by its rank.
+    Dim,
     LParen,
     RParen,
     LBracket,
@@ -76,10 +80,12 @@ impl Kind {
             Kind::Ident => "a name",
             Kind::Int | Kind::Float => "a number",
             Kind::Duration => "a duration",
+            Kind::Imaginary => "an imaginary number",
             Kind::Str => "a string",
             Kind::Physical => "a physical qubit",
             Kind::Pragma => "a pragma",
             Kind::Calibration => "a calibration block",
+            Kind::Dim => "`#dim`",
             Kind::LParen => "`(`",
             Kind::RParen => "`)`",
             Kind::LBracket => "`[`",
@@ -143,7 +149,9 @@ impl<'a> Token<'a> {
     /// that is informative, its kind where it is not.
     pub(crate) fn describe(&self) -> String {
         match self.kind {
-            Kind::Ident | Kind::Int | Kind::Float | Kind::Duration => format!("`{}`", self.text),
+            Kind::Ident | Kind::Int | Kind::Float | Kind::Duration | Kind::Imaginary => {
+                format!("`{}`", self.text)
+            }
             Kind::Physical => format!("`${}`", self.text),
             other => other.describe().to_string(),
         }
@@ -286,6 +294,16 @@ impl<'a> Lexer<'a> {
         let start = self.at;
         let byte = self.bytes[start];
 
+        if byte == b'#'
+            && self.bytes[start + 1..].starts_with(b"dim")
+            && !self
+                .bytes
+                .get(start + 4)
+                .is_some_and(|byte| is_ident_byte(*byte))
+        {
+            self.at += 4;
+            return Ok(self.token(Kind::Dim, start, self.at));
+        }
         if byte == b'#' {
             while self.at < self.bytes.len() && self.bytes[self.at] != b'\n' {
                 self.at += 1;
@@ -549,8 +567,26 @@ impl<'a> Lexer<'a> {
             self.at += width;
             return Ok(self.token(Kind::Duration, start, self.at));
         }
+        if let Some(width) = self.imaginary_width() {
+            self.at += width;
+            return Ok(self.token(Kind::Imaginary, start, self.at));
+        }
         let kind = if float { Kind::Float } else { Kind::Int };
         Ok(self.token(kind, start, self.at))
+    }
+
+    /// Byte width of an `im` suffix after the number just read, spaces or tabs
+    /// before it included, or `None`. A suffix followed by more name characters
+    /// is a name.
+    fn imaginary_width(&self) -> Option<usize> {
+        let rest = &self.bytes[self.at..];
+        let gap = rest
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let suffix = &rest[gap..];
+        (suffix.starts_with(b"im") && !suffix.get(2).is_some_and(|byte| is_ident_byte(*byte)))
+            .then_some(gap + 2)
     }
 
     /// Byte width of a time unit glued to the number just read, or `None`.

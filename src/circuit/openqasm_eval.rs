@@ -10,8 +10,8 @@ use std::collections::{HashMap, HashSet};
 use super::*;
 use crate::circuit::dynamic::ClassicalExpr;
 use crate::circuit::qasm::ast::{
-    self, Argument, AssignOp, Block, CmpOp, Condition, DefParam, ForRange, Index, Operand,
-    OperandName, Stmt, StmtKind,
+    self, Argument, ArrayShape, AssignOp, Block, CmpOp, Condition, DefParam, ForRange, Index,
+    Operand, OperandName, Stmt, StmtKind,
 };
 use crate::circuit::qasm::expr::{self as syntax_expr, Duration, Expr, Timed};
 use crate::circuit::qasm::stream::{MAX_NESTING, with_stack};
@@ -160,7 +160,8 @@ fn timed_of(
     syntax_expr::eval_timed(&resolved, line, vars, durations)
 }
 
-/// `expr` with each array element it reads replaced by that element's value.
+/// `expr` with each array element it reads replaced by that element's value,
+/// and each `sizeof` by the size it asks for.
 fn resolve_elements<'e>(
     expr: &Expr<'e>,
     line: usize,
@@ -168,28 +169,99 @@ fn resolve_elements<'e>(
     durations: &HashMap<&str, Timed>,
     arrays: &HashMap<&str, Rc<ClassicalArray>>,
 ) -> Result<Expr<'e>> {
-    replace_elements(expr, &|element| {
-        let array = arrays.get(element.array).ok_or_else(|| {
-            parse_error(line, format!("`{}` is not a declared array", element.array))
-        })?;
-        let at = element_offset(array, element.array, &element.indices, line, |index| {
-            with_stack(|| number_of(index, line, vars, durations, arrays))
-        })?;
-        Ok(Some(array.values[at]))
+    let fold = |index: &Expr| with_stack(|| number_of(index, line, vars, durations, arrays));
+    replace_nodes(expr, &|node| match node {
+        Expr::Element(element) => {
+            let array = arrays.get(element.array).ok_or_else(|| {
+                parse_error(line, format!("`{}` is not a declared array", element.array))
+            })?;
+            let at = element_offset(array, element.array, &element.indices, line, fold)?;
+            Ok(Some(Expr::Number(array.values[at])))
+        }
+        Expr::Call(call) if call.name == "sizeof" => sizeof(call, line, arrays, &fold).map(Some),
+        _ => Ok(None),
     })
 }
 
-/// `expr` with each element `value` gives a value for replaced by it.
-fn replace_elements<'e>(
-    expr: &Expr<'e>,
-    value: &impl Fn(&syntax_expr::Element<'e>) -> Result<Option<ClassicalValue>>,
+/// `sizeof(a)` or `sizeof(a, d)`: the length of dimension `d`, `0` by default,
+/// of an array or of the slice a subscript of it leaves.
+fn sizeof<'e>(
+    call: &syntax_expr::Call<'e>,
+    line: usize,
+    arrays: &HashMap<&str, Rc<ClassicalArray>>,
+    fold: &impl Fn(&Expr) -> Result<ClassicalValue>,
 ) -> Result<Expr<'e>> {
-    let resolve = |inner: &Expr<'e>| with_stack(|| replace_elements(inner, value));
+    let (target, dimension) = match call.args.as_slice() {
+        [target] => (target, 0),
+        [target, dimension] => (target, whole(fold(dimension)?, line)?),
+        _ => {
+            return Err(parse_error(
+                line,
+                "`sizeof` takes an array and an optional dimension",
+            ));
+        }
+    };
+    let (name, indices) = match target {
+        Expr::Ident(name) => (*name, &[][..]),
+        Expr::Element(element) => (element.array, element.indices.as_slice()),
+        _ => ("", &[][..]),
+    };
+    let array = arrays.get(name).ok_or_else(|| {
+        parse_error(
+            line,
+            format!("`sizeof` takes a declared array, got `{target}`"),
+        )
+    })?;
+    let view = array_view(array, name, indices, line, fold)?;
+    let size = usize::try_from(dimension)
+        .ok()
+        .and_then(|dimension| view.dims.get(dimension))
+        .ok_or_else(|| {
+            parse_error(
+                line,
+                format!(
+                    "`{target}` has {} dimension(s), so `sizeof` has no dimension {dimension}",
+                    view.dims.len()
+                ),
+            )
+        })?;
+    Ok(Expr::Number(ClassicalValue::Int(*size as i128)))
+}
+
+/// A folded value read as a whole number.
+fn whole(value: ClassicalValue, line: usize) -> Result<i64> {
+    match value {
+        ClassicalValue::Float(float) if float.fract() != 0.0 => Err(parse_error(
+            line,
+            format!("expected an integer, got {float}"),
+        )),
+        value => i64::try_from(value.to_int())
+            .map_err(|_| parse_error(line, "integer expression out of range")),
+    }
+}
+
+/// `expr` with each node `value` gives a replacement for replaced by it, and the
+/// children of every other node visited in turn.
+fn replace_nodes<'e>(
+    expr: &Expr<'e>,
+    value: &impl Fn(&Expr<'e>) -> Result<Option<Expr<'e>>>,
+) -> Result<Expr<'e>> {
+    if let Some(replaced) = value(expr)? {
+        return Ok(replaced);
+    }
+    let resolve = |inner: &Expr<'e>| with_stack(|| replace_nodes(inner, value));
+    let bound = |inner: &Option<Expr<'e>>| inner.as_ref().map(resolve).transpose();
     Ok(match expr {
-        Expr::Element(element) => match value(element)? {
-            Some(value) => Expr::Number(value),
-            None => expr.clone(),
-        },
+        Expr::Element(element) => Expr::Element(Box::new(syntax_expr::Element {
+            array: element.array,
+            indices: element.indices.iter().map(resolve).collect::<Result<_>>()?,
+        })),
+        Expr::Range(range) => Expr::Range(Box::new(ast::Range {
+            start: bound(&range.start)?,
+            step: bound(&range.step)?,
+            stop: bound(&range.stop)?,
+        })),
+        Expr::Concat(parts) => Expr::Concat(parts.iter().map(resolve).collect::<Result<_>>()?),
         Expr::Negate(inner) => Expr::Negate(Box::new(resolve(inner)?)),
         Expr::Not(inner) => Expr::Not(Box::new(resolve(inner)?)),
         Expr::BitNot(inner) => Expr::BitNot(Box::new(resolve(inner)?)),
@@ -231,21 +303,119 @@ fn element_offset(
     }
     let mut at = 0usize;
     for (index, &size) in indices.iter().zip(&array.dims) {
-        let written = fold(index)?.to_float();
-        let value = if written < 0.0 {
-            written + size as f64
-        } else {
-            written
-        };
-        if value.fract() != 0.0 || value < 0.0 || value >= size as f64 {
-            return Err(parse_error(
-                line,
-                format!("index {written} is outside `{name}`, whose dimension has size {size}"),
-            ));
-        }
-        at = at * size + value as usize;
+        at = at * size + position(fold(index)?.to_float(), size, name, line)?;
     }
     Ok(at)
+}
+
+/// The position index `written` names along a dimension of `size`, where a
+/// negative index counts from the end.
+fn position(written: f64, size: usize, name: &str, line: usize) -> Result<usize> {
+    let value = if written < 0.0 {
+        written + size as f64
+    } else {
+        written
+    };
+    if value.fract() != 0.0 || value < 0.0 || value >= size as f64 {
+        return Err(parse_error(
+            line,
+            format!("index {written} is outside `{name}`, whose dimension has size {size}"),
+        ));
+    }
+    Ok(value as usize)
+}
+
+/// Positions an inclusive `start:step:stop` range names along a dimension of
+/// `size`, an open bound reaching the end it faces.
+fn range_positions(
+    range: &ast::Range,
+    size: usize,
+    name: &str,
+    line: usize,
+    fold: impl Fn(&Expr) -> Result<ClassicalValue>,
+) -> Result<Vec<usize>> {
+    let bound = |expr: &Option<Expr>, fallback: i64| -> Result<i64> {
+        match expr {
+            None => Ok(fallback),
+            Some(expr) => whole(fold(expr)?, line),
+        }
+    };
+    let from_end = |value: i64| {
+        if value < 0 {
+            value.saturating_add(size as i64)
+        } else {
+            value
+        }
+    };
+    let first = from_end(bound(&range.start, 0)?);
+    let last = from_end(bound(&range.stop, size as i64 - 1)?);
+    let step = bound(&range.step, 1)?;
+    if step == 0 {
+        return Err(parse_error(
+            line,
+            format!("range step in `{name}[{range}]` must be non-zero"),
+        ));
+    }
+    let mut out = Vec::new();
+    let mut at = first;
+    while (step > 0 && at <= last) || (step < 0 && at >= last) {
+        out.push(position(at as f64, size, name, line)?);
+        let Some(next) = at.checked_add(step) else {
+            break;
+        };
+        at = next;
+    }
+    Ok(out)
+}
+
+/// The elements a subscript of an array names: the shape it leaves, each fixed
+/// index dropping its dimension and each range keeping one, and the row-major
+/// positions it covers, in order.
+struct ArrayView {
+    dims: Vec<usize>,
+    offsets: Vec<usize>,
+}
+
+fn array_view(
+    array: &ClassicalArray,
+    name: &str,
+    indices: &[Expr],
+    line: usize,
+    fold: impl Fn(&Expr) -> Result<ClassicalValue>,
+) -> Result<ArrayView> {
+    if indices.len() > array.dims.len() {
+        return Err(parse_error(
+            line,
+            format!(
+                "`{name}` has {} dimension(s) but is indexed with {}",
+                array.dims.len(),
+                indices.len()
+            ),
+        ));
+    }
+    let mut dims = Vec::new();
+    let mut offsets = vec![0usize];
+    for (axis, &size) in array.dims.iter().enumerate() {
+        let picks = match indices.get(axis) {
+            None => (0..size).collect(),
+            Some(Expr::Range(range)) => range_positions(range, size, name, line, &fold)?,
+            Some(index) => vec![position(fold(index)?.to_float(), size, name, line)?],
+        };
+        if !matches!(indices.get(axis), Some(index) if !matches!(index, Expr::Range(_))) {
+            dims.push(picks.len());
+        }
+        offsets = offsets
+            .iter()
+            .flat_map(|&base| picks.iter().map(move |&pick| base * size + pick))
+            .collect();
+    }
+    Ok(ArrayView { dims, offsets })
+}
+
+/// An array value copied out of the arrays a program declares.
+struct ArrayValue {
+    dims: Vec<usize>,
+    values: Vec<ClassicalValue>,
 }
 
 /// The guard a lowered condition spells, when it has one: a bit or its negation,
@@ -346,6 +516,35 @@ pub(super) fn register_value(expr: &ClassicalExpr) -> Option<(usize, usize)> {
         }
         _ => None,
     }
+}
+
+/// An array argument written with a call's operand grammar, `a` or `a[1:3]`,
+/// as the expression that names it.
+fn operand_reference<'e>(operand: &Operand<'e>) -> Result<Expr<'e>> {
+    let Some(name) = operand.register() else {
+        return Err(parse_error(
+            operand.line,
+            format!("`{}` is a qubit where an array belongs", operand.describe()),
+        ));
+    };
+    let index = match &operand.index {
+        None => return Ok(Expr::Ident(name)),
+        Some(Index::Single(index)) => index.clone(),
+        Some(Index::Range(range)) => Expr::Range(range.clone()),
+        Some(Index::Set(_)) => {
+            return Err(parse_error(
+                operand.line,
+                format!(
+                    "`{}` indexes an array with a set, which the language does not allow",
+                    operand.describe()
+                ),
+            ));
+        }
+    };
+    Ok(Expr::Element(Box::new(syntax_expr::Element {
+        array: name,
+        indices: vec![index],
+    })))
 }
 
 fn is_bit_param(args: &[DefParam], name: &str) -> bool {
@@ -779,9 +978,13 @@ impl<'a> Parser<'a> {
                         format!("`{}` holds bits and takes one index", assign.array),
                     ));
                 };
+                let index = match index {
+                    Expr::Range(range) => Index::Range(range.clone()),
+                    index => Index::Single(index.clone()),
+                };
                 let target = Operand {
                     name: OperandName::Register(assign.array),
-                    index: Some(Index::Single(index.clone())),
+                    index: Some(index),
                     line,
                 };
                 self.assign_bits(&target, assign.op, &value, line)
@@ -897,6 +1100,10 @@ impl<'a> Parser<'a> {
             "int" | "uint" => ClassicalType::Int(self.runtime_type(ty, width, line)?),
             "bool" => ClassicalType::Bool,
             "float" | "angle" => self.real_type(ty, width, line)?,
+            "complex" => match self.real_type("float", width, line)? {
+                ClassicalType::Float(bits) => ClassicalType::Complex(bits),
+                other => other,
+            },
             "duration" => ClassicalType::Duration,
             "stretch" => ClassicalType::Stretch,
             other => {
@@ -929,6 +1136,8 @@ impl<'a> Parser<'a> {
             if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
                 let zero = Timed::Duration(Duration::default());
                 self.bind_duration(name, kind, zero, constant);
+            } else if let ClassicalType::Complex(_) = kind {
+                self.bind_complex(name, kind, Complex64::new(0.0, 0.0), constant);
             } else {
                 self.bind_classical(name, kind, ClassicalValue::Int(0), constant);
             }
@@ -937,6 +1146,11 @@ impl<'a> Parser<'a> {
         if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
             let folded = self.duration_of(value, line)?;
             self.bind_duration(name, kind, folded, constant);
+            return Ok(());
+        }
+        if let ClassicalType::Complex(_) = kind {
+            let folded = self.complex_of(value, line)?;
+            self.bind_complex(name, kind, folded, constant);
             return Ok(());
         }
         let folded = self.fold_typed(kind, value, line)?;
@@ -964,6 +1178,70 @@ impl<'a> Parser<'a> {
             self.declared.push(name);
         }
         self.durations.insert(name, value);
+    }
+
+    /// Bind a `complex[float[n]]`, rounding each component to the declared width.
+    fn bind_complex(&mut self, name: &'a str, ty: ClassicalType, value: Complex64, constant: bool) {
+        let value = match ty {
+            ClassicalType::Complex(width) => Complex64::new(
+                crate::circuit::dynamic::real(value.re, width),
+                crate::circuit::dynamic::real(value.im, width),
+            ),
+            _ => value,
+        };
+        let decl = ClassicalDecl {
+            ty,
+            constant,
+            value: constant.then_some(ConstValue::Complex(value)),
+        };
+        if Rc::make_mut(&mut self.classical)
+            .insert(name, decl)
+            .is_none()
+        {
+            self.declared.push(name);
+        }
+        self.complex.insert(name, value);
+    }
+
+    /// Fold an expression to the complex value it has. A real one is promoted.
+    fn complex_of(&self, expr: &Expr, line: usize) -> Result<Complex64> {
+        if self.reads_runtime(expr) {
+            return Err(super::dynamic::runtime_complex(line));
+        }
+        if let Some(name) = self.input_names.iter().find(|name| expr.mentions(name)) {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("input `{name}` in a `complex` value"),
+                line,
+            });
+        }
+        let vars = self.param_vars.as_ref();
+        let expr = self.with_complex(expr)?;
+        let expr = if !self.arrays.is_empty() && expr.reads_element() {
+            Cow::Owned(resolve_elements(
+                &expr,
+                line,
+                vars,
+                &self.durations,
+                &self.arrays,
+            )?)
+        } else {
+            expr
+        };
+        syntax_expr::eval_complex(&expr, line, vars)
+    }
+
+    /// `expr` with each `complex` name it reads replaced by its value.
+    fn with_complex<'x, 'e>(&self, expr: &'x Expr<'e>) -> Result<Cow<'x, Expr<'e>>> {
+        if self.complex.is_empty() || !self.complex.keys().any(|name| expr.mentions(name)) {
+            return Ok(Cow::Borrowed(expr));
+        }
+        replace_nodes(expr, &|node| {
+            Ok(match node {
+                Expr::Ident(name) => self.complex.get(name).map(|value| Expr::Complex(*value)),
+                _ => None,
+            })
+        })
+        .map(Cow::Owned)
     }
 
     /// Fold an expression that has to be a duration or a stretch.
@@ -1001,6 +1279,15 @@ impl<'a> Parser<'a> {
         if let Some(var) = self.runtime_var(target) {
             return self.assign_runtime(var, op, value, line);
         }
+        if self.arrays.contains_key(target) {
+            let assign = ast::ElementAssign {
+                array: target,
+                indices: Vec::new(),
+                op,
+                value: value.clone(),
+            };
+            return self.assign_element(&assign, line);
+        }
         let Some(decl) = self.classical.get(target) else {
             return Err(parse_error(
                 line,
@@ -1018,6 +1305,23 @@ impl<'a> Parser<'a> {
         if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
             return self.assign_duration(target, kind, op, value, line);
         }
+        if let ClassicalType::Complex(_) = kind {
+            let folded = self.complex_of(value, line)?;
+            let updated = match op {
+                None => folded,
+                Some(op) => {
+                    let current = self.complex.get(target).copied().unwrap_or_default();
+                    let combined = Expr::Binary {
+                        op: op.binary(),
+                        left: Box::new(Expr::Complex(current)),
+                        right: Box::new(Expr::Complex(folded)),
+                    };
+                    syntax_expr::eval_complex(&combined, line, None)?
+                }
+            };
+            self.bind_complex(target, kind, updated, false);
+            return Ok(());
+        }
         let folded = self.fold_typed(kind, value, line)?;
         let updated = match op {
             None => folded,
@@ -1030,23 +1334,79 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn declare_array(&mut self, decl: &ast::ArrayDecl<'a>, line: usize) -> Result<()> {
-        let kind = match decl.ty {
-            "int" => ClassicalType::Int(RuntimeType::Int { width: 64 }),
-            "uint" => ClassicalType::Int(RuntimeType::Uint { width: 64 }),
-            "bool" => ClassicalType::Bool,
-            "float" => ClassicalType::FLOAT,
-            "angle" => ClassicalType::Angle(None),
-            other => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
-                        "`array[{other}, ...]`; an array holds `int`, `uint`, `float`, \
-                         `angle` or `bool`, and bits belong in a `bit[n]` register"
-                    ),
-                    line,
-                });
+    /// The element type of an `array[ty[width], ...]`.
+    fn array_kind(&self, ty: &str, width: Option<&Expr>, line: usize) -> Result<ClassicalType> {
+        match ty {
+            "int" | "uint" | "bool" | "float" | "angle" => self.classical_type(ty, width, line),
+            other => Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "`array[{other}, ...]`; an array holds `int`, `uint`, `float`, \
+                     `angle` or `bool`, and bits belong in a `bit[n]` register"
+                ),
+                line,
+            }),
+        }
+    }
+
+    /// The array `expr` names, copied out: a whole array, a slice or a
+    /// partial subscript of one, or arrays joined with `++` along their first
+    /// dimension. `None` when `expr` is a single value.
+    fn array_value(&self, expr: &Expr, line: usize) -> Result<Option<ArrayValue>> {
+        with_stack(|| match expr {
+            Expr::Ident(name) => Ok(self.arrays.get(name).map(|array| ArrayValue {
+                dims: array.dims.clone(),
+                values: array.values.clone(),
+            })),
+            Expr::Element(element) => {
+                let Some(array) = self.arrays.get(element.array) else {
+                    return Ok(None);
+                };
+                let view = array_view(array, element.array, &element.indices, line, |index| {
+                    self.typed_of(index, line)
+                })?;
+                if view.dims.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(ArrayValue {
+                    dims: view.dims,
+                    values: view.offsets.iter().map(|&at| array.values[at]).collect(),
+                }))
             }
-        };
+            Expr::Concat(parts) => {
+                let mut joined: Option<ArrayValue> = None;
+                for part in parts {
+                    let Some(next) = self.array_value(part, line)? else {
+                        return Err(parse_error(
+                            line,
+                            format!("`{part}` is not an array, so `++` cannot join it"),
+                        ));
+                    };
+                    match joined.as_mut() {
+                        None => joined = Some(next),
+                        Some(acc) if acc.dims[1..] == next.dims[1..] => {
+                            acc.dims[0] += next.dims[0];
+                            acc.values.extend(next.values);
+                        }
+                        Some(acc) => {
+                            return Err(parse_error(
+                                line,
+                                format!(
+                                    "`++` joins arrays of shapes {:?} and {:?}, whose inner \
+                                     dimensions differ",
+                                    acc.dims, next.dims
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Ok(joined)
+            }
+            _ => Ok(None),
+        })
+    }
+
+    fn declare_array(&mut self, decl: &ast::ArrayDecl<'a>, line: usize) -> Result<()> {
+        let kind = self.array_kind(decl.ty, decl.width.as_ref(), line)?;
         self.reject_redeclaration(decl.name, line)?;
         let mut dims = Vec::with_capacity(decl.dims.len());
         let mut total = 1usize;
@@ -1109,6 +1469,26 @@ impl<'a> Parser<'a> {
                 values.push(self.fold_typed(kind, expr, line)?);
                 Ok(())
             }
+            (ast::ArrayInit::Value(expr), Some(_)) => {
+                let Some(source) = self.array_value(expr, line)? else {
+                    return Err(parse_error(
+                        line,
+                        format!("initializer for `{name}` does not match its dimensions"),
+                    ));
+                };
+                if source.dims != dims {
+                    return Err(parse_error(
+                        line,
+                        format!(
+                            "initializer `{expr}` for `{name}` has shape {:?} where a shape of \
+                             {dims:?} stands",
+                            source.dims
+                        ),
+                    ));
+                }
+                values.extend(source.values.into_iter().map(|value| kind.store(value)));
+                Ok(())
+            }
             (ast::ArrayInit::List(entries), Some((&size, inner))) if entries.len() == size => {
                 for entry in entries {
                     self.fold_initializer(kind, entry, inner, name, line, values)?;
@@ -1150,6 +1530,14 @@ impl<'a> Parser<'a> {
             ));
         }
         self.reject_guarded_write(assign.array, line)?;
+        if assign.indices.len() < array.dims.len()
+            || assign
+                .indices
+                .iter()
+                .any(|index| matches!(index, Expr::Range(_)))
+        {
+            return self.assign_slice(assign, line);
+        }
         let at = element_offset(array, assign.array, &assign.indices, line, |index| {
             self.typed_of(index, line)
         })?;
@@ -1162,6 +1550,56 @@ impl<'a> Parser<'a> {
         });
         if let Some(array) = self.arrays.get_mut(assign.array) {
             Rc::make_mut(array).values[at] = updated;
+        }
+        Ok(())
+    }
+
+    /// Copy an array value into the elements a slice or a partial subscript
+    /// names, which must have the shape the value has.
+    fn assign_slice(&mut self, assign: &ast::ElementAssign<'a>, line: usize) -> Result<()> {
+        let array = &self.arrays[assign.array];
+        let kind = array.ty;
+        let view = array_view(array, assign.array, &assign.indices, line, |index| {
+            self.typed_of(index, line)
+        })?;
+        let target = if assign.indices.is_empty() {
+            assign.array.to_string()
+        } else {
+            Expr::Element(Box::new(syntax_expr::Element {
+                array: assign.array,
+                indices: assign.indices.clone(),
+            }))
+            .to_string()
+        };
+        if assign.op.is_some() {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("a compound assignment to the array slice `{target}`"),
+                line,
+            });
+        }
+        let Some(source) = self.array_value(&assign.value, line)? else {
+            return Err(parse_error(
+                line,
+                format!(
+                    "`{}` is not an array, so it cannot fill `{target}`, whose shape is {:?}",
+                    assign.value, view.dims
+                ),
+            ));
+        };
+        if source.dims != view.dims {
+            return Err(parse_error(
+                line,
+                format!(
+                    "shape mismatch: `{target}` has shape {:?} and `{}` has shape {:?}",
+                    view.dims, assign.value, source.dims
+                ),
+            ));
+        }
+        if let Some(array) = self.arrays.get_mut(assign.array) {
+            let array = Rc::make_mut(array);
+            for (&at, value) in view.offsets.iter().zip(source.values) {
+                array.values[at] = kind.store(value);
+            }
         }
         Ok(())
     }
@@ -1287,6 +1725,16 @@ impl<'a> Parser<'a> {
         let mut args = args.to_vec();
         // Freeze signature widths before a caller can shadow their bindings.
         for param in &mut args {
+            if let DefParam::Array { width, shape, .. } = param {
+                let sizes = match shape {
+                    ArrayShape::Sized(dims) => dims.iter_mut().collect::<Vec<_>>(),
+                    ArrayShape::Rank(rank) => vec![rank],
+                };
+                for size in sizes.into_iter().chain(width.as_mut()) {
+                    let value = i128::from(self.integer_of(size, line)?);
+                    *size = Expr::Number(ClassicalValue::Int(value));
+                }
+            }
             if let DefParam::Qubit {
                 width: Some(width), ..
             }
@@ -1302,8 +1750,14 @@ impl<'a> Parser<'a> {
             }
         }
         for param in &args {
-            if let DefParam::Value { ty, width, .. } = param {
-                self.classical_type(ty, width.as_ref(), line)?;
+            match param {
+                DefParam::Value { ty, width, .. } => {
+                    self.classical_type(ty, width.as_ref(), line)?;
+                }
+                DefParam::Array { ty, width, .. } => {
+                    self.array_kind(ty, width.as_ref(), line)?;
+                }
+                _ => {}
             }
         }
         let mut result = result.cloned();
@@ -1449,6 +1903,16 @@ impl<'a> Parser<'a> {
             }
             (Some(ast::ReturnValue::Value(value)), Some(ty)) => {
                 let value = self.resolve_calls(value, line, out)?;
+                if let ClassicalType::Complex(width) = ty {
+                    let value = self.complex_of(&value, line)?;
+                    let frame = self.def_result.as_mut().expect("checked above");
+                    frame.value = Some(Expr::Complex(Complex64::new(
+                        crate::circuit::dynamic::real(value.re, width),
+                        crate::circuit::dynamic::real(value.im, width),
+                    )));
+                    frame.returned = true;
+                    return Ok(());
+                }
                 if ty != ClassicalType::Duration
                     && self
                         .lower_expr(&value, line)
@@ -1941,18 +2405,52 @@ impl<'a> Parser<'a> {
 
     pub(super) fn typed_of(&self, expr: &Expr, line: usize) -> Result<ClassicalValue> {
         self.reject_runtime(expr, line)?;
+        let expr = self.with_complex(expr)?;
         let vars = self.param_vars.as_ref();
         if !self.classical.is_empty() && expr.reads_element() {
-            let resolved = replace_elements(expr, &|element| {
-                let Some(at) = self.int_bit(element, line)? else {
+            let resolved = replace_nodes(&expr, &|node| {
+                let Expr::Element(element) = node else {
+                    return Ok(None);
+                };
+                let Some(bits) = self.int_bits(element, line)? else {
                     return Ok(None);
                 };
                 let value = vars.and_then(|vars| vars.get(element.array));
-                Ok(value.map(|value| ClassicalValue::Int((value.to_int() >> at) & 1)))
+                Ok(value.map(|value| {
+                    let word = value.to_int();
+                    let packed = bits
+                        .iter()
+                        .enumerate()
+                        .fold(0i128, |acc, (at, &bit)| acc | (((word >> bit) & 1) << at));
+                    Expr::Number(ClassicalValue::Int(packed))
+                }))
             })?;
             return number_of(&resolved, line, vars, &self.durations, &self.arrays);
         }
-        number_of(expr, line, vars, &self.durations, &self.arrays)
+        number_of(&expr, line, vars, &self.durations, &self.arrays)
+    }
+
+    /// The bits `x[i]` or `x[a:b]` reads of an `int[n]` or `uint[n]` `x`, the
+    /// lowest bit of the value it reads as first; `None` for any other element.
+    fn int_bits(
+        &self,
+        element: &syntax_expr::Element,
+        line: usize,
+    ) -> Result<Option<SmallVec<[u32; 4]>>> {
+        use crate::circuit::dynamic::ClassicalType as Ty;
+        if let [Expr::Range(range)] = element.indices.as_slice()
+            && !self.arrays.contains_key(element.array)
+            && let Some(ClassicalDecl {
+                ty: ClassicalType::Int(Ty::Int { width } | Ty::Uint { width }),
+                ..
+            }) = self.classical.get(element.array)
+        {
+            let picks = range_positions(range, *width as usize, element.array, line, |index| {
+                self.typed_of(index, line)
+            })?;
+            return Ok(Some(picks.into_iter().map(|at| at as u32).collect()));
+        }
+        Ok(self.int_bit(element, line)?.map(|at| smallvec![at]))
     }
 
     /// The bit `int[n] x` or `uint[n] x` reads as `x[i]`, `None` for any other
@@ -2293,12 +2791,14 @@ impl<'a> Parser<'a> {
                     })
                 )
         })?;
-        let Some(Index::Single(index)) = &operand.index else {
-            return None;
+        let index = match &operand.index {
+            Some(Index::Single(index)) => index.clone(),
+            Some(Index::Range(range)) => Expr::Range(range.clone()),
+            _ => return None,
         };
         Some(Expr::Element(Box::new(syntax_expr::Element {
             array,
-            indices: vec![index.clone()],
+            indices: vec![index],
         })))
     }
 
@@ -2509,10 +3009,15 @@ impl<'a> Parser<'a> {
         let runtime = self.def_is_runtime(name, &def.args, args);
         let mut scalar_args = Vec::new();
         let mut durations = HashMap::new();
+        let mut complex = HashMap::new();
+        let mut array_args = Vec::new();
         for (&name, decl) in def.constants.iter() {
             match decl.value {
                 Some(ConstValue::Number(value)) => {
                     bindings.insert(name, value);
+                }
+                Some(ConstValue::Complex(value)) => {
+                    complex.insert(name, value);
                 }
                 Some(ConstValue::Duration(value)) => {
                     durations.insert(name, value);
@@ -2599,6 +3104,13 @@ impl<'a> Parser<'a> {
                         });
                     }
                     let kind = self.classical_type(ty, width.as_ref(), line)?;
+                    if let ClassicalType::Complex(_) = kind {
+                        if runtime {
+                            return Err(super::dynamic::runtime_complex(line));
+                        }
+                        complex.insert(param_name, self.complex_of(expr, line)?);
+                        continue;
+                    }
                     if runtime {
                         let lowered = match self.lower_expr(expr, line)? {
                             ClassicalExpr::Const(_) => {
@@ -2706,6 +3218,95 @@ impl<'a> Parser<'a> {
                         bit_bindings.push((param_name, bits));
                     }
                 }
+                DefParam::Array {
+                    name: param_name,
+                    mutable,
+                    ty,
+                    width,
+                    shape,
+                } => {
+                    let reference = match argument {
+                        Argument::Value(expr) => expr.clone(),
+                        Argument::Operand(operand) => operand_reference(operand)?,
+                    };
+                    let (source, indices) = match &reference {
+                        Expr::Ident(source) => (*source, &[][..]),
+                        Expr::Element(element) => (element.array, element.indices.as_slice()),
+                        _ => ("", &[][..]),
+                    };
+                    let Some(array) = self.arrays.get(source) else {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "def `{name}` parameter `{param_name}` takes an array, got \
+                                 `{reference}`"
+                            ),
+                        ));
+                    };
+                    let kind = self.array_kind(ty, width.as_ref(), line)?;
+                    if kind != array.ty {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "def `{name}` parameter `{param_name}` takes `{ty}` elements, \
+                                 which `{source}` does not hold"
+                            ),
+                        ));
+                    }
+                    let view = array_view(array, source, indices, line, |index| {
+                        self.typed_of(index, line)
+                    })?;
+                    let fits = match shape {
+                        ArrayShape::Sized(dims) => {
+                            let wanted = dims
+                                .iter()
+                                .map(|size| self.integer_of(size, line))
+                                .collect::<Result<Vec<_>>>()?;
+                            wanted.len() == view.dims.len()
+                                && wanted
+                                    .iter()
+                                    .zip(&view.dims)
+                                    .all(|(&wanted, &size)| wanted == size as i64)
+                        }
+                        ArrayShape::Rank(rank) => {
+                            self.integer_of(rank, line)? == view.dims.len() as i64
+                        }
+                    };
+                    if !fits {
+                        return Err(parse_error(
+                            line,
+                            format!(
+                                "def `{name}` parameter `{param_name}` cannot take `{reference}`, \
+                                 whose shape is {:?}",
+                                view.dims
+                            ),
+                        ));
+                    }
+                    if *mutable && array.constant {
+                        return Err(parse_error(
+                            line,
+                            format!("`{source}` is `const` and cannot pass as a `mutable` array"),
+                        ));
+                    }
+                    if *mutable && runtime {
+                        return Err(PrismError::UnsupportedConstruct {
+                            construct: format!(
+                                "a `mutable` array argument to def `{name}`, whose call runs \
+                                 at runtime"
+                            ),
+                            line,
+                        });
+                    }
+                    self.charge(view.offsets.len(), line)?;
+                    let bound = ClassicalArray {
+                        ty: kind,
+                        constant: !*mutable,
+                        dims: view.dims,
+                        values: view.offsets.iter().map(|&at| array.values[at]).collect(),
+                    };
+                    let write_back = mutable.then(|| (source.to_string(), view.offsets));
+                    array_args.push((*param_name, Rc::new(bound), write_back));
+                }
             }
         }
 
@@ -2796,9 +3397,17 @@ impl<'a> Parser<'a> {
                 .collect(),
         );
         sub.durations = durations;
+        sub.complex = complex;
         // A def sees the global constants and nothing else it does not take as
         // an argument, so only a `const` array reaches its body.
         sub.arrays = def.arrays.clone();
+        let mut write_backs = Vec::new();
+        for (param_name, array, write_back) in array_args {
+            sub.arrays.insert(param_name, array);
+            if let Some(write_back) = write_back {
+                write_backs.push((param_name, write_back));
+            }
+        }
         sub.qregs = Rc::new(HashMap::new());
         sub.cregs = Rc::new(HashMap::new());
         sub.aliases = Rc::new(HashMap::new());
@@ -2839,6 +3448,17 @@ impl<'a> Parser<'a> {
             }
         }
         let instructions = sub.execute(&def.body)?;
+        for (param_name, (source, offsets)) in write_backs {
+            if let (Some(written), Some(array)) = (
+                sub.arrays.get(param_name),
+                self.arrays.get_mut(source.as_str()),
+            ) {
+                let array = Rc::make_mut(array);
+                for (&at, &value) in offsets.iter().zip(&written.values) {
+                    array.values[at] = value;
+                }
+            }
+        }
         let frame = sub.def_result.expect("installed above");
         if sub.exit == Some(Exit::End) {
             self.exec_end(line)?;
@@ -2976,6 +3596,7 @@ impl<'a> Parser<'a> {
             params: HashMap::new(),
             classical: Rc::clone(&self.classical),
             durations: HashMap::new(),
+            complex: HashMap::new(),
             arrays: HashMap::new(),
             declared: Vec::new(),
             def_result: None,
@@ -3094,6 +3715,7 @@ impl<'a> Parser<'a> {
             self.forget_runtime(name);
             Rc::make_mut(&mut self.classical).remove(name);
             self.durations.remove(name);
+            self.complex.remove(name);
             self.arrays.remove(name);
             if let Some(values) = self.param_vars.as_mut() {
                 values.remove(name);

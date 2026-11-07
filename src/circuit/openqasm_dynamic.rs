@@ -58,6 +58,7 @@ fn scalar_runtime_type(kind: ClassicalType, line: usize) -> Result<RuntimeType> 
         ClassicalType::Float(width) => RuntimeType::Float { width },
         ClassicalType::Bool => RuntimeType::Bool,
         ClassicalType::Angle(None) => RuntimeType::Angle,
+        ClassicalType::Complex(_) => return Err(runtime_complex(line)),
         ClassicalType::Angle(Some(_)) | ClassicalType::Duration | ClassicalType::Stretch => {
             return Err(PrismError::UnsupportedConstruct {
                 construct: "a runtime duration or fixed-width angle in a subroutine".to_string(),
@@ -219,7 +220,7 @@ pub(super) fn bits_value(bits: &[usize], line: usize) -> Result<ClassicalExpr> {
 fn reads_leaf(expr: &Expr, leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>>) -> Result<bool> {
     with_stack(|| {
         Ok(match expr {
-            Expr::Number(_) | Expr::Duration(_) => false,
+            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) => false,
             Expr::Ident(_) | Expr::Runtime(_) => leaf(expr)?.is_some(),
             Expr::Element(element) => {
                 leaf(expr)?.is_some()
@@ -235,6 +236,12 @@ fn reads_leaf(expr: &Expr, leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>
                 Ok::<_, PrismError>(seen || reads_leaf(arg, leaf)?)
             })?,
             Expr::Cast(cast) => reads_leaf(&cast.value, leaf)?,
+            Expr::Range(range) => range.bounds().try_fold(false, |seen, bound| {
+                Ok::<_, PrismError>(seen || reads_leaf(bound, leaf)?)
+            })?,
+            Expr::Concat(parts) => parts.iter().try_fold(false, |seen, part| {
+                Ok::<_, PrismError>(seen || reads_leaf(part, leaf)?)
+            })?,
         })
     })
 }
@@ -276,6 +283,9 @@ fn lower(
                     line,
                 });
             }
+            Expr::Cast(cast) if cast.ty == syntax_expr::CastType::Complex => {
+                return Err(runtime_complex(line));
+            }
             Expr::Cast(cast) => {
                 let width = match &cast.width {
                     Some(width) => Some(cast.ty.width(fold(width)?, line)?),
@@ -289,9 +299,26 @@ fn lower(
                 }
                 ClassicalExpr::cast(cast.ty.runtime(width), recurse(&cast.value)?)
             }
-            Expr::Number(_) | Expr::Duration(_) => unreachable!("a literal reads no runtime leaf"),
+            Expr::Range(_) | Expr::Concat(_) => {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!("`{expr}`, a slice or array join over a runtime value"),
+                    line,
+                });
+            }
+            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) => {
+                unreachable!("a literal reads no runtime leaf")
+            }
         })
     })
+}
+
+/// The decline for a complex value a measurement or a loop decides, which the
+/// runtime value set has no type for.
+pub(super) fn runtime_complex(line: usize) -> PrismError {
+    PrismError::UnsupportedConstruct {
+        construct: "a `complex` value that a measurement or a loop decides".to_string(),
+        line,
+    }
 }
 
 /// The expression a static condition form spells, for a condition over
@@ -1800,7 +1827,9 @@ impl RuntimeAnalysis {
                         }
                         walk.bind(name, Binding::Var { decl, depth: 0 });
                     }
-                    ast::DefParam::Duration(name) | ast::DefParam::Qubit { name, .. } => {
+                    ast::DefParam::Duration(name)
+                    | ast::DefParam::Qubit { name, .. }
+                    | ast::DefParam::Array { name, .. } => {
                         walk.bind(name, Binding::Constant);
                     }
                 }
@@ -1869,7 +1898,7 @@ impl<'a> Walk<'_, 'a> {
                 runtime: true,
                 bits: false,
             },
-            Expr::Number(_) | Expr::Duration(_) => Reads::default(),
+            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) => Reads::default(),
             Expr::Ident(name) => self.name_reads(name),
             Expr::Element(element) => element
                 .indices
@@ -1887,6 +1916,12 @@ impl<'a> Walk<'_, 'a> {
                 |reads, arg| reads.or(self.expr_reads(arg)),
             ),
             Expr::Cast(cast) => self.expr_reads(&cast.value),
+            Expr::Range(range) => range.bounds().fold(Reads::default(), |reads, bound| {
+                reads.or(self.expr_reads(bound))
+            }),
+            Expr::Concat(parts) => parts.iter().fold(Reads::default(), |reads, part| {
+                reads.or(self.expr_reads(part))
+            }),
         })
     }
 

@@ -118,7 +118,7 @@ fn declarations_that_cannot_stand_are_rejected() {
         "int q = 1;",
         "const int i;",
         "const int i = 1;\ni = 2;",
-        "complex z = 1;",
+        "complex z = 1im;\nfloat f = z;",
         "int i = 1.5;",
         "int i = j;",
         "int 9x = 1;",

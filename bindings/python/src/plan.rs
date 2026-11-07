@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::error::{PyPrismError, PyPrismResult};
+use crate::parameter::PyParameters;
 use crate::sim::{PyPauliObservable, parse_observables, widest_string};
 
 enum OwnedQuery {
@@ -118,26 +119,20 @@ impl PyQuery {
     #[staticmethod]
     fn gradient(
         hamiltonian: crate::sim::Hamiltonian<'_>,
-        parameters: Vec<(usize, usize)>,
+        parameters: &PyParameters,
     ) -> PyPrismResult<Self> {
         Ok(Self(
-            OwnedQuery::Gradient(
-                hamiltonian.observable()?.into_owned(),
-                parameter_links(parameters)?,
-            ),
+            OwnedQuery::Gradient(hamiltonian.observable()?.into_owned(), parameters.0.clone()),
             hamiltonian.text_width(),
         ))
     }
     #[staticmethod]
     fn gradient_shift(
         hamiltonian: crate::sim::Hamiltonian<'_>,
-        parameters: Vec<(usize, usize)>,
+        parameters: &PyParameters,
     ) -> PyPrismResult<Self> {
         Ok(Self(
-            OwnedQuery::GradientShift(
-                hamiltonian.observable()?.into_owned(),
-                parameter_links(parameters)?,
-            ),
+            OwnedQuery::GradientShift(hamiltonian.observable()?.into_owned(), parameters.0.clone()),
             hamiltonian.text_width(),
         ))
     }
@@ -293,23 +288,4 @@ impl PyPlan {
             })
             .collect()
     }
-}
-
-fn parameter_links(parameters: Vec<(usize, usize)>) -> PyPrismResult<prism_q::Parameters> {
-    let links: Vec<_> = parameters
-        .into_iter()
-        .map(|(instruction, slot)| prism_q::ParamLink { instruction, slot })
-        .collect();
-    let count = links
-        .iter()
-        .map(|link| link.slot)
-        .max()
-        .map_or(Ok(0), |slot| {
-            slot.checked_add(1).ok_or_else(|| {
-                PyPrismError(prism_q::PrismError::InvalidParameter {
-                    message: "parameter slot exceeds the supported index range".into(),
-                })
-            })
-        })?;
-    Ok(prism_q::Parameters::from_links(links, count))
 }

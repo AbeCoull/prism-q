@@ -217,7 +217,7 @@ Query constructors are `run()`, `shots(n)`, `counts(n)`, `marginals()`,
 `expectation(observables)`, `observable(hamiltonian)`, `state_vector()`,
 `reduced_density_matrix(qubits)`, and `entropy(qubits)`. The gradient constructors,
 `gradient(hamiltonian, parameters)` and `gradient_shift(hamiltonian, parameters)`,
-take the same Hamiltonian and `(instruction, slot)` links as the execution terminals.
+take the same Hamiltonian and `Parameters` as the execution terminals.
 A shift plan's `evaluations` lists its baseline, then the plus and minus evaluations in
 link order. The top-level backend names the baseline; child reports keep any different
 route chosen for another evaluation, including prepared backend reuse.

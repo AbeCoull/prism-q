@@ -83,16 +83,47 @@ def test_parametric_parser_accepts_a_program_without_inputs():
     [
         ("OPENQASM 3.0; qubit[1] q; rx(", "parse"),
         (
-            "OPENQASM 3.0; input float[64] t; qubit[1] q; rx(2 * t) q[0];",
+            "OPENQASM 3.0; input float[64] t; qubit[1] q; rx(sin(t)) q[0];",
             "unsupported_construct",
         ),
-        ("OPENQASM 3.0; input int[32] n; qubit[1] q;", "unsupported_construct"),
+        ("OPENQASM 3.0; input int[32] n; qubit[1] q;", "invalid_parameter"),
     ],
 )
 def test_parametric_parser_preserves_error_kinds(source, kind):
     with pytest.raises(PrismError) as error:
         parse_qasm_parametric(source)
     assert error.value.kind == kind
+
+
+def test_affine_input_angle_binds_through_its_scale_and_offset():
+    source = "OPENQASM 3.0; input float[64] t; qubit[1] q; rx(2 * t + 0.1) q[0];"
+    template, params = parse_qasm_parametric(source)
+    assert params.num_slots == 1
+    np.testing.assert_allclose(
+        simulate(params.bind(template, [0.3])).seed(42).state_vector(),
+        simulate(parse_qasm("OPENQASM 3.0; qubit[1] q; rx(0.7) q[0];")).seed(42).state_vector(),
+        atol=1e-12,
+    )
+
+
+def test_supplied_inputs_fold_and_take_no_slot():
+    source = (
+        "OPENQASM 3.0; input float[64] t; input int[32] n; qubit[1] q;"
+        " for int i in [1:n] { rx(t) q[0]; }"
+    )
+    template, params = parse_qasm_parametric(source, inputs={"t": 0.2, "n": 3})
+    assert params.num_slots == 0
+    np.testing.assert_allclose(
+        simulate(template).seed(42).state_vector(),
+        simulate(parse_qasm("OPENQASM 3.0; qubit[1] q; rx(0.6) q[0];")).seed(42).state_vector(),
+        atol=1e-12,
+    )
+
+
+def test_unknown_supplied_input_is_invalid():
+    with pytest.raises(PrismError) as error:
+        parse_qasm_parametric("OPENQASM 3.0; qubit[1] q;", inputs={"missing": 1})
+    assert error.value.kind == "invalid_parameter"
 
 
 def test_regular_parser_still_rejects_unbound_inputs():

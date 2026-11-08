@@ -1186,12 +1186,18 @@ class ProgramSimulation:
     def shots(self, num_shots: int) -> ShotsResult: ...
     def sample_counts(self, num_shots: int) -> CountsResult: ...
 
-def parse_qasm(source: str) -> Circuit: ...
+def parse_qasm(
+    source: str, externs: Optional[Mapping[str, Callable[..., bool | int | float]]] = None
+) -> Circuit: ...
 def parse_qasm_dynamic(
-    source: str, inputs: Optional[Mapping[str, bool | int | float]] = None
+    source: str,
+    inputs: Optional[Mapping[str, bool | int | float]] = None,
+    externs: Optional[Mapping[str, Callable[..., bool | int | float]]] = None,
 ) -> DynamicProgram: ...
 def parse_qasm_parametric(
-    source: str, inputs: Optional[Mapping[str, bool | int | float]] = None
+    source: str,
+    inputs: Optional[Mapping[str, bool | int | float]] = None,
+    externs: Optional[Mapping[str, Callable[..., bool | int | float]]] = None,
 ) -> tuple[Circuit, Parameters]: ...
 def run_batch(
     circuits: Sequence[Circuit],

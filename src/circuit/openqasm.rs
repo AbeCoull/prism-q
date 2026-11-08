@@ -60,6 +60,7 @@
 //! | Subroutine definition | `def myg(qubit[2] a, float t) { ... }` | Inlined at the call site. Takes qubits or fixed-width qubit registers and classical values by value, with declared-width coercion. `parse_dynamic` permits classical writes to copied bit parameters |
 //! | Subroutine result | `def mx(qubit a) -> bit { h a; return measure a; }` then `c[0] = mx(q[0]);` | A `bit` or `bit[n]` result lands on the assigned bits. Return a measurement or a local bit; `parse_dynamic` also accepts computed bit values |
 //! | Scalar subroutine result | `def f(int n) -> int[8] { if (n > 0) return n; return 0; }` | Results fold at parse time when known; `parse_dynamic` supports runtime numerical results and early returns. Calls may appear in expressions, branches and loop tests. Durations remain static |
+//! | Extern function | `extern f(int[8], float) -> bool;` | Bound by name to a function in [`Externs`]. A call on constants runs at parse time; [`parse_dynamic_with_externs`] also lowers one over a measured value into the program |
 //! | Static for loop | `for int i in [0:n] { ... }` | Inclusive ranges, optional step, set form `{a,b,c}` |
 //! | Barrier | `barrier q[0], q[1];` | |
 //! | Line comments | `// comment` | |
@@ -76,7 +77,12 @@
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
 //!
-//! - `extern`, `opaque`, and `return` outside a `def`
+//! - `opaque`, and `return` outside a `def`
+//! - `extern` under an entry point that takes no [`Externs`]; under
+//!   [`parse_with_externs`] and its peers, an `extern` with no result type, or
+//!   taking or returning a type other than `bool`, `bit`, `int[n]`, `uint[n]`,
+//!   `float[n]` and `angle`. An `extern` with no registered function returns
+//!   [`PrismError::InvalidParameter`]
 //! - a call to a gate only a `defcal` names, which has no unitary to run
 //! - a `bit` initializer with a set bit, and any assignment to classical bits:
 //!   nothing in the instruction list writes a classical bit, and
@@ -126,7 +132,9 @@
 use num_complex::Complex64;
 
 use super::braket::{self, NoiseSpec, ResultSpec};
-use crate::circuit::dynamic::{ClassicalType as RuntimeType, ClassicalValue};
+use crate::circuit::dynamic::{
+    Callback, ClassicalType as RuntimeType, ClassicalValue, ExternFunction,
+};
 use crate::circuit::parameter::{angle_mut, angle_of};
 use crate::circuit::qasm::ast::{self, DefParam};
 use crate::circuit::qasm::expr::{self as syntax_expr, Timed};
@@ -142,7 +150,9 @@ use crate::sim::noise::{NoiseEvent, NoiseModel};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 fn parse_error(line: usize, message: impl Into<String>) -> PrismError {
     PrismError::Parse {
@@ -196,6 +206,23 @@ pub fn parse(input: &str) -> Result<Circuit> {
 /// Same conditions as [`parse`].
 pub fn parse_with(input: &str, dialect: Dialect) -> Result<Circuit> {
     let (circuit, params) = parse_parametric_with(input, dialect)?;
+    without_slots(circuit, &params)
+}
+
+/// [`parse`] with functions for the program's `extern` declarations.
+///
+/// A call whose arguments fold at parse time runs there and leaves its value,
+/// so `rx(f(2)) q[0];` takes whatever `f` returns.
+///
+/// # Errors
+///
+/// Same conditions as [`parse`], plus those [`Externs`] lists.
+pub fn parse_with_externs(input: &str, externs: &Externs) -> Result<Circuit> {
+    let (circuit, params) = parse_parametric_with_externs(input, &[], externs)?;
+    without_slots(circuit, &params)
+}
+
+fn without_slots(circuit: Circuit, params: &Parameters) -> Result<Circuit> {
     if params.num_slots() > 0 {
         return Err(PrismError::InvalidParameter {
             message: format!(
@@ -248,11 +275,106 @@ pub fn parse_parametric_with_inputs(
     input: &str,
     inputs: &[(&str, ClassicalValue)],
 ) -> Result<(Circuit, Parameters)> {
+    parse_parametric_linked(input, inputs, None)
+}
+
+/// [`parse_parametric_with_inputs`] with functions for the program's `extern`
+/// declarations. An `extern` call reading an unsupplied `input` returns
+/// [`PrismError::UnsupportedConstruct`], as any function of one does.
+///
+/// # Errors
+///
+/// Same conditions as [`parse_parametric_with_inputs`], plus those [`Externs`]
+/// lists.
+pub fn parse_parametric_with_externs(
+    input: &str,
+    inputs: &[(&str, ClassicalValue)],
+    externs: &Externs,
+) -> Result<(Circuit, Parameters)> {
+    parse_parametric_linked(input, inputs, Some(externs))
+}
+
+fn parse_parametric_linked(
+    input: &str,
+    inputs: &[(&str, ClassicalValue)],
+    externs: Option<&Externs>,
+) -> Result<(Circuit, Parameters)> {
     with_stack(|| {
         let mut parser = Parser::new_with(input, Dialect::Native);
         parser.supply(inputs)?;
+        if let Some(externs) = externs {
+            parser.link_externs(externs);
+        }
         parser.parse()
     })
+}
+
+/// Functions that OpenQASM `extern` declarations bind to, by name.
+///
+/// A program declares each one with its types, `extern f(int[8], float) -> bool;`.
+/// A function receives the call's arguments, each stored through its declared
+/// type, and returns a value of the declared result's kind: a `Bool` for `bool`
+/// and `bit`, an `Int` for `int[n]` and `uint[n]`, a `Float` for `float[n]` and
+/// `angle`, where an `Int` is also accepted and promoted. The result is stored
+/// through that type, so an integer wraps to its width.
+///
+/// A call whose arguments fold at parse time runs once, at parse time. One over
+/// a measured value, under [`parse_dynamic_with_externs`], runs each time a shot
+/// evaluates it, on whichever thread runs the shot. A call nothing reads may not
+/// run at all, so a function should be pure.
+///
+/// # Errors
+///
+/// The entry points without `_with_externs` decline every `extern` declaration
+/// with [`PrismError::UnsupportedConstruct`]. The `_with_externs` ones return
+/// [`PrismError::InvalidParameter`] for
+/// an `extern` declaration with no function registered under its name, for a
+/// result of the wrong kind, and for any error the function itself returns.
+/// A declaration with no result type, or with a parameter or result of a type
+/// other than `bool`, `bit`, `int[n]`, `uint[n]`, `float[n]` and `angle`,
+/// returns [`PrismError::UnsupportedConstruct`].
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::circuit::dynamic::ClassicalValue;
+/// use prism_q::circuit::openqasm::{self, Externs};
+///
+/// let mut externs = Externs::new();
+/// externs.register("half", |args| Ok(ClassicalValue::Float(args[0].to_float() / 2.0)));
+/// let circuit = openqasm::parse_with_externs(
+///     "OPENQASM 3.0; extern half(float) -> float; qubit[1] q; rx(half(pi)) q[0];",
+///     &externs,
+/// )?;
+/// # Ok::<(), prism_q::PrismError>(())
+/// ```
+#[derive(Clone, Default)]
+pub struct Externs {
+    functions: HashMap<String, Callback>,
+}
+
+impl Externs {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `function` under `name`, replacing any registered there before.
+    pub fn register(
+        &mut self,
+        name: impl Into<String>,
+        function: impl Fn(&[ClassicalValue]) -> Result<ClassicalValue> + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.functions.insert(name.into(), Arc::new(function));
+        self
+    }
+}
+
+impl fmt::Debug for Externs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut names: Vec<&str> = self.functions.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        f.debug_struct("Externs").field("names", &names).finish()
+    }
 }
 
 /// Parse an OpenQASM 3.0 string plus its `input` [`Parameters`] under an
@@ -510,6 +632,11 @@ pub(crate) struct Parser<'a> {
     /// statement copies the map only while an expansion still holds it.
     gate_defs: Rc<HashMap<&'a str, GateDefinition<'a>>>,
     def_defs: Rc<HashMap<&'a str, DefDefinition<'a>>>,
+    /// Declared `extern` functions, bound to the callers' callbacks.
+    externs: Rc<HashMap<&'a str, Arc<ExternFunction>>>,
+    /// Callbacks by name, which an `extern` declaration binds when it runs;
+    /// `None` under an entry point that takes no [`Externs`].
+    registry: Option<Rc<HashMap<String, Callback>>>,
     total_qubits: usize,
     total_cbits: usize,
     gate_expansion_depth: usize,
@@ -667,6 +794,8 @@ impl<'a> Parser<'a> {
             cregs: Rc::default(),
             gate_defs: Rc::default(),
             def_defs: Rc::default(),
+            externs: Rc::default(),
+            registry: None,
             total_qubits: 0,
             total_cbits: 0,
             gate_expansion_depth: 0,
@@ -2016,7 +2145,7 @@ mod eval;
 mod dynamic;
 
 pub(crate) use dynamic::builder_expr;
-pub use dynamic::{parse_dynamic, parse_dynamic_with_inputs};
+pub use dynamic::{parse_dynamic, parse_dynamic_with_externs, parse_dynamic_with_inputs};
 
 #[cfg(test)]
 #[path = "openqasm_tests.rs"]

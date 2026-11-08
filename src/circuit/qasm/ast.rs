@@ -121,6 +121,13 @@ pub(crate) enum StmtKind<'a> {
         result: Option<DefType<'a>>,
         body: Block<'a>,
     },
+    /// `extern f(int[32], float) -> bool;`, typed only: an extern argument has
+    /// no name.
+    ExternDecl {
+        name: &'a str,
+        params: Vec<DefType<'a>>,
+        result: Option<DefType<'a>>,
+    },
     /// `return;`, `return measure q;` or `return r;`.
     Return(Option<ReturnValue<'a>>),
     /// `array[int[32], 2, 3] a = {{1, 2, 3}, {4, 5, 6}};`. Boxed for the same

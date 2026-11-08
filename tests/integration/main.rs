@@ -55,6 +55,7 @@ mod pauli_rot_correctness;
 mod plan_api;
 mod product_correctness;
 mod qasm_classical;
+mod qasm_externs;
 mod qasm_inputs;
 mod qasm_subset;
 mod qec_decoder;

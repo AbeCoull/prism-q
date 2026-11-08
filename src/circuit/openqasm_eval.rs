@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::circuit::dynamic::ClassicalExpr;
+use crate::circuit::dynamic::{ClassicalExpr, ExternFunction};
 use crate::circuit::qasm::ast::{
     self, Argument, ArrayShape, AssignOp, Block, CmpOp, Condition, DefParam, ForRange, Index,
     Operand, OperandName, Stmt, StmtKind,
@@ -643,6 +643,134 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Take the caller's `extern` functions, which each declaration binds as it
+    /// runs.
+    pub(super) fn link_externs(&mut self, externs: &Externs) {
+        self.registry = Some(Rc::new(externs.functions.clone()));
+    }
+
+    /// Bind an `extern` declaration to the function registered under its name.
+    fn declare_extern(
+        &mut self,
+        name: &'a str,
+        params: &[ast::DefType<'a>],
+        result: Option<&ast::DefType<'a>>,
+        line: usize,
+    ) -> Result<()> {
+        if self.nested {
+            return Err(parse_error(
+                line,
+                format!("extern `{name}` is declared outside the global scope"),
+            ));
+        }
+        if self.gate_defs.contains_key(name)
+            || self.def_defs.contains_key(name)
+            || self.externs.contains_key(name)
+        {
+            return Err(parse_error(line, format!("`{name}` is already declared")));
+        }
+        self.reject_redeclaration(name, line)?;
+        let Some(registry) = self.registry.as_ref() else {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "extern `{name}`, which needs a function from a `_with_externs` entry point"
+                ),
+                line,
+            });
+        };
+        let registry = Rc::clone(registry);
+        let Some(result) = result else {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("extern `{name}` with no result type"),
+                line,
+            });
+        };
+        let params = params
+            .iter()
+            .map(|param| self.extern_type(name, param, line))
+            .collect::<Result<Vec<_>>>()?;
+        let result = self.extern_type(name, result, line)?;
+        let Some(callback) = registry.get(name) else {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "extern `{name}` has no function registered under that name; register one \
+                     in `Externs` and parse with a `_with_externs` entry point"
+                ),
+            });
+        };
+        let function = ExternFunction {
+            name: name.to_string(),
+            params,
+            result,
+            callback: Arc::clone(callback),
+        };
+        Rc::make_mut(&mut self.externs).insert(name, Arc::new(function));
+        Ok(())
+    }
+
+    fn extern_type(&self, name: &str, ty: &ast::DefType, line: usize) -> Result<RuntimeType> {
+        match (ty.ty, &ty.width) {
+            ("bit", None) => Ok(RuntimeType::Bool),
+            ("bool" | "int" | "uint" | "float", _) | ("angle", None) => {
+                self.runtime_type(ty.ty, ty.width.as_ref(), line)
+            }
+            (spelled, width) => Err(PrismError::UnsupportedConstruct {
+                construct: match width {
+                    Some(width) => format!("extern `{name}` over a `{spelled}[{width}]` value"),
+                    None => format!("extern `{name}` over a `{spelled}` value"),
+                },
+                line,
+            }),
+        }
+    }
+
+    /// Reject a call to `function` with the wrong number of arguments.
+    pub(super) fn check_extern_arity(
+        function: &ExternFunction,
+        args: usize,
+        line: usize,
+    ) -> Result<()> {
+        if args != function.params.len() {
+            return Err(parse_error(
+                line,
+                format!(
+                    "extern `{}` takes {} argument(s), got {args}",
+                    function.name,
+                    function.params.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// `expr` with every `extern` call it makes replaced by the value the call
+    /// returns, each argument folded first.
+    fn fold_externs<'x, 'e>(&self, expr: &'x Expr<'e>, line: usize) -> Result<Cow<'x, Expr<'e>>> {
+        if self.externs.is_empty()
+            || expr
+                .finds_call(&|name| self.externs.contains_key(name))
+                .is_none()
+        {
+            return Ok(Cow::Borrowed(expr));
+        }
+        replace_nodes(expr, &|node| {
+            let Expr::Call(call) = node else {
+                return Ok(None);
+            };
+            let Some(function) = self.externs.get(call.name) else {
+                return Ok(None);
+            };
+            Self::check_extern_arity(function, call.args.len(), line)?;
+            let args = call
+                .args
+                .iter()
+                .map(|arg| self.typed_of(arg, line))
+                .collect::<Result<SmallVec<[ClassicalValue; 4]>>>()?;
+            Ok(Some(Expr::Number(function.call(&args)?)))
+        })
+        .map(Cow::Owned)
+    }
+
     /// Reject a supplied value that no `input` declaration took.
     pub(super) fn check_supplied(&self) -> Result<()> {
         match self.supplied.iter().find(|(_, value)| value.is_some()) {
@@ -1019,6 +1147,7 @@ impl<'a> Parser<'a> {
                 qubits,
                 body,
             } => {
+                self.reject_extern_name(name, line)?;
                 Rc::make_mut(&mut self.gate_defs).insert(
                     *name,
                     GateDefinition {
@@ -1038,6 +1167,11 @@ impl<'a> Parser<'a> {
                 self.declare_def(name, args, result.as_ref(), body, line)?;
                 Ok(())
             }
+            StmtKind::ExternDecl {
+                name,
+                params,
+                result,
+            } => self.declare_extern(name, params, result.as_ref(), line),
             StmtKind::Return(value) => self.exec_return(value.as_ref(), line, out),
             StmtKind::CallAssign(assign) => with_stack(|| self.exec_call_assign(assign, line, out)),
             StmtKind::ArrayDecl(decl) if self.is_runtime_decl(stmt) => {
@@ -1843,6 +1977,7 @@ impl<'a> Parser<'a> {
         body: &Block<'a>,
         line: usize,
     ) -> Result<()> {
+        self.reject_extern_name(name, line)?;
         let mut args = args.to_vec();
         // Freeze signature widths before a caller can shadow their bindings.
         for param in &mut args {
@@ -1955,6 +2090,13 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn reject_extern_name(&self, name: &str, line: usize) -> Result<()> {
+        if self.externs.contains_key(name) {
+            return Err(parse_error(line, format!("`{name}` is already an extern")));
+        }
+        Ok(())
+    }
+
     fn check_returns(name: &str, result: Option<&ast::DefType>, body: &[Stmt]) -> Result<()> {
         with_stack(|| {
             for stmt in body {
@@ -2034,6 +2176,13 @@ impl<'a> Parser<'a> {
                     frame.returned = true;
                     return Ok(());
                 }
+                // Folded once here, so the runtime check below does not call an
+                // extern that the fold then calls again.
+                let value = if self.reads_runtime(&value) {
+                    value
+                } else {
+                    self.fold_externs(&value, line)?.into_owned()
+                };
                 if ty != ClassicalType::Duration
                     && self
                         .lower_expr(&value, line)
@@ -2528,6 +2677,7 @@ impl<'a> Parser<'a> {
         self.reject_runtime(expr, line)?;
         self.reject_symbol(expr, line)?;
         let expr = self.with_complex(expr)?;
+        let expr = self.fold_externs(&expr, line)?;
         let vars = self.param_vars.as_ref();
         if !self.classical.is_empty() && expr.reads_element() {
             let resolved = replace_nodes(&expr, &|node| {
@@ -2643,6 +2793,9 @@ impl<'a> Parser<'a> {
     ) -> Result<()> {
         let resolved = self.resolve_arguments(params, line, out)?;
         let params = resolved.as_ref();
+        if self.externs.contains_key(name) {
+            return self.exec_extern_statement(modifiers, name, params, operands, line);
+        }
         if self.dynamic.is_some()
             && !self.def_defs.contains_key(name)
             && params.iter().any(|param| self.argument_is_runtime(param))
@@ -3066,6 +3219,38 @@ impl<'a> Parser<'a> {
         Ok(Some(sub.execute(&def.body)?))
     }
 
+    /// Evaluate an `extern` call written as a statement and drop its value. A
+    /// call over runtime values is dropped unevaluated, since nothing reads it.
+    fn exec_extern_statement<'e>(
+        &self,
+        modifiers: &[ast::Modifier],
+        name: &'e str,
+        params: &[Argument<'e>],
+        operands: &[Operand],
+        line: usize,
+    ) -> Result<()> {
+        if !modifiers.is_empty() || !operands.is_empty() {
+            return Err(parse_error(
+                line,
+                format!("extern `{name}` is a function, not a gate, and takes no qubits"),
+            ));
+        }
+        let call = Expr::Call(Box::new(syntax_expr::Call {
+            name,
+            args: params
+                .iter()
+                .map(|param| match param {
+                    Argument::Value(value) => Ok(value.clone()),
+                    Argument::Operand(operand) => operand_reference(operand),
+                })
+                .collect::<Result<_>>()?,
+        }));
+        if !self.reads_runtime(&call) {
+            self.typed_of(&call, line)?;
+        }
+        Ok(())
+    }
+
     /// Assign a subroutine result or a builtin value to the caller's target.
     fn exec_call_assign(
         &mut self,
@@ -3088,31 +3273,25 @@ impl<'a> Parser<'a> {
                     self.flush(std::mem::take(out));
                 }
                 let value = value.expect("typed result");
-                let target = assign
-                    .target
-                    .register()
-                    .ok_or_else(|| parse_error(line, "a scalar result needs a classical target"))?;
-                if self.is_bit_name(target) {
-                    return self.assign_bits(&assign.target, None, &value, line);
-                }
-                return match &assign.target.index {
-                    None => self.assign_classical(target, None, &value, line),
-                    Some(Index::Single(index)) => self.assign_element(
-                        &ast::ElementAssign {
-                            array: target,
-                            indices: vec![index.clone()],
-                            op: None,
-                            value,
-                        },
-                        line,
-                    ),
-                    _ => Err(parse_error(line, "a scalar result needs one array element")),
-                };
+                return self.assign_call_result(&assign.target, value, line);
             }
             let bits = self.bits_of(&assign.target)?;
             let (instructions, _) = self.expand_def(assign.name, &args, Some(&bits), line)?;
             out.extend(instructions);
             return Ok(());
+        }
+        if self.externs.contains_key(assign.name) {
+            let value = Expr::Call(Box::new(syntax_expr::Call {
+                name: assign.name,
+                args: args
+                    .iter()
+                    .map(|arg| match arg {
+                        Argument::Value(value) => Ok(value.clone()),
+                        Argument::Operand(operand) => operand_reference(operand),
+                    })
+                    .collect::<Result<_>>()?,
+            }));
+            return self.assign_call_result(&assign.target, value, line);
         }
         let Some(target) = assign
             .target
@@ -3145,6 +3324,34 @@ impl<'a> Parser<'a> {
             args,
         }));
         self.assign_classical(target, None, &value, line)
+    }
+
+    /// Write a call's scalar result to a variable, an array element or bits.
+    fn assign_call_result(
+        &mut self,
+        target: &Operand<'a>,
+        value: Expr<'a>,
+        line: usize,
+    ) -> Result<()> {
+        let name = target
+            .register()
+            .ok_or_else(|| parse_error(line, "a scalar result needs a classical target"))?;
+        if self.is_bit_name(name) {
+            return self.assign_bits(target, None, &value, line);
+        }
+        match &target.index {
+            None => self.assign_classical(name, None, &value, line),
+            Some(Index::Single(index)) => self.assign_element(
+                &ast::ElementAssign {
+                    array: name,
+                    indices: vec![index.clone()],
+                    op: None,
+                    value,
+                },
+                line,
+            ),
+            _ => Err(parse_error(line, "a scalar result needs one array element")),
+        }
     }
 
     /// Inline a `def` call, binding each argument by the kind its declaration
@@ -3764,6 +3971,8 @@ impl<'a> Parser<'a> {
             cregs: Rc::clone(&self.cregs),
             gate_defs: Rc::clone(&self.gate_defs),
             def_defs: Rc::clone(&self.def_defs),
+            externs: Rc::clone(&self.externs),
+            registry: self.registry.clone(),
             total_qubits: self.total_qubits,
             total_cbits: self.total_cbits,
             gate_expansion_depth: self.gate_expansion_depth + 1,

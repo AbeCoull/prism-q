@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use super::*;
 use crate::circuit::dynamic::{
     self as dynamic, ClassicalExpr, ClassicalType as RuntimeType, ClassicalValue, DynamicProgram,
-    DynamicProgramBuilder, RotationKind, UnaryOp, VarId,
+    DynamicProgramBuilder, ExternCall, ExternFunction, RotationKind, UnaryOp, VarId,
 };
 use crate::circuit::qasm::ast::{AssignOp, Block, Condition, Operand, Stmt, StmtKind};
 use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Expr};
@@ -114,7 +114,7 @@ fn scalar_runtime_type(kind: ClassicalType, line: usize) -> Result<RuntimeType> 
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn parse_dynamic(input: &str) -> Result<DynamicProgram> {
-    with_stack(|| parse_dynamic_within(input, &[], MAX_EXPANSION))
+    parse_dynamic_with_inputs(input, &[])
 }
 
 /// [`parse_dynamic`] with values for the program's `input` declarations, by
@@ -129,20 +129,44 @@ pub fn parse_dynamic_with_inputs(
     input: &str,
     inputs: &[(&str, ClassicalValue)],
 ) -> Result<DynamicProgram> {
-    with_stack(|| parse_dynamic_within(input, inputs, MAX_EXPANSION))
+    with_stack(|| parse_dynamic_within(input, inputs, None, MAX_EXPANSION))
 }
 
-/// [`parse_dynamic_with_inputs`] with `budget` units of expansion in place of
+/// [`parse_dynamic_with_inputs`] with functions for the program's `extern`
+/// declarations.
+///
+/// A call over a measured bit or a runtime variable lowers to
+/// [`ClassicalExpr::Extern`] and runs when a shot evaluates it, so its value
+/// may feed a condition, an assignment, a bit write or a runtime rotation
+/// angle. A call whose arguments fold at parse time runs once, there.
+///
+/// # Errors
+///
+/// Same conditions as [`parse_dynamic_with_inputs`], plus those [`Externs`]
+/// lists.
+pub fn parse_dynamic_with_externs(
+    input: &str,
+    inputs: &[(&str, ClassicalValue)],
+    externs: &Externs,
+) -> Result<DynamicProgram> {
+    with_stack(|| parse_dynamic_within(input, inputs, Some(externs), MAX_EXPANSION))
+}
+
+/// [`parse_dynamic_with_externs`] with `budget` units of expansion in place of
 /// the default.
 pub(super) fn parse_dynamic_within(
     input: &str,
     inputs: &[(&str, ClassicalValue)],
+    externs: Option<&Externs>,
     budget: usize,
 ) -> Result<DynamicProgram> {
     let tokens = lexer::tokenize(input)?;
     let program = syntax::parse_dynamic_program(&tokens)?;
     let mut parser = Parser::new_with(input, Dialect::Native);
     parser.supply(inputs)?;
+    if let Some(externs) = externs {
+        parser.link_externs(externs);
+    }
     parser.expansion_left.set(budget);
     parser.dynamic = Some(Box::new(DynamicState {
         builder: DynamicProgramBuilder::new(0, 0),
@@ -202,6 +226,7 @@ pub(crate) fn builder_expr(text: &str, builder: &DynamicProgramBuilder) -> Resul
             })
         },
         &|folded: &Expr| syntax_expr::eval(folded, 1, None),
+        &|_| None,
     )
 }
 
@@ -272,18 +297,20 @@ fn reads_leaf(expr: &Expr, leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>
     })
 }
 
-/// Lower `expr`, folding every subtree with no runtime leaf through `fold`.
+/// Lower `expr`, folding every subtree with no runtime leaf through `fold`. A
+/// call `function` names lowers to an `extern` call.
 fn lower(
     expr: &Expr,
     line: usize,
     leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>>,
     fold: &impl Fn(&Expr) -> Result<ClassicalValue>,
+    function: &impl Fn(&str) -> Option<Arc<ExternFunction>>,
 ) -> Result<ClassicalExpr> {
     with_stack(|| {
         if !reads_leaf(expr, leaf)? {
             return Ok(ClassicalExpr::Const(fold(expr)?));
         }
-        let recurse = |inner: &Expr| lower(inner, line, leaf, fold);
+        let recurse = |inner: &Expr| lower(inner, line, leaf, fold, function);
         Ok(match expr {
             Expr::Ident(_) | Expr::Element(_) | Expr::Runtime(_) => match leaf(expr)? {
                 Some(lowered) => lowered,
@@ -301,13 +328,19 @@ fn lower(
                 ClassicalExpr::binary(op.runtime(), recurse(left)?, recurse(right)?)
             }
             Expr::Call(call) => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!(
-                        "builtin `{}` over a runtime value; only operators run at runtime",
-                        call.name
-                    ),
-                    line,
-                });
+                let Some(function) = function(call.name) else {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "builtin `{}` over a runtime value; only operators and `extern` \
+                             calls run at runtime",
+                            call.name
+                        ),
+                        line,
+                    });
+                };
+                Parser::check_extern_arity(&function, call.args.len(), line)?;
+                let args = call.args.iter().map(recurse).collect::<Result<_>>()?;
+                ClassicalExpr::Extern(Box::new(ExternCall::new(function, args)))
             }
             Expr::Cast(cast) if cast.ty == syntax_expr::CastType::Complex => {
                 return Err(runtime_complex(line));
@@ -1129,6 +1162,7 @@ impl<'a> Parser<'a> {
             line,
             &|leaf| self.runtime_leaf(leaf, line),
             &|folded| self.typed_of(folded, line),
+            &|name| self.externs.get(name).cloned(),
         )
     }
 

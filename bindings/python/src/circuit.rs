@@ -1280,27 +1280,43 @@ impl PyCircuitBuilder {
 }
 
 /// Parse an OpenQASM 3.0 (or 2.0-compatible) string into a [`Circuit`].
+///
+/// `externs` maps `extern` names to callables, each called at parse time with
+/// the folded arguments.
 #[pyfunction]
-pub fn parse_qasm(source: &str) -> PyPrismResult<PyCircuit> {
-    Ok(PyCircuit(openqasm::parse(source)?))
+#[pyo3(signature = (source, externs = None))]
+pub fn parse_qasm(
+    source: &str,
+    externs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
+) -> PyPrismResult<PyCircuit> {
+    let circuit = match crate::program::extern_functions(externs)? {
+        Some(externs) => openqasm::parse_with_externs(source, &externs)?,
+        None => openqasm::parse(source)?,
+    };
+    Ok(PyCircuit(circuit))
 }
 
 /// Return a circuit template and its named input slots in declaration order.
 ///
 /// `inputs` maps `input` names to bool, int or float values, each folded as a
-/// constant; an unsupplied `float` or `angle` input keeps its slot.
+/// constant; an unsupplied `float` or `angle` input keeps its slot. `externs`
+/// maps `extern` names to callables, as `parse_qasm` takes them.
 #[pyfunction]
-#[pyo3(signature = (source, inputs = None))]
+#[pyo3(signature = (source, inputs = None, externs = None))]
 pub fn parse_qasm_parametric(
     source: &str,
     inputs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
+    externs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
 ) -> PyPrismResult<(PyCircuit, PyParameters)> {
     let inputs = crate::program::input_values(inputs)?;
     let inputs: Vec<(&str, ClassicalValue)> = inputs
         .iter()
         .map(|(name, value)| (name.as_str(), *value))
         .collect();
-    let (circuit, parameters) = openqasm::parse_parametric_with_inputs(source, &inputs)?;
+    let (circuit, parameters) = match crate::program::extern_functions(externs)? {
+        Some(externs) => openqasm::parse_parametric_with_externs(source, &inputs, &externs)?,
+        None => openqasm::parse_parametric_with_inputs(source, &inputs)?,
+    };
     let parameters = PyParameters::against(parameters, &circuit);
     Ok((PyCircuit(circuit), parameters))
 }

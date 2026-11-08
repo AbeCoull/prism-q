@@ -13,9 +13,12 @@ renamed classes are on [Errors, Typing and Names](../guides/python-names.md#name
 | `circuit::openqasm::parse` | `parse_qasm` |
 | `circuit::openqasm::parse_braket` | `parse_braket` |
 | `circuit::openqasm::parse_dynamic` | `parse_qasm_dynamic` |
+| `circuit::openqasm::parse_dynamic_with_externs` | `parse_qasm_dynamic` |
 | `circuit::openqasm::parse_dynamic_with_inputs` | `parse_qasm_dynamic` |
 | `circuit::openqasm::parse_parametric` | `parse_qasm_parametric` |
+| `circuit::openqasm::parse_parametric_with_externs` | `parse_qasm_parametric` |
 | `circuit::openqasm::parse_parametric_with_inputs` | `parse_qasm_parametric` |
+| `circuit::openqasm::parse_with_externs` | `parse_qasm` |
 | `circuit::qasm_export::to_qasm3` | `Circuit.to_qasm` |
 | `circuits::clifford_heavy_circuit` | `circuits.clifford_heavy` |
 | `circuits::clifford_random_pairs` | `circuits.clifford_random_pairs` |

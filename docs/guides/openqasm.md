@@ -28,6 +28,7 @@ let result = simulate(&circuit).seed(42).run().unwrap();
 | `parse_parametric`, `parse_parametric_with(source, dialect)` | The template `Circuit` and the `Parameters` its `input` declarations name (see [Input parameters](#input-parameters)) |
 | `parse_parametric_with_inputs(source, inputs)` | The same, with values supplied for some `input` declarations by name |
 | `parse_dynamic`, `parse_dynamic_with_inputs(source, inputs)` | A `DynamicProgram` with loops and runtime classical values (see [Dynamic programs](#dynamic-programs)) |
+| `parse_with_externs`, `parse_parametric_with_externs`, `parse_dynamic_with_externs` | The same three, with functions for `extern` declarations (see [Extern functions](#extern-functions)) |
 | `parse_braket` | A `BraketProgram`: circuit, parameters, result requests and noise (see [Amazon Braket Programs](./braket.md)) |
 
 `Dialect::Native`, the default, reads `gpi`, `gpi2` and `ms` angles in turns;
@@ -514,6 +515,64 @@ let bound = params.bind(&template, &[0.8])?;
 # Ok::<(), prism_q::PrismError>(())
 ```
 
+## Extern functions
+
+An `extern` declaration names a function the program calls and gives its types. The
+caller supplies the function: `Externs::register` binds a Rust closure to the name, and
+the `_with_externs` entry points take the registry. Python passes a mapping of callables
+as `externs=` to `parse_qasm`, `parse_qasm_parametric` and `parse_qasm_dynamic`.
+
+```rust
+use prism_q::circuit::dynamic::ClassicalValue;
+use prism_q::circuit::openqasm::{self, Externs};
+
+let mut externs = Externs::new();
+externs.register("correction", |args| Ok(ClassicalValue::Float(args[0].to_float() * 0.1)));
+let circuit = openqasm::parse_with_externs(
+    "OPENQASM 3.0;
+     extern correction(int[8]) -> float;
+     qubit[1] q;
+     rx(correction(3)) q[0];",
+    &externs,
+)?;
+# Ok::<(), prism_q::PrismError>(())
+```
+
+Each argument is stored through its declared type before the call, so `int[8]` passes 257
+as 1. The function returns a `Bool` for `bool` and `bit`, an `Int` for `int[n]` and
+`uint[n]`, and a `Float` for `float[n]` and `angle`, where an `Int` is promoted. The result
+is stored through the declared type. A call reads as a value anywhere one belongs, inside `def` bodies too, and
+as a statement its value is dropped.
+
+A call whose arguments fold at parse time runs once, at parse time, under every entry
+point. Under `parse_dynamic_with_externs`, a call over a measured bit or a runtime variable
+lowers to `ClassicalExpr::Extern` and runs when a shot evaluates it, so its value may feed
+a condition, an assignment, a bit write or a runtime rotation angle:
+
+```qasm
+extern decode(bit, bit) -> bool;
+qubit[3] q;
+bit[2] s;
+s[0] = measure q[1];
+s[1] = measure q[2];
+if (decode(s[0], s[1])) x q[0];
+```
+
+Shots run on several threads, so a Rust function is `Send + Sync`; a Python callable takes
+the GIL for each call. A call nothing reads may not run, and how often a runtime call runs
+is otherwise unspecified, so a function should be pure.
+
+An entry point without `_with_externs`, and a Python parse given no `externs`, declines
+every `extern` declaration with `UnsupportedConstruct`. Under the `_with_externs` entry
+points, these return `InvalidParameter`: a declaration with no function registered under its name,
+a result of the wrong kind, and any error the function returns or a Python callable raises.
+A function registered for no declaration is ignored. These return `UnsupportedConstruct`:
+an `extern` with no result type, a parameter or result of another type (`bit[n]`,
+`angle[n]`, `complex`, `duration`, arrays), a call over an unsupplied `input`, and under
+`parse` a call over a measured value. A call with the wrong number of arguments, an
+`extern` declared inside a body, and a `gate` or `def` sharing an extern's name return
+`Parse`.
+
 ## Dynamic programs
 
 `openqasm::parse` returns a `Circuit`, a finite instruction list, so it declines `while`
@@ -604,7 +663,7 @@ let noisy = simulate_program(&program).noise(&rules).seed(42).shots(1000)?;
   function, `f(x, q)`, the same `def` takes it.
 - A slice read as a runtime value.
 - A builtin function (`sin`, `sqrt` and the rest) over a runtime value. Only operators
-  run at runtime.
+  and [`extern` calls](#extern-functions) run at runtime.
 - A `bit` or `qubit` register declared inside a `while` body, and an `array` a loop or
   measurement writes.
 - A measurement straight into a variable. Measure into a bit and assign the bit.
@@ -646,7 +705,8 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `gate` blocks | Parses; an empty body is the identity | Calls nested past 32 deep: `Parse` |
 | A gate length, `x[100ns] q;` | Parses; the length is dropped | |
 | `defcalgrammar`, `cal`, `defcal` | Parsed and skipped: a calibration says how a gate is pulsed, not what it does | A call to a gate only a `defcal` names: `UnsupportedConstruct` naming it |
-| `extern`, `opaque` | Declines | `UnsupportedConstruct`. A call out of the program has nothing to run against here |
+| `extern` | Calls a registered function under the `_with_externs` entry points; see [Extern functions](#extern-functions) | Any other entry point: `UnsupportedConstruct`. No registered function, or a result of the wrong kind: `InvalidParameter`. No result type, a type other than `bool`, `bit`, `int[n]`, `uint[n]`, `float[n]` and `angle`, a call over an unsupplied input, or a call over a measured value under `parse`: `UnsupportedConstruct`. The wrong number of arguments: `Parse` |
+| `opaque` | Declines | `UnsupportedConstruct` |
 | `ctrl`, `negctrl`, `ctrl(n)`, `negctrl(n)`, `inv`, `pow(k)` | Parses, chainable in any order | See [Gate modifiers](#gate-modifiers) for the reach of each, and below for the declines |
 | `gphase(theta)` | Parses and is carried | |
 | `#pragma braket ...`, `pragma braket ...` | Parses under `Dialect::Braket` | Any other dialect, a `braket` pragma inside a braced body, or one this crate does not read: `UnsupportedConstruct` naming it |

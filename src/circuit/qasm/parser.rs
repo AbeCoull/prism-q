@@ -23,12 +23,7 @@ const DECLARATION_TYPES: &[&str] = &[
 /// carries. Declining by name returns `UnsupportedConstruct` where the operands
 /// would otherwise give a bare syntax error (`while (c[0]) { }` reads as a
 /// malformed gate call). A dynamic parse reads `while` instead.
-const UNSUPPORTED: &[(&str, &str)] = &[
-    ("extern", "extern"),
-    ("opaque", "opaque"),
-    ("while", "while"),
-    ("else", "else"),
-];
+const UNSUPPORTED: &[(&str, &str)] = &[("opaque", "opaque"), ("while", "while"), ("else", "else")];
 
 /// Deepest nesting an array initializer may have, which bounds the recursion
 /// that reads it.
@@ -139,6 +134,7 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         "switch" => switch(stream),
         "gate" => gate_def(stream),
         "def" => def_def(stream),
+        "extern" => extern_decl(stream),
         "return" => return_statement(stream),
         "box" => boxed(stream),
         "array" => array_declaration(stream, false),
@@ -936,6 +932,43 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         args,
         result,
         body,
+    })
+}
+
+fn extern_decl<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
+    let line = stream.line();
+    stream.advance();
+    let name = stream.expect_ident()?;
+    stream.expect(Kind::LParen)?;
+    let mut params = Vec::new();
+    while !stream.eat(Kind::RParen) {
+        if ["readonly", "mutable", "creg"]
+            .iter()
+            .any(|word| stream.is_keyword(word))
+        {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("extern `{name}` taking a `{}` argument", stream.peek().text),
+                line,
+            });
+        }
+        let (ty, width) = typename(stream)?;
+        params.push(DefType { ty, width });
+        if !stream.eat(Kind::Comma) {
+            stream.expect(Kind::RParen)?;
+            break;
+        }
+    }
+    let result = if stream.eat(Kind::Arrow) {
+        let (ty, width) = typename(stream)?;
+        Some(DefType { ty, width })
+    } else {
+        None
+    };
+    stream.expect(Kind::Semicolon)?;
+    Ok(StmtKind::ExternDecl {
+        name,
+        params,
+        result,
     })
 }
 

@@ -571,7 +571,11 @@ fn classical_control_constructs_parse_or_reject_by_name() {
     let rejected = [
         ("while", "while (c[0]) { x q[0]; }", "while"),
         ("opaque", "opaque foo q;", "opaque"),
-        ("extern", "extern foo(int);", "extern"),
+        (
+            "extern",
+            "extern foo(int);",
+            "extern `foo`, which needs a function from a `_with_externs` entry point",
+        ),
         ("return", "return;", "`return` outside a def"),
         ("stray else", "else { x q[0]; }", "else"),
     ];

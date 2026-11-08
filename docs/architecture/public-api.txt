@@ -1049,6 +1049,7 @@ pub prism_q::circuit::dynamic::ClassicalExpr::Cast
 pub prism_q::circuit::dynamic::ClassicalExpr::Cast::operand: alloc::boxed::Box<prism_q::circuit::dynamic::ClassicalExpr>
 pub prism_q::circuit::dynamic::ClassicalExpr::Cast::ty: prism_q::circuit::dynamic::ClassicalType
 pub prism_q::circuit::dynamic::ClassicalExpr::Const(prism_q::circuit::dynamic::ClassicalValue)
+pub prism_q::circuit::dynamic::ClassicalExpr::Extern(alloc::boxed::Box<prism_q::circuit::dynamic::ExternCall>)
 pub prism_q::circuit::dynamic::ClassicalExpr::Register
 pub prism_q::circuit::dynamic::ClassicalExpr::Register::offset: usize
 pub prism_q::circuit::dynamic::ClassicalExpr::Register::size: usize
@@ -1081,6 +1082,10 @@ pub enum prism_q::circuit::dynamic::ClassicalValue
 pub prism_q::circuit::dynamic::ClassicalValue::Bool(bool)
 pub prism_q::circuit::dynamic::ClassicalValue::Float(f64)
 pub prism_q::circuit::dynamic::ClassicalValue::Int(i128)
+impl prism_q::circuit::dynamic::ClassicalValue
+pub fn prism_q::circuit::dynamic::ClassicalValue::to_float(self) -> f64
+pub fn prism_q::circuit::dynamic::ClassicalValue::to_int(self) -> i128
+pub fn prism_q::circuit::dynamic::ClassicalValue::truthy(self) -> bool
 impl core::convert::From<bool> for prism_q::circuit::dynamic::ClassicalValue
 pub fn prism_q::circuit::dynamic::ClassicalValue::from(bool) -> Self
 impl core::convert::From<f64> for prism_q::circuit::dynamic::ClassicalValue
@@ -1144,6 +1149,14 @@ pub fn prism_q::DynamicProgramBuilder::num_classical_bits(&self) -> usize
 pub fn prism_q::DynamicProgramBuilder::num_qubits(&self) -> usize
 pub fn prism_q::DynamicProgramBuilder::variable(&self, &str) -> core::option::Option<prism_q::circuit::dynamic::VarId>
 pub fn prism_q::DynamicProgramBuilder::write_bits(&mut self, &[usize], prism_q::circuit::dynamic::ClassicalExpr) -> &mut Self
+pub struct prism_q::circuit::dynamic::ExternCall
+impl prism_q::circuit::dynamic::ExternCall
+pub fn prism_q::circuit::dynamic::ExternCall::args(&self) -> &[prism_q::circuit::dynamic::ClassicalExpr]
+pub fn prism_q::circuit::dynamic::ExternCall::name(&self) -> &str
+impl core::cmp::PartialEq for prism_q::circuit::dynamic::ExternCall
+pub fn prism_q::circuit::dynamic::ExternCall::eq(&self, &Self) -> bool
+impl core::fmt::Debug for prism_q::circuit::dynamic::ExternCall
+pub fn prism_q::circuit::dynamic::ExternCall::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct prism_q::circuit::dynamic::VarId(_)
 impl prism_q::circuit::dynamic::VarId
 pub fn prism_q::circuit::dynamic::VarId::index(self) -> usize
@@ -1163,14 +1176,23 @@ pub prism_q::circuit::openqasm::BraketProgram::circuit: prism_q::circuit::Circui
 pub prism_q::circuit::openqasm::BraketProgram::noise: core::option::Option<prism_q::sim::noise::NoiseModel>
 pub prism_q::circuit::openqasm::BraketProgram::parameters: prism_q::circuit::parameter::Parameters
 pub prism_q::circuit::openqasm::BraketProgram::results: alloc::vec::Vec<prism_q::circuit::braket::ResultSpec>
+pub struct prism_q::circuit::openqasm::Externs
+impl prism_q::circuit::openqasm::Externs
+pub fn prism_q::circuit::openqasm::Externs::new() -> Self
+pub fn prism_q::circuit::openqasm::Externs::register(&mut self, impl core::convert::Into<alloc::string::String>, impl core::ops::function::Fn(&[prism_q::circuit::dynamic::ClassicalValue]) -> prism_q::error::Result<prism_q::circuit::dynamic::ClassicalValue> + core::marker::Send + core::marker::Sync + 'static) -> &mut Self
+impl core::fmt::Debug for prism_q::circuit::openqasm::Externs
+pub fn prism_q::circuit::openqasm::Externs::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn prism_q::circuit::openqasm::parse(&str) -> prism_q::error::Result<prism_q::circuit::Circuit>
 pub fn prism_q::circuit::openqasm::parse_braket(&str) -> prism_q::error::Result<prism_q::circuit::openqasm::BraketProgram>
 pub fn prism_q::circuit::openqasm::parse_dynamic(&str) -> prism_q::error::Result<prism_q::circuit::dynamic::DynamicProgram>
+pub fn prism_q::circuit::openqasm::parse_dynamic_with_externs(&str, &[(&str, prism_q::circuit::dynamic::ClassicalValue)], &prism_q::circuit::openqasm::Externs) -> prism_q::error::Result<prism_q::circuit::dynamic::DynamicProgram>
 pub fn prism_q::circuit::openqasm::parse_dynamic_with_inputs(&str, &[(&str, prism_q::circuit::dynamic::ClassicalValue)]) -> prism_q::error::Result<prism_q::circuit::dynamic::DynamicProgram>
 pub fn prism_q::circuit::openqasm::parse_parametric(&str) -> prism_q::error::Result<(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)>
 pub fn prism_q::circuit::openqasm::parse_parametric_with(&str, prism_q::circuit::openqasm::Dialect) -> prism_q::error::Result<(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)>
+pub fn prism_q::circuit::openqasm::parse_parametric_with_externs(&str, &[(&str, prism_q::circuit::dynamic::ClassicalValue)], &prism_q::circuit::openqasm::Externs) -> prism_q::error::Result<(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)>
 pub fn prism_q::circuit::openqasm::parse_parametric_with_inputs(&str, &[(&str, prism_q::circuit::dynamic::ClassicalValue)]) -> prism_q::error::Result<(prism_q::circuit::Circuit, prism_q::circuit::parameter::Parameters)>
 pub fn prism_q::circuit::openqasm::parse_with(&str, prism_q::circuit::openqasm::Dialect) -> prism_q::error::Result<prism_q::circuit::Circuit>
+pub fn prism_q::circuit::openqasm::parse_with_externs(&str, &prism_q::circuit::openqasm::Externs) -> prism_q::error::Result<prism_q::circuit::Circuit>
 pub mod prism_q::circuit::parameter
 pub struct prism_q::circuit::parameter::ParamLink
 pub prism_q::circuit::parameter::ParamLink::instruction: usize

@@ -2370,11 +2370,12 @@ fn bench_tn_scalar_tree_quality(_c: &mut Criterion) {}
 
 /// The rows where contraction tree quality is the variable.
 ///
-/// Seven layers is where the greedy planner's tree is on record as
-/// non-monotonic in width: peak intermediate 16.8M elements at 30 and 50
-/// qubits against 1.05M at 40. A planner change moves these rows through the
-/// tree it picks, not through kernel arithmetic, which the depth and width
-/// sweeps above already cover.
+/// At seven layers the plain greedy tree is non-monotonic in width, peaking at
+/// 16.8M elements at 30 and 50 qubits against 1.05M at 40. The noisy restarts
+/// and the fused-circuit plan bring the tree these rows contract to 1.05M
+/// elements at 30 and 40 qubits and 2.1M at 50. A planner change moves these
+/// rows through the tree it picks, not through kernel arithmetic, which the
+/// depth and width sweeps above already cover.
 #[cfg(feature = "bench-internal")]
 fn bench_tn_scalar_tree_quality(c: &mut Criterion) {
     let mut group = c.benchmark_group("tn/scalar_hea_l7");

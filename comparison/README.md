@@ -25,7 +25,7 @@ Two harnesses live here and share the adapters:
 comparison/.venv/Scripts/python comparison/matrix.py list --profile reference      # what would run, and what is skipped and why
 comparison/.venv/Scripts/python comparison/matrix.py run --profile smoke --out comparison/results/my-smoke
 comparison/.venv/Scripts/python comparison/matrix.py run --profile reference --out comparison/results/my-run
-comparison/.venv/Scripts/python comparison/matrix.py report comparison/results/my-run   --docs docs/comparison --landing docs/comparison.md --readme README.md
+comparison/.venv/Scripts/python comparison/matrix.py report comparison/results/my-run   --docs docs/comparison --landing docs/comparison.md
 ```
 
 | Profile | Contents | Wall time on the reference host |

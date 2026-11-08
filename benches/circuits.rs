@@ -370,6 +370,60 @@ fn non_clifford_mid_measure_circuit(n_qubits: usize, depth: usize) -> Circuit {
     circuit
 }
 
+/// `circuit` with a witness qubit flipped under `if (c[mid_bit])` right after each
+/// measurement into `mid_bit`, then measured into a new last bit. The witness bit
+/// copies the value the guard read.
+fn with_readout_witness(circuit: Circuit, mid_bit: usize) -> Circuit {
+    let witness = circuit.num_qubits;
+    let witness_bit = circuit.num_classical_bits;
+    let mut out = Circuit::new(witness + 1, witness_bit + 1);
+    for instruction in circuit.instructions {
+        let guards = matches!(
+            instruction,
+            Instruction::Measure { classical_bit, .. } if classical_bit == mid_bit
+        );
+        out.instructions.push(instruction);
+        if guards {
+            out.instructions.push(Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(mid_bit),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[witness]),
+            });
+        }
+    }
+    out.add_measure(witness, witness_bit);
+    out
+}
+
+/// Readout `(p01, p10)` on every bit but the witness of [`with_readout_witness`].
+fn witness_readout_noise(circuit: &Circuit, p01: f64, p10: f64) -> prism_q::NoiseModel {
+    let mut noise = prism_q::NoiseModel::uniform_depolarizing(circuit, 1e-3);
+    noise.with_readout_error(p01, p10);
+    noise.set_bit_readout_error(circuit.num_classical_bits - 1, 0.0, 0.0);
+    noise
+}
+
+/// Run once outside the timed loop and check the row's route, and that the guard read
+/// the flipped bit: the witness disagrees with `mid_bit` only on gate noise, where a
+/// flip of the finished record alone would split them at the readout rate.
+fn assert_guard_reads_flipped_bit(
+    circuit: &Circuit,
+    noise: &prism_q::NoiseModel,
+    shots: usize,
+    mid_bit: usize,
+    route: prism_q::ResolvedBackend,
+) {
+    let result = run_shots_with_noise(BackendKind::Auto, circuit, noise, shots, SEED).unwrap();
+    assert_eq!(result.metadata.backend, route);
+    let witness_bit = circuit.num_classical_bits - 1;
+    let split = result
+        .shots
+        .iter()
+        .filter(|shot| shot[mid_bit] != shot[witness_bit])
+        .count();
+    assert!(split * 100 < shots, "{split} of {shots} shots split");
+}
+
 /// Brickwork layers between rounds of mid-circuit measurement.
 ///
 /// `mps_measure_reset_circuit` holds bond one from end to end, since a
@@ -4672,6 +4726,27 @@ fn bench_noisy_sampling(c: &mut Criterion) {
         },
     );
 
+    // The same shape with a guard reading the mid-circuit bit under readout error, so
+    // every measurement flips its bit as it writes it.
+    let guarded = with_readout_witness(non_clifford_mid_measure_circuit(10, 4), 10);
+    let guarded_noise = witness_readout_noise(&guarded, 0.02, 0.05);
+    assert_guard_reads_flipped_bit(
+        &guarded,
+        &guarded_noise,
+        1000,
+        10,
+        prism_q::ResolvedBackend::Statevector,
+    );
+    group.bench_function(
+        BenchmarkId::new("trajectory_readout_guard", "non_clifford_11q_p1e-3_1000"),
+        |b| {
+            b.iter(|| {
+                run_shots_with_noise(BackendKind::Auto, &guarded, &guarded_noise, 1000, SEED)
+                    .unwrap();
+            });
+        },
+    );
+
     // The correlated two-qubit branch, the only trajectory path that reads a
     // two-qubit reduced density matrix and applies the selected operator as a
     // `Fused2q`. One `2^n` reduction plus one `2^n` gate pass per event, plus a
@@ -5797,6 +5872,46 @@ fn bench_dynamic_clifford_shots(c: &mut Criterion) {
             },
         );
     }
+
+    // A guard reading a bit under readout error. Symmetric readout stays on the
+    // compiled sampler as an X on the measured alias; asymmetric readout declines it
+    // to per-shot tableau replay, flipping each bit as its measurement writes it.
+    let n = 16;
+    let mut body = Circuit::new(n, n + 1);
+    layered_clifford_body(&mut body, n, 4, SEED);
+    body.add_measure(0, n);
+    body.add_reset(0);
+    layered_clifford_body(&mut body, n, 4, SEED ^ 1);
+    for q in 0..n {
+        body.add_measure(q, q);
+    }
+    let circuit = with_readout_witness(body, n);
+    for (tag, p01, p10, route) in [
+        (
+            "readout_symmetric",
+            0.05,
+            0.05,
+            prism_q::ResolvedBackend::CompiledStabilizer,
+        ),
+        (
+            "readout_asymmetric",
+            0.02,
+            0.05,
+            prism_q::ResolvedBackend::Stabilizer,
+        ),
+    ] {
+        let noise = witness_readout_noise(&circuit, p01, p10);
+        assert_guard_reads_flipped_bit(&circuit, &noise, shots, n, route);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{tag}_{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_shots_with_noise(BackendKind::Auto, circ, &noise, shots, SEED).unwrap()
+                });
+            },
+        );
+    }
     group.finish();
 }
 
@@ -5893,7 +6008,8 @@ fn bench_dynamic_rus(c: &mut Criterion) {
 }
 
 /// The repeat-until-success program under amplitude damping after every gate, which
-/// runs one noisy trajectory per shot instead of splitting shots by outcome history.
+/// runs one noisy trajectory per shot instead of splitting shots by outcome history,
+/// then the same with readout error on the bit the loop reads.
 fn bench_dynamic_rus_noisy(c: &mut Criterion) {
     let shots = 1_000usize;
     let n = 10;
@@ -5905,6 +6021,29 @@ fn bench_dynamic_rus_noisy(c: &mut Criterion) {
     let mut group = c.benchmark_group("dynamic/rus_noisy");
     configure_group(&mut group);
     group.bench_function(BenchmarkId::from_parameter(n), |b| {
+        b.iter(|| {
+            prism_q::simulate_program(&program)
+                .noise(&rules)
+                .seed(SEED)
+                .shots(shots)
+                .unwrap()
+        });
+    });
+
+    // Readout error on every bit, so the loop condition reads each attempt's flipped
+    // bit. The loop leaves only on a read zero, which the record keeps.
+    let rules = rules.uniform_readout_error(0.02, 0.05);
+    let result = prism_q::simulate_program(&program)
+        .noise(&rules)
+        .seed(SEED)
+        .shots(shots)
+        .unwrap();
+    assert_eq!(
+        result.metadata.backend,
+        prism_q::ResolvedBackend::Statevector
+    );
+    assert!(result.shots.iter().all(|shot| !shot[0]));
+    group.bench_function(BenchmarkId::new("readout", n), |b| {
         b.iter(|| {
             prism_q::simulate_program(&program)
                 .noise(&rules)

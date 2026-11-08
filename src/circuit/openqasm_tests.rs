@@ -3343,7 +3343,7 @@ fn malformed_expressions_name_what_is_wrong() {
         ("popcount(-1)", "popcount"),
         ("1 % 0", "modulo by zero"),
         ("1 / 0", "division by zero"),
-        ("sizeof(2)", "unknown function"),
+        ("sizeof(2)", "declared array"),
     ] {
         let err = format!("{}", angle_err(&rx(expression)));
         assert!(
@@ -4796,4 +4796,361 @@ fn end_in_a_def_call_stops_the_rest_of_its_statement() {
          x q[3];\nif (f() == 0) { o[0] = measure q[3]; }",
         "OPENQASM 3.0;\nqubit[4] q;\nx q[3];",
     );
+}
+
+// Complex values
+
+fn rz_angles(source: &str) -> Vec<f64> {
+    parse(source)
+        .unwrap_or_else(|e| panic!("`{source}`: {e}"))
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::Gate {
+                gate: Gate::Rz(angle),
+                ..
+            } => Some(*angle),
+            _ => None,
+        })
+        .collect()
+}
+
+fn complex_parts(declarations: &str, value: &str) -> (f64, f64) {
+    let source = format!(
+        "OPENQASM 3.0;\nqubit q;\n{declarations}\nrz(real({value})) q;\nrz(imag({value})) q;"
+    );
+    match rz_angles(&source).as_slice() {
+        [re, im] => (*re, *im),
+        other => panic!("`{source}` emitted {other:?}"),
+    }
+}
+
+#[test]
+fn complex_arithmetic_matches_the_specification_examples() {
+    let declarations = "complex[float[64]] a = 10.0 + 5.0im;\n\
+                        complex[float[64]] b = -2.0 - 7.0im;";
+    for (value, expected) in [
+        ("a + b", (8.0, -2.0)),
+        ("a - b", (12.0, 12.0)),
+        ("a * b", (15.0, -80.0)),
+        ("a / b", (-55.0 / 53.0, 60.0 / 53.0)),
+        ("a ** b", (0.10694695640729072, 0.17536481119721312)),
+        ("-a", (-10.0, -5.0)),
+        ("2 * a", (20.0, 10.0)),
+    ] {
+        let (re, im) = complex_parts(declarations, value);
+        assert!(
+            (re - expected.0).abs() < 1e-12 && (im - expected.1).abs() < 1e-12,
+            "`{value}`: got {re}+{im}im, expected {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn imaginary_literals_take_every_spelling() {
+    for (value, expected) in [
+        ("1.5im", 1.5),
+        ("2 im", 2.0),
+        ("3\tim", 3.0),
+        ("1e1im", 10.0),
+        (".5im", 0.5),
+    ] {
+        assert_eq!(complex_parts("", value), (0.0, expected), "`{value}`");
+    }
+    let (re, im) = complex_parts("complex[float] d = 2.0+sin(pi/2) + (3.1 * 5.5 im);", "d");
+    assert!((re - 3.0).abs() < 1e-12 && (im - 17.05).abs() < 1e-12);
+    same_instructions(
+        "OPENQASM 3.0;\nqubit im;\nh im;",
+        "OPENQASM 3.0;\nqubit q;\nh q;",
+    );
+}
+
+#[test]
+fn complex_builtins_and_casts_fold() {
+    for (expression, expected) in [
+        ("abs(3.0 + 4.0im)", 5.0),
+        ("arg(2im)", std::f64::consts::FRAC_PI_2),
+        ("real(exp(pi * 1im))", -1.0),
+        ("imag(sqrt(-4 + 0im))", 2.0),
+        ("real(2.5)", 2.5),
+        ("imag(2.5)", 0.0),
+        ("arg(-1)", std::f64::consts::PI),
+        ("real(complex[float[64]](3))", 3.0),
+        ("imag(complex(1im) * 1im)", 0.0),
+        ("real(1im ** 2)", -1.0),
+    ] {
+        let angles = rz_angles(&format!("OPENQASM 3.0;\nqubit q;\nrz({expression}) q;"));
+        assert!(
+            (angles[0] - expected).abs() < 1e-12,
+            "`{expression}`: got {}, expected {expected}",
+            angles[0]
+        );
+    }
+}
+
+#[test]
+fn complex_components_round_to_the_declared_width() {
+    let (re, im) = complex_parts("complex[float[32]] z = 0.1 + 0.2im;", "z");
+    assert_eq!(re, f64::from(0.1f32));
+    assert_eq!(im, f64::from(0.2f32));
+}
+
+#[test]
+fn complex_assignment_and_compound_operators_update_the_value() {
+    let declarations = "complex z;\nz = 1 + 1im;\nz *= 2im;\nz += 1;";
+    assert_eq!(complex_parts(declarations, "z"), (-1.0, 2.0));
+    same_instructions(
+        "OPENQASM 3.0;\nqubit q;\ncomplex z = 1 + 2im;\n\
+         if (z == 1 + 2im) x q;\nif (z != 1 + 2im) y q;",
+        "OPENQASM 3.0;\nqubit q;\nx q;",
+    );
+}
+
+#[test]
+fn complex_values_cross_def_boundaries() {
+    let source = "const complex[float[64]] base = 1im;\n\
+                  def scaled(complex[float[64]] z, float k) -> complex[float[64]] {\n\
+                      return z * k + base;\n\
+                  }\n\
+                  complex w = scaled(2 + 1im, 3);";
+    assert_eq!(complex_parts(source, "w"), (6.0, 4.0));
+}
+
+#[test]
+fn complex_values_in_a_real_context_reject_with_a_parse_error() {
+    for (body, needle) in [
+        ("rx(1im) q;", "complex value where a real one belongs"),
+        (
+            "complex z = 1im; float f = z;",
+            "complex value where a real one belongs",
+        ),
+        ("complex z = 1im; int n = int(z);", "casts a complex value"),
+        (
+            "complex c1 = 1.0 + 2.0im; complex c2 = mod(c1, 2);",
+            "complex value",
+        ),
+        ("complex[int] z;", "`float` components"),
+        ("complex z = 1im / 0im;", "division by zero"),
+        ("rx(sin(1im)) q;", "complex value"),
+    ] {
+        let source = format!("OPENQASM 3.0;\nqubit q;\n{body}");
+        match parse(&source) {
+            Err(PrismError::Parse { message, .. }) => {
+                assert!(message.contains(needle), "`{body}`: `{message}`")
+            }
+            other => panic!("`{body}` gave {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_runtime_complex_value_declines_by_name() {
+    let source = "OPENQASM 3.0;\nqubit q;\nbit c;\ncomplex z = 0;\n\
+                  c = measure q;\nif (c) { z = 1im; }\nrz(real(z)) q;";
+    match crate::circuit::openqasm::parse_dynamic(source) {
+        Err(PrismError::UnsupportedConstruct { construct, .. }) => {
+            assert!(construct.contains("complex"), "{construct}")
+        }
+        other => panic!("expected a decline, got {other:?}"),
+    }
+    let folded = "OPENQASM 3.0;\nqubit q;\ncomplex z = 2 + 1im;\nrz(abs(z)) q;";
+    assert!(crate::circuit::openqasm::parse_dynamic(folded).is_ok());
+}
+
+// Array operations
+
+#[test]
+fn sizeof_reads_array_and_slice_dimensions() {
+    let head = "OPENQASM 3.0;\nqubit q;\narray[int, 4, 3] a;\narray[float, 5] b;\n";
+    for (expression, expected) in [
+        ("sizeof(a)", 4.0),
+        ("sizeof(a, 0)", 4.0),
+        ("sizeof(a, 1)", 3.0),
+        ("sizeof(a[0])", 3.0),
+        ("sizeof(a[1:2], 0)", 2.0),
+        ("sizeof(b[0:2:4])", 3.0),
+        ("sizeof(b) + 1", 6.0),
+    ] {
+        let angles = rz_angles(&format!("{head}rz({expression}) q;"));
+        assert_eq!(angles, vec![expected], "`{expression}`");
+    }
+    for (expression, needle) in [
+        ("sizeof(a, 2)", "no dimension 2"),
+        ("sizeof(q)", "declared array"),
+        ("sizeof(a, 0, 1)", "optional dimension"),
+    ] {
+        match parse(&format!("{head}rz({expression}) q;")) {
+            Err(PrismError::Parse { message, .. }) => {
+                assert!(message.contains(needle), "`{expression}`: `{message}`")
+            }
+            other => panic!("`{expression}` gave {other:?}"),
+        }
+    }
+}
+
+fn array_values(declarations: &str, array: &str, count: usize) -> Vec<f64> {
+    let reads: String = (0..count)
+        .map(|at| format!("rz({array}[{at}]) q;\n"))
+        .collect();
+    rz_angles(&format!("OPENQASM 3.0;\nqubit q;\n{declarations}\n{reads}"))
+}
+
+#[test]
+fn array_slices_copy_rows_ranges_and_joins() {
+    let head = "array[int[8], 2] first = {0, 1};\narray[int[8], 3] second = {2, 3, 4};\n\
+                array[int[8], 4] third = {5, 6, 7, 8};\n";
+    assert_eq!(
+        array_values(
+            &format!("{head}array[int[8], 5] c = first ++ second;"),
+            "c",
+            5
+        ),
+        vec![0.0, 1.0, 2.0, 3.0, 4.0]
+    );
+    assert_eq!(
+        array_values(&format!("{head}array[int[8], 2] s = second[1:2];"), "s", 2),
+        vec![3.0, 4.0]
+    );
+    assert_eq!(
+        array_values(&format!("{head}second[1:2] = first[0:1];"), "second", 3),
+        vec![2.0, 0.0, 1.0]
+    );
+    assert_eq!(
+        array_values(
+            &format!(
+                "{head}array[int[8], 4] j = first ++ first;\nj[0:3] = first[0:1] ++ third[1:2];"
+            ),
+            "j",
+            4
+        ),
+        vec![0.0, 1.0, 6.0, 7.0]
+    );
+    let grid = "array[float[64], 3, 2] g = {{1, 2}, {3, 4}, {5, 6}};\n\
+                array[float[64], 2] row = g[2];\n\
+                array[float[64], 3, 2] h = g;\n\
+                g[0] = row;\ng[1:2, 0] = h[0:1, 1];";
+    assert_eq!(array_values(grid, "row", 2), vec![5.0, 6.0]);
+    let flat = rz_angles(&format!(
+        "OPENQASM 3.0;\nqubit q;\n{grid}\n\
+         for int i in [0:2] {{ for int k in [0:1] {{ rz(g[i, k]) q; }} }}"
+    ));
+    assert_eq!(flat, vec![5.0, 6.0, 2.0, 4.0, 4.0, 6.0]);
+}
+
+#[test]
+fn array_elements_wrap_to_the_declared_width() {
+    assert_eq!(
+        array_values("array[int[8], 2] a = {200, -129};", "a", 2),
+        vec![-56.0, 127.0]
+    );
+    assert_eq!(
+        array_values("array[uint[4], 1] a;\na[0] = 17;", "a", 1),
+        vec![1.0]
+    );
+}
+
+#[test]
+fn array_shape_mismatches_reject() {
+    let head = "OPENQASM 3.0;\narray[int[8], 3] aa;\narray[int[8], 4, 3] bb;\nint[8] scalar;\n";
+    for body in [
+        "bb[0] = 1;",
+        "bb[0, 0] = aa;",
+        "bb = aa;",
+        "array[int[8], 2] x = aa;",
+        "array[int[8], 2] x = aa ++ bb;",
+        "aa[0:1] = aa;",
+    ] {
+        match parse(&format!("{head}{body}")) {
+            Err(PrismError::Parse { .. }) => {}
+            other => panic!("`{body}` gave {other:?}"),
+        }
+    }
+    assert!(
+        parse(&format!(
+            "{head}bb[0] = aa;\nbb[0, 1] = aa[2];\nbb[1:2] = bb[2:3];"
+        ))
+        .is_ok()
+    );
+    match parse(&format!("{head}aa[0:1] += aa[1:2];")) {
+        Err(PrismError::UnsupportedConstruct { construct, .. }) => {
+            assert!(construct.contains("compound"), "{construct}")
+        }
+        other => panic!("compound slice assignment gave {other:?}"),
+    }
+}
+
+#[test]
+fn array_arguments_pass_by_reference() {
+    let program = "OPENQASM 3.0;\nqubit[2] q;\n\
+                   def fill(mutable array[int[8], #dim = 1] out, int v) {\n\
+                       for int i in [0:sizeof(out) - 1] { out[i] = v + i; }\n\
+                   }\n\
+                   def total(readonly array[int[8], 2, 3] grid) -> int {\n\
+                       int sum = 0;\n\
+                       for int i in [0:sizeof(grid, 0) - 1] {\n\
+                           for int k in [0:sizeof(grid, 1) - 1] { sum += grid[i][k]; }\n\
+                       }\n\
+                       return sum;\n\
+                   }\n\
+                   array[int[8], 5] aa;\n\
+                   array[int[8], 2, 3] bb = {{1, 2, 3}, {4, 5, 6}};\n\
+                   fill(aa[1:3], 10);\n\
+                   fill(bb[1, 0:1], 7);\n\
+                   rz(total(bb)) q[0];\n\
+                   for int i in [0:4] { rz(aa[i]) q[1]; }";
+    assert_eq!(
+        rz_angles(program),
+        vec![
+            1.0 + 2.0 + 3.0 + 7.0 + 8.0 + 6.0,
+            0.0,
+            10.0,
+            11.0,
+            12.0,
+            0.0
+        ]
+    );
+    same_instructions(
+        program,
+        "OPENQASM 3.0;\nqubit[2] q;\nrz(27) q[0];\nrz(0) q[1];\nrz(10) q[1];\n\
+         rz(11) q[1];\nrz(12) q[1];\nrz(0) q[1];",
+    );
+}
+
+#[test]
+fn array_arguments_check_mutability_shape_and_type() {
+    let head = "OPENQASM 3.0;\narray[int[8], 4] aa;\nconst array[int[8], 2] cc = {1, 2};\n\
+                array[float[64], 4] ff;\n\
+                def reads(readonly array[int[8], 4] a) { a[0] = 1; }\n\
+                def sized(readonly array[int[8], 4] a) { }\n\
+                def ranked(readonly array[int[8], #dim = 2] a) { }\n\
+                def writes(mutable array[int[8], #dim = 1] a) { a[0] = 1; }\n";
+    for call in [
+        "reads(aa);",
+        "sized(aa[0:2]);",
+        "ranked(aa);",
+        "writes(cc);",
+        "sized(ff);",
+        "sized(aa[{0, 1, 2, 3}]);",
+        "sized(3);",
+    ] {
+        match parse(&format!("{head}{call}")) {
+            Err(PrismError::Parse { .. }) => {}
+            other => panic!("`{call}` gave {other:?}"),
+        }
+    }
+    assert!(parse(&format!("{head}sized(aa);\nwrites(aa[1:2]);")).is_ok());
+}
+
+#[test]
+fn integer_bit_slices_read_as_unsigned_values() {
+    let head = "OPENQASM 3.0;\nqubit q;\nuint[16] u = 10;\nint[32] m = 15;\n";
+    for (expression, expected) in [
+        ("u[0:3]", 10.0),
+        ("u[1:3]", 5.0),
+        ("m[0:2:31]", 3.0),
+        ("m[3:-1:0]", 15.0),
+    ] {
+        let angles = rz_angles(&format!("{head}rz({expression}) q;"));
+        assert_eq!(angles, vec![expected], "`{expression}`");
+    }
 }

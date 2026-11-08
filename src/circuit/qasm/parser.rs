@@ -4,9 +4,9 @@
 //! find where a statement, a block or an argument ended.
 
 use super::ast::{
-    Argument, ArrayDecl, ArrayInit, AssignOp, BitInit, Block, CallAssign, CmpOp, Condition,
-    Conditional, DefParam, DefType, ElementAssign, ForRange, Index, Measure, Modifier, Operand,
-    OperandName, Range, RegisterKind, ReturnValue, Stmt, StmtKind, SwitchArm,
+    Argument, ArrayDecl, ArrayInit, ArrayShape, AssignOp, BitInit, Block, CallAssign, CmpOp,
+    Condition, Conditional, DefParam, DefType, ElementAssign, ForRange, Index, Measure, Modifier,
+    Operand, OperandName, Range, RegisterKind, ReturnValue, Stmt, StmtKind, SwitchArm,
 };
 use super::expr::{self, Expr};
 use super::lexer::{Kind, Token};
@@ -14,8 +14,7 @@ use super::stream::Stream;
 use crate::error::{PrismError, Result};
 use smallvec::SmallVec;
 
-/// Keywords that open a classical declaration. `complex` parses and is declined
-/// by the evaluator.
+/// Keywords that open a classical declaration.
 const DECLARATION_TYPES: &[&str] = &[
     "int", "uint", "float", "angle", "bool", "complex", "duration", "stretch",
 ];
@@ -323,11 +322,17 @@ fn port<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     Ok(StmtKind::OutputDecl { ty, name, size })
 }
 
-/// A type name with its optional width, which every declaration shares.
+/// A type name with its optional width, which every declaration shares. The
+/// width of `complex[float[n]]` is the `n` of its components.
 fn typename<'a>(stream: &mut Stream<'_, 'a>) -> Result<(&'a str, Option<Expr<'a>>)> {
     let ty = stream.expect_ident()?;
     if !stream.eat(Kind::LBracket) {
         return Ok((ty, None));
+    }
+    if ty == "complex" {
+        let width = expr::complex_component(stream)?;
+        stream.expect(Kind::RBracket)?;
+        return Ok((ty, width));
     }
     let width = expr::parse(stream)?;
     stream.expect(Kind::RBracket)?;
@@ -361,7 +366,7 @@ fn declaration<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
 fn array_declaration<'a>(stream: &mut Stream<'_, 'a>, constant: bool) -> Result<StmtKind<'a>> {
     stream.advance();
     stream.expect(Kind::LBracket)?;
-    let (ty, _width) = typename(stream)?;
+    let (ty, width) = typename(stream)?;
     let mut dims = Vec::new();
     while stream.eat(Kind::Comma) {
         dims.push(expr::parse(stream)?);
@@ -380,6 +385,7 @@ fn array_declaration<'a>(stream: &mut Stream<'_, 'a>, constant: bool) -> Result<
     Ok(StmtKind::ArrayDecl(Box::new(ArrayDecl {
         constant,
         ty,
+        width,
         dims,
         name,
         init,
@@ -388,7 +394,7 @@ fn array_declaration<'a>(stream: &mut Stream<'_, 'a>, constant: bool) -> Result<
 
 fn array_init<'a>(stream: &mut Stream<'_, 'a>, depth: usize) -> Result<ArrayInit<'a>> {
     if !stream.eat(Kind::LBrace) {
-        return Ok(ArrayInit::Value(expr::parse(stream)?));
+        return Ok(ArrayInit::Value(value(stream)?));
     }
     if depth >= MAX_INITIALIZER_DEPTH {
         return Err(PrismError::Parse {
@@ -402,6 +408,20 @@ fn array_init<'a>(stream: &mut Stream<'_, 'a>, depth: usize) -> Result<ArrayInit
     }
     stream.expect(Kind::RBrace)?;
     Ok(ArrayInit::List(entries))
+}
+
+/// The value an assignment or an array initializer writes: an expression, or
+/// arrays joined with `++`.
+fn value<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
+    let first = expr::parse(stream)?;
+    if stream.kind() != Kind::Concat {
+        return Ok(first);
+    }
+    let mut parts = vec![first];
+    while stream.eat(Kind::Concat) {
+        parts.push(expr::parse(stream)?);
+    }
+    Ok(Expr::Concat(parts))
 }
 
 /// `let a = q[0:1] ++ q[3];`
@@ -858,6 +878,14 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     stream.expect(Kind::LParen)?;
     let mut args = Vec::new();
     while !stream.eat(Kind::RParen) {
+        if stream.is_keyword("readonly") || stream.is_keyword("mutable") {
+            args.push(array_parameter(stream)?);
+            if !stream.eat(Kind::Comma) {
+                stream.expect(Kind::RParen)?;
+                break;
+            }
+            continue;
+        }
         let (ty, width) = typename(stream)?;
         let arg_name = stream.expect_ident()?;
         args.push(match ty {
@@ -891,7 +919,7 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         let (ty, width) = typename(stream)?;
         if !matches!(
             ty,
-            "bit" | "int" | "uint" | "bool" | "float" | "angle" | "duration"
+            "bit" | "int" | "uint" | "bool" | "float" | "angle" | "complex" | "duration"
         ) {
             return Err(PrismError::UnsupportedConstruct {
                 construct: format!("def `{name}` returning `{ty}`"),
@@ -908,6 +936,36 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
         args,
         result,
         body,
+    })
+}
+
+/// `readonly array[int[8], 2, 3] a` or `mutable array[int[8], #dim = 2] a`.
+fn array_parameter<'a>(stream: &mut Stream<'_, 'a>) -> Result<DefParam<'a>> {
+    let mutable = stream.advance().text == "mutable";
+    if !stream.eat_keyword("array") {
+        return Err(stream.expected("`array` after `readonly` or `mutable`"));
+    }
+    stream.expect(Kind::LBracket)?;
+    let (ty, width) = typename(stream)?;
+    stream.expect(Kind::Comma)?;
+    let shape = if stream.eat(Kind::Dim) {
+        stream.expect(Kind::Assign)?;
+        ArrayShape::Rank(expr::parse(stream)?)
+    } else {
+        let mut dims = vec![expr::parse(stream)?];
+        while stream.eat(Kind::Comma) {
+            dims.push(expr::parse(stream)?);
+        }
+        ArrayShape::Sized(dims)
+    };
+    stream.expect(Kind::RBracket)?;
+    let name = stream.expect_ident()?;
+    Ok(DefParam::Array {
+        name,
+        mutable,
+        ty,
+        width,
+        shape,
     })
 }
 
@@ -1023,12 +1081,17 @@ fn try_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind<'a>
         stream.rewind(value_mark);
     }
 
-    let value = expr::parse(stream)?;
+    let value = value(stream)?;
     stream.expect(Kind::Semicolon)?;
-    if let (Some(array), Some(Index::Single(index))) = (target.register(), &target.index) {
+    let index = match &target.index {
+        Some(Index::Single(index)) => Some(index.clone()),
+        Some(Index::Range(range)) => Some(Expr::Range(range.clone())),
+        _ => None,
+    };
+    if let (Some(array), Some(index)) = (target.register(), index) {
         return Ok(Some(StmtKind::ElementAssign(Box::new(ElementAssign {
             array,
-            indices: vec![index.clone()],
+            indices: vec![index],
             op,
             value,
         }))));
@@ -1082,7 +1145,7 @@ fn element_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<StmtKind
         return Ok(None);
     };
     stream.advance();
-    let value = expr::parse(stream)?;
+    let value = value(stream)?;
     stream.expect(Kind::Semicolon)?;
     Ok(Some(StmtKind::ElementAssign(Box::new(ElementAssign {
         array,

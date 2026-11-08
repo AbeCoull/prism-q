@@ -180,8 +180,52 @@ for int k in [0:3] { order[k] = 3 - k; }
 rx(angles[1, 0]) q[order[0]];   // rx(0.3) q[3]
 ```
 
-`array[bit, n]` declines, since bits belong in a `bit[n]` register. A `def` body sees the
-program's `const` arrays and no others, as it sees no other non-constant global.
+`sizeof(a)` and `sizeof(a, d)` give the length of dimension `d`, `0` by default. A range
+in a subscript, `a[1:3]` or `g[0, 1:2]`, names a slice that keeps the dimension, and a
+subscript with fewer indices than dimensions names a row. A slice or row reads as an
+array where one belongs: an initializer, the right side of an assignment to a slice or a
+whole array, and an array argument. `++` joins arrays along their first dimension. The
+shapes on both sides of an array assignment must match, and a mismatch is a `Parse`
+error. `a[i:j]` on an `int` or `uint` reads those bits as an unsigned value.
+
+```qasm
+array[int[8], 2] first = {0, 1};
+array[int[8], 3] second = {2, 3, 4};
+array[int[8], 5] joined = first ++ second;
+second[1:2] = first;              // second == {2, 0, 1}
+def fill(mutable array[int[8], #dim = 1] out) {
+  for int i in [0:sizeof(out) - 1] { out[i] = i; }
+}
+fill(joined[2:4]);                // joined == {0, 1, 0, 1, 2}
+```
+
+A `def` takes an array as `readonly` or `mutable`, with one size per dimension or a rank,
+`#dim = n`. The argument passes by reference, so a `mutable` parameter writes back to the
+caller's array or slice. The element type must match, and the shape must match the sizes
+or the rank. A compound assignment to a slice, `a[0:1] += b`, declines.
+
+`array[bit, n]`, `array[complex, n]` and `array[duration, n]` decline. A `def` body sees
+the program's `const` arrays and its array parameters, as it sees no other non-constant
+global.
+
+### Complex numbers
+
+`complex[float[n]]`, and bare `complex` for 64-bit components, fold at parse time like the
+other scalars. An imaginary literal is a number followed by `im`, with spaces or tabs
+allowed before the suffix. Complex values take `+ - * /` and `**`, which returns the
+principal value, and compare with `==` and `!=`. `exp` and `sqrt` take a complex
+argument. `real`, `imag`, `abs` and `arg` read one as a real number, and a complex value
+reaches a gate angle only through them. A `def` takes and returns `complex` values.
+
+```qasm
+complex[float[64]] a = 10.0 + 5.0im;
+complex[float[64]] b = a ** (-2.0 - 7.0im);
+rz(arg(b)) q[0];
+```
+
+A complex value where a real one belongs, and a cast from complex to a real type, are
+`Parse` errors. A complex value a measurement or a loop decides declines under
+`parse_dynamic`, which has no runtime type for one.
 
 ### Timing
 
@@ -399,8 +443,8 @@ c[1] = measure q;
 Forms that need private measurement storage decline by name: a call that discards a bit
 result, a measurement into a bit parameter, and a bit the body declares without returning.
 So do a measurement returned as a scalar result, a `stretch` returned as a `duration`,
-runtime duration and fixed-width angle values, modifiers on runtime calls, and the
-`complex` result type. Under `parse`, a scalar result that depends on a measurement and a
+runtime duration, fixed-width angle and `complex` values, and modifiers on runtime calls.
+Under `parse`, a scalar result that depends on a measurement and a
 call inside a measurement-dependent condition decline too; `parse_dynamic` takes both.
 Under `parse_dynamic`, a bit argument or bit result read at runtime declines past 64
 bits, the width a runtime value holds.
@@ -554,8 +598,8 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `include "..."` | Accepted and ignored | Nothing. The standard gates are built in, so an include adds no names; a gate it would have defined declines later by name |
 | `qubit`, `qreg`, `bit`, `creg` | Parses | A `bit` initializer with a set bit, or an assignment to a bit: `UnsupportedConstruct` under `parse`, written at runtime under `parse_dynamic`. A bit string whose length differs from the register, or a float written to bits: `Parse` |
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
-| `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic` |
-| `array` | Parses; folded at parse time | An element type other than `int`, `uint`, `float`, `angle` or `bool`: `UnsupportedConstruct`. An initializer of the wrong shape, an index out of range, or more than 2^20 elements: `Parse` |
+| `int`, `uint`, `bool`, `float`, `angle`, `complex`, `const` | Parses | Any other type: `UnsupportedConstruct` naming the type. A complex value where a real one belongs: `Parse`. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic` |
+| `array` | Parses; folded at parse time, with slices, `++`, `sizeof` and array arguments | An element type other than `int`, `uint`, `float`, `angle` or `bool`, or a compound assignment to a slice: `UnsupportedConstruct`. An initializer or assignment of the wrong shape, an index out of range, an index set on an array, or more than 2^20 elements: `Parse` |
 | `box`, `box[d]` | Runs its body in place | A length that is not a duration or is negative: `Parse` |
 | `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, a runtime value in a duration under `parse_dynamic`, and `durationof`: `UnsupportedConstruct` |
 | `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, two inputs on one gate, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |

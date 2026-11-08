@@ -231,3 +231,13 @@ fn a_leading_byte_order_mark_is_skipped() {
     assert_eq!(kinds("\u{feff}x;"), [Kind::Ident, Kind::Semicolon]);
     assert!(tokenize("x;\u{feff}").is_err());
 }
+
+#[test]
+fn imaginary_literals_and_rank_markers_lex_as_their_own_tokens() {
+    assert_eq!(kinds("1.5im"), vec![Kind::Imaginary]);
+    assert_eq!(kinds("2 \tim"), vec![Kind::Imaginary]);
+    assert_eq!(texts("3im + 1"), vec!["3im", "+", "1"]);
+    assert_eq!(kinds("2 imag"), vec![Kind::Int, Kind::Ident]);
+    assert_eq!(kinds("#dim = 2"), vec![Kind::Dim, Kind::Assign, Kind::Int]);
+    assert_eq!(kinds("#dimension"), vec![Kind::Pragma]);
+}

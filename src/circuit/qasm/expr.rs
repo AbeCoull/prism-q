@@ -7,6 +7,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 
+use num_complex::Complex64;
+
+use super::ast::Range;
 use super::lexer::{Kind, TIME_UNITS};
 use super::stream::{MAX_NESTING, Stream, with_stack};
 use crate::circuit::dynamic::{self, ClassicalValue, UnaryOp};
@@ -138,6 +141,8 @@ pub(crate) enum Expr<'a> {
     /// A literal, or a value already folded into the tree. An integer literal
     /// stays an exact integer.
     Number(ClassicalValue),
+    /// An imaginary literal, or a complex value already folded into the tree.
+    Complex(Complex64),
     Runtime(dynamic::VarId),
     Duration(Duration),
     Ident(&'a str),
@@ -156,6 +161,11 @@ pub(crate) enum Expr<'a> {
     /// An array element, `a[i, j]` or `a[i][j]`.
     Element(Box<Element<'a>>),
     Cast(Box<Cast<'a>>),
+    /// `start:step:stop` standing as one index of an array slice.
+    Range(Box<Range<'a>>),
+    /// `a ++ b`, arrays joined end to end, which only an assignment or an array
+    /// initializer writes.
+    Concat(Vec<Expr<'a>>),
 }
 
 /// `int[8](x)`, `bool(x)` and the other scalar casts.
@@ -175,6 +185,8 @@ pub(crate) enum CastType {
     Angle,
     /// `bit[n](x)`, read as the `uint[n]` its bits spell.
     Bit,
+    /// `complex[float[n]](x)`, whose width is that of each component.
+    Complex,
 }
 
 impl CastType {
@@ -186,6 +198,7 @@ impl CastType {
             "float" => CastType::Float,
             "angle" => CastType::Angle,
             "bit" => CastType::Bit,
+            "complex" => CastType::Complex,
             _ => return None,
         })
     }
@@ -198,10 +211,12 @@ impl CastType {
             CastType::Float => "float",
             CastType::Angle => "angle",
             CastType::Bit => "bit",
+            CastType::Complex => "complex",
         }
     }
 
-    /// The runtime type the cast converts to, `width` already checked.
+    /// The runtime type the cast converts to, `width` already checked. A
+    /// `complex` cast maps to its component type.
     pub(crate) fn runtime(self, width: Option<u32>) -> dynamic::ClassicalType {
         use dynamic::ClassicalType as Ty;
         match self {
@@ -215,7 +230,7 @@ impl CastType {
             CastType::Bit => Ty::Uint {
                 width: width.unwrap_or(1),
             },
-            CastType::Float => Ty::Float {
+            CastType::Float | CastType::Complex => Ty::Float {
                 width: width.unwrap_or(64),
             },
             CastType::Angle => Ty::Angle,
@@ -232,12 +247,14 @@ impl CastType {
                     message: "`bool` takes no width".into(),
                 });
             }
-            (CastType::Float, ClassicalValue::Int(width)) => matches!(width, 16 | 32 | 64 | 128),
+            (CastType::Float | CastType::Complex, ClassicalValue::Int(width)) => {
+                matches!(width, 16 | 32 | 64 | 128)
+            }
             (_, ClassicalValue::Int(width)) => (1..=64).contains(&width),
             _ => false,
         };
         if !fits {
-            let range = if self == CastType::Float {
+            let range = if matches!(self, CastType::Float | CastType::Complex) {
                 "16, 32, 64 or 128"
             } else {
                 "1 to 64"
@@ -269,6 +286,9 @@ impl CastType {
                 });
             }
             (CastType::Angle, value) => ClassicalValue::Float(angle(value.to_float(), width)),
+            (CastType::Complex, value) => {
+                return Err(complex_where_real(&Expr::Number(value), line));
+            }
             _ => self.runtime(width).store(value),
         })
     }
@@ -304,7 +324,7 @@ impl<'a> Expr<'a> {
     /// on an `input` slot.
     pub(crate) fn mentions(&self, name: &str) -> bool {
         with_stack(|| match self {
-            Expr::Number(_) | Expr::Duration(_) | Expr::Runtime(_) => false,
+            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) | Expr::Runtime(_) => false,
             Expr::Ident(ident) => *ident == name,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.mentions(name),
             Expr::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
@@ -313,13 +333,19 @@ impl<'a> Expr<'a> {
             Expr::Cast(cast) => {
                 cast.value.mentions(name) || cast.width.as_ref().is_some_and(|w| w.mentions(name))
             }
+            Expr::Range(range) => range.bounds().any(|bound| bound.mentions(name)),
+            Expr::Concat(parts) => parts.iter().any(|part| part.mentions(name)),
         })
     }
 
     /// The first function the expression calls that `wanted` picks out.
     pub(crate) fn finds_call(&self, wanted: &impl Fn(&str) -> bool) -> Option<&'a str> {
         with_stack(|| match self {
-            Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) | Expr::Runtime(_) => None,
+            Expr::Number(_)
+            | Expr::Complex(_)
+            | Expr::Duration(_)
+            | Expr::Ident(_)
+            | Expr::Runtime(_) => None,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => {
                 inner.finds_call(wanted)
             }
@@ -333,18 +359,47 @@ impl<'a> Expr<'a> {
                 .iter()
                 .find_map(|index| index.finds_call(wanted)),
             Expr::Cast(cast) => cast.value.finds_call(wanted),
+            Expr::Range(range) => range.bounds().find_map(|bound| bound.finds_call(wanted)),
+            Expr::Concat(parts) => parts.iter().find_map(|part| part.finds_call(wanted)),
         })
     }
 
-    /// True when the expression reads an array element.
+    /// True when the expression reads an array element or asks for an array's
+    /// size with `sizeof`.
     pub(crate) fn reads_element(&self) -> bool {
         with_stack(|| match self {
-            Expr::Number(_) | Expr::Duration(_) | Expr::Ident(_) | Expr::Runtime(_) => false,
+            Expr::Number(_)
+            | Expr::Complex(_)
+            | Expr::Duration(_)
+            | Expr::Ident(_)
+            | Expr::Runtime(_) => false,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.reads_element(),
             Expr::Binary { left, right, .. } => left.reads_element() || right.reads_element(),
-            Expr::Call(call) => call.args.iter().any(Expr::reads_element),
+            Expr::Call(call) => call.name == "sizeof" || call.args.iter().any(Expr::reads_element),
             Expr::Element(_) => true,
             Expr::Cast(cast) => cast.value.reads_element(),
+            Expr::Range(range) => range.bounds().any(Expr::reads_element),
+            Expr::Concat(_) => true,
+        })
+    }
+
+    /// True when the expression has a complex value: it reaches an imaginary
+    /// literal through arithmetic, `exp`, `sqrt` or a `complex` cast rather
+    /// than through `real`, `imag`, `abs` or `arg`, which read one as a real.
+    pub(crate) fn is_complex(&self) -> bool {
+        with_stack(|| match self {
+            Expr::Complex(_) => true,
+            Expr::Negate(inner) => inner.is_complex(),
+            Expr::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow,
+                left,
+                right,
+            } => left.is_complex() || right.is_complex(),
+            Expr::Call(call) if matches!(call.name, "exp" | "sqrt") => {
+                call.args.iter().any(Expr::is_complex)
+            }
+            Expr::Cast(cast) => cast.ty == CastType::Complex,
+            _ => false,
         })
     }
 
@@ -365,6 +420,8 @@ impl fmt::Display for Expr<'_> {
             Expr::Number(ClassicalValue::Int(value)) => write!(f, "{value}"),
             Expr::Number(ClassicalValue::Float(value)) => write!(f, "{value}"),
             Expr::Number(ClassicalValue::Bool(value)) => write!(f, "{value}"),
+            Expr::Complex(value) if value.re == 0.0 => write!(f, "{}im", value.im),
+            Expr::Complex(value) => write!(f, "{}{:+}im", value.re, value.im),
             Expr::Duration(duration) if duration.dt == 0.0 => write!(f, "{}ns", duration.ns),
             Expr::Duration(duration) => write!(f, "{}dt", duration.dt),
             Expr::Ident(name) => f.write_str(name),
@@ -412,6 +469,16 @@ impl fmt::Display for Expr<'_> {
                 }
                 write!(f, "({})", cast.value)
             }
+            Expr::Range(range) => write!(f, "{range}"),
+            Expr::Concat(parts) => {
+                for (at, part) in parts.iter().enumerate() {
+                    if at > 0 {
+                        f.write_str(" ++ ")?;
+                    }
+                    grouped(f, part)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -421,6 +488,7 @@ impl fmt::Display for Expr<'_> {
 fn grouped(f: &mut fmt::Formatter<'_>, expr: &Expr<'_>) -> fmt::Result {
     match expr {
         Expr::Binary { .. } => write!(f, "({expr})"),
+        Expr::Complex(value) if value.re != 0.0 => write!(f, "({expr})"),
         _ => write!(f, "{expr}"),
     }
 }
@@ -570,6 +638,12 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
                 1,
             ))
         }
+        Kind::Imaginary => {
+            let token = stream.advance();
+            let digits = token.text.trim_end_matches("im").trim_end();
+            let value = number(digits, token.line as usize)?.to_float();
+            Ok((Expr::Complex(Complex64::new(0.0, value)), 1))
+        }
         Kind::Ident => {
             let name = stream.advance().text;
             if let Some(ty) = CastType::named(name)
@@ -631,7 +705,11 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
 /// parenthesised value.
 fn cast<'a>(stream: &mut Stream<'_, 'a>, ty: CastType) -> Result<Node<'a>> {
     let mut depth = 0;
-    let width = if stream.eat(Kind::LBracket) {
+    let width = if ty == CastType::Complex && stream.eat(Kind::LBracket) {
+        let width = complex_component(stream)?;
+        stream.expect(Kind::RBracket)?;
+        width
+    } else if stream.eat(Kind::LBracket) {
         let (width, width_depth) = parse_node(stream)?;
         stream.expect(Kind::RBracket)?;
         depth = width_depth;
@@ -646,7 +724,30 @@ fn cast<'a>(stream: &mut Stream<'_, 'a>, ty: CastType) -> Result<Node<'a>> {
     deeper(stream, cast, depth.max(value_depth))
 }
 
-/// `[i, j]` or `[i][j]`, read as one flat index list.
+/// The component type inside `complex[...]`, `[` already read: `float` with an
+/// optional width, which is returned. The language gives other component
+/// types no portable meaning, so they are rejected.
+pub(crate) fn complex_component<'a>(stream: &mut Stream<'_, 'a>) -> Result<Option<Expr<'a>>> {
+    if !stream.is_keyword("float") {
+        return Err(PrismError::Parse {
+            line: stream.line(),
+            message: format!(
+                "`complex` takes `float` components, got {}",
+                stream.peek().describe()
+            ),
+        });
+    }
+    stream.advance();
+    if !stream.eat(Kind::LBracket) {
+        return Ok(None);
+    }
+    let width = parse(stream)?;
+    stream.expect(Kind::RBracket)?;
+    Ok(Some(width))
+}
+
+/// `[i, j]` or `[i][j]`, read as one flat index list. An index written
+/// `start:stop` or `start:step:stop` reads as an [`Expr::Range`].
 pub(crate) fn index_groups<'a>(stream: &mut Stream<'_, 'a>) -> Result<Vec<Expr<'a>>> {
     Ok(index_nodes(stream)?.0)
 }
@@ -656,7 +757,7 @@ fn index_nodes<'a>(stream: &mut Stream<'_, 'a>) -> Result<(Vec<Expr<'a>>, usize)
     let mut depth = 0;
     while stream.eat(Kind::LBracket) {
         loop {
-            let (index, index_depth) = parse_node(stream)?;
+            let (index, index_depth) = index_node(stream)?;
             indices.push(index);
             depth = depth.max(index_depth);
             if !stream.eat(Kind::Comma) {
@@ -666,6 +767,38 @@ fn index_nodes<'a>(stream: &mut Stream<'_, 'a>) -> Result<(Vec<Expr<'a>>, usize)
         stream.expect(Kind::RBracket)?;
     }
     Ok((indices, depth))
+}
+
+/// One index of a subscript: a value, or a range with either bound open.
+fn index_node<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
+    let bound = |stream: &mut Stream<'_, 'a>| -> Result<Option<Node<'a>>> {
+        if matches!(stream.kind(), Kind::Colon | Kind::Comma | Kind::RBracket) {
+            return Ok(None);
+        }
+        parse_node(stream).map(Some)
+    };
+    let first = bound(stream)?;
+    if !stream.eat(Kind::Colon) {
+        return first.ok_or_else(|| stream.expected("an index"));
+    }
+    let second = bound(stream)?;
+    let (step, stop) = if stream.eat(Kind::Colon) {
+        (second, bound(stream)?)
+    } else {
+        (None, second)
+    };
+    let depth = [&first, &step, &stop]
+        .into_iter()
+        .flatten()
+        .map(|(_, depth)| *depth)
+        .max()
+        .unwrap_or(0);
+    let range = Range {
+        start: first.map(|(expr, _)| expr),
+        step: step.map(|(expr, _)| expr),
+        stop: stop.map(|(expr, _)| expr),
+    };
+    deeper(stream, Expr::Range(Box::new(range)), depth)
 }
 
 fn binary<'a>(
@@ -795,6 +928,15 @@ fn evaluate(
             line,
         }),
         Expr::Number(value) => Ok(*value),
+        Expr::Complex(_) => Err(complex_where_real(expr, line)),
+        Expr::Range(_) => Err(PrismError::Parse {
+            line,
+            message: format!("the range `{expr}` stands where a value belongs"),
+        }),
+        Expr::Concat(_) => Err(PrismError::Parse {
+            line,
+            message: format!("`{expr}` joins arrays where a single value belongs"),
+        }),
         Expr::Duration(_) => Err(PrismError::Parse {
             line,
             message: format!("`{expr}` is a duration where a number belongs"),
@@ -810,6 +952,14 @@ fn evaluate(
             let value = integral("~", evaluate(inner, line, vars)?, line)?;
             dynamic::unary(UnaryOp::BitNot, value)
         }
+        Expr::Binary {
+            op: op @ (BinaryOp::Eq | BinaryOp::Ne),
+            left,
+            right,
+        } if left.is_complex() || right.is_complex() => {
+            let equal = eval_complex(left, line, vars)? == eval_complex(right, line, vars)?;
+            Ok(ClassicalValue::Bool(equal == (*op == BinaryOp::Eq)))
+        }
         Expr::Binary { op, left, right } => {
             let left = evaluate(left, line, vars)?;
             match op {
@@ -822,6 +972,28 @@ fn evaluate(
             }
             arithmetic(*op, left, evaluate(right, line, vars)?, line)
         }
+        Expr::Call(call)
+            if matches!(call.name, "real" | "imag" | "abs" | "arg")
+                && call.args.iter().any(Expr::is_complex) =>
+        {
+            let [arg] = call.args.as_slice() else {
+                return Err(PrismError::Parse {
+                    line,
+                    message: format!(
+                        "`{}` takes 1 argument(s), got {}",
+                        call.name,
+                        call.args.len()
+                    ),
+                });
+            };
+            let value = eval_complex(arg, line, vars)?;
+            Ok(ClassicalValue::Float(match call.name {
+                "real" => value.re,
+                "imag" => value.im,
+                "abs" => value.norm(),
+                _ => value.arg(),
+            }))
+        }
         Expr::Call(call) => {
             let values = call
                 .args
@@ -830,6 +1002,13 @@ fn evaluate(
                 .collect::<Result<Vec<_>>>()?;
             apply(call.name, &values, line)
         }
+        Expr::Cast(cast) if cast.ty == CastType::Complex => Err(complex_where_real(expr, line)),
+        Expr::Cast(cast) if cast.value.is_complex() => Err(PrismError::Parse {
+            line,
+            message: format!(
+                "`{expr}` casts a complex value; read it with `real`, `imag`, `abs` or `arg` first"
+            ),
+        }),
         Expr::Cast(cast) => {
             let width = match &cast.width {
                 Some(width) => Some(cast.ty.width(evaluate(width, line, vars)?, line)?),
@@ -838,6 +1017,109 @@ fn evaluate(
             cast.ty
                 .convert(width, evaluate(&cast.value, line, vars)?, line)
         }
+    })
+}
+
+fn complex_where_real(expr: &Expr, line: usize) -> PrismError {
+    PrismError::Parse {
+        line,
+        message: format!(
+            "`{expr}` is a complex value where a real one belongs; read it with `real`, \
+             `imag`, `abs` or `arg`"
+        ),
+    }
+}
+
+/// Fold an expression to a complex value, resolving real names against `vars`.
+/// A real subexpression folds as [`eval`] folds it and is promoted, and `**`
+/// takes the principal value.
+pub(crate) fn eval_complex(
+    expr: &Expr,
+    line: usize,
+    vars: Option<&HashMap<&str, ClassicalValue>>,
+) -> Result<Complex64> {
+    let value = complex_value(expr, line, vars)?;
+    if !value.is_finite() {
+        return Err(PrismError::Parse {
+            line,
+            message: format!("the expression evaluates to {value}, which is not finite"),
+        });
+    }
+    Ok(value)
+}
+
+fn complex_value(
+    expr: &Expr,
+    line: usize,
+    vars: Option<&HashMap<&str, ClassicalValue>>,
+) -> Result<Complex64> {
+    with_stack(|| {
+        if !expr.is_complex() {
+            return Ok(Complex64::new(evaluate(expr, line, vars)?.to_float(), 0.0));
+        }
+        let zero = Complex64::new(0.0, 0.0);
+        Ok(match expr {
+            Expr::Complex(value) => *value,
+            Expr::Negate(inner) => -complex_value(inner, line, vars)?,
+            Expr::Binary { op, left, right } => {
+                let left = complex_value(left, line, vars)?;
+                let right = complex_value(right, line, vars)?;
+                match op {
+                    BinaryOp::Add => left + right,
+                    BinaryOp::Sub => left - right,
+                    BinaryOp::Mul => left * right,
+                    BinaryOp::Div if right == zero => {
+                        return Err(PrismError::Parse {
+                            line,
+                            message: "division by zero".into(),
+                        });
+                    }
+                    BinaryOp::Div => left / right,
+                    BinaryOp::Pow if left == zero && right == zero => Complex64::new(1.0, 0.0),
+                    BinaryOp::Pow if left == zero && right.re > 0.0 => zero,
+                    BinaryOp::Pow if left == zero => {
+                        return Err(PrismError::Parse {
+                            line,
+                            message: format!("`0 ** ({right})` has no value"),
+                        });
+                    }
+                    BinaryOp::Pow => left.powc(right),
+                    _ => return Err(complex_where_real(expr, line)),
+                }
+            }
+            Expr::Call(call) => {
+                let [arg] = call.args.as_slice() else {
+                    return Err(PrismError::Parse {
+                        line,
+                        message: format!(
+                            "`{}` takes 1 argument(s), got {}",
+                            call.name,
+                            call.args.len()
+                        ),
+                    });
+                };
+                let value = complex_value(arg, line, vars)?;
+                if call.name == "exp" {
+                    value.exp()
+                } else {
+                    value.sqrt()
+                }
+            }
+            Expr::Cast(cast) => {
+                let value = complex_value(&cast.value, line, vars)?;
+                match &cast.width {
+                    Some(width) => {
+                        let width = cast.ty.width(evaluate(width, line, vars)?, line)?;
+                        Complex64::new(
+                            dynamic::real(value.re, width),
+                            dynamic::real(value.im, width),
+                        )
+                    }
+                    None => value,
+                }
+            }
+            _ => return Err(complex_where_real(expr, line)),
+        })
     })
 }
 
@@ -921,7 +1203,7 @@ fn integral(op: &str, value: ClassicalValue, line: usize) -> Result<ClassicalVal
 /// True when the expression reads a duration: a literal, or a name `times` holds.
 pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
     with_stack(|| match expr {
-        Expr::Number(_) | Expr::Runtime(_) => false,
+        Expr::Number(_) | Expr::Complex(_) | Expr::Runtime(_) => false,
         Expr::Duration(_) => true,
         Expr::Ident(name) => times.contains_key(name),
         Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => is_timed(inner, times),
@@ -929,6 +1211,8 @@ pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
         Expr::Call(call) => call.args.iter().any(|arg| is_timed(arg, times)),
         Expr::Element(element) => element.indices.iter().any(|index| is_timed(index, times)),
         Expr::Cast(cast) => is_timed(&cast.value, times),
+        Expr::Range(range) => range.bounds().any(|bound| is_timed(bound, times)),
+        Expr::Concat(parts) => parts.iter().any(|part| is_timed(part, times)),
     })
 }
 
@@ -979,6 +1263,11 @@ pub(crate) fn eval_timed(
             message: format!("`{expr}` casts a duration to `{}`", cast.ty.spelling()),
         }),
         Expr::Number(value) => Ok(Timed::Number(value.to_float())),
+        Expr::Complex(_) => Err(complex_where_real(expr, line)),
+        Expr::Range(_) | Expr::Concat(_) => Err(PrismError::Parse {
+            line,
+            message: format!("`{expr}` stands where a duration belongs"),
+        }),
         Expr::Runtime(_) => Err(PrismError::UnsupportedConstruct {
             construct: "a runtime value in a duration expression".to_string(),
             line,
@@ -1129,6 +1418,12 @@ fn apply(name: &str, args: &[ClassicalValue], line: usize) -> Result<ClassicalVa
             arity(1)?;
             return popcount(args[0], line);
         }
+        "sizeof" => {
+            return Err(PrismError::Parse {
+                line,
+                message: "`sizeof` takes a declared array".into(),
+            });
+        }
         _ => arity(1)?,
     }
     let arg = args[0].to_float();
@@ -1146,6 +1441,9 @@ fn apply(name: &str, args: &[ClassicalValue], line: usize) -> Result<ClassicalVa
         "abs" => arg.abs(),
         "ceiling" | "ceil" => arg.ceil(),
         "floor" => arg.floor(),
+        "real" => arg,
+        "imag" => 0.0,
+        "arg" => 0f64.atan2(arg),
         _ => {
             return Err(PrismError::Parse {
                 line,

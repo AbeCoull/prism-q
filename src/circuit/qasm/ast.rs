@@ -144,6 +144,8 @@ pub(crate) enum StmtKind<'a> {
 pub(crate) struct ArrayDecl<'a> {
     pub constant: bool,
     pub ty: &'a str,
+    /// `n` in `array[int[n], ...]`.
+    pub width: Option<Expr<'a>>,
     pub dims: Vec<Expr<'a>>,
     pub name: &'a str,
     pub init: Option<ArrayInit<'a>>,
@@ -334,19 +336,7 @@ impl fmt::Display for Index<'_> {
                 }
                 f.write_str("}")
             }
-            Index::Range(range) => {
-                if let Some(start) = &range.start {
-                    write!(f, "{start}")?;
-                }
-                f.write_str(":")?;
-                if let Some(step) = &range.step {
-                    write!(f, "{step}:")?;
-                }
-                match &range.stop {
-                    Some(stop) => write!(f, "{stop}"),
-                    None => Ok(()),
-                }
-            }
+            Index::Range(range) => write!(f, "{range}"),
         }
     }
 }
@@ -356,6 +346,28 @@ pub(crate) struct Range<'a> {
     pub start: Option<Expr<'a>>,
     pub step: Option<Expr<'a>>,
     pub stop: Option<Expr<'a>>,
+}
+
+impl<'a> Range<'a> {
+    pub(crate) fn bounds(&self) -> impl Iterator<Item = &Expr<'a>> {
+        [&self.start, &self.step, &self.stop].into_iter().flatten()
+    }
+}
+
+impl fmt::Display for Range<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(start) = &self.start {
+            write!(f, "{start}")?;
+        }
+        f.write_str(":")?;
+        if let Some(step) = &self.step {
+            write!(f, "{step}:")?;
+        }
+        match &self.stop {
+            Some(stop) => write!(f, "{stop}"),
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -423,4 +435,21 @@ pub(crate) enum DefParam<'a> {
         name: &'a str,
         width: Option<Expr<'a>>,
     },
+    /// `readonly array[int[8], 2, 3] a` or `mutable array[float, #dim = 2] a`,
+    /// passed by reference.
+    Array {
+        name: &'a str,
+        mutable: bool,
+        ty: &'a str,
+        width: Option<Expr<'a>>,
+        shape: ArrayShape<'a>,
+    },
+}
+
+/// The dimensions an array parameter declares: one size each, or only how many.
+#[derive(Clone, Debug)]
+pub(crate) enum ArrayShape<'a> {
+    Sized(Vec<Expr<'a>>),
+    /// `#dim = n`.
+    Rank(Expr<'a>),
 }

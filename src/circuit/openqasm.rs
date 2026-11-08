@@ -26,7 +26,10 @@
 //! | Cast | `int[8](x)` `uint[2](c)` `bool(c)` `angle[3](t)` | Converts to the named scalar type; `bit[n](x)` reads as a `uint[n]` |
 //! | Integer bit read | `a[i]` on `uint[4] a` | One bit of the integer; a negative index counts from the top bit |
 //! | Expression statement | `a == 2;` | Evaluated and discarded |
-//! | Classical array | `array[int, 2, 2] a = {{1, 2}, {3, 4}};` `a[0, 1] = 5;` `h q[a[1][0]];` | `int`, `uint`, `float`, `angle` or `bool` elements, any number of dimensions, folded at parse time like a scalar; a `def` reads only `const` arrays |
+//! | Classical array | `array[int, 2, 2] a = {{1, 2}, {3, 4}};` `a[0, 1] = 5;` `h q[a[1][0]];` | `int`, `uint`, `float`, `angle` or `bool` elements, any number of dimensions, folded at parse time like a scalar; a `def` reads `const` arrays and its array parameters |
+//! | Array slice | `b = a[1:2];` `a[0] = row;` `c = a ++ b;` `sizeof(a, 1)` | A range keeps its dimension and an index drops one; shapes must match on assignment; `++` joins along the first dimension |
+//! | Array parameter | `def f(readonly array[int[8], 2, 3] a)` `def g(mutable array[float, #dim = 1] b)` | Passed by reference; a `mutable` parameter writes back to the caller's array or slice |
+//! | Complex | `complex[float[64]] z = 1.0 + 2.0im;` `rz(arg(z)) q;` | Folded at parse time; `+ - * / **`, `==`, `exp`, `sqrt`; `real`, `imag`, `abs` and `arg` read one as a real |
 //! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number |
 //! | Delay | `delay[d] q[0];` `delay[s];` | The identity on its qubits, all of them when none is named; emits nothing |
 //! | No-op | `nop q[0];` | Names its qubits and emits nothing |
@@ -81,7 +84,7 @@
 //!   control-flow graph
 //! - a measurement-dependent scalar `def` result or early `return` under
 //!   `parse`; `parse_dynamic` lowers these into the graph
-//! - a dropped `bit` result, a `complex` result, a runtime duration in a
+//! - a dropped `bit` result, a runtime `complex` value, a runtime duration in a
 //!   subroutine, a fixed-width runtime angle, and modifiers on a runtime call
 //! - a `def` body that measures into anything but the bit it returns, or
 //!   declares a `bit` it does not return
@@ -98,7 +101,8 @@
 //! - a condition or `switch` target over classical bits that no bit or
 //!   register guard spells, such as `c[0] && c[1]`, which [`parse_dynamic`]
 //!   evaluates at runtime
-//! - an `array` of `bit`, `duration` or any other non-numeric element type
+//! - an `array` of `bit`, `complex`, `duration` or any other non-numeric element
+//!   type, and a compound assignment to an array slice
 //! - `durationof`, a ratio over a `stretch`, and a ratio mixing `dt` with SI
 //!   units: nothing here sizes a stretch or knows a backend's sample period
 //! - `input` of any type but `float` and `angle`, and `output` of any type but
@@ -367,13 +371,14 @@ enum ClassicalType {
     /// `angle[n]`, a multiple of `2 pi / 2^n` in `[0, 2 pi)`. With no width the
     /// value wraps into that range unrounded.
     Angle(Option<u32>),
+    /// `complex[float[n]]`, each component held as a `float[n]` holds it. The
+    /// value sits in `Parser::complex`, since a scalar slot holds one real.
+    Complex(u32),
     Duration,
     Stretch,
 }
 
 impl ClassicalType {
-    const FLOAT: ClassicalType = ClassicalType::Float(64);
-
     /// `value` as this type holds it: truncation toward zero and wraparound for
     /// the integers, truthiness for `bool`, and for an `angle[n]` the nearest
     /// multiple of `2 pi / 2^n`, ties to even, taken modulo `2 pi`.
@@ -387,7 +392,7 @@ impl ClassicalType {
             ClassicalType::Angle(width) => {
                 ClassicalValue::Float(syntax_expr::angle(value.to_float(), width))
             }
-            ClassicalType::Duration | ClassicalType::Stretch => value,
+            ClassicalType::Complex(_) | ClassicalType::Duration | ClassicalType::Stretch => value,
         }
     }
 }
@@ -402,6 +407,7 @@ struct ClassicalDecl {
 #[derive(Clone, Copy)]
 enum ConstValue {
     Number(ClassicalValue),
+    Complex(Complex64),
     Duration(Timed),
 }
 
@@ -485,6 +491,9 @@ pub(crate) struct Parser<'a> {
     /// `duration` and `stretch` values, which no numeric expression reads
     /// directly.
     durations: HashMap<&'a str, Timed>,
+    /// `complex` values, which an expression reads once they are substituted
+    /// into it.
+    complex: HashMap<&'a str, Complex64>,
     arrays: HashMap<&'a str, Rc<ClassicalArray>>,
     /// Names added to `classical` and `arrays`, oldest first. A scope opens at a
     /// length of this log and closes by dropping the names past it.
@@ -613,6 +622,7 @@ impl<'a> Parser<'a> {
             params: HashMap::new(),
             classical: Rc::default(),
             durations: HashMap::new(),
+            complex: HashMap::new(),
             arrays: HashMap::new(),
             declared: Vec::new(),
             def_result: None,

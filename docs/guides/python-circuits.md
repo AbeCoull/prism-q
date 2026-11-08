@@ -358,6 +358,29 @@ counts = simulate_program(program).seed(42).sample_counts(1000).counts()
 assert counts == {"0": 1000}
 ```
 
+An OpenQASM `extern` calls a Python function. Pass a mapping of callables as `externs=`
+to `parse_qasm`, `parse_qasm_parametric` or `parse_qasm_dynamic`; each receives bool, int
+or float arguments and returns one of those. A call over a measured bit runs during the
+shot, taking the GIL:
+
+```python
+program = parse_qasm_dynamic(
+    """
+    OPENQASM 3.0;
+    extern flip(bit) -> bool;
+    qubit[2] q;
+    bit[2] c;
+    h q[0];
+    c[0] = measure q[0];
+    if (flip(c[0])) x q[1];
+    c[1] = measure q[1];
+    """,
+    externs={"flip": lambda bit: not bit},
+)
+shots = simulate_program(program).seed(42).shots(100).shots
+assert (shots[:, 1] != shots[:, 0]).all()
+```
+
 `DynamicProgramBuilder` builds the same structure directly. Conditions, assigned
 values, and rotation angles are OpenQASM expression strings over declared variables and
 classical bits, `c[i]` for one bit and `c` for the

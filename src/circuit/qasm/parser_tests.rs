@@ -292,7 +292,7 @@ fn definitions_keep_their_signatures() {
 
 #[test]
 fn unimplemented_keywords_are_rejected_by_name() {
-    for keyword in ["extern", "opaque", "while"] {
+    for keyword in ["opaque", "while"] {
         let source = format!("{keyword} x;");
         match error(&source) {
             PrismError::UnsupportedConstruct { construct, .. } => {
@@ -301,6 +301,28 @@ fn unimplemented_keywords_are_rejected_by_name() {
             other => panic!("`{source}` gave {other:?}"),
         }
     }
+}
+
+#[test]
+fn an_extern_declaration_keeps_its_types() {
+    match one("extern f(int[8], float) -> bool;") {
+        StmtKind::ExternDecl {
+            name,
+            params,
+            result,
+        } => {
+            assert_eq!(name, "f");
+            let types: Vec<&str> = params.iter().map(|param| param.ty).collect();
+            assert_eq!(types, ["int", "float"]);
+            assert!(params[0].width.is_some() && params[1].width.is_none());
+            assert_eq!(result.map(|result| result.ty), Some("bool"));
+        }
+        other => panic!("got {other:?}"),
+    }
+    assert!(matches!(
+        error("extern f(readonly array[int[8], 2]) -> int;"),
+        PrismError::UnsupportedConstruct { .. }
+    ));
 }
 
 #[test]

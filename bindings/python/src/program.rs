@@ -4,13 +4,13 @@
 use std::collections::BTreeMap;
 
 use prism_q::circuit::dynamic::{ClassicalExpr, ClassicalType, ClassicalValue, RotationKind};
-use prism_q::circuit::openqasm;
+use prism_q::circuit::openqasm::{self, Externs};
 use prism_q::{
     BackendKind, CountsResult, DynamicProgram, DynamicProgramBuilder, ShotsResult,
     simulate_program as core_simulate_program,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyTuple};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
@@ -402,21 +402,74 @@ impl PyProgramSimulation {
 /// values into a `DynamicProgram`.
 ///
 /// `inputs` maps `input` names to bool, int or float values. A program holds no
-/// slot to bind, so every `input` it declares needs one.
+/// slot to bind, so every `input` it declares needs one. `externs` maps `extern`
+/// names to callables; a call over a measured value runs once per evaluation in a
+/// shot, taking the GIL each time.
 #[pyfunction]
-#[pyo3(signature = (source, inputs = None))]
+#[pyo3(signature = (source, inputs = None, externs = None))]
 pub fn parse_qasm_dynamic(
     source: &str,
     inputs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
+    externs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
 ) -> PyPrismResult<PyDynamicProgram> {
     let inputs = input_values(inputs)?;
     let inputs: Vec<(&str, ClassicalValue)> = inputs
         .iter()
         .map(|(name, value)| (name.as_str(), *value))
         .collect();
-    Ok(PyDynamicProgram(openqasm::parse_dynamic_with_inputs(
-        source, &inputs,
-    )?))
+    let program = match extern_functions(externs)? {
+        Some(externs) => openqasm::parse_dynamic_with_externs(source, &inputs, &externs)?,
+        None => openqasm::parse_dynamic_with_inputs(source, &inputs)?,
+    };
+    Ok(PyDynamicProgram(program))
+}
+
+/// The callables an OpenQASM `externs` mapping holds, each called with bool,
+/// int or float arguments and expected to return one of those; `None` when no
+/// mapping was passed.
+pub(crate) fn extern_functions(
+    externs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
+) -> PyPrismResult<Option<Externs>> {
+    let Some(externs) = externs else {
+        return Ok(None);
+    };
+    let mut functions = Externs::new();
+    for (name, function) in externs {
+        if !function.is_callable() {
+            return Err(invalid(format!("extern `{name}` takes a callable")));
+        }
+        let function = function.unbind();
+        let label = name.clone();
+        functions.register(name, move |args| {
+            Python::attach(|py| {
+                let failed = |message: String| prism_q::PrismError::InvalidParameter { message };
+                let args = args
+                    .iter()
+                    .map(|value| {
+                        Ok(match *value {
+                            ClassicalValue::Bool(flag) => {
+                                PyBool::new(py, flag).to_owned().into_any()
+                            }
+                            ClassicalValue::Int(int) => int.into_pyobject(py)?.into_any(),
+                            ClassicalValue::Float(float) => float.into_pyobject(py)?.into_any(),
+                        })
+                    })
+                    .collect::<PyResult<Vec<_>>>()
+                    .and_then(|args| PyTuple::new(py, args))
+                    .map_err(|err| failed(format!("extern `{label}`: {err}")))?;
+                let value = function
+                    .bind(py)
+                    .call1(args)
+                    .map_err(|err| failed(format!("extern `{label}` raised {err}")))?;
+                constant(&value).map_err(|_| {
+                    failed(format!(
+                        "extern `{label}` returned {value}, which is not a bool, int or float"
+                    ))
+                })
+            })
+        });
+    }
+    Ok(Some(functions))
 }
 
 /// The values an OpenQASM `inputs` mapping holds, in name order.

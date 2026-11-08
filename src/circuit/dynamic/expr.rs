@@ -1,6 +1,12 @@
 //! Runtime classical values, variable types, and the expressions a dynamic
 //! program evaluates once per shot.
 
+use std::fmt;
+use std::panic::{RefUnwindSafe, UnwindSafe};
+use std::sync::Arc;
+
+use smallvec::SmallVec;
+
 use crate::error::{PrismError, Result};
 
 /// Index of a runtime classical variable in a [`DynamicProgram`](super::DynamicProgram).
@@ -107,7 +113,8 @@ pub enum ClassicalValue {
 }
 
 impl ClassicalValue {
-    pub(crate) fn truthy(self) -> bool {
+    /// A nonzero number or `true`.
+    pub fn truthy(self) -> bool {
         match self {
             ClassicalValue::Bool(value) => value,
             ClassicalValue::Int(value) => value != 0,
@@ -115,7 +122,8 @@ impl ClassicalValue {
         }
     }
 
-    pub(crate) fn to_float(self) -> f64 {
+    /// `true` reads as `1.0`.
+    pub fn to_float(self) -> f64 {
         match self {
             ClassicalValue::Bool(value) => f64::from(u8::from(value)),
             ClassicalValue::Int(value) => value as f64,
@@ -124,7 +132,7 @@ impl ClassicalValue {
     }
 
     /// Truncated toward zero; a NaN reads as zero and an infinity saturates.
-    pub(crate) fn to_int(self) -> i128 {
+    pub fn to_int(self) -> i128 {
         match self {
             ClassicalValue::Bool(value) => i128::from(value),
             ClassicalValue::Int(value) => value,
@@ -242,6 +250,106 @@ pub enum ClassicalExpr {
         ty: ClassicalType,
         operand: Box<ClassicalExpr>,
     },
+    /// A call to an OpenQASM `extern` function, made each time the expression
+    /// is evaluated.
+    Extern(Box<ExternCall>),
+}
+
+/// A caller's function bound to an `extern` declaration.
+pub(crate) type Callback = Arc<dyn Fn(&[ClassicalValue]) -> Result<ClassicalValue> + Send + Sync>;
+
+/// An `extern` declaration's signature and the function registered for it.
+pub(crate) struct ExternFunction {
+    pub(crate) name: String,
+    pub(crate) params: Vec<ClassicalType>,
+    pub(crate) result: ClassicalType,
+    pub(crate) callback: Callback,
+}
+
+// Keeps `ClassicalExpr`, and every program holding one, unwind safe. A
+// panicking callback unwinds through an evaluation that holds no state across
+// the call.
+impl UnwindSafe for ExternFunction {}
+impl RefUnwindSafe for ExternFunction {}
+
+impl ExternFunction {
+    /// Call with `args` stored through the declared parameter types, and return
+    /// the result stored through the declared result type. An integer result
+    /// for a `float` or `angle` is promoted first.
+    pub(crate) fn call(&self, args: &[ClassicalValue]) -> Result<ClassicalValue> {
+        let args: SmallVec<[ClassicalValue; 4]> = self
+            .params
+            .iter()
+            .zip(args)
+            .map(|(ty, value)| ty.store(*value))
+            .collect();
+        let value = match (self.callback)(&args)? {
+            ClassicalValue::Int(int) if self.result.kind() == ValueKind::Float => {
+                ClassicalValue::Float(int as f64)
+            }
+            value => value,
+        };
+        if value.kind() != self.result.kind() {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "extern `{}` returned {value:?}, which is not the declared `{}`",
+                    self.name,
+                    spelling(self.result)
+                ),
+            });
+        }
+        Ok(self.result.store(value))
+    }
+}
+
+/// The OpenQASM spelling of a runtime type.
+fn spelling(ty: ClassicalType) -> String {
+    match ty {
+        ClassicalType::Bool => "bool".to_string(),
+        ClassicalType::Int { width } => format!("int[{width}]"),
+        ClassicalType::Uint { width } => format!("uint[{width}]"),
+        ClassicalType::Float { width } => format!("float[{width}]"),
+        ClassicalType::Angle => "angle".to_string(),
+    }
+}
+
+/// A runtime call to a registered `extern` function. Each argument is stored
+/// through its declared parameter type before the call, and the result is
+/// checked against the declared result type and stored through it.
+#[derive(Clone)]
+pub struct ExternCall {
+    function: Arc<ExternFunction>,
+    args: Vec<ClassicalExpr>,
+}
+
+impl ExternCall {
+    pub(crate) fn new(function: Arc<ExternFunction>, args: Vec<ClassicalExpr>) -> Self {
+        Self { function, args }
+    }
+
+    /// The name the `extern` declaration gave the function.
+    pub fn name(&self) -> &str {
+        &self.function.name
+    }
+
+    pub fn args(&self) -> &[ClassicalExpr] {
+        &self.args
+    }
+}
+
+impl PartialEq for ExternCall {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.function, &other.function) && self.args == other.args
+    }
+}
+
+impl fmt::Debug for ExternCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExternCall")
+            .field("name", &self.function.name)
+            .field("args", &self.args)
+            .finish()
+    }
 }
 
 impl ClassicalExpr {
@@ -340,6 +448,12 @@ impl ClassicalExpr {
                 operand.check(variables, num_classical_bits)?;
                 Ok(ty.kind())
             }
+            ClassicalExpr::Extern(call) => {
+                for arg in &call.args {
+                    arg.check(variables, num_classical_bits)?;
+                }
+                Ok(call.function.result.kind())
+            }
         }
     }
 
@@ -369,6 +483,14 @@ impl ClassicalExpr {
                 binary(*op, left, rhs.eval(bits, vars)?)?
             }
             ClassicalExpr::Cast { ty, operand } => ty.store(operand.eval(bits, vars)?),
+            ClassicalExpr::Extern(call) => {
+                let args = call
+                    .args
+                    .iter()
+                    .map(|arg| arg.eval(bits, vars))
+                    .collect::<Result<SmallVec<[ClassicalValue; 4]>>>()?;
+                call.function.call(&args)?
+            }
         })
     }
 }

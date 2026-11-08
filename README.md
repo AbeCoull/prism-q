@@ -104,15 +104,6 @@ Rayon threads from 15 qubits. Timings are on
 [Comparative Measurements](https://abecoull.github.io/prism-q/comparison.html) is
 committed in [`comparison/`](comparison/README.md).
 
-<!-- comparison-preview:start -->
-
-[![Comparator time over PRISM-Q time per workload](docs/comparison/figures/ratio-heatmap.svg)](docs/comparison/figures/ratio-heatmap.svg)
-
-Time ratios for 64 validated comparisons against 8 comparator configurations on one
-desktop: [comparison pages](https://abecoull.github.io/prism-q/comparison.html).
-
-<!-- comparison-preview:end -->
-
 ## Documentation
 
 | Task | Page |

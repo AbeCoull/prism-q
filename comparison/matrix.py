@@ -432,8 +432,6 @@ def cmd_report(args: argparse.Namespace) -> int:
     figures.write_all(args.results, fig_dir)
     if args.docs:
         pages.write(args.results, args.docs, args.landing)
-    if args.readme:
-        pages.update_readme(args.results, args.readme)
     return 0
 
 
@@ -491,7 +489,6 @@ def main() -> int:
     p.add_argument("results")
     p.add_argument("--docs", default=None, help="documentation directory for the report pages")
     p.add_argument("--landing", default=None, help="landing page path to regenerate")
-    p.add_argument("--readme", default=None, help="README whose comparison preview block to regenerate")
     p.set_defaults(func=cmd_report)
 
     args = parser.parse_args()

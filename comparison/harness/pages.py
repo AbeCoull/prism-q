@@ -7,7 +7,6 @@ reproduces them byte for byte. The pages report numbers and attach no verdict.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import textwrap
@@ -346,43 +345,6 @@ def landing_page(results_dir: str, manifest: dict, records: list[dict], derived:
         "- [Probability-vector run](./comparison/probability-vector.md): the 0.33.0 comparison.",
     ]
     return "\n".join(_wrap(lines)).rstrip() + "\n"
-
-
-README_START = "<!-- comparison-preview:start -->"
-README_END = "<!-- comparison-preview:end -->"
-
-
-def readme_block(manifest: dict, derived: dict) -> str:
-    """Counts only, no simulator names: the names and the numbers live on the linked pages."""
-    rows = [r for r in derived["ratios"] if r["group"] == "headline" and r["validated"]]
-    comparators = len({r["comparator"] for r in rows})
-    lines = [
-        README_START,
-        "",
-        "[![Comparator time over PRISM-Q time per workload](docs/comparison/figures/ratio-heatmap.svg)]"
-        "(docs/comparison/figures/ratio-heatmap.svg)",
-        "",
-        f"Time ratios for {len(rows)} validated comparisons against {comparators} comparator configurations "
-        "on one desktop: [comparison pages](https://abecoull.github.io/prism-q/comparison.html).",
-        "",
-        README_END,
-    ]
-    return "\n".join(_wrap(lines))
-
-
-def update_readme(results_dir: str, readme: str) -> None:
-    manifest, _ = aggregate.load(results_dir)
-    with open(os.path.join(results_dir, "derived.json"), encoding="utf-8") as handle:
-        derived = json.load(handle)
-    with open(readme, encoding="utf-8") as handle:
-        text = handle.read()
-    start, end = text.find(README_START), text.find(README_END)
-    if start < 0 or end < 0:
-        raise SystemExit(f"{readme} has no {README_START} ... {README_END} block")
-    text = text[:start] + readme_block(manifest, derived) + text[end + len(README_END) :]
-    with open(readme, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
-    print(f"updated the comparison preview in {readme}")
 
 
 def write(results_dir: str, docs_dir: str, landing: str | None) -> None:

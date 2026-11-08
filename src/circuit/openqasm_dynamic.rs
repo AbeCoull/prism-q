@@ -340,7 +340,7 @@ fn lower(
                 };
                 Parser::check_extern_arity(&function, call.args.len(), line)?;
                 let args = call.args.iter().map(recurse).collect::<Result<_>>()?;
-                ClassicalExpr::Extern(Box::new(ExternCall::new(function, args)))
+                ClassicalExpr::Extern(Box::new(ExternCall::bound(function, args)))
             }
             Expr::Cast(cast) if cast.ty == syntax_expr::CastType::Complex => {
                 return Err(runtime_complex(line));

@@ -1,7 +1,8 @@
 //! Dynamic programs: a control-flow graph of circuits with runtime classical
 //! variables, built here or parsed from OpenQASM, and run once per shot.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use prism_q::circuit::dynamic::{ClassicalExpr, ClassicalType, ClassicalValue, RotationKind};
 use prism_q::circuit::openqasm::{self, Externs};
@@ -14,7 +15,7 @@ use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyTuple};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
-use crate::error::{PyPrismResult, invalid};
+use crate::error::{PyPrismError, PyPrismResult, invalid};
 use crate::gate::PyGate;
 use crate::noise::PyNoiseBuilder;
 use crate::sim::{DEFAULT_SEED, PyCountsResult, PyShotsResult};
@@ -27,7 +28,7 @@ use crate::sim::{DEFAULT_SEED, PyCountsResult, PyShotsResult};
     frozen,
     skip_from_py_object
 )]
-pub struct PyDynamicProgram(DynamicProgram);
+pub struct PyDynamicProgram(DynamicProgram, Raised);
 
 #[pymethods]
 impl PyDynamicProgram {
@@ -314,7 +315,7 @@ impl PyDynamicProgramBuilder {
             .inner
             .take()
             .ok_or_else(|| invalid("the builder has already built its program"))?;
-        Ok(PyDynamicProgram(builder.build()?))
+        Ok(PyDynamicProgram(builder.build()?, Raised::default()))
     }
 }
 
@@ -336,13 +337,15 @@ impl PyProgramSimulation {
         py: Python<'_>,
         terminal: impl FnOnce(prism_q::SimulateProgram<'_, prism_q::Seeded>) -> prism_q::Result<T>
         + Send,
-    ) -> PyPrismResult<T> {
-        let program = &self.program.get().0;
+    ) -> PyResult<T> {
+        let program = self.program.get();
+        let raised = &program.1;
+        let program = &program.0;
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let max_steps = self.max_steps;
         let rules = self.noise.as_ref().map(|rules| rules.borrow(py).0.clone());
-        Ok(py.detach(|| {
+        py.detach(|| {
             let mut sim = core_simulate_program(program);
             if let Some(k) = kind {
                 sim = sim.backend(k);
@@ -354,7 +357,8 @@ impl PyProgramSimulation {
                 sim = sim.noise(rules);
             }
             terminal(sim.seed(seed))
-        })?)
+        })
+        .map_err(|err| raised.chain(err.into()))
     }
 }
 
@@ -387,12 +391,12 @@ impl PyProgramSimulation {
         slf
     }
 
-    fn shots(&self, py: Python<'_>, num_shots: usize) -> PyPrismResult<PyShotsResult> {
+    fn shots(&self, py: Python<'_>, num_shots: usize) -> PyResult<PyShotsResult> {
         let result: ShotsResult = self.run(py, |sim| sim.shots(num_shots))?;
         Ok(PyShotsResult::from_result(result))
     }
 
-    fn sample_counts(&self, py: Python<'_>, num_shots: usize) -> PyPrismResult<PyCountsResult> {
+    fn sample_counts(&self, py: Python<'_>, num_shots: usize) -> PyResult<PyCountsResult> {
         let result: CountsResult = self.run(py, |sim| sim.sample_counts(num_shots))?;
         Ok(PyCountsResult::from_result(result))
     }
@@ -411,24 +415,61 @@ pub fn parse_qasm_dynamic(
     source: &str,
     inputs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
     externs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
-) -> PyPrismResult<PyDynamicProgram> {
+) -> PyResult<PyDynamicProgram> {
     let inputs = input_values(inputs)?;
     let inputs: Vec<(&str, ClassicalValue)> = inputs
         .iter()
         .map(|(name, value)| (name.as_str(), *value))
         .collect();
-    let program = match extern_functions(externs)? {
-        Some(externs) => openqasm::parse_dynamic_with_externs(source, &inputs, &externs)?,
-        None => openqasm::parse_dynamic_with_inputs(source, &inputs)?,
-    };
-    Ok(PyDynamicProgram(program))
+    let raised = Raised::default();
+    let program = match extern_functions(externs, &raised)? {
+        Some(externs) => openqasm::parse_dynamic_with_externs(source, &inputs, &externs),
+        None => openqasm::parse_dynamic_with_inputs(source, &inputs),
+    }
+    .map_err(|err| raised.chain(err.into()))?;
+    Ok(PyDynamicProgram(program, raised))
+}
+
+/// The exceptions `externs` callables raised, by the message of the
+/// `PrismError` each became, so the error a caller sees can chain its cause.
+#[derive(Clone, Default)]
+pub(crate) struct Raised(Arc<Mutex<HashMap<String, PyErr>>>);
+
+impl Raised {
+    fn keep(&self, message: &str, err: PyErr) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(message.to_string())
+            .or_insert(err);
+    }
+
+    /// `err` as a Python exception whose `__cause__` is the exception raised
+    /// under its message, if any; the rest are dropped.
+    pub(crate) fn chain(&self, err: PyPrismError) -> PyErr {
+        let cause = {
+            let mut raised = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let cause = match &err.0 {
+                prism_q::PrismError::InvalidParameter { message } => raised.remove(message),
+                _ => None,
+            };
+            raised.clear();
+            cause
+        };
+        let chained: PyErr = err.into();
+        if cause.is_some() {
+            Python::attach(|py| chained.set_cause(py, cause));
+        }
+        chained
+    }
 }
 
 /// The callables an OpenQASM `externs` mapping holds, each called with bool,
 /// int or float arguments and expected to return one of those; `None` when no
-/// mapping was passed.
+/// mapping was passed. An exception a callable raises is kept in `raised`.
 pub(crate) fn extern_functions(
     externs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
+    raised: &Raised,
 ) -> PyPrismResult<Option<Externs>> {
     let Some(externs) = externs else {
         return Ok(None);
@@ -440,6 +481,7 @@ pub(crate) fn extern_functions(
         }
         let function = function.unbind();
         let label = name.clone();
+        let raised = raised.clone();
         functions.register(name, move |args| {
             Python::attach(|py| {
                 let failed = |message: String| prism_q::PrismError::InvalidParameter { message };
@@ -457,10 +499,11 @@ pub(crate) fn extern_functions(
                     .collect::<PyResult<Vec<_>>>()
                     .and_then(|args| PyTuple::new(py, args))
                     .map_err(|err| failed(format!("extern `{label}`: {err}")))?;
-                let value = function
-                    .bind(py)
-                    .call1(args)
-                    .map_err(|err| failed(format!("extern `{label}` raised {err}")))?;
+                let value = function.bind(py).call1(args).map_err(|err| {
+                    let message = format!("extern `{label}` raised {err}");
+                    raised.keep(&message, err);
+                    failed(message)
+                })?;
                 constant(&value).map_err(|_| {
                     failed(format!(
                         "extern `{label}` returned {value}, which is not a bool, int or float"

@@ -16,6 +16,7 @@ use crate::error::{PyPrismResult, invalid};
 use crate::gate::PyGate;
 use crate::parameter::PyParameters;
 use crate::pickle::{Reduced, ReducedMember, reduce, reduce_member};
+use crate::program::Raised;
 use crate::sim::{Hamiltonian, parse_axis, parse_pauli_string};
 
 /// A quantum circuit. Construct via [`CircuitBuilder`], [`parse_qasm`], or one
@@ -1288,11 +1289,13 @@ impl PyCircuitBuilder {
 pub fn parse_qasm(
     source: &str,
     externs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
-) -> PyPrismResult<PyCircuit> {
-    let circuit = match crate::program::extern_functions(externs)? {
-        Some(externs) => openqasm::parse_with_externs(source, &externs)?,
-        None => openqasm::parse(source)?,
-    };
+) -> PyResult<PyCircuit> {
+    let raised = Raised::default();
+    let circuit = match crate::program::extern_functions(externs, &raised)? {
+        Some(externs) => openqasm::parse_with_externs(source, &externs),
+        None => openqasm::parse(source),
+    }
+    .map_err(|err| raised.chain(err.into()))?;
     Ok(PyCircuit(circuit))
 }
 
@@ -1307,16 +1310,18 @@ pub fn parse_qasm_parametric(
     source: &str,
     inputs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
     externs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
-) -> PyPrismResult<(PyCircuit, PyParameters)> {
+) -> PyResult<(PyCircuit, PyParameters)> {
     let inputs = crate::program::input_values(inputs)?;
     let inputs: Vec<(&str, ClassicalValue)> = inputs
         .iter()
         .map(|(name, value)| (name.as_str(), *value))
         .collect();
-    let (circuit, parameters) = match crate::program::extern_functions(externs)? {
-        Some(externs) => openqasm::parse_parametric_with_externs(source, &inputs, &externs)?,
-        None => openqasm::parse_parametric_with_inputs(source, &inputs)?,
-    };
+    let raised = Raised::default();
+    let (circuit, parameters) = match crate::program::extern_functions(externs, &raised)? {
+        Some(externs) => openqasm::parse_parametric_with_externs(source, &inputs, &externs),
+        None => openqasm::parse_parametric_with_inputs(source, &inputs),
+    }
+    .map_err(|err| raised.chain(err.into()))?;
     let parameters = PyParameters::against(parameters, &circuit);
     Ok((PyCircuit(circuit), parameters))
 }

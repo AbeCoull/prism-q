@@ -559,7 +559,8 @@ if (decode(s[0], s[1])) x q[0];
 ```
 
 Shots run on several threads, so a Rust function is `Send + Sync`; a Python callable takes
-the GIL for each call. A call nothing reads may not run, and how often a runtime call runs
+the GIL for each call, and an exception it raises becomes the `__cause__` of the
+`PrismError` the caller sees. A call nothing reads may not run, and how often a runtime call runs
 is otherwise unspecified, so a function should be pure.
 
 An entry point without `_with_externs`, and a Python parse given no `externs`, declines
@@ -572,6 +573,10 @@ an `extern` with no result type, a parameter or result of another type (`bit[n]`
 `parse` a call over a measured value. A call with the wrong number of arguments, an
 `extern` declared inside a body, and a `gate` or `def` sharing an extern's name return
 `Parse`.
+
+`ExternCall::new` builds a call for a `DynamicProgramBuilder` from a name, the parameter
+and result types, the function, and the argument expressions. `build` checks the argument
+count and the type widths.
 
 ## Dynamic programs
 
@@ -696,7 +701,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | Expression statements, `a == 2;` | Evaluated and discarded; scalar subroutine calls are inlined | See [Subroutines](#subroutines) for call limits |
 | `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. A condition over classical bits that no bit or register guard spells: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
 | `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present, or a target over classical bits that no register guard spells: `UnsupportedConstruct` |
-| `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
+| `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds may be classical variables and `def` or `extern` calls |
 | `while` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list |
 | `break`, `continue` | Parses inside `for` and `while` | Outside a loop, or at the top level of a `def` or `gate` body: `Parse`. In a `for` under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
 | `end` | Stops the program; nothing after it runs | Inside a `gate` body, called or not: `Parse`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |

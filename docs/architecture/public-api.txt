@@ -1153,6 +1153,7 @@ pub struct prism_q::circuit::dynamic::ExternCall
 impl prism_q::circuit::dynamic::ExternCall
 pub fn prism_q::circuit::dynamic::ExternCall::args(&self) -> &[prism_q::circuit::dynamic::ClassicalExpr]
 pub fn prism_q::circuit::dynamic::ExternCall::name(&self) -> &str
+pub fn prism_q::circuit::dynamic::ExternCall::new(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<prism_q::circuit::dynamic::ClassicalType>, prism_q::circuit::dynamic::ClassicalType, impl core::ops::function::Fn(&[prism_q::circuit::dynamic::ClassicalValue]) -> prism_q::error::Result<prism_q::circuit::dynamic::ClassicalValue> + core::marker::Send + core::marker::Sync + 'static, alloc::vec::Vec<prism_q::circuit::dynamic::ClassicalExpr>) -> Self
 impl core::cmp::PartialEq for prism_q::circuit::dynamic::ExternCall
 pub fn prism_q::circuit::dynamic::ExternCall::eq(&self, &Self) -> bool
 impl core::fmt::Debug for prism_q::circuit::dynamic::ExternCall

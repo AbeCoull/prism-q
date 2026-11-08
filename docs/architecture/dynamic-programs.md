@@ -171,8 +171,9 @@ tableau, other channels move to the statevector family, and a channel the chosen
 backend cannot sample is rejected before a shot starts. Blocks run unfused so each
 event stays on its instruction. The host statevector stops branching by outcome
 history, since noise makes every history its own. Shot `i` draws its noise from the
-stream a circuit trajectory gives shot `i`. Readout error flips the finished record, so
-a branch reads the bit the measurement wrote, as a guarded region does.
+stream a circuit trajectory gives shot `i`. Readout error flips a bit as a measurement
+writes it, so a branch reads the noisy bit, as a guarded region does, and a classical
+write stores its value unflipped.
 
 Leak flags and quasi-static draws belong to the shot, not the block. Each shot draws
 its quasi-static normals once before its first event, for every source any block or

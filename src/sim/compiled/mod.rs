@@ -3281,7 +3281,9 @@ pub(crate) struct DeferredCircuit {
     /// Gates on the aliases, then one terminal measurement per record in record order.
     pub(crate) circuit: Circuit,
     /// The events that fire on every shot, one slot per instruction of `circuit`, and the
-    /// source model's readout.
+    /// source model's readout on the bits no guard reads. A bit a guard reads takes its
+    /// readout error as an `X` on each alias measured into it, where the measurement
+    /// writes it, so the guard and the record both see the flip.
     pub(crate) noise: NoiseModel,
     /// Events of guarded bodies in execution order, each firing only on the shots whose
     /// guard holds.
@@ -3320,6 +3322,8 @@ struct DeferralWalk<'a> {
     deferred_measurements: Vec<(usize, usize)>,
     /// Record each classical bit last took, `None` until a measurement writes it.
     bit_records: Vec<Option<usize>>,
+    /// Readout flip rate of each bit a guard reads, applied where a measurement writes it.
+    flips_at_write: Vec<Option<f64>>,
     transformed: Circuit,
     noise: Option<&'a NoiseModel>,
     after_gate: Vec<Vec<NoiseEvent>>,
@@ -3346,6 +3350,10 @@ impl<'a> DeferralWalk<'a> {
             });
         }
 
+        let flips_at_write = match noise {
+            Some(noise) => readout_flips_at_write(circuit, noise)?,
+            None => Vec::new(),
+        };
         Ok(Self {
             num_classical_bits: circuit.num_classical_bits,
             aliases: (0..circuit.num_qubits).collect(),
@@ -3353,6 +3361,7 @@ impl<'a> DeferralWalk<'a> {
             next_qubit: circuit.num_qubits,
             deferred_measurements: Vec::new(),
             bit_records: vec![None; circuit.num_classical_bits],
+            flips_at_write,
             transformed: Circuit::new(circuit.num_qubits, circuit.num_classical_bits),
             noise,
             after_gate: Vec::new(),
@@ -3402,6 +3411,10 @@ impl<'a> DeferralWalk<'a> {
                     self.bit_records[*classical_bit] = Some(self.deferred_measurements.len());
                     self.deferred_measurements.push((alias, *classical_bit));
                     self.measured_aliases[alias] = true;
+                    if let Some(p) = self.flips_at_write.get(*classical_bit).copied().flatten() {
+                        let anchor = self.anchor();
+                        self.after_gate[anchor].push(NoiseEvent::pauli(alias, p, 0.0, 0.0));
+                    }
                 }
                 Instruction::Reset { qubit } => {
                     if *qubit >= self.aliases.len() {
@@ -3698,7 +3711,13 @@ impl<'a> DeferralWalk<'a> {
             Some(noise) => {
                 self.after_gate
                     .resize_with(self.transformed.instructions.len(), Vec::new);
-                noise.readout.clone()
+                let mut readout = noise.readout.clone();
+                for (entry, flip) in readout.iter_mut().zip(&self.flips_at_write) {
+                    if flip.is_some() {
+                        *entry = None;
+                    }
+                }
+                readout
             }
             None => Vec::new(),
         };
@@ -3711,6 +3730,35 @@ impl<'a> DeferralWalk<'a> {
             guarded: self.guarded,
         }
     }
+}
+
+/// The readout flip rate of each classical bit a guard reads, for the bits whose readout
+/// error can flip them. A measured alias only ever controls later gates, so an `X` on it
+/// flips the record and every guard reading it and leaves the rest of the state alone. That
+/// `X` fires whatever the outcome, which matches readout error only when `p01 == p10`.
+fn readout_flips_at_write(circuit: &Circuit, noise: &NoiseModel) -> Result<Vec<Option<f64>>> {
+    let read = circuit.condition_bits();
+    let mut flips = vec![None; read.len()];
+    for (bit, err) in noise.readout.iter().enumerate() {
+        let Some(err) = err.as_ref().filter(|err| !err.is_inert()) else {
+            continue;
+        };
+        if !read.get(bit).copied().unwrap_or(false) {
+            continue;
+        }
+        if err.p01 != err.p10 {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "CompiledSampler".to_string(),
+                reason: format!(
+                    "deferred noisy sampling lands readout error a guard reads as a Pauli on \
+                     the measured qubit, and classical bit {bit} flips 0 and 1 at different \
+                     rates"
+                ),
+            });
+        }
+        flips[bit] = Some(err.p01);
+    }
+    Ok(flips)
 }
 
 /// Reject a guarded gate other than a Pauli, which no controlled Clifford applies.

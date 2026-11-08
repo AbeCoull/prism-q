@@ -1,6 +1,6 @@
 //! Noise inside guarded bodies: the slot layout, the shots a body event fires
-//! on, agreement with a deferred-measurement lowering, and the routes that
-//! decline it.
+//! on, agreement with a deferred-measurement lowering, the routes that decline
+//! it, and readout error flipping the bit a guard reads.
 
 use num_complex::Complex64;
 use prism_q::circuit::{Circuit, ClassicalCondition, GuardedRegion, Instruction, guarded};
@@ -410,5 +410,250 @@ fn schedule_rules_decline_a_region() {
     assert_eq!(noise.after_gate.len(), uniform.after_gate.len());
     for (built, expected) in noise.after_gate.iter().zip(&uniform.after_gate) {
         assert_eq!(built.len(), expected.len());
+    }
+}
+
+fn conditional_x(condition: ClassicalCondition, target: usize) -> Instruction {
+    Instruction::Conditional {
+        condition,
+        gate: Gate::X,
+        targets: smallvec![target],
+    }
+}
+
+/// q[0] measured into bit 0, `x q[1]` under `if (c[0])`, then q[1] into bit 1 and
+/// q[0] again into bit 2.
+fn conditional_on_a_remeasured_qubit() -> Circuit {
+    let mut circuit = Circuit::new(2, 3);
+    circuit.add_measure(0, 0);
+    circuit
+        .instructions
+        .push(conditional_x(ClassicalCondition::BitIsOne(0), 1));
+    circuit.add_measure(1, 1);
+    circuit.add_measure(0, 2);
+    circuit
+}
+
+fn readout_kinds() -> [(&'static str, BackendKind); 6] {
+    [
+        ("auto", BackendKind::Auto),
+        ("statevector", BackendKind::Statevector),
+        ("stabilizer", BackendKind::Stabilizer),
+        ("sparse", BackendKind::Sparse),
+        ("mps", BackendKind::Mps { max_bond_dim: 8 }),
+        ("factored", BackendKind::Factored),
+    ]
+}
+
+fn noisy_shots(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    kind: BackendKind,
+    shots: usize,
+) -> Vec<Vec<bool>> {
+    simulate(circuit)
+        .backend(kind)
+        .seed(SEED)
+        .noise(noise)
+        .shots(shots)
+        .expect("noisy shots")
+        .shots
+}
+
+#[test]
+fn readout_error_flips_the_bit_a_condition_reads_and_leaves_the_state() {
+    let circuit = conditional_on_a_remeasured_qubit();
+    for (p01, p10) in [(1.0, 0.0), (1.0, 1.0)] {
+        let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+        noise.set_bit_readout_error(0, p01, p10);
+        for (label, kind) in readout_kinds() {
+            for shot in noisy_shots(&circuit, &noise, kind, 64) {
+                assert_eq!(shot, [true, true, false], "{label}, p01 {p01}, p10 {p10}");
+            }
+        }
+    }
+}
+
+#[test]
+fn readout_error_on_a_guarded_measurement_reaches_a_later_condition() {
+    let mut circuit = Circuit::new(2, 3);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(region(
+        ClassicalCondition::BitIsOne(0),
+        vec![
+            gate(Gate::X, &[1]),
+            Instruction::Measure {
+                qubit: 1,
+                classical_bit: 1,
+            },
+        ],
+    ));
+    circuit
+        .instructions
+        .push(conditional_x(ClassicalCondition::BitIsOne(1), 0));
+    circuit.add_measure(0, 2);
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.set_bit_readout_error(0, 1.0, 0.0);
+    noise.set_bit_readout_error(1, 0.0, 1.0);
+    for (label, kind) in readout_kinds() {
+        for shot in noisy_shots(&circuit, &noise, kind, 64) {
+            assert_eq!(shot, [true, false, false], "{label}");
+        }
+    }
+}
+
+#[test]
+fn a_guard_and_its_body_events_read_the_flipped_bit() {
+    let p = 0.25;
+    let mut circuit = Circuit::new(4, 4);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 2]);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(region(
+        ClassicalCondition::BitIsOne(0),
+        vec![gate(Gate::X, &[1])],
+    ));
+    circuit.add_measure(1, 1);
+    circuit.add_measure(2, 2);
+    circuit.add_measure(3, 3);
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.after_gate[7] = vec![NoiseEvent::pauli(3, 1.0, 0.0, 0.0)];
+    noise.set_bit_readout_error(0, p, p);
+    let shots = 4000;
+    for (label, kind) in [
+        ("auto", BackendKind::Auto),
+        ("statevector", BackendKind::Statevector),
+    ] {
+        let result = noisy_shots(&circuit, &noise, kind, shots);
+        for shot in &result {
+            assert_eq!(shot[1], shot[0], "{label}: the guard read another bit");
+            assert_eq!(shot[3], shot[0], "{label}: the body event read another bit");
+        }
+        let flipped = result.iter().filter(|shot| shot[0] != shot[2]).count();
+        let rate = flipped as f64 / shots as f64;
+        let sigma = (p * (1.0 - p) / shots as f64).sqrt();
+        assert!((rate - p).abs() < 5.0 * sigma, "{label}: flip rate {rate}");
+    }
+}
+
+#[test]
+fn each_measurement_into_a_bit_draws_its_own_flip() {
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_measure(0, 0);
+    circuit
+        .instructions
+        .push(conditional_x(ClassicalCondition::BitIsOne(0), 1));
+    circuit.add_measure(1, 1);
+    circuit.add_measure(0, 0);
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.set_bit_readout_error(0, 0.5, 0.0);
+    let shots = 4000;
+    for (label, kind) in [
+        ("auto", BackendKind::Auto),
+        ("statevector", BackendKind::Statevector),
+    ] {
+        let rates = histogram(&noisy_shots(&circuit, &noise, kind, shots), 2);
+        assert_within_5_sigma(&rates, &[0.25; 4], shots, label);
+    }
+}
+
+/// FNV-1a over every bit of every shot, in order.
+fn fingerprint(shots: &[Vec<bool>]) -> u64 {
+    shots
+        .iter()
+        .flatten()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, &bit| {
+            (hash ^ u64::from(bit)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
+/// [`fingerprint`] of each run in `readout_no_condition_reads_keeps_its_seeded_shots`,
+/// recorded while every route flipped readout into the finished record.
+const PINS: [u64; 8] = [
+    0x8534_97ea_977a_7816,
+    0x4f0c_10da_0439_e626,
+    0xd4de_19de_5832_a89a,
+    0xa919_962c_c90a_8be2,
+    0x10f7_df47_94b3_aec8,
+    0xe264_47bd_bdc5_bf96,
+    0x7521_7302_4e3a_43fd,
+    0x7521_7302_4e3a_43fd,
+];
+
+// No condition here reads a bit carrying readout error, so each route keeps flipping
+// the finished record and draws the bits it drew before readout moved to the write.
+#[test]
+fn readout_no_condition_reads_keeps_its_seeded_shots() {
+    let mut terminal = Circuit::new(3, 3);
+    terminal.add_gate(Gate::H, &[0]);
+    terminal.add_gate(Gate::Cx, &[0, 1]);
+    terminal.add_gate(Gate::Cx, &[1, 2]);
+    terminal.measure_all();
+    let mut terminal_noise = NoiseModel::uniform_depolarizing(&terminal, 0.02);
+    terminal_noise.with_readout_error(0.05, 0.1);
+
+    let mut mid = Circuit::new(2, 3);
+    mid.add_gate(Gate::H, &[0]);
+    mid.add_gate(Gate::Cx, &[0, 1]);
+    mid.add_measure(0, 0);
+    mid.add_reset(0);
+    mid.add_gate(Gate::H, &[0]);
+    mid.add_measure(0, 1);
+    mid.add_measure(1, 2);
+    let mut mid_noise = NoiseModel::uniform_depolarizing(&mid, 0.02);
+    mid_noise.with_readout_error(0.05, 0.1);
+
+    let mut guarded = conditional_on_a_remeasured_qubit();
+    guarded.instructions.insert(0, gate(Gate::H, &[0]));
+    let mut guarded_noise = NoiseModel::uniform_depolarizing(&guarded, 0.02);
+    guarded_noise.set_bit_readout_error(1, 0.05, 0.1);
+    guarded_noise.set_bit_readout_error(2, 0.1, 0.05);
+
+    let runs = [
+        (
+            "terminal auto",
+            &terminal,
+            &terminal_noise,
+            BackendKind::Auto,
+        ),
+        (
+            "terminal statevector",
+            &terminal,
+            &terminal_noise,
+            BackendKind::Statevector,
+        ),
+        (
+            "terminal mps",
+            &terminal,
+            &terminal_noise,
+            BackendKind::Mps { max_bond_dim: 8 },
+        ),
+        (
+            "terminal density",
+            &terminal,
+            &terminal_noise,
+            BackendKind::DensityMatrix,
+        ),
+        ("mid auto", &mid, &mid_noise, BackendKind::Auto),
+        (
+            "mid statevector",
+            &mid,
+            &mid_noise,
+            BackendKind::Statevector,
+        ),
+        ("guarded auto", &guarded, &guarded_noise, BackendKind::Auto),
+        (
+            "guarded statevector",
+            &guarded,
+            &guarded_noise,
+            BackendKind::Statevector,
+        ),
+    ];
+    for ((label, circuit, noise, kind), pin) in runs.into_iter().zip(PINS) {
+        assert_eq!(
+            fingerprint(&noisy_shots(circuit, noise, kind, 500)),
+            pin,
+            "{label}"
+        );
     }
 }

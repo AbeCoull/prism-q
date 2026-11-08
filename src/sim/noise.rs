@@ -434,8 +434,12 @@ pub struct NoiseModel {
     /// it carries no quantum event.
     pub after_gate: Vec<Vec<NoiseEvent>>,
     /// Per-classical-bit readout error; `None` means ideal readout. Either empty,
-    /// for no readout error at all, or one entry per classical bit. A bit no
-    /// measurement writes is never flipped.
+    /// for no readout error at all, or one entry per classical bit.
+    ///
+    /// A measurement flips the bit it writes, so a classical condition reads the
+    /// noisy bit, each measurement into a bit draws its own flip, and the quantum
+    /// state is left alone. A bit no measurement writes is never flipped, and a
+    /// classical write stores its value unflipped.
     pub readout: Vec<Option<ReadoutError>>,
 }
 
@@ -469,7 +473,8 @@ impl NoiseModel {
         }
     }
 
-    /// Set the same readout error on every classical bit.
+    /// Set the same readout error on every classical bit, flipped as each
+    /// measurement writes it (see [`NoiseModel::readout`]).
     pub fn with_readout_error(&mut self, p01: f64, p10: f64) -> &mut Self {
         self.readout.fill(Some(ReadoutError { p01, p10 }));
         self
@@ -478,7 +483,8 @@ impl NoiseModel {
     /// Set the readout error of one classical bit, leaving the rest alone.
     ///
     /// Indexed by classical bit rather than by qubit: a qubit measured into
-    /// several bits carries an independent rate per bit.
+    /// several bits carries an independent rate per bit. Each measurement into
+    /// `bit` draws its own flip (see [`NoiseModel::readout`]).
     ///
     /// # Panics
     ///
@@ -515,9 +521,9 @@ impl NoiseModel {
     }
 
     /// True when every channel samples as a Pauli frame draw, whatever the
-    /// readout entries hold. Readout acts on the measurement record after
-    /// sampling, so the Clifford samplers apply it themselves and only the
-    /// channels decide whether a model can take that route.
+    /// readout entries hold. Readout acts on the measurement record, not the
+    /// state, so the Clifford samplers apply it themselves and only the channels
+    /// decide whether a model can take that route.
     pub(crate) fn has_only_pauli_channels(&self) -> bool {
         self.after_gate
             .iter()
@@ -3327,6 +3333,7 @@ fn walk_region_body(
 struct FrameWalk<'a> {
     backend: &'a mut dyn Backend,
     noise: &'a PreparedNoise,
+    readout: &'a [Option<ReadoutError>],
     rng: &'a mut ChaCha8Rng,
 }
 
@@ -3336,11 +3343,12 @@ impl SlotWalk for FrameWalk<'_> {
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
-        self.backend.apply(instruction)
+        self.backend.apply(instruction)?;
+        crate::sim::trajectory::flip_written_bit(self.backend, instruction, self.readout, self.rng)
     }
 
     fn fire(&mut self, slot: usize) -> Result<()> {
-        for event in self.noise.slot(slot) {
+        for event in self.noise.laid_out_slot(slot) {
             apply_frame_event(self.backend, event, self.rng)?;
         }
         Ok(())
@@ -3378,7 +3386,7 @@ pub(crate) fn run_shots_noisy_brute_with(
 ) -> Result<ShotsResult> {
     let mut shots = Vec::with_capacity(num_shots);
     let mut metadata = crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::Stabilizer);
-    let readout = crate::sim::trajectory::written_readout(circuit, &noise.readout);
+    let readout = crate::sim::trajectory::ShotReadout::new(circuit, &noise.readout);
     let prepared = PreparedNoise::new(noise);
 
     for i in 0..num_shots {
@@ -3387,7 +3395,7 @@ pub(crate) fn run_shots_noisy_brute_with(
         let mut backend = backend_factory(shot_seed);
         backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
 
-        if prepared.num_slots() == circuit.instructions.len() {
+        if readout.at_write.is_empty() && prepared.num_slots() == circuit.instructions.len() {
             for (instr, events) in circuit.instructions.iter().zip(prepared.slots_from(0)) {
                 backend.apply(instr)?;
                 for event in events {
@@ -3398,6 +3406,7 @@ pub(crate) fn run_shots_noisy_brute_with(
             let mut walk = FrameWalk {
                 backend: backend.as_mut(),
                 noise: &prepared,
+                readout: &readout.at_write,
                 rng: &mut rng,
             };
             walk_noise_slots(circuit, 0, &mut walk)?;
@@ -3410,7 +3419,7 @@ pub(crate) fn run_shots_noisy_brute_with(
             metadata.weaken_with(&shot_metadata);
         }
         let mut results = backend.classical_results().to_vec();
-        crate::sim::trajectory::apply_readout_errors(&mut results, &readout, &mut rng);
+        crate::sim::trajectory::apply_readout_errors(&mut results, &readout.record, &mut rng);
         shots.push(results);
     }
 

@@ -7,7 +7,7 @@ use std::f64::consts::PI;
 
 use num_complex::Complex64;
 use prism_q::circuit::dynamic::{
-    ClassicalExpr, DynamicProgram, DynamicProgramBuilder, RotationKind,
+    BinaryOp, ClassicalExpr, ClassicalType, DynamicProgram, DynamicProgramBuilder, RotationKind,
 };
 use prism_q::circuit::{ClassicalCondition, GuardedRegion, Instruction};
 use prism_q::{
@@ -289,12 +289,13 @@ fn a_runtime_rotation_takes_the_gate_rules() {
 }
 
 #[test]
-fn readout_error_flips_the_record_and_not_the_bit_a_branch_reads() {
-    let mut b = DynamicProgramBuilder::new(1, 1);
-    b.add_gate(Gate::H, &[0]).add_measure(0, 0);
-    b.begin_while("retry", ClassicalExpr::Bit(0));
-    b.add_reset(0).add_gate(Gate::H, &[0]).add_measure(0, 0);
+fn readout_error_flips_the_bit_a_branch_reads() {
+    let mut b = DynamicProgramBuilder::new(2, 3);
+    b.add_measure(0, 0);
+    b.begin_if(ClassicalExpr::Bit(0));
+    b.add_gate(Gate::X, &[1]);
     b.end().unwrap();
+    b.add_measure(1, 1).add_measure(0, 2);
     let program = b.build().unwrap();
     let rules = NoiseBuilder::new().readout_error(0, 1.0, 0.0);
     let shots = simulate_program(&program)
@@ -302,7 +303,56 @@ fn readout_error_flips_the_record_and_not_the_bit_a_branch_reads() {
         .seed(SEED)
         .shots(100)
         .unwrap();
-    assert!(shots.shots.iter().all(|shot| shot[0]));
+    assert!(shots.shots.iter().all(|shot| shot == &[true, true, false]));
+}
+
+#[test]
+fn a_loop_condition_reads_the_flipped_bit_and_the_state_keeps_the_outcome() {
+    let mut b = DynamicProgramBuilder::new(1, 2);
+    b.add_gate(Gate::H, &[0]).add_measure(0, 0);
+    b.begin_while("retry", ClassicalExpr::Bit(0));
+    b.add_reset(0).add_gate(Gate::H, &[0]).add_measure(0, 0);
+    b.end().unwrap();
+    b.add_measure(0, 1);
+    let program = b.build().unwrap();
+    assert!(program.static_circuit().is_none());
+    let rules = NoiseBuilder::new().readout_error(0, 0.0, 1.0);
+    let num_shots = 4000;
+    let shots = simulate_program(&program)
+        .noise(&rules)
+        .seed(SEED)
+        .shots(num_shots)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| !shot[0]));
+    let ones = shots.shots.iter().filter(|shot| shot[1]).count() as f64 / num_shots as f64;
+    let sigma = (0.25 / num_shots as f64).sqrt();
+    assert!((ones - 0.5).abs() < 5.0 * sigma, "outcome rate {ones}");
+}
+
+#[test]
+fn a_classical_write_after_a_noisy_measurement_stays_unflipped() {
+    let mut b = DynamicProgramBuilder::new(1, 1);
+    let n = b.declare("n", ClassicalType::Uint { width: 2 }, 0i64.into());
+    b.add_measure(0, 0);
+    b.begin_while(
+        "once",
+        ClassicalExpr::binary(BinaryOp::Lt, n.into(), 1i64.into()),
+    );
+    b.assign(
+        n,
+        ClassicalExpr::binary(BinaryOp::Add, n.into(), 1i64.into()),
+    );
+    b.end().unwrap();
+    b.write_bits(&[0], ClassicalExpr::from(0i64));
+    let program = b.build().unwrap();
+    assert!(program.static_circuit().is_none());
+    let rules = NoiseBuilder::new().readout_error(0, 1.0, 1.0);
+    let shots = simulate_program(&program)
+        .noise(&rules)
+        .seed(SEED)
+        .shots(100)
+        .unwrap();
+    assert!(shots.shots.iter().all(|shot| !shot[0]));
 }
 
 fn gate(gate: Gate, targets: &[usize]) -> Instruction {

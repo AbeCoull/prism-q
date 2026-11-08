@@ -990,7 +990,7 @@ fn replayed_groups_keep_the_per_shot_trajectories() {
 
             let mut order: Vec<usize> = (0..groups.num_groups()).collect();
             order.sort_by_key(|&group| groups.starts[group]);
-            let readout = written_readout(&circuit, &noise.readout);
+            let readout = ShotReadout::new(&circuit, &noise.readout);
             let run = |segments: Vec<Segment>| {
                 run_replayed_chunk(
                     &groups,

@@ -67,7 +67,7 @@ let noise = NoiseBuilder::new()
 | `on_idle_qubits(channel)` | One event per idle qubit per greedy circuit layer |
 | `after_resets(channel)` | One event on each reset qubit |
 | `before_measurements(channel)` | Damage to the measured state, which feedforward also reads |
-| `readout_error(bit, p01, p10)` | Readout rates for one classical bit, overriding `uniform_readout_error` |
+| `readout_error(bit, p01, p10)` | Readout rates for one classical bit, overriding `uniform_readout_error`; the bit flips when a measurement writes it, so a condition reads the noisy value |
 
 Events in one instruction slot follow rule order. Idle events attach to the
 highest-indexed instruction of their layer and pre-measurement events to the instruction

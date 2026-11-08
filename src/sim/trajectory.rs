@@ -70,6 +70,16 @@ impl PreparedNoise {
         &self.events[self.offsets[slot]..self.offsets[slot + 1]]
     }
 
+    /// Slot `slot`, or no events past the slots the model lays out: a model of one
+    /// slot per top-level instruction gives guarded bodies none.
+    #[inline]
+    pub(crate) fn laid_out_slot(&self, slot: usize) -> &[PreparedEvent] {
+        match self.offsets.get(slot + 1) {
+            Some(&end) => &self.events[self.offsets[slot]..end],
+            None => &[],
+        }
+    }
+
     /// Slots `from..` in order.
     #[inline]
     pub(crate) fn slots_from(&self, from: usize) -> impl Iterator<Item = &[PreparedEvent]> {
@@ -410,6 +420,7 @@ fn apply_phase_damping(
 struct TrajectoryWalk<'a> {
     backend: &'a mut dyn Backend,
     noise: &'a PreparedNoise,
+    readout: &'a [Option<ReadoutError>],
     rng: &'a mut ChaCha8Rng,
 }
 
@@ -419,11 +430,12 @@ impl SlotWalk for TrajectoryWalk<'_> {
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
-        self.backend.apply(instruction)
+        self.backend.apply(instruction)?;
+        flip_written_bit(self.backend, instruction, self.readout, self.rng)
     }
 
     fn fire(&mut self, slot: usize) -> Result<()> {
-        for event in self.noise.slot(slot) {
+        for event in self.noise.laid_out_slot(slot) {
             apply_noise_event(self.backend, event, self.rng)?;
         }
         Ok(())
@@ -435,6 +447,7 @@ struct MemoryWalk<'a> {
     backend: &'a mut dyn Backend,
     noise: &'a PreparedNoise,
     memory: &'a mut ShotMemory,
+    readout: &'a [Option<ReadoutError>],
     rng: &'a mut ChaCha8Rng,
 }
 
@@ -444,11 +457,12 @@ impl SlotWalk for MemoryWalk<'_> {
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
-        apply_memory_instruction(self.backend, instruction, self.memory, self.rng)
+        apply_memory_instruction(self.backend, instruction, self.memory, self.rng)?;
+        flip_written_bit(self.backend, instruction, self.readout, self.rng)
     }
 
     fn fire(&mut self, slot: usize) -> Result<()> {
-        for event in self.noise.slot(slot) {
+        for event in self.noise.laid_out_slot(slot) {
             apply_memory_event(self.backend, event, self.memory, self.rng)?;
         }
         Ok(())
@@ -988,28 +1002,30 @@ fn run_memory_shot(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &PreparedNoise,
-    readout: &[Option<ReadoutError>],
+    readout: &ShotReadout,
     spec: MemorySpec,
     rng: &mut ChaCha8Rng,
 ) -> Result<(Vec<bool>, Vec<bool>)> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
     let mut memory = ShotMemory::new(circuit.num_qubits, spec, rng);
-    evolve_with_memory(backend, circuit, noise, &mut memory, rng)?;
+    evolve_with_memory(backend, circuit, noise, &mut memory, &readout.at_write, rng)?;
     let mut results = backend.classical_results().to_vec();
-    apply_readout_errors(&mut results, readout, rng);
+    apply_readout_errors(&mut results, &readout.record, rng);
     Ok((results, memory.ever_leaked))
 }
 
 /// [`evolve_noisy`] from the first instruction on the memory path, reading and
-/// updating the leak flags and drift `memory` holds for the rest of the shot.
+/// updating the leak flags and drift `memory` holds for the rest of the shot, and
+/// flipping each measured bit at its `readout` rate as the measurement writes it.
 pub(crate) fn evolve_with_memory(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &PreparedNoise,
     memory: &mut ShotMemory,
+    readout: &[Option<ReadoutError>],
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    if noise.num_slots() == circuit.instructions.len() {
+    if readout.is_empty() && noise.num_slots() == circuit.instructions.len() {
         for (instr, events) in circuit.instructions.iter().zip(noise.slots_from(0)) {
             apply_memory_instruction(backend, instr, memory, rng)?;
             for event in events {
@@ -1022,6 +1038,7 @@ pub(crate) fn evolve_with_memory(
         backend,
         noise,
         memory,
+        readout,
         rng,
     };
     walk_noise_slots(circuit, 0, &mut walk)
@@ -1033,7 +1050,7 @@ fn run_shot(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &PreparedNoise,
-    readout: &[Option<ReadoutError>],
+    readout: &ShotReadout,
     memory: Option<MemorySpec>,
     rng: &mut ChaCha8Rng,
 ) -> Result<(Vec<bool>, Vec<bool>)> {
@@ -1062,6 +1079,70 @@ pub(crate) fn written_readout(
     masked
 }
 
+/// Readout error as a trajectory applies it. A measurement flips the bit it writes,
+/// so a condition reads the noisy bit and each write draws its own flip. When no
+/// condition reads a bit that can flip, only each bit's last write reaches the record,
+/// so the finished record is flipped instead: the same distribution, on the draws
+/// those circuits have always made. One of the two tables is empty.
+pub(crate) struct ShotReadout {
+    /// Flipped into the finished record, from [`written_readout`].
+    pub(crate) record: Vec<Option<ReadoutError>>,
+    /// Flipped as each measurement writes its bit, from [`flippable_readout`].
+    pub(crate) at_write: Vec<Option<ReadoutError>>,
+}
+
+impl ShotReadout {
+    pub(crate) fn new(circuit: &Circuit, readout: &[Option<ReadoutError>]) -> Self {
+        let at_write = flippable_readout(readout);
+        let read = circuit.condition_bits();
+        if at_write
+            .iter()
+            .zip(&read)
+            .any(|(err, &read)| read && err.is_some())
+        {
+            return Self {
+                record: Vec::new(),
+                at_write,
+            };
+        }
+        Self {
+            record: written_readout(circuit, readout),
+            at_write: Vec::new(),
+        }
+    }
+}
+
+/// `readout` with each entry that cannot flip a bit cleared, empty when none can.
+pub(crate) fn flippable_readout(readout: &[Option<ReadoutError>]) -> Vec<Option<ReadoutError>> {
+    if readout.iter().flatten().all(ReadoutError::is_inert) {
+        return Vec::new();
+    }
+    readout
+        .iter()
+        .map(|err| err.clone().filter(|err| !err.is_inert()))
+        .collect()
+}
+
+/// Flip the bit `instruction` wrote at its `readout` rate when it is a measurement.
+#[inline]
+pub(crate) fn flip_written_bit(
+    backend: &mut dyn Backend,
+    instruction: &Instruction,
+    readout: &[Option<ReadoutError>],
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    if let Instruction::Measure { classical_bit, .. } = instruction
+        && let Some(Some(err)) = readout.get(*classical_bit)
+    {
+        let bit = backend.classical_results()[*classical_bit];
+        let r: f64 = rand::RngExt::random(rng);
+        if r < if bit { err.p10 } else { err.p01 } {
+            backend.set_classical_bit(*classical_bit, !bit)?;
+        }
+    }
+    Ok(())
+}
+
 /// `readout` is the output of [`written_readout`], so an unmeasured bit is `None`.
 pub(crate) fn apply_readout_errors(
     results: &mut [bool],
@@ -1086,12 +1167,12 @@ pub(crate) fn apply_readout_errors(
     }
 }
 
-/// `readout` comes from [`written_readout`] for this `circuit`.
+/// `readout` comes from [`ShotReadout::new`] for this `circuit`.
 pub(crate) fn run_trajectory_shot(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &PreparedNoise,
-    readout: &[Option<ReadoutError>],
+    readout: &ShotReadout,
     rng: &mut ChaCha8Rng,
 ) -> Result<Vec<bool>> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
@@ -1106,26 +1187,28 @@ fn finish_trajectory(
     circuit: &Circuit,
     noise: &PreparedNoise,
     from: usize,
-    readout: &[Option<ReadoutError>],
+    readout: &ShotReadout,
     rng: &mut ChaCha8Rng,
 ) -> Result<Vec<bool>> {
-    evolve_noisy(backend, circuit, noise, from, rng)?;
+    evolve_noisy(backend, circuit, noise, from, &readout.at_write, rng)?;
     let mut results = backend.classical_results().to_vec();
-    apply_readout_errors(&mut results, readout, rng);
+    apply_readout_errors(&mut results, &readout.record, rng);
     Ok(results)
 }
 
 /// Apply `circuit.instructions[from..]` to the state `backend` holds, firing each
-/// slot of `noise` after its instruction. `noise` holds no per-shot memory
+/// slot of `noise` after its instruction and flipping each measured bit at its
+/// `readout` rate as the measurement writes it. `noise` holds no per-shot memory
 /// channel.
 pub(crate) fn evolve_noisy(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &PreparedNoise,
     from: usize,
+    readout: &[Option<ReadoutError>],
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    if noise.num_slots() == circuit.instructions.len() {
+    if readout.is_empty() && noise.num_slots() == circuit.instructions.len() {
         for (instr, events) in circuit.instructions[from..]
             .iter()
             .zip(noise.slots_from(from))
@@ -1140,6 +1223,7 @@ pub(crate) fn evolve_noisy(
     let mut walk = TrajectoryWalk {
         backend,
         noise,
+        readout,
         rng,
     };
     walk_noise_slots(circuit, from, &mut walk)
@@ -1210,7 +1294,7 @@ pub(crate) fn run_trajectories(
         }
     }
 
-    let readout = written_readout(circuit, &noise.readout);
+    let readout = ShotReadout::new(circuit, &noise.readout);
     let memory = MemorySpec::of(noise);
     run_serial(circuit, memory, num_shots, seed, route, |shot_seed, rng| {
         let mut backend = backend_factory(shot_seed);
@@ -1239,7 +1323,7 @@ pub(crate) fn run_trajectories_held<B: Backend>(
     route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
     let prepared = PreparedNoise::new(noise);
-    let readout = written_readout(circuit, &noise.readout);
+    let readout = ShotReadout::new(circuit, &noise.readout);
     let memory = MemorySpec::of(noise);
     run_serial(circuit, memory, num_shots, seed, route, |shot_seed, rng| {
         reseed(backend, shot_seed);
@@ -1305,7 +1389,7 @@ fn run_trajectories_par(
     seed: u64,
     route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
-    let readout = written_readout(circuit, &noise.readout);
+    let readout = ShotReadout::new(circuit, &noise.readout);
     let memory = MemorySpec::of(noise);
     type ParShot = (Vec<bool>, Vec<bool>, crate::sim::RunMetadata);
     let results: Result<Vec<ParShot>> = (0..num_shots)
@@ -1942,7 +2026,7 @@ pub(crate) fn run_replayed_groups(
     route: crate::sim::ResolvedBackend,
     limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
-    let readout = written_readout(circuit, &noise.readout);
+    let readout = ShotReadout::new(circuit, &noise.readout);
     let mut order: Vec<usize> = (0..groups.num_groups()).collect();
     order.sort_by_key(|&group| groups.starts[group]);
     let run = |segments: Vec<Segment>| {
@@ -2008,7 +2092,7 @@ fn run_replayed_chunk(
     segments: &[Segment],
     circuit: &Circuit,
     noise: &NoiseModel,
-    readout: &[Option<ReadoutError>],
+    readout: &ShotReadout,
     seed: u64,
     limits: &ResolvedLimits,
 ) -> Result<Vec<ShotRun>> {
@@ -2166,7 +2250,7 @@ impl SharedEvent {
 struct SharedPrefix<'a> {
     circuit: &'a Circuit,
     noise: &'a PreparedNoise,
-    readout: &'a [Option<ReadoutError>],
+    readout: &'a ShotReadout,
     seed: u64,
     limits: &'a ResolvedLimits,
     /// Instructions shared.
@@ -2395,7 +2479,7 @@ pub(crate) fn run_shared_prefix(
     }
     forks.sort_by_key(|&(ordinal, _)| ordinal);
 
-    let readout = written_readout(circuit, &noise.readout);
+    let readout = ShotReadout::new(circuit, &noise.readout);
     let prefix = SharedPrefix {
         circuit,
         noise: &prepared,

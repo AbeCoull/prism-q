@@ -424,11 +424,10 @@ impl NoiseBuilder {
     /// One single-qubit channel on the measured qubit, immediately before each
     /// measurement.
     ///
-    /// Distinct from [`NoiseModel::readout`], which flips reported bits once at
-    /// the end of a shot: this damages the state the measurement then projects,
-    /// so a mid-circuit outcome feeding a classical conditional is the faulty
-    /// one. A purely classical fault that leaves the state intact is not
-    /// expressible this way.
+    /// Distinct from [`NoiseModel::readout`], which flips the bit a measurement
+    /// writes and leaves the state intact: this damages the state the
+    /// measurement then projects, so a later measurement of the qubit sees the
+    /// fault too.
     ///
     /// The channel is carried by the slot of the preceding instruction, so a
     /// measurement at instruction 0 has nowhere to put it and
@@ -507,8 +506,8 @@ impl NoiseBuilder {
         self
     }
 
-    /// Readout error on one classical bit. Overrides any uniform rate whatever
-    /// order the two are declared in.
+    /// Readout error on one classical bit, flipped as each measurement writes it.
+    /// Overrides any uniform rate whatever order the two are declared in.
     pub fn readout_error(mut self, bit: usize, p01: f64, p10: f64) -> Self {
         self.readout.push((bit, ReadoutError { p01, p10 }));
         self

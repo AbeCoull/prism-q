@@ -318,13 +318,7 @@ fn noisy_mixture_preconditions_match_execution() {
 fn malformed_gradient_slots_are_rejected_by_plan_and_execution() {
     let mut circuit = Circuit::new(1, 0);
     circuit.add_gate(Gate::Ry(0.2), &[0]);
-    let parameters = prism_q::Parameters::from_links(
-        vec![prism_q::ParamLink {
-            instruction: 0,
-            slot: 1,
-        }],
-        0,
-    );
+    let parameters = prism_q::Parameters::from_links(vec![prism_q::ParamLink::new(0, 1)], 0);
     let hamiltonian = prism_q::PauliObservable::from_terms([(1.0, vec![PauliTerm::z(0)])]).unwrap();
     assert!(
         simulate(&circuit)

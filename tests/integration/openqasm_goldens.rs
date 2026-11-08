@@ -743,36 +743,29 @@ fn an_input_broadcast_over_a_register_shares_one_slot() {
 }
 
 // Every way an `input` can be written that the binding surface cannot carry.
-// One angle is written per link, so an input reaching anything but a whole
-// top-level rotation angle has nowhere to land, and a silent wrong angle is the
-// failure worth pinning against.
+// A link writes one affine angle onto one gate, so an input reaching anything
+// else has nowhere to land, and a silent wrong angle is the failure worth
+// pinning against.
 #[test]
 fn input_uses_the_binding_surface_cannot_carry_reject_by_name() {
-    const PROLOGUE: &str = "OPENQASM 3.0;\ninput float[64] t;\nqubit[3] q;\nbit[3] c;\n";
+    const PROLOGUE: &str = "OPENQASM 3.0;
+input float[64] t;
+qubit[3] q;
+bit[3] c;
+";
 
     let rejected = [
-        ("expression over an input", "rx(2 * t) q[0];"),
         ("expression with a function", "rx(sin(t)) q[0];"),
         (
             "two inputs on one gate",
-            "input float[64] u;\nr(t, u) q[0];",
+            "input float[64] u;
+r(t, u) q[0];",
         ),
         ("gate carrying no angle", "cu(t, 0, 0, 0) q[0], q[1];"),
         ("modified gate", "ctrl @ rx(t) q[0], q[1];"),
-        ("inside a for body", "for int i in [0:1] { rx(t) q[i]; }"),
         ("inside a guarded region", "if (c[0]) { rx(t) q[0]; }"),
         ("inside a guarded statement", "if (c[0]) rx(t) q[0];"),
-        (
-            "user-defined gate",
-            "gate myrot(a) x { rx(2 * a) x; }
-myrot(t) q[0];",
-        ),
         ("lowered gate", "xx_plus_yy(t, 0.2) q[0], q[1];"),
-        (
-            "inside a def body",
-            "def d(qubit a, float w) { rx(w) a; }
-d(q[0], t);",
-        ),
     ];
     for (label, body) in rejected {
         let qasm = format!("{PROLOGUE}{body}");
@@ -785,29 +778,39 @@ d(q[0], t);",
         );
     }
 
-    let bad_types = [
-        (
-            "integer input",
-            "OPENQASM 3.0;\ninput int[32] n;\nqubit[1] q;\n",
-        ),
-        (
-            "qubit output",
-            "OPENQASM 3.0;\nqubit[1] q;\noutput float[64] x;\n",
-        ),
-    ];
-    for (label, qasm) in bad_types {
-        assert!(
-            matches!(
-                openqasm::parse_parametric(qasm),
-                Err(PrismError::UnsupportedConstruct { .. })
+    assert!(
+        matches!(
+            openqasm::parse_parametric(
+                "OPENQASM 3.0;
+input int[32] n;
+qubit[1] q;
+"
             ),
-            "{label}: expected UnsupportedConstruct"
-        );
-    }
+            Err(PrismError::InvalidParameter { .. })
+        ),
+        "an unsupplied integer input names the missing value"
+    );
+    assert!(
+        matches!(
+            openqasm::parse_parametric(
+                "OPENQASM 3.0;
+qubit[1] q;
+output float[64] x;
+"
+            ),
+            Err(PrismError::UnsupportedConstruct { .. })
+        ),
+        "a float output declines"
+    );
 
     assert!(
-        openqasm::parse_parametric("OPENQASM 3.0;\ninput float[64] t;\ninput float[64] t;\n")
-            .is_err(),
+        openqasm::parse_parametric(
+            "OPENQASM 3.0;
+input float[64] t;
+input float[64] t;
+"
+        )
+        .is_err(),
         "a name declared twice should not silently take the second slot"
     );
 }

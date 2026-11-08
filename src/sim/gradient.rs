@@ -229,7 +229,7 @@ pub(crate) fn expectation_gradient_within(
                 pauli_sandwiches_from_masks(lambda.state_vector(), phi.state_vector(), &masks);
             for (&(_, s), value) in plan.evaluate[evaluate].iter().zip(&values) {
                 for link in &links[first_link[s]..first_link[s + 1]] {
-                    gradient[link.slot] += value.im;
+                    gradient[link.slot] += link.scale * value.im;
                 }
             }
         }
@@ -920,14 +920,14 @@ pub(crate) fn shift_gradient(
             )
             .collect();
         for (link, t) in links.iter().zip(terms) {
-            gradient[link.slot] += t?;
+            gradient[link.slot] += link.scale * t?;
         }
         return Ok(ExpectationGradient { value, gradient });
     }
 
     let mut shifted = circuit.clone();
     for link in links {
-        gradient[link.slot] += term(&mut shifted, link.instruction)?;
+        gradient[link.slot] += link.scale * term(&mut shifted, link.instruction)?;
     }
 
     Ok(ExpectationGradient { value, gradient })
@@ -958,7 +958,7 @@ fn prepared_shift_gradient(
         sites
             .iter()
             .enumerate()
-            .map(|(slot, &instruction)| ParamLink { instruction, slot })
+            .map(|(slot, &instruction)| ParamLink::new(instruction, slot))
             .collect(),
         sites.len(),
     );
@@ -1026,7 +1026,7 @@ pub(crate) fn prepared_shift(
         Ok(0.5 * (plus - minus))
     })?;
     for (link, term) in links.iter().zip(terms) {
-        gradient[link.slot] += term;
+        gradient[link.slot] += link.scale * term;
     }
 
     Ok(ExpectationGradient { value, gradient })

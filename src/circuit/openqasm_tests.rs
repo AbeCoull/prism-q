@@ -3879,8 +3879,8 @@ fn a_runtime_rotation_is_charged_per_qubit() {
              for int i in [1:{passes}] {{ rx(t) q; }}"
         )
     };
-    assert!(super::dynamic::parse_dynamic_within(&source(5), 1000).is_ok());
-    let err = super::dynamic::parse_dynamic_within(&source(20), 1000)
+    assert!(super::dynamic::parse_dynamic_within(&source(5), &[], 1000).is_ok());
+    let err = super::dynamic::parse_dynamic_within(&source(20), &[], 1000)
         .unwrap_err()
         .to_string();
     assert!(err.contains("expands past"), "{err}");
@@ -3929,7 +3929,7 @@ c[0] = measure q[0];
 ";
     let needs = |body: &str| {
         let source = format!("{head}for int j in [0:99] {{ if (c[0]) {{ {body} }} }}");
-        let fits = |budget| super::dynamic::parse_dynamic_within(&source, budget).is_ok();
+        let fits = |budget| super::dynamic::parse_dynamic_within(&source, &[], budget).is_ok();
         let (mut low, mut high) = (1, 1 << 16);
         while low < high {
             let mid = (low + high) / 2;

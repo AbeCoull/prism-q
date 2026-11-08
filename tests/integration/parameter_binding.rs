@@ -510,18 +510,9 @@ fn shared_slots_bind_every_linked_gate() {
 
     let params = Parameters::from_links(
         vec![
-            ParamLink {
-                instruction: 0,
-                slot: 0,
-            },
-            ParamLink {
-                instruction: 2,
-                slot: 0,
-            },
-            ParamLink {
-                instruction: 3,
-                slot: 1,
-            },
+            ParamLink::new(0, 0),
+            ParamLink::new(2, 0),
+            ParamLink::new(3, 1),
         ],
         2,
     );
@@ -571,13 +562,7 @@ fn non_finite_angle_is_rejected_without_panicking() {
 #[test]
 fn out_of_range_link_is_rejected_without_panicking() {
     let template = circuits::hardware_efficient_ansatz(4, 1, SEED);
-    let params = Parameters::from_links(
-        vec![ParamLink {
-            instruction: 10_000,
-            slot: 0,
-        }],
-        1,
-    );
+    let params = Parameters::from_links(vec![ParamLink::new(10_000, 0)], 1);
     assert!(PreparedCircuit::new(template, params).is_err());
 }
 
@@ -586,13 +571,7 @@ fn link_to_a_gate_without_an_angle_is_rejected() {
     let mut template = Circuit::new(2, 0);
     template.add_gate(Gate::H, &[0]);
     template.add_gate(Gate::Cx, &[0, 1]);
-    let params = Parameters::from_links(
-        vec![ParamLink {
-            instruction: 0,
-            slot: 0,
-        }],
-        1,
-    );
+    let params = Parameters::from_links(vec![ParamLink::new(0, 0)], 1);
     assert!(PreparedCircuit::new(template, params).is_err());
 }
 
@@ -741,19 +720,7 @@ fn run_with_mid_circuit_measurement_is_independent_of_call_history() {
     template.add_gate(Gate::Cx, &[1, 2]);
     template.add_measure(1, 1);
     template.add_measure(2, 2);
-    let params = Parameters::from_links(
-        vec![
-            ParamLink {
-                instruction: 1,
-                slot: 0,
-            },
-            ParamLink {
-                instruction: 4,
-                slot: 1,
-            },
-        ],
-        2,
-    );
+    let params = Parameters::from_links(vec![ParamLink::new(1, 0), ParamLink::new(4, 1)], 2);
     let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
 
     let a = [1.3, 0.4];
@@ -1182,19 +1149,7 @@ fn run_many_with_mid_circuit_measurement_matches_simulate() {
     template.add_gate(Gate::Cx, &[1, 2]);
     template.add_measure(1, 1);
     template.add_measure(2, 2);
-    let params = Parameters::from_links(
-        vec![
-            ParamLink {
-                instruction: 1,
-                slot: 0,
-            },
-            ParamLink {
-                instruction: 4,
-                slot: 1,
-            },
-        ],
-        2,
-    );
+    let params = Parameters::from_links(vec![ParamLink::new(1, 0), ParamLink::new(4, 1)], 2);
     let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
 
     let points: Vec<[f64; 2]> = (0..24)

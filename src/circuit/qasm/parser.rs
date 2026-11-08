@@ -317,7 +317,7 @@ fn port<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     let name = stream.expect_ident()?;
     stream.expect(Kind::Semicolon)?;
     if direction == "input" {
-        return Ok(StmtKind::InputDecl { ty, name });
+        return Ok(StmtKind::InputDecl { ty, name, size });
     }
     Ok(StmtKind::OutputDecl { ty, name, size })
 }

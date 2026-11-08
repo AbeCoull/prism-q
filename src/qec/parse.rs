@@ -24,10 +24,11 @@ const MAX_QEC_EXPANDED_LINES: usize = 1_000_000;
 /// [`QecNoise`], and `RECORD_FLIP(p)`, a [`QecOp::RecordFlip`] of the record just
 /// produced. Comments use `#`.
 ///
-/// `M(p)` and `MR(p)` lower `p` into a Pauli flip before the measurement; `MPP` and the
-/// pair measurements take no measurement-error argument. The square-root, axis-cycling,
-/// `CY`, and swap-family gates lower to `H`, `S`, `SQRT_X`, `CX`, and `CZ` sequences, so
-/// a `SQRT_Y` reads back as `S_DAG`, `SQRT_X`, `S` and a `SWAP` as three `CX`.
+/// `M(p)` and `MR(p)` lower `p` into a Pauli flip before the measurement; `MPP`, the
+/// pair measurements and `MPAD` take no argument, and a `RECORD_FLIP` line flips their
+/// record instead. The square-root, axis-cycling, `CY`, and swap-family gates lower to
+/// `H`, `S`, `SQRT_X`, `CX`, and `CZ` sequences, so a `SQRT_Y` reads back as `S_DAG`,
+/// `SQRT_X`, `S` and a `SWAP` as three `CX`.
 pub fn parse_qec_program(input: &str) -> Result<QecProgram> {
     parse_program(input, Dialect::Native)
 }
@@ -38,12 +39,12 @@ pub fn parse_qec_program(input: &str) -> Result<QecProgram> {
 /// (`T`, `T_DAG`, `LEAK`, `SEEP`, `LEAK_TRANSPORT`, `POSTSELECT`, `EXP_VAL`,
 /// `RECORD_FLIP`), and adds the Stim semantics native text lacks: inverted measurement
 /// targets (`M !0`, `MPP !X0*Z1`), record-controlled Paulis (`CX rec[-1] 2`, `CY`,
-/// `CZ`), and `SHIFT_COORDS` offsets on `DETECTOR` coordinates. Any other instruction,
-/// `sweep[k]` targets, and noise arguments on `MPP`, `MXX`/`MYY`/`MZZ` and `MPAD` are a
-/// [`PrismError::Parse`] naming the line.
+/// `CZ`), and `SHIFT_COORDS` offsets on `DETECTOR` coordinates. Any other instruction
+/// and `sweep[k]` targets are a [`PrismError::Parse`] naming the line.
 ///
-/// `M(p)`, `MR(p)` and their basis variants flip only the record with probability `p`,
-/// through a [`QecOp::RecordFlip`] after the measurement, and leave the qubit alone.
+/// `M(p)`, `MR(p)`, `MPP(p)`, `MXX(p)`/`MYY(p)`/`MZZ(p)`, `MPAD(p)` and their basis
+/// variants flip each record they produce independently with probability `p`, through a
+/// [`QecOp::RecordFlip`] after the op that produced it, and leave the qubits alone.
 pub fn parse_stim_circuit(input: &str) -> Result<QecProgram> {
     parse_program(input, Dialect::Stim)
 }
@@ -396,12 +397,7 @@ impl QecTextParser {
         targets: &[String],
         line_num: usize,
     ) -> Result<()> {
-        if !parse_f64_args(args, line_num)?.is_empty() {
-            return Err(qec_parse_error(
-                line_num,
-                format!("`{name}` does not support measurement-error arguments yet"),
-            ));
-        }
+        let flip = self.parse_record_flip_arg(name, args, line_num)?;
         let basis = measurement_basis(name);
         let qubits = self.parse_measured_targets(targets, line_num)?;
         require_non_empty_targets(&qubits, name, line_num)?;
@@ -423,6 +419,7 @@ impl QecTextParser {
                 terms: vec![QecPauli::new(basis, a), QecPauli::new(basis, b)],
             });
             self.measurement_count += 1;
+            self.push_record_flip(flip);
             if inverted {
                 self.defer_result_flip(basis, a);
             }
@@ -431,12 +428,7 @@ impl QecTextParser {
     }
 
     fn parse_pad(&mut self, args: Option<&str>, targets: &[String], line_num: usize) -> Result<()> {
-        if !parse_f64_args(args, line_num)?.is_empty() {
-            return Err(qec_parse_error(
-                line_num,
-                "`MPAD` does not support a flip-probability argument",
-            ));
-        }
+        let flip = self.parse_record_flip_arg("MPAD", args, line_num)?;
         if targets.is_empty() {
             return Err(qec_parse_error(
                 line_num,
@@ -456,6 +448,7 @@ impl QecTextParser {
             };
             self.ops.push(QecOp::Pad { value });
             self.measurement_count += 1;
+            self.push_record_flip(flip);
         }
         Ok(())
     }
@@ -544,6 +537,25 @@ impl QecTextParser {
         Ok(())
     }
 
+    /// Read the record-flip probability of `MPP`, a pair measurement, or `MPAD`, an
+    /// argument only a Stim circuit carries.
+    fn parse_record_flip_arg(
+        &self,
+        name: &str,
+        args: Option<&str>,
+        line_num: usize,
+    ) -> Result<Option<f64>> {
+        if self.dialect == Dialect::Native && !parse_f64_args(args, line_num)?.is_empty() {
+            return Err(qec_parse_error(
+                line_num,
+                format!(
+                    "`{name}` takes no flip-probability argument; follow it with `RECORD_FLIP`"
+                ),
+            ));
+        }
+        parse_optional_probability_arg(args, name, line_num)
+    }
+
     /// Flip the record just produced with probability `p`; zero or `None` adds nothing.
     fn push_record_flip(&mut self, p: Option<f64>) {
         if let Some(probability) = p.filter(|&p| p > 0.0) {
@@ -626,12 +638,7 @@ impl QecTextParser {
     }
 
     fn parse_mpp(&mut self, args: Option<&str>, targets: &[String], line_num: usize) -> Result<()> {
-        if !parse_f64_args(args, line_num)?.is_empty() {
-            return Err(qec_parse_error(
-                line_num,
-                "`MPP` does not support measurement-error arguments yet",
-            ));
-        }
+        let record_flip = self.parse_record_flip_arg("MPP", args, line_num)?;
         if targets.is_empty() {
             return Err(qec_parse_error(
                 line_num,
@@ -649,6 +656,7 @@ impl QecTextParser {
             }
             self.ops.push(QecOp::MeasurePauliProduct { terms });
             self.measurement_count += 1;
+            self.push_record_flip(record_flip);
             if let Some(term) = flip {
                 self.defer_result_flip(term.basis, term.qubit);
             }

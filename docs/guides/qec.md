@@ -121,16 +121,18 @@ four Stim behaviours the native parser rejects, ignores or reads differently:
 - record-controlled Paulis (`CX rec[-1] 2`, `CY rec[-1] 2`, `CZ rec[-1] 2`), lowered to
   feed-forward corrections;
 - `SHIFT_COORDS`, which offsets later `DETECTOR` coordinates;
-- measurement error on `M(p)`, `MR(p)` and the X and Y variants, which flips only the
-  record with probability `p` and leaves the qubit alone, so `M(0.2) 0` then `M 0`
-  gives a second record that is always 0. Native text reads `M(p)` as a Pauli flip
-  before the measurement, which differs only when the qubit is measured again without a
-  reset.
+- measurement error on `M(p)`, `MR(p)`, `MPP(p)`, `MXX(p)` / `MYY(p)` / `MZZ(p)`,
+  `MPAD(p)` and the X and Y variants, which flips each record the line produces
+  independently with probability `p` and leaves the qubits alone, so `M(0.2) 0` then
+  `M 0` gives a second record that is always 0, and `MPP(0.1) Z0*Z1 Z1*Z2` flips its two
+  records independently. Native text reads `M(p)` as a Pauli flip before the
+  measurement, which differs only when the qubit is measured again without a reset, and
+  takes no argument on `MPP`, the pair measurements or `MPAD`.
 
-Any other instruction, `sweep[k]` targets, and noise arguments on `MPP`, the pair
-measurements and `MPAD` are parse errors naming the line. A record flip lowers to
-`QecOp::RecordFlip`, which every runner and `detector_error_model` honour; `to_text`
-writes it as the native `RECORD_FLIP(p)` line after the measurement.
+Any other instruction and `sweep[k]` targets are parse errors naming the line. A record
+flip lowers to `QecOp::RecordFlip` after the op that produced the record, which every
+runner and `detector_error_model` honour; `to_text` writes it as the native
+`RECORD_FLIP(p)` line after the measurement.
 
 ### Detector reference
 

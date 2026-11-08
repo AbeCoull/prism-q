@@ -1,5 +1,8 @@
 //! Circuit construction, OpenQASM parsing, and reusable circuit builders.
 
+use std::collections::BTreeMap;
+
+use prism_q::circuit::dynamic::ClassicalValue;
 use prism_q::circuit::{openqasm, qasm_export};
 use prism_q::{
     Circuit, CircuitBuilder, ClassicalCondition, Gate, Instruction, PauliObservable, PauliTerm,
@@ -1283,9 +1286,21 @@ pub fn parse_qasm(source: &str) -> PyPrismResult<PyCircuit> {
 }
 
 /// Return a circuit template and its named input slots in declaration order.
+///
+/// `inputs` maps `input` names to bool, int or float values, each folded as a
+/// constant; an unsupplied `float` or `angle` input keeps its slot.
 #[pyfunction]
-pub fn parse_qasm_parametric(source: &str) -> PyPrismResult<(PyCircuit, PyParameters)> {
-    let (circuit, parameters) = openqasm::parse_parametric(source)?;
+#[pyo3(signature = (source, inputs = None))]
+pub fn parse_qasm_parametric(
+    source: &str,
+    inputs: Option<BTreeMap<String, Bound<'_, PyAny>>>,
+) -> PyPrismResult<(PyCircuit, PyParameters)> {
+    let inputs = crate::program::input_values(inputs)?;
+    let inputs: Vec<(&str, ClassicalValue)> = inputs
+        .iter()
+        .map(|(name, value)| (name.as_str(), *value))
+        .collect();
+    let (circuit, parameters) = openqasm::parse_parametric_with_inputs(source, &inputs)?;
     let parameters = PyParameters::against(parameters, &circuit);
     Ok((PyCircuit(circuit), parameters))
 }

@@ -92,10 +92,7 @@ fn slot_per_link(params: &Parameters) -> Parameters {
         links
             .iter()
             .enumerate()
-            .map(|(slot, link)| ParamLink {
-                instruction: link.instruction,
-                slot,
-            })
+            .map(|(slot, link)| ParamLink::new(link.instruction, slot))
             .collect(),
         links.len(),
     )

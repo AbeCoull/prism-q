@@ -117,7 +117,9 @@ impl PyParameters {
         self.0.is_empty()
     }
 
-    /// The recorded `(instruction_index, slot)` links, in the order added.
+    /// The recorded `(instruction_index, slot)` links, in the order added. A link
+    /// `parse_qasm_parametric` read from an affine angle also carries the scale and
+    /// offset `bind` applies.
     fn links(&self) -> Vec<(usize, usize)> {
         self.0
             .links()

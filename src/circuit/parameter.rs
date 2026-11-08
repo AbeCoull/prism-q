@@ -8,12 +8,33 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
 /// Binds one rotation gate instruction to a slot in the parameter vector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The gate's angle is `scale * value + offset` for the slot's value, so a gradient
+/// with respect to the slot carries a factor of `scale`. [`new`](Self::new) builds the
+/// identity link, scale `1` and offset `0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParamLink {
     /// Index into [`Circuit::instructions`].
     pub instruction: usize,
     /// Slot in the parameter vector this gate reads.
     pub slot: usize,
+    pub scale: f64,
+    pub offset: f64,
+}
+
+impl ParamLink {
+    pub fn new(instruction: usize, slot: usize) -> Self {
+        Self {
+            instruction,
+            slot,
+            scale: 1.0,
+            offset: 0.0,
+        }
+    }
+
+    pub(crate) fn angle(&self, value: f64) -> f64 {
+        self.scale * value + self.offset
+    }
 }
 
 /// Parameter slots over the rotation angles of a circuit.
@@ -26,7 +47,7 @@ pub struct ParamLink {
 ///
 /// Bindable gates are `Rx`, `Ry`, `Rz`, `Rzz`, `P`, and `PauliRot`, the `Gate`
 /// variants carrying a rotation angle.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Parameters {
     links: Vec<ParamLink>,
     num_slots: usize,
@@ -115,10 +136,7 @@ impl Parameters {
             if let Instruction::Gate { gate, .. } = inst
                 && gate.pauli_generator().is_some()
             {
-                links.push(ParamLink {
-                    instruction: i,
-                    slot: links.len(),
-                });
+                links.push(ParamLink::new(i, links.len()));
             }
         }
         let num_slots = links.len();
@@ -134,7 +152,7 @@ impl Parameters {
     /// to cover it. For builders accumulating links before the count is known.
     pub(super) fn link_growing(&mut self, instruction: usize, slot: usize) {
         self.num_slots = self.num_slots.max(slot + 1);
-        self.links.push(ParamLink { instruction, slot });
+        self.links.push(ParamLink::new(instruction, slot));
     }
 
     /// Record that `instruction` reads `slot`.
@@ -142,13 +160,31 @@ impl Parameters {
     /// # Panics
     /// Panics if `slot` is not below the declared slot count.
     pub fn link(&mut self, instruction: usize, slot: usize) {
-        assert!(
-            slot < self.num_slots,
-            "slot {} out of bounds (parameter set declares {} slots)",
+        self.push_link(ParamLink::new(instruction, slot));
+    }
+
+    /// Record that `instruction` reads `scale * value + offset` for the value of
+    /// `slot`.
+    ///
+    /// # Panics
+    /// Panics if `slot` is not below the declared slot count.
+    pub fn link_affine(&mut self, instruction: usize, slot: usize, scale: f64, offset: f64) {
+        self.push_link(ParamLink {
+            instruction,
             slot,
+            scale,
+            offset,
+        });
+    }
+
+    fn push_link(&mut self, link: ParamLink) {
+        assert!(
+            link.slot < self.num_slots,
+            "slot {} out of bounds (parameter set declares {} slots)",
+            link.slot,
             self.num_slots
         );
-        self.links.push(ParamLink { instruction, slot });
+        self.links.push(link);
     }
 
     pub fn links(&self) -> &[ParamLink] {
@@ -175,10 +211,19 @@ impl Parameters {
     /// # Errors
     /// Returns [`PrismError::InvalidParameter`] when a link points past the end
     /// of the instruction stream, at a non-gate instruction, or at a gate
-    /// carrying no angle, or references a slot outside the declared value vector.
+    /// carrying no angle, references a slot outside the declared value vector, or
+    /// carries a scale or offset that is not finite or a scale of zero.
     pub fn validate(&self, circuit: &Circuit) -> Result<()> {
         let n = circuit.instructions.len();
         for link in &self.links {
+            if !(link.scale.is_finite() && link.scale != 0.0 && link.offset.is_finite()) {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "parameter link on instruction {} has scale {} and offset {}; both must be finite and the scale nonzero",
+                        link.instruction, link.scale, link.offset
+                    ),
+                });
+            }
             if link.slot >= self.num_slots {
                 return Err(PrismError::InvalidParameter {
                     message: format!(
@@ -308,11 +353,12 @@ impl Parameters {
     /// template. Callers must have validated the links against it.
     pub(crate) fn write_angles(&self, out: &mut Circuit, values: &[f64]) {
         for link in &self.links {
-            *angle_mut(&mut out.instructions[link.instruction]) = values[link.slot];
+            *angle_mut(&mut out.instructions[link.instruction]) = link.angle(values[link.slot]);
         }
     }
 
-    /// Read the angle each slot currently holds in `circuit`.
+    /// Read the value each slot currently holds in `circuit`, inverting each
+    /// link's scale and offset. A slot linked more than once reads its last link.
     ///
     /// # Errors
     /// Same conditions as [`validate`](Self::validate), which this runs first
@@ -321,7 +367,8 @@ impl Parameters {
         self.validate(circuit)?;
         let mut out = vec![0.0; self.num_slots];
         for link in &self.links {
-            out[link.slot] = angle_of(&circuit.instructions[link.instruction]);
+            let angle = angle_of(&circuit.instructions[link.instruction]);
+            out[link.slot] = (angle - link.offset) / link.scale;
         }
         Ok(out)
     }

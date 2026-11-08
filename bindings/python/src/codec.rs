@@ -943,6 +943,17 @@ pub(crate) fn encode_parameters(params: &Parameters, pin: Option<&Pin>) -> PyPri
         }
         None => w.bool(false),
     }
+    let affine = params
+        .links()
+        .iter()
+        .any(|link| link.scale != 1.0 || link.offset != 0.0);
+    if affine {
+        w.bool(true);
+        for link in params.links() {
+            w.f64(link.scale);
+            w.f64(link.offset);
+        }
+    }
     Ok(w.finish())
 }
 
@@ -958,7 +969,7 @@ pub(crate) fn decode_parameters(data: &[u8]) -> PyPrismResult<(Parameters, Optio
                 "pickle payload links a slot past the declared count",
             ));
         }
-        links.push(prism_q::ParamLink { instruction, slot });
+        links.push(prism_q::ParamLink::new(instruction, slot));
     }
     let names = if r.bool()? {
         Some(
@@ -981,6 +992,12 @@ pub(crate) fn decode_parameters(data: &[u8]) -> PyPrismResult<(Parameters, Optio
     } else {
         None
     };
+    if !r.at_end() && r.bool()? {
+        for link in &mut links {
+            link.scale = r.f64()?;
+            link.offset = r.f64()?;
+        }
+    }
     r.finish()?;
     let params = restore_parameters(num_slots, links, names, pin.as_ref())?;
     Ok((params, pin))
@@ -1029,7 +1046,7 @@ pub(crate) fn restore_parameters(
         params = params.pinned_to(&scratch);
     }
     for link in &links[pinned..] {
-        params.link(link.instruction, link.slot);
+        params.link_affine(link.instruction, link.slot, link.scale, link.offset);
     }
     Ok(params)
 }

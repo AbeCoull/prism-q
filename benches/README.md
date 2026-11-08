@@ -70,7 +70,7 @@ worth the disk.
 | `tn/scalar_hea_l2` | Tensor-network scalar contraction, hardware-efficient ansatz, 2 layers, 20–50 qubits (`bench-internal`) |
 | `tn/scalar_depth_20q` | Same contraction at 20 qubits, 4–7 layers, where intermediates grow large enough to reach the parallel contraction arms (`bench-internal`) |
 | `tn/scalar_hea_l6` | Same contraction at 6 layers, 20–50 qubits, the only rows where qubit count drives how many contractions reach the faer arm (`bench-internal`) |
-| `tn/scalar_hea_l7` | Same contraction at 7 layers, 30–50 qubits, where the greedy tree's peak intermediate is non-monotonic in width; the rows that measure contraction tree quality (`bench-internal`) |
+| `tn/scalar_hea_l7` | Same contraction at 7 layers, 30–50 qubits, where the plain greedy tree peaks at 16.8M elements at 30 and 50 qubits and the restarts and fused plan bring it to 1.05M, 1.05M and 2.1M; the rows that measure contraction tree quality (`bench-internal`) |
 | `tn/rdm_chain` | Single-qubit reduced density matrix on CZ chains at 40 and 60 qubits, query-shaped rows past the dense ceiling; depth 4 weighs per-contraction overhead, depth 8 the arithmetic |
 | `tn/midmeasure_chain` | CZ chain with one measurement and one reset at half depth, 16 and 20 qubits; the row where measurement path cost lands mid-run |
 | `tn/noisy_chain` | Depolarizing trajectories on the measured CZ chain at 16 qubits, 100 shots; moves with the measurement path as much as the noise machinery |

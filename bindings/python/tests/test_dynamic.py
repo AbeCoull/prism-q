@@ -155,3 +155,26 @@ def test_parse_declines_loops_and_points_at_dynamic_entry():
     with pytest.raises(PrismError, match="parse_dynamic") as err:
         parse_qasm(RUS)
     assert err.value.kind == "unsupported_construct"
+
+
+def test_a_subroutine_bit_stays_out_of_the_shot_record():
+    program = parse_qasm_dynamic(
+        """
+        OPENQASM 3.0;
+        qubit[2] q;
+        bit[1] c;
+        def herald(qubit a, qubit flag) {
+          bit r;
+          x a;
+          r = measure a;
+          if (r) x flag;
+        }
+        herald(q[0], q[1]);
+        c[0] = measure q[1];
+        """
+    )
+    assert program.num_classical_bits == 1
+    assert program.num_private_bits == 1
+    shots = simulate_program(program).seed(42).shots(10).shots
+    assert shots.shape == (10, 1)
+    assert shots.all()

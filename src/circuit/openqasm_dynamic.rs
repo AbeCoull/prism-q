@@ -168,6 +168,7 @@ pub(super) fn parse_dynamic_within(
         parser.link_externs(externs);
     }
     parser.expansion_left.set(budget);
+    parser.private_bits = Some(Rc::default());
     parser.dynamic = Some(Box::new(DynamicState {
         builder: DynamicProgramBuilder::new(0, 0),
         analysis: RuntimeAnalysis::of(&program),
@@ -186,8 +187,12 @@ pub(super) fn parse_dynamic_within(
     parser.flush(tail);
     let state = parser.dynamic.take().expect("installed above");
     let mut builder = state.builder;
-    builder.resize(parser.total_qubits, parser.total_cbits);
-    builder.build()
+    let private = parser.private_bits.as_ref().map_or(0, |taken| taken.get());
+    if private > 0 {
+        builder.move_bits(PRIVATE_BITS, parser.total_cbits);
+    }
+    builder.resize(parser.total_qubits, parser.total_cbits + private);
+    Ok(builder.build()?.with_private_bits(private))
 }
 
 /// Lower `text` against a builder's variables and its bits, which read as the
@@ -231,6 +236,46 @@ pub(crate) fn builder_expr(text: &str, builder: &DynamicProgramBuilder) -> Resul
 }
 
 /// `bits[offset..offset + size]` as an unsigned value, or one bit.
+/// One subscript of a bit register read in an expression, where a range or a
+/// set parses as a value.
+fn subscript<'e>(index: &Expr<'e>) -> ast::Index<'e> {
+    match index {
+        Expr::Range(range) => ast::Index::Range(range.clone()),
+        Expr::Set(entries) => ast::Index::Set(entries.clone()),
+        single => ast::Index::Single(single.clone()),
+    }
+}
+
+/// `bits` read as one unsigned value, the first bit lowest.
+fn bits_read(bits: &[usize], line: usize) -> Result<ClassicalExpr> {
+    if bits.is_empty() {
+        return Err(parse_error(line, "a bit register read selects no bits"));
+    }
+    let contiguous = bits.windows(2).all(|pair| pair[1] == pair[0] + 1);
+    if contiguous || bits.len() > 64 {
+        return register_read(bits[0], bits.len(), line);
+    }
+    let mut value = ClassicalExpr::Register {
+        offset: bits[0],
+        size: 1,
+    };
+    for (position, &bit) in bits.iter().enumerate().skip(1) {
+        value = ClassicalExpr::binary(
+            dynamic::BinaryOp::BitOr,
+            value,
+            ClassicalExpr::binary(
+                dynamic::BinaryOp::Shl,
+                ClassicalExpr::Register {
+                    offset: bit,
+                    size: 1,
+                },
+                ClassicalExpr::Const(ClassicalValue::Int(position as i128)),
+            ),
+        );
+    }
+    Ok(value)
+}
+
 fn register_read(offset: usize, size: usize, line: usize) -> Result<ClassicalExpr> {
     match size {
         1 => Ok(ClassicalExpr::Bit(offset)),
@@ -268,7 +313,10 @@ pub(super) fn bits_value(bits: &[usize], line: usize) -> Result<ClassicalExpr> {
 }
 
 /// Whether some leaf of `expr` is a runtime value according to `leaf`.
-fn reads_leaf(expr: &Expr, leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>>) -> Result<bool> {
+pub(super) fn reads_leaf(
+    expr: &Expr,
+    leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>>,
+) -> Result<bool> {
     with_stack(|| {
         Ok(match expr {
             Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) => false,
@@ -290,9 +338,11 @@ fn reads_leaf(expr: &Expr, leaf: &impl Fn(&Expr) -> Result<Option<ClassicalExpr>
             Expr::Range(range) => range.bounds().try_fold(false, |seen, bound| {
                 Ok::<_, PrismError>(seen || reads_leaf(bound, leaf)?)
             })?,
-            Expr::Concat(parts) => parts.iter().try_fold(false, |seen, part| {
-                Ok::<_, PrismError>(seen || reads_leaf(part, leaf)?)
-            })?,
+            Expr::Concat(parts) | Expr::Set(parts) => {
+                parts.iter().try_fold(false, |seen, part| {
+                    Ok::<_, PrismError>(seen || reads_leaf(part, leaf)?)
+                })?
+            }
         })
     })
 }
@@ -329,10 +379,13 @@ fn lower(
             }
             Expr::Call(call) => {
                 let Some(function) = function(call.name) else {
+                    if let ("popcount", [arg]) = (call.name, call.args.as_slice()) {
+                        return Ok(ClassicalExpr::unary(UnaryOp::Popcount, recurse(arg)?));
+                    }
                     return Err(PrismError::UnsupportedConstruct {
                         construct: format!(
-                            "builtin `{}` over a runtime value; only operators and `extern` \
-                             calls run at runtime",
+                            "builtin `{}` over a runtime value; only operators, `popcount` \
+                             and `extern` calls run at runtime",
                             call.name
                         ),
                         line,
@@ -358,7 +411,7 @@ fn lower(
                 }
                 ClassicalExpr::cast(cast.ty.runtime(width), recurse(&cast.value)?)
             }
-            Expr::Range(_) | Expr::Concat(_) => {
+            Expr::Range(_) | Expr::Concat(_) | Expr::Set(_) => {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!("`{expr}`, a slice or array join over a runtime value"),
                     line,
@@ -637,7 +690,7 @@ impl<'a> Parser<'a> {
             ast::Argument::Value(Expr::Element(element)) if element.indices.len() == 1 => {
                 std::borrow::Cow::Owned(Operand {
                     name: ast::OperandName::Register(element.array),
-                    index: Some(ast::Index::Single(element.indices[0].clone())),
+                    index: Some(subscript(&element.indices[0])),
                     line,
                 })
             }
@@ -1098,6 +1151,16 @@ impl<'a> Parser<'a> {
             }
             Expr::Element(element) => {
                 if let Some(var) = self.runtime_var(element.array) {
+                    if self
+                        .dynamic
+                        .as_ref()
+                        .is_some_and(|state| state.bit_values.contains_key(element.array))
+                    {
+                        let argument = ast::Argument::Value(expr.clone());
+                        return Ok(self
+                            .runtime_bit_argument(&argument, line)?
+                            .map(|(_, value)| value));
+                    }
                     let Some(at) = self.int_bit(element, line)? else {
                         return Ok(None);
                     };
@@ -1118,7 +1181,7 @@ impl<'a> Parser<'a> {
                 let operand = Operand {
                     name: ast::OperandName::Register(element.array),
                     index: match element.indices.as_slice() {
-                        [index] => Some(ast::Index::Single(index.clone())),
+                        [index] => Some(subscript(index)),
                         _ => {
                             return Err(parse_error(
                                 line,
@@ -1128,7 +1191,7 @@ impl<'a> Parser<'a> {
                     },
                     line,
                 };
-                Ok(Some(ClassicalExpr::Bit(self.bit_of(&operand)?)))
+                bits_read(&self.bits_of(&operand)?, line).map(Some)
             }
             _ => Ok(None),
         }
@@ -1979,9 +2042,11 @@ impl<'a> Walk<'_, 'a> {
             Expr::Range(range) => range.bounds().fold(Reads::default(), |reads, bound| {
                 reads.or(self.expr_reads(bound))
             }),
-            Expr::Concat(parts) => parts.iter().fold(Reads::default(), |reads, part| {
-                reads.or(self.expr_reads(part))
-            }),
+            Expr::Concat(parts) | Expr::Set(parts) => {
+                parts.iter().fold(Reads::default(), |reads, part| {
+                    reads.or(self.expr_reads(part))
+                })
+            }
         })
     }
 

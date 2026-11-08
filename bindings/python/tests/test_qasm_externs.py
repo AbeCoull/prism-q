@@ -184,7 +184,7 @@ def test_a_def_call_bounds_a_for_range():
         ("OPENQASM 3.0; extern f(int) -> float; qubit[1] q;", {"f": 3}, "invalid_parameter"),
         ("OPENQASM 3.0; extern f(int); qubit[1] q;", {"f": abs}, "unsupported_construct"),
         (
-            "OPENQASM 3.0; extern f(bit[4]) -> float; qubit[1] q;",
+            "OPENQASM 3.0; extern f(bit[65]) -> float; qubit[1] q;",
             {"f": abs},
             "unsupported_construct",
         ),

@@ -115,7 +115,8 @@ pub enum Terminator {
 /// One basic block: its circuit runs first, then its actions, then its
 /// terminator picks the next block.
 ///
-/// `circuit` is an ordinary [`Circuit`] over the program's full width, and may
+/// `circuit` is an ordinary [`Circuit`] over the program's full width, private
+/// bits included (see [`DynamicProgram::num_private_bits`]), and may
 /// carry guarded regions on classical bits. Fusion runs on it once, when the
 /// program is prepared for a backend.
 #[derive(Debug, Clone)]
@@ -135,7 +136,9 @@ pub struct BasicBlock {
 #[derive(Debug, Clone)]
 pub struct DynamicProgram {
     num_qubits: usize,
+    /// Every bit the blocks address, private ones included.
     num_classical_bits: usize,
+    num_private_bits: usize,
     variables: Vec<Variable>,
     blocks: Vec<BasicBlock>,
 }
@@ -257,16 +260,37 @@ impl DynamicProgram {
         Ok(Self {
             num_qubits,
             num_classical_bits,
+            num_private_bits: 0,
             variables,
             blocks,
         })
+    }
+
+    /// Hold the last `count` bits back from each shot's record.
+    pub(crate) fn with_private_bits(mut self, count: usize) -> Self {
+        debug_assert!(count <= self.num_classical_bits);
+        self.num_private_bits = count;
+        self
     }
 
     pub fn num_qubits(&self) -> usize {
         self.num_qubits
     }
 
+    /// Bits each shot reports, which leaves out the private ones.
     pub fn num_classical_bits(&self) -> usize {
+        self.num_classical_bits - self.num_private_bits
+    }
+
+    /// Bits past [`num_classical_bits`](Self::num_classical_bits) that hold a
+    /// measurement an OpenQASM subroutine keeps to itself. The blocks address
+    /// them; no shot reports them.
+    pub fn num_private_bits(&self) -> usize {
+        self.num_private_bits
+    }
+
+    /// Every bit the blocks address, private ones included.
+    pub(crate) fn num_held_bits(&self) -> usize {
         self.num_classical_bits
     }
 
@@ -282,9 +306,14 @@ impl DynamicProgram {
     /// The program's circuit when it has no runtime control flow: one block,
     /// no actions, and nothing after it. Such a program runs exactly as that
     /// circuit does, through every sampling shortcut the circuit qualifies for.
+    /// A program with private bits has none, since its circuit would report them.
     pub fn static_circuit(&self) -> Option<&Circuit> {
         match self.blocks.as_slice() {
-            [block] if block.actions.is_empty() && block.terminator == Terminator::End => {
+            [block]
+                if self.num_private_bits == 0
+                    && block.actions.is_empty()
+                    && block.terminator == Terminator::End =>
+            {
                 Some(&block.circuit)
             }
             _ => None,

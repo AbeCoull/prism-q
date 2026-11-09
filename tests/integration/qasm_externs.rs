@@ -299,9 +299,9 @@ fn unsupported_extern_forms_decline_by_name() {
         "complex",
     );
     unsupported(
-        parse("extern f(bit[4]) -> float;"),
-        "bit[4]",
-        "bit register",
+        parse("extern f(bit[65]) -> float;"),
+        "bit[65]",
+        "bit register past 64 bits",
     );
     unsupported(
         parse("extern f(int) -> angle[8];"),

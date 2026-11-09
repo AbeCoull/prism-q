@@ -356,7 +356,9 @@ if (c[0]) {
 existing condition language rather than new IR syntax. A condition may test a bit, a
 register against a value, or a parity such as `if (c[0] ^ c[2])` or
 `if ((c[0] ^ c[2]) == 0)`. Under `parse`, anything else over classical bits declines;
-[`parse_dynamic`](#dynamic-programs) evaluates it at runtime.
+[`parse_dynamic`](#dynamic-programs) evaluates it at runtime, along with measured bits read
+as values, such as `int x = c[0] + 2 * c[1];` or `if (c[0] && !c[1])`. Under `parse`, a
+bit read as a value anywhere but a guard returns `UnsupportedConstruct`.
 
 Because the guards re-read the classical bits, `else` is rejected when the `if` body
 measures into a bit the condition reads, and `switch` when any arm measures into the
@@ -442,9 +444,29 @@ rx(correction * pi) q;
 c[1] = measure q;
 ```
 
-Forms that need private measurement storage decline by name: a call that discards a bit
-result, a measurement into a bit parameter, and a bit the body declares without returning.
-So do a measurement returned as a scalar result, a `stretch` returned as a `duration`,
+Under `parse_dynamic`, a body may declare bits it does not return and measure into them,
+and a call may drop a `bit` result. Those bits are private: the blocks address them past
+the declared bits, `DynamicProgram::num_private_bits` counts them, and no shot reports
+them, so the shot width stays the declared width. Each call takes its own, and a runtime
+call writes a private bit's initializer, or zero, on every call:
+
+```qasm
+qubit[2] q;
+bit[1] c;
+def herald(qubit a, qubit flag) {
+  bit r;
+  h a;
+  r = measure a;
+  if (r) x flag;
+}
+herald(q[0], q[1]);
+c[0] = measure q[1];
+```
+
+`parse` declines these forms by name, since a `Circuit` reports every bit it holds.
+`parse_dynamic` declines a measurement into a bit parameter, and a private bit in a `def`
+inlined into a `while` body, whose passes would share it. Both decline a measurement
+returned as a scalar result, a `stretch` returned as a `duration`,
 runtime duration, fixed-width angle and `complex` values, and modifiers on runtime calls.
 Under `parse`, a scalar result that depends on a measurement and a
 call inside a measurement-dependent condition decline too; `parse_dynamic` takes both.
@@ -540,7 +562,9 @@ let circuit = openqasm::parse_with_externs(
 
 Each argument is stored through its declared type before the call, so `int[8]` passes 257
 as 1. The function returns a `Bool` for `bool` and `bit`, an `Int` for `int[n]` and
-`uint[n]`, and a `Float` for `float[n]` and `angle`, where an `Int` is promoted. The result
+`uint[n]`, and a `Float` for `float[n]` and `angle`, where an `Int` is promoted. A
+`bit[n]` of up to 64 bits passes and returns as the `uint[n]` its bits spell, so
+`f(c[0:2])` and `f(c[{0, 2, 1}])` pass a slice or an index set. The result
 is stored through the declared type. A call reads as a value anywhere one belongs, inside `def` bodies too, and
 as a statement its value is dropped.
 
@@ -568,8 +592,8 @@ every `extern` declaration with `UnsupportedConstruct`. Under the `_with_externs
 points, these return `InvalidParameter`: a declaration with no function registered under its name,
 a result of the wrong kind, and any error the function returns or a Python callable raises.
 A function registered for no declaration is ignored. These return `UnsupportedConstruct`:
-an `extern` with no result type, a parameter or result of another type (`bit[n]`,
-`angle[n]`, `complex`, `duration`, arrays), a call over an unsupplied `input`, and under
+an `extern` with no result type, a parameter or result of another type (`bit[n]` past 64
+bits, `angle[n]`, `complex`, `duration`, arrays), a call over an unsupplied `input`, and under
 `parse` a call over a measured value. A call with the wrong number of arguments, an
 `extern` declared inside a body, and a `gate` or `def` sharing an extern's name return
 `Parse`.
@@ -666,9 +690,11 @@ let noisy = simulate_program(&program).noise(&rules).seed(42).shots(1000)?;
   register size, a duration, and the angle of any gate but the five rotations above.
 - A runtime argument to a `def` written as a gate application, `f(x) q;`. Called as a
   function, `f(x, q)`, the same `def` takes it.
-- A slice read as a runtime value.
-- A builtin function (`sin`, `sqrt` and the rest) over a runtime value. Only operators
-  and [`extern` calls](#extern-functions) run at runtime.
+- A slice of a runtime `int` or `uint` read as a value. A slice or index set of a bit
+  register, `c[0:2]` or `c[{0, 2}]`, reads as the unsigned value of the bits it picks,
+  the first lowest.
+- A builtin function (`sin`, `sqrt` and the rest) over a runtime value. Only operators,
+  `popcount` and [`extern` calls](#extern-functions) run at runtime.
 - A `bit` or `qubit` register declared inside a `while` body, and an `array` a loop or
   measurement writes.
 - A measurement straight into a variable. Measure into a bit and assign the bit.
@@ -687,7 +713,7 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | --- | --- | --- |
 | `OPENQASM 2.x` and `3.x` headers | Parses | Another major version: `UnsupportedConstruct` naming the version. A header that is not a number: `Parse` |
 | `include "..."` | Accepted and ignored | Nothing. The standard gates are built in, so an include adds no names; a gate it would have defined declines later by name |
-| `qubit`, `qreg`, `bit`, `creg` | Parses | A `bit` initializer with a set bit, or an assignment to a bit: `UnsupportedConstruct` under `parse`, written at runtime under `parse_dynamic`. A bit string whose length differs from the register, or a float written to bits: `Parse` |
+| `qubit`, `qreg`, `bit`, `creg` | Parses | A `bit` initializer with a set bit, an assignment to a bit, or a bit read as a value outside a guard: `UnsupportedConstruct` under `parse`, written or read at runtime under `parse_dynamic`, where a slice or an index set reads as an unsigned value. A bit string whose length differs from the register, or a float written to bits: `Parse` |
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
 | `int`, `uint`, `bool`, `float`, `angle`, `complex`, `const` | Parses | Any other type: `UnsupportedConstruct` naming the type. A complex value where a real one belongs: `Parse`. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic` |
 | `array` | Parses; folded at parse time, with slices, `++`, `sizeof` and array arguments | An element type other than `int`, `uint`, `float`, `angle` or `bool`, or a compound assignment to a slice: `UnsupportedConstruct`. An initializer or assignment of the wrong shape, an index out of range, an index set on an array, or more than 2^20 elements: `Parse` |
@@ -705,12 +731,12 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | `while` | Parses under `parse_dynamic` | `UnsupportedConstruct` under `parse`: a loop that exits on a measurement has no finite instruction list |
 | `break`, `continue` | Parses inside `for` and `while` | Outside a loop, or at the top level of a `def` or `gate` body: `Parse`. In a `for` under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
 | `end` | Stops the program; nothing after it runs | Inside a `gate` body, called or not: `Parse`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
-| `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results; `parse_dynamic` supports runtime numerical results | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, overlapping qubit arguments, a missing result, or calls nested past 32 deep: `Parse` |
+| `def` | Inlines its body, with fixed-width qubit registers, bit results, and scalar results; `parse_dynamic` supports runtime numerical results, and bits a body measures into without returning, or a call drops, which no shot reports | See [Subroutines](#subroutines) for the forms that decline, all `UnsupportedConstruct`. A result or argument of the wrong width, overlapping qubit arguments, a missing result, or calls nested past 32 deep: `Parse` |
 | `return` | Exits a `def`, including nested branches and loops | Outside a `def`: `UnsupportedConstruct`. Under a measurement-dependent branch: `UnsupportedConstruct` under `parse`, lowered into the graph under `parse_dynamic` |
 | `gate` blocks | Parses; an empty body is the identity | Calls nested past 32 deep: `Parse` |
 | A gate length, `x[100ns] q;` | Parses; the length is dropped | |
 | `defcalgrammar`, `cal`, `defcal` | Parsed and skipped: a calibration says how a gate is pulsed, not what it does | A call to a gate only a `defcal` names: `UnsupportedConstruct` naming it |
-| `extern` | Calls a registered function under the `_with_externs` entry points; see [Extern functions](#extern-functions) | Any other entry point: `UnsupportedConstruct`. No registered function, or a result of the wrong kind: `InvalidParameter`. No result type, a type other than `bool`, `bit`, `int[n]`, `uint[n]`, `float[n]` and `angle`, a call over an unsupplied input, or a call over a measured value under `parse`: `UnsupportedConstruct`. The wrong number of arguments: `Parse` |
+| `extern` | Calls a registered function under the `_with_externs` entry points; see [Extern functions](#extern-functions) | Any other entry point: `UnsupportedConstruct`. No registered function, or a result of the wrong kind: `InvalidParameter`. No result type, a type other than `bool`, `bit`, `bit[n]` up to 64 bits, `int[n]`, `uint[n]`, `float[n]` and `angle`, a call over an unsupplied input, or a call over a measured value under `parse`: `UnsupportedConstruct`. The wrong number of arguments: `Parse` |
 | `opaque` | Declines | `UnsupportedConstruct` |
 | `ctrl`, `negctrl`, `ctrl(n)`, `negctrl(n)`, `inv`, `pow(k)` | Parses, chainable in any order | See [Gate modifiers](#gate-modifiers) for the reach of each, and below for the declines |
 | `gphase(theta)` | Parses and is carried | |

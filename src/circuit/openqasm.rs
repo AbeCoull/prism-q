@@ -58,7 +58,7 @@
 //! | Boolean literals | `rx(true * pi) ...` | `true` / `false` evaluate to `1.0` / `0.0` |
 //! | Gate definition | `gate rxx(t) a,b { ... }` | User-defined gates |
 //! | Subroutine definition | `def myg(qubit[2] a, float t) { ... }` | Inlined at the call site. Takes qubits or fixed-width qubit registers and classical values by value, with declared-width coercion. `parse_dynamic` permits classical writes to copied bit parameters |
-//! | Subroutine result | `def mx(qubit a) -> bit { h a; return measure a; }` then `c[0] = mx(q[0]);` | A `bit` or `bit[n]` result lands on the assigned bits. Return a measurement or a local bit; `parse_dynamic` also accepts computed bit values |
+//! | Subroutine result | `def mx(qubit a) -> bit { h a; return measure a; }` then `c[0] = mx(q[0]);` | A `bit` or `bit[n]` result lands on the assigned bits. Return a measurement or a local bit; `parse_dynamic` also accepts computed bit values, a dropped result, and local bits the body measures into without returning, none of which a shot reports |
 //! | Scalar subroutine result | `def f(int n) -> int[8] { if (n > 0) return n; return 0; }` | Results fold at parse time when known; `parse_dynamic` supports runtime numerical results and early returns. Calls may appear in expressions, branches and loop tests. Durations remain static |
 //! | Extern function | `extern f(int[8], float) -> bool;` | Bound by name to a function in [`Externs`]. A call on constants runs at parse time; [`parse_dynamic_with_externs`] also lowers one over a measured value into the program |
 //! | Static for loop | `for int i in [0:n] { ... }` | Inclusive ranges, optional step, set form `{a,b,c}` |
@@ -80,21 +80,24 @@
 //! - `opaque`, and `return` outside a `def`
 //! - `extern` under an entry point that takes no [`Externs`]; under
 //!   [`parse_with_externs`] and its peers, an `extern` with no result type, or
-//!   taking or returning a type other than `bool`, `bit`, `int[n]`, `uint[n]`,
-//!   `float[n]` and `angle`. An `extern` with no registered function returns
+//!   taking or returning a type other than `bool`, `bit`, `bit[n]` up to 64
+//!   bits, `int[n]`, `uint[n]`, `float[n]` and `angle`. An `extern` with no registered function returns
 //!   [`PrismError::InvalidParameter`]
 //! - a call to a gate only a `defcal` names, which has no unitary to run
 //! - a `bit` initializer with a set bit, and any assignment to classical bits:
 //!   nothing in the instruction list writes a classical bit, and
 //!   [`parse_dynamic`] writes them
+//! - a classical bit read as a value outside a guard, `int x = c[0] + c[1];`,
+//!   which [`parse_dynamic`] evaluates at runtime
 //! - `while`, `break` and `continue`, which [`parse_dynamic`] reads into a
 //!   control-flow graph
 //! - a measurement-dependent scalar `def` result or early `return` under
 //!   `parse`; `parse_dynamic` lowers these into the graph
-//! - a dropped `bit` result, a runtime `complex` value, a runtime duration in a
+//! - under `parse`, a dropped `bit` result; under both, a runtime `complex` value, a runtime duration in a
 //!   subroutine, a fixed-width runtime angle, and modifiers on a runtime call
 //! - a `def` body that measures into anything but the bit it returns, or
-//!   declares a `bit` it does not return
+//!   declares a `bit` it does not return; [`parse_dynamic`] takes bits the body
+//!   declares, but not a measurement into a bit parameter
 //! - `ctrl @` on a `def` call: a subroutine is not a gate and the language
 //!   gives it no controlled form
 //! - `ctrl @` and a fractional `pow(k) @` on a call spanning more than four
@@ -704,6 +707,12 @@ pub(crate) struct Parser<'a> {
     /// Work left of [`MAX_EXPANSION`], shared with every expansion parser this
     /// one spawns.
     expansion_left: Rc<Cell<usize>>,
+    /// Bits taken from [`PRIVATE_BITS`] on, shared with every expansion parser;
+    /// `None` outside [`parse_dynamic`], which alone can hold them.
+    private_bits: Option<Rc<Cell<usize>>>,
+    /// An enclosing parser runs this expansion inside a `while` body, whose
+    /// passes would share any bit it allocates.
+    in_outer_while: bool,
     /// Qubit a bare `gphase` carries its phase on: qubit 0 at the top level, a
     /// gate's first qubit inside its body, so a control on the gate never
     /// lands on the carrier.
@@ -719,6 +728,9 @@ const MAX_EXPANSION: usize = 1 << 24;
 /// Most qubits, and separately most classical bits, a program may declare,
 /// which bounds what a later run allocates for them.
 const MAX_DECLARED_WIDTH: usize = 1 << 24;
+/// First index of the bits a `def` keeps to itself while a dynamic parse runs,
+/// past every declared bit; the parse moves them to follow the declared bits.
+const PRIVATE_BITS: usize = MAX_DECLARED_WIDTH;
 const MAX_FOR_ITERATIONS: i64 = 1_000_000;
 
 /// Largest whole-number `pow(k)` exponent, which bounds both the repetition of
@@ -826,6 +838,8 @@ impl<'a> Parser<'a> {
             guard: None,
             dynamic: None,
             expansion_left: Rc::new(Cell::new(MAX_EXPANSION)),
+            private_bits: None,
+            in_outer_while: false,
             phase_qubit: 0,
         }
     }

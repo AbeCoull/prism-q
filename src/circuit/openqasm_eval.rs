@@ -262,6 +262,7 @@ fn replace_nodes<'e>(
             stop: bound(&range.stop)?,
         })),
         Expr::Concat(parts) => Expr::Concat(parts.iter().map(resolve).collect::<Result<_>>()?),
+        Expr::Set(entries) => Expr::Set(entries.iter().map(resolve).collect::<Result<_>>()?),
         Expr::Negate(inner) => Expr::Negate(Box::new(resolve(inner)?)),
         Expr::Not(inner) => Expr::Not(Box::new(resolve(inner)?)),
         Expr::BitNot(inner) => Expr::BitNot(Box::new(resolve(inner)?)),
@@ -711,6 +712,17 @@ impl<'a> Parser<'a> {
     fn extern_type(&self, name: &str, ty: &ast::DefType, line: usize) -> Result<RuntimeType> {
         match (ty.ty, &ty.width) {
             ("bit", None) => Ok(RuntimeType::Bool),
+            ("bit", Some(width)) => match self.integer_of(width, line)? {
+                bits @ 1..=64 => Ok(RuntimeType::Uint { width: bits as u32 }),
+                bits if bits < 1 => Err(parse_error(line, format!("`bit[{bits}]` has no bits"))),
+                bits => Err(PrismError::UnsupportedConstruct {
+                    construct: format!(
+                        "extern `{name}` over a `bit[{bits}]` value, past the 64 bits a value \
+                         holds"
+                    ),
+                    line,
+                }),
+            },
             ("bool" | "int" | "uint" | "float", _) | ("angle", None) => {
                 self.runtime_type(ty.ty, ty.width.as_ref(), line)
             }
@@ -982,6 +994,12 @@ impl<'a> Parser<'a> {
                         ),
                         line,
                     });
+                }
+                if *kind == ast::RegisterKind::Classical
+                    && self.def_result.is_some()
+                    && self.private_bits.is_some()
+                {
+                    return self.declare_private(name, size.as_ref(), init.as_deref(), line);
                 }
                 self.declare_register(*kind, name, size.as_ref(), line)?;
                 if let Some(init) = init {
@@ -1287,6 +1305,73 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Declare a `bit` a `def` body keeps to itself, on bits no declaration
+    /// names. A runtime call writes its initial value on every call.
+    fn declare_private(
+        &mut self,
+        name: &'a str,
+        size: Option<&Expr<'a>>,
+        init: Option<&ast::BitInit<'a>>,
+        line: usize,
+    ) -> Result<()> {
+        if self.dynamic.is_none() && self.in_outer_while {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "`bit {name}` inside a def inlined into a `while` loop, whose passes would \
+                     share it; declare it in the caller before the loop"
+                ),
+                line,
+            });
+        }
+        let width = match size {
+            None => 1usize,
+            Some(expr) => match self.integer_of(expr, line)? {
+                width if width > 0 => width as usize,
+                _ => return Err(parse_error(line, "bit count must be > 0")),
+            },
+        };
+        self.reject_redeclaration(name, line)?;
+        let offset = self.private_register(width, line)?;
+        Rc::make_mut(&mut self.cregs).insert(
+            name,
+            Register {
+                offset,
+                size: width,
+            },
+        );
+        if self.dynamic.is_none() {
+            if init.is_some() {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!(
+                        "an initializer on `{name}`, a bit an inlined def keeps to itself"
+                    ),
+                    line,
+                });
+            }
+            return Ok(());
+        }
+        if let Some(init) = init {
+            return self.init_bits(name, size, init, line);
+        }
+        let bits: Vec<usize> = (offset..offset + width).collect();
+        for bits in bits.chunks(64) {
+            self.write_classical_bits(bits, ClassicalExpr::Const(ClassicalValue::Int(0)), line)?;
+        }
+        Ok(())
+    }
+
+    /// The first of `width` bits taken from [`PRIVATE_BITS`] on.
+    pub(super) fn private_register(&self, width: usize, line: usize) -> Result<usize> {
+        let taken = self.private_bits.as_ref().expect("a dynamic parse");
+        let offset = taken.get();
+        let total = offset
+            .checked_add(width)
+            .filter(|&total| total <= MAX_DECLARED_WIDTH)
+            .ok_or_else(|| too_wide(ast::RegisterKind::Classical, line))?;
+        taken.set(total);
+        Ok(PRIVATE_BITS + offset)
     }
 
     /// Declare an `input`: a supplied one as a variable holding its value, an
@@ -2075,7 +2160,8 @@ impl<'a> Parser<'a> {
             }
             None
         };
-        Self::check_def_writes(name, &args, local, body, true)?;
+        let private = self.private_bits.is_some().then(Vec::new);
+        Self::check_def_writes(name, &args, local, body, true, private)?;
         Rc::make_mut(&mut self.def_defs).insert(
             name,
             DefDefinition {
@@ -2432,20 +2518,31 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Check that a `def` body writes classical bits only through its result.
+    /// Check that a `def` body writes classical bits only through its result,
+    /// or under [`parse_dynamic`] also through the bits it declares, which
+    /// `locals` collects as the walk meets them.
     ///
-    /// A bit parameter is a copy, and any other bit would need a classical
-    /// register the program never declared, so neither can be written here.
+    /// A bit parameter is a copy, and outside [`parse_dynamic`] any other bit
+    /// would need a classical register the program never declared, so neither
+    /// can be written here.
     fn check_def_writes(
         name: &str,
         args: &[DefParam<'a>],
         local: Option<&str>,
         block: &Block<'a>,
         top: bool,
-    ) -> Result<()> {
+        mut locals: Option<Vec<&'a str>>,
+    ) -> Result<Option<Vec<&'a str>>> {
         with_stack(|| {
             for stmt in block {
                 match &stmt.kind {
+                    StmtKind::RegisterDecl {
+                        kind: ast::RegisterKind::Classical,
+                        name: declared,
+                        ..
+                    } if !(top && local == Some(*declared)) && locals.is_some() => {
+                        locals.as_mut().expect("checked").push(declared);
+                    }
                     StmtKind::RegisterDecl {
                         kind: ast::RegisterKind::Classical,
                         name: declared,
@@ -2462,6 +2559,12 @@ impl<'a> Parser<'a> {
                     StmtKind::Measure(measure) => {
                         let target = measure.target.register();
                         if target.is_some() && target == local {
+                            continue;
+                        }
+                        if let (Some(target), Some(locals)) = (target, &locals)
+                            && locals.contains(&target)
+                            && !is_bit_param(args, target)
+                        {
                             continue;
                         }
                         let construct = match target {
@@ -2481,25 +2584,35 @@ impl<'a> Parser<'a> {
                         });
                     }
                     StmtKind::If(conditional) => {
-                        Self::check_def_writes(name, args, local, &conditional.then_body, false)?;
+                        locals = Self::check_def_writes(
+                            name,
+                            args,
+                            local,
+                            &conditional.then_body,
+                            false,
+                            locals,
+                        )?;
                         if let Some(body) = &conditional.else_body {
-                            Self::check_def_writes(name, args, local, body, false)?;
+                            locals =
+                                Self::check_def_writes(name, args, local, body, false, locals)?;
                         }
                     }
                     StmtKind::For { body, .. }
                     | StmtKind::While { body, .. }
                     | StmtKind::Box { body, .. } => {
-                        Self::check_def_writes(name, args, local, body, false)?;
+                        locals = Self::check_def_writes(name, args, local, body, false, locals)?;
                     }
                     StmtKind::Switch { arms, .. } => {
                         for arm in arms {
-                            Self::check_def_writes(name, args, local, &arm.body, false)?;
+                            locals = Self::check_def_writes(
+                                name, args, local, &arm.body, false, locals,
+                            )?;
                         }
                     }
                     _ => {}
                 }
             }
-            Ok(())
+            Ok(locals)
         })
     }
 
@@ -2675,6 +2788,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn typed_of(&self, expr: &Expr, line: usize) -> Result<ClassicalValue> {
         self.reject_runtime(expr, line)?;
+        self.reject_bit_value(expr, line)?;
         self.reject_symbol(expr, line)?;
         let expr = self.with_complex(expr)?;
         let expr = self.fold_externs(&expr, line)?;
@@ -2700,6 +2814,43 @@ impl<'a> Parser<'a> {
             return number_of(&resolved, line, vars, &self.durations, &self.arrays);
         }
         number_of(&expr, line, vars, &self.durations, &self.arrays)
+    }
+
+    /// Reject a classical bit read as a value under `parse`, where a measured bit
+    /// reaches only a guard.
+    fn reject_bit_value(&self, expr: &Expr, line: usize) -> Result<()> {
+        if self.dynamic.is_some() || (self.cregs.is_empty() && self.params.is_empty()) {
+            return Ok(());
+        }
+        let bit_leaf = |leaf: &Expr| {
+            let name = match leaf {
+                Expr::Ident(name) => *name,
+                Expr::Element(element) => element.array,
+                _ => return Ok(None),
+            };
+            let shadowed = self.classical.contains_key(name)
+                || self.arrays.contains_key(name)
+                || self.durations.contains_key(name)
+                || self.complex.contains_key(name)
+                || self.inputs.contains_key(name)
+                || self.symbolic.contains(&name)
+                || self
+                    .param_vars
+                    .as_ref()
+                    .is_some_and(|vars| vars.contains_key(name));
+            Ok((!shadowed && self.is_bit_name(name))
+                .then_some(ClassicalExpr::Const(ClassicalValue::Bool(false))))
+        };
+        if super::dynamic::reads_leaf(expr, &bit_leaf)? {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "`{expr}` reads a classical bit as a value, which only a guard reads under \
+                     `parse`; `openqasm::parse_dynamic` evaluates it at runtime"
+                ),
+                line,
+            });
+        }
+        Ok(())
     }
 
     /// The bits `x[i]` or `x[a:b]` reads of an `int[n]` or `uint[n]` `x`, the
@@ -3704,6 +3855,19 @@ impl<'a> Parser<'a> {
             }
         }
 
+        let dropped: SmallVec<[usize; 4]>;
+        let result = match (&def.result, result) {
+            (Some(declared), None) if declared.ty == "bit" && self.private_bits.is_some() => {
+                let width = match &declared.width {
+                    Some(width) => self.integer_of(width, line)?.max(1) as usize,
+                    None => 1,
+                };
+                let offset = self.private_register(width, line)?;
+                dropped = (offset..offset + width).collect();
+                Some(dropped.as_slice())
+            }
+            _ => result,
+        };
         let frame = match (&def.result, result) {
             (None, None) => DefResult {
                 bits: SmallVec::new(),
@@ -4003,6 +4167,8 @@ impl<'a> Parser<'a> {
             guard: None,
             dynamic: None,
             expansion_left: Rc::clone(&self.expansion_left),
+            private_bits: self.private_bits.clone(),
+            in_outer_while: self.in_outer_while || self.in_while(),
             phase_qubit: self.phase_qubit,
         }
     }

@@ -361,6 +361,7 @@ exclude = [
 "DynamicProgram::blocks" = { rust_only = "basic-block representation" }
 "DynamicProgram::new" = { rust_only = "Python builds through DynamicProgramBuilder or parse_qasm_dynamic" }
 "DynamicProgram::num_classical_bits" = "DynamicProgram.num_classical_bits"
+"DynamicProgram::num_private_bits" = "DynamicProgram.num_private_bits"
 "DynamicProgram::num_qubits" = "DynamicProgram.num_qubits"
 "DynamicProgram::static_circuit" = "DynamicProgram.static_circuit"
 "DynamicProgram::variables" = "DynamicProgram.variables"

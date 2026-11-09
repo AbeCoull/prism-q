@@ -166,6 +166,8 @@ pub(crate) enum Expr<'a> {
     /// `a ++ b`, arrays joined end to end, which only an assignment or an array
     /// initializer writes.
     Concat(Vec<Expr<'a>>),
+    /// `{a, b, c}` standing as the one index of a register subscript.
+    Set(Vec<Expr<'a>>),
 }
 
 /// `int[8](x)`, `bool(x)` and the other scalar casts.
@@ -334,7 +336,7 @@ impl<'a> Expr<'a> {
                 cast.value.mentions(name) || cast.width.as_ref().is_some_and(|w| w.mentions(name))
             }
             Expr::Range(range) => range.bounds().any(|bound| bound.mentions(name)),
-            Expr::Concat(parts) => parts.iter().any(|part| part.mentions(name)),
+            Expr::Concat(parts) | Expr::Set(parts) => parts.iter().any(|part| part.mentions(name)),
         })
     }
 
@@ -360,7 +362,9 @@ impl<'a> Expr<'a> {
                 .find_map(|index| index.finds_call(wanted)),
             Expr::Cast(cast) => cast.value.finds_call(wanted),
             Expr::Range(range) => range.bounds().find_map(|bound| bound.finds_call(wanted)),
-            Expr::Concat(parts) => parts.iter().find_map(|part| part.finds_call(wanted)),
+            Expr::Concat(parts) | Expr::Set(parts) => {
+                parts.iter().find_map(|part| part.finds_call(wanted))
+            }
         })
     }
 
@@ -380,6 +384,7 @@ impl<'a> Expr<'a> {
             Expr::Cast(cast) => cast.value.reads_element(),
             Expr::Range(range) => range.bounds().any(Expr::reads_element),
             Expr::Concat(_) => true,
+            Expr::Set(entries) => entries.iter().any(Expr::reads_element),
         })
     }
 
@@ -470,6 +475,16 @@ impl fmt::Display for Expr<'_> {
                 write!(f, "({})", cast.value)
             }
             Expr::Range(range) => write!(f, "{range}"),
+            Expr::Set(entries) => {
+                f.write_str("{")?;
+                for (at, entry) in entries.iter().enumerate() {
+                    if at > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{entry}")?;
+                }
+                f.write_str("}")
+            }
             Expr::Concat(parts) => {
                 for (at, part) in parts.iter().enumerate() {
                     if at > 0 {
@@ -777,6 +792,20 @@ fn index_node<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
         }
         parse_node(stream).map(Some)
     };
+    if stream.eat(Kind::LBrace) {
+        let mut entries = Vec::new();
+        let mut depth = 0;
+        loop {
+            let (entry, entry_depth) = parse_node(stream)?;
+            entries.push(entry);
+            depth = depth.max(entry_depth);
+            if !stream.eat(Kind::Comma) {
+                break;
+            }
+        }
+        stream.expect(Kind::RBrace)?;
+        return deeper(stream, Expr::Set(entries), depth);
+    }
     let first = bound(stream)?;
     if !stream.eat(Kind::Colon) {
         return first.ok_or_else(|| stream.expected("an index"));
@@ -936,6 +965,10 @@ fn evaluate(
         Expr::Concat(_) => Err(PrismError::Parse {
             line,
             message: format!("`{expr}` joins arrays where a single value belongs"),
+        }),
+        Expr::Set(_) => Err(PrismError::Parse {
+            line,
+            message: format!("the index set `{expr}` stands where a value belongs"),
         }),
         Expr::Duration(_) => Err(PrismError::Parse {
             line,
@@ -1212,7 +1245,7 @@ pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
         Expr::Element(element) => element.indices.iter().any(|index| is_timed(index, times)),
         Expr::Cast(cast) => is_timed(&cast.value, times),
         Expr::Range(range) => range.bounds().any(|bound| is_timed(bound, times)),
-        Expr::Concat(parts) => parts.iter().any(|part| is_timed(part, times)),
+        Expr::Concat(parts) | Expr::Set(parts) => parts.iter().any(|part| is_timed(part, times)),
     })
 }
 
@@ -1264,7 +1297,7 @@ pub(crate) fn eval_timed(
         }),
         Expr::Number(value) => Ok(Timed::Number(value.to_float())),
         Expr::Complex(_) => Err(complex_where_real(expr, line)),
-        Expr::Range(_) | Expr::Concat(_) => Err(PrismError::Parse {
+        Expr::Range(_) | Expr::Concat(_) | Expr::Set(_) => Err(PrismError::Parse {
             line,
             message: format!("`{expr}` stands where a duration belongs"),
         }),

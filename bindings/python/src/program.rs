@@ -42,6 +42,12 @@ impl PyDynamicProgram {
         self.0.num_classical_bits()
     }
 
+    /// Bits a subroutine measures into for itself, which no shot reports.
+    #[getter]
+    fn num_private_bits(&self) -> usize {
+        self.0.num_private_bits()
+    }
+
     #[getter]
     fn num_blocks(&self) -> usize {
         self.0.blocks().len()

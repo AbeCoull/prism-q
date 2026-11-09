@@ -250,7 +250,7 @@ fn rotation_events(
     targets: &[usize],
 ) -> Result<Vec<NoiseEvent>> {
     let events_at = |angle: f64| -> Result<Vec<NoiseEvent>> {
-        let mut circuit = Circuit::new(program.num_qubits(), program.num_classical_bits());
+        let mut circuit = Circuit::new(program.num_qubits(), program.num_held_bits());
         circuit.add_gate(kind.gate(angle), targets);
         Ok(rules.build(&circuit)?.after_gate.swap_remove(0))
     };
@@ -386,9 +386,23 @@ impl<'p> Prepared<'p> {
             #[cfg(not(feature = "parallel"))]
             let parallel = false;
             let branch_limits = BranchLimits::for_width(num_qubits, parallel, &self.limits);
-            return branching::branch_program_shots(self, num_shots, seed, &branch_limits);
+            return branching::branch_program_shots(self, num_shots, seed, &branch_limits)
+                .map(|result| self.without_private_bits(result));
         }
         self.run_per_shot(kind, num_shots, seed)
+            .map(|result| self.without_private_bits(result))
+    }
+
+    /// `result` with each shot cut to the bits the program reports.
+    fn without_private_bits(&self, mut result: ShotsResult) -> ShotsResult {
+        let reported = self.program.num_classical_bits();
+        if self.program.num_private_bits() > 0 {
+            for shot in &mut result.shots {
+                shot.truncate(reported);
+            }
+            result.num_classical_bits = reported;
+        }
+        result
     }
 
     fn run_per_shot(&self, kind: &BackendKind, num_shots: usize, seed: u64) -> Result<ShotsResult> {
@@ -443,8 +457,8 @@ impl<'p> Prepared<'p> {
             shots.push(bits);
             leaked.push(shot_leaked);
         }
-        let result = ShotsResult::from_shots(shots, self.program.num_classical_bits())
-            .with_metadata(metadata);
+        let result =
+            ShotsResult::from_shots(shots, self.program.num_held_bits()).with_metadata(metadata);
         let memory = self.noise.as_ref().and_then(|noise| noise.memory);
         Ok(trajectory::with_leak_record(result, memory, leaked))
     }
@@ -459,7 +473,7 @@ impl<'p> Prepared<'p> {
         vars: &mut Vec<ClassicalValue>,
         shot_seed: u64,
     ) -> Result<(Vec<bool>, Vec<bool>)> {
-        backend.init(self.program.num_qubits(), self.program.num_classical_bits())?;
+        backend.init(self.program.num_qubits(), self.program.num_held_bits())?;
         vars.clear();
         vars.extend_from_slice(&self.initial);
         let mut steps = 0;
@@ -651,8 +665,8 @@ impl<'p> Prepared<'p> {
         self.program.num_qubits()
     }
 
-    pub(super) fn num_classical_bits(&self) -> usize {
-        self.program.num_classical_bits()
+    pub(super) fn num_held_bits(&self) -> usize {
+        self.program.num_held_bits()
     }
 
     fn step_limit(&self, at: usize) -> PrismError {

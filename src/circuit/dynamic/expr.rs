@@ -183,6 +183,8 @@ pub enum UnaryOp {
     Not,
     /// Bitwise complement of an integer.
     BitNot,
+    /// Set bits of a non-negative integer, as OpenQASM `popcount` counts them.
+    Popcount,
 }
 
 /// Binary operators. Arithmetic on two integers stays integral, with `/`
@@ -398,6 +400,28 @@ impl ClassicalExpr {
         }
     }
 
+    /// Relabel each classical bit the expression reads through `bit`, which must
+    /// keep the bits of a register read in one run.
+    pub(crate) fn remap_bits(&mut self, bit: &impl Fn(usize) -> usize) {
+        match self {
+            ClassicalExpr::Const(_) | ClassicalExpr::Var(_) => {}
+            ClassicalExpr::Bit(index) => *index = bit(*index),
+            ClassicalExpr::Register { offset, .. } => *offset = bit(*offset),
+            ClassicalExpr::Unary { operand, .. } | ClassicalExpr::Cast { operand, .. } => {
+                operand.remap_bits(bit);
+            }
+            ClassicalExpr::Binary { lhs, rhs, .. } => {
+                lhs.remap_bits(bit);
+                rhs.remap_bits(bit);
+            }
+            ClassicalExpr::Extern(call) => {
+                for arg in &mut call.args {
+                    arg.remap_bits(bit);
+                }
+            }
+        }
+    }
+
     /// Check every reference against the program's widths and return the kind
     /// of value the expression produces.
     pub(crate) fn check(
@@ -440,6 +464,8 @@ impl ClassicalExpr {
                     UnaryOp::Neg => Ok(ValueKind::Int),
                     UnaryOp::BitNot if kind == ValueKind::Float => Err(float_operand("~")),
                     UnaryOp::BitNot => Ok(ValueKind::Int),
+                    UnaryOp::Popcount if kind == ValueKind::Float => Err(float_operand("popcount")),
+                    UnaryOp::Popcount => Ok(ValueKind::Int),
                 }
             }
             ClassicalExpr::Binary { op, lhs, rhs } => {
@@ -604,6 +630,14 @@ pub(crate) fn unary(op: UnaryOp, value: ClassicalValue) -> Result<ClassicalValue
         (UnaryOp::Neg, value) => ClassicalValue::Int(value.to_int().wrapping_neg()),
         (UnaryOp::BitNot, ClassicalValue::Float(_)) => return Err(float_operand("~")),
         (UnaryOp::BitNot, value) => ClassicalValue::Int(!value.to_int()),
+        (UnaryOp::Popcount, ClassicalValue::Float(_)) => return Err(float_operand("popcount")),
+        (UnaryOp::Popcount, value) => {
+            let value =
+                u128::try_from(value.to_int()).map_err(|_| PrismError::InvalidParameter {
+                    message: format!("`popcount` of the negative value {}", value.to_int()),
+                })?;
+            ClassicalValue::Int(i128::from(value.count_ones()))
+        }
     })
 }
 

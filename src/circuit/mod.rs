@@ -1552,7 +1552,7 @@ fn remap_condition(
 ///
 /// Callers must have established that every qubit `inst` touches has an image
 /// under `qubit`, which for a region means its whole body.
-fn remap_instruction(
+pub(crate) fn remap_instruction(
     inst: &Instruction,
     qubit: &impl Fn(usize) -> usize,
     cbit: &impl Fn(usize) -> usize,

@@ -4,7 +4,7 @@ use super::{
     Action, BasicBlock, BlockId, ClassicalExpr, ClassicalType, ClassicalValue, DynamicProgram,
     RotationKind, Terminator, VarId, Variable,
 };
-use crate::circuit::{Circuit, Instruction, SmallVec};
+use crate::circuit::{Circuit, Instruction, SmallVec, remap_instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
@@ -120,6 +120,37 @@ impl DynamicProgramBuilder {
 
     pub fn num_classical_bits(&self) -> usize {
         self.num_classical_bits
+    }
+
+    /// Move every classical bit at `from` or past it down by `from - to`.
+    pub(crate) fn move_bits(&mut self, from: usize, to: usize) {
+        let bit = |index: usize| {
+            if index >= from {
+                index - from + to
+            } else {
+                index
+            }
+        };
+        for block in &mut self.blocks {
+            for instruction in &mut block.instructions {
+                *instruction = remap_instruction(instruction, &|qubit| qubit, &bit);
+            }
+            for action in &mut block.actions {
+                match action {
+                    Action::Assign { value, .. } => value.remap_bits(&bit),
+                    Action::Rotation { angle, .. } => angle.remap_bits(&bit),
+                    Action::WriteBits { bits, value } => {
+                        for index in bits.iter_mut() {
+                            *index = bit(*index);
+                        }
+                        value.remap_bits(&bit);
+                    }
+                }
+            }
+            if let Some(Terminator::Branch { condition, .. }) = &mut block.terminator {
+                condition.remap_bits(&bit);
+            }
+        }
     }
 
     pub(crate) fn resize(&mut self, num_qubits: usize, num_classical_bits: usize) {

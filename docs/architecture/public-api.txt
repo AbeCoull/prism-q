@@ -1109,6 +1109,7 @@ pub prism_q::circuit::dynamic::Terminator::Jump(prism_q::circuit::dynamic::Block
 pub prism_q::circuit::dynamic::UnaryOp::BitNot
 pub prism_q::circuit::dynamic::UnaryOp::Neg
 pub prism_q::circuit::dynamic::UnaryOp::Not
+pub prism_q::circuit::dynamic::UnaryOp::Popcount
 pub struct prism_q::circuit::dynamic::BasicBlock
 pub prism_q::circuit::dynamic::BasicBlock::actions: alloc::vec::Vec<prism_q::circuit::dynamic::Action>
 pub prism_q::circuit::dynamic::BasicBlock::circuit: prism_q::circuit::Circuit
@@ -1123,6 +1124,7 @@ impl prism_q::circuit::dynamic::DynamicProgram
 pub fn prism_q::circuit::dynamic::DynamicProgram::blocks(&self) -> &[prism_q::circuit::dynamic::BasicBlock]
 pub fn prism_q::circuit::dynamic::DynamicProgram::new(usize, usize, alloc::vec::Vec<prism_q::circuit::dynamic::Variable>, alloc::vec::Vec<prism_q::circuit::dynamic::BasicBlock>) -> prism_q::error::Result<Self>
 pub fn prism_q::circuit::dynamic::DynamicProgram::num_classical_bits(&self) -> usize
+pub fn prism_q::circuit::dynamic::DynamicProgram::num_private_bits(&self) -> usize
 pub fn prism_q::circuit::dynamic::DynamicProgram::num_qubits(&self) -> usize
 pub fn prism_q::circuit::dynamic::DynamicProgram::static_circuit(&self) -> core::option::Option<&prism_q::circuit::Circuit>
 pub fn prism_q::circuit::dynamic::DynamicProgram::variables(&self) -> &[prism_q::circuit::dynamic::Variable]
@@ -3548,6 +3550,7 @@ impl prism_q::circuit::dynamic::DynamicProgram
 pub fn prism_q::circuit::dynamic::DynamicProgram::blocks(&self) -> &[prism_q::circuit::dynamic::BasicBlock]
 pub fn prism_q::circuit::dynamic::DynamicProgram::new(usize, usize, alloc::vec::Vec<prism_q::circuit::dynamic::Variable>, alloc::vec::Vec<prism_q::circuit::dynamic::BasicBlock>) -> prism_q::error::Result<Self>
 pub fn prism_q::circuit::dynamic::DynamicProgram::num_classical_bits(&self) -> usize
+pub fn prism_q::circuit::dynamic::DynamicProgram::num_private_bits(&self) -> usize
 pub fn prism_q::circuit::dynamic::DynamicProgram::num_qubits(&self) -> usize
 pub fn prism_q::circuit::dynamic::DynamicProgram::static_circuit(&self) -> core::option::Option<&prism_q::circuit::Circuit>
 pub fn prism_q::circuit::dynamic::DynamicProgram::variables(&self) -> &[prism_q::circuit::dynamic::Variable]

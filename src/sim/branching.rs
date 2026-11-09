@@ -139,7 +139,7 @@ pub(super) fn branch_program_shots(
     };
     walk.shots(
         program.num_qubits(),
-        program.num_classical_bits(),
+        program.num_held_bits(),
         cursor,
         num_shots,
         seed,

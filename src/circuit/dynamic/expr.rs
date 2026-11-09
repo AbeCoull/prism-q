@@ -323,7 +323,30 @@ pub struct ExternCall {
 }
 
 impl ExternCall {
-    pub(crate) fn new(function: Arc<ExternFunction>, args: Vec<ClassicalExpr>) -> Self {
+    /// A call to `function`, declared as `name` taking `params` and returning
+    /// `result`, over `args`. The call compares equal only to its clones.
+    /// [`build`](super::DynamicProgramBuilder::build) returns
+    /// [`PrismError::InvalidParameter`] when `args` and `params` differ in
+    /// length or a type's width is out of range.
+    pub fn new(
+        name: impl Into<String>,
+        params: Vec<ClassicalType>,
+        result: ClassicalType,
+        function: impl Fn(&[ClassicalValue]) -> Result<ClassicalValue> + Send + Sync + 'static,
+        args: Vec<ClassicalExpr>,
+    ) -> Self {
+        Self::bound(
+            Arc::new(ExternFunction {
+                name: name.into(),
+                params,
+                result,
+                callback: Arc::new(function),
+            }),
+            args,
+        )
+    }
+
+    pub(crate) fn bound(function: Arc<ExternFunction>, args: Vec<ClassicalExpr>) -> Self {
         Self { function, args }
     }
 
@@ -449,10 +472,24 @@ impl ClassicalExpr {
                 Ok(ty.kind())
             }
             ClassicalExpr::Extern(call) => {
+                let function = &call.function;
+                if call.args.len() != function.params.len() {
+                    return Err(PrismError::InvalidParameter {
+                        message: format!(
+                            "extern `{}` takes {} argument(s), got {}",
+                            function.name,
+                            function.params.len(),
+                            call.args.len()
+                        ),
+                    });
+                }
+                for ty in function.params.iter().chain([&function.result]) {
+                    ty.check()?;
+                }
                 for arg in &call.args {
                     arg.check(variables, num_classical_bits)?;
                 }
-                Ok(call.function.result.kind())
+                Ok(function.result.kind())
             }
         }
     }

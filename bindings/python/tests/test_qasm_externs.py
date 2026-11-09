@@ -1,3 +1,5 @@
+import traceback
+
 import numpy as np
 import pytest
 
@@ -114,6 +116,10 @@ def test_an_exception_in_the_callable_names_the_extern():
     assert error.value.kind == "invalid_parameter"
     assert "extern `f` raised" in str(error.value)
     assert "no entry" in str(error.value)
+    cause = error.value.__cause__
+    assert isinstance(cause, ValueError)
+    assert cause.args == ("no entry",)
+    assert any(frame.name == "broken" for frame in traceback.extract_tb(cause.__traceback__))
 
 
 def test_a_runtime_exception_surfaces_from_the_run():
@@ -125,9 +131,49 @@ def test_a_runtime_exception_surfaces_from_the_run():
         " h q[0]; c[0] = measure q[0]; if (f(c[0])) x q[0];",
         externs={"f": broken},
     )
+    for run in (lambda sim: sim.shots(8), lambda sim: sim.sample_counts(8)):
+        with pytest.raises(PrismError) as error:
+            run(simulate_program(program).seed(42))
+        assert error.value.kind == "invalid_parameter"
+        assert "decoder offline" in str(error.value)
+        assert isinstance(error.value.__cause__, RuntimeError)
+        assert any(
+            frame.name == "broken"
+            for frame in traceback.extract_tb(error.value.__cause__.__traceback__)
+        )
+
+
+def test_a_parametric_parse_chains_the_raised_exception():
+    def broken(n):
+        raise KeyError(n)
+
     with pytest.raises(PrismError) as error:
-        simulate_program(program).seed(42).shots(8)
-    assert "decoder offline" in str(error.value)
+        parse_qasm_parametric(
+            "OPENQASM 3.0; extern f(int) -> float; qubit[1] q; rx(f(4)) q[0];",
+            externs={"f": broken},
+        )
+    assert error.value.kind == "invalid_parameter"
+    assert isinstance(error.value.__cause__, KeyError)
+
+
+def test_an_error_with_no_raise_has_no_cause():
+    with pytest.raises(PrismError) as error:
+        parse_qasm(
+            "OPENQASM 3.0; extern f(int) -> int; qubit[1] q; rx(f(1)) q[0];",
+            externs={"f": lambda n: "one"},
+        )
+    assert error.value.__cause__ is None
+
+
+def test_a_def_call_bounds_a_for_range():
+    source = (
+        "OPENQASM 3.0; def twice(int n) -> int { return 2 * n; } qubit[1] q;"
+        " for int i in [1:twice(5)] { rx(0.1) q[0]; }"
+    )
+    want = state(parse_qasm("OPENQASM 3.0; qubit[1] q; rx(1.0) q[0];"))
+    np.testing.assert_allclose(state(parse_qasm(source)), want, atol=1e-12)
+    circuit = parse_qasm_dynamic(source).static_circuit()
+    np.testing.assert_allclose(state(circuit), want, atol=1e-12)
 
 
 @pytest.mark.parametrize(

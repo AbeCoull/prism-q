@@ -7,9 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::common;
 
 use common::{SEED, SV_EPS};
-use prism_q::circuit::dynamic::ClassicalValue;
+use prism_q::circuit::dynamic::{
+    BinaryOp, ClassicalExpr, ClassicalType, ClassicalValue, ExternCall,
+};
 use prism_q::circuit::openqasm::{self, Externs};
-use prism_q::{Circuit, PrismError, simulate_program};
+use prism_q::{Circuit, DynamicProgramBuilder, Gate, PrismError, simulate_program};
 
 fn assert_same_unitary(got: &Circuit, want: &Circuit, label: &str) {
     common::assert_unitary_close(
@@ -343,5 +345,91 @@ fn unsupported_extern_forms_decline_by_name() {
     assert!(matches!(
         parse("extern f(int) -> float; f(1) q[0];"),
         PrismError::Parse { .. }
+    ));
+}
+
+#[test]
+fn a_def_call_bounds_a_for_range() {
+    let looped = |range: &str| {
+        format!(
+            "OPENQASM 3.0; def twice(int n) -> int {{ return 2 * n; }} qubit[1] q;
+             for int i in {range} {{ rx(0.1) q[0]; }}"
+        )
+    };
+    let want = openqasm::parse("OPENQASM 3.0; qubit[1] q; rx(1.0) q[0];").unwrap();
+    for range in [
+        "[1:twice(5)]",
+        "[twice(0):twice(1):twice(9) + 1]",
+        "{twice(1), 0, 1, 2, 3, 5, 6, 7, 8, 9}",
+    ] {
+        let source = looped(range);
+        let circuit = openqasm::parse(&source).expect(range);
+        assert_same_unitary(&circuit, &want, range);
+        let program = openqasm::parse_dynamic(&source).expect(range);
+        let circuit = program.static_circuit().expect("no runtime control flow");
+        assert_same_unitary(circuit, &want, range);
+    }
+
+    let source = "OPENQASM 3.0; qubit[2] q; bit[1] c;
+def prepare(qubit a) -> int { x a; return 3; }
+for int i in [1:prepare(q[1])] { rx(0.25) q[0]; }";
+    let want = openqasm::parse("OPENQASM 3.0; qubit[2] q; x q[1]; rx(0.75) q[0];").unwrap();
+    assert_same_unitary(&openqasm::parse(source).unwrap(), &want, "def with gates");
+}
+
+#[test]
+fn a_hand_built_extern_call_runs_per_shot() {
+    let int8 = ClassicalType::Int { width: 8 };
+    let mut builder = DynamicProgramBuilder::new(2, 2);
+    builder.add_gate(Gate::H, &[0]).add_measure(0, 0);
+    let call = ExternCall::new(
+        "succ",
+        vec![int8],
+        int8,
+        |args| Ok(ClassicalValue::Int(args[0].to_int() + 127)),
+        vec![ClassicalExpr::Bit(0)],
+    );
+    assert_eq!(call.name(), "succ");
+    assert_eq!(call.args(), &[ClassicalExpr::Bit(0)]);
+    let call = ClassicalExpr::Extern(Box::new(call));
+    assert_eq!(call, call.clone());
+    let wraps = ClassicalExpr::binary(BinaryOp::Lt, call, ClassicalExpr::from(0i64));
+    builder.begin_if(wraps);
+    builder.add_gate(Gate::X, &[1]);
+    builder.end().unwrap();
+    builder.add_measure(1, 1);
+    let program = builder.build().expect("build");
+    let shots = simulate_program(&program)
+        .seed(SEED)
+        .shots(100)
+        .unwrap()
+        .shots;
+    for shot in &shots {
+        assert_eq!(shot[1], shot[0], "1 + 127 wraps to -128 in 8 bits");
+    }
+    assert!(shots.iter().any(|shot| shot[0]) && shots.iter().any(|shot| !shot[0]));
+}
+
+#[test]
+fn a_hand_built_extern_call_is_checked_at_build() {
+    let build = |params: Vec<ClassicalType>, args: Vec<ClassicalExpr>| {
+        let mut builder = DynamicProgramBuilder::new(1, 1);
+        let call = ExternCall::new("f", params, ClassicalType::Bool, |_| Ok(true.into()), args);
+        builder.write_bits(&[0], ClassicalExpr::Extern(Box::new(call)));
+        builder.build().unwrap_err()
+    };
+    invalid(
+        build(vec![ClassicalType::Bool], vec![]),
+        "takes 1 argument(s), got 0",
+        "arity",
+    );
+    invalid(
+        build(vec![ClassicalType::Int { width: 65 }], vec![0i64.into()]),
+        "width 65",
+        "width",
+    );
+    assert!(matches!(
+        build(vec![ClassicalType::Bool], vec![ClassicalExpr::Bit(3)]),
+        PrismError::InvalidClassicalBit { index: 3, .. }
     ));
 }

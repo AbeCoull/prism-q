@@ -4190,7 +4190,8 @@ impl<'a> Parser<'a> {
         line: usize,
         out: &mut Vec<Instruction>,
     ) -> Result<()> {
-        let values = self.for_values(range, line)?;
+        let range = self.resolve_range_calls(range, line, out)?;
+        let values = self.for_values(&range, line)?;
         if values.len() as i64 > MAX_FOR_ITERATIONS {
             return Err(parse_error(
                 line,
@@ -4335,6 +4336,45 @@ impl<'a> Parser<'a> {
             };
         }
         result
+    }
+
+    /// `range` with each `def` call in its bounds expanded ahead of the loop, in
+    /// source order.
+    fn resolve_range_calls<'r>(
+        &mut self,
+        range: &'r ForRange<'a>,
+        line: usize,
+        out: &mut Vec<Instruction>,
+    ) -> Result<Cow<'r, ForRange<'a>>> {
+        let calls_def = |expr: &Expr| {
+            expr.finds_call(&|name| self.def_defs.contains_key(name))
+                .is_some()
+        };
+        let any_call = match range {
+            ForRange::Set(entries) => entries.iter().any(calls_def),
+            ForRange::Range { start, step, stop } => {
+                calls_def(start) || step.as_ref().is_some_and(calls_def) || calls_def(stop)
+            }
+        };
+        if !any_call {
+            return Ok(Cow::Borrowed(range));
+        }
+        Ok(Cow::Owned(match range {
+            ForRange::Set(entries) => ForRange::Set(
+                entries
+                    .iter()
+                    .map(|entry| self.resolve_calls(entry, line, out))
+                    .collect::<Result<_>>()?,
+            ),
+            ForRange::Range { start, step, stop } => ForRange::Range {
+                start: self.resolve_calls(start, line, out)?,
+                step: step
+                    .as_ref()
+                    .map(|step| self.resolve_calls(step, line, out))
+                    .transpose()?,
+                stop: self.resolve_calls(stop, line, out)?,
+            },
+        }))
     }
 
     fn for_values(&self, range: &ForRange, line: usize) -> Result<Vec<i64>> {

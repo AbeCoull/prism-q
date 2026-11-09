@@ -2,6 +2,71 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.38.0] - 2026-11-09
+
+### Bug Fixes
+
+- **noise:** Flip readout error when the measurement writes the bit (#627) (**BREAKING**)([13f2c7f](https://github.com/AbeCoull/prism-q/commit/13f2c7f9388ce689f62046350c2d0aff6d8cdf1b))
+- **qec:** Make detector-circuit M(p) flip only the record (#620)([d07aac4](https://github.com/AbeCoull/prism-q/commit/d07aac49a81a825cdf15e8487c35547afc00f43e))
+- **compiled:** Order parity blocks by their first row (#616)([62d9885](https://github.com/AbeCoull/prism-q/commit/62d98857b613aad0b3e0dd081596ca1b0cb892b4))
+- Decline runtime angle[n] and strip terminal measurements once (#615) (**BREAKING**)([5f54d17](https://github.com/AbeCoull/prism-q/commit/5f54d179586d751c61000e998367731a4f80bd1c))
+
+### Documentation
+
+- **bench:** State the planned peaks for tn/scalar_hea_l7 (#634)([d6fb429](https://github.com/AbeCoull/prism-q/commit/d6fb429790bbde8b0e46944a94f4c31dfa0df9af))
+- Drop the comparison heatmap from the README (#633)([10ba814](https://github.com/AbeCoull/prism-q/commit/10ba81460f2810e3ae2cbe60f6d85e73e5fd7ec6))
+- Shorten the README to the pitch, quick start and docs map (#630)([acea3aa](https://github.com/AbeCoull/prism-q/commit/acea3aae576ce758d7642a1215c3a62c353f454c))
+- Show the project card in docs link previews (#623)([082ae80](https://github.com/AbeCoull/prism-q/commit/082ae80fd0d1bd4c8dcf3bbc483ce396a798c114))
+- Correct stabilizer-rank routing and GPU density sizing (#610)([b5271c5](https://github.com/AbeCoull/prism-q/commit/b5271c5357e092f93e107e113ce3f743d975d421))
+- Correct stale pages and consolidate overlapping guides (#609)([9bfee40](https://github.com/AbeCoull/prism-q/commit/9bfee40d998de42235490de473e55788554cc1d9))
+- Split the Python guide and tighten prose across the book (#603)([faf8d3e](https://github.com/AbeCoull/prism-q/commit/faf8d3ed00e6519d7ef0907c6f633138e4ac7944))
+- **comparison:** Shorten the comparison pages and make figures zoomable (#601)([e39552e](https://github.com/AbeCoull/prism-q/commit/e39552ef8a3dbc7257be91ebfbde57e3f90ddd6f))
+
+### Features
+
+- **qasm:** Private subroutine bits and bit registers read as values (#632)([e258b68](https://github.com/AbeCoull/prism-q/commit/e258b68921a543a4308fd8d2b5568facc4b5d068))
+- **qasm:** Chain extern exceptions and build extern calls by hand (#631)([b6b3a16](https://github.com/AbeCoull/prism-q/commit/b6b3a16df40943dfbb9c0e46fbb3a269191a6d6d))
+- **qasm:** Bind extern declarations to registered functions (#628)([9861619](https://github.com/AbeCoull/prism-q/commit/986161941dade8b0f2914d51dc07f230cd16650d))
+- **qec:** Read flip probabilities on MPP, pair measurements and MPAD (#626)([a9a4e84](https://github.com/AbeCoull/prism-q/commit/a9a4e84aed0bf56f2c7e5817ac57c3962b03b247))
+- **qasm:** Link affine input angles and take input values (#625) (**BREAKING**)([bd69fef](https://github.com/AbeCoull/prism-q/commit/bd69fef22e8369c569fa9a8e3f4f39586e7cd01a))
+- **qasm:** Fold complex values and array slices (#624)([83886c0](https://github.com/AbeCoull/prism-q/commit/83886c06189165f62422d095a547c75285b48117))
+- **python:** Take Parameters in Query.gradient (#622) (**BREAKING**)([bb77d8f](https://github.com/AbeCoull/prism-q/commit/bb77d8f888728eb33101a7d0e8dcc8fad3076c1a))
+- **api:** Add gradients to PreparedCircuit and take PauliObservable (#613) (**BREAKING**)([d5d1939](https://github.com/AbeCoull/prism-q/commit/d5d19397467dabcd0b6e49eb18287b405adadfd9))
+- **qec:** Read circuit files in the external detector-circuit format (#612)([e2983b1](https://github.com/AbeCoull/prism-q/commit/e2983b11a9bb0982f216f19ae2106bab49999c9b))
+- **api:** Settle on one Python expectation terminal (#605) (**BREAKING**)([22e3d23](https://github.com/AbeCoull/prism-q/commit/22e3d232fa716183de4270ef878a38da35a1c076))
+- **qasm:** Support break and continue in for loops, and end (#604)([d99abca](https://github.com/AbeCoull/prism-q/commit/d99abcafd09a48c3f71d41fbcaf973ae46d057e2))
+- **comparison:** Add a cross-simulator benchmark matrix (#600)([a8f4dc7](https://github.com/AbeCoull/prism-q/commit/a8f4dc7bd3d4a5142c78560d024e7c83612462b9))
+- **qasm:** Lower runtime subroutine values and returns (#599)([fc7e0c9](https://github.com/AbeCoull/prism-q/commit/fc7e0c96996590ccc69c1cd0fea7322365b9b9b7))
+- **qasm:** Support static returns and qubit register parameters (#598)([d21b9c9](https://github.com/AbeCoull/prism-q/commit/d21b9c9ca89ea849f3565ddc6fd2a8357ec8246b))
+- **docs:** Refine circuit diagrams and documentation theme (#597)([7986b7d](https://github.com/AbeCoull/prism-q/commit/7986b7d858d037b8243e48a6b1afcd302bc90d36))
+
+### Miscellaneous
+
+- **bench:** Lower TN HEA cap and fix bench and bit-order docs (#621)([3bf1744](https://github.com/AbeCoull/prism-q/commit/3bf17447c5a9252168a31621a10b57139fd9d3a7))
+
+### Performance
+
+- **compiled:** Move component samplers into filtered parity blocks (#618)([edd93a5](https://github.com/AbeCoull/prism-q/commit/edd93a555e0d990e6431deb1452a86a592ffd129))
+- **spd:** Hold Pauli terms inline instead of in heap words (#617)([5db9eb6](https://github.com/AbeCoull/prism-q/commit/5db9eb65f0bb7cbd978ba7695f9d27d7e98e1609))
+- **qec:** Stream chunked heralds and records into the final buffers (#614)([608624b](https://github.com/AbeCoull/prism-q/commit/608624b7997fcaebf41e288aa3a7ec06183842e2))
+- **compiled:** Skip untouched rows in the dense forward sweep (#611)([3e0228d](https://github.com/AbeCoull/prism-q/commit/3e0228d03f6eba84a05097d87b34821b41c82d4e))
+- **compiled:** Cut allocation churn in the dense forward compile (#608)([94070ac](https://github.com/AbeCoull/prism-q/commit/94070acdcbbdf31cea88986ca9b60a034177c6ca))
+- **spd:** Propagate a weighted observable as one Pauli sum (#607) (**BREAKING**)([02fbedb](https://github.com/AbeCoull/prism-q/commit/02fbedbbbe17897cd1d424c9bbf04dd22cbc8115))
+- **spd:** Hold the weighted Pauli sum as a term list (#606)([44f9311](https://github.com/AbeCoull/prism-q/commit/44f9311a5695c800694e19214a70c4b1717c4efb))
+
+### Refactor
+
+- **sim:** Share masked-bit packing with terminal sampling (#619)([eb2eb87](https://github.com/AbeCoull/prism-q/commit/eb2eb879c9a18d02d7e3214c0373b02ae789bccb))
+- **circuit:** Share matrix transpose helper (#602)([747c3c3](https://github.com/AbeCoull/prism-q/commit/747c3c3e269124e340bbd58266495ec0262ffdb5))
+
+### Bench
+
+- **noise:** Add readout rows where a guard reads the measured bit (#629)([82c1298](https://github.com/AbeCoull/prism-q/commit/82c1298eabe572445abf39852eacfefd2aebb920))
+## [py-v0.37.0] - 2026-11-02
+
+### Miscellaneous
+
+- **python:** Release 0.37.0([bc065e3](https://github.com/AbeCoull/prism-q/commit/bc065e37c77e5d6e8189c7cfb9f6beac658375ad))
 ## [0.37.0] - 2026-11-02
 
 ### Bug Fixes
@@ -49,6 +114,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Miscellaneous
 
+- Release([c205beb](https://github.com/AbeCoull/prism-q/commit/c205beb1bef227c2a22cc250b0403aa920c44b10))
 - **bench:** Measure several changes per build or per A/B (#560)([d4ef83f](https://github.com/AbeCoull/prism-q/commit/d4ef83fe0c7e322a5201cc56bc50d35f5cd2bea9))
 - **scripts:** Add a pre-PR check runner keyed on the branch diff (#561)([602d42d](https://github.com/AbeCoull/prism-q/commit/602d42d6dd1a20f9430dc9783bd3dcd08428923a))
 - **bench:** Retry RERUN queue steps against their cached binaries (#559)([09a669b](https://github.com/AbeCoull/prism-q/commit/09a669b29077d6416c40005f6568f74dae6ccc5f))

@@ -40,20 +40,31 @@ if [[ -z "${PRISM_BENCH_REF:-}" ]]; then
     exit 1
 fi
 
+# One or two rows per simulation path, not per bench group. The gate exists to
+# notice that a path regressed, and a second row of the same shape doubles the
+# wall clock for a signal the first already carries. Every backend the crate
+# ships has a row here except the GPU and distributed ones, which have bench
+# targets of their own.
+#
 # Sizes are the smallest that still exercise the paths the gate exists to watch,
 # not the smallest available. `MIN_QUBITS_FOR_DIAG_BATCH = 16` and
 # `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in `circuit/fusion.rs` are the floors:
 # below 16 the diagonal-batch families never form, and below 18 the post-phase
 # rebatch never runs, so a smaller row would gate a different pipeline than the
 # one that ships. `qft_textbook` has no 18 in its size list and stays at 20.
-# Six passes over these eight rows measured at 73-75s in total, against about six
-# minutes per pass for the 22q and 1000q set this replaces, which is the
-# difference between a gate that fits its timeout and one that does not. Under
-# `bench-fast` a row costs its 1s measurement window rather than its iteration
-# time, so a millisecond row and a microsecond row price the same here.
 #
-# The `auto/` twins are absent on purpose: dispatch resolves them to the
-# statevector rows above, doubling the most expensive pair for nothing.
+# Under `bench-fast` a row whose iteration fits the 1s measurement window costs
+# the window, so a 0.2 ms row and a 60 ms row price the same, and rows above
+# about 100 ms per iteration are chosen against: their smaller siblings gate the
+# same code for a few seconds each. Rows are also chosen against noise, measured
+# as the drift between two runs of one binary. `statevector/qv/16` is absent for
+# that reason (same-code controls of 6.3% to 8.0%), and the guarded region runs
+# at 20 qubits, where the 16-qubit row drifted.
+#
+# The `auto/` sweep twins are absent on purpose: dispatch resolves them to the
+# statevector rows below, doubling the most expensive pair for nothing.
+# `auto/expectation` is the exception, because the scalar tensor route it takes
+# is reached from no other row here.
 #
 # The stabilizer measurement row is `wall_measure_all` rather than
 # `ghz_measure_all` for two reasons. A GHZ chain collapses once and reads the
@@ -66,11 +77,72 @@ fi
 # microseconds between runs on a byte-identical cached executable. A gate whose
 # verdict blocks a merge cannot rest on a row that moves 46% for reasons a
 # within-run control cannot see.
-CIRCUITS_FILTER="^(statevector/(scalability_d5/18|qft_textbook/20|qpe_t_gate/16q|qaoa_l3/16)"
-CIRCUITS_FILTER+="|stabilizer/(scaling/500|measurement/wall_measure_all/1000)"
-CIRCUITS_FILTER+="|compiled_sampler/(noiseless/noiseless_500q_10k|noisy/noisy_500q_10k))$"
+CIRCUITS_ROW_LIST=(
+    # Dense statevector: scaling, the structured phase and swap workload, a
+    # non-Clifford shape, ZZ rotations with mixer layers, and the diagonal-batch
+    # families.
+    statevector/scalability_d5/18
+    statevector/qft_textbook/20
+    statevector/qpe_t_gate/16q
+    statevector/qaoa_l3/16
+    statevector/diag_mixed_l6/20
 
-CIRCUITS_ROWS=8
+    # Clifford tableau, terminal measurement, and the block-split variant.
+    stabilizer/scaling/500
+    stabilizer/measurement/wall_measure_all/1000
+    factored_stabilizer/local_blocks/10x5/50
+
+    # Compiled shot sampling, noiseless and under a Pauli model.
+    compiled_sampler/noiseless/noiseless_500q_10k
+    compiled_sampler/noisy/noisy_500q_10k
+
+    # Matrix product state: gate application with truncation, then sampling.
+    mps/random_d10/16
+    mps/sampling/32
+
+    # Sparse map state: gate application, then sampling.
+    sparse/random_d10/20
+    sparse/sampling/32
+
+    # Density matrix: the fused unitary sandwich and a Kraus channel.
+    density_matrix/rzz_layers_fused/10
+    density_matrix/noisy_channels/kraus_amp_damp/10
+
+    # Split-state and tensor network, the latter for contraction and for the
+    # mid-circuit measurement path that forces a dense collapse.
+    factored/partial_independence/factored/20
+    tn/linear_chain/12
+    tn/midmeasure_chain/20
+
+    # Product state, no entanglement.
+    product/scaling_d10/64
+
+    # Clifford+T: the deterministic and stochastic Pauli engines, and the
+    # approximate stabilizer-rank route with its pruning.
+    clifford_t/spd/10q_12t
+    spp/spp_10k/20q_8t
+    stabilizer_rank/approx_1024/10q_20t
+
+    # Analytic terminals: adjoint gradients, Pauli-sum expectations, and the
+    # scalar tensor route Auto takes for an expectation terminal.
+    gradient/qaoa_l1/adjoint/18
+    expectation/pauli_sum/18
+    auto/expectation/brickwork_d4/20
+
+    # Noise: trajectory sampling on a non-Clifford circuit, the compiled Pauli
+    # sampler, and the Pauli path engine.
+    noisy_sampling/trajectory_pauli/non_clifford_12q_512
+    noisy_sampling/compiled_pauli/clifford_100q_10k
+    pauli_path/noisy_expectation/path/50
+
+    # Circuit-level paths that no backend row reaches: a guarded region and
+    # parameter binding without a rebuild.
+    dynamic/guarded_region/20
+    vqe/bind/16
+)
+
+CIRCUITS_FILTER="^($(IFS='|'; echo "${CIRCUITS_ROW_LIST[*]}"))$"
+CIRCUITS_ROWS=${#CIRCUITS_ROW_LIST[@]}
 
 # The job builds head in place straight before measuring. A same-code run
 # measured off such a build read 9.1% slower at the median on the development

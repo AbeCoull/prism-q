@@ -664,7 +664,7 @@ row is in `scripts/bench_ci.sh`):
 | Circuit level | `dynamic/guarded_region/20`, `vqe/bind/16` |
 
 The sizes are the smallest that still exercise the pipeline that ships, not the smallest
-available: `MIN_QUBITS_FOR_DIAG_BATCH = 16` and `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in
+available: `MIN_QUBITS_FOR_DIAG_BATCH = 14` and `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in
 `circuit/fusion.rs` are the floors, and `qft_textbook` has no 18 in its size list so it
 stays at 20. The job builds head in place just before measuring, so `bench_ci.sh` passes
 `--settle 60`: the first pass waits until the runner has read quiet for a minute without

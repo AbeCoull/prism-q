@@ -47,9 +47,9 @@ fi
 # targets of their own.
 #
 # Sizes are the smallest that still exercise the paths the gate exists to watch,
-# not the smallest available. `MIN_QUBITS_FOR_DIAG_BATCH = 16` and
+# not the smallest available. `MIN_QUBITS_FOR_DIAG_BATCH = 14` and
 # `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in `circuit/fusion.rs` are the floors:
-# below 16 the diagonal-batch families never form, and below 18 the post-phase
+# below 14 the diagonal-batch families never form, and below 18 the post-phase
 # rebatch never runs, so a smaller row would gate a different pipeline than the
 # one that ships. `qft_textbook` has no 18 in its size list and stays at 20.
 #

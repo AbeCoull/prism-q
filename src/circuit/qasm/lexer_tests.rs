@@ -71,8 +71,9 @@ fn numbers_split_from_what_follows_them() {
     }
 }
 
-// A unit belongs to the number only when nothing name-like follows it, so `2sx`
-// stays the number and the name it lexed as before durations existed.
+// A unit belongs to the number, spaces between them or not, only when nothing
+// name-like follows it, so `2sx` stays the number and the name it lexed as
+// before durations existed.
 #[test]
 fn a_time_unit_glues_to_its_number() {
     for source in [
@@ -89,9 +90,12 @@ fn a_time_unit_glues_to_its_number() {
         assert_eq!(kinds(source), vec![Kind::Duration], "`{source}`");
         assert_eq!(texts(source), vec![source.to_string()], "`{source}`");
     }
+    for source in ["2 ns", "1000\tms", "4  dt"] {
+        assert_eq!(kinds(source), vec![Kind::Duration], "`{source}`");
+    }
     for (source, expected) in [
         ("2sx", vec![Kind::Int, Kind::Ident]),
-        ("2 ns", vec![Kind::Int, Kind::Ident]),
+        ("2 nsx", vec![Kind::Int, Kind::Ident]),
         ("2nsec", vec![Kind::Int, Kind::Ident]),
         ("2e", vec![Kind::Int, Kind::Ident]),
         ("0x1f", vec![Kind::Int]),

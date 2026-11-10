@@ -102,6 +102,7 @@ fn register_distribution_matches_the_statevector() {
             .unwrap()
             .expect("the register fits");
         let label = format!("seed {seed}, n {n}, t {t_count}");
+        assert_close(&sampler.distribution(), &want, &label);
         assert_close(&exact_distribution(&sampler), &want, &label);
     }
 }
@@ -174,7 +175,46 @@ fn register_marginals_follow_the_measurement_map() {
     let sampler = TerminalSampler::compile(&circuit, MAX_REGISTER_QUBITS)
         .unwrap()
         .unwrap();
+    assert_close(&sampler.distribution(), &want, "subset");
     assert_close(&exact_distribution(&sampler), &want, "subset");
+}
+
+#[test]
+fn distribution_reads_the_last_write_to_each_classical_bit() {
+    let n = 6;
+    let base = random_clifford_t(n, 50, 6, 42);
+    let full = statevector_probabilities(&base);
+    let mut circuit = Circuit::new(n, 3);
+    circuit.instructions = base.instructions.clone();
+    circuit.add_measure(2, 0);
+    circuit.add_measure(5, 1);
+    circuit.add_measure(4, 0);
+    circuit.add_measure(0, 1);
+    circuit.add_measure(0, 2);
+
+    let mut want = vec![0.0; 8];
+    for (state, p) in full.iter().enumerate() {
+        let (q4, q0) = ((state >> 4) & 1, state & 1);
+        want[q4 | (q0 << 1) | (q0 << 2)] += p;
+    }
+    let sampler = TerminalSampler::compile(&circuit, MAX_REGISTER_QUBITS)
+        .unwrap()
+        .unwrap();
+    assert_close(&sampler.distribution(), &want, "overwritten bits");
+    assert_close(&exact_distribution(&sampler), &want, "overwritten bits");
+}
+
+#[test]
+fn every_qubit_distribution_ignores_the_circuit_measurements() {
+    let n = 5;
+    let mut circuit = random_clifford_t(n, 40, 8, 42);
+    let want = statevector_probabilities(&circuit);
+    circuit.add_measure(3, 0);
+    let sampler = TerminalSampler::compile_every_qubit(&circuit, MAX_REGISTER_QUBITS)
+        .unwrap()
+        .unwrap();
+    assert!(sampler.register_width() <= n);
+    assert_close(&sampler.distribution(), &want, "every qubit");
 }
 
 #[test]

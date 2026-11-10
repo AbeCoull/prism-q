@@ -389,6 +389,8 @@ struct WeightedMpsBranch {
 #[derive(Debug, Clone)]
 pub struct StabRankResult {
     pub probabilities: Vec<f64>,
+    /// Terms held at the end: `2^k` merged coefficients for a Clifford register of
+    /// width `k` on the exact route, the branch count on the branch routes.
     pub num_terms: usize,
     pub t_count: usize,
     /// Number of terms pruned during approximate simulation (0 for exact).
@@ -416,11 +418,33 @@ const MIN_TERMS_FOR_PAR: usize = 16;
 
 /// Run stabilizer rank simulation for exact probabilities.
 ///
-/// Clifford gates update all terms in O(n²). T gates double the term count
-/// via T = α·I + β·Z decomposition. n ≤ 25, total terms ≤ 2²⁰.
+/// Probabilities come from the Clifford register: the branches of the
+/// `T = α·I + β·Z` expansion that land on one basis state of the `k` qubits the
+/// T gates reach are summed into one coefficient, so the cost follows `2^k`
+/// with `k <= min(n, t)` and no T-count limit applies. A register wider than
+/// 20 qubits falls back to one branch per T choice, at most `2^20` of them.
+/// `n <= 25`.
 pub fn run_stabilizer_rank(circuit: &Circuit, seed: u64) -> Result<StabRankResult> {
+    exact_probabilities(circuit, seed, MAX_REGISTER_QUBITS)
+}
+
+fn exact_probabilities(
+    circuit: &Circuit,
+    seed: u64,
+    max_register_width: usize,
+) -> Result<StabRankResult> {
     let n = circuit.num_qubits;
     let circuit = lower_probability_circuit(circuit)?;
+    require_dense_width(n)?;
+    if let Some(sampler) = TerminalSampler::compile_every_qubit(&circuit, max_register_width)? {
+        return Ok(StabRankResult {
+            probabilities: sampler.distribution(),
+            num_terms: 1 << sampler.register_width(),
+            t_count: circuit.t_count(),
+            pruned_count: 0,
+            discarded_weight: 0.0,
+        });
+    }
     let (mut backend, mut branches) = stabilizer_rank_setup(&circuit, seed)?;
 
     let mut t_count = 0usize;
@@ -456,13 +480,7 @@ pub fn run_stabilizer_rank(circuit: &Circuit, seed: u64) -> Result<StabRankResul
     })
 }
 
-/// Shared qubit-cap check and initial state for the exact and approximate
-/// runners, on a circuit `lower_probability_circuit` has already taken.
-fn stabilizer_rank_setup(
-    circuit: &Circuit,
-    seed: u64,
-) -> Result<(StabilizerBackend, Vec<WeightedBranch>)> {
-    let n = circuit.num_qubits;
+fn require_dense_width(n: usize) -> Result<()> {
     if n > MAX_STATEVECTOR_QUBITS {
         return Err(PrismError::BackendUnsupported {
             backend: "stabilizer_rank".into(),
@@ -472,6 +490,16 @@ fn stabilizer_rank_setup(
             ),
         });
     }
+    Ok(())
+}
+
+/// Initial state for the branch runners, on a circuit `lower_probability_circuit`
+/// and `require_dense_width` have already taken.
+fn stabilizer_rank_setup(
+    circuit: &Circuit,
+    seed: u64,
+) -> Result<(StabilizerBackend, Vec<WeightedBranch>)> {
+    let n = circuit.num_qubits;
     let mut backend = StabilizerBackend::new(seed);
     backend.init(n, circuit.num_classical_bits)?;
 
@@ -586,6 +614,7 @@ pub fn run_stabilizer_rank_approx(
 ) -> Result<StabRankResult> {
     let n = circuit.num_qubits;
     let circuit = lower_probability_circuit(circuit)?;
+    require_dense_width(n)?;
     let (mut backend, mut branches) = stabilizer_rank_setup(&circuit, seed)?;
 
     let max_terms = max_terms.max(2);

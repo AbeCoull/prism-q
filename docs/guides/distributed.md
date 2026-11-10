@@ -25,8 +25,8 @@ let result = simulate(&circuit).distributed(context).seed(42).run()?;
 ```
 
 `DistributedContext::world()` and `attached_world()` need the `distributed-mpi` feature.
-`world()` calls `MPI_Init` at `MPI_THREAD_FUNNELED` and captures the world communicator;
-dropping the context on the thread that created it runs `MPI_Finalize`. When another
+`world()` calls `MPI_Init` at `MPI_THREAD_FUNNELED` and captures the world communicator.
+Dropping the context on the thread that created it runs `MPI_Finalize`. When another
 component already owns MPI, such as an embedding interpreter with mpi4py,
 `attached_world()` attaches without taking over the MPI lifetime. It returns `Ok(None)`
 when MPI is not initialized, and an error when MPI runs below the thread level the
@@ -43,9 +43,8 @@ Launch the binary under the MPI launcher with a power-of-two rank count:
 mpiexec -n 4 ./target/release/my_simulation
 ```
 
-The contract is SPMD: every rank runs the same program and enters every collective
-inside the backend, so branching on `context.rank()` before a simulation call deadlocks
-the other ranks.
+Every rank runs the same program and enters every collective inside the backend (SPMD),
+so branching on `context.rank()` before a simulation call deadlocks the other ranks.
 
 ## Other transports
 
@@ -71,13 +70,12 @@ let probabilities = run_ranks(4, |context| {
 ## Memory layout
 
 Global index `rank * 2^(n-p) + local_index`. Qubit `q` below `n - p` is bit `q` of
-the local index; qubit `q` at or above `n - p` is bit `q - (n - p)` of the rank id.
+the local index, and qubit `q` at or above `n - p` is bit `q - (n - p)` of the rank id.
 Qubit 0 is the least significant bit, as everywhere in PRISM-Q, and `|0...0>` is index
 0 on rank 0.
 
-`PRISM_DIST_MIN_LOCAL_QUBITS` (default 10) sets the fewest local qubits a rank may hold
-for its slice to be worth the exchanges; a split that leaves fewer is rejected at
-`init`.
+`PRISM_DIST_MIN_LOCAL_QUBITS` (default 10) sets the fewest local qubits a rank may hold;
+a split that leaves fewer is rejected at `init`.
 
 ## Qubit relabeling
 
@@ -90,7 +88,7 @@ and control bits are free on global qubits and never trigger a relabel.
 
 Relabeling pays off when gate activity has locality: SWAP networks, repeated gates on
 the same qubits, working sets that fit the local positions. A cyclic scan over more hot
-qubits than local positions evicts on every layer; `PRISM_DIST_RELABEL=0` switches the
+qubits than local positions evicts on every layer. `PRISM_DIST_RELABEL=0` switches the
 map off and falls back to a direct exchange per gate. `PRISM_DIST_EXCHANGE_CHUNK` tiles
 each exchange into messages of that many amplitudes and bounds the transfer buffers. The
 default, 2^29 amplitudes, sends a slice of up to 8 GiB as one message and keeps every
@@ -107,7 +105,7 @@ message within the `int` count MPI calls take.
   gathering the dense state.
 - Reduced density matrices, summed from rank-local partial traces. Kept qubits on rank
   bits move to local positions first, one half-slice exchange each, and stay there with
-  relabeling on; with `PRISM_DIST_RELABEL=0` the layout is restored afterwards. A
+  relabeling on. With `PRISM_DIST_RELABEL=0` the layout is restored afterwards. A
   subsystem wider than the local slice reads the gathered state. Entanglement entropy
   needs a global SVD and declines.
 - `probabilities()` and `export_statevector()` gather, so they carry the dense output
@@ -128,11 +126,11 @@ message within the `int` count MPI calls take.
   | One-qubit Kraus | the qubit's reduced density matrix, four scalars per rank, plus a half-slice exchange when the qubit sits on a rank bit |
   | Two-qubit Kraus | the pair's block, after relabeling the pair local |
 
-  With relabeling off, that relabel is undone after the read, two more exchanges; with
+  With relabeling off, that relabel is undone after the read, two more exchanges. With
   fewer than two local qubits the event gathers the whole state, under the export cap.
   Ranks sum the gathered parts in rank order, so each weighs a draw against the same
   value. The records match the host statevector's trajectory engine run serially at the
-  same seed. The host's default route for a Pauli-only model with terminal measurements
+  same seed. For a Pauli-only model with terminal measurements the host's default route
   samples from shared error prefixes instead, so its records differ.
 - Before the first noisy shot the ranks compare the circuit, noise model, shot count and
   seed, and whether each rank accepted the run under the limits it resolved. A run any
@@ -160,9 +158,9 @@ prints per-rank timings for comparing exchange pipelines across hosts.
 
 `cargo bench --bench bench_distributed --features "parallel distributed bench-internal"`
 runs the loopback benchmarks. Their ranks share one memory system, so the rows price
-packing, copying and per-gate dispatch, not network latency; see
-[Benchmark Methodology](./benchmarking.md).
+packing, copying and per-gate dispatch rather than network latency (see
+[Benchmark Methodology](./benchmarking.md)).
 
 The exchange paths and relabeling algorithm are documented on the
-[`distributed_statevector` module](https://docs.rs/prism-q/latest/prism_q/backend/distributed_statevector/index.html);
-per-backend support is in the [Capability and Support Matrix](./capabilities.md).
+[`distributed_statevector` module](https://docs.rs/prism-q/latest/prism_q/backend/distributed_statevector/index.html),
+and per-backend support is in the [Capability and Support Matrix](./capabilities.md).

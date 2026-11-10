@@ -2,11 +2,11 @@
 
 Two routes sample error correction experiments without a dense statevector per shot. A
 Clifford `Circuit` with reset reuse compiles into a detector sampler, and the
-[native QEC program IR](../architecture/qec-programs.md) adds detectors, logical observables,
-postselection and noise annotations as operations. Noise on ordinary circuits
-is on [Noise Models](noise.md). The [QEC memory tutorial](../tutorials/qec-memory.md)
-runs a decoded experiment end to end, and [QEC from Python](python-qec.md) covers the
-Python surface.
+[native QEC program IR](../architecture/qec-programs.md) adds detectors, logical
+observables, postselection and noise annotations as operations. Noise on ordinary
+circuits is on [Noise Models](noise.md). The
+[QEC memory tutorial](../tutorials/qec-memory.md) runs a decoded experiment, and
+[QEC from Python](python-qec.md) covers the Python surface.
 
 ## Detector sampling
 
@@ -80,11 +80,11 @@ detectors, observables, postselection, `X_ERROR` / `Y_ERROR` / `Z_ERROR` /
 expectation estimates.
 A noiseless `EXP_VAL` runs under a `QecTStrategy`: `Auto` tries exact light-cone SPD,
 then CAMPS, then a tensor network scalar, and `run_qec_program_with_strategy` picks
-`Spd`, `Camps` or `Reference` directly. Detector records are still sampled by the packed
-runner. A noisy `EXP_VAL` is computed exactly on the density
-matrix when it fits, and falls to the per-shot reference runner when the program
-carries measurement records or postselection or exceeds the density matrix cap.
-The packed sampling path rejects non-Clifford gates.
+`Spd`, `Camps` or `Reference` directly. The packed runner still samples detector records.
+A noisy `EXP_VAL` is computed exactly on the density matrix when it fits, and falls to
+the per-shot reference runner when the program carries measurement records or
+postselection or exceeds the density matrix cap. The packed sampling path rejects
+non-Clifford gates.
 [QEC programs](../architecture/qec-programs.md) has the full grammar, the runner
 routing, the V1 reset requirement, and the `EXP_VAL` placement rules.
 ```
@@ -172,8 +172,8 @@ assert_eq!(run_qec_program(&program)?.logical_error_rates(), vec![1.0]);
 ### Compiling once for repeated sampling
 
 `run_qec_program` compiles the program on every call. `QecProgram::compile_sampler`
-compiles once and returns a `QecCompiledSampler` whose `sample` call only samples, so many
-small batches or a sweep over seeds pay for one compile:
+compiles once and returns a `QecCompiledSampler`, so many small batches or a sweep over
+seeds pay for one compile:
 
 ```rust
 use prism_q::parse_qec_program;
@@ -261,7 +261,8 @@ let failures = (0..result.total_shots)
 The repetition code protects a Z memory; the rotated surface and triangular 6.6.6 color
 codes take an X or Z memory basis. A zero rate adds no annotation, so
 `QecCircuitNoise::default()` gives the noiseless program, whose detectors and observable
-never fire. [QEC programs](../architecture/qec-programs.md#memory-experiment-generators) has the
+never fire.
+[QEC programs](../architecture/qec-programs.md#memory-experiment-generators) has the
 layouts and schedules.
 
 ## Detector error model export
@@ -353,16 +354,14 @@ achievable logical error rate. Construction rejects hypergraph models and points
 batches decode in parallel.
 
 Two more decoders take the same model and expose the same `decode_packed` and
-`logical_error_rate` calls:
+`logical_error_rate` calls. `MatchingDecoder` is exact minimum-weight perfect matching
+over the same graphlike model: it finds the least-weight correction for every shot, so it
+fails no more often than union-find on hard noise, at a higher per-shot cost.
 
-- `MatchingDecoder` is exact minimum-weight perfect matching over the same graphlike
-  model. It finds the least-weight correction for every shot, so it fails no more often
-  than union-find on hard noise, at a higher per-shot cost.
-- `BpOsdDecoder` runs belief propagation with ordered statistics decoding on the check
-  matrix and accepts hypergraph models directly, which color codes and qLDPC codes
-  need. `BpOsdOptions` picks the BP rule (`MinSum { scaling }` or `ProductSum`), the
-  iteration cap, and the OSD search (`Zero`, `CombinationSweep { order }`, or
-  `Exhaustive { order }`).
+`BpOsdDecoder` runs belief propagation with ordered statistics decoding on the check
+matrix and accepts hypergraph models directly, which color codes and qLDPC codes need.
+`BpOsdOptions` picks the BP rule (`MinSum { scaling }` or `ProductSum`), the iteration
+cap, and the OSD search (`Zero`, `CombinationSweep { order }`, or `Exhaustive { order }`).
 
 ```rust
 use prism_q::{BpOsdDecoder, BpOsdOptions, MatchingDecoder, OsdMethod, run_qec_program};

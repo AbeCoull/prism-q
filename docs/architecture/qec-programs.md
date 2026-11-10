@@ -22,7 +22,7 @@ in a Pauli product, branch probabilities summing to at most 1, and target pairin
 | `QecOp` variant | Payload | Semantics |
 | --- | --- | --- |
 | `Gate` | `gate`, `targets` | Standard gate. The compiled runner requires Clifford gates; the reference runner accepts any gate the statevector backend supports. |
-| `Measure` | `basis`, `qubit` | Single-qubit measurement in the requested basis. One record. The qubit is left in the Z frame: the basis rotation is not undone. Reusing a measured qubit before a `Reset` is rejected (see the reset requirement below); after a non-Z basis the reference runner rejects it too, so the frame it is left in is never observable. |
+| `Measure` | `basis`, `qubit` | Single-qubit measurement in the requested basis. One record. The basis rotation is not undone, so the qubit is left in the Z frame. Reuse before a `Reset` is rejected (see the reset requirement below), by the reference runner too after a non-Z basis, so that frame is never observable. |
 | `MeasurePauliProduct` | `terms` | One record equal to the parity of the listed Pauli terms. Unlike `Measure`, the per-term basis rotations are undone before the record is taken. |
 | `Reset` | `basis`, `qubit` | Reset to the `+1` eigenstate of the requested basis. |
 | `Detector` | `records`, `coords` | Parity over the listed records. `coords` is passthrough metadata with no effect on sampling. |
@@ -53,7 +53,7 @@ rows therefore hold absolute measurement indices by the time a sampler compiles 
 ## Feed-forward
 
 `QecOp::Feedforward` conditions a body on the parity of a record list against an
-expected value, the shape a detector already has. It reuses the guarded-region
+expected value, the shape a detector already has, and reuses the guarded-region
 contract. The QEC record space and the classical bit vector are one address space (the
 reference runner writes record `i` to classical bit `i`), so a resolved record index is
 the bit a `ClassicalCondition::Parity` reads. The op executes as the guarded instruction
@@ -75,13 +75,12 @@ already flipped. The flip sets come from the forward Pauli frame walk the record
 uses, up to 64 corrections as lanes of one walk. A Pauli on a qubit measured since its
 last reset flips nothing and is dropped, as noise there is.
 
-Two cases are rejected by name, with a pointer to `run_qec_program_reference`: a body
-holding any other gate or a reset, and a feed-forward in a program with leakage
-annotations. A feed-forward program also skips the parity route that reads no records,
-since its predicates read records. The deferred lowering's other consumers and the
-density matrix estimator reject the op outright, and detector error model derivation
-inherits the deferred lowering's rejection. Build the op with
-`QecProgram::feedforward`; the native text format does not spell it.
+A body holding any other gate or a reset, and a feed-forward in a program with leakage
+annotations, are rejected by name with a pointer to `run_qec_program_reference`. A
+feed-forward program also skips the parity route that reads no records. The deferred
+lowering's other consumers and the density matrix estimator reject the op outright, and
+detector error model derivation inherits the deferred lowering's rejection. Build the op
+with `QecProgram::feedforward`, since the native text format does not spell it.
 
 ## Parsing
 
@@ -95,7 +94,7 @@ annotations (`LEAK(p)`, `SEEP(p)`, and `LEAK_TRANSPORT(p)` on pairs), `TICK`,
 instructions below, which lower onto the same ops. `rec[-k]` resolves to an absolute
 index while parsing. A numeric argument on a basis measurement, such as `M(0.001)`,
 lowers to a Pauli flip on that record just before the measurement. Inverted (`!`)
-targets are rejected; instruction tags such as `X_ERROR[tag](p)` are ignored.
+targets are rejected, and instruction tags such as `X_ERROR[tag](p)` are ignored.
 
 | Instruction | Lowering |
 | --- | --- |
@@ -130,9 +129,9 @@ error rather than a lossy write.
 
 `src/qec/generators.rs` builds the standard memory experiments as ordinary programs, so
 sampling, model derivation, decoding and text export treat them like any other. Each
-generator assembles the op list and validates it once through `QecProgram::from_ops`.
-The incremental builders recount records on every append, which would make a
-distance-13, 1000-round program quadratic to build.
+generator validates its op list once through `QecProgram::from_ops`, because the
+incremental builders recount records on every append and would make a distance-13,
+1000-round program quadratic to build.
 
 | Generator | Qubits | Round | Memory basis | Observable 0 |
 | --- | --- | --- | --- | --- |
@@ -164,9 +163,9 @@ readouts against its last ancilla record, at `t = rounds`. Coordinates:
 The surface schedule visits X plaquettes NW, SW, NE, SE and Z plaquettes NW, NE, SW,
 SE. On every data pair an X and a Z ancilla share, the Z ancilla acts first on both or
 on neither, so interleaved ancillas measure the stabilizers correctly. The order also
-lays each hook error perpendicular to the logical operator it could extend. A hook
-error is the two-qubit error an ancilla fault halfway through a plaquette leaves on the
-data. The graphlike distance of the decomposed model (the fewest mechanisms that flip
+lays each hook error (the two-qubit error an ancilla fault halfway through a plaquette
+leaves on the data) perpendicular to the logical operator it could extend. The graphlike
+distance of the decomposed model (the fewest mechanisms that flip
 the observable with no detector) equals `d` for both bases at `d` = 3 and 5, as it does
 for the repetition code.
 
@@ -182,8 +181,7 @@ damage, and the circuit distance can fall below `d`. The code distance is `d`: u
 data noise alone, the fewest undetected observable-flipping mechanisms is exactly `d`
 at `d` = 3 and 5 in both bases. A bulk data error flips three faces. From distance 5
 some of those hyperedges have no graphlike cover, so `decompose_graphlike` rejects the
-model and union-find does not apply; a hypergraph decoder consumes the model as
-derived.
+model and union-find does not apply. A hypergraph decoder consumes the model as derived.
 
 With the union-find decoder at 100k shots, seed 42, `d` rounds and uniform noise:
 
@@ -194,8 +192,8 @@ With the union-find decoder at 100k shots, seed 42, `d` rounds and uniform noise
 | surface, X memory | 0.002 | 339, 144 at `d` = 3, 5 |
 
 The MPP-based repetition and surface memories in the benchmark and test helpers are a
-different program. They measure stabilizers directly under phenomenological noise, and
-seeded-record digests and benchmark history pin them, so they stay as they are.
+different program: they measure stabilizers directly under phenomenological noise, and
+seeded-record digests and benchmark history pin them.
 
 ## Runner routing
 
@@ -224,24 +222,24 @@ Programs without `EXP_VAL` take the packed compiled path:
 program's shot count and seed. Validation rejects non-Clifford gates and reports
 whether active noise is present. A program with no measurements returns an empty record
 buffer without compiling a sampler. Noisy Clifford programs compile a noise-aware
-sampler; clean ones lower to a circuit and compile a detector sampler. Both honor
-`QecOptions::chunk_size`: sampling runs in batches of at most `chunk_size` shots, with
-detector, observable, postselection and logical-error accounting per chunk. Peak memory
-is then one chunk of records when raw measurements are not kept.
+sampler, and clean ones lower to a circuit and compile a detector sampler. Both sample in
+batches of at most `QecOptions::chunk_size` shots, with detector, observable,
+postselection and logical-error accounting per chunk, so peak memory is one chunk of
+records when raw measurements are not kept.
 
-The two-run split serves noiseless `EXP_VAL` programs with detectors. Detectors are
-record metadata with no effect on the state, so the halves compose. The packed sampler
+The two-run split serves noiseless `EXP_VAL` programs with detectors, which are record
+metadata with no effect on the state, so the halves compose. The packed sampler
 runs the program without its `EXP_VAL` ops (real measurement, detector and observable
 records), and the analytical ladder runs it without its detectors (exact estimates
-attached to the sampled result). When either half cannot run, for example non-Clifford
-gates on the packed half, the whole program falls back to the reference runner.
+attached to the sampled result). When either half cannot run (non-Clifford gates on the
+packed half), the whole program falls back to the reference runner.
 
 The density-matrix estimator serves noisy `EXP_VAL` programs whose ensemble the mixed
 state can carry in full. There `Tr(rho P)` is the exact value the reference runner
 approximates by averaging per-shot statevector expectations. Eligibility:
 
 - No measurement records. `M` and `MPP` collapse the state per shot and feed the
-  measurement, detector and observable rows; the mixed state holds no record stream.
+  measurement, detector and observable rows, and the mixed state holds no record stream.
 - No postselection, which would condition the estimate on an accepted subensemble
   `Tr(rho P)` does not express.
 - Width within the density-matrix cap (`PRISM_MAX_DM_QUBITS`, default half the
@@ -253,7 +251,7 @@ directly, and the reference runner samples one trajectory per shot, so the shot 
 still converges to `Tr(rho P)`.
 
 A gate or channel the density-matrix path rejects surfaces as an error from the
-lowering or the oracle, which also falls back to the reference runner. The lowering
+lowering or the oracle, and also falls back to the reference runner. The lowering
 maps gates one to one and expands a basis reset into `Reset` plus its Z-to-basis
 rotation. Each Pauli-noise annotation becomes `NoiseModel` events on the instruction it
 follows, applied through the backend's exact one-qubit Kraus and two-qubit depolarizing
@@ -275,32 +273,31 @@ execution path, and rejects programs containing gates, resets, active noise, or
 `EXP_VAL`.
 
 The clean compiled path builds its sampler from the lowered Clifford circuit instead.
-It backward-propagates each measurement observable into a Pauli sensitivity row. Gaussian
-elimination reduces the rows to independent flip rows plus a deterministic reference
-outcome, and each shot XORs a random subset of flip rows into the reference bits.
-Detector and observable rows are then applied as parities over the sampled records. See
-[compiled samplers](./samplers.md) for the machinery.
+It backward-propagates each measurement observable into a Pauli sensitivity row.
+Gaussian elimination reduces the rows to independent flip rows plus a deterministic
+reference outcome, and each shot XORs a random subset of flip rows into the reference
+bits. Detector and observable rows are then applied as parities over the sampled records
+([compiled samplers](./samplers.md)).
 
 ## Lowering
 
 Two lowerings turn a QEC program into a circuit the samplers accept. They share the
 basis-rotation helpers (`append_basis_to_z_rotation` and its inverse) and `MPP` parity
-accumulation in `append_mpp_parity_rotations`. That helper rotates each term into Z,
+accumulation in `append_mpp_parity_rotations`, which rotates each term into Z,
 accumulates parity on a scratch qubit via `CX`, undoes the rotations and measures the
 scratch. Both lowerings finish by checking that exactly `num_measurements` records were
 emitted.
 
-The clean Clifford lowering measures in place: rotate the qubit into Z and measure into
-the next record, leaving the rotation in place, so the qubit stays in the Z frame.
+The clean Clifford lowering measures in place: it rotates the qubit into Z, measures
+into the next record and leaves the rotation, so the qubit stays in the Z frame.
 `MPP` uses one scratch qubit at index `num_qubits`, reset between uses. A reset emits a
 reset followed by the basis rotation.
 
 The deferred lowering backs the noisy path and the analytical estimator prelude. A
 reset gives the program qubit a fresh circuit alias, so every measurement can be
-deferred to a terminal record; reusing a measured qubit without a reset is rejected.
-Each program qubit's final alias is recorded so terminal `EXP_VAL` terms translate onto
-the lowered circuit. Noise ops are not applied to the circuit but recorded as
-positioned events for sensitivity compilation.
+deferred to a terminal record. Each program qubit's final alias is recorded so terminal
+`EXP_VAL` terms translate onto the lowered circuit. Noise ops are recorded as positioned
+events for sensitivity compilation instead of applied to the circuit.
 
 ```admonish note title="V1 reset requirement"
 A measured qubit must be reset before any later gate reuses it, because the
@@ -309,10 +306,9 @@ compiled lowering defers measurements to terminal records.
 
 ## Noisy data flow
 
-Noise never executes during compiled sampling; it compiles into record flips.
-
-At compile time the deferred lowering produces the noiseless circuit plus positioned
-noise events. Backward Pauli propagation walks the circuit in reverse, carrying each
+Noise never executes during compiled sampling. It compiles into record flips: the
+deferred lowering produces the noiseless circuit plus positioned noise events, and
+backward Pauli propagation walks the circuit in reverse, carrying each
 measurement's observable to each event position. Every event becomes sensitivity rows:
 for each noise branch, the records whose propagated Pauli anticommutes with the
 injected error, packed as flip masks. The noiseless sampler is compiled on the deferred
@@ -322,7 +318,7 @@ When records are neither kept nor postselected, the walk holds rows only for the
 aliases live at each position and projects each event onto detector and observable bits
 as it reaches it. Compile memory then follows the live qubit count rather than records
 times aliases. The same walk reads the noiseless detector and observable values from
-the propagated signs; if any is random, compilation falls back to the record path. A
+the propagated signs, and falls back to the record path if any is random. A
 noiseless program takes the same walk with no events, at cost live qubits times
 records. Compiling the deferred circuit forward grew with the square of the record
 count.
@@ -339,7 +335,7 @@ in every event.
 Noise draws in fixed units of 8192 shots. Unit `k` covers shots
 `[8192 k, 8192 (k + 1))` and draws every event in program order from ChaCha stream `k`
 of the noise seed, so a unit's faults depend only on the seed and `k`. A chunk boundary
-inside a unit continues that unit's draws. Seeded noise is therefore independent of
+inside a unit continues that unit's draws, so seeded noise is independent of
 `QecOptions::chunk_size`, and units run in parallel under the `parallel` feature without
 changing any bit. When records are neither kept nor postselected and every detector and
 observable is fixed in the noiseless circuit, the draws land directly on detector and
@@ -360,8 +356,8 @@ channel with one measured target degrades to its marginal on the survivor:
 The leakage annotations `LEAK(p)`, `SEEP(p)` and `LEAK_TRANSPORT(p)` (on pairs) carry a
 leak flag per qubit through the shot, which no fixed flip map holds. `run_qec_program`
 samples them with a forward frame walk next to the leak rows, and each `LEAK` target
-adds a herald column to `QecSampleResult::heralds`. The walk is described under
-[leakage on the compiled QEC path](./noise.md#leakage-on-the-compiled-qec-path). The
+adds a herald column to `QecSampleResult::heralds`
+([leakage on the compiled QEC path](./noise.md#leakage-on-the-compiled-qec-path)). The
 reference runner, the record noise sampler and the error model derivation reject them
 by name, and so does a program pairing them with a feed-forward.
 
@@ -369,8 +365,8 @@ The reference runner applies the Pauli channels stochastically to each shot's st
 The density-matrix estimator applies them exactly: the one-qubit channels as Pauli
 channels, `DEPOLARIZE1` as a symmetric one-qubit depolarizing channel, `DEPOLARIZE2`
 as a two-qubit depolarizing channel on each target pair, and `PAULI_CHANNEL_2` as a
-two-qubit Kraus channel of `sqrt(p) P` terms. How this path relates to the
-noisy engines for circuits is on [Noise Compilation](./noise.md).
+two-qubit Kraus channel of `sqrt(p) P` terms. The noisy engines for circuits are on
+[Noise Compilation](./noise.md).
 
 ## Detector error models and decoding
 
@@ -382,8 +378,8 @@ program's detectors, and three in-crate decoders consume the result. Both are on
 
 `EXP_VAL(c) P1*...*Pk` estimates `c * <P>` for the Pauli product `P` in the program's
 final state and returns one `QecObservableEstimate` per op, in op order, in
-`QecSampleResult::expectation_values`. Two placement rules make "final state" well
-defined on every path:
+`QecSampleResult::expectation_values`. Two placement rules define "final state" on
+every path:
 
 - Terminal placement: no gate, measurement, reset, or active noise may follow an
   `EXP_VAL` op. Detector, observable, postselection and tick metadata may.
@@ -410,7 +406,7 @@ average to `Tr(rho P)`.
 The analytical strategies evaluate `<0|U^dag P U|0>` on the deferred lowering with the
 trailing measurements stripped. Record observables become Z strings, and `EXP_VAL`
 terms translate through the final qubit aliases. The strategies reject detectors and
-active noise; `run_qec_program` handles those through the split and reference routes.
+active noise, which `run_qec_program` handles through the split and reference routes.
 `QecTStrategy` selects the path:
 
 - `Auto`, the production ladder. Light-cone SPD runs first (truncation tolerance
@@ -425,7 +421,7 @@ active noise; `run_qec_program` handles those through the split and reference ro
 
 CAMPS evaluates arbitrary X/Y/Z strings by conjugating each letter through the signed
 Clifford prefix (`Y = i * X * Z` composes the two inverse-tableau rows). Postselection
-composes on both paths. The reference runner averages over accepted shots, and the
+composes on both paths: the reference runner averages over accepted shots, and the
 analytical combiner conditions via `<O * Pi> / <Pi>` over the projector subsets,
 capped at 12 postselection predicates. The projector Z strings live on measured aliases
 and never overlap `EXP_VAL` terms.
@@ -437,7 +433,7 @@ holds `<S> = +1` in the lowered state. Observables without a reroute use their o
 support. It rejects `EXP_VAL` ops, postselection, and resets (resets relabel qubits,
 making stabilizer indices ambiguous).
 
-`tests/integration/qec_exp_val.rs` pins routing and placement;
+`tests/integration/qec_exp_val.rs` pins routing and placement, and
 `tests/integration/qec_e2e_d3.rs` checks distance-3 repetition-code fixtures against
 closed-form expectations on the compiled, analytical and reference paths.
 
@@ -464,10 +460,10 @@ contributed, postselection rejections excluded). Zero accepted shots yield
 `{mean: 0.0, variance: 0.0, num_shots: 0}`.
 
 Analytical strategies have no per-shot stream, so they synthesize the packed
-`observables` records to match the `logical_errors` counts. The one-bits occupy
-positions `[0, accepted_shots)` and the rest is inert padding. Derive rates with
+`observables` records to match the `logical_errors` counts, with the one-bits at
+positions `[0, accepted_shots)` and inert padding after. Derive rates with
 `logical_error_rates` (denominator `accepted_shots`), and do not align these rows shot
-for shot with detector rows on the analytical path.
+for shot with detector rows.
 
 The compiled runner delivers shot-major `PackedShots` record buffers: one row of packed
 record bits per shot, record `j` at bit `j % 64` of word `j / 64`. The Clifford+T

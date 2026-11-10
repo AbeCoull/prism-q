@@ -31,16 +31,17 @@ outcome = sim.run()
 | `overlap(other)` | `OverlapResult`: `.fidelity`, `\|<a\|b>\|^2` against a second `Simulation`, with `.left` and `.right` metadata | no | yes |
 
 [Advanced State Handling](python-state.md#entropy-overlap-and-reduced-states) has
-examples of the entropy, overlap and reduced state terminals. Read
-`expectation().metadata` when the route matters: under `auto()` a wide shallow circuit
-may be answered by tensor contraction instead of the state vector, and only the metadata
-says which ran. `expectation_gradient_shift()` gives the same gradient as
-`expectation_gradient()` at two extra circuit runs per parameter, and is the only route
-on a backend with no adjoint pass or with a noise model attached; under noise each
-evaluation reads the exact mixture, and the shift stays exact because the channels do
-not depend on the shifted angle. `overlap()` takes a second `Simulation`, so each side
-keeps its own backend, seed and start state; both circuits must have the same width and
-be unitary.
+examples of the entropy, overlap and reduced state terminals. Under `auto()` a wide
+shallow circuit may be answered by tensor contraction instead of the state vector, and
+only `expectation().metadata` says which ran.
+
+`expectation_gradient_shift()` gives the same gradient as `expectation_gradient()` at two
+extra circuit runs per parameter. It is the only route on a backend with no adjoint pass
+or with a noise model attached. Under noise each evaluation reads the exact mixture, and
+the shift stays exact because the channels do not depend on the shifted angle.
+
+`overlap()` takes a second `Simulation`, so each side keeps its own backend, seed and
+start state. Both circuits must have the same width and be unitary.
 
 `shots()` and `sample_counts()` average trajectories on any backend holding a per-shot
 pure state. Rows marked "density matrix only" read the exact mixed state and need
@@ -54,8 +55,7 @@ measurement samples and collapses, so `run()` returns one branch's probabilities
 `sample_counts()` draws a fresh branch per shot.
 
 Terminals that cannot honor a model raise `PrismError` naming the reason.
-`state_vector()` honors `.backend(...)` and declines on a backend holding no pure state
-rather than substituting one.
+`state_vector()` honors `.backend(...)` and declines on a backend holding no pure state.
 
 `ShotsResult` and `CountsResult` both expose `counts()`, a dict keyed by bitstring.
 `ShotsResult.shots` is a `bool` array of shape `(shots, bits)`; call `.tolist()` for
@@ -158,12 +158,11 @@ print(result.metadata.blocks)                # per-block engines when 'Decompose
 
 `is_exact` is False when the engine can discard state weight or estimate by sampling. It
 marks the route, not the run: an MPS whose bond dimension the circuit never fills
-reports `is_exact == False` with `fidelity_lower_bound == 1.0`. The flag says the answer
-could have been approximated; the bound says whether it was.
+reports `is_exact == False` with `fidelity_lower_bound == 1.0`.
 
 An MPS run also reports `bond`, a `BondReport`: `peak` (the widest bond any cut kept),
 `cap` (the configured maximum), and `saturated` (`peak >= cap`). A run whose peak stayed
-under the cap truncated nothing on the cap's account, whatever the exactness label says.
+under the cap truncated nothing on the cap's account.
 
 Automatic dispatch sends a circuit past the statevector cap to the sparse map when its
 state never holds more than 128 basis states, and to an MPS with a bounded bond otherwise.
@@ -209,9 +208,8 @@ accepted backends by speed.
 
 `peak_memory` holds `bytes` and `kind`. Known bounds cover the state and terminal buffer
 payload, not circuit or fusion storage, allocator overhead, or process memory. Other
-routes return `{"bytes": None, "kind": "unknown"}`; state size alone is not reported as
-a peak bound. Inspection may run bounded sparse support or tensor contraction planning
-probes but does not execute the terminal.
+routes return `{"bytes": None, "kind": "unknown"}`. Inspection may run bounded sparse
+support or tensor contraction planning probes but does not execute the terminal.
 
 Query constructors are `run()`, `shots(n)`, `counts(n)`, `marginals()`,
 `expectation(observables)`, `observable(hamiltonian)`, `state_vector()`,
@@ -224,7 +222,7 @@ route chosen for another evaluation, including prepared backend reuse.
 
 ## Selecting a backend
 
-`BackendKind.auto()`, the default, picks a backend from circuit structure; an explicit
+`BackendKind.auto()`, the default, picks a backend from circuit structure. An explicit
 one overrides it.
 
 | Constructor | Notes |
@@ -247,7 +245,7 @@ one overrides it.
 | `auto_gpu(context)`, `statevector_gpu(context)`, `stabilizer_gpu(context)`, `density_matrix_gpu(context)` | CUDA device paths, see [GPU backends](#gpu-backends) |
 
 The density matrix backend stores `4^n` amplitudes, so its qubit ceiling is about half
-the statevector cap; exceeding it raises `PrismError` naming the cap.
+the statevector cap. Exceeding it raises `PrismError` naming the cap.
 `statevector_distributed(context)` reaches the sharded backend
 ([Distributed backend](#distributed-backend)).
 
@@ -265,13 +263,15 @@ outcome = simulate(circuits.qft(16)).backend(BackendKind.auto_gpu(context)).seed
 print(outcome.probabilities)
 ```
 
-A missing or unusable device raises `PrismError` from `GpuContext(device_id)`; there is
-no fallback at that point. After construction, routing is soft, as in the Rust API:
-`statevector_gpu` keeps circuits below its crossover on the host, `auto_gpu` routes each
-block on its own, and a block whose device allocation fails runs on the host instead of
-erroring, so a host result is not a failure signal. `density_matrix_gpu(context)` is the
-exception: it has no crossover and no host fallback, `auto_gpu` never selects it, and a
-width whose `4^n` buffer exceeds free device memory raises before allocating.
+A missing or unusable device raises `PrismError` from `GpuContext(device_id)`, with no
+fallback. After construction, routing is soft, as in the Rust API. `statevector_gpu`
+keeps circuits below its crossover on the host, `auto_gpu` routes each block on its own,
+and a block whose device allocation fails runs on the host instead of erroring. A host
+result is not a failure signal.
+
+`density_matrix_gpu(context)` has no crossover and no host fallback, and `auto_gpu` never
+selects it. A width whose `4^n` buffer exceeds free device memory raises before
+allocating.
 `context.device_name` reports the device's product name.
 
 The macOS wheel and a default source build carry no CUDA support. There the constructors
@@ -297,7 +297,7 @@ GpuContext.is_available()   # ... and does the driver open a device
 
 The distributed statevector shards the dense state across MPI ranks. Python reaches it
 through a `DistributedContext`, which attaches to an MPI that is already running. The
-extension never calls `MPI_Init` or `MPI_Finalize`: mpi4py does both, at import and at
+extension never calls `MPI_Init` or `MPI_Finalize`. mpi4py does both, at import and at
 interpreter exit, and a handle that finalized MPI when dropped would break every later
 MPI call in the process.
 
@@ -316,7 +316,7 @@ print(context.rank, context.size, outcome.probabilities[:4])
 ```
 
 Run it with `mpiexec -n 4 python script.py`. The rank count must be a power of two, and
-every rank needs enough local qubits after the shard bits are taken; the
+every rank needs enough local qubits after the shard bits are taken. The
 [distributed guide](distributed.md) has the memory layout, the tuning variables and what
 runs sharded.
 
@@ -330,10 +330,10 @@ if comm.rank == 0:
 ```
 
 hangs the job: rank 0 blocks in a collective the others never enter. Every rank calls
-`run` with the same circuit and seed; only the handling of the returned value may branch
-on rank. Two checks, one collective each at run entry, turn the common violations into
-errors instead of hangs: ranks disagreeing about the register shape, the seed, or the
-tuning knobs, and ranks handed different circuits.
+`run` with the same circuit and seed, and only the handling of the returned value may
+branch on rank. Two checks at run entry, one collective each, turn the common violations
+into errors: ranks disagreeing about the register shape, the seed, or the tuning knobs,
+and ranks handed different circuits.
 
 Two cases raise on purpose.
 

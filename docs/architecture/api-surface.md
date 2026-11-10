@@ -74,7 +74,7 @@ decline one.
 `prism_q::sim::run_batch` runs a list of circuits, holding one backend across those of
 the same width that draw no randomness. Results match running each circuit alone with
 the same seed. Under `parallel`, batches of circuits up to 16 qubits split across cores,
-one circuit per core with each run single threaded; wider batches run one circuit at a
+one circuit per core with each run single threaded. Wider batches run one circuit at a
 time on the kernels' own threads.
 
 ### State diagnostics
@@ -93,12 +93,10 @@ tabulates which backends answer each.
 
 ### Prepared circuits
 
-`PreparedCircuit` carries `run`, `expectation_values`, `observable_expectation`,
-`expectation_gradient` and `expectation_gradient_shift`, each answering as the `Simulate`
-terminal of that name does on the bound circuit, plus a `_many` form of each that takes
-a list of bindings and splits it across cores where `run_batch` would. Gradient batches
-split only below the statevector kernels' parallel width, 15 qubits, and run in order
-above it. See [Parameters, Binding and Gradients](./parameters.md).
+`PreparedCircuit` answers the `Simulate` terminals on a bound circuit, each with a
+`_many` form over a list of bindings.
+[Parameters, Binding and Gradients](./parameters.md#plan-capture-and-replay) lists the
+terminals and how the batches split.
 
 ## Growth of the public enums
 

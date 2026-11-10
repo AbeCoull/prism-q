@@ -46,7 +46,7 @@ says what each release promises.
 
 | Item | Status |
 | --- | --- |
-| OpenQASM 3 constructs that decline today: private measurement storage in subroutines, the `complex` type, and `durationof`. [The subset](./guides/openqasm.md#the-subset) lists the rest | Planned |
+| OpenQASM 3 constructs that decline today: private measurement storage in subroutines and the `complex` type. [The subset](./guides/openqasm.md#the-subset) lists the rest | Planned |
 | Conversion from Python circuit frameworks, behind an optional dependency | Planned |
 | Checkpoint and resume across processes, which needs a state format first | Research |
 | Pulse-level and continuous-time simulation. Design only: whether it becomes a backend or a separate crate is the first decision | Research |
@@ -79,7 +79,7 @@ says what each release promises.
 ## Hardware that would help
 
 Thresholds and tile sizes were tuned on one desktop, an Intel i7-6700K with a GTX
-1080 Ti (see [Benchmarks](./benchmarks.md)). The Needs hardware items wait on one of
+1080 Ti (see [Performance](./performance/index.md)). The Needs hardware items wait on one of
 these:
 
 - an x86-64 CPU with AVX-512

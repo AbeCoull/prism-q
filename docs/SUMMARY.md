@@ -61,12 +61,7 @@
 
 # Reference
 
-- [Benchmarks](./benchmarks.md)
-- [Comparative Measurements](./comparison.md)
-  - [Methodology](./comparison/methodology.md)
-  - [Results](./comparison/results.md)
-  - [Report](./comparison/report.md)
-  - [Probability-Vector Comparison](./comparison/probability-vector.md)
+- [Performance](./performance/index.md)
 - [Circuit Builders](./reference/builders.md)
 - [Python API](./reference/python-api.md)
 - [Glossary](./glossary.md)

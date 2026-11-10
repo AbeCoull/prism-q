@@ -1,10 +1,9 @@
-"""Benchmark matrix: run a profile, aggregate its raw observations, draw its figures.
+"""Benchmark matrix: run a profile, aggregate its raw observations, write the Performance page.
 
     python comparison/matrix.py list --profile reference
     python comparison/matrix.py run --profile smoke --out comparison/results/smoke
     python comparison/matrix.py aggregate comparison/results/smoke
-    python comparison/matrix.py figures comparison/results/smoke
-    python comparison/matrix.py report comparison/results/reference-i7-6700k --docs docs/comparison
+    python comparison/matrix.py report comparison/results/matrix-reference-i7-6700k --docs docs/performance
 
 `run` writes `observations.jsonl` (one record per simulator, workload and
 thread count, failures included), `manifest.json` (host, toolchain, versions,
@@ -417,21 +416,13 @@ def cmd_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_figures(args: argparse.Namespace) -> int:
-    from harness import figures
-
-    figures.write_all(args.results, args.figures_dir)
-    return 0
-
-
 def cmd_report(args: argparse.Namespace) -> int:
-    from harness import aggregate, figures, pages
+    from harness import aggregate, pages
 
-    aggregate.write(args.results)
-    fig_dir = os.path.join(args.docs, "figures") if args.docs else None
-    figures.write_all(args.results, fig_dir)
     if args.docs:
-        pages.write(args.results, args.docs, args.landing)
+        pages.write(args.results, args.docs)
+    else:
+        aggregate.write(args.results)
     return 0
 
 
@@ -480,15 +471,9 @@ def main() -> int:
     p.add_argument("results")
     p.set_defaults(func=cmd_aggregate)
 
-    p = sub.add_parser("figures", help="SVG figures from observations.jsonl")
+    p = sub.add_parser("report", help="aggregate and write the Performance page")
     p.add_argument("results")
-    p.add_argument("--figures-dir", default=None)
-    p.set_defaults(func=cmd_figures)
-
-    p = sub.add_parser("report", help="aggregate, draw, and write the documentation pages")
-    p.add_argument("results")
-    p.add_argument("--docs", default=None, help="documentation directory for the report pages")
-    p.add_argument("--landing", default=None, help="landing page path to regenerate")
+    p.add_argument("--docs", default=None, help="page directory, docs/performance")
     p.set_defaults(func=cmd_report)
 
     args = parser.parse_args()

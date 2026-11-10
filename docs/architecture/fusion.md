@@ -65,7 +65,7 @@ never block each other.
 Each stage leaves as one existing batch: a `Multi2q` with every 1q gate folded into a
 2q entry on its qubit, a `MultiFused` when it holds no 2q gate, or a `MultiPauliRot`,
 whose Z letters cost no tile slot. Diagonal gates ride in a tile when a later gate needs
-them; the rest wait for a diagonal stage (`BatchRzz` or `DiagonalBatch`), taken when no
+them. The rest wait for a diagonal stage (`BatchRzz` or `DiagonalBatch`), taken when no
 tile moves anything or when clearing them first doubles what the next tile moves. The
 schedule reads only the stream and the tile geometry, which comes from the hardware, not
 the Rayon pool, so results are bitwise equal across thread counts. The planner records
@@ -76,7 +76,7 @@ density matrix keeps the batching passes.
 
 `Backend::fusion_profile` picks the pipeline. The statevector picks
 `FusionProfile::Device` when a GPU is attached and the state reaches
-`gpu::tiles::MIN_QUBITS` (18); every other backend, and the device below that width,
+`gpu::tiles::MIN_QUBITS` (18). Every other backend, and the device below that width,
 keeps the host pipeline above. The device profile stops after the 1q passes and fuses
 2q gates only in runs of at least two on one pair with a moving gate among them (quantum
 volume blocks), where the run's leading 1q gates fold in as well. A lone CX keeps its
@@ -102,10 +102,11 @@ Mixed tiles run at apply time, inside the backend, over whatever stream fusion h
 over: they regroup operations the batches left apart, without adding a gate variant.
 
 Past the last-level cache floor, the CPU statevector lowers the fused instruction slice
-into a schedule of its own. A stage admits operations whose moving qubits fit one cache tile
-and whose dependencies are met. Diagonal qubits and Pauli Z letters outside the tile are
-constant within a subcube and take no tile slot. The planner examines at most four times
-the state width in skipped operations per scan, and in candidate seeds per growth step.
+into a schedule of its own. A stage admits operations whose moving qubits fit one cache
+tile and whose dependencies are met. Diagonal qubits and Pauli Z letters outside the tile
+are constant within a subcube and take no tile slot. The planner examines at most four
+times the state width in skipped operations per scan, and in candidate seeds per growth
+step.
 
 Homogeneous stages use the existing 1q, 2q, Pauli or diagonal batch kernels. Mixed
 stages gather once, execute their operations in order, and scatter once. Controlled X
@@ -127,7 +128,7 @@ The density matrix schedules a doubled stream over its `2n`-qubit buffer: ket ga
 commuting work from the other register can share a tile. An unsupported operation ends
 the segment and runs through the density matrix backend. The device path keeps its own
 fusion profile and kernels. The static density-matrix census accepts only supported gate
-streams; unsupported kernels have their own ket, bra and conjugation passes and are
+streams. Unsupported kernels have their own ket, bra and conjugation passes and are
 excluded from that count.
 
 ## QFT recognition
@@ -200,8 +201,8 @@ binding flips a decision read from a matrix. The recipes and guards are on
 
 ## Fusion cost against apply cost
 
-Fusion cost tracks instruction count and is nearly flat in qubit count; gate application
-is `2^n`. For `hardware_efficient_ansatz(n, 5, seed)` on this project's
+Fusion cost tracks instruction count and is nearly flat in qubit count, while gate
+application is `2^n`. For `hardware_efficient_ansatz(n, 5, seed)` on this project's
 reference host, fusion is about 22% of a run at 12 qubits and about 0.3% at 20.
 
 From 16 qubits fusion is off the hot path, and these passes are written for

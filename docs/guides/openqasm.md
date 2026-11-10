@@ -1,12 +1,9 @@
 # OpenQASM Support
 
-PRISM-Q parses a subset of OpenQASM 3.0 and the common 2.0 syntax. Text is lexed, parsed
-to a statement tree that holds syntax only, and evaluated into the
-[Circuit IR](../architecture/ir.md), so a program's meaning is decided once, in the
-evaluator.
-
-[The subset](#the-subset) lists what parses and what declines. Valid OpenQASM outside the
-subset returns `UnsupportedConstruct` naming the construct, never a panic or a silent drop.
+PRISM-Q parses a subset of OpenQASM 3.0 and the common 2.0 syntax into the
+[Circuit IR](../architecture/ir.md). [The subset](#the-subset) lists what parses and what
+declines. Valid OpenQASM outside the subset returns `UnsupportedConstruct` naming the
+construct, never a panic or a silent drop.
 
 ## Parsing and running
 
@@ -82,8 +79,8 @@ Names may open with any Unicode letter, so `gate cphase(θ) a, b { ... }` and `q
 parse. A program declares at most 2^24 qubits and 2^24 classical bits, physical `$k`
 indices included; past that the parse fails with `PrismError::Parse`.
 
-`output bit[3] c;` declares the register and marks it as the program's result. The mark
-changes nothing, since every classical bit is reported either way.
+`output bit[3] c;` declares the register and marks it as the program's result, which
+changes nothing: every classical bit is reported either way.
 
 ### Physical qubits
 
@@ -164,11 +161,11 @@ A declaration inside a `for` body binds for one pass: the body's scope is droppe
 end of each iteration, while a write to a name declared outside the loop carries on to the
 next pass and past the loop.
 
-An `if`, `else` or `switch` body opens a scope too, but a measurement decides whether it
-runs, and classical variables fold at parse time. Such a body may declare and write its
-own variables. A write to one declared outside it returns `UnsupportedConstruct`, since
-the value would otherwise depend on what the measurement read. Holding such a value needs
-the control-flow graph [`parse_dynamic`](#dynamic-programs) builds.
+An `if`, `else` or `switch` body opens a scope too and may declare and write its own
+variables. A measurement decides whether it runs, so a write to a variable declared
+outside it returns `UnsupportedConstruct`: the folded value would depend on what the
+measurement read. Holding such a value needs the control-flow graph
+[`parse_dynamic`](#dynamic-programs) builds.
 
 An `array` of any of those element types takes a size per dimension, fixed at parse time,
 and folds the same way. Elements read as `a[i, j]` or `a[i][j]` wherever a value would and
@@ -293,9 +290,9 @@ A `box[d]` whose delays run past `d` is a `Parse` error.
 - Qiskit and exporter names: sxdg, cs, csdg, csx, ccz, r, xx_plus_yy, xx_minus_yy, ecr,
   iswap, dcx, c3x, c4x, mcx, rccx, rc3x/rcccx.
 - Hardware-native: gpi, gpi2, ms, syc, sqrt_iswap, sqrt_iswap_inv. `gpi`, `gpi2` and `ms`
-  take angles in turns, matching IonQ's transpiler output. Amazon Braket spells the same
-  three gates in radians; `openqasm::parse_with(source, Dialect::Braket)` reads them that
-  way and changes nothing else.
+  take angles in turns, matching IonQ's transpiler output.
+  `openqasm::parse_with(source, Dialect::Braket)` reads them in radians, as Amazon Braket
+  spells them.
 - Pauli rotations: `r` followed by one Pauli letter per qubit argument. `rxx`, `ryy` and
   `rzz` are the two-letter cases; `rxyz(0.7) q[0], q[1], q[2];` is
   `exp(-i * 0.7 * (X⊗Y⊗Z) / 2)` with `x` on `q[0]`. `rzz` resolves to the native
@@ -377,7 +374,7 @@ if (c[0]) {
 ```
 
 `else`, `else if` and `switch` with `case` and `default` arms lower to guards on the
-existing condition language rather than new IR syntax. A condition may test a bit, a
+existing condition language. A condition may test a bit, a
 register against a value, or a parity such as `if (c[0] ^ c[2])` or
 `if ((c[0] ^ c[2]) == 0)`. Under `parse`, anything else over classical bits declines;
 [`parse_dynamic`](#dynamic-programs) evaluates it at runtime, along with measured bits read
@@ -490,12 +487,12 @@ c[0] = measure q[1];
 `parse` declines these forms by name, since a `Circuit` reports every bit it holds.
 `parse_dynamic` declines a measurement into a bit parameter, and a private bit in a `def`
 inlined into a `while` body, whose passes would share it. Both decline a measurement
-returned as a scalar result, a `stretch` returned as a `duration`,
-runtime duration, fixed-width angle and `complex` values, and modifiers on runtime calls.
-Under `parse`, a scalar result that depends on a measurement and a
-call inside a measurement-dependent condition decline too; `parse_dynamic` takes both.
-Under `parse_dynamic`, a bit argument or bit result read at runtime declines past 64
-bits, the width a runtime value holds.
+returned as a scalar result, a `stretch` returned as a `duration`, runtime duration,
+fixed-width angle and `complex` values, and modifiers on runtime calls. `parse` also
+declines a scalar result that depends on a measurement and a call inside a
+measurement-dependent condition, both of which `parse_dynamic` takes. Under
+`parse_dynamic`, a bit argument or bit result read at runtime declines past 64 bits, the
+width a runtime value holds.
 
 ## Input parameters
 
@@ -588,9 +585,9 @@ Each argument is stored through its declared type before the call, so `int[8]` p
 as 1. The function returns a `Bool` for `bool` and `bit`, an `Int` for `int[n]` and
 `uint[n]`, and a `Float` for `float[n]` and `angle`, where an `Int` is promoted. A
 `bit[n]` of up to 64 bits passes and returns as the `uint[n]` its bits spell, so
-`f(c[0:2])` and `f(c[{0, 2, 1}])` pass a slice or an index set. The result
-is stored through the declared type. A call reads as a value anywhere one belongs, inside `def` bodies too, and
-as a statement its value is dropped.
+`f(c[0:2])` and `f(c[{0, 2, 1}])` pass a slice or an index set. The result is stored
+through the declared type. A call reads as a value anywhere one belongs, inside `def`
+bodies too, and as a statement its value is dropped.
 
 A call whose arguments fold at parse time runs once, at parse time, under every entry
 point. Under `parse_dynamic_with_externs`, a call over a measured bit or a runtime variable
@@ -606,21 +603,21 @@ s[1] = measure q[2];
 if (decode(s[0], s[1])) x q[0];
 ```
 
-Shots run on several threads, so a Rust function is `Send + Sync`; a Python callable takes
-the GIL for each call, and an exception it raises becomes the `__cause__` of the
-`PrismError` the caller sees. A call nothing reads may not run, and how often a runtime call runs
-is otherwise unspecified, so a function should be pure.
+Shots run on several threads, so a Rust function is `Send + Sync`. A Python callable
+takes the GIL for each call, and an exception it raises becomes the `__cause__` of the
+`PrismError` the caller sees. A call nothing reads may not run, and how often a runtime
+call runs is otherwise unspecified, so a function should be pure.
 
 An entry point without `_with_externs`, and a Python parse given no `externs`, declines
 every `extern` declaration with `UnsupportedConstruct`. Under the `_with_externs` entry
-points, these return `InvalidParameter`: a declaration with no function registered under its name,
-a result of the wrong kind, and any error the function returns or a Python callable raises.
-A function registered for no declaration is ignored. These return `UnsupportedConstruct`:
-an `extern` with no result type, a parameter or result of another type (`bit[n]` past 64
-bits, `angle[n]`, `complex`, `duration`, arrays), a call over an unsupplied `input`, and under
-`parse` a call over a measured value. A call with the wrong number of arguments, an
-`extern` declared inside a body, and a `gate` or `def` sharing an extern's name return
-`Parse`.
+points, these return `InvalidParameter`: a declaration with no function registered under
+its name, a result of the wrong kind, and any error the function returns or a Python
+callable raises. A function registered for no declaration is ignored. These return
+`UnsupportedConstruct`: an `extern` with no result type, a parameter or result of another
+type (`bit[n]` past 64 bits, `angle[n]`, `complex`, `duration`, arrays), a call over an
+unsupplied `input`, and under `parse` a call over a measured value. A call with the wrong
+number of arguments, an `extern` declared inside a body, and a `gate` or `def` sharing an
+extern's name return `Parse`.
 
 `ExternCall::new` builds a call for a `DynamicProgramBuilder` from a name, the parameter
 and result types, the function, and the argument expressions. `build` checks the argument
@@ -678,7 +675,8 @@ variable folds as under `parse`, so a program `parse` accepts gives the same cir
 under `parse_dynamic` and the same seeded shots. Runtime `int` and `uint` variables wrap
 at their declared width, and runtime floats round to their width. A runtime `angle`
 holds a double. Fixed-width runtime `angle[n]` declarations and casts return
-`UnsupportedConstruct`; their precision is supported only when the value folds at parse time.
+`UnsupportedConstruct`, since that precision is honoured only when the value folds at
+parse time.
 
 A shot that runs more than a million blocks stops with `PrismError::StepLimit` naming its
 loop; `SimulateProgram::max_steps` sets another bound. The
@@ -783,13 +781,13 @@ binding and copying its constant environment count too, and a `pow` repetition i
 against the bound before it is built.
 
 Every decline above happens at parse time, so a program that parses is one the IR can
-hold. The backend it runs on may still decline the circuit; the
-[Capabilities](capabilities.md) page lists those limits.
+hold. The backend it runs on may still decline the circuit, as
+[Capabilities](capabilities.md) lists.
 
 ## Amazon Braket programs
 
 `parse_braket` reads Braket's result, noise, unitary and verbatim pragmas, and
-`Simulate::braket_results` answers the requests in Braket's conventions. See
+`Simulate::braket_results` answers the requests in Braket's conventions, both covered on
 [Amazon Braket Programs](./braket.md).
 
 ```admonish note title="Qubit ordering"

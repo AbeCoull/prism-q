@@ -42,7 +42,7 @@ cannot produce that form fails the run with its own message. A route that rewrit
 circuit instead of executing it (the compiled samplers, the stabilizer-rank engine, the
 Pauli-propagation engines) declines a circuit carrying one.
 
-Only `Simulate::run` returns the records; every other terminal declines a circuit with
+Only `Simulate::run` returns the records. Every other terminal declines a circuit with
 save points rather than discarding what they recorded.
 
 ### Guarded regions
@@ -72,10 +72,10 @@ noiseless run on the host statevector replays once per distinct outcome history 
 splitting the shots binomially at each measurement until only measurements remain, then
 drawing each branch's readout from its state. Routes requiring a unitary circuit
 (adjoint gradients, exact expectation values, Pauli propagation, stabilizer-rank
-probabilities) reject a region as they reject a bare conditional. A noise model keeps one
-event slot per top-level instruction, then a slot for every guarded body instruction and
-every conditional's gate; a body slot fires only on the shots its instruction runs. Only
-routes holding one state per shot serve such a model.
+probabilities) reject a region as they reject a bare conditional. A noise model gives
+guarded instructions their own
+[event slots](./noise.md#slots-for-guarded-instructions), and only routes holding one
+state per shot serve such a model.
 
 `Circuit::fold_static_guards` runs once per shots or counts call and resolves guards that
 cannot depend on a measurement. A condition reading only bits no earlier measurement

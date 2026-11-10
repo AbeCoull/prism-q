@@ -99,10 +99,9 @@ statevector behind features.
 
 A multi-pass fusion pipeline merges gates before a circuit runs. Statevector kernels use
 AVX2, FMA and BMI2 on x86-64 and NEON on ARM64, chosen at run time, and split across
-Rayon threads from 15 qubits. Timings are on
-[Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html); the harness behind
-[Comparative Measurements](https://abecoull.github.io/prism-q/comparison.html) is
-committed in [`comparison/`](comparison/README.md).
+Rayon threads from 15 qubits. Timings beside simulators of the same method are on
+[Performance](https://abecoull.github.io/prism-q/performance/index.html); the harness behind them is committed in
+[`comparison/`](comparison/README.md).
 
 ## Documentation
 

@@ -1,7 +1,6 @@
 # Performance and SIMD
 
-The mechanisms that make a run fast and the variables that tune them. Internals are in
-[Fusion Pipeline](../architecture/fusion.md) and
+Internals are in [Fusion Pipeline](../architecture/fusion.md) and
 [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
 
 ## Fusion, tiling and SIMD
@@ -9,12 +8,12 @@ The mechanisms that make a run fast and the variables that tune them. Internals 
 1. Fusion merges many small gate passes into fewer, larger ones before execution,
    cutting memory traffic over the statevector. It is gated on qubit count and costs
    nothing when it does not apply.
-2. Cache-resident tiling keeps batched gates on data that stays hot across a pass,
-   in two shapes. Both size tiles from one budget read off the cache topology at
-   startup: the smaller of the L2 per core and a quarter of the last-level cache per
-   logical CPU sharing it, floored at 256 KB and capped at 1 MB, so every concurrent
-   tile and the lines it gathers fit half that cache. On the i7-6700K used for
-   measurement that is 256 KB; a 1 MB tile ran 2x slower there at 22 and 24 qubits.
+2. Cache-resident tiling keeps batched gates on data that stays hot across a pass.
+   Tiles are sized from one budget read off the cache topology at startup: the smaller
+   of the L2 per core and a quarter of the last-level cache per logical CPU sharing it,
+   floored at 256 KB and capped at 1 MB, so every concurrent tile and the lines it
+   gathers fit half that cache. On the i7-6700K used for measurement that is 256 KB,
+   and a 1 MB tile ran 2x slower there at 22 and 24 qubits.
 
    `MultiFused` splits its gates by target: targets whose period fits the budget run on
    tiles of the budget size (bit 13 and below at 256 KB), bits 14 through 16 on 2 MB tiles
@@ -29,7 +28,7 @@ The mechanisms that make a run fast and the variables that tune them. Internals 
    and `PRISM_MULTI_2Q_LOW_BITS` set the `Multi2q` shape by hand. Budgets past 256 KB
    are derived, not measured, so a core with a larger cache is worth a sweep of
    `PRISM_TILE_KB`.
-3. SIMD vectorizes the inner complex-arithmetic loop. The tier is picked at
+3. SIMD vectorizes the inner complex-arithmetic loop, with the tier picked at
    runtime: AVX-512 (opt-in, see `PRISM_AVX512` below), AVX2+FMA, FMA or SSE2 on x86_64,
    NEON on aarch64, scalar elsewhere.
 
@@ -62,14 +61,14 @@ contract per path.
 
 Every knob is read once per process, on first use, and cached. A value that does not
 parse, or falls below the knob's minimum, prints a stderr warning naming the variable
-and is treated as unset, so a typo neither fails a run nor passes silently. A flag needs
-only to be present: any value switches the path off.
+and is treated as unset. A flag needs only to be present: any value switches the path
+off.
 
 ### Limits (also settable in code)
 
 Each cap below is both a `Limits` field and a variable. `Simulate::limits` (Python
 `Simulation.limits`) sets it for one request and `set_default_limits` for every later
-call in the process; a request value beats the process default, which beats the
+call in the process. A request value beats the process default, which beats the
 variable. `memory_budget_bytes` sets the budget every cap derives from (half of physical
 memory by default), and a layer that sets it discards the per-cap values below it.
 `auto_mps_bond_dim` (default 256) has no variable.
@@ -116,4 +115,4 @@ memory by default), and a layer that sets it discards the per-cap values below i
 
 Run benchmarks with `--features parallel`, one process at a time.
 [Benchmark Methodology](./benchmarking.md) has the targets, the A/B gate and the
-comparison controls, and [Benchmarks](../benchmarks.md) the current numbers.
+comparison controls, and [Performance](../performance/index.md) the current numbers.

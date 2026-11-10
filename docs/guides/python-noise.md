@@ -1,8 +1,8 @@
 # Noise and Shots
 
-This page covers the Python calls; [Noise Models](noise.md) describes what each rule and
-channel does, and the [Noisy Simulation tutorial](../tutorials/noisy-simulation.md) works
-through a GHZ state under gate noise, readout error and a device calibration.
+[Noise Models](noise.md) describes what each rule and channel does, and the
+[Noisy Simulation tutorial](../tutorials/noisy-simulation.md) works through a GHZ state
+under gate noise, readout error and a device calibration.
 
 ## Noise
 
@@ -71,15 +71,17 @@ model = calibration.to_noise_model(circuit)
 Channels are `pauli(px, py, pz)`, `depolarizing(p)`, `amplitude_damping(gamma)`,
 `phase_damping(gamma)`, `thermal_relaxation(t1, t2, gate_time, excited_population=0.0)`,
 `two_qubit_depolarizing(p)`, `custom(kraus)` for an explicit list of 2x2 Kraus operators,
-`custom_2q(kraus)` for 4x4 operators on two qubits, indexed with the first target as the
-high bit, the leakage channels below, and `quasi_static(axis, weights)`, a rotation about
-`"x"`, `"y"` or `"z"` by `sum(w * z[source])` over `(source, w)` pairs, with `z` standard
-normal draws made once per shot; the drift rules below lower onto it. `num_qubits` is the
-number of targets an event with the channel names. `validate()` checks probabilities and
-Kraus completeness. `is_pauli_only()` is true only for single-qubit Pauli channels with no
-readout error; a model with readout error or `two_qubit_depolarizing` reports `False` yet
-still runs on the stabilizer samplers, which apply readout to the record and draw the pair
-channel jointly over its 15 branches.
+`custom_2q(kraus)` for 4x4 operators on two qubits, the leakage channels below, and
+`quasi_static(axis, weights)`. `custom_2q` indexes with the first target as the high bit.
+`quasi_static` rotates about `"x"`, `"y"` or `"z"` by `sum(w * z[source])` over
+`(source, w)` pairs, with `z` standard normal draws made once per shot, and the drift
+rules below lower onto it.
+
+`num_qubits` is the number of targets an event with the channel names. `validate()`
+checks probabilities and Kraus completeness. `is_pauli_only()` is true only for
+single-qubit Pauli channels with no readout error. A model with readout error or
+`two_qubit_depolarizing` reports `False` yet still runs on the stabilizer samplers, which
+apply readout to the record and draw the pair channel jointly over its 15 branches.
 
 A two-qubit Kraus channel models correlated noise, here `ZZ` dephasing:
 
@@ -96,7 +98,7 @@ model.validate()
 ```
 
 It runs exactly on the density matrix and by trajectories on the statevector, sparse,
-factored, and MPS backends; the stabilizer samplers decline it.
+factored, and MPS backends. The stabilizer samplers decline it.
 
 ### Leakage
 
@@ -129,7 +131,7 @@ models.
 ### Timed and correlated noise
 
 `NoiseBuilder.schedule(GateTimes(one_qubit, two_qubit))` schedules the circuit as soon
-as possible, durations in seconds; `with_gate(name, t)`, `with_pair(a, b, t)`,
+as possible, durations in seconds. `with_gate(name, t)`, `with_pair(a, b, t)`,
 `with_measure(t)` and `with_reset(t)` refine it, and an `"id"` entry turns identity
 gates into delays. These rules read the schedule or draw once per shot:
 
@@ -142,7 +144,7 @@ gates into delays. These rules read the schedule or draw once per shot:
 
 A `DriftDistribution` is a zero-mean Gaussian over per-qubit offsets, built by
 `independent(sigmas)`, `from_t2_star(t2_star)` (widths `sqrt(2) / t2_star`), or
-`from_covariance(matrix)`; `with_neighbour_correlation(coupling, rho)` correlates the
+`from_covariance(matrix)`. `with_neighbour_correlation(coupling, rho)` correlates the
 two qubits of each coupling edge. Drawn offsets have exactly the requested covariance,
 and a matrix that is not positive semidefinite raises at `build`:
 
@@ -185,9 +187,9 @@ correlators = sampler.correlators([(0, 2)], 10**6)
 
 Columns, count keys, and indices are measurement records in circuit order: record `j`
 is the `j`-th measurement, and `circuit.measurement_map()[j]` names its qubit and
-classical bit; `shots()` reports classical bits instead. Calls continue one seeded
-stream, so successive calls draw fresh shots and a new sampler with the same seed
-replays them. `rank` counts the independent random bits behind the record, and
+classical bit. `shots()` reports classical bits instead. Calls continue one seeded
+stream: successive calls draw fresh shots, and a new sampler with the same seed replays
+them. `rank` counts the independent random bits behind the record, and
 `exact_counts()` enumerates all `2 ** rank` outcomes up to rank 25. `sample_packed(n)`
 returns records eight to a byte in the `QecSampleResult.packed_measurements()` layout.
 
@@ -195,10 +197,10 @@ returns records eight to a byte in the `QecSampleResult.packed_measurements()` l
 the expectation of the Z-type Pauli product those records measure; `correlators(pairs,
 n)` is the two-record case.
 
-`noise=model` compiles a Pauli noise model, readout error included, into the sampler;
-`rank` and `exact_counts()` are then `None`. The circuit must be Clifford with terminal
-measurements and no reset or classical condition; other input raises `PrismError`
-naming the reason.
+`noise=model` compiles a Pauli noise model, readout error included, into the sampler,
+and `rank` and `exact_counts()` are then `None`. The circuit must be Clifford with
+terminal measurements and no reset or classical condition. Other input raises
+`PrismError` naming the reason.
 
 ```python
 from prism_q import ErrorChainComplex, NoiseModel, noisy_marginals_analytical

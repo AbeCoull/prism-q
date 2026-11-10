@@ -4,9 +4,9 @@
 `BraketProgram`: the circuit, its `input` parameters, the result requests from
 `#pragma braket result` lines, and the noise model from `#pragma braket noise` lines.
 `parse` reads the native dialect, where a pragma is an unsupported construct. `parse_with`
-under `Dialect::Braket` reads the pragmas but returns only the circuit, dropping what they
-declared. Use `parse_braket` whenever a result request has to survive. Everything else
-about the language is on [OpenQASM Support](./openqasm.md).
+under `Dialect::Braket` reads the pragmas but returns only the circuit, so a result
+request survives only through `parse_braket`. The rest of the language is on
+[OpenQASM Support](./openqasm.md).
 
 ```qasm
 OPENQASM 3.0;

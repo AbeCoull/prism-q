@@ -17,12 +17,12 @@ and a scalar path runs otherwise.
 
 ## Backend support by architecture
 
-The nine CPU backends implement the `Backend` trait; the feature-gated distributed
-statevector is a tenth, covered by the Distributed column. `Roadmap` marks only work the
-roadmap carries: here a ROCm port of the existing CUDA kernels, and under
-[Not yet supported](#not-yet-supported) multi-GPU and distributed GPU execution. Backends
-without a CUDA kernel have nothing to port, so their ROCm cell is `No`, and the roadmap
-carries no distributed execution for any backend but the statevector.
+The nine CPU backends implement the `Backend` trait, and the feature-gated distributed
+statevector is a tenth, covered by the Distributed column. `Roadmap` here marks a ROCm
+port of the existing CUDA kernels. A backend without a CUDA kernel has nothing to port,
+so its ROCm cell is `No`. The roadmap carries no distributed execution for any backend
+but the statevector; multi-GPU and distributed GPU work is under
+[Not yet supported](#not-yet-supported).
 
 | Backend | x86-64 | AVX2/FMA/BMI2 | ARM64 | NEON | CUDA (NVIDIA) | ROCm (AMD) | Distributed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -52,8 +52,7 @@ Notes:
 - **AVX2/FMA/BMI2**: the x86-64 tier is chosen at runtime, AVX2+FMA, then FMA, then the
   SSE2 baseline, with an AVX-512 tier first when `PRISM_AVX512=1` is set on a CPU that
   has it. See [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
-- **NEON**: backends marked `SIMD` carry a NEON kernel that mirrors the x86-64 path; the
-  rest run scalar code on ARM64.
+- **NEON**: a `SIMD` backend's NEON kernel mirrors its x86-64 path.
 - **CUDA**: the optional `gpu` feature. The statevector, stabilizer and density matrix
   have device kernels, and every other backend runs on CPU. The density matrix runs on
   the device only when selected explicitly (`BackendKind::DensityMatrixGpu`). See the
@@ -70,8 +69,7 @@ Notes:
 
 `Gate::unitary` takes a caller-supplied `2^k x 2^k` matrix and lowers it into the existing
 gate set wherever a variant carries it. Only a dense matrix on three or four qubits
-becomes `Gate::Unitary`, which fewer backends execute; a lowered matrix is an ordinary
-gate, so the table covers the dense form alone.
+becomes `Gate::Unitary`, and the table covers that form alone.
 
 | Backend | Dense `Gate::Unitary` |
 | --- | --- |
@@ -122,8 +120,9 @@ with `BackendUnsupported` naming the engine, not the route that selected it.
 
 `simulate(...).marginals()` escapes the dense output cap when the circuit routes straight
 to an observable path, so a Clifford circuit with measurements reads its marginals off the
-tableau at any width. The cases that fall back to the dense distribution are listed with
-the [routing rules](../architecture/engine.md#routes-the-tree-does-not-show).
+tableau at any width. The
+[routing rules](../architecture/engine.md#routes-the-tree-does-not-show) list the cases
+that fall back to the dense distribution.
 
 Under a noise model `run()` and `marginals()` answer from the exact mixture, so both
 reject a model that carries readout error: readout acts on the measurement record, not
@@ -136,8 +135,8 @@ run honours `.limits()`, `.require_exact()` and a start state, and reports the s
 metadata as the circuit without its resets. A measurement, conditional or `Region` is
 still rejected there.
 
-`simulate(...).run()` is the one terminal that needs the whole distribution, so on the
-distributed backend it rejects a register past the dense cap before running.
+On the distributed backend `simulate(...).run()`, the one terminal that needs the whole
+distribution, rejects a register past the dense cap before running.
 
 ## What kind of answer a result is
 
@@ -179,10 +178,10 @@ squared weight allows, then slices whatever is still over the cap. It reports
 `require_exact()` rejects it by name.
 
 Past the statevector cap `Auto` takes an MPS at a bounded bond dimension, unless an
-expectation or marginals terminal finds the exact tensor route cheaper. The MPS route is
-taken by default and the result says so, since refusing it would leave an oversize circuit
-that is not sparse with no route at all. `simulate(...).require_exact()` rejects it with
-an error naming the engine it would have used; the
+expectation or marginals terminal finds the exact tensor route cheaper, since refusing
+the MPS would leave an oversize circuit that is not sparse with no route at all. The
+result says so. `simulate(...).require_exact()` rejects it with an error naming the
+engine it would have used, and the
 [engine page](../architecture/engine.md#result-provenance) says when that check runs.
 
 `Simulate::expectation_values_reported` returns a standard error per value on a route that
@@ -210,7 +209,7 @@ and answers anyway.
 | The error chain complex needs named Clifford gates and single-qubit Pauli channels | `IncompatibleBackend` from `ErrorChainComplex` (`error chain complex`) for a gate outside the named Clifford set, which can turn one Pauli error into a sum of them (a rotation at a Clifford angle is not recognized), or for a damping, Kraus or two-qubit channel, which has no single error column. `noisy_marginals_analytical` returns the same errors |
 | Schedule rules need a static schedule | `IncompatibleBackend` from `NoiseBuilder::build` when an idle, scheduled idle, detuning or before-measurement rule meets a circuit holding a region, whose duration depends on the branch |
 
-Backend width and memory caps live with the terminals that raise them; see
+Backend width and memory caps live with the terminals that raise them, under
 [Shot and observable queries above the dense cap](#shot-and-observable-queries-above-the-dense-cap).
 A cap overrun raises `PrismError::ResourceLimit`, whose `knob` names the `Limits` field
 that raises the cap and whose `limit_source` says whether detection, the environment, the

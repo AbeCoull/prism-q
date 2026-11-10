@@ -13,8 +13,8 @@ observables. Matching and belief propagation decoders consume this model rather 
 raw detector samples.
 
 The derivation reuses the [noisy data flow](./qec-programs.md#noisy-data-flow). Every
-annotation expands into its fault branches (three per target for one-qubit channels,
-fifteen per pair for two-qubit ones; zero-probability branches do not fire). Each
+annotation expands into its fault branches, three per target for one-qubit channels and
+fifteen per pair for two-qubit ones, and zero-probability branches do not fire. Each
 branch's record mask projects through the detector and observable rows to its symptom,
 the detectors and observables it flips.
 
@@ -72,11 +72,11 @@ logical_observable L<j>
 - One `detector` line per detector in index order, with the program's detector
   coordinates when present, and one `logical_observable` line per observable slot.
 
-Indices are zero-based and dense; probabilities print with enough digits to round-trip
-exactly. There are no `repeat` blocks and no `shift_detectors`, because derivation
-merges mechanisms across the whole program by symptom and the per-round structure is
-not in the model. A distance-13 surface memory over 1000 rounds at uniform circuit
-noise writes 3.4 million mechanisms, about 200 MB of text.
+Indices are zero-based and dense, and probabilities print with enough digits to
+round-trip exactly. There are no `repeat` blocks and no `shift_detectors`, because
+derivation merges mechanisms across the whole program by symptom and the per-round
+structure is not in the model. A distance-13 surface memory over 1000 rounds at uniform
+circuit noise writes 3.4 million mechanisms, about 200 MB of text.
 
 `DetectorErrorModel::from_text` reads the format back: `error(p)` with `D`, `L` and `^`
 targets, `detector` with optional coordinates, `logical_observable`,
@@ -106,7 +106,7 @@ detector D1
 In Python, `QecProgram.detector_error_model()` returns the model with
 `probabilities()` (float64), `detector_matrix()` and `observable_matrix()` (bool,
 detectors or observables by mechanisms), `detector_coords()`,
-`suggested_decompositions()`, and `to_text()`; `DetectorErrorModel.from_text` reads
+`suggested_decompositions()`, and `to_text()`. `DetectorErrorModel.from_text` reads
 one. The matrix triple feeds check-matrix decoder constructors directly.
 
 ## Decoders
@@ -144,7 +144,7 @@ rejected with a pointer to `decompose_graphlike`.
 Decoding is deterministic: no randomness, ties break by ascending edge index in
 mechanism order, and serial and Rayon results are identical. Under the `parallel`
 feature, batches of at least 1024 shots decode in parallel over 256-shot chunks with no
-per-shot allocation; a model with no observables decodes serially at any batch size.
+per-shot allocation. A model with no observables decodes serially at any batch size.
 
 On the enumerable distance-3 models the exact union-find failure rate sits between the
 maximum-likelihood rate and `P(two or more faults)` plus the measured single-fault
@@ -194,8 +194,8 @@ When belief propagation does not converge, ordered-statistics decoding (Pantelee
 Kalachev, arXiv:1904.02703; Roffe et al., arXiv:2005.07016) sorts columns by posterior
 log-likelihood and reduces the check matrix in that order over GF(2). A nonzero
 right-hand side below the rank rejects the batch. Each candidate fixes the free
-(non-pivot) bits and reads the pivot bits from the reduced rows; the candidate of least
-prior weight wins:
+(non-pivot) bits and reads the pivot bits from the reduced rows, and the candidate of
+least prior weight wins:
 
 | `OsdMethod` | Candidates |
 | --- | --- |

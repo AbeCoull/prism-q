@@ -4,7 +4,7 @@
 
 `Backend` in `src/backend/mod.rs` is sealed: only the crate's own backends implement it,
 so a method can be added without a breaking release. Six methods are required and about
-35 more have defaults. The sketch below shows the required set; the
+35 more have defaults. The sketch shows the required set, and the
 [rustdoc page](https://docs.rs/prism-q/latest/prism_q/backend/trait.Backend.html) lists
 every method.
 
@@ -60,8 +60,9 @@ Other extraction failures propagate as errors too.
 stochastic and deterministic Pauli backends accept only unitary circuits of Clifford gates
 and Pauli rotations, with no measurement, reset or conditional. `T`, `Tdg`, `Rz`, `P` and
 `Rzz` branch natively. `Rx`, `Ry` and multi-qubit `PauliRot` lower to Clifford conjugation
-around one `Rz`; `Fused` matrices lower to the named gate they equal up to phase, or to an
-Euler triple; a `Cu` with a diagonal or Pauli target lowers to Z rotations and Cliffords.
+around one `Rz`. `Fused` matrices lower to the named gate they equal up to phase, or to an
+Euler triple, and a `Cu` with a diagonal or Pauli target lowers to Z rotations and
+Cliffords.
 Automatic dispatch sends only Clifford+T circuits to SPD (rotations at multiples of pi/4
 count as Clifford or T), so arbitrary angles reach the Pauli engines only by explicit
 selection.
@@ -144,8 +145,8 @@ The statevector cap is half of physical memory, about 29 qubits on a 16 GiB host
 derivation and the other caps.
 
 A circuit with no entangling gate at 8 qubits or more meets the block split first and
-runs as one product state block per qubit; shots skip the split and sample the product
-state directly (see [Compiled Samplers](./samplers.md)).
+runs as one product state block per qubit. Shots skip the split and sample the product
+state directly ([Compiled Samplers](./samplers.md)).
 
 Past the cap, dispatch runs the gates on a sparse map and takes it when the map never
 holds more than 128 entries, as a W state does. A sparse gate costs about 8 ns per entry
@@ -153,8 +154,7 @@ and an MPS gate about 2 us even at bond 2, so the MPS wins past that on a circui
 barely entangles. A circuit whose gates only permute or phase basis states stays on one
 entry and skips the probe.
 
-For a user-facing version of this decision, see
-[Choosing a Backend](../getting-started/choosing-a-backend.md).
+[Choosing a Backend](../getting-started/choosing-a-backend.md) is the user-facing version.
 
 ### Routes the tree does not show
 
@@ -171,8 +171,9 @@ Each of these is tested before the state route, with its own constants in
 | Scalar tensor contraction | An expectation or marginals terminal on a unitary circuit whose bounded greedy plan for every observable stays under `2^12` elements: from 18 qubits under the statevector cap, and above it when the plan costs less than an estimate of the MPS run `Auto` would take |
 
 Each answers where the tree would have said statevector or stabilizer, so the backend a
-result reports is the only reliable record of what ran. See
-[what a backend reports](./backends.md#what-a-backend-reports-about-its-own-result).
+result reports
+([what a backend reports](./backends.md#what-a-backend-reports-about-its-own-result)) is
+the only reliable record of what ran.
 
 `marginals()` on a route that goes straight to the resolved backend's observable path is
 not held to the dense output cap: a Clifford circuit with measurements reads its
@@ -228,7 +229,7 @@ hide the error inside it.
 `Simulate::initial_density_matrix` is the mixed-state counterpart. It takes the `4^n`
 buffer `DensityMatrixBackend::density_matrix` exports, row-major `2^n x 2^n` with qubit 0
 the least significant bit of both indices, so a mixture can be stored between runs or
-composed from two evolutions. Only `DensityMatrix` and `DensityMatrixGpu` accept one;
+composed from two evolutions. Only `DensityMatrix` and `DensityMatrixGpu` accept one.
 `initial_state_plan` declines every other kind by name, `Auto` included, since automatic
 dispatch never selects the density matrix. `Backend::init_from_density_matrix` validates
 before sizing the register: `4^n` entries, all finite, each entry pair Hermitian to 1e-12
@@ -236,8 +237,8 @@ before sizing the register: `4^n` entries, all finite, each entry pair Hermitian
 `InvalidParameter` naming the failed check. Positive semidefiniteness is not checked,
 because that needs an eigendecomposition the backend does not carry, so a mixture with a
 negative eigenvalue evolves without complaint. The host backend takes ownership of the
-buffer; the device uploads it in one transfer instead of forming the outer product of a
-pure state.
+buffer, and the device uploads it in one transfer instead of forming the outer product of
+a pure state.
 
 ## Subsystem decomposition
 
@@ -248,7 +249,7 @@ that kind. The merged result reports `Decomposed` and lists each block's engine 
 `FactoredStabilizer`, and under `Auto` from 16 qubits once a block holds two or more,
 because that backend already keeps one tableau per cluster and merges and splits them as
 the circuit runs. Results merge lazily through `Probabilities::Factored`, a Kronecker
-product evaluated per element in O(K); the O(2^N) dense vector is built only on request.
+product evaluated per element in O(K). The O(2^N) dense vector is built only on request.
 
 Blocks run in parallel under Rayon only when every block is below 15 qubits
 (`src/sim/decomposed.rs`), so block threads do not oversubscribe the kernels' own
@@ -300,12 +301,11 @@ no variance.
 
 ## Expectation-value gradients
 
-The caller picks the method. `expectation_gradient` runs the adjoint method on the
-statevector at a cost independent of the parameter count; `expectation_gradient_shift`
-runs `1 + 2 * links` forward evaluations on any backend with an observable path, the
-density matrix and noise models included. Both read the links a `Parameters` table
-records. The algorithms, the gate set and the binding they share are on
-[Parameters, Binding and Gradients](./parameters.md).
+`expectation_gradient` runs the adjoint method on the statevector at a cost independent
+of the parameter count. `expectation_gradient_shift` runs `1 + 2 * links` forward
+evaluations on any backend with an observable path, the density matrix and noise models
+included. Both read the links a `Parameters` table records. The algorithms, the gate set
+and the binding they share are on [Parameters, Binding and Gradients](./parameters.md).
 
 ## Backend dispatch variants
 
@@ -341,9 +341,9 @@ capabilities are readable before a backend is constructed.
 The report separates the selected route from runtime alternatives: bounded SPD work can
 decline at execution, and soft GPU initialization can lose device residency.
 `Plan::fallbacks` declares those possibilities and `RunMetadata::reason` records one
-actually taken. `would_fail` reports predictable failures; malformed query inputs return
-an error. Exactness checks per query admit exact marginal and expectation routes even
-where the full-state tree would choose MPS.
+actually taken. `would_fail` reports predictable failures, and malformed query inputs
+return an error. Exactness checks per query admit exact marginal and expectation routes
+even where the full-state tree would choose MPS.
 
 Gradient queries carry their Hamiltonian and parameter links. Parameter shift plans reuse
 the prepared family decision when execution does, and report each evaluation in baseline,

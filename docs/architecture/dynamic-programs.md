@@ -23,7 +23,7 @@ program with no runtime control flow never reaches the graph walker.
 A block runs its circuit, then its actions. Bits a measurement writes in the circuit
 are visible to the actions and the terminator. The circuit's own guarded regions read
 the bits as they stand, so measurement-conditioned code inside a block keeps the
-guarded-region form. Variables are never visible to a circuit. This keeps fusion's
+guarded-region form. Variables are never visible to a circuit, which keeps fusion's
 dependency model intact: fusion orders instructions by the qubits they touch, and the
 only classical state a circuit reads is written by a measurement on a qubit the same
 circuit orders.
@@ -32,7 +32,7 @@ circuit orders.
 `n` of 16, 32, 64 or 128, and `angle`. A store converts to the declared type. Integers
 truncate toward zero and wrap to their width, a 16- or 32-bit float rounds to half or
 single precision, and an angle reduces into `[0, 2 pi)`. Arithmetic on two integers
-stays integral, `/` truncating; a float on either side makes it a float. `%` and the
+stays integral, `/` truncating, and a float on either side makes it a float. `%` and the
 bitwise operators take integers only, and construction rejects a float operand.
 Comparisons and logical operators return a `bool`, and `&&` and `||` short-circuit.
 Integer division by zero fails the run with `InvalidParameter`.
@@ -81,7 +81,7 @@ outside lives at runtime, since a pass may stop before the write.
 
 An exit every path reaches stops the unrolling at parse time, as under `parse`. The
 exception is a measured `continue` earlier in the pass that sent some paths on to the
-next one; then the exit jumps and the unrolling goes on. A `return` likewise leaves the
+next one. Then the exit jumps and the unrolling goes on. A `return` likewise leaves the
 code after the loop in place when a measured `break` reached the loop's exit. A measured
 `end` jumps to a block that ends the shot, and a `def` holding an `end` runs as a call so
 the same holds inside it. An `end` that no branch, `return` or measured exit separates
@@ -104,7 +104,7 @@ to one block holding the instruction list `parse` returns.
 
 Runtime subroutines expand into the same graph. Each call copies its classical
 arguments into local variables and gets its own exit block. A return assigns the typed
-result and jumps to that exit, including from a loop inside the callee; loop exits
+result and jumps to that exit, including from a loop inside the callee. Loop exits
 cannot cross the call boundary. Locals are initialized each time the call executes,
 and every reachable path through a typed call must return. Definitions keep their
 lexical constants and cannot see the caller's variables.
@@ -137,14 +137,14 @@ conditions are functions of the outcome history, so every shot on a branch takes
 same path. A prefix all shots share, the entry block included, evolves once. The
 live-state budget and the per-shot fallback past it are the circuit walk's. Only a
 block that ends the graph with no actions is cut after its last measurement or drawn
-as a terminal readout; anywhere else a later block may still read the state.
+as a terminal readout, since anywhere else a later block may still read the state.
 
 On every other backend shot `i` draws from `mix_seed(seed, i)`, the seed the per-shot
 circuit routes give shot `i`, and shots split across Rayon workers by the same rule
 those routes use. Each backend is built per shot.
 
 A shot that runs more blocks than its step bound stops with `PrismError::StepLimit`
-naming the loop it was in. The bound defaults to one million blocks;
+naming the loop it was in. The bound defaults to one million blocks, and
 `SimulateProgram::max_steps` sets another. Every block entered counts, the empty loop
 header included.
 

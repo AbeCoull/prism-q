@@ -67,9 +67,8 @@ values = (
 print(round(values.values[0], 6), values.metadata.is_exact)   # 0.03125 True
 ```
 
-`expectation` returns the values with the run's metadata. Shot sampling
-on the measured version goes to the stabilizer-rank engine unprompted; it tracks a sum
-of stabilizer states that grows with the T count, not the width:
+Shots on the measured version go to the stabilizer-rank engine unprompted. It tracks a
+sum of stabilizer states that grows with the T count, not the width:
 
 ```python
 shots = simulate(kicked_chain(60, measure=True)).seed(42).shots(2000)

@@ -6,7 +6,7 @@ stabilizer and density matrix also run on CUDA, and the `distributed` feature ad
 statevector sharded across MPI ranks. Four Clifford+T engines (stabilizer rank, SPP, SPD
 and the Pauli path) hold no state and sit beside the backends. The
 [simulation engine](./engine.md) picks a backend unless the caller names one, and never
-picks the density matrix or the distributed backend;
+picks the density matrix or the distributed backend.
 [Choosing a Backend](../getting-started/choosing-a-backend.md) covers the same ground by
 task.
 
@@ -36,12 +36,11 @@ is the channel. The density matrix applies the channel directly, with no draw.
 
 ## Memory budget
 
-A circuit that does not fit in memory is an error. No backend hands work to another when
-its state would not fit: it returns `PrismError::ResourceLimit` naming itself, the
-requirement, the cap, the layer that set the cap, and the `Limits` field and environment
-variable that override it. `BackendKind::Auto` chooses from circuit structure before any
-backend is constructed. The check lives in `Backend::init`, so `run_on` gets the same
-guard as `simulate`.
+A backend whose state would not fit returns `PrismError::ResourceLimit` instead of
+handing work to another. The error names the backend, the requirement, the cap, the layer
+that set the cap, and the `Limits` field and environment variable that override it.
+`BackendKind::Auto` chooses from circuit structure before any backend is constructed. The
+check lives in `Backend::init`, so `run_on` gets the same guard as `simulate`.
 
 The statevector cap comes from detected physical memory: half of it is the budget, and
 the cap is the widest register whose `2^n` `Complex64` amplitudes fit, so 29 qubits on a
@@ -69,7 +68,7 @@ Each cap resolves through four layers, highest first: the request's `Limits`
 (`Simulate::limits`), the process default (`set_default_limits`), the environment, and
 detection. A layer that sets `memory_budget_bytes` re-derives every cap from that budget
 and discards the per-cap values below it, so a wide `PRISM_MAX_SV_QUBITS` cannot lift a
-cap past a tenant budget. Caps resolve once per request and travel with the backend; no
+cap past a tenant budget. Caps resolve once per request and travel with the backend. No
 gate kernel reads them.
 
 The five growth caps (sparse, factored, MPS, tensor network, factored stabilizer) are
@@ -159,8 +158,7 @@ independent tableaux apart again, so product structure never pays for the joint 
 non-zero amplitudes, O(k) memory. After gates that can shrink or cancel amplitudes,
 entries with |a|² at or below a pruning threshold (1e-28, roundoff level) are removed and
 the rest rescaled to keep the norm. A run with the threshold raised above the default
-reports `Approximate` with a fidelity bound from the dropped weight. Suited to large
-registers whose support stays concentrated on few basis states.
+reports `Approximate` with a fidelity bound from the dropped weight.
 
 An entry costs about 16 times a dense amplitude, so a state holding more than roughly a
 sixteenth of its basis runs slower than a dense vector of the same width. There is no
@@ -184,23 +182,23 @@ ungauged and treat drops under four machine epsilons of the largest value as rou
 ## Product State
 
 Per-qubit `[Complex64; 2]` storage, O(n) memory, O(1) per single-qubit gate. Rejects
-entangling gates; selected automatically for circuits with no 2q gates.
+entangling gates and is selected automatically for circuits with no 2q gates.
 
-Shots and Pauli expectations read the per-qubit states, not a `2^n` probability vector,
-so both stay O(n) at widths no dense route reaches. See
-[Sampling Architecture](./samplers.md).
+Shots and Pauli expectations read the per-qubit states instead of a `2^n` probability
+vector, so both stay O(n) at widths no dense route reaches
+([Sampling Architecture](./samplers.md)).
 
 ## Tensor Network
 
 Deferred contraction planned on metadata: a greedy min-size pass, with seeded restarts
-when its peak intermediate grows large, picks the pair order. Gates append tensors;
+when its peak intermediate grows large, picks the pair order. Gates append tensors, and
 contraction happens at probability extraction, where `PRISM_MAX_PROB_QUBITS` guards the
 dense readout and an explicit run past it errors naming the cap rather than reporting
 `probabilities: None`.
 
 Every contraction checks its planned peak intermediate against `PRISM_MAX_TN_PEAK_QUBITS`
 before allocating. A plan over the cap is sliced and stays exact, holding no more memory
-than an unsliced run; only a plan still over the cap at `PRISM_MAX_TN_SLICES`
+than an unsliced run. Only a plan still over the cap at `PRISM_MAX_TN_SLICES`
 assignments is rejected, naming the cap. `BackendKind::TensorNetworkBounded { tolerance }`
 truncates before it slices, with the same first-order bound as the MPS; the
 [Capability and Support Matrix](../guides/capabilities.md#what-kind-of-answer-a-result-is)
@@ -212,20 +210,19 @@ mid-circuit measurement has no width ceiling and the tensor count does not grow 
 measurements.
 
 A one-qubit reduced density matrix and a Pauli expectation contract the network against
-its conjugate rather than the dense state, so they cost what the doubled network costs.
-An identity factor is a closed leg: a weight-`k` observable adds `k` tensors, not `n`.
+its conjugate, so they cost what the doubled network costs. An identity factor is a
+closed leg: a weight-`k` observable adds `k` tensors, not `n`.
 
-The one-qubit reduced density matrix is what the trajectory engine needs for general
-noise, so amplitude damping, phase damping, thermal relaxation and one-qubit custom Kraus
+The trajectory engine needs only that one-qubit reduction for general noise, so
+amplitude damping, phase damping, thermal relaxation and one-qubit custom Kraus
 channels run here under explicit dispatch. Two-qubit Kraus channels do not, because the
 backend declines the two-qubit reduction.
 
 ## Factored
 
-Dynamic split-state simulation. Starts with n independent 1-qubit states and merges by
-tensor product only when a 2q gate bridges groups. Sub-states of 15 qubits or more use
-the statevector's parallel kernels. Selected when subsystem decomposition detects partial
-independence.
+Starts with n independent 1-qubit states and merges by tensor product only when a 2q gate
+bridges groups. Sub-states of 15 qubits or more use the statevector's parallel kernels.
+Selected when subsystem decomposition detects partial independence.
 
 ## Density Matrix
 
@@ -244,9 +241,9 @@ together.
 Memory is `16 * 4^n` bytes: about 14 qubits on a 16 GiB host and 15 on 32 GiB
 (`PRISM_MAX_DM_QUBITS` moves it within the statevector budget). With a device attached
 (`BackendKind::DensityMatrixGpu`, or `with_gpu` on the backend) the buffer lives in VRAM,
-budgeted against free memory at `init`; an 11 GiB card holds 14 qubits, so the device is
-for throughput, not width. Both kinds are explicit only: `Auto` and `AutoGpu` never
-select them, and the device kind has no host fallback.
+budgeted against free memory at `init`. An 11 GiB card holds 14 qubits, so the device is
+for throughput, not width. `Auto` and `AutoGpu` never select either kind, and the device
+kind has no host fallback.
 
 With a noise model attached it is the exact route for every `Simulate` terminal except
 the adjoint gradient, which needs a pure state to walk backward. `run` and `marginals`
@@ -257,7 +254,7 @@ reject a model carrying readout error and point at `sample_counts`.
 
 `src/sim/stabilizer_rank.rs` expands each T gate as `T = αI + βZ`, so a circuit with `t`
 T gates is a weighted sum of up to `2^t` stabilizer branches. One shared
-`StabilizerBackend` runs every Clifford once; each branch is a weight and a signed Pauli
+`StabilizerBackend` runs every Clifford once. Each branch is a weight and a signed Pauli
 string, the Zs earlier T positions chose, conjugated through the Cliffords that followed.
 Clifford gates cost O(n²) for all branches together and each T gate doubles the count.
 
@@ -278,8 +275,8 @@ stabilizer. `Auto` takes it for shots only; the thresholds are in
 ## SPP and SPD
 
 Both propagate an observable backward through a unitary circuit of Clifford gates and
-Pauli rotations (`src/sim/unified_pauli.rs`). Neither holds a state or is a `Backend`; the
-dispatcher reaches them directly. A rotation at a non-Clifford angle splits each
+Pauli rotations (`src/sim/unified_pauli.rs`). Neither holds a state or is a `Backend`, and
+the dispatcher reaches them directly. A rotation at a non-Clifford angle splits each
 anticommuting string into two.
 
 SPP (`StochasticPauli { num_samples }`, `run_spp`) samples one branch per rotation and
@@ -288,8 +285,8 @@ averages `num_samples` backward walks, so its cost follows samples and gate coun
 
 SPD (`DeterministicPauli { truncation }`, `run_spd`) carries the whole weighted sum.
 `SpdTruncation::Threshold { epsilon, max_terms }` drops terms below `epsilon` once the sum
-passes `max_terms`; `Budget { max_terms }` drops the smallest surplus to hold the sum at
-the budget. With nothing to drop the run is exact and errors at a fixed term ceiling
+passes `max_terms`, and `Budget { max_terms }` drops the smallest surplus to hold the sum
+at the budget. With nothing to drop the run is exact and errors at a fixed term ceiling
 rather than truncating. Either way the discarded coefficient mass bounds the error,
 `|error| <= sum |discarded|`. `Auto` sends marginals on Clifford+T circuits from 12 qubits
 here, and expectation values on Clifford circuits.
@@ -327,8 +324,8 @@ exact whatever its budget.
 
 `Simulate::reduced_density_matrix`, `Simulate::entanglement_entropy` and
 `Simulate::overlap` read the output state, so all three require a unitary circuit: a
-measurement, reset or conditional leaves one seeded branch. Each resolves to a single
-backend and asks it for the answer in its own representation. An explicitly selected
+measurement, reset or conditional leaves one seeded branch. Each asks a single backend
+for the answer in its own representation. An explicitly selected
 backend with no kernel reports `BackendUnsupported` naming itself and the diagnostic,
 with no dense export fallback. Under `BackendKind::Auto` a backend that cannot answer is
 replaced by the statevector while the circuit fits its cap; a partially independent
@@ -347,8 +344,8 @@ circuit keeps the factored backend and a Clifford circuit its tableau.
 | Distributed statevector | Rank-local partial trace after relabeling the kept qubits local, summed across ranks; a subsystem wider than the slice reads the gathered state | Declines | Dense export |
 
 Entropy is von Neumann in nats (a Bell pair reads `ln 2`). Schmidt values come back
-descending, squares summing to one. A stabilizer cut of rank `r` has `2^r` equal weights;
-past the dense export cap that list no longer fits, so the entropy comes back alone with
+descending, squares summing to one. A stabilizer cut of rank `r` has `2^r` equal weights.
+Past the dense export cap that list no longer fits, so the entropy comes back alone with
 `EntropyResult::schmidt_values` at `None`, as it does on the factored backend when the
 product of its blocks' spectra no longer fits. The reduced density matrix is row major
 with side `2^k` and trace one, priced as a `2k`-qubit statevector against the export cap.
@@ -383,6 +380,5 @@ the MPS blocks against their shared cap, and placement is `Device` only when eve
 was. Per-shot routes evolve one state per shot and keep the weakest claim, with the bound
 a minimum rather than a product.
 
-The [GPU backend](../guides/gpu.md) is documented as a user guide. The distributed
-statevector backend is covered in the
-[Capability and Support Matrix](../guides/capabilities.md).
+The [GPU backend](../guides/gpu.md) has its own guide, and the distributed statevector is
+covered in the [Capability and Support Matrix](../guides/capabilities.md).

@@ -67,11 +67,7 @@ A Bell pair gives `'00'` and `'11'`, which look the same either way, but
 | [Advanced State Handling](python-state.md) | start states and mixtures, entropy and overlap, Clifford tableau hand-off, mid-circuit saves |
 | [Errors, Typing and Names](python-names.md) | `PrismError`, type stubs, how Python names map to the Rust API |
 
-The [tutorials](../tutorials/index.md) walk through whole tasks:
-[variational circuits](../tutorials/variational.md) for sweeps and gradients,
-[noisy simulation](../tutorials/noisy-simulation.md),
-[a QEC memory experiment](../tutorials/qec-memory.md) and
-[dynamic circuits](../tutorials/dynamic-circuits.md).
+The [tutorials](../tutorials/index.md) walk through whole tasks, and
 [Python API](../reference/python-api.md) lists every Rust function with a Python
 counterpart.
 

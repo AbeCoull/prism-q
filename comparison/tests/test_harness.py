@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -16,7 +17,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import matrix  # noqa: E402
-from harness import aggregate, profiles, reference, runners, stats, validate, workloads  # noqa: E402
+from harness import aggregate, pages, profiles, reference, runners, stats, validate, workloads  # noqa: E402
 from harness.worker import counts_text_from_ints  # noqa: E402
 
 
@@ -228,6 +229,37 @@ class RunFileTests(unittest.TestCase):
         self.assertEqual({r["superseded_by"] for r in kept}, {"b"})
         with open(os.path.join(out, "observations.jsonl"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "")
+
+
+class PageTests(unittest.TestCase):
+    REFERENCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results", "matrix-reference-i7-6700k")
+
+    def _render(self, tmp: str) -> tuple[str, dict]:
+        results = os.path.join(tmp, "results")
+        shutil.copytree(self.REFERENCE, results)
+        docs = os.path.join(tmp, "docs")
+        pages.write(results, docs)
+        with open(os.path.join(docs, "index.md"), encoding="utf-8") as handle:
+            page = handle.read()
+        with open(os.path.join(docs, "data.js"), encoding="utf-8") as handle:
+            script = handle.read()
+        payload = script[script.index("=") + 1 :].strip().rstrip(";")
+        return page, json.loads(payload)
+
+    def test_reference_page_titles_and_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page, data = self._render(tmp)
+            again, _ = self._render(os.path.join(tmp, "again"))
+        self.assertEqual(page, again)
+        self.assertIn("Aer takes 5.85x to 19.8x the PRISM-Q time", page)
+        self.assertIn("Stim takes 0.66x to 1.47x the PRISM-Q time", page)
+        self.assertIn("fastest forced backend on 7 rows", page)
+        self.assertNotIn(chr(0x2014), page)
+        for chart in ("summary", "sv64", "explore", "dispatch"):
+            self.assertIn(f'data-chart="{chart}"', page)
+        threads = [r for r in data["observations"] if r["group"] == "threads" and r["threads"] < 8]
+        self.assertTrue(threads)
+        self.assertTrue(all(r["status"] == "ok" and not r["checked"] for r in threads))
 
 
 if __name__ == "__main__":

@@ -6,8 +6,7 @@ CUDA toolkit: the NVIDIA driver loads when the first `GpuContext` opens, and NVR
 when kernels need compiling.
 Running it needs a CUDA-capable device, a driver for CUDA 12.0 or newer, and NVRTC
 from a CUDA 12 toolkit on the loader path (`PATH` on Windows, the `ld.so` search path
-on Linux). A missing driver or NVRTC is a `PrismError` from `GpuContext::new`, not a
-load failure.
+on Linux). A missing driver or NVRTC surfaces as a `PrismError` from `GpuContext::new`.
 ```
 
 ```bash
@@ -16,42 +15,33 @@ cargo nextest run --features "parallel gpu" --test golden_gpu --test golden_gpu_
 ```
 
 Constructing a `GpuContext` compiles the CUDA kernels through NVRTC, one to three
-seconds on a GTX 1080 Ti. NVRTC emits SASS (a cubin) for the device's exact
-architecture, so a cubin from any CUDA 12 NVRTC loads on any CUDA 12 driver. When the
-NVRTC is older than the device and cannot target it, the kernels compile to PTX for the
-newest architecture below it and the driver JITs that PTX. That needs a driver at least
-as new as the NVRTC; `GpuContext::new` names both versions when it is not.
+seconds on a GTX 1080 Ti. NVRTC emits a cubin for the device's exact architecture, which
+loads on any CUDA 12 driver. An NVRTC older than the device compiles PTX for the newest
+architecture it knows, and the driver JITs it. That path needs a driver at least as new
+as the NVRTC, and `GpuContext::new` names both versions when it is not.
 
-Every context in the process shares the image, and it is cached on disk in `prism-q-ptx`
-under the user cache directory (`XDG_CACHE_HOME`, else `LOCALAPPDATA`, else
-`HOME/.cache`, else the OS temp directory), keyed by device arch, crate version and a
-hash of the kernel source, so later processes skip the compile. File names also record
-the NVRTC version. A cached cubin is used whichever NVRTC made it, without opening
-NVRTC; cached PTX is used only after opening it, since the driver may refuse the PTX. A
-missing, unreadable or corrupt cache file only costs a recompile; delete the directory
-to force one.
+The compiled image is cached in `prism-q-ptx` under the user cache directory, keyed by
+device architecture, crate version and kernel source, so later processes skip the
+compile. A cached cubin loads without NVRTC. Delete the directory to force a recompile.
 
 The device runs statevector, stabilizer and density matrix execution and compiled BTS
 sampling. `BackendKind` has four device kinds, and the backends and samplers below opt in
 directly:
 
-- `BackendKind::AutoGpu { context }` (`simulate(circuit).gpu_auto(ctx)`). Automatic
-  selection with the device opted in. The decision tree runs unchanged; a selected
-  statevector or stabilizer workload that clears its family's qubit crossover and fits
-  in VRAM runs on the device. Everything else, including a device allocation that fails
-  at `init`, takes the identical CPU path (the soft VRAM fallback).
+- `BackendKind::AutoGpu { context }` (`simulate(circuit).gpu_auto(ctx)`). The decision
+  tree runs unchanged, and a selected statevector or stabilizer workload that clears its
+  family's qubit crossover and fits in VRAM runs on the device. Everything else,
+  including a device allocation that fails at `init`, takes the identical CPU path.
   `RunMetadata::placement` reports `Host` or `Device` for the run.
-- `BackendKind::StatevectorGpu { context }` (`simulate(circuit).gpu(ctx)`). Routes through
-  `simulate(circuit).backend(kind).seed(seed).run()`, keeps fusion and subsystem
-  decomposition, and keeps sub-circuits below `crate::gpu::min_qubits()` (default 14,
-  `PRISM_GPU_MIN_QUBITS` override) on the CPU.
+- `BackendKind::StatevectorGpu { context }` (`simulate(circuit).gpu(ctx)`). Keeps fusion
+  and subsystem decomposition, and leaves sub-circuits below `crate::gpu::min_qubits()`
+  (default 14, `PRISM_GPU_MIN_QUBITS` override) on the CPU.
 - `BackendKind::StabilizerGpu { context }`. Gates apply to a device tableau through
   one word-grouped batched Clifford kernel (`stab_apply_word_grouped`). Measurement and
   reset keep pivot search, row cascade, phase fixup and deterministic outcomes on the
-  device. The default crossover stays conservative
-  (`STABILIZER_MIN_QUBITS_DEFAULT = 100_000`, `PRISM_STABILIZER_GPU_MIN_QUBITS`
-  override) until benchmarks justify lowering it. Direct backend benchmarks should use
-  `StabilizerBackend::with_gpu(ctx)` to exclude diagnostic readbacks from
+  device. The default crossover is conservative (`STABILIZER_MIN_QUBITS_DEFAULT =
+  100_000`, `PRISM_STABILIZER_GPU_MIN_QUBITS` override). Direct backend benchmarks should
+  use `StabilizerBackend::with_gpu(ctx)` to exclude diagnostic readbacks from
   `probabilities()`, `export_tableau()` and `export_statevector()`. Golden tests cover
   every kernel path, including 500q GHZ measure-all.
 - `BackendKind::DensityMatrixGpu { context }`. The exact mixture in device memory.
@@ -59,28 +49,26 @@ directly:
   no host fallback. `init` budgets the `4^n` buffer against free VRAM and errors before
   allocating when it does not fit, so an 11 GiB card holds 14 qubits (4 GiB at 14
   plus a `2^n` diagonal scratch; 15 needs 16 GiB). The unitary half reuses the dense
-  statevector kernels on the embedded `2n`-qubit buffer; every channel, measurement and
-  readout sweep has a kernel of its own. The noisy `Simulate` terminals answer from the device mixture
-  exactly as `DensityMatrix` does. `DensityMatrixBackend::new(seed).with_gpu(ctx)` is
-  the direct form.
-- `StatevectorBackend::new(seed).with_gpu(ctx)`. Direct statevector opt-in: every
-  instruction routes to CUDA once the context is attached, with no crossover or
-  subsystem decomposition.
-- `StabilizerBackend::new(seed).with_gpu(ctx)`. Direct stabilizer opt-in, for kernel
-  benchmarks and targeted correctness tests.
+  statevector kernels on the embedded `2n`-qubit buffer, and every channel, measurement
+  and readout sweep has a kernel of its own. The noisy `Simulate` terminals answer from
+  the device mixture exactly as `DensityMatrix` does.
+  `DensityMatrixBackend::new(seed).with_gpu(ctx)` is the direct form.
+- `StatevectorBackend::new(seed).with_gpu(ctx)`. Every instruction routes to CUDA once
+  the context is attached, with no crossover or subsystem decomposition.
+- `StabilizerBackend::new(seed).with_gpu(ctx)`, for kernel benchmarks and targeted
+  correctness tests.
 - `run_shots_compiled_with_gpu` (or `CompiledSampler::with_gpu(ctx)`). BTS sampling for
-  flat sparse parity on the device: one kernel per chunk of `65_536` shots, random bits
-  generated on the host, and the CPU `sample_bts_meas_major` layout. The sampler caches
-  sparse parity CSR arrays, packed reference bits and reusable scratch on the device.
-  Three gates keep a sampler on the CPU, where launch and transfer setup would cost more
-  than the kernel saves: fewer than `131_072` shots (`PRISM_GPU_BTS_MIN_SHOTS`), a rank
-  below 4 (`PRISM_GPU_BTS_MIN_RANK`; GHZ and other low-rank samplers expand each shot from
-  a few bits), or a parity map with fewer than 2 entries per measurement
-  (`PRISM_GPU_BTS_MIN_WEIGHT_FACTOR`). `sample_bulk_packed_device` returns a
-  `DevicePackedShots` handle. Marginals reduce to one counter per measurement row on the
-  device. Exact counts use a bounded device hash reduction for up to 8 packed measurement
-  words when the compact result is cheaper to transfer than the full shot matrix, and a
-  host copy otherwise.
+  flat sparse parity: one kernel per chunk of `65_536` shots, random bits generated on
+  the host, and the CPU `sample_bts_meas_major` layout. Sparse parity CSR arrays, packed
+  reference bits and scratch stay cached on the device. A sampler stays on the CPU,
+  where launch and transfer setup would cost more than the kernel saves, below `131_072`
+  shots (`PRISM_GPU_BTS_MIN_SHOTS`), below rank 4 (`PRISM_GPU_BTS_MIN_RANK`; GHZ and
+  other low-rank samplers expand each shot from a few bits), or with fewer than 2 parity
+  entries per measurement (`PRISM_GPU_BTS_MIN_WEIGHT_FACTOR`).
+  `sample_bulk_packed_device` returns a `DevicePackedShots` handle. Marginals reduce to
+  one counter per measurement row on the device. Exact counts use a bounded device hash
+  reduction for up to 8 packed measurement words when the compact result is cheaper to
+  transfer than the full shot matrix, and a host copy otherwise.
 - `NoisyCompiledSampler::with_gpu(ctx)`. The same BTS path with Pauli noise. Noise masks
   come from an RNG stream seeded on the device when the event probabilities allow it, or
   from the host otherwise, and counts and marginals reduce on the device. The device
@@ -89,23 +77,22 @@ directly:
 - `CompiledDetectorSampler::with_gpu(ctx)`. Detector and observable sampling over the
   device measurement sampler, with parity rows derived as on the CPU.
 
-With a GPU context attached, `Backend::init` allocates state on the device instead of a
-host `Vec<Complex64>` and every instruction routes to a CUDA kernel. On the hard
-statevector path (`StatevectorGpu`, `with_gpu`), a state that does not fit the free VRAM
-is rejected at `init` with an error naming the requested and free device memory.
+On the hard statevector path (`StatevectorGpu`, `with_gpu`), a state that does not fit
+the free VRAM is rejected at `init` with an error naming the requested and free device
+memory.
 
 `GpuContext` reports on its device before a run: `device_name`, `vram_bytes` and
 `vram_available`, `max_qubits_for_statevector` (the advisory cap from free memory), and
 `fits_statevector(n)` for the amplitudes alone. `fits_statevector_with_scratch(n)` and
 `fits_tableau(n)` are the checks `AutoGpu` runs before placing a block. `synchronize`
-waits for queued kernels, which a caller timing device work needs. `gpu::is_available()`
-opens no context, and `gpu::nvrtc_available()` reports whether NVRTC loads, which matters
-only when no cached kernel image fits the device. Under `bench-internal`, `pass_census`
-counts launches, passes over the state and host copies since the context opened.
+waits for queued kernels, which timing device work needs. `gpu::is_available()` opens no
+context. `gpu::nvrtc_available()` reports whether NVRTC loads, which matters only when no
+cached kernel image fits the device. Under `bench-internal`, `pass_census` counts
+launches, passes over the state and host copies since the context opened.
 
-The four `BackendKind` device kinds are also reachable from Python. The Linux and
-Windows wheels carry the `gpu` feature, and `pip install "prism-q[cuda12]"` adds NVRTC
-from PyPI. See [Python Bindings](python-running.md#gpu-backends).
+Python reaches the four device kinds too. The Linux and Windows wheels carry the `gpu`
+feature, and `pip install "prism-q[cuda12]"` adds NVRTC from PyPI. See
+[Python Bindings](python-running.md#gpu-backends).
 
 ## Module layout (`src/gpu/`)
 
@@ -138,10 +125,10 @@ a warp's loads contiguous, plus up to five of the sub-gates' higher targets. A
 three sub-gates falls back to per gate launches. `Multi2q` launches once per sub-gate. A
 sub-gate or `Fused2q` whose matrix is exactly a CX, swap, CZ or controlled phase runs on
 that gate's kernel, and one with a single nonzero per row (a permutation with phases, or
-a diagonal) on `apply_monomial_2q`; only the rest pay the dense 4x4 multiply. That
-multiply takes three real multiply-adds per complex product (the Gauss form), so on a
-card with reduced FP64 rate such as the GTX 1080 Ti it costs about one sweep of the
-state instead of one and a half.
+a diagonal) on `apply_monomial_2q`. Only the rest pay the dense 4x4 multiply, which
+takes three real multiply-adds per complex product (the Gauss form). On a card with
+reduced FP64 rate such as the GTX 1080 Ti it costs about one sweep of the state instead
+of one and a half.
 
 From 18 qubits the statevector fuses for the device (`FusionProfile::Device`, see
 [Fusion Pipeline](../architecture/fusion.md#device-profile)) and `apply_instructions`
@@ -152,43 +139,42 @@ matrices, diagonals, CX, swap, CZ, controlled phases and `Rzz`. A real 1q matrix
 shaped like `Rx`, takes half the multiplies of a general one. Dense 4x4 blocks, `Mcu`,
 `QftBlock` and the rest keep their kernels. On a GTX 1080 Ti a five-layer hardware
 efficient ansatz at 24 qubits drops from 115 dense passes to 7 tile passes, and a random
-depth-10 circuit from 73 to 7. The tiles are FP64 bound on that card, not memory bound,
-so a dense 1q gate still costs about half a sweep.
+depth-10 circuit from 73 to 7. The tiles are FP64 bound on that card, so a dense 1q gate
+still costs about half a sweep.
 
-The CUDA C source sits in `.cu` files beside the Rust launchers and reaches
-`KERNEL_SOURCE_TEMPLATE` through `include_str!`. `kernels/dense.cu` carries placeholders
-such as `{{BP_TABLE_SIZE}}` and `{{TILE_Q}}`, which `kernel_source()` fills at device
-construction from the Rust constants in `src/backend/statevector/kernels.rs`, so CPU and
-GPU share one value.
+The CUDA C source sits in `.cu` files beside the launchers and reaches
+`KERNEL_SOURCE_TEMPLATE` through `include_str!`. Placeholders such as `{{BP_TABLE_SIZE}}`
+and `{{TILE_Q}}` in `kernels/dense.cu` are filled at device construction from the
+constants in `src/backend/statevector/kernels.rs`, so CPU and GPU share one value.
 
 ## Correctness
 
 `tests/golden_gpu.rs` compares GPU amplitudes against the CPU statevector within
 1e-12 for every gate variant, the fusion paths, and the `BackendKind::StatevectorGpu`
-public dispatch path at the crossover boundary; `tests/golden_gpu_density_matrix.rs`
+public dispatch path at the crossover boundary. `tests/golden_gpu_density_matrix.rs`
 does the same for the full density matrix buffer. Both suites skip when no device
 opens, and no CI job opens one. `scripts/test-gpu.ps1` runs them with
 `PRISM_REQUIRE_GPU=1` so a missing or unusable device fails the run.
 
 ### Shot reproducibility
 
-Two limits bound what a seed guarantees, and the golden equality tests show neither.
+The golden equality tests do not cover two limits on what a seed guarantees.
 
 - CPU against GPU: agreement in distribution, not bit for bit. Both paths draw the
   same RNG stream for a given shot seed, but the device reduction behind a measurement
-  probability sums in tree order with FMA contraction, so it can differ from the host
-  sum in the last ulp; a uniform draw landing between the two flips that outcome and
-  every one after it. Where the probability is a dyadic rational (0.5, 1.0, and the
+  probability sums in tree order with FMA contraction and can differ from the host sum
+  in the last ulp. A uniform draw landing between the two flips that outcome and every
+  one after it. Where the probability is a dyadic rational (0.5, 1.0, and the
   amplitudes Clifford gates reach) both sums are exact and the shots match, as
   `statevector_gpu_mid_measure_shots_match_cpu` pins.
   `statevector_gpu_shot_frequencies_match_cpu_off_dyadic` pins the general case: equal
   frequencies within 5 sigma after `Rx(0.3)`.
 - GPU BTS sampling: reproducible at a fixed Rayon thread count. Above
   `MIN_PAR_DRAWS` random bits per chunk, `fill_random_bits` seeds one stream per worker
-  and partitions the draws by `rayon::current_num_threads()`, so the same seed with a
-  different worker count produces different shots. Below that threshold the serial
-  single-stream path runs and the seed reproduces outright. Pin `RAYON_NUM_THREADS` when
-  byte-identical shot payloads matter across machines.
+  and partitions the draws by `rayon::current_num_threads()`, so another worker count
+  gives other shots. Below that threshold the serial single-stream path runs and the
+  seed reproduces outright. Pin `RAYON_NUM_THREADS` when byte-identical shot payloads
+  matter across machines.
 
 ## Current limits
 
@@ -196,7 +182,6 @@ Two limits bound what a seed guarantees, and the golden equality tests show neit
   back to the CPU.
 - Every trajectory shot rebuilds the backend and reallocates the device buffer,
   measured at 0.1 ms per shot at 20 qubits. `Custom` Kraus branch probabilities come
-  from the qubit's reduced density matrix, computed on the device (`rdm_qubit`), not from
-  a readback of the whole state.
+  from the qubit's reduced density matrix, computed on the device (`rdm_qubit`).
 - Kernel design notes live in the module docstrings under `src/gpu/kernels/`. The
   statevector crossover measurement is on `MIN_QUBITS_DEFAULT` in `src/gpu/mod.rs`.

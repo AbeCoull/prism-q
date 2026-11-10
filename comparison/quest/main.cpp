@@ -6,18 +6,19 @@
 //   quest_runner version
 //
 // The timed region covers register allocation, gate execution, and the
-// probability read-out. OpenMP reads OMP_NUM_THREADS for the thread count.
+// probability read-out: one OpenMP pass squaring each of the register's CPU
+// amplitudes, whose index already puts qubit 0 in the least significant bit.
+// OpenMP reads OMP_NUM_THREADS for the thread count.
 
 #include <quest.h>
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <complex>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -87,7 +88,12 @@ Program parseGateList(std::istream& in) {
     return program;
 }
 
-std::vector<double> run(const Program& program) {
+struct Probs {
+    std::unique_ptr<double[]> data;
+    size_t size;
+};
+
+Probs run(const Program& program) {
     Qureg qureg = createQureg(program.numQubits);
     for (const Op& op : program.ops) {
         switch (op.kind) {
@@ -100,11 +106,16 @@ std::vector<double> run(const Program& program) {
             default: fail(3, "unknown op");
         }
     }
-    const qindex numAmps = qindex(1) << program.numQubits;
-    std::vector<qcomp> amps(static_cast<size_t>(numAmps));
-    getQuregAmps(amps.data(), qureg, 0, numAmps);
-    std::vector<double> probs(static_cast<size_t>(numAmps));
-    for (qindex i = 0; i < numAmps; ++i) probs[static_cast<size_t>(i)] = std::norm(amps[static_cast<size_t>(i)]);
+    const qindex numAmps = qureg.numAmps;
+    const qcomp* amps = qureg.cpuAmps;
+    Probs probs{std::unique_ptr<double[]>(new double[static_cast<size_t>(numAmps)]), static_cast<size_t>(numAmps)};
+    double* out = probs.data.get();
+#pragma omp parallel for schedule(static)
+    for (qindex i = 0; i < numAmps; ++i) {
+        const double re = std::real(amps[i]);
+        const double im = std::imag(amps[i]);
+        out[i] = re * re + im * im;
+    }
     destroyQureg(qureg);
     return probs;
 }
@@ -143,7 +154,8 @@ int main(int argc, char** argv) {
     if (argc < 2) usage();
     const std::string command = argv[1];
     if (command == "version") {
-        std::printf("{\"simulator\":\"quest\",\"version\":\"%s\"}\n", QUEST_RUNNER_TAG);
+        std::printf("{\"simulator\":\"quest\",\"version\":\"%s\",\"build\":\"%s\"}\n", QUEST_RUNNER_TAG,
+                    QUEST_RUNNER_BUILD);
         return 0;
     }
     if (argc != 3) usage();
@@ -152,21 +164,21 @@ int main(int argc, char** argv) {
     if (command == "time") {
         const int iterations = std::atoi(argv[2]);
         if (iterations <= 0) usage();
-        volatile double sink = run(program)[0];
+        volatile double sink = run(program).data[0];
         std::vector<double> times;
         for (int i = 0; i < iterations; ++i) {
             const auto start = std::chrono::steady_clock::now();
-            std::vector<double> probs = run(program);
+            Probs probs = run(program);
             times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
-            sink = probs[0];
+            sink = probs.data[0];
         }
         (void)sink;
         printTimes(program, times);
     } else if (command == "probabilities") {
-        std::vector<double> probs = run(program);
+        Probs probs = run(program);
         std::ofstream out(argv[2], std::ios::binary);
-        out.write(reinterpret_cast<const char*>(probs.data()),
-                  static_cast<std::streamsize>(probs.size() * sizeof(double)));
+        out.write(reinterpret_cast<const char*>(probs.data.get()),
+                  static_cast<std::streamsize>(probs.size * sizeof(double)));
         if (!out) fail(4, "failed to write the probability vector");
         std::string path;
         for (const char* c = argv[2]; *c; ++c) {
@@ -176,7 +188,7 @@ int main(int argc, char** argv) {
         std::printf(
             "{\"schema\":\"prismq-compare-runner/2\",\"simulator\":\"quest\",\"num_qubits\":%d,"
             "\"num_operations\":%zu,\"length\":%zu,\"dtype\":\"<f8\",\"path\":\"%s\"}\n",
-            program.numQubits, program.ops.size(), probs.size(), path.c_str());
+            program.numQubits, program.ops.size(), probs.size, path.c_str());
     } else {
         usage();
     }

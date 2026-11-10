@@ -1,5 +1,6 @@
-//! Reads the resolved Spinoza and qip versions out of `Cargo.lock` so the
-//! provenance the binary reports cannot drift from what it was built against.
+//! Reads the resolved Spinoza and qip versions out of `Cargo.lock`, and the
+//! rustflags the crate compiles with, so the provenance the binary reports
+//! cannot drift from what it was built against.
 
 use std::fs;
 use std::path::Path;
@@ -34,4 +35,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", lock_path.display());
     println!("cargo:rustc-env=SPINOZA_VERSION={}", locked(&lock, "spinoza"));
     println!("cargo:rustc-env=QIP_VERSION={}", locked(&lock, "qip"));
+    let rustflags = std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+    println!("cargo:rustc-env=PEERS_RUSTFLAGS={}", rustflags.replace('\x1f', " "));
 }

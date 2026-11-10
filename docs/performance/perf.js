@@ -9,10 +9,14 @@ document.documentElement.classList.add('pq-perf');
 
 const NS = 'http://www.w3.org/2000/svg', O = D.observations, draws = [];
 const NAME = {prismq: 'PRISM-Q', 'aer-statevector': 'Aer', 'aer-statevector-f32': 'Aer fp32', 'aer-automatic': 'Aer automatic',
-  'aer-mps': 'Aer MPS', qsim: 'qsim fp32', quest: 'QuEST', spinoza: 'Spinoza', qip: 'qip', stim: 'Stim'};
+  'aer-mps': 'Aer MPS', qsim: 'qsim fp32', quest: 'QuEST', spinoza: 'Spinoza', qip: 'qip', stim: 'Stim',
+  'quimb-tn': 'quimb TN', 'quimb-mps:256': 'quimb MPS cap 256', 'aer-mps:256': 'Aer MPS cap 256',
+  'prismq:mps-256': 'PRISM-Q MPS cap 256', 'prismq:tensor-network': 'PRISM-Q TN', 'prismq:no-qft-block': 'PRISM-Q, QFT recognition off'};
 const VER = {prismq: 'PRISM-Q', 'aer-statevector': 'Aer statevector', 'aer-statevector-f32': 'Aer statevector (fp32)',
-  'aer-automatic': 'Aer automatic', 'aer-mps': 'Aer MPS', qsim: 'qsim (fp32)', quest: 'QuEST', spinoza: 'Spinoza', qip: 'qip', stim: 'Stim'};
-const STAT = {oom: 'out of memory', crash: 'crash', timeout: 'timeout', invalid: 'invalid', error: 'refused', 'not-applicable': 'n/a'};
+  'aer-automatic': 'Aer automatic', 'aer-mps': 'Aer MPS', qsim: 'qsim (fp32)', quest: 'QuEST', spinoza: 'Spinoza', qip: 'qip', stim: 'Stim',
+  'quimb-tn': 'quimb TN', 'quimb-mps': 'quimb MPS'};
+const STAT = {oom: 'out of memory', crash: 'crash', timeout: 'timeout', invalid: 'invalid', error: 'refused',
+  'not-applicable': 'cannot run', skipped: 'not run'};
 const STUB = Object.assign({}, STAT, {oom: 'oom'});
 const key = s => s.split(':')[0];
 const nm = o => NAME[o.simulator] || o.name;
@@ -31,23 +35,44 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', 
 const median = a => { const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const uniq = a => a.filter((x, i) => a.indexOf(x) === i);
 
-const top = {}, idx = {};
-O.forEach(o => { const g = o.group + '|' + o.workload; if (!(top[g] >= o.threads)) top[g] = o.threads; });
-O.forEach(o => { if (o.threads === top[o.group + '|' + o.workload]) idx[o.group + '|' + o.workload + '|' + o.simulator] = o; });
-const get = (g, w, s) => idx[g + '|' + w + '|' + s];
+// Each simulator's record at its own top thread count; `at` keeps every thread count, and
+// `get(g, w, 'sim@T')` reads one. A ratio pairs a peer with the PRISM-Q record at its thread
+// count where one exists.
+const top = {}, idx = {}, at = {};
+O.forEach(o => { const g = o.group + '|' + o.workload + '|' + o.simulator; if (!(top[g] >= o.threads)) top[g] = o.threads; });
+O.forEach(o => {
+  const g = o.group + '|' + o.workload + '|' + o.simulator;
+  at[g + '@' + o.threads] = o;
+  if (o.threads === top[g]) idx[g] = o;
+});
+const get = (g, w, s) => s.indexOf('@') > 0 ? at[g + '|' + w + '|' + s] : idx[g + '|' + w + '|' + s];
+const BASE = {mpsdeep: 'prismq:mps-256'};
+const baseOf = g => BASE[g] || 'prismq';
+const isTop = o => o.threads === top[o.group + '|' + o.workload + '|' + o.simulator];
 const ok = o => !!o && o.status === 'ok' && o.median_ms != null;
-const few = o => o.mode === 'counts' && o.shots < 100;
-const valid = o => ok(o) && o.checked !== false && !few(o);
-const ratio = (p, q) => valid(p) && valid(q) ? p.median_ms / q.median_ms : null;
+// `validated` and `valid` come from comparison/harness/aggregate.py: a ratio needs both sides
+// validated (passed a check or the row's reference); `valid` also admits untested outputs.
+const valid = o => ok(o) && o.validated === true;
+const usable = o => ok(o) && o.valid === true;
+const mate = (o, pq) => pq && (at[o.group + '|' + o.workload + '|' + pq.simulator + '@' + o.threads] || pq);
+const ratio = (p, q) => { q = p && mate(p, q); return valid(p) && valid(q) ? p.median_ms / q.median_ms : null; };
+const peerOf = s => s.indexOf('prismq') !== 0;
 
 const SEC = [
   {id: 'sv64', name: 'Statevector, fp64', chip: 'Statevector fp64', g: 'headline', fam: ['rcs', 'qft', 'qv'],
     sims: ['prismq', 'aer-statevector', 'quest', 'spinoza', 'qip'], ref: 'aer-statevector'},
   {id: 'sv32', name: 'Statevector against fp32 peers', chip: 'fp32 peers', g: 'headline', fam: ['rcs', 'qft', 'qv'],
     sims: ['prismq', 'aer-statevector-f32', 'qsim'], ref: 'qsim'},
-  {id: 'stabilizer', name: 'Stabilizer', chip: 'Stabilizer', g: 'headline', fam: ['clifford'], sims: ['prismq', 'stim'], ref: 'stim'},
+  {id: 'stabilizer', name: 'Stabilizer', chip: 'Stabilizer', g: 'headline', fam: ['clifford'], sims: ['prismq', 'prismq@1', 'stim'],
+    ref: 'stim'},
+  {id: 'highshot', name: 'High-shot stabilizer', chip: 'High-shot', g: 'highshot', fam: ['clifford'],
+    sims: ['prismq', 'prismq@1', 'stim'], ref: 'stim'},
   {id: 'mps', name: 'Matrix product state', chip: 'MPS', g: 'headline', fam: ['lowent'],
     sims: ['prismq', 'aer-mps', 'aer-automatic'], ref: 'aer-mps'},
+  {id: 'mpsdeep', name: 'Deep MPS', chip: 'Deep MPS', g: 'mpsdeep', fam: ['lowent'],
+    sims: ['prismq:mps-256', 'aer-mps:256', 'quimb-mps:256'], ref: 'aer-mps:256'},
+  {id: 'tn', name: 'Tensor network expectation values', chip: 'TN expval', g: 'tn', fam: ['rcs'],
+    sims: ['prismq', 'prismq:tensor-network', 'prismq:mps-256', 'quimb-tn', 'aer-mps'], ref: 'quimb-tn'},
   {id: 'sampling', name: 'Shot sampling', chip: 'Sampling', g: 'sampling', fam: ['sampling'],
     sims: ['prismq', 'aer-statevector', 'aer-statevector-f32', 'qsim'], ref: 'aer-statevector'},
   {id: 'disjoint', name: 'Disjoint components', chip: 'Disjoint', g: 'headline', fam: ['disjoint'],
@@ -59,11 +84,10 @@ const FAM = ['rcs', 'qft', 'qv', 'clifford', 'lowent', 'sampling', 'disjoint'];
 const order = (a, b) => FAM.indexOf(a.family) - FAM.indexOf(b.family) || (a.depth || 0) - (b.depth || 0) || a.qubits - b.qubits ||
   (a.measured === 'half') - (b.measured === 'half') || String(a.layout || '').localeCompare(String(b.layout || '')) || (a.shots || 0) - (b.shots || 0);
 function secRows(sec) {
-  const pqs = O.filter(o => o.group === sec.g && sec.fam.indexOf(o.family) >= 0 && o.simulator === 'prismq' &&
-    o.threads === top[o.group + '|' + o.workload]).sort(order);
+  const pqs = O.filter(o => o.group === sec.g && sec.fam.indexOf(o.family) >= 0 && o.simulator === sec.sims[0] && isTop(o)).sort(order);
   const one = sec.fam.length === 1;
   return pqs.map(pq => ({w: pq.workload, label: pq.label, short: one ? pq.label.replace(pq.family + ' ', '') : pq.label, pq: pq,
-    peers: sec.sims.slice(1).map(s => get(sec.g, pq.workload, s)).filter(Boolean), ref: sec.ref}));
+    peers: sec.sims.slice(1).map(s => get(sec.g, pq.workload, s)).filter(o => o && o !== pq), ref: sec.ref}));
 }
 
 // ---- DOM helpers
@@ -179,13 +203,20 @@ function tipHTML(o) {
   L.push(meta.join(' · '));
   if (o.median_ms != null) L.push('median <b>' + fms(o.median_ms) + '</b>' +
     (o.p25_ms != null ? ' · p25 to p75 ' + fms(o.p25_ms) + ' to ' + fms(o.p75_ms) : '') + (o.n ? ' · n ' + o.n : ''));
+  if (o.first_ms != null) L.push('cold call ' + fms(o.first_ms) + (o.min_ms != null ? ' · fastest warm ' + fms(o.min_ms) : ''));
+  if (o.internal_ms != null) L.push('time Aer reports ' + fms(o.internal_ms));
   if (o.peak_rss_mb) L.push('peak memory ' + fmb(o.peak_rss_mb));
-  const pq = key(o.simulator) !== 'prismq' && get(o.group, o.workload, 'prismq'), r = pq && ratio(o, pq);
-  if (r) L.push('<b>' + fx(r) + '</b> the PRISM-Q median (' + fms(pq.median_ms) + ')');
+  const pq = peerOf(o.simulator) && mate(o, get(o.group, o.workload, baseOf(o.group))), r = pq && ratio(o, pq);
+  if (r) L.push('<b>' + fx(r) + '</b> the ' + (NAME[pq.simulator] || pq.name) + ' median at ' + pq.threads + ' thread' +
+    (pq.threads > 1 ? 's' : '') + ' (' + fms(pq.median_ms) + ')');
+  if (o.max_abs_error != null) L.push('largest error against exact ' + fdist(o.max_abs_error));
   if (o.tvd != null) L.push('distance from reference ' + fdist(o.tvd));
   if (o.status !== 'ok') L.push('<i>' + esc(STAT[o.status] || o.status) + (o.reason ? ': ' + esc(o.reason) : '') + '</i>');
-  else if (o.checked === false) L.push('<i>timed, output not checked</i>');
-  else if (few(o)) L.push('<i>under 100 shots: checked on deterministic bits only, no ratio</i>');
+  else if (o.role === 'too-few-shots') L.push('<i>under 100 shots: checked on deterministic bits only, no ratio</i>');
+  else if (o.role === 'reference') L.push('<i>reference output' + (o.cross_checked ? ', cross-checked' : ', no cross-check') + '</i>');
+  else if (o.role === 'weakly-tested') L.push('<i>weakly tested: detects shifts above ' + fdist(o.min_detectable) + ' in a marginal</i>');
+  else if (!o.validated) L.push('<i>timed, output not checked</i>');
+  if (o.min_detectable != null && o.role !== 'weakly-tested') L.push('check detects shifts above ' + fdist(o.min_detectable));
   return L.join('<br>');
 }
 function show(m) {
@@ -383,6 +414,7 @@ function linePanel(fig, spec) {
       const m = Object.assign({}, v, m0), box = cells[mi], W = box.clientWidth || 260, Hh = m.h || 196;
       const ser = m.series.map(s => ({s: s, pts: s.pts.map(p => ({x: p.x, o: p.o, y: m.y(p.o, s)})).filter(p => p.y != null)}))
         .filter(s => s.pts.length > 1);
+      if (!ser.length) { box.replaceChildren(); return; }
       const ys = [];
       ser.forEach(s => s.pts.forEach(p => ys.push(p.y)));
       let lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
@@ -436,7 +468,7 @@ function summary(fig) {
   const box = H('div', 'pq-box', fig.querySelector('.pq-plot'));
   const groups = SEC.map(sec => {
     const rows = secRows(sec);
-    return {sec: sec, peers: sec.sims.slice(1).map(s => {
+    return {sec: sec, peers: sec.sims.slice(1).filter(peerOf).map(s => {
       const pts = rows.map(r => ({r: r, o: get(sec.g, r.w, s)})).map(p => ({r: p.r, o: p.o, x: ratio(p.o, p.r.pq)})).filter(p => p.x != null);
       const xs = pts.map(p => p.x);
       return {s: s, pts: pts, ref: s === sec.ref, lo: Math.min.apply(null, xs), hi: Math.max.apply(null, xs), med: xs.length && median(xs)};
@@ -502,7 +534,7 @@ function summary(fig) {
 // ---- explore: filter matrix over every comparison row, bars diverging from the PRISM-Q rule
 function explore(fig) {
   const plot = fig.querySelector('.pq-plot');
-  const st = {m: 'sv64', f: null, q: null, s: null, v: 'time', all: false};
+  const st = {m: (SEC.find(s => secRows(s).length) || SEC[0]).id, f: null, q: null, s: null, v: 'time', all: false};
   const fromHash = location.hash.indexOf('#explore') === 0;
   if (fromHash) {
     const p = new URLSearchParams(location.hash.slice(location.hash.indexOf('?') + 1 || location.hash.length));
@@ -520,7 +552,7 @@ function explore(fig) {
     rows = secRows(sec);
     fams = uniq(rows.map(r => r.pq.family));
     qs = uniq(rows.map(r => r.pq.qubits)).sort((a, b) => a - b);
-    sims = sec.sims.slice(1).filter(s => rows.some(r => get(sec.g, r.w, s)));
+    sims = sec.sims.slice(1).filter(s => peerOf(s) && rows.some(r => get(sec.g, r.w, s)));
     const keep = (sel, opts) => { const k = (sel || []).filter(x => opts.indexOf(x) >= 0); return k.length ? k : opts.slice(); };
     st.f = keep(st.f, fams); st.q = keep(st.q, qs); st.s = keep(st.s, sims);
   }
@@ -584,6 +616,7 @@ function explore(fig) {
     const amount = o => mem ? o.peak_rss_mb : o.median_ms, fa = mem ? fmb : fms;
     const cell = (o, pq) => {
       if (!o) return null;
+      pq = mate(o, pq);
       if (o.status !== 'ok' || amount(o) == null) return {o: o, fail: 1};
       if (pq.status !== 'ok' || amount(pq) == null) return {o: o, fail: 1};
       return {o: o, r: amount(o) / amount(pq), soft: !mem && !(valid(o) && valid(pq))};
@@ -691,7 +724,7 @@ function memPanel(fig) {
         mark(S('rect', {class: 'pq-bar ' + role, x: ax0, y: cy - 5, width: Math.max(1.5, X(v) - ax0), height: 10, rx: 2}, row), it.o, it.s);
         T(row, X(v) + 7, cy + 4, fmb(v), 'pq-blab pq-bx' + (role === 'pq' ? ' pq' : ''));
       } else {
-        const word = it.o ? STUB[it.o.status] || it.o.status : 'n/a', w = tw(word, 10.5) + 14;
+        const word = it.o ? STUB[it.o.status] || it.o.status : 'not run', w = tw(word, 10.5) + 14;
         const stub = S('rect', {class: 'pq-stub', x: ax0 + 2, y: cy - 7, width: w, height: 14, rx: 7}, row);
         if (it.o) mark(stub, it.o, it.s);
         else hot(stub, '<b>' + esc(NAME[it.s]) + '</b><br><i>no run at ' + n + ' qubits</i>', NAME[it.s] + ': no run at ' + n + ' qubits');
@@ -723,7 +756,7 @@ function memPanel(fig) {
 const views = (rows, keyOf, labels) => [{label: 'All', rows: rows}].concat(labels.map(l => ({label: l[1], rows: rows.filter(r => keyOf(r.pq) === l[0])})));
 const ratioCol = (h, ref) => ({h: h, w: 62, f: r => {
   const o = r.peers.find(p => p.simulator === ref), x = ratio(o, r.pq);
-  return x != null ? {t: fx(x)} : {t: o ? (o.status !== 'ok' ? STUB[o.status] || o.status : '-') : '-', miss: 1};
+  return x != null ? {t: fx(x)} : {t: o ? (o.status !== 'ok' ? STUB[o.status] || o.status : 'unchecked') : 'not run', miss: 1};
 }});
 const PANELS = {
   summary: summary,
@@ -738,6 +771,23 @@ const PANELS = {
   sampling: fig => { const rows = secRows(SECM.sampling); dotPanel(fig, {ctl: 'Qubits', ref: 'aer-statevector',
     views: views(rows, o => o.qubits, [16, 20, 24].map(q => [q, q + 'q'])), cols: [ratioCol(['Aer /', 'PRISM-Q'], 'aer-statevector')]}); },
   disjoint: fig => dotPanel(fig, {ref: 'aer-mps', views: [{rows: secRows(SECM.disjoint)}], cols: [ratioCol(['Aer MPS /', 'PRISM-Q'], 'aer-mps')]}),
+  highshot: fig => dotPanel(fig, {ref: 'stim', views: [{rows: secRows(SECM.highshot)}],
+    name: o => o.simulator === 'prismq' ? 'PRISM-Q ' + o.threads + 't' : nm(o), kOf: o => key(o.simulator),
+    cols: [ratioCol(['Stim /', 'PRISM-Q 1t'], 'stim')]}),
+  mpsdeep: fig => { const rows = secRows(SECM.mpsdeep); dotPanel(fig, {ctl: 'Depth', ref: 'aer-mps:256',
+    views: views(rows, o => o.depth, [[12, 'depth 12'], [16, 'depth 16']]), cols: [ratioCol(['Aer MPS /', 'PRISM-Q MPS'], 'aer-mps:256')]}); },
+  tn: fig => dotPanel(fig, {ref: 'quimb-tn', views: [{rows: secRows(SECM.tn)}], cols: [ratioCol(['quimb TN /', 'PRISM-Q'], 'quimb-tn')]}),
+  sweep: fig => {
+    const sw = O.filter(o => o.group === 'bondsweep'), caps = uniq(sw.filter(o => o.bond_cap).map(o => o.bond_cap)).sort((a, b) => a - b);
+    const ns = uniq(sw.map(o => o.qubits)).sort((a, b) => a - b);
+    const ser = n => [{k: 'aer-mps', name: 'Aer MPS', cls: 'ref', pfx: 'aer-mps:'}, {k: 'quimb-mps', name: 'quimb MPS', cls: 'peer', pfx: 'quimb-mps:'},
+      {k: 'prismq', name: 'PRISM-Q MPS', cls: 'pq', pfx: 'prismq:mps-'}]
+      .map(s => ({k: s.k, name: s.name, cls: s.cls, pts: caps.map(c => ({x: c, o: sw.find(o => o.qubits === n && o.simulator === s.pfx + c)})).filter(p => p.o)}));
+    const floor = 1e-16, err = o => o.max_abs_error == null ? null : Math.max(o.max_abs_error, floor);
+    linePanel(fig, {xs: caps, xscale: 'cat', xfmt: c => 'cap ' + c, log: true, mult: [].concat.apply([], ns.map(n => [
+      {title: 'Largest error, ' + n + ' qubits', series: ser(n), y: err, tick: t => t >= 0.01 ? String(t) : '1e' + Math.round(Math.log10(t))},
+      {title: 'Median time, ' + n + ' qubits', series: ser(n), y: o => o.median_ms, tick: ftick}]))});
+  },
   bondcap: fig => {
     const acc = O.filter(o => o.group === 'accuracy'), caps = uniq(acc.filter(o => o.bond_cap).map(o => o.bond_cap)).sort((a, b) => a - b);
     const at = s => acc.find(o => o.simulator === s);
@@ -761,7 +811,7 @@ const PANELS = {
     const dp = O.filter(o => o.group === 'dispatch'), ws = uniq(dp.map(o => o.workload));
     const rows = ws.map(w => {
       const pq = get('dispatch', w, 'prismq'), fs = dp.filter(o => o.workload === w && o.simulator.indexOf('prismq:') === 0);
-      const best = fs.filter(valid).sort((a, b) => a.median_ms - b.median_ms)[0];
+      const best = fs.filter(usable).sort((a, b) => a.median_ms - b.median_ms)[0];
       return {label: pq.label, pq: pq, peers: fs, ref: best.simulator, ratio: pq.median_ms / best.median_ms,
         sub: 'auto ' + pq.resolved_backend + ', fastest ' + best.simulator.slice(7)};
     }).sort((a, b) => a.ratio - b.ratio);
@@ -774,7 +824,7 @@ const PANELS = {
   memory: memPanel,
   suite: fig => {
     const R = D.suite.rows, so = r => ({name: 'PRISM-Q', simulator: 'prismq', version: D.suite.version, label: r.family + ' ' + r.qubits + 'q',
-      median_ms: r.ms, threads: D.suite.rayon_threads, method: 'automatic', status: 'ok', checked: true});
+      median_ms: r.ms, threads: D.suite.rayon_threads, method: 'automatic', status: 'ok', valid: true, validated: true});
     const fam = f => R.filter(r => r.family === f).sort((a, b) => a.qubits - b.qubits).map(r => ({x: r.qubits, o: so(r)}));
     const gq = fam('ghz'), small = gq.filter(p => p.x <= 28), wide = gq.filter(p => p.x > 28);
     const dense = ['qft', 'hea', 'qv', 'ghz'].map((f, i) => ({k: 'prismq', name: f.toUpperCase(), cls: 'pq', dash: i % 2 === 1,

@@ -1,16 +1,23 @@
 """Python-driven simulators behind the same process protocol as the native runners.
 
-    python worker.py <simulator> exec --mode probs|counts --shots S --iterations K
+    python worker.py <simulator> exec --mode probs|counts|expval|stats --shots S --iterations K
                      --threads T [--out PATH] [--budget-ms B] [--min-iterations M]
-                     < gate_list.txt
+                     [--keys PATH] < gate_list.txt
     python worker.py <simulator> version
 
 Stim runs single-threaded; `--threads` is recorded but has no effect on it.
 One process per measurement, so peak memory and import cost belong to the
 workload that caused them. Prints one JSON line. The timed region ends at the
-simulator's own result object (Aer's `Result` with its saved probabilities,
-qsim's probability vector or measurement array, Stim's sample array);
-converting that to the harness's file format happens after the timer.
+simulator's own result object (Aer's `Result` with its saved probabilities or
+expectation values, qsim's probability vector or measurement array, Stim's bit-packed
+sample array, quimb's sample list or values); converting that to the harness's file format
+happens after the timer. In `stats` mode Stim samples bit-packed buffers of at most
+64 MiB and only the sampling is timed; reducing each buffer to the `--keys` counts is not.
+
+quimb's tensor network contracts each observable over its reverse light cone with a
+fresh cotengra `auto-hq` optimizer per observable and cleared circuit storage per call, so path finding
+is inside every timed call. quimb's CircuitMPS applies gates as they are added, so its
+timed call builds the MPS from the gate list.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ import numpy as np  # noqa: E402
 from workloads import parse  # noqa: E402
 
 SIM_SEED = 42
+STATS_CHUNK_BYTES = 1 << 26
 
 
 def counts_text_from_ints(pairs: list[tuple[int, int]], num_bits: int) -> str:
@@ -45,6 +53,34 @@ def _digest(data: bytes) -> str:
     return hashlib.blake2b(data, digest_size=8).hexdigest()
 
 
+def values_text(keys: list[str], values: list[float]) -> bytes:
+    return "".join(f"{k} {float(v)!r}\n" for k, v in zip(keys, values)).encode()
+
+
+def z_terms(key: str) -> list[int]:
+    return [int(x) for x in key.split("Z")[1:]]
+
+
+def stat_totals(packed: np.ndarray, keys: list[str], record_of_bit: dict[int, int], totals: np.ndarray) -> None:
+    """Add each key's count of ones (`bA`) or odd parities (`bA^bB`) over a bit-packed shot block.
+
+    `packed` is (shots, bytes) with measurement record `r` at bit `r % 8` of byte `r // 8`.
+    """
+    columns = [[record_of_bit[int(part[1:])] for part in key.split("^")] for key in keys]
+    records = sorted({r for cols in columns for r in cols})
+    where = {r: i for i, r in enumerate(records)}
+    first = np.asarray([where[c[0]] for c in columns])
+    second = np.asarray([where[c[-1]] for c in columns])
+    single = np.asarray([len(c) == 1 for c in columns])
+    byte = np.asarray([r // 8 for r in records])
+    shift = np.asarray([r % 8 for r in records], dtype=np.uint8)
+    for start in range(0, packed.shape[0], 1 << 14):
+        bits = (packed[start : start + (1 << 14)][:, byte] >> shift) & 1
+        ones = bits[:, first].sum(axis=0, dtype=np.int64)
+        odd = (bits[:, first] ^ bits[:, second]).sum(axis=0, dtype=np.int64)
+        totals += np.where(single, ones, odd)
+
+
 class Aer:
     def __init__(self, name: str, threads: int) -> None:
         from qiskit_aer import AerSimulator
@@ -59,6 +95,9 @@ class Aer:
             self.precision = "single"
         if method == "mps" and option:
             options["matrix_product_state_max_bond_dimension"] = int(option)
+        if method in ("mps", "automatic"):
+            options["mps_lapack"] = True
+            options["mps_omp_threads"] = threads
         if method == "mps":
             method = "matrix_product_state"
         self.method = method
@@ -107,11 +146,17 @@ class Aer:
                     gate(*inst[3:])
         if mode == "probs":
             qc.save_probabilities()
+        elif mode == "expval":
+            from qiskit.quantum_info import Pauli
+
+            for key in self.keys:
+                qubits = z_terms(key)
+                qc.save_expectation_value(Pauli("Z" * len(qubits)), qubits, label=key)
         self.num_bits = clbits
         return qc
 
     def execute(self, circuit, mode: str, shots: int):
-        if mode == "probs":
+        if mode in ("probs", "expval"):
             result = self.backend.run(circuit, shots=1).result()
         else:
             result = self.backend.run(circuit, shots=shots, seed_simulator=SIM_SEED).result()
@@ -122,6 +167,9 @@ class Aer:
     def output(self, result, mode: str) -> bytes:
         if mode == "probs":
             return np.asarray(result.data()["probabilities"], dtype="<f8").tobytes()
+        if mode == "expval":
+            data = result.data()
+            return values_text(self.keys, [np.real(data[k]) for k in self.keys])
         counts = result.data()["counts"]
         pairs = [(int(k, 16), int(v)) for k, v in counts.items()]
         return counts_text_from_ints(pairs, self.num_bits).encode()
@@ -129,11 +177,17 @@ class Aer:
     def details(self, result) -> dict:
         entry = result.results[0]
         meta = getattr(entry, "metadata", {}) or {}
-        return {
+        out = {
             "resolved_backend": meta.get("method"),
             "internal_ms": float(getattr(entry, "time_taken", 0.0)) * 1000.0,
             "fusion_applied": (meta.get("fusion") or {}).get("applied"),
         }
+        opts = self.backend.options
+        if self.method in ("matrix_product_state", "automatic"):
+            out["details"] = {"mps_lapack": opts.mps_lapack, "mps_omp_threads": opts.mps_omp_threads}
+        if self.method == "matrix_product_state":
+            out["details"]["truncation_threshold"] = opts.matrix_product_state_truncation_threshold
+        return out
 
 
 class Qsim:
@@ -142,7 +196,12 @@ class Qsim:
     def __init__(self, name: str, threads: int) -> None:
         import qsimcirq
 
-        self.simulator = qsimcirq.QSimSimulator(qsimcirq.QSimOptions(cpu_threads=threads), seed=SIM_SEED)
+        self.qsimcirq, self.threads = qsimcirq, threads
+
+    @staticmethod
+    def fused_gate_size(num_qubits: int) -> int:
+        """qsimcirq's documented `max_fused_gate_size` guidance: 3 below 22 qubits, 4 from 22."""
+        return 3 if num_qubits < 22 else 4
 
     @staticmethod
     def version() -> str:
@@ -154,6 +213,9 @@ class Qsim:
         import cirq
 
         n, clbits, instructions = parse(text)
+        self.fused = self.fused_gate_size(n)
+        options = self.qsimcirq.QSimOptions(max_fused_gate_size=self.fused, cpu_threads=self.threads)
+        self.simulator = self.qsimcirq.QSimSimulator(options, seed=SIM_SEED)
         qubits = cirq.LineQubit.range(n)
         ops = []
         measured: dict[int, int] = {}
@@ -205,8 +267,11 @@ class Qsim:
     def execute(self, prepared, mode: str, shots: int):
         circuit, order = prepared
         if mode == "probs":
-            probs = np.abs(self.simulator.simulate(circuit, qubit_order=order).final_state_vector)
-            return np.square(probs, out=probs)
+            _, state, _ = self.simulator.simulate_into_1d_array(circuit, qubit_order=order)
+            parts = state.view(np.float32)
+            np.square(parts, out=parts)
+            probs = parts[0::2]
+            return np.add(probs, parts[1::2], out=probs)
         return self.simulator.run(circuit, repetitions=shots).measurements["m"]
 
     def output(self, result, mode: str) -> bytes:
@@ -219,7 +284,11 @@ class Qsim:
 
     def details(self, result) -> dict:
         # The simulator is seeded once, so successive calls draw fresh samples.
-        return {"resolved_backend": "statevector", "reseeds_per_call": False}
+        return {
+            "resolved_backend": "statevector",
+            "details": {"max_fused_gate_size": self.fused, "cpu_threads": self.threads},
+            "reseeds_per_call": False,
+        }
 
 
 class Stim:
@@ -240,7 +309,7 @@ class Stim:
         return stim.__version__
 
     def build(self, text: str, mode: str):
-        if mode != "counts":
+        if mode not in ("counts", "stats"):
             raise RuntimeError("stim samples measurements only")
         _, clbits, instructions = parse(text)
         lines: list[str] = []
@@ -268,13 +337,39 @@ class Stim:
         self.num_bits = clbits
         # Column j of a sample is the j-th measurement; reorder to classical bit order.
         self.order = np.argsort(np.asarray(record))
+        self.record_of_bit = {bit: j for j, bit in enumerate(record)}
         return self.stim.Circuit("\n".join(lines))
 
     def execute(self, circuit, mode: str, shots: int):
-        return circuit.compile_sampler(seed=SIM_SEED).sample(shots)
+        return circuit.compile_sampler(seed=SIM_SEED).sample(shots, bit_packed=True)
+
+    def timed_execute(self, circuit, mode: str, shots: int):
+        """Run and time one call; `stats` reduces each packed block to the key totals outside the timer."""
+        if mode != "stats":
+            start = time.perf_counter()
+            result = self.execute(circuit, mode, shots)
+            return result, (time.perf_counter() - start) * 1000.0
+        chunk = max(1, STATS_CHUNK_BYTES // max(1, (circuit.num_measurements + 7) // 8))
+        totals = np.zeros(len(self.keys), dtype=np.int64)
+        start = time.perf_counter()
+        sampler = circuit.compile_sampler(seed=SIM_SEED)
+        elapsed = time.perf_counter() - start
+        left = shots
+        while left > 0:
+            take = min(left, chunk)
+            start = time.perf_counter()
+            packed = sampler.sample(take, bit_packed=True)
+            elapsed += time.perf_counter() - start
+            stat_totals(packed, self.keys, self.record_of_bit, totals)
+            del packed
+            left -= take
+        return (shots, totals), elapsed * 1000.0
 
     def output(self, result, mode: str) -> bytes:
-        bits = result[:, self.order].astype(np.uint8)
+        if mode == "stats":
+            shots, totals = result
+            return (f"shots {shots}\n" + "".join(f"{k} {int(t)}\n" for k, t in zip(self.keys, totals))).encode()
+        bits = np.unpackbits(result, axis=1, count=self.num_bits, bitorder="little")[:, self.order]
         packed = np.packbits(bits, axis=1, bitorder="little")
         rows, counts = np.unique(packed, axis=0, return_counts=True)
         pairs = [(int.from_bytes(row.tobytes(), "little"), int(c)) for row, c in zip(rows, counts)]
@@ -284,6 +379,112 @@ class Stim:
         return {"resolved_backend": "compiled sampler"}
 
 
+class Quimb:
+    """quimb's exact tensor network (`quimb-tn`) or its CircuitMPS under a bond cap (`quimb-mps:<cap>`)."""
+
+    precision = "double"
+    MPS_CUTOFF = 1e-16
+
+    def __init__(self, name: str, threads: int) -> None:
+        import cotengra
+        import quimb
+        import quimb.tensor as qtn
+
+        self.cotengra, self.qtn = cotengra, qtn
+        self.z = quimb.pauli("Z")
+        self.zz = np.kron(self.z, self.z)
+        base, _, option = name.partition(":")
+        self.mps = base == "quimb-mps"
+        self.max_bond = int(option) if option else None
+
+    @staticmethod
+    def version() -> str:
+        from importlib import metadata
+
+        return metadata.version("quimb")
+
+    def build(self, text: str, mode: str):
+        n, clbits, instructions = parse(text)
+        gates, measured = [], {}
+        for inst in instructions:
+            if inst[0] == "measure":
+                measured[inst[2]] = inst[1]
+                continue
+            if inst[0] != "gate":
+                raise RuntimeError("quimb adapter carries no reset or classically controlled gate")
+            if measured:
+                raise RuntimeError("quimb adapter samples terminal measurements only")
+            name, qubits, angle = inst[1:]
+            gates.append((name.upper(), (angle,) if angle is not None else (), tuple(qubits)))
+        self.n, self.num_bits, self.measured = n, clbits, measured
+        if self.mps:
+            return gates
+        circuit = self.qtn.Circuit(n)
+        for name, params, qubits in gates:
+            circuit.apply_gate(name, *params, *qubits)
+        return circuit
+
+    def _optimizer(self):
+        return self.cotengra.AutoHQOptimizer(cache=False)
+
+    def execute(self, prepared, mode: str, shots: int):
+        if not self.mps:
+            prepared.clear_storage()
+            # A hyper optimizer keeps the trees it found, so each light cone gets its own.
+            return [
+                prepared.local_expectation(self.z if len(qs) == 1 else self.zz, tuple(qs), optimize=self._optimizer())
+                for qs in map(z_terms, self.keys)
+            ]
+        circuit = self.qtn.CircuitMPS(self.n, max_bond=self.max_bond, cutoff=self.MPS_CUTOFF)
+        for name, params, qubits in prepared:
+            circuit.apply_gate(name, *params, *qubits)
+        if mode == "counts":
+            return list(circuit.sample(shots, seed=SIM_SEED))
+        return [
+            circuit.local_expectation(self.z if len(qs) == 1 else self.zz, tuple(qs), normalized=True)
+            for qs in map(z_terms, self.keys)
+        ]
+
+    def output(self, result, mode: str) -> bytes:
+        if mode == "expval":
+            return values_text(self.keys, [np.real(v) for v in result])
+        tally: dict[int, int] = {}
+        for config in result:
+            value = sum(1 << bit for bit, q in self.measured.items() if config[q] == "1")
+            tally[value] = tally.get(value, 0) + 1
+        return counts_text_from_ints(list(tally.items()), self.num_bits).encode()
+
+    def details(self, result) -> dict:
+        if self.mps:
+            return {
+                "resolved_backend": f"CircuitMPS, max_bond {self.max_bond}",
+                "details": {"cutoff": self.MPS_CUTOFF, "normalized_expectations": True},
+                "reseeds_per_call": True,
+            }
+        from cotengra.hyperoptimizers.hyper import get_default_hq_methods, get_default_optlib
+
+        return {
+            "resolved_backend": "tensor network, reverse light cone per observable",
+            "details": {"optimizer": optimizer_details(get_default_hq_methods(), get_default_optlib())},
+            "reseeds_per_call": False,
+        }
+
+
+def optimizer_details(methods, optlib) -> dict:
+    import importlib.util
+
+    return {
+        "preset": "auto-hq",
+        "cache": False,
+        "hyper_methods": list(methods),
+        "optlib": optlib,
+        "kahypar_available": importlib.util.find_spec("kahypar") is not None,
+        "cotengrust_available": importlib.util.find_spec("cotengrust") is not None,
+        "exact_below_hardness": 650,
+        "storage_cleared_per_call": True,
+    }
+
+
 def make(name: str, threads: int):
     if name.startswith("aer-"):
         return Aer(name, threads)
@@ -291,15 +492,32 @@ def make(name: str, threads: int):
         return Qsim(name, threads)
     if name == "stim":
         return Stim(name, threads)
+    if name.startswith("quimb-"):
+        return Quimb(name, threads)
     raise SystemExit(f"unknown simulator {name}")
+
+
+def _class(name: str):
+    if name.startswith("aer-"):
+        return Aer
+    if name.startswith("quimb-"):
+        return Quimb
+    return Stim if name == "stim" else Qsim
+
+
+def _timed(sim, prepared, mode: str, shots: int):
+    if hasattr(sim, "timed_execute"):
+        return sim.timed_execute(prepared, mode, shots)
+    start = time.perf_counter()
+    result = sim.execute(prepared, mode, shots)
+    return result, (time.perf_counter() - start) * 1000.0
 
 
 def main() -> int:
     name = sys.argv[1]
     command = sys.argv[2]
     if command == "version":
-        cls = Aer if name.startswith("aer-") else (Stim if name == "stim" else Qsim)
-        print(json.dumps({"simulator": name, "version": cls.version()}))
+        print(json.dumps({"simulator": name, "version": _class(name).version()}))
         return 0
     args = dict(zip(sys.argv[3::2], sys.argv[4::2]))
     mode = args.get("--mode", "probs")
@@ -314,14 +532,16 @@ def main() -> int:
     sim = make(name, threads)
     import_ms = (time.perf_counter() - import_start) * 1000.0
     text = sys.stdin.read()
+    sim.keys = []
+    if "--keys" in args:
+        with open(args["--keys"], encoding="utf-8") as handle:
+            sim.keys = [line.strip() for line in handle if line.strip()]
 
     start = time.perf_counter()
     prepared = sim.build(text, mode)
     build_ms = (time.perf_counter() - start) * 1000.0
 
-    start = time.perf_counter()
-    result = sim.execute(prepared, mode, shots)
-    first_ms = (time.perf_counter() - start) * 1000.0
+    result, first_ms = _timed(sim, prepared, mode, shots)
     data = sim.output(result, mode)
     details = sim.details(result)
     first_internal = details.pop("internal_ms", None)
@@ -336,9 +556,8 @@ def main() -> int:
     for i in range(iterations):
         if i >= min_iterations and sum(times_ms) >= budget_ms:
             break
-        start = time.perf_counter()
-        result = sim.execute(prepared, mode, shots)
-        times_ms.append((time.perf_counter() - start) * 1000.0)
+        result, ms = _timed(sim, prepared, mode, shots)
+        times_ms.append(ms)
         info = sim.details(result)
         if "internal_ms" in info:
             internal_ms.append(info["internal_ms"])

@@ -29,7 +29,7 @@ fn main() {
             let mut times = Vec::new();
             for _ in 0..10 {
                 let start = Instant::now();
-                let _ = sampler.sample_bulk_packed(n_shots);
+                std::hint::black_box(sampler.sample_bulk_packed(n_shots));
                 times.push(start.elapsed());
             }
             times.sort();

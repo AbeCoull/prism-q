@@ -1,7 +1,10 @@
 """Canonical workload definitions for the benchmark matrix.
 
 A workload is a gate list (the shared text format read by every runner), an
-output mode, and the parameters that produced it. The list is generated once,
+output mode, and the parameters that produced it. The modes are `probs` (the full
+probability vector), `counts` (a shot histogram), `expval` (Z and adjacent ZZ
+expectation values on an unmeasured circuit) and `stats` (only the shot statistics
+the validator checks, for shot counts whose histogram would not fit in memory). The list is generated once,
 hashed, and handed unchanged to every simulator, so no simulator gets a
 private transpilation pass. Random families draw from NumPy's PCG64 seeded per
 workload; the structured families (QFT, QV) come from the `prism_q::circuits`
@@ -31,7 +34,8 @@ CLIFFORD_1Q = ("h", "s", "sdg", "x", "z", "hs")
 FAMILIES: dict[str, str] = {
     "rcs": (
         "dense random circuit: per layer an Rz Ry Rz rotation with uniform random angles on every "
-        "qubit, then CX on alternating nearest-neighbour pairs (brickwork on a line)"
+        "qubit, then CX on alternating nearest-neighbour pairs (brickwork on a line); in `expval` "
+        "mode the same circuit without measurements, read out as Z and adjacent ZZ expectation values"
     ),
     "qft": (
         "textbook quantum Fourier transform from prism_q::circuits::qft_circuit, expanded to H, CP, "
@@ -47,7 +51,7 @@ FAMILIES: dict[str, str] = {
         "then CX on alternating nearest-neighbour pairs; every qubit measured at the end"
     ),
     "lowent": (
-        "shallow dense brickwork on a wide register: the rcs layer at depth 4 or 8, so the bond "
+        "dense brickwork on a wide register: the rcs layer at depth 4 to 16, so the bond "
         "dimension across any cut stays at most 2^ceil(d/2); every qubit measured at the end"
     ),
     "disjoint": (
@@ -99,7 +103,7 @@ class Workload:
             if key == "seed":
                 value = f"{value:x}"
             parts.append(f"{key}={value}")
-        parts.append(self.mode if self.mode == "probs" else f"counts{self.shots}")
+        parts.append(self.mode if self.mode in ("probs", "expval") else f"{self.mode}{self.shots}")
         return "/".join(parts)
 
     def summary(self) -> dict[str, Any]:
@@ -149,6 +153,19 @@ def rcs(n: int, depth: int, seed: int = CIRCUIT_SEED) -> Workload:
     return Workload("rcs", n, "probs", _text(n, body), {"depth": depth, "seed": seed})
 
 
+def expval(n: int, depth: int, observables: int | None = None, seed: int = CIRCUIT_SEED) -> Workload:
+    """The rcs circuit read out as expectation values.
+
+    `observables` Z terms and as many adjacent ZZ terms, drawn as `validate.select_statistics`
+    draws bits; None takes every qubit and every adjacent pair up to its cap.
+    """
+    base = rcs(n, depth, seed)
+    params = dict(base.params)
+    if observables is not None:
+        params["observables"] = observables
+    return Workload("rcs", n, "expval", base.text, params)
+
+
 def sampling(n: int, shots: int, measured: str = "all", depth: int = 10, seed: int = CIRCUIT_SEED) -> Workload:
     rng = np.random.Generator(np.random.PCG64(seed))
     body: list[str] = []
@@ -165,7 +182,7 @@ def sampling(n: int, shots: int, measured: str = "all", depth: int = 10, seed: i
     )
 
 
-def clifford(n: int, shots: int, depth: int = 8, seed: int = CIRCUIT_SEED) -> Workload:
+def clifford(n: int, shots: int, depth: int = 8, seed: int = CIRCUIT_SEED, mode: str = "counts") -> Workload:
     rng = np.random.Generator(np.random.PCG64(seed))
     body: list[str] = []
     for layer in range(depth):
@@ -180,7 +197,7 @@ def clifford(n: int, shots: int, depth: int = 8, seed: int = CIRCUIT_SEED) -> Wo
         for i in range(layer % 2, n - 1, 2):
             body.append(f"cx {i} {i + 1}")
     _measure(body, list(range(n)))
-    return Workload("clifford", n, "counts", _text(n, body, n), {"depth": depth, "seed": seed}, shots)
+    return Workload("clifford", n, mode, _text(n, body, n), {"depth": depth, "seed": seed}, shots)
 
 
 def lowent(n: int, depth: int, shots: int, seed: int = CIRCUIT_SEED) -> Workload:

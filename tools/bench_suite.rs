@@ -10,12 +10,17 @@
 //! QV) are bounded by the statevector memory cap; the Clifford family (GHZ)
 //! routes to the stabilizer backend under auto dispatch and runs far past that
 //! ceiling. Sizes that exceed available memory raise an error from `run()` and
-//! are skipped rather than aborting the suite.
+//! are recorded under `skipped` with the error rather than aborting the suite.
 //!
 //! Methodology: wall-clock simulation time only. Circuit construction happens
 //! once per circuit outside the timed region. The timed call is the full
 //! user-facing `simulate().run()`, which includes the fusion pass and
-//! probability extraction.
+//! probability extraction when the resolved backend offers it (the stabilizer
+//! rows time the tableau alone). Each row records the backend that ran, whether
+//! probabilities were produced, and its warm sample count. One untimed warmup
+//! precedes the samples, which continue until `BUDGET_MS` is spent and at least
+//! `MIN_SAMPLES` have run; a row whose warmup took longer than
+//! `SLOW_ROW_MS / MIN_SAMPLES` takes fewer, down to one.
 //!
 //! Usage: cargo run --release --features parallel --example bench_suite
 
@@ -41,19 +46,30 @@ const FAMILIES: [(&str, &[usize]); 4] = [
     ("qv", &[16, 20, 24]),
 ];
 
+const BUDGET_MS: f64 = 2000.0;
+const MIN_SAMPLES: usize = 5;
+const MAX_SAMPLES: usize = 50;
+const SLOW_ROW_MS: f64 = 30_000.0;
+
 struct Row {
     family: &'static str,
     qubits: usize,
     median_ms: f64,
+    samples: usize,
+    backend: String,
+    probabilities: bool,
 }
 
-fn runs_for(qubits: usize) -> (usize, usize) {
-    match qubits {
-        0..=18 => (2, 7),
-        19..=22 => (1, 5),
-        23..=25 => (1, 3),
-        _ => (0, 1),
-    }
+struct Skipped {
+    family: &'static str,
+    qubits: usize,
+    reason: String,
+}
+
+struct Sample {
+    ms: f64,
+    backend: String,
+    probabilities: bool,
 }
 
 fn build(family: &str, n: usize) -> Circuit {
@@ -83,14 +99,32 @@ fn median(mut samples: Vec<f64>) -> f64 {
     }
 }
 
-fn time_run(circuit: &Circuit) -> Result<f64> {
+fn time_run(circuit: &Circuit) -> Result<Sample> {
     let start = Instant::now();
     let outcome = simulate(circuit)
         .backend(BackendKind::Auto)
         .seed(42)
         .run()?;
     std::hint::black_box(&outcome);
-    Ok(start.elapsed().as_secs_f64() * 1000.0)
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    Ok(Sample {
+        ms,
+        backend: format!("{:?}", outcome.metadata.backend),
+        probabilities: outcome.probabilities.is_some(),
+    })
+}
+
+/// Warm up once, then sample until the budget and the minimum count are met.
+fn measure(circuit: &Circuit) -> Result<(Sample, Vec<f64>)> {
+    let warmup = time_run(circuit)?;
+    let min_samples = ((SLOW_ROW_MS / warmup.ms.max(1e-3)) as usize).clamp(1, MIN_SAMPLES);
+    let mut samples = Vec::new();
+    while samples.len() < MAX_SAMPLES
+        && (samples.len() < min_samples || samples.iter().sum::<f64>() < BUDGET_MS)
+    {
+        samples.push(time_run(circuit)?.ms);
+    }
+    Ok((warmup, samples))
 }
 
 /// UTC date as `YYYY-MM-DD` from a Unix timestamp (Howard Hinnant's civil_from_days).
@@ -151,7 +185,7 @@ fn json_str(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn render(rows: &[Row], threads: usize) -> String {
+fn render(rows: &[Row], skipped: &[Skipped], threads: usize) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -169,10 +203,25 @@ fn render(rows: &[Row], threads: usize) -> String {
         let sep = if i + 1 < rows.len() { "," } else { "" };
         let _ = writeln!(
             s,
-            "    {{\"family\": {}, \"qubits\": {}, \"ms\": {:.4}}}{sep}",
+            "    {{\"family\": {}, \"qubits\": {}, \"ms\": {:.4}, \"samples\": {}, \
+             \"backend\": {}, \"probabilities\": {}}}{sep}",
             json_str(row.family),
             row.qubits,
-            row.median_ms
+            row.median_ms,
+            row.samples,
+            json_str(&row.backend),
+            row.probabilities
+        );
+    }
+    s.push_str("  ],\n  \"skipped\": [\n");
+    for (i, row) in skipped.iter().enumerate() {
+        let sep = if i + 1 < skipped.len() { "," } else { "" };
+        let _ = writeln!(
+            s,
+            "    {{\"family\": {}, \"qubits\": {}, \"reason\": {}}}{sep}",
+            json_str(row.family),
+            row.qubits,
+            json_str(&row.reason)
         );
     }
     s.push_str("  ]\n}\n");
@@ -186,42 +235,42 @@ fn main() {
         .unwrap_or(1);
 
     let mut rows: Vec<Row> = Vec::new();
+    let mut skipped: Vec<Skipped> = Vec::new();
 
     for (family, sizes) in FAMILIES {
         for &n in sizes {
             let id = label(family, n);
             let circuit = build(family, n);
-            let (warmup, runs) = runs_for(n);
-
-            let mut samples = Vec::with_capacity(runs);
-            let mut failure = None;
-            for _ in 0..(warmup + runs) {
-                match time_run(&circuit) {
-                    Ok(ms) => samples.push(ms),
-                    Err(e) => {
-                        failure = Some(e);
-                        break;
-                    }
+            match measure(&circuit) {
+                Ok((warmup, samples)) => {
+                    let count = samples.len();
+                    let med = median(samples);
+                    println!(
+                        "{id:<16} {:<12} {med:>11.3} ms ({count} runs)",
+                        warmup.backend
+                    );
+                    rows.push(Row {
+                        family,
+                        qubits: n,
+                        median_ms: med,
+                        samples: count,
+                        backend: warmup.backend,
+                        probabilities: warmup.probabilities,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("{id:<16} skipped ({e})");
+                    skipped.push(Skipped {
+                        family,
+                        qubits: n,
+                        reason: e.to_string().replace(['\n', '\r'], " "),
+                    });
                 }
             }
-
-            if let Some(e) = failure {
-                eprintln!("{id:<16} skipped ({e})");
-                continue;
-            }
-
-            let timed = samples.split_off(warmup);
-            let med = median(timed);
-            println!("{id:<16} auto {med:>11.3} ms ({runs} runs)");
-            rows.push(Row {
-                family,
-                qubits: n,
-                median_ms: med,
-            });
         }
     }
 
     let out_path = root.join("docs/performance/suite.json");
-    fs::write(&out_path, render(&rows, threads)).expect("write suite.json");
+    fs::write(&out_path, render(&rows, &skipped, threads)).expect("write suite.json");
     eprintln!("wrote {}", out_path.display());
 }

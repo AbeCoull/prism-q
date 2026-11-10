@@ -17,7 +17,24 @@ from typing import Any
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-TRACKED_PACKAGES = ("qiskit", "qiskit-aer", "qsimcirq", "cirq-core", "numpy", "psutil", "scipy", "stim")
+TRACKED_PACKAGES = (
+    "qiskit",
+    "qiskit-aer",
+    "qsimcirq",
+    "cirq-core",
+    "numpy",
+    "psutil",
+    "scipy",
+    "stim",
+    "quimb",
+    "cotengra",
+    "cotengrust",
+    "autoray",
+    "numba",
+    "llvmlite",
+    "cytoolz",
+    "kahypar",
+)
 
 
 def _run(cmd: list[str], cwd: str | None = None) -> str | None:
@@ -123,7 +140,43 @@ def _packages() -> dict[str, str | None]:
     return versions
 
 
-def collect(features: str, threads: int, simulators: dict[str, str | None]) -> dict[str, Any]:
+def contraction_optimizer() -> dict[str, Any] | None:
+    """The cotengra `auto-hq` settings quimb's tensor network runs with on this host, kahypar included."""
+    import importlib.util
+    import warnings
+
+    if importlib.util.find_spec("cotengra") is None:
+        return None
+    from cotengra.hyperoptimizers.hyper import get_default_hq_methods, get_default_optlib
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        methods = list(get_default_hq_methods())
+    return {
+        "preset": "auto-hq, a fresh optimizer per observable with cache=False",
+        "hyper_methods": methods,
+        "optlib": get_default_optlib(),
+        "kahypar_available": importlib.util.find_spec("kahypar") is not None,
+        "cotengrust_available": importlib.util.find_spec("cotengrust") is not None,
+    }
+
+
+def stim_build() -> dict[str, Any] | None:
+    """Which of Stim's extension modules this interpreter loads; `_stim_avx2` uses 256-bit SIMD words."""
+    import importlib.util
+
+    if importlib.util.find_spec("stim") is None:
+        return None
+    import stim  # noqa: F401
+
+    loaded = sorted(name for name in sys.modules if name.startswith("stim._stim_"))
+    return {"version": metadata.version("stim"), "module": loaded[0] if loaded else None}
+
+
+def collect(
+    features: str, threads: int, simulators: dict[str, str | None], child_env: dict[str, str]
+) -> dict[str, Any]:
+    """Provenance block; `child_env` is the thread environment a child at the headline thread count gets."""
     return {
         "host": _host(),
         "toolchain": _toolchain(features),
@@ -131,12 +184,14 @@ def collect(features: str, threads: int, simulators: dict[str, str | None]) -> d
             "version": platform.python_version(),
             "implementation": platform.python_implementation(),
             "packages": _packages(),
+            "contraction_optimizer": contraction_optimizer(),
+            "stim_build": stim_build(),
         },
         "simulators": simulators,
         "threads": {
             "requested": threads,
-            "rayon_num_threads": os.environ.get("RAYON_NUM_THREADS"),
-            "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+            "rayon_num_threads": child_env.get("RAYON_NUM_THREADS"),
+            "omp_num_threads": child_env.get("OMP_NUM_THREADS"),
         },
     }
 

@@ -18,6 +18,7 @@
 //! `--features parallel,bench-internal`.
 
 mod common;
+use common::{SEED, configure_group_timed};
 
 #[cfg(feature = "bench-internal")]
 use criterion::{BenchmarkGroup, measurement::WallTime};
@@ -36,8 +37,6 @@ use std::collections::HashSet;
 #[cfg(feature = "bench-internal")]
 use std::hint::black_box;
 use std::time::Duration;
-
-const SEED: u64 = 0xDEAD_BEEF;
 
 fn options(shots: usize) -> QecOptions {
     QecOptions {
@@ -113,7 +112,6 @@ type FixtureBuilder = fn(usize) -> QecProgram;
 struct FixtureSpec {
     label: &'static str,
     builder: FixtureBuilder,
-    skipped: &'static [QecTStrategy],
 }
 
 fn fixtures() -> Vec<FixtureSpec> {
@@ -121,22 +119,18 @@ fn fixtures() -> Vec<FixtureSpec> {
         FixtureSpec {
             label: "h_t_h_1q",
             builder: one_qubit_clifford_t_program,
-            skipped: &[],
         },
         FixtureSpec {
             label: "two_qubit_single_t",
             builder: two_qubit_single_t_per_path,
-            skipped: &[],
         },
         FixtureSpec {
             label: "cx_t_zz",
             builder: cx_t_zz_program,
-            skipped: &[],
         },
         FixtureSpec {
             label: "h_t_t_h_1q",
             builder: multi_t_single_path_program,
-            skipped: &[],
         },
     ]
 }
@@ -159,16 +153,16 @@ fn strategies() -> Vec<QecTStrategy> {
 
 fn bench_qec_t_strategies(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_t_strategies");
-    group.sample_size(20);
-    group.warm_up_time(Duration::from_millis(400));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        20,
+        Duration::from_millis(400),
+        Duration::from_secs(3),
+    );
 
     let shots = 1_000usize;
     for fixture in fixtures() {
         for strategy in strategies() {
-            if fixture.skipped.contains(&strategy) {
-                continue;
-            }
             let program = (fixture.builder)(shots);
             let id = BenchmarkId::new(strategy.label(), fixture.label);
             group.bench_function(id, |b| {
@@ -185,9 +179,12 @@ fn bench_qec_t_strategies(c: &mut Criterion) {
 /// T-scaling sweep: single-qubit `(H*T)^t*H` over several T counts.
 fn bench_qec_t_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_t_strategies_scaling");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(400));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(400),
+        Duration::from_secs(3),
+    );
 
     let shots = 1_000usize;
     let t_counts = [1usize, 2, 4, 8, 12, 16, 20, 24, 32];
@@ -225,18 +222,18 @@ fn local_observable_with_disjoint_t_block(t_outside: usize) -> Circuit {
 }
 
 #[cfg(feature = "bench-internal")]
-fn telemetry_label(
-    base: &str,
+fn print_telemetry(
+    label: &str,
     circuit: &Circuit,
     observable: &[PauliTerm],
     peak_terms: usize,
     total_discarded: f64,
-) -> String {
+) {
     let t = cone_telemetry(circuit, observable);
-    format!(
-        "{base}_gt{}_gc{}_tt{}_tc{}_k{}_discarded{:.3e}",
+    eprintln!(
+        "qec_internal_sweeps {label}: gt{} gc{} tt{} tc{} k{} discarded{:.3e}",
         t.gates_total, t.gates_in_cone, t.t_total, t.t_in_cone, peak_terms, total_discarded
-    )
+    );
 }
 
 #[cfg(feature = "bench-internal")]
@@ -502,8 +499,8 @@ fn bench_reroute_coset_case(
     let rerouted = run_spd_observable_light_cone(&circuit, &rerouted_terms, 0.0, 0).unwrap();
     assert!((unrestricted.mean - original.mean).abs() < 1e-10);
     assert!((unrestricted.mean - rerouted.mean).abs() < 1e-10);
-    let label = format!(
-        "{name}_full_k{}_orig_tc{}_gc{}_k{}_discarded{:.3e}_reroute_tc{}_gc{}_k{}_discarded{:.3e}_support{}",
+    eprintln!(
+        "qec_internal_sweeps {name}: full k{} orig tc{} gc{} k{} discarded{:.3e} reroute tc{} gc{} k{} discarded{:.3e} support {}",
         unrestricted.peak_terms,
         route.original.t_in_cone,
         route.original.gates_in_cone,
@@ -516,15 +513,15 @@ fn bench_reroute_coset_case(
         support_label(&route.rerouted_support)
     );
     group.bench_function(
-        BenchmarkId::new("reroute_coset_unrestricted_spd", label.clone()),
+        BenchmarkId::new("reroute_coset_unrestricted_spd", name),
         |b| b.iter(|| run_spd_observable(&circuit, &original_terms, 0.0, 0).unwrap()),
     );
     group.bench_function(
-        BenchmarkId::new("reroute_coset_original_lc_spd", label.clone()),
+        BenchmarkId::new("reroute_coset_original_lc_spd", name),
         |b| b.iter(|| run_spd_observable_light_cone(&circuit, &original_terms, 0.0, 0).unwrap()),
     );
     group.bench_function(
-        BenchmarkId::new("reroute_coset_rerouted_lc_spd", label),
+        BenchmarkId::new("reroute_coset_rerouted_lc_spd", name),
         |b| b.iter(|| run_spd_observable_light_cone(&circuit, &rerouted_terms, 0.0, 0).unwrap()),
     );
 }
@@ -559,8 +556,8 @@ fn bench_reroute_branch_preserving_case(
     assert!(original.peak_terms > 1);
     assert!(alternate.peak_terms > 1);
 
-    let label = format!(
-        "{name}_orig_tc{}_gc{}_k{}_alt_tc{}_gc{}_k{}_stab_k{}_support{}",
+    eprintln!(
+        "qec_internal_sweeps {name}: orig tc{} gc{} k{} alt tc{} gc{} k{} stab k{} support {}",
         route.original.t_in_cone,
         route.original.gates_in_cone,
         original.peak_terms,
@@ -571,24 +568,27 @@ fn bench_reroute_branch_preserving_case(
         support_label(&alternate_support)
     );
     group.bench_function(
-        BenchmarkId::new("reroute_branch_unrestricted_spd", label.clone()),
+        BenchmarkId::new("reroute_branch_unrestricted_spd", &name),
         |b| b.iter(|| run_spd_observable(&circuit, &original_terms, 0.0, 0).unwrap()),
     );
     group.bench_function(
-        BenchmarkId::new("reroute_branch_original_lc_spd", label.clone()),
+        BenchmarkId::new("reroute_branch_original_lc_spd", &name),
         |b| b.iter(|| run_spd_observable_light_cone(&circuit, &original_terms, 0.0, 0).unwrap()),
     );
     group.bench_function(
-        BenchmarkId::new("reroute_branch_alternate_lc_spd", label),
+        BenchmarkId::new("reroute_branch_alternate_lc_spd", &name),
         |b| b.iter(|| run_spd_observable_light_cone(&circuit, &alternate_terms, 0.0, 0).unwrap()),
     );
 }
 
 fn bench_spd_light_cone(c: &mut Criterion) {
     let mut group = c.benchmark_group("spd_light_cone");
-    group
-        .sample_size(20)
-        .warm_up_time(Duration::from_millis(500));
+    configure_group_timed(
+        &mut group,
+        20,
+        Duration::from_millis(500),
+        Duration::from_secs(5),
+    );
 
     for &t_outside in &[2usize, 4, 8, 16] {
         let circuit = local_observable_with_disjoint_t_block(t_outside);
@@ -610,9 +610,12 @@ fn bench_spd_light_cone(c: &mut Criterion) {
 /// edges through the deterministic Pauli engine.
 fn bench_pauli_engine_qaoa(c: &mut Criterion) {
     let mut group = c.benchmark_group("pauli_engine_qaoa");
-    group
-        .sample_size(20)
-        .warm_up_time(Duration::from_millis(500));
+    configure_group_timed(
+        &mut group,
+        20,
+        Duration::from_millis(500),
+        Duration::from_secs(5),
+    );
 
     let n = 16usize;
     let circuit = circuits::qaoa_circuit(n, 2, SEED);
@@ -666,10 +669,12 @@ fn near_clifford_hea(n: usize, layers: usize) -> Circuit {
 /// budget where the policy must not fire.
 fn bench_spd_truncation(c: &mut Criterion) {
     let mut group = c.benchmark_group("spd_truncation");
-    group
-        .sample_size(10)
-        .warm_up_time(Duration::from_millis(500))
-        .measurement_time(Duration::from_secs(5));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(500),
+        Duration::from_secs(5),
+    );
 
     let hea = near_clifford_hea(10, 3);
     let hea_obs = [PauliTerm::x(5)];
@@ -710,9 +715,12 @@ fn bench_spd_truncation(c: &mut Criterion) {
 #[cfg(feature = "bench-internal")]
 fn bench_qec_internal_sweeps(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_internal_sweeps");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(300));
-    group.measurement_time(Duration::from_secs(1));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(300),
+        Duration::from_secs(1),
+    );
 
     let obs0 = [PauliTerm::z(0)];
 
@@ -724,15 +732,17 @@ fn bench_qec_internal_sweeps(c: &mut Criterion) {
         let full = run_spd_observable(&circuit, &obs0, 0.0, 0).unwrap();
         let cone = run_spd_observable_light_cone(&circuit, &obs0, 0.0, 0).unwrap();
         assert!((full.mean - cone.mean).abs() < 1e-10);
-        let unrestricted_label = telemetry_label(
-            &format!("{name}_spd"),
+        let unrestricted_label = format!("{name}_spd");
+        let cone_label = format!("{name}_lc");
+        print_telemetry(
+            &unrestricted_label,
             &circuit,
             &obs0,
             full.peak_terms,
             full.total_discarded,
         );
-        let cone_label = telemetry_label(
-            &format!("{name}_lc"),
+        print_telemetry(
+            &cone_label,
             &circuit,
             &obs0,
             cone.peak_terms,
@@ -757,8 +767,8 @@ fn bench_qec_internal_sweeps(c: &mut Criterion) {
         let original = run_spd_observable_light_cone(&circuit, &original_terms, 0.0, 0).unwrap();
         let rerouted = run_spd_observable_light_cone(&circuit, &rerouted_terms, 0.0, 0).unwrap();
         assert!((original.mean - rerouted.mean).abs() < 1e-10);
-        let label = format!(
-            "{name}_orig_tc{}_gc{}_k{}_discarded{:.3e}_reroute_tc{}_gc{}_k{}_discarded{:.3e}_support{}",
+        eprintln!(
+            "qec_internal_sweeps {name}: orig tc{} gc{} k{} discarded{:.3e} reroute tc{} gc{} k{} discarded{:.3e} support {}",
             route.original.t_in_cone,
             route.original.gates_in_cone,
             original.peak_terms,
@@ -770,13 +780,13 @@ fn bench_qec_internal_sweeps(c: &mut Criterion) {
             support_label(&route.rerouted_support)
         );
         group.bench_function(
-            BenchmarkId::new("reroute_original_light_cone_spd", label.clone()),
+            BenchmarkId::new("reroute_original_light_cone_spd", name),
             |b| {
                 b.iter(|| run_spd_observable_light_cone(&circuit, &original_terms, 0.0, 0).unwrap())
             },
         );
         group.bench_function(
-            BenchmarkId::new("reroute_rerouted_light_cone_spd", label),
+            BenchmarkId::new("reroute_rerouted_light_cone_spd", name),
             |b| {
                 b.iter(|| run_spd_observable_light_cone(&circuit, &rerouted_terms, 0.0, 0).unwrap())
             },
@@ -803,8 +813,8 @@ fn bench_qec_internal_sweeps(c: &mut Criterion) {
         let original = run_spd_observable_light_cone(&circuit, &original_terms, 0.0, 0).unwrap();
         let rerouted = run_spd_observable_light_cone(&circuit, &rerouted_terms, 0.0, 0).unwrap();
         assert!((original.mean - rerouted.mean).abs() < 1e-10);
-        let label = format!(
-            "{name}_orig_tc{}_gc{}_k{}_discarded{:.3e}_reroute_tc{}_gc{}_k{}_discarded{:.3e}_support{}",
+        eprintln!(
+            "qec_internal_sweeps {name}: orig tc{} gc{} k{} discarded{:.3e} reroute tc{} gc{} k{} discarded{:.3e} support {}",
             route.original.t_in_cone,
             route.original.gates_in_cone,
             original.peak_terms,
@@ -815,13 +825,10 @@ fn bench_qec_internal_sweeps(c: &mut Criterion) {
             rerouted.total_discarded,
             support_label(&route.rerouted_support)
         );
-        group.bench_function(
-            BenchmarkId::new("strip_original_lc_spd", label.clone()),
-            |b| {
-                b.iter(|| run_spd_observable_light_cone(&circuit, &original_terms, 0.0, 0).unwrap())
-            },
-        );
-        group.bench_function(BenchmarkId::new("strip_rerouted_lc_spd", label), |b| {
+        group.bench_function(BenchmarkId::new("strip_original_lc_spd", name), |b| {
+            b.iter(|| run_spd_observable_light_cone(&circuit, &original_terms, 0.0, 0).unwrap())
+        });
+        group.bench_function(BenchmarkId::new("strip_rerouted_lc_spd", name), |b| {
             b.iter(|| run_spd_observable_light_cone(&circuit, &rerouted_terms, 0.0, 0).unwrap())
         });
     }
@@ -866,13 +873,13 @@ fn bench_qec_internal_sweeps(c: &mut Criterion) {
         let width = min_fill_treewidth_proxy(&graph, &HashSet::new());
         let cut_width = min_fill_treewidth_proxy(&graph, &excluded);
         let score = cut_score(&graph, &excluded, 1.0);
-        let label = format!(
-            "{name}_edges{}_w{}_cutw{}_score{score:.3}",
+        eprintln!(
+            "qec_internal_sweeps {name}: edges{} w{} cutw{} score{score:.3}",
             graph.num_edges(),
             width,
             cut_width
         );
-        group.bench_function(BenchmarkId::new("cut_width_proxy", label), |b| {
+        group.bench_function(BenchmarkId::new("cut_width_proxy", name), |b| {
             b.iter(|| {
                 let graph = black_box(&graph);
                 let excluded = black_box(&excluded);

@@ -394,9 +394,7 @@ fn bench_noisy_shots(c: &mut Criterion) {
     for &n in noisy_sizes() {
         let mut circuit = Circuit::new(n, n);
         circuit.instructions = cyclic_wall(n, 2, SEED).instructions;
-        for q in 0..n {
-            circuit.add_measure(q, q);
-        }
+        circuit.measure_all();
         for ranks in [2usize, 4] {
             let id = BenchmarkId::new(format!("noiseless/{n}"), format!("{ranks}ranks"));
             group.bench_with_input(id, &circuit, |b, circ| {

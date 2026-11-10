@@ -25,7 +25,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 mod common;
-use common::{SEED, run_shots_with};
+use common::{SEED, configure_group_timed, run_shots_with};
 
 const API_QUERY_SHOTS: usize = 100_000;
 
@@ -58,16 +58,8 @@ fn run_counts_with(
 }
 
 fn bell_circuit_with_measurements(n_qubits: usize) -> Circuit {
-    let mut c = Circuit::new(n_qubits, n_qubits);
-    for q in (0..n_qubits).step_by(2) {
-        if q + 1 < n_qubits {
-            c.add_gate(Gate::H, &[q]);
-            c.add_gate(Gate::Cx, &[q, q + 1]);
-        }
-    }
-    for q in 0..n_qubits {
-        c.add_measure(q, q);
-    }
+    let mut c = prism_q::circuits::independent_bell_pairs(n_qubits / 2);
+    c.measure_all();
     c
 }
 
@@ -81,14 +73,8 @@ fn uniform_circuit_with_measurements(n_qubits: usize) -> Circuit {
 }
 
 fn ghz_circuit_with_measurements(n_qubits: usize) -> Circuit {
-    let mut c = Circuit::new(n_qubits, n_qubits);
-    c.add_gate(Gate::H, &[0]);
-    for q in 0..n_qubits - 1 {
-        c.add_gate(Gate::Cx, &[q, q + 1]);
-    }
-    for q in 0..n_qubits {
-        c.add_measure(q, q);
-    }
+    let mut c = prism_q::circuits::ghz_circuit(n_qubits);
+    c.measure_all();
     c
 }
 
@@ -142,9 +128,7 @@ fn api_redesign_circuit(n_qubits: usize, with_measurements: bool) -> Circuit {
         c.add_gate(Gate::Rx(0.07 + q as f64 * 0.023), &[q]);
     }
     if with_measurements {
-        for q in 0..n_qubits {
-            c.add_measure(q, q);
-        }
+        c.measure_all();
     }
     c
 }
@@ -245,9 +229,12 @@ fn bench_api_queries(c: &mut Criterion) {
 
 fn bench_run_shots(c: &mut Criterion) {
     let mut group = c.benchmark_group("run_shots");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(500),
+        Duration::from_secs(3),
+    );
 
     for &n_shots in &[1_000, 10_000, 100_000, 1_000_000] {
         let circuit = bell_circuit_with_measurements(16);
@@ -305,9 +292,12 @@ fn bench_run_shots(c: &mut Criterion) {
 
 fn bench_counts(c: &mut Criterion) {
     let mut group = c.benchmark_group("shots_counts");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(500),
+        Duration::from_secs(3),
+    );
 
     for &n_shots in &[10_000, 100_000, 1_000_000] {
         let circuit = bell_circuit_with_measurements(16);
@@ -340,9 +330,12 @@ fn bench_counts(c: &mut Criterion) {
 
 fn bench_run_counts_terminal(c: &mut Criterion) {
     let mut group = c.benchmark_group("run_counts_terminal");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(500),
+        Duration::from_secs(3),
+    );
 
     for &n_shots in &[10_000, 100_000] {
         let circuit = non_clifford_terminal_circuit(18, 18);
@@ -402,9 +395,12 @@ fn bench_run_counts_terminal(c: &mut Criterion) {
 
 fn bench_compiled_counts(c: &mut Criterion) {
     let mut group = c.benchmark_group("compiled_counts");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(500),
+        Duration::from_secs(3),
+    );
 
     for &n_shots in &[10_000, 100_000, 1_000_000] {
         let circuit = ghz_circuit_with_measurements(20);
@@ -426,9 +422,12 @@ fn bench_compiled_counts(c: &mut Criterion) {
 fn bench_histogram_counts(c: &mut Criterion) {
     use prism_q::HistogramAccumulator;
     let mut group = c.benchmark_group("histogram_counts");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(500),
+        Duration::from_secs(3),
+    );
 
     for &n_qubits in &[20, 100, 1000] {
         let circuit = ghz_circuit_with_measurements(n_qubits);
@@ -468,9 +467,12 @@ fn bench_histogram_counts(c: &mut Criterion) {
 // of the call. Route pinned in `tests/integration/bench_fixture_routing.rs`.
 fn bench_clifford_register_counts(c: &mut Criterion) {
     let mut group = c.benchmark_group("clifford_register_counts");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(500),
+        Duration::from_secs(3),
+    );
 
     let mut circuit = prism_q::circuits::clifford_t_circuit(40, 20, 0.05, SEED);
     circuit.measure_all();
@@ -488,9 +490,12 @@ fn bench_clifford_register_counts(c: &mut Criterion) {
 
 fn bench_rank_space_counts(c: &mut Criterion) {
     let mut group = c.benchmark_group("rank_space_counts");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(500),
+        Duration::from_secs(3),
+    );
 
     for &n_qubits in &[20, 100, 1000] {
         let circuit = ghz_circuit_with_measurements(n_qubits);
@@ -530,10 +535,7 @@ fn bench_rank_space_counts(c: &mut Criterion) {
 
 fn clifford_circuit_with_measurements(n_qubits: usize, depth: usize) -> Circuit {
     let mut c = prism_q::circuits::clifford_heavy_circuit(n_qubits, depth, SEED);
-    c.num_classical_bits = n_qubits;
-    for q in 0..n_qubits {
-        c.add_measure(q, q);
-    }
+    c.measure_all();
     c
 }
 
@@ -648,9 +650,12 @@ fn qec_repetition_program_text(
 
 fn bench_qec_clifford_runner(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_clifford_runner");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     for &(n_data, rounds, shots) in &[(25, 5, 10_000), (25, 5, 100_000), (100, 3, 100_000)] {
         let program = qec_repetition_program(n_data, rounds, shots, None);
@@ -674,9 +679,12 @@ fn bench_qec_clifford_runner(c: &mut Criterion) {
 
 fn bench_qec_noisy_runner(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_noisy_runner");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     for &(n_data, rounds, shots) in &[(25, 5, 10_000), (25, 5, 100_000)] {
         let program = qec_repetition_program(n_data, rounds, shots, Some(0.001));
@@ -689,42 +697,12 @@ fn bench_qec_noisy_runner(c: &mut Criterion) {
     group.finish();
 }
 
-// Distance-d rotated surface-code Z memory with d rounds: Z and X plaquettes per round,
-// compare detectors after the first round, data readout closing the Z checks, and the
-// left column as the logical observable. Data qubit (r, c) is r * d + c.
 fn qec_surface_program(
     distance: usize,
     rounds: usize,
     shots: usize,
     noise_rate: Option<f64>,
 ) -> QecProgram {
-    let mut z_stabs = Vec::new();
-    let mut x_stabs = Vec::new();
-    for i in 0..=distance {
-        for j in 0..=distance {
-            let cells: Vec<usize> = [(i, j), (i, j + 1), (i + 1, j), (i + 1, j + 1)]
-                .into_iter()
-                .filter(|&(r, c)| (1..=distance).contains(&r) && (1..=distance).contains(&c))
-                .map(|(r, c)| (r - 1) * distance + (c - 1))
-                .collect();
-            let z_type = (i + j) % 2 == 1;
-            let boundary_kept = if z_type {
-                i == 0 || i == distance
-            } else {
-                j == 0 || j == distance
-            };
-            if cells.len() == 4 || (cells.len() == 2 && boundary_kept) {
-                if z_type {
-                    z_stabs.push(cells);
-                } else {
-                    x_stabs.push(cells);
-                }
-            }
-        }
-    }
-
-    let num_qubits = distance * distance;
-    let data: Vec<usize> = (0..num_qubits).collect();
     let options = QecOptions {
         shots,
         seed: SEED,
@@ -732,53 +710,7 @@ fn qec_surface_program(
         keep_measurements: false,
         ..QecOptions::default()
     };
-    let mut program = QecProgram::with_options(num_qubits, options);
-    let mut previous: Vec<usize> = Vec::new();
-    for _ in 0..rounds {
-        if let Some(p) = noise_rate {
-            program.noise(QecNoise::Depolarize1(p), &data).unwrap();
-        }
-        let mut records = Vec::with_capacity(z_stabs.len() + x_stabs.len());
-        for stab in &z_stabs {
-            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::z(q)).collect();
-            records.push(program.measure_pauli_product(&terms).unwrap());
-        }
-        for stab in &x_stabs {
-            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::x(q)).collect();
-            records.push(program.measure_pauli_product(&terms).unwrap());
-        }
-        if previous.is_empty() {
-            for &record in &records[..z_stabs.len()] {
-                program.detector(&[QecRecordRef::absolute(record)]).unwrap();
-            }
-        } else {
-            for (&record, &prior) in records.iter().zip(&previous) {
-                program
-                    .detector(&[
-                        QecRecordRef::absolute(record),
-                        QecRecordRef::absolute(prior),
-                    ])
-                    .unwrap();
-            }
-        }
-        previous = records;
-    }
-    let readout: Vec<usize> = (0..num_qubits)
-        .map(|qubit| program.measure_z(qubit).unwrap())
-        .collect();
-    for (stab, &prior) in z_stabs.iter().zip(&previous) {
-        let mut refs: Vec<QecRecordRef> = stab
-            .iter()
-            .map(|&q| QecRecordRef::absolute(readout[q]))
-            .collect();
-        refs.push(QecRecordRef::absolute(prior));
-        program.detector(&refs).unwrap();
-    }
-    let logical: Vec<QecRecordRef> = (0..distance)
-        .map(|row| QecRecordRef::absolute(readout[row * distance]))
-        .collect();
-    program.observable_include(0, &logical).unwrap();
-    program
+    common::qec::rotated_surface_memory(distance, rounds, noise_rate, options)
 }
 
 type QecMemoryBuilder = fn(usize, usize, usize, Option<f64>) -> QecProgram;
@@ -788,9 +720,12 @@ type QecMemoryBuilder = fn(usize, usize, usize, Option<f64>) -> QecProgram;
 // program with and without materialized measurement records.
 fn bench_qec_detector_sampling(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_detector_sampling");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     let shots = 100_000;
     let families: [(&str, &[usize], QecMemoryBuilder); 2] = [
@@ -849,9 +784,12 @@ fn bench_qec_detector_sampling(c: &mut Criterion) {
 // The noiseless rows time the lowering and detector compile on their own.
 fn bench_qec_deep_memory(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_deep_memory");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     struct DeepRow {
         label: &'static str,
@@ -961,9 +899,12 @@ fn bench_qec_noisy_runner_split(_c: &mut Criterion) {}
 #[cfg(feature = "bench-internal")]
 fn bench_qec_noisy_runner_split(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_noisy_runner_split");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     let n_data = 25;
     let rounds = 5;
@@ -1064,18 +1005,18 @@ fn bench_qec_noisy_runner_split(c: &mut Criterion) {
 fn sparse_active_circuit(n_qubits: usize, n_active: usize) -> Circuit {
     let mut active = prism_q::circuits::clifford_heavy_circuit(n_active, 10, SEED);
     active.num_qubits = n_qubits;
-    active.num_classical_bits = n_qubits;
-    for q in 0..n_qubits {
-        active.add_measure(q, q);
-    }
+    active.measure_all();
     active
 }
 
 fn bench_sparse_deterministic(c: &mut Criterion) {
     let mut group = c.benchmark_group("sparse_deterministic");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     for &(n_qubits, n_active) in &[(100, 10), (200, 20), (500, 50), (1000, 100)] {
         let circuit = sparse_active_circuit(n_qubits, n_active);
@@ -1094,9 +1035,12 @@ fn bench_sparse_deterministic(c: &mut Criterion) {
 
 fn bench_analytical_marginals(c: &mut Criterion) {
     let mut group = c.benchmark_group("analytical_marginals");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     for &n in &[20, 50, 100, 200, 500, 1000] {
         let circuit = ghz_circuit_with_measurements(n);
@@ -1121,9 +1065,12 @@ fn bench_chunked_high_shots(c: &mut Criterion) {
     use prism_q::{HistogramAccumulator, MarginalsAccumulator, PauliExpectationAccumulator};
 
     let mut group = c.benchmark_group("chunked_high_shots");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(500));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(500),
+        Duration::from_secs(3),
+    );
 
     let mut shot_counts = vec![1_000_000, 10_000_000];
     shot_counts.extend(high_shot_counts());
@@ -1181,9 +1128,12 @@ fn bench_chunked_high_shots(c: &mut Criterion) {
 // error model of its 100-round sibling, 340k mechanisms in 18 MB of text.
 fn bench_qec_workflow(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_workflow");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(5));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(5),
+    );
 
     let noise = QecCircuitNoise::uniform(0.001);
     group.bench_function("surface_memory/d13_r1000", |b| {
@@ -1235,9 +1185,12 @@ fn bench_qec_workflow(c: &mut Criterion) {
 /// `qec_detector_sampling/surf_d5` record path on the same program without them.
 fn bench_qec_erasure_runner(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_erasure_runner");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     let shots = 100_000;
     for &distance in &[3usize, 5] {
@@ -1337,9 +1290,12 @@ fn qec_corrected_repetition_program(
 /// which applies each round's corrections as record flips.
 fn bench_qec_feedforward_runner(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_feedforward_runner");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     for &distance in &[5usize, 15] {
         let program = qec_corrected_repetition_program(distance, distance, 100_000, 0.001);
@@ -1396,9 +1352,12 @@ fn corrected_repetition_circuit(n_data: usize, rounds: usize) -> Circuit {
 /// included, sampled through the `Auto` noisy shot route.
 fn bench_noisy_dynamic_shots(c: &mut Criterion) {
     let mut group = c.benchmark_group("noisy_dynamic_shots");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     for &(distance, shots) in &[(5usize, 10_000usize), (9, 2_000)] {
         let circuit = corrected_repetition_circuit(distance, distance);
@@ -1426,9 +1385,12 @@ fn bench_noisy_dynamic_shots(c: &mut Criterion) {
 /// the same program. Both draw the same shots at the same seed.
 fn bench_qec_chunked_noise(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_chunked_noise");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     let shots = 100_000;
     let records = qec_repetition_program(15, 15, shots, Some(0.001));
@@ -1518,9 +1480,12 @@ fn qec_repeat_text(program: impl Fn(usize) -> QecProgram, rounds: usize) -> Stri
 /// every noise event dominates.
 fn bench_qec_sample_one_shot(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_sample_one_shot");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     let noise = QecCircuitNoise::uniform(0.001);
     for distance in [5, 25] {
@@ -1547,9 +1512,12 @@ fn bench_qec_sample_one_shot(c: &mut Criterion) {
 
 fn bench_qec_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_parse");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     let noise = QecCircuitNoise::uniform(0.001);
     for distance in [15, 25] {
@@ -1577,9 +1545,12 @@ fn bench_qec_parse(c: &mut Criterion) {
 /// records route.
 fn bench_qec_compile(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_compile");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     let noise = QecCircuitNoise::uniform(0.001);
     for distance in [5, 15, 25] {
@@ -1632,9 +1603,12 @@ fn bench_qec_compile(c: &mut Criterion) {
 /// of noise units.
 fn bench_qec_postselection(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_postselection");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
 
     let mut base = qec_repetition_program(5, 5, 1_000_000, Some(0.001));
     for record in 0..20 {

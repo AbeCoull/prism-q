@@ -20,13 +20,7 @@ fn random_matrix(m: usize, n: usize, seed: u64) -> Vec<Complex64> {
 
 fn bench_svd(c: &mut Criterion) {
     let mut group = c.benchmark_group("svd");
-
-    #[cfg(feature = "bench-fast")]
-    {
-        group.sample_size(10);
-        group.warm_up_time(std::time::Duration::from_millis(200));
-        group.measurement_time(std::time::Duration::from_millis(500));
-    }
+    common::configure_group_at(&mut group, 100);
 
     for &size in &[4, 16, 64, 128] {
         let mat = random_matrix(size, size, 0xDEAD_BEEF);
@@ -46,13 +40,7 @@ fn bench_svd(c: &mut Criterion) {
 
 fn bench_svd_rectangular(c: &mut Criterion) {
     let mut group = c.benchmark_group("svd_rect");
-
-    #[cfg(feature = "bench-fast")]
-    {
-        group.sample_size(10);
-        group.warm_up_time(std::time::Duration::from_millis(200));
-        group.measurement_time(std::time::Duration::from_millis(500));
-    }
+    common::configure_group_at(&mut group, 100);
 
     for &bond in &[4, 16, 64, 128] {
         let m = 2 * bond;

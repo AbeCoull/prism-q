@@ -4205,6 +4205,42 @@ fn clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
     circuit
 }
 
+/// H on every qubit, then per T gate a block of `3n` random H, S, Sdg or CX followed by
+/// one T or Tdg on a random qubit, then a random 1q Clifford layer. The Clifford blocks
+/// keep the T rotations from commuting into fewer distinct terms.
+fn scrambled_clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = Circuit::new(n_qubits, 0);
+    let ones = [Gate::H, Gate::S, Gate::Sdg];
+    let finals = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
+
+    for q in 0..n_qubits {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for _ in 0..t_count {
+        for _ in 0..3 * n_qubits {
+            let choice = rng.random_range(0..4);
+            if choice < ones.len() {
+                circuit.add_gate(ones[choice].clone(), &[rng.random_range(0..n_qubits)]);
+            } else {
+                let a = rng.random_range(0..n_qubits);
+                let b = (a + rng.random_range(1..n_qubits)) % n_qubits;
+                circuit.add_gate(Gate::Cx, &[a, b]);
+            }
+        }
+        let t = if rng.random_bool(0.5) {
+            Gate::T
+        } else {
+            Gate::Tdg
+        };
+        circuit.add_gate(t, &[rng.random_range(0..n_qubits)]);
+    }
+    for q in 0..n_qubits {
+        circuit.add_gate(finals[rng.random_range(0..finals.len())].clone(), &[q]);
+    }
+    circuit
+}
+
 fn stabilizer_rank_terminal_shot_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
     let mut circuit = clifford_t_circuit(n_qubits, t_count, seed);
     let measured = n_qubits.min(4);
@@ -4333,6 +4369,18 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
         });
     }
 
+    for &t in &[2, 4, 8, 12] {
+        let circuit = scrambled_clifford_t_circuit(n, t, SEED);
+        group.bench_function(
+            BenchmarkId::new("stab_rank_scrambled", format!("{n}q_{t}t")),
+            |b| {
+                b.iter(|| {
+                    prism_q::run_stabilizer_rank(&circuit, 42).unwrap();
+                });
+            },
+        );
+    }
+
     // Approximate mode: higher T-counts with bounded terms
     for &t in &[16, 20] {
         let circuit = clifford_t_circuit(n, t, SEED);
@@ -4358,6 +4406,27 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
         }
     }
     bench_stabilizer_rank_shot_case(&mut group, 1000, 1, shot_count);
+
+    let t = 4;
+    for &n in &[32, 64] {
+        let mut terminal = scrambled_clifford_t_circuit(n, t, SEED);
+        terminal.num_classical_bits = 4;
+        for q in 0..4 {
+            terminal.add_measure(q, q);
+        }
+        let id = format!("{n}q_chi{}_{shot_count}shots", 1usize << t);
+        group.bench_function(BenchmarkId::new("shots_terminal_scrambled", &id), |b| {
+            b.iter(|| {
+                run_shots_with(
+                    BackendKind::StabilizerRank,
+                    black_box(&terminal),
+                    black_box(shot_count),
+                    SEED,
+                )
+                .unwrap();
+            });
+        });
+    }
 
     group.finish();
 }

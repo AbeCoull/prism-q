@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The host-wide marker for a measurement in progress, shared by bench_queue.sh
-# and bench_ab.sh. Sourced, not run.
+# The host-wide marker for a measurement in progress, shared by bench_queue.sh,
+# bench_ab.sh, and bench_interleave.sh. Sourced, not run.
 #
 # The marker is bench_results/MEASURING in the main checkout, whichever worktree
 # runs the measurement, so every session of this repository on the host sees
@@ -15,7 +15,7 @@
 #
 # A session that sees the file must not run cargo, or anything else that loads
 # the host, until it is gone. A marker whose pid is no longer running is stale:
-# it is overwritten and the log says so. PRISM_BENCH_LOCK_HELD=1 in the
+# it is replaced and the log says so. PRISM_BENCH_LOCK_HELD=1 in the
 # environment means a parent process holds the marker already, so a child skips
 # it; the queue exports it for every step and bench_ab.sh for its nested runs.
 
@@ -36,13 +36,30 @@ bench_lock_path() {
 # Write the marker for this process. $1 is a checkout on the host, $2 the
 # script name, $3 the task, $4 the out path, and a non-empty $5 takes the
 # marker from a live holder. Returns 1 when a live process holds it.
+#
+# The marker is created with noclobber, an exclusive create, so two processes
+# that both find no marker cannot both write one: the second create fails and
+# that process reads the winner's pid like any other holder. A stale marker is
+# removed only while it still names the dead pid that was read, then the create
+# is tried again.
 bench_lock_acquire() {
     local dir="$1" by="$2" task="$3" out="$4" force="${5:-}"
+    local body pid tries
     [[ -n "${PRISM_BENCH_LOCK_HELD:-}" ]] && return 0
     BENCH_LOCK="$(bench_lock_path "$dir")"
-    if [[ -f "$BENCH_LOCK" ]]; then
-        local pid
-        pid="$(awk '/^pid: / { print $2; exit }' "$BENCH_LOCK")"
+    mkdir -p "$(dirname "$BENCH_LOCK")"
+    body="$(printf 'pid: %s\nby: %s\ntask: %s\nout: %s\nstarted: %s' \
+        "$$" "$by" "$task" "$out" "$(date '+%Y-%m-%d %H:%M:%S')")"
+    for (( tries = 0; tries < 5; tries++ )); do
+        if ( set -o noclobber; printf '%s\n' "$body" > "$BENCH_LOCK" ) 2>/dev/null; then
+            break
+        fi
+        pid="$(awk '/^pid: / { print $2; exit }' "$BENCH_LOCK" 2>/dev/null)"
+        if [[ -z "$pid" ]]; then
+            # Created but not yet written by its holder; give it a moment.
+            sleep 1
+            pid="$(awk '/^pid: / { print $2; exit }' "$BENCH_LOCK" 2>/dev/null)"
+        fi
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             if [[ -z "$force" ]]; then
                 echo "Error: a measurement is running on this host. $BENCH_LOCK says:" >&2
@@ -51,13 +68,18 @@ bench_lock_acquire() {
                 return 1
             fi
             echo ">>> taking $BENCH_LOCK from live pid $pid under --force-lock"
-        else
-            echo ">>> stale $BENCH_LOCK from pid ${pid:-unknown}, which is not running; overwriting it"
+            printf '%s\n' "$body" > "$BENCH_LOCK"
+            break
         fi
+        echo ">>> stale $BENCH_LOCK from pid ${pid:-unknown}, which is not running; replacing it"
+        if [[ "$(awk '/^pid: / { print $2; exit }' "$BENCH_LOCK" 2>/dev/null)" == "$pid" ]]; then
+            rm -f "$BENCH_LOCK"
+        fi
+    done
+    if ! grep -q "^pid: $$\$" "$BENCH_LOCK" 2>/dev/null; then
+        echo "Error: could not take $BENCH_LOCK; another process keeps replacing it." >&2
+        return 1
     fi
-    mkdir -p "$(dirname "$BENCH_LOCK")"
-    printf 'pid: %s\nby: %s\ntask: %s\nout: %s\nstarted: %s\n' \
-        "$$" "$by" "$task" "$out" "$(date '+%Y-%m-%d %H:%M:%S')" > "$BENCH_LOCK"
     BENCH_LOCK_HELD=1
     export PRISM_BENCH_LOCK_HELD=1
     echo ">>> measuring: wrote $BENCH_LOCK (pid $$); no cargo on this host until it is gone"

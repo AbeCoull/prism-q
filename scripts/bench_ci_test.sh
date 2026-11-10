@@ -5,7 +5,9 @@
 # canned report and exit status for the first and the confirming run, then
 # checks the gate's exit status. A first FAIL may clear only on a valid second
 # result: a PASS, or a FAIL on disjoint rows. RERUN, NO DATA, host-busy and a
-# missing report leave it standing.
+# missing report leave it standing. A FAIL report carries a second verdict line
+# below the first, as a report with a follow-up section does, so the gate must
+# read the first. The stub exits 99 unless the gate passes --no-confirm.
 #
 # Usage: scripts/bench_ci_test.sh
 
@@ -21,7 +23,8 @@ FAIL=0
 report() {
     case "$1" in
         pass)    printf '**Regression verdict**: PASS at 5.0%%.\n' ;;
-        fail:*)  printf '**Regression verdict**: FAIL. 1 row(s) regressed beyond 5.0%% and beyond their own control spread.\n\n- `%s`\n\nTrailer.\n' "${1#fail:}" ;;
+        control) printf '**Regression verdict**: CONTROL (same code). Both binaries carry the same code.\n' ;;
+        fail:*)  printf '**Regression verdict**: FAIL. 1 row(s) regressed beyond 5.0%% and beyond their own control spread.\n\n- `%s`\n\nTrailer.\n\n## Follow-up\n\n**Regression verdict**: PASS at 5.0%%.\n' "${1#fail:}" ;;
         failnorow) printf '**Regression verdict**: FAIL. 1 row(s) regressed beyond 5.0%% and beyond their own control spread.\n\nTrailer.\n' ;;
         rerun)   printf '**Regression verdict**: RERUN. The working-tree binary moved as a lane.\n' ;;
         nodata)  printf '**Regression verdict**: NO DATA. No row appeared in all 6 passes.\n' ;;
@@ -38,6 +41,7 @@ check() {
     cat > "$tree/scripts/bench_ab.sh" <<'STUB'
 #!/usr/bin/env bash
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ " $* " == *" --no-confirm "* ]] || exit 99
 runs=$(( $(cat "$dir/runs" 2>/dev/null || echo 0) + 1 ))
 echo "$runs" > "$dir/runs"
 out=""
@@ -76,10 +80,11 @@ check first-rerun-blocks             3/rerun           0/none            1 1
 check first-host-busy-blocks         2/none            0/none            1 1
 check first-smoke-test-blocks        4/none            0/none            1 1
 check confirm-pass-clears            1/fail:a/1        0/pass            0 2
+check confirm-same-code-clears       1/fail:a/1        0/control         0 2
 check confirm-same-row-blocks        1/fail:a/1        1/fail:a/1        1 2
 check confirm-disjoint-rows-clear    1/fail:a/1        1/fail:b/2        0 2
 check confirm-rerun-blocks           1/fail:a/1        3/rerun           1 2
-check confirm-nodata-blocks          1/fail:a/1        1/nodata          1 2
+check confirm-nodata-blocks          1/fail:a/1        5/nodata          1 2
 check confirm-host-busy-blocks       1/fail:a/1        2/none            1 2
 check confirm-missing-report-blocks  1/fail:a/1        1/none            1 2
 check confirm-pass-without-report    1/fail:a/1        0/none            1 2

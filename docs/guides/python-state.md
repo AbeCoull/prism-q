@@ -18,16 +18,18 @@ probs = simulate(circuit).initial_state(start).seed(42).run().probabilities
 ```
 
 The vector must have `2 ** num_qubits` entries and unit norm. A wrong length, a
-non-finite entry, or a norm off unity raises `PrismError`; an unnormalized vector is
-rejected, not rescaled.
+non-finite entry, or a norm off unity raises `PrismError`. An unnormalized vector is not
+rescaled.
 
 A start state also narrows the route. The dispatch shortcuts (tableau, product state,
-subsystem decomposition, Pauli propagation) hold only from |0...0>: a Clifford circuit
-yields a stabilizer state only from one. So `auto()` resolves to the statevector, the
-GPU and distributed statevectors and `density_matrix()` are the only other backends
-that accept a start state, and any other choice raises `PrismError` naming itself.
+subsystem decomposition, Pauli propagation) hold only from |0...0>, since a Clifford
+circuit yields a stabilizer state only from one. So `auto()` resolves to the
+statevector. The GPU and distributed statevectors and `density_matrix()` are the only
+other backends that accept a start state, and any other choice raises `PrismError`
+naming itself.
+
 Terminals carry it where the [terminal table](python-running.md#running-a-simulation)
-says so; `expectation_gradient()` rejects it, as do `shots()` and `sample_counts()` with
+says so. `expectation_gradient()` rejects it, as do `shots()` and `sample_counts()` with
 a noise model, since trajectory replay reinitializes a pure state per shot. Under noise,
 read the exact mixture with `run()`, `marginals()`, or `expectation()` on
 `density_matrix()`.
@@ -64,9 +66,9 @@ probs = (
 ```
 
 The matrix must have `4 ** num_qubits` entries, be Hermitian to 1e-12 per entry, and
-have unit trace to 1e-9; a failed check raises `PrismError` naming it. Positive
+have unit trace to 1e-9, and a failed check raises `PrismError` naming it. Positive
 semidefiniteness is not checked. Only `density_matrix()` and its GPU sibling accept a
-mixture; every other backend, `auto()` included, raises `PrismError` naming itself. The
+mixture. Every other backend, `auto()` included, raises `PrismError` naming itself. The
 [terminal table](python-running.md#running-a-simulation) applies unchanged. A mixture
 clears an earlier `.initial_state()`, and the reverse.
 
@@ -87,17 +89,18 @@ print(simulate(bell).overlap(simulate(plus)).fidelity)     # 0.5
 a stabilizer cut past the export cap does. The cut must leave qubits on both sides.
 `reduced_density_matrix(qubits)` returns `.matrix` with `qubits[0]` the lowest bit, its
 `.purity`, and `.qubits`. `overlap(other)` compares two pure states and reports only
-`fidelity`, `|<a|b>|^2`, since a tableau keeps no global phase and truncation moves one;
+`fidelity`, `|<a|b>|^2`, since a tableau keeps no global phase and truncation moves one.
 `.left` and `.right` carry each side's route.
 
 ## Handing a Clifford state to a second run
 
 `StabilizerBackend` holds a tableau across calls. `run(circuit)` resets it to the
-circuit's width and runs the circuit; `export_tableau()` returns the rows as a `uint64`
-array of bit-packed words and a `bool` array of row signs;
+circuit's width and runs the circuit, and `apply(circuit)` runs a circuit on the held
+state without resetting it. `export_tableau()` returns the rows as a `uint64` array of
+bit-packed words and a `bool` array of row signs, and
 `import_tableau(num_qubits, words, phases, num_classical_bits)` starts a backend from
-that pair; `apply(circuit)` runs a circuit on the held state without resetting it. The
-raw tableau serves as a checkpoint for a Clifford prefix that is expensive to replay.
+that pair. The pair serves as a checkpoint for a Clifford prefix that is expensive to
+replay.
 
 ```python
 from prism_q import StabilizerBackend
@@ -114,7 +117,7 @@ bits = resumed.apply(measurement_suffix)
 ```
 
 The import checks only the lengths and that each destabilizer anticommutes with its
-stabilizer partner; the intended input is an export. The random stream restarts from
+stabilizer partner, so feed it an export. The random stream restarts from
 the importing backend's seed, so a resumed run matches an uninterrupted one only when
 neither drew before the split.
 
@@ -140,8 +143,8 @@ for record in outcome.saves:
 
 Each record is a dictionary with `label`, `kind`, and `value`. `SaveSpec.StateVector`
 and `SaveSpec.DensityMatrix` come back as `complex128` arrays, the density matrix flat
-and row major over `2**n` rows; `SaveSpec.Probabilities` comes back as `float64`.
-Records arrive in the order their points were reached; labels need not be unique.
+and row major over `2**n` rows. `SaveSpec.Probabilities` comes back as `float64`.
+Records arrive in the order their points were reached, and labels need not be unique.
 
 A save is a barrier across the whole register, so no gate is fused or reordered across
 it. Only `run` returns the records: `shots`, `marginals` and the other terminals decline

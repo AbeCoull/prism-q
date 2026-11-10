@@ -134,11 +134,10 @@ q[7]: ██      ███ ███ █
 
 ## SVG
 
-`to_svg(&SvgOptions)` returns a complete `<svg>` document as a `String`, to write to a
-file or embed in HTML or Markdown. `to_svg_heatmap` does the same for the heatmap and
-adds marginal activity bars and a color key. Each operation counts once on every qubit it
-touches, so a CX adds two to its moment total; the bars sum these counts by qubit and by
-moment.
+`to_svg(&SvgOptions)` returns a complete `<svg>` document as a `String`. `to_svg_heatmap`
+does the same for the heatmap and adds marginal activity bars and a color key. The bars
+sum activity by qubit and by moment, and an operation counts once on every qubit it
+touches, so a CX adds two to its moment total.
 
 ```rust,no_run
 use prism_q::SvgOptions;
@@ -157,15 +156,13 @@ std::fs::write(
 .unwrap();
 ```
 
-Gates read left to right. A filled dot marks a control and a circled plus the target of
-a CX. `q[0]` is the least significant bit.
+A filled dot marks a control and a circled plus the target of a CX. `q[0]` is the least
+significant bit. Subscripts identify wires and rotation axes. Angles appear below gate
+names in radians, to at most three decimal places, with scientific notation for small
+values. Tooltips show the full angle when the SVG is opened directly or embedded inline
+but not when it is embedded as an image, so each figure below links its full SVG.
 
-Subscripts identify wires and rotation axes. Angles appear below gate names in radians,
-to at most three decimal places, with scientific notation for small values. Gate tooltips
-show full angle values when the SVG is opened directly or embedded inline, not when it is
-embedded as an image; each figure below links its full SVG.
-
-Wide figures scroll horizontally, or with the arrow keys once focused. Images follow the
+Wide figures scroll horizontally, or with the arrow keys once focused, and follow the
 book theme.
 
 <figure class="circuit-figure">
@@ -192,7 +189,7 @@ The `SvgOptions` fields fall into four groups. Lengths are in SVG user units.
 | Layout | `wire_spacing`, `moment_width`, `gate_height`, `gate_min_width`, `padding_*`, `font_size`, `control_radius`, `compact` | 64, 72, 46, 46, padding 64/32/24/32, 20 px, 4.2; `compact` shrinks spacing and fonts for dense embedding |
 
 `animate` is on by default and adds CSS animations, which a `prefers-reduced-motion`
-query switches off. Turn it off for static output such as documentation.
+query switches off. Turn it off for static output.
 
 ```rust
 use prism_q::SvgOptions;

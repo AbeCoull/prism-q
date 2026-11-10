@@ -3,10 +3,10 @@
 A `NoiseModel` attaches channels to the instructions of one circuit. The trajectory
 backends sample it shot by shot, the density matrix evolves it exactly, and on a
 Clifford circuit with Pauli noise the [compiled samplers](../architecture/samplers.md)
-draw it with no state per shot at all. [Noise internals](../architecture/noise.md)
-covers how each route runs a model; the
-[Noisy Simulation tutorial](../tutorials/noisy-simulation.md) walks through one end to
-end, and [Noise and Shots](python-noise.md) is the Python version of this page.
+draw it with no state per shot. [Noise internals](../architecture/noise.md) covers how
+each route runs a model, the [Noisy Simulation tutorial](../tutorials/noisy-simulation.md)
+walks through one, and [Noise and Shots](python-noise.md) is the Python version of this
+page.
 
 ## Attaching a model
 
@@ -81,10 +81,10 @@ A `DeviceCalibration` holds what a calibration page reports: `t1`, `t2` and read
 per qubit, a duration and depolarizing error per gate family, and optional two-qubit
 entries per pair. `to_noise_model(&circuit)` lowers it onto a circuit. After every gate,
 each target gets a `ThermalRelaxation` channel with its own `t1` and `t2` over the family's
-duration; a nonzero family error adds `Depolarizing` on a one-qubit target or
-`TwoQubitDepolarizing` on the pair; each measurement takes its classical bit's readout
-error from the measured qubit. Gates on more than two qubits are rejected, so decompose
-them first.
+duration, and a nonzero family error adds `Depolarizing` on a one-qubit target or
+`TwoQubitDepolarizing` on the pair. Each measurement takes its classical bit's readout
+error from the measured qubit. Gates on more than two qubits are rejected; decompose them
+first.
 
 The text form has one record per line, `key=value` fields in any order, and `#`
 comments:
@@ -122,11 +122,11 @@ let result = simulate(&circuit)
 
 `prism_q::sim::calibration::presets` has `superconducting_transmon(n)`, `trapped_ion(n)`
 and `neutral_atom(n)`: illustrative magnitudes for a technology class, the same on every
-qubit, not a measured device. Write the text form for a specific device.
+qubit. A specific device needs the text form.
 
 `to_noise_model` charges decoherence only to the qubits a gate touches.
 `to_scheduled_noise_model(&circuit)` also decays the qubits that wait, using the table's
-gate durations: the circuit is laid out as soon as possible in the greedy layers
+gate durations. The circuit is laid out as soon as possible in the greedy layers
 `Circuit::depth` counts, each layer as long as its longest gate, and at the end of each
 layer every qubit relaxes with its own `t1` and `t2` over the part of the layer it spent
 idle. `gate_times()` returns those durations as a `GateTimes` for a builder.
@@ -193,8 +193,8 @@ A `DriftDistribution` is a zero-mean Gaussian over per-qubit offsets:
 `independent(sigmas)`, `from_t2_star(t2_star)` for widths `sqrt(2) / t2_star`, a full
 `from_covariance(matrix)`, or `with_neighbour_correlation(coupling, rho)` to correlate the
 qubits of each coupling edge. Each shot draws standard normals and correlates them through
-the covariance's Cholesky factor; a covariance that is not positive semidefinite is
-rejected at `build`.
+the covariance's Cholesky factor. `build` rejects a covariance that is not positive
+semidefinite.
 
 ```rust
 use prism_q::{DriftDistribution, GateFilter, GateTimes, NoiseBuilder};

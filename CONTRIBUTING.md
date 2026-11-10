@@ -19,7 +19,7 @@ rustup installs on the first `cargo` call in the checkout. CI uses the same rele
 except in the MSRV job and the nightly jobs (Miri, ThreadSanitizer, fuzzing, public
 API), so lints and codegen move only with the pin. Bump it in its own change: update the
 channel and the `dtolnay/rust-toolchain@<version>` steps in `.github/workflows/`, then
-fix the new lints. The supported floor is a separate number; see
+fix the new lints. The supported floor is a separate number, in
 [Compatibility](docs/guides/compatibility.md).
 
 ### From source
@@ -46,18 +46,18 @@ cargo clippy --all-targets --features "parallel gpu distributed" -- -D warnings 
 cargo doc --no-deps --features "parallel gpu distributed"
 ```
 
-These run on any host: the `gpu` and `distributed` features build without a CUDA toolkit
-or MPI.
+These run on any host, since the `gpu` and `distributed` features build without a CUDA
+toolkit or MPI.
 
 Before opening a pull request, run `scripts/pre_pr.sh`. It runs the gate at `parallel`,
-then the CI checks the branch's diff against `origin/main` reaches: the doc build, the
-public API snapshot, semver, the Python parity manifest, `--no-default-features` and
+then whichever CI checks the branch's diff against `origin/main` reaches: the doc build,
+the public API snapshot, semver, the Python parity manifest, `--no-default-features` and
 cross-target clippy. `--plan` lists what it would run and why.
 
 `--all-features` adds `distributed-mpi`, which needs a system MPI installation and
 libclang for its bindgen step. Run it when a change touches the MPI surface or the
-`Cargo.toml` feature wiring. On Windows, dot-source `scripts/mpi-env.ps1` first
-(`. scripts\mpi-env.ps1`) to load MSVC, MS-MPI, and libclang into the PowerShell session:
+`Cargo.toml` feature wiring. On Windows, first dot-source `scripts/mpi-env.ps1`
+(`. scripts\mpi-env.ps1`) to load MSVC, MS-MPI, and libclang into the session:
 
 ```bash
 cargo nextest run --all-features
@@ -68,7 +68,7 @@ Use `cargo test` with the same features when `cargo-nextest` is not installed. K
 doctests on `cargo test --doc` until nextest doctest support is no longer experimental.
 
 Integration tests are modules of one binary, `tests/integration/main.rs`: add a file
-there and declare it with `mod`, then select it with a filter such as
+there, declare it with `mod`, and select it with a filter such as
 `cargo nextest run --features parallel -E 'test(/^backend_matrix::/)'`. A file that sets
 an environment variable, builds the global Rayon pool, or calls `set_default_limits`
 stays its own `tests/<name>.rs` binary, since `cargo test` runs a binary's tests in one
@@ -78,8 +78,8 @@ The GPU golden tests (`--test golden_gpu --test golden_gpu_density_matrix` under
 `--features "parallel gpu"`) skip without a CUDA device, so a green run on a host
 without a card means untested, and no CI job opens a device. Before merging a change to
 `src/gpu/`, the gate set, the fusion pipeline, or a kernel table shape, run
-`scripts/test-gpu.ps1` on a host with a card; it sets `PRISM_REQUIRE_GPU=1` so a missing
-device fails the run.
+`scripts/test-gpu.ps1` on a host with a card. It sets `PRISM_REQUIRE_GPU=1`, so a
+missing device fails the run.
 
 ## Coverage
 
@@ -94,10 +94,10 @@ with the MPI and libclang requirements above.
 
 ## Fuzzing
 
-`fuzz/` holds `cargo fuzz` targets for the OpenQASM front end (`qasm_parse` on raw
-bytes, `qasm_tokens` on programs assembled from QASM fragments), which must never panic,
-and for fusion (`fusion`), which checks a fused statevector run against a plain apply
-loop to 1e-10 per amplitude. The crate is its own workspace and needs nightly:
+`fuzz/` holds `cargo fuzz` targets for the OpenQASM front end, which must never panic
+(`qasm_parse` on raw bytes, `qasm_tokens` on programs assembled from QASM fragments),
+and for fusion (`fusion`, a fused statevector run checked against a plain apply loop to
+1e-10 per amplitude). The crate is its own workspace and needs nightly:
 
 ```bash
 # requires: cargo install cargo-fuzz
@@ -115,7 +115,7 @@ crash input.
 ## Documentation site
 
 `docs/` publishes as an mdBook site to GitHub Pages through `.github/workflows/docs.yml`.
-Preview locally:
+To preview:
 
 ```bash
 cargo install mdbook   # once
@@ -133,8 +133,8 @@ cargo bench --bench circuits --features parallel        # circuit macrobenchmark
 cargo bench --bench bench_driver --features parallel    # gate microbenchmarks
 ```
 
-Always use `--features parallel`, since baselines were taken with Rayon enabled. Run one
-`cargo bench` process at a time; competing Rayon pools add noise.
+Always use `--features parallel`: baselines were taken with Rayon enabled. Run one
+`cargo bench` process at a time, because competing Rayon pools add noise.
 
 ### Profiling
 
@@ -147,7 +147,7 @@ The script header lists the platform profiler it needs and where the SVG lands.
 
 ### Regression checks
 
-Numbers held to the 5% gate come from the adjacent-binary A/B. It builds both bench
+Numbers held to the 5% gate come from the adjacent-binary A/B, which builds both bench
 binaries, checks the working tree did not change between the builds, runs them back to
 back, and reports each row against its own same-code control:
 
@@ -158,7 +158,7 @@ back, and reports each row against its own same-code control:
 Two `cargo bench` runs minutes apart are not an A/B on a development host: the rebuild
 lands between them, and a byte-identical control group has read as much as +98%. Report
 every change with its control column, and say when a delta sits inside the noise floor.
-`benches/README.md` has the method and the rows this cannot resolve.
+`benches/README.md` has the method and the rows the A/B cannot resolve.
 
 Stored baselines still serve for tracking a number over weeks and for the CI gate,
 where both sides run in one job:
@@ -198,21 +198,19 @@ The level comes from `scripts/release_bump_level.sh` in two stages:
 | `fix:` or `perf:` | patch | patch |
 | anything else | none | none |
 
-The second column is the specification; the third is what ships below 1.0. Cargo reads
-`0.27.0` as `^0.27.0`, so under 0.x the minor position is already the compatibility
-boundary: `0.27` to `0.28` signals a break to every downstream caret requirement.
-`cargo release major` on 0.x would resolve to 1.0.0, which crates.io allows yanking but
-never unpublishing, and which claims an API stability the crate has not reached. The
-clamp reads the major version from `Cargo.toml`, so a deliberate 1.0.0 restores the
-major path with no edit to the script.
+The third column is what ships below 1.0. Cargo reads `0.27.0` as `^0.27.0`, so under
+0.x the minor position is already the compatibility boundary: `0.27` to `0.28` signals
+a break to every downstream caret requirement. `cargo release major` on 0.x would
+resolve to 1.0.0, which crates.io allows yanking but never unpublishing, and which
+claims an API stability the crate has not reached. The clamp reads the major version
+from `Cargo.toml`, so the workflow never reaches 1.0.0 on its own: set that version in
+`Cargo.toml` by hand and release from there, and the major path returns with no edit to
+the script.
 
 `scripts/release_bump_level_test.sh` checks the mapping against synthetic commit lists,
 asserting the level and the resulting version (a `feat!:` commit on 0.27.0 resolves to
 `minor` and publishes 0.28.0). The `release-bump-level` CI job runs it on every pull
 request, and the release workflow runs it again before reading the commit range.
-
-The workflow never reaches 1.0.0 on its own: set that version in `Cargo.toml` by hand
-and release from there.
 
 The wheel follows in the same run: the workflow writes the new version into
 `bindings/python/Cargo.toml` and tags it `py-v<version>`, so the two never drift. What a
@@ -224,8 +222,8 @@ version promises, which feature flags are part of the surface, and the MSRV pin 
 PRs run formatting, clippy, nextest, doctests, doc build, coverage, the release
 bump-level check, aarch64 cross-compile, macOS ARM64 tests, and `cargo-deny`
 (security advisories and license audit). The GPU job compiles the `gpu` feature without
-a CUDA toolkit and runs the kernel name registry test, which needs no device; no CI job
-opens a device, so `scripts/test-gpu.ps1` covers the device suites on a host with a card.
+a CUDA toolkit and runs the kernel name registry test, which needs no device. The device
+suites run only through `scripts/test-gpu.ps1` on a host with a card.
 
 ## Hot-path rules
 
@@ -235,9 +233,8 @@ opens a device, so `scripts/test-gpu.ps1` covers the device suites on a host wit
 
 ## Comments and documentation
 
-Whether to write a comment and how to write it are separate questions. The rules below
-settle the first. The file being edited settles the second: match its comment density
-and voice in whatever does get written.
+The rules below settle whether to write a comment. The file being edited settles how:
+match its comment density and voice.
 
 ### Inline comments
 
@@ -253,11 +250,10 @@ and voice in whatever does get written.
 
 - A docstring must add a fact the name, signature, and types do not already carry: a
   unit, an ordering or packing convention, a default, an invariant, a
-  cross-reference, a contract. If no such fact exists, write no docstring. Restating
-  the signature is noise.
+  cross-reference, a contract. If no such fact exists, write no docstring.
 - One line is the norm. More than three lines is reserved for real contract or
-  algorithm prose (a trait's call-order contract, a backend's applicability). Never
-  pad to look thorough, and never document to hit coverage.
+  algorithm prose (a trait's call-order contract, a backend's applicability). Do not
+  pad, and do not document to hit coverage.
 - Trivial self-describing items (`into_x`, `len`, `is_empty`, obvious constructors,
   fields whose name says everything) get nothing.
 - A `pub` item that is not meant as public API gets demoted to `pub(crate)` instead of

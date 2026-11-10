@@ -119,25 +119,25 @@ batch = sampler.sample_result(1000, seed=7)
 
 `sample(shots, *, seed=None, bit_packed=True, separate_observables=True)` returns a
 `(detectors, observables)` pair of `(shots, ceil(n / 8))` byte arrays in the
-`packed_detectors()` layout below; bool arrays with `bit_packed=False`; or, with
-`separate_observables=False`, one array whose columns are the detectors followed by the
+`packed_detectors()` layout below. `bit_packed=False` gives bool arrays, and
+`separate_observables=False` one array whose columns are the detectors followed by the
 observables. It counts every shot, whether or not postselection accepts it.
+
 `sample_result` returns a full `QecSampleResult`. `seed=None` continues one stream that
 starts at the program's seed, and an explicit seed draws what `run()` draws at that
 seed. Sampling releases the GIL, and calls on one sampler from several threads run one
 at a time. Measurement records are dropped unless `compile_sampler(keep_measurements=True)`
-asks for them, which `sample_result` then reports. A program that needs the per-shot or
-analytical runners (`EXP_VAL`, non-Clifford gates) raises `PrismError` from
-`compile_sampler`.
+asks for them. A program that needs the per-shot or analytical runners (`EXP_VAL`,
+non-Clifford gates) raises `PrismError` from `compile_sampler`.
 
 ## Detector error models and decoders
 
 `detector_error_model()` derives the program's `DetectorErrorModel`.
 `probabilities()` (float64), `detector_matrix()`, and `observable_matrix()` (bool,
-detectors or observables by mechanisms) feed check-matrix decoder constructors;
-`detector_coords()` holds per-detector coordinates; `decompose_graphlike()` returns the
-form matching decoders need (at most two detectors per mechanism); and `to_text()`
-writes the common detector error model text format for file-based decoders:
+detectors or observables by mechanisms) feed check-matrix decoder constructors.
+`detector_coords()` holds per-detector coordinates, and `decompose_graphlike()` returns
+the form matching decoders need, at most two detectors per mechanism. `to_text()` writes
+the common detector error model text format for file-based decoders:
 
 ```python
 dem = qp.detector_error_model()
@@ -159,9 +159,9 @@ failures = (predicted[:, 0] != res.observables[:, 0]).sum()
 `MatchingDecoder` (exact minimum-weight perfect matching, graphlike models) and
 `BpOsdDecoder` (belief propagation with ordered statistics, any model) share that
 surface. Every decoder also has `logical_error_rate(detectors, observables)`, the
-fraction of shots with any observable mispredicted, which takes bool or packed arrays
-as long as both arguments match, and `decode_packed`, which takes the
-`packed_detectors()` layout below and returns flips in that layout. `BpOsdDecoder` takes
+fraction of shots with any observable mispredicted, on bool or packed arrays as long as
+both arguments match. `decode_packed` takes the `packed_detectors()` layout below and
+returns flips in that layout. `BpOsdDecoder` takes
 keyword options `max_iterations`, `bp_method` (`"min_sum"` or `"product_sum"`),
 `min_sum_scaling`, `osd_method` (`"osd0"`, `"cs"`, or `"exhaustive"`), and
 `osd_order`:
@@ -176,11 +176,11 @@ rates = [d.logical_error_rate(res.detectors, res.observables) for d in (matching
 
 `feedforward(records, expected, body)` applies the gates and resets of `body`, a
 second `QecProgram` holding the correction, only in shots where the parity over
-`records` equals `expected`: an adaptive correction keyed on a syndrome. A body of only
-Pauli gates (`X`, `Y`, `Z`, identity) runs on the compiled path of `run()`, where the
-correction becomes a fixed set of record flips. Any other body breaks the single affine
-map that sampler applies to every shot, so the program runs through `run_reference()`,
-the per-shot statevector path, at `O(shots * 2^n)`; it suits small programs.
+`records` equals `expected`. A body of only Pauli gates (`X`, `Y`, `Z`, identity) runs
+on the compiled path of `run()`, where the correction becomes a fixed set of record
+flips. Any other body breaks the single affine map that sampler applies to every shot,
+so the program runs through `run_reference()`, the per-shot statevector path, at
+`O(shots * 2^n)`. That suits small programs.
 
 ```python
 from prism_q import Gate, QecProgram, QecRecordRef
@@ -203,8 +203,8 @@ assert not prog.run_reference().measurements[:, 1].any()
 `packed_detectors()`, `packed_observables()`, and `packed_measurements()` return
 the same records eight to a byte, as `(shots, ceil(n / 8))` `uint8` arrays: record
 `j` of a shot is bit `j % 8` of byte `j // 8`, and the unused high bits of the last
-byte are zero. That is an eighth of the bool arrays' memory; `np.unpackbits` restores
-them:
+byte are zero. That is an eighth of the bool arrays' memory, and `np.unpackbits`
+restores them:
 
 ```python
 import numpy as np

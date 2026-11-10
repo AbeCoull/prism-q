@@ -11,7 +11,7 @@ gates to differentiate.
 16 bytes. Each `ParamLink` ties an instruction index to a slot in the value vector, and a
 slot may drive several instructions: `bind` writes one angle to each, and the adjoint
 gradient sums their contributions into one entry. `CircuitBuilder::param` records a
-link on the gate it follows; OpenQASM `input` declarations name the slots.
+link on the gate it follows, and OpenQASM `input` declarations name the slots.
 
 The arity is declared at construction, so a value vector of the wrong length is rejected
 even when its trailing slots carry no link. The table also records the gate kind and
@@ -35,10 +35,11 @@ no error, because replay patches only the sites it recorded.
 
 Fusion decides the same block structure at every point of a sweep. `PreparedCircuit`
 settles it once in a `FusionPlan` (`src/circuit/plan.rs`), along with the backend
-choice, and rebinds against it. Capture gates the fusion floors on the buffer width of the backend the prepared circuit holds, so a
-prepared density matrix fuses at `2n` as a direct run does.
+choice, and rebinds against it. Capture gates the fusion floors on the buffer width of
+the backend the prepared circuit holds, so a prepared density matrix fuses at `2n` as a
+direct run does.
 
-The plan is reusable; the matrices are not, since a changed angle changes every fused
+The plan is reusable. The matrices are not, since a changed angle changes every fused
 matrix it feeds. `FusionPlan` records a recipe per payload derived from an angle: a list
 of template instructions and how each one's matrix enters the product. Replay recomputes
 the products and never caches them. Nested recipes splice by rewriting a placement flag
@@ -82,11 +83,11 @@ angle in a boxed payload, not the enum slot, and replay patches it as it patches
 terminal of that name does on the bound circuit, plus a `_many` form of each that takes
 a list of bindings and splits it across cores where `run_batch` would. Gradient batches
 split only below the statevector kernels' parallel width, 15 qubits, and run in order
-above it. Where the held backend would answer differently, the call binds and
-hands the circuit to `simulate`.
+above it. Where the held backend would answer differently, the call binds and hands the
+circuit to `simulate`.
 
-Fusion cost tracks instruction count and is nearly flat in qubit count, while gate
-application is `2^n`, so capture pays most on narrow circuits.
+Capture pays most on narrow circuits, where
+[fusion cost](./fusion.md#fusion-cost-against-apply-cost) is the larger share of a run.
 
 ## Adjoint gradient
 
@@ -151,8 +152,8 @@ eigenvalues `±1`, so `⟨H⟩` is a trigonometric polynomial of degree 1 in tha
 `P(θ) = e^{iθ/2} Rz(θ)` and the scalar cancels against its conjugate in `⟨ψ|H|ψ⟩`
 wherever the gate sits, so the same shift applies.
 
-The gate set is the adjoint's, so parameter shift reaches no gate the adjoint rejects;
-it extends the backends and circuit shapes, not the gates. A `PauliRot` on a backend
+The gate set is the adjoint's, so parameter shift reaches no gate the adjoint rejects.
+It extends the backends and circuit shapes, not the gates. A `PauliRot` on a backend
 without the native kernel is shifted in place, because the ladder expansion happens
 below the forward evaluation.
 
@@ -164,5 +165,5 @@ Cost is `1 + 2 * links` evaluations against the adjoint's one, with no light con
 pruning: a trainable gate with a zero gradient is still evaluated twice. Evaluations run
 in sequence, because each already drives a Rayon parallel backend run and several in
 flight would multiply peak state memory by the parameter count, the resource this path
-exists to stay under. With a noise model, only the density matrix kinds accept the pair;
-see [noise across the terminals](./engine.md#noise-across-the-terminals).
+exists to stay under. With a noise model, only the density matrix kinds accept the pair
+([noise across the terminals](./engine.md#noise-across-the-terminals)).

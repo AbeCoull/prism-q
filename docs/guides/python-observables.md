@@ -17,12 +17,12 @@ route that served them. The result also indexes, slices to a `float64` array, ha
 length, converts with `np.asarray` as its `.values`, and pickles with its metadata.
 
 A `PauliObservable` returns an `ObservableExpectation` for the weighted sum. `mean` is
-`<H>`; `group_variances` holds `Var(H_g)` for each commuting group and `variance` their
+`<H>`. `group_variances` holds `Var(H_g)` for each commuting group and `variance` their
 sum, the variance of an estimate drawing one shot per group, or `None` on a route without
-grouping; `std_error` is set only when a sampling route estimated the terms. Weighted
-terms must be wrapped in `PauliObservable([...])`; a bare `(coefficient, observable)` list
-raises `TypeError`, as does a single factor list such as `[(0, "Z")]`, which is written
-`[[(0, "Z")]]`. The circuit must be unitary, except on the density matrix below.
+grouping. `std_error` is set only when a sampling route estimated the terms. Weighted
+terms must be wrapped in `PauliObservable([...])`. A bare `(coefficient, observable)`
+list raises `TypeError`, as does a single factor list such as `[(0, "Z")]`, which is
+written `[[(0, "Z")]]`. The circuit must be unitary, except on the density matrix below.
 `observable_variance(hamiltonian)` returns `<H^2> - <H>^2` with the mean.
 
 ```python

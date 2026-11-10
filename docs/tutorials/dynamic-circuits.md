@@ -40,8 +40,8 @@ print(round(math.sin(theta / 2) ** 2, 4))     # 0.3188
 The sampled rate is 0.002 from the exact one; one standard error at 100,000 shots is
 0.0015. `shots` is a `(shots, bits)` bool array, so column 2 is classical bit `c[2]`.
 
-A circuit with feed-forward has no single final state, so use the shot terminals,
-`shots()` and `sample_counts()`. `run()` follows one sampled branch: `classical_bits`
+A circuit with feed-forward has no single final state, so use `shots()` and
+`sample_counts()`. `run()` follows one sampled branch: `classical_bits`
 holds that shot's outcomes and `probabilities` the state it ended in. `state_vector()`
 declines any circuit that measures, resets or branches.
 
@@ -79,10 +79,10 @@ branch, so they read `110`. The other half took `h`, which leaves `c[1]` a fair 
 Conditions can also test a parity, `if (c[0] ^ c[1])`, and `switch` with `case` arms
 lowers to the same guards. `parse_qasm` declines `while`, since a loop that exits on a
 measurement has no fixed instruction list. `parse_qasm_dynamic` reads it, with `break`
-and `continue`, and `simulate_program` runs the result once per shot; past a million
-blocks a shot stops with a step-limit error unless `max_steps` raises the bound.
-The [OpenQASM guide](../guides/openqasm.md#dynamic-programs) covers what the dynamic
-parser reads, and [the subset](../guides/openqasm.md#the-subset) has the rest.
+and `continue`, and `simulate_program` runs the result once per shot. A shot that passes
+a million blocks stops with a step-limit error unless `max_steps` raises the bound. The
+[OpenQASM guide](../guides/openqasm.md#dynamic-programs) lists what the dynamic parser
+reads.
 
 ## Subroutines and classical values
 
@@ -116,7 +116,7 @@ print(sorted(counts))   # ['001', '101']
 ```
 
 `c[0]` is a fair coin. The correction always returns the qubit to `|0>`, so `c[1]` reads
-0 and `c[2]` is always 1. The [Subroutines section](../guides/openqasm.md#subroutines) of the OpenQASM guide lists the
+0 and `c[2]` is always 1. [Subroutines](../guides/openqasm.md#subroutines) lists the
 result types and the forms that decline.
 
 ## In Rust

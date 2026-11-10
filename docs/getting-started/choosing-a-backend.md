@@ -83,11 +83,10 @@ throughout.
 | Factored | $O(2^n)$ worst case | Largest merged block |
 | Density Matrix | $O(4^n)$ | Half the statevector cap, about 14 qubits on 16 GiB |
 
-The [memory budget](../architecture/backends.md#memory-budget) derives every cap from the
-same detected budget. The `distributed` feature adds a statevector sharded across MPI
-ranks with exact results; [Distributed Statevector and MPI](../guides/distributed.md) has
-its layout and limits. CPU and GPU support per backend is in the
-[Capability and Support Matrix](../guides/capabilities.md), and each backend's internals
-in the [architecture reference](../architecture/backends.md).
+Every cap derives from one detected [memory budget](../architecture/backends.md#memory-budget).
+The `distributed` feature adds an exact statevector sharded across MPI ranks
+([Distributed Statevector and MPI](../guides/distributed.md)). The
+[Capability and Support Matrix](../guides/capabilities.md) has CPU and GPU support per
+backend, and the [architecture reference](../architecture/backends.md) has the internals.
 
 Next: work through a task end to end in the [Tutorials](../tutorials/index.md).

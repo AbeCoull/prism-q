@@ -1,8 +1,7 @@
 # Benchmark Methodology
 
-How PRISM-Q's numbers are produced, what they include, and how to reproduce them or
-compare against another simulator. [Performance](../performance/index.md) holds the
-published timings, and [Performance and SIMD](./performance.md) the mechanisms being measured.
+[Performance](../performance/index.md) holds the published timings, and
+[Performance and SIMD](./performance.md) the mechanisms being measured.
 
 ## Two kinds of measurement
 
@@ -13,8 +12,8 @@ published timings, and [Performance and SIMD](./performance.md) the mechanisms b
 | Instruction counts on a shared CI runner | The `iai` target under callgrind | Counts per row, compared against the base commit |
 
 The suite answers how long a circuit takes end to end on one host. The Criterion rows
-answer whether a change moved a code path, which needs the A/B below, with both binaries
-run back to back, not two runs minutes apart.
+answer whether a change moved a code path, which takes the A/B described under
+[Reading a number](#reading-a-number).
 
 ## The published suite
 
@@ -30,7 +29,7 @@ version. `comparison/matrix.py report` folds it into the Performance page.
 | HEA | `hardware_efficient_ansatz(n, 5, seed)` | 5 layers of random Ry and Rz on every qubit followed by a linear CX chain | 16, 20, 24, 26, 28 |
 | QV | `quantum_volume_circuit(n, n, seed)` | `n` layers, each a random pairing of qubits with a random SU(4) on each pair, decomposed into CX and single-qubit rotations | 16, 20, 24 |
 
-Rules the generator fixes, so a rerun on another host differs only in the host:
+Fixed by the generator, so a rerun on another host differs only in the host:
 
 - Circuit seed `0xDEAD_BEEF` for the random families; simulation seed `42`.
 - Backend `Auto`. GHZ is Clifford and lands on the stabilizer backend, which is why it
@@ -48,9 +47,8 @@ Rules the generator fixes, so a rerun on another host differs only in the host:
   records the host's logical core count and the pool width used.
 - Precision: `Complex<f64>` amplitudes on every backend, with no single precision mode.
 
-A number on that page describes the crate version and host in its Setup section.
-Dispatch rules and kernels change between releases, so compare numbers only within one
-run.
+The page's Setup section names the crate version and host. Dispatch rules and kernels
+change between releases, so compare numbers only within one run.
 
 ## Criterion targets
 
@@ -131,7 +129,7 @@ harness in `comparison/` under these controls:
   Time the other simulator to the same observable, or time both to the final state
   only; mixing the two moves a 26-qubit row by the cost of a full pass over the state.
 - Same precision. PRISM-Q is `f64` complex throughout. A single precision run moves half
-  the memory traffic, which makes it a different measurement, not a worse or better one.
+  the memory traffic, which makes it a different measurement.
 - Same thread budget. Pin both with their own variable (`RAYON_NUM_THREADS` here,
   `OMP_NUM_THREADS` or an API call there) and report the count. Report the physical
   and logical core counts of the host.
@@ -144,24 +142,15 @@ harness in `comparison/` under these controls:
 - Versions. Name the release of each simulator and the commit when a release is not
   enough.
 
-A results table that names the version, hardware, compiler, qubit count, circuit, shot
-count, thread count, timing and memory for every row can be reproduced by its readers.
-Where a workload favors one simulator's design, name the design choice that explains it;
-a difference without its mechanism is not yet a finding.
+Where a workload favors one simulator's design, name the design choice that explains it.
+A difference without its mechanism is not yet a finding.
 
 ### The benchmark matrix
 
-`comparison/matrix.py` applies those controls to the published comparison.
-
-| Adapter | Configuration | Precision |
-| --- | --- | --- |
-| `prismq` | PRISM-Q, automatic dispatch, `--features parallel` | fp64 |
-| `prismq:<backend>` | PRISM-Q, one backend forced | fp64 |
-| `aer-statevector`, `-f32` | Qiskit Aer statevector, defaults | fp64, fp32 |
-| `aer-mps`, `aer-automatic` | Qiskit Aer MPS; Aer's own method choice | fp64 |
-| `stim` | Stim compiled sampler, single-threaded | exact |
-| `qsim` | qsimcirq, defaults | fp32 |
-| `quest`, `spinoza`, `qip` | QuEST v4.3.0, Spinoza, RustQIP | fp64 |
+`comparison/matrix.py` applies those controls to the published comparison. PRISM-Q runs
+with automatic dispatch and, for the dispatch rows, with each backend forced; every peer
+runs at its defaults. [Performance](../performance/index.md) lists each simulator with its
+version and precision.
 
 | Family | Sizes | Circuit |
 | --- | --- | --- |
@@ -185,8 +174,8 @@ a difference without its mechanism is not yet a finding.
   1e-5). Sampled outputs: bit marginals and pair parities against exact values from an
   independent light-cone reference, exact binomial tests at family-wise alpha 1e-3;
   under 100 shots, deterministic bits only.
-- Not covered: GPU, 16 threads, ISA variants, noise, Qulacs (no Windows wheel for Python
-  3.14), and dense sizes past 26 qubits (the `full` profile).
+- Not covered: GPU, 16 threads, ISA variants, noise, simulators without a Windows wheel
+  for Python 3.14, and dense sizes past 26 qubits (the `full` profile).
 
 ## Profiling
 

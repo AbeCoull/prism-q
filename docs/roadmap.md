@@ -46,7 +46,7 @@ says what each release promises.
 
 | Item | Status |
 | --- | --- |
-| OpenQASM 3 constructs that decline today: private measurement storage in subroutines, the `complex` type, and `durationof`. [The subset](./guides/openqasm.md#the-subset) lists the rest | Planned |
+| OpenQASM 3 constructs that decline today: private measurement storage in subroutines and the `complex` type. [The subset](./guides/openqasm.md#the-subset) lists the rest | Planned |
 | Conversion from Python circuit frameworks, behind an optional dependency | Planned |
 | Checkpoint and resume across processes, which needs a state format first | Research |
 | Pulse-level and continuous-time simulation. Design only: whether it becomes a backend or a separate crate is the first decision | Research |

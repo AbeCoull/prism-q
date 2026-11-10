@@ -7,7 +7,7 @@ models and leakage are on [Noise Compilation](./noise.md).
 
 `compile_measurements` propagates Pauli Z observables backward through the circuit. Each
 measured qubit becomes a row of a GF(2) parity matrix M recording which input qubits it
-depends on; a Clifford gate conjugates a Pauli string in O(1). `compile_forward` tracks
+depends on, and a Clifford gate conjugates a Pauli string in O(1). `compile_forward` tracks
 stabilizer generator dependencies forward through the circuit and produces the same
 matrix.
 
@@ -32,8 +32,8 @@ Results collect through the `ShotAccumulator` trait:
 
 `PackedShots::RAW_FORMAT_VERSION` is the replay contract for `raw_data()` and
 `into_data()`. Version 1 stores little-endian bit order within each `u64`. `ShotMajor`
-stores one row per shot with `m_words() = ceil(num_measurements / 64)`; `MeasMajor` one
-row per measurement with `s_words() = ceil(num_shots / 64)`. `try_from_shot_major` and
+stores one row per shot with `m_words() = ceil(num_measurements / 64)`, and `MeasMajor`
+one row per measurement with `s_words() = ceil(num_shots / 64)`. `try_from_shot_major` and
 `try_from_meas_major` reject shape mismatches and nonzero semantic padding. Histograms,
 marginals, parity rows and accumulators mask only semantic padding: the bits past the
 last measurement in shot major data, and past the last shot in measurement major data.
@@ -94,7 +94,7 @@ The product state is the one backend taken past subsystem decomposition. It alre
 stores one factor per qubit, so splitting a non-entangling circuit into blocks pays a
 backend, a partition and a merge per block to rebuild what one native draw reads off
 the state, and past 64 qubits the merged block distribution has no representation.
-Every other backend keeps the block split;
+Every other backend keeps the block split.
 `only_the_product_state_takes_the_native_sampler_past_decomposition`
 (`src/sim/tests.rs`) pins both sides.
 
@@ -113,6 +113,5 @@ next qubit. A shot costs one doubled contraction per qubit, with peaks set by
 treewidth rather than `2^n`. The measured crossover that put the dense arm below the
 ceiling is in the backend's module docstring.
 
-Weighted observables and their commuting groups moved to
-[the engine page](./engine.md#weighted-observables), noise models and the noisy engines to
-[Noise Compilation](./noise.md).
+Weighted observables and their commuting groups are on
+[the engine page](./engine.md#weighted-observables).

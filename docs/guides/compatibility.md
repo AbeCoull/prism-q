@@ -1,14 +1,11 @@
 # Compatibility and Versioning
 
-What a version number promises, which toolchains build the crate, and when a seed stops
-reproducing a result.
-
 ## Rust version
 
 The minimum supported Rust version is 1.89.0, pinned in three places updated together:
 `rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`, and the `CI_MSRV` variable the
 `msrv` CI job builds against. That job checks the library with `parallel`, `gpu` and
-`distributed`; `distributed-mpi` needs a system MPI to build and is not checked at the
+`distributed`. `distributed-mpi` needs a system MPI to build and is not checked at the
 floor. Raising the MSRV is a minor bump while the crate is below 1.0. The development
 toolchain is separate: `rust-toolchain.toml` pins an exact stable release (see
 [Contributing](https://github.com/AbeCoull/prism-q/blob/main/CONTRIBUTING.md#build)).
@@ -25,7 +22,7 @@ disappear in any release.
 The crate and the Python wheel carry one version. A release bumps the crate, writes the
 same version into the bindings manifest and tags the wheel `py-v<version>`, so a wheel and
 a crate with the same number were built from one commit. Below 1.0 the minor position is
-the compatibility boundary: Cargo reads `0.32.0` as `^0.32.0`, so `0.32` to `0.33` already
+the compatibility boundary. Cargo reads `0.32.0` as `^0.32.0`, so `0.32` to `0.33` already
 signals a break to every caret requirement, and the release tooling resolves a breaking
 change to a minor bump rather than 1.0.0.
 

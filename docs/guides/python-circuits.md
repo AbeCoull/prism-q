@@ -61,8 +61,8 @@ energy = simulate(evolved).seed(42).expectation(ising).mean
 assert abs(energy - 1.0) < 1e-2  # <H> is conserved up to the Trotter error
 ```
 
-Standard gates lower exactly as the OpenQASM parser lowers them, so a builder circuit
-matches the parsed one instruction for instruction: `crx`, `cy` and the other
+Standard gates lower as the OpenQASM parser lowers them, so a builder circuit matches
+the parsed one instruction for instruction: `crx`, `cy` and the other
 controlled gates become one controlled-unitary, `rxx` and `ryy` become Pauli
 rotations that `.param(slot)` can bind, `u` becomes one fused matrix, and `iswap`
 and `cswap` expand to Clifford gates and a Toffoli.
@@ -103,7 +103,7 @@ assert ghz.gate_count() == 10 and ghz.t_count() == 0 and ghz.is_clifford_only()
 the `+1` eigenvalue as `0`. The qubit is left in the Z eigenstate, not the `axis` one.
 `measure_pauli_product(factors, bit)` measures a product such as `X0 X1` without
 measuring its factors. The first call appends one ancilla past the register to collect
-the parity, so the circuit is one qubit wider; a second call resets that ancilla, which
+the parity, so the circuit is one qubit wider. A second call resets that ancilla, which
 takes the circuit off the compiled sampling route.
 
 ```python
@@ -191,7 +191,7 @@ dense unitaries on three or more qubits have no OpenQASM spelling and raise `Pri
 with `kind == "export_unsupported"`.
 
 `print(circuit)` draws the text wire diagram. `draw()` takes `fold_width`,
-`show_idle_wires`, `show_barriers`, `max_qubits`, and `max_moments`; past 64 qubits or
+`show_idle_wires`, `show_barriers`, `max_qubits`, and `max_moments`. Past 64 qubits or
 500 moments it returns `summary()` instead (gate counts, connectivity, depth profile).
 `heatmap()` draws gate density by qubit and moment.
 
@@ -215,9 +215,8 @@ wires and 200 moments.
 ## Parameter sweeps
 
 `Parameters` names the angle slots a variational loop rebinds. `PreparedCircuit` holds
-the circuit across bindings, so fusion and backend selection happen once rather than
-per point. The [variational tutorial](../tutorials/variational.md) runs an optimization
-loop on top of this.
+the circuit across bindings, so fusion and backend selection happen once, not per point.
+The [variational tutorial](../tutorials/variational.md) runs an optimization loop on it.
 
 ```python
 from prism_q import CircuitBuilder, PreparedCircuit
@@ -237,8 +236,7 @@ for values in [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]:
 `expectation(values, observables)` reads `Simulation.expectation()` on the bound circuit
 without dispatching or fusing again: a list of Pauli strings returns a `float64` ndarray,
 one value per string, and a `PauliObservable` returns the `ObservableExpectation`.
-`bind(values)` returns the bound `Circuit`, for `simulate(...)` with other options or any
-other consumer.
+`bind(values)` returns the bound `Circuit`.
 
 `run_many` and `expectation_many` take a `(points, num_slots)` array and cross into Rust
 once. `expectation_many` returns a `(points, observables)` array for a list of strings
@@ -285,12 +283,12 @@ circuit, params = builder.build(), builder.parameters()
 prepared = PreparedCircuit(circuit, params, BackendKind.statevector())
 ```
 
-`reuses_fusion_plan` reports whether the recorded fused structure is replayed. Results
-agree either way; only speed differs.
+`reuses_fusion_plan` reports whether the recorded fused structure is replayed. Only
+speed depends on it.
 
-`builder.parameters()` returns the slots recorded by `param(slot)`;
+`builder.parameters()` returns the slots recorded by `param(slot)`.
 `Parameters.all_rotations(circuit)` gives every bindable gate its own slot in circuit
-order; `Parameters(n)` plus `link(instruction, slot)` declares slots up front. Gates
+order, and `Parameters(n)` plus `link(instruction, slot)` declares slots up front. Gates
 sharing a slot all receive its angle.
 
 `parse_qasm_parametric` returns a template and the named slots declared by OpenQASM
@@ -336,8 +334,7 @@ measurement comes up. `parse_qasm_dynamic` reads OpenQASM with `while`, `break`,
 `continue`, and runtime classical values, and returns a `DynamicProgram`: circuits
 joined by branches on classical expressions, run once per shot. `simulate_program`
 returns the same `ShotsResult` and `CountsResult` as a circuit run. The
-[dynamic circuits tutorial](../tutorials/dynamic-circuits.md) ends with a subroutine
-that returns a value computed from a measured bit.
+[dynamic circuits tutorial](../tutorials/dynamic-circuits.md) has a worked subroutine.
 
 ```python
 from prism_q import parse_qasm_dynamic, simulate_program
@@ -359,8 +356,8 @@ assert counts == {"0": 1000}
 ```
 
 An OpenQASM `extern` calls a Python function. Pass a mapping of callables as `externs=`
-to `parse_qasm`, `parse_qasm_parametric` or `parse_qasm_dynamic`; each receives bool, int
-or float arguments and returns one of those. A call over a measured bit runs during the
+to `parse_qasm`, `parse_qasm_parametric` or `parse_qasm_dynamic`. Each receives bool,
+int or float arguments and returns one of those. A call over a measured bit runs during the
 shot, taking the GIL:
 
 ```python
@@ -434,5 +431,5 @@ noisy = simulate_program(program).noise(rules).seed(42).shots(1000)
 
 A program without runtime control flow runs as its circuit, with the same seeded shots.
 The statevector, stabilizer, sparse, MPS, product state, factored, tensor network and
-density matrix backends run dynamic programs; the stabilizer rank and Pauli propagation
+density matrix backends run dynamic programs. The stabilizer rank and Pauli propagation
 engines keep no state per shot and raise `incompatible_backend`.

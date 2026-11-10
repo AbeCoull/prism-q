@@ -2,8 +2,7 @@
 
 Circuits that mix Clifford gates with a modest number of `T` gates sit between the
 polynomial stabilizer regime and the exponential statevector regime. Four engines cover
-them, chosen by T count, qubit count, whether Monte Carlo error is acceptable, and
-whether the circuit carries noise.
+them.
 
 ```admonish tip title="Which engine?"
 - Few T gates and an exact result: stabilizer rank (`run_stabilizer_rank`).
@@ -83,8 +82,7 @@ the returned distribution differs from the exact one by at most `4 * d`, and
 worst-case interference between the non-orthogonal branch states, so an aggressive budget
 drives it to zero. `Auto` never selects this function, nor the exact expansion for
 probabilities: at every width the expansion can hold, a statevector also fits and is
-faster, so the automatic probability route goes to the dispatch tree. Only a direct call
-reaches the pruned expansion.
+faster.
 
 ## Stochastic Pauli Propagation (`src/sim/unified_pauli.rs`)
 
@@ -137,13 +135,13 @@ passes `max_terms`, and `max_terms = 0` disables pruning for an exact run. With 
 `epsilon` too small to hold the growth, the sum climbs to the engine's internal ceiling
 and the run errors there rather than returning an over-truncated value.
 
-`SpdTruncation::Budget { max_terms }` instead drops exactly enough of the
-smallest terms to return to the budget. There is no threshold to guess, and
-growth the budget caps cannot reach the ceiling, so it suits runs where the term count is
-the binding constraint. A budget of zero is rejected.
+`SpdTruncation::Budget { max_terms }` instead drops exactly enough of the smallest terms
+to return to the budget. It has no threshold to guess and never reaches the ceiling, so
+it suits runs where the term count is the binding constraint. A budget of zero is
+rejected.
 
-Both report the discarded coefficient magnitude on the engine result, and it bounds the
-error: `|error| <= sum |discarded|`. It is not a fidelity bound.
+Both report the discarded coefficient magnitude on the engine result, which bounds the
+error as `|error| <= sum |discarded|`. It is not a fidelity bound.
 
 `observable_expectation` propagates a weighted `PauliObservable` as one sum, with each
 term's weight on its coefficient. `max_terms` caps that whole sum rather than each term,
@@ -171,18 +169,17 @@ let values = simulate(&circuit)
 # Ok::<(), prism_q::PrismError>(())
 ```
 
-Of the two sources of error, only the truncation is approximate. The channels are
-exact. Each is applied as its adjoint on the Pauli basis, not as a twirl,
-so depolarizing, dephasing, thermal relaxation and amplitude damping reproduce the density
-matrix to machine precision at `max_terms = 0`. Amplitude damping is not unital, and the
-identity term its adjoint produces from `Z` is carried. A channel with no Pauli-basis form
-(custom Kraus, two-qubit Kraus, readout error) is rejected rather than approximated.
+Only the truncation is approximate. Each channel applies as its exact adjoint on the
+Pauli basis, not as a twirl, so depolarizing, dephasing, thermal relaxation and amplitude
+damping reproduce the density matrix to machine precision at `max_terms = 0`. Amplitude
+damping is not unital, and the identity term its adjoint produces from `Z` is carried. A
+channel with no Pauli-basis form (custom Kraus, two-qubit Kraus, readout error) is
+rejected rather than approximated.
 
-The truncation reports its own bound. With `max_terms = 0` nothing is dropped and the
-value is exact. With a budget set, terms whose magnitude falls below `epsilon` are dropped
-once the sum exceeds the budget, and the total dropped magnitude bounds the error in the
-returned value. The bound is a worst case, not an estimate: it holds because every
-remaining operation is a contraction in the Pauli 1-norm.
+With a budget set, terms whose magnitude falls below `epsilon` are dropped once the sum
+exceeds the budget, and the total dropped magnitude bounds the error in the returned
+value. The bound is a worst case, and it holds because every remaining operation is a
+contraction in the Pauli 1-norm.
 
 The term count, not the qubit count, decides whether the engine is usable. Every
 non-Clifford rotation in the observable's backward light cone can double the sum, and
@@ -190,8 +187,8 @@ every channel shrinks it. Where noise wins, a circuit stays cheap at widths no d
 representation reaches. Where it does not, the run hits the budget and reports a large
 discarded mass: use the density matrix or trajectory averaging instead.
 
-The observable's weight moves that count more than width or depth, since the backward
-light cone opens from every letter it starts with. On a two-layer hardware-efficient
+The observable's weight moves that count more than width or depth, since the light cone
+opens from every letter it starts with. On a two-layer hardware-efficient
 ansatz under 1% depolarizing, `Z` on one qubit stays at 11 terms at 20 qubits or 100; `Z`
 on two adjacent qubits fills a 16384-term budget by 30 qubits; a `Z` on every qubit fills
 it at 20 and returns a discarded mass larger than the observable's own norm, which flags

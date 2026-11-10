@@ -1,7 +1,7 @@
 # Threading, SIMD, and Memory Layout
 
-For which SIMD tiers and architectures each backend supports, see the
-[Capability and Support Matrix](../guides/capabilities.md).
+The [Capability and Support Matrix](../guides/capabilities.md) lists the SIMD tiers and
+architectures each backend supports.
 
 ## Memory layout
 
@@ -21,18 +21,18 @@ For which SIMD tiers and architectures each backend supports, see the
 ## Threading
 
 Under the `parallel` feature, gate kernels have `_par` variants built on
-`par_chunks_mut`. They engage at `PARALLEL_THRESHOLD_QUBITS = 15` (`src/backend/mod.rs`);
-below that, thread-pool overhead exceeds the work. Each task covers at least
+`par_chunks_mut`. They engage at `PARALLEL_THRESHOLD_QUBITS = 15` (`src/backend/mod.rs`),
+below which thread-pool overhead exceeds the work. Each task covers at least
 `MIN_PAR_ELEMS = 4096` amplitudes, 64 KiB.
 
 The pool is the process-wide Rayon pool, sized on the first simulation call to every
-logical core; `RAYON_NUM_THREADS` overrides it. Hyperthreads help from 24 qubits
-by hiding memory latency.
+logical core, and `RAYON_NUM_THREADS` overrides it. Hyperthreads help from 24 qubits by
+hiding memory latency.
 
 An application that owns the global pool can hand PRISM-Q a bounded one instead:
 `ThreadPool::with_threads(n)` builds it and `install` runs a closure on it, leaving the
 global pool unbuilt and unresized. Calls outside `install` take the global path. Pool
-width can change results; see [Determinism](#determinism).
+width can change results ([Determinism](#determinism)).
 
 ## SIMD
 
@@ -80,7 +80,7 @@ is exactly reproducible. Anything that sums floating-point values in parallel is
 only to about the last ulp, and the batched compiled sampler only at a fixed thread
 count. `tests/determinism.rs` pins the dense unitary, terminal sampling, per-shot replay,
 reduction and compiled-sampler claims below by running the same seeded circuits in
-scoped 1-thread and 4-thread pools; the trajectory, SPD and stabilizer bullets rest on
+scoped 1-thread and 4-thread pools. The trajectory, SPD and stabilizer bullets rest on
 the mechanisms they state.
 
 Every clause depends on thread count, not on which pool supplied the threads, so a
@@ -116,8 +116,8 @@ payloads change whenever its width differs from the comparison run's.
   width for a product state. Noisy trajectories follow the same rule, on every engine.
   Shot `i` runs on a seed hashed from the run seed and `i` with SplitMix64, and results
   fold in shot order. Adjacent run seeds draw unrelated shots, not the same shots offset
-  by one. Pinned for decomposed, tableau and product-state circuits, and
-  for tableau trajectories.
+  by one. Pinned for decomposed, tableau and product-state circuits, and for tableau
+  trajectories.
 - **Outcome branching: bitwise for a given seed, at any thread count.** A noiseless
   circuit of that kind on the host statevector evolves once per distinct outcome
   history instead: at each measurement the shots on a branch split by a binomial draw
@@ -125,9 +125,9 @@ payloads change whenever its width differs from the comparison run's.
   qubits up to the dense floor the two sides of a split run on separate workers. Rows
   are laid out in record order, then shuffled from the run seed, so the schedule reaches
   neither. The split compares a draw against a collapse probability, which above the
-  dense floor is a parallel reduction and carries the caveat below. Once
-  only measurements remain, a branch draws its readout from its own state through
-  the terminal sampler, seeded from its outcome path. A dynamic program on the host
+  dense floor is a parallel reduction and carries the caveat below. Once only
+  measurements remain, a branch draws its readout from its own state through the
+  terminal sampler, seeded from its outcome path. A dynamic program on the host
   statevector walks its graph the same way. Pinned for 8-, 12- and 16-qubit circuits and
   a 12-qubit program.
 - **Parallel reductions: stable to about 1e-12, not bitwise.** Norms, measurement
@@ -154,7 +154,7 @@ payloads change whenever its width differs from the comparison run's.
   ulp of a threshold.
   The GPU analogue is documented in the [GPU guide](../guides/gpu.md).
 - **SPD analytic estimates: stable to about 1e-12 between runs.** Hash-order term
-  accumulation moves the last ulp even at a fixed thread count; tests carry that
+  accumulation moves the last ulp even at a fixed thread count, and tests carry that
   tolerance.
 - **Stabilizer tableau: bitwise, at any thread count.** Row operations are integer and
   exactly associative. MPS carries no bitwise claim: truncation runs through faer's

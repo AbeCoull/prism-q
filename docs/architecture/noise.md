@@ -1,7 +1,7 @@
 # Noise Compilation
 
 How a noise model becomes events, and which engine samples them. The user-facing
-version is the [noise guide](../guides/noise.md); the native QEC path is on
+version is the [noise guide](../guides/noise.md), and the native QEC path is on
 [QEC programs](./qec-programs.md).
 
 ## Noise models (`src/sim/noise.rs`)
@@ -19,7 +19,7 @@ circuit layers, crosstalk through a coupling map, and coherent over-rotation
 proportional to a rotation gate's angle. They also cover reset error, error before
 measurement, readout per bit, idle relaxation and detuning timed by an as-soon-as-possible
 schedule of gate durations, and amplitude drift per shot. Every rule is evaluated once at
-build time, so nothing reaches a loop over shots or instructions; the drift rules emit
+build time, so nothing reaches a loop over shots or instructions. The drift rules emit
 fixed weights over draws the trajectory makes per shot. A timed rule places each qubit's
 events for a layer just before that qubit's next instruction, since instruction order
 can list a later layer's gate on the qubit ahead of an earlier layer's last instruction.
@@ -62,9 +62,9 @@ fall back to the CPU reduction.
 ## Engine routing and the observable contract
 
 Noisy sampling is reachable through `simulate(...).noise(...).shots(n)` and
-`.sample_counts(n)` on trajectory backends; the density matrix also serves `run`,
-`marginals` and `expectation_values` (see
-[noise across the terminals](./engine.md#noise-across-the-terminals)).
+`.sample_counts(n)` on trajectory backends. The density matrix also serves `run`,
+`marginals` and `expectation_values`
+([noise across the terminals](./engine.md#noise-across-the-terminals)).
 `run_shots_with_noise` (`src/sim/mod.rs`) routes Pauli-only noise on Clifford circuits
 to the compiled family when the backend is `Auto` or a stabilizer kind and the
 measurements are terminal or rewrite to terminal (below). Every other accepted
@@ -81,7 +81,7 @@ All engines sample the same distribution of measurement records for the models a
 circuits they accept. They consume independent RNG streams, so one seed gives different
 shots with matching marginals, correlators and histograms. The frame and compiled
 engines and the noiseless compiled sampler all resolve to
-`ResolvedBackend::CompiledStabilizer`; `RunMetadata::engine` names which one ran.
+`ResolvedBackend::CompiledStabilizer`, and `RunMetadata::engine` names which one ran.
 
 `defer_noisy_circuit` (`src/sim/compiled/mod.rs`) rewrites a circuit with resets,
 mid-circuit measurements or guarded Pauli gates to terminal measurements. A reset moves
@@ -101,7 +101,8 @@ and lands its precomputed record flips on the shots whose guard parity holds; re
 comes last. Readout error on a bit a guard reads is not left to the end: the rewrite
 places an `X` of that rate on each alias measured into the bit, which the guard's
 controls and the record then both see. Only a rate equal both ways is such a Pauli, so
-asymmetric readout on a guarded bit declines the rewrite. Such a circuit always takes the compiled sampler, not the frame sampler.
+asymmetric readout on a guarded bit declines the rewrite. Such a circuit always takes the
+compiled sampler, never the frame sampler.
 
 ## Slots for guarded instructions
 
@@ -156,8 +157,8 @@ transpose still run on the device.
 Readout error flips a classical bit when a measurement writes it, so a condition reads
 the noisy bit and each measurement into the bit draws its own flip. The state is never
 touched. When no condition reads a bit carrying readout error, only each bit's last
-write reaches the record, and flipping the finished record draws the same distribution;
-every route then keeps doing that, with the seeded shots it always drew. A trajectory
+write reaches the record, and flipping the finished record draws the same distribution.
+Every route then keeps doing that, with the seeded shots it always drew. A trajectory
 whose conditions read such a bit, the brute-force stabilizer replay included, flips
 each bit on the shot's noise stream right after the measurement instead.
 
@@ -179,7 +180,7 @@ Two channel families carry state from one event to the next within a shot: leaka
 `QuasiStatic` reads standard normal draws made once at the start of the shot. Neither is
 a CPTP map applied event by event, so the density matrix and the Pauli path estimator
 decline them and they run on the trajectory engines only. A model holding neither takes
-the trajectory loop unchanged; `MemorySpec::of` decides that once per run.
+the trajectory loop unchanged, which `MemorySpec::of` decides once per run.
 
 ### A leaked qubit in a trajectory
 

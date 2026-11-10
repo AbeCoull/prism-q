@@ -43,7 +43,7 @@ COUNTS_METHOD = (
 )
 STATS_METHOD = COUNTS_METHOD + ", on the statistics and shot total the simulator returns"
 EXPVAL_METHOD = (
-    "absolute difference per value against the cone reference (<Z> = 1 - 2p, <ZZ> = 1 - 2 P(odd)), "
+    "absolute difference per value against the cone reference (⟨Z⟩ = 1 - 2p, ⟨ZZ⟩ = 1 - 2 P(odd)), "
     "against a simulator of another family where the cone is too wide"
 )
 

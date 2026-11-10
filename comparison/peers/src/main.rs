@@ -216,9 +216,9 @@ fn build_qip(program: &Program) -> LocalBuilder<f64> {
                 let pair = b
                     .apply_vec_matrix(pair, m)
                     .unwrap_or_else(|e| fail(4, format!("qip: {e:?}")));
-                let (rt, rc) = b.split_first_qubit(pair);
-                qubits[c] = Some(rc);
-                qubits[t] = Some(rt.unwrap_or_else(|| fail(4, "qip: merged pair lost a qubit")));
+                let (rc, rt) = b.split_first_qubit(pair);
+                qubits[c] = Some(rc.unwrap_or_else(|| fail(4, "qip: merged pair lost a qubit")));
+                qubits[t] = Some(rt);
             }
         }
     }

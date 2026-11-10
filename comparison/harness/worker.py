@@ -61,6 +61,13 @@ def z_terms(key: str) -> list[int]:
     return [int(x) for x in key.split("Z")[1:]]
 
 
+def z_parity_expectation(probs) -> float:
+    """Expectation of a Z product from the marginal distribution over its qubits: even parity minus odd."""
+    p = np.asarray(probs, dtype=np.float64)
+    odd = np.array([bin(i).count("1") & 1 for i in range(len(p))], dtype=bool)
+    return float(p[~odd].sum() - p[odd].sum())
+
+
 def stat_totals(packed: np.ndarray, keys: list[str], record_of_bit: dict[int, int], totals: np.ndarray) -> None:
     """Add each key's count of ones (`bA`) or odd parities (`bA^bB`) over a bit-packed shot block.
 
@@ -147,11 +154,10 @@ class Aer:
         if mode == "probs":
             qc.save_probabilities()
         elif mode == "expval":
-            from qiskit.quantum_info import Pauli
-
+            # Marginal probabilities rather than save_expectation_value: on the MPS method
+            # the latter returned one shared value for every observable past 65 qubits.
             for key in self.keys:
-                qubits = z_terms(key)
-                qc.save_expectation_value(Pauli("Z" * len(qubits)), qubits, label=key)
+                qc.save_probabilities(z_terms(key), label=key)
         self.num_bits = clbits
         return qc
 
@@ -169,7 +175,7 @@ class Aer:
             return np.asarray(result.data()["probabilities"], dtype="<f8").tobytes()
         if mode == "expval":
             data = result.data()
-            return values_text(self.keys, [np.real(data[k]) for k in self.keys])
+            return values_text(self.keys, [z_parity_expectation(data[k]) for k in self.keys])
         counts = result.data()["counts"]
         pairs = [(int(k, 16), int(v)) for k, v in counts.items()]
         return counts_text_from_ints(pairs, self.num_bits).encode()

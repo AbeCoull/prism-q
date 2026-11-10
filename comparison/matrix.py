@@ -11,7 +11,8 @@ profile, code hashes) and `circuits.jsonl.gz` (every gate list with its SHA-256)
 outputs (up to 64 MiB each) of the simulators a row can validate against are kept gzipped under `outputs/`,
 so a later rerun of part of the row can still be checked. A rerun with `--append
 --replace` moves the records it re-measures to `superseded.jsonl` once each row's new
-records are written. The later commands read only those files.
+records are written, and records its own provenance under `supplementary_runs`. The
+later commands read only those files.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ OUTPUTS = "outputs"
 MAX_STORED_BYTES = 1 << 26
 OUTPUT_SUFFIX = {"probs": ".f64", "counts": ".counts", "expval": ".values", "stats": ".stats"}
 FRESH_RUN_REMOVES = ("superseded.jsonl", "fusion.json", "samples.csv", "summary.csv", "derived.json", OUTPUTS)
+RUN_PROVENANCE_KEYS = ("memory_method", "timed_region", "repetition_policy", "validation", "provenance", "simulators")
 
 
 def build_runner() -> None:
@@ -153,7 +155,8 @@ def _manifest(args: argparse.Namespace, profile: profiles.Profile, run_id: str, 
             ),
             "expval": (
                 "execute the circuit and return every requested expectation value (PRISM-Q's "
-                "expectation_values, Aer's saved expectation values, quimb's local_expectation per "
+                "expectation_values, Aer's saved marginal probabilities over each observable's qubits, "
+                "quimb's local_expectation per "
                 "observable); quimb's tensor network finds a fresh contraction path for every observable "
                 "inside the timed call, and quimb's CircuitMPS applies the gates inside it"
             ),
@@ -536,16 +539,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             "skipped_peers": list(args.skip_peer),
             "smoke": checks,
             "workloads": [c.workload.workload_id for c in profile.cells],
+            **{k: manifest[k] for k in RUN_PROVENANCE_KEYS},
         }
         base_manifest.setdefault("supplementary_runs", []).append(supplement)
-        for name, entry in manifest["simulators"].items():
-            if entry.get("version") and not base_manifest["simulators"].get(name, {}).get("version"):
-                base_manifest["simulators"][name] = entry
-        for name, version in manifest["provenance"]["simulators"].items():
-            base_manifest["provenance"]["simulators"].setdefault(name, version)
-        base_manifest["provenance"]["python"]["packages"].update(
-            {k: v for k, v in manifest["provenance"]["python"]["packages"].items() if v}
-        )
     with open(manifest_path, "w", encoding="utf-8") as handle:
         json.dump(base_manifest or manifest, handle, indent=2)
 
@@ -734,8 +730,10 @@ GATE_SMOKE_PAIR = (3, 1)
 def gate_smoke_text(gate: str | None) -> str:
     """A seeded product state, one `gate` on qubit 3 (and 1), then Ry on every qubit.
 
-    The control sits above the target so a swapped orientation shows, and the closing Ry
-    turns a phase into a change in the probabilities. `gate` None is the bare preparation.
+    The control sits above the target so a swapped orientation shows, the closing Ry
+    turns a phase into a change in the probabilities, and its angle differs per qubit so
+    an adapter that swaps qubit handles after the gate shows too. `gate` None is the bare
+    preparation.
     """
     n = GATE_SMOKE_QUBITS
     lines = [f"qubits {n}"]
@@ -750,7 +748,7 @@ def gate_smoke_text(gate: str | None) -> str:
         lines.append(f"{gate} {a} {b}")
     elif gate == "cp":
         lines.append(f"cp {a} {b} 0.9")
-    lines += [f"ry {q} 0.7" for q in range(n)]
+    lines += [f"ry {q} {0.7 + 0.11 * q!r}" for q in range(n)]
     return "\n".join(lines) + "\n"
 
 

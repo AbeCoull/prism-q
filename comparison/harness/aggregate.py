@@ -160,6 +160,15 @@ def _normalize(record: dict) -> dict:
     if isinstance(record.get("internal_ms"), (int, float)):
         record["first_internal_ms"] = record.pop("internal_ms")
         record["internal_ms"] = []
+    if (
+        record["status"] == "error"
+        and record["simulator"] in ("prismq:stabilizer", "prismq:factored-stabilizer")
+        and "is incompatible" in (record.get("reason") or "")
+    ):
+        record.update({"status": "not-applicable", "reason": "not a Clifford circuit"})
+    v = record.get("validation")
+    if v and "<Z" in (v.get("method") or ""):
+        v["method"] = v["method"].replace("<ZZ>", "⟨ZZ⟩").replace("<Z>", "⟨Z⟩")
     return record
 
 

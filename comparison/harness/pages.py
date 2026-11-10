@@ -146,8 +146,6 @@ SECTIONS = [
         [
             "The circuit is the rcs brickwork without measurements; every value is checked against the exact "
             "cone reference.",
-            "quimb contracts each observable over its reverse light cone and finds a fresh contraction path "
-            "inside every timed call.",
         ],
     ),
     (
@@ -374,8 +372,9 @@ def _comparison(records: list[dict], ratio: dict, section: tuple) -> tuple[list[
             if "@" not in s and threads:
                 header[i] = _column(f"{s}@{threads}")
     tables = _html_table(["Workload"] + header, table)
+    own_time = ", the time Aer reports for itself" if any(s.startswith("aer") for s in present) else ""
     tables += (
-        '<p class="pq-note">Cold call, fastest warm call, the time Aer reports for itself, and the smallest '
+        f'<p class="pq-note">Cold call, fastest warm call{own_time}, and the smallest '
         "shift in a marginal a sampled check detects:</p>"
     )
     tables += _html_table(["Workload"] + header, detail)
@@ -543,7 +542,7 @@ def _shared_notes(recs: list[dict], sims: list[str]) -> list[str]:
             by_output[o].append(_column(s))
         notes.append(
             "The timed call ends at the simulator's own result: "
-            + "; ".join(f"{_and(names)}, a {o}" for o, names in by_output.items())
+            + "; ".join(f"{_and(names)}, {o}" for o, names in by_output.items())
             + "."
         )
     slow = []
@@ -972,6 +971,17 @@ def _suite(suite: dict | None) -> list[str]:
             + "; ".join(f"{_and(families)} on {b}" for b, families in by_backend.items())
             + "."
         )
+    dense = [r for r in suite["rows"] if r.get("probabilities") is True]
+    tableau = [r for r in suite["rows"] if r.get("probabilities") is False]
+    if dense and tableau:
+        lines.append(
+            "- Rows without a probability vector time the run alone: "
+            + "; ".join(
+                f"{family.upper()} at {_and(sorted(r['qubits'] for r in tableau if r['family'] == family))} qubits"
+                for family in sorted({r["family"] for r in tableau})
+            )
+            + ". Every other row includes the dense probability vector."
+        )
     lines.append("")
     lines += _figure(
         "suite",
@@ -982,18 +992,70 @@ def _suite(suite: dict | None) -> list[str]:
     return lines
 
 
+def _runs(manifest: dict) -> list[dict]:
+    """The base run and every supplementary run, oldest first; a run that recorded no provenance has none."""
+    base = {k: manifest.get(k) for k in ("run_id", "provenance", "simulators")}
+    return sorted([base, *manifest.get("supplementary_runs", [])], key=lambda r: r["run_id"])
+
+
+def _current(manifest: dict) -> dict:
+    """The newest run that recorded provenance, each simulator's version from the newest run that recorded one."""
+    runs = [r for r in _runs(manifest) if r.get("provenance")]
+    simulators = {name: dict(entry) for name, entry in runs[-1]["simulators"].items()}
+    for run in runs:
+        for name, entry in run["simulators"].items():
+            if entry.get("version"):
+                simulators.setdefault(name, dict(entry))["version"] = entry["version"]
+    return {**runs[-1], "simulators": simulators}
+
+
+def _commit(toolchain: dict) -> str:
+    dirty = " with uncommitted changes" if toolchain.get("git_dirty") else ""
+    return f"`{(toolchain.get('git_sha') or '')[:10]}`{dirty}"
+
+
+def _older_runs(manifest: dict, records: list[dict]) -> list[str]:
+    """One bullet per group with shown records from a run at another commit than the newest, or with no provenance."""
+    runs = {r["run_id"]: r for r in _runs(manifest)}
+    sha = _current(manifest)["provenance"]["toolchain"].get("git_sha")
+    total: dict[str, int] = defaultdict(int)
+    older: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for r in records:
+        total[r["group"]] += 1
+        prov = (runs.get(r["run_id"]) or {}).get("provenance")
+        if not prov or prov["toolchain"].get("git_sha") != sha:
+            older[r["group"]][r["run_id"]] += 1
+    bullets = []
+    for group in sorted(older):
+        described = []
+        for run_id in sorted(older[group]):
+            prov = (runs.get(run_id) or {}).get("provenance")
+            facts = [f"commit {_commit(prov['toolchain'])}" if prov else "commit not recorded"]
+            if re.match(r"\d{8}T", run_id):
+                facts.insert(0, f"{run_id[:4]}-{run_id[4:6]}-{run_id[6:8]}")
+            described.append(f"`{run_id}` ({', '.join(facts)})")
+        n = sum(older[group].values())
+        share = f"All {n}" if n == total[group] else f"{n} of {total[group]}"
+        runs_word = "run" if len(described) == 1 else "runs"
+        bullets.append(f"- {share} shown `{group}` records come from the older {runs_word} {_and(described)}.")
+    return bullets + [""] if bullets else []
+
+
 def _setup(manifest: dict, records: list[dict]) -> list[str]:
-    prov = manifest["provenance"]
+    current = _current(manifest)
+    prov, simulators = current["provenance"], current["simulators"]
     host, tool, py = prov["host"], prov["toolchain"], prov["python"]
+    runs = f"`{manifest['run_id']}` and {len(manifest.get('supplementary_runs', []))} supplementary runs"
+    if current["run_id"] != manifest["run_id"]:
+        runs += f"; the rows below describe `{current['run_id']}`"
+        if current.get("provenance_collected"):
+            runs += f" (provenance collected {current['provenance_collected']})"
     rows = [
         ["Host", _host_line(host)],
-        ["PRISM-Q", f"{manifest['simulators']['prismq'].get('version')}, rustc {tool.get('rustc')}, `parallel`"],
+        ["PRISM-Q", f"{simulators['prismq'].get('version')}, rustc {tool.get('rustc')}, `parallel`"],
         ["Python", py.get("version")],
-        [
-            "Commit",
-            f"`{(tool.get('git_sha') or '')[:10]}`" + (" with uncommitted changes" if tool.get("git_dirty") else ""),
-        ],
-        ["Runs", f"`{manifest['run_id']}` and {len(manifest.get('supplementary_runs', []))} supplementary runs"],
+        ["Commit", _commit(tool)],
+        ["Runs", runs],
     ]
     seen = {r["simulator"].partition(":")[0] for r in records}
     native = tool.get("native_builds") or {}
@@ -1001,17 +1063,20 @@ def _setup(manifest: dict, records: list[dict]) -> list[str]:
     peers = ", ".join(filter(None, [rustc, native.get("peers")])) or None
     built = {"quest": native.get("quest_runner") or tool.get("cxx_compiler"), "spinoza": peers, "qip": peers}
     stim = py.get("stim_build") or {}
-    for name, s in manifest["simulators"].items():
+    packages = py.get("packages") or {}
+    for name, s in simulators.items():
         if name in seen and name != "prismq":
             value = f"{s.get('version') or 'n/a'}, {s['precision']}"
             if name == "stim" and stim.get("module"):
                 value += f", package {stim['version']} loading `{stim['module']}`"
+            if name == "quimb-tn":
+                value += "".join(f", {k} {packages[k]}" for k in ("cotengra", "cotengrust") if packages.get(k))
             if s.get("env"):
                 value += ", " + ", ".join(f"`{k}={v}`" for k, v in s["env"].items())
             if name in built:
                 value += f", built with {built[name]}" if built[name] else ", compiler not recorded"
             rows.append([aggregate.label(name), value])
-    return _table(["Item", "Value"], rows)
+    return _older_runs(manifest, records) + _table(["Item", "Value"], rows)
 
 
 def _host_line(host: dict) -> str:
@@ -1021,7 +1086,7 @@ def _host_line(host: dict) -> str:
 
 
 def page(results_dir: str, manifest: dict, records: list[dict], derived: dict, suite: dict | None) -> str:
-    host = manifest["provenance"]["host"]
+    host = _current(manifest)["provenance"]["host"]
     ratio = _ratios(derived)
     warm = _only((r.get("policy") or {}).get("iterations") for r in records if r["status"] == "ok")
     warm_text = f"up to {NUMBER_WORDS.get(warm, warm)} warm calls" if warm else "a set of warm calls"
@@ -1178,10 +1243,11 @@ def data(manifest: dict, records: list[dict], suite: dict | None) -> dict:
             "observables": w["params"].get("observables"),
         }
         rows.append({k: val for k, val in row.items() if val is not None})
-    host = manifest["provenance"]["host"]
+    current = _current(manifest)
+    host = current["provenance"]["host"]
     return {
         "host": {"cpu": _host_line(host), "ram_gb": host.get("ram_gb")},
-        "versions": {aggregate.label(k): v.get("version") for k, v in manifest["simulators"].items()},
+        "versions": {aggregate.label(k): v.get("version") for k, v in current["simulators"].items()},
         "observations": rows,
         "suite": suite,
     }

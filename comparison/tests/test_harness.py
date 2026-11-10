@@ -19,7 +19,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import matrix  # noqa: E402
-from harness import aggregate, pages, profiles, reference, runners, stats, validate, workloads  # noqa: E402
+from harness import aggregate, pages, profiles, provenance, reference, runners, stats, validate, workloads  # noqa: E402
 from harness.worker import counts_text_from_ints  # noqa: E402
 
 
@@ -267,9 +267,9 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual((old["threads"], old["threads_requested"]), (1, 8))
 
     def test_timed_output_by_family(self) -> None:
-        self.assertEqual(runners.timed_output("aer-mps:256", "counts"), "Result holding a histogram")
-        self.assertEqual(runners.timed_output("stim", "counts"), "bit-packed per-shot array")
-        self.assertEqual(runners.timed_output("prismq:mps-256", "counts"), "histogram")
+        self.assertEqual(runners.timed_output("aer-mps:256", "counts"), "a Result holding a histogram")
+        self.assertEqual(runners.timed_output("stim", "counts"), "a bit-packed per-shot array")
+        self.assertEqual(runners.timed_output("prismq:mps-256", "counts"), "a histogram")
         self.assertIsNone(runners.timed_output("stim", "probs"))
 
 
@@ -741,21 +741,17 @@ class PageTests(unittest.TestCase):
             page, data = self._render(tmp)
             again, _ = self._render(os.path.join(tmp, "again"))
         self.assertEqual(page, again)
-        self.assertIn("Aer takes 5.85x to 19.8x the PRISM-Q time", page)
-        self.assertIn("no 1-thread PRISM-Q record ran, so no ratio is shown", page)
+        self.assertIn("Aer takes 5.11x to 10.9x the PRISM-Q time", page)
         self.assertNotIn("method-matched", page)
         self.assertIn("Peer median time over PRISM-Q median time, per section and peer", page)
         self.assertIn("Thread counts, PRISM-Q matched to the peer: ", page)
         self.assertIn("<td>fp32 peer, PRISM-Q fp64</td>", page)
-        self.assertIn("`fc7e0c9699` with uncommitted changes", page)
-        self.assertIn("compiler not recorded", page)
         self.assertIn("rows take their reference vector from one simulator with no cross-check", page)
-        self.assertIn("Aer qv 16q (48.7 ms cold, 89.9 ms warm)", page)
         self.assertIn("internal ", page)
         self.assertIn("QFT rows take their gate list from PRISM-Q's `qft_circuit` generator", page)
         self.assertIn("fastest forced backend on 7 rows", page)
         stim = [r for r in data["observations"] if r["simulator"] == "stim"]
-        self.assertTrue(stim and all(r["threads"] == 1 and r["threads_requested"] == 8 for r in stim))
+        self.assertTrue(stim and all(r["threads"] == 1 for r in stim))
         aer = next(r for r in data["observations"] if r["simulator"] == "aer-statevector" and r["status"] == "ok")
         self.assertIn("first_ms", aer)
         self.assertTrue(any("internal_ms" in r for r in data["observations"] if r["simulator"].startswith("aer")))
@@ -773,23 +769,30 @@ class PageTests(unittest.TestCase):
     def test_partial_results_render(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             page, _ = self._render(tmp, lambda r: r["group"] not in ("sampling", "accuracy", "threads"))
-        self.assertIn("Aer takes 5.85x to 19.8x the PRISM-Q time", page)
+        self.assertIn("Aer takes 5.11x to 10.9x the PRISM-Q time", page)
         for chart in ("sampling", "bondcap", "threads"):
             self.assertNotIn(f'data-chart="{chart}"', page)
 
     def test_single_family_renders(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             page, _ = self._render(tmp, lambda r: r["workload"]["family"] == "clifford" and r["group"] == "headline")
-        self.assertIn("Median time, 100 to 10,000 qubits", page)
+        self.assertIn("Stim takes 0.54x to 1.12x the 1-thread PRISM-Q time, 100 to 10,000 qubits", page)
+        self.assertIn("ratios pair Stim with the 1-thread PRISM-Q record", page)
         self.assertIn("PRISM-Q, a histogram; Stim, a bit-packed per-shot array", page)
+        self.assertEqual(page.count('data-chart="'), 3)
         for chart in ("sv64", "dispatch", "memory", "threads"):
             self.assertNotIn(f'data-chart="{chart}"', page)
 
     def test_new_sections_render_from_their_records(self) -> None:
         extra = _wide_records()
+        groups = {r["group"] for r in extra}
+
+        def keep(r: dict) -> bool:
+            return r["group"] not in groups
+
         with tempfile.TemporaryDirectory() as tmp:
-            page, data = self._render(tmp, extra=extra)
-            again, _ = self._render(os.path.join(tmp, "again"), extra=extra)
+            page, data = self._render(tmp, keep, extra)
+            again, _ = self._render(os.path.join(tmp, "again"), keep, extra)
         self.assertEqual(page, again)
         for chart in ("highshot", "mpsdeep", "sweep", "tn"):
             self.assertIn(f'data-chart="{chart}"', page)
@@ -848,6 +851,135 @@ class PageTests(unittest.TestCase):
         self.assertLess(intro, issue)
         self.assertLess(issue, page.index("- Host:"))
         self.assertIn("https://github.com/AbeCoull/prism-q/issues", page)
+
+    def test_setup_names_a_dirty_commit_and_an_unrecorded_compiler(self) -> None:
+        manifest = _provenance_manifest()
+        manifest.pop("supplementary_runs")
+        text = "\n".join(pages._setup(manifest, [_bare(BASE_RUN, "quest", workloads.rcs(4, 2), "headline")]))
+        self.assertIn("`fc7e0c9699` with uncommitted changes", text)
+        self.assertIn("compiler not recorded", text)
+        self.assertNotIn("older run", text)
+
+    def test_single_threaded_peer_keeps_the_requested_thread_count(self) -> None:
+        record = aggregate._normalize(_bare(BASE_RUN, "stim", workloads.clifford(4, 100), "headline", threads=8))
+        self.assertEqual((record["threads"], record["threads_requested"]), (1, 8))
+        row = pages.data(_provenance_manifest(), [record], None)["observations"][0]
+        self.assertEqual((row["threads"], row["threads_requested"]), (1, 8))
+
+    def test_stabilizer_note_without_a_one_thread_prismq_record(self) -> None:
+        wl = workloads.clifford(4, 100)
+        recs = [_bare("r", "prismq", wl, "headline"), _bare("r", "stim", wl, "headline", threads=1)]
+        notes = pages._notes("stabilizer", {"row": recs}, ["prismq", "stim"])
+        self.assertIn("no 1-thread PRISM-Q record ran, so no ratio is shown", " ".join(notes))
+
+    def test_warm_median_above_the_cold_call_is_named(self) -> None:
+        record = _bare("r", "aer-statevector", workloads.rcs(16, 8), "headline")
+        record.update(phases={"first_ms": 48.7}, stats={"median_ms": 89.9})
+        notes = pages._shared_notes([record], ["aer-statevector"])
+        self.assertIn("Aer rcs 16q d8 (48.7 ms cold, 89.9 ms warm)", " ".join(notes))
+
+    def test_setup_uses_the_newest_run_provenance_and_names_older_groups(self) -> None:
+        wl = workloads.rcs(4, 2)
+        records = [
+            _bare(NEW_RUN, "prismq", wl, "headline"),
+            _bare(NEW_RUN, "quest", wl, "headline"),
+            _bare(NEW_RUN, "stim", wl, "headline", threads=1),
+            _bare(BASE_RUN, "prismq", wl, "dispatch"),
+            _bare("20261103T202523-cccccc", "prismq:statevector", wl, "dispatch"),
+        ]
+        text = " ".join(" ".join(pages._setup(_provenance_manifest(), records)).split())
+        self.assertIn("| PRISM-Q | 0.38.0, rustc 1.99.0, `parallel` |", text)
+        self.assertIn("| Commit | `b012445717` |", text)
+        self.assertIn("the rows below describe `20261110T124244-bbbbbb`", text)
+        self.assertIn("built with MSVC 19.38, /O2", text)
+        self.assertIn("package 1.16.0+avx2 loading `stim._stim_avx2`", text)
+        self.assertIn("`OMP_WAIT_POLICY=PASSIVE`", text)
+        self.assertNotIn("compiler not recorded", text)
+        self.assertIn(
+            "All 2 shown `dispatch` records come from the older runs `20261103T090018-aaaaaa` (2026-11-03, "
+            "commit `fc7e0c9699` with uncommitted changes) and `20261103T202523-cccccc` (2026-11-03, commit "
+            "not recorded).",
+            text,
+        )
+        self.assertNotIn("`headline` records", text)
+
+    def test_supplementary_run_records_its_own_provenance(self) -> None:
+        prov = _provenance_manifest()["supplementary_runs"][-1]["provenance"]
+        args = mock.Mock(
+            no_build=True,
+            profile="smoke",
+            threads=8,
+            groups="none",
+            match=None,
+            simulators=None,
+            skip_peer=[],
+            append=True,
+            replace=False,
+            retire=[],
+            drop_other_simulators=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            args.out = tmp
+            base = _provenance_manifest()
+            base.pop("supplementary_runs")
+            _write(tmp, "manifest.json", json.dumps(base))
+            with (
+                mock.patch.object(matrix, "smoke_check", lambda profile: {}),
+                mock.patch.object(provenance, "collect", lambda *a: json.loads(json.dumps(prov))),
+                mock.patch.object(provenance, "host_details", lambda: {}),
+                mock.patch.object(provenance, "quiet_machine_warnings", lambda: []),
+                mock.patch.object(runners, "native_builds", lambda: prov["toolchain"]["native_builds"]),
+            ):
+                self.assertEqual(matrix.cmd_run(args), 0)
+            with open(os.path.join(tmp, "manifest.json"), encoding="utf-8") as handle:
+                written = json.load(handle)
+        run = written["supplementary_runs"][-1]
+        for key in matrix.RUN_PROVENANCE_KEYS:
+            self.assertIn(key, run)
+        self.assertEqual(run["provenance"]["toolchain"]["git_sha"], prov["toolchain"]["git_sha"])
+        self.assertEqual(run["simulators"]["quest"]["env"], dict(runners.REGISTRY["quest"].env))
+        self.assertEqual(written["provenance"], base["provenance"])
+
+
+BASE_RUN = "20261103T090018-aaaaaa"
+NEW_RUN = "20261110T124244-bbbbbb"
+
+
+def _provenance_manifest() -> dict:
+    def run(sha: str, dirty: bool, prismq: str, native: dict | None, stim: dict | None, env: dict) -> dict:
+        toolchain = {"rustc": "1.99.0", "rustc_peers": "1.99.0-nightly", "git_sha": sha, "git_dirty": dirty}
+        if native:
+            toolchain["native_builds"] = native
+        host = {"cpu_model": "Test CPU", "physical_cores": 4, "logical_cores": 8, "os": "Test OS", "ram_gb": 32.0}
+        versions = {"prismq": prismq, "quest": "v4.3.0", "stim": "1.16.0"}
+        return {
+            "provenance": {
+                "host": host,
+                "toolchain": toolchain,
+                "python": {"version": "3.14.0", "packages": {}, "stim_build": stim},
+                "simulators": versions,
+            },
+            "simulators": {
+                name: {"label": name, "precision": "double", "env": env, "version": versions[name]} for name in versions
+            },
+        }
+
+    base = run("fc7e0c96996590ccc69c1cd0fea7322365b9b9b7", True, "0.37.0", None, None, {})
+    new = run(
+        "b012445717f411e9144babfb40d1942a5fc788bf",
+        False,
+        "0.38.0",
+        {"quest_runner": "MSVC 19.38, /O2", "peers": None},
+        {"version": "1.16.0+avx2", "module": "stim._stim_avx2"},
+        {"OMP_WAIT_POLICY": "PASSIVE"},
+    )
+    old_supplement = {"run_id": "20261103T202523-cccccc", "command": "matrix.py run --append"}
+    return {
+        "run_id": BASE_RUN,
+        "profile": "test",
+        **base,
+        "supplementary_runs": [old_supplement, {"run_id": NEW_RUN, "command": "matrix.py run --append", **new}],
+    }
 
 
 def _wide_records() -> list[dict]:

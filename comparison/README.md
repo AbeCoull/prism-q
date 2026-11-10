@@ -101,7 +101,7 @@ The harness is formatted with `ruff format` and checked with `ruff check` under
 
 | File | Contents |
 | --- | --- |
-| `manifest.json` | run id, profile, host (CPU, flags, affinity, clock, power plan, GPU, RAM, OS), toolchains, package versions, environment, timed-region and policy statements, SHA-256 of the runner binaries and harness scripts, and every supplementary run |
+| `manifest.json` | run id, profile, host (CPU, flags, affinity, clock, power plan, GPU, RAM, OS), toolchains, package versions, environment, timed-region and policy statements, SHA-256 of the runner binaries and harness scripts, and every supplementary run, each with its own host, toolchain, version and statement blocks |
 | `observations.jsonl` | one record per simulator, workload and thread count: status (`ok`, `not-applicable` for a row the simulator cannot run, `skipped` for one the profile leaves out, `timeout`, `oom`, `crash`, `error`) and reason, phases, warm samples, statistics, peak memory, resolved backend and route, validation result, seed reproducibility |
 | `superseded.jsonl` | records a supplementary run re-measured or retired, each tagged with the run that superseded it |
 | `outputs/` | gzipped outputs of the simulators a row validates against (Aer and QuEST vectors, sampled counts), named by each record's `output_file`, so a rerun of part of a row can be checked against the stored reference; not committed |

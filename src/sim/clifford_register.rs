@@ -267,8 +267,8 @@ where
 }
 
 /// Map independent commuting register Paulis to single `Z` letters with a Clifford `W`,
-/// apply `W` to `amps`, and return the cumulative table of `|W φ|^2` over those letters
-/// with each row's sign.
+/// apply `W` to `amps`, and return the table of `|W φ|^2` over those letters with each
+/// row's sign.
 fn register_marginals(
     amps: &mut [Complex64],
     mut rows: Vec<RegisterPauli>,
@@ -319,15 +319,7 @@ fn register_marginals(
             .fold(0, |acc, (i, &c)| acc | (((b >> c) & 1) << i));
         table[index] += amp.norm_sqr();
     }
-    let mut total = 0.0;
-    let cumulative = table
-        .into_iter()
-        .map(|p| {
-            total += p;
-            total
-        })
-        .collect();
-    (cumulative, flips)
+    (table, flips)
 }
 
 /// Where a measured row's outcome comes from.
@@ -351,19 +343,22 @@ pub(super) struct TerminalSampler {
     /// Column `r` of the inverse of the row-combination matrix: the measured qubits'
     /// bits are the XOR of `inverse[r]` over rows `r` whose outcome is 1.
     inverse: Vec<Vec<u64>>,
-    cumulative: Vec<f64>,
+    /// `|W φ|^2` indexed by register outcome.
+    table: Vec<f64>,
     measures: Vec<(usize, usize)>,
     row_of_qubit: Vec<usize>,
     num_classical_bits: usize,
 }
 
-impl TerminalSampler {
-    /// Reduce `circuit`, or return `None` when its register would pass `max_width`
-    /// qubits.
-    pub(super) fn compile(circuit: &Circuit, max_width: usize) -> Result<Option<Self>> {
-        let n = circuit.num_qubits;
-        let mut state = CliffordRegister::new(n);
-        let mut measures = Vec::new();
+impl CliffordRegister {
+    /// Absorb the gates of `circuit`, pushing its measurements onto `measures`, or return
+    /// `None` when the register would pass `max_width` qubits.
+    fn build(
+        circuit: &Circuit,
+        max_width: usize,
+        measures: &mut Vec<(usize, usize)>,
+    ) -> Result<Option<Self>> {
+        let mut state = CliffordRegister::new(circuit.num_qubits);
         for inst in &circuit.instructions {
             match inst {
                 Instruction::Gate { gate, targets } => match gate {
@@ -399,7 +394,31 @@ impl TerminalSampler {
                 }
             }
         }
+        Ok(Some(state))
+    }
+}
 
+impl TerminalSampler {
+    /// Reduce `circuit`, or return `None` when its register would pass `max_width`
+    /// qubits.
+    pub(super) fn compile(circuit: &Circuit, max_width: usize) -> Result<Option<Self>> {
+        let mut measures = Vec::new();
+        let Some(state) = CliffordRegister::build(circuit, max_width, &mut measures)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self::reduce(
+            state,
+            measures,
+            circuit.num_classical_bits,
+        )))
+    }
+
+    fn reduce(
+        mut state: CliffordRegister,
+        measures: Vec<(usize, usize)>,
+        num_classical_bits: usize,
+    ) -> Self {
+        let n = state.slot.len();
         let mut measured: Vec<usize> = Vec::new();
         let mut row_of_qubit = vec![usize::MAX; n];
         for &(q, _) in &measures {
@@ -483,7 +502,7 @@ impl TerminalSampler {
         }
 
         let rows = independent.iter().map(|&i| reg_rows[i].1).collect();
-        let (cumulative, flips) = register_marginals(&mut state.amps, rows, width);
+        let (table, flips) = register_marginals(&mut state.amps, rows, width);
         for (index, (&i, flip)) in independent.iter().zip(flips).enumerate() {
             outcome[reg_rows[i].0] = Some(RowOutcome::Register { index, flip });
         }
@@ -492,29 +511,33 @@ impl TerminalSampler {
             .into_iter()
             .map(|o| o.expect("every measured row is classified"))
             .collect();
-        Ok(Some(Self {
+        Self {
             outcome,
             inverse,
-            cumulative,
+            table,
             measures,
             row_of_qubit,
-            num_classical_bits: circuit.num_classical_bits,
-        }))
+            num_classical_bits,
+        }
     }
 
     pub(super) fn sample(&self, num_shots: usize, seed: u64) -> Vec<Vec<bool>> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let total = *self
-            .cumulative
-            .last()
-            .expect("the table has one entry at least");
+        let mut total = 0.0;
+        let cumulative: Vec<f64> = self
+            .table
+            .iter()
+            .map(|p| {
+                total += p;
+                total
+            })
+            .collect();
         (0..num_shots)
             .map(|_| {
                 let draw = rng.random::<f64>() * total;
-                let index = self
-                    .cumulative
+                let index = cumulative
                     .partition_point(|&c| c <= draw)
-                    .min(self.cumulative.len() - 1);
+                    .min(cumulative.len() - 1);
                 self.classical_bits(index, || rng.random::<bool>())
             })
             .collect()

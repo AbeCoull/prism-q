@@ -60,10 +60,8 @@ fn exact_distribution(sampler: &TerminalSampler) -> Vec<f64> {
         .filter(|o| matches!(o, RowOutcome::Random))
         .count();
     let mut dist = vec![0.0; 1 << sampler.num_classical_bits];
-    let mut below = 0.0;
-    for (index, &upto) in sampler.cumulative.iter().enumerate() {
-        let p = (upto - below) / (1u64 << coins) as f64;
-        below = upto;
+    for (index, &p) in sampler.table.iter().enumerate() {
+        let p = p / (1u64 << coins) as f64;
         for assignment in 0..1usize << coins {
             let mut k = 0;
             let bits = sampler.classical_bits(index, || {

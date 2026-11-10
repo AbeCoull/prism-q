@@ -1183,11 +1183,21 @@ fn auto_clifford_register_shots_follow_the_statevector() {
     ignore = "reaches its route only under --cfg prism_lowered_thresholds"
 )]
 fn auto_wide_stabilizer_rank_shots_follow_the_statevector() {
-    // Three T gates exceed the lowered register cap, so the register declines. A
-    // detached Bell pair leaves the register partly independent, which keeps it
-    // off the terminal statevector, and the branch expansion takes the wide route.
-    let mut circuit = clifford_t(10, 3);
-    circuit.num_qubits = 12;
+    // Three T gates exceed the lowered register test, but two reach qubit 0, so the
+    // register stays at the lowered cap of two qubits. A detached Bell pair leaves the
+    // circuit partly independent, which keeps it off the terminal statevector, and the
+    // register takes the wide route.
+    let mut circuit = Circuit::new(12, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::T, &[0]);
+    circuit.add_gate(Gate::T, &[0]);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::T, &[1]);
+    circuit.add_gate(Gate::H, &[1]);
+    for q in 0..9 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
     circuit.add_gate(Gate::H, &[10]);
     circuit.add_gate(Gate::Cx, &[10, 11]);
     let circuit = measure_all(&circuit);
@@ -1202,6 +1212,113 @@ fn auto_wide_stabilizer_rank_shots_follow_the_statevector() {
         &unfused_probs(&circuit),
         shots,
     );
+}
+
+/// 31 qubits with `H` then `T` on each of `rotated` qubits, then a CX chain over all of
+/// them, measured: each rotated qubit joins the Clifford register.
+fn wide_register_circuit(rotated: usize) -> Circuit {
+    let n = 31;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..rotated {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    measure_all(&circuit)
+}
+
+fn statevector_cap(qubits: usize) -> Limits {
+    Limits::new().max_statevector_qubits(qubits)
+}
+
+#[test]
+fn auto_wide_register_past_its_cap_takes_the_tree() {
+    // 21 T gates at 31 qubits fit the wide T bound, but the register would reach 21
+    // qubits, so the shots take the MPS the tree picks past the statevector cap.
+    let circuit = wide_register_circuit(21);
+    assert_eq!(
+        circuit.t_count(),
+        stabilizer_rank_budget(circuit.num_qubits)
+    );
+    assert!(!auto_samples_wide_by_stabilizer_rank(&circuit));
+    assert!(!auto_samples_by_stabilizer_rank(&circuit));
+
+    let plan = simulate(&circuit)
+        .limits(statevector_cap(20))
+        .plan(Query::Shots(64))
+        .unwrap();
+    assert_eq!(plan.backend, ResolvedBackend::Mps);
+    assert_eq!(plan.rule, RouteRule::NativeSampling);
+
+    let result = simulate(&circuit)
+        .limits(statevector_cap(20))
+        .seed(SEED)
+        .shots(64)
+        .unwrap();
+    assert_eq!(result.metadata.backend, plan.backend);
+    assert_eq!(result.shots.len(), 64);
+}
+
+#[test]
+fn require_exact_rejects_a_wide_register_past_its_cap_before_running() {
+    let circuit = wide_register_circuit(21);
+    let plan = simulate(&circuit)
+        .limits(statevector_cap(20))
+        .plan(Query::Shots(64))
+        .unwrap();
+    assert_ne!(plan.exactness, PlannedExactness::Exact);
+
+    let err = simulate(&circuit)
+        .limits(statevector_cap(20))
+        .seed(SEED)
+        .require_exact()
+        .shots(64)
+        .unwrap_err();
+    match err {
+        PrismError::IncompatibleBackend { backend, reason } => {
+            assert_eq!(backend, "Mps");
+            assert!(reason.contains("drop the requirement"), "{reason}");
+        }
+        other => panic!("expected IncompatibleBackend, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register cap is narrower than this circuit's register"
+)]
+fn auto_wide_register_within_its_cap_keeps_the_register() {
+    // 21 T gates all on qubit 0 keep the register at one qubit, so the wide route
+    // still takes the register. The chain copies qubit 0 everywhere.
+    let mut circuit = Circuit::new(31, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    for _ in 0..21 {
+        circuit.add_gate(Gate::T, &[0]);
+    }
+    circuit.add_gate(Gate::H, &[0]);
+    for q in 0..30 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let circuit = measure_all(&circuit);
+    assert!(auto_samples_wide_by_stabilizer_rank(&circuit));
+
+    let plan = simulate(&circuit)
+        .limits(statevector_cap(20))
+        .plan(Query::Shots(64))
+        .unwrap();
+    assert_eq!(plan.backend, ResolvedBackend::StabilizerRank);
+    assert_eq!(plan.rule, RouteRule::CliffordRegister);
+
+    let result = simulate(&circuit)
+        .limits(statevector_cap(20))
+        .seed(SEED)
+        .shots(64)
+        .unwrap();
+    assert_eq!(result.metadata.backend, ResolvedBackend::StabilizerRank);
+    assert!(result.shots.iter().all(|s| s.iter().all(|&b| b == s[0])));
 }
 
 #[test]

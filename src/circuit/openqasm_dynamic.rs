@@ -319,7 +319,7 @@ pub(super) fn reads_leaf(
 ) -> Result<bool> {
     with_stack(|| {
         Ok(match expr {
-            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) => false,
+            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) | Expr::DurationOf(_) => false,
             Expr::Ident(_) | Expr::Runtime(_) => leaf(expr)?.is_some(),
             Expr::Element(element) => {
                 leaf(expr)?.is_some()
@@ -417,7 +417,7 @@ fn lower(
                     line,
                 });
             }
-            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) => {
+            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) | Expr::DurationOf(_) => {
                 unreachable!("a literal reads no runtime leaf")
             }
         })
@@ -2021,7 +2021,9 @@ impl<'a> Walk<'_, 'a> {
                 runtime: true,
                 bits: false,
             },
-            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) => Reads::default(),
+            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) | Expr::DurationOf(_) => {
+                Reads::default()
+            }
             Expr::Ident(name) => self.name_reads(name),
             Expr::Element(element) => element
                 .indices

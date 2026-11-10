@@ -31,7 +31,9 @@
 //! | Array slice | `b = a[1:2];` `a[0] = row;` `c = a ++ b;` `sizeof(a, 1)` | A range keeps its dimension and an index drops one; shapes must match on assignment; `++` joins along the first dimension |
 //! | Array parameter | `def f(readonly array[int[8], 2, 3] a)` `def g(mutable array[float, #dim = 1] b)` | Passed by reference; a `mutable` parameter writes back to the caller's array or slice |
 //! | Complex | `complex[float[64]] z = 1.0 + 2.0im;` `rz(arg(z)) q;` | Folded at parse time; `+ - * / **`, `==`, `exp`, `sqrt`; `real`, `imag`, `abs` and `arg` read one as a real |
-//! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number |
+//! | Duration | `duration d = 2 * 50ns;` `stretch s;` | Units `dt`, `ns`, `us`/`µs`, `ms`, `s`, attached or after spaces. Folded at parse time; a ratio of two durations, `d / 1ns`, reads as a number, and a comparison as a `bool`. `dt` stays its own unit: a mix with SI units folds only where the answer holds for any sample period |
+//! | Durationof | `delay[durationof({ x q[0]; delay[20ns] q[0]; })] q[1];` | Every gate takes no time, so the length is the longest qubit timeline the block's delays and fixed-length boxes build; the block does not run |
+//! | Stretch resolution | `stretch s; box[90ns] { delay[s] q; x q; delay[2 * s] q; }` | A fixed-length `box` fixes the stretches its alignment determines, here `s = 30ns`; a stretch nothing fixes keeps no value |
 //! | Delay | `delay[d] q[0];` `delay[s];` | The identity on its qubits, all of them when none is named; emits nothing |
 //! | No-op | `nop q[0];` | Names its qubits and emits nothing |
 //! | Gate length | `x[100ns] q[0];` | The designator is dropped, since an ideal simulation has no clock |
@@ -113,8 +115,12 @@
 //!   evaluates at runtime
 //! - an `array` of `bit`, `complex`, `duration` or any other non-numeric element
 //!   type, and a compound assignment to an array slice
-//! - `durationof`, a ratio over a `stretch`, and a ratio mixing `dt` with SI
-//!   units: nothing here sizes a stretch or knows a backend's sample period
+//! - a ratio or comparison over a `stretch` no fixed-length `box` has resolved,
+//!   and a ratio or comparison mixing `dt` with SI units whose answer depends on
+//!   the sample period
+//! - `durationof` over a block holding anything but gate calls, `measure`,
+//!   `reset`, `barrier`, `delay`, `nop` and `box`, or over timelines mixing `dt`
+//!   with SI units
 //! - `output` of any type but `bit`
 //! - an unsupplied `input` anywhere but in a gate angle affine in it: an angle
 //!   over two inputs or not affine in one, a modified gate or `gphase`, a gate
@@ -717,6 +723,8 @@ pub(crate) struct Parser<'a> {
     /// gate's first qubit inside its body, so a control on the gate never
     /// lands on the carrier.
     phase_qubit: usize,
+    /// Next stretch id, shared with every expansion parser so ids stay distinct.
+    stretch_ids: Rc<Cell<u32>>,
 }
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
@@ -841,6 +849,7 @@ impl<'a> Parser<'a> {
             private_bits: None,
             in_outer_while: false,
             phase_qubit: 0,
+            stretch_ids: Rc::default(),
         }
     }
 
@@ -2157,6 +2166,9 @@ mod eval;
 
 #[path = "openqasm_dynamic.rs"]
 mod dynamic;
+
+#[path = "openqasm_timing.rs"]
+mod timing;
 
 pub(crate) use dynamic::builder_expr;
 pub use dynamic::{parse_dynamic, parse_dynamic_with_externs, parse_dynamic_with_inputs};

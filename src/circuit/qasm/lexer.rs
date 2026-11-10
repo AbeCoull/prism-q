@@ -589,12 +589,17 @@ impl<'a> Lexer<'a> {
             .then_some(gap + 2)
     }
 
-    /// Byte width of a time unit glued to the number just read, or `None`.
+    /// Byte width of a time unit after the number just read, spaces or tabs
+    /// before it included, or `None`.
     ///
     /// A unit followed by more name characters is no unit, so `2sx` stays a
     /// number beside a name, as it lexed before durations existed.
     fn time_unit_width(&self) -> Option<usize> {
-        let rest = &self.bytes[self.at..];
+        let gap = self.bytes[self.at..]
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let rest = &self.bytes[self.at + gap..];
         if !rest
             .first()
             .is_some_and(|byte| byte.is_ascii_alphabetic() || !byte.is_ascii())
@@ -610,7 +615,7 @@ impl<'a> Lexer<'a> {
         {
             return None;
         }
-        Some(unit.len())
+        Some(gap + unit.len())
     }
 
     /// True when `e` here opens an exponent rather than an identifier, which

@@ -13,7 +13,7 @@ use crate::circuit::qasm::ast::{
     self, Argument, ArrayShape, AssignOp, Block, CmpOp, Condition, DefParam, ForRange, Index,
     Operand, OperandName, Stmt, StmtKind,
 };
-use crate::circuit::qasm::expr::{self as syntax_expr, Duration, Expr, Timed};
+use crate::circuit::qasm::expr::{self as syntax_expr, Duration, Expr, Stretched, Timed};
 use crate::circuit::qasm::stream::{MAX_NESTING, with_stack};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
@@ -138,7 +138,7 @@ fn number_of(
             line,
             format!("`{expr}` is a duration where a number belongs"),
         )),
-        Timed::Stretch => Err(parse_error(
+        Timed::Stretch(_) => Err(parse_error(
             line,
             format!("`{expr}` is a stretch where a number belongs"),
         )),
@@ -242,7 +242,7 @@ fn whole(value: ClassicalValue, line: usize) -> Result<i64> {
 
 /// `expr` with each node `value` gives a replacement for replaced by it, and the
 /// children of every other node visited in turn.
-fn replace_nodes<'e>(
+pub(super) fn replace_nodes<'e>(
     expr: &Expr<'e>,
     value: &impl Fn(&Expr<'e>) -> Result<Option<Expr<'e>>>,
 ) -> Result<Expr<'e>> {
@@ -1237,10 +1237,14 @@ impl<'a> Parser<'a> {
                 // A box and Braket's verbatim pragma both direct a scheduler or
                 // a device compiler, which a simulator has nothing to honour.
                 self.verbatim_pending = false;
-                if let Some(duration) = duration {
-                    self.span_of(duration, "box", line)?;
-                }
+                let length = match duration {
+                    Some(duration) => self.span_of(duration, "box", line)?,
+                    None => None,
+                };
                 out.extend(self.exec_box(body)?);
+                if let Some(length) = length {
+                    self.resolve_stretches(body, length, line)?;
+                }
                 Ok(())
             }
             StmtKind::Pragma(text) => {
@@ -1478,7 +1482,7 @@ impl<'a> Parser<'a> {
             }
             if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
                 let zero = Timed::Duration(Duration::default());
-                self.bind_duration(name, kind, zero, constant);
+                self.bind_duration(name, kind, zero, constant, line)?;
             } else if let ClassicalType::Complex(_) = kind {
                 self.bind_complex(name, kind, Complex64::new(0.0, 0.0), constant);
             } else {
@@ -1488,8 +1492,7 @@ impl<'a> Parser<'a> {
         };
         if matches!(kind, ClassicalType::Duration | ClassicalType::Stretch) {
             let folded = self.duration_of(value, line)?;
-            self.bind_duration(name, kind, folded, constant);
-            return Ok(());
+            return self.bind_duration(name, kind, folded, constant, line);
         }
         if let ClassicalType::Complex(_) = kind {
             let folded = self.complex_of(value, line)?;
@@ -1501,13 +1504,23 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Bind a `duration` or `stretch`. A stretch keeps no value: a scheduler
-    /// sizes it, so whatever it was initialised with is only a lower bound.
-    fn bind_duration(&mut self, name: &'a str, ty: ClassicalType, value: Timed, constant: bool) {
-        let value = if ty == ClassicalType::Stretch {
-            Timed::Stretch
-        } else {
-            value
+    /// Bind a `duration` or `stretch`. A stretch is its initializer, a lower
+    /// bound, plus a growth of its own that a fixed-length `box` may resolve.
+    fn bind_duration(
+        &mut self,
+        name: &'a str,
+        ty: ClassicalType,
+        value: Timed,
+        constant: bool,
+        line: usize,
+    ) -> Result<()> {
+        let value = match (ty, value.stretched()) {
+            (ClassicalType::Stretch, Some(lower)) => {
+                let id = self.stretch_ids.get();
+                self.stretch_ids.set(id + 1);
+                Timed::from(lower.plus(Stretched::growth(id), 1.0, line)?)
+            }
+            _ => value,
         };
         let decl = ClassicalDecl {
             ty,
@@ -1521,6 +1534,7 @@ impl<'a> Parser<'a> {
             self.declared.push(name);
         }
         self.durations.insert(name, value);
+        Ok(())
     }
 
     /// Bind a `complex[float[n]]`, rounding each component to the declared width.
@@ -1585,10 +1599,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Fold an expression that has to be a duration or a stretch.
-    fn duration_of(&self, expr: &Expr, line: usize) -> Result<Timed> {
+    pub(super) fn duration_of(&self, expr: &Expr, line: usize) -> Result<Timed> {
         self.reject_symbol(expr, line)?;
+        let expr = self.with_durationof(expr, line)?;
         let vars = self.param_vars.as_ref();
-        match timed_of(expr, line, vars, &self.durations, &self.arrays)? {
+        match timed_of(&expr, line, vars, &self.durations, &self.arrays)? {
             Timed::Number(value) => Err(parse_error(
                 line,
                 format!("`{expr}` is the number {value} where a duration belongs; give it a unit"),
@@ -1597,17 +1612,19 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Check the length a `delay` or `box` names, which has no further effect.
-    fn span_of(&self, expr: &Expr, what: &str, line: usize) -> Result<()> {
-        if let Timed::Duration(duration) = self.duration_of(expr, line)?
-            && duration.is_negative()
-        {
+    /// Check the length a `delay` or `box` names, returning it once no stretch
+    /// is left in it.
+    pub(super) fn span_of(&self, expr: &Expr, what: &str, line: usize) -> Result<Option<Duration>> {
+        let Timed::Duration(duration) = self.duration_of(expr, line)? else {
+            return Ok(None);
+        };
+        if duration.is_negative() {
             return Err(parse_error(
                 line,
                 format!("`{what}` needs a non-negative duration, got `{expr}`"),
             ));
         }
-        Ok(())
+        Ok(Some(duration))
     }
 
     fn assign_classical(
@@ -1962,8 +1979,9 @@ impl<'a> Parser<'a> {
             ));
         }
         self.reject_symbol(value, line)?;
+        let value = self.with_durationof(value, line)?;
         let value = timed_of(
-            value,
+            &value,
             line,
             self.param_vars.as_ref(),
             &self.durations,
@@ -1976,7 +1994,7 @@ impl<'a> Parser<'a> {
                     .durations
                     .get(target)
                     .copied()
-                    .unwrap_or(Timed::Stretch);
+                    .unwrap_or(Timed::Duration(Duration::default()));
                 syntax_expr::combine_timed(op.binary(), current, value, line)?
             }
         };
@@ -1986,8 +2004,7 @@ impl<'a> Parser<'a> {
                 format!("assignment leaves duration `{target}` holding the number {number}"),
             ));
         }
-        self.bind_duration(target, kind, updated, false);
-        Ok(())
+        self.bind_duration(target, kind, updated, false, line)
     }
 
     /// Fold an initializer to the value its declared type holds. An integer or
@@ -2282,7 +2299,7 @@ impl<'a> Parser<'a> {
                 Some(if ty == ClassicalType::Duration {
                     match self.duration_of(&value, line)? {
                         Timed::Duration(duration) => Expr::Duration(duration),
-                        Timed::Stretch => {
+                        Timed::Stretch(_) => {
                             return Err(PrismError::UnsupportedConstruct {
                                 construct: "a stretch returned as a duration".to_string(),
                                 line,
@@ -2813,7 +2830,12 @@ impl<'a> Parser<'a> {
             })?;
             return number_of(&resolved, line, vars, &self.durations, &self.arrays);
         }
-        number_of(&expr, line, vars, &self.durations, &self.arrays)
+        let value = number_of(&expr, line, vars, &self.durations, &self.arrays);
+        if value.is_err() && expr.has_durationof() {
+            let expr = self.with_durationof(&expr, line)?;
+            return number_of(&expr, line, vars, &self.durations, &self.arrays);
+        }
+        value
     }
 
     /// Reject a classical bit read as a value under `parse`, where a measured bit
@@ -3675,8 +3697,9 @@ impl<'a> Parser<'a> {
                             format!("def `{name}` parameter `{param_name}` takes a duration"),
                         ));
                     };
+                    let expr = self.with_durationof(expr, line)?;
                     let value = timed_of(
-                        expr,
+                        &expr,
                         line,
                         self.param_vars.as_ref(),
                         &self.durations,
@@ -4170,6 +4193,7 @@ impl<'a> Parser<'a> {
             private_bits: self.private_bits.clone(),
             in_outer_while: self.in_outer_while || self.in_while(),
             phase_qubit: self.phase_qubit,
+            stretch_ids: Rc::clone(&self.stretch_ids),
         }
     }
 

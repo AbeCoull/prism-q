@@ -59,6 +59,7 @@ mod qasm_externs;
 mod qasm_inputs;
 mod qasm_subroutine_measure;
 mod qasm_subset;
+mod qasm_timing;
 mod qec_decoder;
 mod qec_dem_export;
 mod qec_dem_import;

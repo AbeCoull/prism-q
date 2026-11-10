@@ -164,4 +164,19 @@ impl<'t, 'a> Stream<'t, 'a> {
     pub(crate) fn rewind(&mut self, mark: usize) {
         self.at = mark;
     }
+
+    /// The tokens read since `mark`, followed by an end of input, so a later
+    /// [`Stream`] can read them again.
+    pub(crate) fn since(&self, mark: usize) -> Box<[Token<'a>]> {
+        let end = Token {
+            kind: Kind::Eof,
+            text: "",
+            ..self.peek()
+        };
+        self.tokens[mark..self.at]
+            .iter()
+            .copied()
+            .chain(std::iter::once(end))
+            .collect()
+    }
 }

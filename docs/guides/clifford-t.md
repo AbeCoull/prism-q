@@ -20,8 +20,9 @@ whether the circuit carries noise.
 - Terminal shots go to stabilizer rank on a circuit of 16 qubits or more with fewer T
   gates than qubits and at most 20 (the Clifford register form below). Past the
   statevector cap, it takes terminal shots with a T count of at most 40, inside a bound
-  derived from the width. Shots with mid-circuit measurements take it inside the same T
-  bound.
+  derived from the width, when the register stays within 20 qubits; a circuit that would
+  grow it further goes to the dispatch tree. Shots with mid-circuit measurements take it
+  inside the same T bound.
 - Marginals on a unitary Clifford+T circuit of 12 qubits or more go to SPD.
 - Expectation values on a Clifford circuit go to SPD.
 
@@ -44,7 +45,7 @@ take any rotation angle. Stabilizer rank needs every lowered Z rotation on the p
 ## Stabilizer rank (`src/sim/stabilizer_rank.rs`)
 
 Exact probability output is capped because it returns a dense vector of 2^n entries.
-Shot sampling has no hard qubit cap and takes one of two forms.
+Shot sampling is not bound by the statevector cap and takes one of two forms.
 
 For terminal measurements of a unitary circuit, the state is a Clifford tableau `C`
 applied to `|0>` on most qubits and a dense register `φ` on the rest. A T gate on qubit
@@ -54,13 +55,15 @@ the qubit into the register, so the register grows by at most one qubit per T ga
 holds at most `2^t` amplitudes. Sampling reduces each measured `C† Z_q C` once: an outcome
 that flips a `|0>` qubit is a fair coin, and the rest are read from one table of register
 marginals. Random Clifford depth 10 with 10 T gates takes about 0.5 ms for 1024 shots from
-16 to 32 qubits and 77 ms at 1000 qubits. The register is capped at 20 qubits.
+16 to 32 qubits and 77 ms at 1000 qubits. The register is capped at 20 qubits: a circuit
+that would grow it past 20 returns `BackendUnsupported`, and `Auto` checks the width
+from the tableau alone and sends such a circuit to the dispatch tree instead.
 
-Mid-circuit measurements, or a register past that cap, carry coherent weighted MPS
-branches instead. Clifford gates mutate each branch, `T` and `Tdg` split branches, and a
+Mid-circuit measurements carry coherent weighted MPS branches instead. Clifford gates mutate each branch, `T` and `Tdg` split branches, and a
 measurement computes outcome probabilities from the weighted ensemble before projecting
 every branch onto the sampled outcome. Branch count, MPS bond growth and measurement count
-set how far this form scales.
+set how far this form scales; past 20 T gates the branch count passes its cap and the run
+returns `BackendUnsupported`.
 
 The dense probability path reads its probabilities off the same Clifford register the
 terminal shots use. Branches of `T = alpha*I + beta*Z` that land on one basis state of the
@@ -72,7 +75,7 @@ register wider than 20 qubits falls back to one branch per T choice, capped at `
 |----------|-----|
 | `run_stabilizer_rank` | Exact probabilities (register width ≤ 20, n ≤ 25) |
 | `run_stabilizer_rank_approx` | Approximate under a term budget (higher t counts) |
-| `run_stabilizer_rank_shots` | Shot-based sampling with no fixed qubit cap |
+| `run_stabilizer_rank_shots` | Shot sampling past the statevector cap (register of at most 20 qubits) |
 | `stabilizer_overlap_sq` | Inner product between stabilizer states |
 
 `run_stabilizer_rank_approx` truncates deterministically: after each `T` it drops the

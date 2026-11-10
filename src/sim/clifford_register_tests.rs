@@ -230,6 +230,27 @@ fn register_declines_past_its_width() {
 }
 
 #[test]
+fn register_width_dry_run_agrees_with_compile() {
+    for seed in 0..60u64 {
+        let n = 2 + (seed as usize % 6);
+        let t_count = 1 + (seed as usize / 6) % 8;
+        let mut circuit = random_clifford_t(n, 12 + 4 * n, t_count, seed);
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+        for max_width in 0..=n {
+            assert_eq!(
+                register_fits(&circuit, max_width).unwrap(),
+                TerminalSampler::compile(&circuit, max_width)
+                    .unwrap()
+                    .is_some(),
+                "seed {seed}, n {n}, t {t_count}, max width {max_width}"
+            );
+        }
+    }
+}
+
+#[test]
 fn register_samples_a_wide_register_from_one_rotated_qubit() {
     let n = 200;
     let mut circuit = Circuit::new(n, n);

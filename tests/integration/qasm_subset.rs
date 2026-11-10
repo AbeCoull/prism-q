@@ -147,7 +147,7 @@ fn timing_that_cannot_be_evaluated_is_rejected_by_name() {
     let unsupported = [
         ("stretch s;\nrx(s / 1ns) q[0];", "stretch"),
         ("rx(10ns / 2dt) q[0];", "`dt`"),
-        ("delay[durationof({ x q[0]; })] q[0];", "`durationof`"),
+        ("delay[durationof({ int i = 0; })] q[0];", "`durationof`"),
     ];
     for (body, needle) in unsupported {
         match parse_err(body) {

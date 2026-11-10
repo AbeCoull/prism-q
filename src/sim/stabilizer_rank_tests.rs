@@ -103,6 +103,29 @@ fn shots_with_t_bypass_statevector_qubit_cap_terminal() {
 }
 
 #[test]
+fn shots_decline_a_register_past_its_cap() {
+    let width = MAX_REGISTER_QUBITS + 1;
+    let mut c = Circuit::new(width + 1, width + 1);
+    for q in 0..width {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..width {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..=width {
+        c.add_measure(q, q);
+    }
+
+    assert!(!terminal_register_fits(&c));
+    let err = run_stabilizer_rank_shots(&c, 8, 42).unwrap_err();
+    assert!(
+        matches!(err, PrismError::BackendUnsupported { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
 fn shots_with_t_bypass_statevector_qubit_cap_mid_circuit() {
     let n = MAX_STATEVECTOR_QUBITS + 5;
     let mut c = Circuit::new(n, 2);
@@ -673,7 +696,13 @@ fn triangle_gram_matches_the_full_sum() {
     c.add_gate(Gate::H, &[2]);
     c.add_gate(Gate::T, &[2]);
 
-    let branches = build_mps_branches_for_unitary(&c, 42).unwrap();
+    let mut branches = initial_mps_branches(&c, 42).unwrap();
+    for inst in &c.instructions {
+        let Instruction::Gate { gate, targets } = inst else {
+            unreachable!("the circuit holds gates only");
+        };
+        apply_mps_gate(&mut branches, gate, targets).unwrap();
+    }
     assert!(branches.len() >= 8, "expected a T-branched state");
 
     let mut full = Complex64::new(0.0, 0.0);

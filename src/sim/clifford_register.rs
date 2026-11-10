@@ -25,6 +25,9 @@ struct CliffordRegister {
     prefix: SignedCliffordPrefix,
     /// Qubit `q`'s bit in `amps`, or `None` while it holds `|0>`.
     slot: Vec<Option<usize>>,
+    width: usize,
+    /// `2^width` amplitudes, or the starting amplitude alone when only the width is
+    /// tracked.
     amps: Vec<Complex64>,
 }
 
@@ -86,41 +89,46 @@ impl CliffordRegister {
         Self {
             prefix: SignedCliffordPrefix::identity(num_qubits),
             slot: vec![None; num_qubits],
+            width: 0,
             amps: vec![Complex64::new(1.0, 0.0)],
         }
     }
 
-    fn width(&self) -> usize {
-        self.amps.len().trailing_zeros() as usize
+    /// Return `P = C† Z_q C` with its support inside the register. When `P` flips a
+    /// qubit still in `|0>`, CX gates controlled on that qubit, which leave the state
+    /// alone, clear the flips from every other such qubit and fold into `C`, and the
+    /// qubit joins the register. Returns `None` past `max_width`.
+    fn admit_z(&mut self, q: usize, max_width: usize) -> Option<SignedPauli> {
+        let p = self.prefix.conjugate_z(q);
+        let Some(anchor) = (0..self.slot.len()).find(|&j| self.slot[j].is_none() && bit(&p.x, j))
+        else {
+            return Some(p);
+        };
+        if self.width == max_width {
+            return None;
+        }
+        for i in 0..self.slot.len() {
+            if i != anchor && self.slot[i].is_none() && bit(&p.x, i) {
+                self.prefix
+                    .fold_right_state_gate(&Gate::Cx, &[anchor, i])
+                    .expect("CX folds into the prefix");
+            }
+        }
+        self.slot[anchor] = Some(self.width);
+        self.width += 1;
+        Some(self.prefix.conjugate_z(q))
     }
 
     /// Apply `exp(-i θ Z_q)` after the Clifford: `exp(-i θ P)` on `|0> ⊗ φ` for
-    /// `P = C† Z_q C`. When `P` flips a qubit still in `|0>`, CX gates controlled on
-    /// that qubit, which leave the state alone, clear the flips from every other such
-    /// qubit and fold into `C`, and the qubit joins the register. Returns `false` past
-    /// `max_width`.
+    /// `P = C† Z_q C`. Returns `false` past `max_width`.
     fn rotate_z(&mut self, q: usize, theta: f64, max_width: usize) -> bool {
-        let p = self.prefix.conjugate_z(q);
-        let anchor = (0..self.slot.len()).find(|&j| self.slot[j].is_none() && bit(&p.x, j));
-        let p = match anchor {
-            None => p,
-            Some(anchor) => {
-                if self.width() == max_width {
-                    return false;
-                }
-                for i in 0..self.slot.len() {
-                    if i != anchor && self.slot[i].is_none() && bit(&p.x, i) {
-                        self.prefix
-                            .fold_right_state_gate(&Gate::Cx, &[anchor, i])
-                            .expect("CX folds into the prefix");
-                    }
-                }
-                self.slot[anchor] = Some(self.width());
-                let len = self.amps.len();
-                self.amps.resize(2 * len, Complex64::new(0.0, 0.0));
-                self.prefix.conjugate_z(q)
-            }
+        let Some(p) = self.admit_z(q, max_width) else {
+            return false;
         };
+        let len = self.amps.len();
+        if len < 1 << self.width {
+            self.amps.resize(2 * len, Complex64::new(0.0, 0.0));
+        }
         let reg = self.restrict(&p);
         self.apply_rotation(reg, theta);
         true
@@ -351,52 +359,60 @@ pub(super) struct TerminalSampler {
     register_width: usize,
 }
 
-impl CliffordRegister {
-    /// Absorb the gates of `circuit`, pushing its measurements onto `measures`, or return
-    /// `None` when the register would pass `max_width` qubits.
-    fn build(
-        circuit: &Circuit,
-        max_width: usize,
-        measures: &mut Vec<(usize, usize)>,
-    ) -> Result<Option<Self>> {
-        let mut state = CliffordRegister::new(circuit.num_qubits);
-        for inst in &circuit.instructions {
-            match inst {
-                Instruction::Gate { gate, targets } => match gate {
-                    Gate::T | Gate::Tdg => {
-                        let theta = if matches!(gate, Gate::T) {
-                            FRAC_PI_8
-                        } else {
-                            -FRAC_PI_8
-                        };
-                        if !state.rotate_z(targets[0], theta, max_width) {
-                            return Ok(None);
-                        }
+/// Run `circuit` through a register, with its amplitudes only when `dense`, pushing its
+/// measurements onto `measures`; `None` when the register would pass `max_width` qubits.
+fn build_register(
+    circuit: &Circuit,
+    max_width: usize,
+    dense: bool,
+    measures: &mut Vec<(usize, usize)>,
+) -> Result<Option<CliffordRegister>> {
+    let mut state = CliffordRegister::new(circuit.num_qubits);
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Gate { gate, targets } => match gate {
+                Gate::T | Gate::Tdg => {
+                    let admitted = if !dense {
+                        state.admit_z(targets[0], max_width).is_some()
+                    } else if matches!(gate, Gate::T) {
+                        state.rotate_z(targets[0], FRAC_PI_8, max_width)
+                    } else {
+                        state.rotate_z(targets[0], -FRAC_PI_8, max_width)
+                    };
+                    if !admitted {
+                        return Ok(None);
                     }
-                    _ => state.prefix.apply_state_gate(gate, targets).map_err(|_| {
-                        PrismError::BackendUnsupported {
-                            backend: "stabilizer_rank".into(),
-                            operation: format!("gate `{}` in the Clifford register", gate.name()),
-                        }
-                    })?,
-                },
-                Instruction::Measure {
-                    qubit,
-                    classical_bit,
-                } => measures.push((*qubit, *classical_bit)),
-                Instruction::Barrier { .. } => {}
-                _ => {
-                    return Err(PrismError::IncompatibleBackend {
-                        backend: "stabilizer_rank".into(),
-                        reason: "the Clifford register samples terminal measurements of a unitary \
-                             circuit"
-                            .into(),
-                    });
                 }
+                _ => state.prefix.apply_state_gate(gate, targets).map_err(|_| {
+                    PrismError::BackendUnsupported {
+                        backend: "stabilizer_rank".into(),
+                        operation: format!("gate `{}` in the Clifford register", gate.name()),
+                    }
+                })?,
+            },
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => measures.push((*qubit, *classical_bit)),
+            Instruction::Barrier { .. } => {}
+            _ => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "stabilizer_rank".into(),
+                    reason: "the Clifford register samples terminal measurements of a unitary \
+                         circuit"
+                        .into(),
+                });
             }
         }
-        Ok(Some(state))
     }
+    Ok(Some(state))
+}
+
+/// Whether the register of `circuit` stays within `max_width` qubits, read off the
+/// tableau without amplitudes: `true` exactly when [`TerminalSampler::compile`] returns
+/// `Some`.
+pub(super) fn register_fits(circuit: &Circuit, max_width: usize) -> Result<bool> {
+    Ok(build_register(circuit, max_width, false, &mut Vec::new())?.is_some())
 }
 
 impl TerminalSampler {
@@ -404,7 +420,7 @@ impl TerminalSampler {
     /// qubits.
     pub(super) fn compile(circuit: &Circuit, max_width: usize) -> Result<Option<Self>> {
         let mut measures = Vec::new();
-        let Some(state) = CliffordRegister::build(circuit, max_width, &mut measures)? else {
+        let Some(state) = build_register(circuit, max_width, true, &mut measures)? else {
             return Ok(None);
         };
         Ok(Some(Self::reduce(
@@ -418,7 +434,7 @@ impl TerminalSampler {
     /// the circuit's own measurements.
     pub(super) fn compile_every_qubit(circuit: &Circuit, max_width: usize) -> Result<Option<Self>> {
         let n = circuit.num_qubits;
-        let Some(state) = CliffordRegister::build(circuit, max_width, &mut Vec::new())? else {
+        let Some(state) = build_register(circuit, max_width, true, &mut Vec::new())? else {
             return Ok(None);
         };
         Ok(Some(Self::reduce(
@@ -488,7 +504,7 @@ impl TerminalSampler {
             .filter(|&r| outcome[r].is_none())
             .map(|r| (r, state.restrict(&rows[r])))
             .collect();
-        let width = state.width();
+        let width = state.width;
         let mut independent: Vec<usize> = Vec::new();
         for column in 0..2 * width {
             let has = |p: &RegisterPauli| {

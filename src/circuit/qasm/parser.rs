@@ -651,7 +651,7 @@ fn body<'a>(stream: &mut Stream<'_, 'a>) -> Result<Block<'a>> {
     Ok(out)
 }
 
-fn braced_block<'a>(stream: &mut Stream<'_, 'a>) -> Result<Block<'a>> {
+pub(crate) fn braced_block<'a>(stream: &mut Stream<'_, 'a>) -> Result<Block<'a>> {
     stream.expect(Kind::LBrace)?;
     let mut out = Block::new();
     while !stream.eat(Kind::RBrace) {

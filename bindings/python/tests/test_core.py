@@ -125,6 +125,22 @@ def test_errors_carry_a_kind():
     assert excinfo.value.kind == "backend_unsupported"
 
 
+def test_timing_folds_with_zero_length_gates():
+    timed = parse_qasm(
+        "OPENQASM 3.0;\nqubit[2] q;\nstretch s;\n"
+        "box[90ns] { delay[s] q[0]; x q[0]; delay[2 * s] q[0]; }\n"
+        "rx(durationof({ delay[s] q[1]; }) / 10ns) q[1];"
+    )
+    plain = parse_qasm("OPENQASM 3.0;\nqubit[2] q;\nx q[0];\nrx(3) q[1];")
+    np.testing.assert_allclose(
+        simulate(timed).seed(1).state_vector(), simulate(plain).seed(1).state_vector()
+    )
+
+    with pytest.raises(prism_q.PrismError) as excinfo:
+        parse_qasm("OPENQASM 3.0;\nqubit[1] q;\nstretch s;\nrx(s / 1ns) q[0];")
+    assert excinfo.value.kind == "unsupported_construct"
+
+
 def test_marginals():
     bell = CircuitBuilder(2).h(0).cx(0, 1).build()
     marginals = simulate(bell).seed(1).marginals()

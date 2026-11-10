@@ -646,25 +646,29 @@ sits beside the checkout rather than inside it: `/target/` in `.gitignore` is
 anchored to the repository root, so a nested worktree's build output would read
 as an untracked change and abort the A/B.
 
-Representative CI workloads:
+CI workloads, one or two rows per simulation path (the full list and the reason for each
+row is in `scripts/bench_ci.sh`):
 
-| Filter | Coverage |
-|--------|----------|
-| `statevector/scalability_d5/18` | Dense statevector scaling, above the post-phase rebatch floor |
-| `statevector/qft_textbook/20` | Structured controlled phase and swap workload |
-| `statevector/qpe_t_gate/16q` | Phase estimation with non-Clifford gates |
-| `statevector/qaoa_l3/16` | QAOA workload with ZZ rotations and mixer layers |
-| `stabilizer/scaling/500` | Clifford stabilizer backend path |
-| `stabilizer/measurement/wall_measure_all/1000` | Stabilizer collapse and index maintenance under random measurement |
-| `compiled_sampler/noiseless/noiseless_500q_10k` | Compiled shot sampling path |
-| `compiled_sampler/noisy/noisy_500q_10k` | Compiled Pauli-noise shot sampling path |
+| Path | Rows |
+|------|------|
+| Dense statevector | `statevector/{scalability_d5/18, qft_textbook/20, qpe_t_gate/16q, qaoa_l3/16, diag_mixed_l6/20}` |
+| Stabilizer | `stabilizer/scaling/500`, `stabilizer/measurement/wall_measure_all/1000`, `factored_stabilizer/local_blocks/10x5/50` |
+| Compiled sampler | `compiled_sampler/noiseless/noiseless_500q_10k`, `compiled_sampler/noisy/noisy_500q_10k` |
+| MPS and sparse | `mps/random_d10/16`, `mps/sampling/32`, `sparse/random_d10/20`, `sparse/sampling/32` |
+| Density matrix | `density_matrix/rzz_layers_fused/10`, `density_matrix/noisy_channels/kraus_amp_damp/10` |
+| Factored and tensor network | `factored/partial_independence/factored/20`, `tn/linear_chain/12`, `tn/midmeasure_chain/20` |
+| Product state | `product/scaling_d10/64` |
+| Clifford+T | `clifford_t/spd/10q_12t`, `spp/spp_10k/20q_8t`, `stabilizer_rank/approx_1024/10q_20t` |
+| Analytic terminals | `gradient/qaoa_l1/adjoint/18`, `expectation/pauli_sum/18`, `auto/expectation/brickwork_d4/20` |
+| Noise | `noisy_sampling/trajectory_pauli/non_clifford_12q_512`, `noisy_sampling/compiled_pauli/clifford_100q_10k`, `pauli_path/noisy_expectation/path/50` |
+| Circuit level | `dynamic/guarded_region/20`, `vqe/bind/16` |
 
 The sizes are the smallest that still exercise the pipeline that ships, not the smallest
-available: `MIN_QUBITS_FOR_DIAG_BATCH = 16` and `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in
+available: `MIN_QUBITS_FOR_DIAG_BATCH = 14` and `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in
 `circuit/fusion.rs` are the floors, and `qft_textbook` has no 18 in its size list so it
-stays at 20. Six passes over the eight rows take about 75 seconds. The job builds head in
-place just before measuring, so `bench_ci.sh` passes `--settle 60`: the first pass waits
-until the runner has read quiet for a minute without a break.
+stays at 20. The job builds head in place just before measuring, so `bench_ci.sh` passes
+`--settle 60`: the first pass waits until the runner has read quiet for a minute without
+a break.
 
 The stabilizer row measures a CNOT wall rather than a GHZ chain. A GHZ chain collapses
 once and reads the rest of the register off deterministically, so it prices almost none

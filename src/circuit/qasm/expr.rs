@@ -10,7 +10,7 @@ use std::fmt;
 use num_complex::Complex64;
 
 use super::ast::Range;
-use super::lexer::{Kind, TIME_UNITS};
+use super::lexer::{Kind, TIME_UNITS, Token};
 use super::stream::{MAX_NESTING, Stream, with_stack};
 use crate::circuit::dynamic::{self, ClassicalValue, UnaryOp};
 use crate::error::{PrismError, Result};
@@ -115,15 +115,158 @@ impl Duration {
     pub(crate) fn is_negative(self) -> bool {
         self.ns < 0.0 || self.dt < 0.0
     }
+
+    pub(crate) fn minus(self, other: Duration) -> Duration {
+        Duration {
+            ns: self.ns - other.ns,
+            dt: self.dt - other.dt,
+        }
+    }
+
+    /// Order two lengths when the order holds whatever length `dt` has, which
+    /// is when their difference has no component of each sign.
+    pub(crate) fn order(self, other: Duration) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+        let diff = self.minus(other);
+        if diff.ns == 0.0 && diff.dt == 0.0 {
+            Some(Ordering::Equal)
+        } else if diff.ns >= 0.0 && diff.dt >= 0.0 {
+            Some(Ordering::Greater)
+        } else if diff.ns <= 0.0 && diff.dt <= 0.0 {
+            Some(Ordering::Less)
+        } else {
+            None
+        }
+    }
+
+    /// `self / other` when the two are proportional, which fixes the ratio
+    /// whatever length `dt` has.
+    fn ratio(self, other: Duration) -> Option<f64> {
+        let norm = other.ns * other.ns + other.dt * other.dt;
+        let k = (self.ns * other.ns + self.dt * other.dt) / norm;
+        let residual = self.minus(other.scaled(k));
+        let scale = self.ns.abs().max(self.dt.abs());
+        (residual.ns.abs() <= 1e-12 * scale && residual.dt.abs() <= 1e-12 * scale).then_some(k)
+    }
 }
 
-/// What a timing expression folds to. A stretch has no length until a scheduler
-/// sizes it, so anything built from one stays unresolved.
+/// Most distinct stretches one timing value may combine.
+pub(crate) const MAX_STRETCH_TERMS: usize = 4;
+
+/// A length that grows with unresolved stretches: `base` plus each stretch's
+/// growth times its coefficient. Ids are the parser's and never reach a user.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Stretched {
+    pub base: Duration,
+    terms: [(u32, f64); MAX_STRETCH_TERMS],
+    len: u8,
+}
+
+impl Stretched {
+    pub(crate) fn fixed(base: Duration) -> Stretched {
+        Stretched {
+            base,
+            terms: [(0, 0.0); MAX_STRETCH_TERMS],
+            len: 0,
+        }
+    }
+
+    pub(crate) fn growth(id: u32) -> Stretched {
+        let mut out = Stretched::fixed(Duration::default());
+        out.terms[0] = (id, 1.0);
+        out.len = 1;
+        out
+    }
+
+    pub(crate) fn terms(&self) -> &[(u32, f64)] {
+        &self.terms[..usize::from(self.len)]
+    }
+
+    fn scaled(self, factor: f64) -> Stretched {
+        let mut out = self;
+        out.base = self.base.scaled(factor);
+        for term in &mut out.terms[..usize::from(self.len)] {
+            term.1 *= factor;
+        }
+        out.normalized()
+    }
+
+    /// `self + factor * other`.
+    pub(crate) fn plus(self, other: Stretched, factor: f64, line: usize) -> Result<Stretched> {
+        let mut out = self;
+        out.base = Duration {
+            ns: self.base.ns + factor * other.base.ns,
+            dt: self.base.dt + factor * other.base.dt,
+        };
+        for &(id, coeff) in other.terms() {
+            let len = usize::from(out.len);
+            match out.terms[..len].iter_mut().find(|term| term.0 == id) {
+                Some(term) => term.1 += factor * coeff,
+                None if len < MAX_STRETCH_TERMS => {
+                    out.terms[len] = (id, factor * coeff);
+                    out.len += 1;
+                }
+                None => {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "a timing value over more than {MAX_STRETCH_TERMS} stretches"
+                        ),
+                        line,
+                    });
+                }
+            }
+        }
+        Ok(out.normalized())
+    }
+
+    fn normalized(mut self) -> Stretched {
+        let mut kept = 0;
+        for at in 0..usize::from(self.len) {
+            if self.terms[at].1 != 0.0 {
+                self.terms[kept] = self.terms[at];
+                kept += 1;
+            }
+        }
+        self.len = kept as u8;
+        self
+    }
+
+    /// Replace each resolved stretch with its growth.
+    pub(crate) fn substitute(self, resolved: &HashMap<u32, Duration>) -> Timed {
+        let mut out = Stretched::fixed(self.base);
+        for &(id, coeff) in self.terms() {
+            match resolved.get(&id) {
+                Some(growth) => {
+                    out.base.ns += coeff * growth.ns;
+                    out.base.dt += coeff * growth.dt;
+                }
+                None => {
+                    out.terms[usize::from(out.len)] = (id, coeff);
+                    out.len += 1;
+                }
+            }
+        }
+        Timed::from(out)
+    }
+}
+
+/// What a timing expression folds to. A stretch no fixed-length `box` has
+/// resolved stays a [`Stretched`] form.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Timed {
     Number(f64),
     Duration(Duration),
-    Stretch,
+    Stretch(Stretched),
+}
+
+impl From<Stretched> for Timed {
+    fn from(value: Stretched) -> Timed {
+        if value.len == 0 {
+            Timed::Duration(value.base)
+        } else {
+            Timed::Stretch(value)
+        }
+    }
 }
 
 impl Timed {
@@ -131,7 +274,16 @@ impl Timed {
         match self {
             Timed::Number(_) => "a number",
             Timed::Duration(_) => "a duration",
-            Timed::Stretch => "a stretch",
+            Timed::Stretch(_) => "a stretch",
+        }
+    }
+
+    /// The length as a form, or `None` for a number.
+    pub(crate) fn stretched(self) -> Option<Stretched> {
+        match self {
+            Timed::Number(_) => None,
+            Timed::Duration(duration) => Some(Stretched::fixed(duration)),
+            Timed::Stretch(form) => Some(form),
         }
     }
 }
@@ -168,6 +320,11 @@ pub(crate) enum Expr<'a> {
     Concat(Vec<Expr<'a>>),
     /// `{a, b, c}` standing as the one index of a register subscript.
     Set(Vec<Expr<'a>>),
+    /// `durationof({ ... })`, holding the tokens of its block, braces included.
+    /// The evaluator parses them again and replaces the node with the block's
+    /// length before folding; a statement tree here would make `Expr` invariant
+    /// in `'a`, since a call's arguments sit in a `SmallVec`.
+    DurationOf(Box<[Token<'a>]>),
 }
 
 /// `int[8](x)`, `bool(x)` and the other scalar casts.
@@ -326,7 +483,11 @@ impl<'a> Expr<'a> {
     /// on an `input` slot.
     pub(crate) fn mentions(&self, name: &str) -> bool {
         with_stack(|| match self {
-            Expr::Number(_) | Expr::Complex(_) | Expr::Duration(_) | Expr::Runtime(_) => false,
+            Expr::Number(_)
+            | Expr::Complex(_)
+            | Expr::Duration(_)
+            | Expr::Runtime(_)
+            | Expr::DurationOf(_) => false,
             Expr::Ident(ident) => *ident == name,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.mentions(name),
             Expr::Binary { left, right, .. } => left.mentions(name) || right.mentions(name),
@@ -347,7 +508,8 @@ impl<'a> Expr<'a> {
             | Expr::Complex(_)
             | Expr::Duration(_)
             | Expr::Ident(_)
-            | Expr::Runtime(_) => None,
+            | Expr::Runtime(_)
+            | Expr::DurationOf(_) => None,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => {
                 inner.finds_call(wanted)
             }
@@ -376,7 +538,8 @@ impl<'a> Expr<'a> {
             | Expr::Complex(_)
             | Expr::Duration(_)
             | Expr::Ident(_)
-            | Expr::Runtime(_) => false,
+            | Expr::Runtime(_)
+            | Expr::DurationOf(_) => false,
             Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.reads_element(),
             Expr::Binary { left, right, .. } => left.reads_element() || right.reads_element(),
             Expr::Call(call) => call.name == "sizeof" || call.args.iter().any(Expr::reads_element),
@@ -408,6 +571,24 @@ impl<'a> Expr<'a> {
         })
     }
 
+    pub(crate) fn has_durationof(&self) -> bool {
+        with_stack(|| match self {
+            Expr::DurationOf(_) => true,
+            Expr::Number(_)
+            | Expr::Complex(_)
+            | Expr::Duration(_)
+            | Expr::Ident(_)
+            | Expr::Runtime(_) => false,
+            Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => inner.has_durationof(),
+            Expr::Binary { left, right, .. } => left.has_durationof() || right.has_durationof(),
+            Expr::Call(call) => call.args.iter().any(Expr::has_durationof),
+            Expr::Element(element) => element.indices.iter().any(Expr::has_durationof),
+            Expr::Cast(cast) => cast.value.has_durationof(),
+            Expr::Range(range) => range.bounds().any(Expr::has_durationof),
+            Expr::Concat(parts) | Expr::Set(parts) => parts.iter().any(Expr::has_durationof),
+        })
+    }
+
     /// The identifier this expression is, when it is exactly one and nothing
     /// more. An `input` binds an angle whole, so that is the shape it takes.
     pub(crate) fn as_ident(&self) -> Option<&'a str> {
@@ -428,7 +609,9 @@ impl fmt::Display for Expr<'_> {
             Expr::Complex(value) if value.re == 0.0 => write!(f, "{}im", value.im),
             Expr::Complex(value) => write!(f, "{}{:+}im", value.re, value.im),
             Expr::Duration(duration) if duration.dt == 0.0 => write!(f, "{}ns", duration.ns),
-            Expr::Duration(duration) => write!(f, "{}dt", duration.dt),
+            Expr::Duration(duration) if duration.ns == 0.0 => write!(f, "{}dt", duration.dt),
+            Expr::Duration(duration) => write!(f, "{}ns + {}dt", duration.ns, duration.dt),
+            Expr::DurationOf(_) => f.write_str("durationof({ ... })"),
             Expr::Ident(name) => f.write_str(name),
             Expr::Negate(inner) => {
                 f.write_str("-")?;
@@ -504,6 +687,9 @@ fn grouped(f: &mut fmt::Formatter<'_>, expr: &Expr<'_>) -> fmt::Result {
     match expr {
         Expr::Binary { .. } => write!(f, "({expr})"),
         Expr::Complex(value) if value.re != 0.0 => write!(f, "({expr})"),
+        Expr::Duration(duration) if duration.ns != 0.0 && duration.dt != 0.0 => {
+            write!(f, "({expr})")
+        }
         _ => write!(f, "{expr}"),
     }
 }
@@ -678,10 +864,11 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Node<'a>> {
                 return Ok((Expr::Ident(name), 1));
             }
             if name == "durationof" {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: "`durationof`, which needs a scheduler to size the block".into(),
-                    line: stream.line(),
-                });
+                let mark = stream.mark();
+                super::parser::braced_block(stream)?;
+                let block = stream.since(mark);
+                stream.expect(Kind::RParen)?;
+                return deeper(stream, Expr::DurationOf(block), 1);
             }
             if stream.eat(Kind::RParen) {
                 return deeper(
@@ -907,7 +1094,7 @@ fn duration(text: &str, line: usize) -> Result<Duration> {
             message: format!("invalid duration: `{text}`"),
         });
     };
-    let value = number(&text[..text.len() - unit.len()], line)?.to_float();
+    let value = number(text[..text.len() - unit.len()].trim_end(), line)?.to_float();
     let nanoseconds = match *unit {
         "dt" => return Ok(Duration { ns: 0.0, dt: value }),
         "ns" => 1.0,
@@ -974,6 +1161,7 @@ fn evaluate(
             line,
             message: format!("`{expr}` is a duration where a number belongs"),
         }),
+        Expr::DurationOf(_) => Err(unscheduled_durationof(line)),
         Expr::Ident(name) => resolve(name, line, vars),
         Expr::Element(element) => Err(PrismError::Parse {
             line,
@@ -1237,7 +1425,7 @@ fn integral(op: &str, value: ClassicalValue, line: usize) -> Result<ClassicalVal
 pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
     with_stack(|| match expr {
         Expr::Number(_) | Expr::Complex(_) | Expr::Runtime(_) => false,
-        Expr::Duration(_) => true,
+        Expr::Duration(_) | Expr::DurationOf(_) => true,
         Expr::Ident(name) => times.contains_key(name),
         Expr::Negate(inner) | Expr::Not(inner) | Expr::BitNot(inner) => is_timed(inner, times),
         Expr::Binary { left, right, .. } => is_timed(left, times) || is_timed(right, times),
@@ -1252,8 +1440,9 @@ pub(crate) fn is_timed(expr: &Expr, times: &HashMap<&str, Timed>) -> bool {
 /// Fold an expression that may read durations, resolving the duration and
 /// stretch names against `times` and every other name against `vars`.
 ///
-/// Durations add and subtract, scale by a number, and divide into a number when
-/// both sides are in SI units or both in `dt`. Any other mix is an error.
+/// Durations add and subtract, scale by a number, compare, and divide into a
+/// number. A ratio or comparison mixing `dt` with SI units folds only when its
+/// answer holds for any length of `dt`.
 pub(crate) fn eval_timed(
     expr: &Expr,
     line: usize,
@@ -1272,8 +1461,9 @@ pub(crate) fn eval_timed(
         Expr::Negate(inner) => Ok(match eval_timed(inner, line, vars, times)? {
             Timed::Number(value) => Timed::Number(-value),
             Timed::Duration(duration) => Timed::Duration(duration.scaled(-1.0)),
-            Timed::Stretch => Timed::Stretch,
+            Timed::Stretch(form) => Timed::from(form.scaled(-1.0)),
         }),
+        Expr::DurationOf(_) => Err(unscheduled_durationof(line)),
         Expr::Not(_) | Expr::BitNot(_) => Err(PrismError::Parse {
             line,
             message: format!("`{expr}` applies a logical or bitwise operator to a duration"),
@@ -1310,65 +1500,79 @@ pub(crate) fn eval_timed(
 
 /// Apply `op` to two folded timing values.
 pub(crate) fn combine_timed(op: BinaryOp, left: Timed, right: Timed, line: usize) -> Result<Timed> {
-    use BinaryOp::{Add, Div, Mul, Sub};
+    use BinaryOp::{Add, Div, Eq, Ge, Gt, Le, Lt, Mul, Ne, Sub};
     let zero_divisor = || PrismError::Parse {
         line,
         message: "division by zero in a duration expression".into(),
     };
-    Ok(match (op, left, right) {
-        (_, Timed::Number(a), Timed::Number(b)) => Timed::Number(
-            arithmetic(op, ClassicalValue::Float(a), ClassicalValue::Float(b), line)?.to_float(),
+    let unresolved = |what: &str| PrismError::UnsupportedConstruct {
+        construct: format!(
+            "{what} a stretch that no fixed-length `box` has resolved, whose length only a \
+             scheduler fixes"
         ),
-        (Add, Timed::Duration(a), Timed::Duration(b)) => Timed::Duration(Duration {
-            ns: a.ns + b.ns,
-            dt: a.dt + b.dt,
-        }),
-        (Sub, Timed::Duration(a), Timed::Duration(b)) => Timed::Duration(Duration {
-            ns: a.ns - b.ns,
-            dt: a.dt - b.dt,
-        }),
-        (Add | Sub, Timed::Stretch, Timed::Duration(_) | Timed::Stretch)
-        | (Add | Sub, Timed::Duration(_), Timed::Stretch)
-        | (Mul, Timed::Stretch, Timed::Number(_))
-        | (Mul, Timed::Number(_), Timed::Stretch) => Timed::Stretch,
-        (Mul, Timed::Duration(a), Timed::Number(k))
-        | (Mul, Timed::Number(k), Timed::Duration(a)) => Timed::Duration(a.scaled(k)),
-        (Div, Timed::Duration(a), Timed::Number(k)) => {
-            if k == 0.0 {
-                return Err(zero_divisor());
-            }
-            Timed::Duration(a.scaled(1.0 / k))
+        line,
+    };
+    let mixed = |what: &str| PrismError::UnsupportedConstruct {
+        construct: format!(
+            "{what} mixing `dt` with SI units, whose value depends on the backend's sample \
+             period"
+        ),
+        line,
+    };
+    if let (Timed::Number(a), Timed::Number(b)) = (left, right) {
+        return Ok(Timed::Number(
+            arithmetic(op, ClassicalValue::Float(a), ClassicalValue::Float(b), line)?.to_float(),
+        ));
+    }
+    Ok(match (op, left.stretched(), right.stretched()) {
+        (Add | Sub, Some(a), Some(b)) => {
+            let factor = if op == Add { 1.0 } else { -1.0 };
+            Timed::from(a.plus(b, factor, line)?)
         }
-        (Div, Timed::Stretch, Timed::Number(k)) => {
-            if k == 0.0 {
-                return Err(zero_divisor());
-            }
-            Timed::Stretch
-        }
-        (Div, Timed::Duration(a), Timed::Duration(b)) => {
-            let (num, den) = if a.dt == 0.0 && b.dt == 0.0 {
-                (a.ns, b.ns)
-            } else if a.ns == 0.0 && b.ns == 0.0 {
-                (a.dt, b.dt)
-            } else {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: "a duration ratio mixing `dt` with SI units, which only a \
-                                backend's sample period relates"
-                        .into(),
-                    line,
-                });
+        (Mul, Some(form), None) | (Mul, None, Some(form)) => {
+            let ((Timed::Number(k), _) | (_, Timed::Number(k))) = (left, right) else {
+                unreachable!("one side is a number");
             };
-            if den == 0.0 {
+            Timed::from(form.scaled(k))
+        }
+        (Div, Some(form), None) => {
+            let Timed::Number(k) = right else {
+                unreachable!("the divisor is a number");
+            };
+            if k == 0.0 {
                 return Err(zero_divisor());
             }
-            Timed::Number(finite(line, op.spelling(), num / den)?)
+            Timed::from(form.scaled(1.0 / k))
         }
-        (Div, Timed::Stretch, Timed::Duration(_) | Timed::Stretch)
-        | (Div, Timed::Duration(_), Timed::Stretch) => {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: "a ratio over a stretch, whose length only a scheduler fixes".into(),
-                line,
-            });
+        (Div, Some(_), Some(_)) => {
+            let (Timed::Duration(a), Timed::Duration(b)) = (left, right) else {
+                return Err(unresolved("a ratio over"));
+            };
+            if b.ns == 0.0 && b.dt == 0.0 {
+                return Err(zero_divisor());
+            }
+            let Some(ratio) = a.ratio(b) else {
+                return Err(mixed("a duration ratio"));
+            };
+            Timed::Number(finite(line, op.spelling(), ratio)?)
+        }
+        (Eq | Ne | Lt | Le | Gt | Ge, Some(_), Some(_)) => {
+            use std::cmp::Ordering::{Equal, Greater, Less};
+            let (Timed::Duration(a), Timed::Duration(b)) = (left, right) else {
+                return Err(unresolved("a comparison with"));
+            };
+            let Some(order) = a.order(b) else {
+                return Err(mixed("a duration comparison"));
+            };
+            let holds = match op {
+                Eq => order == Equal,
+                Ne => order != Equal,
+                Lt => order == Less,
+                Le => order != Greater,
+                Gt => order == Greater,
+                _ => order != Less,
+            };
+            Timed::Number(if holds { 1.0 } else { 0.0 })
         }
         _ => {
             return Err(PrismError::Parse {
@@ -1382,6 +1586,13 @@ pub(crate) fn combine_timed(op: BinaryOp, left: Timed, right: Timed, line: usize
             });
         }
     })
+}
+
+fn unscheduled_durationof(line: usize) -> PrismError {
+    PrismError::UnsupportedConstruct {
+        construct: "`durationof` where no length is folded, such as a gate argument".into(),
+        line,
+    }
 }
 
 fn resolve(

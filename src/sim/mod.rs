@@ -2941,11 +2941,16 @@ fn auto_prefers_clifford_register(circuit: &Circuit) -> bool {
 }
 
 /// Whether terminal shots of a circuit wider than [`MAX_STABILIZER_RANK_QUBITS`]
-/// go to the stabilizer-rank expansion once the statevector has declined them.
+/// go to the stabilizer-rank expansion once the statevector has declined them. Past
+/// [`clifford_register::MAX_REGISTER_QUBITS`] T gates a tableau dry run confirms the
+/// register stays within its cap; a circuit it would outgrow takes the family tree.
 fn auto_samples_wide_by_stabilizer_rank(circuit: &Circuit) -> bool {
     circuit.has_terminal_measurements_only()
         && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
-        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
+        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some_and(|t| {
+            t <= clifford_register::MAX_REGISTER_QUBITS
+                || stabilizer_rank::terminal_register_fits(circuit)
+        })
 }
 
 /// Whether `Auto` shots of `circuit`, without noise or a start state, run on the

@@ -252,11 +252,35 @@ box[settle] {
 }
 ```
 
-Literals take `dt`, `ns`, `us` (or `µs`), `ms` and `s`. Durations add, subtract, scale by
-a number and divide into a number, all folded at parse time. A ratio needs both sides in
-SI units or both in `dt`, since only a backend's sample period relates the two. A
-`stretch` is sized by a scheduler: it may stand wherever a delay takes a length and is
-rejected where its value would be read.
+Literals take `dt`, `ns`, `us` (or `µs`), `ms` and `s`, with or without spaces before
+the unit. Durations add, subtract, scale by a number, divide into a number and compare,
+all folded at parse time. A length is held as nanoseconds beside a count of `dt`, which
+stays its own unit since only a backend's sample period relates the two: `10ns + 2dt`
+keeps both parts, `(10ns + 2dt) / (5ns + 1dt)` is 2 and `10ns + 2dt > 5ns` holds, but
+`10ns / 2dt` and `10ns > 2dt` decline because their answer depends on the period.
+
+Every gate takes no time. `durationof({ ... })` is the length of its block under that
+model, without running it: the longest qubit timeline its delays build, where a
+multi-qubit gate, a `barrier` and a multi-qubit `delay` synchronise the qubits they name
+and a fixed-length `box` takes its length.
+
+```qasm
+duration d = durationof({ delay[100ns] q[0]; cx q[0], q[1]; delay[50ns] q[1]; });  // 150ns
+```
+
+A `stretch` is its initializer, a lower bound, plus a growth that fills idle time. A
+`box[d]` whose body holds only gates, measurements, resets, barriers, delays, `nop` and
+nested boxes fixes the stretches its alignment determines uniquely; after the box their
+value reads like any duration. A stretch nothing fixes may still stand wherever a delay
+takes a length, and declines where its value would be read.
+
+```qasm
+stretch s;
+box[90ns] { delay[s] q[0]; x q[0]; delay[2 * s] q[0]; }
+rz(s / 1ns) q[1];   // s resolved to 30ns
+```
+
+A `box[d]` whose delays run past `d` is a `Parse` error.
 
 ## Supported gates
 
@@ -717,8 +741,9 @@ the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`
 | Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
 | `int`, `uint`, `bool`, `float`, `angle`, `complex`, `const` | Parses | Any other type: `UnsupportedConstruct` naming the type. A complex value where a real one belongs: `Parse`. A write under a runtime `if` or `switch` to a variable declared outside it: `UnsupportedConstruct` under `parse`, evaluated at runtime under `parse_dynamic` |
 | `array` | Parses; folded at parse time, with slices, `++`, `sizeof` and array arguments | An element type other than `int`, `uint`, `float`, `angle` or `bool`, or a compound assignment to a slice: `UnsupportedConstruct`. An initializer or assignment of the wrong shape, an index out of range, an index set on an array, or more than 2^20 elements: `Parse` |
-| `box`, `box[d]` | Runs its body in place | A length that is not a duration or is negative: `Parse` |
-| `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio over a stretch or mixing `dt` with SI units, a runtime value in a duration under `parse_dynamic`, and `durationof`: `UnsupportedConstruct` |
+| `box`, `box[d]` | Runs its body in place; `box[d]` resolves the stretches its alignment fixes | A length that is not a duration or is negative, or delays that run past it: `Parse` |
+| `duration`, `stretch`, `delay` | Parses; a delay is the identity | A length that is not a duration (`delay[10]`) or is negative, and a duration where a number belongs: `Parse`. A ratio or comparison over a stretch no `box[d]` has resolved, or mixing `dt` with SI units where the sample period decides the answer, and a runtime value in a duration under `parse_dynamic`: `UnsupportedConstruct` |
+| `durationof` | Folds to the block's length with every gate taking no time | A block holding anything but gate calls, `measure`, `reset`, `barrier`, `delay`, `nop` and `box`, or timelines mixing `dt` with SI units: `UnsupportedConstruct` |
 | `input`, `output` | Parses; an unsupplied `float` or `angle` input is a slot that gate angles affine in it link to | An unsupplied input of another type: `InvalidParameter`. `output` of a type other than `bit`, two inputs on one gate, or an unsupplied input anywhere but in an angle affine in it: `UnsupportedConstruct` |
 | `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
 | `barrier;`, `barrier q;` and `barrier q[0], q[1];` | Parses | A bare `barrier;` spans every qubit declared so far, across registers |

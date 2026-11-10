@@ -1423,6 +1423,25 @@ fn bench_stabilizer_random_pairs(c: &mut Criterion) {
     group.finish();
 }
 
+// `stabilizer/random_pairs` at depths 50 and 100; every other `stabilizer/*`
+// gate row is depth 10.
+fn bench_stabilizer_random_pairs_deep(c: &mut Criterion) {
+    for depth in [50, 100] {
+        let mut group = c.benchmark_group(format!("stabilizer/random_pairs_d{depth}"));
+        configure_group(&mut group);
+
+        for &n in &[500, 1000] {
+            let circuit = circuits::clifford_random_pairs(n, depth, SEED);
+            group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+                b.iter(|| {
+                    run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+                });
+            });
+        }
+        group.finish();
+    }
+}
+
 fn bench_stabilizer_measurement(c: &mut Criterion) {
     let mut group = c.benchmark_group("stabilizer/measurement");
     configure_group(&mut group);
@@ -6090,6 +6109,7 @@ criterion_group! {
     // Stabilizer
     bench_stabilizer_scaling,
     bench_stabilizer_random_pairs,
+    bench_stabilizer_random_pairs_deep,
     bench_stabilizer_measurement,
     bench_stabilizer_dense_terminals,
     // Factored stabilizer

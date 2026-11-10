@@ -570,14 +570,16 @@ fn test_stabilizer_inner_product_matches_dense_export() {
 }
 
 #[test]
-fn test_too_many_terms() {
+fn twenty_one_t_on_one_qubit_hold_two_terms() {
     let mut c = Circuit::new(1, 0);
-    // 21 T gates would need 2^21 > MAX_TERMS terms
+    c.add_gate(Gate::H, &[0]);
     for _ in 0..21 {
         c.add_gate(Gate::T, &[0]);
     }
-    let result = run_stabilizer_rank(&c, 42);
-    assert!(result.is_err());
+    c.add_gate(Gate::H, &[0]);
+    let sr = assert_matches_statevector(&c, 1e-10);
+    assert_eq!(sr.t_count, 21);
+    assert_eq!(sr.num_terms, 2);
 }
 
 #[test]
@@ -620,7 +622,7 @@ fn eight_t_circuit() -> Circuit {
 fn pruned_runs_stay_inside_the_reported_error_bound() {
     let c = eight_t_circuit();
     let exact = run_stabilizer_rank(&c, 42).unwrap();
-    assert_eq!(exact.num_terms, 256);
+    assert_eq!(exact.num_terms, 16);
 
     for budget in [64usize, 160, 224] {
         let approx = run_stabilizer_rank_approx(&c, budget, 42).unwrap();
@@ -976,5 +978,119 @@ fn overlap_matches_the_dense_inner_product_over_random_clifford_pairs() {
                 "{n} qubits, pair {case}: tableau overlap {got} against dense {want}"
             );
         }
+    }
+}
+
+/// `H` on every qubit, then `t` rotations (`T` or `Tdg`) spread through random
+/// Cliffords.
+fn scrambled_clifford_t(n: usize, t: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::SX, Gate::X, Gate::Z];
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for _ in 0..t {
+        for _ in 0..n {
+            if rng.random_bool(0.4) {
+                let a = rng.random_range(0..n);
+                let b = (a + rng.random_range(1..n)) % n;
+                let gate = [Gate::Cx, Gate::Cz, Gate::Swap][rng.random_range(0..3)].clone();
+                c.add_gate(gate, &[a, b]);
+            } else {
+                let gate = cliffords[rng.random_range(0..cliffords.len())].clone();
+                c.add_gate(gate, &[rng.random_range(0..n)]);
+            }
+        }
+        let gate = if rng.random_bool(0.5) {
+            Gate::T
+        } else {
+            Gate::Tdg
+        };
+        c.add_gate(gate, &[rng.random_range(0..n)]);
+    }
+    c
+}
+
+/// The shape of the `stabilizer_rank` bench rows: an `H` layer and a CX ladder, every
+/// `T`, then three Clifford layers.
+fn layered_clifford_t(n: usize, t: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n - 1 {
+        if rng.random_bool(0.5) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    for _ in 0..t {
+        c.add_gate(Gate::T, &[rng.random_range(0..n)]);
+    }
+    for _ in 0..3 {
+        for q in 0..n {
+            c.add_gate(
+                cliffords[rng.random_range(0..cliffords.len())].clone(),
+                &[q],
+            );
+        }
+        for q in 0..n - 1 {
+            if rng.random_bool(0.5) {
+                c.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+    }
+    c
+}
+
+fn assert_merged_terms(sr: &StabRankResult, n: usize, t: usize) {
+    assert_eq!(sr.t_count, t);
+    assert!(sr.num_terms.is_power_of_two());
+    assert!(sr.num_terms <= 1 << n.min(t), "{} terms", sr.num_terms);
+}
+
+#[test]
+fn scrambled_circuits_past_twenty_t_match_statevector() {
+    for (n, t) in [(10, 24), (12, 30), (14, 30)] {
+        let c = scrambled_clifford_t(n, t, 42);
+        let sr = assert_matches_statevector(&c, 1e-10);
+        assert_merged_terms(&sr, n, t);
+    }
+}
+
+#[test]
+fn layered_circuits_at_thirty_t_match_statevector() {
+    for n in [12, 16] {
+        let c = layered_clifford_t(n, 30, 42);
+        let sr = assert_matches_statevector(&c, 1e-10);
+        assert_merged_terms(&sr, n, 30);
+    }
+}
+
+#[test]
+fn more_t_than_qubits_keeps_the_register_at_the_qubit_count() {
+    let c = scrambled_clifford_t(4, 12, 42);
+    let sr = assert_matches_statevector(&c, 1e-10);
+    assert_merged_terms(&sr, 4, 12);
+    assert!(sr.num_terms <= 16);
+}
+
+#[test]
+fn declined_register_falls_back_to_one_branch_per_t() {
+    let c = eight_t_circuit();
+    let merged = run_stabilizer_rank(&c, 42).unwrap();
+    let expanded = exact_probabilities(&c, 42, 2).unwrap();
+    assert_eq!(merged.num_terms, 16);
+    assert_eq!(expanded.num_terms, 256);
+    assert_eq!(expanded.t_count, 8);
+    for (i, (m, e)) in merged
+        .probabilities
+        .iter()
+        .zip(&expanded.probabilities)
+        .enumerate()
+    {
+        assert!((m - e).abs() < 1e-10, "prob[{i}]: merged {m}, expanded {e}");
     }
 }

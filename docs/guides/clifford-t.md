@@ -6,7 +6,8 @@ them, chosen by T count, qubit count, whether Monte Carlo error is acceptable, a
 whether the circuit carries noise.
 
 ```admonish tip title="Which engine?"
-- Few T gates and an exact result: stabilizer rank (`run_stabilizer_rank`).
+- An exact result with T gates that reach at most 20 qubits: stabilizer rank
+  (`run_stabilizer_rank`).
 - Many T gates, marginals only: stochastic Pauli propagation, SPP (`run_spp`).
 - Moderate T count, exact or bounded-error expectation values: deterministic Pauli
   propagation, SPD (`run_spd`).
@@ -61,13 +62,15 @@ measurement computes outcome probabilities from the weighted ensemble before pro
 every branch onto the sampled outcome. Branch count, MPS bond growth and measurement count
 set how far this form scales.
 
-The dense probability path keeps a weighted sum of stabilizer states. Each T gate doubles
-the term count through `T = alpha*I + beta*Z`; Clifford gates cost O(n²) per term, and
-weighted amplitudes accumulate into exact probabilities.
+The dense probability path reads its probabilities off the same Clifford register the
+terminal shots use. Branches of `T = alpha*I + beta*Z` that land on one basis state of the
+register merge into one coefficient, so a circuit holds `2^k` terms, where `k` is the
+number of qubits the T gates reach and `k <= min(n, t)`. The T count sets no limit. A
+register wider than 20 qubits falls back to one branch per T choice, capped at `2^20`.
 
 | Function | Use |
 |----------|-----|
-| `run_stabilizer_rank` | Exact probabilities (t ≤ 20, n ≤ 25) |
+| `run_stabilizer_rank` | Exact probabilities (register width ≤ 20, n ≤ 25) |
 | `run_stabilizer_rank_approx` | Approximate under a term budget (higher t counts) |
 | `run_stabilizer_rank_shots` | Shot-based sampling with no fixed qubit cap |
 | `stabilizer_overlap_sq` | Inner product between stabilizer states |

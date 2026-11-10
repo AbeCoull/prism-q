@@ -1,5 +1,5 @@
-//! Terminal shot sampling for Clifford+T circuits as a Clifford tableau over a dense
-//! register that holds only the qubits the T rotations reach.
+//! Terminal shots and exact output distributions for Clifford+T circuits as a Clifford
+//! tableau over a dense register that holds only the qubits the T rotations reach.
 
 use num_complex::Complex64;
 use rand::RngExt;

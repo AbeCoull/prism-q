@@ -28,7 +28,7 @@ says what each release promises.
 
 | Item | Status |
 | --- | --- |
-| Exact stabilizer-rank simulation past 20 T gates, from decompositions that cover several T gates at once rather than one | Research |
+| Exact stabilizer-rank simulation when the T gates reach more than 20 qubits, from decompositions that cover several T gates at once rather than one | Research |
 | A tighter error bound for the approximate stabilizer-rank route; at practical term budgets the current bound sits far above the realized error | Research |
 | Clifford+T shot routing chosen by branch cost rather than by T count alone | Planned |
 | A dense tableau mode for wide Clifford circuits whose generators fill in | Research |

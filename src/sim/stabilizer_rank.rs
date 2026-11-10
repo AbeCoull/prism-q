@@ -13,8 +13,10 @@
 //! phase ambiguity inherent in per-branch tableau export.
 //!
 //! Two modes:
-//! - **Exact probabilities** (n ≤ 25): reconstruct `|ψ_0⟩`, sum weighted
-//!   Pauli-shifted amplitudes, compute |amplitude|² for each basis state.
+//! - **Exact probabilities** (n ≤ 25): read off the Clifford register, which sums
+//!   the branches that land on one basis state of the qubits the T gates reach.
+//!   A register wider than 20 qubits falls back to reconstructing `|ψ_0⟩` and
+//!   summing weighted Pauli-shifted amplitudes.
 //! - **Measurement sampling** (any n): terminal measurements go through a
 //!   Clifford tableau over a dense register of the qubits the T gates reach;
 //!   otherwise keep coherent weighted MPS branches,

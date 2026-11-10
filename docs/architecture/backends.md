@@ -261,8 +261,10 @@ T gates is a weighted sum of up to `2^t` stabilizer branches. One shared
 string, the Zs earlier T positions chose, conjugated through the Cliffords that followed.
 Clifford gates cost O(n²) for all branches together and each T gate doubles the count.
 
-- Exact probabilities (`run_stabilizer_rank`) rebuild the dense state once and route its
-  amplitudes through each branch's Pauli, so they stop at 25 qubits and `2^20` terms.
+- Exact probabilities (`run_stabilizer_rank`) come from the Clifford register below, which
+  sums branches that differ by a stabilizer of the base state, so they stop at 25 qubits
+  and a register of 20 qubits at any T count. A wider register falls back to the branch
+  sum, capped at `2^20` terms.
 - `run_stabilizer_rank_approx` drops the smallest surplus terms after each T gate. The
   dropped weight `d` bounds the error: the summed absolute difference from the exact
   distribution is at most `4d`.

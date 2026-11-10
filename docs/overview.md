@@ -56,7 +56,7 @@ exports back to OpenQASM 3.0.
 
 - [Interactive atlas](./atlas/index.html): one statevector gate traced from its matrix
   through memory layout and SIMD lanes, and native recordings of each fusion pass
-- [Benchmarks](./benchmarks.md): measured timings on the reference circuit suite, and
+- [Performance](./performance/index.md): timings beside simulators of the same method, and
   the [methodology](./guides/benchmarking.md) behind them
 - [Glossary](./glossary.md)
 - [API reference](https://docs.rs/prism-q) on docs.rs

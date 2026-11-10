@@ -79,7 +79,7 @@ says what each release promises.
 ## Hardware that would help
 
 Thresholds and tile sizes were tuned on one desktop, an Intel i7-6700K with a GTX
-1080 Ti (see [Benchmarks](./benchmarks.md)). The Needs hardware items wait on one of
+1080 Ti (see [Performance](./performance/index.md)). The Needs hardware items wait on one of
 these:
 
 - an x86-64 CPU with AVX-512

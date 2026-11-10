@@ -12,12 +12,10 @@ Two harnesses live here and share the adapters:
   brickwork, QFT, quantum volume, wide Clifford, shallow wide, disconnected,
   sampling-heavy, mid-circuit), thread scaling, PRISM-Q's automatic dispatch
   against every forced backend, and an accuracy study under a bond cap. Its
-  pages are [Comparative Measurements](https://abecoull.github.io/prism-q/comparison.html)
-  and the methodology, results and report pages beneath it.
+  page is [Performance](https://abecoull.github.io/prism-q/performance/index.html).
 - `run_comparison.py`, the earlier probability-vector comparison of four
   families at 16 to 24 qubits, with a `--check` mode against its committed
-  reference. Its page is
-  [Probability-Vector Comparison](https://abecoull.github.io/prism-q/comparison/probability-vector.html).
+  reference.
 
 ## Benchmark matrix
 
@@ -25,7 +23,7 @@ Two harnesses live here and share the adapters:
 comparison/.venv/Scripts/python comparison/matrix.py list --profile reference      # what would run, and what is skipped and why
 comparison/.venv/Scripts/python comparison/matrix.py run --profile smoke --out comparison/results/my-smoke
 comparison/.venv/Scripts/python comparison/matrix.py run --profile reference --out comparison/results/my-run
-comparison/.venv/Scripts/python comparison/matrix.py report comparison/results/my-run   --docs docs/comparison --landing docs/comparison.md
+comparison/.venv/Scripts/python comparison/matrix.py report comparison/results/my-run   --docs docs/performance
 ```
 
 | Profile | Contents | Wall time on the reference host |
@@ -179,8 +177,8 @@ comparison is CPU against CPU on one host.
 
 ### Corpus
 
-The four families of the published [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html)
-page, from the `prism_q::circuits` generators with circuit seed `0xDEAD_BEEF`:
+The four families of the `bench_suite` run on the
+[Performance](https://abecoull.github.io/prism-q/performance/index.html) page, from the `prism_q::circuits` generators with circuit seed `0xDEAD_BEEF`:
 
 | Family | Circuit |
 | --- | --- |
@@ -221,8 +219,7 @@ alongside `cargo bench`:
 ```bash
 comparison/.venv/Scripts/python comparison/run_comparison.py --iterations 5 --qubits 16,20,24 \
   --out comparison/results/reference-<host>.json \
-  --markdown comparison/results/reference-<host>.md \
-  --docs docs/comparison/probability-vector.md
+  --markdown comparison/results/reference-<host>.md
 ```
 
 A reference is only meaningful when the run it came from passed its equivalence

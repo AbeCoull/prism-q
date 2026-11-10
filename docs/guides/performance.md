@@ -116,4 +116,4 @@ memory by default), and a layer that sets it discards the per-cap values below i
 
 Run benchmarks with `--features parallel`, one process at a time.
 [Benchmark Methodology](./benchmarking.md) has the targets, the A/B gate and the
-comparison controls, and [Benchmarks](../benchmarks.md) the current numbers.
+comparison controls, and [Performance](../performance/index.md) the current numbers.

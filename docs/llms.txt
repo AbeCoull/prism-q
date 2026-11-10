@@ -98,8 +98,7 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 
 ## Reference
 
-- [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html): wall-clock timings on a fixed circuit suite, with the command that reproduces them.
-- [Comparative measurements](https://abecoull.github.io/prism-q/comparison.html): eight workload families (dense random, QFT, quantum volume, wide Clifford, shallow wide, disconnected, sampling-heavy, mid-circuit) timed beside Qiskit Aer, qsim, QuEST, Spinoza and RustQIP on one host. Covers fp32 and fp64 separately, peak memory, thread scaling and automatic dispatch, validates each row against an independent reference, and regenerates every table and figure from raw observations with a committed harness.
+- [Performance](https://abecoull.github.io/prism-q/performance/index.html): PRISM-Q timed beside simulators of the same method (statevector fp64 and fp32, stabilizer, MPS, sampling, disconnected) on one host: Qiskit Aer, qsim, QuEST, Spinoza, RustQIP and Stim. Covers peak memory, thread scaling, automatic dispatch against every forced backend and the PRISM-Q suite on its own, validates each row against an independent reference, and generates every table and chart from raw observations with a committed harness.
 - [Circuit builders](https://abecoull.github.io/prism-q/reference/builders.html): the prebuilt circuit generators and the Jordan-Wigner Hamiltonian generator.
 - [Python API](https://abecoull.github.io/prism-q/reference/python-api.html): the Rust-to-Python name table.
 - [Glossary](https://abecoull.github.io/prism-q/glossary.html)

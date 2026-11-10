@@ -17,7 +17,7 @@ from typing import Any
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-TRACKED_PACKAGES = ("qiskit", "qiskit-aer", "qsimcirq", "cirq-core", "numpy", "psutil", "scipy", "matplotlib", "stim")
+TRACKED_PACKAGES = ("qiskit", "qiskit-aer", "qsimcirq", "cirq-core", "numpy", "psutil", "scipy", "stim")
 
 
 def _run(cmd: list[str], cwd: str | None = None) -> str | None:

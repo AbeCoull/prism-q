@@ -1,6 +1,6 @@
 """Circuit corpus: the benchmark suite's own families, exported once as gate lists.
 
-The circuits are the ones `docs/benchmarks.md` is measured on, built by the
+The circuits are the ones `tools/bench_suite.rs` times, built by the
 `prism_q::circuits` generators and written out by `compare_runner export` as a
 plain gate list (`qubits N`, then one gate per line). Every simulator replays
 that list through its native API, so no simulator gets a private transpilation

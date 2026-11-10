@@ -1,0 +1,28 @@
+{
+  "version": "0.33.0",
+  "date": "2026-10-04",
+  "cpu": "Intel64 Family 6 Model 94 Stepping 3, GenuineIntel",
+  "logical_cores": 8,
+  "rayon_threads": 8,
+  "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+  "rows": [
+    {"family": "ghz", "qubits": 24, "ms": 18.7800},
+    {"family": "ghz", "qubits": 28, "ms": 299.0300},
+    {"family": "ghz", "qubits": 256, "ms": 0.2429},
+    {"family": "ghz", "qubits": 1024, "ms": 1.1300},
+    {"family": "ghz", "qubits": 4096, "ms": 3.1600},
+    {"family": "qft", "qubits": 16, "ms": 0.9027},
+    {"family": "qft", "qubits": 20, "ms": 13.3100},
+    {"family": "qft", "qubits": 24, "ms": 295.3800},
+    {"family": "qft", "qubits": 26, "ms": 1843.0000},
+    {"family": "qft", "qubits": 28, "ms": 8353.0000},
+    {"family": "hea", "qubits": 16, "ms": 3.9400},
+    {"family": "hea", "qubits": 20, "ms": 33.1200},
+    {"family": "hea", "qubits": 24, "ms": 639.0800},
+    {"family": "hea", "qubits": 26, "ms": 2761.0000},
+    {"family": "hea", "qubits": 28, "ms": 11695.0000},
+    {"family": "qv", "qubits": 16, "ms": 5.7800},
+    {"family": "qv", "qubits": 20, "ms": 79.2400},
+    {"family": "qv", "qubits": 24, "ms": 1538.0000}
+  ]
+}

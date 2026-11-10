@@ -412,30 +412,3 @@ body {
         display: none;
     }
 }
-
-/* Linked figures open full size in an overlay (theme/figure-zoom.js). */
-.content a:has(> img[src$=".svg"]) {
-    cursor: zoom-in;
-}
-
-dialog.figure-zoom {
-    width: 96vw;
-    height: 94vh;
-    max-width: none;
-    max-height: none;
-    padding: 1rem;
-    border: none;
-    border-radius: 8px;
-    background: #fcfcfb;
-    cursor: zoom-out;
-}
-
-dialog.figure-zoom::backdrop {
-    background: rgb(0 0 0 / 0.6);
-}
-
-dialog.figure-zoom img {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-}

@@ -118,7 +118,7 @@ Measuring `q[i]` into `c[i]`, the state with only `q[0]` set reads `"10..."`, no
 - [Choosing a backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html)
 - [Capability matrix](https://abecoull.github.io/prism-q/guides/capabilities.html), for
   what runs where and what is experimental
-- [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html) and the
+- [Performance](https://abecoull.github.io/prism-q/performance/index.html) and the
   [method behind them](https://abecoull.github.io/prism-q/guides/benchmarking.html)
 - [Changelog](https://github.com/AbeCoull/prism-q/blob/main/CHANGELOG.md)
 

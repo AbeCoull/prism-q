@@ -165,7 +165,7 @@ Each of these is tested before the state route, with its own constants in
 | --- | --- |
 | Compiled Clifford sampler | Shots on a Clifford circuit whose measurements are terminal or rewrite to terminal; see [Compiled Samplers](./samplers.md) |
 | Clifford register (stabilizer rank) | Shots on a Clifford+T circuit with terminal measurements only and no reset, at least 16 qubits, T count at most 20 and below the qubit count |
-| Stabilizer rank, sampled | Shots with terminal measurements only, above 25 qubits, T count at most 40 and at most `n - 2⌈log2 n⌉`; also runs per shot with mid-circuit measurement inside the same T bound |
+| Stabilizer rank, sampled | Shots with terminal measurements only, above 25 qubits, T count at most 40 and at most `n - 2⌈log2 n⌉`, and past 20 T gates only when a tableau dry run keeps the register within 20 qubits; also runs per shot with mid-circuit measurement inside the same T bound |
 | Deterministic Pauli marginals | A marginals terminal on a unitary Clifford+T circuit of at least 12 qubits. The propagation is exact, and at or below the statevector cap it hands over to the tree once its summed term count passes the dense run's amplitude updates divided by 64 |
 | Deterministic Pauli expectations | An expectation terminal on a Clifford circuit |
 | Scalar tensor contraction | An expectation or marginals terminal on a unitary circuit whose bounded greedy plan for every observable stays under `2^12` elements: from 18 qubits under the statevector cap, and above it when the plan costs less than an estimate of the MPS run `Auto` would take |

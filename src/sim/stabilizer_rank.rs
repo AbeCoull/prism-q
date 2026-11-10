@@ -36,7 +36,7 @@ use crate::circuit::{Circuit, GuardedRegion, Instruction, SmallVec, any_gate};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
-use super::clifford_register::{MAX_REGISTER_QUBITS, TerminalSampler};
+use super::clifford_register::{MAX_REGISTER_QUBITS, TerminalSampler, register_fits};
 
 /// Letter-level signed Pauli string. Each qubit's `(x, z)` bit pair encodes
 /// the Pauli letter directly: (0,0)=I, (1,0)=X, (0,1)=Z, (1,1)=Y. `phase4` is
@@ -1091,59 +1091,6 @@ fn process_mps_instruction(
     }
 }
 
-fn build_mps_branches_for_unitary(circuit: &Circuit, seed: u64) -> Result<Vec<WeightedMpsBranch>> {
-    let mut branches = initial_mps_branches(circuit, seed)?;
-    let mut classical_bits = vec![false; circuit.num_classical_bits];
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    for inst in &circuit.instructions {
-        match inst {
-            Instruction::Gate { .. } | Instruction::Barrier { .. } => {
-                process_mps_instruction(&mut branches, inst, &mut classical_bits, &mut rng)?;
-            }
-            Instruction::Save { .. }
-            | Instruction::Measure { .. }
-            | Instruction::Reset { .. }
-            | Instruction::Conditional { .. }
-            | Instruction::Region(_) => {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "stabilizer_rank".into(),
-                    reason: "unitary branch preparation cannot include measurements, resets, or conditionals"
-                        .to_string(),
-                });
-            }
-        }
-    }
-    Ok(branches)
-}
-
-fn sample_terminal_mps_branches(
-    base_branches: &[WeightedMpsBranch],
-    circuit: &Circuit,
-    num_shots: usize,
-    seed: u64,
-) -> Result<super::ShotsResult> {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut shots = Vec::with_capacity(num_shots);
-    for _ in 0..num_shots {
-        let mut branches = base_branches.to_vec();
-        let mut classical_bits = vec![false; circuit.num_classical_bits];
-        for inst in &circuit.instructions {
-            if matches!(
-                inst,
-                Instruction::Measure { .. } | Instruction::Barrier { .. }
-            ) {
-                process_mps_instruction(&mut branches, inst, &mut classical_bits, &mut rng)?;
-            }
-        }
-        shots.push(classical_bits);
-    }
-    Ok(
-        super::ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
-            super::RunMetadata::exact(super::ResolvedBackend::StabilizerRank),
-        ),
-    )
-}
-
 fn sample_mps_branches_online(
     circuit: &Circuit,
     num_shots: usize,
@@ -1177,10 +1124,11 @@ fn sample_mps_branches_online(
 /// `[cos²(π/8), sin²(π/8)]`).
 ///
 /// Terminal measurements of a unitary circuit are drawn from a Clifford tableau over a
-/// dense register holding only the qubits the T gates reach, at most 20 of them.
-/// Mid-circuit measurements, and a wider register, are sampled by projecting coherent
-/// weighted branches and contracting branch overlaps. Neither is bound by the dense
-/// statevector cap.
+/// dense register holding only the qubits the T gates reach, at most 20 of them; a
+/// circuit whose register would grow past 20 returns `BackendUnsupported`. Mid-circuit
+/// measurements are sampled by projecting coherent weighted branches and contracting
+/// branch overlaps, up to 20 T gates. Neither route is bound by the dense statevector
+/// cap.
 pub fn run_stabilizer_rank_shots(
     circuit: &Circuit,
     num_shots: usize,
@@ -1199,21 +1147,33 @@ pub fn run_stabilizer_rank_shots(
     }
 
     if circuit.has_terminal_measurements_only() && !circuit.has_resets() {
-        if let Some(sampler) = TerminalSampler::compile(circuit, MAX_REGISTER_QUBITS)? {
-            return Ok(super::ShotsResult::from_shots(
-                sampler.sample(num_shots, seed),
-                circuit.num_classical_bits,
-            )
-            .with_metadata(super::RunMetadata::exact(
-                super::ResolvedBackend::StabilizerRank,
-            )));
-        }
-        let stripped = circuit.without_measurements();
-        let base_branches = build_mps_branches_for_unitary(&stripped, seed)?;
-        return sample_terminal_mps_branches(&base_branches, circuit, num_shots, seed);
+        let Some(sampler) = TerminalSampler::compile(circuit, MAX_REGISTER_QUBITS)? else {
+            return Err(PrismError::BackendUnsupported {
+                backend: "stabilizer_rank".into(),
+                operation: format!(
+                    "terminal sampling with a Clifford register wider than {MAX_REGISTER_QUBITS} \
+                     qubits"
+                ),
+            });
+        };
+        return Ok(super::ShotsResult::from_shots(
+            sampler.sample(num_shots, seed),
+            circuit.num_classical_bits,
+        )
+        .with_metadata(super::RunMetadata::exact(
+            super::ResolvedBackend::StabilizerRank,
+        )));
     }
 
     sample_mps_branches_online(circuit, num_shots, seed)
+}
+
+/// Whether [`run_stabilizer_rank_shots`] samples terminal shots of `circuit` from a
+/// register within the width cap, decided from the tableau alone. `false` when the
+/// circuit does not lower to Clifford+T.
+pub(super) fn terminal_register_fits(circuit: &Circuit) -> bool {
+    lower_clifford_t_circuit(circuit)
+        .is_ok_and(|lowered| register_fits(&lowered, MAX_REGISTER_QUBITS).unwrap_or(false))
 }
 
 #[cfg(test)]

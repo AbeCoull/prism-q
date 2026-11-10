@@ -10,14 +10,20 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [main]
+    # Everything the gpu feature builds from: cudarc and the feature list (Cargo files), the
+    # toolchain, src/ (src/gpu plus the feature-gated code in the backends, sim, gates and
+    # lib, including the gpu_scaffold lib tests), the device suites and their shared helpers
+    # in tests/common, the setup-rust action, and this workflow. There is no build.rs.
     paths:
-      - 'src/gpu/**'
+      - 'src/**'
       - 'tests/golden_gpu.rs'
       - 'tests/golden_gpu_density_matrix.rs'
       - 'tests/gpu_pass_census.rs'
+      - 'tests/common/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - '.github/actions/setup-rust/**'
       - '.github/workflows/gpu-sim.yml'
 
 concurrency:
@@ -34,9 +40,16 @@ env:
 
 jobs:
   gpu-sim:
-    name: GPU suites on a simulated H100
+    name: GPU suites on a simulated H100 (CUDA ${{ matrix.cuda }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda: ['12.6', '13.0']
+    env:
+      # Where the action installs the toolkit selected by the matrix entry.
+      CUDA_HOME: /usr/local/cuda-${{ matrix.cuda }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -51,7 +64,7 @@ jobs:
         uses: pantheongpu/setup-pantheonsim@ca87fe3143b29166822b923d6050945c5179408c # v0.1.5
         with:
           gpu: nvidia/h100
-          cuda-toolkit: "13.0"
+          cuda-toolkit: ${{ matrix.cuda }}
 
       - name: Build the test binaries
         run: >
@@ -64,8 +77,8 @@ jobs:
         env:
           PRISM_REQUIRE_GPU: '1'
         run: |
-          export LD_LIBRARY_PATH="/usr/local/cuda-13.0/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          export PATH="/usr/local/cuda-13.0/bin:$PATH"
-          vgpu run cargo test --release --features "$GPU_FEATURES" --lib -- gpu::
+          export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export PATH="$CUDA_HOME/bin:$PATH"
+          vgpu run cargo test --release --features "$GPU_FEATURES" --lib -- gpu:: gpu_scaffold::
           vgpu run cargo test --release --features "$GPU_FEATURES" \
             --test golden_gpu --test golden_gpu_density_matrix --test gpu_pass_census

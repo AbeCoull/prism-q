@@ -1207,6 +1207,17 @@ pub(super) fn terminal_register_fits(circuit: &Circuit) -> bool {
         .is_ok_and(|lowered| register_fits(&lowered, MAX_REGISTER_QUBITS).unwrap_or(false))
 }
 
+#[cfg(feature = "bench-internal")]
+pub use super::clifford_register::CliffordRegisterCensus;
+
+/// Counts of the register [`run_stabilizer_rank_shots`] builds for the terminal
+/// measurements of `circuit`, with the width cap lifted so a circuit past it still reports
+/// its width and rotation work.
+#[cfg(feature = "bench-internal")]
+pub fn clifford_register_census(circuit: &Circuit) -> Result<CliffordRegisterCensus> {
+    super::clifford_register::census(&*lower_clifford_t_circuit(circuit)?)
+}
+
 #[cfg(test)]
 #[path = "stabilizer_rank_tests.rs"]
 mod tests;

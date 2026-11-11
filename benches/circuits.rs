@@ -31,7 +31,9 @@ use std::time::Duration;
 
 mod common;
 use common::fixtures::{
-    DENSE_UNITARY_LAYERS, dense_unitary_layers, product_observables, sparse_entanglement_circuit,
+    DENSE_UNITARY_LAYERS, clifford_t_layers_mid_circuit, dense_unitary_layers, product_observables,
+    random_clifford_t_layers, random_t_insertion_circuit, scrambled_clifford_t_circuit,
+    sparse_entanglement_circuit, stabilizer_rank_mid_circuit_shot_circuit,
 };
 use common::{
     SEED, amplitude_damping_kraus, configure_group, configure_group_timed, correlated_zz_kraus,
@@ -4085,78 +4087,6 @@ fn bench_factored_dense(c: &mut Criterion) {
     group.finish();
 }
 
-fn random_t_insertion_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut circuit = Circuit::new(n_qubits, 0);
-    let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
-
-    // Clifford layer first
-    for q in 0..n_qubits {
-        circuit.add_gate(Gate::H, &[q]);
-    }
-    for q in 0..n_qubits - 1 {
-        if rng.random_bool(0.5) {
-            circuit.add_gate(Gate::Cx, &[q, q + 1]);
-        }
-    }
-
-    // Insert T gates on random qubits
-    for _ in 0..t_count {
-        let q = rng.random_range(0..n_qubits);
-        circuit.add_gate(Gate::T, &[q]);
-    }
-
-    // More Clifford layers
-    for _ in 0..3 {
-        for q in 0..n_qubits {
-            let gate_idx = rng.random_range(0..cliffords.len());
-            circuit.add_gate(cliffords[gate_idx].clone(), &[q]);
-        }
-        for q in 0..n_qubits - 1 {
-            if rng.random_bool(0.5) {
-                circuit.add_gate(Gate::Cx, &[q, q + 1]);
-            }
-        }
-    }
-    circuit
-}
-
-/// H on every qubit, then per T gate a block of `3n` random H, S, Sdg or CX followed by
-/// one T or Tdg on a random qubit, then a random 1q Clifford layer. The Clifford blocks
-/// keep the T rotations from commuting into fewer distinct terms.
-fn scrambled_clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut circuit = Circuit::new(n_qubits, 0);
-    let ones = [Gate::H, Gate::S, Gate::Sdg];
-    let finals = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
-
-    for q in 0..n_qubits {
-        circuit.add_gate(Gate::H, &[q]);
-    }
-    for _ in 0..t_count {
-        for _ in 0..3 * n_qubits {
-            let choice = rng.random_range(0..4);
-            if choice < ones.len() {
-                circuit.add_gate(ones[choice].clone(), &[rng.random_range(0..n_qubits)]);
-            } else {
-                let a = rng.random_range(0..n_qubits);
-                let b = (a + rng.random_range(1..n_qubits)) % n_qubits;
-                circuit.add_gate(Gate::Cx, &[a, b]);
-            }
-        }
-        let t = if rng.random_bool(0.5) {
-            Gate::T
-        } else {
-            Gate::Tdg
-        };
-        circuit.add_gate(t, &[rng.random_range(0..n_qubits)]);
-    }
-    for q in 0..n_qubits {
-        circuit.add_gate(finals[rng.random_range(0..finals.len())].clone(), &[q]);
-    }
-    circuit
-}
-
 fn stabilizer_rank_terminal_shot_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
     let mut circuit = random_t_insertion_circuit(n_qubits, t_count, seed);
     let measured = n_qubits.min(4);
@@ -4164,20 +4094,6 @@ fn stabilizer_rank_terminal_shot_circuit(n_qubits: usize, t_count: usize, seed: 
     for q in 0..measured {
         circuit.add_measure(q, q);
     }
-    circuit
-}
-
-fn stabilizer_rank_mid_circuit_shot_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
-    let mut circuit = random_t_insertion_circuit(n_qubits, t_count, seed);
-    circuit.num_classical_bits = 2;
-    circuit.add_measure(0, 0);
-    circuit.instructions.push(Instruction::Conditional {
-        condition: ClassicalCondition::BitIsOne(0),
-        gate: Gate::X,
-        targets: SmallVec::from_slice(&[1]),
-    });
-    circuit.add_reset(0);
-    circuit.add_measure(1, 1);
     circuit
 }
 
@@ -4338,35 +4254,6 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
     group.finish();
 }
 
-/// Random Clifford layers with a full random CX pairing each, and `t_count` T gates at
-/// random spots ahead of a layer.
-fn random_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let ones = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Z];
-    let mut spots: Vec<usize> = (0..depth * n).collect();
-    for i in (1..spots.len()).rev() {
-        spots.swap(i, rng.random_range(0..=i));
-    }
-    spots.truncate(t_count);
-    let mut c = Circuit::new(n, n);
-    for layer in 0..depth {
-        for q in (0..n).filter(|q| spots.contains(&(layer * n + q))) {
-            c.add_gate(Gate::T, &[q]);
-        }
-        for q in 0..n {
-            c.add_gate(ones[rng.random_range(0..ones.len())].clone(), &[q]);
-        }
-        let mut perm: Vec<usize> = (0..n).collect();
-        for i in (1..n).rev() {
-            perm.swap(i, rng.random_range(0..=i));
-        }
-        for pair in perm.as_chunks::<2>().0 {
-            c.add_gate(Gate::Cx, &[pair[0], pair[1]]);
-        }
-    }
-    with_terminal_measurements(c)
-}
-
 fn bench_auto_clifford_t_shots(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/clifford_t_shots");
     configure_group(&mut group);
@@ -4379,6 +4266,106 @@ fn bench_auto_clifford_t_shots(c: &mut Criterion) {
             |b, circ| {
                 b.iter(|| black_box(run_shots_with(BackendKind::Auto, circ, 1024, SEED).unwrap()));
             },
+        );
+    }
+
+    group.finish();
+}
+
+/// Clifford+T shots priced on each engine that can take them: the Clifford register
+/// (`register`), the dense statevector (`statevector`), what `Auto` picks (`auto`), and,
+/// for circuits with a mid-circuit measurement, the stabilizer-rank branches (`rank_mid`)
+/// against the statevector walk (`statevector_mid`). Routes pinned in
+/// `tests/integration/bench_fixture_routing.rs`.
+fn bench_auto_clifford_t_price(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auto/clifford_t_price");
+    configure_group(&mut group);
+
+    let mut shots_row = |arm: &str, id: String, kind: BackendKind, circuit: Circuit, shots| {
+        group.bench_with_input(BenchmarkId::new(arm, id), &circuit, |b, circ| {
+            b.iter(|| black_box(run_shots_with(kind.clone(), circ, shots, SEED).unwrap()));
+        });
+    };
+    let layers = |n, t| random_clifford_t_layers(n, 10, t, SEED);
+    let scrambled = |n, t| {
+        let mut circuit = scrambled_clifford_t_circuit(n, t, SEED);
+        circuit.measure_all();
+        circuit
+    };
+    let rank = BackendKind::StabilizerRank;
+    let dense = BackendKind::Statevector;
+    let high: Vec<usize> = high_qubit_sizes()
+        .into_iter()
+        .filter(|&n| n == 28)
+        .collect();
+
+    for (n, t) in [
+        (26, 24),
+        (28, 24),
+        (30, 24),
+        (32, 24),
+        (26, 10),
+        (26, 20),
+        (20, 40),
+    ] {
+        shots_row(
+            "register",
+            format!("layers_{n}q_t{t}"),
+            rank.clone(),
+            layers(n, t),
+            1024,
+        );
+    }
+    for (n, t) in [(26, 16), (26, 18), (26, 20), (20, 20), (22, 20), (32, 20)] {
+        let id = format!("scrambled_{n}q_t{t}");
+        shots_row("register", id, rank.clone(), scrambled(n, t), 1024);
+    }
+    let mut onelayer = random_t_insertion_circuit(20, 80, SEED);
+    onelayer.measure_all();
+    shots_row(
+        "register",
+        "onelayer_20q_t80".into(),
+        rank.clone(),
+        onelayer,
+        1024,
+    );
+
+    let layer_widths = [22, 24, 26].into_iter().chain(high.iter().copied());
+    for n in layer_widths {
+        for (arm, kind) in [("statevector", dense.clone()), ("auto", BackendKind::Auto)] {
+            shots_row(arm, format!("layers_{n}q_t24"), kind, layers(n, 24), 1024);
+        }
+    }
+    for n in [20, 22, 24] {
+        let id = format!("scrambled_{n}q_t20");
+        shots_row("statevector", id, dense.clone(), scrambled(n, 20), 1024);
+    }
+    shots_row(
+        "auto",
+        "scrambled_22q_t20".into(),
+        BackendKind::Auto,
+        scrambled(22, 20),
+        1024,
+    );
+    for (arm, kind) in [("statevector", dense.clone()), ("auto", BackendKind::Auto)] {
+        shots_row(arm, "layers_20q_t40".into(), kind, layers(20, 40), 1024);
+    }
+
+    for (t, shots) in [(6, 16), (8, 4)] {
+        for n in [26, 32] {
+            let id = format!("mid_{n}q_t{t}_{shots}shots");
+            let circuit = stabilizer_rank_mid_circuit_shot_circuit(n, t, SEED);
+            shots_row("rank_mid", id, rank.clone(), circuit, shots);
+        }
+    }
+    for n in [22, 24, 26] {
+        let circuit = clifford_t_layers_mid_circuit(n, 10, 8, SEED);
+        shots_row(
+            "statevector_mid",
+            format!("layers_{n}q_t8"),
+            dense.clone(),
+            circuit,
+            64,
         );
     }
 
@@ -6104,6 +6091,7 @@ criterion_group! {
     // Stabilizer rank
     bench_stabilizer_rank,
     bench_auto_clifford_t_shots,
+    bench_auto_clifford_t_price,
     bench_qasm_parse,
     // Compiled sampler (noiseless + noisy shot sampling)
     bench_compiled_sampler,

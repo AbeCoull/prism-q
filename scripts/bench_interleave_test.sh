@@ -6,7 +6,8 @@
 # variant b, so a case states what the measurement would have read and the
 # expected verdict. The last cases run the whole script against a stub bench
 # binary to cover the A B B A order and its several-variant form, the smoke test,
-# and the host-load guard.
+# the MEASURING marker, a TERM while a bench binary runs, and the host-load
+# guard.
 #
 # Usage: scripts/bench_interleave_test.sh
 
@@ -16,6 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="$SCRIPT_DIR/bench_interleave.sh"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
+# The end-to-end cases measure, so the runner writes a MEASURING marker; keep it
+# out of the checkout, where a real measurement would see it.
+export PRISM_BENCH_LOCK="$SCRATCH/MEASURING"
 
 PASS=0
 FAIL=0
@@ -110,8 +114,8 @@ check one-outlier-round-passes  0 PASS    10 target:x/a:1000:1:0.005:0 control:c
 check burst-rounds-dropped      1 FAIL    16 target:x/a:1000:1.10:0.005:0 control:c/a:800:1:0.005:0 burst:1:1.5 burst:2:1.5 burst:3:1.5 burst:5:1.5 burst:7:1.5
 check too-busy-reruns           3 RERUN   10 target:x/a:1000:1:0.005:0 burst:1:1.5 burst:2:1.5 burst:3:1.5 burst:4:1.5 burst:5:1.5
 check threshold-flag-honored    0 PASS    10 target:x/a:1000:1.10:0.005:0 control:c/a:800:1:0.005:0 -- --threshold 15
-check five-rounds-no-data       1 "NO DATA" 5 target:x/a:1000:1:0.005:0
-check min-rows-no-data          1 "NO DATA" 10 target:x/a:1000:1:0.005:0 -- --min-rows 2
+check five-rounds-no-data       5 "NO DATA" 5 target:x/a:1000:1:0.005:0
+check min-rows-no-data          5 "NO DATA" 10 target:x/a:1000:1:0.005:0 -- --min-rows 2
 
 REGRESSION_THRESHOLD=15 check regression-threshold-env 0 PASS 10 target:x/a:1000:1.10:0.005:0 control:c/a:800:1:0.005:0
 
@@ -179,6 +183,10 @@ while [[ $# -gt 0 ]]; do
 done
 home="$CRITERION_HOME"
 command -v cygpath >/dev/null 2>&1 && home="$(cygpath -u "$home")"
+if [[ -n "${STUB_SLEEP:-}" && "$mode" == bench ]]; then
+    echo "$$" > "$STUB_STATE/pid"
+    exec sleep "$STUB_SLEEP"
+fi
 calls=$(( $(cat "$STUB_STATE/calls" 2>/dev/null || echo 0) + 1 ))
 echo "$calls" > "$STUB_STATE/calls"
 [[ "$mode" == bench ]] && echo "$PRISM_BENCH_VARIANT" >> "$STUB_STATE/order"
@@ -263,8 +271,8 @@ if e2e two-variants 1 STUB_EFFECT=1.10 -- --max-host-load 0 --variants b,c; then
     fi
 fi
 
-if e2e bad-variant 1 -- --max-host-load 0 --variants b,a; then
-    PASS=$((PASS + 1)); printf 'ok    %-34s exit 1, a is the base\n' e2e-bad-variant
+if e2e bad-variant 5 -- --max-host-load 0 --variants b,a; then
+    PASS=$((PASS + 1)); printf 'ok    %-34s exit 5, a is the base\n' e2e-bad-variant
 fi
 
 if e2e same-code 0 -- --max-host-load 0; then
@@ -297,6 +305,47 @@ if e2e host-busy 2 PRISM_BENCH_HOST_LOAD=50 -- --max-host-load 10; then
     else
         FAIL=$((FAIL + 1)); printf 'FAIL  %-34s measured on a busy host\n' e2e-host-busy
     fi
+fi
+
+if [[ ! -e "$PRISM_BENCH_LOCK" ]]; then
+    PASS=$((PASS + 1)); printf 'ok    %-34s every run removed its marker\n' e2e-marker-released
+else
+    FAIL=$((FAIL + 1)); printf 'FAIL  %-34s a run left %s behind\n' e2e-marker-released "$PRISM_BENCH_LOCK"
+    rm -f "$PRISM_BENCH_LOCK"
+fi
+
+sleep 300 &
+HOLDER=$!
+printf 'pid: %s\nby: test\n' "$HOLDER" > "$PRISM_BENCH_LOCK"
+if e2e lock-held 2 -- --max-host-load 0; then
+    if [[ ! -s "$E2E_DIR/state/order" ]] && grep -q "^pid: $HOLDER\$" "$PRISM_BENCH_LOCK"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 2, nothing measured, marker kept\n' e2e-lock-held
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s measured under a live marker\n' e2e-lock-held
+    fi
+fi
+kill "$HOLDER" 2>/dev/null
+wait "$HOLDER" 2>/dev/null
+rm -f "$PRISM_BENCH_LOCK"
+
+# A TERM to the runner ends the bench binary it is waiting on and removes the
+# marker, rather than leaving the binary measuring after the runner is gone.
+dir="$SCRATCH/e2e-term"
+mkdir -p "$dir/state"
+STUB_STATE="$dir/state" STUB_SLEEP=300 bash "$RUNNER" --exe "$STUB" -f '^x/' --rounds 6 \
+    --out "$dir/report.md" --project-dir "$SCRIPT_DIR/.." --max-host-load 0 > "$dir/log" 2>&1 &
+runner=$!
+for (( i = 0; i < 100; i++ )); do [[ -s "$dir/state/pid" ]] && break; sleep 0.2; done
+kill -TERM "$runner" 2>/dev/null
+wait "$runner"
+got=$?
+child="$(cat "$dir/state/pid" 2>/dev/null)"
+if [[ "$got" == 143 && -n "$child" ]] && ! kill -0 "$child" 2>/dev/null && [[ ! -e "$PRISM_BENCH_LOCK" ]]; then
+    PASS=$((PASS + 1)); printf 'ok    %-34s exit 143, binary ended, marker removed\n' e2e-term
+else
+    FAIL=$((FAIL + 1)); printf 'FAIL  %-34s exit %s, child %s\n' e2e-term "$got" "${child:-none}"
+    [[ -n "$child" ]] && kill "$child" 2>/dev/null
+    sed 's/^/      /' "$dir/log"
 fi
 
 echo

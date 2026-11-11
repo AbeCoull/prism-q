@@ -127,6 +127,23 @@ else
     bad "unknown branch"
 fi
 
+printf '# branch  target  rows\n\nnosuch circuits ^x$\n' > "$SCRATCH/lineno.txt"
+batch "$SCRATCH/lineno.txt"
+if [[ $? -eq 1 ]] && grep -q 'line 3 of .*nosuch' "$SCRATCH/log"; then
+    ok "errors name the file line, comments and blanks counted"
+else
+    bad "file line in errors"
+fi
+
+printf '# crlf\r\n\r\none circuits ^sv/one/20$\r\ntwo circuits ^sv/two/20$ ^mps/c/16$' > "$SCRATCH/crlf.txt"
+batch "$SCRATCH/crlf.txt"
+if [[ $? -eq 0 && "$(steps)" == 'circuits|(^sv/one/20$)|(^sv/two/20$)|(^mps/c/16$)|' ]] \
+    && git -C "$SCRATCH/combined" merge-base --is-ancestor two HEAD; then
+    ok "CRLF lines and a last line without a newline are read whole"
+else
+    bad "CRLF and missing final newline"; steps
+fi
+
 printf '#!/bin/sh\nexit 1\n' > "$REPO/.git/hooks/commit-msg"
 chmod +x "$REPO/.git/hooks/commit-msg"
 batch "$SCRATCH/batch.txt"

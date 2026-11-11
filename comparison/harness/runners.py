@@ -16,7 +16,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import psutil
@@ -42,8 +42,16 @@ WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
 UNITARY = {"h", "x", "z", "s", "sdg", "ry", "rz", "cx", "cz", "swap", "cp"}
 CLIFFORD = {"h", "x", "z", "s", "sdg", "cx", "cz", "swap", "measure", "reset", "if"}
 LEGACY_GATES = {"h", "cx", "swap", "ry", "rz", "cp"}
-DENSE_BYTES_PER_AMP = {"double": 16, "single": 8}
+PROBS_BYTES_PER_AMP = 8
+THREAD_ENV_KEYS = ("RAYON_NUM_THREADS", "OMP_NUM_THREADS")
 DENSE_MEMORY_FRACTION = 0.8
+# Warm calls of these OpenMP peers ran faster with idle worker threads sleeping than spinning
+# between calls, on both a 20- and a 24-qubit row; PRISM-Q's environment is left unchanged.
+OMP_PASSIVE = (("OMP_WAIT_POLICY", "PASSIVE"),)
+SPINOZA_H_FAULT = (
+    "Spinoza's multithreaded H (2 or more threads, 15 or more qubits) returns a state 0.05 to 0.3 "
+    "from the reference in total variation distance at git f900971"
+)
 
 
 @dataclass(frozen=True)
@@ -56,11 +64,11 @@ class Simulator:
     modes: frozenset[str]
     gates: frozenset[str] = frozenset(UNITARY | {"measure", "reset", "if"})
     dense: bool = False
-    terminal_only: bool = False
+    state_bytes_per_amp: int = 16
     backend: str | None = None
-    threads_env: str = ""
-    notes: str = ""
-    extra: dict[str, Any] = field(default_factory=dict)
+    single_threaded: bool = False
+    env: tuple[tuple[str, str], ...] = ()
+    gate_faults: tuple[tuple[str, str], ...] = ()
 
 
 def _registry() -> dict[str, Simulator]:
@@ -71,9 +79,8 @@ def _registry() -> dict[str, Simulator]:
             "exec",
             "double",
             "dispatcher picks per circuit",
-            frozenset({"probs", "counts"}),
+            frozenset({"probs", "counts", "expval", "stats"}),
             backend="auto",
-            threads_env="RAYON_NUM_THREADS",
         ),
         Simulator(
             "aer-statevector",
@@ -81,8 +88,9 @@ def _registry() -> dict[str, Simulator]:
             "python",
             "double",
             "dense statevector",
-            frozenset({"probs", "counts"}),
+            frozenset({"probs", "counts", "expval"}),
             dense=True,
+            env=OMP_PASSIVE,
         ),
         Simulator(
             "aer-statevector-f32",
@@ -90,8 +98,10 @@ def _registry() -> dict[str, Simulator]:
             "python",
             "single",
             "dense statevector",
-            frozenset({"probs", "counts"}),
+            frozenset({"probs", "counts", "expval"}),
             dense=True,
+            state_bytes_per_amp=8,
+            env=OMP_PASSIVE,
         ),
         Simulator(
             "aer-automatic",
@@ -100,6 +110,7 @@ def _registry() -> dict[str, Simulator]:
             "double",
             "Aer picks the method per circuit",
             frozenset({"probs", "counts"}),
+            env=OMP_PASSIVE,
         ),
         Simulator(
             "aer-stabilizer",
@@ -109,6 +120,7 @@ def _registry() -> dict[str, Simulator]:
             "stabilizer tableau",
             frozenset({"counts"}),
             gates=frozenset(CLIFFORD),
+            env=OMP_PASSIVE,
         ),
         Simulator(
             "aer-mps",
@@ -116,7 +128,8 @@ def _registry() -> dict[str, Simulator]:
             "python",
             "double",
             "matrix product state",
-            frozenset({"probs", "counts"}),
+            frozenset({"probs", "counts", "expval"}),
+            env=OMP_PASSIVE,
         ),
         Simulator(
             "stim",
@@ -124,8 +137,29 @@ def _registry() -> dict[str, Simulator]:
             "python",
             "exact (tableau)",
             "stabilizer tableau, compiled sampler",
-            frozenset({"counts"}),
+            frozenset({"counts", "stats"}),
             gates=frozenset(CLIFFORD),
+            single_threaded=True,
+        ),
+        Simulator(
+            "quimb-tn",
+            "quimb (tensor network, cotengra paths)",
+            "python",
+            "double",
+            "tensor network contracted per observable over its reverse light cone",
+            frozenset({"expval"}),
+            gates=frozenset(UNITARY),
+            env=OMP_PASSIVE,
+        ),
+        Simulator(
+            "quimb-mps",
+            "quimb (CircuitMPS)",
+            "python",
+            "double",
+            "matrix product state",
+            frozenset({"counts", "expval"}),
+            gates=frozenset(UNITARY | {"measure"}),
+            env=OMP_PASSIVE,
         ),
         Simulator(
             "qsim",
@@ -136,7 +170,8 @@ def _registry() -> dict[str, Simulator]:
             frozenset({"probs", "counts"}),
             gates=frozenset(UNITARY | {"measure"}),
             dense=True,
-            terminal_only=True,
+            state_bytes_per_amp=8,
+            env=OMP_PASSIVE,
         ),
         Simulator(
             "quest",
@@ -147,7 +182,7 @@ def _registry() -> dict[str, Simulator]:
             frozenset({"probs"}),
             gates=frozenset(LEGACY_GATES),
             dense=True,
-            threads_env="OMP_NUM_THREADS",
+            env=OMP_PASSIVE,
         ),
         Simulator(
             "spinoza",
@@ -158,7 +193,7 @@ def _registry() -> dict[str, Simulator]:
             frozenset({"probs"}),
             gates=frozenset(LEGACY_GATES),
             dense=True,
-            threads_env="RAYON_NUM_THREADS",
+            gate_faults=(("h", SPINOZA_H_FAULT),),
         ),
         Simulator(
             "qip",
@@ -169,7 +204,6 @@ def _registry() -> dict[str, Simulator]:
             frozenset({"probs"}),
             gates=frozenset(LEGACY_GATES),
             dense=True,
-            threads_env="RAYON_NUM_THREADS",
         ),
     ]
     return {s.name: s for s in sims}
@@ -185,7 +219,6 @@ PRISMQ_BACKENDS = {
     "product": ("product state", False),
     "factored": ("split dense sub-states", False),
     "tensor-network": ("tensor network", False),
-    "stabilizer-rank": ("stabilizer-rank branches", False),
 }
 
 
@@ -197,6 +230,17 @@ def resolve(name: str) -> Simulator:
         raise KeyError(f"unknown simulator `{name}`; known: {', '.join(REGISTRY)}")
     if not option:
         return sim
+    if name == "prismq:no-qft-block":
+        return Simulator(
+            name,
+            "PRISM-Q (auto dispatch, QFT recognition off)",
+            "exec",
+            "double",
+            sim.representation,
+            sim.modes,
+            backend="auto",
+            env=(("PRISM_NO_QFT_BLOCK", "1"),),
+        )
     if base == "prismq":
         if option.startswith("mps"):
             representation, dense = f"matrix product state, bond cap {option.split('-')[-1]}", False
@@ -204,45 +248,102 @@ def resolve(name: str) -> Simulator:
         else:
             representation, dense = PRISMQ_BACKENDS[option]
             backend = option
+        gates = CLIFFORD if backend in ("stabilizer", "factored-stabilizer") else sim.gates
         return Simulator(
             name,
             f"PRISM-Q ({backend})",
             "exec",
             "double",
             representation,
-            sim.modes,
+            sim.modes - {"stats"},
+            gates=frozenset(gates),
             dense=dense,
             backend=backend,
-            threads_env=sim.threads_env,
         )
-    if base == "aer-mps":
+    if base in ("aer-mps", "quimb-mps"):
         return Simulator(
             name,
-            f"Qiskit Aer (MPS, bond cap {option})",
+            sim.label.partition(" (")[0] + f" (MPS, bond cap {option})",
             "python",
             "double",
             f"matrix product state, bond cap {option}",
             sim.modes,
+            gates=sim.gates,
+            env=sim.env,
         )
     raise KeyError(f"`{base}` takes no option")
+
+
+PRISMQ_MPS_SVD_EPSILON = 1e-12
+TIMED_OUTPUT = {
+    "probs": {
+        "prismq": "a probability vector",
+        "aer": "a Result holding the probability vector",
+        "qsim": "a probability vector",
+        "quest": "a probability vector",
+        "spinoza": "a probability vector",
+        "qip": "a probability vector",
+    },
+    "counts": {
+        "prismq": "a histogram",
+        "aer": "a Result holding a histogram",
+        "qsim": "a per-shot measurement array, which qsimcirq's `run` builds by expanding each shot into Python bools",
+        "stim": "a bit-packed per-shot array",
+        "quimb": "a per-shot sample list",
+    },
+    "expval": {
+        "prismq": "expectation values",
+        "aer": "a Result holding the marginal probabilities of each observable's qubits",
+        "quimb": "expectation values",
+    },
+    "stats": {"prismq": "bit-packed shot buffers", "stim": "bit-packed shot buffers"},
+}
+
+
+def timed_output(name: str, mode: str) -> str | None:
+    """What a simulator's timed call returns in `mode`, by base family (`aer`, `quimb`, `prismq`, ...)."""
+    return TIMED_OUTPUT.get(mode, {}).get(name.partition(":")[0].partition("-")[0])
+
+
+MODE_WORDS = {
+    "probs": "dense probability output",
+    "counts": "shot sampling",
+    "expval": "expectation values",
+    "stats": "statistics-only sampling",
+}
 
 
 def applicable(sim: Simulator, workload: Workload) -> str | None:
     """None when the simulator can run the workload, otherwise the reason it cannot."""
     if workload.mode not in sim.modes:
-        what = "dense probability output" if workload.mode == "probs" else "shot sampling"
         source = "adapter" if sim.kind == "legacy" else "simulator configuration"
-        return f"{source} offers no {what}"
-    missing = gate_names(workload.text) - sim.gates
+        return f"{source} offers no {MODE_WORDS[workload.mode]}"
+    used = gate_names(workload.text)
+    faults = [f"{gate}: {why}" for gate, why in sim.gate_faults if gate in used]
+    if faults:
+        return "; ".join(faults)
+    missing = used - sim.gates
     if missing:
         if sim.name in ("aer-stabilizer", "stim") or sim.backend in ("stabilizer", "factored-stabilizer"):
             return "not a Clifford circuit"
         return f"adapter carries no {', '.join(sorted(missing))}"
     if sim.dense:
-        need = DENSE_BYTES_PER_AMP.get(sim.precision, 16) * 2**workload.num_qubits
+        per_amp = sim.state_bytes_per_amp + (PROBS_BYTES_PER_AMP if workload.mode == "probs" else 0)
+        need = per_amp * 2**workload.num_qubits
         have = psutil.virtual_memory().total * DENSE_MEMORY_FRACTION
         if need > have:
             return f"dense state of 2^{workload.num_qubits} amplitudes needs {need / 1024**3:.3g} GiB"
+    executable = _executable(sim)
+    if executable is not None and not os.path.exists(executable):
+        return f"executable not built: {executable}"
+    return None
+
+
+def _executable(sim: Simulator) -> str | None:
+    if sim.kind == "exec":
+        return RUNNER
+    if sim.kind == "legacy":
+        return QUEST if sim.name == "quest" else PEERS
     return None
 
 
@@ -307,23 +408,31 @@ def run_process(argv: list[str], stdin_text: str, env: dict[str, str], timeout_s
             sample()
             done.wait(0.02)
 
-    poller = threading.Thread(target=poll, daemon=True)
-    poller.start()
-    timed_out = False
-    try:
-        stdout, stderr = child.communicate(stdin_text, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        for proc in tree.values():
+    def kill_tree() -> None:
+        for proc in list(tree.values()):
             try:
                 proc.kill()
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
         child.kill()
-        stdout, stderr = child.communicate()
-    wall_ms = (time.perf_counter() - start) * 1000.0
-    done.set()
-    poller.join()
+
+    poller = threading.Thread(target=poll, daemon=True)
+    poller.start()
+    timed_out = finished = False
+    try:
+        try:
+            stdout, stderr = child.communicate(stdin_text, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            kill_tree()
+            stdout, stderr = child.communicate()
+        wall_ms = (time.perf_counter() - start) * 1000.0
+        finished = True
+    finally:
+        if not finished:
+            kill_tree()
+        done.set()
+        poller.join()
     sample()
     peak = max(peaks.values(), default=0.0)
     return ProcessResult(child.returncode, stdout, stderr, wall_ms, peak / 1024**2 if peak else None, timed_out)
@@ -347,9 +456,9 @@ def classify(proc: ProcessResult) -> tuple[str, str | None]:
     return "error", tail or f"exit {proc.returncode}"
 
 
-def _env(sim: Simulator, threads: int) -> dict[str, str]:
+def child_env(threads: int) -> dict[str, str]:
     env = dict(os.environ)
-    for key in ("RAYON_NUM_THREADS", "OMP_NUM_THREADS"):
+    for key in THREAD_ENV_KEYS:
         env[key] = str(threads)
     env["PYTHONHASHSEED"] = "0"
     return env
@@ -382,6 +491,18 @@ def version(sim: Simulator) -> str | None:
         return None
 
 
+def native_builds() -> dict[str, str | None]:
+    """Compiler and flags each native peer binary reports it was built with."""
+    builds: dict[str, str | None] = {}
+    for key, argv in (("quest_runner", [QUEST, "version"]), ("peers", [PEERS, "qip", "version"])):
+        try:
+            out = subprocess.run(argv, input="", capture_output=True, text=True, timeout=120, check=False)
+            builds[key] = _last_json(out.stdout).get("build")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            builds[key] = None
+    return builds
+
+
 def execute(
     sim: Simulator,
     workload: Workload,
@@ -391,13 +512,19 @@ def execute(
     budget_s: float,
     timeout_s: float,
     out_path: str,
+    keys_path: str | None = None,
 ) -> dict[str, Any]:
-    """Run one measurement and return the observation fields it determines."""
-    env = _env(sim, threads)
+    """Run one measurement and return the observation fields it determines.
+
+    `keys_path` names the observables or statistics file an `expval` or `stats` workload needs.
+    """
+    env = {**child_env(threads), **dict(sim.env)}
     budget = ["--budget-ms", str(budget_s * 1000.0), "--min-iterations", str(min_iterations)]
     if sim.kind in ("exec", "python"):
         common = ["--mode", workload.mode, "--shots", str(workload.shots), "--iterations", str(iterations)]
         common += ["--out", out_path, *budget]
+        if keys_path:
+            common += ["--keys", keys_path]
         if sim.kind == "exec":
             argv = [RUNNER, "exec", *common, "--backend", sim.backend or "auto"]
         else:
@@ -420,7 +547,7 @@ def execute(
         if data.get("first_internal_ms") is not None:
             obs["first_internal_ms"] = data["first_internal_ms"]
         obs["version"] = data.get("version")
-        for key in ("resolved_backend", "route", "engine", "exactness", "bond", "plan", "fusion_applied"):
+        for key in ("resolved_backend", "route", "engine", "exactness", "bond", "plan", "fusion_applied", "details"):
             if data.get(key) is not None:
                 obs[key] = data[key]
         hashes = data.get("output_hashes") or []

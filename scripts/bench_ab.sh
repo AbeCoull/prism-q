@@ -81,7 +81,9 @@
 #                   collecting: the corpus row that provoked this projected
 #                   4200s per pass, seven hours across the six, and was caught
 #                   after one 140s iteration.
-#   --ref,      -r  git ref for the reference build (default: HEAD)
+#   --ref,      -r  git ref for the reference build (default: HEAD). On a clean
+#                   tree at that commit both binaries carry the same code, and
+#                   a run that would PASS reads CONTROL (same code) instead.
 #   --bench,    -b  bench target (default: circuits)
 #   --features      cargo feature list (default: parallel)
 #   --ref-dir       reference worktree path. Persists between runs, so the
@@ -119,19 +121,24 @@
 #                   measured pass, where it is recorded in the report. One busy
 #                   thread on an 8-thread host is 12.5%.
 #   --wait-idle     seconds to wait for the host to fall under --max-host-load
-#                   before giving up (default 0). A queued run passes a long wait
-#                   so it starts when the host settles instead of failing.
+#                   before giving up (default 0), and before the first build for
+#                   another measurement's marker to clear. A queued run passes a
+#                   long wait so it starts when the host settles instead of failing.
 #   --settle        seconds the host must stay under --max-host-load without a
 #                   break before the first measured pass (default 0, one reading).
 #                   A build just before measuring leaves the host disturbed after
 #                   its processes exit, so a job that builds in place waits out the
 #                   window. A busy reading restarts it, and the busy time counts
 #                   against --wait-idle. With no load reading it is a plain wait.
-#   --force-lock    measure even while a live process holds the MEASURING
-#                   marker. The marker (see bench_lock.sh) is written before the
-#                   host load check and removed on exit, so other sessions on
-#                   the host know not to run cargo; a run under bench_queue.sh
-#                   inherits the queue's marker through PRISM_BENCH_LOCK_HELD.
+#   --force-lock    build and measure even while a live process holds the
+#                   MEASURING marker. Without it the script waits up to
+#                   --wait-idle for the marker to clear before its first build,
+#                   since cargo is what a measurement in progress must not see,
+#                   and stops with exit 2 if it is still held. The marker (see
+#                   bench_lock.sh) is written before the host load check and
+#                   removed on exit, so other sessions on the host know not to
+#                   run cargo; a run under bench_queue.sh inherits the queue's
+#                   marker through PRISM_BENCH_LOCK_HELD.
 #
 # Verdict guards:
 #   A run whose same-binary controls lean one way across most rows reads RERUN
@@ -144,7 +151,8 @@
 #                   regress again leaves the run at RERUN rather than FAIL: a
 #                   copied binary can land in a slow layout for one run, and the
 #                   controls cannot see it because they compare a binary with
-#                   itself.
+#                   itself. A confirmation that gives no verdict of its own
+#                   (busy host, error) also leaves RERUN.
 #   --escalate      with --light, re-run every row that moved past half the
 #                   threshold on the full tier against the same two binaries,
 #                   and take the verdict from that run.
@@ -156,8 +164,14 @@
 #   and earlier passes have been paid for. Runs started by this script for a
 #   confirmation or an escalation skip it, since the same binaries passed it.
 #
-# Exit status: 0 PASS, 1 FAIL, 2 host too busy to start or another measurement
-# holding the marker, 3 RERUN, 4 a binary failed the smoke test.
+# Rows a filter matched in some passes but not all (a row added or renamed on one
+# side) get no result: the report lists them as NO DATA and the run's verdict
+# comes from the rest.
+#
+# Exit status: 0 PASS or CONTROL (same code), 1 FAIL, 2 host too busy to start
+# or another measurement holding the marker, 3 RERUN, 4 a binary failed the
+# smoke test, 5 NO DATA or any other error (bad option, failed build, a bench
+# binary that exited non-zero mid-pass). Exit 1 always means FAIL.
 #
 # Environment:
 #   REGRESSION_THRESHOLD   regression gate in percent (default: 5.0)
@@ -166,6 +180,7 @@
 #                          re-run at the default on those rows alone.
 #   PRISM_BENCH_PLOTS      set to render Criterion HTML (about 58s per row)
 #   PRISM_BENCH_HIGH_QUBITS  set to admit the 28q/30q statevector rows
+#   PRISM_BENCH_HOST_LOAD  fixed host load reading in percent, for the scripts' tests
 #
 # Requires git, awk, and cargo. Deliberately not jq or bc: neither is present on
 # the reference host, which is why the stored-baseline tooling never ran there.
@@ -180,6 +195,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # shellcheck source=scripts/bench_lock.sh
 source "$SCRIPT_DIR/bench_lock.sh"
+# shellcheck source=scripts/bench_common.sh
+source "$SCRIPT_DIR/bench_common.sh"
 
 FILTER=""
 CONTROL_FILTER=""
@@ -240,13 +257,13 @@ while [[ $# -gt 0 ]]; do
         --out)         OUT="$2"; shift 2 ;;
         --threshold|-t) THRESHOLD="$2"; shift 2 ;;
         -h|--help)     awk 'NR > 1 && !/^#/ { exit } NR > 1' "${BASH_SOURCE[0]}"; exit 0 ;;
-        *) echo "Unknown option: $1" >&2; exit 1 ;;
+        *) echo "Unknown option: $1" >&2; exit 5 ;;
     esac
 done
 
 if [[ -z "$FILTER" && -z "$BUILD_ONLY" ]]; then
     echo "Error: --filter is required. Name the rows to compare." >&2
-    exit 1
+    exit 5
 fi
 
 # Everything the tier changes, in one place. Both tiers set Criterion's windows
@@ -267,7 +284,7 @@ PASS_COUNT="${#PASS_LABELS[@]}"
 
 if [[ -n "$ESCALATE" && -z "$LIGHT" ]]; then
     echo "Error: --escalate re-runs light-tier rows on the full tier, so it needs --light." >&2
-    exit 1
+    exit 5
 fi
 # The light verdict is triage, so there is nothing to confirm; a nested run
 # never starts another of its own kind.
@@ -284,21 +301,21 @@ PASS_ORDER="${PASS_ORDER//,/, }"
 # report that no row was measured at.
 if (( CONTROL_SAMPLES < 10 )); then
     echo "Error: --control-samples is $CONTROL_SAMPLES; Criterion's floor is 10." >&2
-    exit 1
+    exit 5
 fi
 if (( SLOW_SAMPLES < 10 )); then
     echo "Error: --slow-samples is $SLOW_SAMPLES; Criterion's floor is 10." >&2
-    exit 1
+    exit 5
 fi
 if (( WARM_SAMPLES < 10 )); then
     echo "Error: --warm-samples is $WARM_SAMPLES; Criterion's floor is 10." >&2
-    exit 1
+    exit 5
 fi
 
 cd "$PROJECT_DIR"
 
 for cmd in git awk cargo; do
-    command -v "$cmd" >/dev/null 2>&1 || { echo "Error: '$cmd' not found." >&2; exit 1; }
+    command -v "$cmd" >/dev/null 2>&1 || { echo "Error: '$cmd' not found." >&2; exit 5; }
 done
 
 WORKDIR="$(mktemp -d)"
@@ -311,7 +328,11 @@ fi
 # The bench binary of the running segment, or a nested run, so a signal ends it
 # before the marker goes.
 CHILD_PID=""
+# Set just before the script exits with its verdict. Any other exit 1 (a stray
+# failing command under set -e) becomes 5, so 1 reaches a caller only as FAIL.
+FINAL=""
 cleanup() {
+    local status=$?
     if [[ -n "$CHILD_PID" ]]; then
         kill -TERM "$CHILD_PID" 2>/dev/null || true
         wait "$CHILD_PID" 2>/dev/null || true
@@ -321,36 +342,14 @@ cleanup() {
         git worktree remove --force "$REF_DIR" 2>/dev/null || true
     fi
     rm -rf "$WORKDIR"
+    if (( status == 1 )) && [[ -z "$FINAL" ]]; then
+        status=5
+    fi
+    exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-# Windows-native path for variables read by cargo and by the bench binary. MSYS
-# converts arguments but not arbitrary environment variables, so a POSIX path in
-# CARGO_TARGET_DIR or CRITERION_HOME reaches the native binary unusable.
-native_path() {
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -w "$1"
-    else
-        printf '%s' "$1"
-    fi
-}
-
-# Content hash of the working tree: HEAD, every tracked modification against it,
-# and every untracked file that is not ignored. Recomputed after the reference
-# build so a save from the editor between the two builds is caught rather than
-# silently pairing two binaries that no longer differ by the change under test.
-tree_fingerprint() {
-    {
-        git rev-parse HEAD
-        git diff HEAD --binary
-        git ls-files -o --exclude-standard -z | while IFS= read -r -d '' f; do
-            printf '%s ' "$f"
-            git hash-object "$f"
-        done
-    } | git hash-object --stdin
-}
 
 # Build the bench target in `dir` and copy the resulting executable to `out`.
 # The path comes from cargo's own artifact message, not from an mtime scan of
@@ -369,11 +368,16 @@ build_bench_exe() {
     local log="$WORKDIR/build-$label.json"
 
     echo ">>> building $label: cargo bench --bench $BENCH --features \"$FEATURES\" --no-run"
+    local status=0
     (
-        cd "$dir"
+        cd "$dir" &&
         CARGO_TARGET_DIR="$(native_path "$dir/target")" \
             cargo bench --bench "$BENCH" --features "$FEATURES" --no-run --message-format=json
-    ) > "$log"
+    ) > "$log" || status=$?
+    if (( status != 0 )); then
+        echo "Error: the $label build failed (exit $status); cargo's errors are above." >&2
+        exit 5
+    fi
 
     local exe
     exe="$(awk -v want="$BENCH" '
@@ -391,7 +395,7 @@ build_bench_exe() {
     if [[ -z "$exe" ]]; then
         echo "Error: cargo reported no executable for bench target '$BENCH'." >&2
         echo "  artifact log: $log" >&2
-        exit 1
+        exit 5
     fi
 
     # Cargo emits an escaped Windows path in JSON; unescape before touching it.
@@ -401,19 +405,21 @@ build_bench_exe() {
     fi
     if [[ ! -f "$exe" ]]; then
         echo "Error: bench executable '$exe' does not exist." >&2
-        exit 1
+        exit 5
     fi
 
     cp "$exe" "$out"
     echo "    $out"
 }
 
-# Extract `full_id<TAB>mean_ns<TAB>samples` for every row a pass measured. The
-# mean is the first point estimate in the JSON object, which serde writes before
-# the median. The sample count travels with the row so a report can say which
-# rows were measured at the control count.
+# Extract `full_id<TAB>mean_ns<TAB>samples<TAB>segment` for every row a pass
+# measured. The mean is the first point estimate in the JSON object, which serde
+# writes before the median. The sample count and the segment (main, slow, or
+# ctl) travel with the row, so the report tells a control row from a row under
+# test by the regex that measured it rather than by its count, which the two
+# share under --light or PRISM_BENCH_SAMPLES=10.
 snapshot() {
-    local home="$1" out="$2" samples="$3"
+    local home="$1" out="$2" samples="$3" seg="$4"
 
     find "$home" -path "*/new/estimates.json" -print 2>/dev/null | while IFS= read -r est; do
         local bm="${est%estimates.json}benchmark.json"
@@ -433,7 +439,7 @@ snapshot() {
                 exit
             }' "$est")"
 
-        [[ -n "$id" && -n "$mean" ]] && printf '%s\t%s\t%s\n' "$id" "$mean" "$samples"
+        [[ -n "$id" && -n "$mean" ]] && printf '%s\t%s\t%s\t%s\n' "$id" "$mean" "$samples" "$seg"
     done | sort > "$out"
 }
 
@@ -509,15 +515,25 @@ split_slow_rows() {
 # The first per-pass projection Criterion has printed that is over budget.
 #
 # Criterion writes the projection before it starts collecting, so this sees a
-# row's cost after one iteration rather than after the row.
+# row's cost after one iteration rather than after the row. $2, when set, is the
+# sample count the measured passes will run a warmup segment's rows at. A row
+# that outlasts the window runs one iteration per sample, so it costs its
+# per-iteration time times that count, or times --slow-samples once that count
+# puts it past --slow-row-seconds, as split_slow_rows decides. A row that fits
+# the window costs the window at either count, which the warmup projection is.
 over_budget_row() {
-    awk -v budget="$MAX_ROW_SECONDS" -v scale="${2:-1}" '
+    awk -v budget="$MAX_ROW_SECONDS" -v full="${2:-0}" -v slow_budget="$SLOW_ROW_SECONDS" \
+        -v slow="$SLOW_SAMPLES" '
         /Collecting [0-9]+ samples in estimated/ {
             if (match($0, /estimated [0-9.]+ s/)) {
                 secs = substr($0, RSTART + 10, RLENGTH - 12) + 0
-                if (scale > 1 && match($0, /\([0-9]+ iterations\)/)) {
+                if (full > 0 && match($0, /\([0-9]+ iterations\)/)) {
                     iters = substr($0, RSTART + 1, RLENGTH - 13) + 0
-                    if (iters > 0 && secs / iters * scale > secs) { secs = secs / iters * scale }
+                    if (iters > 0) {
+                        at = secs / iters * full
+                        if (slow_budget > 0 && at > slow_budget && slow < full) { at = secs / iters * slow }
+                        if (at > secs) { secs = at }
+                    }
                 }
                 if (secs > budget) {
                     id = $2
@@ -561,13 +577,8 @@ projected_pass_seconds() {
 # pass that measured nothing.
 run_segment() {
     local exe="$1" home="$2" filter="$3" samples="$4" log="$5" quiet="$6"
-    local pid status over shown total scale
-    # A warmup pass runs fewer samples than the measured passes will, so its
-    # projection is scaled up to the full count before it meets the budget.
-    scale=1
-    if [[ -n "${WARMING:-}" ]]; then
-        scale=$(( SAMPLES > samples ? SAMPLES / samples : 1 ))
-    fi
+    local project_at="${7:-}"
+    local pid status over shown total
 
     mkdir -p "$home"
     : > "$log"
@@ -587,7 +598,7 @@ run_segment() {
             fi
         fi
         if (( MAX_ROW_SECONDS > 0 )); then
-            over="$(over_budget_row "$log" "$scale")"
+            over="$(over_budget_row "$log" "$project_at")"
             if [[ -n "$over" ]]; then
                 kill "$pid" 2>/dev/null || true
                 break
@@ -606,12 +617,12 @@ run_segment() {
         echo "  $(( PASS_COUNT + 2 )) passes run, so that row alone costs about that many times as much." >&2
         echo "  Narrow --filter, move the row behind --control, pass --light, lower" >&2
         echo "  PRISM_BENCH_SAMPLES, or pass --max-row-seconds 0 to measure it anyway." >&2
-        exit 1
+        exit 5
     fi
     if (( status != 0 )); then
         [[ "$quiet" == "quiet" ]] && cat "$log" >&2
         echo "Error: the bench binary exited $status during '$filter'." >&2
-        exit 1
+        exit 5
     fi
     if [[ "$quiet" != "quiet" ]]; then
         total="$(wc -l < "$log" | tr -d '[:space:]')"
@@ -624,12 +635,18 @@ run_segment() {
 # Run every segment of one pass and collect them into one sorted table.
 measure() {
     local exe="$1" home="$2" out="$3" logbase="$4" quiet="$5"
-    local seg filter samples
+    local seg filter samples project_at
 
     : > "$out"
     while IFS=$'\t' read -r seg filter samples; do
-        run_segment "$exe" "$home/$seg" "$filter" "$samples" "$logbase-$seg.log" "$quiet"
-        snapshot "$home/$seg" "$WORKDIR/segment.tsv" "$samples"
+        # A warmup runs the main segment below the count the measured passes
+        # will use, so its projection is priced at that count instead.
+        project_at=""
+        if [[ -n "${WARMING:-}" && "$seg" == main ]]; then
+            project_at="$SAMPLES"
+        fi
+        run_segment "$exe" "$home/$seg" "$filter" "$samples" "$logbase-$seg.log" "$quiet" "$project_at"
+        snapshot "$home/$seg" "$WORKDIR/segment.tsv" "$samples" "$seg"
         cat "$WORKDIR/segment.tsv" >> "$out"
     done < <(pass_segments)
 
@@ -650,7 +667,7 @@ run_pass() {
     if (( rows == 0 )); then
         echo "Error: pass $idx produced no Criterion estimates under $home." >&2
         echo "  Either --filter '$FILTER' matched nothing, or CRITERION_HOME was ignored." >&2
-        exit 1
+        exit 5
     fi
     dupes="$(cut -f1 "$out" | uniq -d)"
     if [[ -n "$dupes" ]]; then
@@ -658,7 +675,7 @@ run_pass() {
         printf '  %s\n' $dupes >&2
         echo "  A row measured at two sample counts has no single control column." >&2
         echo "  Make the two regexes disjoint." >&2
-        exit 1
+        exit 5
     fi
     echo "    pass $idx measured $rows rows"
     echo ""
@@ -680,100 +697,6 @@ warm_up() {
     echo ">>> warmup $idx (discarded, $WARM_SAMPLES samples)"
     WARMING=1 measure "$exe" "$home" "$WORKDIR/warm-$idx.tsv" "$WORKDIR/warm-$idx" "quiet"
     echo ""
-}
-
-host_cpu() {
-    if [[ -r /proc/cpuinfo ]]; then
-        awk -F': ' '/model name/ { print $2; exit }' /proc/cpuinfo
-    elif command -v sysctl >/dev/null 2>&1 && sysctl -n machdep.cpu.brand_string >/dev/null 2>&1; then
-        sysctl -n machdep.cpu.brand_string
-    else
-        printf '%s' "${PROCESSOR_IDENTIFIER:-unknown}"
-    fi
-}
-
-# Busy share of every CPU over about two seconds, as a whole percent, or empty
-# where the host offers no reading. MSYS and Cygwin expose the Windows counters
-# through /proc/stat, so one reader covers Windows, Linux, and WSL.
-host_load() {
-    if [[ -r /proc/stat ]]; then
-        local first second
-        first="$(awk '/^cpu / { b = $2 + $3 + $4 + $7 + $8 + $9; print b, b + $5 + $6; exit }' /proc/stat)"
-        sleep 2
-        second="$(awk '/^cpu / { b = $2 + $3 + $4 + $7 + $8 + $9; print b, b + $5 + $6; exit }' /proc/stat)"
-        awk -v a="$first" -v b="$second" 'BEGIN {
-            split(a, x, " "); split(b, y, " ")
-            if (y[2] > x[2]) { printf "%d", (y[1] - x[1]) * 100 / (y[2] - x[2]) }
-        }'
-    elif command -v sysctl >/dev/null 2>&1 && sysctl -n hw.ncpu >/dev/null 2>&1; then
-        ps -A -o %cpu= | awk -v n="$(sysctl -n hw.ncpu)" '{ s += $1 } END { printf "%d", s / n }'
-    fi
-}
-
-# The processes holding the most CPU, for the message that stops a run.
-busy_processes() {
-    if command -v wmic >/dev/null 2>&1; then
-        wmic path Win32_PerfFormattedData_PerfProc_Process get Name,PercentProcessorTime 2>/dev/null |
-            tr -d '\r' |
-            awk 'NR > 1 && $1 != "_Total" && $1 != "Idle" && $2 + 0 > 0 { print $2 "% " $1 }' |
-            sort -rn | head -5
-    else
-        ps -eo pcpu,comm --sort=-pcpu 2>/dev/null | sed -n '2,6p'
-    fi
-}
-
-# Stop, or wait up to --wait-idle, while other work holds more of the host than
-# --max-host-load. Every row of the run would carry that load, and the controls
-# only see the part of it that changes between passes. Under --settle the host
-# must then read quiet for that many seconds in a row before the first pass.
-preflight() {
-    local load="" waited=0 quiet_since=""
-    if (( MAX_HOST_LOAD > 0 )); then
-        load="$(host_load)"
-        if [[ -z "$load" ]]; then
-            echo ">>> no host load reading here, so the load guard is off for this run"
-            MAX_HOST_LOAD=0
-        fi
-    fi
-    if (( MAX_HOST_LOAD <= 0 )); then
-        if (( SETTLE > 0 )); then
-            echo ">>> settling for ${SETTLE}s before measuring"
-            sleep "$SETTLE"
-        fi
-        return 0
-    fi
-    while :; do
-        if (( load <= MAX_HOST_LOAD )); then
-            [[ -n "$quiet_since" ]] || quiet_since=$SECONDS
-            if (( SECONDS - quiet_since >= SETTLE )); then
-                if (( SETTLE > 0 )); then
-                    echo ">>> host ${load}% busy before measuring, quiet for $(( SECONDS - quiet_since ))s"
-                else
-                    echo ">>> host ${load}% busy before measuring"
-                fi
-                echo ""
-                return 0
-            fi
-            sleep 3
-        else
-            quiet_since=""
-            if (( waited >= WAIT_IDLE )); then
-                echo "Error: the host is ${load}% busy before measuring, over --max-host-load ${MAX_HOST_LOAD}%." >&2
-                busy_processes | sed 's/^/    /' >&2
-                echo "  Stop that work, pass --wait-idle SECONDS to wait for it, or raise" >&2
-                echo "  --max-host-load if the load is part of what is being measured." >&2
-                exit 2
-            fi
-            echo ">>> host ${load}% busy, waiting for it to fall under ${MAX_HOST_LOAD}% (${waited}s of ${WAIT_IDLE}s)"
-            if (( waited % 600 == 0 )); then
-                busy_processes | sed 's/^/    /'
-            fi
-            sleep 28
-            waited=$(( waited + 30 ))
-        fi
-        load="$(host_load)"
-        load="${load:-0}"
-    done
 }
 
 # Read the host between passes, when none of this script's work is running, and
@@ -815,15 +738,35 @@ smoke_test() {
     done
 }
 
+# Wait up to --wait-idle while another process holds the MEASURING marker, before
+# any build: cargo on the host is what a measurement in progress must not see.
+# A run under a holder of the marker (a queue step, a nested run) skips this.
+wait_for_marker() {
+    local dir="$1" lock
+    [[ -n "$FORCE_LOCK" ]] && return 0
+    bench_lock_wait "$dir" "$WAIT_IDLE" && return 0
+    lock="$(bench_lock_path "$dir")"
+    echo "Error: a measurement is running on this host, so nothing is built. $lock says:" >&2
+    sed 's/^/    /' "$lock" >&2
+    echo "  Wait for it to finish, pass --wait-idle SECONDS, or pass --force-lock." >&2
+    exit 2
+}
+
 # --- Build both binaries ---
 
 if [[ -n "$BUILD_ONLY" ]]; then
+    BUILD_DIR="$(cd "${BUILD_DIR:-$PROJECT_DIR}" && pwd)"
+    wait_for_marker "$BUILD_DIR"
     mkdir -p "$(dirname "$BUILD_ONLY")"
-    build_bench_exe "$(cd "${BUILD_DIR:-$PROJECT_DIR}" && pwd)" "$BUILD_ONLY" "build-only"
+    build_bench_exe "$BUILD_DIR" "$BUILD_ONLY" "build-only"
+    FINAL=1
     exit 0
 fi
 
-REF_SHA="$(git rev-parse --short "$REF")"
+REF_SHA="$(git rev-parse --short "$REF")" || {
+    echo "Error: --ref '$REF' is not a commit in $PROJECT_DIR." >&2
+    exit 5
+}
 FINGERPRINT_BEFORE="$(tree_fingerprint)"
 
 echo "=== PRISM-Q adjacent-binary A/B ==="
@@ -834,10 +777,14 @@ echo "  reference: $REF ($REF_SHA)"
 echo "  threshold: ${THRESHOLD}%"
 echo ""
 
+if [[ -z "$NEW_EXE" || -z "$REF_EXE" ]]; then
+    wait_for_marker "$PROJECT_DIR"
+fi
+
 if [[ -n "$NEW_EXE" ]]; then
     if [[ ! -f "$NEW_EXE" ]]; then
         echo "Error: --new-exe '$NEW_EXE' does not exist." >&2
-        exit 1
+        exit 5
     fi
     echo ">>> using the supplied working-tree executable $NEW_EXE"
     cp "$NEW_EXE" "$WORKDIR/exe-new"
@@ -851,7 +798,7 @@ fi
 if [[ -n "$REF_EXE" ]]; then
     if [[ ! -f "$REF_EXE" ]]; then
         echo "Error: --ref-exe '$REF_EXE' does not exist." >&2
-        exit 1
+        exit 5
     fi
     echo ">>> using the supplied reference executable $REF_EXE"
     cp "$REF_EXE" "$WORKDIR/exe-ref"
@@ -878,7 +825,7 @@ else
         echo "Error: the working tree changed between the two builds." >&2
         echo "  The two binaries no longer differ by the change under test, so the" >&2
         echo "  comparison would be meaningless. Re-run with the tree settled." >&2
-        exit 1
+        exit 5
     fi
 fi
 
@@ -886,8 +833,12 @@ fi
 # timestamp and the PDB GUID differ on every link. Same code is decided from git
 # instead. Those bytes are all that differs, measured 2026-08-17: the same commit
 # built in two directories has byte-identical `.text`, so the build directory is
-# not a reason to distrust a row on this target.
+# not a reason to distrust a row on this target. A same-code run that would
+# PASS reads CONTROL (same code) instead, still exit 0: it measures the host's
+# noise floor, and a PASS there says nothing about a change.
+SAME_CODE=""
 if [[ -z "$(git status --porcelain)" && "$(git rev-parse HEAD)" == "$(git rev-parse "$REF_SHA")" ]]; then
+    SAME_CODE=1
     echo "Note: the working tree matches $REF exactly, so both binaries carry the"
     echo "      same code and every row is a control row. This is the same-code"
     echo "      noise floor of the host, with no change under test."
@@ -941,11 +892,12 @@ done
 
 # --- Report ---
 
+# One line per row and pass, `pass id mean samples segment`, grouped by row so a
+# row that some passes lack still gets a place in the table's order.
 MERGED="$WORKDIR/merged.tsv"
-: > "$MERGED"
 for idx in $(seq 1 "$PASS_COUNT"); do
-    awk -v p="$idx" 'BEGIN { OFS = "\t" } { print p, $1, $2, $3 }' "$WORKDIR/pass-$idx.tsv" >> "$MERGED"
-done
+    awk -v p="$idx" 'BEGIN { OFS = "\t" } { print p, $1, $2, $3, $4 }' "$WORKDIR/pass-$idx.tsv"
+done | sort -t $'\t' -k2,2 -k1,1n > "$MERGED"
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -987,21 +939,26 @@ set +e
     echo "| Toolchain | $(rustc --version) |"
     echo "| Bench profile | \`lto = \"fat\"\`, \`codegen-units = 1\`, \`debug = \"line-tables-only\"\` |"
     echo "| Threshold | ${THRESHOLD}% |"
+    if [[ -n "$SAME_CODE" ]]; then
+        echo "| Same code | the working tree matches \`$REF\`, so every row is a control row |"
+    fi
     echo ""
 
-    awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" -v full="$SAMPLES" \
+    awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" \
         -v light="${LIGHT:-0}" -v passes="$PASS_COUNT" -v slow_ids="$SLOW_IDS" \
-        -v slow_at="$SLOW_SAMPLES" -v loaded="$LOADED_PASSES" \
+        -v slow_at="$SLOW_SAMPLES" -v loaded="$LOADED_PASSES" -v same_code="${SAME_CODE:-0}" \
+        -v pass_labels="${PASS_LABELS[*]}" \
         -v moved_file="$WORKDIR/moved.txt" -v regressed_file="$WORKDIR/regressed.txt" '
         BEGIN {
             FS = "\t"; SEP = "\x1f"
             slow_n = split(slow_ids, slow_list, "\n")
             for (k = 1; k <= slow_n; k++) { if (slow_list[k] != "") { is_slow[slow_list[k]] = 1 } }
+            split(pass_labels, label, " ")
         }
 
         {
             mean[$1 SEP $2] = $3
-            if ($1 == 1) { order[++n] = $2; samples[$2] = $4 }
+            if (!($2 in samples)) { order[++n] = $2; samples[$2] = $4; segment[$2] = $5 }
         }
 
         function fmt(ns) {
@@ -1040,18 +997,23 @@ set +e
 
             for (i = 1; i <= n; i++) {
                 id = order[i]
+                # A row some passes lack, typically one added or renamed on one
+                # side, has no change to report. It is listed below the table.
+                gone = ""
+                for (p = 1; p <= passes; p++) {
+                    if (mean[p SEP id] == "") { gone = gone (gone == "" ? "" : ", ") "pass " p " (" label[p] ")" }
+                }
+                if (gone != "") { missing++; missing_row[missing] = id; missing_from[missing] = gone; continue }
                 # Light tier passes are ref, new, ref: the new binary is measured once
                 # and has no control of its own, so the row floor is the ref spread.
                 if (light) {
                     a1 = mean[1 SEP id]; b1 = mean[2 SEP id]; a2 = mean[3 SEP id]
-                    if (a1 == "" || b1 == "" || a2 == "") { continue }
                     new = b1
                     ctl_new = 0
                     ctl_new_text = "n/a"
                 } else {
                     a1 = mean[1 SEP id]; b1 = mean[2 SEP id]
                     b2 = mean[3 SEP id]; a2 = mean[4 SEP id]
-                    if (a1 == "" || b1 == "" || b2 == "" || a2 == "") { continue }
                     new = (b1 + b2) / 2
                     ctl_new = (b2 - b1) * 100 / b1
                     ctl_new_text = pct(ctl_new)
@@ -1091,8 +1053,10 @@ set +e
                 # its own spread and past the threshold is collateral damage either way.
                 # A slow row runs at its own reduced count but is a row under test:
                 # it keeps its verdict, sets the floor, and is counted on its own line.
+                # The segment that measured a row says which it is, not its count:
+                # under --light the controls and the targets share 10 samples.
                 at = samples[id] + 0
-                control_row = (at > 0 && at != full + 0 && !(id in is_slow))
+                control_row = (segment[id] == "ctl")
                 if (id in is_slow) { slowed++ }
                 if (control_row) {
                     reduced++
@@ -1151,7 +1115,7 @@ set +e
                 printf ", with %d slow row(s) at %d samples", slowed, slow_at
             }
             if (reduced > 0) {
-                printf " across the %d row(s) at %d samples.\n", compared - reduced, full
+                printf " across the %d row(s) under test.\n", compared - reduced
                 printf "%d control row(s) ran at %d samples, widest own-spread %.1f%%. A reduced count\n",
                     reduced, reduced_at, reduced_floor
                 print "widens that spread by construction, so it is not the host noise floor."
@@ -1160,15 +1124,21 @@ set +e
             }
             print ""
 
+            if (missing > 0) {
+                printf "%d row(s) appeared in some passes but not all, so they have no result. A row added or renamed on one side reads this way:\n\n", missing
+                for (i = 1; i <= missing; i++) { printf "- `%s`: NO DATA, missing from %s\n", missing_row[i], missing_from[i] }
+                print ""
+            }
+
             if (compared == 0) {
                 printf "**Regression verdict**: NO DATA. No row appeared in all %d passes.\n", passes
-                exit 1
+                exit 5
             }
 
             if (compared < min_rows) {
                 printf "**Regression verdict**: NO DATA. %d row(s) appeared in all %d passes, expected at least %d. The filter no longer matches every benchmark id it names.\n",
                     compared, passes, min_rows
-                exit 1
+                exit 5
             }
 
             # The light tier names itself on the verdict line so the table cannot be
@@ -1218,6 +1188,11 @@ set +e
                     regressions, threshold, tier_note
                 print ""
                 for (i = 1; i <= regressions; i++) { printf "- `%s`\n", regressed[i] }
+            } else if (same_code) {
+                printf "**Regression verdict**: CONTROL (same code). Both binaries carry the same code, so this table is the host'"'"'s noise floor at %s%%, not a result for a change.%s\n", threshold, tier_note
+                if (loaded != "") {
+                    printf "\nThe host was busy before %s.\n", loaded
+                }
             } else {
                 printf "**Regression verdict**: PASS at %s%%.%s\n", threshold, tier_note
                 if (loaded != "") {
@@ -1275,16 +1250,35 @@ follow_up() {
     return "$status"
 }
 
+# The verdict word a follow-up's report $1 ends on: its last final verdict when it
+# ran a follow-up of its own, otherwise its regression verdict.
+nested_verdict() {
+    local word
+    word="$(sed -n 's/^\*\*Final verdict\*\*: \([A-Z][A-Z ]*[A-Z]\).*/\1/p' "$1" 2>/dev/null | tail -n 1)"
+    [[ -n "$word" ]] || word="$(report_verdict "$1")"
+    printf '%s' "$word"
+}
+
+# Only a FAIL goes to confirmation: NO DATA exits 5 and has no rows to re-run.
 if [[ -n "$CONFIRM" && "$REPORT_STATUS" == 1 && -s "$WORKDIR/regressed.txt" ]]; then
     echo ">>> re-running the regressed rows from fresh copies of both binaries"
     CONFIRM_STATUS=0
     follow_up confirm "$(ids_to_filter < "$WORKDIR/regressed.txt")" \
         "Confirmation: the regressed rows from fresh copies" || CONFIRM_STATUS=$?
-    if (( CONFIRM_STATUS == 1 )); then
+    CONFIRM_VERDICT="$(nested_verdict "${OUT%.md}-confirm.md")"
+    if (( CONFIRM_STATUS == 1 )) && [[ "$CONFIRM_VERDICT" == FAIL ]]; then
         printf '\n**Final verdict**: FAIL, confirmed from fresh copies of both binaries.\n' >> "$OUT"
     else
         REPORT_STATUS=3
-        printf '\n**Final verdict**: RERUN. Fresh copies did not reproduce the regression, which points at the layout one copy landed in rather than the change. Measure again before claiming either way.\n' >> "$OUT"
+        case "$CONFIRM_STATUS/$CONFIRM_VERDICT" in
+            0/PASS|0/CONTROL)
+                printf '\n**Final verdict**: RERUN. Fresh copies did not reproduce the regression, which points at the layout one copy landed in rather than the change. Measure again before claiming either way.\n' >> "$OUT" ;;
+            3/RERUN)
+                printf '\n**Final verdict**: RERUN. The confirmation read RERUN itself, so the regression is unconfirmed. Measure again before claiming either way.\n' >> "$OUT" ;;
+            *)
+                printf '\n**Final verdict**: RERUN. The confirmation gave no verdict (exit %d, %s), so the regression is unconfirmed. Measure again before claiming either way.\n' \
+                    "$CONFIRM_STATUS" "${CONFIRM_VERDICT:-no report}" >> "$OUT" ;;
+        esac
     fi
 fi
 
@@ -1295,7 +1289,9 @@ if [[ -n "$ESCALATE" ]]; then
         follow_up escalate "$(ids_to_filter < "$WORKDIR/moved.txt")" \
             "Full-tier run of the rows that moved" || ESCALATE_STATUS=$?
         REPORT_STATUS=$ESCALATE_STATUS
-        printf '\n**Final verdict**: the full-tier run above decides (exit %d).\n' "$ESCALATE_STATUS" >> "$OUT"
+        ESCALATE_VERDICT="$(nested_verdict "${OUT%.md}-escalate.md")"
+        printf '\n**Final verdict**: %s, from the full-tier run above (exit %d).\n' \
+            "${ESCALATE_VERDICT:-no verdict}" "$ESCALATE_STATUS" >> "$OUT"
     else
         printf '\nNo row moved past half the threshold, so nothing went to the full tier.\n' >> "$OUT"
     fi
@@ -1304,4 +1300,5 @@ fi
 cat "$OUT"
 echo ""
 echo "Markdown written to $OUT"
+FINAL=1
 exit "$REPORT_STATUS"

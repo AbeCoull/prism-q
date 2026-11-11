@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Verify RERUN retries, --build-only, and the build-phase lock wait in
-# scripts/bench_queue.sh against a stub bench_ab.sh.
+# Verify RERUN retries, --build-only, the cache key of a checkout that changes
+# during its build, the build-phase lock wait, and a stop signal during a `run`
+# step in scripts/bench_queue.sh against a stub bench_ab.sh.
 #
 # Each case copies bench_queue.sh and bench_lock.sh into a scratch tree beside a
 # stub that fills the cache on --build-only and otherwise writes a canned report
@@ -28,18 +29,27 @@ git -C "$REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m two
 setup() {
     local tree="$SCRATCH/$1"
     mkdir -p "$tree/scripts"
-    cp "$SCRIPT_DIR/bench_queue.sh" "$SCRIPT_DIR/bench_lock.sh" "$tree/scripts/"
+    cp "$SCRIPT_DIR/bench_queue.sh" "$SCRIPT_DIR/bench_lock.sh" "$SCRIPT_DIR/bench_common.sh" "$tree/scripts/"
     cat > "$tree/scripts/bench_ab.sh" <<'STUB'
 #!/usr/bin/env bash
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out=""
+build=""
+build_dir=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --build-only) : > "$2"; exit 0 ;;
+        --build-only) build="$2"; shift 2 ;;
+        --build-dir) build_dir="$2"; shift 2 ;;
         --out) out="$2"; shift 2 ;;
         *) shift ;;
     esac
 done
+if [[ -n "$build" ]]; then
+    # An edit landing mid-build, as an editor save would.
+    [[ -f "$dir/mutate" ]] && echo edit > "$build_dir/edited.txt"
+    : > "$build"
+    exit 0
+fi
 runs=$(( $(cat "$dir/runs" 2>/dev/null || echo 0) + 1 ))
 echo "$runs" > "$dir/runs"
 status="$(tr ' ' '\n' < "$dir/spec" | sed -n "${runs}p")"
@@ -108,6 +118,16 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL  build-only did not fill both cache entries"
 fi
 
+setup tree-changes-during-build "0"
+: > "$SCRATCH/tree-changes-during-build/scripts/mutate"
+check tree-changes-during-build 1 0 '^BUILD-FAILED step new: the checkout changed during the build'
+rm -f "$REPO/edited.txt"
+if (( $(find "$SCRATCH/tree-changes-during-build/cache" -type f | wc -l) == 0 )); then
+    PASS=$((PASS + 1)); echo "ok    tree-changes-during-build cached nothing"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL  tree-changes-during-build cached a binary"
+fi
+
 setup lock-live "0"
 sleep 300 &
 SLEEPER=$!
@@ -122,6 +142,28 @@ fi
 setup lock-stale "0"
 printf 'pid: 999999\nby: test\n' > "$SCRATCH/lock-stale/MEASURING"
 check lock-stale 0 1 '^END step exit=0'
+
+# A TERM to the queue ends a running `run` step's command, not only the shell
+# that started it, and removes the marker.
+tree="$SCRATCH/stop-run-step"
+setup stop-run-step "0"
+printf 'run sleeper %q -- bash -c %q\n' "$REPO" "echo \$\$ > '$tree/pid'; exec sleep 300" > "$tree/queue.sh"
+PRISM_BENCH_LOCK="$tree/MEASURING" bash "$tree/scripts/bench_queue.sh" --out "$tree/out" \
+    --cache "$tree/cache" --ref-root "$tree/refs" --wait-idle 0 "$tree/queue.sh" > "$tree/log" 2>&1 &
+queue=$!
+for (( i = 0; i < 100; i++ )); do [[ -s "$tree/pid" ]] && break; sleep 0.2; done
+kill -TERM "$queue" 2>/dev/null
+wait "$queue"
+got=$?
+child="$(cat "$tree/pid" 2>/dev/null)"
+if [[ "$got" == 143 && -n "$child" ]] && ! kill -0 "$child" 2>/dev/null &&
+   [[ ! -e "$tree/MEASURING" ]] && grep -q '^STOPPED by SIGTERM' "$tree/out/status.txt"; then
+    PASS=$((PASS + 1)); echo "ok    stop-run-step ends the command and removes the marker"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL  stop-run-step exit $got, child ${child:-none}"
+    [[ -n "$child" ]] && kill "$child" 2>/dev/null
+    sed 's/^/      /' "$tree/log" "$tree/out/status.txt" 2>/dev/null
+fi
 
 echo
 echo "$PASS passed, $FAIL failed"

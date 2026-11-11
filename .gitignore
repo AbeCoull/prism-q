@@ -14,13 +14,10 @@ perf.data
 perf.data.old
 
 # Comparison harness: ad-hoc runs and the local environment stay out,
-# committed references do not
+# committed matrix runs do not
 comparison/results/*
 !comparison/results/.gitkeep
-!comparison/results/reference-*.json
-!comparison/results/reference-*.md
 !comparison/results/matrix-*/
-comparison/results/matrix-*/figures/
 comparison/results/matrix-smoke-*/
 comparison/.venv/
 

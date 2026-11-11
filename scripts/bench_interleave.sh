@@ -52,7 +52,7 @@
 # The run is RERUN when a control is off zero or wide and unresolved, when a
 # target row is undecided and nothing failed, or when fewer than six rounds were
 # undisturbed. With several variants each gets its own table and verdict, and the
-# run takes the worst: FAIL or NO DATA, then RERUN, then PASS.
+# run takes the worst: FAIL, then NO DATA, then RERUN, then PASS.
 #
 # Usage:
 #   scripts/bench_interleave.sh -f '^statevector/qft_textbook/(16|20)$' -c '^mps/random_d10/16$'
@@ -110,10 +110,17 @@
 #                   disables). Read before the first invocation, where a busy host
 #                   stops the run, and before each round, where it is recorded
 #                   only: the disturbed-round test decides which rounds count.
-#   --wait-idle     seconds to wait for an idle host before giving up (default 0)
+#   --wait-idle     seconds to wait for an idle host before giving up (default 0),
+#                   and for another measurement's MEASURING marker to clear
+#                   before the build
+#   --force-lock    build and measure even while a live process holds the
+#                   MEASURING marker. Run alone, the script writes the marker
+#                   (see bench_lock.sh) before the host load check and removes it
+#                   on exit; under bench_queue.sh it inherits the queue's.
 #
-# Exit status: 0 PASS, 1 FAIL or NO DATA, 2 host too busy to start, 3 RERUN,
-# 4 a variant failed the smoke test.
+# Exit status: 0 PASS, 1 FAIL, 2 host too busy to start or another measurement
+# holding the marker, 3 RERUN, 4 a variant failed the smoke test, 5 NO DATA or
+# any other error. Exit 1 always means FAIL.
 #
 # Environment:
 #   REGRESSION_THRESHOLD   regression gate in percent (default: 5.0)
@@ -123,6 +130,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/bench_lock.sh
+source "$SCRIPT_DIR/bench_lock.sh"
+# shellcheck source=scripts/bench_common.sh
+source "$SCRIPT_DIR/bench_common.sh"
 
 FILTER=""
 CONTROL_FILTER=""
@@ -143,6 +154,7 @@ THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
 MAX_HOST_LOAD=10
 WAIT_IDLE=0
 NO_EARLY_STOP=""
+FORCE_LOCK=""
 VARIANT_LIST="b"
 # A wide control is resolved when every target |change| is at least this many
 # control half-widths.
@@ -171,8 +183,9 @@ while [[ $# -gt 0 ]]; do
         --max-host-load) MAX_HOST_LOAD="$2"; shift 2 ;;
         --wait-idle)    WAIT_IDLE="$2"; shift 2 ;;
         --no-early-stop) NO_EARLY_STOP=1; shift ;;
+        --force-lock)   FORCE_LOCK=1; shift ;;
         -h|--help)      awk 'NR > 1 && !/^#/ { exit } NR > 1' "${BASH_SOURCE[0]}"; exit 0 ;;
-        *) echo "Unknown option: $1" >&2; exit 1 ;;
+        *) echo "Unknown option: $1" >&2; exit 5 ;;
     esac
 done
 
@@ -182,7 +195,7 @@ if [[ -n "$BUILD_ONLY" ]]; then
 fi
 if [[ -z "$FILTER" && -z "$FROM_TSV" ]]; then
     echo "Error: --filter is required. Name the rows the switch changes." >&2
-    exit 1
+    exit 5
 fi
 
 if [[ -n "$LIGHT" ]]; then
@@ -197,104 +210,59 @@ fi
 WARM_UP="$(awk -v w="$WINDOW" 'BEGIN { printf "%g", w / 2 }')"
 case "$ESTIMATE" in
     mean) EST_COL=6 ;; median) EST_COL=7 ;; min) EST_COL=8 ;;
-    *) echo "Error: --estimate is mean, median, or min." >&2; exit 1 ;;
+    *) echo "Error: --estimate is mean, median, or min." >&2; exit 5 ;;
 esac
 if (( ROUNDS < 6 )); then
     echo "Error: --rounds is $ROUNDS; fewer than 6 rounds cannot give a 95% interval." >&2
-    exit 1
+    exit 5
 fi
 if (( SAMPLES < 10 )); then
     echo "Error: --samples is $SAMPLES; Criterion's floor is 10." >&2
-    exit 1
+    exit 5
 fi
 IFS=',' read -r -a VARIANTS <<< "$VARIANT_LIST"
 if [[ -z "$FROM_TSV" ]]; then
     if (( ${#VARIANTS[@]} == 0 )) || [[ -n "$(printf '%s\n' "${VARIANTS[@]}" | grep -vx '[b-z]')" ]] ||
        [[ -n "$(printf '%s\n' "${VARIANTS[@]}" | sort | uniq -d)" ]]; then
         echo "Error: --variants is '$VARIANT_LIST'; name distinct letters b to z, comma separated." >&2
-        exit 1
+        exit 5
     fi
 fi
 
 cd "$PROJECT_DIR"
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
 
-native_path() {
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -w "$1"
-    else
-        printf '%s' "$1"
+# The bench binary running now, so a signal ends it before the marker goes. FINAL
+# is set just before the verdict exit; any other exit 1 becomes 5, so 1 reaches a
+# caller only as FAIL.
+CHILD_PID=""
+FINAL=""
+cleanup() {
+    local status=$?
+    if [[ -n "$CHILD_PID" ]]; then
+        kill -TERM "$CHILD_PID" 2>/dev/null || true
+        wait "$CHILD_PID" 2>/dev/null || true
     fi
-}
-
-host_cpu() {
-    if [[ -r /proc/cpuinfo ]]; then
-        awk -F': ' '/model name/ { print $2; exit }' /proc/cpuinfo
-    elif command -v sysctl >/dev/null 2>&1 && sysctl -n machdep.cpu.brand_string >/dev/null 2>&1; then
-        sysctl -n machdep.cpu.brand_string
-    else
-        printf '%s' "${PROCESSOR_IDENTIFIER:-unknown}"
+    bench_lock_release
+    rm -rf "$WORKDIR"
+    if (( status == 1 )) && [[ -z "$FINAL" ]]; then
+        status=5
     fi
+    exit "$status"
 }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# Busy share of every CPU over about two seconds, as a whole percent, or empty
-# where the host offers no reading.
-host_load() {
-    if [[ -n "${PRISM_BENCH_HOST_LOAD:-}" ]]; then
-        printf '%s' "$PRISM_BENCH_HOST_LOAD"
-    elif [[ -r /proc/stat ]]; then
-        local first second
-        first="$(awk '/^cpu / { b = $2 + $3 + $4 + $7 + $8 + $9; print b, b + $5 + $6; exit }' /proc/stat)"
-        sleep 2
-        second="$(awk '/^cpu / { b = $2 + $3 + $4 + $7 + $8 + $9; print b, b + $5 + $6; exit }' /proc/stat)"
-        awk -v a="$first" -v b="$second" 'BEGIN {
-            split(a, x, " "); split(b, y, " ")
-            if (y[2] > x[2]) { printf "%d", (y[1] - x[1]) * 100 / (y[2] - x[2]) }
-        }'
-    elif command -v sysctl >/dev/null 2>&1 && sysctl -n hw.ncpu >/dev/null 2>&1; then
-        ps -A -o %cpu= | awk -v n="$(sysctl -n hw.ncpu)" '{ s += $1 } END { printf "%d", s / n }'
-    fi
-}
-
-busy_processes() {
-    if command -v wmic >/dev/null 2>&1; then
-        wmic path Win32_PerfFormattedData_PerfProc_Process get Name,PercentProcessorTime 2>/dev/null |
-            tr -d '\r' |
-            awk 'NR > 1 && $1 != "_Total" && $1 != "Idle" && $2 + 0 > 0 { print $2 "% " $1 }' |
-            sort -rn | head -5
-    else
-        ps -eo pcpu,comm --sort=-pcpu 2>/dev/null | sed -n '2,6p'
-    fi
-}
-
-# Stop, or wait up to --wait-idle, while other work holds more of the host than
-# --max-host-load.
-preflight() {
-    (( MAX_HOST_LOAD > 0 )) || return 0
-    local load waited=0
-    while :; do
-        load="$(host_load)"
-        if [[ -z "$load" ]]; then
-            echo ">>> no host load reading here, so the load guard is off for this run"
-            MAX_HOST_LOAD=0
-            return 0
-        fi
-        if (( load <= MAX_HOST_LOAD )); then
-            echo ">>> host ${load}% busy before measuring"
-            return 0
-        fi
-        if (( waited >= WAIT_IDLE )); then
-            echo "Error: the host is ${load}% busy before measuring, over --max-host-load ${MAX_HOST_LOAD}%." >&2
-            busy_processes | sed 's/^/    /' >&2
-            echo "  Stop that work, pass --wait-idle SECONDS to wait for it, or raise" >&2
-            echo "  --max-host-load if the load is part of what is being measured." >&2
-            exit 2
-        fi
-        echo ">>> host ${load}% busy, waiting for it to fall under ${MAX_HOST_LOAD}% (${waited}s of ${WAIT_IDLE}s)"
-        sleep 28
-        waited=$(( waited + 30 ))
-    done
+# Run a command in the background and wait for it, so a signal to this script
+# reaches its trap at once and the trap can end the command.
+run_child() {
+    local status=0
+    "$@" &
+    CHILD_PID=$!
+    wait "$CHILD_PID" || status=$?
+    CHILD_PID=""
+    return "$status"
 }
 
 # `full_id<TAB>mean_ns<TAB>median_ns<TAB>min_ns` for every row an invocation
@@ -338,7 +306,7 @@ smoke_test() {
         log="$WORKDIR/smoke-$variant.log"
         status=0
         PRISM_BENCH_VARIANT="$variant" CRITERION_HOME="$(native_path "$WORKDIR/smoke-home")" \
-            "$RUN_EXE" --test "$filter" > "$log" 2>&1 || status=$?
+            run_child "$RUN_EXE" --test "$filter" > "$log" 2>&1 || status=$?
         rows="$(grep -c '^Testing ' "$log" || true)"
         if (( status != 0 )); then
             row="$(awk '/^Testing / { id = substr($0, 9) } END { print id }' "$log")"
@@ -370,17 +338,17 @@ run_slot() {
         log="$WORKDIR/run-$round-$slot-$seg.log"
         mkdir -p "$home"
         if ! PRISM_BENCH_VARIANT="$variant" CRITERION_HOME="$(native_path "$home")" \
-            PRISM_BENCH_SAMPLES="$SAMPLES" "$RUN_EXE" --bench \
+            PRISM_BENCH_SAMPLES="$SAMPLES" run_child "$RUN_EXE" --bench \
             --warm-up-time "$WARM_UP" --measurement-time "$WINDOW" "$filter" > "$log" 2>&1; then
             tail -n 15 "$log" >&2
             echo "Error: the bench binary failed in round $round, variant $variant, '$filter'." >&2
-            exit 1
+            exit 5
         fi
         rows="$(snapshot "$home" | awk -v r="$round" -v s="$slot" -v v="$variant" -v g="$seg" '
             BEGIN { OFS = "\t" } { print r, s, v, g, $1, $2, $3, $4 }' | tee -a "$RAW" | wc -l | tr -d '[:space:]')"
         if (( rows == 0 )); then
             echo "Error: no Criterion estimates for '$filter' in round $round, variant $variant." >&2
-            exit 1
+            exit 5
         fi
         rm -rf "$home"
     done
@@ -628,7 +596,7 @@ END {
     if (compared == 0 || compared < min_rows) {
         printf "**Regression verdict**: NO DATA. %d filter row(s) completed at least 6 rounds, expected at least %d.\n",
             compared, (min_rows > 1 ? min_rows : 1)
-        exit 1
+        exit 5
     }
     if (offs > 0) {
         printf "**Regression verdict**: RERUN. %d control row(s) did not read flat, so the two variants differ on rows the switch should not reach, or the rounds were too noisy to tell.%s\n\n",
@@ -666,7 +634,7 @@ all_settled() {
 }
 
 # One table and verdict per variant, then the run's verdict, the worst of them:
-# FAIL or NO DATA, then RERUN, then PASS.
+# FAIL, then NO DATA, then RERUN, then PASS.
 report_variants() {
     local v section status verdict rank worst_rank=0 worst_word="" worst_status=0 summary=""
     for v in "${VARIANTS[@]}"; do
@@ -704,12 +672,20 @@ if [[ -z "$FROM_TSV" ]]; then
     echo ""
 
     if [[ -n "$EXE" ]]; then
-        [[ -f "$EXE" ]] || { echo "Error: --exe '$EXE' does not exist." >&2; exit 1; }
+        [[ -f "$EXE" ]] || { echo "Error: --exe '$EXE' does not exist." >&2; exit 5; }
         RUN_EXE="$EXE"
         PROVENANCE="supplied via \`--exe\`, not built here"
     else
+        # bench_ab.sh --build-only waits on the MEASURING marker itself; it gets
+        # this run's --wait-idle and --force-lock, and exits 2 if still held.
         RUN_EXE="$WORKDIR/exe"
-        bash "$SCRIPT_DIR/bench_ab.sh" --build-only "$RUN_EXE" --bench "$BENCH" --features "$FEATURES"
+        build_status=0
+        bash "$SCRIPT_DIR/bench_ab.sh" --build-only "$RUN_EXE" --build-dir "$PROJECT_DIR" \
+            --bench "$BENCH" --features "$FEATURES" --wait-idle "$WAIT_IDLE" \
+            ${FORCE_LOCK:+--force-lock} || build_status=$?
+        if (( build_status != 0 )); then
+            exit "$(( build_status == 2 ? 2 : 5 ))"
+        fi
         PROVENANCE="built from the working tree"
     fi
     COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -719,6 +695,10 @@ if [[ -z "$FROM_TSV" ]]; then
     for v in a "${VARIANTS[@]}"; do smoke_test "$v"; done
     echo ""
 
+    if [[ -z "$OUT" ]]; then
+        OUT="$PROJECT_DIR/bench_results/ix-$(date +%Y-%m-%d_%H%M%S).md"
+    fi
+    bench_lock_acquire "$PROJECT_DIR" bench_interleave.sh "$FILTER" "$OUT" "$FORCE_LOCK" || exit 2
     preflight
     echo ">>> warmup: one discarded invocation per variant"
     warm_start="$(date +%s)"
@@ -745,7 +725,7 @@ if [[ -z "$FROM_TSV" ]]; then
     ROUNDS_RUN="$round"
     WALL="$(( ($(date +%s) - STARTED) / 60 )) min $(( ($(date +%s) - STARTED) % 60 )) s"
 else
-    [[ -f "$FROM_TSV" ]] || { echo "Error: --from-tsv '$FROM_TSV' does not exist." >&2; exit 1; }
+    [[ -f "$FROM_TSV" ]] || { echo "Error: --from-tsv '$FROM_TSV' does not exist." >&2; exit 5; }
     awk -F'\t' 'NF >= 6' "$FROM_TSV" > "$RAW"
     IFS=',' read -r -a VARIANTS <<< "$(awk -F'\t' '$3 != "a" { print $3 }' "$RAW" | sort -u | paste -sd, -)"
     LOADED_ROUNDS="$(awk -F'\t' '$1 == "#loaded" { print $2 }' "$FROM_TSV")"
@@ -816,4 +796,5 @@ set -e
 
 echo "=== report: $OUT ==="
 cat "$OUT"
+FINAL=1
 exit "$STATUS"

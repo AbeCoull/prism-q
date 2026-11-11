@@ -12,6 +12,9 @@ on:
       - 'scripts/bench_smoke.sh'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - 'build.rs'
   workflow_dispatch:
 
 permissions:

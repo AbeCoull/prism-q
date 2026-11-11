@@ -22,7 +22,9 @@
 #      bench_ab.sh --build-only, into a cache keyed on the commit, the features,
 #      the bench target, and the toolchain. Steps that share a reference share
 #      one build of it, and a later queue reuses whatever is cached. A step whose
-#      checkout has uncommitted changes is keyed on those changes as well. An
+#      checkout has uncommitted changes or untracked files is keyed on their
+#      content as well, read again just before its build and once more after
+#      it: a checkout that changed during the build caches nothing. An
 #      interleaved step builds only its checkout, by default with
 #      "parallel bench-internal". The phase first waits, up to --wait-idle, for
 #      any other live holder of the MEASURING marker to finish, because a build
@@ -67,9 +69,10 @@
 #
 # Exit status: 0 when every step exited 0, otherwise 1, including a queue that
 # stopped at LOCKED because another measurement holds the marker. A step's own
-# exit code is in the status file; bench_ab.sh and bench_interleave.sh use 1 for
-# FAIL, 2 for a host too busy to start, 3 for RERUN, and 4 for a binary that
-# failed its smoke test, whose lane and row the status file's summary names.
+# exit code is in the status file; bench_ab.sh and bench_interleave.sh use 0 for
+# PASS or CONTROL (same code), 1 for FAIL, 2 for a host too busy to start, 3 for
+# RERUN, 4 for a binary that failed its smoke test, whose lane and row the status
+# file's summary names, and 5 for NO DATA or any other error.
 
 set -uo pipefail
 
@@ -80,6 +83,8 @@ BENCH_AB="$SCRIPT_DIR/bench_ab.sh"
 BENCH_IX="$SCRIPT_DIR/bench_interleave.sh"
 # shellcheck source=scripts/bench_lock.sh
 source "$SCRIPT_DIR/bench_lock.sh"
+# shellcheck source=scripts/bench_common.sh
+source "$SCRIPT_DIR/bench_common.sh"
 
 SCHEDULE=""
 DRY_RUN=""
@@ -145,11 +150,18 @@ if [[ -n "$SCHEDULE" ]]; then
             printf ' > %q 2>&1\n' "$OUT_DIR/queue.log"
         } > "$runner"
         bash_exe="$(cygpath -w "$(command -v bash)")"
-        # The task runs once, now. Its trigger is set far ahead so it cannot
-        # fire a second copy; /Run starts this one.
-        MSYS_NO_PATHCONV=1 schtasks /Create /TN "$task" \
+        # The task runs once, now, through /Run. Its one trigger is 00:00 today,
+        # already past, so it cannot fire a second copy. A date would have to be
+        # written in the system's short-date order, which /SD reads by locale;
+        # leaving it out takes today, and /ST is a 24-hour time everywhere.
+        # schtasks warns that the task may not run at that time, which is the
+        # point, so its output is shown only on failure.
+        if ! created="$(MSYS_NO_PATHCONV=1 schtasks /Create /TN "$task" \
             /TR "\"$bash_exe\" -l \"$(cygpath -w "$runner")\"" \
-            /SC ONCE /SD 12/31/2030 /ST 23:59 /F >/dev/null || exit 1
+            /SC ONCE /ST 00:00 /F 2>&1)"; then
+            echo "$created" >&2
+            exit 1
+        fi
         MSYS_NO_PATHCONV=1 schtasks /Run /TN "$task" >/dev/null || exit 1
         echo "Scheduled as task $task; it survives this shell."
     else
@@ -228,12 +240,13 @@ step_build_options() {
 
 TOOLCHAIN_KEY="$(rustc --version 2>/dev/null | git hash-object --stdin | cut -c1-8)"
 
-# The cache file for the checkout at $1 at commit $2, holding any uncommitted
-# change in the key.
+# The cache file for the checkout at $1 at commit $2. With $3 = worktree, a
+# checkout with uncommitted changes or untracked files carries the content hash
+# bench_ab.sh checks its own builds against, so an edit gets its own entry.
 cache_path() {
     local dir="$1" sha="$2" dirty=""
-    if [[ "$3" == "worktree" && -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]]; then
-        dirty="-dirty$(git -C "$dir" diff HEAD --binary | git hash-object --stdin | cut -c1-8)"
+    if [[ "$3" == "worktree" && -n "$(git -C "$dir" status --porcelain)" ]]; then
+        dirty="-dirty$(tree_fingerprint "$dir" | cut -c1-8)"
     fi
     printf '%s/%s-%s%s-%s-%s' "$CACHE_DIR" "$BENCH_ARG" "$sha" "$dirty" \
         "$(printf '%s' "$FEATURES_ARG" | tr -c 'a-zA-Z0-9\n' '_')" "$TOOLCHAIN_KEY"
@@ -293,8 +306,10 @@ run_step() {
     return "$status"
 }
 
+# Replaces the background subshell with the command, so the pid run_step holds
+# is the measurement itself and a stop signal reaches it.
 run_in() {
-    cd "$1" && shift && "$@"
+    cd "$1" && shift && exec "$@"
 }
 
 stop() {
@@ -312,12 +327,20 @@ trap bench_lock_release EXIT
 # --- Build ---
 
 # Build the checkout at $1 into $2 unless it is cached. A reference commit gets
-# its own worktree under --ref-root, reused across queues.
+# its own worktree under --ref-root, reused across queues. With $6 = worktree the
+# key is read again after the build, and a checkout that changed meanwhile caches
+# nothing and returns 2: the binary matches neither the old key nor the new one.
 build_into() {
-    local dir="$1" exe="$2" features="$3" bench="$4" log="$5"
+    local dir="$1" exe="$2" features="$3" bench="$4" log="$5" kind="${6:-}"
     [[ -f "$exe" ]] && return 0
     bash "$BENCH_AB" --build-only "$exe.tmp" --build-dir "$dir" --features "$features" \
         --bench "$bench" > "$log" 2>&1 || return 1
+    if [[ "$kind" == worktree &&
+          "$(cache_path "$dir" "$(git -C "$dir" rev-parse --short=10 HEAD)" worktree)" != "$exe" ]]; then
+        rm -f "$exe.tmp"
+        echo "Error: $dir changed during the build, so the binary is not cached." >> "$log"
+        return 2
+    fi
     mv "$exe.tmp" "$exe"
 }
 
@@ -332,7 +355,18 @@ for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
     [[ "${STEP_KIND[s]}" == ab || "${STEP_KIND[s]}" == ix ]] || continue
     step_build_options "${STEP_ARGS[s]}" "${STEP_KIND[s]}"
     name="${STEP_NAME[s]}"
-    if ! build_into "${STEP_DIR[s]}" "${NEW_EXE_OF[s]}" "$FEATURES_ARG" "$BENCH_ARG" "$OUT_DIR/$name-build-new.log"; then
+    # The plan read the checkout before the lock wait, which can last an hour.
+    fresh="$(cache_path "${STEP_DIR[s]}" "$(git -C "${STEP_DIR[s]}" rev-parse --short=10 HEAD)" worktree)"
+    if [[ "$fresh" != "${NEW_EXE_OF[s]}" ]]; then
+        mark "REKEY $name: the checkout changed after the plan"
+        NEW_EXE_OF[s]="$fresh"
+    fi
+    build_into "${STEP_DIR[s]}" "${NEW_EXE_OF[s]}" "$FEATURES_ARG" "$BENCH_ARG" \
+        "$OUT_DIR/$name-build-new.log" worktree
+    built=$?
+    if (( built == 2 )); then
+        mark "BUILD-FAILED $name new: the checkout changed during the build"; build_failed=1; continue
+    elif (( built != 0 )); then
         mark "BUILD-FAILED $name new"; build_failed=1; continue
     fi
     [[ "${STEP_KIND[s]}" == ix ]] && continue

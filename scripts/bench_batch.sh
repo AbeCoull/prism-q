@@ -28,8 +28,9 @@
 # Options:
 #   --base REF      commit every branch merges onto and the A/B compares with
 #                   (default origin/main)
-#   --only LIST     merge only these lines of the batch, 1-based and comma
-#                   separated, to bisect a FAIL
+#   --only LIST     merge only these entries of the batch, to bisect a FAIL:
+#                   1-based and comma separated, counting the lines that name a
+#                   branch (blank and comment lines are not counted)
 #   --dir DIR       combined checkout, reused between batches so dependencies
 #                   stay built (default prism-q-batch beside the repository)
 #   --schedule      run the queue through bench_queue.sh --schedule
@@ -75,19 +76,25 @@ BRANCHES=()
 TARGETS=()
 FILTERS=()
 CONTROLS=()
-line_no=0
-while read -r branch target filter control _; do
+# Messages name the file line; --only counts entries, the lines that name a
+# branch.
+file_line=0
+entry=0
+while IFS= read -r line || [[ -n "$line" ]]; do
+    file_line=$((file_line + 1))
+    line="${line%$'\r'}"
+    read -r branch target filter control _ <<< "$line"
     [[ -z "$branch" || "$branch" == \#* ]] && continue
-    line_no=$((line_no + 1))
-    if [[ -n "$ONLY" && ",$ONLY," != *",$line_no,"* ]]; then
+    entry=$((entry + 1))
+    if [[ -n "$ONLY" && ",$ONLY," != *",$entry,"* ]]; then
         continue
     fi
     if [[ -z "$filter" ]]; then
-        echo "Error: line $line_no of $BATCH_FILE names no rows for $branch." >&2
+        echo "Error: line $file_line of $BATCH_FILE names no rows for $branch." >&2
         exit 1
     fi
     git -C "$MAIN_DIR" rev-parse --verify -q "$branch^{commit}" > /dev/null || {
-        echo "Error: line $line_no names $branch, which is not a commit here." >&2
+        echo "Error: line $file_line of $BATCH_FILE names $branch, which is not a commit here." >&2
         exit 1
     }
     BRANCHES+=("$branch"); TARGETS+=("$target"); FILTERS+=("$filter"); CONTROLS+=("${control:-}")

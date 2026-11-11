@@ -20,7 +20,7 @@
     const color = name => style.getPropertyValue(name).trim();
     const surface = color('--doc-code-bg');
     const text = color('--fg');
-    const border = color('--doc-muted');
+    const border = color('--doc-line-strong');
 
     mermaid.initialize({
         startOnLoad: true,
@@ -39,7 +39,7 @@
             tertiaryColor: surface,
             tertiaryTextColor: text,
             tertiaryBorderColor: border,
-            lineColor: border,
+            lineColor: color('--doc-muted'),
             textColor: text,
             edgeLabelBackground: color('--bg'),
             noteBkgColor: surface,

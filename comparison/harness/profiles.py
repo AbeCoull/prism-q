@@ -11,8 +11,10 @@ day and needs 32 GB for the 28-qubit rows.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
+from . import runners
 from . import workloads as w
 
 FP64_DENSE = ["prismq", "aer-statevector", "quest", "spinoza", "qip"]
@@ -39,6 +41,18 @@ class Cell:
     min_iterations: int = 3
     budget_s: float = 30.0
     timeout_s: float = 600.0
+    sim_threads: dict[str, list[int]] = field(default_factory=dict)
+    excluded: dict[str, str] = field(default_factory=dict)
+    profile_simulators: list[str] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.profile_simulators = list(self.simulators)
+
+    def threads_for(self, name: str) -> list[int]:
+        """Thread counts `name` runs at: 1 for a single-threaded simulator, its `sim_threads` entry, else the cell's."""
+        if runners.resolve(name).single_threaded:
+            return [1]
+        return self.sim_threads.get(name, self.threads)
 
 
 @dataclass
@@ -63,13 +77,92 @@ def _dense_sims(n: int, slow_limit: int, quest_limit: int) -> list[str]:
     return sims + FP32_DENSE
 
 
+def _thread_counts(candidates: tuple[int, ...], threads: int) -> list[int]:
+    """The candidates the host has logical cores for, plus the headline count."""
+    cores = os.cpu_count() or 1
+    return sorted({t for t in candidates if t <= cores} | {threads})
+
+
+QFT_CONTROL = "prismq:no-qft-block"
+
+
+def _with_one_thread(threads: int) -> dict[str, list[int]]:
+    """PRISM-Q at 1 thread beside the headline count, so a single-threaded peer has a partner."""
+    return {"prismq": sorted({1, threads})}
+
+
+TN_PEERS = ["prismq", "prismq:tensor-network", "prismq:mps-256", "quimb-tn", "aer-mps"]
+DEEP_MPS_PEERS = ["prismq:mps-256", "aer-mps:256", "quimb-mps:256"]
+DEEP_MPS_SHOTS = 100
+# Depth 12 rows also run PRISM-Q and Aer at this many shots, which shrinks the smallest shift
+# their check detects from about 0.23 to 0.07; depth 16 rows cost too much per call to repeat.
+DEEP_MPS_POWER_SHOTS = 1000
+SWEEP_CAPS = (2, 4, 8, 16, 32)
+# Cost of one quimb CircuitMPS call (gates plus 100 samples, bond cap 256) per qubit, measured on
+# the reference host, and the widest row it runs at so cold call plus warm calls stay near two minutes.
+QUIMB_MPS_COST = {12: (0.07, 500), 16: (0.54, 50)}
+
+
+def _sweep_sims() -> list[str]:
+    return [f"{sim}{c}" for sim in ("prismq:mps-", "aer-mps:", "quimb-mps:") for c in SWEEP_CAPS]
+
+
+def _quimb_mps_excluded(n: int, depth: int) -> dict[str, str]:
+    rate, limit = QUIMB_MPS_COST[depth]
+    if n <= limit:
+        return {}
+    return {
+        "quimb-mps:256": (
+            f"one quimb CircuitMPS call costs about {rate:g} s per qubit at depth {depth} on the reference "
+            f"host; rows past {limit} qubits would exceed the row budget"
+        )
+    }
+
+
+def _wide_cells(threads: int) -> list[Cell]:
+    """Tensor network expectation values, deep MPS, the wide bond-cap sweep and high-shot stabilizer rows."""
+    t = [threads]
+    cells = [Cell("tn", w.expval(n, 8, 4), list(TN_PEERS), t) for n in (32, 64, 128, 256)]
+    for depth in (12, 16):
+        for n in (50, 100, 200, 500, 1000):
+            heavy = depth == 16 and n >= 500
+            policy = {"iterations": 2 if heavy else 3, "min_iterations": 1 if heavy else 2, "timeout_s": 1800.0}
+            cells.append(
+                Cell(
+                    "mpsdeep",
+                    w.lowent(n, depth, DEEP_MPS_SHOTS),
+                    list(DEEP_MPS_PEERS),
+                    t,
+                    excluded=_quimb_mps_excluded(n, depth),
+                    **policy,
+                )
+            )
+            if depth == 12:
+                sims = [s for s in DEEP_MPS_PEERS if not s.startswith("quimb")]
+                cells.append(Cell("mpsdeep", w.lowent(n, depth, DEEP_MPS_POWER_SHOTS), sims, t, **policy))
+    for n in (32, 48):
+        cells.append(Cell("bondsweep", w.expval(n, 8), _sweep_sims(), t, 3, 2, 10.0, 300.0))
+    for n, shots in ((100, 10**6), (1000, 10**6), (10000, 10**6), (100, 10**7), (1000, 10**7)):
+        cells.append(
+            Cell(
+                "highshot",
+                w.clifford(n, shots, mode="stats"),
+                ["prismq", "stim"],
+                t,
+                timeout_s=900.0,
+                sim_threads=_with_one_thread(threads),
+            )
+        )
+    return cells
+
+
 def smoke(runner: str, threads: int) -> Profile:
     t = [threads]
     cells = [
         Cell("headline", w.rcs(12, 10), _dense_sims(12, 12, 12), t),
-        Cell("headline", w.qft(runner, 12), _dense_sims(12, 12, 12), t),
+        Cell("headline", w.qft(runner, 12), _dense_sims(12, 12, 12) + [QFT_CONTROL], t),
         Cell("headline", w.exported(runner, "qv", 12), _dense_sims(12, 12, 12), t),
-        Cell("headline", w.clifford(100, 200), ["prismq", "stim"], t),
+        Cell("headline", w.clifford(100, 200), ["prismq", "stim"], t, sim_threads=_with_one_thread(threads)),
         Cell("headline", w.lowent(50, 4, 200), ["prismq", "aer-mps", "aer-automatic"], t),
         Cell("headline", w.disjoint(40, 200), ["prismq", "aer-mps", "aer-automatic", "aer-statevector"], t),
         Cell("headline", w.sampling(12, 1000), ["prismq", "aer-statevector", "qsim"], t),
@@ -81,6 +174,16 @@ def smoke(runner: str, threads: int) -> Profile:
             w.rcs(12, 10),
             ["aer-statevector", "prismq:mps-4", "prismq:mps-64", "aer-mps:4", "aer-mps:64"],
             t,
+        ),
+        Cell("tn", w.expval(32, 4, 4), list(TN_PEERS), t),
+        Cell("mpsdeep", w.lowent(16, 12, 100), list(DEEP_MPS_PEERS), t),
+        Cell("bondsweep", w.expval(16, 6), ["prismq:mps-4", "aer-mps:4", "quimb-mps:4"], t),
+        Cell(
+            "highshot",
+            w.clifford(100, 10_000, mode="stats"),
+            ["prismq", "stim"],
+            t,
+            sim_threads=_with_one_thread(threads),
         ),
     ]
     for cell in cells:
@@ -94,13 +197,22 @@ def reference(runner: str, threads: int) -> Profile:
     for n in (20, 24, 26):
         for depth in (10, 20):
             cells.append(Cell("headline", w.rcs(n, depth), _dense_sims(n, 20, 24), t))
-        cells.append(Cell("headline", w.qft(runner, n), _dense_sims(n, 20, 24), t))
+        cells.append(Cell("headline", w.qft(runner, n), _dense_sims(n, 20, 24) + [QFT_CONTROL], t))
     for n in (16, 20, 24):
         cells.append(Cell("headline", w.exported(runner, "qv", n), _dense_sims(n, 20, 24), t))
 
     stab = ["prismq", "stim"]
     for n in (100, 1000, 10000):
-        cells.append(Cell("headline", w.clifford(n, 1000), stab, t, timeout_s=120.0 if n > 1000 else 300.0))
+        cells.append(
+            Cell(
+                "headline",
+                w.clifford(n, 1000),
+                stab,
+                t,
+                timeout_s=120.0 if n > 1000 else 300.0,
+                sim_threads=_with_one_thread(threads),
+            )
+        )
     mps = ["prismq", "aer-mps", "aer-automatic"]
     for n in (50, 100, 200):
         for depth in (4, 8):
@@ -124,7 +236,7 @@ def reference(runner: str, threads: int) -> Profile:
 
     scaling = ["prismq", "aer-statevector", "qsim", "quest"]
     for wl in (w.rcs(22, 10), w.qft(runner, 22), w.exported(runner, "qv", 20)):
-        cells.append(Cell("threads", wl, scaling, [1, 2, 4, threads]))
+        cells.append(Cell("threads", wl, scaling, _thread_counts((1, 2, 4), threads)))
 
     for wl in (
         w.rcs(20, 10),
@@ -145,23 +257,33 @@ def reference(runner: str, threads: int) -> Profile:
     for seed in SEED_VARIANTS[1:]:
         cells.append(Cell("seeds", w.rcs(20, 10, seed), ["prismq", "aer-statevector", "qsim"], t))
         cells.append(Cell("seeds", w.exported(runner, "qv", 20, seed), ["prismq", "aer-statevector", "qsim"], t))
-    return Profile("reference", "the published subset: every family, sizes that fit an hour on a 4-core host", cells)
+    cells += _wide_cells(threads)
+    return Profile(
+        "reference", "the published subset: every family, sizes that fit about three hours on a 4-core host", cells
+    )
 
 
 def full(runner: str, threads: int) -> Profile:
-    base = reference(runner, threads)
+    """The reference profile with its dense headline rows widened to every simulator and size."""
     t = [threads]
-    cells = [c for c in base.cells if c.group != "threads"]
+    dense: list[Cell] = []
     for n in (20, 24, 26, 28):
         for depth in (10, 20):
-            cells.append(Cell("full", w.rcs(n, depth), _dense_sims(n, 28, 28), t, timeout_s=3600.0))
+            dense.append(Cell("headline", w.rcs(n, depth), _dense_sims(n, 28, 28), t, timeout_s=3600.0))
     for n in (20, 24, 26):
-        cells.append(Cell("full", w.qft(runner, n), _dense_sims(n, 26, 26), t, timeout_s=3600.0))
+        dense.append(Cell("headline", w.qft(runner, n), _dense_sims(n, 26, 26) + [QFT_CONTROL], t, timeout_s=3600.0))
     for n in (16, 20, 24):
-        cells.append(Cell("full", w.exported(runner, "qv", n), _dense_sims(n, 24, 24), t, timeout_s=3600.0))
+        dense.append(Cell("headline", w.exported(runner, "qv", n), _dense_sims(n, 24, 24), t, timeout_s=3600.0))
+    widened = {c.workload.workload_id for c in dense}
+    base = reference(runner, threads)
+    cells = dense + [
+        c
+        for c in base.cells
+        if c.group != "threads" and not (c.group == "headline" and c.workload.workload_id in widened)
+    ]
     scaling = ["prismq", "aer-statevector", "qsim", "quest"]
     for wl in (w.rcs(24, 10), w.rcs(26, 10), w.qft(runner, 26), w.exported(runner, "qv", 24)):
-        cells.append(Cell("threads", wl, scaling, [1, 2, 4, 8, 16]))
+        cells.append(Cell("threads", wl, scaling, _thread_counts((1, 2, 4, 8, 16), threads)))
     return Profile("full", "every size in the matrix, all thread counts up to 16 where the host has them", cells)
 
 

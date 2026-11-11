@@ -4,102 +4,249 @@
 
 <link rel="stylesheet" href="perf.css">
 
-Median wall time per call for PRISM-Q and simulators that use the same method, each output
-checked against a reference.
+Median wall time per call for PRISM-Q and other simulators on the same gate lists. Each
+simulator's output at its top thread count on a row is checked against a reference: dense
+vectors by total variation distance, samples by per-statistic tests, expectation values by
+absolute difference. Records below the top thread count, rows under 100 shots
+(deterministic bits only) and the reference output itself are not checked; tables mark
+them.
 
-- Host: Intel Core i7-6700K, 4 cores, 8 threads, Windows 10, 31.9 GB RAM, CPU only.
-- One process per measurement: a cold call, then up to five warm calls; the median warm
-  call is reported.
-- Ratio = peer median time / PRISM-Q median time. Cross-process timing varies by about 10%
-  on this host, so ratios within 0.9x to 1.1x are not distinguishable.
-- Raw data: `comparison/results/matrix-reference-i7-6700k/`; how it was taken: [Benchmark
-  Methodology](../guides/benchmarking.md).
+These numbers come from one host and the harness in `comparison/`. If the method looks
+wrong or a simulator should be added, [open an
+issue](https://github.com/AbeCoull/prism-q/issues).
+
+- <span class="pq-spec-l">Host</span> Intel Core i7-6700K, 4 cores, 8 threads, Windows 10,
+  31.9 GB RAM, CPU only.
+- <span class="pq-spec-l">Protocol</span> One process per measurement: a cold call, then a
+  set of warm calls; the median warm call is reported.
+- <span class="pq-spec-l">Ratio</span> Peer median time / PRISM-Q median time.
+  Cross-process timing varies by about 10% on the reference host, where ratios within 0.9x
+  to 1.1x are not distinguishable.
+- <span class="pq-spec-l">Raw data</span> `comparison/results/matrix-reference-i7-6700k/`;
+  how it was taken: [Benchmark Methodology](../guides/benchmarking.md).
+
+<ul class="pq-kpis">
+<li class="pq-kpi"><a href="#statevector-fp64"><span class="pq-kpi-l">Statevector, fp64</span><span class="pq-kpi-v"><span>5.11</span><i>x</i> <em>to</em> <span>69.2</span><i>x</i></span><span class="pq-kpi-b" data-lo="5.115" data-hi="69.22"></span><span class="pq-kpi-s">Aer, QuEST, Spinoza and qip over PRISM-Q · 12 rows</span></a></li>
+<li class="pq-kpi"><a href="#statevector-against-fp32-peers"><span class="pq-kpi-l">Statevector against fp32 peers</span><span class="pq-kpi-v"><span>1.42</span><i>x</i> <em>to</em> <span>14.8</span><i>x</i></span><span class="pq-kpi-b" data-lo="1.425" data-hi="14.81"></span><span class="pq-kpi-s">Aer fp32 and qsim fp32 over PRISM-Q · 12 rows · fp32 peers, PRISM-Q fp64</span></a></li>
+<li class="pq-kpi"><a href="#stabilizer"><span class="pq-kpi-l">Stabilizer</span><span class="pq-kpi-v"><span>0.54</span><i>x</i> <em>to</em> <span>1.12</span><i>x</i></span><span class="pq-kpi-b" data-lo="0.5367" data-hi="1.121"></span><span class="pq-kpi-s">Stim over PRISM-Q · 3 rows · 1 thread</span></a></li>
+<li class="pq-kpi"><a href="#high-shot-stabilizer"><span class="pq-kpi-l">High-shot stabilizer</span><span class="pq-kpi-v"><span>44.0</span><i>x</i> <em>to</em> <span>71.7</span><i>x</i></span><span class="pq-kpi-b" data-lo="44" data-hi="71.69"></span><span class="pq-kpi-s">Stim over PRISM-Q · 5 rows · 1 thread</span></a></li>
+<li class="pq-kpi"><a href="#matrix-product-state"><span class="pq-kpi-l">Matrix product state</span><span class="pq-kpi-v"><span>13.5</span><i>x</i> <em>to</em> <span>62.0</span><i>x</i></span><span class="pq-kpi-b" data-lo="13.48" data-hi="62.01"></span><span class="pq-kpi-s">Aer MPS over PRISM-Q · 6 rows</span></a></li>
+<li class="pq-kpi"><a href="#deep-mps"><span class="pq-kpi-l">Deep MPS</span><span class="pq-kpi-v"><span>2.09</span><i>x</i> <em>to</em> <span>18.1</span><i>x</i></span><span class="pq-kpi-b" data-lo="2.088" data-hi="18.07"></span><span class="pq-kpi-s">Aer MPS cap 256 and quimb MPS cap 256 over PRISM-Q MPS cap 256 · 15 rows</span></a></li>
+<li class="pq-kpi"><a href="#tensor-network-expectation-values"><span class="pq-kpi-l">Tensor network expectation values</span><span class="pq-kpi-v"><span>2.71</span><i>x</i> <em>to</em> <span>303</span><i>x</i></span><span class="pq-kpi-b" data-lo="2.707" data-hi="302.6"></span><span class="pq-kpi-s">quimb TN and Aer MPS over PRISM-Q · 4 rows</span></a></li>
+<li class="pq-kpi"><a href="#shot-sampling"><span class="pq-kpi-l">Shot sampling</span><span class="pq-kpi-v"><span>1.57</span><i>x</i> <em>to</em> <span>69.7</span><i>x</i></span><span class="pq-kpi-b" data-lo="1.568" data-hi="69.67"></span><span class="pq-kpi-s">Aer, Aer fp32 and qsim fp32 over PRISM-Q · 6 rows · PRISM-Q fp64</span></a></li>
+<li class="pq-kpi"><a href="#disjoint-components"><span class="pq-kpi-l">Disjoint components</span><span class="pq-kpi-v"><span>2.83</span><i>x</i> <em>to</em> <span>142</span><i>x</i></span><span class="pq-kpi-b" data-lo="2.829" data-hi="142.2"></span><span class="pq-kpi-s">Aer MPS over PRISM-Q · 4 rows</span></a></li>
+</ul>
 
 <figure class="pq-figure" data-chart="summary">
-<p class="pq-kicker">Every pairing at 8 threads</p>
-<p class="pq-title">Peer median time over PRISM-Q median time: 0.66x to 198x across 12 method-matched pairings</p>
+<p class="pq-kicker">All sections · peer time over PRISM-Q time</p>
+<p class="pq-title">Peer median time over PRISM-Q median time, per section and peer</p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Method</th><th>Peer</th><th>Rows</th><th>Range</th></tr></thead><tbody><tr><td>Statevector, fp64</td><td>Aer</td><td>12</td><td>5.85x to 19.8x</td></tr><tr><td>Statevector, fp64</td><td>QuEST</td><td>9</td><td>13.4x to 49.8x</td></tr><tr><td>Statevector, fp64</td><td>Spinoza</td><td>4</td><td>70.8x to 198x</td></tr><tr><td>Statevector, fp64</td><td>qip</td><td>5</td><td>47.9x to 163x</td></tr><tr><td>Statevector against fp32 peers</td><td>Aer fp32</td><td>9</td><td>3.81x to 19.4x</td></tr><tr><td>Statevector against fp32 peers</td><td>qsim fp32</td><td>12</td><td>2.39x to 16.4x</td></tr><tr><td>Stabilizer</td><td>Stim</td><td>3</td><td>0.66x to 1.47x</td></tr><tr><td>Matrix product state</td><td>Aer MPS</td><td>6</td><td>9.99x to 49.6x</td></tr><tr><td>Shot sampling</td><td>Aer</td><td>6</td><td>6.93x to 33.8x</td></tr><tr><td>Shot sampling</td><td>Aer fp32</td><td>6</td><td>4.89x to 32.5x</td></tr><tr><td>Shot sampling</td><td>qsim fp32</td><td>6</td><td>2.60x to 72.2x</td></tr><tr><td>Disjoint components</td><td>Aer MPS</td><td>4</td><td>2.29x to 107x</td></tr></tbody></table></details>
+<p class="pq-note">Thread counts, PRISM-Q matched to the peer: Aer MPS, Aer MPS cap 256, Aer, Aer fp32, qip, qsim fp32, QuEST, quimb MPS cap 256, quimb TN and Spinoza at 8 threads; Stim at 1 thread</p>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Section</th><th>Peer</th><th>Precision</th><th>Threads</th><th>Rows</th><th>Range</th></tr></thead><tbody><tr><td>Statevector, fp64</td><td>Aer</td><td>double, PRISM-Q double</td><td>8</td><td>12</td><td>5.11x to 10.9x</td></tr><tr><td>Statevector, fp64</td><td>QuEST</td><td>double, PRISM-Q double</td><td>8</td><td>9</td><td>9.49x to 44.6x</td></tr><tr><td>Statevector, fp64</td><td>Spinoza</td><td>double, PRISM-Q double</td><td>8</td><td>4</td><td>9.11x to 29.8x</td></tr><tr><td>Statevector, fp64</td><td>qip</td><td>double, PRISM-Q double</td><td>8</td><td>5</td><td>41.0x to 69.2x</td></tr><tr><td>Statevector against fp32 peers</td><td>Aer fp32</td><td>fp32 peer, PRISM-Q fp64</td><td>8</td><td>9</td><td>3.13x to 8.82x</td></tr><tr><td>Statevector against fp32 peers</td><td>qsim fp32</td><td>fp32 peer, PRISM-Q fp64</td><td>8</td><td>12</td><td>1.42x to 14.8x</td></tr><tr><td>Stabilizer</td><td>Stim</td><td>exact (tableau), PRISM-Q double</td><td>1</td><td>3</td><td>0.54x to 1.12x</td></tr><tr><td>High-shot stabilizer</td><td>Stim</td><td>exact (tableau), PRISM-Q double</td><td>1</td><td>5</td><td>44.0x to 71.7x</td></tr><tr><td>Matrix product state</td><td>Aer MPS</td><td>double, PRISM-Q double</td><td>8</td><td>6</td><td>13.5x to 62.0x</td></tr><tr><td>Deep MPS</td><td>Aer MPS cap 256</td><td>double, PRISM-Q double</td><td>8</td><td>15</td><td>2.09x to 18.1x</td></tr><tr><td>Deep MPS</td><td>quimb MPS cap 256</td><td>double, PRISM-Q double</td><td>8</td><td>5</td><td>2.14x to 11.8x</td></tr><tr><td>Tensor network expectation values</td><td>quimb TN</td><td>double, PRISM-Q double</td><td>8</td><td>4</td><td>44.0x to 303x</td></tr><tr><td>Tensor network expectation values</td><td>Aer MPS</td><td>double, PRISM-Q double</td><td>8</td><td>4</td><td>2.71x to 4.31x</td></tr><tr><td>Shot sampling</td><td>Aer</td><td>double, PRISM-Q double</td><td>8</td><td>6</td><td>4.82x to 27.4x</td></tr><tr><td>Shot sampling</td><td>Aer fp32</td><td>fp32 peer, PRISM-Q fp64</td><td>8</td><td>6</td><td>3.41x to 27.5x</td></tr><tr><td>Shot sampling</td><td>qsim fp32</td><td>fp32 peer, PRISM-Q fp64</td><td>8</td><td>6</td><td>1.57x to 69.7x</td></tr><tr><td>Disjoint components</td><td>Aer MPS</td><td>double, PRISM-Q double</td><td>8</td><td>4</td><td>2.83x to 142x</td></tr></tbody></table></details>
 </figure>
 
-## Statevector, fp64
+## Statevector, fp64 {#statevector-fp64}
 
+- QFT rows take their gate list from PRISM-Q's `qft_circuit` generator, and PRISM-Q
+  recognises that expansion and runs it as one FFT block; the control below reruns PRISM-Q
+  with `PRISM_NO_QFT_BLOCK=1`, gate by gate.
+- The timed call ends at the simulator's own result: PRISM-Q, QuEST, Spinoza and qip, a
+  probability vector; Aer, a Result holding the probability vector.
+- 3 rows take their reference vector from one simulator with no cross-check by a second.
 - Every simulator here stores 2^n complex amplitudes in double precision.
 - Output is the full probability vector, checked against the Aer vector by total variation
   distance.
 
 <figure class="pq-figure" data-chart="sv64">
 <p class="pq-kicker">Statevector · fp64 · full probability vector</p>
-<p class="pq-title">Aer takes 5.85x to 19.8x the PRISM-Q time, 16 to 26 qubits</p>
+<p class="pq-title">Aer takes 5.11x to 10.9x the PRISM-Q time, 16 to 26 qubits</p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer</th><th>QuEST</th><th>Spinoza</th><th>qip</th></tr></thead><tbody><tr><td>rcs 20q d10</td><td>29.6 ms</td><td>212 ms (7.15x)</td><td>855 ms (28.9x)</td><td>5.48 s (185x)</td><td>1.91 s (64.6x)</td></tr><tr><td>rcs 24q d10</td><td>490 ms</td><td>3.23 s (6.59x)</td><td>22.16 s (45.2x)</td><td>-</td><td>-</td></tr><tr><td>rcs 26q d10</td><td>2.02 s</td><td>11.82 s (5.85x)</td><td>-</td><td>-</td><td>-</td></tr><tr><td>rcs 20q d20</td><td>56.4 ms</td><td>412 ms (7.30x)</td><td>1.76 s (31.3x)</td><td>11.15 s (198x)</td><td>3.77 s (66.7x)</td></tr><tr><td>rcs 24q d20</td><td>884 ms</td><td>6.46 s (7.30x)</td><td>44.08 s (49.8x)</td><td>-</td><td>-</td></tr><tr><td>rcs 26q d20</td><td>3.87 s</td><td>24.20 s (6.25x)</td><td>-</td><td>-</td><td>-</td></tr><tr><td>qft 20q</td><td>17.4 ms</td><td>165 ms (9.48x)</td><td>233 ms (13.4x)</td><td>invalid</td><td>2.84 s (163x)</td></tr><tr><td>qft 24q</td><td>269 ms</td><td>3.47 s (12.9x)</td><td>6.68 s (24.8x)</td><td>-</td><td>-</td></tr><tr><td>qft 26q</td><td>1.11 s</td><td>14.08 s (12.6x)</td><td>-</td><td>-</td><td>-</td></tr><tr><td>qv 16q</td><td>4.54 ms</td><td>89.9 ms (19.8x)</td><td>90.8 ms (20.0x)</td><td>321 ms (70.8x)</td><td>217 ms (47.9x)</td></tr><tr><td>qv 20q</td><td>60.5 ms</td><td>429 ms (7.09x)</td><td>1.92 s (31.8x)</td><td>6.67 s (110x)</td><td>4.69 s (77.5x)</td></tr><tr><td>qv 24q</td><td>1.23 s</td><td>7.43 s (6.02x)</td><td>59.08 s (47.9x)</td><td>-</td><td>-</td></tr></tbody></table></details>
+<p class="pq-note">‡ reference output with no cross-check by a second simulator.</p>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer</th><th>QuEST</th><th>Spinoza</th><th>qip</th></tr></thead><tbody><tr><td>rcs 20q d10</td><td>28.2 ms</td><td>150 ms (5.33x)</td><td>755 ms (26.7x)</td><td>774 ms (27.4x)</td><td>1.70 s (60.1x)</td></tr><tr><td>rcs 24q d10</td><td>485 ms</td><td>2.49 s (5.13x)</td><td>18.96 s (39.1x)</td><td>not run</td><td>not run</td></tr><tr><td>rcs 26q d10</td><td>1.96 s</td><td>10.26 s (5.23x)‡</td><td>not run</td><td>not run</td><td>not run</td></tr><tr><td>rcs 20q d20</td><td>53.6 ms</td><td>303 ms (5.66x)</td><td>1.47 s (27.5x)</td><td>1.55 s (28.8x)</td><td>3.39 s (63.2x)</td></tr><tr><td>rcs 24q d20</td><td>849 ms</td><td>5.07 s (5.97x)</td><td>37.90 s (44.6x)</td><td>not run</td><td>not run</td></tr><tr><td>rcs 26q d20</td><td>3.74 s</td><td>20.76 s (5.55x)‡</td><td>not run</td><td>not run</td><td>not run</td></tr><tr><td>qft 20q</td><td>16.7 ms</td><td>126 ms (7.56x)</td><td>158 ms (9.49x)</td><td>cannot run</td><td>839 ms (50.3x)</td></tr><tr><td>qft 24q</td><td>274 ms</td><td>2.83 s (10.3x)</td><td>5.40 s (19.7x)</td><td>not run</td><td>not run</td></tr><tr><td>qft 26q</td><td>1.17 s</td><td>12.83 s (10.9x)‡</td><td>not run</td><td>not run</td><td>not run</td></tr><tr><td>qv 16q</td><td>4.78 ms</td><td>45.2 ms (9.46x)</td><td>73.5 ms (15.4x)</td><td>43.5 ms (9.11x)</td><td>196 ms (41.0x)</td></tr><tr><td>qv 20q</td><td>62.0 ms</td><td>381 ms (6.15x)</td><td>1.75 s (28.2x)</td><td>1.85 s (29.8x)</td><td>4.29 s (69.2x)</td></tr><tr><td>qv 24q</td><td>1.25 s</td><td>6.37 s (5.11x)</td><td>51.30 s (41.2x)</td><td>not run</td><td>not run</td></tr></tbody></table><p class="pq-note">Cold call, fastest warm call, the time Aer reports for itself, and the smallest shift in a marginal a sampled check detects:</p><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer</th><th>QuEST</th><th>Spinoza</th><th>qip</th></tr></thead><tbody><tr><td>rcs 20q d10</td><td>cold 29.6 ms, fastest 27.7 ms</td><td>cold 146 ms, fastest 146 ms, internal 134 ms</td><td>fastest 731 ms</td><td>fastest 769 ms</td><td>fastest 1.69 s</td></tr><tr><td>rcs 24q d10</td><td>cold 472 ms, fastest 481 ms</td><td>cold 2.51 s, fastest 2.46 s, internal 2.47 s</td><td>fastest 18.86 s</td><td>not run</td><td>not run</td></tr><tr><td>rcs 26q d10</td><td>cold 1.94 s, fastest 1.95 s</td><td>cold 10.33 s, fastest 10.21 s, internal 10.24 s</td><td>not run</td><td>not run</td><td>not run</td></tr><tr><td>rcs 20q d20</td><td>cold 52.8 ms, fastest 51.3 ms</td><td>cold 314 ms, fastest 299 ms, internal 278 ms</td><td>fastest 1.46 s</td><td>fastest 1.54 s</td><td>fastest 3.38 s</td></tr><tr><td>rcs 24q d20</td><td>cold 846 ms, fastest 845 ms</td><td>cold 5.12 s, fastest 5.03 s, internal 5.03 s</td><td>fastest 37.87 s</td><td>not run</td><td>not run</td></tr><tr><td>rcs 26q d20</td><td>cold 3.81 s, fastest 3.71 s</td><td>cold 20.74 s, fastest 20.73 s, internal 20.72 s</td><td>not run</td><td>not run</td><td>not run</td></tr><tr><td>qft 20q</td><td>cold 19.3 ms, fastest 16.3 ms</td><td>cold 119 ms, fastest 118 ms, internal 110 ms</td><td>fastest 155 ms</td><td>cannot run</td><td>fastest 834 ms</td></tr><tr><td>qft 24q</td><td>cold 265 ms, fastest 264 ms</td><td>cold 2.80 s, fastest 2.82 s, internal 2.81 s</td><td>fastest 5.36 s</td><td>not run</td><td>not run</td></tr><tr><td>qft 26q</td><td>cold 1.15 s, fastest 1.11 s</td><td>cold 12.43 s, fastest 12.38 s, internal 12.80 s</td><td>not run</td><td>not run</td><td>not run</td></tr><tr><td>qv 16q</td><td>cold 5.31 ms, fastest 4.53 ms</td><td>cold 45.2 ms, fastest 43.1 ms, internal 24.2 ms</td><td>fastest 73.2 ms</td><td>fastest 42.7 ms</td><td>fastest 195 ms</td></tr><tr><td>qv 20q</td><td>cold 63.6 ms, fastest 58.7 ms</td><td>cold 360 ms, fastest 357 ms, internal 337 ms</td><td>fastest 1.74 s</td><td>fastest 1.84 s</td><td>fastest 4.25 s</td></tr><tr><td>qv 24q</td><td>cold 1.26 s, fastest 1.21 s</td><td>cold 6.58 s, fastest 6.37 s, internal 6.32 s</td><td>fastest 51.11 s</td><td>not run</td><td>not run</td></tr></tbody></table></details>
 </figure>
 
-## Statevector against fp32 peers
+| QFT control | PRISM-Q | PRISM-Q, QFT recognition off | Aer |
+| --- | --- | --- | --- |
+| qft 20q | 16.7 ms | 22.8 ms | 126 ms |
+| qft 24q | 274 ms | 335 ms | 2.83 s |
+| qft 26q | 1.17 s | 1.48 s | 12.83 s‡ |
 
+## Statevector against fp32 peers {#statevector-against-fp32-peers}
+
+- QFT rows take their gate list from PRISM-Q's `qft_circuit` generator, and PRISM-Q
+  recognises that expansion and runs it as one FFT block; the control below reruns PRISM-Q
+  with `PRISM_NO_QFT_BLOCK=1`, gate by gate.
+- The timed call ends at the simulator's own result: PRISM-Q and qsim fp32, a probability
+  vector; Aer fp32, a Result holding the probability vector.
+- qsim runs with `max_fused_gate_size` 3 at 16 and 20 qubits and 4 at 24 and 26 qubits.
 - qsim and Aer fp32 store single-precision amplitudes, half the bytes PRISM-Q moves per
   amplitude.
 - The fp32 outputs are checked at a tolerance of 1e-5 instead of 1e-8.
 
 <figure class="pq-figure" data-chart="sv32">
 <p class="pq-kicker">Statevector · PRISM-Q fp64, peers fp32</p>
-<p class="pq-title">qsim fp32 takes 2.39x to 16.4x the PRISM-Q time, 16 to 26 qubits</p>
+<p class="pq-title">qsim fp32 takes 1.42x to 14.8x the PRISM-Q time, 16 to 26 qubits</p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer fp32</th><th>qsim fp32</th></tr></thead><tbody><tr><td>rcs 20q d10</td><td>29.6 ms</td><td>152 ms (5.13x)</td><td>79.2 ms (2.67x)</td></tr><tr><td>rcs 24q d10</td><td>490 ms</td><td>2.09 s (4.27x)</td><td>1.75 s (3.56x)</td></tr><tr><td>rcs 26q d10</td><td>2.02 s</td><td>7.76 s (3.84x)</td><td>7.29 s (3.61x)</td></tr><tr><td>rcs 20q d20</td><td>56.4 ms</td><td>301 ms (5.33x)</td><td>136 ms (2.41x)</td></tr><tr><td>rcs 24q d20</td><td>884 ms</td><td>4.14 s (4.68x)</td><td>3.24 s (3.67x)</td></tr><tr><td>rcs 26q d20</td><td>3.87 s</td><td>15.42 s (3.98x)</td><td>13.75 s (3.55x)</td></tr><tr><td>qft 20q</td><td>17.4 ms</td><td>crash</td><td>89.1 ms (5.13x)</td></tr><tr><td>qft 24q</td><td>269 ms</td><td>crash</td><td>3.97 s (14.8x)</td></tr><tr><td>qft 26q</td><td>1.11 s</td><td>crash</td><td>18.22 s (16.4x)</td></tr><tr><td>qv 16q</td><td>4.54 ms</td><td>88.3 ms (19.4x)</td><td>56.1 ms (12.3x)</td></tr><tr><td>qv 20q</td><td>60.5 ms</td><td>288 ms (4.76x)</td><td>144 ms (2.39x)</td></tr><tr><td>qv 24q</td><td>1.23 s</td><td>4.71 s (3.81x)</td><td>3.88 s (3.14x)</td></tr></tbody></table></details>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer fp32</th><th>qsim fp32</th></tr></thead><tbody><tr><td>rcs 20q d10</td><td>28.2 ms</td><td>101 ms (3.58x)</td><td>45.5 ms (1.61x)</td></tr><tr><td>rcs 24q d10</td><td>485 ms</td><td>1.58 s (3.26x)</td><td>737 ms (1.52x)</td></tr><tr><td>rcs 26q d10</td><td>1.96 s</td><td>6.52 s (3.33x)</td><td>3.03 s (1.55x)</td></tr><tr><td>rcs 20q d20</td><td>53.6 ms</td><td>216 ms (4.04x)</td><td>76.4 ms (1.42x)</td></tr><tr><td>rcs 24q d20</td><td>849 ms</td><td>3.19 s (3.76x)</td><td>1.40 s (1.64x)</td></tr><tr><td>rcs 26q d20</td><td>3.74 s</td><td>13.18 s (3.52x)</td><td>5.79 s (1.55x)</td></tr><tr><td>qft 20q</td><td>16.7 ms</td><td>crash</td><td>53.2 ms (3.19x)</td></tr><tr><td>qft 24q</td><td>274 ms</td><td>crash</td><td>3.58 s (13.1x)</td></tr><tr><td>qft 26q</td><td>1.17 s</td><td>crash</td><td>17.37 s (14.8x)</td></tr><tr><td>qv 16q</td><td>4.78 ms</td><td>42.1 ms (8.82x)</td><td>30.5 ms (6.38x)</td></tr><tr><td>qv 20q</td><td>62.0 ms</td><td>234 ms (3.78x)</td><td>91.3 ms (1.47x)</td></tr><tr><td>qv 24q</td><td>1.25 s</td><td>3.90 s (3.13x)</td><td>1.86 s (1.49x)</td></tr></tbody></table><p class="pq-note">Cold call, fastest warm call, the time Aer reports for itself, and the smallest shift in a marginal a sampled check detects:</p><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer fp32</th><th>qsim fp32</th></tr></thead><tbody><tr><td>rcs 20q d10</td><td>cold 29.6 ms, fastest 27.7 ms</td><td>cold 108 ms, fastest 99.9 ms, internal 87.0 ms</td><td>cold 47.8 ms, fastest 36.2 ms</td></tr><tr><td>rcs 24q d10</td><td>cold 472 ms, fastest 481 ms</td><td>cold 1.56 s, fastest 1.57 s, internal 1.56 s</td><td>cold 707 ms, fastest 731 ms</td></tr><tr><td>rcs 26q d10</td><td>cold 1.94 s, fastest 1.95 s</td><td>cold 6.57 s, fastest 6.45 s, internal 6.51 s</td><td>cold 3.01 s, fastest 2.97 s</td></tr><tr><td>rcs 20q d20</td><td>cold 52.8 ms, fastest 51.3 ms</td><td>cold 211 ms, fastest 214 ms, internal 184 ms</td><td>cold 73.3 ms, fastest 71.6 ms</td></tr><tr><td>rcs 24q d20</td><td>cold 846 ms, fastest 845 ms</td><td>cold 3.20 s, fastest 3.15 s, internal 3.15 s</td><td>cold 1.37 s, fastest 1.39 s</td></tr><tr><td>rcs 26q d20</td><td>cold 3.81 s, fastest 3.71 s</td><td>cold 13.11 s, fastest 13.06 s, internal 13.14 s</td><td>cold 5.74 s, fastest 5.66 s</td></tr><tr><td>qft 20q</td><td>cold 19.3 ms, fastest 16.3 ms</td><td>crash</td><td>cold 57.4 ms, fastest 50.8 ms</td></tr><tr><td>qft 24q</td><td>cold 265 ms, fastest 264 ms</td><td>crash</td><td>cold 3.57 s, fastest 3.57 s</td></tr><tr><td>qft 26q</td><td>cold 1.15 s, fastest 1.11 s</td><td>crash</td><td>cold 17.01 s, fastest 16.99 s</td></tr><tr><td>qv 16q</td><td>cold 5.31 ms, fastest 4.53 ms</td><td>cold 49.6 ms, fastest 38.7 ms, internal 19.1 ms</td><td>cold 32.6 ms, fastest 29.1 ms</td></tr><tr><td>qv 20q</td><td>cold 63.6 ms, fastest 58.7 ms</td><td>cold 242 ms, fastest 222 ms, internal 195 ms</td><td>cold 89.9 ms, fastest 84.5 ms</td></tr><tr><td>qv 24q</td><td>cold 1.26 s, fastest 1.21 s</td><td>cold 3.93 s, fastest 3.88 s, internal 3.83 s</td><td>cold 1.81 s, fastest 1.84 s</td></tr></tbody></table></details>
 </figure>
 
-## Stabilizer
+## Stabilizer {#stabilizer}
 
-- Stim runs single-threaded; PRISM-Q uses 8 threads.
+- Stim runs single-threaded; PRISM-Q runs at 1 and 8 threads, and ratios pair Stim with
+  the 1-thread PRISM-Q record.
+- The timed call ends at the simulator's own result: PRISM-Q, a histogram; Stim, a
+  bit-packed per-shot array.
+- Smallest shift in a marginal the sampled check detects: PRISM-Q 0.072 to 0.073 and Stim
+  0.072 to 0.073; checks above 0.05 are marked weakly tested.
 - Both draw shots from a compiled sampler.
 
 <figure class="pq-figure" data-chart="stabilizer">
 <p class="pq-kicker">Stabilizer tableau · 1,000 shots</p>
-<p class="pq-title">Stim takes 0.66x to 1.47x the PRISM-Q time, 100 to 10,000 qubits</p>
+<p class="pq-title">Stim takes 0.54x to 1.12x the 1-thread PRISM-Q time, 100 to 10,000 qubits</p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Stim</th></tr></thead><tbody><tr><td>clifford 100q 1k shots</td><td>616 us</td><td>404 us (0.66x)</td></tr><tr><td>clifford 1000q 1k shots</td><td>4.87 ms</td><td>7.14 ms (1.47x)</td></tr><tr><td>clifford 10000q 1k shots</td><td>376 ms</td><td>464 ms (1.23x)</td></tr></tbody></table></details>
+<p class="pq-note">† weakly tested: the check detects only shifts above 0.05 in a marginal.</p>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q 8 threads</th><th>PRISM-Q 1 thread</th><th>Stim 1 thread</th></tr></thead><tbody><tr><td>clifford 100q 1k shots</td><td>468 us†</td><td>720 us†</td><td>386 us (0.54x)†</td></tr><tr><td>clifford 1000q 1k shots</td><td>4.53 ms†</td><td>6.20 ms†</td><td>6.13 ms (0.99x)†</td></tr><tr><td>clifford 10000q 1k shots</td><td>368 ms†</td><td>354 ms†</td><td>397 ms (1.12x)†</td></tr></tbody></table><p class="pq-note">Cold call, fastest warm call, and the smallest shift in a marginal a sampled check detects:</p><table><thead><tr><th>Workload</th><th>PRISM-Q 8 threads</th><th>PRISM-Q 1 thread</th><th>Stim 1 thread</th></tr></thead><tbody><tr><td>clifford 100q 1k shots</td><td>cold 755 us, fastest 453 us, detects 0.072</td><td>cold 620 us, fastest 434 us, detects 0.072</td><td>cold 647 us, fastest 376 us, detects 0.072</td></tr><tr><td>clifford 1000q 1k shots</td><td>cold 4.60 ms, fastest 4.04 ms, detects 0.073</td><td>cold 6.03 ms, fastest 3.97 ms, detects 0.073</td><td>cold 5.93 ms, fastest 6.02 ms, detects 0.073</td></tr><tr><td>clifford 10000q 1k shots</td><td>cold 374 ms, fastest 358 ms, detects 0.073</td><td>cold 371 ms, fastest 344 ms, detects 0.073</td><td>cold 390 ms, fastest 384 ms, detects 0.073</td></tr></tbody></table></details>
 </figure>
 
-## Matrix product state
+## High-shot stabilizer {#high-shot-stabilizer}
 
-- Aer automatic picks a statevector for these circuits and runs out of memory on every
-  row.
+- Stim runs single-threaded; PRISM-Q runs at 1 and 8 threads, and ratios pair Stim with
+  the 1-thread PRISM-Q record.
+- The timed call ends at the simulator's own result: PRISM-Q and Stim, bit-packed shot
+  buffers.
+- Smallest shift in a marginal the sampled check detects: PRISM-Q 0.00072 to 0.0023 and
+  Stim 0.00072 to 0.0023; checks above 0.05 are marked weakly tested.
+- Each simulator returns only the checked statistics: single-bit counts, adjacent-pair
+  parity counts and the shot total, never the full histogram.
+- Time covers compiling the sampler and drawing every shot into the simulator's packed
+  buffer; reducing the buffer to statistics is outside the timer on both sides.
+
+<figure class="pq-figure" data-chart="highshot">
+<p class="pq-kicker">Stabilizer tableau · statistics only</p>
+<p class="pq-title">Stim takes 44.0x to 71.7x the 1-thread PRISM-Q time, 100 to 10,000 qubits</p>
+<div class="pq-plot"></div>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q 8 threads</th><th>PRISM-Q 1 thread</th><th>Stim 1 thread</th></tr></thead><tbody><tr><td>clifford 100q 1M shots</td><td>3.54 ms</td><td>7.14 ms</td><td>314 ms (44.0x)</td></tr><tr><td>clifford 100q 10M shots</td><td>24.6 ms</td><td>44.3 ms</td><td>3.17 s (71.7x)</td></tr><tr><td>clifford 1000q 1M shots</td><td>39.8 ms</td><td>82.5 ms</td><td>3.66 s (44.4x)</td></tr><tr><td>clifford 1000q 10M shots</td><td>376 ms</td><td>799 ms</td><td>38.19 s (47.8x)</td></tr><tr><td>clifford 10000q 1M shots</td><td>1.09 s</td><td>1.07 s</td><td>47.28 s (44.3x)</td></tr></tbody></table><p class="pq-note">Cold call, fastest warm call, and the smallest shift in a marginal a sampled check detects:</p><table><thead><tr><th>Workload</th><th>PRISM-Q 8 threads</th><th>PRISM-Q 1 thread</th><th>Stim 1 thread</th></tr></thead><tbody><tr><td>clifford 100q 1M shots</td><td>cold 3.29 ms, fastest 3.17 ms, detects 0.0023</td><td>cold 7.32 ms, fastest 6.90 ms, detects 0.0023</td><td>cold 311 ms, fastest 310 ms, detects 0.0023</td></tr><tr><td>clifford 100q 10M shots</td><td>cold 26.9 ms, fastest 24.2 ms, detects 0.00072</td><td>cold 43.1 ms, fastest 43.2 ms, detects 0.00072</td><td>cold 3.14 s, fastest 3.15 s, detects 0.00072</td></tr><tr><td>clifford 1000q 1M shots</td><td>cold 41.7 ms, fastest 39.3 ms, detects 0.0023</td><td>cold 81.2 ms, fastest 81.4 ms, detects 0.0023</td><td>cold 3.65 s, fastest 3.54 s, detects 0.0023</td></tr><tr><td>clifford 1000q 10M shots</td><td>cold 369 ms, fastest 369 ms, detects 0.00073</td><td>cold 803 ms, fastest 797 ms, detects 0.00073</td><td>cold 38.34 s, fastest 37.75 s, detects 0.00073</td></tr><tr><td>clifford 10000q 1M shots</td><td>cold 1.07 s, fastest 1.08 s, detects 0.0023</td><td>cold 1.04 s, fastest 1.05 s, detects 0.0023</td><td>cold 47.32 s, fastest 47.12 s, detects 0.0023</td></tr></tbody></table></details>
+</figure>
+
+## Matrix product state {#matrix-product-state}
+
+- Aer automatic refuses 6 of 6 rows before running: it picks its statevector method and
+  reports that the state would not fit in memory.
+- Truncation besides the bond cap: PRISM-Q drops singular values at or below 1e-12 of the
+  largest; Aer runs with `matrix_product_state_truncation_threshold` 1e-16.
+- The timed call ends at the simulator's own result: PRISM-Q, a histogram; Aer MPS and Aer
+  automatic, a Result holding a histogram.
+- Smallest shift in a marginal the sampled check detects: PRISM-Q 0.07 to 0.073 and Aer
+  MPS 0.07 to 0.073; checks above 0.05 are marked weakly tested.
+- Aer's matrix product state method runs with `mps_lapack=True` and `mps_omp_threads`
+  equal to the thread count.
 
 <figure class="pq-figure" data-chart="mps">
 <p class="pq-kicker">MPS · shallow wide brickwork · 1,000 shots</p>
-<p class="pq-title">Aer MPS takes 9.99x to 49.6x the PRISM-Q time, 50 to 200 qubits</p>
+<p class="pq-title">Aer MPS takes 13.5x to 62.0x the PRISM-Q time, 50 to 200 qubits</p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer MPS</th><th>Aer automatic</th></tr></thead><tbody><tr><td>lowent 50q d4 1k shots</td><td>3.83 ms</td><td>175 ms (45.7x)</td><td>out of memory</td></tr><tr><td>lowent 100q d4 1k shots</td><td>6.55 ms</td><td>325 ms (49.6x)</td><td>out of memory</td></tr><tr><td>lowent 200q d4 1k shots</td><td>13.1 ms</td><td>607 ms (46.4x)</td><td>out of memory</td></tr><tr><td>lowent 50q d8 1k shots</td><td>23.9 ms</td><td>298 ms (12.5x)</td><td>out of memory</td></tr><tr><td>lowent 100q d8 1k shots</td><td>49.6 ms</td><td>529 ms (10.7x)</td><td>out of memory</td></tr><tr><td>lowent 200q d8 1k shots</td><td>105 ms</td><td>1.04 s (9.99x)</td><td>out of memory</td></tr></tbody></table></details>
+<p class="pq-note">† weakly tested: the check detects only shifts above 0.05 in a marginal.</p>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer MPS</th><th>Aer automatic</th></tr></thead><tbody><tr><td>lowent 50q d4 1k shots</td><td>3.09 ms†</td><td>186 ms (60.2x)†</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 100q d4 1k shots</td><td>5.96 ms†</td><td>370 ms (62.0x)†</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 200q d4 1k shots</td><td>11.6 ms†</td><td>710 ms (61.3x)†</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 50q d8 1k shots</td><td>21.9 ms†</td><td>323 ms (14.7x)†</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 100q d8 1k shots</td><td>45.8 ms†</td><td>631 ms (13.8x)†</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 200q d8 1k shots</td><td>94.7 ms†</td><td>1.28 s (13.5x)†</td><td>refused, statevector would not fit</td></tr></tbody></table><p class="pq-note">Cold call, fastest warm call, the time Aer reports for itself, and the smallest shift in a marginal a sampled check detects:</p><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer MPS</th><th>Aer automatic</th></tr></thead><tbody><tr><td>lowent 50q d4 1k shots</td><td>cold 3.80 ms, fastest 3.08 ms, detects 0.07</td><td>cold 194 ms, fastest 181 ms, internal 169 ms, detects 0.07</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 100q d4 1k shots</td><td>cold 7.02 ms, fastest 5.83 ms, detects 0.072</td><td>cold 359 ms, fastest 350 ms, internal 336 ms, detects 0.072</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 200q d4 1k shots</td><td>cold 12.5 ms, fastest 11.4 ms, detects 0.073</td><td>cold 718 ms, fastest 701 ms, internal 646 ms, detects 0.073</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 50q d8 1k shots</td><td>cold 23.5 ms, fastest 21.6 ms, detects 0.07</td><td>cold 300 ms, fastest 304 ms, internal 286 ms, detects 0.07</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 100q d8 1k shots</td><td>cold 47.9 ms, fastest 45.5 ms, detects 0.072</td><td>cold 635 ms, fastest 625 ms, internal 561 ms, detects 0.072</td><td>refused, statevector would not fit</td></tr><tr><td>lowent 200q d8 1k shots</td><td>cold 101 ms, fastest 92.0 ms, detects 0.073</td><td>cold 1.32 s, fastest 1.25 s, internal 1.14 s, detects 0.073</td><td>refused, statevector would not fit</td></tr></tbody></table></details>
 </figure>
 
 <figure class="pq-figure" data-chart="bondcap">
 <p class="pq-kicker">MPS bond cap against accuracy · rcs 20q d10</p>
-<p class="pq-title">At bond cap 32, PRISM-Q MPS reaches distance 8.3e-15 in 82.9 ms; Aer MPS reaches 1.3e-10 in 1.30 s</p>
+<p class="pq-title">At bond cap 32, PRISM-Q MPS reaches distance <span class="pq-nw">8.3e-15</span> in <span class="pq-nw">53.1 ms</span>; Aer MPS reaches <span class="pq-nw">8.2e-15</span> in <span class="pq-nw">1.15 s</span></p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Bond cap</th><th>PRISM-Q MPS</th><th>Distance</th><th>Aer MPS</th><th>Distance</th></tr></thead><tbody><tr><td>2</td><td>8.10 ms</td><td>0.79</td><td>1.03 s</td><td>0.79</td></tr><tr><td>4</td><td>10.8 ms</td><td>0.57</td><td>1.09 s</td><td>0.6</td></tr><tr><td>8</td><td>15.9 ms</td><td>0.39</td><td>1.16 s</td><td>0.41</td></tr><tr><td>16</td><td>43.5 ms</td><td>0.17</td><td>1.22 s</td><td>0.17</td></tr><tr><td>32</td><td>82.9 ms</td><td>8.3e-15</td><td>1.30 s</td><td>1.3e-10</td></tr></tbody></table></details>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Bond cap</th><th>PRISM-Q MPS</th><th>Distance</th><th>Aer MPS</th><th>Distance</th></tr></thead><tbody><tr><td>2</td><td>6.66 ms</td><td>0.79</td><td>900 ms</td><td>0.79</td></tr><tr><td>4</td><td>9.96 ms</td><td>0.57</td><td>956 ms</td><td>0.6</td></tr><tr><td>8</td><td>14.9 ms</td><td>0.39</td><td>1.02 s</td><td>0.41</td></tr><tr><td>16</td><td>28.3 ms</td><td>0.17</td><td>1.08 s</td><td>0.17</td></tr><tr><td>32</td><td>53.1 ms</td><td>8.3e-15</td><td>1.15 s</td><td>8.2e-15</td></tr></tbody></table></details>
 </figure>
 
-## Shot sampling
+## Deep MPS {#deep-mps}
 
+- Truncation besides the bond cap: PRISM-Q drops singular values at or below 1e-12 of the
+  largest; Aer runs with `matrix_product_state_truncation_threshold` 1e-16.
+- The timed call ends at the simulator's own result: PRISM-Q MPS cap 256, a histogram; Aer
+  MPS cap 256, a Result holding a histogram; quimb MPS cap 256, a per-shot sample list.
+- Smallest shift in a marginal the sampled check detects: quimb MPS cap 256 0.31 to 0.33,
+  Aer MPS cap 256 0.099 to 0.33 and PRISM-Q MPS cap 256 0.099 to 0.33; checks above 0.05
+  are marked weakly tested.
+- Aer's matrix product state method runs with `mps_lapack=True` and `mps_omp_threads`
+  equal to the thread count.
+- Brickwork at depth 12 needs bond 64 across a cut and depth 16 needs 256; every simulator
+  here runs under a bond cap of 256.
+- The cone reference cannot reach most statistics at these depths; those are tested
+  against another simulator's counts.
+
+<figure class="pq-figure" data-chart="mpsdeep">
+<p class="pq-kicker">MPS · bond cap 256</p>
+<p class="pq-title">Aer MPS cap 256 takes 2.09x to 18.1x the PRISM-Q MPS cap 256 time, 50 to 1,000 qubits</p>
+<div class="pq-plot"></div>
+<p class="pq-note">† weakly tested: the check detects only shifts above 0.05 in a marginal.</p>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q MPS cap 256</th><th>Aer MPS cap 256</th><th>quimb MPS cap 256</th></tr></thead><tbody><tr><td>lowent 50q d12 100 shots</td><td>290 ms†</td><td>747 ms (2.58x)†</td><td>2.78 s (9.61x)†</td></tr><tr><td>lowent 50q d12 1k shots</td><td>434 ms†</td><td>2.90 s (6.68x)†</td><td>not run</td></tr><tr><td>lowent 100q d12 100 shots</td><td>746 ms†</td><td>1.67 s (2.24x)†</td><td>6.31 s (8.47x)†</td></tr><tr><td>lowent 100q d12 1k shots</td><td>1.11 s†</td><td>6.78 s (6.13x)†</td><td>not run</td></tr><tr><td>lowent 200q d12 100 shots</td><td>1.57 s†</td><td>3.78 s (2.41x)†</td><td>14.43 s (9.19x)†</td></tr><tr><td>lowent 200q d12 1k shots</td><td>2.34 s†</td><td>16.63 s (7.11x)†</td><td>not run</td></tr><tr><td>lowent 500q d12 100 shots</td><td>4.10 s†</td><td>12.60 s (3.07x)†</td><td>48.25 s (11.8x)†</td></tr><tr><td>lowent 500q d12 1k shots</td><td>6.46 s†</td><td>66.85 s (10.3x)†</td><td>not run</td></tr><tr><td>lowent 1000q d12 100 shots</td><td>8.53 s†</td><td>30.25 s (3.55x)†</td><td>not run</td></tr><tr><td>lowent 1000q d12 1k shots</td><td>13.46 s†</td><td>243.37 s (18.1x)†</td><td>not run</td></tr><tr><td>lowent 50q d16 100 shots</td><td>7.01 s†</td><td>17.44 s (2.49x)†</td><td>15.01 s (2.14x)†</td></tr><tr><td>lowent 100q d16 100 shots</td><td>20.43 s†</td><td>42.66 s (2.09x)†</td><td>not run</td></tr><tr><td>lowent 200q d16 100 shots</td><td>40.62 s†</td><td>93.31 s (2.30x)†</td><td>not run</td></tr><tr><td>lowent 500q d16 100 shots</td><td>114.99 s†</td><td>245.02 s (2.13x)†</td><td>not run</td></tr><tr><td>lowent 1000q d16 100 shots</td><td>228.23 s†</td><td>497.40 s (2.18x)†</td><td>not run</td></tr></tbody></table><p class="pq-note">Cold call, fastest warm call, the time Aer reports for itself, and the smallest shift in a marginal a sampled check detects:</p><table><thead><tr><th>Workload</th><th>PRISM-Q MPS cap 256</th><th>Aer MPS cap 256</th><th>quimb MPS cap 256</th></tr></thead><tbody><tr><td>lowent 50q d12 100 shots</td><td>cold 294 ms, fastest 285 ms, detects 0.31</td><td>cold 859 ms, fastest 737 ms, internal 693 ms, detects 0.31</td><td>cold 2.97 s, fastest 2.76 s, detects 0.31</td></tr><tr><td>lowent 50q d12 1k shots</td><td>cold 438 ms, fastest 434 ms, detects 0.099</td><td>cold 3.15 s, fastest 2.88 s, internal 2.84 s, detects 0.099</td><td>not run</td></tr><tr><td>lowent 100q d12 100 shots</td><td>cold 761 ms, fastest 738 ms, detects 0.32</td><td>cold 1.95 s, fastest 1.67 s, internal 1.58 s, detects 0.32</td><td>cold 6.33 s, fastest 6.23 s, detects 0.32</td></tr><tr><td>lowent 100q d12 1k shots</td><td>cold 1.12 s, fastest 1.10 s, detects 0.1</td><td>cold 7.01 s, fastest 6.74 s, internal 6.68 s, detects 0.1</td><td>not run</td></tr><tr><td>lowent 200q d12 100 shots</td><td>cold 1.58 s, fastest 1.57 s, detects 0.33</td><td>cold 4.02 s, fastest 3.73 s, internal 3.57 s, detects 0.33</td><td>cold 14.56 s, fastest 14.39 s, detects 0.33</td></tr><tr><td>lowent 200q d12 1k shots</td><td>cold 2.45 s, fastest 2.33 s, detects 0.1</td><td>cold 16.39 s, fastest 16.39 s, internal 16.41 s, detects 0.1</td><td>not run</td></tr><tr><td>lowent 500q d12 100 shots</td><td>cold 4.26 s, fastest 4.08 s, detects 0.33</td><td>cold 11.86 s, fastest 11.81 s, internal 12.13 s, detects 0.33</td><td>cold 48.81 s, fastest 48.06 s, detects 0.33</td></tr><tr><td>lowent 500q d12 1k shots</td><td>cold 6.32 s, fastest 6.32 s, detects 0.1</td><td>cold 57.23 s, fastest 64.37 s, internal 66.36 s, detects 0.1</td><td>not run</td></tr><tr><td>lowent 1000q d12 100 shots</td><td>cold 8.61 s, fastest 8.51 s, detects 0.33</td><td>cold 29.66 s, fastest 29.47 s, internal 29.17 s, detects 0.33</td><td>not run</td></tr><tr><td>lowent 1000q d12 1k shots</td><td>cold 13.92 s, fastest 13.39 s, detects 0.1</td><td>cold 204.54 s, fastest 239.34 s, internal 242.36 s, detects 0.1</td><td>not run</td></tr><tr><td>lowent 50q d16 100 shots</td><td>cold 7.02 s, fastest 7.00 s, detects 0.31</td><td>cold 17.55 s, fastest 17.41 s, internal 17.37 s, detects 0.31</td><td>cold 15.14 s, fastest 14.98 s, detects 0.31</td></tr><tr><td>lowent 100q d16 100 shots</td><td>cold 20.51 s, fastest 20.41 s, detects 0.32</td><td>cold 42.78 s, fastest 42.62 s, internal 42.51 s, detects 0.32</td><td>not run</td></tr><tr><td>lowent 200q d16 100 shots</td><td>cold 40.60 s, fastest 40.50 s, detects 0.33</td><td>cold 93.68 s, fastest 93.23 s, internal 93.05 s, detects 0.33</td><td>not run</td></tr><tr><td>lowent 500q d16 100 shots</td><td>cold 115.57 s, fastest 114.99 s, detects 0.33</td><td>cold 243.15 s, fastest 245.02 s, internal 244.35 s, detects 0.33</td><td>not run</td></tr><tr><td>lowent 1000q d16 100 shots</td><td>cold 228.28 s, fastest 228.23 s, detects 0.33</td><td>cold 496.04 s, fastest 497.40 s, internal 496.16 s, detects 0.33</td><td>not run</td></tr></tbody></table></details>
+</figure>
+
+<figure class="pq-figure" data-chart="sweep">
+<p class="pq-kicker">MPS bond cap against expectation-value error · brickwork depth 8</p>
+<p class="pq-title">Largest error in Z and adjacent ZZ against the exact value, 32 and 48 qubits; every simulator is within <span class="pq-nw">1e-8</span> from bond cap 16 at 48 qubits</p>
+<div class="pq-plot"></div>
+<p class="pq-note">Error is the largest absolute difference from the cone reference over every Z and adjacent ZZ value.</p>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Qubits</th><th>Bond cap</th><th>PRISM-Q MPS</th><th>Largest error</th><th>Aer MPS</th><th>Largest error</th><th>quimb MPS</th><th>Largest error</th></tr></thead><tbody><tr><td>32</td><td>2</td><td>1.03 ms</td><td>0.48</td><td>28.1 ms</td><td>0.51</td><td>245 ms</td><td>0.53</td></tr><tr><td>32</td><td>4</td><td>2.41 ms</td><td>0.18</td><td>26.1 ms</td><td>0.13</td><td>232 ms</td><td>0.16</td></tr><tr><td>32</td><td>8</td><td>3.82 ms</td><td>0.022</td><td>31.3 ms</td><td>0.01</td><td>244 ms</td><td>0.014</td></tr><tr><td>32</td><td>16</td><td>8.27 ms</td><td>4.1e-15</td><td>37.1 ms</td><td>3.1e-15</td><td>238 ms</td><td>4.3e-15</td></tr><tr><td>32</td><td>32</td><td>7.79 ms</td><td>3.9e-15</td><td>34.7 ms</td><td>3.1e-15</td><td>241 ms</td><td>4.3e-15</td></tr><tr><td>48</td><td>2</td><td>1.66 ms</td><td>0.73</td><td>37.3 ms</td><td>0.53</td><td>361 ms</td><td>0.76</td></tr><tr><td>48</td><td>4</td><td>3.80 ms</td><td>0.16</td><td>35.0 ms</td><td>0.15</td><td>377 ms</td><td>0.16</td></tr><tr><td>48</td><td>8</td><td>6.14 ms</td><td>0.022</td><td>44.7 ms</td><td>0.017</td><td>367 ms</td><td>0.022</td></tr><tr><td>48</td><td>16</td><td>13.5 ms</td><td>4.9e-15</td><td>60.8 ms</td><td>5.1e-15</td><td>390 ms</td><td>3.3e-15</td></tr><tr><td>48</td><td>32</td><td>11.4 ms</td><td>6e-15</td><td>60.6 ms</td><td>5.1e-15</td><td>375 ms</td><td>3.3e-15</td></tr></tbody></table></details>
+</figure>
+
+## Tensor network expectation values {#tensor-network-expectation-values}
+
+- kahypar was unavailable, so cotengra searched paths with greedy and labels under
+  `sbplx`, with cotengrust installed for its greedy and optimal paths.
+- quimb's circuit storage is cleared on every call and a fresh optimizer built for every
+  observable, so the contraction path search is inside every timed call.
+- The timed call ends at the simulator's own result: PRISM-Q, PRISM-Q TN, PRISM-Q MPS cap
+  256 and quimb TN, expectation values; Aer MPS, a Result holding the marginal
+  probabilities of each observable's qubits.
+- Aer's matrix product state method runs with `mps_lapack=True` and `mps_omp_threads`
+  equal to the thread count.
+- The circuit is the rcs brickwork without measurements; every value is checked against
+  the exact cone reference.
+
+<figure class="pq-figure" data-chart="tn">
+<p class="pq-kicker">Expectation values · 4 Z and 4 ZZ · brickwork depth 8</p>
+<p class="pq-title">quimb TN takes 44.0x to 303x the PRISM-Q time, 32 to 256 qubits</p>
+<div class="pq-plot"></div>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>PRISM-Q TN</th><th>PRISM-Q MPS cap 256</th><th>quimb TN</th><th>Aer MPS</th></tr></thead><tbody><tr><td>rcs 32q d8 4 Z + 4 ZZ</td><td>6.72 ms</td><td>13.0 ms</td><td>6.57 ms</td><td>2.03 s (303x)</td><td>29.0 ms (4.31x)</td></tr><tr><td>rcs 64q d8 4 Z + 4 ZZ</td><td>13.8 ms</td><td>17.1 ms</td><td>13.3 ms</td><td>2.18 s (157x)</td><td>53.9 ms (3.90x)</td></tr><tr><td>rcs 128q d8 4 Z + 4 ZZ</td><td>27.8 ms</td><td>20.5 ms</td><td>26.7 ms</td><td>2.43 s (87.4x)</td><td>104 ms (3.74x)</td></tr><tr><td>rcs 256q d8 4 Z + 4 ZZ</td><td>65.0 ms</td><td>25.6 ms</td><td>57.4 ms</td><td>2.86 s (44.0x)</td><td>176 ms (2.71x)</td></tr></tbody></table><p class="pq-note">Cold call, fastest warm call, the time Aer reports for itself, and the smallest shift in a marginal a sampled check detects:</p><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>PRISM-Q TN</th><th>PRISM-Q MPS cap 256</th><th>quimb TN</th><th>Aer MPS</th></tr></thead><tbody><tr><td>rcs 32q d8 4 Z + 4 ZZ</td><td>cold 8.17 ms, fastest 6.08 ms</td><td>cold 14.5 ms, fastest 12.3 ms</td><td>cold 11.7 ms, fastest 6.00 ms</td><td>cold 3.36 s, fastest 2.02 s</td><td>cold 34.9 ms, fastest 28.0 ms, internal 9.46 ms</td></tr><tr><td>rcs 64q d8 4 Z + 4 ZZ</td><td>cold 14.3 ms, fastest 13.2 ms</td><td>cold 16.2 ms, fastest 16.9 ms</td><td>cold 15.6 ms, fastest 13.0 ms</td><td>cold 3.25 s, fastest 2.16 s</td><td>cold 58.6 ms, fastest 49.1 ms, internal 13.1 ms</td></tr><tr><td>rcs 128q d8 4 Z + 4 ZZ</td><td>cold 26.7 ms, fastest 26.9 ms</td><td>cold 19.1 ms, fastest 18.6 ms</td><td>cold 26.6 ms, fastest 26.6 ms</td><td>cold 3.50 s, fastest 2.38 s</td><td>cold 92.0 ms, fastest 89.5 ms, internal 16.1 ms</td></tr><tr><td>rcs 256q d8 4 Z + 4 ZZ</td><td>cold 68.2 ms, fastest 62.5 ms</td><td>cold 28.5 ms, fastest 23.4 ms</td><td>cold 55.8 ms, fastest 55.7 ms</td><td>cold 3.95 s, fastest 2.82 s</td><td>cold 197 ms, fastest 170 ms, internal 18.9 ms</td></tr></tbody></table></details>
+</figure>
+
+## Shot sampling {#shot-sampling}
+
+- The timed call ends at the simulator's own result: PRISM-Q, a histogram; Aer and Aer
+  fp32, a Result holding a histogram; qsim fp32, a per-shot measurement array, which
+  qsimcirq's `run` builds by expanding each shot into Python bools.
+- Smallest shift in a marginal the sampled check detects: PRISM-Q 0.002 to 0.067, Aer
+  0.002 to 0.067, Aer fp32 0.002 to 0.067 and qsim fp32 0.002 to 0.067; checks above 0.05
+  are marked weakly tested.
+- qsim runs with `max_fused_gate_size` 3 at 16 and 20 qubits and 4 at 24 qubits.
 - Time covers building the state and drawing every shot.
 
 <figure class="pq-figure" data-chart="sampling">
 <p class="pq-kicker">Statevector sampling · rcs depth 10</p>
-<p class="pq-title">Aer takes 6.93x to 33.8x the PRISM-Q time, 16 to 24 qubits</p>
+<p class="pq-title">Aer takes 4.82x to 27.4x the PRISM-Q time, 16 to 24 qubits</p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer</th><th>Aer fp32</th><th>qsim fp32</th></tr></thead><tbody><tr><td>sampling 16q 1 shot</td><td>4.06 ms</td><td>49.1 ms</td><td>52.0 ms</td><td>32.8 ms</td></tr><tr><td>sampling 16q 1M shots</td><td>50.3 ms</td><td>1.70 s (33.8x)</td><td>1.63 s (32.5x)</td><td>3.63 s (72.2x)</td></tr><tr><td>sampling 20q 1 shot</td><td>33.5 ms</td><td>211 ms</td><td>150 ms</td><td>60.5 ms</td></tr><tr><td>sampling 20q 1k shots</td><td>32.5 ms</td><td>226 ms (6.93x)</td><td>159 ms (4.89x)</td><td>84.7 ms (2.60x)</td></tr><tr><td>sampling 20q 100k shots</td><td>50.2 ms</td><td>454 ms (9.04x)</td><td>413 ms (8.22x)</td><td>523 ms (10.4x)</td></tr><tr><td>sampling 20q 1M shots</td><td>144 ms</td><td>2.29 s (15.9x)</td><td>2.29 s (15.9x)</td><td>4.32 s (30.0x)</td></tr><tr><td>sampling 20q half measured 1M shots</td><td>80.0 ms</td><td>1.62 s (20.2x)</td><td>1.59 s (19.9x)</td><td>4.20 s (52.5x)</td></tr><tr><td>sampling 24q 1 shot</td><td>581 ms</td><td>3.17 s</td><td>2.29 s</td><td>2.09 s</td></tr><tr><td>sampling 24q 1M shots</td><td>796 ms</td><td>10.61 s (13.3x)</td><td>8.00 s (10.0x)</td><td>6.93 s (8.71x)</td></tr></tbody></table></details>
+<p class="pq-note">* output not checked; † weakly tested: the check detects only shifts above 0.05 in a marginal.</p>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer</th><th>Aer fp32</th><th>qsim fp32</th></tr></thead><tbody><tr><td>sampling 16q 1 shot</td><td>2.26 ms*</td><td>27.5 ms*</td><td>25.0 ms*</td><td>14.2 ms*</td></tr><tr><td>sampling 16q 1M shots</td><td>47.0 ms</td><td>1.29 s (27.4x)</td><td>1.30 s (27.5x)</td><td>3.28 s (69.7x)</td></tr><tr><td>sampling 20q 1 shot</td><td>31.5 ms*</td><td>155 ms*</td><td>105 ms*</td><td>38.3 ms*</td></tr><tr><td>sampling 20q 1k shots</td><td>31.6 ms†</td><td>152 ms (4.82x)†</td><td>108 ms (3.41x)†</td><td>49.5 ms (1.57x)†</td></tr><tr><td>sampling 20q 100k shots</td><td>48.6 ms</td><td>346 ms (7.11x)</td><td>294 ms (6.05x)</td><td>458 ms (9.42x)</td></tr><tr><td>sampling 20q 1M shots</td><td>140 ms</td><td>2.09 s (14.9x)</td><td>2.02 s (14.4x)</td><td>4.08 s (29.1x)</td></tr><tr><td>sampling 20q half measured 1M shots</td><td>74.6 ms</td><td>1.37 s (18.3x)</td><td>1.32 s (17.7x)</td><td>4.04 s (54.1x)</td></tr><tr><td>sampling 24q 1 shot</td><td>507 ms*</td><td>2.46 s*</td><td>1.55 s*</td><td>710 ms*</td></tr><tr><td>sampling 24q 1M shots</td><td>707 ms</td><td>9.09 s (12.9x)</td><td>6.62 s (9.36x)</td><td>5.52 s (7.80x)</td></tr></tbody></table><p class="pq-note">Cold call, fastest warm call, the time Aer reports for itself, and the smallest shift in a marginal a sampled check detects:</p><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer</th><th>Aer fp32</th><th>qsim fp32</th></tr></thead><tbody><tr><td>sampling 16q 1 shot</td><td>cold 3.33 ms, fastest 2.20 ms</td><td>cold 29.8 ms, fastest 25.3 ms, internal 14.3 ms</td><td>cold 27.6 ms, fastest 24.5 ms, internal 10.6 ms</td><td>cold 16.4 ms, fastest 12.9 ms</td></tr><tr><td>sampling 16q 1M shots</td><td>cold 48.3 ms, fastest 45.5 ms, detects 0.0021</td><td>cold 1.27 s, fastest 1.24 s, internal 1.27 s, detects 0.0021</td><td>cold 1.29 s, fastest 1.24 s, internal 1.27 s, detects 0.0021</td><td>cold 3.38 s, fastest 3.23 s, detects 0.0021</td></tr><tr><td>sampling 20q 1 shot</td><td>cold 30.7 ms, fastest 29.9 ms</td><td>cold 158 ms, fastest 152 ms, internal 137 ms</td><td>cold 110 ms, fastest 102 ms, internal 91.0 ms</td><td>cold 42.2 ms, fastest 36.5 ms</td></tr><tr><td>sampling 20q 1k shots</td><td>cold 31.7 ms, fastest 31.1 ms, detects 0.067</td><td>cold 156 ms, fastest 151 ms, internal 137 ms, detects 0.067</td><td>cold 115 ms, fastest 102 ms, internal 88.4 ms, detects 0.067</td><td>cold 51.5 ms, fastest 44.4 ms, detects 0.067</td></tr><tr><td>sampling 20q 100k shots</td><td>cold 49.9 ms, fastest 47.7 ms, detects 0.0067</td><td>cold 389 ms, fastest 338 ms, internal 310 ms, detects 0.0067</td><td>cold 306 ms, fastest 283 ms, internal 256 ms, detects 0.0067</td><td>cold 446 ms, fastest 439 ms, detects 0.0067</td></tr><tr><td>sampling 20q 1M shots</td><td>cold 141 ms, fastest 137 ms, detects 0.0021</td><td>cold 2.01 s, fastest 2.06 s, internal 1.95 s, detects 0.0021</td><td>cold 1.98 s, fastest 1.95 s, internal 1.85 s, detects 0.0021</td><td>cold 4.01 s, fastest 3.99 s, detects 0.0021</td></tr><tr><td>sampling 20q half measured 1M shots</td><td>cold 75.2 ms, fastest 73.5 ms, detects 0.002</td><td>cold 1.37 s, fastest 1.36 s, internal 1.35 s, detects 0.002</td><td>cold 1.30 s, fastest 1.31 s, internal 1.30 s, detects 0.002</td><td>cold 4.03 s, fastest 3.83 s, detects 0.002</td></tr><tr><td>sampling 24q 1 shot</td><td>cold 507 ms, fastest 505 ms</td><td>cold 2.44 s, fastest 2.40 s, internal 2.44 s</td><td>cold 1.56 s, fastest 1.54 s, internal 1.53 s</td><td>cold 759 ms, fastest 704 ms</td></tr><tr><td>sampling 24q 1M shots</td><td>cold 704 ms, fastest 702 ms, detects 0.003</td><td>cold 9.09 s, fastest 9.04 s, internal 8.78 s, detects 0.003</td><td>cold 6.74 s, fastest 6.57 s, internal 6.31 s, detects 0.003</td><td>cold 5.39 s, fastest 5.42 s, detects 0.003</td></tr></tbody></table></details>
 </figure>
 
-## Disjoint components
+## Disjoint components {#disjoint-components}
 
-- PRISM-Q splits the register into independent blocks; past 40 qubits it samples shot by
-  shot.
+- Aer automatic refuses 4 of 4 rows before running: it picks its statevector method and
+  reports that the state would not fit in memory.
+- PRISM-Q resolves `Decomposed`, with route `IndependentBlocks` at 40 qubits and `PerShot`
+  at 100 and 200 qubits.
+- The timed call ends at the simulator's own result: PRISM-Q, a histogram; Aer MPS and Aer
+  automatic, a Result holding a histogram.
+- Smallest shift in a marginal the sampled check detects: PRISM-Q 0.069 to 0.073 and Aer
+  MPS 0.069 to 0.073; checks above 0.05 are marked weakly tested.
+- Aer's matrix product state method runs with `mps_lapack=True` and `mps_omp_threads`
+  equal to the thread count.
 
 <figure class="pq-figure" data-chart="disjoint">
 <p class="pq-kicker">Independent 10-qubit blocks · 1,000 shots</p>
-<p class="pq-title">Aer MPS takes 2.29x to 107x the PRISM-Q time, 40 to 200 qubits</p>
+<p class="pq-title">Aer MPS takes 2.83x to 142x the PRISM-Q time, 40 to 200 qubits</p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer MPS</th><th>Aer automatic</th></tr></thead><tbody><tr><td>disjoint 40q contiguous 1k shots</td><td>2.09 ms</td><td>223 ms (107x)</td><td>out of memory</td></tr><tr><td>disjoint 40q strided 1k shots</td><td>2.46 ms</td><td>224 ms (91.1x)</td><td>out of memory</td></tr><tr><td>disjoint 100q contiguous 1k shots</td><td>203 ms</td><td>512 ms (2.52x)</td><td>out of memory</td></tr><tr><td>disjoint 200q contiguous 1k shots</td><td>405 ms</td><td>926 ms (2.29x)</td><td>out of memory</td></tr></tbody></table></details>
+<p class="pq-note">† weakly tested: the check detects only shifts above 0.05 in a marginal.</p>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer MPS</th><th>Aer automatic</th></tr></thead><tbody><tr><td>disjoint 40q contiguous 1k shots</td><td>1.56 ms†</td><td>221 ms (142x)†</td><td>refused, statevector would not fit</td></tr><tr><td>disjoint 40q strided 1k shots</td><td>1.60 ms†</td><td>221 ms (138x)†</td><td>refused, statevector would not fit</td></tr><tr><td>disjoint 100q contiguous 1k shots</td><td>193 ms†</td><td>560 ms (2.90x)†</td><td>refused, statevector would not fit</td></tr><tr><td>disjoint 200q contiguous 1k shots</td><td>384 ms†</td><td>1.09 s (2.83x)†</td><td>refused, statevector would not fit</td></tr></tbody></table><p class="pq-note">Cold call, fastest warm call, the time Aer reports for itself, and the smallest shift in a marginal a sampled check detects:</p><table><thead><tr><th>Workload</th><th>PRISM-Q</th><th>Aer MPS</th><th>Aer automatic</th></tr></thead><tbody><tr><td>disjoint 40q contiguous 1k shots</td><td>cold 2.11 ms, fastest 1.44 ms, detects 0.069</td><td>cold 214 ms, fastest 217 ms, internal 188 ms, detects 0.069</td><td>refused, statevector would not fit</td></tr><tr><td>disjoint 40q strided 1k shots</td><td>cold 2.14 ms, fastest 1.51 ms, detects 0.069</td><td>cold 230 ms, fastest 218 ms, internal 192 ms, detects 0.069</td><td>refused, statevector would not fit</td></tr><tr><td>disjoint 100q contiguous 1k shots</td><td>cold 192 ms, fastest 192 ms, detects 0.072</td><td>cold 580 ms, fastest 554 ms, internal 485 ms, detects 0.072</td><td>refused, statevector would not fit</td></tr><tr><td>disjoint 200q contiguous 1k shots</td><td>cold 399 ms, fastest 383 ms, detects 0.073</td><td>cold 1.19 s, fastest 1.07 s, internal 924 ms, detects 0.073</td><td>refused, statevector would not fit</td></tr></tbody></table></details>
 </figure>
 
 ## Every row
@@ -119,9 +266,9 @@ checked against a reference.
 
 <figure class="pq-figure" data-chart="threads">
 <p class="pq-kicker">Strong scaling · 1 to 8 threads</p>
-<p class="pq-title">PRISM-Q time at 1 thread is 2.32x to 3.67x its time at 8 threads</p>
+<p class="pq-title">PRISM-Q time at 1 thread is 2.30x to 3.51x its time at 8 threads</p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>8 threads over 1</th><th>PRISM-Q</th><th>Aer</th><th>qsim fp32</th><th>QuEST</th></tr></thead><tbody><tr><td>qft 22q</td><td>2.32x</td><td>2.97x</td><td>1.16x</td><td>2.07x</td></tr><tr><td>qv 20q</td><td>2.98x</td><td>3.00x</td><td>1.25x</td><td>2.29x</td></tr><tr><td>rcs 22q d10</td><td>3.67x</td><td>3.50x</td><td>1.03x</td><td>1.68x</td></tr></tbody></table></details>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>8 threads over 1</th><th>PRISM-Q</th><th>Aer</th><th>qsim fp32</th><th>QuEST</th></tr></thead><tbody><tr><td>qft 22q</td><td>2.30x</td><td>3.46x</td><td>1.31x</td><td>1.49x</td></tr><tr><td>qv 20q</td><td>3.07x</td><td>4.00x</td><td>2.78x</td><td>2.08x</td></tr><tr><td>rcs 22q d10</td><td>3.51x</td><td>4.30x</td><td>3.43x</td><td>1.48x</td></tr></tbody></table></details>
 </figure>
 
 ## Automatic dispatch
@@ -132,7 +279,7 @@ checked against a reference.
 <p class="pq-kicker">Auto against every forced backend</p>
 <p class="pq-title">Automatic dispatch takes 0.95x to 1.05x the time of the fastest forced backend on 7 rows</p>
 <div class="pq-plot"></div>
-<p class="pq-note">Forced backends without a valid output: factored (2 refused); factored-stabilizer (6 refused); mps-64 (1 invalid); sparse (2 refused); stabilizer (6 refused); tensor-network (2 timeout).</p>
+<p class="pq-note">Forced backends without a valid output: factored (2 refused); mps-64 (1 invalid); sparse (2 refused); tensor-network (2 timeout).</p>
 <details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>Automatic choice</th><th>Fastest forced backend</th><th>Automatic / fastest</th></tr></thead><tbody><tr><td>rcs 20q d10</td><td>Statevector, 30.1 ms</td><td>statevector, 30.0 ms</td><td>1.00x</td></tr><tr><td>qft 20q</td><td>Statevector, 17.9 ms</td><td>statevector, 17.5 ms</td><td>1.03x</td></tr><tr><td>clifford 1000q 1k shots</td><td>CompiledStabilizer, 4.37 ms</td><td>stabilizer, 4.60 ms</td><td>0.95x</td></tr><tr><td>lowent 100q d4 1k shots</td><td>Mps, 6.92 ms</td><td>mps-64, 6.57 ms</td><td>1.05x</td></tr><tr><td>disjoint 100q contiguous 1k shots</td><td>Decomposed, 209 ms</td><td>factored, 211 ms</td><td>0.99x</td></tr><tr><td>midcircuit 12q 1k shots</td><td>Statevector, 9.58 ms</td><td>statevector, 9.62 ms</td><td>1.00x</td></tr><tr><td>sampling 20q 100k shots</td><td>Statevector, 53.8 ms</td><td>statevector, 54.4 ms</td><td>0.99x</td></tr></tbody></table></details>
 </figure>
 
@@ -143,59 +290,77 @@ checked against a reference.
 
 <figure class="pq-figure" data-chart="memory">
 <p class="pq-kicker">Peak working set · rcs depth 10</p>
-<p class="pq-title">At 26 qubits PRISM-Q peaks at 1.51 GB; the bare fp64 state is 1.00 GB</p>
+<p class="pq-title">At 26 qubits PRISM-Q peaks at <span class="pq-nw">1.51 GB</span>; the bare fp64 state is <span class="pq-nw">1.00 GB</span></p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>fp64 state</th><th>PRISM-Q</th><th>Aer</th><th>QuEST</th><th>Aer fp32</th><th>qsim fp32</th></tr></thead><tbody><tr><td>rcs 20q d10</td><td>16 MB</td><td>31 MB</td><td>104 MB</td><td>45 MB</td><td>96 MB</td><td>210 MB</td></tr><tr><td>rcs 24q d10</td><td>256 MB</td><td>390 MB</td><td>464 MB</td><td>645 MB</td><td>337 MB</td><td>511 MB</td></tr><tr><td>rcs 26q d10</td><td>1.00 GB</td><td>1.51 GB</td><td>1.58 GB</td><td>n/a</td><td>1.08 GB</td><td>1.44 GB</td></tr></tbody></table></details>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Workload</th><th>fp64 state</th><th>PRISM-Q</th><th>Aer</th><th>QuEST</th><th>Aer fp32</th><th>qsim fp32</th></tr></thead><tbody><tr><td>rcs 20q d10</td><td>16 MB</td><td>31 MB</td><td>105 MB</td><td>29 MB</td><td>97 MB</td><td>215 MB</td></tr><tr><td>rcs 24q d10</td><td>256 MB</td><td>391 MB</td><td>465 MB</td><td>389 MB</td><td>337 MB</td><td>576 MB</td></tr><tr><td>rcs 26q d10</td><td>1.00 GB</td><td>1.51 GB</td><td>1.58 GB</td><td>n/a</td><td>1.08 GB</td><td>1.69 GB</td></tr></tbody></table></details>
 </figure>
 
 ## Correctness
 
-- Dense: 79 of 81 within tolerance of the fp64 reference.
-- Sampled: 76 of 76 passed; 12 under 100 shots checked on deterministic bits only.
+- Dense, total variation distance against the reference vector: 82 of 83 within tolerance.
+- Expectation values, absolute difference per value against the cone reference (⟨Z⟩ = 1 -
+  2p, ⟨ZZ⟩ = 1 - 2 P(odd)), against a simulator of another family where the cone is too
+  wide: 20 of 20 within tolerance.
+- Sampled, binomial z-test per statistic, Bonferroni family-wise alpha 1e-3: 23 of 23
+  passed; 17 of those passes detect only shifts above 0.05 in a marginal.
+- Sampled, exact binomial test per statistic against the cone reference, two-sample z-test
+  against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3:
+  91 of 91 passed; 70 of those passes detect only shifts above 0.05 in a marginal; 12
+  under 100 shots checked on deterministic bits only.
+- Statistics only, exact binomial test per statistic against the cone reference,
+  two-sample z-test against another simulator where the cone is too wide; Bonferroni
+  family-wise alpha 1e-3, on the statistics and shot total the simulator returns: 15 of 15
+  passed.
 
 Runs without a valid timing:
 
 | Simulator | Outcome | Workloads | Detail |
 | --- | --- | --- | --- |
-| Aer automatic | out of memory | 6 shallow, 4 disconnected rows | Insufficient memory to run circuit circuit-46 using the statevector simulator |
+| Aer automatic | refused, statevector would not fit | 6 shallow, 4 disconnected rows | Aer reports the statevector would not fit in memory |
 | Aer statevector (fp32) | crash | qft 20q, qft 24q, qft 26q | exit 0xC0000005 |
-| Spinoza | invalid | qft 20q | distance 0.86 from the reference |
 
 ## PRISM-Q alone
 
-- `bench_suite` on the same host, measured 2026-10-04 with PRISM-Q 0.33.0, automatic
+- `bench_suite` on the same host, measured 2026-11-10 with PRISM-Q 0.38.0, automatic
   dispatch, every logical core.
-- GHZ is Clifford and runs on the stabilizer backend into the thousands of qubits; QFT,
-  HEA and QV are dense up to the memory cap.
+- Backend each family resolved to: GHZ on `Stabilizer`; QFT, HEA and QV on `Statevector`.
+- Rows without a probability vector time the run alone: GHZ at 256, 1,024 and 4,096
+  qubits. Every other row includes the dense probability vector.
 
 <figure class="pq-figure" data-chart="suite">
-<p class="pq-kicker">bench_suite · PRISM-Q 0.33.0 · 2026-10-04</p>
+<p class="pq-kicker">bench_suite · PRISM-Q 0.38.0 · 2026-11-10</p>
 <p class="pq-title">Median time per run up to 28 dense qubits</p>
 <div class="pq-plot"></div>
-<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Family</th><th>Qubits</th><th>Median</th></tr></thead><tbody><tr><td>GHZ</td><td>24</td><td>18.8 ms</td></tr><tr><td>GHZ</td><td>28</td><td>299 ms</td></tr><tr><td>GHZ</td><td>256</td><td>243 us</td></tr><tr><td>GHZ</td><td>1,024</td><td>1.13 ms</td></tr><tr><td>GHZ</td><td>4,096</td><td>3.16 ms</td></tr><tr><td>QFT</td><td>16</td><td>903 us</td></tr><tr><td>QFT</td><td>20</td><td>13.3 ms</td></tr><tr><td>QFT</td><td>24</td><td>295 ms</td></tr><tr><td>QFT</td><td>26</td><td>1.84 s</td></tr><tr><td>QFT</td><td>28</td><td>8.35 s</td></tr><tr><td>HEA</td><td>16</td><td>3.94 ms</td></tr><tr><td>HEA</td><td>20</td><td>33.1 ms</td></tr><tr><td>HEA</td><td>24</td><td>639 ms</td></tr><tr><td>HEA</td><td>26</td><td>2.76 s</td></tr><tr><td>HEA</td><td>28</td><td>11.70 s</td></tr><tr><td>QV</td><td>16</td><td>5.78 ms</td></tr><tr><td>QV</td><td>20</td><td>79.2 ms</td></tr><tr><td>QV</td><td>24</td><td>1.54 s</td></tr></tbody></table></details>
+<details class="pq-table"><summary>Exact numbers</summary><table><thead><tr><th>Family</th><th>Qubits</th><th>Median</th></tr></thead><tbody><tr><td>GHZ</td><td>24</td><td>18.7 ms</td></tr><tr><td>GHZ</td><td>28</td><td>308 ms</td></tr><tr><td>GHZ</td><td>256</td><td>71 us</td></tr><tr><td>GHZ</td><td>1,024</td><td>604 us</td></tr><tr><td>GHZ</td><td>4,096</td><td>3.08 ms</td></tr><tr><td>QFT</td><td>16</td><td>1.06 ms</td></tr><tr><td>QFT</td><td>20</td><td>11.1 ms</td></tr><tr><td>QFT</td><td>24</td><td>179 ms</td></tr><tr><td>QFT</td><td>26</td><td>766 ms</td></tr><tr><td>QFT</td><td>28</td><td>3.08 s</td></tr><tr><td>HEA</td><td>16</td><td>2.13 ms</td></tr><tr><td>HEA</td><td>20</td><td>26.2 ms</td></tr><tr><td>HEA</td><td>24</td><td>360 ms</td></tr><tr><td>HEA</td><td>26</td><td>1.63 s</td></tr><tr><td>HEA</td><td>28</td><td>6.23 s</td></tr><tr><td>QV</td><td>16</td><td>3.65 ms</td></tr><tr><td>QV</td><td>20</td><td>58.7 ms</td></tr><tr><td>QV</td><td>24</td><td>1.21 s</td></tr></tbody></table></details>
 </figure>
 
 ## Setup and versions
 
+- All 58 shown `dispatch` records come from the older runs `20261103T090018-b6c9ed`
+  (2026-11-03, commit `fc7e0c9699` with uncommitted changes) and `20261103T202523-0a42e5`
+  (2026-11-03, commit not recorded).
+
 | Item | Value |
 | --- | --- |
 | Host | Intel Core i7-6700K, 4 cores, 8 threads, Windows 10 |
-| PRISM-Q | 0.37.0, rustc 1.99.0, `parallel` |
+| PRISM-Q | 0.38.0, rustc 1.99.0, `parallel` |
 | Python | 3.14.0 |
-| Commit | `fc7e0c9699` |
-| Runs | `20261103T090018-b6c9ed` and 8 supplementary runs |
-| Aer statevector | 0.17.2, double |
-| Aer statevector (fp32) | 0.17.2, single |
-| Aer automatic | 0.17.2, double |
-| Aer MPS | 0.17.2, double |
-| qsim (fp32) | 0.22.1, single |
-| QuEST | v4.3.0, double |
-| Spinoza | 0.5.1 (git f900971), double |
-| qip | 1.5.0, double |
-| Stim | 1.16.0, exact (tableau) |
+| Commit | `b012445717` with uncommitted changes |
+| Runs | `20261103T090018-b6c9ed` and 13 supplementary runs; the rows below describe `20261110T154405-4e1624` (provenance collected after the run, same environment) |
+| Aer statevector | 0.17.2, double, `OMP_WAIT_POLICY=PASSIVE` |
+| Aer statevector (fp32) | 0.17.2, single, `OMP_WAIT_POLICY=PASSIVE` |
+| Aer automatic | 0.17.2, double, `OMP_WAIT_POLICY=PASSIVE` |
+| Aer MPS | 0.17.2, double, `OMP_WAIT_POLICY=PASSIVE` |
+| Stim | 1.16.0, exact (tableau), package 1.16.0+avx2 loading `stim._stim_avx2` |
+| quimb TN | 1.15.0, double, cotengra 0.8.3, cotengrust 0.2.1, `OMP_WAIT_POLICY=PASSIVE` |
+| quimb MPS | 1.15.0, double, `OMP_WAIT_POLICY=PASSIVE` |
+| qsim (fp32) | 0.22.1, single, `OMP_WAIT_POLICY=PASSIVE` |
+| QuEST | v4.3.0, double, `OMP_WAIT_POLICY=PASSIVE`, built with MSVC 19.38.33145.0, /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG /arch:AVX2 -openmp |
+| Spinoza | 0.5.1 (git f900971), double, built with rustc 1.99.0-nightly, rustflags -C target-cpu=x86-64-v3 |
+| qip | 1.5.0, double, built with rustc 1.99.0-nightly, rustflags -C target-cpu=x86-64-v3 |
 
-Rerun the matrix and regenerate this page (about 90 minutes; `--profile smoke` takes about
-2):
+Rerun the matrix and regenerate this page (about three hours; `--profile smoke` takes
+about 5 minutes):
 
 ```bash
 comparison/.venv/Scripts/python comparison/matrix.py run --profile reference --out comparison/results/my-run

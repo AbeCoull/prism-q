@@ -18,6 +18,11 @@
 # first: a PASS, or a FAIL on disjoint rows. A RERUN, NO DATA, a busy host or a
 # missing report leaves the FAIL standing. `scripts/bench_ci_test.sh` covers each.
 #
+# Each run passes `--no-confirm`, so bench_ab.sh does not also re-run the
+# regressed rows itself. The whole-set rerun here is the stronger check, and the
+# nested confirmation would append a second verdict to the report and write the
+# same `ci-ab-confirm.md` this script uses for its own second run.
+#
 # Environment:
 #   PRISM_BENCH_REF       git ref for the reference build (required)
 #   PRISM_BENCH_REF_EXE   prebuilt reference executable. When it names an
@@ -157,6 +162,7 @@ args=(
     --features "$FEATURES"
     --wait-idle 120
     --settle 60
+    --no-confirm
 )
 
 if [[ -n "${PRISM_BENCH_REF_EXE:-}" && -f "${PRISM_BENCH_REF_EXE}" ]]; then
@@ -204,13 +210,17 @@ echo
 CONFIRM_STATUS=0
 bash "$SCRIPT_DIR/bench_ab.sh" "${args[@]}" --out "$CONFIRM" || CONFIRM_STATUS=$?
 
+# The first verdict line only: a report that carries a follow-up of its own has
+# a second one below it.
 CONFIRM_VERDICT=""
 if [[ -f "$CONFIRM" ]]; then
-    CONFIRM_VERDICT="$(sed -n 's/^\*\*Regression verdict\*\*: \([A-Z][A-Z ]*[A-Z]\).*/\1/p' "$CONFIRM")"
+    CONFIRM_VERDICT="$(sed -n 's/^\*\*Regression verdict\*\*: \([A-Z][A-Z ]*[A-Z]\).*/\1/p' "$CONFIRM" | head -n 1)"
 fi
 
+# CONTROL is the verdict a same-code run gives in place of PASS, as a local
+# PRISM_BENCH_REF=HEAD on a clean tree does.
 case "$CONFIRM_STATUS/$CONFIRM_VERDICT" in
-    0/PASS)
+    0/PASS|0/CONTROL)
         echo "Second run passes. Treating the first as unconfirmed."
         exit 0
         ;;

@@ -1,0 +1,3 @@
+# AVX2 and FMA, matching the instruction sets PRISM-Q dispatches to at run time.
+[build]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

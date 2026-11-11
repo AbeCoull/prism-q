@@ -86,7 +86,14 @@
         "psutil": "7.2.2",
         "scipy": "1.18.1",
         "matplotlib": "3.11.2",
-        "stim": "1.16.0"
+        "stim": "1.16.0+avx2",
+        "quimb": "1.15.0",
+        "cotengra": "0.8.3",
+        "cotengrust": "0.2.1",
+        "autoray": "0.11.0",
+        "numba": "0.68.1",
+        "llvmlite": "0.50.0",
+        "cytoolz": "1.2.0"
       }
     },
     "simulators": {
@@ -100,7 +107,9 @@
       "qsim": "0.22.1",
       "quest": "v4.3.0",
       "spinoza": "0.5.1 (git f900971)",
-      "stim": "1.16.0"
+      "stim": "1.16.0",
+      "quimb-mps": "1.15.0",
+      "quimb-tn": "1.15.0"
     },
     "threads": {
       "requested": 8,
@@ -225,6 +234,33 @@
         "counts"
       ],
       "version": "1.16.0"
+    },
+    "quimb-tn": {
+      "label": "quimb (tensor network, cotengra paths)",
+      "kind": "python",
+      "precision": "double",
+      "representation": "tensor network contracted per observable over its reverse light cone",
+      "modes": [
+        "expval"
+      ],
+      "env": {
+        "OMP_WAIT_POLICY": "PASSIVE"
+      },
+      "version": "1.15.0"
+    },
+    "quimb-mps": {
+      "label": "quimb (CircuitMPS)",
+      "kind": "python",
+      "precision": "double",
+      "representation": "matrix product state",
+      "modes": [
+        "counts",
+        "expval"
+      ],
+      "env": {
+        "OMP_WAIT_POLICY": "PASSIVE"
+      },
+      "version": "1.15.0"
     }
   },
   "finished_utc": "2026-11-03T15:30:54+00:00",
@@ -419,6 +455,3188 @@
       ],
       "finished_utc": "2026-11-04T02:10:16+00:00",
       "wall_minutes": 44.82
+    },
+    {
+      "run_id": "20261110T124244-ee533a",
+      "command": "matrix.py run --profile reference --out results/matrix-reference-i7-6700k --append --replace --drop-other-simulators --no-build --groups headline,sampling,seeds,accuracy,threads",
+      "started_utc": "2026-11-10T17:42:48+00:00",
+      "machine_warnings": [],
+      "code_sha256": {
+        "compare_runner": "5b10f3a0a624d2dd46dcdf7c5c964654746cee5db6f556b70b333d6328eb00b0",
+        "peers": "949b622a0448c765fedf42da59598fd2c4a5f56ba36c9d3383de20ddcba4037d",
+        "quest_runner": "e272bbd6ea735db284d5f026fc0e7e3058383985d10ecb441b8ed5265d5352d4",
+        "matrix.py": "e51db0ad123c4c1651205ceefb23f04fe51fbe25f7146254b9d0e0fe1ca56cc2",
+        "harness/__init__.py": "d497707e1bcc5bcc4b012465feb89dd7042f272f7dfcbff76ad3312226945444",
+        "harness/aggregate.py": "6951d36e2186b2890ea1f64895373cfaf5d4cb973ce1c863de893b2d514f08ee",
+        "harness/pages.py": "6e53432a67a498c260e2b607aea8d65660c48b09fbacff13bc1297e596011029",
+        "harness/profiles.py": "424719a6f4fd81700f793ebf9b10250c8fe2137cd295c6fd58563f2cc80f807c",
+        "harness/provenance.py": "4d694204a6240b4fbbd3f51618f3b5167fba97cbac77a95456c5d652290e73a6",
+        "harness/reference.py": "ad50b028c6b3bd69eda58c15e0f85b30f318c49cd856812dd9b865bd87d16485",
+        "harness/runners.py": "8b98394deb7030cbe97f0da0ce66a2b6d05040a099455945d3b05e619a0241d7",
+        "harness/stats.py": "05faeaa4d8ef32355ea93e5625b5f764ad987c1f3ccb24698544dfd1bfd3481a",
+        "harness/validate.py": "2be85ee3945f27a4e73d292f4b7e3fbae04b2b076311380ac3e9312f36eb457f",
+        "harness/worker.py": "84c804ed86f26549e1e0b3a31d7b6c9b739b0a55133c1c4f62661531777a813e",
+        "harness/workloads.py": "a3436e085cfd5b57c4bfb958260c597d5e3eee2f14ad9b9d46e99426662955f2"
+      },
+      "replaced_records": 217,
+      "retired": [],
+      "skipped_peers": [],
+      "smoke": {
+        "prismq": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            },
+            "probs": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 0"
+            }
+          }
+        },
+        "aer-automatic": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            }
+          }
+        },
+        "aer-mps": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            }
+          }
+        },
+        "aer-mps:16": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 2.4e-15"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 1.9e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 4.1e-16"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.5e-16"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 2.2e-16"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.3e-16"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 5.8e-16"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            }
+          }
+        },
+        "aer-mps:2": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 2.4e-15"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 1.9e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 4.1e-16"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.5e-16"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 2.2e-16"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.3e-16"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 5.8e-16"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            }
+          }
+        },
+        "aer-mps:32": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 2.4e-15"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 1.9e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 4.1e-16"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.5e-16"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 2.2e-16"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.3e-16"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 5.8e-16"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            }
+          }
+        },
+        "aer-mps:4": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 2.4e-15"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 1.9e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 4.1e-16"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.5e-16"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 2.2e-16"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.3e-16"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 5.8e-16"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            }
+          }
+        },
+        "aer-mps:8": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 2.4e-15"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 1.9e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 4.1e-16"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.5e-16"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 2.2e-16"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.3e-16"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 5.8e-16"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2e-16"
+            }
+          }
+        },
+        "aer-statevector": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            },
+            "probs": {
+              "result": "pass",
+              "detail": "distance 3.2e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.4e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 1.9e-16"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 1.9e-16"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 1.6e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 1.8e-16"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 1.8e-16"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2.4e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.1e-16"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 1.8e-16"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 1.8e-16"
+            }
+          }
+        },
+        "aer-statevector-f32": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            },
+            "probs": {
+              "result": "pass",
+              "detail": "distance 5.7e-08"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 6.8e-08"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 7.1e-08"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 6e-08"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 5.7e-08"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 7e-08"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 6.9e-08"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 6.6e-08"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 6.9e-08"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 6.9e-08"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 5.8e-08"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 5.9e-08"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 5.9e-08"
+            }
+          }
+        },
+        "prismq:mps-16": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 7.7e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 2.8e-15"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 3e-15"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.5e-15"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            }
+          }
+        },
+        "prismq:mps-2": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 8.1e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 2.8e-15"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 3e-15"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.5e-15"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            }
+          }
+        },
+        "prismq:mps-32": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 7.7e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 2.8e-15"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 3e-15"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.5e-15"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            }
+          }
+        },
+        "prismq:mps-4": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 7.7e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 2.8e-15"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 3e-15"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.5e-15"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            }
+          }
+        },
+        "prismq:mps-8": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 7.7e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 2.8e-15"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 3e-15"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2.9e-15"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.5e-15"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2.7e-15"
+            }
+          }
+        },
+        "prismq:no-qft-block": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 0"
+            }
+          }
+        },
+        "prismq:statevector": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 0"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 0"
+            }
+          }
+        },
+        "qip": {
+          "ok": true,
+          "version": "1.5.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 4.2e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 3.4e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.8e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 2.6e-16"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.9e-16"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 3.4e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 3.2e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.8e-16"
+            }
+          }
+        },
+        "qsim": {
+          "ok": true,
+          "version": "0.22.1",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            },
+            "probs": {
+              "result": "pass",
+              "detail": "distance 5.8e-07"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 2.4e-07"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 1.6e-07"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 1.7e-07"
+            },
+            "gate cz": {
+              "result": "pass",
+              "detail": "distance 1.7e-07"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.5e-07"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.4e-07"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 2.4e-07"
+            },
+            "gate s": {
+              "result": "pass",
+              "detail": "distance 2.5e-07"
+            },
+            "gate sdg": {
+              "result": "pass",
+              "detail": "distance 2.5e-07"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 1.7e-07"
+            },
+            "gate x": {
+              "result": "pass",
+              "detail": "distance 2.4e-07"
+            },
+            "gate z": {
+              "result": "pass",
+              "detail": "distance 2.4e-07"
+            }
+          }
+        },
+        "quest": {
+          "ok": true,
+          "version": "v4.3.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 4.2e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 3.4e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.8e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 2.6e-16"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.7e-16"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 3.4e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 3.2e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.8e-16"
+            }
+          }
+        },
+        "spinoza": {
+          "ok": true,
+          "version": "0.5.1 (git f900971)",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 4.2e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 3.7e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 3e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 2.8e-16"
+            },
+            "gate h": {
+              "result": "skipped",
+              "detail": "Spinoza's multithreaded H (2 or more threads, 15 or more qubits) returns a state 0.05 to 0.3 from the reference in total variation distance at git f900971"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 3.9e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 3.5e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.5e-16"
+            }
+          }
+        },
+        "stim": {
+          "ok": true,
+          "version": "1.16.0",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            }
+          }
+        }
+      },
+      "workloads": [
+        "rcs/n20/depth=10/seed=deadbeef/probs",
+        "rcs/n20/depth=20/seed=deadbeef/probs",
+        "qft/n20/input=product/seed=deadbeef/probs",
+        "rcs/n24/depth=10/seed=deadbeef/probs",
+        "rcs/n24/depth=20/seed=deadbeef/probs",
+        "qft/n24/input=product/seed=deadbeef/probs",
+        "rcs/n26/depth=10/seed=deadbeef/probs",
+        "rcs/n26/depth=20/seed=deadbeef/probs",
+        "qft/n26/input=product/seed=deadbeef/probs",
+        "qv/n16/seed=deadbeef/probs",
+        "qv/n20/seed=deadbeef/probs",
+        "qv/n24/seed=deadbeef/probs",
+        "clifford/n100/depth=8/seed=deadbeef/counts1000",
+        "clifford/n1000/depth=8/seed=deadbeef/counts1000",
+        "clifford/n10000/depth=8/seed=deadbeef/counts1000",
+        "lowent/n50/depth=4/seed=deadbeef/counts1000",
+        "lowent/n50/depth=8/seed=deadbeef/counts1000",
+        "lowent/n100/depth=4/seed=deadbeef/counts1000",
+        "lowent/n100/depth=8/seed=deadbeef/counts1000",
+        "lowent/n200/depth=4/seed=deadbeef/counts1000",
+        "lowent/n200/depth=8/seed=deadbeef/counts1000",
+        "disjoint/n40/block=10/depth=10/layout=contiguous/seed=deadbeef/counts1000",
+        "disjoint/n100/block=10/depth=10/layout=contiguous/seed=deadbeef/counts1000",
+        "disjoint/n200/block=10/depth=10/layout=contiguous/seed=deadbeef/counts1000",
+        "disjoint/n40/block=10/depth=10/layout=strided/seed=deadbeef/counts1000",
+        "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1",
+        "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1000",
+        "sampling/n20/depth=10/measured=all/seed=deadbeef/counts100000",
+        "sampling/n20/depth=10/measured=all/seed=deadbeef/counts1000000",
+        "sampling/n16/depth=10/measured=all/seed=deadbeef/counts1",
+        "sampling/n16/depth=10/measured=all/seed=deadbeef/counts1000000",
+        "sampling/n24/depth=10/measured=all/seed=deadbeef/counts1",
+        "sampling/n24/depth=10/measured=all/seed=deadbeef/counts1000000",
+        "sampling/n20/depth=10/measured=half/seed=deadbeef/counts1000000",
+        "midcircuit/n12/rounds=3/seed=deadbeef/counts1000",
+        "midcircuit/n12/rounds=3/seed=deadbeef/counts10000",
+        "midcircuit/n18/rounds=3/seed=deadbeef/counts1000",
+        "rcs/n22/depth=10/seed=deadbeef/probs",
+        "qft/n22/input=product/seed=deadbeef/probs",
+        "qv/n20/seed=deadbeef/probs",
+        "rcs/n20/depth=10/seed=deadbeef/probs",
+        "rcs/n20/depth=10/seed=deadbef0/probs",
+        "qv/n20/seed=deadbef0/probs",
+        "rcs/n20/depth=10/seed=deadbef1/probs",
+        "qv/n20/seed=deadbef1/probs"
+      ],
+      "finished_utc": "2026-11-10T18:38:21+00:00",
+      "wall_minutes": 55.53,
+      "memory_method": "largest PeakWorkingSetSize over the child and its descendants, sampled every 20 ms and once more after exit; the counter only rises, so the last sample bounds the peak from below",
+      "timed_region": {
+        "probs": "execute the circuit and materialize the full 2^n probability vector",
+        "counts": "execute the circuit and return the simulator's own shot result (PRISM-Q's count map, Aer's Result, qsim's measurement array, Stim's bit-packed sample array, quimb's sample list)",
+        "expval": "execute the circuit and return every requested expectation value (PRISM-Q's expectation_values, Aer's saved marginal probabilities over each observable's qubits, quimb's local_expectation per observable); quimb's tensor network finds a fresh contraction path for every observable inside the timed call, and quimb's CircuitMPS applies the gates inside it",
+        "stats": "compile the sampler and draw every shot into the simulator's packed shot buffer (PRISM-Q's compile_measurements and CompiledSampler::try_sample_bulk_packed, Stim's compile_sampler and sample with bit_packed=True), in buffers of at most 64 MiB; reducing each buffer to the selected statistics happens outside the timer on both sides",
+        "excluded": "process start, imports, building the circuit object from the gate list, conversion to the harness file format"
+      },
+      "repetition_policy": "one cold call, then up to `iterations` warm calls in the same process; stop early once the warm calls have used `budget_s`, never below `min_iterations`",
+      "validation": {
+        "probs": "total variation distance against the fp64 reference simulator's vector; Aer is the reference only within 1e-08 of QuEST where QuEST ran on the row",
+        "counts": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3",
+        "stats": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3, on the statistics and shot total the simulator returns",
+        "expval": "absolute difference per value against the cone reference (<Z> = 1 - 2p, <ZZ> = 1 - 2 P(odd)), against a simulator of another family where the cone is too wide; tolerance 1e-08 for fp64 and 1e-05 for fp32 simulators; the bond-cap sweep reports the largest error without a pass or fail",
+        "family_alpha": 0.001,
+        "stored_outputs": "gzipped outputs of the reference candidates under `outputs/`, named by `output_file`"
+      },
+      "provenance": {
+        "host": {
+          "cpu_model": "Intel(R) Core(TM) i7-6700K CPU @ 4.00GHz",
+          "arch": "AMD64",
+          "logical_cores": 8,
+          "physical_cores": 4,
+          "ram_gb": 31.9,
+          "os": "Windows 10",
+          "cpu_flags": [
+            "AVX",
+            "AVX2",
+            "F16C",
+            "FMA3",
+            "SSE42"
+          ],
+          "cpu_affinity": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "cpu_freq_mhz": {
+            "current": 4008.0,
+            "max": 4008.0
+          },
+          "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)",
+          "gpu": [
+            "NVIDIA GeForce GTX 1080 Ti, 11264 MiB, 581.42"
+          ],
+          "numpy_blas": "scipy-openblas 0.3.33.112.0",
+          "environment": {
+            "RAYON_NUM_THREADS": null,
+            "OMP_NUM_THREADS": null,
+            "RUSTFLAGS": null,
+            "PRISM_MAX_SV_QUBITS": null,
+            "PRISM_AVX512": null,
+            "PRISM_NO_QFT_BLOCK": null,
+            "OMP_PROC_BIND": null,
+            "KMP_AFFINITY": null
+          },
+          "timer": "time.perf_counter in Python, std::time::Instant in Rust; QuEST, Spinoza, qip use their own monotonic clocks"
+        },
+        "toolchain": {
+          "rustc": "1.99.0",
+          "rustc_peers": "1.99.0-nightly",
+          "cxx_compiler": "MSVC 19.38.33145.0",
+          "cargo_profile": "release",
+          "cargo_features": "parallel",
+          "rustflags": "",
+          "git_sha": "b012445717f411e9144babfb40d1942a5fc788bf",
+          "git_dirty": false,
+          "native_builds": {
+            "quest_runner": "MSVC 19.38.33145.0, /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG /arch:AVX2 -openmp",
+            "peers": "rustflags -C target-cpu=x86-64-v3"
+          }
+        },
+        "python": {
+          "version": "3.14.0",
+          "implementation": "CPython",
+          "packages": {
+            "qiskit": "2.5.2",
+            "qiskit-aer": "0.17.2",
+            "qsimcirq": "0.22.1",
+            "cirq-core": "1.7.0",
+            "numpy": "2.5.1",
+            "psutil": "7.2.2",
+            "scipy": "1.18.1",
+            "stim": "1.16.0+avx2",
+            "quimb": "1.15.0",
+            "cotengra": "0.8.3",
+            "cotengrust": "0.2.1",
+            "autoray": "0.11.0",
+            "numba": "0.68.1",
+            "llvmlite": "0.50.0",
+            "cytoolz": "1.2.0",
+            "kahypar": null
+          },
+          "contraction_optimizer": {
+            "preset": "auto-hq, a fresh optimizer per observable with cache=False",
+            "hyper_methods": [
+              "greedy",
+              "labels"
+            ],
+            "optlib": "sbplx",
+            "kahypar_available": false,
+            "cotengrust_available": true
+          },
+          "stim_build": {
+            "version": "1.16.0+avx2",
+            "module": "stim._stim_avx2"
+          }
+        },
+        "simulators": {
+          "aer-automatic": "0.17.2",
+          "aer-mps": "0.17.2",
+          "aer-statevector": "0.17.2",
+          "aer-statevector-f32": "0.17.2",
+          "prismq": "0.38.0",
+          "qip": "1.5.0",
+          "qsim": "0.22.1",
+          "quest": "v4.3.0",
+          "spinoza": "0.5.1 (git f900971)",
+          "stim": "1.16.0"
+        },
+        "threads": {
+          "requested": 8,
+          "rayon_num_threads": "8",
+          "omp_num_threads": "8"
+        }
+      },
+      "simulators": {
+        "prismq": {
+          "label": "PRISM-Q (auto dispatch)",
+          "kind": "exec",
+          "precision": "double",
+          "representation": "dispatcher picks per circuit",
+          "modes": [
+            "counts",
+            "expval",
+            "probs",
+            "stats"
+          ],
+          "env": {},
+          "version": "0.38.0"
+        },
+        "aer-statevector": {
+          "label": "Qiskit Aer (statevector)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "0.17.2"
+        },
+        "aer-statevector-f32": {
+          "label": "Qiskit Aer (statevector, single)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "0.17.2"
+        },
+        "aer-automatic": {
+          "label": "Qiskit Aer (automatic)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "Aer picks the method per circuit",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "0.17.2"
+        },
+        "aer-stabilizer": {
+          "label": "Qiskit Aer (stabilizer)",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau",
+          "modes": [
+            "counts"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-mps": {
+          "label": "Qiskit Aer (matrix_product_state)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "0.17.2"
+        },
+        "stim": {
+          "label": "Stim",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau, compiled sampler",
+          "modes": [
+            "counts",
+            "stats"
+          ],
+          "env": {},
+          "version": "1.16.0"
+        },
+        "quimb-tn": {
+          "label": "quimb (tensor network, cotengra paths)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "tensor network contracted per observable over its reverse light cone",
+          "modes": [
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "quimb-mps": {
+          "label": "quimb (CircuitMPS)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "qsim": {
+          "label": "qsim (qsimcirq)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "0.22.1"
+        },
+        "quest": {
+          "label": "QuEST (OpenMP)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "v4.3.0"
+        },
+        "spinoza": {
+          "label": "Spinoza",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": "0.5.1 (git f900971)"
+        },
+        "qip": {
+          "label": "RustQIP (qip)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": "1.5.0"
+        }
+      },
+      "provenance_collected": "after the run, same environment"
+    },
+    {
+      "run_id": "20261110T140407-e95734",
+      "command": "matrix.py run --profile reference --out results/matrix-reference-i7-6700k --append --replace --drop-other-simulators --no-build --groups tn,bondsweep,highshot",
+      "started_utc": "2026-11-10T19:04:10+00:00",
+      "machine_warnings": [],
+      "code_sha256": {
+        "compare_runner": "5b10f3a0a624d2dd46dcdf7c5c964654746cee5db6f556b70b333d6328eb00b0",
+        "peers": "bff47065dfa3293f9c3375e0f710f4aad13e27a988b280e0fd0172b6317e6369",
+        "quest_runner": "e272bbd6ea735db284d5f026fc0e7e3058383985d10ecb441b8ed5265d5352d4",
+        "matrix.py": "4b0fdd2e96f8c816511066bfc59b659f09a8a287b85d23472c229a7197d899c2",
+        "harness/__init__.py": "d497707e1bcc5bcc4b012465feb89dd7042f272f7dfcbff76ad3312226945444",
+        "harness/aggregate.py": "6951d36e2186b2890ea1f64895373cfaf5d4cb973ce1c863de893b2d514f08ee",
+        "harness/pages.py": "6e53432a67a498c260e2b607aea8d65660c48b09fbacff13bc1297e596011029",
+        "harness/profiles.py": "424719a6f4fd81700f793ebf9b10250c8fe2137cd295c6fd58563f2cc80f807c",
+        "harness/provenance.py": "4d694204a6240b4fbbd3f51618f3b5167fba97cbac77a95456c5d652290e73a6",
+        "harness/reference.py": "ad50b028c6b3bd69eda58c15e0f85b30f318c49cd856812dd9b865bd87d16485",
+        "harness/runners.py": "8b98394deb7030cbe97f0da0ce66a2b6d05040a099455945d3b05e619a0241d7",
+        "harness/stats.py": "05faeaa4d8ef32355ea93e5625b5f764ad987c1f3ccb24698544dfd1bfd3481a",
+        "harness/validate.py": "2be85ee3945f27a4e73d292f4b7e3fbae04b2b076311380ac3e9312f36eb457f",
+        "harness/worker.py": "84c804ed86f26549e1e0b3a31d7b6c9b739b0a55133c1c4f62661531777a813e",
+        "harness/workloads.py": "a3436e085cfd5b57c4bfb958260c597d5e3eee2f14ad9b9d46e99426662955f2"
+      },
+      "replaced_records": 0,
+      "retired": [],
+      "skipped_peers": [],
+      "smoke": {
+        "prismq": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 0"
+            },
+            "stats": {
+              "result": "pass",
+              "detail": "identical output"
+            }
+          }
+        },
+        "aer-mps": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.2e-16"
+            }
+          }
+        },
+        "aer-mps:16": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.2e-16"
+            }
+          }
+        },
+        "aer-mps:2": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.2e-16"
+            }
+          }
+        },
+        "aer-mps:32": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.2e-16"
+            }
+          }
+        },
+        "aer-mps:4": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.2e-16"
+            }
+          }
+        },
+        "aer-mps:8": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.2e-16"
+            }
+          }
+        },
+        "prismq:mps-16": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.3e-16"
+            }
+          }
+        },
+        "prismq:mps-2": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.3e-16"
+            }
+          }
+        },
+        "prismq:mps-256": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.3e-16"
+            }
+          }
+        },
+        "prismq:mps-32": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.3e-16"
+            }
+          }
+        },
+        "prismq:mps-4": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.3e-16"
+            }
+          }
+        },
+        "prismq:mps-8": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.3e-16"
+            }
+          }
+        },
+        "prismq:tensor-network": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 1.1e-16"
+            }
+          }
+        },
+        "quimb-mps:16": {
+          "ok": true,
+          "version": "1.15.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.7e-16"
+            }
+          }
+        },
+        "quimb-mps:2": {
+          "ok": true,
+          "version": "1.15.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.7e-16"
+            }
+          }
+        },
+        "quimb-mps:32": {
+          "ok": true,
+          "version": "1.15.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.7e-16"
+            }
+          }
+        },
+        "quimb-mps:4": {
+          "ok": true,
+          "version": "1.15.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.7e-16"
+            }
+          }
+        },
+        "quimb-mps:8": {
+          "ok": true,
+          "version": "1.15.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 3.7e-16"
+            }
+          }
+        },
+        "quimb-tn": {
+          "ok": true,
+          "version": "1.15.0",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 1.7e-15"
+            }
+          }
+        },
+        "stim": {
+          "ok": true,
+          "version": "1.16.0",
+          "checks": {
+            "stats": {
+              "result": "pass",
+              "detail": "identical output"
+            }
+          }
+        }
+      },
+      "workloads": [
+        "rcs/n32/depth=8/observables=4/seed=deadbeef/expval",
+        "rcs/n64/depth=8/observables=4/seed=deadbeef/expval",
+        "rcs/n128/depth=8/observables=4/seed=deadbeef/expval",
+        "rcs/n256/depth=8/observables=4/seed=deadbeef/expval",
+        "rcs/n32/depth=8/seed=deadbeef/expval",
+        "rcs/n48/depth=8/seed=deadbeef/expval",
+        "clifford/n100/depth=8/seed=deadbeef/stats1000000",
+        "clifford/n1000/depth=8/seed=deadbeef/stats1000000",
+        "clifford/n10000/depth=8/seed=deadbeef/stats1000000",
+        "clifford/n100/depth=8/seed=deadbeef/stats10000000",
+        "clifford/n1000/depth=8/seed=deadbeef/stats10000000"
+      ],
+      "finished_utc": "2026-11-10T19:18:36+00:00",
+      "wall_minutes": 14.4,
+      "memory_method": "largest PeakWorkingSetSize over the child and its descendants, sampled every 20 ms and once more after exit; the counter only rises, so the last sample bounds the peak from below",
+      "timed_region": {
+        "probs": "execute the circuit and materialize the full 2^n probability vector",
+        "counts": "execute the circuit and return the simulator's own shot result (PRISM-Q's count map, Aer's Result, qsim's measurement array, Stim's bit-packed sample array, quimb's sample list)",
+        "expval": "execute the circuit and return every requested expectation value (PRISM-Q's expectation_values, Aer's saved marginal probabilities over each observable's qubits, quimb's local_expectation per observable); quimb's tensor network finds a fresh contraction path for every observable inside the timed call, and quimb's CircuitMPS applies the gates inside it",
+        "stats": "compile the sampler and draw every shot into the simulator's packed shot buffer (PRISM-Q's compile_measurements and CompiledSampler::try_sample_bulk_packed, Stim's compile_sampler and sample with bit_packed=True), in buffers of at most 64 MiB; reducing each buffer to the selected statistics happens outside the timer on both sides",
+        "excluded": "process start, imports, building the circuit object from the gate list, conversion to the harness file format"
+      },
+      "repetition_policy": "one cold call, then up to `iterations` warm calls in the same process; stop early once the warm calls have used `budget_s`, never below `min_iterations`",
+      "validation": {
+        "probs": "total variation distance against the fp64 reference simulator's vector; Aer is the reference only within 1e-08 of QuEST where QuEST ran on the row",
+        "counts": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3",
+        "stats": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3, on the statistics and shot total the simulator returns",
+        "expval": "absolute difference per value against the cone reference (<Z> = 1 - 2p, <ZZ> = 1 - 2 P(odd)), against a simulator of another family where the cone is too wide; tolerance 1e-08 for fp64 and 1e-05 for fp32 simulators; the bond-cap sweep reports the largest error without a pass or fail",
+        "family_alpha": 0.001,
+        "stored_outputs": "gzipped outputs of the reference candidates under `outputs/`, named by `output_file`"
+      },
+      "provenance": {
+        "host": {
+          "cpu_model": "Intel(R) Core(TM) i7-6700K CPU @ 4.00GHz",
+          "arch": "AMD64",
+          "logical_cores": 8,
+          "physical_cores": 4,
+          "ram_gb": 31.9,
+          "os": "Windows 10",
+          "cpu_flags": [
+            "AVX",
+            "AVX2",
+            "F16C",
+            "FMA3",
+            "SSE42"
+          ],
+          "cpu_affinity": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "cpu_freq_mhz": {
+            "current": 4008.0,
+            "max": 4008.0
+          },
+          "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)",
+          "gpu": [
+            "NVIDIA GeForce GTX 1080 Ti, 11264 MiB, 581.42"
+          ],
+          "numpy_blas": "scipy-openblas 0.3.33.112.0",
+          "environment": {
+            "RAYON_NUM_THREADS": null,
+            "OMP_NUM_THREADS": null,
+            "RUSTFLAGS": null,
+            "PRISM_MAX_SV_QUBITS": null,
+            "PRISM_AVX512": null,
+            "PRISM_NO_QFT_BLOCK": null,
+            "OMP_PROC_BIND": null,
+            "KMP_AFFINITY": null
+          },
+          "timer": "time.perf_counter in Python, std::time::Instant in Rust; QuEST, Spinoza, qip use their own monotonic clocks"
+        },
+        "toolchain": {
+          "rustc": "1.99.0",
+          "rustc_peers": "1.99.0-nightly",
+          "cxx_compiler": "MSVC 19.38.33145.0",
+          "cargo_profile": "release",
+          "cargo_features": "parallel",
+          "rustflags": "",
+          "git_sha": "b012445717f411e9144babfb40d1942a5fc788bf",
+          "git_dirty": true,
+          "native_builds": {
+            "quest_runner": "MSVC 19.38.33145.0, /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG /arch:AVX2 -openmp",
+            "peers": "rustflags -C target-cpu=x86-64-v3"
+          }
+        },
+        "python": {
+          "version": "3.14.0",
+          "implementation": "CPython",
+          "packages": {
+            "qiskit": "2.5.2",
+            "qiskit-aer": "0.17.2",
+            "qsimcirq": "0.22.1",
+            "cirq-core": "1.7.0",
+            "numpy": "2.5.1",
+            "psutil": "7.2.2",
+            "scipy": "1.18.1",
+            "stim": "1.16.0+avx2",
+            "quimb": "1.15.0",
+            "cotengra": "0.8.3",
+            "cotengrust": "0.2.1",
+            "autoray": "0.11.0",
+            "numba": "0.68.1",
+            "llvmlite": "0.50.0",
+            "cytoolz": "1.2.0",
+            "kahypar": null
+          },
+          "contraction_optimizer": {
+            "preset": "auto-hq, a fresh optimizer per observable with cache=False",
+            "hyper_methods": [
+              "greedy",
+              "labels"
+            ],
+            "optlib": "sbplx",
+            "kahypar_available": false,
+            "cotengrust_available": true
+          },
+          "stim_build": {
+            "version": "1.16.0+avx2",
+            "module": "stim._stim_avx2"
+          }
+        },
+        "simulators": {
+          "aer-mps": "0.17.2",
+          "prismq": "0.38.0",
+          "quimb-mps": "1.15.0",
+          "quimb-tn": "1.15.0",
+          "stim": "1.16.0"
+        },
+        "threads": {
+          "requested": 8,
+          "rayon_num_threads": "8",
+          "omp_num_threads": "8"
+        }
+      },
+      "simulators": {
+        "prismq": {
+          "label": "PRISM-Q (auto dispatch)",
+          "kind": "exec",
+          "precision": "double",
+          "representation": "dispatcher picks per circuit",
+          "modes": [
+            "counts",
+            "expval",
+            "probs",
+            "stats"
+          ],
+          "env": {},
+          "version": "0.38.0"
+        },
+        "aer-statevector": {
+          "label": "Qiskit Aer (statevector)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-statevector-f32": {
+          "label": "Qiskit Aer (statevector, single)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-automatic": {
+          "label": "Qiskit Aer (automatic)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "Aer picks the method per circuit",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-stabilizer": {
+          "label": "Qiskit Aer (stabilizer)",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau",
+          "modes": [
+            "counts"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-mps": {
+          "label": "Qiskit Aer (matrix_product_state)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "0.17.2"
+        },
+        "stim": {
+          "label": "Stim",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau, compiled sampler",
+          "modes": [
+            "counts",
+            "stats"
+          ],
+          "env": {},
+          "version": "1.16.0"
+        },
+        "quimb-tn": {
+          "label": "quimb (tensor network, cotengra paths)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "tensor network contracted per observable over its reverse light cone",
+          "modes": [
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "1.15.0"
+        },
+        "quimb-mps": {
+          "label": "quimb (CircuitMPS)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "1.15.0"
+        },
+        "qsim": {
+          "label": "qsim (qsimcirq)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "quest": {
+          "label": "QuEST (OpenMP)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "spinoza": {
+          "label": "Spinoza",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": null
+        },
+        "qip": {
+          "label": "RustQIP (qip)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": null
+        }
+      },
+      "provenance_collected": "after the run, same environment"
+    },
+    {
+      "run_id": "20261110T141839-00ab11",
+      "command": "matrix.py run --profile reference --out results/matrix-reference-i7-6700k --append --replace --drop-other-simulators --no-build --groups headline --simulators qip",
+      "started_utc": "2026-11-10T19:18:41+00:00",
+      "machine_warnings": [],
+      "code_sha256": {
+        "compare_runner": "5b10f3a0a624d2dd46dcdf7c5c964654746cee5db6f556b70b333d6328eb00b0",
+        "peers": "bff47065dfa3293f9c3375e0f710f4aad13e27a988b280e0fd0172b6317e6369",
+        "quest_runner": "e272bbd6ea735db284d5f026fc0e7e3058383985d10ecb441b8ed5265d5352d4",
+        "matrix.py": "4b0fdd2e96f8c816511066bfc59b659f09a8a287b85d23472c229a7197d899c2",
+        "harness/__init__.py": "d497707e1bcc5bcc4b012465feb89dd7042f272f7dfcbff76ad3312226945444",
+        "harness/aggregate.py": "6951d36e2186b2890ea1f64895373cfaf5d4cb973ce1c863de893b2d514f08ee",
+        "harness/pages.py": "6e53432a67a498c260e2b607aea8d65660c48b09fbacff13bc1297e596011029",
+        "harness/profiles.py": "424719a6f4fd81700f793ebf9b10250c8fe2137cd295c6fd58563f2cc80f807c",
+        "harness/provenance.py": "4d694204a6240b4fbbd3f51618f3b5167fba97cbac77a95456c5d652290e73a6",
+        "harness/reference.py": "ad50b028c6b3bd69eda58c15e0f85b30f318c49cd856812dd9b865bd87d16485",
+        "harness/runners.py": "8b98394deb7030cbe97f0da0ce66a2b6d05040a099455945d3b05e619a0241d7",
+        "harness/stats.py": "05faeaa4d8ef32355ea93e5625b5f764ad987c1f3ccb24698544dfd1bfd3481a",
+        "harness/validate.py": "2be85ee3945f27a4e73d292f4b7e3fbae04b2b076311380ac3e9312f36eb457f",
+        "harness/worker.py": "84c804ed86f26549e1e0b3a31d7b6c9b739b0a55133c1c4f62661531777a813e",
+        "harness/workloads.py": "a3436e085cfd5b57c4bfb958260c597d5e3eee2f14ad9b9d46e99426662955f2"
+      },
+      "replaced_records": 5,
+      "retired": [],
+      "skipped_peers": [],
+      "smoke": {
+        "qip": {
+          "ok": true,
+          "version": "1.5.0",
+          "checks": {
+            "probs": {
+              "result": "pass",
+              "detail": "distance 4.2e-16"
+            },
+            "gate preparation": {
+              "result": "pass",
+              "detail": "distance 2.6e-16"
+            },
+            "gate cp": {
+              "result": "pass",
+              "detail": "distance 2.4e-16"
+            },
+            "gate cx": {
+              "result": "pass",
+              "detail": "distance 2.5e-16"
+            },
+            "gate h": {
+              "result": "pass",
+              "detail": "distance 2.3e-16"
+            },
+            "gate ry": {
+              "result": "pass",
+              "detail": "distance 2.5e-16"
+            },
+            "gate rz": {
+              "result": "pass",
+              "detail": "distance 2.7e-16"
+            },
+            "gate swap": {
+              "result": "pass",
+              "detail": "distance 2.5e-16"
+            }
+          }
+        }
+      },
+      "workloads": [
+        "rcs/n20/depth=10/seed=deadbeef/probs",
+        "rcs/n20/depth=20/seed=deadbeef/probs",
+        "qft/n20/input=product/seed=deadbeef/probs",
+        "qv/n16/seed=deadbeef/probs",
+        "qv/n20/seed=deadbeef/probs"
+      ],
+      "finished_utc": "2026-11-10T19:19:59+00:00",
+      "wall_minutes": 1.28,
+      "memory_method": "largest PeakWorkingSetSize over the child and its descendants, sampled every 20 ms and once more after exit; the counter only rises, so the last sample bounds the peak from below",
+      "timed_region": {
+        "probs": "execute the circuit and materialize the full 2^n probability vector",
+        "counts": "execute the circuit and return the simulator's own shot result (PRISM-Q's count map, Aer's Result, qsim's measurement array, Stim's bit-packed sample array, quimb's sample list)",
+        "expval": "execute the circuit and return every requested expectation value (PRISM-Q's expectation_values, Aer's saved marginal probabilities over each observable's qubits, quimb's local_expectation per observable); quimb's tensor network finds a fresh contraction path for every observable inside the timed call, and quimb's CircuitMPS applies the gates inside it",
+        "stats": "compile the sampler and draw every shot into the simulator's packed shot buffer (PRISM-Q's compile_measurements and CompiledSampler::try_sample_bulk_packed, Stim's compile_sampler and sample with bit_packed=True), in buffers of at most 64 MiB; reducing each buffer to the selected statistics happens outside the timer on both sides",
+        "excluded": "process start, imports, building the circuit object from the gate list, conversion to the harness file format"
+      },
+      "repetition_policy": "one cold call, then up to `iterations` warm calls in the same process; stop early once the warm calls have used `budget_s`, never below `min_iterations`",
+      "validation": {
+        "probs": "total variation distance against the fp64 reference simulator's vector; Aer is the reference only within 1e-08 of QuEST where QuEST ran on the row",
+        "counts": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3",
+        "stats": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3, on the statistics and shot total the simulator returns",
+        "expval": "absolute difference per value against the cone reference (<Z> = 1 - 2p, <ZZ> = 1 - 2 P(odd)), against a simulator of another family where the cone is too wide; tolerance 1e-08 for fp64 and 1e-05 for fp32 simulators; the bond-cap sweep reports the largest error without a pass or fail",
+        "family_alpha": 0.001,
+        "stored_outputs": "gzipped outputs of the reference candidates under `outputs/`, named by `output_file`"
+      },
+      "provenance": {
+        "host": {
+          "cpu_model": "Intel(R) Core(TM) i7-6700K CPU @ 4.00GHz",
+          "arch": "AMD64",
+          "logical_cores": 8,
+          "physical_cores": 4,
+          "ram_gb": 31.9,
+          "os": "Windows 10",
+          "cpu_flags": [
+            "AVX",
+            "AVX2",
+            "F16C",
+            "FMA3",
+            "SSE42"
+          ],
+          "cpu_affinity": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "cpu_freq_mhz": {
+            "current": 4008.0,
+            "max": 4008.0
+          },
+          "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)",
+          "gpu": [
+            "NVIDIA GeForce GTX 1080 Ti, 11264 MiB, 581.42"
+          ],
+          "numpy_blas": "scipy-openblas 0.3.33.112.0",
+          "environment": {
+            "RAYON_NUM_THREADS": null,
+            "OMP_NUM_THREADS": null,
+            "RUSTFLAGS": null,
+            "PRISM_MAX_SV_QUBITS": null,
+            "PRISM_AVX512": null,
+            "PRISM_NO_QFT_BLOCK": null,
+            "OMP_PROC_BIND": null,
+            "KMP_AFFINITY": null
+          },
+          "timer": "time.perf_counter in Python, std::time::Instant in Rust; QuEST, Spinoza, qip use their own monotonic clocks"
+        },
+        "toolchain": {
+          "rustc": "1.99.0",
+          "rustc_peers": "1.99.0-nightly",
+          "cxx_compiler": "MSVC 19.38.33145.0",
+          "cargo_profile": "release",
+          "cargo_features": "parallel",
+          "rustflags": "",
+          "git_sha": "b012445717f411e9144babfb40d1942a5fc788bf",
+          "git_dirty": true,
+          "native_builds": {
+            "quest_runner": "MSVC 19.38.33145.0, /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG /arch:AVX2 -openmp",
+            "peers": "rustflags -C target-cpu=x86-64-v3"
+          }
+        },
+        "python": {
+          "version": "3.14.0",
+          "implementation": "CPython",
+          "packages": {
+            "qiskit": "2.5.2",
+            "qiskit-aer": "0.17.2",
+            "qsimcirq": "0.22.1",
+            "cirq-core": "1.7.0",
+            "numpy": "2.5.1",
+            "psutil": "7.2.2",
+            "scipy": "1.18.1",
+            "stim": "1.16.0+avx2",
+            "quimb": "1.15.0",
+            "cotengra": "0.8.3",
+            "cotengrust": "0.2.1",
+            "autoray": "0.11.0",
+            "numba": "0.68.1",
+            "llvmlite": "0.50.0",
+            "cytoolz": "1.2.0",
+            "kahypar": null
+          },
+          "contraction_optimizer": {
+            "preset": "auto-hq, a fresh optimizer per observable with cache=False",
+            "hyper_methods": [
+              "greedy",
+              "labels"
+            ],
+            "optlib": "sbplx",
+            "kahypar_available": false,
+            "cotengrust_available": true
+          },
+          "stim_build": {
+            "version": "1.16.0+avx2",
+            "module": "stim._stim_avx2"
+          }
+        },
+        "simulators": {
+          "qip": "1.5.0"
+        },
+        "threads": {
+          "requested": 8,
+          "rayon_num_threads": "8",
+          "omp_num_threads": "8"
+        }
+      },
+      "simulators": {
+        "prismq": {
+          "label": "PRISM-Q (auto dispatch)",
+          "kind": "exec",
+          "precision": "double",
+          "representation": "dispatcher picks per circuit",
+          "modes": [
+            "counts",
+            "expval",
+            "probs",
+            "stats"
+          ],
+          "env": {},
+          "version": null
+        },
+        "aer-statevector": {
+          "label": "Qiskit Aer (statevector)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-statevector-f32": {
+          "label": "Qiskit Aer (statevector, single)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-automatic": {
+          "label": "Qiskit Aer (automatic)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "Aer picks the method per circuit",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-stabilizer": {
+          "label": "Qiskit Aer (stabilizer)",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau",
+          "modes": [
+            "counts"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-mps": {
+          "label": "Qiskit Aer (matrix_product_state)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "stim": {
+          "label": "Stim",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau, compiled sampler",
+          "modes": [
+            "counts",
+            "stats"
+          ],
+          "env": {},
+          "version": null
+        },
+        "quimb-tn": {
+          "label": "quimb (tensor network, cotengra paths)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "tensor network contracted per observable over its reverse light cone",
+          "modes": [
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "quimb-mps": {
+          "label": "quimb (CircuitMPS)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "qsim": {
+          "label": "qsim (qsimcirq)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "quest": {
+          "label": "QuEST (OpenMP)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "spinoza": {
+          "label": "Spinoza",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": null
+        },
+        "qip": {
+          "label": "RustQIP (qip)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": "1.5.0"
+        }
+      },
+      "provenance_collected": "after the run, same environment"
+    },
+    {
+      "run_id": "20261110T142439-da92a7",
+      "command": "matrix.py run --profile reference --out results/matrix-reference-i7-6700k --append --replace --drop-other-simulators --no-build --groups mpsdeep",
+      "started_utc": "2026-11-10T19:24:41+00:00",
+      "machine_warnings": [],
+      "code_sha256": {
+        "compare_runner": "5b10f3a0a624d2dd46dcdf7c5c964654746cee5db6f556b70b333d6328eb00b0",
+        "peers": "bff47065dfa3293f9c3375e0f710f4aad13e27a988b280e0fd0172b6317e6369",
+        "quest_runner": "e272bbd6ea735db284d5f026fc0e7e3058383985d10ecb441b8ed5265d5352d4",
+        "matrix.py": "7aad902a0f9fbf7f9b925b9a196dc20284220827623a97dbe95353339f21536a",
+        "harness/__init__.py": "d497707e1bcc5bcc4b012465feb89dd7042f272f7dfcbff76ad3312226945444",
+        "harness/aggregate.py": "6951d36e2186b2890ea1f64895373cfaf5d4cb973ce1c863de893b2d514f08ee",
+        "harness/pages.py": "6e53432a67a498c260e2b607aea8d65660c48b09fbacff13bc1297e596011029",
+        "harness/profiles.py": "424719a6f4fd81700f793ebf9b10250c8fe2137cd295c6fd58563f2cc80f807c",
+        "harness/provenance.py": "4d694204a6240b4fbbd3f51618f3b5167fba97cbac77a95456c5d652290e73a6",
+        "harness/reference.py": "ad50b028c6b3bd69eda58c15e0f85b30f318c49cd856812dd9b865bd87d16485",
+        "harness/runners.py": "8b98394deb7030cbe97f0da0ce66a2b6d05040a099455945d3b05e619a0241d7",
+        "harness/stats.py": "05faeaa4d8ef32355ea93e5625b5f764ad987c1f3ccb24698544dfd1bfd3481a",
+        "harness/validate.py": "2be85ee3945f27a4e73d292f4b7e3fbae04b2b076311380ac3e9312f36eb457f",
+        "harness/worker.py": "63ffa74bda427dd774e4fa7d48421eb401ac733c44ec9af48c23ec2345d91141",
+        "harness/workloads.py": "a3436e085cfd5b57c4bfb958260c597d5e3eee2f14ad9b9d46e99426662955f2"
+      },
+      "replaced_records": 0,
+      "retired": [],
+      "skipped_peers": [],
+      "smoke": {
+        "aer-mps:256": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            }
+          }
+        },
+        "prismq:mps-256": {
+          "ok": true,
+          "version": "0.38.0",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            }
+          }
+        },
+        "quimb-mps:256": {
+          "ok": true,
+          "version": "1.15.0",
+          "checks": {
+            "counts": {
+              "result": "pass",
+              "detail": "identical output"
+            }
+          }
+        }
+      },
+      "workloads": [
+        "lowent/n50/depth=12/seed=deadbeef/counts100",
+        "lowent/n50/depth=12/seed=deadbeef/counts1000",
+        "lowent/n100/depth=12/seed=deadbeef/counts100",
+        "lowent/n100/depth=12/seed=deadbeef/counts1000",
+        "lowent/n200/depth=12/seed=deadbeef/counts100",
+        "lowent/n200/depth=12/seed=deadbeef/counts1000",
+        "lowent/n500/depth=12/seed=deadbeef/counts100",
+        "lowent/n500/depth=12/seed=deadbeef/counts1000",
+        "lowent/n1000/depth=12/seed=deadbeef/counts100",
+        "lowent/n1000/depth=12/seed=deadbeef/counts1000",
+        "lowent/n50/depth=16/seed=deadbeef/counts100",
+        "lowent/n100/depth=16/seed=deadbeef/counts100",
+        "lowent/n200/depth=16/seed=deadbeef/counts100",
+        "lowent/n500/depth=16/seed=deadbeef/counts100",
+        "lowent/n1000/depth=16/seed=deadbeef/counts100"
+      ],
+      "finished_utc": "2026-11-10T20:43:54+00:00",
+      "wall_minutes": 79.2,
+      "memory_method": "largest PeakWorkingSetSize over the child and its descendants, sampled every 20 ms and once more after exit; the counter only rises, so the last sample bounds the peak from below",
+      "timed_region": {
+        "probs": "execute the circuit and materialize the full 2^n probability vector",
+        "counts": "execute the circuit and return the simulator's own shot result (PRISM-Q's count map, Aer's Result, qsim's measurement array, Stim's bit-packed sample array, quimb's sample list)",
+        "expval": "execute the circuit and return every requested expectation value (PRISM-Q's expectation_values, Aer's saved marginal probabilities over each observable's qubits, quimb's local_expectation per observable); quimb's tensor network finds a fresh contraction path for every observable inside the timed call, and quimb's CircuitMPS applies the gates inside it",
+        "stats": "compile the sampler and draw every shot into the simulator's packed shot buffer (PRISM-Q's compile_measurements and CompiledSampler::try_sample_bulk_packed, Stim's compile_sampler and sample with bit_packed=True), in buffers of at most 64 MiB; reducing each buffer to the selected statistics happens outside the timer on both sides",
+        "excluded": "process start, imports, building the circuit object from the gate list, conversion to the harness file format"
+      },
+      "repetition_policy": "one cold call, then up to `iterations` warm calls in the same process; stop early once the warm calls have used `budget_s`, never below `min_iterations`",
+      "validation": {
+        "probs": "total variation distance against the fp64 reference simulator's vector; Aer is the reference only within 1e-08 of QuEST where QuEST ran on the row",
+        "counts": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3",
+        "stats": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3, on the statistics and shot total the simulator returns",
+        "expval": "absolute difference per value against the cone reference (<Z> = 1 - 2p, <ZZ> = 1 - 2 P(odd)), against a simulator of another family where the cone is too wide; tolerance 1e-08 for fp64 and 1e-05 for fp32 simulators; the bond-cap sweep reports the largest error without a pass or fail",
+        "family_alpha": 0.001,
+        "stored_outputs": "gzipped outputs of the reference candidates under `outputs/`, named by `output_file`"
+      },
+      "provenance": {
+        "host": {
+          "cpu_model": "Intel(R) Core(TM) i7-6700K CPU @ 4.00GHz",
+          "arch": "AMD64",
+          "logical_cores": 8,
+          "physical_cores": 4,
+          "ram_gb": 31.9,
+          "os": "Windows 10",
+          "cpu_flags": [
+            "AVX",
+            "AVX2",
+            "F16C",
+            "FMA3",
+            "SSE42"
+          ],
+          "cpu_affinity": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "cpu_freq_mhz": {
+            "current": 4008.0,
+            "max": 4008.0
+          },
+          "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)",
+          "gpu": [
+            "NVIDIA GeForce GTX 1080 Ti, 11264 MiB, 581.42"
+          ],
+          "numpy_blas": "scipy-openblas 0.3.33.112.0",
+          "environment": {
+            "RAYON_NUM_THREADS": null,
+            "OMP_NUM_THREADS": null,
+            "RUSTFLAGS": null,
+            "PRISM_MAX_SV_QUBITS": null,
+            "PRISM_AVX512": null,
+            "PRISM_NO_QFT_BLOCK": null,
+            "OMP_PROC_BIND": null,
+            "KMP_AFFINITY": null
+          },
+          "timer": "time.perf_counter in Python, std::time::Instant in Rust; QuEST, Spinoza, qip use their own monotonic clocks"
+        },
+        "toolchain": {
+          "rustc": "1.99.0",
+          "rustc_peers": "1.99.0-nightly",
+          "cxx_compiler": "MSVC 19.38.33145.0",
+          "cargo_profile": "release",
+          "cargo_features": "parallel",
+          "rustflags": "",
+          "git_sha": "b012445717f411e9144babfb40d1942a5fc788bf",
+          "git_dirty": true,
+          "native_builds": {
+            "quest_runner": "MSVC 19.38.33145.0, /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG /arch:AVX2 -openmp",
+            "peers": "rustflags -C target-cpu=x86-64-v3"
+          }
+        },
+        "python": {
+          "version": "3.14.0",
+          "implementation": "CPython",
+          "packages": {
+            "qiskit": "2.5.2",
+            "qiskit-aer": "0.17.2",
+            "qsimcirq": "0.22.1",
+            "cirq-core": "1.7.0",
+            "numpy": "2.5.1",
+            "psutil": "7.2.2",
+            "scipy": "1.18.1",
+            "stim": "1.16.0+avx2",
+            "quimb": "1.15.0",
+            "cotengra": "0.8.3",
+            "cotengrust": "0.2.1",
+            "autoray": "0.11.0",
+            "numba": "0.68.1",
+            "llvmlite": "0.50.0",
+            "cytoolz": "1.2.0",
+            "kahypar": null
+          },
+          "contraction_optimizer": {
+            "preset": "auto-hq, a fresh optimizer per observable with cache=False",
+            "hyper_methods": [
+              "greedy",
+              "labels"
+            ],
+            "optlib": "sbplx",
+            "kahypar_available": false,
+            "cotengrust_available": true
+          },
+          "stim_build": {
+            "version": "1.16.0+avx2",
+            "module": "stim._stim_avx2"
+          }
+        },
+        "simulators": {
+          "aer-mps": "0.17.2",
+          "prismq": "0.38.0",
+          "quimb-mps": "1.15.0"
+        },
+        "threads": {
+          "requested": 8,
+          "rayon_num_threads": "8",
+          "omp_num_threads": "8"
+        }
+      },
+      "simulators": {
+        "prismq": {
+          "label": "PRISM-Q (auto dispatch)",
+          "kind": "exec",
+          "precision": "double",
+          "representation": "dispatcher picks per circuit",
+          "modes": [
+            "counts",
+            "expval",
+            "probs",
+            "stats"
+          ],
+          "env": {},
+          "version": "0.38.0"
+        },
+        "aer-statevector": {
+          "label": "Qiskit Aer (statevector)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-statevector-f32": {
+          "label": "Qiskit Aer (statevector, single)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-automatic": {
+          "label": "Qiskit Aer (automatic)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "Aer picks the method per circuit",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-stabilizer": {
+          "label": "Qiskit Aer (stabilizer)",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau",
+          "modes": [
+            "counts"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-mps": {
+          "label": "Qiskit Aer (matrix_product_state)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "0.17.2"
+        },
+        "stim": {
+          "label": "Stim",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau, compiled sampler",
+          "modes": [
+            "counts",
+            "stats"
+          ],
+          "env": {},
+          "version": null
+        },
+        "quimb-tn": {
+          "label": "quimb (tensor network, cotengra paths)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "tensor network contracted per observable over its reverse light cone",
+          "modes": [
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "quimb-mps": {
+          "label": "quimb (CircuitMPS)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "1.15.0"
+        },
+        "qsim": {
+          "label": "qsim (qsimcirq)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "quest": {
+          "label": "QuEST (OpenMP)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "spinoza": {
+          "label": "Spinoza",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": null
+        },
+        "qip": {
+          "label": "RustQIP (qip)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": null
+        }
+      },
+      "provenance_collected": "after the run, same environment"
+    },
+    {
+      "run_id": "20261110T154405-4e1624",
+      "command": "matrix.py run --profile reference --out results/matrix-reference-i7-6700k --append --replace --drop-other-simulators --no-build --groups tn,bondsweep --simulators aer-mps,aer-mps:2,aer-mps:4,aer-mps:8,aer-mps:16,aer-mps:32",
+      "started_utc": "2026-11-10T20:44:07+00:00",
+      "machine_warnings": [],
+      "code_sha256": {
+        "compare_runner": "5b10f3a0a624d2dd46dcdf7c5c964654746cee5db6f556b70b333d6328eb00b0",
+        "peers": "bff47065dfa3293f9c3375e0f710f4aad13e27a988b280e0fd0172b6317e6369",
+        "quest_runner": "e272bbd6ea735db284d5f026fc0e7e3058383985d10ecb441b8ed5265d5352d4",
+        "matrix.py": "7aad902a0f9fbf7f9b925b9a196dc20284220827623a97dbe95353339f21536a",
+        "harness/__init__.py": "d497707e1bcc5bcc4b012465feb89dd7042f272f7dfcbff76ad3312226945444",
+        "harness/aggregate.py": "6951d36e2186b2890ea1f64895373cfaf5d4cb973ce1c863de893b2d514f08ee",
+        "harness/pages.py": "6e53432a67a498c260e2b607aea8d65660c48b09fbacff13bc1297e596011029",
+        "harness/profiles.py": "424719a6f4fd81700f793ebf9b10250c8fe2137cd295c6fd58563f2cc80f807c",
+        "harness/provenance.py": "4d694204a6240b4fbbd3f51618f3b5167fba97cbac77a95456c5d652290e73a6",
+        "harness/reference.py": "ad50b028c6b3bd69eda58c15e0f85b30f318c49cd856812dd9b865bd87d16485",
+        "harness/runners.py": "8b98394deb7030cbe97f0da0ce66a2b6d05040a099455945d3b05e619a0241d7",
+        "harness/stats.py": "05faeaa4d8ef32355ea93e5625b5f764ad987c1f3ccb24698544dfd1bfd3481a",
+        "harness/validate.py": "2be85ee3945f27a4e73d292f4b7e3fbae04b2b076311380ac3e9312f36eb457f",
+        "harness/worker.py": "63ffa74bda427dd774e4fa7d48421eb401ac733c44ec9af48c23ec2345d91141",
+        "harness/workloads.py": "a3436e085cfd5b57c4bfb958260c597d5e3eee2f14ad9b9d46e99426662955f2"
+      },
+      "replaced_records": 14,
+      "retired": [],
+      "skipped_peers": [],
+      "smoke": {
+        "aer-mps": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.4e-16"
+            }
+          }
+        },
+        "aer-mps:16": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.4e-16"
+            }
+          }
+        },
+        "aer-mps:2": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.4e-16"
+            }
+          }
+        },
+        "aer-mps:32": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.4e-16"
+            }
+          }
+        },
+        "aer-mps:4": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.4e-16"
+            }
+          }
+        },
+        "aer-mps:8": {
+          "ok": true,
+          "version": "0.17.2",
+          "checks": {
+            "expval": {
+              "result": "pass",
+              "detail": "largest difference 4.4e-16"
+            }
+          }
+        }
+      },
+      "workloads": [
+        "rcs/n32/depth=8/observables=4/seed=deadbeef/expval",
+        "rcs/n64/depth=8/observables=4/seed=deadbeef/expval",
+        "rcs/n128/depth=8/observables=4/seed=deadbeef/expval",
+        "rcs/n256/depth=8/observables=4/seed=deadbeef/expval",
+        "rcs/n32/depth=8/seed=deadbeef/expval",
+        "rcs/n48/depth=8/seed=deadbeef/expval"
+      ],
+      "finished_utc": "2026-11-10T20:45:09+00:00",
+      "wall_minutes": 1.01,
+      "memory_method": "largest PeakWorkingSetSize over the child and its descendants, sampled every 20 ms and once more after exit; the counter only rises, so the last sample bounds the peak from below",
+      "timed_region": {
+        "probs": "execute the circuit and materialize the full 2^n probability vector",
+        "counts": "execute the circuit and return the simulator's own shot result (PRISM-Q's count map, Aer's Result, qsim's measurement array, Stim's bit-packed sample array, quimb's sample list)",
+        "expval": "execute the circuit and return every requested expectation value (PRISM-Q's expectation_values, Aer's saved marginal probabilities over each observable's qubits, quimb's local_expectation per observable); quimb's tensor network finds a fresh contraction path for every observable inside the timed call, and quimb's CircuitMPS applies the gates inside it",
+        "stats": "compile the sampler and draw every shot into the simulator's packed shot buffer (PRISM-Q's compile_measurements and CompiledSampler::try_sample_bulk_packed, Stim's compile_sampler and sample with bit_packed=True), in buffers of at most 64 MiB; reducing each buffer to the selected statistics happens outside the timer on both sides",
+        "excluded": "process start, imports, building the circuit object from the gate list, conversion to the harness file format"
+      },
+      "repetition_policy": "one cold call, then up to `iterations` warm calls in the same process; stop early once the warm calls have used `budget_s`, never below `min_iterations`",
+      "validation": {
+        "probs": "total variation distance against the fp64 reference simulator's vector; Aer is the reference only within 1e-08 of QuEST where QuEST ran on the row",
+        "counts": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3",
+        "stats": "exact binomial test per statistic against the cone reference, two-sample z-test against another simulator where the cone is too wide; Bonferroni family-wise alpha 1e-3, on the statistics and shot total the simulator returns",
+        "expval": "absolute difference per value against the cone reference (<Z> = 1 - 2p, <ZZ> = 1 - 2 P(odd)), against a simulator of another family where the cone is too wide; tolerance 1e-08 for fp64 and 1e-05 for fp32 simulators; the bond-cap sweep reports the largest error without a pass or fail",
+        "family_alpha": 0.001,
+        "stored_outputs": "gzipped outputs of the reference candidates under `outputs/`, named by `output_file`"
+      },
+      "provenance": {
+        "host": {
+          "cpu_model": "Intel(R) Core(TM) i7-6700K CPU @ 4.00GHz",
+          "arch": "AMD64",
+          "logical_cores": 8,
+          "physical_cores": 4,
+          "ram_gb": 31.9,
+          "os": "Windows 10",
+          "cpu_flags": [
+            "AVX",
+            "AVX2",
+            "F16C",
+            "FMA3",
+            "SSE42"
+          ],
+          "cpu_affinity": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "cpu_freq_mhz": {
+            "current": 4008.0,
+            "max": 4008.0
+          },
+          "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)",
+          "gpu": [
+            "NVIDIA GeForce GTX 1080 Ti, 11264 MiB, 581.42"
+          ],
+          "numpy_blas": "scipy-openblas 0.3.33.112.0",
+          "environment": {
+            "RAYON_NUM_THREADS": null,
+            "OMP_NUM_THREADS": null,
+            "RUSTFLAGS": null,
+            "PRISM_MAX_SV_QUBITS": null,
+            "PRISM_AVX512": null,
+            "PRISM_NO_QFT_BLOCK": null,
+            "OMP_PROC_BIND": null,
+            "KMP_AFFINITY": null
+          },
+          "timer": "time.perf_counter in Python, std::time::Instant in Rust; QuEST, Spinoza, qip use their own monotonic clocks"
+        },
+        "toolchain": {
+          "rustc": "1.99.0",
+          "rustc_peers": "1.99.0-nightly",
+          "cxx_compiler": "MSVC 19.38.33145.0",
+          "cargo_profile": "release",
+          "cargo_features": "parallel",
+          "rustflags": "",
+          "git_sha": "b012445717f411e9144babfb40d1942a5fc788bf",
+          "git_dirty": true,
+          "native_builds": {
+            "quest_runner": "MSVC 19.38.33145.0, /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG /arch:AVX2 -openmp",
+            "peers": "rustflags -C target-cpu=x86-64-v3"
+          }
+        },
+        "python": {
+          "version": "3.14.0",
+          "implementation": "CPython",
+          "packages": {
+            "qiskit": "2.5.2",
+            "qiskit-aer": "0.17.2",
+            "qsimcirq": "0.22.1",
+            "cirq-core": "1.7.0",
+            "numpy": "2.5.1",
+            "psutil": "7.2.2",
+            "scipy": "1.18.1",
+            "stim": "1.16.0+avx2",
+            "quimb": "1.15.0",
+            "cotengra": "0.8.3",
+            "cotengrust": "0.2.1",
+            "autoray": "0.11.0",
+            "numba": "0.68.1",
+            "llvmlite": "0.50.0",
+            "cytoolz": "1.2.0",
+            "kahypar": null
+          },
+          "contraction_optimizer": {
+            "preset": "auto-hq, a fresh optimizer per observable with cache=False",
+            "hyper_methods": [
+              "greedy",
+              "labels"
+            ],
+            "optlib": "sbplx",
+            "kahypar_available": false,
+            "cotengrust_available": true
+          },
+          "stim_build": {
+            "version": "1.16.0+avx2",
+            "module": "stim._stim_avx2"
+          }
+        },
+        "simulators": {
+          "aer-mps": "0.17.2"
+        },
+        "threads": {
+          "requested": 8,
+          "rayon_num_threads": "8",
+          "omp_num_threads": "8"
+        }
+      },
+      "simulators": {
+        "prismq": {
+          "label": "PRISM-Q (auto dispatch)",
+          "kind": "exec",
+          "precision": "double",
+          "representation": "dispatcher picks per circuit",
+          "modes": [
+            "counts",
+            "expval",
+            "probs",
+            "stats"
+          ],
+          "env": {},
+          "version": null
+        },
+        "aer-statevector": {
+          "label": "Qiskit Aer (statevector)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-statevector-f32": {
+          "label": "Qiskit Aer (statevector, single)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-automatic": {
+          "label": "Qiskit Aer (automatic)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "Aer picks the method per circuit",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-stabilizer": {
+          "label": "Qiskit Aer (stabilizer)",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau",
+          "modes": [
+            "counts"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "aer-mps": {
+          "label": "Qiskit Aer (matrix_product_state)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": "0.17.2"
+        },
+        "stim": {
+          "label": "Stim",
+          "kind": "python",
+          "precision": "exact (tableau)",
+          "representation": "stabilizer tableau, compiled sampler",
+          "modes": [
+            "counts",
+            "stats"
+          ],
+          "env": {},
+          "version": null
+        },
+        "quimb-tn": {
+          "label": "quimb (tensor network, cotengra paths)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "tensor network contracted per observable over its reverse light cone",
+          "modes": [
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "quimb-mps": {
+          "label": "quimb (CircuitMPS)",
+          "kind": "python",
+          "precision": "double",
+          "representation": "matrix product state",
+          "modes": [
+            "counts",
+            "expval"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "qsim": {
+          "label": "qsim (qsimcirq)",
+          "kind": "python",
+          "precision": "single",
+          "representation": "dense statevector",
+          "modes": [
+            "counts",
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "quest": {
+          "label": "QuEST (OpenMP)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {
+            "OMP_WAIT_POLICY": "PASSIVE"
+          },
+          "version": null
+        },
+        "spinoza": {
+          "label": "Spinoza",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": null
+        },
+        "qip": {
+          "label": "RustQIP (qip)",
+          "kind": "legacy",
+          "precision": "double",
+          "representation": "dense statevector",
+          "modes": [
+            "probs"
+          ],
+          "env": {},
+          "version": null
+        }
+      },
+      "provenance_collected": "after the run, same environment"
     }
   ]
 }

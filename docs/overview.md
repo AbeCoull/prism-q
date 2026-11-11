@@ -54,8 +54,9 @@ exports back to OpenQASM 3.0.
 
 ## Reference and tools
 
-- [Interactive atlas](./atlas/index.html): one statevector gate traced from its matrix
-  through memory layout and SIMD lanes, and native recordings of each fusion pass
+- [Interactive atlas](./atlas/index.html) (opens a separate app, light theme only): one
+  statevector gate traced from its matrix through memory layout and SIMD lanes, and native
+  recordings of each fusion pass
 - [Performance](./performance/index.md): timings beside simulators of the same method, and
   the [methodology](./guides/benchmarking.md) behind them
 - [Glossary](./glossary.md)

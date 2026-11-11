@@ -6,17 +6,18 @@ Criterion.rs. Most rows live in two binaries: `bench_driver` holds microbenchmar
 gate kernels, measurement, and end-to-end QASM, and `circuits` sweeps circuit families
 across qubit counts and depths.
 
-Six more targets cover narrower surfaces: `bench_shots_perf` (shot and count
+Seven more targets cover narrower surfaces: `bench_shots_perf` (shot and count
 sampling), `svd_bench` (the MPS decomposition kernels), `qec_t_strategies` and
-`qec_decoder` (the QEC runner), and the feature-gated `bench_gpu` and
-`bench_distributed`. List a target's rows with `cargo bench --bench <name> -- --list`.
+`qec_decoder` (the QEC runner), the feature-gated `bench_gpu` and `bench_distributed`,
+and `iai`, which counts instructions under callgrind instead of timing. List a Criterion
+target's rows with `cargo bench --bench <name> -- --list`.
 
 ### Run configuration
 
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `PRISM_BENCH_PLOTS` | unset | Set to render the Criterion HTML report. Off by default: on the reference host a five-row group took 335s with plots and 47s without, about 58s of rendering per row against 9s of measurement. Gating reads stdout and `target/criterion/**/estimates.json`, which the plots do not feed. |
-| `PRISM_BENCH_SAMPLES` | 30 | Samples per row outside the `bench-fast` tier; values below 10 are clamped. Criterion divides `measurement_time` across the samples, so the count is free while one iteration fits in `measurement_time / samples`. Past that it sets the cost: `density_matrix/unitary_layers/12` runs 3.87s per iteration, so 100 samples cost 39 minutes across the six passes of an adjacent A/B against 4 minutes at 10. Raise it for a tighter interval and lower it for triage; the CI gate runs the `bench-fast` tier for the same reason. |
+| `PRISM_BENCH_SAMPLES` | 30, or the group's own count | Samples per row outside the `bench-fast` tier, overriding every group's default (10 or 20 in `bench_shots_perf`, `qec_t_strategies` and the `scalability_d5` groups, 100 in `svd_bench`); values below 10 are clamped. Criterion divides `measurement_time` across the samples, so the count is free while one iteration fits in `measurement_time / samples`. Past that it sets the cost: `density_matrix/unitary_layers/12` runs 3.87s per iteration, so 100 samples cost 39 minutes across the six passes of an adjacent A/B against 4 minutes at 10. Raise it for a tighter interval and lower it for triage; the CI gate runs the `bench-fast` tier for the same reason. |
 
 Sample count sets the precision of one run's mean. It does not remove drift between
 runs: on the reference host, back-to-back runs of identical code at 100 samples still
@@ -44,15 +45,21 @@ feature set is not worth the disk.
 |-------|-----------------|
 | `single_qubit_gates` | H, Rx, T gate kernels across qubit counts (4 to 20) |
 | `two_qubit_gates` | CX, CZ, SWAP kernels across qubit counts (4 to 20) |
-| `two_qubit_gate_kernels` | CX and CZ kernels by control/target order and separation (12 to 22) |
+| `two_qubit_gate_kernels` | The `two_qubit_gates` CX and CZ placements at 22 qubits, past that group's widest row |
 | `measurement` | Probability read, 1q reduced density matrix, measure, and reset on a 20-qubit register, plus one end-to-end `simulate()` row |
 | `e2e_qasm` | Full parse + simulate from OpenQASM string |
+| `high_target_qubit` | H on qubit 13 at 16 qubits and on qubits 15 and 17 at 20, and Rz on qubits 17 and 19 at 20, where the diagonal pass leaves four tiles or one |
+| `controlled_gates` | Controlled-H, Toffoli and CCCX kernels across qubit counts (4 to 20) |
+| `diagonal_parametric_gates` | Rz, Ry and P on qubit 0 across qubit counts (4 to 20) |
+| `cphase_kernel` | Controlled phase with the control below and above the target (4 to 20) |
+| `new_gate_types` | SX and SXdg kernels across qubit counts (4 to 20) |
+| `classical_only` | H on every qubit, a CX chain and one measurement through `simulate()` (4 to 20) |
 
 ### Macrobenchmarks (circuits)
 
 | Group | What it measures |
 |-------|-----------------|
-| `statevector/random_d10` | Seeded random circuits, depth 10, 4 to 20 qubits |
+| `statevector/random_d10` | Seeded random circuits, depth 10, at 4, 8, 12, 15, 16, 17, 20, 22 and 24 qubits, plus 28 and 30 up to `PRISM_BENCH_HIGH_QUBITS` |
 | `statevector/qft_like` | QFT-structured circuits, 4 to 16 qubits |
 | `statevector/hea_l5` | Hardware-efficient ansatz, 5 layers, 4 to 20 qubits |
 | `statevector/clifford_d10` | Clifford-heavy circuits, depth 10, 4 to 20 qubits |
@@ -81,7 +88,15 @@ first such run pays a cold build in both the working tree and the reference work
 ### GPU benchmarks (bench_gpu)
 
 Built with `--features "parallel gpu"` and skipped when no device answers. The groups
-mirror the CPU sweeps above on the device path; these rows have no CPU twin:
+mirror the CPU sweeps above on the device path.
+
+`gpu_stab/clifford_d10` and `gpu_stab/ghz_measure` run only when
+`PRISM_STABILIZER_GPU_MIN_QUBITS` is at most the group's widest row (5000 and 2000
+qubits, 1024 and 512 under `bench-fast`). The default crossover of 100,000 qubits keeps
+stabilizer runs on the host, so a default run prints SKIP for both; set the variable to
+`0` to time them.
+
+These rows have no CPU twin:
 
 | Group | What it measures |
 |-------|-----------------|
@@ -98,7 +113,7 @@ mirror the CPU sweeps above on the device path; these rows have no CPU twin:
 | `clifford_register_counts` | `sample_counts(1000)` of a 40-qubit Clifford+T circuit whose T gates reach 20 qubits, on the Clifford register route at its 2^20 width cap |
 | `qec_clifford_runner` | Packed native Clifford QEC execution |
 | `qec_noisy_runner` | Packed native QEC execution with Pauli-noise rows |
-| `qec_noisy_runner_split` | Parse, compile, sample, noise, detector, postselection, logical count, and total QEC timings |
+| `qec_noisy_runner_split` | Parse, compile, sample, noise, detector, postselection, logical count, and total QEC timings (`bench-internal`) |
 | `qec_feedforward_runner` | Packed native QEC execution of a repetition memory whose Pauli feed-forward corrections land as record flips |
 | `noisy_dynamic_shots` | The circuit form of that memory, ancillas measured and reset each round and corrections in guarded bodies, sampled under depolarizing noise through the `Auto` noisy shot route |
 | `qec_chunked_noise` | 100k-shot repetition memories on the record and leakage samplers at `chunk_size` 64 against the unchunked run, so a split noise unit's cost shows against one drawn whole |
@@ -113,6 +128,9 @@ mirror the CPU sweeps above on the device path; these rows have no CPU twin:
 |-------|-----------------|
 | `qec_decoder/rep_d3_r3`, `qec_decoder/rep_d5_r5` | Bulk union-find decode of sampled repetition-memory detector batches, 1k and 20k shots |
 | `qec_decoder/surface_d3_r3`, `qec_decoder/surface_d5_r5` | Bulk union-find decode of sampled rotated-surface-memory detector batches, 1k and 20k shots |
+| `qec_decoder_compare/{uf,mwpm}/surface_d{5,9,13}_*` | Union-find against exact matching on the same 4096 sampled shots of rotated-surface memories, d rounds at distance d, p = 1e-3 and 5e-3 |
+| `qec_decoder_compare/bposd/color_d3_r3_*` | BP+OSD on 4096 shots of a distance-3 color-code memory, whose model is a hypergraph, p = 1e-3 and 1e-2 |
+| `qec_dem` | Detector error model derivation alone for repetition and rotated-surface memories, up to distance 5 with 25 rounds |
 
 ### Distributed loopback benchmarks (bench_distributed)
 
@@ -153,10 +171,11 @@ the cost the binding adds.
 All seeded with `0xDEAD_BEEF`.
 
 - **Random**: Mix of single-qubit gates + 50% CX on even-odd pairs per layer.
-- **QFT-like**: Hadamard + controlled rotations (approximated with Rz + CX decomposition).
+- **QFT-like**: Hadamard + controlled phase (`Gate::cphase`) on every later qubit.
 - **Hardware-efficient ansatz**: Ry/Rz layers + linear CX chain.
 - **Clifford-heavy**: H, S, X, Y, Z + CX only.
-- **Sparse entanglement**: H on all qubits + single CX(0, n-1) per layer.
+- **Sparse entanglement**: H on all qubits + CX on every fourth bond of the chain per
+  layer, the first bond advancing one per layer.
 - **Dense entanglement**: H on all qubits + linear CX chain per layer.
 - **Sparse walk** (`circuits::sparse_walk_circuit`): H on the low k qubits,
   then layers of seeded diagonal phases and basis permutations over the whole
@@ -256,8 +275,9 @@ flat.
 **A copy that landed slow.** A copied binary can run a row about 18% slow for a whole
 run and fast in the next, invisible to controls that compare a binary with itself. On
 the full tier a FAIL re-runs the regressed rows once from fresh copies of both binaries,
-and stays a FAIL only if they regress again; otherwise it reads RERUN. `--no-confirm`
-turns this off.
+and stays a FAIL only if the confirmation's own verdict is FAIL; a PASS, a RERUN, or a
+confirmation that stops without a verdict leaves the run at RERUN. `--no-confirm` turns
+this off.
 
 **A row that cannot run.** Before measuring, each binary runs every row of the filter
 and the control filter once in Criterion's test mode (`--test`). A binary that panics or
@@ -265,12 +285,25 @@ exits non-zero stops the run with exit 4, naming the lane (`ref` or `new`), the 
 the tail of its output, instead of surfacing mid-pass after the warmups have been paid
 for.
 
+**A row on one side only.** A row the filter matched in some passes but not others, as
+a benchmark added or renamed on one side is, has no change to report. The report lists
+it as NO DATA under the table, naming the passes it is missing from, and the verdict
+comes from the remaining rows. `--min-rows` still turns a filter that lost its rows into
+a NO DATA verdict.
+
+**The same code twice.** With the default `--ref HEAD` on a clean tree, both binaries
+carry the same code. The report says so in its settings table, and a run that would
+PASS reads `CONTROL (same code)` instead, still exit 0, since it measured the host's
+noise floor rather than a change.
+
 `--escalate` joins the two tiers: after a light run, every row that moved past half the
 threshold is measured again on the full tier against the same two binaries, and that run
 decides the verdict.
 
-Exit status: 0 PASS, 1 FAIL, 2 host too busy to start or another measurement holding the
-marker below, 3 RERUN, 4 a binary failed the smoke test.
+Exit status: 0 PASS or CONTROL (same code), 1 FAIL, 2 host too busy to start or another
+measurement holding the marker below, 3 RERUN, 4 a binary failed the smoke test, 5 NO
+DATA or any other error (a bad option, a failed build, a bench binary that exited
+mid-pass). Exit 1 always means FAIL.
 
 ### One measurement at a time
 
@@ -289,11 +322,15 @@ started: 2026-10-17 10:10:10
 ```
 
 `bench_queue.sh` writes it once every build has finished and removes it at `ALLDONE`;
-`bench_ab.sh` run alone writes it before the host load check and removes it at the end.
-Both remove it on any exit, including a `kill -INT` or `kill -TERM` of the script's
-pid, and both refuse to start while a live process holds it (`LOCKED` in the queue's
-status file, exit 2 from `bench_ab.sh`). The next run overwrites a stale marker, one
-whose pid is gone, and logs that. `--force-lock` measures regardless. A queue step
+`bench_ab.sh` and `bench_interleave.sh` run alone write it before the host load check
+and remove it at the end. All three remove it on any exit, including a `kill -INT` or
+`kill -TERM` of the script's pid, which also ends the bench binary or queue step running
+at the time. All three refuse to start while a live process holds it (`LOCKED` in the
+queue's status file, exit 2 from the other two), and the two A/B scripts wait up to
+`--wait-idle` for it to clear before their first build, so they do not compile under
+someone else's measurement. The marker is created exclusively, so two runs that start
+together cannot both take it. The next run replaces a stale marker, one whose pid is
+gone, and logs that. `--force-lock` builds and measures regardless. A queue step
 inherits `PRISM_BENCH_LOCK_HELD=1` and writes no marker of its own, and
 `PRISM_BENCH_LOCK` names another path for the file.
 
@@ -413,11 +450,16 @@ EOF
 
 Binaries are cached under `bench_results/bin`, keyed on commit, features, bench target,
 and toolchain, so steps that share a reference build it once and a later queue reuses it.
-`--build-only` fills the cache and stops. Each A/B waits up to an hour for an idle host.
+A checkout with uncommitted changes or untracked files adds the content hash `bench_ab.sh`
+checks its own builds against. The key is read again just before each build and once
+more after it, and a checkout that changed during its build caches nothing (a
+`BUILD-FAILED` line in the status file). `--build-only` fills the cache and stops. Each
+A/B waits up to an hour for an idle host.
 
 `--schedule` matters on Windows, where a child of a terminal session dies with that
-session's job object even under `nohup`, so the queue runs from a scheduled task. The
-task opens a console window; closing it ends the queue. A second queue scheduled while
+session's job object even under `nohup`, so the queue runs from a scheduled task, started
+at once; its only trigger is 00:00 on the day it was created, already past, so it never
+fires again. The task opens a console window; closing it ends the queue. A second queue scheduled while
 one runs needs its own `--task-name`. Its build phase waits for a live `MEASURING`
 marker to clear, but the first queue writes that marker only after its own builds, so
 start the second once the first reaches its measure phase.
@@ -522,6 +564,10 @@ perf/qec-walk       bench_shots_perf  ^qec_detector_sampling/surf_p001_drop/5$
 ./scripts/bench_batch.sh --only 1,2 --schedule batch.txt           # bisect a FAIL by halves
 ```
 
+`--only` counts entries, the lines that name a branch, so comments and blank lines do not
+shift it; error messages name the file line. Windows line endings and a last line
+without a newline are read as written.
+
 A PASS clears every branch in the batch. A FAIL names rows, not branches, so run each
 half with `--only` to find the branch, about log2(N) more A/Bs. A speedup in one branch
 can hide a regression in another on a row both reach. Batch branches whose changes
@@ -595,7 +641,8 @@ out of the comparison and the row-count guard fails the run. The gate does not r
 the local suite a performance change needs.
 
 It measures only when a pull request changes a `.rs` file under `src/` or `benches/`,
-or a manifest; a `skip-bench` label opts out. Either way it reports a result, so it is
+a manifest, `rust-toolchain.toml`, `.cargo/`, or `build.rs`; a `skip-bench` label opts
+out. Either way it reports a result, so it is
 safe as a required check. The reference worktree sits beside the checkout because
 `/target/` in `.gitignore` is anchored to the repository root: a nested worktree's build
 output would read as an untracked change and abort the A/B.
@@ -631,7 +678,8 @@ of the same commit, with a tight same-code control both times, because the refer
 lane moved from 113 to 165 microseconds on a byte-identical cached executable.
 
 A reported regression has to repeat before it blocks: the set runs a second time and
-only a row that regressed in both counts. Four same-code runs on the reference host
+only a row that regressed in both counts. Each run passes `--no-confirm`, so this
+whole-set rerun is the only confirmation. Four same-code runs on the reference host
 returned three passes and one failure, on `statevector/scalability_d5/18` at +5.3%
 against a 4.2% control spread; their worst same-code control spreads were 20.6%, 8.5%,
 21.8% and 18.3%. An earlier three-run measurement on the same host read 6.0%, 7.1% and
@@ -656,7 +704,8 @@ commit alone, with no `restore-keys`, so a restore yields the binary for that ex
 or nothing. A miss falls back to building the reference in a worktree.
 
 `PRISM_BENCH_REF=HEAD` on a clean tree builds both binaries from the same code, so every
-row is a control row and the report is this host's noise floor.
+row is a control row, the report is this host's noise floor, and a clean run reads
+`CONTROL (same code)` rather than PASS.
 
 ## Instruction-count gate
 

@@ -286,25 +286,7 @@ fn main() {
         eprintln!();
     }
 
-    // --- Section 4: Measurement scaling ---
-    eprintln!("--- Measurement-Only (GHZ state, measure all qubits) ---");
-    eprintln!();
-    print_header();
-    for &n in &qubit_counts {
-        let ghz = build_ghz_circuit(n);
-        let mut c = Circuit::new(n, n);
-        for instr in &ghz.instructions {
-            c.instructions.push(instr.clone());
-        }
-        for q in 0..n {
-            c.add_measure(q, q);
-        }
-        let r = bench_circuit(&c, "ghz+measure_all", iterations);
-        print_row(&r);
-    }
-    eprintln!();
-
-    // --- Section 5: Scaling summary ---
+    // --- Section 4: Scaling summary ---
     eprintln!("--- Scaling Summary (clifford_d{depth}, per-gate cost) ---");
     eprintln!();
     eprintln!(

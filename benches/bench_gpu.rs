@@ -41,8 +41,8 @@ use prism_q::{
 
 mod common;
 use common::{
-    SEED, configure_group, heisenberg_hamiltonian, is_fast, ising_hamiltonian, run_shots_with,
-    run_with,
+    SEED, amplitude_damping_kraus, configure_group, correlated_zz_kraus, h_conjugated_zz_kraus,
+    heisenberg_hamiltonian, is_fast, ising_hamiltonian, run_shots_with, run_with,
 };
 
 fn shared_ctx() -> Option<Arc<GpuContext>> {
@@ -400,16 +400,6 @@ fn bench_gpu_floor(c: &mut Criterion) {
 // Noisy trajectory (general noise on the GPU statevector)
 // ============================================================================
 
-/// Kraus set for amplitude damping at rate `gamma`.
-fn amplitude_damping_kraus(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
-    let c = |re: f64| Complex64::new(re, 0.0);
-    let zero = c(0.0);
-    vec![
-        [[c(1.0), zero], [zero, c((1.0 - gamma).sqrt())]],
-        [[zero, c(gamma.sqrt())], [zero, zero]],
-    ]
-}
-
 /// Custom Kraus amplitude damping after every gate. `Custom` keeps the
 /// channel on the general trajectory route, where branch probabilities
 /// come from `reduced_density_matrix_1q` per event.
@@ -436,10 +426,7 @@ fn custom_kraus_noise(circuit: &Circuit) -> NoiseModel {
 
 fn measured_random_circuit(n: usize) -> Circuit {
     let mut circuit = circuits::random_circuit(n, 10, SEED);
-    circuit.num_classical_bits = n;
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
     circuit
 }
 
@@ -521,29 +508,27 @@ fn stab_sweep_sizes() -> &'static [usize] {
     }
 }
 
-fn stabilizer_dispatch_enabled(max_qubits: usize) -> bool {
+fn stabilizer_dispatch_enabled(group: &str, max_qubits: usize) -> bool {
     let threshold = prism_q::gpu::stabilizer_min_qubits();
     if threshold <= max_qubits {
         return true;
     }
     eprintln!(
-        "SKIP: explicit StabilizerGpu dispatch benches require PRISM_STABILIZER_GPU_MIN_QUBITS<={max_qubits}, got {threshold}"
+        "SKIP: {group} needs PRISM_STABILIZER_GPU_MIN_QUBITS<={max_qubits} to reach the device, \
+         got {threshold}; set it to 0 to run these rows"
     );
     false
 }
 
+/// The GPU BTS shot floor when these rows were named, fixed so that moving
+/// `BTS_MIN_SHOTS_DEFAULT` or setting `PRISM_GPU_BTS_MIN_SHOTS` leaves the row ids alone.
+const BTS_FLOOR_SHOTS: usize = 131_072;
+
 fn bts_gpu_shot_sizes() -> Vec<usize> {
-    let threshold = std::env::var("PRISM_GPU_BTS_MIN_SHOTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT);
     if is_fast() {
-        vec![threshold.max(64)]
+        vec![BTS_FLOOR_SHOTS]
     } else {
-        let mut sizes = vec![threshold.max(64), 1_000_000];
-        sizes.sort_unstable();
-        sizes.dedup();
-        sizes
+        vec![BTS_FLOOR_SHOTS, 1_000_000]
     }
 }
 
@@ -572,7 +557,10 @@ fn bench_stab_cpu_clifford_d10(c: &mut Criterion) {
 /// direct backend groups below for hot-path throughput comparisons.
 fn bench_stab_gpu_clifford_d10(c: &mut Criterion) {
     let Some(ctx) = shared_ctx() else { return };
-    if !stabilizer_dispatch_enabled(stab_sweep_sizes().iter().copied().max().unwrap_or(0)) {
+    if !stabilizer_dispatch_enabled(
+        "gpu_stab/clifford_d10",
+        stab_sweep_sizes().iter().copied().max().unwrap_or(0),
+    ) {
         return;
     }
     let mut group = c.benchmark_group("gpu_stab/clifford_d10");
@@ -627,8 +615,8 @@ fn bench_stab_direct_cpu_clifford_d10(c: &mut Criterion) {
 /// Direct backend GPU timing for the stabilizer hot path.
 ///
 /// Uses `StabilizerBackend::with_gpu(ctx)` directly so the timed region tracks
-/// queued Clifford application and measurement kernels without the end-of-run
-/// probability readback.
+/// Clifford application and measurement kernels, synchronized on both sides, without
+/// the end-of-run probability readback.
 fn bench_stab_direct_gpu_clifford_d10(c: &mut Criterion) {
     let Some(ctx) = shared_ctx() else { return };
     let mut group = c.benchmark_group("gpu_stab_direct/clifford_d10");
@@ -647,8 +635,10 @@ fn bench_stab_direct_gpu_clifford_d10(c: &mut Criterion) {
                     backend
                         .init(circ.num_qubits, circ.num_classical_bits)
                         .unwrap();
+                    ctx.synchronize().unwrap();
                     let start = Instant::now();
                     backend.apply_instructions(&circ.instructions).unwrap();
+                    ctx.synchronize().unwrap();
                     total += start.elapsed();
                 }
                 total
@@ -668,7 +658,10 @@ fn bench_stab_gpu_ghz_measure(c: &mut Criterion) {
     } else {
         &[200, 1000, 2000]
     };
-    if !stabilizer_dispatch_enabled(sizes.iter().copied().max().unwrap_or(0)) {
+    if !stabilizer_dispatch_enabled(
+        "gpu_stab/ghz_measure",
+        sizes.iter().copied().max().unwrap_or(0),
+    ) {
         return;
     }
     let mut group = c.benchmark_group("gpu_stab/ghz_measure");
@@ -677,14 +670,8 @@ fn bench_stab_gpu_ghz_measure(c: &mut Criterion) {
         context: ctx.clone(),
     };
     for &n in sizes {
-        let mut circuit = Circuit::new(n, n);
-        circuit.add_gate(Gate::H, &[0]);
-        for i in 0..n - 1 {
-            circuit.add_gate(Gate::Cx, &[i, i + 1]);
-        }
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.measure_all();
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 run_with(kind.clone(), circ, 42).unwrap();
@@ -694,24 +681,26 @@ fn bench_stab_gpu_ghz_measure(c: &mut Criterion) {
     group.finish();
 }
 
+/// H on every qubit, a CX chain, then every qubit measured: the BTS sampling fixture.
+fn h_chain_measured(n: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for i in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[i, i + 1]);
+    }
+    circuit.measure_all();
+    circuit
+}
+
 fn bench_stab_bts_cpu_vs_gpu(c: &mut Criterion) {
     use prism_q::{run_shots_compiled, run_shots_compiled_with_gpu};
-    let Some(ctx) = shared_ctx() else { return };
-
     let qubit_sizes: &[usize] = if is_fast() { &[512] } else { &[512, 2048] };
     let shot_sizes = bts_gpu_shot_sizes();
 
     for &n in qubit_sizes {
-        let mut circuit = Circuit::new(n, n);
-        for q in 0..n {
-            circuit.add_gate(Gate::H, &[q]);
-        }
-        for i in 0..n - 1 {
-            circuit.add_gate(Gate::Cx, &[i, i + 1]);
-        }
-        for q in 0..n {
-            circuit.add_measure(q, q);
-        }
+        let circuit = h_chain_measured(n);
 
         let mut cpu_group = c.benchmark_group(format!("gpu_bts_cpu/n{}", n));
         configure_group(&mut cpu_group);
@@ -724,6 +713,7 @@ fn bench_stab_bts_cpu_vs_gpu(c: &mut Criterion) {
         }
         cpu_group.finish();
 
+        let Some(ctx) = shared_ctx() else { continue };
         let mut gpu_group = c.benchmark_group(format!("gpu_bts/n{}", n));
         configure_group(&mut gpu_group);
         for &shots in &shot_sizes {
@@ -742,22 +732,11 @@ fn bench_stab_bts_cpu_vs_gpu(c: &mut Criterion) {
 /// Excludes compilation from the timed region so the group isolates the
 /// CPU and GPU sampling kernels plus packed-result materialization.
 fn bench_stab_bts_packed_cpu_vs_gpu(c: &mut Criterion) {
-    let Some(ctx) = shared_ctx() else { return };
-
     let qubit_sizes: &[usize] = if is_fast() { &[512] } else { &[512, 2048] };
     let shot_sizes = bts_gpu_shot_sizes();
 
     for &n in qubit_sizes {
-        let mut circuit = Circuit::new(n, n);
-        for q in 0..n {
-            circuit.add_gate(Gate::H, &[q]);
-        }
-        for i in 0..n - 1 {
-            circuit.add_gate(Gate::Cx, &[i, i + 1]);
-        }
-        for q in 0..n {
-            circuit.add_measure(q, q);
-        }
+        let circuit = h_chain_measured(n);
 
         let mut cpu_group = c.benchmark_group(format!("gpu_bts_packed_cpu/n{}", n));
         configure_group(&mut cpu_group);
@@ -777,6 +756,7 @@ fn bench_stab_bts_packed_cpu_vs_gpu(c: &mut Criterion) {
         }
         cpu_group.finish();
 
+        let Some(ctx) = shared_ctx() else { continue };
         let mut gpu_group = c.benchmark_group(format!("gpu_bts_packed/n{}", n));
         configure_group(&mut gpu_group);
         for &shots in &shot_sizes {
@@ -805,9 +785,7 @@ fn bts_low_rank_wide_circuit(num_qubits: usize, rank: usize) -> Circuit {
     for q in 0..rank {
         circuit.add_gate(Gate::H, &[q]);
     }
-    for q in 0..num_qubits {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
     circuit
 }
 
@@ -815,22 +793,11 @@ fn bts_low_rank_wide_circuit(num_qubits: usize, rank: usize) -> Circuit {
 /// The GPU path now keeps packed shots on device and copies back only one
 /// counter per measurement row.
 fn bench_stab_bts_marginals_cpu_vs_gpu(c: &mut Criterion) {
-    let Some(ctx) = shared_ctx() else { return };
-
     let qubit_sizes: &[usize] = if is_fast() { &[512] } else { &[512, 2048] };
     let shot_sizes = bts_gpu_shot_sizes();
 
     for &n in qubit_sizes {
-        let mut circuit = Circuit::new(n, n);
-        for q in 0..n {
-            circuit.add_gate(Gate::H, &[q]);
-        }
-        for i in 0..n - 1 {
-            circuit.add_gate(Gate::Cx, &[i, i + 1]);
-        }
-        for q in 0..n {
-            circuit.add_measure(q, q);
-        }
+        let circuit = h_chain_measured(n);
 
         let mut cpu_group = c.benchmark_group(format!("gpu_bts_marginals_cpu/n{}", n));
         configure_group(&mut cpu_group);
@@ -850,6 +817,7 @@ fn bench_stab_bts_marginals_cpu_vs_gpu(c: &mut Criterion) {
         }
         cpu_group.finish();
 
+        let Some(ctx) = shared_ctx() else { continue };
         let mut gpu_group = c.benchmark_group(format!("gpu_bts_marginals/n{}", n));
         configure_group(&mut gpu_group);
         for &shots in &shot_sizes {
@@ -911,17 +879,7 @@ fn bench_gpu_noisy_readout_counts(c: &mut Criterion) {
 /// This exercises `sample_bulk_packed_device().counts()` where the compacted
 /// `(bitstring, count)` output is far smaller than the full packed shot matrix.
 fn bench_stab_bts_device_counts_explicit(c: &mut Criterion) {
-    let Some(ctx) = shared_ctx() else { return };
-
-    let threshold = std::env::var("PRISM_GPU_BTS_MIN_SHOTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT);
-    let shot_sizes: Vec<usize> = if is_fast() {
-        vec![threshold.max(64)]
-    } else {
-        vec![threshold.max(64), 1_000_000]
-    };
+    let shot_sizes = bts_gpu_shot_sizes();
     let qubit_sizes: &[(usize, usize)] = if is_fast() {
         &[(512, 12)]
     } else {
@@ -950,6 +908,7 @@ fn bench_stab_bts_device_counts_explicit(c: &mut Criterion) {
         }
         cpu_group.finish();
 
+        let Some(ctx) = shared_ctx() else { continue };
         let mut gpu_group = c.benchmark_group(format!("gpu_bts_device_counts/n{}_r{}", n, rank));
         configure_group(&mut gpu_group);
         for &shots in &shot_sizes {
@@ -989,16 +948,7 @@ fn bench_stab_gpu_shots_explicit(c: &mut Criterion) {
     let shot_sizes = bts_gpu_shot_sizes();
 
     for &n in qubit_sizes {
-        let mut circuit = Circuit::new(n, n);
-        for q in 0..n {
-            circuit.add_gate(Gate::H, &[q]);
-        }
-        for i in 0..n - 1 {
-            circuit.add_gate(Gate::Cx, &[i, i + 1]);
-        }
-        for q in 0..n {
-            circuit.add_measure(q, q);
-        }
+        let circuit = h_chain_measured(n);
 
         let mut group = c.benchmark_group(format!("gpu_stab_shots/n{}", n));
         configure_group(&mut group);
@@ -1034,35 +984,6 @@ fn dm_device_backend(ctx: &Arc<GpuContext>, n: usize) -> DensityMatrixBackend {
     backend.apply_instructions(&circuit.instructions).unwrap();
     ctx.synchronize().unwrap();
     backend
-}
-
-/// Correlated `ZZ` dephasing, which compiles to a diagonal superoperator.
-fn correlated_zz_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
-    let zero = Complex64::new(0.0, 0.0);
-    let diag = |scale: f64, signs: [f64; 4]| {
-        let mut m = [[zero; 4]; 4];
-        for (t, sign) in signs.iter().enumerate() {
-            m[t][t] = Complex64::new(scale * sign, 0.0);
-        }
-        m
-    };
-    vec![
-        diag((1.0 - p).sqrt(), [1.0, 1.0, 1.0, 1.0]),
-        diag(p.sqrt(), [1.0, -1.0, -1.0, 1.0]),
-    ]
-}
-
-/// `{sqrt(1-p) I, sqrt(p) X(x)Z}`, which fills the 16x16 superoperator.
-fn h_conjugated_zz_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
-    let zero = Complex64::new(0.0, 0.0);
-    let mut k0 = [[zero; 4]; 4];
-    let mut k1 = [[zero; 4]; 4];
-    for t in 0..4 {
-        k0[t][t] = Complex64::new((1.0 - p).sqrt(), 0.0);
-        let sign = if t & 1 == 0 { 1.0 } else { -1.0 };
-        k1[t][t ^ 2] = Complex64::new(p.sqrt() * sign, 0.0);
-    }
-    vec![k0, k1]
 }
 
 fn bench_gpu_dm_noisy_channels(c: &mut Criterion) {
@@ -1291,6 +1212,7 @@ fn bench_gpu_export(c: &mut Criterion) {
         group.bench_function(BenchmarkId::from_parameter(n), |b| {
             b.iter(|| black_box(backend.export_statevector().unwrap()));
         });
+        drop(backend);
 
         circuit.add_measure(0, 0);
         let mut backend = StatevectorBackend::new(42).with_gpu(ctx.clone());

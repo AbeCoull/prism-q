@@ -2,17 +2,23 @@
 
 Outputs, all in the results directory:
 
-- `samples.csv`: one row per timed sample, the long form every figure can be redrawn from.
+- `samples.csv`: one row per timed sample, in long form.
 - `summary.csv`: one row per observation, failures included, with its status and reason.
 - `derived.json`: ratios against PRISM-Q, dispatch regret, thread scaling, sampling
   costs and seed spread, each computed only from observations that ran and failed no
   check. Ratios carry `validated`, true when both outputs passed a test or one is the
   row's reference; thread counts below a row's top count share its circuit and are not
-  validated separately.
+  validated separately, except a simulator whose thread counts the row lists itself.
 
-Records written before the current validation rules are read under them: a dense
-record that is its row's reference gets role `reference`, and a sampled record under
-`validate.MIN_SHOTS` shots that passed gets role `too-few-shots`.
+A record's identity is its group, workload, simulator and thread count. When an
+appended run leaves two records with one identity, the newest `run_id` wins
+everywhere: tables, ratios and the page.
+
+Records written before the current rules are read under them: a dense record that is
+its row's reference gets role `reference`, a sampled record under `validate.MIN_SHOTS`
+shots that passed gets role `too-few-shots`, a sampled check gains `min_detectable` (and
+role `weakly-tested` above `validate.WEAK_DETECTABLE`), and a single-threaded simulator's
+record carries 1 thread, the requested count kept as `threads_requested`.
 """
 
 from __future__ import annotations
@@ -20,14 +26,17 @@ from __future__ import annotations
 import csv
 import json
 import os
+import sys
 from collections import defaultdict
 from typing import Any
 
 import numpy as np
 
-from . import stats, validate
+from . import runners, stats, validate
 
-COMPARE_GROUPS = ("headline", "sampling", "seeds", "full")
+COMPARE_GROUPS = ("headline", "sampling", "seeds", "tn", "mpsdeep", "highshot")
+# The PRISM-Q configuration a group's ratios divide by, where it is not automatic dispatch.
+RATIO_BASE = {"mpsdeep": "prismq:mps-256"}
 
 SHORT = {
     "prismq": "PRISM-Q",
@@ -41,6 +50,8 @@ SHORT = {
     "spinoza": "Spinoza",
     "qip": "qip",
     "stim": "Stim",
+    "quimb-tn": "quimb TN",
+    "quimb-mps": "quimb MPS",
 }
 
 
@@ -66,8 +77,10 @@ def row_label(wl: dict) -> str:
         bits.append(p.get("layout", ""))
     if p.get("measured") == "half":
         bits.append("half measured")
-    if wl["mode"] == "counts":
+    if wl["mode"] in ("counts", "stats"):
         bits.append(shots_label(wl["shots"]))
+    if p.get("observables"):
+        bits.append(f"{p['observables']} Z + {p['observables']} ZZ")
     return " ".join(bits)
 
 
@@ -83,6 +96,20 @@ def family_order(wl: dict) -> tuple:
     )
 
 
+def identity(record: dict) -> tuple[str, str, str, int]:
+    return (record["group"], record["workload"]["workload_id"], record["simulator"], record["threads"])
+
+
+def newest(records: list[dict]) -> list[dict]:
+    """One record per `identity`, the newest `run_id` winning, in file order."""
+    best: dict[tuple, dict] = {}
+    for r in records:
+        key = identity(r)
+        if key not in best or r["run_id"] >= best[key]["run_id"]:
+            best[key] = r
+    return [r for r in records if best[identity(r)] is r]
+
+
 def load(results_dir: str) -> tuple[dict, list[dict]]:
     with open(os.path.join(results_dir, "manifest.json"), encoding="utf-8") as handle:
         manifest = json.load(handle)
@@ -91,7 +118,14 @@ def load(results_dir: str) -> tuple[dict, list[dict]]:
         for line in handle:
             if line.strip():
                 records.append(_normalize(json.loads(line)))
-    return manifest, records
+    kept = newest(records)
+    if len(kept) < len(records):
+        print(
+            f"warning: {len(records) - len(kept)} records share an identity with a newer record and are ignored; "
+            "`run --append --replace` moves them to superseded.jsonl",
+            file=sys.stderr,
+        )
+    return manifest, kept
 
 
 def _normalize(record: dict) -> dict:
@@ -105,9 +139,36 @@ def _normalize(record: dict) -> dict:
             "role": "too-few-shots",
             "reason": f"fewer than {validate.MIN_SHOTS} shots: statistics not tested",
         }
+    v = record.get("validation")
+    if v and ("min_p_value" in v or "z_threshold" in v) and "min_detectable" not in v:
+        shots = record["workload"]["shots"]
+        statistical = (v.get("against_exact") or 0) - (v.get("deterministic") or 0) + (v.get("against_simulator") or 0)
+        detectable = None
+        if statistical and shots >= validate.MIN_SHOTS:
+            fallback = shots if v.get("against_simulator") else None
+            detectable = validate.min_detectable(v.get("statistics") or 0, shots, fallback)
+        v["min_detectable"] = detectable
+        if v.get("pass") is True and detectable is not None and detectable > validate.WEAK_DETECTABLE:
+            v["role"] = "weakly-tested"
+            v["reason"] = (
+                f"smallest detectable shift in a marginal is {detectable:.2g}, above {validate.WEAK_DETECTABLE:g}"
+            )
+    sim = runners.REGISTRY.get(record["simulator"].partition(":")[0])
+    if sim is not None and sim.single_threaded and record["threads"] != 1:
+        record["threads_requested"] = record["threads"]
+        record["threads"] = 1
     if isinstance(record.get("internal_ms"), (int, float)):
         record["first_internal_ms"] = record.pop("internal_ms")
         record["internal_ms"] = []
+    if (
+        record["status"] == "error"
+        and record["simulator"] in ("prismq:stabilizer", "prismq:factored-stabilizer")
+        and "is incompatible" in (record.get("reason") or "")
+    ):
+        record.update({"status": "not-applicable", "reason": "not a Clifford circuit"})
+    v = record.get("validation")
+    if v and "<Z" in (v.get("method") or ""):
+        v["method"] = v["method"].replace("<ZZ>", "⟨ZZ⟩").replace("<Z>", "⟨Z⟩")
     return record
 
 
@@ -117,11 +178,11 @@ def validated(record: dict) -> bool:
 
 
 def valid(record: dict) -> bool:
-    """The observation ran and its output failed no check: validated, the reference, or too few shots to test."""
+    """The observation ran and its output failed no check: validated, the reference, or not testable."""
     if record.get("status") != "ok" or not record.get("samples_ms"):
         return False
     v = record.get("validation") or {}
-    return validated(record) or v.get("role") == "too-few-shots"
+    return validated(record) or v.get("role") in ("too-few-shots", "untested")
 
 
 def _write_csv(path: str, rows: list[dict], fields: list[str]) -> None:
@@ -159,6 +220,8 @@ def _flat(record: dict) -> dict[str, Any]:
         "ci95_low_ms": st.get("ci95_low_ms"),
         "ci95_high_ms": st.get("ci95_high_ms"),
         "first_ms": ph.get("first_ms"),
+        "min_ms": st.get("min_ms"),
+        "internal_median_ms": float(np.median(record["internal_ms"])) if record.get("internal_ms") else None,
         "build_ms": ph.get("build_ms"),
         "startup_ms": (ph.get("startup_ms") or 0) + (ph.get("import_ms") or 0) if "import_ms" in ph else None,
         "process_wall_ms": ph.get("process_wall_ms"),
@@ -170,27 +233,31 @@ def _flat(record: dict) -> dict[str, Any]:
         "validation_pass": v.get("pass"),
         "tvd": v.get("tvd"),
         "max_abs_z": v.get("max_abs_z"),
+        "max_abs_error": v.get("max_abs_error"),
         "min_p_value": v.get("min_p_value"),
+        "min_detectable": v.get("min_detectable"),
         "validation_role": v.get("role"),
     }
 
 
 def ratios(records: list[dict]) -> list[dict]:
-    """Comparator median over PRISM-Q median per group, workload, thread count and run.
+    """Comparator median over PRISM-Q median per group, workload and thread count.
 
-    Above 1 means PRISM-Q took less time.
+    Above 1 means PRISM-Q took less time. Each side is the newest record with its identity. The
+    PRISM-Q side is automatic dispatch, or the group's `RATIO_BASE`; other PRISM-Q configurations
+    are not comparators.
     """
     by_key: dict[tuple, dict[str, dict]] = defaultdict(dict)
-    for r in records:
+    for r in newest(records):
         if r["group"] in COMPARE_GROUPS and valid(r):
-            by_key[(r["group"], r["workload"]["workload_id"], r["threads"], r["run_id"])][r["simulator"]] = r
+            by_key[(r["group"], r["workload"]["workload_id"], r["threads"])][r["simulator"]] = r
     out = []
-    for (group, wid, threads, run_id), sims in sorted(by_key.items()):
-        base = sims.get("prismq")
+    for (group, wid, threads), sims in sorted(by_key.items()):
+        base = sims.get(RATIO_BASE.get(group, "prismq"))
         if base is None:
             continue
         for name, r in sorted(sims.items()):
-            if name == "prismq":
+            if name.startswith("prismq"):
                 continue
             ratio = stats.ratio(r["samples_ms"], base["samples_ms"])
             out.append(
@@ -199,7 +266,8 @@ def ratios(records: list[dict]) -> list[dict]:
                     "family": r["workload"]["family"],
                     "num_qubits": r["workload"]["num_qubits"],
                     "group": group,
-                    "run_id": run_id,
+                    "run_id": r["run_id"],
+                    "prismq_run_id": base["run_id"],
                     "threads": threads,
                     "comparator": name,
                     "validated": validated(r) and validated(base),

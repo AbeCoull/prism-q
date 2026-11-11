@@ -11,6 +11,7 @@ description = "Rust comparators for the cross-simulator comparison harness"
 
 [dependencies]
 qip = "1.5.0"
+rayon = "1.12.0"
 spinoza = { git = "https://github.com/QuState/spinoza", rev = "f900971" }
 
 [profile.release]

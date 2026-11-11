@@ -662,11 +662,11 @@ jobs:
         working-directory: head
         run: |
           changed="$(git diff --name-only "$PRISM_BENCH_REF" HEAD)"
-          if grep -Eq '^(src/.*\.rs$|benches/.*\.rs$|Cargo\.(toml|lock)$)' <<< "$changed"; then
+          if grep -Eq '^(src/.*\.rs$|benches/.*\.rs$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.cargo/|build\.rs$)' <<< "$changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "No Rust source or manifest change. Nothing to measure." >> "$GITHUB_STEP_SUMMARY"
+            echo "No Rust source, manifest, or toolchain change. Nothing to measure." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - uses: ./head/.github/actions/setup-rust
@@ -945,9 +945,9 @@ jobs:
             sha="$(git rev-parse FETCH_HEAD)"
             changed="$(git diff --name-only "$sha" HEAD)"
             if [[ "$GITHUB_EVENT_NAME" == pull_request ]] &&
-               ! grep -Eq '^(src/.*\.rs$|benches/.*\.rs$|Cargo\.(toml|lock)$)' <<< "$changed"; then
+               ! grep -Eq '^(src/.*\.rs$|benches/.*\.rs$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.cargo/|build\.rs$)' <<< "$changed"; then
               run=false
-              echo "No Rust source or manifest change. Nothing to count." >> "$GITHUB_STEP_SUMMARY"
+              echo "No Rust source, manifest, or toolchain change. Nothing to count." >> "$GITHUB_STEP_SUMMARY"
             fi
             pin='^iai-callgrind = "=.*"$'
             if [[ "$(git show "$sha:Cargo.toml" | grep -E "$pin")" == "$(grep -E "$pin" Cargo.toml)" ]] &&

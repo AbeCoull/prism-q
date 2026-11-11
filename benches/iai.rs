@@ -14,10 +14,7 @@ mod common;
 use common::{SEED, run_shots_with, run_with};
 
 fn measured(mut circuit: Circuit) -> Circuit {
-    circuit.num_classical_bits = circuit.num_qubits;
-    for q in 0..circuit.num_qubits {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
     circuit
 }
 

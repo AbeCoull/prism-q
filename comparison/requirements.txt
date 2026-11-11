@@ -8,4 +8,20 @@ cirq-core==1.7.0
 numpy==2.5.1
 psutil==7.2.2
 scipy==1.18.1
+# Stim's wheel loads its SSE2 extension, which MSVC builds with 64-bit SIMD words. After
+# installing this file, `python comparison/build_stim.py` rebuilds 1.16.0 from source with
+# Stim's AVX2 extension (256-bit words) and replaces the wheel; the run records the build as
+# version 1.16.0+avx2 loading stim._stim_avx2.
 stim==1.16.0
+# quimb's tensor network and MPS adapters, with the dependencies that change its numbers.
+# kahypar has no wheel for this host; cotengra then searches paths with greedy and labels,
+# which the run records in its provenance.
+quimb==1.15.0
+cotengra==0.8.3
+cotengrust==0.2.1
+autoray==0.11.0
+numba==0.68.1
+llvmlite==0.50.0
+cytoolz==1.2.0
+toolz==1.2.0
+tqdm==4.70.1

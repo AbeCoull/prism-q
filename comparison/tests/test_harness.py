@@ -8,6 +8,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -765,6 +766,59 @@ class PageTests(unittest.TestCase):
         self.assertIn("4 physical cores, 8 hardware threads", page)
         self.assertIn("Aer automatic refuses 6 of 6 rows before running", page)
         self.assertIn("refused, statevector would not fit", page)
+        self.assertIn('class="pq-kpis"', page)
+        tiles = re.findall(
+            r'<li class="pq-kpi"><a href="#([^"]+)"><span class="pq-kpi-l">([^<]+)</span>'
+            r'<span class="pq-kpi-v">(.+?)</span><span class="pq-kpi-b"[^>]*></span>'
+            r'<span class="pq-kpi-s">([^<]+)</span></a></li>',
+            page,
+        )
+        self.assertEqual(page.count('class="pq-kpi"'), 9)
+        self.assertIn(
+            '<span class="pq-kpi-v"><span>5.11</span><i>x</i> <em>to</em> <span>69.2</span><i>x</i></span>', page
+        )
+        tiles = [(h, t, re.sub(r"<[^>]+>", "", v), n) for h, t, v, n in tiles]
+        self.assertEqual(
+            tiles,
+            [
+                ("statevector-fp64", "Statevector, fp64", "5.11x to 69.2x",
+                 "Aer, QuEST, Spinoza and qip over PRISM-Q · 12 rows"),
+                ("statevector-against-fp32-peers", "Statevector against fp32 peers", "1.42x to 14.8x",
+                 "Aer fp32 and qsim fp32 over PRISM-Q · 12 rows · fp32 peers, PRISM-Q fp64"),
+                ("stabilizer", "Stabilizer", "0.54x to 1.12x", "Stim over PRISM-Q · 3 rows · 1 thread"),
+                ("high-shot-stabilizer", "High-shot stabilizer", "44.0x to 71.7x", "Stim over PRISM-Q · 5 rows · 1 thread"),
+                ("matrix-product-state", "Matrix product state", "13.5x to 62.0x", "Aer MPS over PRISM-Q · 6 rows"),
+                ("deep-mps", "Deep MPS", "2.09x to 18.1x",
+                 "Aer MPS cap 256 and quimb MPS cap 256 over PRISM-Q MPS cap 256 · 15 rows"),
+                ("tensor-network-expectation-values", "Tensor network expectation values", "2.71x to 303x",
+                 "quimb TN and Aer MPS over PRISM-Q · 4 rows"),
+                ("shot-sampling", "Shot sampling", "1.57x to 69.7x",
+                 "Aer, Aer fp32 and qsim fp32 over PRISM-Q · 6 rows · PRISM-Q fp64"),
+                ("disjoint-components", "Disjoint components", "2.83x to 142x", "Aer MPS over PRISM-Q · 4 rows"),
+            ],
+        )
+        for href, heading, _, _ in tiles:
+            self.assertIn(f"## {heading} {{#{href}}}", page)
+        labels = re.findall(r'- <span class="pq-spec-l">([^<]+)</span> ', page)
+        self.assertEqual(labels, ["Host", "Protocol", "Ratio", "Raw data"])
+        self.assertLess(page.index('pq-spec-l">Raw data<'), page.index('class="pq-kpis"'))
+        self.assertLess(page.index('class="pq-kpis"'), page.index('data-chart="summary"'))
+        self.assertIn('distance <span class="pq-nw">8.3e-15</span> in <span class="pq-nw">53.1 ms</span>', page)
+        self.assertIn('<p class="pq-kicker">All sections · peer time over PRISM-Q time</p>', page)
+        sv = next(
+            r
+            for r in data["observations"]
+            if r["simulator"] == "aer-statevector" and r["group"] == "headline" and r["workload"].startswith("rcs")
+            and r["threads"] == 8 and r["status"] == "ok"
+        )
+        pq = next(
+            r
+            for r in data["observations"]
+            if r["simulator"] == "prismq" and r["group"] == "headline" and r["workload"] == sv["workload"] and r["threads"] == 8
+        )
+        self.assertIn("ratio", sv)
+        self.assertNotIn("ratio", pq)
+        self.assertAlmostEqual(sv["ratio"], sv["median_ms"] / pq["median_ms"], delta=0.01 * sv["ratio"])
 
     def test_partial_results_render(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -780,6 +834,9 @@ class PageTests(unittest.TestCase):
         self.assertIn("ratios pair Stim with the 1-thread PRISM-Q record", page)
         self.assertIn("PRISM-Q, a histogram; Stim, a bit-packed per-shot array", page)
         self.assertEqual(page.count('data-chart="'), 3)
+        self.assertEqual(re.findall(r'class="pq-kpi"><a href="#([^"]+)"', page), ["stabilizer"])
+        self.assertIn('<span class="pq-kpi-s">Stim over PRISM-Q · 3 rows · 1 thread</span>', page)
+        self.assertIn("## Stabilizer {#stabilizer}", page)
         for chart in ("sv64", "dispatch", "memory", "threads"):
             self.assertNotIn(f'data-chart="{chart}"', page)
 
@@ -804,7 +861,7 @@ class PageTests(unittest.TestCase):
         self.assertNotIn("runs exactly under", page)
         self.assertIn("quimb TN takes 10.0x the PRISM-Q time, 64 qubits", page)
         self.assertIn("kahypar was unavailable, so cotengra searched paths with greedy and labels", page)
-        self.assertIn("within 1e-8 from bond cap 16 at 48 qubits", page)
+        self.assertIn('within <span class="pq-nw">1e-8</span> from bond cap 16 at 48 qubits', page)
         self.assertNotIn(chr(0x2014), page)
         sweep = [o for o in data["observations"] if o["group"] == "bondsweep"]
         self.assertEqual({o["bond_cap"] for o in sweep}, {2, 16})
@@ -834,6 +891,7 @@ class PageTests(unittest.TestCase):
         one_shot = [o for o in data["observations"] if o["group"] == "sampling" and o["shots"] == 1]
         self.assertTrue(one_shot)
         self.assertTrue(all(not o["validated"] and o["valid"] for o in one_shot if o["status"] == "ok"))
+        self.assertTrue(all("ratio" not in o for o in one_shot))
 
     def test_suite_backend_claim_follows_the_record(self) -> None:
         rows = [{"family": "ghz", "qubits": 1024, "ms": 1.0}, {"family": "qft", "qubits": 20, "ms": 2.0}]
@@ -849,7 +907,7 @@ class PageTests(unittest.TestCase):
         intro = page.index("tables mark")
         issue = page.index("[open an")
         self.assertLess(intro, issue)
-        self.assertLess(issue, page.index("- Host:"))
+        self.assertLess(issue, page.index('- <span class="pq-spec-l">Host</span> Intel'))
         self.assertIn("https://github.com/AbeCoull/prism-q/issues", page)
 
     def test_setup_names_a_dirty_commit_and_an_unrecorded_compiler(self) -> None:

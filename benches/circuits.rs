@@ -34,7 +34,8 @@ use common::fixtures::{
     DENSE_UNITARY_LAYERS, dense_unitary_layers, product_observables, sparse_entanglement_circuit,
 };
 use common::{
-    SEED, configure_group, heisenberg_hamiltonian, ising_hamiltonian, run_shots_with, run_with,
+    SEED, amplitude_damping_kraus, configure_group, configure_group_timed, correlated_zz_kraus,
+    h_conjugated_zz_kraus, heisenberg_hamiltonian, ising_hamiltonian, run_shots_with, run_with,
 };
 
 fn run_shots_with_noise(
@@ -281,21 +282,11 @@ fn interleaved_measure_chain_circuit(
 }
 
 fn compiled_filtered_bell_pairs_circuit(n_pairs: usize) -> Circuit {
-    let mut circuit = circuits::independent_bell_pairs(n_pairs);
-    let n = circuit.num_qubits;
-    circuit.num_classical_bits = n;
-    for i in 0..n {
-        circuit.add_measure(i, i);
-    }
-    circuit
+    with_terminal_measurements(circuits::independent_bell_pairs(n_pairs))
 }
 
 fn with_terminal_measurements(mut circuit: Circuit) -> Circuit {
-    let n = circuit.num_qubits;
-    circuit.num_classical_bits = n;
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
     circuit
 }
 
@@ -1071,15 +1062,6 @@ fn single_z() -> Vec<PauliTerm> {
     vec![PauliTerm::z(0)]
 }
 
-/// `circuit` with a classical register and one terminal measurement per qubit, so
-/// the trajectory arm can read the observable off measured bits.
-fn measured_copy(circuit: &Circuit) -> Circuit {
-    let mut measured = circuit.clone();
-    measured.num_classical_bits = measured.num_qubits;
-    measured.measure_all();
-    measured
-}
-
 /// Mean of `(-1)^bit0` over noisy shots, the trajectory estimate of `Z` on qubit
 /// 0.
 fn trajectory_single_z(circuit: &Circuit, noise: &prism_q::NoiseModel, shots: usize) -> f64 {
@@ -1144,7 +1126,7 @@ fn bench_pauli_path_noisy_expectation(c: &mut Criterion) {
     }
 
     for &n in &[12usize, 16] {
-        let circuit = measured_copy(&circuits::hardware_efficient_ansatz(n, 2, SEED));
+        let circuit = with_terminal_measurements(circuits::hardware_efficient_ansatz(n, 2, SEED));
         let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, PAULI_PATH_NOISE);
         group.bench_with_input(BenchmarkId::new("trajectory", n), &n, |b, _| {
             b.iter(|| {
@@ -1271,9 +1253,12 @@ fn bench_statevector_dense_unitary(c: &mut Criterion) {
 
 fn bench_statevector_scalability(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/scalability_d5");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(100));
-    group.measurement_time(Duration::from_millis(500));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(100),
+        Duration::from_millis(500),
+    );
 
     for n in (2..=26).step_by(2) {
         let circuit = circuits::random_circuit(n, 5, SEED);
@@ -1311,11 +1296,7 @@ fn bench_statevector_marginals(c: &mut Criterion) {
     }
 
     for &n in &[18usize, 20, 22] {
-        let mut circuit = Circuit::new(n, 0);
-        circuit.add_gate(Gate::H, &[0]);
-        for i in 0..n - 1 {
-            circuit.add_gate(Gate::Cx, &[i, i + 1]);
-        }
+        let circuit = circuits::ghz_circuit(n);
         group.bench_with_input(BenchmarkId::new("ghz", n), &circuit, |b, circ| {
             b.iter(|| {
                 black_box(
@@ -1447,14 +1428,8 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n in &[10, 50, 100, 500, 1000, 5000] {
-        let mut circuit = Circuit::new(n, n);
-        circuit.add_gate(Gate::H, &[0]);
-        for i in 0..n - 1 {
-            circuit.add_gate(Gate::Cx, &[i, i + 1]);
-        }
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.measure_all();
 
         group.bench_with_input(
             BenchmarkId::new("ghz_measure_all", n),
@@ -1483,9 +1458,7 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
                 q += 2;
             }
         }
-        for q in 0..n {
-            circuit.add_measure(q, q);
-        }
+        circuit.measure_all();
 
         group.bench_with_input(
             BenchmarkId::new("wall_measure_all", n),
@@ -1615,14 +1588,8 @@ fn bench_factored_stabilizer_measurement(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n in &[10, 50, 100, 500] {
-        let mut circuit = Circuit::new(n, n);
-        circuit.add_gate(Gate::H, &[0]);
-        for i in 0..n - 1 {
-            circuit.add_gate(Gate::Cx, &[i, i + 1]);
-        }
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.measure_all();
 
         group.bench_with_input(
             BenchmarkId::new("ghz_measure_all", n),
@@ -1807,7 +1774,7 @@ fn bench_mps_noisy_trajectory(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &(n, depth, shots) in &[(12usize, 8usize, 4usize), (16, 10, 1)] {
-        let circuit = measure_all(&circuits::brickwork_circuit(n, depth, SEED));
+        let circuit = with_terminal_measurements(circuits::brickwork_circuit(n, depth, SEED));
         let noise = prism_q::NoiseModel::with_amplitude_damping(&circuit, 0.01);
         group.bench_with_input(
             BenchmarkId::new("amplitude_damping_b16", n),
@@ -1957,16 +1924,6 @@ fn bench_mps_matched(c: &mut Criterion) {
 
 // ---- Native shot sampling on the polynomial-state backends ----
 
-/// Terminal measurements on every qubit, the shape the native samplers serve.
-fn measure_all(circuit: &Circuit) -> Circuit {
-    let mut measured = Circuit::new(circuit.num_qubits, circuit.num_qubits);
-    measured.instructions = circuit.instructions.clone();
-    for q in 0..circuit.num_qubits {
-        measured.add_measure(q, q);
-    }
-    measured
-}
-
 /// Sizes past the dense probability cap, where the sampler is the only path to
 /// a bitstring. The 24q row stays inside the cap so the polynomial cost can be
 /// read against the dense route on the same circuit family.
@@ -1979,7 +1936,7 @@ fn bench_mps_sampling(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n in &SAMPLING_QUBITS {
-        let circuit = measure_all(&dense_entanglement_circuit(n, 4));
+        let circuit = with_terminal_measurements(dense_entanglement_circuit(n, 4));
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 black_box(
@@ -2066,7 +2023,7 @@ fn bench_sparse_sampling(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n in &SAMPLING_QUBITS {
-        let circuit = measure_all(&circuits::ghz_circuit(n));
+        let circuit = with_terminal_measurements(circuits::ghz_circuit(n));
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 black_box(
@@ -2083,7 +2040,7 @@ fn bench_sparse_sampling_populated(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n in &[32, 64] {
-        let circuit = measure_all(&circuits::sparse_walk_circuit(n, 12, 2, SEED));
+        let circuit = with_terminal_measurements(circuits::sparse_walk_circuit(n, 12, 2, SEED));
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 black_box(
@@ -2107,7 +2064,7 @@ fn bench_sparse_noisy_walk(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n in &[32, 64] {
-        let circuit = measure_all(&circuits::sparse_walk_circuit(n, 12, 2, SEED));
+        let circuit = with_terminal_measurements(circuits::sparse_walk_circuit(n, 12, 2, SEED));
         let damping = prism_q::NoiseModel::with_amplitude_damping(&circuit, 0.01);
         let depolarizing = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
         for (arm, noise) in [
@@ -2139,17 +2096,17 @@ fn bench_native_counts(c: &mut Criterion) {
         (
             "mps/dense_d4_24",
             BackendKind::Mps { max_bond_dim: 32 },
-            measure_all(&dense_entanglement_circuit(24, 4)),
+            with_terminal_measurements(dense_entanglement_circuit(24, 4)),
         ),
         (
             "sparse/ghz_64",
             BackendKind::Sparse,
-            measure_all(&circuits::ghz_circuit(64)),
+            with_terminal_measurements(circuits::ghz_circuit(64)),
         ),
         (
             "sparse/walk_k12_64",
             BackendKind::Sparse,
-            measure_all(&circuits::sparse_walk_circuit(64, 12, 2, SEED)),
+            with_terminal_measurements(circuits::sparse_walk_circuit(64, 12, 2, SEED)),
         ),
     ];
     for (label, kind, circuit) in rows {
@@ -2199,7 +2156,7 @@ fn bench_product_sampling(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n in &PRODUCT_SAMPLING_QUBITS {
-        let circuit = measure_all(&random_single_qubit_circuit(n, 10, SEED));
+        let circuit = with_terminal_measurements(random_single_qubit_circuit(n, 10, SEED));
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 black_box(
@@ -2671,30 +2628,6 @@ fn bench_compare_single_qubit(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_compare_general(c: &mut Criterion) {
-    let mut group = c.benchmark_group("compare/general_d10");
-    configure_group(&mut group);
-
-    let backends: &[(&str, BackendKind)] = &[
-        ("statevector", BackendKind::Statevector),
-        ("sparse", BackendKind::Sparse),
-        ("mps_64", BackendKind::Mps { max_bond_dim: 64 }),
-        ("auto", BackendKind::Auto),
-    ];
-
-    for &n in &[4, 8, 12, 16, 20] {
-        let circuit = circuits::random_circuit(n, 10, SEED);
-        for &(name, ref kind) in backends {
-            group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
-                b.iter(|| {
-                    run_with(kind.clone(), circ, 42).unwrap();
-                });
-            });
-        }
-    }
-    group.finish();
-}
-
 // ---- Auto dispatch sweeps ----
 
 /// The expectation terminal under `Auto` at the widths where the scalar tensor
@@ -2807,8 +2740,8 @@ fn bench_auto_expectation_above_cap(c: &mut Criterion) {
 /// marginals floor (12 qubits).
 ///
 /// Boundaries bracketed elsewhere and not repeated here: the factored override
-/// in `factored/dynamic_advantage`, the dense families in `compare/general_d10`,
-/// and the scalar tensor route in `auto/expectation`.
+/// in `factored/dynamic_advantage`, the dense families in `auto/random_d10` against
+/// the per-backend `random_d10` groups, and the scalar tensor route in `auto/expectation`.
 fn bench_auto_crossover(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/crossover");
     configure_group(&mut group);
@@ -2887,7 +2820,7 @@ fn bench_auto_crossover(c: &mut Criterion) {
     }
 
     for &t in &[6usize, 10, 12] {
-        let circuit = clifford_t_circuit(20, t, SEED);
+        let circuit = random_t_insertion_circuit(20, t, SEED);
         let id = format!("rank_20q_{t}t");
         group.bench_with_input(BenchmarkId::new("auto", &id), &circuit, |b, circ| {
             b.iter(|| {
@@ -2902,7 +2835,7 @@ fn bench_auto_crossover(c: &mut Criterion) {
     }
 
     for &n in &[10usize, 12, 16] {
-        let circuit = clifford_t_circuit(n, 8, SEED);
+        let circuit = random_t_insertion_circuit(n, 8, SEED);
         let id = format!("spd_{n}q_8t");
         for (name, kind) in [
             ("auto", BackendKind::Auto),
@@ -3089,9 +3022,12 @@ fn bench_auto_clifford(c: &mut Criterion) {
 
 fn bench_auto_scalability(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/scalability_d5");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(100));
-    group.measurement_time(Duration::from_millis(500));
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(100),
+        Duration::from_millis(500),
+    );
 
     for n in (2..=26).step_by(2) {
         let circuit = circuits::random_circuit(n, 5, SEED);
@@ -3137,7 +3073,7 @@ fn bench_auto_sparse_support(c: &mut Criterion) {
         ("wide_k12/64", wide_support_circuit(64, 12)),
     ];
     for (name, circuit) in cases {
-        let circuit = measure_all(&circuit);
+        let circuit = with_terminal_measurements(circuit);
         group.bench_with_input(BenchmarkId::from_parameter(name), &circuit, |b, circ| {
             b.iter(|| black_box(run_shots_with(BackendKind::Auto, circ, 1024, SEED).unwrap()));
         });
@@ -3826,14 +3762,12 @@ fn bench_expectation_clustered(c: &mut Criterion) {
 /// dominates the iteration, not the circuit run.
 fn bench_expectation_grouped(c: &mut Criterion) {
     let mut group = c.benchmark_group("expectation/pauli_sum_grouped");
-    group.sample_size(10);
-    if common::is_fast() {
-        group.warm_up_time(Duration::from_millis(200));
-        group.measurement_time(Duration::from_secs(1));
-    } else {
-        group.warm_up_time(Duration::from_secs(1));
-        group.measurement_time(Duration::from_secs(10));
-    }
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+    );
 
     for &n in &[16, 20] {
         let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
@@ -3904,24 +3838,6 @@ fn bench_factored_independent(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_factored_sim_only(c: &mut Criterion) {
-    let mut group = c.benchmark_group("factored/sim_only_d10");
-    configure_group(&mut group);
-
-    for &n in &[16, 20, 24] {
-        let circuit = circuits::random_circuit(n, 10, SEED);
-
-        group.bench_with_input(BenchmarkId::new("statevector", n), &circuit, |b, circ| {
-            b.iter(|| run_with(BackendKind::Statevector, circ, 42).unwrap());
-        });
-        group.bench_with_input(BenchmarkId::new("factored", n), &circuit, |b, circ| {
-            b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
-        });
-    }
-
-    group.finish();
-}
-
 fn bench_factored_dynamic(c: &mut Criterion) {
     let mut group = c.benchmark_group("factored/dynamic_advantage");
     configure_group(&mut group);
@@ -3934,7 +3850,6 @@ fn bench_factored_dynamic(c: &mut Criterion) {
         let block_size = 4;
         let num_blocks = total_q / block_size;
         let mut circuit = circuits::independent_random_blocks(num_blocks, block_size, 5, SEED);
-        // Add one CX bridging first and last block (prevents static decomposition)
         circuit.add_gate(Gate::Cx, &[0, total_q - 1]);
 
         group.bench_with_input(
@@ -3990,7 +3905,8 @@ fn bench_factored_sampling(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n in &[16, 20, 24] {
-        let circuit = measure_all(&circuits::partially_independent_circuit(n, 5, SEED));
+        let circuit =
+            with_terminal_measurements(circuits::partially_independent_circuit(n, 5, SEED));
         for &shots in &[1_000, 20_000] {
             group.bench_with_input(
                 BenchmarkId::new(format!("{n}q"), shots),
@@ -4169,7 +4085,7 @@ fn bench_factored_dense(c: &mut Criterion) {
     group.finish();
 }
 
-fn clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
+fn random_t_insertion_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut circuit = Circuit::new(n_qubits, 0);
     let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
@@ -4242,7 +4158,7 @@ fn scrambled_clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> C
 }
 
 fn stabilizer_rank_terminal_shot_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
-    let mut circuit = clifford_t_circuit(n_qubits, t_count, seed);
+    let mut circuit = random_t_insertion_circuit(n_qubits, t_count, seed);
     let measured = n_qubits.min(4);
     circuit.num_classical_bits = measured;
     for q in 0..measured {
@@ -4252,7 +4168,7 @@ fn stabilizer_rank_terminal_shot_circuit(n_qubits: usize, t_count: usize, seed: 
 }
 
 fn stabilizer_rank_mid_circuit_shot_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
-    let mut circuit = clifford_t_circuit(n_qubits, t_count, seed);
+    let mut circuit = random_t_insertion_circuit(n_qubits, t_count, seed);
     circuit.num_classical_bits = 2;
     circuit.add_measure(0, 0);
     circuit.instructions.push(Instruction::Conditional {
@@ -4306,7 +4222,7 @@ fn bench_clifford_t(c: &mut Criterion) {
 
     let n = 10;
     for &t in &[1, 2, 4, 8, 12] {
-        let circuit = clifford_t_circuit(n, t, SEED);
+        let circuit = random_t_insertion_circuit(n, t, SEED);
 
         group.bench_function(BenchmarkId::new("spd", format!("{n}q_{t}t")), |b| {
             b.iter(|| {
@@ -4328,7 +4244,7 @@ fn bench_clifford_t(c: &mut Criterion) {
     }
 
     for &n in &[5, 15, 20] {
-        let circuit = clifford_t_circuit(n, 4, SEED);
+        let circuit = random_t_insertion_circuit(n, 4, SEED);
 
         group.bench_function(BenchmarkId::new("spd", format!("{n}q_4t")), |b| {
             b.iter(|| {
@@ -4350,21 +4266,12 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
     let mut group = c.benchmark_group("stabilizer_rank");
     configure_group(&mut group);
 
-    // Compare stabilizer_rank exact vs SPD vs statevector
     let n = 10;
     for &t in &[2, 4, 8, 12] {
-        let circuit = clifford_t_circuit(n, t, SEED);
-        let id = format!("{n}q_{t}t");
-
-        group.bench_function(BenchmarkId::new("stab_rank", &id), |b| {
+        let circuit = random_t_insertion_circuit(n, t, SEED);
+        group.bench_function(BenchmarkId::new("stab_rank", format!("{n}q_{t}t")), |b| {
             b.iter(|| {
                 prism_q::run_stabilizer_rank(&circuit, 42).unwrap();
-            });
-        });
-
-        group.bench_function(BenchmarkId::new("spd", &id), |b| {
-            b.iter(|| {
-                prism_q::run_spd(&circuit, 0.0, 0).unwrap();
             });
         });
     }
@@ -4383,7 +4290,7 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
 
     // Approximate mode: higher T-counts with bounded terms
     for &t in &[16, 20] {
-        let circuit = clifford_t_circuit(n, t, SEED);
+        let circuit = random_t_insertion_circuit(n, t, SEED);
         let id = format!("{n}q_{t}t");
 
         group.bench_function(BenchmarkId::new("approx_256", &id), |b| {
@@ -4457,7 +4364,7 @@ fn random_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -
             c.add_gate(Gate::Cx, &[pair[0], pair[1]]);
         }
     }
-    measure_all(&c)
+    with_terminal_measurements(c)
 }
 
 fn bench_auto_clifford_t_shots(c: &mut Criterion) {
@@ -4494,7 +4401,7 @@ fn clifford_layers(n: usize, depth: usize, seed: u64) -> Circuit {
             c.add_gate(Gate::Cx, &[q, q + 1]);
         }
     }
-    measure_all(&c)
+    with_terminal_measurements(c)
 }
 
 fn bench_qasm_parse(c: &mut Criterion) {
@@ -4577,9 +4484,7 @@ fn bench_compiled_sampler(c: &mut Criterion) {
         for q in 0..rank {
             circuit.add_gate(Gate::H, &[q]);
         }
-        for q in 0..rank {
-            circuit.add_measure(q, q);
-        }
+        circuit.measure_all();
         let mut sampler = prism_q::compile_measurements(&circuit, SEED).unwrap();
         assert_eq!(sampler.rank(), rank);
         group.bench_function(BenchmarkId::new("single_shot", rank), |b| {
@@ -4592,9 +4497,7 @@ fn bench_compiled_sampler(c: &mut Criterion) {
     for q in 0..4096 {
         hadamard_wide.add_gate(Gate::H, &[q]);
     }
-    for q in 0..4096 {
-        hadamard_wide.add_measure(q, q);
-    }
+    hadamard_wide.measure_all();
     group.bench_function(BenchmarkId::new("compile", "hadamard_4096q"), |b| {
         b.iter(|| prism_q::compile_measurements(&hadamard_wide, SEED).unwrap());
     });
@@ -4605,10 +4508,7 @@ fn bench_compiled_sampler(c: &mut Criterion) {
 
     for &n in &[100, 500, 1000] {
         let mut circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
 
         let id = format!("noiseless_{}q_10k", n);
         group.bench_function(BenchmarkId::new("noiseless", &id), |b| {
@@ -4672,7 +4572,7 @@ fn bench_compiled_sampler(c: &mut Criterion) {
     // leaves each destabilizer dense: the shape that prices the deterministic
     // branch rather than the collapses the Clifford rows above spend on.
     for &n in &[1000, 5000] {
-        let circuit = measure_all(&circuits::ghz_circuit(n));
+        let circuit = with_terminal_measurements(circuits::ghz_circuit(n));
         group.bench_function(BenchmarkId::new("compile", format!("ghz_{n}q")), |b| {
             b.iter(|| prism_q::compile_measurements(&circuit, SEED).unwrap());
         });
@@ -4687,7 +4587,7 @@ fn bench_compiled_sampler(c: &mut Criterion) {
     for q in 0..99 {
         deterministic.add_gate(Gate::Cx, &[q, q + 1]);
     }
-    let deterministic = measure_all(&deterministic);
+    let deterministic = with_terminal_measurements(deterministic);
     for &shots in &[100_000, 1_000_000] {
         group.bench_function(
             BenchmarkId::new("deterministic_counts", format!("100q_{shots}")),
@@ -4911,10 +4811,7 @@ fn bench_compiled_sampler_scale(c: &mut Criterion) {
 
     let n = 100;
     let mut circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
-    circuit.num_classical_bits = n;
-    for i in 0..n {
-        circuit.add_measure(i, i);
-    }
+    circuit.measure_all();
 
     for &shots in &[100_000, 1_000_000, 10_000_000] {
         let label = format!("packed_100q_{shots}");
@@ -4962,27 +4859,8 @@ fn bench_spp(c: &mut Criterion) {
 
     let num_samples = 10_000;
 
-    for &t in &[2, 4, 8, 12] {
-        let circuit = clifford_t_circuit(10, t, SEED);
-        let id = format!("10q_{t}t");
-
-        group.bench_function(BenchmarkId::new("spp_10k", &id), |b| {
-            b.iter(|| {
-                prism_q::sim::unified_pauli::run_spp(&circuit, num_samples, 42).unwrap();
-            });
-        });
-
-        if t <= 12 {
-            group.bench_function(BenchmarkId::new("spd", &id), |b| {
-                b.iter(|| {
-                    prism_q::run_spd(&circuit, 0.0, 0).unwrap();
-                });
-            });
-        }
-    }
-
     for &n in &[20, 50, 100] {
-        let circuit = clifford_t_circuit(n, 8, SEED);
+        let circuit = random_t_insertion_circuit(n, 8, SEED);
         let id = format!("{n}q_8t");
 
         group.bench_function(BenchmarkId::new("spp_10k", &id), |b| {
@@ -4992,14 +4870,14 @@ fn bench_spp(c: &mut Criterion) {
         });
     }
 
-    let circuit_100t = clifford_t_circuit(20, 100, SEED);
+    let circuit_100t = random_t_insertion_circuit(20, 100, SEED);
     group.bench_function(BenchmarkId::new("spp_10k", "20q_100t"), |b| {
         b.iter(|| {
             prism_q::sim::unified_pauli::run_spp(&circuit_100t, num_samples, 42).unwrap();
         });
     });
 
-    let circuit_1000t = clifford_t_circuit(50, 1000, SEED);
+    let circuit_1000t = random_t_insertion_circuit(50, 1000, SEED);
     group.bench_function(BenchmarkId::new("spp_10k", "50q_1000t"), |b| {
         b.iter(|| {
             prism_q::sim::unified_pauli::run_spp(&circuit_1000t, num_samples, 42).unwrap();
@@ -5134,6 +5012,7 @@ fn bench_density_matrix_rzz_sandwich(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n in &[10, 12] {
+        let mut prepared = None;
         for &(q0, q1, label) in &[
             (2usize, 3usize, "adjacent"),
             (0, n - 1, "q0_qtop"),
@@ -5146,7 +5025,7 @@ fn bench_density_matrix_rzz_sandwich(c: &mut Criterion) {
                 targets: SmallVec::from_slice(&[q0, q1]),
             };
             group.bench_with_input(BenchmarkId::new(label, n), &n, |b, &n| {
-                let mut backend = dm_backend(n);
+                let backend = prepared.get_or_insert_with(|| dm_backend(n));
                 b.iter(|| backend.apply(&instruction).unwrap());
             });
         }
@@ -5416,16 +5295,6 @@ fn bench_density_matrix_exact_expectation(c: &mut Criterion) {
     group.finish();
 }
 
-/// Kraus set for amplitude damping at rate `gamma`.
-fn amplitude_damping_kraus(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
-    let c = |re: f64| Complex64::new(re, 0.0);
-    let zero = c(0.0);
-    vec![
-        [[c(1.0), zero], [zero, c((1.0 - gamma).sqrt())]],
-        [[zero, c(gamma.sqrt())], [zero, zero]],
-    ]
-}
-
 /// Kraus set for symmetric one-qubit depolarizing at rate `p`.
 fn depolarizing_kraus(p: f64) -> Vec<[[Complex64; 2]; 2]> {
     let c = |re: f64| Complex64::new(re, 0.0);
@@ -5440,42 +5309,10 @@ fn depolarizing_kraus(p: f64) -> Vec<[[Complex64; 2]; 2]> {
     ]
 }
 
-/// Kraus pair for correlated `ZZ` dephasing at rate `p`, in the
-/// `2*bit(q0) + bit(q1)` packing `NoiseChannel::Kraus2q` takes.
-fn correlated_zz_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
-    let zero = Complex64::new(0.0, 0.0);
-    let diag = |scale: f64, signs: [f64; 4]| {
-        let mut m = [[zero; 4]; 4];
-        for (t, sign) in signs.iter().enumerate() {
-            m[t][t] = Complex64::new(scale * sign, 0.0);
-        }
-        m
-    };
-    vec![
-        diag((1.0 - p).sqrt(), [1.0, 1.0, 1.0, 1.0]),
-        diag(p.sqrt(), [1.0, -1.0, -1.0, 1.0]),
-    ]
-}
-
 fn correlated_zz_channel(p: f64) -> prism_q::NoiseChannel {
     prism_q::NoiseChannel::Kraus2q {
         kraus: correlated_zz_kraus(p),
     }
-}
-
-/// The correlated `ZZ` pair conjugated by `H` on `q0`: `{sqrt(1-p) I, sqrt(p) X(x)Z}`.
-/// Unitary conjugation of the whole set preserves CPTP, and the `X` factor fills the
-/// compiled 16x16 superoperator, where the `ZZ` pair compiles to its diagonal.
-fn h_conjugated_zz_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
-    let zero = Complex64::new(0.0, 0.0);
-    let mut k0 = [[zero; 4]; 4];
-    let mut k1 = [[zero; 4]; 4];
-    for t in 0..4 {
-        k0[t][t] = Complex64::new((1.0 - p).sqrt(), 0.0);
-        let sign = if t & 1 == 0 { 1.0 } else { -1.0 };
-        k1[t][t ^ 2] = Complex64::new(p.sqrt() * sign, 0.0);
-    }
-    vec![k0, k1]
 }
 
 fn dm_backend(n: usize) -> DensityMatrixBackend {
@@ -5554,8 +5391,9 @@ fn bench_density_matrix_noisy_channels(c: &mut Criterion) {
         // through `conjugate_gate`; without that arm it costs two extra
         // full-buffer conjugations, and no circuit row reaches it because the
         // brick layers in `random_circuit` batch every run.
-        group.bench_with_input(BenchmarkId::new("fused_2q_gate", n), &n, |b, &_n| {
-            let mut backend = dm_backend(n);
+        let mut prepared = None;
+        group.bench_with_input(BenchmarkId::new("fused_2q_gate", n), &n, |b, &n| {
+            let backend = prepared.get_or_insert_with(|| dm_backend(n));
             let fused = Instruction::Gate {
                 gate: Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())),
                 targets: SmallVec::from_slice(&[0, 1]),
@@ -5581,8 +5419,9 @@ fn bench_density_matrix_noisy_channels(c: &mut Criterion) {
             });
         }
 
+        let mut prepared = None;
         group.bench_with_input(BenchmarkId::new("purity", n), &n, |b, &n| {
-            let backend = dm_backend(n);
+            let backend = prepared.get_or_insert_with(|| dm_backend(n));
             b.iter(|| black_box(backend.purity()));
         });
     }
@@ -5599,10 +5438,7 @@ fn bench_density_matrix_noisy_shots(c: &mut Criterion) {
 
     for &n in &[8, 10] {
         let mut circuit = circuits::random_circuit(n, 4, SEED);
-        circuit.num_classical_bits = n;
-        for q in 0..n {
-            circuit.add_measure(q, q);
-        }
+        circuit.measure_all();
         let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
@@ -5641,9 +5477,7 @@ fn bench_density_matrix_shots_fused(c: &mut Criterion) {
                 classical_bit: 0,
             },
         );
-        for q in 0..n {
-            circuit.add_measure(q, q);
-        }
+        circuit.measure_all();
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 black_box(run_shots_with(BackendKind::DensityMatrix, circ, 2, SEED).unwrap());
@@ -5744,9 +5578,7 @@ fn dead_region_circuit(n: usize, with_region: bool) -> Circuit {
         }
     }
     layered_clifford_body(&mut circuit, n, 10, SEED);
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
     circuit
 }
 
@@ -5881,9 +5713,7 @@ fn mid_circuit_measure_all_circuit(n: usize) -> Circuit {
     circuit.add_measure(0, n);
     circuit.add_measure(1, n + 1);
     layers(&mut circuit);
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
     circuit
 }
 
@@ -5921,9 +5751,7 @@ fn dynamic_clifford_circuit(n: usize, depth: usize) -> Circuit {
     });
     circuit.add_reset(0);
     layered_clifford_body(&mut circuit, n, depth, SEED ^ 1);
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
     circuit
 }
 
@@ -5971,9 +5799,7 @@ fn bench_dynamic_clifford_shots(c: &mut Criterion) {
     body.add_measure(0, n);
     body.add_reset(0);
     layered_clifford_body(&mut body, n, 4, SEED ^ 1);
-    for q in 0..n {
-        body.add_measure(q, q);
-    }
+    body.measure_all();
     let circuit = with_readout_witness(body, n);
     for (tag, p01, p10, route) in [
         (
@@ -6239,7 +6065,6 @@ criterion_group! {
     // Cross-backend comparisons
     bench_compare_clifford,
     bench_compare_single_qubit,
-    bench_compare_general,
     // Decomposition
     bench_decomposition,
     // Parameter sweep setup (rebuild vs rebind)
@@ -6267,7 +6092,6 @@ criterion_group! {
     // Factored backend
     bench_factored_random,
     bench_factored_independent,
-    bench_factored_sim_only,
     bench_factored_dynamic,
     bench_factored_partial_independence,
     bench_factored_sampling,

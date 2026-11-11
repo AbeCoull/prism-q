@@ -109,31 +109,31 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
     group.finish();
 }
 
+/// The same CX and CZ placements as `two_qubit_gates` at 22 qubits, past its widest row.
 fn bench_two_qubit_gate_kernels(c: &mut Criterion) {
     let mut group = c.benchmark_group("two_qubit_gate_kernels");
     configure_group(&mut group);
 
-    for &n_qubits in &[12, 16, 20, 22] {
-        let hi = n_qubits - 1;
-        bench_kernel_row(
-            &mut group,
-            "cx_ctrl_lt_adjacent",
-            n_qubits,
-            Gate::Cx,
-            &[0, 1],
-        );
-        bench_kernel_row(
-            &mut group,
-            "cx_ctrl_gt_adjacent",
-            n_qubits,
-            Gate::Cx,
-            &[1, 0],
-        );
-        bench_kernel_row(&mut group, "cx_ctrl_lt_high", n_qubits, Gate::Cx, &[0, hi]);
-        bench_kernel_row(&mut group, "cx_ctrl_gt_high", n_qubits, Gate::Cx, &[hi, 0]);
-        bench_kernel_row(&mut group, "cz_adjacent", n_qubits, Gate::Cz, &[0, 1]);
-        bench_kernel_row(&mut group, "cz_high", n_qubits, Gate::Cz, &[0, hi]);
-    }
+    let n_qubits = 22;
+    let hi = n_qubits - 1;
+    bench_kernel_row(
+        &mut group,
+        "cx_ctrl_lt_adjacent",
+        n_qubits,
+        Gate::Cx,
+        &[0, 1],
+    );
+    bench_kernel_row(
+        &mut group,
+        "cx_ctrl_gt_adjacent",
+        n_qubits,
+        Gate::Cx,
+        &[1, 0],
+    );
+    bench_kernel_row(&mut group, "cx_ctrl_lt_high", n_qubits, Gate::Cx, &[0, hi]);
+    bench_kernel_row(&mut group, "cx_ctrl_gt_high", n_qubits, Gate::Cx, &[hi, 0]);
+    bench_kernel_row(&mut group, "cz_adjacent", n_qubits, Gate::Cz, &[0, 1]);
+    bench_kernel_row(&mut group, "cz_high", n_qubits, Gate::Cz, &[0, hi]);
 
     group.finish();
 }
@@ -316,24 +316,20 @@ fn bench_controlled_gates(c: &mut Criterion) {
     for &n_qubits in &QUBIT_COUNTS {
         bench_kernel_row(&mut group, "cu_h", n_qubits, Gate::cu(h_mat), &[0, 1]);
 
-        if n_qubits >= 3 {
-            bench_kernel_row(
-                &mut group,
-                "toffoli",
-                n_qubits,
-                Gate::mcu(x_mat, 2),
-                &[0, 1, 2],
-            );
-        }
-        if n_qubits >= 4 {
-            bench_kernel_row(
-                &mut group,
-                "cccx",
-                n_qubits,
-                Gate::mcu(x_mat, 3),
-                &[0, 1, 2, 3],
-            );
-        }
+        bench_kernel_row(
+            &mut group,
+            "toffoli",
+            n_qubits,
+            Gate::mcu(x_mat, 2),
+            &[0, 1, 2],
+        );
+        bench_kernel_row(
+            &mut group,
+            "cccx",
+            n_qubits,
+            Gate::mcu(x_mat, 3),
+            &[0, 1, 2, 3],
+        );
     }
 
     group.finish();

@@ -56,6 +56,7 @@ distributed = []
 distributed-mpi = ["distributed", "dep:mpi"]
 bench-fast = []
 bench-internal = []
+unstable-pulse = []
 
 # The gpu surface documents without a CUDA toolkit: cudarc's build script with the pinned
 # cuda-12040 feature does not probe for one, and the driver and NVRTC load at run time.

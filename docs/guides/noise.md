@@ -240,3 +240,42 @@ let complex = ErrorChainComplex::build(&ghz, &noise, 42)?;
 let logical_classes = complex.homology_dim();
 # Ok::<(), prism_q::PrismError>(())
 ```
+
+## Gates compiled from pulses
+
+The `unstable-pulse` feature adds `prism_q::pulse`, which integrates a pulse schedule on
+a model of one to three transmons once and hands the result to the gate level. It is
+closed-system only and outside the [stability promise](compatibility.md#feature-flags):
+its items may change in any release.
+
+```toml
+prism-q = { version = "*", features = ["unstable-pulse"] }
+```
+
+```rust,ignore
+use prism_q::pulse::{compile, Device, Envelope, Schedule, Transmon};
+use prism_q::{Circuit, Gate};
+
+let device = Device::new([Transmon { frequency: 5e9, anharmonicity: -300e6, levels: 3 }]);
+let mut schedule = Schedule::new(1e-9);
+let drag = Envelope::Drag { amp: 50e6, sigma: 5e-9, beta: 1.0 / (2.0 * std::f64::consts::PI * 300e6) };
+schedule.play(0, 0.0, 20e-9, drag);
+let gate = compile(&device, &schedule, 16)?;
+let mut circuit = Circuit::new(1, 0);
+circuit.add_unitary(gate.unitary(), &[0])?;
+let residual = gate.error_after(&Gate::X);
+```
+
+Frequencies and amplitudes are in Hz and times in seconds. The three outputs:
+
+- `unitary()`: the nearest unitary to the propagator restricted to `|0>` and `|1>` on
+  every site, packed for `Gate::unitary` and `Circuit::add_unitary` with site 0 on the
+  first target.
+- `leakage()`: per site, the probability of leaving `{|0>, |1>}` from `|0>` and from
+  `|1>`. These can parameterize the `Leakage` channel above.
+- `error_after(ideal)`: the coherent difference between the pulse and the gate it stands
+  for, as a one-operator `Custom` or `Kraus2q` channel to attach after that gate with a
+  `NoiseBuilder`.
+
+`evolve` returns the populations after each sample period instead, for Rabi or leakage
+curves.

@@ -49,7 +49,7 @@ says what each release promises.
 | OpenQASM 3 constructs that decline today: private measurement storage in subroutines and the `complex` type. [The subset](./guides/openqasm.md#the-subset) lists the rest | Planned |
 | Conversion from Python circuit frameworks, behind an optional dependency | Planned |
 | Checkpoint and resume across processes, which needs a state format first | Research |
-| Pulse-level and continuous-time simulation. Design only: whether it becomes a backend or a separate crate is the first decision | Research |
+| Gate channels from a pulse-level device model. A closed-system compile to a unitary and leakage rates ships behind the `unstable-pulse` feature (see [Noise Models](./guides/noise.md#gates-compiled-from-pulses)); a Lindblad channel during the gate and OpenPulse input wait on a caller | Needs a use case |
 
 ## GPU on one device
 

@@ -222,6 +222,24 @@ jobs:
       - name: Tests
         run: cargo nextest run --features "$CI_DIST_FEATURES"
 
+  # The pulse module sits behind a feature outside CI_DOC_FEATURES, so no other job
+  # builds it.
+  check-pulse:
+    name: Lint & Test (unstable-pulse)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          nextest: true
+
+      - name: Clippy
+        run: cargo clippy --all-targets --features "parallel unstable-pulse" -- -D warnings -D clippy::undocumented_unsafe_blocks
+
+      - name: Tests
+        run: cargo nextest run --features "parallel unstable-pulse" --test pulse_compile
+
   # The MPI transport against Open MPI, under a real launcher. The loopback suite
   # above never links MPI, and a Windows MS-MPI run speaks for neither Open MPI's
   # handle types (`MPI_Comm` is a pointer there, an int in MS-MPI) nor its launcher.
@@ -498,6 +516,9 @@ jobs:
 
       - name: Check (gpu and distributed)
         run: cargo +"$CI_MSRV" check --features "parallel gpu distributed"
+
+      - name: Check (unstable-pulse)
+        run: cargo +"$CI_MSRV" check --features "parallel unstable-pulse"
 
   # The release workflow publishes to crates.io with --no-confirm --execute and no
   # manual gate, so the version arithmetic in front of it is verified here rather

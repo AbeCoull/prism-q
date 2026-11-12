@@ -652,3 +652,31 @@ fn the_tail_after_the_last_measurement_is_skipped_but_a_save_is_not() {
     let result = branch_shots(&c, 1_000, 42, &limits, true).unwrap();
     assert_near(frequency(&result.shots, 0), 0.5, 1_000, "bit 0 with a save");
 }
+
+// A qubit still in |0>, untouched or reset, measures 0 and resets with no pass
+// over the state, so the pair costs what the circuit without it costs.
+#[test]
+fn a_measurement_and_reset_of_a_zero_qubit_take_no_pass() {
+    let ticks = |with_pair: bool| {
+        let mut c = Circuit::new(2, 3);
+        if with_pair {
+            c.add_measure(0, 0);
+            c.add_reset(0);
+        }
+        c.add_gate(Gate::H, &[1]);
+        c.add_measure(1, 1);
+        c.add_reset(1);
+        if with_pair {
+            c.add_measure(1, 2);
+            c.add_reset(1);
+        }
+        c.add_gate(Gate::H, &[0]);
+        c.add_measure(0, 0);
+        let limits = BranchLimits::for_width(2, false, &ResolvedLimits::process_default());
+        crate::backend::statevector::sweeps::take_ticks();
+        let shots = branch_shots(&c, 1_000, 42, &limits, true).unwrap().shots;
+        assert!(shots.iter().all(|s| !s[2]));
+        crate::backend::statevector::sweeps::take_ticks()
+    };
+    assert_eq!(ticks(true), ticks(false));
+}

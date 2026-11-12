@@ -390,6 +390,22 @@ fn bench_run_counts_terminal(c: &mut Criterion) {
         );
     }
 
+    // Nearest-neighbour Clifford brickwork read out in full. One shot isolates the
+    // compile, which dominates at 100 qubits; 1000 shots adds the sampling and counting.
+    for &n in &[100, 1000] {
+        let mut circuit = prism_q::circuits::clifford_heavy_circuit(n, 8, SEED);
+        circuit.measure_all();
+        for &shots in &[1, 1000] {
+            group.bench_with_input(
+                BenchmarkId::new(format!("clifford_brickwork_d8_{shots}"), n),
+                &circuit,
+                |b, circ| {
+                    b.iter(|| run_counts_with(BackendKind::Auto, circ, shots, SEED).unwrap());
+                },
+            );
+        }
+    }
+
     group.finish();
 }
 

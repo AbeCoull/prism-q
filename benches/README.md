@@ -235,7 +235,13 @@ baseline and comparing later.
 ./scripts/bench_ab.sh -f '^x/affected/' -c '^x/control/'         # controls at 10 samples
 ./scripts/bench_ab.sh -f '^statevector/' --light                 # triage tier, about a fifth of the time
 ./scripts/bench_ab.sh -f '^statevector/' --light --escalate      # then the full tier on rows that moved
+./scripts/bench_ab.sh -f '^sparse/' -c '^mps/random_d10/16$' --interleave  # interleaved rounds, below
 ```
+
+Without `--ref` the reference is the merge-base of `HEAD` and `origin/main` (local `main`
+when there is no remote), and the report's `Reference` line names the resolved commit.
+A clean tree sitting at that commit is an error, since both sides would be the same code;
+an uncommitted change against it is a normal run.
 
 The script builds the working tree and a reference git ref (in a separate worktree),
 checks the working tree did not change between the builds, then runs the two
@@ -263,14 +269,26 @@ tree, and `--build-dir` points `--build-only` at another checkout. Nothing check
 supplied executable was built from what it claims, so whatever stores it owns that
 claim; the report records how each binary arrived.
 
+`--interleave` keeps the builds and hands the smoke test and the measurement to the
+interleaved runner below in its two-binary mode: short invocations in A B B A rounds,
+each read at its fastest sample, with disturbed rounds dropped and an early stop. The
+four passes need an idle host; on a desktop that never drops under 12% load they either
+wait for hours or read RERUN with same-code controls spread 60% to 120%. The mode needs
+`--control`, forwards the filters, `--light`, `--threshold`, `--min-rows`, the host
+guards and `--out`, and keeps the exit codes. `--escalate` is refused, and the options
+that shape passes (`--control-samples`, the slow-row and warmup counts,
+`--max-row-seconds`, `--no-confirm`) do not apply. `MEASURE_METHOD` near the top of the
+script sets which method a run without `--interleave` or `--passes` takes.
+
 ### Host and verdict guards
 
 The script names each of these failure patterns instead of reporting a number.
 
 **A busy host.** Before the first measured pass the script reads host CPU load for two
 seconds and stops with exit 2, listing the busiest processes, when other work holds more
-than `--max-host-load` (default 10% of all CPUs; one busy thread on an 8-thread host is
-12.5%). `--wait-idle SECONDS` waits for the load to fall instead. `--settle SECONDS`
+than `--max-host-load` (default 25% of all CPUs; one busy thread on an 8-thread host is
+12.5%, and a desktop with chat and editor apps open idles at 12% to 19%, so 10% never
+cleared there). `--wait-idle SECONDS` waits for the load to fall instead. `--settle SECONDS`
 asks for that many seconds of consecutive quiet readings first, for a job that builds
 just before it measures: a build leaves the host disturbed after its processes exit. The
 reading before each measured pass goes into the report, and a FAIL with a busy pass
@@ -303,10 +321,10 @@ it as NO DATA under the table, naming the passes it is missing from, and the ver
 comes from the remaining rows. `--min-rows` still turns a filter that lost its rows into
 a NO DATA verdict.
 
-**The same code twice.** With the default `--ref HEAD` on a clean tree, both binaries
+**The same code twice.** With an explicit `--ref HEAD` on a clean tree, both binaries
 carry the same code. The report says so in its settings table, and a run that would
 PASS reads `CONTROL (same code)` instead, still exit 0, since it measured the host's
-noise floor rather than a change.
+noise floor rather than a change. The default reference refuses that case instead.
 
 `--escalate` joins the two tiers: after a light run, every row that moved past half the
 threshold is measured again on the full tier against the same two binaries, and that run
@@ -460,6 +478,11 @@ EOF
 ./scripts/bench_queue.sh --schedule queue.sh    # detached; progress in <out>/status.txt
 ```
 
+An `ab` step without `-r` compares with the same merge-base default as `bench_ab.sh`,
+resolved in its checkout when the queue is planned, and a clean checkout at that commit
+stops the plan. `--interleave` among a step's options measures its two cached binaries
+through the interleaved runner; retries and `NAME-tryN/` work the same.
+
 Binaries are cached under `bench_results/bin`, keyed on commit, features, bench target,
 and toolchain, so steps that share a reference build it once and a later queue reuses it.
 A checkout with uncommitted changes or untracked files adds the content hash `bench_ab.sh`
@@ -556,6 +579,19 @@ Use `bench_ab.sh` for anything a switch cannot express: a change spread across m
 sites, a data layout change, a dependency or toolchain bump, or a comparison against
 another commit. A queue step `ix NAME DIR [options]` runs the interleaved runner from
 `bench_queue.sh`, building its one binary in the build phase.
+
+`--base-exe PATH` runs the same rounds on two executables: variant a runs `--base-exe`,
+variant b runs `--exe`, and every invocation sees `PRISM_BENCH_VARIANT=a` and otherwise
+the same environment. The smoke test covers every row on both. Two binaries keep two code
+layouts, which one binary cancels and this mode cannot, so it requires `--control`: a
+binary sitting in a slow layout reads as a control off zero, and the run reads RERUN.
+`--variants` must stay `b`. `bench_ab.sh --interleave` and an `ab` queue step given
+`--interleave` measure this way.
+
+```bash
+./scripts/bench_interleave.sh --base-exe /tmp/circuits-main --exe /tmp/circuits-change \
+    -f '^statevector/random_d10/(16|20)$' -c '^mps/random_d10/16$'
+```
 
 ## Batches of branches: one combined A/B
 

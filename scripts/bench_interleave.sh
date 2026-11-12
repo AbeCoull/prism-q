@@ -54,11 +54,21 @@
 # undisturbed. With several variants each gets its own table and verdict, and the
 # run takes the worst: FAIL, then NO DATA, then RERUN, then PASS.
 #
+# Two-binary mode (--base-exe) runs the same engine on two executables: variant a
+# runs --base-exe and variant b runs --exe, every invocation with
+# PRISM_BENCH_VARIANT=a and otherwise the same environment. Two binaries carry two
+# code layouts, which one binary cancels and this mode cannot, so a binary that
+# sits in a slow layout shows up only on rows the change does not reach. The mode
+# therefore requires --control, and a control off zero reads RERUN as usual.
+# scripts/bench_ab.sh --interleave measures through this mode.
+#
 # Usage:
 #   scripts/bench_interleave.sh -f '^statevector/qft_textbook/(16|20)$' -c '^mps/random_d10/16$'
 #   scripts/bench_interleave.sh -f '^sparse/' --exe /tmp/circuits-switch --rounds 12
 #   scripts/bench_interleave.sh -f '^sparse/' --light               # triage, about a fifth of the time
 #   scripts/bench_interleave.sh --build-only /tmp/circuits-switch   # for --exe or a queue
+#   scripts/bench_interleave.sh -f '^sparse/' -c '^mps/random_d10/16$' \
+#       --base-exe /tmp/circuits-main --exe /tmp/circuits-change    # two binaries
 #
 # Options:
 #   --filter,   -f  Criterion filter regex for the rows the switch changes (required)
@@ -73,6 +83,9 @@
 #                   switch only exists under bench-internal)
 #   --exe           prebuilt bench executable; skips the build. The caller owns the
 #                   claim that it was built from the tree under test.
+#   --base-exe      prebuilt executable for variant a, which turns on two-binary
+#                   mode: --exe is then variant b and required, --control is
+#                   required, and --variants must stay b.
 #   --build-only    build the working tree's bench binary, copy it to this path,
 #                   and exit. Delegates to scripts/bench_ab.sh, so a binary cached by
 #                   either script is what the other expects.
@@ -106,13 +119,18 @@
 #   --threshold, -t regression gate in percent (default: REGRESSION_THRESHOLD or 5.0)
 #
 # Host guards, as in scripts/bench_ab.sh:
-#   --max-host-load percent of all CPUs other work may hold (default 10, 0
+#   --max-host-load percent of all CPUs other work may hold (default 25, 0
 #                   disables). Read before the first invocation, where a busy host
 #                   stops the run, and before each round, where it is recorded
-#                   only: the disturbed-round test decides which rounds count.
+#                   only: the disturbed-round test decides which rounds count. A
+#                   desktop with chat and editor apps open idles at 12% to 19%, so
+#                   a lower default never clears there.
 #   --wait-idle     seconds to wait for an idle host before giving up (default 0),
 #                   and for another measurement's MEASURING marker to clear
 #                   before the build
+#   --settle        seconds the host must stay under --max-host-load without a
+#                   break before the first invocation (default 0), as in
+#                   scripts/bench_ab.sh
 #   --force-lock    build and measure even while a live process holds the
 #                   MEASURING marker. Run alone, the script writes the marker
 #                   (see bench_lock.sh) before the host load check and removes it
@@ -140,6 +158,7 @@ CONTROL_FILTER=""
 BENCH="circuits"
 FEATURES="parallel bench-internal"
 EXE=""
+BASE_EXE=""
 BUILD_ONLY=""
 BUILD_DIR=""
 ROUNDS=""
@@ -151,8 +170,9 @@ ESTIMATE="min"
 OUT=""
 FROM_TSV=""
 THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
-MAX_HOST_LOAD=10
+MAX_HOST_LOAD=25
 WAIT_IDLE=0
+SETTLE=0
 NO_EARLY_STOP=""
 FORCE_LOCK=""
 VARIANT_LIST="b"
@@ -168,6 +188,7 @@ while [[ $# -gt 0 ]]; do
         --bench|-b)    BENCH="$2"; shift 2 ;;
         --features)     FEATURES="$2"; shift 2 ;;
         --exe)          EXE="$2"; shift 2 ;;
+        --base-exe)     BASE_EXE="$2"; shift 2 ;;
         --build-only)   BUILD_ONLY="$2"; shift 2 ;;
         --build-dir)    BUILD_DIR="$2"; shift 2 ;;
         --project-dir)  PROJECT_DIR="$(cd "$2" && pwd)"; shift 2 ;;
@@ -182,6 +203,7 @@ while [[ $# -gt 0 ]]; do
         --threshold|-t) THRESHOLD="$2"; shift 2 ;;
         --max-host-load) MAX_HOST_LOAD="$2"; shift 2 ;;
         --wait-idle)    WAIT_IDLE="$2"; shift 2 ;;
+        --settle)       SETTLE="$2"; shift 2 ;;
         --no-early-stop) NO_EARLY_STOP=1; shift ;;
         --force-lock)   FORCE_LOCK=1; shift ;;
         -h|--help)      awk 'NR > 1 && !/^#/ { exit } NR > 1' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -226,6 +248,22 @@ if [[ -z "$FROM_TSV" ]]; then
        [[ -n "$(printf '%s\n' "${VARIANTS[@]}" | sort | uniq -d)" ]]; then
         echo "Error: --variants is '$VARIANT_LIST'; name distinct letters b to z, comma separated." >&2
         exit 5
+    fi
+    if [[ -n "$BASE_EXE" ]]; then
+        if [[ "$VARIANT_LIST" != b ]]; then
+            echo "Error: --base-exe compares two executables, a and b, so --variants must stay b (got '$VARIANT_LIST')." >&2
+            exit 5
+        fi
+        if [[ -z "$EXE" ]]; then
+            echo "Error: --base-exe needs --exe, the executable variant b runs." >&2
+            exit 5
+        fi
+        if [[ -z "$CONTROL_FILTER" ]]; then
+            echo "Error: --base-exe needs --control. Two binaries differ in code layout, and" >&2
+            echo "  only rows the change does not reach can show a binary sitting in a slow one." >&2
+            exit 5
+        fi
+        [[ -f "$BASE_EXE" ]] || { echo "Error: --base-exe '$BASE_EXE' does not exist." >&2; exit 5; }
     fi
 fi
 
@@ -298,26 +336,39 @@ snapshot() {
     done
 }
 
+# The executable and PRISM_BENCH_VARIANT value of an invocation of variant $1, in
+# INV_EXE and INV_VARIANT. Under --base-exe the variant picks the executable and
+# the environment stays the same for both.
+invocation_of() {
+    INV_EXE="$RUN_EXE"; INV_VARIANT="$1"
+    if [[ -n "$BASE_EXE" ]]; then
+        INV_VARIANT=a
+        if [[ "$1" == a ]]; then INV_EXE="$BASE_EXE"; fi
+    fi
+}
+
 # Run every row of the filters once per variant in Criterion's test mode; the
 # last `Testing` line in a failing log names the row.
 smoke_test() {
-    local variant="$1" filter log status row rows
+    local variant="$1" filter log status row rows label="variant $1"
+    invocation_of "$variant"
+    if [[ -n "$BASE_EXE" ]]; then label="variant $variant ($INV_EXE)"; fi
     for filter in "$FILTER" ${CONTROL_FILTER:+"$CONTROL_FILTER"}; do
         log="$WORKDIR/smoke-$variant.log"
         status=0
-        PRISM_BENCH_VARIANT="$variant" CRITERION_HOME="$(native_path "$WORKDIR/smoke-home")" \
-            run_child "$RUN_EXE" --test "$filter" > "$log" 2>&1 || status=$?
+        PRISM_BENCH_VARIANT="$INV_VARIANT" CRITERION_HOME="$(native_path "$WORKDIR/smoke-home")" \
+            run_child "$INV_EXE" --test "$filter" > "$log" 2>&1 || status=$?
         rows="$(grep -c '^Testing ' "$log" || true)"
         if (( status != 0 )); then
             row="$(awk '/^Testing / { id = substr($0, 9) } END { print id }' "$log")"
             echo "" >&2
-            echo "Error: smoke test failed on variant $variant: it exited $status on row '${row:-unknown}'." >&2
+            echo "Error: smoke test failed on $label: it exited $status on row '${row:-unknown}'." >&2
             echo "  Filter: $filter" >&2
             tail -n 15 "$log" | sed 's/^/    /' >&2
             echo "  No measurement ran. Fix the row or leave it out of the filter." >&2
             exit 4
         fi
-        echo "    variant $variant: $rows row(s) ran once under '$filter'"
+        echo "    $label: $rows row(s) ran once under '$filter'"
     done
 }
 
@@ -337,8 +388,9 @@ run_slot() {
         home="$WORKDIR/crit-$round-$slot-$seg"
         log="$WORKDIR/run-$round-$slot-$seg.log"
         mkdir -p "$home"
-        if ! PRISM_BENCH_VARIANT="$variant" CRITERION_HOME="$(native_path "$home")" \
-            PRISM_BENCH_SAMPLES="$SAMPLES" run_child "$RUN_EXE" --bench \
+        invocation_of "$variant"
+        if ! PRISM_BENCH_VARIANT="$INV_VARIANT" CRITERION_HOME="$(native_path "$home")" \
+            PRISM_BENCH_SAMPLES="$SAMPLES" run_child "$INV_EXE" --bench \
             --warm-up-time "$WARM_UP" --measurement-time "$WINDOW" "$filter" > "$log" 2>&1; then
             tail -n 15 "$log" >&2
             echo "Error: the bench binary failed in round $round, variant $variant, '$filter'." >&2
@@ -425,7 +477,7 @@ disturbed_text() {
 analyze() {
     awk -v mode="$1" -v disturbed="$2" -v var="${3:-b}" -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" \
         -v loaded="$LOADED_ROUNDS" -v light="${LIGHT:-0}" -v col="$EST_COL" \
-        -v wide_ratio="$WIDE_CONTROL_EFFECT_RATIO" '
+        -v wide_ratio="$WIDE_CONTROL_EFFECT_RATIO" -v two_binary="${TWO_BINARY:-0}" '
 BEGIN {
     FS = "\t"; SEP = "\x1f"
     nd = split(disturbed, dl, " ")
@@ -598,9 +650,14 @@ END {
             compared, (min_rows > 1 ? min_rows : 1)
         exit 5
     }
-    if (offs > 0) {
+    if (offs > 0 && two_binary) {
+        printf "**Regression verdict**: RERUN. %d control row(s) did not read flat, so the two binaries differ on rows the change should not reach, as one sitting in a slow code layout does, or the rounds were too noisy to tell.%s\n\n",
+            offs, tier_note
+    } else if (offs > 0) {
         printf "**Regression verdict**: RERUN. %d control row(s) did not read flat, so the two variants differ on rows the switch should not reach, or the rounds were too noisy to tell.%s\n\n",
             offs, tier_note
+    }
+    if (offs > 0) {
         for (i = 1; i <= offs; i++) { printf "- `%s`\n", off[i] }
         if (regressions > 0) {
             print "\nRows past the gate in this run, not a result:\n"
@@ -661,12 +718,19 @@ report_variants() {
 LOADED_ROUNDS=""
 STOPPED_EARLY=""
 STARTED="$(date +%s)"
+TWO_BINARY=""
+KIND="same-binary"
+if [[ -n "$BASE_EXE" ]]; then
+    TWO_BINARY=1
+    KIND="two-binary"
+fi
 if [[ -z "$FROM_TSV" ]]; then
-    echo "=== PRISM-Q interleaved same-binary A/B ==="
+    echo "=== PRISM-Q interleaved $KIND A/B ==="
     echo "  bench:     $BENCH"
     echo "  filter:    $FILTER"
     [[ -n "$CONTROL_FILTER" ]] && echo "  control:   $CONTROL_FILTER"
     echo "  features:  $FEATURES"
+    [[ -n "$TWO_BINARY" ]] && echo "  binaries:  a $BASE_EXE, b $EXE"
     echo "  tier:      $TIER, $ROUNDS rounds, $SAMPLES samples, ${WARM_UP}s + ${WINDOW}s windows"
     echo "  threshold: ${THRESHOLD}%"
     echo ""
@@ -729,6 +793,10 @@ else
     awk -F'\t' 'NF >= 6' "$FROM_TSV" > "$RAW"
     IFS=',' read -r -a VARIANTS <<< "$(awk -F'\t' '$3 != "a" { print $3 }' "$RAW" | sort -u | paste -sd, -)"
     LOADED_ROUNDS="$(awk -F'\t' '$1 == "#loaded" { print $2 }' "$FROM_TSV")"
+    if grep -q $'^#two-binary\t' "$FROM_TSV"; then
+        TWO_BINARY=1
+        KIND="two-binary"
+    fi
     PROVENANCE="from tsv"; COMMIT="from tsv"; WALL="from tsv"
     ROUNDS="$(awk -F'\t' '$1 > m { m = $1 } END { print m + 0 }' "$RAW")"
     ROUNDS_RUN="$ROUNDS"
@@ -744,20 +812,31 @@ mkdir -p "$(dirname "$OUT")"
 if [[ -z "$FROM_TSV" ]]; then
     cp "$RAW" "${OUT%.md}.tsv"
     [[ -z "$LOADED_ROUNDS" ]] || printf '#loaded\t%s\n' "$LOADED_ROUNDS" >> "${OUT%.md}.tsv"
+    [[ -z "$TWO_BINARY" ]] || printf '#two-binary\t%s\t%s\n' "$BASE_EXE" "$EXE" >> "${OUT%.md}.tsv"
 fi
 
 set +e
 {
-    echo "## Interleaved same-binary A/B: \`$BENCH\`"
+    echo "## Interleaved $KIND A/B: \`$BENCH\`"
     echo ""
     echo "| Setting | Value |"
     echo "| --- | --- |"
     echo "| Filter | \`${FILTER:-from tsv}\` |"
     [[ -n "$CONTROL_FILTER" ]] && echo "| Control filter | \`$CONTROL_FILTER\` |"
-    echo "| Binary | $PROVENANCE, commit $COMMIT |"
-    if (( ${#VARIANTS[@]} == 1 )); then
+    if [[ -n "$TWO_BINARY" ]]; then
+        echo "| Mode | two binaries: a runs \`--base-exe\`, b runs \`--exe\`, every invocation with \`PRISM_BENCH_VARIANT=a\` and otherwise the same environment |"
+        echo "| Layout check | two binaries carry two code layouts, which this mode cannot cancel; the control rows carry the check, and a control off zero reads RERUN |"
+        if [[ -n "$FROM_TSV" ]]; then
+            echo "| Binaries | from tsv |"
+        else
+            echo "| Binaries | a \`$BASE_EXE\`, b \`$EXE\`, both supplied, not built here; checkout at commit $COMMIT |"
+        fi
+        echo "| Variants | a and b, one process per invocation |"
+    elif (( ${#VARIANTS[@]} == 1 )); then
+        echo "| Binary | $PROVENANCE, commit $COMMIT |"
         echo "| Variants | a and ${VARIANTS[0]} of \`PRISM_BENCH_VARIANT\`, one process per invocation |"
     else
+        echo "| Binary | $PROVENANCE, commit $COMMIT |"
         echo "| Variants | a against each of $(IFS=,; echo "${VARIANTS[*]}" | sed 's/,/, /g') of \`PRISM_BENCH_VARIANT\`, one process per invocation |"
     fi
     echo "| Features | \`$FEATURES\` |"
@@ -776,6 +855,7 @@ set +e
     echo "| Estimate | \`$ESTIMATE\` of each invocation; median paired change across rounds, 95% interval from order statistics |"
     if (( MAX_HOST_LOAD > 0 )); then
         echo "| Host load guard | ${MAX_HOST_LOAD}% of all CPUs, read before each round |"
+        (( SETTLE > 0 )) && echo "| Settle | ${SETTLE}s under the guard before the first invocation |"
     else
         echo "| Host load guard | off |"
     fi

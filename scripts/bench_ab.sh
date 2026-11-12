@@ -37,12 +37,23 @@
 # gate result: the new binary is measured once, so only the reference side
 # carries a control.
 #
+# --interleave keeps steps 1 to 3 and hands the smoke test and the measurement to
+# scripts/bench_interleave.sh in two-binary mode: many short invocations in
+# A B B A rounds, each read at its fastest sample, with disturbed rounds dropped
+# and an early stop. It tolerates a host that never goes idle, where the passes
+# above wait or read RERUN. It needs --control, whose rows carry the check for a
+# binary sitting in a slow layout. --escalate and the pass options
+# (--control-samples, --slow-row-seconds, --slow-samples, --warm-samples,
+# --max-row-seconds, --no-confirm) belong to the passes and do not apply;
+# --escalate is refused. The exit status keeps the meanings below.
+#
 # Usage:
 #   scripts/bench_ab.sh --filter '^factored/noise_kraus/'
 #   scripts/bench_ab.sh -f '^density_matrix/' -r main -b circuits
 #   scripts/bench_ab.sh -f '^sparse/' --ref-dir /tmp/prism-q-ref   # reuse the build
 #   scripts/bench_ab.sh -f '^x/affected/' -c '^x/(control_a|control_b)/'
 #   scripts/bench_ab.sh -f '^statevector/' --light                  # triage in a third of the time
+#   scripts/bench_ab.sh -f '^sparse/' -c '^mps/random_d10/16$' --interleave
 #
 # Options:
 #   --filter,   -f  Criterion filter regex, applied to every pass (required)
@@ -81,9 +92,16 @@
 #                   collecting: the corpus row that provoked this projected
 #                   4200s per pass, seven hours across the six, and was caught
 #                   after one 140s iteration.
-#   --ref,      -r  git ref for the reference build (default: HEAD). On a clean
-#                   tree at that commit both binaries carry the same code, and
-#                   a run that would PASS reads CONTROL (same code) instead.
+#   --ref,      -r  git ref for the reference build (default: the merge-base of
+#                   HEAD and origin/main, or of HEAD and main without a remote).
+#                   A clean tree at the default reference is an error, since
+#                   both sides would be the same code. Named explicitly, a
+#                   clean tree at that commit still runs: both binaries carry
+#                   the same code, and a run that would PASS reads CONTROL (same
+#                   code) instead.
+#   --interleave    measure through scripts/bench_interleave.sh, as above
+#   --passes        measure with the passes above. MEASURE_METHOD below picks
+#                   which of the two a run without either flag takes.
 #   --bench,    -b  bench target (default: circuits)
 #   --features      cargo feature list (default: parallel)
 #   --ref-dir       reference worktree path. Persists between runs, so the
@@ -116,10 +134,12 @@
 #
 # Host guards (on by default):
 #   --max-host-load percent of all CPUs other work may hold while the host sits
-#                   between passes (default 10, 0 disables). Checked before the
+#                   between passes (default 25, 0 disables). Checked before the
 #                   first pass, where a busy host stops the run, and before each
 #                   measured pass, where it is recorded in the report. One busy
-#                   thread on an 8-thread host is 12.5%.
+#                   thread on an 8-thread host is 12.5%, and a desktop with chat
+#                   and editor apps open idles at 12% to 19%, so a lower default
+#                   never clears there.
 #   --wait-idle     seconds to wait for the host to fall under --max-host-load
 #                   before giving up (default 0), and before the first build for
 #                   another measurement's marker to clear. A queued run passes a
@@ -207,7 +227,10 @@ WARM_SAMPLES=10
 MAX_ROW_SECONDS=240
 SAMPLES="${PRISM_BENCH_SAMPLES:-30}"
 LIGHT=""
-REF="HEAD"
+# Empty takes default_ref (bench_common.sh).
+REF=""
+# How a run without --interleave or --passes measures: passes or interleave.
+MEASURE_METHOD="passes"
 BENCH="circuits"
 FEATURES="parallel"
 REF_DIR=""
@@ -218,7 +241,7 @@ NEW_EXE=""
 OUT=""
 MIN_ROWS=1
 THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
-MAX_HOST_LOAD=10
+MAX_HOST_LOAD=25
 WAIT_IDLE=0
 SETTLE=0
 FORCE_LOCK=""
@@ -238,6 +261,8 @@ while [[ $# -gt 0 ]]; do
         --slow-samples) SLOW_SAMPLES="$2"; shift 2 ;;
         --warm-samples) WARM_SAMPLES="$2"; shift 2 ;;
         --light)       LIGHT=1; shift ;;
+        --interleave)  MEASURE_METHOD=interleave; shift ;;
+        --passes)      MEASURE_METHOD=passes; shift ;;
         --ref|-r)      REF="$2"; shift 2 ;;
         --bench|-b)    BENCH="$2"; shift 2 ;;
         --features)    FEATURES="$2"; shift 2 ;;
@@ -282,6 +307,22 @@ else
 fi
 PASS_COUNT="${#PASS_LABELS[@]}"
 
+case "$MEASURE_METHOD" in
+    passes|interleave) ;;
+    *) echo "Error: MEASURE_METHOD is '$MEASURE_METHOD'; it is passes or interleave." >&2; exit 5 ;;
+esac
+if [[ "$MEASURE_METHOD" == interleave && -z "$BUILD_ONLY" ]]; then
+    if [[ -n "$ESCALATE" ]]; then
+        echo "Error: --escalate re-runs light passes on the full tier and has no meaning under" >&2
+        echo "  --interleave, which stops early once its intervals settle. Drop one of the two." >&2
+        exit 5
+    fi
+    if [[ -z "$CONTROL_FILTER" ]]; then
+        echo "Error: --interleave needs --control. Two binaries differ in code layout, and" >&2
+        echo "  only rows the change does not reach can show a binary sitting in a slow one." >&2
+        exit 5
+    fi
+fi
 if [[ -n "$ESCALATE" && -z "$LIGHT" ]]; then
     echo "Error: --escalate re-runs light-tier rows on the full tier, so it needs --light." >&2
     exit 5
@@ -763,6 +804,24 @@ if [[ -n "$BUILD_ONLY" ]]; then
     exit 0
 fi
 
+if [[ -n "$REF" ]]; then
+    REF_TEXT="\`$REF\`"
+else
+    if ! default_ref "$PROJECT_DIR"; then
+        echo "Error: no --ref given, and neither origin/main nor main resolves to a merge-base" >&2
+        echo "  with HEAD in $PROJECT_DIR. Pass --ref with the commit to compare against." >&2
+        exit 5
+    fi
+    REF="$DEFAULT_REF"
+    REF_TEXT="merge-base of HEAD and \`$DEFAULT_REF_BASE\`"
+    if [[ "$REF" == "$(git rev-parse HEAD)" && -z "$(git status --porcelain)" ]]; then
+        echo "Error: the default reference, the merge-base of HEAD and $DEFAULT_REF_BASE, is HEAD" >&2
+        echo "  itself and the working tree is clean, so both sides would be the same code." >&2
+        echo "  Pass --ref with the commit to compare against, or --ref HEAD for a deliberate" >&2
+        echo "  same-code run." >&2
+        exit 5
+    fi
+fi
 REF_SHA="$(git rev-parse --short "$REF")" || {
     echo "Error: --ref '$REF' is not a commit in $PROJECT_DIR." >&2
     exit 5
@@ -773,7 +832,8 @@ echo "=== PRISM-Q adjacent-binary A/B ==="
 echo "  bench:     $BENCH"
 echo "  filter:    $FILTER"
 echo "  features:  $FEATURES"
-echo "  reference: $REF ($REF_SHA)"
+echo "  reference: $REF_TEXT ($REF_SHA)"
+echo "  method:    $MEASURE_METHOD"
 echo "  threshold: ${THRESHOLD}%"
 echo ""
 
@@ -847,6 +907,52 @@ fi
 
 # --- Measure ---
 
+if [[ -z "$OUT" ]]; then
+    OUT="$PROJECT_DIR/bench_results/ab-$(date +%Y-%m-%d_%H%M%S).md"
+fi
+
+# The interleaved runner runs its own smoke test on both executables, takes the
+# marker, and exits with the same codes, so its status is this run's verdict.
+# The rows this script knows and the runner does not go into the report's
+# settings table after the filter rows.
+if [[ "$MEASURE_METHOD" == interleave ]]; then
+    IX_STATUS=0
+    bash "$SCRIPT_DIR/bench_interleave.sh" --project-dir "$PROJECT_DIR" \
+        --base-exe "$WORKDIR/exe-ref" --exe "$WORKDIR/exe-new" \
+        --bench "$BENCH" --features "$FEATURES" --filter "$FILTER" --control "$CONTROL_FILTER" \
+        --min-rows "$MIN_ROWS" --threshold "$THRESHOLD" --out "$OUT" \
+        --max-host-load "$MAX_HOST_LOAD" --wait-idle "$WAIT_IDLE" --settle "$SETTLE" \
+        ${LIGHT:+--light} ${FORCE_LOCK:+--force-lock} &
+    CHILD_PID=$!
+    wait "$CHILD_PID" || IX_STATUS=$?
+    CHILD_PID=""
+    if [[ -f "$OUT" ]]; then
+        {
+            echo "| Reference | $REF_TEXT ($REF_SHA) |"
+            echo "| Reference binary (a) | $REF_PROVENANCE |"
+            echo "| Working-tree binary (b) | $NEW_PROVENANCE |"
+            echo "| Method | \`bench_ab.sh --interleave\` |"
+            [[ -z "$SAME_CODE" ]] || echo "| Same code | the working tree matches \`$REF\`, so every row is a control row |"
+        } > "$WORKDIR/ab-rows.md"
+        awk -v rows="$WORKDIR/ab-rows.md" '
+            { print }
+            !done && /^\| Control filter \|/ {
+                while ((getline line < rows) > 0) { print line }
+                done = 1
+            }' "$OUT" > "$WORKDIR/report.md"
+        if [[ -n "$SAME_CODE" ]] && (( IX_STATUS == 0 )); then
+            sed 's/^\*\*Regression verdict\*\*: PASS at \([^ ]*%\)\./**Regression verdict**: CONTROL (same code). Both binaries carry the same code, so this table is the host'"'"'s noise floor at \1, not a result for a change./' \
+                "$WORKDIR/report.md" > "$OUT"
+        else
+            cp "$WORKDIR/report.md" "$OUT"
+        fi
+        echo ""
+        echo "Markdown written to $OUT"
+    fi
+    FINAL=1
+    exit "$IX_STATUS"
+fi
+
 if [[ -z "$NESTED" ]]; then
     echo ">>> smoke test: every row once per binary in Criterion's test mode"
     smoke_test ref "$WORKDIR/exe-ref"
@@ -854,9 +960,6 @@ if [[ -z "$NESTED" ]]; then
     echo ""
 fi
 
-if [[ -z "$OUT" ]]; then
-    OUT="$PROJECT_DIR/bench_results/ab-$(date +%Y-%m-%d_%H%M%S).md"
-fi
 bench_lock_acquire "$PROJECT_DIR" bench_ab.sh "$FILTER" "$OUT" "$FORCE_LOCK" || exit 2
 
 echo "=== $TIER tier: two discarded warmup passes, then $PASS_COUNT adjacent passes ($PASS_ORDER) ==="
@@ -916,7 +1019,7 @@ set +e
     if [[ -n "$CONTROL_FILTER" ]]; then
         echo "| Control filter | \`$CONTROL_FILTER\`, measured at $CONTROL_SAMPLES samples |"
     fi
-    echo "| Reference | \`$REF\` ($REF_SHA) |"
+    echo "| Reference | $REF_TEXT ($REF_SHA) |"
     echo "| Reference binary | $REF_PROVENANCE |"
     echo "| Working-tree binary | $NEW_PROVENANCE |"
     echo "| Features | \`$FEATURES\` |"
@@ -1232,7 +1335,7 @@ follow_up() {
     local kind="$1" filter="$2" title="$3"
     shift 3
     local sub_out="${OUT%.md}-$kind.md" status=0
-    PRISM_BENCH_AB_NESTED="$kind" bash "${BASH_SOURCE[0]}" \
+    PRISM_BENCH_AB_NESTED="$kind" bash "${BASH_SOURCE[0]}" --passes \
         --project-dir "$PROJECT_DIR" --bench "$BENCH" --features "$FEATURES" --ref "$REF" \
         --ref-exe "$WORKDIR/exe-ref" --new-exe "$WORKDIR/exe-new" \
         --filter "$filter" --out "$sub_out" --threshold "$THRESHOLD" \

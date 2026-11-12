@@ -1844,6 +1844,140 @@ fn test_shots_temporal_clifford_fallback() {
     }
 }
 
+fn wide_terminal_block_circuit(n: usize, strided: bool) -> Circuit {
+    let mut circuit = crate::circuits::disjoint_block_layers_circuit(n, 10, 3, 42);
+    if strided {
+        for inst in &mut circuit.instructions {
+            if let Instruction::Gate { targets, .. } = inst {
+                for target in targets {
+                    *target = *target / 10 + (*target % 10) * (n / 10);
+                }
+            }
+        }
+    }
+    circuit.num_classical_bits = n + 3;
+    for q in (0..n).rev() {
+        circuit.add_measure(q, n - q);
+    }
+    circuit.add_measure(0, n);
+    circuit
+}
+
+#[test]
+fn wide_terminal_blocks_preserve_replayed_shots_and_counts() {
+    let limits = ResolvedLimits::process_default();
+    for n in [70, 100, 200] {
+        for strided in [false, true] {
+            let circuit = wide_terminal_block_circuit(n, strided);
+            for seed in [42, 43] {
+                let expected: Vec<Vec<bool>> = (0..32)
+                    .map(|shot| {
+                        run_with_internal(
+                            BackendKind::Auto,
+                            &circuit,
+                            mix_seed(seed, shot),
+                            SimOptions::classical_only(),
+                            &limits,
+                        )
+                        .unwrap()
+                        .classical_bits
+                    })
+                    .collect();
+                let actual =
+                    run_shots_with(BackendKind::Auto, &circuit, 32, seed, &limits).unwrap();
+                assert_eq!(actual.shots, expected, "{n}q, strided={strided}");
+                assert_eq!(actual.metadata.backend, ResolvedBackend::Decomposed);
+                assert_eq!(actual.metadata.reason, RouteRule::PerShot);
+                assert_eq!(actual.metadata.blocks.len(), n / 10);
+                let (counts, metadata) =
+                    run_counts_with(BackendKind::Auto, &circuit, 32, seed, &limits).unwrap();
+                assert_eq!(counts, actual.counts());
+                assert_eq!(metadata.backend, actual.metadata.backend);
+                assert!(actual.shots.iter().all(|shot| !shot[0] && !shot[n + 1]));
+            }
+        }
+    }
+}
+
+#[test]
+fn wide_terminal_blocks_accept_empty_and_single_shots() {
+    let circuit = wide_terminal_block_circuit(70, true);
+    let limits = ResolvedLimits::process_default();
+    for count in [0, 1] {
+        let shots = run_shots_with(BackendKind::Auto, &circuit, count, 42, &limits).unwrap();
+        assert_eq!(shots.shots.len(), count);
+        let (counts, _) = run_counts_with(BackendKind::Auto, &circuit, count, 42, &limits).unwrap();
+        assert_eq!(counts.values().sum::<u64>(), count as u64);
+    }
+}
+
+#[test]
+fn wide_terminal_blocks_allow_unmeasured_components() {
+    let mut circuit = wide_terminal_block_circuit(70, false);
+    circuit
+        .instructions
+        .retain(|inst| !matches!(inst, Instruction::Measure { qubit, .. } if *qubit >= 60));
+    let limits = ResolvedLimits::process_default();
+    let actual = run_shots_with(BackendKind::Auto, &circuit, 16, 42, &limits).unwrap();
+    for (shot, bits) in actual.shots.iter().enumerate() {
+        let expected = run_with_internal(
+            BackendKind::Auto,
+            &circuit,
+            mix_seed(42, shot),
+            SimOptions::classical_only(),
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(*bits, expected.classical_bits);
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn wide_terminal_blocks_preserve_replay_above_the_parallel_floor() {
+    crate::ThreadPool::with_threads(1).unwrap().install(|| {
+        let mut circuit = crate::circuits::disjoint_block_layers_circuit(80, 16, 3, 42);
+        circuit.num_classical_bits = 80;
+        for q in (0..80).rev() {
+            circuit.add_measure(q, q);
+        }
+        let limits = ResolvedLimits::process_default();
+        let actual = run_shots_with(BackendKind::Auto, &circuit, 4, 42, &limits).unwrap();
+        for (shot, bits) in actual.shots.iter().enumerate() {
+            let expected = run_with_internal(
+                BackendKind::Auto,
+                &circuit,
+                mix_seed(42, shot),
+                SimOptions::classical_only(),
+                &limits,
+            )
+            .unwrap();
+            assert_eq!(*bits, expected.classical_bits);
+        }
+    });
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn wide_terminal_blocks_preserve_shots_across_thread_counts() {
+    let circuit = wide_terminal_block_circuit(100, true);
+    let run = |threads| {
+        crate::ThreadPool::with_threads(threads)
+            .unwrap()
+            .install(|| {
+                run_shots_with(
+                    BackendKind::Auto,
+                    &circuit,
+                    257,
+                    42,
+                    &ResolvedLimits::process_default(),
+                )
+                .unwrap()
+            })
+    };
+    assert_eq!(run(1).shots, run(4).shots);
+}
+
 #[test]
 fn test_stabilizer_rank_dispatch() {
     let circuit = make_general_circuit();

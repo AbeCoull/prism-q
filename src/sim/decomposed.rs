@@ -3,13 +3,18 @@
 //! Runs each independent block on its own backend, then merges classical bits
 //! and factored probabilities into one outcome.
 
-use crate::circuit::Circuit;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+
+use crate::backend::Backend;
+use crate::backend::statevector::StatevectorBackend;
+use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 use crate::limits::ResolvedLimits;
 
 use super::{
     BackendKind, ExecutionPlan, FactoredBlock, Probabilities, ProbabilityRoute, RunMetadata,
-    RunOutcome, SimOptions,
+    RunOutcome, ShotsResult, SimOptions,
     dispatch::{BackendPlan, TemporalCliffordPlan},
     ensure_saves_recorded, execute_circuit, expand_for_backend, fuse_for_backend,
     plan_probability_route, plan_temporal_clifford, resolve, run_route, run_temporal_clifford,
@@ -27,13 +32,13 @@ const MAX_BLOCK_QUBITS_FOR_PAR: usize = crate::backend::PARALLEL_THRESHOLD_QUBIT
 
 /// Run block `i` of `k` on `run(i, mix_seed(seed, i))`, across Rayon workers
 /// when every block sits below the parallel floor.
-fn run_blocks_maybe_par(
+fn run_blocks_maybe_par<T: Send>(
     _kind: &BackendKind,
     _components: &[Vec<usize>],
     seed: u64,
     k: usize,
-    run: impl Fn(usize, u64) -> Result<RunOutcome> + Sync,
-) -> Vec<Result<RunOutcome>> {
+    run: impl Fn(usize, u64) -> Result<T> + Sync,
+) -> Vec<Result<T>> {
     #[cfg(feature = "parallel")]
     {
         let all_small = _components
@@ -306,6 +311,61 @@ pub(super) fn run_decomposed_prefused(
         original_circuit.num_qubits,
         opts,
     )
+}
+
+pub(super) fn sample_terminal_blocks(
+    components: &[Vec<usize>],
+    partitions: &[(Circuit, Vec<usize>, Vec<usize>)],
+    fused_blocks: &[std::borrow::Cow<'_, Circuit>],
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<ShotsResult> {
+    let results = run_blocks_maybe_par(
+        &BackendKind::Statevector,
+        components,
+        seed,
+        partitions.len(),
+        |block, block_seed| {
+            let fused = &fused_blocks[block];
+            let split = fused
+                .instructions
+                .iter()
+                .position(|inst| matches!(inst, Instruction::Measure { .. }))
+                .unwrap_or(fused.instructions.len());
+            let mut state = StatevectorBackend::with_limits(block_seed, limits);
+            state.init(fused.num_qubits, fused.num_classical_bits)?;
+            state.apply_instructions(&fused.instructions[..split])?;
+            let metadata = super::backend_metadata(&state);
+            let mut scratch = StatevectorBackend::with_limits(block_seed, limits);
+            let bits = fused.num_classical_bits;
+            let mut shots = vec![false; num_shots * bits];
+            for shot in 0..num_shots {
+                scratch.copy_state_from(&state);
+                scratch.rng =
+                    ChaCha8Rng::seed_from_u64(super::mix_seed(super::mix_seed(seed, shot), block));
+                scratch.apply_instructions(&fused.instructions[split..])?;
+                shots[shot * bits..][..bits].copy_from_slice(&scratch.classical_bits);
+            }
+            Ok((shots, metadata))
+        },
+    );
+    let mut shots = vec![vec![false; circuit.num_classical_bits]; num_shots];
+    let mut metadata = Vec::with_capacity(partitions.len());
+    for (result, (_, _, classical_map)) in results.into_iter().zip(partitions) {
+        let (block_shots, block_metadata) = result?;
+        metadata.push(block_metadata);
+        let bits = classical_map.len();
+        for (index, shot) in shots.iter_mut().enumerate() {
+            let block_shot = &block_shots[index * bits..][..bits];
+            for (local, &global) in classical_map.iter().enumerate() {
+                shot[global] = block_shot[local];
+            }
+        }
+    }
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits)
+        .with_metadata(RunMetadata::decomposed(metadata)))
 }
 
 /// Combine per-block probability vectors via Kronecker product.

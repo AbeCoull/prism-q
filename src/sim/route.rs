@@ -272,6 +272,14 @@ pub(super) fn decide_shots(
         return Ok(
             match decide_native(kind, &terminal.circuit, true, limits)? {
                 Some(plan) => ShotRoute::Native(plan, terminal),
+                None if terminal.circuit.num_qubits > 64
+                    && matches!(
+                        plan_probability_route(kind, &terminal.circuit, limits),
+                        ProbabilityRoute::Decomposed(_)
+                    ) =>
+                {
+                    ShotRoute::PerShot
+                }
                 None => ShotRoute::TerminalProbabilities(terminal),
             },
         );

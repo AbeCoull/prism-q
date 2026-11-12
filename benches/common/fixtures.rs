@@ -8,6 +8,41 @@ use prism_q::gates::Gate;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+/// Build ten-qubit Ry/Rz brickwork blocks with terminal measurements.
+pub fn terminal_disjoint_blocks(n: usize, strided: bool, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = Circuit::new(n, n);
+    let blocks = n / 10;
+    for block in 0..blocks {
+        let qubit = |local| {
+            if strided {
+                block + local * blocks
+            } else {
+                block * 10 + local
+            }
+        };
+        for layer in 0..10 {
+            for q in 0..10 {
+                circuit.add_gate(
+                    Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU),
+                    &[qubit(q)],
+                );
+                circuit.add_gate(
+                    Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU),
+                    &[qubit(q)],
+                );
+            }
+            for q in (layer % 2..9).step_by(2) {
+                circuit.add_gate(Gate::Cx, &[qubit(q), qubit(q + 1)]);
+            }
+        }
+    }
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
 /// The `product/expectation/pauli` observables: `Z` on every qubit, then `XX` on every
 /// bond of the chain.
 pub fn product_observables(n_qubits: usize) -> Vec<Vec<PauliTerm>> {

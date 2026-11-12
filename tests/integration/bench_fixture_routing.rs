@@ -16,6 +16,36 @@ use prism_q::{BackendKind, MpsBackend, NoiseChannel, NoiseEvent, NoiseModel, cir
 // the routing under check is the routing the bench measures.
 const SEED: u64 = 0xDEAD_BEEF;
 
+#[test]
+fn terminal_disjoint_rows_keep_ten_qubit_statevector_blocks() {
+    for n in [60, 70, 100, 200] {
+        for strided in [false, true] {
+            let circuit = bench_fixtures::terminal_disjoint_blocks(n, strided, SEED);
+            let components = circuit.independent_subsystems();
+            assert_eq!(components.len(), n / 10);
+            assert!(components.iter().all(|block| block.len() == 10));
+            assert!(circuit.has_terminal_measurements_only());
+            let result = sim::simulate(&circuit).seed(42).shots(4).unwrap();
+            assert_eq!(result.metadata.backend, ResolvedBackend::Decomposed);
+            assert_eq!(
+                result.metadata.blocks,
+                vec![ResolvedBackend::Statevector; n / 10]
+            );
+            let rule = if n > 64 {
+                RouteRule::PerShot
+            } else {
+                RouteRule::IndependentBlocks
+            };
+            assert_eq!(result.metadata.reason, rule);
+            for query in [sim::Query::Shots(4), sim::Query::Counts(4)] {
+                let plan = sim::simulate(&circuit).seed(42).plan(query).unwrap();
+                assert_eq!(plan.backend, result.metadata.backend);
+                assert_eq!(plan.rule, rule);
+            }
+        }
+    }
+}
+
 #[track_caller]
 fn assert_resolves(label: &str, kind: BackendKind, circuit: &prism_q::circuit::Circuit) {
     let outcome = sim::simulate(circuit)

@@ -664,9 +664,30 @@ fn near_clifford_hea(n: usize, layers: usize) -> Circuit {
     c
 }
 
+/// The [`near_clifford_hea`] shape with its first rotation spelled `H`, `Rz`,
+/// `H`: Z rotations only, so no axis rule other than Z runs.
+fn near_clifford_zrot(n: usize, layers: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    let mut angle = 0.05f64;
+    for _ in 0..layers {
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::Rz(angle), &[q]);
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::Rz(1.3 * angle), &[q]);
+            angle += 0.003;
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    c
+}
+
 /// Budgeted SPD truncation against the untruncated engine: the near-Clifford
-/// shape where the budget pays, and a Clifford+T control sized under the
-/// budget where the policy must not fire.
+/// shape where the budget pays, a threshold run that prunes on every
+/// instruction once past its term count, and a Clifford+T control sized under
+/// the budget where the policy must not fire.
 fn bench_spd_truncation(c: &mut Criterion) {
     let mut group = c.benchmark_group("spd_truncation");
     configure_group_timed(
@@ -687,6 +708,14 @@ fn bench_spd_truncation(c: &mut Criterion) {
             |b| b.iter(|| run_spd_observable_budgeted(&hea, &hea_obs, budget).unwrap()),
         );
     }
+
+    let zrot = near_clifford_zrot(10, 3);
+    let (epsilon, max_terms) = (1e-5, 256);
+    let thresholded = run_spd_observable(&zrot, &hea_obs, epsilon, max_terms).unwrap();
+    assert!(thresholded.peak_terms > max_terms && thresholded.total_discarded > 0.0);
+    group.bench_function(BenchmarkId::new("threshold", "zrot_10q_l3"), |b| {
+        b.iter(|| run_spd_observable(&zrot, &hea_obs, epsilon, max_terms).unwrap())
+    });
 
     let mut t_control = Circuit::new(10, 0);
     for q in 0..10 {

@@ -2679,9 +2679,11 @@ fn bench_auto_expectation(c: &mut Criterion) {
 /// `Auto` expectations above the statevector cap, where MPS is the fallback.
 ///
 /// `su4_brick_d6` drives the MPS bond to 64 while one `Z` has a twelve-qubit
-/// cone; `brickwork_d10` crosses the tensor route's peak bound after a dry run;
-/// `hea_l2` and `su4_brick_d4` stay under the MPS cost at which the dry run is
-/// worth attempting.
+/// cone; `brickwork_d10` crosses the tensor route's peak bound after a dry run,
+/// and `brickwork_d10_zz` asks eight two-local terms of the same circuit;
+/// `brickwork_d8_local/256` holds the bond at 16 along the whole chain while its
+/// `Z` and adjacent `ZZ` cones stay local; `hea_l2` and `su4_brick_d4` stay under
+/// the MPS cost at which the dry run is worth attempting.
 fn bench_auto_expectation_above_cap(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/expectation_above_cap");
     configure_group(&mut group);
@@ -2695,6 +2697,14 @@ fn bench_auto_expectation_above_cap(c: &mut Criterion) {
                 vec![PauliTerm::z(a), PauliTerm::z(b)]
             })
             .collect()
+    };
+    let z_and_adjacent_zz = |n: usize| -> Vec<Vec<PauliTerm>> {
+        let singles = (0..4).map(|k| vec![PauliTerm::z(k * n / 4 + n / 8)]);
+        let pairs = (0..4).map(|k| {
+            let a = k * n / 4 + n / 16 + k;
+            vec![PauliTerm::z(a), PauliTerm::z(a + 1)]
+        });
+        singles.chain(pairs).collect()
     };
     let rows: Vec<(&str, Circuit, Vec<Vec<PauliTerm>>)> = vec![
         (
@@ -2716,6 +2726,16 @@ fn bench_auto_expectation_above_cap(c: &mut Criterion) {
             "su4_brick_d4/64",
             su4_brickwork_circuit(64, 4, SEED),
             two_local(64),
+        ),
+        (
+            "brickwork_d10_zz/48",
+            circuits::brickwork_circuit(48, 10, SEED),
+            two_local(48),
+        ),
+        (
+            "brickwork_d8_local/256",
+            circuits::brickwork_circuit(256, 8, SEED),
+            z_and_adjacent_zz(256),
         ),
     ];
     for (name, circuit, observables) in rows {

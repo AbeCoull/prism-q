@@ -100,3 +100,7 @@ Seeded output has changed in these releases:
   since, taking the probability as exactly 1. The pass returned 1 to within about 1e-14,
   so later probabilities on that branch move in the last bits, and a fixed-seed outcome
   changes only where a draw lands that close to a boundary.
+- 0.39.0 moves more noisy and noiseless Clifford circuits with mid-circuit measurements
+  from per-shot tableau replay to the compiled sampler, which draws a different stream:
+  circuits that use a measured qubit again without a reset, active reset by a guarded
+  `X` among them. Circuits that compiled before keep their shots.

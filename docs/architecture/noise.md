@@ -85,13 +85,14 @@ engines and the noiseless compiled sampler all resolve to
 
 `defer_noisy_circuit` (`src/sim/compiled/mod.rs`) rewrites a circuit with resets,
 mid-circuit measurements or guarded Pauli gates to terminal measurements. A reset moves
-its qubit to a fresh alias, and a measured alias is never touched again, so its
-measurement moves to the end unchanged. A guarded Pauli `P` on qubit `t` becomes `P`
+its qubit to a fresh alias. A measurement whose qubit nothing touches before its next
+reset moves to the end unchanged; one whose qubit a later gate, guard or measurement
+uses becomes a `CX` onto a fresh alias measured at the end, so the qubit stays live and
+the copy only ever controls. A guarded Pauli `P` on qubit `t` becomes `P`
 controlled by the alias of each record its condition reads, plus an unconditional `P`
 when the condition is inverted. The condition must be a single bit, a `Parity`, or a
 register comparison reading at most one written bit, and a guarded body holds Pauli
-gates only. An event on a measured alias drops, and a qubit measured twice without a
-reset between declines the rewrite. The noiseless shot route takes the same rewrite at
+gates only. An event on a measured alias drops. The noiseless shot route takes the same rewrite at
 two shots or more.
 
 An event in a guarded body fires only on shots whose guard holds, which no fixed linear

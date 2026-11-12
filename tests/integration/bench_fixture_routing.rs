@@ -1079,15 +1079,15 @@ fn clifford_register_counts_row_fills_the_register() {
     assert_eq!(counts.metadata.reason, RouteRule::CliffordRegister);
 }
 
-// The noisy dynamic rows each price one form the rewrite to terminal measurements
-// declines: an ancilla reused after its measurement, and a guard comparing several bits.
+// The noisy dynamic rows each price one form of the rewrite to terminal measurements: an
+// ancilla reused after its measurement, and a guard comparing several bits.
 #[test]
 fn noisy_dynamic_rows_take_their_route() {
     for (label, circuit, rule) in [
         (
             "rep_d9_active_reset_p001",
             bench_fixtures::active_reset_repetition_circuit(9, 9),
-            RouteRule::PerShot,
+            RouteRule::CompiledCliffordSampler,
         ),
         (
             "rep_d5_lookup_p001",

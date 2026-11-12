@@ -728,14 +728,31 @@ fn qec_compiled_runner_evaluates_noiseless_exp_val_via_analytic_route() {
 }
 
 #[test]
-fn qec_compiled_runner_rejects_measurement_reuse_without_reset() {
-    let mut program = QecProgram::new(1);
+fn qec_compiled_runner_reuses_a_measured_qubit_without_reset() {
+    let options = QecOptions {
+        shots: 4,
+        seed: 42,
+        chunk_size: None,
+        keep_measurements: true,
+        detector_reference: QecDetectorReference::Raw,
+    };
+    let mut program = QecProgram::with_options(1, options);
     program.measure_z(0).unwrap();
     program.push_gate(Gate::X, &[0]).unwrap();
     program.measure_z(0).unwrap();
 
-    let err = run_qec_program(&program).unwrap_err();
-    assert!(format!("{err}").contains("reset before reusing"));
+    let want = vec![vec![false, true]; 4];
+    assert_eq!(
+        run_qec_program(&program).unwrap().measurements.to_shots(),
+        want
+    );
+    assert_eq!(
+        run_qec_program_reference(&program)
+            .unwrap()
+            .measurements
+            .to_shots(),
+        want
+    );
 }
 
 #[test]

@@ -2117,16 +2117,19 @@ fn outcome_frequencies(shots: &[Vec<bool>]) -> Vec<f64> {
 #[test]
 fn noisy_feedforward_counts_follow_stabilizer_replay() {
     let circuit = noisy_feedforward_round();
-    let noise = noisy_feedforward_model(&circuit);
-    let shots = 40_000;
+    assert_counts_follow_replay(&circuit, &noisy_feedforward_model(&circuit));
+}
 
-    let compiled = crate::sim::simulate(&circuit)
-        .noise(&noise)
+#[track_caller]
+fn assert_counts_follow_replay(circuit: &Circuit, noise: &NoiseModel) {
+    let shots = 40_000;
+    let compiled = crate::sim::simulate(circuit)
+        .noise(noise)
         .seed(42)
         .shots(shots)
         .unwrap();
     assert_eq!(compiled.metadata.engine, Some(Engine::NoisyCompiledSampler));
-    let replayed = replay(&circuit, &noise, shots);
+    let replayed = replay(circuit, noise, shots);
 
     let sampled = outcome_frequencies(&compiled.shots);
     let reference = outcome_frequencies(&replayed.shots);
@@ -2135,7 +2138,7 @@ fn noisy_feedforward_counts_follow_stabilizer_replay() {
         let sigma = (pooled * (1.0 - pooled) * 2.0 / shots as f64).sqrt();
         assert!(
             (f - r).abs() <= 5.0 * sigma + 1.0 / shots as f64,
-            "outcome {outcome:#07b}: compiled {f}, replay {r}"
+            "outcome {outcome:#09b}: compiled {f}, replay {r}"
         );
     }
 }
@@ -2224,4 +2227,97 @@ fn seeded_feedforward_counts_hold_their_draws() {
         0, 3, 40, 98, 9, 0, 12, 17, 2,
     ];
     assert_eq!(counts, want);
+}
+
+// A measured qubit used again without a reset, each with a fixed outcome: active reset by
+// a guarded X, a measurement read twice, and gates and a CX after the measurement.
+fn deterministic_reuse() -> Circuit {
+    use crate::circuit::ClassicalCondition as C;
+    let mut circuit = Circuit::new(3, 6);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_measure(0, 0);
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsOne(0), Gate::X, 0));
+    circuit.add_measure(0, 1);
+    circuit.add_measure(0, 2);
+    circuit.add_gate(Gate::X, &[1]);
+    circuit.add_measure(1, 3);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    circuit.add_measure(1, 4);
+    circuit.add_measure(2, 5);
+    circuit
+}
+
+#[test]
+fn reused_measured_qubits_compile_to_the_records_replay_reads() {
+    let circuit = deterministic_reuse();
+    let want = [true, false, false, true, true, true];
+    let replayed = replay(&circuit, &bare_model(&circuit), 16);
+    let compiled = crate::sim::simulate(&circuit).seed(42).shots(64).unwrap();
+    let inert = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    let noisy = crate::sim::simulate(&circuit)
+        .noise(&inert)
+        .seed(42)
+        .shots(64)
+        .unwrap();
+
+    assert_eq!(
+        compiled.metadata.backend,
+        ResolvedBackend::CompiledStabilizer
+    );
+    assert_eq!(noisy.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    for (label, shots) in [
+        ("replay", &replayed.shots),
+        ("compiled", &compiled.shots),
+        ("noisy compiled", &noisy.shots),
+    ] {
+        assert!(
+            shots.iter().all(|shot| shot == &want),
+            "{label}: {:?}",
+            shots.iter().find(|shot| *shot != &want)
+        );
+    }
+}
+
+// One round of the distance-3 repetition code whose ancillas return to zero through a
+// guarded X, then a second check on a reused ancilla, and data qubit 0 measured, rotated
+// and measured again. Six bits, 64 outcomes.
+fn active_reset_round() -> Circuit {
+    use crate::circuit::ClassicalCondition as C;
+    let mut circuit = Circuit::new(5, 6);
+    circuit.add_gate(Gate::H, &[0]);
+    for (data, ancilla) in [(0, 3), (1, 3), (1, 4), (2, 4)] {
+        circuit.add_gate(Gate::Cx, &[data, ancilla]);
+    }
+    circuit.add_measure(3, 0);
+    circuit.add_measure(4, 1);
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsOne(0), Gate::X, 3));
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsOne(1), Gate::X, 4));
+    circuit
+        .instructions
+        .push(guarded_gate(C::BitIsOne(0), Gate::X, 0));
+    circuit
+        .instructions
+        .push(pauli_region(C::BitIsOne(1), &[(Gate::X, 1), (Gate::Z, 2)]));
+    circuit.add_gate(Gate::Cx, &[0, 3]);
+    circuit.add_gate(Gate::Cx, &[1, 3]);
+    circuit.add_measure(3, 2);
+    circuit.add_measure(0, 3);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 4);
+    circuit.add_measure(1, 5);
+    circuit
+}
+
+#[test]
+fn active_reset_counts_follow_stabilizer_replay() {
+    let circuit = active_reset_round();
+    assert_counts_follow_replay(&circuit, &noisy_feedforward_model(&circuit));
 }

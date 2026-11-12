@@ -568,7 +568,9 @@ fn fingerprint(shots: &[Vec<bool>]) -> u64 {
 }
 
 /// [`fingerprint`] of each run in `readout_no_condition_reads_keeps_its_seeded_shots`,
-/// recorded while every route flipped readout into the finished record.
+/// recorded while every route flipped readout into the finished record. The guarded
+/// `Auto` run was recorded again when its remeasured qubit moved it from replay to the
+/// compiled sampler.
 const PINS: [u64; 8] = [
     0x8534_97ea_977a_7816,
     0x4f0c_10da_0439_e626,
@@ -576,7 +578,7 @@ const PINS: [u64; 8] = [
     0xa919_962c_c90a_8be2,
     0x10f7_df47_94b3_aec8,
     0xe264_47bd_bdc5_bf96,
-    0x7521_7302_4e3a_43fd,
+    0x1fce_4472_62e2_2e04,
     0x7521_7302_4e3a_43fd,
 ];
 

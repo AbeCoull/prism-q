@@ -1166,30 +1166,42 @@ fn noisy_stabilizer_trajectories_identical_across_thread_counts() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn noisy_guarded_pauli_shots_identical_across_thread_counts() {
-    let circuit = dynamic_clifford_circuit(20, Gate::X);
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-    let shots = |threads: usize| {
-        in_pool(threads, || {
-            simulate(&circuit)
-                .noise(&noise)
-                .seed(SEED)
-                .shots(PER_SHOT_SHOTS)
-                .expect("noisy shots")
-        })
-    };
-    let single = shots(1);
-    let wide = shots(THREADS_HI);
-    assert_eq!(
-        single.metadata.backend,
-        ResolvedBackend::CompiledStabilizer,
-        "unexpected guarded route"
-    );
-    assert_eq!(single.shots, wide.shots, "guarded record bits differ");
-    assert_eq!(
-        format!("{:?}", single.metadata),
-        format!("{:?}", wide.metadata),
-        "guarded metadata differs"
-    );
+    let guarded = dynamic_clifford_circuit(20, Gate::X);
+    let mut active_reset = guarded.clone();
+    for inst in &mut active_reset.instructions {
+        if matches!(inst, Instruction::Reset { qubit: 0 }) {
+            *inst = Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(0),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[0]),
+            };
+        }
+    }
+    for (label, circuit) in [("guarded", &guarded), ("active reset", &active_reset)] {
+        let noise = NoiseModel::uniform_depolarizing(circuit, 0.01);
+        let shots = |threads: usize| {
+            in_pool(threads, || {
+                simulate(circuit)
+                    .noise(&noise)
+                    .seed(SEED)
+                    .shots(PER_SHOT_SHOTS)
+                    .expect("noisy shots")
+            })
+        };
+        let single = shots(1);
+        let wide = shots(THREADS_HI);
+        assert_eq!(
+            single.metadata.backend,
+            ResolvedBackend::CompiledStabilizer,
+            "{label}: unexpected route"
+        );
+        assert_eq!(single.shots, wide.shots, "{label}: record bits differ");
+        assert_eq!(
+            format!("{:?}", single.metadata),
+            format!("{:?}", wide.metadata),
+            "{label}: metadata differs"
+        );
+    }
 }
 
 /// Parity checks over `2k` rotated data qubits onto `k` ancillas (`n = 3k`), each

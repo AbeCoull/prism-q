@@ -39,10 +39,10 @@ marginals, parity rows and accumulators mask only semantic padding: the bits pas
 last measurement in shot major data, and past the last shot in measurement major data.
 
 `compile_detector_sampler` compiles Clifford circuits that reuse qubits after
-measurement and reset into the same packed sampler, then derives detector and
+measurement, with or without a reset between, into the same packed sampler, then derives detector and
 observable records as packed parity rows over measurement record indices. A reset
-becomes a fresh qubit alias, so repeated syndrome extraction replays no tableau per
-shot. The sampler returns packed measurements, detectors or observables,
+becomes a fresh qubit alias and a measured qubit used again copies its record onto
+one, so repeated syndrome extraction replays no tableau per shot. The sampler returns packed measurements, detectors or observables,
 detector counts, or feeds packed detector chunks into any `ShotAccumulator`.
 
 ## Native backend sampling (`Backend::sample_basis_states`)

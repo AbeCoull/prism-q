@@ -2983,11 +2983,12 @@ fn run_shots_noisy_frame(
 ///
 /// A circuit with resets, mid-circuit measurements, or guarded Pauli gates is
 /// first rewritten to terminal measurements: a reset moves its qubit to a fresh
-/// one, and a guarded Pauli becomes that Pauli controlled by the measured qubits
-/// its condition reads, which holds for a single bit, a parity, or a register
+/// one, a measured qubit used again copies its record onto a fresh one, and a
+/// guarded Pauli becomes that Pauli controlled by the measured qubits its
+/// condition reads, which holds for a single bit, a parity, or a register
 /// comparison reading one measured bit. A circuit the rewrite declines, such as
-/// one reusing a measured qubit without a reset, falls back to per-shot
-/// stabilizer replay. Non-Clifford circuits take the same fallback and error on
+/// one guarding a gate that is not a Pauli, falls back to per-shot stabilizer
+/// replay. Non-Clifford circuits take the same fallback and error on
 /// the first non-Clifford gate; the public entry point routes them to the
 /// trajectory engine before reaching here.
 pub fn run_shots_noisy(

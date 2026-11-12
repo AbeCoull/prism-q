@@ -3308,9 +3308,10 @@ fn compile_measurements_filtered(
     ))
 }
 
-/// Convert reset reuse into fresh qubit aliases and move measurements to the end. A
-/// guarded Pauli becomes that Pauli controlled by the alias of each record its guard
-/// reads, the deferred-measurement form of classical feed-forward.
+/// Convert reset reuse into fresh qubit aliases, copy the record of a measured qubit that
+/// is used again onto a fresh alias, and move measurements to the end. A guarded Pauli
+/// becomes that Pauli controlled by the alias of each record its guard reads, the
+/// deferred-measurement form of classical feed-forward.
 pub(crate) fn defer_measure_reset_circuit(circuit: &Circuit) -> Result<Circuit> {
     let mut walk = DeferralWalk::new(circuit, None, false)?;
     walk.run(&circuit.instructions)?;
@@ -3351,8 +3352,9 @@ pub(crate) struct GuardedEvent {
 }
 
 /// [`defer_measure_reset_circuit`] carrying `noise` onto the rewrite. An event on a
-/// measured alias drops, since its record already holds the value the shot keeps, so
-/// measuring an alias a second time without a reset between is rejected.
+/// measured alias drops, since its record already holds the value the shot keeps. A
+/// measurement whose qubit is used again before a reset copies its record onto a fresh
+/// alias instead, so the qubit stays live and noise after the copy reaches it alone.
 pub(crate) fn defer_noisy_circuit(
     circuit: &Circuit,
     noise: &NoiseModel,
@@ -3377,6 +3379,9 @@ struct DeferralWalk<'a> {
     noise: Option<&'a NoiseModel>,
     after_gate: Vec<Vec<NoiseEvent>>,
     guarded: Vec<GuardedEvent>,
+    /// Top-level measurements that copy their record onto a fresh alias, leaving the
+    /// measured alias live for the instructions that touch it later.
+    copied_measurements: Vec<bool>,
 }
 
 impl<'a> DeferralWalk<'a> {
@@ -3410,6 +3415,11 @@ impl<'a> DeferralWalk<'a> {
             Some(noise) => readout_flips_at_write(circuit, noise)?,
             None => Vec::new(),
         };
+        let copied_measurements = if copies_reused_measurements() {
+            reused_measurements(circuit, noise.is_some())
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             num_classical_bits: circuit.num_classical_bits,
             aliases: (0..circuit.num_qubits).collect(),
@@ -3422,6 +3432,7 @@ impl<'a> DeferralWalk<'a> {
             noise,
             after_gate: Vec::new(),
             guarded: Vec::new(),
+            copied_measurements,
         })
     }
 
@@ -3455,21 +3466,32 @@ impl<'a> DeferralWalk<'a> {
                         });
                     }
                     let alias = self.aliases[*qubit];
-                    if self.noise.is_some() && self.measured_aliases[alias] {
-                        return Err(PrismError::IncompatibleBackend {
-                            backend: "CompiledSampler".to_string(),
-                            reason: "deferred noisy sampling requires reset before measuring a \
-                                     measured qubit again, since noise between the two \
-                                     measurements reaches the second alone"
-                                .to_string(),
-                        });
-                    }
+                    let record_alias = if self.copied_measurements.get(slot) == Some(&true) {
+                        let copy = self.next_qubit;
+                        self.next_qubit += 1;
+                        self.measured_aliases.push(true);
+                        self.transformed.num_qubits = self.next_qubit;
+                        self.transformed.add_gate(Gate::Cx, &[alias, copy]);
+                        copy
+                    } else {
+                        if self.noise.is_some() && self.measured_aliases[alias] {
+                            return Err(PrismError::IncompatibleBackend {
+                                backend: "CompiledSampler".to_string(),
+                                reason: "deferred noisy sampling requires reset before \
+                                         measuring a measured qubit again, since noise between \
+                                         the two measurements reaches the second alone"
+                                    .to_string(),
+                            });
+                        }
+                        self.measured_aliases[alias] = true;
+                        alias
+                    };
                     self.bit_records[*classical_bit] = Some(self.deferred_measurements.len());
-                    self.deferred_measurements.push((alias, *classical_bit));
-                    self.measured_aliases[alias] = true;
+                    self.deferred_measurements
+                        .push((record_alias, *classical_bit));
                     if let Some(p) = self.flips_at_write.get(*classical_bit).copied().flatten() {
                         let anchor = self.anchor();
-                        self.after_gate[anchor].push(NoiseEvent::pauli(alias, p, 0.0, 0.0));
+                        self.after_gate[anchor].push(NoiseEvent::pauli(record_alias, p, 0.0, 0.0));
                     }
                 }
                 Instruction::Reset { qubit } => {
@@ -3788,6 +3810,53 @@ impl<'a> DeferralWalk<'a> {
     }
 }
 
+/// Whether a measured qubit that a later instruction touches stays live behind a copy of
+/// its record.
+fn copies_reused_measurements() -> bool {
+    #[cfg(feature = "bench-internal")]
+    if !crate::bench_variant('b') {
+        return false;
+    }
+    true
+}
+
+/// Mark each top-level measurement whose qubit a later gate, guarded gate or region touches
+/// before the qubit's next reset; on the noisy walk a later measurement counts too. A marked
+/// measurement becomes `CX` onto a fresh alias measured at the end, the deferred-measurement
+/// form, which stays exact for any later use of the qubit because the copy only controls.
+fn reused_measurements(circuit: &Circuit, noisy: bool) -> Vec<bool> {
+    let mut touched = vec![false; circuit.num_qubits];
+    let mut marked = vec![false; circuit.instructions.len()];
+    let touch = |touched: &mut [bool], qubits: &[usize]| {
+        for &q in qubits {
+            if let Some(t) = touched.get_mut(q) {
+                *t = true;
+            }
+        }
+    };
+    for (slot, inst) in circuit.instructions.iter().enumerate().rev() {
+        match inst {
+            Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => {
+                touch(&mut touched, targets)
+            }
+            Instruction::Region(region) => touch(&mut touched, region.qubits()),
+            Instruction::Measure { qubit, .. } => {
+                if let Some(t) = touched.get_mut(*qubit) {
+                    marked[slot] = *t;
+                    *t |= noisy;
+                }
+            }
+            Instruction::Reset { qubit } => {
+                if let Some(t) = touched.get_mut(*qubit) {
+                    *t = false;
+                }
+            }
+            Instruction::Barrier { .. } | Instruction::Save { .. } => {}
+        }
+    }
+    marked
+}
+
 /// The readout flip rate of each classical bit a guard reads, for the bits whose readout
 /// error can flip them. A measured alias only ever controls later gates, so an `X` on it
 /// flips the record and every guard reading it and leaves the rest of the state alone. That
@@ -3863,8 +3932,9 @@ fn map_deferred_targets(
 /// Compile a Clifford measurement circuit plus detector parity metadata.
 ///
 /// `detector_rows` and `observable_rows` contain measurement record indices
-/// in circuit measurement order. Circuits with reset reuse are rewritten to
-/// terminal measurements before compiling.
+/// in circuit measurement order. Circuits that reuse a qubit after a reset, or
+/// keep using a measured qubit without one, are rewritten to terminal
+/// measurements before compiling.
 pub fn compile_detector_sampler(
     circuit: &Circuit,
     detector_rows: Vec<Vec<usize>>,

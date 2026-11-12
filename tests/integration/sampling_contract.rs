@@ -783,7 +783,12 @@ fn clifford_dynamic_routes_agree() {
         "clifford conditional",
         &circuit,
         &[
-            route("auto", BackendKind::Auto, R::Stabilizer),
+            compiled("auto deferred", BackendKind::Auto),
+            noisy(
+                "zero noise deferred",
+                R::CompiledStabilizer,
+                Some(Engine::NoisyCompiledSampler),
+            ),
             route("statevector", BackendKind::Statevector, R::Statevector),
             route("factored", BackendKind::Factored, R::Factored),
             route("mps", mps(), R::Mps),

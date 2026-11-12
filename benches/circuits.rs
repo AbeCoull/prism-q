@@ -37,8 +37,9 @@ use common::fixtures::{
     stabilizer_rank_mid_circuit_shot_circuit,
 };
 use common::{
-    SEED, amplitude_damping_kraus, configure_group, configure_group_timed, correlated_zz_kraus,
-    h_conjugated_zz_kraus, heisenberg_hamiltonian, ising_hamiltonian, run_shots_with, run_with,
+    SEED, amplitude_damping_kraus, configure_group, configure_group_at, configure_group_timed,
+    correlated_zz_kraus, h_conjugated_zz_kraus, heisenberg_hamiltonian, ising_hamiltonian,
+    run_shots_with, run_with,
 };
 
 fn run_shots_with_noise(
@@ -5776,6 +5777,62 @@ fn bench_dynamic_mid_circuit_measure_all(c: &mut Criterion) {
     group.finish();
 }
 
+/// `rounds` parity checks on `2n/3` data qubits and `n/3` ancillas: per round random
+/// Ry/Rz on the data and a CX brick layer, then each ancilla gathers a data pair's
+/// parity, is measured, conditions an X on the pair's first qubit, and is reset.
+/// The data qubits are measured at the end.
+fn parity_rounds_circuit(n: usize, rounds: usize) -> Circuit {
+    let anc = n / 3;
+    let data = 2 * anc;
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let mut circuit = Circuit::new(n, rounds * anc + data);
+    for r in 0..rounds {
+        for q in 0..data {
+            circuit.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            circuit.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+        }
+        for q in ((r % 2)..data - 1).step_by(2) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for j in 0..anc {
+            let a = data + j;
+            let bit = r * anc + j;
+            circuit.add_gate(Gate::Cx, &[2 * j, a]);
+            circuit.add_gate(Gate::Cx, &[2 * j + 1, a]);
+            circuit.add_measure(a, bit);
+            circuit.instructions.push(Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(bit),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[2 * j]),
+            });
+            circuit.add_reset(a);
+        }
+    }
+    for q in 0..data {
+        circuit.add_measure(q, rounds * anc + q);
+    }
+    circuit
+}
+
+/// Many mid-circuit measurements with feedback and reset: past the first dozen
+/// splits nearly every shot follows its own outcome history, so the 18-qubit row
+/// prices one `2^18` evolution per shot.
+fn bench_dynamic_parity_rounds(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dynamic/parity_rounds");
+    configure_group_at(&mut group, 10);
+    for &(n, shots) in &[(12usize, 1_000usize), (18, 100)] {
+        let circuit = parity_rounds_circuit(n, 3);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| run_shots_with(BackendKind::Auto, circ, shots, SEED).unwrap());
+            },
+        );
+    }
+    group.finish();
+}
+
 /// Clifford layers, a measurement of qubit 0 that conditions an X on qubit 1,
 /// a reset of qubit 0, more layers, then every qubit measured. The condition and
 /// the reset keep it off the compiled sampler, so Auto replays it per shot on a
@@ -6179,6 +6236,7 @@ criterion_group! {
     bench_dynamic_shots,
     bench_dynamic_mid_circuit_shots,
     bench_dynamic_mid_circuit_measure_all,
+    bench_dynamic_parity_rounds,
     bench_dynamic_clifford_shots,
     bench_dynamic_temporal_prefix_blocks,
     bench_dynamic_rus,

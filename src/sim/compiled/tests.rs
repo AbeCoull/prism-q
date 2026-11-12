@@ -2898,3 +2898,66 @@ fn detector_chunks_are_sized_by_the_measurement_record() {
     let sampler = compile_detector_sampler(&c, vec![vec![0]], vec![], 42).unwrap();
     assert_eq!(sampler.detector_chunk_size(), default_chunk_size(640));
 }
+
+fn random_finished_sampler(rank: usize, words: usize, seed: u64) -> CompiledSampler {
+    use rand::{RngExt, SeedableRng};
+    let m = 64 * words - 3;
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    let tail = (1u64 << (m % 64)) - 1;
+    let flip_rows: Vec<Vec<u64>> = (0..rank)
+        .map(|_| {
+            let mut row: Vec<u64> = (0..words)
+                .map(|_| rng.random::<u64>() & rng.random::<u64>() & rng.random::<u64>())
+                .collect();
+            row[words - 1] &= tail;
+            row
+        })
+        .collect();
+    let ref_bits: Vec<bool> = (0..m).map(|_| rng.random::<bool>()).collect();
+    finish_sampler(flip_rows, rank, m, &ref_bits, 42)
+}
+
+fn in_pools<T: Send + PartialEq + std::fmt::Debug>(sample: impl Fn() -> T + Sync) -> T {
+    let expected = sample();
+    #[cfg(feature = "parallel")]
+    for num_threads in [1, 4] {
+        let actual = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap()
+            .install(&sample);
+        assert_eq!(actual, expected, "{num_threads} threads");
+    }
+    expected
+}
+
+#[test]
+fn flip_table_floor_draws_the_same_shots() {
+    let batches = [1, 5, 40, 17, 63, 300];
+    for words in 1..=6 {
+        for rank in [8, 13, 40, 61] {
+            let draw = |prebuilt: bool| {
+                let mut sampler = random_finished_sampler(rank, words, 42);
+                let m_words = sampler.num_measurements().div_ceil(64);
+                if prebuilt {
+                    FlipGroups::new(&sampler.lut, &sampler.flip_rows, m_words);
+                }
+                let mut out = Vec::new();
+                for &shots in &batches {
+                    out.push(sampler.sample_bulk_words_shot_major(shots).0);
+                    let shots = sampler.sample_bulk_packed(shots).to_shots().concat();
+                    out.push(shots.into_iter().map(u64::from).collect());
+                }
+                out
+            };
+            let fresh = in_pools(|| draw(false));
+            assert_eq!(fresh, in_pools(|| draw(true)), "words {words}, rank {rank}");
+
+            let mut sampler = random_finished_sampler(rank, words, 42);
+            sampler.sample_bulk_words_shot_major(MIN_SHOTS_FOR_FLIP_LUT - 1);
+            assert!(sampler.lut.get().is_none(), "words {words}, rank {rank}");
+            sampler.sample_bulk_words_shot_major(1);
+            assert!(sampler.lut.get().is_some(), "words {words}, rank {rank}");
+        }
+    }
+}

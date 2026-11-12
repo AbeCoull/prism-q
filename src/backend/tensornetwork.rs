@@ -1768,18 +1768,20 @@ struct ScalarExpectationNetwork {
 }
 
 impl ScalarExpectationNetwork {
-    fn new(num_qubits: usize) -> Self {
+    /// Network over `num_qubits` with a `|0>` ket and bra only for the qubits
+    /// `in_cone` marks; the others never receive a tensor.
+    fn new(num_qubits: usize, in_cone: &[bool]) -> Self {
         let mut network = Self {
             num_qubits,
-            tensors: Vec::with_capacity(num_qubits * 4),
-            ket_legs: Vec::with_capacity(num_qubits),
-            bra_legs: Vec::with_capacity(num_qubits),
+            tensors: Vec::new(),
+            ket_legs: vec![LegId::MAX; num_qubits],
+            bra_legs: vec![LegId::MAX; num_qubits],
             next_leg: 0,
         };
         let zero_state = vec![Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)];
-        for _ in 0..num_qubits {
+        for q in (0..num_qubits).filter(|&q| in_cone[q]) {
             let ket_leg = network.fresh_leg();
-            network.ket_legs.push(ket_leg);
+            network.ket_legs[q] = ket_leg;
             network.tensors.push(Tensor {
                 data: zero_state.clone(),
                 shape: smallvec::smallvec![2],
@@ -1787,7 +1789,7 @@ impl ScalarExpectationNetwork {
             });
 
             let bra_leg = network.fresh_leg();
-            network.bra_legs.push(bra_leg);
+            network.bra_legs[q] = bra_leg;
             network.tensors.push(Tensor {
                 data: zero_state.clone(),
                 shape: smallvec::smallvec![2],
@@ -1914,22 +1916,17 @@ impl ScalarExpectationNetwork {
     /// `<0| U^dag P U |0>` over the backward light cone of `terms`, rejecting any
     /// instruction that is not a unitary gate or a barrier. A gate whose qubits all
     /// lie outside the cone cancels against its adjoint, and a qubit no kept gate
-    /// touches closes to `<0|0> = 1`, so neither enters the network.
+    /// touches closes to `<0|0> = 1`, so neither enters the network. Gates are
+    /// screened by the qubits they touch before any matrix is built, so the build
+    /// costs the cone rather than the circuit.
     fn for_observable(circuit: &Circuit, terms: &[PauliTerm]) -> Result<Self> {
         let num_qubits = circuit.num_qubits;
         let mut axes = vec![None; num_qubits];
         observable_axes(terms, &mut axes, "tensor-network scalar")?;
 
-        let mut ops = Vec::new();
         for instruction in &circuit.instructions {
             match instruction {
-                Instruction::Gate { gate, targets } => {
-                    for_each_gate_tensor(gate, targets, num_qubits, |op| {
-                        ops.push(op);
-                        Ok(())
-                    })?;
-                }
-                Instruction::Barrier { .. } => {}
+                Instruction::Gate { .. } | Instruction::Barrier { .. } => {}
                 Instruction::Save { label, .. } => {
                     return Err(crate::backend::save_not_applied("TensorNetwork", label));
                 }
@@ -1946,6 +1943,42 @@ impl ScalarExpectationNetwork {
         }
 
         let mut in_cone: Vec<bool> = axes.iter().map(Option::is_some).collect();
+        let mut reached = vec![false; circuit.instructions.len()];
+        for (hit, instruction) in reached.iter_mut().zip(&circuit.instructions).rev() {
+            let Instruction::Gate { gate, targets } = instruction else {
+                continue;
+            };
+            let mut touches = false;
+            for_each_gate_tensor_qubit(gate, targets, |q| {
+                if q >= num_qubits {
+                    return Err(PrismError::InvalidQubit {
+                        index: q,
+                        register_size: num_qubits,
+                    });
+                }
+                touches |= in_cone[q];
+                Ok(())
+            })?;
+            if touches {
+                *hit = true;
+                for_each_gate_tensor_qubit(gate, targets, |q| {
+                    in_cone[q] = true;
+                    Ok(())
+                })?;
+            }
+        }
+
+        let mut ops = Vec::new();
+        for (instruction, reached) in circuit.instructions.iter().zip(reached) {
+            if let (true, Instruction::Gate { gate, targets }) = (reached, instruction) {
+                for_each_gate_tensor(gate, targets, num_qubits, |op| {
+                    ops.push(op);
+                    Ok(())
+                })?;
+            }
+        }
+
+        let mut in_cone: Vec<bool> = axes.iter().map(Option::is_some).collect();
         let mut keep = vec![false; ops.len()];
         for (kept, op) in keep.iter_mut().zip(&ops).rev() {
             let qubits = op.qubits();
@@ -1957,21 +1990,21 @@ impl ScalarExpectationNetwork {
             }
         }
 
-        let mut network = Self::new(num_qubits);
-        let mut idle_legs = vec![false; network.next_leg];
-        for q in (0..num_qubits).filter(|&q| !in_cone[q]) {
-            idle_legs[network.ket_legs[q]] = true;
-            idle_legs[network.bra_legs[q]] = true;
-        }
+        let mut network = Self::new(num_qubits, &in_cone);
         for (op, kept) in ops.into_iter().zip(keep) {
             if kept {
                 network.append_op(op)?;
             }
         }
-        network.append_observable(terms)?;
-        network
-            .tensors
-            .retain(|t| !t.legs.iter().all(|&leg| idle_legs.get(leg) == Some(&true)));
+        for (qubit, axis) in axes.into_iter().enumerate() {
+            if in_cone[qubit] {
+                network.tensors.push(pauli_tensor(
+                    axis,
+                    network.bra_legs[qubit],
+                    network.ket_legs[qubit],
+                ));
+            }
+        }
         Ok(network)
     }
 
@@ -1990,19 +2023,6 @@ impl ScalarExpectationNetwork {
                 self.append_nq_matrix(qubits, matrix, true)
             }
         }
-    }
-
-    fn append_observable(&mut self, terms: &[PauliTerm]) -> Result<()> {
-        let mut axes = vec![None; self.num_qubits];
-        observable_axes(terms, &mut axes, "tensor-network scalar")?;
-        for (qubit, axis) in axes.into_iter().enumerate() {
-            self.tensors.push(pauli_tensor(
-                axis,
-                self.bra_legs[qubit],
-                self.ket_legs[qubit],
-            ));
-        }
-        Ok(())
     }
 
     fn contract_on(self, plan: &ContractionPlan, limits: ContractionLimits) -> Result<f64> {
@@ -2254,6 +2274,24 @@ impl GateTensorOp<'_> {
             GateTensorOp::NQ(qubits, _) => SmallVec::from_slice(qubits),
         }
     }
+}
+
+/// Call `visit` with every qubit an operation of [`for_each_gate_tensor`] on
+/// `gate` touches, without building a matrix. `BatchPhase` lists only its control
+/// in `targets`, so its phase targets are visited from the data.
+fn for_each_gate_tensor_qubit<F>(gate: &Gate, targets: &[usize], mut visit: F) -> Result<()>
+where
+    F: FnMut(usize) -> Result<()>,
+{
+    for &q in targets {
+        visit(q)?;
+    }
+    if let Gate::BatchPhase(data) = gate {
+        for &(q, _) in &data.phases {
+            visit(q)?;
+        }
+    }
+    Ok(())
 }
 
 /// Decompose `gate` into the elementary 1q/2q/nq matrix operations a tensor

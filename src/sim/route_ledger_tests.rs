@@ -126,6 +126,7 @@ const LEDGER: &[Entry] = &[
     here("shots", "ResolvedBackend::CompiledStabilizer", Sv, "compiled_clifford_shots_follow_the_statevector"),
     here("shots", "Engine::CompiledSampler", Sv, "compiled_clifford_shots_follow_the_statevector"),
     here("shots", "ShotSource::CompiledDeferred", ClosedForm, "deferred_clifford_shots_follow_the_closed_form"),
+    here("shots", "ShotSource::Guarded", ClosedForm, "guarded_clifford_shots_follow_the_closed_form"),
     here("shots", "ShotSource::TerminalStatevector", Sv, "terminal_statevector_shots_follow_the_statevector"),
     here("sample_counts", "ShotSource::Native", Sv, "native_sampler_counts_follow_the_statevector"),
     here("sample_counts", "ShotSource::TerminalProbabilities", Sv, "terminal_probability_counts_follow_the_statevector"),
@@ -262,6 +263,7 @@ macro_rules! route_keys {
 route_keys!(shot_source_key, shot_source_keys, ShotSource, {
     ShotSource::Compiled { deferred: false, .. } => "ShotSource::Compiled",
     ShotSource::Compiled { deferred: true, .. } => "ShotSource::CompiledDeferred",
+    ShotSource::Guarded(_) => "ShotSource::Guarded",
     ShotSource::TerminalStatevector { .. } => "ShotSource::TerminalStatevector",
     ShotSource::Native { .. } => "ShotSource::Native",
     ShotSource::TerminalProbabilities { .. } => "ShotSource::TerminalProbabilities",
@@ -1070,6 +1072,39 @@ fn deferred_clifford_shots_follow_the_closed_form() {
     let shots = 4000;
     let result = simulate(&circuit).seed(SEED).shots(shots).unwrap();
     assert_counts_follow("deferred", &shot_counts(&result), &[0.25; 4], shots);
+}
+
+#[test]
+fn guarded_clifford_shots_follow_the_closed_form() {
+    // c0 and c1 read fair coins, and an X guarded on both reading 1 writes c2 = c0 and
+    // c1: four outcomes, uniform.
+    let mut circuit = Circuit::new(3, 3);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::RegisterEquals {
+            offset: 0,
+            size: 2,
+            value: 0b11,
+        },
+        gate: Gate::X,
+        targets: crate::circuit::smallvec![2],
+    });
+    circuit.add_measure(2, 2);
+    assert_eq!(
+        source_key(&BackendKind::Auto, &circuit, 100),
+        "ShotSource::Guarded"
+    );
+    let shots = 4000;
+    let result = simulate(&circuit).seed(SEED).shots(shots).unwrap();
+    assert_counts_follow(
+        "guarded",
+        &shot_counts(&result),
+        &[0.25, 0.25, 0.25, 0.0, 0.0, 0.0, 0.0, 0.25],
+        shots,
+    );
 }
 
 #[test]

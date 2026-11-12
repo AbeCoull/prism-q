@@ -103,4 +103,6 @@ Seeded output has changed in these releases:
 - 0.39.0 moves more noisy and noiseless Clifford circuits with mid-circuit measurements
   from per-shot tableau replay to the compiled sampler, which draws a different stream:
   circuits that use a measured qubit again without a reset, active reset by a guarded
-  `X` among them. Circuits that compiled before keep their shots.
+  `X` among them, and guarded Paulis under a register comparison reading several
+  measured bits, the form `switch` and lookup decoding take. Circuits that compiled before
+  keep their shots.

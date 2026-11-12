@@ -1177,7 +1177,36 @@ fn noisy_guarded_pauli_shots_identical_across_thread_counts() {
             };
         }
     }
-    for (label, circuit) in [("guarded", &guarded), ("active reset", &active_reset)] {
+    let mut lookup = guarded.clone();
+    let reset = lookup
+        .instructions
+        .iter()
+        .position(|inst| matches!(inst, Instruction::Reset { qubit: 0 }))
+        .unwrap();
+    lookup.instructions.insert(
+        reset,
+        Instruction::Measure {
+            qubit: 1,
+            classical_bit: 1,
+        },
+    );
+    lookup.instructions.insert(
+        reset + 1,
+        Instruction::Conditional {
+            condition: ClassicalCondition::RegisterEquals {
+                offset: 0,
+                size: 2,
+                value: 0b11,
+            },
+            gate: Gate::X,
+            targets: SmallVec::from_slice(&[2]),
+        },
+    );
+    for (label, circuit) in [
+        ("guarded", &guarded),
+        ("active reset", &active_reset),
+        ("lookup", &lookup),
+    ] {
         let noise = NoiseModel::uniform_depolarizing(circuit, 0.01);
         let shots = |threads: usize| {
             in_pool(threads, || {

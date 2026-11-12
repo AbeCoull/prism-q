@@ -3313,9 +3313,7 @@ fn compile_measurements_filtered(
 /// becomes that Pauli controlled by the alias of each record its guard reads, the
 /// deferred-measurement form of classical feed-forward.
 pub(crate) fn defer_measure_reset_circuit(circuit: &Circuit) -> Result<Circuit> {
-    let mut walk = DeferralWalk::new(circuit, None, false)?;
-    walk.run(&circuit.instructions)?;
-    Ok(walk.finish().circuit)
+    unguarded(defer_guarded_circuit(circuit)?)
 }
 
 /// [`defer_measure_reset_circuit`] on a Clifford+T circuit. A guard still applies only a
@@ -3323,7 +3321,28 @@ pub(crate) fn defer_measure_reset_circuit(circuit: &Circuit) -> Result<Circuit> 
 pub(crate) fn defer_clifford_t_circuit(circuit: &Circuit) -> Result<Circuit> {
     let mut walk = DeferralWalk::new(circuit, None, true)?;
     walk.run(&circuit.instructions)?;
-    Ok(walk.finish().circuit)
+    unguarded(walk.finish())
+}
+
+fn unguarded(deferred: DeferredCircuit) -> Result<Circuit> {
+    if !deferred.guarded.is_empty() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: "deferred measurement sampling applies a guard as a parity of measured \
+                     bits, and a register comparison that reads two measured bits is not one"
+                .to_string(),
+        });
+    }
+    Ok(deferred.circuit)
+}
+
+/// [`defer_measure_reset_circuit`] keeping the guarded Paulis no controlled Pauli applies,
+/// those under a comparison of several measured bits, as [`DeferredCircuit::guarded`]
+/// entries over a model with no events.
+pub(crate) fn defer_guarded_circuit(circuit: &Circuit) -> Result<DeferredCircuit> {
+    let mut walk = DeferralWalk::new(circuit, None, false)?;
+    walk.run(&circuit.instructions)?;
+    Ok(walk.finish())
 }
 
 /// A dynamic circuit rewritten by [`defer_noisy_circuit`].
@@ -3335,20 +3354,61 @@ pub(crate) struct DeferredCircuit {
     /// readout error as an `X` on each alias measured into it, where the measurement
     /// writes it, so the guard and the record both see the flip.
     pub(crate) noise: NoiseModel,
-    /// Events of guarded bodies in execution order, each firing only on the shots whose
-    /// guard holds.
+    /// Guarded Paulis and events of guarded bodies in execution order, each landing only
+    /// on the shots whose guard holds.
     pub(crate) guarded: Vec<GuardedEvent>,
 }
 
-/// A one-qubit Pauli event from a guarded body slot.
+/// A one-qubit Pauli that lands after the compiled sample, on `qubit` after instruction
+/// `anchor` of the deferred circuit.
 pub(crate) struct GuardedEvent {
-    /// Instruction of the deferred circuit the event follows.
     pub(crate) anchor: usize,
-    /// The guard holds where the parity of these records, XOR `invert`, is one.
-    pub(crate) records: SmallVec<[usize; 4]>,
-    pub(crate) invert: bool,
+    pub(crate) guard: Guard,
     pub(crate) qubit: usize,
-    pub(crate) probs: (f64, f64, f64),
+    pub(crate) kind: GuardedKind,
+}
+
+/// The records a guarded entry reads, each one a measurement of the deferred circuit.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Guard {
+    /// Holds where the parity of the records, XOR `invert`, is one.
+    Parity {
+        records: SmallVec<[usize; 4]>,
+        invert: bool,
+    },
+    /// Holds where every record equals its wanted bit, XOR `negate`.
+    All {
+        terms: SmallVec<[(usize, bool); 4]>,
+        negate: bool,
+    },
+}
+
+impl Guard {
+    /// Whether the guard holds on a shot whose record `r` reads `bit(r)`.
+    #[inline(always)]
+    pub(crate) fn holds(&self, bit: impl Fn(usize) -> bool) -> bool {
+        match self {
+            Guard::Parity { records, invert } => records
+                .iter()
+                .fold(*invert, |acc, &record| acc ^ bit(record)),
+            Guard::All { terms, negate } => {
+                terms.iter().all(|&(record, want)| bit(record) == want) ^ negate
+            }
+        }
+    }
+
+    fn is_constant(&self, value: bool) -> bool {
+        matches!(self, Guard::Parity { records, invert } if records.is_empty() && *invert == value)
+    }
+}
+
+/// What a [`GuardedEvent`] lands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum GuardedKind {
+    /// A guarded Pauli gate, letter 1 `X`, 2 `Y`, 3 `Z`, on every shot the guard holds.
+    Gate(u8),
+    /// A guarded body slot's Pauli channel `(px, py, pz)`, drawn per shot.
+    Noise((f64, f64, f64)),
 }
 
 /// [`defer_measure_reset_circuit`] carrying `noise` onto the rewrite. An event on a
@@ -3527,9 +3587,9 @@ impl<'a> DeferralWalk<'a> {
                     targets,
                 } => {
                     require_guarded_pauli(gate)?;
-                    let (records, invert) = self.guard(condition)?;
-                    self.push_guarded_pauli(gate, targets, &records, invert)?;
-                    self.carry_guarded(nested, &records, invert)?;
+                    let guard = self.guard(condition)?;
+                    self.push_guarded_gate(gate, targets, &guard)?;
+                    self.carry_guarded(nested, &guard)?;
                     nested += 1;
                 }
                 Instruction::Region(region) => {
@@ -3548,12 +3608,12 @@ impl<'a> DeferralWalk<'a> {
                             }
                         }
                     }
-                    let (records, invert) = self.guard(region.condition())?;
+                    let guard = self.guard(region.condition())?;
                     for (offset, body_inst) in region.body().iter().enumerate() {
                         if let Instruction::Gate { gate, targets } = body_inst {
-                            self.push_guarded_pauli(gate, targets, &records, invert)?;
+                            self.push_guarded_gate(gate, targets, &guard)?;
                         }
-                        self.carry_guarded(nested + offset, &records, invert)?;
+                        self.carry_guarded(nested + offset, &guard)?;
                     }
                     nested += region.noise_slots();
                 }
@@ -3572,10 +3632,10 @@ impl<'a> DeferralWalk<'a> {
         Ok(())
     }
 
-    /// The records whose parity, XOR the returned flag, decides `condition` against the
-    /// bits the measurements so far wrote. A bit no measurement wrote reads 0 and drops
-    /// out, so a register comparison is a parity while it reads at most one written bit.
-    fn guard(&self, condition: &ClassicalCondition) -> Result<(SmallVec<[usize; 4]>, bool)> {
+    /// The guard deciding `condition` against the bits the measurements so far wrote. A
+    /// bit no measurement wrote reads 0 and drops out, so a register comparison is a parity
+    /// while it reads at most one written bit, and a conjunction of records past that.
+    fn guard(&self, condition: &ClassicalCondition) -> Result<Guard> {
         let record = |bit: usize| {
             self.bit_records
                 .get(bit)
@@ -3585,15 +3645,21 @@ impl<'a> DeferralWalk<'a> {
                     register_size: self.num_classical_bits,
                 })
         };
+        let parity =
+            |records: SmallVec<[usize; 4]>, invert: bool| Guard::Parity { records, invert };
         match condition {
-            ClassicalCondition::BitIsOne(bit) => Ok((record(*bit)?.into_iter().collect(), false)),
-            ClassicalCondition::BitIsZero(bit) => Ok((record(*bit)?.into_iter().collect(), true)),
+            ClassicalCondition::BitIsOne(bit) => {
+                Ok(parity(record(*bit)?.into_iter().collect(), false))
+            }
+            ClassicalCondition::BitIsZero(bit) => {
+                Ok(parity(record(*bit)?.into_iter().collect(), true))
+            }
             ClassicalCondition::Parity { bits, expected } => {
                 let mut records = SmallVec::new();
                 for &bit in bits.iter() {
                     records.extend(record(bit)?);
                 }
-                Ok((records, !expected))
+                Ok(parity(records, !expected))
             }
             ClassicalCondition::RegisterEquals {
                 offset,
@@ -3607,33 +3673,64 @@ impl<'a> DeferralWalk<'a> {
             } => {
                 let not_equals = matches!(condition, ClassicalCondition::RegisterNotEquals { .. });
                 let mut feasible = *size >= 64 || value >> size == 0;
-                let mut written: Option<(usize, bool)> = None;
+                let mut written = SmallVec::<[(usize, bool); 4]>::new();
                 for i in 0..*size {
                     let want = i < 64 && (value >> i) & 1 == 1;
                     match record(offset.saturating_add(i))? {
                         None => feasible &= !want,
-                        Some(r) => {
-                            if written.replace((r, want)).is_some() {
-                                return Err(PrismError::IncompatibleBackend {
-                                    backend: "CompiledSampler".to_string(),
-                                    reason: format!(
-                                        "deferred measurement sampling applies a guard as a \
-                                         parity of measured bits, and a comparison of the \
-                                         {size}-bit register at bit {offset} that reads two \
-                                         measured bits is not one"
-                                    ),
-                                });
-                            }
-                        }
+                        Some(r) => written.push((r, want)),
                     }
                 }
-                Ok(match (feasible, written) {
-                    (false, _) => (SmallVec::new(), not_equals),
-                    (true, None) => (SmallVec::new(), !not_equals),
-                    (true, Some((r, want))) => (SmallVec::from_slice(&[r]), want == not_equals),
+                if written.len() > 1 && !lands_register_comparisons() {
+                    return Err(PrismError::IncompatibleBackend {
+                        backend: "CompiledSampler".to_string(),
+                        reason: format!(
+                            "deferred measurement sampling applies a guard as a parity of \
+                             measured bits, and a comparison of the {size}-bit register at bit \
+                             {offset} that reads two measured bits is not one"
+                        ),
+                    });
+                }
+                Ok(match (feasible, written.as_slice()) {
+                    (false, _) => parity(SmallVec::new(), not_equals),
+                    (true, []) => parity(SmallVec::new(), !not_equals),
+                    (true, &[(r, want)]) => parity(SmallVec::from_slice(&[r]), want == not_equals),
+                    (true, _) => Guard::All {
+                        terms: written,
+                        negate: not_equals,
+                    },
                 })
             }
         }
+    }
+
+    /// Apply Pauli `gate` on `targets[0]` under `guard`: a parity as controlled Paulis in the
+    /// deferred circuit, a conjunction as a [`GuardedKind::Gate`] entry after the last
+    /// instruction emitted.
+    fn push_guarded_gate(
+        &mut self,
+        gate: &Gate,
+        targets: &SmallVec<[usize; 4]>,
+        guard: &Guard,
+    ) -> Result<()> {
+        let letter = match (guard, gate) {
+            (Guard::Parity { records, invert }, _) => {
+                return self.push_guarded_pauli(gate, targets, records, *invert);
+            }
+            (Guard::All { .. }, Gate::Id) => return Ok(()),
+            (Guard::All { .. }, Gate::X) => 1,
+            (Guard::All { .. }, Gate::Y) => 2,
+            (Guard::All { .. }, _) => 3,
+        };
+        let qubit = map_deferred_targets(targets, &self.aliases, &self.measured_aliases)?[0];
+        let anchor = self.anchor();
+        self.guarded.push(GuardedEvent {
+            anchor,
+            guard: guard.clone(),
+            qubit,
+            kind: GuardedKind::Gate(letter),
+        });
+        Ok(())
     }
 
     /// Emit Pauli `gate` on `targets[0]` under the guard `(records, invert)`: once
@@ -3726,19 +3823,14 @@ impl<'a> DeferralWalk<'a> {
         }
     }
 
-    /// Carry the events of guarded slot `slot`, which fire on the shots the guard
-    /// `(records, invert)` holds: into [`DeferredCircuit::guarded`], or among the
-    /// every-shot events when the guard reads no record and so always holds.
-    fn carry_guarded(
-        &mut self,
-        slot: usize,
-        records: &SmallVec<[usize; 4]>,
-        invert: bool,
-    ) -> Result<()> {
+    /// Carry the events of guarded slot `slot`, which fire on the shots `guard` holds:
+    /// into [`DeferredCircuit::guarded`], or among the every-shot events when the guard
+    /// reads no record and so always holds.
+    fn carry_guarded(&mut self, slot: usize, guard: &Guard) -> Result<()> {
         let Some(events) = self.noise.and_then(|noise| noise.after_gate.get(slot)) else {
             return Ok(());
         };
-        if records.is_empty() && !invert {
+        if guard.is_constant(false) {
             return Ok(());
         }
         for event in events {
@@ -3756,7 +3848,7 @@ impl<'a> DeferralWalk<'a> {
                 continue;
             }
             let anchor = self.anchor();
-            if records.is_empty() {
+            if guard.is_constant(true) {
                 self.after_gate[anchor].push(NoiseEvent {
                     channel: event.channel.clone(),
                     qubits: SmallVec::from_slice(&[alias]),
@@ -3764,10 +3856,9 @@ impl<'a> DeferralWalk<'a> {
             } else {
                 self.guarded.push(GuardedEvent {
                     anchor,
-                    records: records.clone(),
-                    invert,
+                    guard: guard.clone(),
                     qubit: alias,
-                    probs,
+                    kind: GuardedKind::Noise(probs),
                 });
             }
         }
@@ -3785,10 +3876,10 @@ impl<'a> DeferralWalk<'a> {
                 classical_bit,
             });
         }
+        self.after_gate
+            .resize_with(self.transformed.instructions.len(), Vec::new);
         let readout = match self.noise {
             Some(noise) => {
-                self.after_gate
-                    .resize_with(self.transformed.instructions.len(), Vec::new);
                 let mut readout = noise.readout.clone();
                 for (entry, flip) in readout.iter_mut().zip(&self.flips_at_write) {
                     if flip.is_some() {
@@ -3808,6 +3899,16 @@ impl<'a> DeferralWalk<'a> {
             guarded: self.guarded,
         }
     }
+}
+
+/// Whether a guard comparing several measured bits lands its body after the compiled
+/// sample rather than declining the rewrite.
+fn lands_register_comparisons() -> bool {
+    #[cfg(feature = "bench-internal")]
+    if !crate::bench_variant('c') {
+        return false;
+    }
+    true
 }
 
 /// Whether a measured qubit that a later instruction touches stays live behind a copy of

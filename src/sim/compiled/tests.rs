@@ -192,6 +192,44 @@ fn defer_measure_reset_rejects_guards_no_controlled_pauli_expresses() {
 }
 
 #[test]
+fn defer_guarded_keeps_a_comparison_of_two_bits_as_an_entry() {
+    let mut c = Circuit::new(3, 3);
+    c.add_measure(0, 0);
+    c.add_measure(1, 1);
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::RegisterNotEquals {
+            offset: 0,
+            size: 2,
+            value: 0b01,
+        },
+        gate: Gate::Z,
+        targets: smallvec![2],
+    });
+    c.add_measure(2, 2);
+
+    let deferred = defer_guarded_circuit(&c).unwrap();
+    assert!(
+        deferred
+            .circuit
+            .instructions
+            .iter()
+            .all(|inst| !matches!(inst, Instruction::Gate { .. }))
+    );
+    let [entry] = deferred.guarded.as_slice() else {
+        panic!("{} entries", deferred.guarded.len());
+    };
+    assert_eq!(entry.qubit, 2);
+    assert_eq!(entry.kind, GuardedKind::Gate(3));
+    assert_eq!(
+        entry.guard,
+        Guard::All {
+            terms: smallvec![(0, true), (1, false)],
+            negate: true,
+        }
+    );
+}
+
+#[test]
 fn run_shots_deferred_reset_preserves_bell_correlation() {
     let mut c = Circuit::new(2, 2);
     c.add_gate(Gate::H, &[0]);

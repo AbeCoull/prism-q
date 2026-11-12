@@ -573,6 +573,14 @@ pub(super) fn inspect<S>(
                     p.engine = Some(Engine::CompiledSampler);
                     Ok(p)
                 }
+                ShotRoute::Guarded(_) => {
+                    let mut p = Plan::new(
+                        ResolvedBackend::CompiledStabilizer,
+                        RouteRule::CompiledCliffordSampler,
+                    );
+                    p.engine = Some(Engine::NoisyCompiledSampler);
+                    Ok(p)
+                }
                 ShotRoute::StabilizerRank => Ok(Plan::new(
                     ResolvedBackend::StabilizerRank,
                     RouteRule::CliffordRegister,

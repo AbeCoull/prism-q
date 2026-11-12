@@ -17,8 +17,8 @@ use crate::error::Result;
 use crate::gates::Gate;
 use crate::limits::ResolvedLimits;
 use crate::sim::compiled::{
-    DeferredCircuit, GuardedEvent, PackedShots, batch_propagate_backward, compile_measurements,
-    defer_noisy_circuit, xor_words,
+    DeferredCircuit, Guard, GuardedEvent, GuardedKind, PackedShots, batch_propagate_backward,
+    compile_measurements, defer_noisy_circuit, shot_tail_mask, xor_words,
 };
 use crate::sim::trajectory::{PreparedChannel, PreparedEvent, PreparedNoise};
 use crate::sim::unified_pauli::PauliAxis;
@@ -2986,7 +2986,8 @@ fn run_shots_noisy_frame(
 /// one, a measured qubit used again copies its record onto a fresh one, and a
 /// guarded Pauli becomes that Pauli controlled by the measured qubits its
 /// condition reads, which holds for a single bit, a parity, or a register
-/// comparison reading one measured bit. A circuit the rewrite declines, such as
+/// comparison reading one measured bit. A comparison reading several measured
+/// bits lands its Pauli as record flips on the shots it holds. A circuit the rewrite declines, such as
 /// one guarding a gate that is not a Pauli, falls back to per-shot stabilizer
 /// replay. Non-Clifford circuits take the same fallback and error on
 /// the first non-Clifford gate; the public entry point routes them to the
@@ -3055,10 +3056,14 @@ pub(crate) fn run_deferred_shots_noisy(
     run_shots_noisy_guarded(deferred, num_shots, seed)
 }
 
-/// Sample a deferred circuit whose guarded bodies carry events. The compiled sampler
-/// draws every shot's records under the every-shot events, then each guarded event, in
-/// execution order, lands on the shots whose guard holds, then readout. A guard reads
-/// records measured before its event, which only earlier guarded events can still flip.
+/// Sample a deferred circuit with guarded entries. The compiled sampler draws every
+/// shot's records under the every-shot events, then each guarded entry, in execution
+/// order, lands on the shots whose guard holds, then readout. A guard reads records
+/// measured before its entry, which only earlier guarded entries can still flip.
+///
+/// Entries land on shot rows, except when a guarded gate is among them: a gate lands on
+/// every shot its guard holds, which measurement rows evaluate a word of 64 shots at a
+/// time.
 pub(crate) fn run_shots_noisy_guarded(
     deferred: &DeferredCircuit,
     num_shots: usize,
@@ -3067,11 +3072,29 @@ pub(crate) fn run_shots_noisy_guarded(
     let circuit = &deferred.circuit;
     let mut sampler = compile_validated_noisy(circuit, &deferred.noise, seed)?;
     let readout = std::mem::take(&mut sampler.readout);
-    let flips = guarded_flips(circuit, &deferred.guarded);
+    let (flips, num_measurements) = guarded_flips(circuit, &deferred.guarded);
 
     let (mut accum, m_words) = sampler.sample_bulk_words_shot_major_cpu(num_shots);
-    for flip in &flips {
-        flip.land(&mut accum, num_shots, m_words, &mut sampler.rng);
+    if flips
+        .iter()
+        .any(|flip| matches!(flip.kind, GuardedKind::Gate(_)))
+    {
+        let mut rows =
+            PackedShots::from_shot_major(accum, num_shots, num_measurements).into_meas_major_data();
+        let mut fire = vec![0u64; num_shots.div_ceil(64)];
+        for flip in &flips {
+            flip.land_rows(&mut rows, num_shots, &mut fire, &mut sampler.rng);
+        }
+        accum =
+            PackedShots::from_meas_major(rows, num_shots, num_measurements).into_shot_major_data();
+    } else {
+        let mut shot_rows = ShotRows {
+            words: &mut accum,
+            m_words,
+        };
+        for flip in &flips {
+            flip.land(&mut shot_rows, num_shots, &mut sampler.rng);
+        }
     }
     apply_readout_packed(&mut accum, num_shots, m_words, &readout, &mut sampler.rng);
 
@@ -3091,35 +3114,106 @@ pub(crate) fn run_shots_noisy_guarded(
     )
 }
 
-/// A guarded event's record flips: an X error flips `x_flips`, a Z error `z_flips`, a Y
-/// both.
+/// Packed records a guarded entry reads and flips one shot at a time.
+trait RecordRows {
+    fn bit(&self, shot: usize, record: usize) -> bool;
+    /// XOR `flips`, packed one bit per record, into shot `shot`.
+    fn xor_flips(&mut self, shot: usize, flips: &[u64]);
+}
+
+/// Shot-major records: `m_words` words per shot.
+struct ShotRows<'a> {
+    words: &'a mut [u64],
+    m_words: usize,
+}
+
+impl RecordRows for ShotRows<'_> {
+    #[inline(always)]
+    fn bit(&self, shot: usize, record: usize) -> bool {
+        (self.words[shot * self.m_words + record / 64] >> (record % 64)) & 1 == 1
+    }
+
+    #[inline(always)]
+    fn xor_flips(&mut self, shot: usize, flips: &[u64]) {
+        let start = shot * self.m_words;
+        xor_words(&mut self.words[start..start + self.m_words], flips);
+    }
+}
+
+/// Measurement-major records: `s_words` words per record.
+struct MeasRows<'a> {
+    words: &'a mut [u64],
+    s_words: usize,
+}
+
+impl RecordRows for MeasRows<'_> {
+    #[inline(always)]
+    fn bit(&self, shot: usize, record: usize) -> bool {
+        (self.words[record * self.s_words + shot / 64] >> (shot % 64)) & 1 == 1
+    }
+
+    #[inline(always)]
+    fn xor_flips(&mut self, shot: usize, flips: &[u64]) {
+        let bit = 1u64 << (shot % 64);
+        for_each_set_bit(flips, |record| {
+            self.words[record * self.s_words + shot / 64] ^= bit;
+        });
+    }
+}
+
+#[inline(always)]
+fn for_each_set_bit(words: &[u64], mut f: impl FnMut(usize)) {
+    for (w, &word) in words.iter().enumerate() {
+        let mut rest = word;
+        while rest != 0 {
+            f(w * 64 + rest.trailing_zeros() as usize);
+            rest &= rest - 1;
+        }
+    }
+}
+
+/// A guarded entry's record flips: an X error flips `x_flips`, a Z error `z_flips`, a Y
+/// both. A gate's flips are folded into `x_flips`.
 struct GuardedFlip {
-    records: SmallVec<[usize; 4]>,
-    invert: bool,
+    guard: Guard,
+    kind: GuardedKind,
     x_flips: Vec<u64>,
     z_flips: Vec<u64>,
-    probs: (f64, f64, f64),
 }
 
 impl GuardedFlip {
-    /// Draw the event on each of `num_shots` shot-major records in `accum`, landing it
-    /// where the guard holds on that shot.
-    fn land(&self, accum: &mut [u64], num_shots: usize, m_words: usize, rng: &mut ChaCha8Rng) {
-        let (px, py, pz) = self.probs;
+    /// Land the entry on each of `num_shots` shots of `rows` where its guard holds,
+    /// drawing a noise entry per shot.
+    fn land(&self, rows: &mut impl RecordRows, num_shots: usize, rng: &mut ChaCha8Rng) {
+        match self.kind {
+            GuardedKind::Gate(_) => {
+                for shot in 0..num_shots {
+                    if self.guard.holds(|record| rows.bit(shot, record)) {
+                        rows.xor_flips(shot, &self.x_flips);
+                    }
+                }
+            }
+            GuardedKind::Noise(probs) => self.land_noise(rows, num_shots, probs, rng),
+        }
+    }
+
+    fn land_noise(
+        &self,
+        rows: &mut impl RecordRows,
+        num_shots: usize,
+        (px, py, pz): (f64, f64, f64),
+        rng: &mut ChaCha8Rng,
+    ) {
         let p_event = px + py + pz;
         let mut fire = |shot: usize, branch: f64| {
-            let words = &mut accum[shot * m_words..(shot + 1) * m_words];
-            let holds = self.records.iter().fold(self.invert, |acc, &record| {
-                acc ^ ((words[record / 64] >> (record % 64)) & 1 == 1)
-            });
-            if !holds {
+            if !self.guard.holds(|record| rows.bit(shot, record)) {
                 return;
             }
             if branch < px + py {
-                xor_words(words, &self.x_flips);
+                rows.xor_flips(shot, &self.x_flips);
             }
             if branch >= px {
-                xor_words(words, &self.z_flips);
+                rows.xor_flips(shot, &self.z_flips);
             }
         };
         if p_event < 0.5 && num_shots >= 32 {
@@ -3139,11 +3233,60 @@ impl GuardedFlip {
             }
         }
     }
+
+    /// [`Self::land`] on measurement-major `rows`, a gate a word of shots at a time
+    /// through `fire`, one word per 64 shots.
+    fn land_rows(
+        &self,
+        rows: &mut [u64],
+        num_shots: usize,
+        fire: &mut [u64],
+        rng: &mut ChaCha8Rng,
+    ) {
+        let s_words = fire.len();
+        if !matches!(self.kind, GuardedKind::Gate(_)) {
+            let mut meas_rows = MeasRows {
+                words: rows,
+                s_words,
+            };
+            return self.land(&mut meas_rows, num_shots, rng);
+        }
+        if s_words == 0 {
+            return;
+        }
+        let row = |record: usize| record * s_words..(record + 1) * s_words;
+        match &self.guard {
+            Guard::Parity { records, invert } => {
+                fire.fill(if *invert { u64::MAX } else { 0 });
+                for &record in records {
+                    xor_words(fire, &rows[row(record)]);
+                }
+            }
+            Guard::All { terms, negate } => {
+                fire.fill(u64::MAX);
+                for &(record, want) in terms {
+                    let flip = if want { 0 } else { u64::MAX };
+                    for (word, &bits) in fire.iter_mut().zip(&rows[row(record)]) {
+                        *word &= bits ^ flip;
+                    }
+                }
+                if *negate {
+                    for word in fire.iter_mut() {
+                        *word = !*word;
+                    }
+                }
+            }
+        }
+        fire[s_words - 1] &= shot_tail_mask(num_shots);
+        for_each_set_bit(&self.x_flips, |record| {
+            xor_words(&mut rows[row(record)], fire);
+        });
+    }
 }
 
-/// The record flips of each guarded event, in order, from one backward sweep of
-/// `circuit`, whose measurements are all terminal.
-fn guarded_flips(circuit: &Circuit, guarded: &[GuardedEvent]) -> Vec<GuardedFlip> {
+/// The record flips of each guarded entry, in order, from one backward sweep of
+/// `circuit`, whose measurements are all terminal, and the number of measurements.
+fn guarded_flips(circuit: &Circuit, guarded: &[GuardedEvent]) -> (Vec<GuardedFlip>, usize) {
     let num_measurements = circuit
         .instructions
         .iter()
@@ -3159,12 +3302,20 @@ fn guarded_flips(circuit: &Circuit, guarded: &[GuardedEvent]) -> Vec<GuardedFlip
     let mut mi = num_measurements;
     for (instr_idx, inst) in circuit.instructions.iter().enumerate().rev() {
         while let Some(event) = pending.next_if(|event| event.anchor == instr_idx) {
+            let mut x_flips = z_packed[event.qubit].clone();
+            let mut z_flips = x_packed[event.qubit].clone();
+            if let GuardedKind::Gate(letter) = event.kind {
+                match letter {
+                    1 => z_flips.fill(0),
+                    2 => xor_words(&mut x_flips, &z_flips),
+                    _ => std::mem::swap(&mut x_flips, &mut z_flips),
+                }
+            }
             flips.push(GuardedFlip {
-                records: event.records.clone(),
-                invert: event.invert,
-                x_flips: z_packed[event.qubit].clone(),
-                z_flips: x_packed[event.qubit].clone(),
-                probs: event.probs,
+                guard: event.guard.clone(),
+                kind: event.kind,
+                x_flips,
+                z_flips,
             });
         }
         match inst {
@@ -3186,7 +3337,7 @@ fn guarded_flips(circuit: &Circuit, guarded: &[GuardedEvent]) -> Vec<GuardedFlip
         }
     }
     flips.reverse();
-    flips
+    (flips, num_measurements)
 }
 
 fn finish_noisy_compiled_run(

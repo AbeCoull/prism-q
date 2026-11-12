@@ -2169,7 +2169,8 @@ fn a_noisy_dynamic_circuit_takes_the_compiled_route() {
         assert_eq!(rule, crate::sim::RouteRule::CompiledCliffordSampler);
     }
 
-    // A comparison reading two measured bits is no parity, so it stays per shot.
+    // A comparison reading two measured bits is no parity: its X lands after the compiled
+    // sample, on the noisy route and on the noiseless one.
     let mut nonlinear = Circuit::new(3, 3);
     nonlinear.add_gate(Gate::H, &[0]);
     nonlinear.add_gate(Gate::H, &[1]);
@@ -2186,19 +2187,54 @@ fn a_noisy_dynamic_circuit_takes_the_compiled_route() {
     ));
     nonlinear.add_measure(2, 2);
     let noise = NoiseModel::uniform_depolarizing(&nonlinear, 0.0);
-    let result = crate::sim::simulate(&nonlinear)
+    let noisy = crate::sim::simulate(&nonlinear)
         .noise(&noise)
         .seed(42)
         .shots(64)
         .unwrap();
-    assert_ne!(result.metadata.backend, ResolvedBackend::CompiledStabilizer);
-    assert_eq!(result.metadata.reason, crate::sim::RouteRule::PerShot);
-    assert!(
-        result
-            .shots
-            .iter()
-            .all(|shot| shot[2] == (shot[0] && shot[1]))
-    );
+    let noiseless = crate::sim::simulate(&nonlinear).seed(42).shots(64).unwrap();
+    let noisy_plan = crate::sim::simulate(&nonlinear)
+        .noise(&noise)
+        .plan(crate::sim::Query::Shots(64))
+        .unwrap();
+    let noiseless_plan = crate::sim::simulate(&nonlinear)
+        .plan(crate::sim::Query::Shots(64))
+        .unwrap();
+    for (backend, engine, rule) in [
+        (noisy_plan.backend, noisy_plan.engine, noisy_plan.rule),
+        (
+            noiseless_plan.backend,
+            noiseless_plan.engine,
+            noiseless_plan.rule,
+        ),
+        (
+            noisy.metadata.backend,
+            noisy.metadata.engine,
+            noisy.metadata.reason,
+        ),
+        (
+            noiseless.metadata.backend,
+            noiseless.metadata.engine,
+            noiseless.metadata.reason,
+        ),
+    ] {
+        assert_eq!(backend, ResolvedBackend::CompiledStabilizer);
+        assert_eq!(engine, Some(Engine::NoisyCompiledSampler));
+        assert_eq!(rule, crate::sim::RouteRule::CompiledCliffordSampler);
+    }
+    let counts = crate::sim::simulate(&nonlinear)
+        .seed(42)
+        .sample_counts(64)
+        .unwrap();
+    assert_eq!(counts.metadata.engine, Some(Engine::NoisyCompiledSampler));
+    for result in [&noisy, &noiseless] {
+        assert!(
+            result
+                .shots
+                .iter()
+                .all(|shot| shot[2] == (shot[0] && shot[1]))
+        );
+    }
 }
 
 fn noisy_feedforward_model(circuit: &Circuit) -> NoiseModel {
@@ -2319,5 +2355,131 @@ fn active_reset_round() -> Circuit {
 #[test]
 fn active_reset_counts_follow_stabilizer_replay() {
     let circuit = active_reset_round();
+    assert_counts_follow_replay(&circuit, &noisy_feedforward_model(&circuit));
+}
+
+// Register comparisons reading several measured bits, each with a fixed outcome: an equal
+// that holds and one that does not, a not-equal guarding a region, a comparison reading a
+// bit an earlier comparison's X wrote, and an X a later CX carries to another qubit.
+fn deterministic_comparisons() -> Circuit {
+    use crate::circuit::ClassicalCondition as C;
+    let register = |offset: usize, size: usize, value: u64| C::RegisterEquals {
+        offset,
+        size,
+        value,
+    };
+    let mut circuit = Circuit::new(8, 8);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    circuit
+        .instructions
+        .push(guarded_gate(register(0, 2, 0b01), Gate::X, 2));
+    circuit
+        .instructions
+        .push(guarded_gate(register(0, 2, 0b11), Gate::X, 3));
+    circuit.instructions.push(pauli_region(
+        C::RegisterNotEquals {
+            offset: 0,
+            size: 2,
+            value: 0b11,
+        },
+        &[(Gate::X, 4), (Gate::Z, 4), (Gate::Id, 4)],
+    ));
+    circuit.add_measure(2, 2);
+    circuit.add_measure(3, 3);
+    circuit.add_measure(4, 4);
+    circuit
+        .instructions
+        .push(guarded_gate(register(0, 3, 0b101), Gate::Y, 5));
+    circuit.add_measure(5, 5);
+    circuit
+        .instructions
+        .push(guarded_gate(register(1, 2, 0b10), Gate::X, 6));
+    circuit.add_gate(Gate::Cx, &[6, 7]);
+    circuit.add_measure(6, 6);
+    circuit.add_measure(7, 7);
+    circuit
+}
+
+#[test]
+fn register_comparisons_compile_to_the_records_replay_reads() {
+    let circuit = deterministic_comparisons();
+    let want = [true, false, true, false, true, true, true, true];
+    let replayed = replay(&circuit, &bare_model(&circuit), 16);
+    let compiled = crate::sim::simulate(&circuit).seed(42).shots(64).unwrap();
+    let inert = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    let noisy = crate::sim::simulate(&circuit)
+        .noise(&inert)
+        .seed(42)
+        .shots(64)
+        .unwrap();
+
+    for (label, result) in [("compiled", &compiled), ("noisy compiled", &noisy)] {
+        assert_eq!(
+            result.metadata.engine,
+            Some(Engine::NoisyCompiledSampler),
+            "{label}"
+        );
+    }
+    for (label, shots) in [
+        ("replay", &replayed.shots),
+        ("compiled", &compiled.shots),
+        ("noisy compiled", &noisy.shots),
+    ] {
+        assert!(
+            shots.iter().all(|shot| shot == &want),
+            "{label}: {:?}",
+            shots.iter().find(|shot| *shot != &want)
+        );
+    }
+}
+
+// One round of the distance-3 repetition code decoded by lookup: both checks reset, one
+// comparison of the two-bit syndrome per correction, and a not-equal region whose slots
+// carry noise only on the shots it runs. Five bits, 32 outcomes.
+fn lookup_round() -> Circuit {
+    use crate::circuit::ClassicalCondition as C;
+    let syndrome = |value: u64| C::RegisterEquals {
+        offset: 0,
+        size: 2,
+        value,
+    };
+    let mut circuit = Circuit::new(5, 5);
+    circuit.add_gate(Gate::H, &[0]);
+    for (data, ancilla) in [(0, 3), (1, 3), (1, 4), (2, 4)] {
+        circuit.add_gate(Gate::Cx, &[data, ancilla]);
+    }
+    circuit.add_measure(3, 0);
+    circuit.add_measure(4, 1);
+    circuit.add_reset(3);
+    circuit.add_reset(4);
+    circuit
+        .instructions
+        .push(guarded_gate(syndrome(0b01), Gate::X, 0));
+    circuit
+        .instructions
+        .push(guarded_gate(syndrome(0b10), Gate::X, 2));
+    circuit
+        .instructions
+        .push(guarded_gate(syndrome(0b11), Gate::X, 1));
+    circuit.instructions.push(pauli_region(
+        C::RegisterNotEquals {
+            offset: 0,
+            size: 2,
+            value: 0,
+        },
+        &[(Gate::Z, 0), (Gate::Id, 2)],
+    ));
+    circuit.add_gate(Gate::Cx, &[0, 3]);
+    circuit.add_measure(0, 2);
+    circuit.add_measure(1, 3);
+    circuit.add_measure(2, 4);
+    circuit
+}
+
+#[test]
+fn lookup_counts_follow_stabilizer_replay() {
+    let circuit = lookup_round();
     assert_counts_follow_replay(&circuit, &noisy_feedforward_model(&circuit));
 }

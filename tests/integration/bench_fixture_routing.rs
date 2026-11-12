@@ -1092,7 +1092,7 @@ fn noisy_dynamic_rows_take_their_route() {
         (
             "rep_d5_lookup_p001",
             bench_fixtures::lookup_repetition_circuit(5, 5),
-            RouteRule::PerShot,
+            RouteRule::CompiledCliffordSampler,
         ),
     ] {
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);

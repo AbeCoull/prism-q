@@ -400,6 +400,8 @@ pub(super) struct TerminalCircuit {
 
 pub(super) enum ShotRoute {
     Compiled(Option<Circuit>),
+    /// The rewrite to terminal measurements with guarded Paulis that land after sampling.
+    Guarded(Box<compiled::DeferredCircuit>),
     TerminalStatevector(TerminalCircuit),
     Native(BackendPlan, TerminalCircuit),
     TerminalProbabilities(TerminalCircuit),
@@ -447,9 +449,13 @@ pub(super) fn decide_shots(
         return Ok(ShotRoute::Compiled(None));
     }
     if should_use_deferred_clifford_sampling(kind, circuit, num_shots)
-        && let Ok(deferred) = compiled::defer_measure_reset_circuit(circuit)
+        && let Ok(deferred) = compiled::defer_guarded_circuit(circuit)
     {
-        return Ok(ShotRoute::Compiled(Some(deferred)));
+        return Ok(if deferred.guarded.is_empty() {
+            ShotRoute::Compiled(Some(deferred.circuit))
+        } else {
+            ShotRoute::Guarded(Box::new(deferred))
+        });
     }
     if kind.is_auto() && decide_clifford_register(circuit, limits) {
         return Ok(ShotRoute::StabilizerRank);

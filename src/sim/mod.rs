@@ -2893,6 +2893,8 @@ enum ShotSource {
         meas_map: Vec<(usize, usize)>,
         deferred: bool,
     },
+    /// The deferred rewrite whose guarded Paulis land after the compiled sample.
+    Guarded(Box<compiled::DeferredCircuit>),
     TerminalStatevector {
         backend: Box<StatevectorBackend>,
         expected_device: bool,
@@ -2923,6 +2925,11 @@ impl ShotSource {
             ShotSource::Compiled { .. } => Some(
                 RunMetadata::exact(ResolvedBackend::CompiledStabilizer)
                     .with_engine(Engine::CompiledSampler)
+                    .with_reason(RouteRule::CompiledCliffordSampler),
+            ),
+            ShotSource::Guarded(_) => Some(
+                RunMetadata::exact(ResolvedBackend::CompiledStabilizer)
+                    .with_engine(Engine::NoisyCompiledSampler)
                     .with_reason(RouteRule::CompiledCliffordSampler),
             ),
             ShotSource::TerminalStatevector {
@@ -3018,6 +3025,7 @@ fn prepare_shot_source(
                 deferred: deferred.is_some(),
             })
         }
+        ShotRoute::Guarded(deferred) => Ok(ShotSource::Guarded(deferred)),
         ShotRoute::StabilizerRank => Ok(ShotSource::StabilizerRank),
         ShotRoute::TerminalStatevector(terminal) => {
             let (backend, meas_map, expected_device) =
@@ -3165,6 +3173,9 @@ pub(crate) fn run_counts_with(
         ShotSource::TerminalProbabilities {
             probs, meas_map, ..
         } => counts_of(sample_shots(&probs, &meas_map, bits, num_shots, seed), bits),
+        ShotSource::Guarded(deferred) => {
+            noise::run_shots_noisy_guarded(&deferred, num_shots, seed)?.counts()
+        }
         ShotSource::StabilizerRank => {
             stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed)?.counts()
         }
@@ -4200,6 +4211,9 @@ pub(crate) fn run_shots_with(
         ShotSource::TerminalProbabilities {
             probs, meas_map, ..
         } => ShotsResult::from_shots(sample_shots(&probs, &meas_map, bits, num_shots, seed), bits),
+        ShotSource::Guarded(deferred) => {
+            noise::run_shots_noisy_guarded(&deferred, num_shots, seed)?
+        }
         ShotSource::StabilizerRank => {
             stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed)?
         }

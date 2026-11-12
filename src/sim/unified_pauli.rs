@@ -1060,9 +1060,11 @@ impl<K: SpdKey> WeightedPauliSum<K> {
     }
 
     fn truncate(&mut self, epsilon: f64) -> f64 {
+        let threshold = epsilon.max(0.0);
+        let threshold_sqr = threshold * threshold;
         let mut discarded = 0.0;
         self.terms.retain(|(_, coeff)| {
-            if coeff.norm() < epsilon {
+            if coeff.norm_sqr() < threshold_sqr {
                 discarded += coeff.norm();
                 false
             } else {

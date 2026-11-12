@@ -862,3 +862,34 @@ fn spd_engines_agree_across_key_widths() {
     let values = reference.unwrap();
     assert!(values[..3].iter().all(|v| v.abs() > 1e-6));
 }
+
+#[test]
+fn threshold_truncation_drops_below_epsilon_and_reports_the_one_norm() {
+    let coeffs = [
+        Complex64::new(0.6, -0.2),
+        Complex64::new(3e-4, 4e-4),
+        Complex64::new(0.0, -7e-4),
+        Complex64::new(1e-3, 0.0),
+        Complex64::new(-2e-5, 1e-5),
+    ];
+    let build = || {
+        let mut sum = WeightedPauliSum::<InlinePauli<1>>::new();
+        for (k, &c) in coeffs.iter().enumerate() {
+            sum.insert(InlinePauli::<1>::from_words(&[k as u64], &[0]), c);
+        }
+        sum
+    };
+    let epsilon = 1e-3;
+    let expected: f64 = coeffs
+        .iter()
+        .map(|c| c.norm())
+        .filter(|&m| m < epsilon)
+        .sum();
+    let mut sum = build();
+    assert!((sum.truncate(epsilon) - expected).abs() < 1e-15);
+    assert_eq!(sum.terms.len(), 2);
+
+    let mut sum = build();
+    assert_eq!(sum.truncate(-1.0), 0.0);
+    assert_eq!(sum.terms.len(), coeffs.len());
+}

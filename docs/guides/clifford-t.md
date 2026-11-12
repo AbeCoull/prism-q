@@ -31,8 +31,9 @@ has the exact conditions.
 
 ## Accepted gate forms
 
-All four engines take Clifford gates, `T`, `Tdg`, `Rz`, `P` and `Rzz` as they are,
-and lower `Rx`, `Ry` and `PauliRot` to Clifford conjugation around one `Rz`. A `Fused`
+All four engines take Clifford gates, `T`, `Tdg`, `Rz`, `P` and `Rzz` as they are. SPD
+and Pauli path branch on `Rx` and `Ry` too; SPP and stabilizer rank lower them, and every
+engine lowers `PauliRot`, to Clifford conjugation around one `Rz`. A `Fused`
 matrix (the parser's `u`, `u3`, `u2`, `r`, `gpi` and `gpi2`) lowers to the named gate or
 `Rz` it equals up to a global phase, or else to its Rz-Ry-Rz Euler triple. A `cu` lowers
 when its target is diagonal or a Pauli up to phase (`cy`, `cp`, `crz`, `cs`) and is

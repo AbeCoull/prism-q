@@ -2961,3 +2961,39 @@ fn flip_table_floor_draws_the_same_shots() {
         }
     }
 }
+
+#[test]
+fn direct_counts_match_the_typed_histogram() {
+    for words in 1..=6 {
+        for rank in [9, 20, 23, 61, 89, 150] {
+            if rank > 64 * words - 3 {
+                continue;
+            }
+            for shots in [1, 64, 1000, 2000] {
+                if rank <= MAX_RANK_FOR_RANK_SPACE && shots >= MIN_SHOTS_PER_OUTCOME << rank {
+                    continue;
+                }
+                let direct = shots_mostly_distinct(rank, shots);
+                let actual = in_pools(|| {
+                    let mut sampler = random_finished_sampler(rank, words, 42);
+                    [sampler.sample_counts(shots), sampler.sample_counts(shots)]
+                });
+                let expected = in_pools(|| {
+                    let mut sampler = random_finished_sampler(rank, words, 42);
+                    [
+                        counts_from_chunks(|acc| sampler.sample_chunked(shots, acc)),
+                        counts_from_chunks(|acc| sampler.sample_chunked(shots, acc)),
+                    ]
+                });
+                assert_eq!(
+                    actual, expected,
+                    "words {words}, rank {rank}, {shots} shots, direct {direct}"
+                );
+            }
+        }
+    }
+    assert!(shots_mostly_distinct(20, 1024));
+    assert!(!shots_mostly_distinct(20, 1025));
+    assert!(shots_mostly_distinct(89, 1 << 44));
+    assert!(shots_mostly_distinct(909, usize::MAX));
+}

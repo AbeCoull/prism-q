@@ -1327,7 +1327,16 @@ impl CompiledSampler {
                 return self.sample_counts_rank_space(total_shots);
             }
         }
-        counts_from_chunks(|acc| self.sample_chunked(total_shots, acc))
+        let direct = shots_mostly_distinct(self.rank, total_shots);
+        #[cfg(feature = "bench-internal")]
+        let direct = direct && crate::bench_variant('d');
+        let mut acc = if direct {
+            HistogramAccumulator::direct()
+        } else {
+            HistogramAccumulator::new()
+        };
+        self.sample_chunked(total_shots, &mut acc);
+        acc.into_counts()
     }
 
     fn sample_counts_multinomial(
@@ -2813,6 +2822,12 @@ const MIN_KEYS_FOR_PAR_MULTINOMIAL: usize = 1 << 13;
 const MAX_RANK_FOR_RANK_SPACE: usize = 20;
 const MIN_SHOTS_PER_OUTCOME: usize = 4;
 const MAX_LUT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Whether `shots` uniform draws over the `2^rank` outcomes are expected to repeat less
+/// than half a time (`shots^2 <= 2^rank`), so a count can skip the typed map.
+fn shots_mostly_distinct(rank: usize, shots: usize) -> bool {
+    rank >= 128 || (shots as u128).saturating_mul(shots as u128) <= 1u128 << rank
+}
 
 fn require_clifford(circuit: &Circuit) -> Result<()> {
     if circuit.is_clifford_only() {

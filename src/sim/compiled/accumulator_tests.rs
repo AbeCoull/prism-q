@@ -173,3 +173,48 @@ fn transpose_64x64_scalar_involutive() {
     transpose_64x64(&mut matrix);
     assert_eq!(matrix, original);
 }
+
+#[test]
+fn direct_histogram_matches_typed_counts() {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for words in [1, 2, 3, 4, 5, 6, 9] {
+        let m = 64 * words - 3;
+        for shots in [1, 63, 64, 130, 70_000] {
+            let pool: Vec<Vec<u64>> = (0..8)
+                .map(|_| (0..words).map(|_| rng.random::<u64>()).collect())
+                .collect();
+            let mut data = vec![0u64; shots * words];
+            for shot in data.chunks_exact_mut(words) {
+                if rng.random::<bool>() {
+                    shot.copy_from_slice(&pool[rng.random_range(0..pool.len())]);
+                } else {
+                    shot.iter_mut().for_each(|w| *w = rng.random::<u64>());
+                }
+                shot[words - 1] &= (1u64 << (m % 64)) - 1;
+            }
+            let shot_major = PackedShots::from_shot_major(data, shots, m);
+            let meas_major = shot_major.to_meas_major();
+            let counts = |mut acc: HistogramAccumulator, chunk: &PackedShots| {
+                acc.accumulate(chunk);
+                acc.accumulate(chunk);
+                acc.into_counts()
+            };
+            let pooled = |chunk: &PackedShots| {
+                let expected = counts(HistogramAccumulator::new(), chunk);
+                #[cfg(feature = "parallel")]
+                for num_threads in [1, 4] {
+                    let actual = rayon::ThreadPoolBuilder::new()
+                        .num_threads(num_threads)
+                        .build()
+                        .unwrap()
+                        .install(|| counts(HistogramAccumulator::direct(), chunk));
+                    assert_eq!(actual, expected, "{words} words, {shots} shots");
+                }
+                assert_eq!(counts(HistogramAccumulator::direct(), chunk), expected);
+                expected
+            };
+            assert_eq!(pooled(&shot_major), pooled(&meas_major));
+        }
+    }
+}

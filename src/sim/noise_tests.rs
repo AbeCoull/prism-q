@@ -2117,8 +2117,7 @@ fn outcome_frequencies(shots: &[Vec<bool>]) -> Vec<f64> {
 #[test]
 fn noisy_feedforward_counts_follow_stabilizer_replay() {
     let circuit = noisy_feedforward_round();
-    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.05);
-    noise.set_bit_readout_error(0, 0.08, 0.08);
+    let noise = noisy_feedforward_model(&circuit);
     let shots = 40_000;
 
     let compiled = crate::sim::simulate(&circuit)
@@ -2197,4 +2196,32 @@ fn a_noisy_dynamic_circuit_takes_the_compiled_route() {
             .iter()
             .all(|shot| shot[2] == (shot[0] && shot[1]))
     );
+}
+
+fn noisy_feedforward_model(circuit: &Circuit) -> NoiseModel {
+    let mut noise = NoiseModel::uniform_depolarizing(circuit, 0.05);
+    noise.set_bit_readout_error(0, 0.08, 0.08);
+    noise
+}
+
+// Seeded counts of a circuit the deferral compiles, so a change to the guarded pass that
+// moves its draws shows here before it shows as a shifted bench row.
+#[test]
+fn seeded_feedforward_counts_hold_their_draws() {
+    let circuit = noisy_feedforward_round();
+    let result = crate::sim::simulate(&circuit)
+        .noise(&noisy_feedforward_model(&circuit))
+        .seed(42)
+        .shots(4096)
+        .unwrap();
+    assert_eq!(result.metadata.engine, Some(Engine::NoisyCompiledSampler));
+    let counts: Vec<usize> = outcome_frequencies(&result.shots)
+        .iter()
+        .map(|f| (f * 4096.0).round() as usize)
+        .collect();
+    let want = [
+        1418, 81, 5, 48, 326, 17, 0, 9, 53, 5, 7, 91, 12, 0, 4, 33, 43, 1340, 52, 2, 14, 345, 10,
+        0, 3, 40, 98, 9, 0, 12, 17, 2,
+    ];
+    assert_eq!(counts, want);
 }

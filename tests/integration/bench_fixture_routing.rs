@@ -1079,6 +1079,37 @@ fn clifford_register_counts_row_fills_the_register() {
     assert_eq!(counts.metadata.reason, RouteRule::CliffordRegister);
 }
 
+// The noisy dynamic rows each price one form the rewrite to terminal measurements
+// declines: an ancilla reused after its measurement, and a guard comparing several bits.
+#[test]
+fn noisy_dynamic_rows_take_their_route() {
+    for (label, circuit, rule) in [
+        (
+            "rep_d9_active_reset_p001",
+            bench_fixtures::active_reset_repetition_circuit(9, 9),
+            RouteRule::PerShot,
+        ),
+        (
+            "rep_d5_lookup_p001",
+            bench_fixtures::lookup_repetition_circuit(5, 5),
+            RouteRule::PerShot,
+        ),
+    ] {
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        let plan = sim::simulate(&circuit)
+            .noise(&noise)
+            .plan(sim::Query::Shots(2_000))
+            .unwrap();
+        let result = sim::simulate(&circuit)
+            .noise(&noise)
+            .seed(SEED)
+            .shots(64)
+            .unwrap();
+        assert_eq!(plan.rule, rule, "{label}: plan");
+        assert_eq!(result.metadata.reason, rule, "{label}: run");
+    }
+}
+
 fn price_layers(n: usize, t: usize) -> prism_q::circuit::Circuit {
     bench_fixtures::random_clifford_t_layers(n, 10, t, SEED)
 }

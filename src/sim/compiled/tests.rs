@@ -3068,3 +3068,62 @@ fn early_exit_blocks_match_the_column_lists() {
     }
     assert!(split > 0);
 }
+
+#[test]
+fn live_bound_routes_like_the_full_schedule() {
+    let mut cases = Vec::new();
+    for n in [8, 64, 100, 130] {
+        let mut c = circuits::clifford_heavy_circuit(n, 8, 42);
+        c.measure_all();
+        cases.push(c);
+        let mut c = circuits::clifford_random_pairs(n, 20, 42);
+        c.measure_all();
+        cases.push(c);
+        let mut c = Circuit::new(n, n);
+        for q in 0..n - 1 {
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        c.measure_all();
+        cases.push(c);
+        let mut c = circuits::clifford_heavy_circuit(n, 8, 7);
+        let mut tail = Circuit::new(n, n);
+        tail.add_measure(n - 1, 0);
+        for q in 0..n - 1 {
+            tail.add_measure(q, q + 1);
+        }
+        c.instructions.extend(tail.instructions);
+        c.num_classical_bits = n;
+        cases.push(c);
+    }
+
+    let mut bound_routed = 0;
+    for (index, c) in cases.iter().enumerate() {
+        let bound = live_forward::peak_live_lower_bound(c);
+        let schedule = live_forward::LiveSchedule::plan(c);
+        assert!(bound <= schedule.peak_live, "case {index}");
+        let cap = LIVE_FORWARD_DENSITY * c.num_qubits;
+        let dense = schedule.peak_live * schedule.peak_live > cap;
+        if bound * bound > cap {
+            assert!(dense, "case {index}");
+            bound_routed += 1;
+        }
+
+        let draw = |mut sampler: CompiledSampler| {
+            let counts = sampler.sample_counts(100);
+            (counts, sampler.sample_bulk_packed(70).to_shots())
+        };
+        let actual = in_pools(|| draw(compile_forward(c, 42).unwrap()));
+        let expected = in_pools(|| {
+            let schedule = live_forward::LiveSchedule::plan(c);
+            let sampler = if dense {
+                compile_forward_dense(c, 42)
+            } else {
+                live_forward::compile_forward_live(c, 42, &schedule)
+            };
+            draw(sampler.unwrap())
+        });
+        assert_eq!(actual, expected, "case {index}");
+    }
+    assert!(bound_routed >= 4);
+}

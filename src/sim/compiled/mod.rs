@@ -2913,8 +2913,19 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
 }
 
 fn compile_forward_unchecked(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
+    let density_cap = LIVE_FORWARD_DENSITY * circuit.num_qubits;
+    #[cfg(feature = "bench-internal")]
+    let try_bound = crate::bench_variant('g');
+    #[cfg(not(feature = "bench-internal"))]
+    let try_bound = true;
+    if try_bound {
+        let bound = live_forward::peak_live_lower_bound(circuit);
+        if bound * bound > density_cap {
+            return compile_forward_dense(circuit, seed);
+        }
+    }
     let schedule = live_forward::LiveSchedule::plan(circuit);
-    if schedule.peak_live * schedule.peak_live <= LIVE_FORWARD_DENSITY * circuit.num_qubits {
+    if schedule.peak_live * schedule.peak_live <= density_cap {
         return live_forward::compile_forward_live(circuit, seed, &schedule);
     }
     compile_forward_dense(circuit, seed)

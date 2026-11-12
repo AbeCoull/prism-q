@@ -102,6 +102,7 @@ pub(super) fn decide_tensor_expectations(
         circuit,
         observables,
         crate::backend::tensornetwork::AUTO_EXPECTATION_PEAK_BOUND,
+        usize::MAX,
     )? {
         Ok(planned) => planned,
         Err(e) => return Some(Err(e)),
@@ -125,9 +126,10 @@ const TENSOR_ELEMENT_MPS_COST: f64 = 3.0;
 /// The scalar tensor route for an `Auto` expectation above the statevector cap,
 /// where the alternative is the MPS `Auto` resolves to rather than a dense run.
 /// `None` when `Auto` resolves to another backend, when the MPS estimate is
-/// under [`TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE`] per observable, when a plan
-/// crosses the peak bound, or when the planned contraction costs more than the
-/// MPS estimate.
+/// under [`TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE`] per observable, or when the
+/// planned contraction would cost more than the MPS estimate or hold an
+/// intermediate over the tensor peak cap. The dry run stops as soon as the planned
+/// elements overspend, so a declined plan costs a fraction of the MPS run.
 pub(super) fn decide_tensor_over_mps(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
@@ -160,14 +162,12 @@ pub(super) fn decide_tensor_over_mps(
     let planned = match crate::backend::tensornetwork::plan_bounded_expectations(
         circuit,
         observables,
-        crate::backend::tensornetwork::AUTO_EXPECTATION_PEAK_BOUND,
+        limits.tn_peak_elements(),
+        (mps_cost / TENSOR_ELEMENT_MPS_COST) as usize,
     )? {
         Ok(planned) => planned,
         Err(e) => return Some(Err(e)),
     };
-    if planned.total_elements() as f64 * TENSOR_ELEMENT_MPS_COST >= mps_cost {
-        return None;
-    }
     Some(Ok(planned.with_limits(limits)))
 }
 

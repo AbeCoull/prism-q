@@ -2679,11 +2679,11 @@ fn bench_auto_expectation(c: &mut Criterion) {
 /// `Auto` expectations above the statevector cap, where MPS is the fallback.
 ///
 /// `su4_brick_d6` drives the MPS bond to 64 while one `Z` has a twelve-qubit
-/// cone; `brickwork_d10` crosses the tensor route's peak bound after a dry run,
-/// and `brickwork_d10_zz` asks eight two-local terms of the same circuit;
-/// `brickwork_d8_local/256` holds the bond at 16 along the whole chain while its
-/// `Z` and adjacent `ZZ` cones stay local; `hea_l2` and `su4_brick_d4` stay under
-/// the MPS cost at which the dry run is worth attempting.
+/// cone; `brickwork_d10` plans one `Z` under the MPS estimate, and
+/// `brickwork_d10_zz` plans eight two-local terms over it, so its dry run
+/// declines; `brickwork_d8_local/256` holds the bond at 16 along the whole chain
+/// while its `Z` and adjacent `ZZ` cones stay local; `hea_l2` and `su4_brick_d4`
+/// stay under the MPS cost at which the dry run is worth attempting.
 fn bench_auto_expectation_above_cap(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/expectation_above_cap");
     configure_group(&mut group);

@@ -876,11 +876,13 @@ fn queue_slot_pairs(
 /// Returns `None` as soon as a result exceeds `abort_above` elements: the pass
 /// can no longer beat the plan holding that peak, and abandoning it keeps a
 /// failed restart from paying for a full walk. Peak ties complete, since they
-/// can still win on `total`.
+/// can still win on `total`. Also `None` once the summed elements pass
+/// `total_budget`.
 fn plan_pairs(
     mut slots: Vec<Option<TensorMeta>>,
     noise: Option<(&mut ChaCha8Rng, f64)>,
     abort_above: usize,
+    total_budget: usize,
 ) -> Option<ContractionPlan> {
     let mut leg_holders: Vec<SmallVec<[usize; 2]>> = Vec::new();
     let mut queue = match noise {
@@ -914,6 +916,9 @@ fn plan_pairs(
         }
         plan.peak = plan.peak.max(elements);
         plan.total += elements;
+        if plan.total > total_budget {
+            return None;
+        }
         plan.pairs.push((i, j));
         slots.push(Some(result));
         queue_slot_pairs(&slots, slots.len() - 1, &mut leg_holders, &mut queue);
@@ -932,7 +937,7 @@ fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
     #[cfg(test)]
     PLANNER_CALLS.with(|calls| calls.set(calls.get() + 1));
     let slots: Vec<Option<TensorMeta>> = tensors.iter().map(|t| Some(TensorMeta::of(t))).collect();
-    let greedy = plan_pairs(slots, None, usize::MAX).expect("unbounded pass completes");
+    let greedy = plan_pairs(slots, None, usize::MAX, usize::MAX).expect("unbounded pass completes");
     if greedy.peak < RESTART_PEAK_THRESHOLD {
         return greedy;
     }
@@ -945,7 +950,7 @@ fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
         let pass_seed = PLAN_NOISE_SEED ^ ((temp_index << 32) | pass);
         let mut rng = ChaCha8Rng::seed_from_u64(pass_seed);
         let slots: Vec<Option<TensorMeta>> = metas.iter().cloned().map(Some).collect();
-        plan_pairs(slots, Some((&mut rng, temperature)), bound)
+        plan_pairs(slots, Some((&mut rng, temperature)), bound, usize::MAX)
     };
     let passes = PLAN_NOISE_TEMPERATURES.len() as u64 * PLAN_RESTARTS_PER_TEMPERATURE;
     #[cfg(feature = "parallel")]
@@ -2099,10 +2104,10 @@ fn plan_scalar(
 }
 
 /// Largest greedy-tree intermediate, in elements, under which the `Auto`
-/// expectation route takes the scalar path. Measured over 24 circuits: every
-/// family the scalar path beat the statevector on stayed under it for every
-/// observable, every family it lost to crossed it, and the bounded pass that
-/// decides costs 1 to 22 ms.
+/// expectation route below the statevector cap takes the scalar path. Measured
+/// over 24 circuits: every family the scalar path beat the statevector on stayed
+/// under it for every observable, every family it lost to crossed it, and the
+/// bounded pass that decides costs 1 to 22 ms.
 pub(crate) const AUTO_EXPECTATION_PEAK_BOUND: usize = 1 << 12;
 
 /// Scalar networks with carried contraction trees and optional slice plans.
@@ -2112,11 +2117,6 @@ pub(crate) struct BoundedExpectations {
 }
 
 impl BoundedExpectations {
-    /// Sum of every planned intermediate's element count across the observables.
-    pub(crate) fn total_elements(&self) -> usize {
-        self.planned.iter().map(|(_, plan, _)| plan.total).sum()
-    }
-
     pub(crate) fn with_limits(mut self, limits: &ResolvedLimits) -> Self {
         let limits = ContractionLimits::new(limits, None);
         for (network, plan, slice) in &mut self.planned {
@@ -2154,17 +2154,19 @@ impl BoundedExpectations {
     }
 }
 
-/// Plan `<0| U^dag P U |0>` for every observable under `bound` elements. `None`
-/// when any observable's tree crosses the bound, or the circuit holds an
-/// instruction the network cannot append, so the caller falls back to another
-/// route.
+/// Plan `<0| U^dag P U |0>` for every observable with no intermediate over
+/// `peak_bound` elements and at most `budget` elements summed over every tree.
+/// `None` when a tree crosses either, or the circuit holds an instruction the
+/// network cannot append, so the caller falls back to another route.
 pub(crate) fn plan_bounded_expectations(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
-    bound: usize,
+    peak_bound: usize,
+    budget: usize,
 ) -> Option<Result<BoundedExpectations>> {
     let circuit = crate::circuit::expand_qft_blocks(circuit);
     let mut planned = Vec::with_capacity(observables.len());
+    let mut spent = 0usize;
     for observable in observables {
         let mut axes = vec![None; circuit.num_qubits];
         if let Err(e) = observable_axes(observable, &mut axes, "tensor-network scalar") {
@@ -2176,7 +2178,8 @@ pub(crate) fn plan_bounded_expectations(
             .iter()
             .map(|t| Some(TensorMeta::of(t)))
             .collect();
-        let plan = plan_pairs(slots, None, bound)?;
+        let plan = plan_pairs(slots, None, peak_bound, budget - spent)?;
+        spent += plan.total;
         planned.push((network, plan, None));
     }
     Some(Ok(BoundedExpectations {
@@ -2542,7 +2545,8 @@ impl TensorNetworkBackend {
         let (network, _, _) = self.double_for_partial_trace(0);
         let slots: Vec<Option<TensorMeta>> =
             network.iter().map(|t| Some(TensorMeta::of(t))).collect();
-        let plan = plan_pairs(slots, None, usize::MAX).expect("unbounded pass completes");
+        let plan =
+            plan_pairs(slots, None, usize::MAX, usize::MAX).expect("unbounded pass completes");
         let mut probe: Vec<Complex64> = Vec::new();
         reserve_dense_output(&mut probe, plan.peak, self.name(), "native sampling")?;
         drop(probe);

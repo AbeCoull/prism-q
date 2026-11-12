@@ -421,7 +421,7 @@ fn test_plan_restarts_deterministic_and_never_worse() {
         .map(|t| Some(TensorMeta::of(t)))
         .collect();
 
-    let greedy = plan_pairs(slots, None, usize::MAX).unwrap();
+    let greedy = plan_pairs(slots, None, usize::MAX, usize::MAX).unwrap();
     assert!(
         greedy.peak >= RESTART_PEAK_THRESHOLD,
         "fixture no longer reaches the restart arm: greedy peak {}",
@@ -604,7 +604,7 @@ fn test_noisy_plans_execute_to_the_same_scalar() {
             .map(|t| Some(TensorMeta::of(t)))
             .collect();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let plan = plan_pairs(slots, Some((&mut rng, 1.0)), usize::MAX).unwrap();
+        let plan = plan_pairs(slots, Some((&mut rng, 1.0)), usize::MAX, usize::MAX).unwrap();
 
         let result = replay_plan(&mut network.tensors, &plan);
         assert_eq!(result.data.len(), 1);
@@ -659,9 +659,9 @@ fn test_exact_plans_match_the_heap_order() {
 
     for metas in &networks {
         let slots = || metas.iter().cloned().map(Some).collect::<Vec<_>>();
-        let exact = plan_pairs(slots(), None, usize::MAX).unwrap();
+        let exact = plan_pairs(slots(), None, usize::MAX, usize::MAX).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let heap = plan_pairs(slots(), Some((&mut rng, 0.0)), usize::MAX).unwrap();
+        let heap = plan_pairs(slots(), Some((&mut rng, 0.0)), usize::MAX, usize::MAX).unwrap();
         assert_eq!(exact.pairs, heap.pairs);
         assert_eq!((exact.peak, exact.total), (heap.peak, heap.total));
     }

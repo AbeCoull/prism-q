@@ -21,6 +21,15 @@ fn two_local(n: usize) -> Vec<Vec<PauliTerm>> {
         .collect()
 }
 
+fn z_and_adjacent_zz(n: usize) -> Vec<Vec<PauliTerm>> {
+    let singles = (0..4).map(|k| vec![PauliTerm::z(k * n / 4 + n / 8)]);
+    let pairs = (0..4).map(|k| {
+        let a = k * n / 4 + n / 16 + k;
+        vec![PauliTerm::z(a), PauliTerm::z(a + 1)]
+    });
+    singles.chain(pairs).collect()
+}
+
 /// Brick layers of generic two-qubit blocks (three CX with rotations between),
 /// so the MPS bond grows fourfold per layer at every cut the layer crosses.
 fn su4_brickwork(n: usize, depth: usize) -> Circuit {
@@ -185,6 +194,39 @@ fn above_the_cap_marginals_of_a_bond_heavy_chain_take_the_tensor_path() {
     assert_eq!(auto.metadata.backend, ResolvedBackend::TensorNetwork);
     assert_eq!(plan.rule, auto.metadata.reason);
     assert_eq!(auto.marginals.len(), 64);
+}
+
+// Eight brick layers hold the MPS bond at 16 along all 256 qubits, so the MPS
+// run walks the whole chain while each observable's cone stays local. An
+// adjacent ZZ plans a 16384-element intermediate, which the fixed bound used
+// below the cap would refuse.
+#[test]
+fn above_the_cap_local_observables_on_a_long_chain_take_the_tensor_path() {
+    let circuit = brickwork_circuit(256, 8, SEED);
+    let observables = z_and_adjacent_zz(256);
+    let auto = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert_eq!(auto.metadata.backend, ResolvedBackend::TensorNetwork);
+
+    let mps = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 256 })
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap();
+    for (got, want) in auto.values.iter().zip(&mps) {
+        assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+    }
+}
+
+// Ten layers on 48 qubits widen every two-local cone until the planned
+// contraction costs more than the MPS estimate, so the dry run declines.
+#[test]
+fn above_the_cap_a_plan_dearer_than_mps_stays_on_mps() {
+    let circuit = brickwork_circuit(48, 10, SEED);
+    assert_eq!(auto_backend(&circuit, &two_local(48)), ResolvedBackend::Mps);
 }
 
 #[test]

@@ -1629,6 +1629,45 @@ fn bench_terminal_disjoint_blocks(c: &mut Criterion) {
     group.finish();
 }
 
+/// Time to first shot for a caller holding a distance-`d` surface memory file at
+/// p = 1e-3: parse the text, compile, and draw one shot, with measurements kept (the
+/// default options, the records route) and dropped (the parity route).
+fn bench_qec_first_shot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_first_shot");
+    configure_group_timed(
+        &mut group,
+        10,
+        Duration::from_millis(200),
+        Duration::from_secs(3),
+    );
+
+    let noise = QecCircuitNoise::uniform(0.001);
+    for distance in [5, 25] {
+        let text = qec_repeat_text(
+            |rounds| QecProgram::surface_memory(distance, rounds, QecBasis::Z, &noise).unwrap(),
+            distance,
+        );
+        for (label, keep) in [
+            ("surface_z_p001_kept", true),
+            ("surface_z_p001_dropped", false),
+        ] {
+            group.bench_with_input(BenchmarkId::new(label, distance), &text, |b, text| {
+                b.iter(|| {
+                    let mut program = parse_qec_program(black_box(text)).unwrap();
+                    program.set_options(QecOptions {
+                        keep_measurements: keep,
+                        seed: SEED,
+                        ..program.options()
+                    });
+                    let mut sampler = program.compile_sampler().unwrap();
+                    sampler.sample(1, None).unwrap()
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 /// A 1M-shot distance-5 repetition memory postselected on all 20 check records, so
 /// counting the accepted shots and their logical errors is a large share of the run:
 /// once over the whole run unchunked, and once per chunk at 16384 shots, a whole number
@@ -1694,6 +1733,7 @@ criterion_group! {
     bench_qec_sample_one_shot,
     bench_qec_postselection,
     bench_qec_parse,
-    bench_qec_compile
+    bench_qec_compile,
+    bench_qec_first_shot
 }
 criterion_main!(benches);

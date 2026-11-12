@@ -2681,9 +2681,11 @@ fn bench_auto_expectation(c: &mut Criterion) {
 /// `su4_brick_d6` drives the MPS bond to 64 while one `Z` has a twelve-qubit
 /// cone; `brickwork_d10` plans one `Z` under the MPS estimate, and
 /// `brickwork_d10_zz` plans eight two-local terms over it, so its dry run
-/// declines; `brickwork_d8_local/256` holds the bond at 16 along the whole chain
-/// while its `Z` and adjacent `ZZ` cones stay local; `hea_l2` and `su4_brick_d4`
-/// stay under the MPS cost at which the dry run is worth attempting.
+/// declines; `brickwork_d8_local` holds the bond at 16 along the whole chain
+/// while its `Z` and adjacent `ZZ` cones stay local, the MPS run growing with
+/// width and the contraction not (`/64` against `/128` brackets the crossover);
+/// `hea_l2` and `su4_brick_d4` stay under the MPS cost at which the dry run is
+/// worth attempting.
 fn bench_auto_expectation_above_cap(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/expectation_above_cap");
     configure_group(&mut group);
@@ -2736,6 +2738,16 @@ fn bench_auto_expectation_above_cap(c: &mut Criterion) {
             "brickwork_d8_local/256",
             circuits::brickwork_circuit(256, 8, SEED),
             z_and_adjacent_zz(256),
+        ),
+        (
+            "brickwork_d8_local/128",
+            circuits::brickwork_circuit(128, 8, SEED),
+            z_and_adjacent_zz(128),
+        ),
+        (
+            "brickwork_d8_local/64",
+            circuits::brickwork_circuit(64, 8, SEED),
+            z_and_adjacent_zz(64),
         ),
     ];
     for (name, circuit, observables) in rows {

@@ -59,10 +59,11 @@ Other extraction failures propagate as errors too.
 `BackendUnsupported` when it has neither rather than fabricating uniform marginals. The
 stochastic and deterministic Pauli backends accept only unitary circuits of Clifford gates
 and Pauli rotations, with no measurement, reset or conditional. `T`, `Tdg`, `Rz`, `P` and
-`Rzz` branch natively. `Rx`, `Ry` and multi-qubit `PauliRot` lower to Clifford conjugation
-around one `Rz`. `Fused` matrices lower to the named gate they equal up to phase, or to an
-Euler triple, and a `Cu` with a diagonal or Pauli target lowers to Z rotations and
-Cliffords.
+`Rzz` branch natively, and the deterministic engine also branches on `Rx` and `Ry`. The
+stochastic engine lowers `Rx` and `Ry`, and both lower multi-qubit `PauliRot`, to Clifford
+conjugation around one `Rz`. `Fused` matrices lower to the named gate they equal up to
+phase, or to an Euler triple, and a `Cu` with a diagonal or Pauli target lowers to Z
+rotations and Cliffords.
 Automatic dispatch sends only Clifford+T circuits to SPD (rotations at multiples of pi/4
 count as Clifford or T), so arbitrary angles reach the Pauli engines only by explicit
 selection.

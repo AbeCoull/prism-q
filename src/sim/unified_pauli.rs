@@ -5,7 +5,8 @@
 //! state vector.
 //!
 //! Z-axis rotations (`T`, `Tdg`, `Rz`, `P`) and the two-qubit `Rzz` branch
-//! natively; `Rx`, `Ry`, and multi-qubit `PauliRot` strings lower to Clifford
+//! natively, as do `Rx` and `Ry` in SPD and the Pauli path engine; SPP's `Rx`
+//! and `Ry`, and multi-qubit `PauliRot` strings everywhere, lower to Clifford
 //! conjugation around one `Rz` before the run, a `Fused` matrix lowers to the
 //! named gate it equals up to phase or to its ZYZ Euler triple, and a `Cu` with
 //! a diagonal or Pauli target lowers to Z rotations and Cliffords.
@@ -77,16 +78,20 @@ fn zz_rotation_angle(gate: &Gate) -> Option<f64> {
     }
 }
 
-/// Validate the circuit and lower every non-native gate in one walk.
+/// Validate the circuit and lower every gate `native` rejects in one walk.
 ///
-/// `Rx`, `Ry`, and multi-qubit `PauliRot` strings expand through the shared
-/// CNOT-ladder lowering into Clifford conjugation around one `Rz`, and `Fused`
-/// matrices and `Cu` gates take the forms `lower_to_pauli_forms` documents, so
-/// the engines only ever branch on Z-axis rules; `Rzz` stays native and
-/// branches directly on the `Z⊗Z` anticommutation test. The lowering tests sit
-/// on the walk's rejection path, so a circuit needing none pays no second scan
-/// and borrows through unchanged.
-fn validate_and_lower<'c>(circuit: &'c Circuit, backend: &'static str) -> Result<Cow<'c, Circuit>> {
+/// Multi-qubit `PauliRot` strings, and `Rx` and `Ry` unless `native` keeps them,
+/// expand through the shared CNOT-ladder lowering into Clifford conjugation
+/// around one `Rz`, and `Fused` matrices and `Cu` gates take the forms
+/// `lower_to_pauli_forms` documents; `Rzz` stays native and branches directly on
+/// the `Z⊗Z` anticommutation test. The lowering tests sit on the walk's
+/// rejection path, so a circuit needing none pays no second scan and borrows
+/// through unchanged.
+fn validate_and_lower<'c>(
+    circuit: &'c Circuit,
+    backend: &'static str,
+    native: fn(&Gate) -> bool,
+) -> Result<Cow<'c, Circuit>> {
     let reject = |operation: String| PrismError::BackendUnsupported {
         backend: backend.to_string(),
         operation,
@@ -95,7 +100,7 @@ fn validate_and_lower<'c>(circuit: &'c Circuit, backend: &'static str) -> Result
     for inst in &circuit.instructions {
         match inst {
             Instruction::Gate { gate, targets } => {
-                if is_pauli_native(gate) {
+                if native(gate) {
                     continue;
                 }
                 lower_to_pauli_forms(gate, targets, &mut |_, _| {}).map_err(reject)?;
@@ -126,6 +131,10 @@ fn validate_and_lower<'c>(circuit: &'c Circuit, backend: &'static str) -> Result
             out.push(inst.clone());
             continue;
         };
+        if native(gate) {
+            out.push(inst.clone());
+            continue;
+        }
         lower_to_pauli_forms(gate, targets, &mut |gate, tgts| {
             out.push(Instruction::Gate {
                 gate,
@@ -135,6 +144,12 @@ fn validate_and_lower<'c>(circuit: &'c Circuit, backend: &'static str) -> Result
         .map_err(reject)?;
     }
     Ok(Cow::Owned(circuit.with_instructions(out)))
+}
+
+/// Gates the deterministic engines take without lowering: the shared native set
+/// plus `Rx` and `Ry`, which branch on their own axis.
+fn is_spd_native(gate: &Gate) -> bool {
+    is_pauli_native(gate) || matches!(gate, Gate::Rx(_) | Gate::Ry(_))
 }
 
 // ---- Coalesced circuit representation ----
@@ -303,7 +318,9 @@ fn count_branching_gates(circuit: &Circuit) -> usize {
         .iter()
         .filter(|inst| match inst {
             Instruction::Gate { gate, .. } => {
-                z_rotation_angle(gate).is_some() || zz_rotation_angle(gate).is_some()
+                z_rotation_angle(gate).is_some()
+                    || zz_rotation_angle(gate).is_some()
+                    || matches!(gate, Gate::Rx(_) | Gate::Ry(_))
             }
             _ => false,
         })
@@ -529,7 +546,7 @@ pub fn run_spp_observable(
     num_samples: usize,
     seed: u64,
 ) -> Result<SppObservableResult> {
-    let lowered = validate_and_lower(circuit, "SPP observable")?;
+    let lowered = validate_and_lower(circuit, "SPP observable", is_pauli_native)?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let t_count = count_branching_gates(circuit);
@@ -588,7 +605,7 @@ pub fn run_spp_observable(
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppResult> {
-    let lowered = validate_and_lower(circuit, "SPP")?;
+    let lowered = validate_and_lower(circuit, "SPP", is_pauli_native)?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
@@ -841,9 +858,10 @@ macro_rules! with_spd_key {
 /// Weighted Pauli sum held as a list of distinct Pauli strings.
 ///
 /// Clifford conjugation is a bijection on Pauli strings, so a Clifford step
-/// rewrites each term in place and never merges two. A rotation flips z bits
-/// only, so the flip of an anticommuting term can land only on another
-/// anticommuting term; those are the only terms a rotation hashes.
+/// rewrites each term in place and never merges two. A rotation's flip
+/// multiplies by its axis, which preserves anticommutation with that axis, so
+/// the flip of an anticommuting term can land only on another anticommuting
+/// term; those are the only terms a rotation hashes.
 struct WeightedPauliSum<K> {
     terms: Vec<(K, Complex64)>,
     in_support: Vec<usize>,
@@ -891,6 +909,23 @@ impl<K: SpdKey> WeightedPauliSum<K> {
         anticommutes: impl Fn(&K) -> bool,
         flip: impl Fn(&mut K),
     ) {
+        self.branch_with(sin, cos, anticommutes, flip, |_, c| {
+            Complex64::new(c.im * sin, -c.re * sin)
+        });
+    }
+
+    /// [`branch`](Self::branch) with the flipped coefficient taken from
+    /// `flipped_coeff(source, c)`, for an axis whose phase depends on the
+    /// source term's letter. `sin == 0` still means no flip.
+    #[inline(always)]
+    fn branch_with(
+        &mut self,
+        sin: f64,
+        cos: f64,
+        anticommutes: impl Fn(&K) -> bool,
+        flip: impl Fn(&mut K),
+        flipped_coeff: impl Fn(&K, Complex64) -> Complex64,
+    ) {
         self.in_support.clear();
         self.in_support.extend(
             self.terms
@@ -923,26 +958,28 @@ impl<K: SpdKey> WeightedPauliSum<K> {
             self.partner.resize(self.in_support.len(), usize::MAX);
         }
 
-        let flipped_coeff = |c: Complex64| Complex64::new(c.im * sin, -c.re * sin);
         for k in 0..self.in_support.len() {
             let i = self.in_support[k];
             let j = self.partner[k];
             if j != usize::MAX {
                 if i < j {
                     let (ci, cj) = (self.terms[i].1, self.terms[j].1);
-                    self.terms[i].1 = ci * cos + flipped_coeff(cj);
-                    self.terms[j].1 = cj * cos + flipped_coeff(ci);
+                    let from_j = flipped_coeff(&self.terms[j].0, cj);
+                    let from_i = flipped_coeff(&self.terms[i].0, ci);
+                    self.terms[i].1 = ci * cos + from_j;
+                    self.terms[j].1 = cj * cos + from_i;
                 }
             } else if cos == 0.0 {
                 let (pauli, coeff) = &mut self.terms[i];
+                *coeff = flipped_coeff(pauli, *coeff);
                 flip(pauli);
-                *coeff = flipped_coeff(*coeff);
             } else {
                 let mut pauli = self.terms[i].0.clone();
                 flip(&mut pauli);
                 let coeff = self.terms[i].1;
+                let flipped = flipped_coeff(&self.terms[i].0, coeff);
                 self.terms[i].1 = coeff * cos;
-                self.terms.push((pauli, flipped_coeff(coeff)));
+                self.terms.push((pauli, flipped));
             }
         }
     }
@@ -1036,6 +1073,43 @@ impl<K: SpdKey> WeightedPauliSum<K> {
         );
     }
 
+    /// X-axis analogue of [`branch_z_rotation`](Self::branch_z_rotation): a
+    /// term anticommutes with `X_q` when its z bit is set, and `P X_q` is minus
+    /// the term with its x bit toggled, so the flip carries `+i sin`.
+    fn branch_x_rotation(&mut self, qubit: usize, sin: f64, cos: f64) {
+        self.branch(
+            -sin,
+            cos,
+            |pauli| get_bit(pauli.z(), qubit),
+            |pauli| flip_bit(pauli.words_mut().0, qubit),
+        );
+    }
+
+    /// Y-axis analogue of [`branch_z_rotation`](Self::branch_z_rotation): a
+    /// term anticommutes with `Y_q` when its x and z bits differ, and the flip
+    /// toggles both.
+    fn branch_y_rotation(&mut self, qubit: usize, sin: f64, cos: f64) {
+        self.branch_with(
+            sin,
+            cos,
+            |pauli| get_bit(pauli.x(), qubit) != get_bit(pauli.z(), qubit),
+            |pauli| {
+                let (x, z) = pauli.words_mut();
+                flip_bit(x, qubit);
+                flip_bit(z, qubit);
+            },
+            // With Y = iXZ: X·Y = iZ and Z·Y = -iX, so -i sin times the phase is
+            // real, +sin from an X source and -sin from a Z source.
+            |source, c| {
+                c * if get_bit(source.z(), qubit) {
+                    -sin
+                } else {
+                    sin
+                }
+            },
+        );
+    }
+
     /// Backward-apply one gate: a single discriminant match, so the Clifford
     /// path pays no rotation-probe chain per instruction. Angle cases mirror
     /// [`z_rotation_angle`] and [`zz_rotation_angle`].
@@ -1048,6 +1122,14 @@ impl<K: SpdKey> WeightedPauliSum<K> {
             Gate::Rzz(theta) => {
                 let (sin, cos) = theta.sin_cos();
                 self.branch_zz_rotation(targets[0], targets[1], sin, cos);
+            }
+            Gate::Rx(theta) => {
+                let (sin, cos) = theta.sin_cos();
+                self.branch_x_rotation(targets[0], sin, cos);
+            }
+            Gate::Ry(theta) => {
+                let (sin, cos) = theta.sin_cos();
+                self.branch_y_rotation(targets[0], sin, cos);
             }
             _ => self.conjugate_all_backward_phased(gate, targets),
         }
@@ -1194,8 +1276,8 @@ impl SpdTruncation {
 /// Deterministic SPD on a joint Pauli observable.
 ///
 /// Starts with the single weighted term `(observable, 1.0)`, backward-
-/// propagates through every gate, splits each anticommuting term at an
-/// `Rz(theta)` or `Rzz(theta)` into `cos(theta)` and `-i sin(theta)`
+/// propagates through every gate, splits each term anticommuting with the axis
+/// of an `Rz`, `Rzz`, `Rx` or `Ry` into `cos(theta)` and `sin(theta)`
 /// branches, and truncates terms whose
 /// magnitude falls below `epsilon` whenever the sum exceeds `max_terms`.
 /// Returns `⟨0^n| U† P U |0^n⟩` as the sum of remaining diagonal-term
@@ -1282,7 +1364,7 @@ pub(crate) fn run_spd_weighted_observable_with(
     truncation: &SpdTruncation,
 ) -> Result<SpdObservableResult> {
     truncation.validate()?;
-    let lowered = validate_and_lower(circuit, "SPD observable")?;
+    let lowered = validate_and_lower(circuit, "SPD observable", is_spd_native)?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let t_count = count_branching_gates(circuit);
@@ -1386,7 +1468,7 @@ fn run_spd_bounded(
     truncation: &SpdTruncation,
     work_budget: Option<usize>,
 ) -> Result<Option<SpdResult>> {
-    let lowered = validate_and_lower(circuit, "SPD")?;
+    let lowered = validate_and_lower(circuit, "SPD", is_spd_native)?;
     let circuit = lowered.as_ref();
     with_spd_key!(circuit.num_qubits, K => run_spd_lowered::<K>(circuit, truncation, work_budget))
 }
@@ -1410,6 +1492,8 @@ fn run_spd_lowered<K: SpdKey>(
     enum Rot {
         Single { sin: f64, cos: f64 },
         Pair { sin: f64, cos: f64 },
+        X { sin: f64, cos: f64 },
+        Y { sin: f64, cos: f64 },
     }
     let rotations: Vec<Option<Rot>> = circuit
         .instructions
@@ -1418,10 +1502,20 @@ fn run_spd_lowered<K: SpdKey>(
             Instruction::Gate { gate, .. } => {
                 if let Some((sin, cos)) = z_rotation_angle(gate).map(f64::sin_cos) {
                     Some(Rot::Single { sin, cos })
+                } else if let Some((sin, cos)) = zz_rotation_angle(gate).map(f64::sin_cos) {
+                    Some(Rot::Pair { sin, cos })
                 } else {
-                    zz_rotation_angle(gate)
-                        .map(f64::sin_cos)
-                        .map(|(sin, cos)| Rot::Pair { sin, cos })
+                    match gate {
+                        Gate::Rx(theta) => {
+                            let (sin, cos) = theta.sin_cos();
+                            Some(Rot::X { sin, cos })
+                        }
+                        Gate::Ry(theta) => {
+                            let (sin, cos) = theta.sin_cos();
+                            Some(Rot::Y { sin, cos })
+                        }
+                        _ => None,
+                    }
                 }
             }
             _ => None,
@@ -1441,6 +1535,8 @@ fn run_spd_lowered<K: SpdKey>(
                     Some(Rot::Pair { sin, cos }) => {
                         sum.branch_zz_rotation(targets[0], targets[1], sin, cos)
                     }
+                    Some(Rot::X { sin, cos }) => sum.branch_x_rotation(targets[0], sin, cos),
+                    Some(Rot::Y { sin, cos }) => sum.branch_y_rotation(targets[0], sin, cos),
                     None => sum.conjugate_all_backward_phased(gate, targets),
                 }
             }
@@ -1516,7 +1612,7 @@ pub fn run_spd_observable_light_cone(
     epsilon: f64,
     max_terms: usize,
 ) -> Result<SpdObservableResult> {
-    let lowered = validate_and_lower(circuit, "light-cone SPD observable")?;
+    let lowered = validate_and_lower(circuit, "light-cone SPD observable", is_spd_native)?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let t_count = count_branching_gates(circuit);
@@ -1716,9 +1812,9 @@ enum PathOp {
 /// Flatten `circuit` and `noise` into the ordered step list the backward walk
 /// consumes.
 ///
-/// Lowering `Rx`, `Ry`, and `PauliRot` rewrites one instruction into several, so
-/// the noise events cannot stay indexed by circuit position. Emitting a
-/// gate's own channels directly after it sidesteps the remapping.
+/// Lowering a `PauliRot` string or a `Fused` matrix rewrites one instruction
+/// into several, so the noise events cannot stay indexed by circuit position.
+/// Emitting a gate's own channels directly after it sidesteps the remapping.
 fn pauli_path_ops(circuit: &Circuit, noise: &NoiseModel, backend: &str) -> Result<Vec<PathOp>> {
     if noise.readout.iter().any(|r| r.is_some()) {
         return Err(PrismError::IncompatibleBackend {
@@ -1731,6 +1827,9 @@ fn pauli_path_ops(circuit: &Circuit, noise: &NoiseModel, backend: &str) -> Resul
     let mut ops = Vec::with_capacity(circuit.instructions.len() * 2);
     for (index, inst) in circuit.instructions.iter().enumerate() {
         match inst {
+            Instruction::Gate { gate, targets } if is_spd_native(gate) => {
+                ops.push(PathOp::Gate(gate.clone(), targets.clone()));
+            }
             Instruction::Gate { gate, targets } => {
                 lower_to_pauli_forms(gate, targets, &mut |g, tgts| {
                     ops.push(PathOp::Gate(g, SmallVec::from_slice(tgts)));
@@ -1785,10 +1884,11 @@ pub struct PauliPathResult {
 /// Pauli propagation with coefficient truncation.
 ///
 /// The observable propagates back through the circuit as a weighted Pauli sum:
-/// Clifford gates conjugate it, `Rz` and `Rzz` split each anticommuting term in
-/// two, and every noise channel scales the terms by the channel's Pauli
-/// eigenvalues. Noise shrinks coefficients while rotations grow the term count,
-/// so the sum stays small whenever noise outpaces the branching rotations.
+/// Clifford gates conjugate it, `Rz`, `Rzz`, `Rx` and `Ry` split each
+/// anticommuting term in two, and every noise channel scales the terms by the
+/// channel's Pauli eigenvalues. Noise shrinks coefficients while rotations grow
+/// the term count, so the sum stays small whenever noise outpaces the branching
+/// rotations.
 ///
 /// # Truncation
 ///

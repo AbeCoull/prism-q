@@ -893,3 +893,188 @@ fn threshold_truncation_drops_below_epsilon_and_reports_the_one_norm() {
     assert_eq!(sum.truncate(-1.0), 0.0);
     assert_eq!(sum.terms.len(), coeffs.len());
 }
+
+fn reference_expectations(
+    circuit: &Circuit,
+    kind: crate::sim::BackendKind,
+    noise: Option<&NoiseModel>,
+    observables: &[Vec<PauliTerm>],
+) -> Vec<f64> {
+    let mut run = crate::sim::simulate(circuit).backend(kind);
+    if let Some(noise) = noise {
+        run = run.noise(noise);
+    }
+    run.seed(42).expectation_values(observables).unwrap()
+}
+
+fn native_axis_mix() -> Circuit {
+    let mut c = Circuit::new(4, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Rx(0.41), &[0]);
+    c.add_gate(Gate::Ry(-0.83), &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Rz(0.29), &[1]);
+    c.add_gate(Gate::Rx(0.2), &[1]);
+    c.add_gate(Gate::Rx(-0.5), &[1]);
+    c.add_gate(Gate::Ry(1.17), &[0]);
+    c.add_gate(Gate::Rx(0.66), &[0]);
+    c.add_gate(Gate::Rzz(0.66), &[1, 2]);
+    c.add_gate(Gate::S, &[2]);
+    c.add_gate(Gate::Rx(-1.9), &[2]);
+    c.add_gate(Gate::Ry(0.37), &[2]);
+    c.add_gate(Gate::Ry(0.52), &[2]);
+    c.add_gate(Gate::Cz, &[2, 3]);
+    c.add_gate(Gate::SX, &[3]);
+    c.add_gate(Gate::Ry(2.4), &[3]);
+    c.add_gate(Gate::T, &[3]);
+    c.add_gate(Gate::Rx(0.73), &[3]);
+    c.add_gate(Gate::Cx, &[3, 0]);
+    c.add_gate(Gate::Ry(-0.61), &[0]);
+    c.add_gate(Gate::Rzz(-0.4), &[0, 2]);
+    c.add_gate(Gate::Rx(1.05), &[2]);
+    c
+}
+
+fn native_axis_observables() -> Vec<Vec<PauliTerm>> {
+    let mut observables: Vec<Vec<PauliTerm>> = (0..4)
+        .flat_map(|q| [PauliTerm::x(q), PauliTerm::y(q), PauliTerm::z(q)])
+        .map(|term| vec![term])
+        .collect();
+    observables.push(vec![PauliTerm::x(0), PauliTerm::y(2)]);
+    observables.push(vec![PauliTerm::z(1), PauliTerm::x(2), PauliTerm::y(3)]);
+    observables.push(vec![PauliTerm::y(0), PauliTerm::z(3)]);
+    observables
+}
+
+#[test]
+fn native_axis_rotations_match_the_statevector_on_every_letter() {
+    let circuit = native_axis_mix();
+    let observables = native_axis_observables();
+    let want = reference_expectations(
+        &circuit,
+        crate::sim::BackendKind::Statevector,
+        None,
+        &observables,
+    );
+    let noiseless = NoiseModel::with_amplitude_damping(&circuit, 0.0);
+    for (obs, want) in observables.iter().zip(&want) {
+        let exact = run_spd_observable(&circuit, obs, 0.0, 0).unwrap().mean;
+        let cone = run_spd_observable_light_cone(&circuit, obs, 0.0, 0)
+            .unwrap()
+            .mean;
+        let path = run_pauli_path_observable(&circuit, &noiseless, obs, 0.0, 0)
+            .unwrap()
+            .mean;
+        for (label, got) in [("spd", exact), ("light cone", cone), ("path", path)] {
+            assert!(
+                (got - want).abs() < 1e-12,
+                "{label} {obs:?}: {got} vs {want}"
+            );
+        }
+    }
+    assert!(want.iter().filter(|v| v.abs() > 1e-3).count() > 6);
+
+    let weights = [0.5, -1.25, 2.0, 0.75];
+    let weighted: Vec<(f64, &[PauliTerm])> = observables[12..]
+        .iter()
+        .chain(&observables[1..2])
+        .zip(weights)
+        .map(|(obs, w)| (w, obs.as_slice()))
+        .collect();
+    let joint = run_spd_weighted_observable_with(
+        &circuit,
+        &weighted,
+        &SpdTruncation::Threshold {
+            epsilon: 0.0,
+            max_terms: 0,
+        },
+    )
+    .unwrap();
+    let joint_want: f64 = weights[..3]
+        .iter()
+        .zip(&want[12..])
+        .map(|(w, v)| w * v)
+        .sum::<f64>()
+        + weights[3] * want[1];
+    assert!((joint.mean - joint_want).abs() < 1e-12);
+
+    let marginals = run_spd(&circuit, 0.0, 0).unwrap().expectations;
+    for q in 0..4 {
+        let want = want[3 * q + 2];
+        assert!(
+            (marginals[q] - want).abs() < 1e-12,
+            "qubit {q}: {} vs {want}",
+            marginals[q]
+        );
+    }
+}
+
+#[test]
+fn consecutive_axis_rotations_merge_each_flip_into_a_term_already_present() {
+    let (a, b) = (0.37, 1.1);
+    let rotations: [fn(f64) -> Gate; 2] = [Gate::Rx, Gate::Ry];
+    let anticommuting = [
+        [PauliTerm::z(0), PauliTerm::y(0)],
+        [PauliTerm::z(0), PauliTerm::x(0)],
+    ];
+    for (rotation, letters) in rotations.into_iter().zip(anticommuting) {
+        let mut split = Circuit::new(1, 0);
+        split.add_gate(rotation(a), &[0]);
+        split.add_gate(rotation(b), &[0]);
+        let mut joined = Circuit::new(1, 0);
+        joined.add_gate(rotation(a + b), &[0]);
+        for letter in letters {
+            let obs = [letter];
+            let split = run_spd_observable(&split, &obs, 0.0, 0).unwrap();
+            let joined = run_spd_observable(&joined, &obs, 0.0, 0).unwrap();
+            assert_eq!(split.peak_terms, 2);
+            assert!((split.mean - joined.mean).abs() < 1e-12);
+        }
+        let z = run_spd_observable(&split, &[PauliTerm::z(0)], 0.0, 0).unwrap();
+        assert!((z.mean - (a + b).cos()).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn native_axis_rotations_match_the_density_matrix_under_noise() {
+    let circuit = native_axis_mix();
+    let noise = NoiseModel::with_amplitude_damping(&circuit, 0.04);
+    let observables = native_axis_observables();
+    let want = reference_expectations(
+        &circuit,
+        crate::sim::BackendKind::DensityMatrix,
+        Some(&noise),
+        &observables,
+    );
+    for (obs, want) in observables.iter().zip(&want) {
+        let got = run_pauli_path_observable(&circuit, &noise, obs, 0.0, 0)
+            .unwrap()
+            .mean;
+        assert!((got - want).abs() < 1e-12, "{obs:?}: {got} vs {want}");
+    }
+}
+
+#[test]
+fn branching_gate_count_is_unchanged_by_native_axis_rotations() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Rx(0.3), &[0]);
+    circuit.add_gate(Gate::Ry(-0.7), &[1]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::T, &[1]);
+    circuit.add_gate(Gate::Rzz(0.2), &[0, 1]);
+    circuit.add_gate(Gate::Rx(1.4), &[1]);
+    let obs = [PauliTerm::z(0)];
+    assert_eq!(run_spd(&circuit, 0.0, 0).unwrap().t_count, 5);
+    assert_eq!(
+        run_spd_observable(&circuit, &obs, 0.0, 0).unwrap().t_count,
+        5
+    );
+    assert_eq!(
+        run_spd_observable_light_cone(&circuit, &obs, 0.0, 0)
+            .unwrap()
+            .t_count,
+        5
+    );
+    assert_eq!(run_spp(&circuit, 16, 42).unwrap().t_count, 5);
+}

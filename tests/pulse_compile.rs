@@ -270,6 +270,120 @@ fn carrier_off_the_integration_frame_converges() {
     assert!(fine < 1e-4, "fine {fine:e}");
 }
 
+const CR_CONTROL: f64 = 5.0e9;
+const CR_TARGET: f64 = 4.9e9;
+const CR_G: f64 = 3e6;
+const CR_AMP: f64 = 20e6;
+
+fn cross_resonance() -> CompiledGate {
+    let device = Device::new([transmon(CR_CONTROL, 3), transmon(CR_TARGET, 3)]).couple(0, 1, CR_G);
+    let mut schedule = Schedule::new(NS);
+    // A real drive leaves the unitary symmetric; the trailing virtual Z on the control
+    // breaks that, so a transposed packing cannot match the reference.
+    schedule
+        .set_frequency(0, 0.0, CR_TARGET)
+        .play(
+            0,
+            0.0,
+            300.0 * NS,
+            Envelope::GaussianSquare {
+                amp: CR_AMP,
+                sigma: 10.0 * NS,
+                width: 260.0 * NS,
+            },
+        )
+        .shift_phase(0, 300.0 * NS, 0.5);
+    compile(&device, &schedule, 4).unwrap()
+}
+
+#[test]
+fn cross_resonance_matches_reference() {
+    // Nearest unitary from an independent numpy integrator of the same model: eigh per
+    // segment on the same midpoint grid, both sites in the drive frame with the control
+    // as the high Kronecker factor, then rotated into each site's frame.
+    const REFERENCE: [[f64; 2]; 16] = [
+        [-0.09241029409049249, 0.8727473152577921],
+        [-0.4704840269689533, -0.09075664762698551],
+        [0.011027683867266895, 0.0029070354995390547],
+        [-0.006143758651703485, -0.0035589461601993368],
+        [-0.470484026968949, -0.09075664762700988],
+        [-0.23941468336236496, 0.8437113534206634],
+        [-0.013077919409268342, -0.022657002956778412],
+        [0.00803912051878062, 0.02215340967855366],
+        [0.011071410120059542, -0.00273578961643592],
+        [-0.022339299865101175, -0.013613502142941016],
+        [-0.3132800605948771, 0.4090370642061431],
+        [0.7122038408261746, 0.4759154761360512],
+        [-0.007097905136914997, -0.0001777942882452745],
+        [0.017675902347288577, 0.015587286335679098],
+        [0.7122038408262112, 0.4759154761359961],
+        [-0.2574637116822463, 0.4465162628238746],
+    ];
+    const LEAK_FROM_ONE: f64 = 2.828_813_057_949_483e-4;
+    const FIDELITY: f64 = 0.999_828_785_088_539_3;
+    let compiled = cross_resonance();
+    let reference: Vec<Complex64> = REFERENCE
+        .iter()
+        .map(|&[re, im]| Complex64::new(re, im))
+        .collect();
+    let unitary = compiled.unitary();
+    let error = (0..16)
+        .map(|k| (unitary[k] - reference[k]).norm())
+        .fold(0.0f64, f64::max);
+    assert!(error < 1e-10, "max entry error {error:e}");
+
+    let leakage = compiled.leakage();
+    assert!(
+        (leakage[0][1] - LEAK_FROM_ONE).abs() < 1e-8 * LEAK_FROM_ONE,
+        "control leakage from |1> {:e}",
+        leakage[0][1]
+    );
+    assert!(leakage[0][0] < 1e-7 && leakage[1].iter().all(|&p| p < 1e-7));
+
+    let fidelity = compiled.average_fidelity(&Gate::unitary(reference, 2).unwrap());
+    assert!((fidelity - FIDELITY).abs() < 1e-10, "fidelity {fidelity}");
+}
+
+#[test]
+fn cross_resonance_zx_follows_perturbative_rate() {
+    // To first order in g and in the drive, control level n drives the target's X at c_n:
+    // c_0 = -amp g / (2 D), c_1 = amp g (1 / (2 D) - 1 / (D + alpha)), D the detuning, so
+    // H = 2 pi (c_0 - c_1) / 2 ZX + IX terms and U = exp(-i theta ZX / 2) with
+    // theta = 2 pi (c_0 - c_1) times the envelope area. The next order goes as
+    // (amp / D)^2: the reference integrator puts the angle 1% under this at 10 MHz, 4%
+    // under at 20 MHz and 8% under at 30 MHz, so 10% still catches a factor or a sign.
+    let unitary = cross_resonance().unitary();
+    let x_angle = |b: [Complex64; 4]| {
+        let root = (b[0] * b[3] - b[1] * b[2]).sqrt();
+        let cos = ((b[0] + b[3]) / root).re * 0.5;
+        let sin = (Complex64::new(0.0, 0.5) * (b[1] + b[2]) / root).re;
+        // The square root fixes the angle only up to 2 pi.
+        let theta = 2.0 * sin.atan2(cos);
+        (theta + PI).rem_euclid(TAU) - PI
+    };
+    let control_zero = x_angle([unitary[0], unitary[1], unitary[4], unitary[5]]);
+    let control_one = x_angle([unitary[10], unitary[11], unitary[14], unitary[15]]);
+    assert!(control_zero < 0.0 && control_one > 0.0);
+    let zx = 0.5 * (control_zero - control_one);
+
+    let (edge, sigma, h) = (20.0 * NS, 10.0 * NS, NS / 4.0);
+    let floor = (-0.5 * (edge / sigma).powi(2)).exp();
+    let area: f64 = (0..1200)
+        .map(|k| {
+            let t = (k as f64 + 0.5) * h;
+            let x = (t - edge).min(0.0) + (t - edge - 260.0 * NS).max(0.0);
+            ((-0.5 * (x / sigma).powi(2)).exp() - floor) / (1.0 - floor) * h
+        })
+        .sum();
+    let detuning = CR_CONTROL - CR_TARGET;
+    let rate = 0.5 * CR_AMP * CR_G * -ALPHA / (detuning * (detuning + ALPHA));
+    let predicted = TAU * 2.0 * rate * area;
+    assert!(
+        (zx / predicted - 1.0).abs() < 0.1,
+        "zx {zx}, perturbative {predicted}"
+    );
+}
+
 #[test]
 fn error_after_completes_the_ideal_gate() {
     let compiled = pi_pulse(&Device::new([transmon(5e9, 3)]), drag_beta());

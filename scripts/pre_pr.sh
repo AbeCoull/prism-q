@@ -433,7 +433,7 @@ run_if clippy-py "$PY_BINDINGS_HIT" "no public item or bindings/ change" check_c
 run_if nextest-dist "$(first_file '^src/(distributed|backend/distributed_statevector)/')" \
     "no distributed change" check_nextest_dist
 
-PULSE_HIT="$(first_file '^(src/pulse/|tests/pulse_compile\.rs$)')"
+PULSE_HIT="$(first_file '^(src/pulse/|tests/pulse_compile\.rs$|benches/bench_pulse\.rs$)')"
 run_if clippy-pulse "$PULSE_HIT" "no pulse change" check_clippy_pulse
 run_if nextest-pulse "$PULSE_HIT" "no pulse change" check_nextest_pulse
 run_if doc-pulse "$PULSE_HIT" "no pulse change" check_doc_pulse

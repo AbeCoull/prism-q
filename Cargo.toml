@@ -154,6 +154,11 @@ name = "bench_distributed"
 harness = false
 required-features = ["distributed", "bench-internal"]
 
+[[bench]]
+name = "bench_pulse"
+harness = false
+required-features = ["unstable-pulse"]
+
 # Development tools: built as examples so `cargo run --example <name>` works, kept out of
 # examples/ so that directory holds only usage examples.
 [[example]]

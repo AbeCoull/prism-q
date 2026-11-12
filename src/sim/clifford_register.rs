@@ -30,7 +30,6 @@ struct CliffordRegister {
     /// tracked.
     amps: Vec<Complex64>,
     /// Amplitudes the rotations sweep: `2^width` per T gate, at the width after it.
-    #[cfg(feature = "bench-internal")]
     rotation_work: u64,
 }
 
@@ -94,7 +93,6 @@ impl CliffordRegister {
             slot: vec![None; num_qubits],
             width: 0,
             amps: vec![Complex64::new(1.0, 0.0)],
-            #[cfg(feature = "bench-internal")]
             rotation_work: 0,
         }
     }
@@ -391,10 +389,7 @@ fn build_register(
                     if !admitted {
                         return Ok(None);
                     }
-                    #[cfg(feature = "bench-internal")]
-                    {
-                        state.rotation_work += 1 << state.width;
-                    }
+                    state.rotation_work += 1 << state.width;
                 }
                 _ => state.prefix.apply_state_gate(gate, targets).map_err(|_| {
                     PrismError::BackendUnsupported {
@@ -421,11 +416,11 @@ fn build_register(
     Ok(Some(state))
 }
 
-/// Whether the register of `circuit` stays within `max_width` qubits, read off the
-/// tableau without amplitudes: `true` exactly when [`TerminalSampler::compile`] returns
-/// `Some`.
-pub(super) fn register_fits(circuit: &Circuit, max_width: usize) -> Result<bool> {
-    Ok(build_register(circuit, max_width, false, &mut Vec::new())?.is_some())
+/// Width and rotation work of the register of `circuit`, read off the tableau without
+/// amplitudes; `None` exactly when [`TerminalSampler::compile`] returns `None`.
+pub(super) fn register_price(circuit: &Circuit, max_width: usize) -> Result<Option<(usize, u64)>> {
+    Ok(build_register(circuit, max_width, false, &mut Vec::new())?
+        .map(|state| (state.width, state.rotation_work)))
 }
 
 /// Register counts of one terminal Clifford+T circuit, read off the tableau without

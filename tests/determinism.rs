@@ -661,6 +661,47 @@ fn mps_terminal_shots_identical_across_thread_counts() {
     );
 }
 
+// `Auto` sends 16 T gates on a four-qubit register to the Clifford register, which reduces
+// once and draws every shot from one table, so the words match at any thread count.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn clifford_register_terminal_shots_identical_across_thread_counts() {
+    let n = 16;
+    let mut circuit = Circuit::new(n, n);
+    for _ in 0..4 {
+        for q in 0..4 {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+        }
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.measure_all();
+
+    let run = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .seed(SEED)
+                .shots(SAMPLING_SHOTS)
+                .expect("shots")
+        })
+    };
+    let single = run(1);
+    assert_eq!(single.metadata.backend, ResolvedBackend::StabilizerRank);
+    assert_eq!(single.shots.len(), SAMPLING_SHOTS);
+    assert_eq!(
+        single.shots,
+        run(THREADS_HI).shots,
+        "clifford register shots differ"
+    );
+    assert_eq!(
+        single.shots,
+        run(1).shots,
+        "clifford register shots not seed stable"
+    );
+}
+
 // The product and factored samplers draw 256-shot blocks on streams keyed by
 // the block index, so the words match at any thread count, including a
 // partial trailing block. Each fixture makes enough draws to fork its blocks.

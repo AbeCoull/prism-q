@@ -117,7 +117,7 @@ fn shots_decline_a_register_past_its_cap() {
         c.add_measure(q, q);
     }
 
-    assert!(!terminal_register_fits(&c));
+    assert!(terminal_register_price(&c, MAX_REGISTER_QUBITS).is_none());
     let err = run_stabilizer_rank_shots(&c, 8, 42).unwrap_err();
     assert!(
         matches!(err, PrismError::BackendUnsupported { .. }),

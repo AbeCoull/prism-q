@@ -604,7 +604,7 @@ pub(super) fn inspect<S>(
                 }
                 ShotRoute::PerShot => {
                     let mut p = inspect_probability(kind, circuit, limits)?;
-                    if kind.is_auto() && auto_samples_by_stabilizer_rank(circuit) {
+                    if kind.is_auto() && auto_samples_by_stabilizer_rank(circuit, limits) {
                         p.backend = ResolvedBackend::StabilizerRank;
                         p.exactness = PlannedExactness::Exact;
                     }

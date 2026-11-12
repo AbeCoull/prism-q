@@ -16,12 +16,14 @@ them.
 `Auto` reaches three of them ahead of the
 [dispatch tree](../architecture/engine.md#auto-dispatch-decision-tree):
 
-- Terminal shots go to stabilizer rank on a circuit of 16 qubits or more with fewer T
-  gates than qubits and at most 20 (the Clifford register form below). Past the
-  statevector cap, it takes terminal shots with a T count of at most 40, inside a bound
-  derived from the width, when the register stays within 20 qubits; a circuit that would
-  grow it further goes to the dispatch tree. Shots with mid-circuit measurements take it
-  inside the same T bound.
+- Terminal shots go to stabilizer rank on a circuit of 16 qubits or more when the
+  Clifford register (the form below) fits 20 qubits and costs less than the dense run.
+  The T count sets no limit of its own: 24 T gates on a 14-qubit register at 26 qubits
+  take about 1 ms for 1024 shots against 1.5 s on the statevector. Past the statevector
+  cap the dense run is priced at the cap, so a register that fits takes the shots ahead
+  of the MPS; a circuit that would grow it past 20 goes to the dispatch tree. Shots with
+  mid-circuit measurements take stabilizer rank inside a T bound derived from the width,
+  at most 40.
 - Marginals on a unitary Clifford+T circuit of 12 qubits or more go to SPD.
 - Expectation values on a Clifford circuit go to SPD.
 

@@ -1161,7 +1161,10 @@ fn explicit_stabilizer_rank_shots_follow_the_statevector() {
 )]
 fn auto_clifford_register_shots_follow_the_statevector() {
     let circuit = measure_all(&clifford_t(5, 2));
-    assert!(auto_prefers_clifford_register(&circuit));
+    assert!(decide_clifford_register(
+        &circuit,
+        &ResolvedLimits::process_default()
+    ));
     assert_eq!(
         source_key(&BackendKind::Auto, &circuit, 100),
         "ShotSource::StabilizerRank"
@@ -1183,13 +1186,11 @@ fn auto_clifford_register_shots_follow_the_statevector() {
     ignore = "reaches its route only under --cfg prism_lowered_thresholds"
 )]
 fn auto_wide_stabilizer_rank_shots_follow_the_statevector() {
-    // Three T gates exceed the lowered register test, but two reach qubit 0, so the
-    // register stays at the lowered cap of two qubits. A detached Bell pair leaves the
-    // circuit partly independent, which keeps it off the terminal statevector, and the
-    // register takes the wide route.
-    let mut circuit = Circuit::new(12, 0);
+    // A reset on an untouched qubit keeps the circuit off the priced register test, and
+    // a detached Bell pair leaves it partly independent, which keeps it off the terminal
+    // statevector. Two T gates fit the lowered register cap, and the wide route takes it.
+    let mut circuit = Circuit::new(13, 0);
     circuit.add_gate(Gate::H, &[0]);
-    circuit.add_gate(Gate::T, &[0]);
     circuit.add_gate(Gate::T, &[0]);
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_gate(Gate::H, &[1]);
@@ -1200,8 +1201,12 @@ fn auto_wide_stabilizer_rank_shots_follow_the_statevector() {
     }
     circuit.add_gate(Gate::H, &[10]);
     circuit.add_gate(Gate::Cx, &[10, 11]);
+    circuit.add_reset(12);
     let circuit = measure_all(&circuit);
-    assert!(!auto_prefers_clifford_register(&circuit));
+    assert!(!decide_clifford_register(
+        &circuit,
+        &ResolvedLimits::process_default()
+    ));
     assert!(auto_samples_wide_by_stabilizer_rank(&circuit));
     let shots = 4000;
     let result = simulate(&circuit).seed(SEED).shots(shots).unwrap();
@@ -1243,7 +1248,10 @@ fn auto_wide_register_past_its_cap_takes_the_tree() {
         stabilizer_rank_budget(circuit.num_qubits)
     );
     assert!(!auto_samples_wide_by_stabilizer_rank(&circuit));
-    assert!(!auto_samples_by_stabilizer_rank(&circuit));
+    assert!(!auto_samples_by_stabilizer_rank(
+        &circuit,
+        &ResolvedLimits::resolve(Some(&statevector_cap(20)))
+    ));
 
     let plan = simulate(&circuit)
         .limits(statevector_cap(20))
@@ -1291,8 +1299,8 @@ fn require_exact_rejects_a_wide_register_past_its_cap_before_running() {
     ignore = "the lowered register cap is narrower than this circuit's register"
 )]
 fn auto_wide_register_within_its_cap_keeps_the_register() {
-    // 21 T gates all on qubit 0 keep the register at one qubit, so the wide route
-    // still takes the register. The chain copies qubit 0 everywhere.
+    // 21 T gates all on qubit 0 keep the register at one qubit, so the dry run admits
+    // it past the T bound. The chain copies qubit 0 everywhere.
     let mut circuit = Circuit::new(31, 0);
     circuit.add_gate(Gate::H, &[0]);
     for _ in 0..21 {
@@ -1303,7 +1311,10 @@ fn auto_wide_register_within_its_cap_keeps_the_register() {
         circuit.add_gate(Gate::Cx, &[q, q + 1]);
     }
     let circuit = measure_all(&circuit);
-    assert!(auto_samples_wide_by_stabilizer_rank(&circuit));
+    assert!(decide_clifford_register(
+        &circuit,
+        &ResolvedLimits::resolve(Some(&statevector_cap(20)))
+    ));
 
     let plan = simulate(&circuit)
         .limits(statevector_cap(20))
@@ -1319,6 +1330,212 @@ fn auto_wide_register_within_its_cap_keeps_the_register() {
         .unwrap();
     assert_eq!(result.metadata.backend, ResolvedBackend::StabilizerRank);
     assert!(result.shots.iter().all(|s| s.iter().all(|&b| b == s[0])));
+}
+
+// The Clifford register cost rule: one circuit on each side of each decision it
+// reverses, each sampled against the route it replaced.
+
+/// `rounds` rounds of `H T H` on each of the first `rotated` qubits, then a CX chain over
+/// all `n`, measured: a register at most `rotated` wide under `rounds * rotated` T.
+fn register_rounds(n: usize, rotated: usize, rounds: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, 0);
+    for _ in 0..rounds {
+        for q in 0..rotated {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+            circuit.add_gate(Gate::H, &[q]);
+        }
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    measure_all(&circuit)
+}
+
+fn register_dry_runs(circuit: &Circuit, limits: &Limits) -> (bool, usize) {
+    let limits = ResolvedLimits::resolve(Some(limits));
+    REGISTER_DRY_RUNS.with(|runs| runs.set(0));
+    let takes = decide_clifford_register(circuit, &limits);
+    (takes, REGISTER_DRY_RUNS.with(|runs| runs.get()))
+}
+
+/// `Auto` against `previous` on the same seed, outcome by outcome: the two frequencies
+/// sit within five standard deviations of their difference, `p` from the exact state.
+fn assert_auto_matches(label: &str, circuit: &Circuit, limits: Limits, previous: BackendKind) {
+    let shots = 20_000;
+    let probs = unfused_probs(circuit);
+    let frequencies = |result: ShotsResult| {
+        let mut binned = vec![0u64; probs.len()];
+        for (key, count) in shot_counts(&result) {
+            binned[count_index(&key)] += count;
+        }
+        binned
+    };
+    let auto = simulate(circuit)
+        .limits(limits)
+        .seed(SEED)
+        .shots(shots)
+        .unwrap();
+    let old = simulate(circuit)
+        .backend(previous)
+        .seed(SEED)
+        .shots(shots)
+        .unwrap();
+    let (auto, old) = (frequencies(auto), frequencies(old));
+    for (index, &p) in probs.iter().enumerate() {
+        let (a, b) = (
+            auto[index] as f64 / shots as f64,
+            old[index] as f64 / shots as f64,
+        );
+        let variance = (p * (1.0 - p)).max(0.0) * 2.0 / shots as f64;
+        let bound = 5.0 * variance.sqrt() + 1.0 / shots as f64;
+        assert!(
+            (a - b).abs() <= bound,
+            "{label}: outcome {index} at {a} against {b}, p {p}"
+        );
+    }
+}
+
+fn auto_shot_route(circuit: &Circuit, limits: Limits) -> (ResolvedBackend, RouteRule) {
+    let plan = simulate(circuit)
+        .limits(limits)
+        .plan(Query::Shots(1024))
+        .unwrap();
+    (plan.backend, plan.rule)
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register constants price these circuits differently"
+)]
+fn cost_rule_takes_a_narrow_register_past_the_t_count() {
+    // More T gates than qubits, on a register six wide.
+    let circuit = register_rounds(16, 6, 3);
+    assert!(circuit.t_count() > circuit.num_qubits);
+    assert_eq!(register_dry_runs(&circuit, &Limits::new()), (true, 1));
+    assert_eq!(
+        auto_shot_route(&circuit, Limits::new()),
+        (ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister)
+    );
+    assert_auto_matches(
+        "narrow register",
+        &circuit,
+        Limits::new(),
+        BackendKind::Statevector,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register constants price these circuits differently"
+)]
+fn cost_rule_leaves_a_register_near_full_width_to_the_statevector() {
+    // 16 T gates on distinct qubits of 17: the register would be 16 wide over a short
+    // circuit, where one dense pass is cheaper.
+    let circuit = register_rounds(17, 16, 1);
+    assert_eq!(register_dry_runs(&circuit, &Limits::new()), (false, 1));
+    assert_eq!(
+        auto_shot_route(&circuit, Limits::new()),
+        (ResolvedBackend::Statevector, RouteRule::TerminalStatevector)
+    );
+    assert_auto_matches(
+        "full-width register",
+        &circuit,
+        Limits::new(),
+        BackendKind::StabilizerRank,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register constants price these circuits differently"
+)]
+fn cost_rule_takes_the_register_above_the_cap_past_the_t_bound() {
+    // Past the cap of 12 the 18 T gates exceed the wide T bound of 8, so the tree's
+    // truncating MPS took these shots before.
+    let circuit = register_rounds(16, 6, 3);
+    assert!(circuit.t_count() > stabilizer_rank_budget(circuit.num_qubits));
+    assert_eq!(register_dry_runs(&circuit, &statevector_cap(12)), (true, 1));
+    assert_eq!(
+        auto_shot_route(&circuit, statevector_cap(12)),
+        (ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister)
+    );
+    let exact = simulate(&circuit)
+        .limits(statevector_cap(12))
+        .seed(SEED)
+        .require_exact()
+        .shots(64)
+        .unwrap();
+    assert_eq!(exact.metadata.backend, ResolvedBackend::StabilizerRank);
+    assert_auto_matches(
+        "register above the cap",
+        &circuit,
+        statevector_cap(12),
+        BackendKind::Statevector,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register constants price these circuits differently"
+)]
+fn cost_rule_leaves_small_blocks_to_the_decomposed_route() {
+    // Two independent 8-qubit blocks with five rotated qubits each: one 10-wide register
+    // against two 8-qubit dense runs.
+    let mut circuit = Circuit::new(16, 0);
+    for offset in [0, 8] {
+        for q in offset..offset + 5 {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for q in offset..offset + 7 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    let circuit = measure_all(&circuit);
+    assert_eq!(circuit.t_count(), 10);
+    assert_eq!(register_dry_runs(&circuit, &Limits::new()), (false, 1));
+    let (backend, rule) = auto_shot_route(&circuit, Limits::new());
+    assert_ne!(backend, ResolvedBackend::StabilizerRank);
+    assert_ne!(rule, RouteRule::CliffordRegister);
+    assert_auto_matches(
+        "decomposed blocks",
+        &circuit,
+        Limits::new(),
+        BackendKind::StabilizerRank,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register constants price these circuits differently"
+)]
+fn cost_rule_admits_ten_t_layers_without_a_dry_run() {
+    // The shape of `auto/clifford_t_shots`: ten layers of H and a CX chain, ten T gates.
+    for n in [16, 20, 24] {
+        let mut circuit = Circuit::new(n, 0);
+        for layer in 0..10 {
+            for q in 0..n {
+                circuit.add_gate(Gate::H, &[q]);
+            }
+            circuit.add_gate(Gate::T, &[layer]);
+            for q in 0..n - 1 {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+        let circuit = measure_all(&circuit);
+        assert_eq!(
+            register_dry_runs(&circuit, &Limits::new()),
+            (true, 0),
+            "{n} qubits"
+        );
+    }
 }
 
 #[test]

@@ -38,7 +38,7 @@ use crate::circuit::{Circuit, GuardedRegion, Instruction, SmallVec, any_gate};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
-use super::clifford_register::{MAX_REGISTER_QUBITS, TerminalSampler, register_fits};
+use super::clifford_register::{MAX_REGISTER_QUBITS, TerminalSampler, register_price};
 
 /// Letter-level signed Pauli string. Each qubit's `(x, z)` bit pair encodes
 /// the Pauli letter directly: (0,0)=I, (1,0)=X, (0,1)=Z, (1,1)=Y. `phase4` is
@@ -1199,12 +1199,12 @@ pub fn run_stabilizer_rank_shots(
     sample_mps_branches_online(circuit, num_shots, seed)
 }
 
-/// Whether [`run_stabilizer_rank_shots`] samples terminal shots of `circuit` from a
-/// register within the width cap, decided from the tableau alone. `false` when the
-/// circuit does not lower to Clifford+T.
-pub(super) fn terminal_register_fits(circuit: &Circuit) -> bool {
-    lower_clifford_t_circuit(circuit)
-        .is_ok_and(|lowered| register_fits(&lowered, MAX_REGISTER_QUBITS).unwrap_or(false))
+/// Width and rotation work of the register [`run_stabilizer_rank_shots`] samples terminal
+/// shots of `circuit` from, decided from the tableau alone. `None` past `max_width`
+/// qubits or when the circuit does not lower to Clifford+T.
+pub(super) fn terminal_register_price(circuit: &Circuit, max_width: usize) -> Option<(usize, u64)> {
+    let lowered = lower_clifford_t_circuit(circuit).ok()?;
+    register_price(&lowered, max_width).ok().flatten()
 }
 
 #[cfg(feature = "bench-internal")]

@@ -41,7 +41,7 @@ use dispatch::{
     accel_for, approximate_route_name, auto_selects_cpu_statevector, auto_spd_work_budget,
     build_statevector, has_temporal_clifford_opportunity, initial_state_plan, mps_apply_cost,
     plan_for_family, plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
-    stabilizer_rank_budget, validate_explicit_backend,
+    stabilizer_rank_budget, statevector_work, validate_explicit_backend,
 };
 pub use dynamic::{SimulateProgram, simulate_program};
 pub use metadata::{
@@ -2928,10 +2928,8 @@ const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 16;
 #[cfg(prism_lowered_thresholds)]
 const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 4;
 
-/// Whether terminal shots of `circuit` go to the Clifford register ahead of the
-/// statevector: Clifford+T, at least [`MIN_AUTO_CLIFFORD_REGISTER_QUBITS`] wide, and
-/// fewer T gates than qubits, within the register's width cap.
-fn auto_prefers_clifford_register(circuit: &Circuit) -> bool {
+#[cfg(feature = "bench-internal")]
+fn legacy_prefers_clifford_register(circuit: &Circuit) -> bool {
     circuit.num_qubits >= MIN_AUTO_CLIFFORD_REGISTER_QUBITS
         && circuit.has_terminal_measurements_only()
         && !circuit.has_resets()
@@ -2940,27 +2938,38 @@ fn auto_prefers_clifford_register(circuit: &Circuit) -> bool {
         })
 }
 
-/// Whether terminal shots of a circuit wider than [`MAX_STABILIZER_RANK_QUBITS`]
-/// go to the stabilizer-rank expansion once the statevector has declined them. Past
-/// [`clifford_register::MAX_REGISTER_QUBITS`] T gates a tableau dry run confirms the
-/// register stays within its cap; a circuit it would outgrow takes the family tree.
+/// Whether terminal shots of a circuit with a reset, wider than
+/// [`MAX_STABILIZER_RANK_QUBITS`], go to the stabilizer-rank expansion once the
+/// statevector has declined them. Past [`clifford_register::MAX_REGISTER_QUBITS`] T gates
+/// a tableau dry run confirms the register stays within its cap. Circuits without a
+/// reset are priced by [`route::decide_clifford_register`] instead.
 fn auto_samples_wide_by_stabilizer_rank(circuit: &Circuit) -> bool {
+    #[cfg(feature = "bench-internal")]
+    let reset_only = crate::bench_variant_b();
+    #[cfg(not(feature = "bench-internal"))]
+    let reset_only = true;
     circuit.has_terminal_measurements_only()
+        && (circuit.has_resets() || !reset_only)
         && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
         && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some_and(|t| {
             t <= clifford_register::MAX_REGISTER_QUBITS
-                || stabilizer_rank::terminal_register_fits(circuit)
+                || stabilizer_rank::terminal_register_price(
+                    circuit,
+                    clifford_register::MAX_REGISTER_QUBITS,
+                )
+                .is_some()
         })
 }
 
 /// Whether `Auto` shots of `circuit`, without noise or a start state, run on the
 /// exact stabilizer-rank expansion: the register and wide-circuit tests in
 /// [`prepare_shot_source`], or the per-shot test in [`run_shots_per_shot`].
-fn auto_samples_by_stabilizer_rank(circuit: &Circuit) -> bool {
+fn auto_samples_by_stabilizer_rank(circuit: &Circuit, limits: &ResolvedLimits) -> bool {
     let folded = circuit.fold_static_guards();
     let circuit = folded.as_ref();
     if circuit.has_terminal_measurements_only() {
-        auto_prefers_clifford_register(circuit) || auto_samples_wide_by_stabilizer_rank(circuit)
+        route::decide_clifford_register(circuit, limits)
+            || auto_samples_wide_by_stabilizer_rank(circuit)
     } else {
         auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
     }

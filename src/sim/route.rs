@@ -172,6 +172,89 @@ pub(super) fn decide_tensor_over_mps(
     Some(Ok(planned.with_limits(limits)))
 }
 
+/// Statevector instruction-amplitudes that one register amplitude costs per pass over
+/// the Clifford register: 1.2 to 1.9 ns per register amplitude against 0.056 to 0.069 ns
+/// per dense instruction-amplitude on four cores. The register runs serially, so the
+/// ratio rises with core count.
+/// No bench row brackets this yet.
+/// Fitted on `auto/clifford_t_price` (`register/scrambled_22q_t20` and
+/// `register/scrambled_32q_t20` give 22 to 27); every row timed on both engines lands on
+/// the register side.
+#[cfg(not(prism_lowered_thresholds))]
+pub(super) const REGISTER_PASS_STATEVECTOR_AMPLITUDES: f64 = 25.0;
+#[cfg(prism_lowered_thresholds)]
+pub(super) const REGISTER_PASS_STATEVECTOR_AMPLITUDES: f64 = 1.0;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static REGISTER_DRY_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Register work in statevector instruction-amplitudes: `rotation_work` amplitudes swept
+/// by the T rotations plus about `3 (min(width, measured) + 1)` passes over `2^width`
+/// amplitudes to diagonalize the measured rows.
+fn clifford_register_work(width: usize, rotation_work: f64, measured: usize) -> f64 {
+    let passes = 3 * (width.min(measured) + 1);
+    REGISTER_PASS_STATEVECTOR_AMPLITUDES * (rotation_work + (passes << width) as f64)
+}
+
+/// Whether `Auto` samples the terminal measurements of `circuit` from the Clifford
+/// register: a unitary Clifford+T circuit from [`MIN_AUTO_CLIFFORD_REGISTER_QUBITS`]
+/// qubits whose register fits [`clifford_register::MAX_REGISTER_QUBITS`] and costs less
+/// than the dense alternative, every independent block run at up to the statevector cap.
+/// Above the cap the alternative is the dense run at the cap, a work ceiling rather than
+/// a route, so the register is taken ahead of the tree whenever it fits within that work.
+///
+/// A bound from the T count decides most circuits. The rest take a tableau dry run
+/// capped at the widest register that could still win.
+pub(super) fn decide_clifford_register(circuit: &Circuit, limits: &ResolvedLimits) -> bool {
+    #[cfg(feature = "bench-internal")]
+    if !crate::bench_variant_b() {
+        return legacy_prefers_clifford_register(circuit);
+    }
+    let n = circuit.num_qubits;
+    if n < MIN_AUTO_CLIFFORD_REGISTER_QUBITS
+        || !circuit.has_terminal_measurements_only()
+        || circuit.has_resets()
+    {
+        return false;
+    }
+    let Some((t, _)) = auto_clifford_t_budget(circuit) else {
+        return false;
+    };
+    let mut is_measured = vec![false; n];
+    for (q, _) in circuit.measurement_map() {
+        is_measured[q] = true;
+    }
+    let measured = is_measured.iter().filter(|&&m| m).count();
+    let cap = limits.statevector_qubits.value;
+    let instructions = circuit.instructions.len();
+    let dense = match analyze_independence(circuit).0 {
+        Some((blocks, _)) => blocks.iter().fold(0usize, |work, block| {
+            work.saturating_add(statevector_work(instructions, block.len().min(cap)))
+        }),
+        None => statevector_work(instructions, n.min(cap)),
+    } as f64;
+
+    let max_width = clifford_register::MAX_REGISTER_QUBITS;
+    let bound = t.min(n);
+    if bound <= max_width
+        && clifford_register_work(bound, ((t - bound + 2) << bound) as f64, measured) < dense
+    {
+        return true;
+    }
+    let Some(widest) = (0..=bound.min(max_width))
+        .rev()
+        .find(|&k| clifford_register_work(k, (2usize << k) as f64, measured) < dense)
+    else {
+        return false;
+    };
+    #[cfg(test)]
+    REGISTER_DRY_RUNS.with(|runs| runs.set(runs.get() + 1));
+    stabilizer_rank::terminal_register_price(circuit, widest)
+        .is_some_and(|(k, rotations)| clifford_register_work(k, rotations as f64, measured) < dense)
+}
+
 pub(super) fn contract_tensor(
     planned: crate::backend::tensornetwork::BoundedExpectations,
     limits: &ResolvedLimits,
@@ -239,7 +322,7 @@ pub(super) fn decide_shots(
     {
         return Ok(ShotRoute::Compiled(Some(deferred)));
     }
-    if kind.is_auto() && auto_prefers_clifford_register(circuit) {
+    if kind.is_auto() && decide_clifford_register(circuit, limits) {
         return Ok(ShotRoute::StabilizerRank);
     }
     let terminal_only = circuit.has_terminal_measurements_only();

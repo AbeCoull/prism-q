@@ -156,16 +156,19 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
     num_qubits.saturating_sub(log2n)
 }
 
+/// Amplitude updates of `instructions` gates applied to a dense `width`-qubit state,
+/// saturating at `usize::MAX`.
+#[inline]
+pub(super) fn statevector_work(instructions: usize, width: usize) -> usize {
+    instructions.saturating_mul(1usize.checked_shl(width as u32).unwrap_or(usize::MAX))
+}
+
 /// SPD term steps `Auto` spends on a marginals query before handing it to the
-/// statevector: the dense run's `instructions * 2^n` amplitude updates, priced
-/// at [`AUTO_SPD_AMPLITUDES_PER_TERM`] each.
+/// statevector: the dense run's [`statevector_work`], priced at
+/// [`AUTO_SPD_AMPLITUDES_PER_TERM`] each.
 #[inline]
 pub(super) fn auto_spd_work_budget(circuit: &Circuit) -> usize {
-    circuit.instructions.len().saturating_mul(
-        1usize
-            .checked_shl(circuit.num_qubits as u32)
-            .unwrap_or(usize::MAX),
-    ) / AUTO_SPD_AMPLITUDES_PER_TERM
+    statevector_work(circuit.instructions.len(), circuit.num_qubits) / AUTO_SPD_AMPLITUDES_PER_TERM
 }
 
 /// Backend selection for a simulation run.
@@ -173,10 +176,10 @@ pub(super) fn auto_spd_work_budget(circuit: &Circuit) -> usize {
 /// `Auto` resolves per call from circuit shape. Two routes run before the
 /// family tree: circuits that decompose into independent blocks run per block
 /// (Clifford-only circuits at 16 qubits and above with a block of 2 or more use
-/// FactoredStabilizer), and shot paths sample Clifford+T circuits whose T
-/// count fits the size-derived stabilizer-rank budget through the StabilizerRank
-/// expansion, to 40 T gates; a terminal circuit whose Clifford register would pass 20
-/// qubits goes to the tree instead. A probability
+/// FactoredStabilizer), and shot paths sample Clifford+T circuits through the
+/// StabilizerRank expansion: terminal shots when the Clifford register fits 20 qubits and
+/// is priced below the dense run, shots with mid-circuit measurements or a reset when the T
+/// count fits the size-derived stabilizer-rank budget, to 40 T gates. A probability
 /// query never takes that expansion under `Auto`, since it is slower than the
 /// statevector at every width both can hold. The pruned expansion is reachable
 /// only through [`run_stabilizer_rank_approx`], never from `Auto`; marginal queries
@@ -1032,7 +1035,7 @@ pub(super) fn approximate_route_name(
     if !kind.is_auto() {
         return None;
     }
-    if sampling && crate::sim::auto_samples_by_stabilizer_rank(circuit) {
+    if sampling && crate::sim::auto_samples_by_stabilizer_rank(circuit, limits) {
         return None;
     }
     let (_, has_partial_independence) = crate::sim::analyze_independence(circuit);

@@ -240,10 +240,12 @@ fn register_width_dry_run_agrees_with_compile() {
         }
         for max_width in 0..=n {
             assert_eq!(
-                register_fits(&circuit, max_width).unwrap(),
+                register_price(&circuit, max_width)
+                    .unwrap()
+                    .map(|(width, _)| width),
                 TerminalSampler::compile(&circuit, max_width)
                     .unwrap()
-                    .is_some(),
+                    .map(|sampler| sampler.register_width()),
                 "seed {seed}, n {n}, t {t_count}, max width {max_width}"
             );
         }

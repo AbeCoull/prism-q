@@ -1174,16 +1174,16 @@ fn clifford_t_price_rows_pin_their_engines() {
     }
 
     let auto_rows = [
-        ("layers_22q_t24", price_layers(22, 24), terminal_statevector),
-        ("layers_24q_t24", price_layers(24, 24), terminal_statevector),
-        ("layers_26q_t24", price_layers(26, 24), terminal_statevector),
-        ("scrambled_22q_t20", price_scrambled(22, 20), register),
-        ("layers_20q_t40", price_layers(20, 40), terminal_statevector),
+        ("layers_22q_t24", price_layers(22, 24)),
+        ("layers_24q_t24", price_layers(24, 24)),
+        ("layers_26q_t24", price_layers(26, 24)),
+        ("scrambled_22q_t20", price_scrambled(22, 20)),
+        ("layers_20q_t40", price_layers(20, 40)),
     ];
-    for (label, circuit, route) in &auto_rows {
+    for (label, circuit) in &auto_rows {
         assert_eq!(
             shot_plan(BackendKind::Auto, circuit, 1024),
-            *route,
+            register,
             "auto/{label}"
         );
     }
@@ -1193,11 +1193,7 @@ fn clifford_t_price_rows_pin_their_engines() {
         .seed(42)
         .plan(sim::Query::Shots(1024))
         .unwrap();
-    assert_eq!(
-        (plan.backend, plan.rule),
-        terminal_statevector,
-        "auto/layers_28q_t24"
-    );
+    assert_eq!((plan.backend, plan.rule), register, "auto/layers_28q_t24");
 
     for (t, shots) in [(6, 16), (8, 4)] {
         for n in [26, 32] {
@@ -1230,7 +1226,7 @@ fn clifford_t_price_rows_pin_their_engines() {
 fn clifford_t_price_census() {
     use prism_q::{Gate, Instruction};
 
-    const REGISTER_PASS_STATEVECTOR_AMPLITUDES: f64 = 20.0;
+    const REGISTER_PASS_STATEVECTOR_AMPLITUDES: f64 = 25.0;
     const MAX_REGISTER_QUBITS: usize = 20;
 
     let mut terminal = Vec::new();

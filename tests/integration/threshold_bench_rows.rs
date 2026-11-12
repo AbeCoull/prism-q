@@ -19,6 +19,7 @@ const THRESHOLDS: &[(&str, &str)] = &[
     ("src/sim/route.rs", "TENSOR_ROUTE_MIN_QUBITS"),
     ("src/sim/route.rs", "TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE"),
     ("src/sim/route.rs", "TENSOR_ELEMENT_MPS_COST"),
+    ("src/sim/route.rs", "REGISTER_PASS_STATEVECTOR_AMPLITUDES"),
     ("src/circuit/fusion.rs", "MIN_QUBITS_FOR_FUSION"),
     ("src/circuit/fusion.rs", "MIN_QUBITS_FOR_MULTI_FUSION"),
     ("src/circuit/fusion.rs", "MIN_QUBITS_FOR_DIAG_BATCH"),

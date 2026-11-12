@@ -631,11 +631,20 @@ fn clifford_t_terminal_routes_agree() {
     for seed in [SEED, SEED + 1] {
         let circuit = terminal_case(OneQubit::CliffordT, seed);
         assert!(circuit.has_t_gates());
+        // The lowered register constants price a register this small below the dense run.
+        let auto = if cfg!(prism_lowered_thresholds) {
+            simulate(&circuit)
+                .plan(prism_q::sim::Query::Shots(SHOTS))
+                .unwrap()
+                .backend
+        } else {
+            R::Statevector
+        };
         check_routes(
             &format!("clifford+t terminal seed {seed}"),
             &circuit,
             &[
-                route("auto", BackendKind::Auto, R::Statevector),
+                route("auto", BackendKind::Auto, auto),
                 route("statevector", BackendKind::Statevector, R::Statevector),
                 route(
                     "stabilizer rank",

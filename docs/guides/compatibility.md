@@ -64,3 +64,9 @@ Seeded output has changed in these releases:
   state in one pass. Dynamic programs on the host statevector branch the same way, so
   their shots no longer follow `mix_seed(seed, i)`. Compiled Clifford counts at high shot
   counts draw from a corrected binomial sampler, which also fixes their spread.
+- 0.39.0 prices `Auto` terminal shots of a Clifford+T circuit between the Clifford
+  register and the dense run instead of capping the T count. Circuits with more than 20
+  T gates, or at least as many T gates as qubits, whose register fits 20 qubits move to
+  the register from the statevector, or past the statevector cap from the MPS. A register
+  nearly as wide as the circuit, or one wider than the independent blocks the circuit
+  splits into, moves the other way. Fixed-seed shots on those circuits changed.

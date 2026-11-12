@@ -147,6 +147,37 @@ impl SparseParity {
         if self.num_rows <= 1 || rank == 0 {
             return None;
         }
+        #[cfg(feature = "bench-internal")]
+        if !crate::bench_variant('f') {
+            return self.find_blocks_by_column_lists(rank);
+        }
+
+        let mut parent: Vec<usize> = (0..self.num_rows).collect();
+        let mut size: Vec<usize> = vec![1; self.num_rows];
+        let mut components = self.num_rows;
+        let mut first_row = vec![usize::MAX; rank];
+        for m in 0..self.num_rows {
+            for &c in self.row_cols(m) {
+                let first = &mut first_row[c as usize];
+                if *first == usize::MAX {
+                    *first = m;
+                } else if union_rows(&mut parent, &mut size, *first, m) {
+                    components -= 1;
+                    if components == 1 {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        blocks_by_root(&mut parent)
+    }
+
+    #[cfg(any(test, feature = "bench-internal"))]
+    pub(super) fn find_blocks_by_column_lists(&self, rank: usize) -> Option<Vec<Vec<usize>>> {
+        if self.num_rows <= 1 || rank == 0 {
+            return None;
+        }
 
         let mut col_to_rows: Vec<Vec<usize>> = vec![Vec::new(); rank];
         for m in 0..self.num_rows {
@@ -157,58 +188,13 @@ impl SparseParity {
 
         let mut parent: Vec<usize> = (0..self.num_rows).collect();
         let mut size: Vec<usize> = vec![1; self.num_rows];
-
-        fn find(parent: &mut [usize], x: usize) -> usize {
-            let mut root = x;
-            while parent[root] != root {
-                root = parent[root];
-            }
-            let mut cur = x;
-            while parent[cur] != root {
-                let next = parent[cur];
-                parent[cur] = root;
-                cur = next;
-            }
-            root
-        }
-
-        fn union(parent: &mut [usize], size: &mut [usize], a: usize, b: usize) {
-            let ra = find(parent, a);
-            let rb = find(parent, b);
-            if ra == rb {
-                return;
-            }
-            if size[ra] < size[rb] {
-                parent[ra] = rb;
-                size[rb] += size[ra];
-            } else {
-                parent[rb] = ra;
-                size[ra] += size[rb];
-            }
-        }
-
         for rows in &col_to_rows {
             for i in 1..rows.len() {
-                union(&mut parent, &mut size, rows[0], rows[i]);
+                union_rows(&mut parent, &mut size, rows[0], rows[i]);
             }
         }
 
-        let mut block_of_root = vec![usize::MAX; self.num_rows];
-        let mut blocks: Vec<Vec<usize>> = Vec::new();
-        for m in 0..self.num_rows {
-            let root = find(&mut parent, m);
-            if block_of_root[root] == usize::MAX {
-                block_of_root[root] = blocks.len();
-                blocks.push(Vec::new());
-            }
-            blocks[block_of_root[root]].push(m);
-        }
-
-        if blocks.len() <= 1 {
-            return None;
-        }
-
-        Some(blocks)
+        blocks_by_root(&mut parent)
     }
 
     pub fn compile_detection_events(&self, pairs: &[(usize, usize)]) -> SparseParity {
@@ -236,6 +222,53 @@ impl SparseParity {
             non_det_rows,
         }
     }
+}
+
+fn find_root(parent: &mut [usize], x: usize) -> usize {
+    let mut root = x;
+    while parent[root] != root {
+        root = parent[root];
+    }
+    let mut cur = x;
+    while parent[cur] != root {
+        let next = parent[cur];
+        parent[cur] = root;
+        cur = next;
+    }
+    root
+}
+
+/// Join the sets holding `a` and `b`; false when they already share one.
+fn union_rows(parent: &mut [usize], size: &mut [usize], a: usize, b: usize) -> bool {
+    let ra = find_root(parent, a);
+    let rb = find_root(parent, b);
+    if ra == rb {
+        return false;
+    }
+    if size[ra] < size[rb] {
+        parent[ra] = rb;
+        size[rb] += size[ra];
+    } else {
+        parent[rb] = ra;
+        size[ra] += size[rb];
+    }
+    true
+}
+
+/// Rows grouped by set, blocks ordered by their first row; `None` for a single set.
+fn blocks_by_root(parent: &mut [usize]) -> Option<Vec<Vec<usize>>> {
+    let num_rows = parent.len();
+    let mut block_of_root = vec![usize::MAX; num_rows];
+    let mut blocks: Vec<Vec<usize>> = Vec::new();
+    for m in 0..num_rows {
+        let root = find_root(parent, m);
+        if block_of_root[root] == usize::MAX {
+            block_of_root[root] = blocks.len();
+            blocks.push(Vec::new());
+        }
+        blocks[block_of_root[root]].push(m);
+    }
+    (blocks.len() > 1).then_some(blocks)
 }
 
 fn symmetric_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
@@ -387,6 +420,13 @@ pub(super) fn build_parity_blocks_if_useful(
     rank: usize,
     ref_bits: &[u64],
 ) -> Option<ParityBlocks> {
+    // A fixed outcome is a block of one row, which MIN_BLOCK_MEASUREMENTS rejects.
+    let has_fixed_row = sparse.non_det_rows.len() < sparse.num_rows;
+    #[cfg(feature = "bench-internal")]
+    let has_fixed_row = has_fixed_row && crate::bench_variant('f');
+    if has_fixed_row {
+        return None;
+    }
     let block_meas = sparse.find_blocks(rank)?;
 
     if block_meas.len() < MIN_BLOCKS_FOR_PARALLEL {

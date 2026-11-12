@@ -29,6 +29,9 @@ struct CliffordRegister {
     /// `2^width` amplitudes, or the starting amplitude alone when only the width is
     /// tracked.
     amps: Vec<Complex64>,
+    /// Amplitudes the rotations sweep: `2^width` per T gate, at the width after it.
+    #[cfg(feature = "bench-internal")]
+    rotation_work: u64,
 }
 
 /// Pauli string on the register in the letter convention of [`SignedPauli`]: bit `b` of
@@ -91,6 +94,8 @@ impl CliffordRegister {
             slot: vec![None; num_qubits],
             width: 0,
             amps: vec![Complex64::new(1.0, 0.0)],
+            #[cfg(feature = "bench-internal")]
+            rotation_work: 0,
         }
     }
 
@@ -276,12 +281,12 @@ where
 
 /// Map independent commuting register Paulis to single `Z` letters with a Clifford `W`,
 /// apply `W` to `amps`, and return the table of `|W φ|^2` over those letters with each
-/// row's sign.
+/// row's sign and the number of passes over `amps` that `W` took.
 fn register_marginals(
     amps: &mut [Complex64],
     mut rows: Vec<RegisterPauli>,
     width: usize,
-) -> (Vec<f64>, Vec<bool>) {
+) -> (Vec<f64>, Vec<bool>, usize) {
     let mut gates = Vec::new();
     let mut pivots: Vec<usize> = Vec::with_capacity(rows.len());
     let mut flips = Vec::with_capacity(rows.len());
@@ -327,7 +332,7 @@ fn register_marginals(
             .fold(0, |acc, (i, &c)| acc | (((b >> c) & 1) << i));
         table[index] += amp.norm_sqr();
     }
-    (table, flips)
+    (table, flips, gates.len())
 }
 
 /// Where a measured row's outcome comes from.
@@ -357,6 +362,10 @@ pub(super) struct TerminalSampler {
     row_of_qubit: Vec<usize>,
     num_classical_bits: usize,
     register_width: usize,
+    /// Passes over the register in the reduction: one per diagonalizing gate, plus the
+    /// table fold.
+    #[cfg(feature = "bench-internal")]
+    reduction_passes: usize,
 }
 
 /// Run `circuit` through a register, with its amplitudes only when `dense`, pushing its
@@ -381,6 +390,10 @@ fn build_register(
                     };
                     if !admitted {
                         return Ok(None);
+                    }
+                    #[cfg(feature = "bench-internal")]
+                    {
+                        state.rotation_work += 1 << state.width;
                     }
                 }
                 _ => state.prefix.apply_state_gate(gate, targets).map_err(|_| {
@@ -413,6 +426,57 @@ fn build_register(
 /// `Some`.
 pub(super) fn register_fits(circuit: &Circuit, max_width: usize) -> Result<bool> {
     Ok(build_register(circuit, max_width, false, &mut Vec::new())?.is_some())
+}
+
+/// Register counts of one terminal Clifford+T circuit, read off the tableau without
+/// amplitudes.
+#[cfg(feature = "bench-internal")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CliffordRegisterCensus {
+    /// T and Tdg gates after lowering.
+    pub t_count: usize,
+    /// Register qubits once every T gate is admitted, uncapped.
+    pub width: usize,
+    /// Amplitudes the rotations sweep: `2^w` per T gate, `w` the width after it.
+    pub rotation_work: u64,
+    /// Full-width passes of the readout reduction, the table fold included; `None` past
+    /// the width cap.
+    pub reduction_passes: Option<usize>,
+    /// Independent measured rows left on the register, the index bits of the outcome
+    /// table; `None` past the width cap.
+    pub register_rows: Option<usize>,
+}
+
+#[cfg(feature = "bench-internal")]
+pub(super) fn census(circuit: &Circuit) -> Result<CliffordRegisterCensus> {
+    let mut measures = Vec::new();
+    let state = build_register(circuit, circuit.num_qubits, false, &mut measures)?
+        .expect("an uncapped register always fits");
+    let t_count = circuit
+        .instructions
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::T | Gate::Tdg,
+                    ..
+                }
+            )
+        })
+        .count();
+    let (width, rotation_work) = (state.width, state.rotation_work);
+    let reduced = (width <= MAX_REGISTER_QUBITS)
+        .then(|| TerminalSampler::reduce(state, measures, circuit.num_classical_bits));
+    Ok(CliffordRegisterCensus {
+        t_count,
+        width,
+        rotation_work,
+        reduction_passes: reduced.as_ref().map(|s| s.reduction_passes),
+        register_rows: reduced
+            .as_ref()
+            .map(|s| s.table.len().trailing_zeros() as usize),
+    })
 }
 
 impl TerminalSampler {
@@ -537,7 +601,8 @@ impl TerminalSampler {
         }
 
         let rows = independent.iter().map(|&i| reg_rows[i].1).collect();
-        let (table, flips) = register_marginals(&mut state.amps, rows, width);
+        let (table, flips, _diagonalizing_passes) =
+            register_marginals(&mut state.amps, rows, width);
         for (index, (&i, flip)) in independent.iter().zip(flips).enumerate() {
             outcome[reg_rows[i].0] = Some(RowOutcome::Register { index, flip });
         }
@@ -554,6 +619,8 @@ impl TerminalSampler {
             row_of_qubit,
             num_classical_bits,
             register_width: width,
+            #[cfg(feature = "bench-internal")]
+            reduction_passes: _diagonalizing_passes + 1,
         }
     }
 

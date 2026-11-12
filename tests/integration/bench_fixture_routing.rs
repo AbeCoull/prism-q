@@ -1048,3 +1048,284 @@ fn clifford_register_counts_row_fills_the_register() {
         .unwrap();
     assert_eq!(counts.metadata.reason, RouteRule::CliffordRegister);
 }
+
+fn price_layers(n: usize, t: usize) -> prism_q::circuit::Circuit {
+    bench_fixtures::random_clifford_t_layers(n, 10, t, SEED)
+}
+
+fn price_scrambled(n: usize, t: usize) -> prism_q::circuit::Circuit {
+    let mut circuit = bench_fixtures::scrambled_clifford_t_circuit(n, t, SEED);
+    circuit.measure_all();
+    circuit
+}
+
+fn price_onelayer() -> prism_q::circuit::Circuit {
+    let mut circuit = bench_fixtures::random_t_insertion_circuit(20, 80, SEED);
+    circuit.measure_all();
+    circuit
+}
+
+/// The shot plan `kind` takes for `circuit`, without running it.
+fn shot_plan(
+    kind: BackendKind,
+    circuit: &prism_q::circuit::Circuit,
+    shots: usize,
+) -> (ResolvedBackend, RouteRule) {
+    let plan = sim::simulate(circuit)
+        .backend(kind)
+        .seed(42)
+        .plan(sim::Query::Shots(shots))
+        .unwrap();
+    (plan.backend, plan.rule)
+}
+
+// `auto/clifford_t_price` prices one circuit on several engines, so each arm must land
+// on the engine it names. The `statevector` rows must also stay one block, or the
+// `auto` arm beside them would time the decomposed route. `auto/layers_28q_t24` runs
+// only where `PRISM_BENCH_HIGH_QUBITS` admits 28 qubits, so its pin fixes the cap at 28
+// rather than reading the host's.
+#[test]
+fn clifford_t_price_rows_pin_their_engines() {
+    let register = (ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister);
+    let terminal_statevector = (ResolvedBackend::Statevector, RouteRule::TerminalStatevector);
+
+    let mut register_rows = Vec::new();
+    for (n, t) in [
+        (26, 24),
+        (28, 24),
+        (30, 24),
+        (32, 24),
+        (26, 10),
+        (26, 20),
+        (20, 40),
+    ] {
+        register_rows.push((format!("layers_{n}q_t{t}"), price_layers(n, t)));
+    }
+    for (n, t) in [(26, 16), (26, 18), (26, 20), (20, 20), (22, 20), (32, 20)] {
+        register_rows.push((format!("scrambled_{n}q_t{t}"), price_scrambled(n, t)));
+    }
+    register_rows.push(("onelayer_20q_t80".into(), price_onelayer()));
+    for (label, circuit) in &register_rows {
+        assert_eq!(
+            shot_plan(BackendKind::StabilizerRank, circuit, 1024),
+            register,
+            "register/{label}"
+        );
+    }
+    // Past 20 T gates the register width is not bounded by the T count, and a row that
+    // outgrew the cap would fail rather than time.
+    for (label, circuit) in register_rows.iter().filter(|(l, _)| l.ends_with("_t24")) {
+        sim::simulate(circuit)
+            .backend(BackendKind::StabilizerRank)
+            .seed(42)
+            .shots(1)
+            .unwrap_or_else(|e| panic!("register/{label}: {e}"));
+    }
+
+    let mut statevector_rows = Vec::new();
+    for n in [22, 24, 26, 28] {
+        statevector_rows.push((format!("layers_{n}q_t24"), price_layers(n, 24)));
+    }
+    for n in [20, 22, 24] {
+        statevector_rows.push((format!("scrambled_{n}q_t20"), price_scrambled(n, 20)));
+    }
+    statevector_rows.push(("layers_20q_t40".into(), price_layers(20, 40)));
+    for (label, circuit) in &statevector_rows {
+        assert_eq!(
+            circuit.independent_subsystems().len(),
+            1,
+            "statevector/{label}: the register splits"
+        );
+        assert_eq!(
+            shot_plan(BackendKind::Statevector, circuit, 1024),
+            terminal_statevector,
+            "statevector/{label}"
+        );
+    }
+
+    let auto_rows = [
+        ("layers_22q_t24", price_layers(22, 24), terminal_statevector),
+        ("layers_24q_t24", price_layers(24, 24), terminal_statevector),
+        ("layers_26q_t24", price_layers(26, 24), terminal_statevector),
+        ("scrambled_22q_t20", price_scrambled(22, 20), register),
+        ("layers_20q_t40", price_layers(20, 40), terminal_statevector),
+    ];
+    for (label, circuit, route) in &auto_rows {
+        assert_eq!(
+            shot_plan(BackendKind::Auto, circuit, 1024),
+            *route,
+            "auto/{label}"
+        );
+    }
+    let wide = price_layers(28, 24);
+    let plan = sim::simulate(&wide)
+        .limits(prism_q::Limits::new().max_statevector_qubits(28))
+        .seed(42)
+        .plan(sim::Query::Shots(1024))
+        .unwrap();
+    assert_eq!(
+        (plan.backend, plan.rule),
+        terminal_statevector,
+        "auto/layers_28q_t24"
+    );
+
+    for (t, shots) in [(6, 16), (8, 4)] {
+        for n in [26, 32] {
+            let circuit = bench_fixtures::stabilizer_rank_mid_circuit_shot_circuit(n, t, SEED);
+            assert!(!circuit.has_terminal_measurements_only());
+            assert_eq!(
+                shot_plan(BackendKind::StabilizerRank, &circuit, shots),
+                register,
+                "rank_mid/mid_{n}q_t{t}_{shots}shots"
+            );
+        }
+    }
+    for n in [22, 24, 26] {
+        let circuit = bench_fixtures::clifford_t_layers_mid_circuit(n, 10, 8, SEED);
+        assert_eq!(
+            shot_plan(BackendKind::Statevector, &circuit, 64),
+            (ResolvedBackend::Statevector, RouteRule::PerShot),
+            "statevector_mid/layers_{n}q_t8"
+        );
+    }
+}
+
+// Deterministic counts behind `auto/clifford_t_price`, printed rather than asserted:
+// the register's width, rotation work and reduction passes per terminal fixture, the
+// route `Auto` takes, and whether a width-priced rule would need a tableau dry run;
+// per mid-circuit fixture the branch count and the inner products one shot costs.
+// Run with `--features "parallel bench-internal" --no-capture`.
+#[cfg(feature = "bench-internal")]
+#[test]
+fn clifford_t_price_census() {
+    use prism_q::{Gate, Instruction};
+
+    const REGISTER_PASS_STATEVECTOR_AMPLITUDES: f64 = 20.0;
+    const MAX_REGISTER_QUBITS: usize = 20;
+
+    let mut terminal = Vec::new();
+    for (n, t) in [
+        (20, 40),
+        (22, 24),
+        (24, 24),
+        (26, 10),
+        (26, 20),
+        (26, 24),
+        (28, 24),
+        (30, 24),
+        (32, 24),
+    ] {
+        terminal.push((format!("layers_{n}q_t{t}"), price_layers(n, t)));
+    }
+    for (n, t) in [
+        (20, 20),
+        (22, 20),
+        (24, 20),
+        (26, 16),
+        (26, 18),
+        (26, 20),
+        (32, 20),
+    ] {
+        terminal.push((format!("scrambled_{n}q_t{t}"), price_scrambled(n, t)));
+    }
+    terminal.push(("onelayer_20q_t80".into(), price_onelayer()));
+    let mut counts_row = circuits::clifford_t_circuit(40, 20, 0.05, SEED);
+    counts_row.measure_all();
+    terminal.push(("clifford_register_counts/40q_d20_t5pct".into(), counts_row));
+
+    println!(
+        "{:<40} {:>3} {:>3} {:>3} {:>4} {:>8} {:>6} {:>3} {:>7}  auto route",
+        "fixture", "n", "t", "k", "e", "R/2^k", "passes", "r", "dry_run"
+    );
+    for (label, circuit) in &terminal {
+        let census = prism_q::clifford_register_census(circuit).unwrap();
+        let (n, t, k) = (circuit.num_qubits, census.t_count, census.width);
+        let m = circuit.measurement_map().len();
+        let instructions = circuit.instructions.len() as f64;
+        let w_alt: f64 = circuit
+            .independent_subsystems()
+            .iter()
+            .map(|block| instructions * 2f64.powi(block.len() as i32))
+            .sum();
+        let w_reg = |k: usize, rotation_amps: f64| {
+            let reduction = 3.0 * (k.min(m) + 1) as f64 * 2f64.powi(k as i32);
+            REGISTER_PASS_STATEVECTOR_AMPLITUDES * (rotation_amps + reduction)
+        };
+        let kb = t.min(n);
+        let bound_admits = kb <= MAX_REGISTER_QUBITS
+            && w_reg(kb, (t - kb + 2) as f64 * 2f64.powi(kb as i32)) < w_alt;
+        let k_stop = (0..=kb.min(MAX_REGISTER_QUBITS))
+            .rev()
+            .find(|&k| w_reg(k, 2.0 * 2f64.powi(k as i32)) < w_alt);
+        let dry_run = !bound_admits && k_stop.is_some();
+        let (backend, rule) = shot_plan(BackendKind::Auto, circuit, 1024);
+        let show = |v: Option<usize>| v.map_or("-".to_string(), |v| v.to_string());
+        println!(
+            "{:<40} {:>3} {:>3} {:>3} {:>4} {:>8.2} {:>6} {:>3} {:>7}  {backend:?}/{rule:?}",
+            label,
+            n,
+            t,
+            k,
+            t as i64 - k as i64,
+            census.rotation_work as f64 / 2f64.powi(k as i32),
+            show(census.reduction_passes),
+            show(census.register_rows),
+            dry_run,
+        );
+    }
+
+    let mut mid = Vec::new();
+    for (t, shots) in [(6, 16), (8, 4)] {
+        for n in [26, 32] {
+            let circuit = bench_fixtures::stabilizer_rank_mid_circuit_shot_circuit(n, t, SEED);
+            mid.push((
+                format!("rank_mid/mid_{n}q_t{t}_{shots}shots"),
+                circuit,
+                shots,
+            ));
+        }
+    }
+    for n in [22, 24, 26] {
+        let circuit = bench_fixtures::clifford_t_layers_mid_circuit(n, 10, 8, SEED);
+        mid.push((format!("statevector_mid/layers_{n}q_t8"), circuit, 64));
+    }
+    println!();
+    println!(
+        "{:<40} {:>3} {:>3} {:>6} {:>6} {:>12}  auto route",
+        "mid fixture", "n", "t", "B", "events", "inner_prods"
+    );
+    for (label, circuit, shots) in &mid {
+        let t = circuit
+            .instructions
+            .iter()
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    Instruction::Gate {
+                        gate: Gate::T | Gate::Tdg,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let events = circuit
+            .instructions
+            .iter()
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    Instruction::Measure { .. } | Instruction::Reset { .. }
+                )
+            })
+            .count();
+        let branches = 1u64 << t;
+        // Each event takes the norm of both projections, `B (B + 1) / 2` overlaps each
+        // while no branch projects to zero.
+        let inner_products = events as u64 * branches * (branches + 1);
+        let (backend, rule) = shot_plan(BackendKind::Auto, circuit, *shots);
+        println!(
+            "{:<40} {:>3} {:>3} {:>6} {:>6} {:>12}  {backend:?}/{rule:?}",
+            label, circuit.num_qubits, t, branches, events, inner_products
+        );
+    }
+}

@@ -126,6 +126,8 @@ pub use sim::noise::{
     NoisyCompiledSampler, ReadoutError, compile_noisy, density_matrix_expectation_values,
     run_shots_noisy,
 };
+#[cfg(feature = "bench-internal")]
+pub use sim::stabilizer_rank::{CliffordRegisterCensus, clifford_register_census};
 pub use sim::stabilizer_rank::{
     StabRankResult, run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_inner_product,
     stabilizer_overlap_sq,

@@ -2997,3 +2997,29 @@ fn direct_counts_match_the_typed_histogram() {
     assert!(shots_mostly_distinct(89, 1 << 44));
     assert!(shots_mostly_distinct(909, usize::MAX));
 }
+
+#[test]
+fn set_bit_parity_build_matches_the_bit_probe() {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for words in 1..=6 {
+        for num_meas in [64 * words - 3, 64 * words] {
+            for rank in [0, 1, 7, 64, 89, 300] {
+                let flip_rows: Vec<Vec<u64>> = (0..rank)
+                    .map(|_| {
+                        (0..words)
+                            .map(|_| rng.random::<u64>() & rng.random::<u64>())
+                            .collect()
+                    })
+                    .collect();
+                let actual = SparseParity::from_flip_rows(&flip_rows, num_meas);
+                let expected = SparseParity::from_flip_rows_by_probe(&flip_rows, num_meas);
+                let label = format!("words {words}, {num_meas} measurements, rank {rank}");
+                assert_eq!(actual.row_offsets, expected.row_offsets, "{label}");
+                assert_eq!(actual.col_indices, expected.col_indices, "{label}");
+                assert_eq!(actual.non_det_rows, expected.non_det_rows, "{label}");
+                assert_eq!(actual.num_rows, expected.num_rows, "{label}");
+            }
+        }
+    }
+}

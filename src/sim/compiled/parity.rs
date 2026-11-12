@@ -12,6 +12,65 @@ pub struct SparseParity {
 
 impl SparseParity {
     pub fn from_flip_rows(flip_rows: &[Vec<u64>], num_measurements: usize) -> Self {
+        #[cfg(feature = "bench-internal")]
+        if !crate::bench_variant('e') {
+            return Self::from_flip_rows_by_probe(flip_rows, num_measurements);
+        }
+        let num_rows = num_measurements;
+        let m_words = num_rows.div_ceil(64);
+        let tail_mask = match num_rows % 64 {
+            0 => u64::MAX,
+            tail => (1u64 << tail) - 1,
+        };
+        let mut row_offsets = vec![0u32; num_rows + 1];
+        for row in flip_rows {
+            for (w, &word) in row[..m_words].iter().enumerate() {
+                let mut bits = if w + 1 == m_words {
+                    word & tail_mask
+                } else {
+                    word
+                };
+                while bits != 0 {
+                    row_offsets[w * 64 + bits.trailing_zeros() as usize + 1] += 1;
+                    bits &= bits - 1;
+                }
+            }
+        }
+        for m in 0..num_rows {
+            row_offsets[m + 1] += row_offsets[m];
+        }
+        let mut col_indices = vec![0u32; row_offsets[num_rows] as usize];
+        let mut cursor = row_offsets[..num_rows].to_vec();
+        for (j, row) in flip_rows.iter().enumerate() {
+            for (w, &word) in row[..m_words].iter().enumerate() {
+                let mut bits = if w + 1 == m_words {
+                    word & tail_mask
+                } else {
+                    word
+                };
+                while bits != 0 {
+                    let m = w * 64 + bits.trailing_zeros() as usize;
+                    col_indices[cursor[m] as usize] = j as u32;
+                    cursor[m] += 1;
+                    bits &= bits - 1;
+                }
+            }
+        }
+
+        let non_det_rows: Vec<u32> = (0..num_rows as u32)
+            .filter(|&m| row_offsets[m as usize + 1] != row_offsets[m as usize])
+            .collect();
+
+        Self {
+            col_indices,
+            row_offsets,
+            num_rows,
+            non_det_rows,
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-internal"))]
+    pub(super) fn from_flip_rows_by_probe(flip_rows: &[Vec<u64>], num_measurements: usize) -> Self {
         let num_rows = num_measurements;
         let rank = flip_rows.len();
         let mut row_offsets = Vec::with_capacity(num_rows + 1);

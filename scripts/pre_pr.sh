@@ -29,6 +29,9 @@
 #                      the Linux and macOS targets the host has installed
 #   check-gpu-dist     src/sim/dispatch.rs or a cfg(feature) line
 #   nextest-dist       src/distributed/ or src/backend/distributed_statevector/
+#   clippy-pulse, nextest-pulse, doc-pulse
+#                      src/pulse/ or tests/pulse_compile.rs, built with the
+#                      unstable-pulse feature no other check enables
 #   test:<script>      scripts/X.sh or scripts/X_test.sh, when scripts/X_test.sh exists
 #   py-tools           a Python file under scripts/
 #   sh-syntax          a .sh file
@@ -257,9 +260,15 @@ check_no_default()   { cargo clippy --all-targets --no-default-features "${LINT[
 check_gpu_dist()     { cargo check --all-targets --features "parallel gpu distributed"; }
 check_clippy_py()    { cargo clippy -p prism-q-py --all-targets "${LINT[@]}"; }
 check_nextest_dist() { cargo nextest run --features "parallel distributed" -E 'test(distributed)'; }
+check_clippy_pulse() { cargo clippy --all-targets --features "parallel unstable-pulse" "${LINT[@]}"; }
+check_nextest_pulse() { cargo nextest run --features "parallel unstable-pulse" --test pulse_compile; }
 
 check_doc_build() {
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "${DOC_FEATURES//,/ }"
+}
+
+check_doc_pulse() {
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "${DOC_FEATURES//,/ } unstable-pulse"
 }
 
 # stacker's build script assembles for the target, so a cross check needs a C
@@ -423,6 +432,11 @@ run_if clippy-py "$PY_BINDINGS_HIT" "no public item or bindings/ change" check_c
 
 run_if nextest-dist "$(first_file '^src/(distributed|backend/distributed_statevector)/')" \
     "no distributed change" check_nextest_dist
+
+PULSE_HIT="$(first_file '^(src/pulse/|tests/pulse_compile\.rs$|benches/bench_pulse\.rs$)')"
+run_if clippy-pulse "$PULSE_HIT" "no pulse change" check_clippy_pulse
+run_if nextest-pulse "$PULSE_HIT" "no pulse change" check_nextest_pulse
+run_if doc-pulse "$PULSE_HIT" "no pulse change" check_doc_pulse
 
 run_if doc-build "$(first_hit '^[+-]$' '^src/.*\.rs$' '^[[:space:]]*//[/!]')" \
     "no docstring changed under src/" check_doc_build

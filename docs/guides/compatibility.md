@@ -15,7 +15,8 @@ toolchain is separate: `rust-toolchain.toml` pins an exact stable release (see
 Four feature flags are part of the surface: `parallel`, on by default, and `gpu`,
 `distributed` and `distributed-mpi`, each off. `bench-fast` and `bench-internal` are not.
 They shape benchmark runs, gate items no caller should reach for, and may change or
-disappear in any release.
+disappear in any release. `unstable-pulse` is not part of it either: the `pulse` module
+it enables may change or disappear in any release.
 
 ## Versions
 

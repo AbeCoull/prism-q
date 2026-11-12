@@ -33,6 +33,7 @@ show each step in Rust and in Python.
 | `gpu` | no | Optional CUDA backend (see the [GPU guide](../guides/gpu.md)) |
 | `distributed` | no | Statevector partitioning across ranks (see [Capabilities](../guides/capabilities.md)) |
 | `distributed-mpi` | no | `distributed` plus the MPI transport |
+| `unstable-pulse` | no | Gate compile from a pulse-level transmon model, outside the stability promise (see [Noise Models](../guides/noise.md#gates-compiled-from-pulses)) |
 
 ```admonish tip title="Keep parallel on for performance"
 The published benchmarks were taken with `parallel` enabled. Without it, runs from 15

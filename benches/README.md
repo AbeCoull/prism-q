@@ -6,11 +6,11 @@ Criterion.rs. Most rows live in two binaries: `bench_driver` holds microbenchmar
 gate kernels, measurement, and end-to-end QASM, and `circuits` sweeps circuit families
 across qubit counts and depths.
 
-Seven more targets cover narrower surfaces: `bench_shots_perf` (shot and count
+Eight more targets cover narrower surfaces: `bench_shots_perf` (shot and count
 sampling), `svd_bench` (the MPS decomposition kernels), `qec_t_strategies` and
-`qec_decoder` (the QEC runner), the feature-gated `bench_gpu` and `bench_distributed`,
-and `iai`, which counts instructions under callgrind instead of timing. List a Criterion
-target's rows with `cargo bench --bench <name> -- --list`.
+`qec_decoder` (the QEC runner), the feature-gated `bench_gpu`, `bench_distributed` and
+`bench_pulse`, and `iai`, which counts instructions under callgrind instead of timing.
+List a Criterion target's rows with `cargo bench --bench <name> -- --list`.
 
 ### Run configuration
 
@@ -151,6 +151,17 @@ loops after an exchange fan out.
 | `distributed/sample_indices` | 4096 terminal shots of a 20 qubit uniform state at two and four ranks with relabeling off: the per-rank cumulative distribution, owner draws, and the index gather |
 | `distributed/cyclic_wall/ranks{2,4}` | Three layers of a seeded Rx or Ry on every qubit and a nearest neighbour CX ring at 20 and 22 qubits across two and four ranks with relabeling on: the cyclic scan whose working set exceeds the local positions, so eviction choice sets the exchange count |
 | `distributed/noisy_shots` | 16 shots of a two-layer cyclic wall with every qubit measured, at 16 qubits (12 under `bench-fast`) on two and four ranks, with depolarizing, amplitude damping, or a one-qubit Kraus channel after every gate: serial trajectories in lockstep. `noiseless` runs the same wall without a model, one fused run and terminal sampling, the floor the per-shot trajectories are measured against |
+
+### Pulse compile benchmarks (bench_pulse)
+
+Requires `--features "parallel unstable-pulse"`. Each row times one `pulse::compile`
+call, which pays one Hermitian eigensolve and two dense products per segment, so cost
+grows with segments times dimension cubed.
+
+| Group | What it measures |
+|-------|-----------------|
+| `pulse_compile/cr_two_transmon_d3/300ns` | A 300 ns `GaussianSquare` cross-resonance drive on two coupled three-level transmons: dimension 9, 1,200 segments |
+| `pulse_compile/x_transmon_d3/20ns` | A 20 ns DRAG pi pulse on one three-level transmon at 16 segments per ns: dimension 3, 320 segments, the control |
 
 ### Instruction counts (iai)
 

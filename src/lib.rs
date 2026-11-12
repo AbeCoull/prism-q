@@ -63,6 +63,8 @@ pub mod gates;
 pub mod gpu;
 mod hash;
 mod limits;
+#[cfg(feature = "unstable-pulse")]
+pub mod pulse;
 pub mod qec;
 pub mod sim;
 #[cfg(feature = "parallel")]

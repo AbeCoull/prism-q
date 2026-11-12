@@ -56,6 +56,7 @@ distributed = []
 distributed-mpi = ["distributed", "dep:mpi"]
 bench-fast = []
 bench-internal = []
+unstable-pulse = []
 
 # The gpu surface documents without a CUDA toolkit: cudarc's build script with the pinned
 # cuda-12040 feature does not probe for one, and the driver and NVRTC load at run time.
@@ -152,6 +153,11 @@ required-features = ["gpu"]
 name = "bench_distributed"
 harness = false
 required-features = ["distributed", "bench-internal"]
+
+[[bench]]
+name = "bench_pulse"
+harness = false
+required-features = ["unstable-pulse"]
 
 # Development tools: built as examples so `cargo run --example <name>` works, kept out of
 # examples/ so that directory holds only usage examples.

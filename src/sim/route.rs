@@ -112,16 +112,17 @@ pub(super) fn decide_tensor_expectations(
 
 /// MPS work per observable, in [`mps_apply_cost`] units, from which an `Auto`
 /// expectation above the statevector cap plans the scalar tensor route before
-/// running MPS. About 2 ms of MPS time, the most one observable's dry run took
-/// across the calibration circuits (0.1 to 1.9 ms), so a declined or losing
-/// plan costs at most about the MPS run it tried to replace.
-/// Bracketed by `auto/expectation_above_cap` (`hea_l2/64` and `su4_brick_d4/64` against `su4_brick_d6/64`).
-const TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE: f64 = 1.5e5;
+/// running MPS, about 5 ms of MPS time per observable on one thread. Eight local
+/// observables on a four-layer brickwork stay under it at any width, and on an
+/// eight-layer one up to 64 qubits.
+/// Bracketed by `auto/expectation_above_cap` (`su4_brick_d4/64` and `brickwork_d8_local/64` against `brickwork_d8_local/128`).
+const TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE: f64 = 8e4;
 
-/// [`mps_apply_cost`] units one planned tensor-network element costs: about
-/// 40 ns per element contracted against 15 ns per unit.
-/// No bench row brackets this yet.
-const TENSOR_ELEMENT_MPS_COST: f64 = 3.0;
+/// [`mps_apply_cost`] units one planned tensor-network element costs: 60 to
+/// 140 ns per element contracted against 50 to 70 ns per unit on brickwork
+/// circuits, both on one thread.
+/// Bracketed by `auto/expectation_above_cap` (`brickwork_d8_local/128` against `brickwork_d10_zz/48`).
+const TENSOR_ELEMENT_MPS_COST: f64 = 2.0;
 
 /// The scalar tensor route for an `Auto` expectation above the statevector cap,
 /// where the alternative is the MPS `Auto` resolves to rather than a dense run.

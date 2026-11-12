@@ -29,7 +29,7 @@
 #                      the Linux and macOS targets the host has installed
 #   check-gpu-dist     src/sim/dispatch.rs or a cfg(feature) line
 #   nextest-dist       src/distributed/ or src/backend/distributed_statevector/
-#   clippy-pulse, nextest-pulse
+#   clippy-pulse, nextest-pulse, doc-pulse
 #                      src/pulse/ or tests/pulse_compile.rs, built with the
 #                      unstable-pulse feature no other check enables
 #   test:<script>      scripts/X.sh or scripts/X_test.sh, when scripts/X_test.sh exists
@@ -267,6 +267,10 @@ check_doc_build() {
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "${DOC_FEATURES//,/ }"
 }
 
+check_doc_pulse() {
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features "${DOC_FEATURES//,/ } unstable-pulse"
+}
+
 # stacker's build script assembles for the target, so a cross check needs a C
 # toolchain for it. On Windows the clang and llvm-ar that Visual Studio bundles serve.
 check_cross() {
@@ -432,6 +436,7 @@ run_if nextest-dist "$(first_file '^src/(distributed|backend/distributed_stateve
 PULSE_HIT="$(first_file '^(src/pulse/|tests/pulse_compile\.rs$)')"
 run_if clippy-pulse "$PULSE_HIT" "no pulse change" check_clippy_pulse
 run_if nextest-pulse "$PULSE_HIT" "no pulse change" check_nextest_pulse
+run_if doc-pulse "$PULSE_HIT" "no pulse change" check_doc_pulse
 
 run_if doc-build "$(first_hit '^[+-]$' '^src/.*\.rs$' '^[[:space:]]*//[/!]')" \
     "no docstring changed under src/" check_doc_build

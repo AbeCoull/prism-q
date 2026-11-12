@@ -68,6 +68,11 @@ pub enum PulseError {
 /// Each site's frame at the end is its drive line's frame, so a net
 /// [`Schedule::shift_phase`] shows up in the result as a Z rotation, the virtual Z
 /// convention.
+///
+/// Integration runs in the frame of the earliest play's carrier. A drive on any other
+/// carrier is held at each segment's midpoint, which costs about `(2 pi d s)^2 / 24` of
+/// its amplitude for a carrier `d` Hz away and segments of `s` seconds: 6e-4 at 300 MHz
+/// and 16 substeps per ns. Raise `substeps` for schedules that mix carriers.
 pub fn compile(
     device: &Device,
     schedule: &Schedule,

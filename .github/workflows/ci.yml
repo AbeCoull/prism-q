@@ -240,6 +240,11 @@ jobs:
       - name: Tests
         run: cargo nextest run --features "parallel unstable-pulse" --test pulse_compile
 
+      - name: Docs
+        run: cargo doc --no-deps --features "$CI_DOC_FEATURES unstable-pulse"
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   # The MPI transport against Open MPI, under a real launcher. The loopback suite
   # above never links MPI, and a Windows MS-MPI run speaks for neither Open MPI's
   # handle types (`MPI_Comm` is a pointer there, an int in MS-MPI) nor its launcher.
@@ -1049,6 +1054,7 @@ jobs:
       - avx512-sde
       - check-no-default-features
       - check-distributed
+      - check-pulse
       - mpi-linux
       - miri
       - miri-avx2

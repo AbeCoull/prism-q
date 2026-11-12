@@ -230,6 +230,47 @@ fn mixed_levels_factor_into_single_sites() {
 }
 
 #[test]
+fn carrier_off_the_integration_frame_converges() {
+    // A zero-amplitude play on site 1 comes first, so the integration frame sits on its
+    // carrier and site 0's drive rotates at 300 MHz in it. Holding that drive at each
+    // segment midpoint costs accuracy that falls as the square of the segment length.
+    let drag = || Envelope::Drag {
+        amp: pi_pulse_amp(),
+        sigma: 5.0 * NS,
+        beta: drag_beta(),
+    };
+    let error = |substeps: usize| {
+        let mut alone = Schedule::new(NS);
+        alone.play(0, NS, 20.0 * NS, drag());
+        let one = compile(&Device::new([transmon(5e9, 3)]), &alone, substeps)
+            .unwrap()
+            .unitary();
+
+        let mut both = Schedule::new(NS);
+        both.play(1, 0.0, NS, Envelope::Constant { amp: 0.0 })
+            .play(0, NS, 20.0 * NS, drag());
+        let pair = Device::new([transmon(5e9, 3), transmon(5.3e9, 2)]);
+        let two = compile(&pair, &both, substeps).unwrap().unitary();
+
+        let mut worst = 0.0f64;
+        for row in 0..4 {
+            for column in 0..4 {
+                let expected = if row % 2 == column % 2 {
+                    one[(row / 2) * 2 + column / 2]
+                } else {
+                    Complex64::new(0.0, 0.0)
+                };
+                worst = worst.max((two[row * 4 + column] - expected).norm());
+            }
+        }
+        worst
+    };
+    let (coarse, fine) = (error(16), error(64));
+    assert!(fine < coarse / 10.0, "coarse {coarse:e}, fine {fine:e}");
+    assert!(fine < 1e-4, "fine {fine:e}");
+}
+
+#[test]
 fn error_after_completes_the_ideal_gate() {
     let compiled = pi_pulse(&Device::new([transmon(5e9, 3)]), drag_beta());
     let ideal = Gate::Rx(PI);
@@ -366,6 +407,13 @@ fn invalid_schedules_are_rejected() {
             Envelope::Gaussian {
                 amp: 1e6,
                 sigma: 0.0,
+            },
+        ),
+        (
+            NS,
+            Envelope::Gaussian {
+                amp: 1e6,
+                sigma: 1.0,
             },
         ),
         (

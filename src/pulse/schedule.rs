@@ -40,7 +40,7 @@ pub enum Envelope {
 }
 
 impl Envelope {
-    fn check(&self, samples: usize) -> Result<(), String> {
+    fn check(&self, samples: usize, duration: f64) -> Result<(), String> {
         let finite = |name: &str, value: f64| {
             if value.is_finite() {
                 Ok(())
@@ -55,16 +55,29 @@ impl Envelope {
                 Err(format!("{name} must be finite and positive, got {value}"))
             }
         };
+        // The lift divides by one minus the Gaussian at the edge, which rounds to zero once
+        // sigma is about 1e8 edges wide.
+        let liftable = |sigma: f64, reach: f64| {
+            if (-0.5 * (reach / sigma).powi(2)).exp() < 1.0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "sigma {sigma} s is too wide for an edge of {reach} s to reach zero"
+                ))
+            }
+        };
         match self {
             Envelope::Constant { amp } => finite("amp", *amp),
             Envelope::Gaussian { amp, sigma } => {
                 finite("amp", *amp)?;
-                positive("sigma", *sigma)
+                positive("sigma", *sigma)?;
+                liftable(*sigma, 0.5 * duration)
             }
             Envelope::Drag { amp, sigma, beta } => {
                 finite("amp", *amp)?;
                 positive("sigma", *sigma)?;
-                finite("beta", *beta)
+                finite("beta", *beta)?;
+                liftable(*sigma, 0.5 * duration)
             }
             Envelope::GaussianSquare { amp, sigma, width } => {
                 finite("amp", *amp)?;
@@ -72,6 +85,10 @@ impl Envelope {
                 finite("width", *width)?;
                 if *width < 0.0 {
                     return Err(format!("width must not be negative, got {width}"));
+                }
+                let edge = 0.5 * (duration - width);
+                if edge > 0.0 {
+                    liftable(*sigma, edge)?;
                 }
                 Ok(())
             }
@@ -261,7 +278,9 @@ impl Schedule {
                     play.duration
                 )));
             }
-            play.envelope.check(len).map_err(invalid)?;
+            play.envelope
+                .check(len, len as f64 * period)
+                .map_err(invalid)?;
             lines[site].plays.push(SlotPlay {
                 start,
                 len,

@@ -248,8 +248,8 @@ a model of one to three transmons once and hands the result to the gate level. I
 closed-system only and outside the [stability promise](compatibility.md#feature-flags):
 its items may change in any release.
 
-```toml
-prism-q = { version = "*", features = ["unstable-pulse"] }
+```bash
+cargo add prism-q --features unstable-pulse
 ```
 
 ```rust,ignore

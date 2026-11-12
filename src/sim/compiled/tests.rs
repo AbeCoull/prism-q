@@ -1347,6 +1347,67 @@ fn weight_minimization_reduces_weight() {
 }
 
 #[test]
+fn weight_minimization_matches_row_by_row_greedy() {
+    use rand::{RngExt, SeedableRng};
+
+    fn reference(rows: &mut [Vec<u64>]) -> usize {
+        let rank = rows.len();
+        let weight = |r: &[u64]| r.iter().map(|w| w.count_ones()).sum::<u32>();
+        let mut weights: Vec<u32> = rows.iter().map(|r| weight(r)).collect();
+        for _ in 0..5 {
+            let mut improved = false;
+            for i in 0..rank {
+                if weights[i] == 0 {
+                    continue;
+                }
+                let mut best = (usize::MAX, weights[i]);
+                for j in (0..rank).filter(|&j| j != i) {
+                    let w: u32 = rows[i]
+                        .iter()
+                        .zip(&rows[j])
+                        .map(|(a, b)| (a ^ b).count_ones())
+                        .sum();
+                    if w < best.1 {
+                        best = (j, w);
+                    }
+                }
+                if best.0 != usize::MAX {
+                    let src = rows[best.0].clone();
+                    for (d, s) in rows[i].iter_mut().zip(&src) {
+                        *d ^= s;
+                    }
+                    weights[i] = best.1;
+                    improved = true;
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        weights.iter().map(|&w| w as usize).sum()
+    }
+
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for words in 1..=6 {
+        for rank in [2, 7, 33, 90] {
+            let rows: Vec<Vec<u64>> = (0..rank)
+                .map(|_| {
+                    (0..words)
+                        .map(|_| rng.random::<u64>() & rng.random::<u64>() & rng.random::<u64>())
+                        .collect()
+                })
+                .collect();
+            let mut expected = rows.clone();
+            let expected_after = reference(&mut expected);
+            let mut actual = rows;
+            let (_, after) = minimize_flip_row_weight(&mut actual);
+            assert_eq!(actual, expected, "words {words}, rank {rank}");
+            assert_eq!(after, expected_after, "words {words}, rank {rank}");
+        }
+    }
+}
+
+#[test]
 fn weight_minimization_preserves_sampling() {
     let mut c = circuits::clifford_random_pairs(16, 20, 42);
     c.num_classical_bits = 16;

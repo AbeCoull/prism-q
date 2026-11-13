@@ -98,6 +98,13 @@ Every other backend keeps the block split.
 `only_the_product_state_takes_the_native_sampler_past_decomposition`
 (`src/sim/tests.rs`) pins both sides.
 
+For multiple shots of terminal measurements above 64 total qubits, decomposed host
+statevector blocks cache their states before the first measurement. Each shot copies
+that state into a reusable buffer and applies the original measurement suffix with
+the same shot and block seeds as full replay. Gate evolution runs once per block;
+measurement order, collapse arithmetic and ordered shot output stay unchanged. Blocks
+at the statevector memory cap, resets and other backend families retain full replay.
+
 MPS records each bit against the logical qubit hosted at a site, not the site index, so
 a layout permuted by SWAP routing needs no canonicalization pass.
 `tests/integration/native_sampling.rs` pins that case.

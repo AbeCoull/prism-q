@@ -4294,6 +4294,26 @@ fn run_shots_per_shot(
             })
             .collect();
 
+        if num_shots > 1
+            && circuit.num_qubits > 64
+            && circuit.has_terminal_measurements_only()
+            && !circuit.has_resets()
+            && circuit.save_count() == 0
+            && block_plans.iter().zip(comps).all(|(plan, comp)| {
+                plan.is_host_statevector() && comp.len() < limits.statevector_qubits.value
+            })
+        {
+            return decomposed::sample_terminal_blocks(
+                comps,
+                &partitions,
+                &fused_blocks,
+                circuit,
+                num_shots,
+                seed,
+                limits,
+            );
+        }
+
         let block_states: Vec<(ResolvedBackend, usize)> = block_plans
             .iter()
             .zip(comps)

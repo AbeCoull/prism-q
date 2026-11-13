@@ -1597,6 +1597,38 @@ fn bench_qec_compile(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_terminal_disjoint_blocks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("terminal_disjoint_blocks");
+    common::configure_group(&mut group);
+    for n in [40, 60, 70, 100, 200] {
+        for (strided, layout) in [(false, "contiguous"), (true, "strided")] {
+            let circuit = common::fixtures::terminal_disjoint_blocks(n, strided, SEED);
+            for counts in [false, true] {
+                let mode = if counts { "counts" } else { "shots" };
+                group.bench_with_input(
+                    BenchmarkId::new(format!("{layout}/{mode}"), n),
+                    &circuit,
+                    |b, circuit| {
+                        b.iter(|| {
+                            if counts {
+                                black_box(
+                                    run_counts_with(BackendKind::Auto, circuit, 1000, SEED)
+                                        .unwrap(),
+                                );
+                            } else {
+                                black_box(
+                                    run_shots_with(BackendKind::Auto, circuit, 1000, SEED).unwrap(),
+                                );
+                            }
+                        });
+                    },
+                );
+            }
+        }
+    }
+    group.finish();
+}
+
 /// A 1M-shot distance-5 repetition memory postselected on all 20 check records, so
 /// counting the accepted shots and their logical errors is a large share of the run:
 /// once over the whole run unchunked, and once per chunk at 16384 shots, a whole number
@@ -1638,6 +1670,7 @@ criterion_group! {
     config = common::criterion_config();
     targets =
         bench_api_queries,
+    bench_terminal_disjoint_blocks,
     bench_run_shots,
     bench_counts,
     bench_run_counts_terminal,

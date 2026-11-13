@@ -134,6 +134,7 @@ const LEDGER: &[Entry] = &[
     lowered("shots", "deferred_clifford_register", Sv, "auto_deferred_register_shots_follow_the_statevector"),
     here("shots", "mid_circuit_branches", Sv, "mid_circuit_branches_take_a_declined_circuit_past_the_cap"),
     here("shots", "ShotSource::PerShot", ClosedForm, "per_shot_route_follows_the_closed_form"),
+    here("shots", "parity_ancilla_rewrite", Sv, "parity_ancilla_rewrite_matches_the_unrewritten_walk"),
     here("shots", "initial_state", Sv, "initial_state_terminals_match_the_unfused_statevector"),
     here("sample_counts", "compiled_counts_multinomial", Sv, "compiled_count_regimes_follow_the_statevector"),
     here("sample_counts", "compiled_counts_rank_space", Sv, "compiled_count_regimes_follow_the_statevector"),
@@ -203,6 +204,7 @@ const PREDICATE_ROUTES: &[&str] = &[
     "clifford_register",
     "deferred_clifford_register",
     "mid_circuit_branches",
+    "parity_ancilla_rewrite",
     "compiled_counts_multinomial",
     "compiled_counts_rank_space",
     "compiled_counts_chunked",
@@ -2607,4 +2609,267 @@ fn prepared_tensor_first_matches_the_unfused_statevector() {
         template.clone(),
         Parameters::all_rotations(&template),
     );
+}
+
+/// `rounds` rounds over `2k` data qubits and `k` ancillas (`n = 3k`): rotations, a
+/// brick of CX gates, then each ancilla reads the parity of its data pair, is measured,
+/// flips the pair's first qubit on a 1, and resets; a terminal readout of the data
+/// follows.
+fn parity_rounds(n: usize, rounds: usize) -> Circuit {
+    let anc = n / 3;
+    let data = 2 * anc;
+    let mut c = Circuit::new(n, rounds * anc + data);
+    for r in 0..rounds {
+        for q in 0..data {
+            c.add_gate(Gate::Ry(0.31 + 0.23 * (q + 3 * r) as f64), &[q]);
+            c.add_gate(Gate::Rz(0.17 + 0.41 * (q + r) as f64), &[q]);
+        }
+        for q in ((r % 2)..data - 1).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for j in 0..anc {
+            let (a, bit) = (data + j, r * anc + j);
+            c.add_gate(Gate::Cx, &[2 * j, a]);
+            c.add_gate(Gate::Cx, &[2 * j + 1, a]);
+            c.add_measure(a, bit);
+            c.instructions.push(Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(bit),
+                gate: Gate::X,
+                targets: crate::circuit::smallvec![2 * j],
+            });
+            c.add_reset(a);
+        }
+    }
+    for q in 0..data {
+        c.add_measure(q, rounds * anc + q);
+    }
+    c
+}
+
+/// Three rotated data qubits read by ancilla 3 each round, the span shaped by `span`
+/// and every span but the last closed by `close`.
+fn three_source_rounds(
+    rounds: usize,
+    span: impl Fn(&mut Circuit, usize),
+    close: impl Fn(&mut Circuit, usize, usize),
+) -> Circuit {
+    let mut c = Circuit::new(4, rounds + 3);
+    for r in 0..rounds {
+        for q in 0..3 {
+            c.add_gate(Gate::Ry(0.4 + 0.3 * (q + r) as f64), &[q]);
+        }
+        c.add_gate(Gate::Cx, &[0, 1]);
+        span(&mut c, 3);
+        c.add_measure(3, r);
+        if r + 1 < rounds {
+            close(&mut c, 3, r);
+        }
+    }
+    for q in 0..3 {
+        c.add_measure(q, rounds + q);
+    }
+    c
+}
+
+fn pick_up_all(c: &mut Circuit, a: usize) {
+    for d in 0..3 {
+        c.add_gate(Gate::Cx, &[d, a]);
+    }
+}
+
+fn reset_after(c: &mut Circuit, a: usize, _bit: usize) {
+    c.add_reset(a);
+}
+
+fn active_reset_after(c: &mut Circuit, a: usize, bit: usize) {
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(bit),
+        gate: Gate::X,
+        targets: crate::circuit::smallvec![a],
+    });
+}
+
+fn flip_then_pick_up(c: &mut Circuit, a: usize) {
+    c.add_gate(Gate::X, &[a]);
+    pick_up_all(c, a);
+}
+
+/// Circuits the parity rewrite takes, one per case of its grammar, with a shot count.
+fn rewritten_cases() -> Vec<(&'static str, Circuit, usize)> {
+    vec![
+        ("parity rounds 12q", parity_rounds(12, 3), 20_000),
+        ("parity rounds 18q", parity_rounds(18, 3), 2_000),
+        (
+            "three sources",
+            three_source_rounds(1, pick_up_all, reset_after),
+            20_000,
+        ),
+        (
+            "a flip in the span",
+            three_source_rounds(2, flip_then_pick_up, reset_after),
+            20_000,
+        ),
+        (
+            "four rounds",
+            three_source_rounds(4, pick_up_all, reset_after),
+            20_000,
+        ),
+        (
+            "active reset",
+            three_source_rounds(3, pick_up_all, active_reset_after),
+            20_000,
+        ),
+    ]
+}
+
+// The rewrite reaches only `Auto`, so explicit `Statevector` walks the circuit as
+// written: the same outcome law on a register wider by the ancillas. The three-source
+// cases end on a span with no reset.
+#[test]
+fn parity_ancilla_rewrite_matches_the_unrewritten_walk() {
+    for (label, circuit, shots) in rewritten_cases() {
+        let rewritten = rewrite_parity_ancillas(&circuit)
+            .unwrap_or_else(|| panic!("{label}: the pass declined"));
+        assert!(rewritten.num_qubits < circuit.num_qubits, "{label}: width");
+        let new = simulate(&circuit).seed(SEED).shots(shots).unwrap();
+        let old = simulate(&circuit)
+            .backend(BackendKind::Statevector)
+            .seed(SEED)
+            .shots(shots)
+            .unwrap();
+        assert_same_frequencies(label, &new, &old);
+        for bit in 0..circuit.num_classical_bits {
+            let ones = |r: &ShotsResult| r.shots.iter().filter(|s| s[bit]).count() as f64;
+            let (a, b) = (ones(&new) / shots as f64, ones(&old) / shots as f64);
+            let p = (a + b) / 2.0;
+            let bound = 5.0 * (p * (1.0 - p) * 2.0 / shots as f64).sqrt() + 1.0 / shots as f64;
+            assert!(
+                (a - b).abs() <= bound,
+                "{label}: bit {bit} at {a} against {b}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_parity_rewrite_plans_the_width_it_runs() {
+    let circuit = parity_rounds(18, 3);
+    let rewritten = rewrite_parity_ancillas(&circuit).unwrap();
+    assert_eq!(rewritten.num_qubits, 12);
+    // Under a 15-qubit statevector cap only the rewritten width fits a dense state.
+    let result = assert_plan_matches_run("parity rounds", &circuit, statevector_cap(15), 200);
+    assert_eq!(result.metadata.backend, ResolvedBackend::Statevector);
+    let plan = |kind: BackendKind| {
+        simulate(&circuit)
+            .backend(kind)
+            .limits(statevector_cap(15))
+            .plan(Query::Shots(200))
+            .unwrap()
+    };
+    let auto = plan(BackendKind::Auto);
+    assert_eq!(auto.backend, ResolvedBackend::Statevector);
+    assert!(auto.would_fail.is_none());
+    assert!(plan(BackendKind::Statevector).would_fail.is_some());
+
+    // One thread, so every pass ticks on the counting thread.
+    let ticks = |c: &Circuit| {
+        crate::ThreadPool::with_threads(1).unwrap().install(|| {
+            crate::backend::statevector::sweeps::take_ticks();
+            let shots = simulate(c).seed(SEED).shots(200).unwrap().shots;
+            (shots, crate::backend::statevector::sweeps::take_ticks())
+        })
+    };
+    assert_eq!(ticks(&circuit), ticks(&rewritten));
+}
+
+#[test]
+fn a_clifford_parity_memory_keeps_the_compiled_sampler() {
+    let mut circuit = parity_rounds(9, 3);
+    circuit.instructions.retain(|inst| {
+        !matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::Ry(_) | Gate::Rz(_),
+                ..
+            }
+        )
+    });
+    for q in 0..6 {
+        circuit.instructions.insert(
+            0,
+            Instruction::Gate {
+                gate: Gate::H,
+                targets: crate::circuit::smallvec![q],
+            },
+        );
+    }
+    assert!(rewrite_parity_ancillas(&circuit).is_some());
+    assert_eq!(
+        source_key(&BackendKind::Auto, &circuit, 10_000),
+        "ShotSource::CompiledDeferred"
+    );
+}
+
+// Each circuit breaks one rule of the grammar on its only ancilla, so `Auto` walks it
+// as written and matches explicit `Statevector` shot for shot.
+#[test]
+fn a_declined_parity_circuit_walks_as_written() {
+    let cases: [(&str, Circuit); 4] = [
+        (
+            "h on the ancilla",
+            three_source_rounds(
+                2,
+                |c, a| {
+                    pick_up_all(c, a);
+                    c.add_gate(Gate::H, &[a]);
+                },
+                reset_after,
+            ),
+        ),
+        (
+            "rz on a frozen source",
+            three_source_rounds(
+                2,
+                |c, a| {
+                    pick_up_all(c, a);
+                    c.add_gate(Gate::Rz(0.3), &[0]);
+                },
+                reset_after,
+            ),
+        ),
+        (
+            "ancilla as a control",
+            three_source_rounds(
+                2,
+                |c, a| {
+                    pick_up_all(c, a);
+                    c.add_gate(Gate::Cx, &[a, 0]);
+                },
+                reset_after,
+            ),
+        ),
+        (
+            "second measurement",
+            three_source_rounds(2, pick_up_all, |c, a, bit| c.add_measure(a, bit)),
+        ),
+    ];
+    for (label, circuit) in cases {
+        assert!(
+            rewrite_parity_ancillas(&circuit).is_none(),
+            "{label}: the pass fired"
+        );
+        let run = |kind: BackendKind| {
+            simulate(&circuit)
+                .backend(kind)
+                .seed(SEED)
+                .shots(2_000)
+                .unwrap()
+                .shots
+        };
+        assert_eq!(
+            run(BackendKind::Auto),
+            run(BackendKind::Statevector),
+            "{label}"
+        );
+    }
 }

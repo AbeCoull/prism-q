@@ -603,7 +603,13 @@ pub(super) fn inspect<S>(
                     Ok(p)
                 }
                 ShotRoute::PerShot => {
-                    let mut p = inspect_probability(kind, circuit, limits)?;
+                    let rewritten = if has_temporal_clifford_opportunity(kind, circuit, limits) {
+                        None
+                    } else {
+                        parity_rewrite(kind, circuit)
+                    };
+                    let mut p =
+                        inspect_probability(kind, rewritten.as_ref().unwrap_or(circuit), limits)?;
                     #[cfg(feature = "bench-internal")]
                     if !mid_circuit_route_live()
                         && kind.is_auto()

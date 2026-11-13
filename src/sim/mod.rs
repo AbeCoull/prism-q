@@ -66,6 +66,7 @@ use num_complex::Complex64;
 use crate::backend::Backend;
 use crate::backend::sparse::MAX_SPARSE_INDEX_QUBITS;
 use crate::backend::statevector::StatevectorBackend;
+use crate::circuit::parity_ancilla::rewrite_parity_ancillas;
 use crate::circuit::{Circuit, Instruction, SaveRecord, SaveSpec, SavedValue};
 use crate::error::{PrismError, Result};
 use crate::limits::{Limits, ResolvedLimits};
@@ -2811,6 +2812,27 @@ fn mid_circuit_route_live() -> bool {
     true
 }
 
+/// Whether `Auto` per-shot runs drop parity ancillas: always in a shipping build, on
+/// `PRISM_BENCH_VARIANT=d` under `bench-internal`.
+#[cfg(feature = "bench-internal")]
+fn parity_rewrite_live() -> bool {
+    crate::bench_variant('d')
+}
+#[cfg(not(feature = "bench-internal"))]
+fn parity_rewrite_live() -> bool {
+    true
+}
+
+/// The circuit an `Auto` per-shot run walks in place of `circuit`, once every route
+/// ahead of the walk has declined: its parity ancillas folded into parity measurements
+/// on the data qubits ([`rewrite_parity_ancillas`]).
+fn parity_rewrite(kind: &BackendKind, circuit: &Circuit) -> Option<Circuit> {
+    if !kind.is_auto() || !parity_rewrite_live() {
+        return None;
+    }
+    rewrite_parity_ancillas(circuit)
+}
+
 fn prepare_terminal_statevector_backend(
     kind: &BackendKind,
     terminal: TerminalCircuit,
@@ -4284,6 +4306,14 @@ fn run_shots_per_shot(
         );
     }
 
+    let rewritten = parity_rewrite(&kind, circuit);
+    let (circuit, decompose, has_partial_independence) = match &rewritten {
+        Some(rewritten) => {
+            let (decompose, partial) = analyze_independence(rewritten);
+            (rewritten, decompose, partial)
+        }
+        None => (circuit, decompose, has_partial_independence),
+    };
     let opts = SimOptions::classical_only();
 
     if let Some((ref comps, _)) = decompose {

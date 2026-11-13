@@ -76,3 +76,8 @@ Seeded output has changed in these releases:
   the statevector cap, a circuit the register does not take runs on the statevector walk;
   past the cap, one whose measurements stay in place keeps the branches up to 6 T gates
   and goes to the dispatch tree beyond. Fixed-seed shots on those circuits changed.
+- 0.39.0 drops parity ancillas from `Auto` shots of a circuit that reaches the
+  mid-circuit walk. An ancilla that only collects CX gates from data qubits and X flips,
+  is measured, and is then reset or left alone becomes a parity measurement on those data
+  qubits, so the walk runs on a smaller register. Fixed-seed shots on those circuits
+  changed; explicit `Statevector` keeps the ancillas and its shots.

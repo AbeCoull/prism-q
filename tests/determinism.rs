@@ -1191,3 +1191,62 @@ fn noisy_guarded_pauli_shots_identical_across_thread_counts() {
         "guarded metadata differs"
     );
 }
+
+/// Parity checks over `2k` rotated data qubits onto `k` ancillas (`n = 3k`), each
+/// measured, fed back onto its first data qubit and reset, then a data readout. With
+/// `declined` an `H` lands on each ancilla inside its span, which keeps the ancillas.
+fn parity_rounds(n: usize, rounds: usize, declined: bool) -> Circuit {
+    let anc = n / 3;
+    let data = 2 * anc;
+    let mut c = Circuit::new(n, rounds * anc + data);
+    for r in 0..rounds {
+        for q in 0..data {
+            c.add_gate(Gate::Ry(0.31 + 0.23 * (q + 3 * r) as f64), &[q]);
+        }
+        for q in ((r % 2)..data - 1).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for j in 0..anc {
+            let (a, bit) = (data + j, r * anc + j);
+            c.add_gate(Gate::Cx, &[2 * j, a]);
+            if declined {
+                c.add_gate(Gate::H, &[a]);
+            }
+            c.add_gate(Gate::Cx, &[2 * j + 1, a]);
+            c.add_measure(a, bit);
+            c.instructions.push(Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(bit),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[2 * j]),
+            });
+            c.add_reset(a);
+        }
+    }
+    for q in 0..data {
+        c.add_measure(q, rounds * anc + q);
+    }
+    c
+}
+
+// The 18-qubit circuit drops to 12 qubits, where splits run on separate workers.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn parity_ancilla_shots_identical_across_thread_counts() {
+    for (n, declined) in [(18, false), (12, true)] {
+        let circuit = parity_rounds(n, 3, declined);
+        let shots = |threads: usize| {
+            in_pool(threads, || {
+                simulate(&circuit)
+                    .seed(SEED)
+                    .shots(PER_SHOT_SHOTS)
+                    .expect("parity shots")
+                    .shots
+            })
+        };
+        assert_eq!(
+            shots(1),
+            shots(THREADS_HI),
+            "{n} qubits, declined {declined}"
+        );
+    }
+}

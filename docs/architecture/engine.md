@@ -185,6 +185,28 @@ distribution on a circuit that splits into independent blocks, unless those bloc
 as product states, and under a noise model, where the mixture is read densely and the
 density-matrix cap applies.
 
+### Parity ancillas on the walk
+
+`Auto` shots that reach the mid-circuit walk, after the compiled sampler, the Clifford
+register and the temporal Clifford prefix have declined, first drop their parity
+ancillas (`src/circuit/parity_ancilla.rs`). A qubit `a` qualifies when every instruction
+touching it reads
+
+```text
+( CX(d -> a) | X a )*   Measure a -> bit   ( Reset a | if (bit) x a )?
+```
+
+repeated, the closing group optional only on the last span, and each source `d` takes
+nothing but CX gates it controls from its pickup to the measurement. Each span becomes a
+measurement of the parity of its sources (the `X a` count inverts it): the sources fan
+onto the lowest one with CX gates, it is measured into the same bit, and the fan is
+undone. The ancilla leaves the register and the other qubits keep their order, so the
+walk, the independence analysis and `Simulate::plan` all see the smaller width. Any
+other gate, guard or region on the ancilla, an empty parity, a reset with no
+measurement, or a second measurement with no reset keeps that ancilla; a save keeps them
+all. Explicit backends, noisy runs, start states and dynamic programs never reach the
+rewrite.
+
 ### Auto dispatch policy
 
 Routing constants are static values in `src/sim/dispatch.rs`, except the dense memory

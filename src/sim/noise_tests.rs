@@ -2001,7 +2001,7 @@ fn guarded_paulis_compile_to_the_records_stabilizer_replay_reads() {
 // the reported value onto q1, and onto q2 an X that a certain X in the guarded slot
 // undoes, so c1 matches c0 and c2 is always 0: the guarded event lands only where the
 // guard holds, and the guard reads the bit readout flipped. Asymmetric readout on the
-// guarded bit leaves the compiled sampler and keeps the same law.
+// guarded bit lands after the compiled sample and keeps the same law.
 #[test]
 fn a_guarded_event_lands_where_its_guard_reads_the_flipped_bit() {
     use crate::circuit::ClassicalCondition as C;
@@ -2023,7 +2023,7 @@ fn a_guarded_event_lands_where_its_guard_reads_the_flipped_bit() {
     noise.after_gate[circuit.instructions.len() + 1] = vec![NoiseEvent::pauli(2, 1.0, 0.0, 0.0)];
 
     let shots = 4000;
-    for (p01, p10, compiled) in [(1.0, 1.0, true), (1.0, 0.0, false)] {
+    for (p01, p10, compiled) in [(1.0, 1.0, true), (1.0, 0.0, true)] {
         noise.set_bit_readout_error(0, p01, p10);
         let routed = crate::sim::simulate(&circuit)
             .noise(&noise)
@@ -2482,4 +2482,20 @@ fn lookup_round() -> Circuit {
 fn lookup_counts_follow_stabilizer_replay() {
     let circuit = lookup_round();
     assert_counts_follow_replay(&circuit, &noisy_feedforward_model(&circuit));
+}
+
+// Asymmetric readout on both check bits the corrections read, under parity guards alone,
+// behind an active reset, and under register comparisons.
+#[test]
+fn asymmetric_guarded_readout_counts_follow_stabilizer_replay() {
+    for circuit in [
+        noisy_feedforward_round(),
+        active_reset_round(),
+        lookup_round(),
+    ] {
+        let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.05);
+        noise.set_bit_readout_error(0, 0.02, 0.05);
+        noise.set_bit_readout_error(1, 0.30, 0.05);
+        assert_counts_follow_replay(&circuit, &noise);
+    }
 }

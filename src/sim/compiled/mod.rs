@@ -3352,7 +3352,8 @@ pub(crate) struct DeferredCircuit {
     /// The events that fire on every shot, one slot per instruction of `circuit`, and the
     /// source model's readout on the bits no guard reads. A bit a guard reads takes its
     /// readout error as an `X` on each alias measured into it, where the measurement
-    /// writes it, so the guard and the record both see the flip.
+    /// writes it, so the guard and the record both see the flip: an every-shot event when
+    /// `p01 == p10`, else a [`GuardedKind::Readout`] entry.
     pub(crate) noise: NoiseModel,
     /// Guarded Paulis and events of guarded bodies in execution order, each landing only
     /// on the shots whose guard holds.
@@ -3409,6 +3410,9 @@ pub(crate) enum GuardedKind {
     Gate(u8),
     /// A guarded body slot's Pauli channel `(px, py, pz)`, drawn per shot.
     Noise((f64, f64, f64)),
+    /// An `X` on the alias measured into `record`, drawn per shot at `p01` where the record
+    /// reads 0 and `p10` where it reads 1.
+    Readout { record: usize, p01: f64, p10: f64 },
 }
 
 /// [`defer_measure_reset_circuit`] carrying `noise` onto the rewrite. An event on a
@@ -3433,8 +3437,9 @@ struct DeferralWalk<'a> {
     deferred_measurements: Vec<(usize, usize)>,
     /// Record each classical bit last took, `None` until a measurement writes it.
     bit_records: Vec<Option<usize>>,
-    /// Readout flip rate of each bit a guard reads, applied where a measurement writes it.
-    flips_at_write: Vec<Option<f64>>,
+    /// Readout flip rates `(p01, p10)` of each bit a guard reads, applied where a
+    /// measurement writes it.
+    flips_at_write: Vec<Option<(f64, f64)>>,
     transformed: Circuit,
     noise: Option<&'a NoiseModel>,
     after_gate: Vec<Vec<NoiseEvent>>,
@@ -3546,12 +3551,32 @@ impl<'a> DeferralWalk<'a> {
                         self.measured_aliases[alias] = true;
                         alias
                     };
-                    self.bit_records[*classical_bit] = Some(self.deferred_measurements.len());
+                    let record = self.deferred_measurements.len();
+                    self.bit_records[*classical_bit] = Some(record);
                     self.deferred_measurements
                         .push((record_alias, *classical_bit));
-                    if let Some(p) = self.flips_at_write.get(*classical_bit).copied().flatten() {
+                    if let Some((p01, p10)) =
+                        self.flips_at_write.get(*classical_bit).copied().flatten()
+                    {
                         let anchor = self.anchor();
-                        self.after_gate[anchor].push(NoiseEvent::pauli(record_alias, p, 0.0, 0.0));
+                        if p01 == p10 {
+                            self.after_gate[anchor].push(NoiseEvent::pauli(
+                                record_alias,
+                                p01,
+                                0.0,
+                                0.0,
+                            ));
+                        } else {
+                            self.guarded.push(GuardedEvent {
+                                anchor,
+                                guard: Guard::Parity {
+                                    records: SmallVec::new(),
+                                    invert: true,
+                                },
+                                qubit: record_alias,
+                                kind: GuardedKind::Readout { record, p01, p10 },
+                            });
+                        }
                     }
                 }
                 Instruction::Reset { qubit } => {
@@ -3901,6 +3926,16 @@ impl<'a> DeferralWalk<'a> {
     }
 }
 
+/// Whether asymmetric readout on a bit a guard reads lands after the compiled sample rather
+/// than declining the rewrite.
+fn lands_asymmetric_readout() -> bool {
+    #[cfg(feature = "bench-internal")]
+    if !crate::bench_variant('d') {
+        return false;
+    }
+    true
+}
+
 /// Whether a guard comparing several measured bits lands its body after the compiled
 /// sample rather than declining the rewrite.
 fn lands_register_comparisons() -> bool {
@@ -3958,11 +3993,15 @@ fn reused_measurements(circuit: &Circuit, noisy: bool) -> Vec<bool> {
     marked
 }
 
-/// The readout flip rate of each classical bit a guard reads, for the bits whose readout
-/// error can flip them. A measured alias only ever controls later gates, so an `X` on it
-/// flips the record and every guard reading it and leaves the rest of the state alone. That
-/// `X` fires whatever the outcome, which matches readout error only when `p01 == p10`.
-fn readout_flips_at_write(circuit: &Circuit, noise: &NoiseModel) -> Result<Vec<Option<f64>>> {
+/// The readout flip rates `(p01, p10)` of each classical bit a guard reads, for the bits
+/// whose readout error can flip them. A measured alias only ever controls later gates, so
+/// an `X` on it flips the record and every guard reading it and leaves the rest of the state
+/// alone. Equal rates fire that `X` whatever the outcome; unequal ones pick the rate by the
+/// record's value after the compiled sample.
+fn readout_flips_at_write(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+) -> Result<Vec<Option<(f64, f64)>>> {
     let read = circuit.condition_bits();
     let mut flips = vec![None; read.len()];
     for (bit, err) in noise.readout.iter().enumerate() {
@@ -3972,7 +4011,7 @@ fn readout_flips_at_write(circuit: &Circuit, noise: &NoiseModel) -> Result<Vec<O
         if !read.get(bit).copied().unwrap_or(false) {
             continue;
         }
-        if err.p01 != err.p10 {
+        if err.p01 != err.p10 && !lands_asymmetric_readout() {
             return Err(PrismError::IncompatibleBackend {
                 backend: "CompiledSampler".to_string(),
                 reason: format!(
@@ -3982,7 +4021,7 @@ fn readout_flips_at_write(circuit: &Circuit, noise: &NoiseModel) -> Result<Vec<O
                 ),
             });
         }
-        flips[bit] = Some(err.p01);
+        flips[bit] = Some((err.p01, err.p10));
     }
     Ok(flips)
 }

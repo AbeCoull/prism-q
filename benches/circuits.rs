@@ -5888,8 +5888,8 @@ fn bench_dynamic_clifford_shots(c: &mut Criterion) {
     }
 
     // A guard reading a bit under readout error. Symmetric readout stays on the
-    // compiled sampler as an X on the measured alias; asymmetric readout declines it
-    // to per-shot tableau replay, flipping each bit as its measurement writes it.
+    // compiled sampler as an X on the measured alias; asymmetric readout lands that X
+    // after the compiled sample, at the rate the record's value picks.
     let n = 16;
     let mut body = Circuit::new(n, n + 1);
     layered_clifford_body(&mut body, n, 4, SEED);
@@ -5905,12 +5905,7 @@ fn bench_dynamic_clifford_shots(c: &mut Criterion) {
             0.05,
             prism_q::ResolvedBackend::CompiledStabilizer,
         ),
-        (
-            "readout_asymmetric",
-            0.02,
-            0.05,
-            prism_q::ResolvedBackend::Stabilizer,
-        ),
+        ("readout_asymmetric", 0.02, 0.05, asymmetric_readout_route()),
     ] {
         let noise = witness_readout_noise(&circuit, p01, p10);
         assert_guard_reads_flipped_bit(&circuit, &noise, shots, n, route);
@@ -5925,6 +5920,14 @@ fn bench_dynamic_clifford_shots(c: &mut Criterion) {
         );
     }
     group.finish();
+}
+
+fn asymmetric_readout_route() -> prism_q::ResolvedBackend {
+    #[cfg(feature = "bench-internal")]
+    if !prism_q::bench_variant('d') {
+        return prism_q::ResolvedBackend::Stabilizer;
+    }
+    prism_q::ResolvedBackend::CompiledStabilizer
 }
 
 /// Neutrality row:an untouched statevector row re-run under a density-matrix

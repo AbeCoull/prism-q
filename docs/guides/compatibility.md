@@ -104,5 +104,5 @@ Seeded output has changed in these releases:
   from per-shot tableau replay to the compiled sampler, which draws a different stream:
   circuits that use a measured qubit again without a reset, active reset by a guarded
   `X` among them, and guarded Paulis under a register comparison reading several
-  measured bits, the form `switch` and lookup decoding take. Circuits that compiled before
-  keep their shots.
+  measured bits, the form `switch` and lookup decoding take, and asymmetric readout error
+  on a bit a guard reads. Circuits that compiled before keep their shots.

@@ -3173,7 +3173,7 @@ fn for_each_set_bit(words: &[u64], mut f: impl FnMut(usize)) {
 }
 
 /// A guarded entry's record flips: an X error flips `x_flips`, a Z error `z_flips`, a Y
-/// both. A gate's flips are folded into `x_flips`.
+/// both. A gate's flips are folded into `x_flips`, as are a readout flip's.
 struct GuardedFlip {
     guard: Guard,
     kind: GuardedKind,
@@ -3194,6 +3194,49 @@ impl GuardedFlip {
                 }
             }
             GuardedKind::Noise(probs) => self.land_noise(rows, num_shots, probs, rng),
+            GuardedKind::Readout { record, p01, p10 } => {
+                self.land_readout(rows, num_shots, record, p01, p10, rng)
+            }
+        }
+    }
+
+    /// Flip `record` and the records its alias reaches at the rate its value picks, with
+    /// the draws of [`apply_readout_packed`].
+    fn land_readout(
+        &self,
+        rows: &mut impl RecordRows,
+        num_shots: usize,
+        record: usize,
+        p01: f64,
+        p10: f64,
+        rng: &mut ChaCha8Rng,
+    ) {
+        let p_max = p01.max(p10);
+        if p_max >= 0.5 || num_shots < 32 {
+            for shot in 0..num_shots {
+                let p = if rows.bit(shot, record) { p10 } else { p01 };
+                let r: f64 = rand::RngExt::random(rng);
+                if r < p {
+                    rows.xor_flips(shot, &self.x_flips);
+                }
+            }
+            return;
+        }
+        let ln_1mp = (-p_max).ln_1p();
+        let accept_set = p10 / p_max;
+        let accept_clear = p01 / p_max;
+        let mut shot = geometric_sample(rng, ln_1mp);
+        while shot < num_shots {
+            let accept = if rows.bit(shot, record) {
+                accept_set
+            } else {
+                accept_clear
+            };
+            let r: f64 = rand::RngExt::random(rng);
+            if r < accept {
+                rows.xor_flips(shot, &self.x_flips);
+            }
+            shot += 1 + geometric_sample(rng, ln_1mp);
         }
     }
 
@@ -3304,12 +3347,11 @@ fn guarded_flips(circuit: &Circuit, guarded: &[GuardedEvent]) -> (Vec<GuardedFli
         while let Some(event) = pending.next_if(|event| event.anchor == instr_idx) {
             let mut x_flips = z_packed[event.qubit].clone();
             let mut z_flips = x_packed[event.qubit].clone();
-            if let GuardedKind::Gate(letter) = event.kind {
-                match letter {
-                    1 => z_flips.fill(0),
-                    2 => xor_words(&mut x_flips, &z_flips),
-                    _ => std::mem::swap(&mut x_flips, &mut z_flips),
-                }
+            match event.kind {
+                GuardedKind::Gate(1) | GuardedKind::Readout { .. } => z_flips.fill(0),
+                GuardedKind::Gate(2) => xor_words(&mut x_flips, &z_flips),
+                GuardedKind::Gate(_) => std::mem::swap(&mut x_flips, &mut z_flips),
+                GuardedKind::Noise(_) => {}
             }
             flips.push(GuardedFlip {
                 guard: event.guard.clone(),

@@ -104,9 +104,10 @@ Pauli lands on every shot its guard holds. When a guarded Pauli is among the ent
 they land on measurement rows, so a guard is a few word operations per 64 shots; readout
 comes last. Readout error on a bit a guard reads is not left to the end: the rewrite
 places an `X` of that rate on each alias measured into the bit, which the guard's
-controls and the record then both see. Only a rate equal both ways is such a Pauli, so
-asymmetric readout on a guarded bit declines the rewrite. Such a circuit always takes the
-compiled sampler, never the frame sampler.
+controls and the record then both see. A rate equal both ways fires that `X` on every
+shot. Unequal rates make it a guarded entry instead, drawn at the rate the record's value
+picks after the earlier entries land. Such a circuit always takes the compiled sampler,
+never the frame sampler.
 
 ## Slots for guarded instructions
 

@@ -1202,12 +1202,17 @@ fn noisy_guarded_pauli_shots_identical_across_thread_counts() {
             targets: SmallVec::from_slice(&[2]),
         },
     );
-    for (label, circuit) in [
-        ("guarded", &guarded),
-        ("active reset", &active_reset),
-        ("lookup", &lookup),
+    for (label, circuit, asymmetric) in [
+        ("guarded", &guarded, false),
+        ("active reset", &active_reset, false),
+        ("lookup", &lookup, false),
+        ("asymmetric readout", &lookup, true),
     ] {
-        let noise = NoiseModel::uniform_depolarizing(circuit, 0.01);
+        let mut noise = NoiseModel::uniform_depolarizing(circuit, 0.01);
+        if asymmetric {
+            noise.set_bit_readout_error(0, 0.02, 0.05);
+            noise.set_bit_readout_error(1, 0.30, 0.05);
+        }
         let shots = |threads: usize| {
             in_pool(threads, || {
                 simulate(circuit)

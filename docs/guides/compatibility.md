@@ -42,7 +42,7 @@ not part of the surface.
 A breaking release can keep a public field and change what it reports. These fields
 changed meaning:
 
-- 0.39.0 runs `run_stabilizer_rank_approx` on the Clifford register and changes three
+- Unreleased: `run_stabilizer_rank_approx` runs on the Clifford register and changes three
   fields of its `StabRankResult`. `discarded_weight` is the sum over cuts of the exact
   2-norm each cut dropped, where it was the summed 1-norm of the dropped branch weights; a
   caller's `4 * discarded_weight` remains a valid bound on the summed absolute difference
@@ -78,7 +78,7 @@ Seeded output has changed in these releases:
   state in one pass. Dynamic programs on the host statevector branch the same way, so
   their shots no longer follow `mix_seed(seed, i)`. Compiled Clifford counts at high shot
   counts draw from a corrected binomial sampler, which also fixes their spread.
-- 0.39.0 changes the draws of these routes:
+- Unreleased: these routes draw differently:
   - `Auto` terminal shots of a Clifford+T circuit are priced between the Clifford
     register and the dense run instead of capping the T count. Circuits with more than 20
     T gates, or at least as many T gates as qubits, whose register fits 20 qubits move to

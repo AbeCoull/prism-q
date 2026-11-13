@@ -2808,11 +2808,14 @@ fn the_parity_rewrite_plans_the_width_it_runs() {
 
     // One thread, so every pass ticks on the counting thread.
     let ticks = |c: &Circuit| {
-        crate::ThreadPool::with_threads(1).unwrap().install(|| {
+        let count = || {
             crate::backend::statevector::sweeps::take_ticks();
             let shots = simulate(c).seed(SEED).shots(200).unwrap().shots;
             (shots, crate::backend::statevector::sweeps::take_ticks())
-        })
+        };
+        #[cfg(feature = "parallel")]
+        let count = || crate::ThreadPool::with_threads(1).unwrap().install(count);
+        count()
     };
     assert_eq!(ticks(&circuit), ticks(&rewritten));
 }

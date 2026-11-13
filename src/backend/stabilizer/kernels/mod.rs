@@ -3,6 +3,7 @@
 //! gate's qubits, and entry points for word-group batching.
 
 pub(crate) mod batch;
+pub(crate) mod colmajor;
 pub(crate) mod rowops;
 mod simd;
 

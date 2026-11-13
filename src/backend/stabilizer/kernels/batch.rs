@@ -9,6 +9,7 @@ use crate::gates::Gate;
 #[cfg(feature = "parallel")]
 use super::MIN_QUBITS_FOR_PAR_GATES;
 use super::StabilizerBackend;
+use super::colmajor::{self, ColumnScratch};
 
 /// Minimum number of u64 words for word-group gate batching to be profitable.
 ///
@@ -912,15 +913,48 @@ impl StabilizerBackend {
         &mut self,
         instructions: &[Instruction],
     ) -> Result<()> {
+        let columns = colmajor::columns_enabled(self.n);
+        self.apply_instructions_word_batch_with(instructions, columns)
+    }
+
+    /// Word batch over `instructions`; with `columns` set, a Clifford run that
+    /// [`colmajor::run_takes_columns`] accepts goes through the column mode.
+    pub(in crate::backend::stabilizer) fn apply_instructions_word_batch_with(
+        &mut self,
+        instructions: &[Instruction],
+        columns: bool,
+    ) -> Result<()> {
         self.sgi_stale = true;
         let nw = self.num_words;
         let mut word_groups: Vec<Vec<BatchGate>> = vec![Vec::new(); nw];
         let mut cross_word: Vec<CrossWordGate> = Vec::new();
         let mut cross_word_qubits: Vec<u64> = vec![0u64; nw];
+        let mut scratch = ColumnScratch::default();
+        let mut rows_until = if columns { 0 } else { instructions.len() };
 
         let mut idx = 0;
         while idx < instructions.len() {
             let instruction = &instructions[idx];
+            if idx >= rows_until && matches!(instruction, Instruction::Gate { .. }) {
+                let (len, cross) = colmajor::col_run(&instructions[idx..], true);
+                if colmajor::run_takes_columns(cross, nw) {
+                    self.gate_rows_view()
+                        .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                    cross_word_qubits.fill(0);
+                    let rows = GateRows {
+                        n: self.n,
+                        num_words: nw,
+                        row_start: self.gate_row_start,
+                        xz: &mut self.xz,
+                        phase: &mut self.phase,
+                    };
+                    let run = &instructions[idx..idx + len];
+                    colmajor::apply_run(rows, &mut scratch, run, &self.classical_bits);
+                    idx += len;
+                    continue;
+                }
+                rows_until = idx + len.max(1);
+            }
             match instruction {
                 Instruction::Gate { gate, targets } => {
                     let chain = cx_chain_len(&instructions[idx..]);
@@ -1066,14 +1100,40 @@ pub(crate) fn apply_gates_word_batch<T: BatchTarget>(
     target: &mut T,
     instructions: &[Instruction],
 ) -> Result<()> {
+    let columns = colmajor::columns_enabled(target.batch_rows().n);
+    apply_gates_word_batch_with(target, instructions, columns)
+}
+
+/// [`apply_gates_word_batch`] with the column mode on or off.
+pub(crate) fn apply_gates_word_batch_with<T: BatchTarget>(
+    target: &mut T,
+    instructions: &[Instruction],
+    columns: bool,
+) -> Result<()> {
     let nw = target.num_words();
     let mut word_groups: Vec<Vec<BatchGate>> = vec![Vec::new(); nw];
     let mut cross_word: Vec<CrossWordGate> = Vec::new();
     let mut cross_word_qubits: Vec<u64> = vec![0u64; nw];
+    let mut scratch = ColumnScratch::default();
+    let mut rows_until = if columns { 0 } else { instructions.len() };
 
     let mut idx = 0;
     while idx < instructions.len() {
         let instruction = &instructions[idx];
+        if idx >= rows_until && matches!(instruction, Instruction::Gate { .. }) {
+            let (len, cross) = colmajor::col_run(&instructions[idx..], false);
+            if colmajor::run_takes_columns(cross, nw) {
+                target
+                    .batch_rows()
+                    .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                cross_word_qubits.fill(0);
+                let run = &instructions[idx..idx + len];
+                colmajor::apply_run(target.batch_rows(), &mut scratch, run, &[]);
+                idx += len;
+                continue;
+            }
+            rows_until = idx + len.max(1);
+        }
         idx += 1;
         match instruction {
             Instruction::Gate { gate, targets } => {

@@ -37,6 +37,20 @@ only the crate implements it and a new method is additive. Items hidden from the
 API docs, such as `prism_q::circuit::fusion`, are reachable for tests and tooling but are
 not part of the surface.
 
+## Changed results
+
+A breaking release can keep a public field and change what it reports. These fields
+changed meaning:
+
+- 0.39.0 runs `run_stabilizer_rank_approx` on the Clifford register and changes three
+  fields of its `StabRankResult`. `discarded_weight` is the sum over cuts of the exact
+  2-norm each cut dropped, where it was the summed 1-norm of the dropped branch weights; a
+  caller's `4 * discarded_weight` remains a valid bound on the summed absolute difference
+  from the exact distribution. `num_terms` and `pruned_count` count register
+  coefficients, not branches. The new field `kept_norm_sqr` carries the kept norm, and
+  `fidelity_bound()` uses both. A register wider than 20 qubits now returns
+  `BackendUnsupported`, and `seed` is ignored.
+
 ## Seeded output
 
 A seed reproduces a result within a version, under the thread-count rules each path

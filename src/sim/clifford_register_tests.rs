@@ -310,3 +310,108 @@ fn auto_shots_take_the_register_from_16_qubits_with_fewer_t_than_qubits() {
     assert_eq!(route(&ladder(12, 4)), ResolvedBackend::Statevector);
     assert_eq!(route(&ladder(16, 16)), ResolvedBackend::Statevector);
 }
+
+#[test]
+fn cut_keeps_strictly_larger_amplitudes_before_ties_in_index_order() {
+    let mut state = CliffordRegister::new(2);
+    state.width = 2;
+    state.amps = [0.5, 0.5, 0.5, 0.6]
+        .iter()
+        .map(|&a| Complex64::new(a, 0.0))
+        .collect();
+    let mut prune = Pruning::new(2);
+    state.cut(&mut prune);
+    let kept: Vec<f64> = state.amps.iter().map(|a| a.re).collect();
+    assert_eq!(kept, [0.5, 0.0, 0.0, 0.6]);
+    assert_eq!(prune.pruned, 2);
+    assert!((prune.discarded - 0.5f64.sqrt()).abs() < 1e-15);
+
+    let mut sparse = CliffordRegister::new(2);
+    sparse.width = 2;
+    sparse.amps = vec![
+        Complex64::new(0.6, 0.0),
+        Complex64::new(0.0, 0.8),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    ];
+    let before = sparse.amps.clone();
+    let mut prune = Pruning::new(2);
+    sparse.cut(&mut prune);
+    assert_eq!(sparse.amps, before);
+    assert_eq!((prune.pruned, prune.discarded), (0, 0.0));
+}
+
+fn register_pair(circuit: &Circuit, budget: usize) -> (Vec<Complex64>, Vec<Complex64>, Pruning) {
+    let exact = build_register(circuit, MAX_REGISTER_QUBITS, true, None, &mut Vec::new())
+        .unwrap()
+        .unwrap();
+    let mut prune = Pruning::new(budget);
+    let pruned = build_register(
+        circuit,
+        MAX_REGISTER_QUBITS,
+        true,
+        Some(&mut prune),
+        &mut Vec::new(),
+    )
+    .unwrap()
+    .unwrap();
+    (exact.amps, pruned.amps, prune)
+}
+
+#[test]
+fn one_cut_drops_exactly_the_reported_norm() {
+    let mut circuit = Circuit::new(3, 0);
+    for q in 0..3 {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    let (phi, psi, prune) = register_pair(&circuit, 4);
+    assert_eq!(prune.pruned, 4);
+    let dropped: f64 = phi.iter().zip(&psi).map(|(a, b)| (a - b).norm_sqr()).sum();
+    let kept: f64 = psi.iter().map(|a| a.norm_sqr()).sum();
+    let d2 = prune.discarded * prune.discarded;
+    assert!((dropped - d2).abs() < 1e-14, "{dropped} vs {d2}");
+    assert!((1.0 - kept - d2).abs() < 1e-14, "{kept} vs {d2}");
+}
+
+#[test]
+fn pruned_register_stays_within_the_summed_cut_norms() {
+    let mut multi_cut_runs = 0;
+    for seed in 0..12u64 {
+        let circuit = random_clifford_t(6, 60, 14, seed);
+        for budget in [4, 12, 24] {
+            let (phi, psi, prune) = register_pair(&circuit, budget);
+            assert!(psi.iter().filter(|a| a.norm_sqr() != 0.0).count() <= budget);
+            let distance = phi
+                .iter()
+                .zip(&psi)
+                .map(|(a, b)| (a - b).norm_sqr())
+                .sum::<f64>()
+                .sqrt();
+            let n2: f64 = psi.iter().map(|a| a.norm_sqr()).sum();
+            let overlap: Complex64 = phi.iter().zip(&psi).map(|(a, b)| a.conj() * b).sum();
+            let fidelity = overlap.norm_sqr() / n2;
+            let floor = crate::StabRankResult {
+                probabilities: Vec::new(),
+                num_terms: 0,
+                t_count: 0,
+                pruned_count: prune.pruned,
+                discarded_weight: prune.discarded,
+                kept_norm_sqr: n2,
+            }
+            .fidelity_bound();
+            let label = format!("seed {seed}, budget {budget}");
+            assert!(distance <= prune.discarded + 1e-12, "{label}: {distance}");
+            assert!(1.0 - n2 <= prune.discarded.powi(2) + 1e-12, "{label}");
+            assert!(fidelity >= floor - 1e-12, "{label}: {fidelity} < {floor}");
+            if prune.pruned == 0 {
+                assert_eq!(prune.discarded, 0.0, "{label}");
+                assert_eq!(psi, phi, "{label}");
+            } else if distance < prune.discarded - 1e-9 {
+                multi_cut_runs += 1;
+            }
+        }
+    }
+    assert!(multi_cut_runs > 0);
+}

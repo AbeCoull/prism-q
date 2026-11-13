@@ -17,6 +17,8 @@
 //!   the branches that land on one basis state of the qubits the T gates reach.
 //!   A register wider than 20 qubits falls back to reconstructing `|ψ_0⟩` and
 //!   summing weighted Pauli-shifted amplitudes.
+//!   The approximate route cuts the same register back to a coefficient budget
+//!   after each T gate and reports the exact norm each cut drops.
 //! - **Measurement sampling** (any n): terminal measurements go through a
 //!   Clifford tableau over a dense register of the qubits the T gates reach;
 //!   otherwise keep coherent weighted MPS branches,
@@ -38,7 +40,7 @@ use crate::circuit::{Circuit, GuardedRegion, Instruction, SmallVec, any_gate};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
-use super::clifford_register::{MAX_REGISTER_QUBITS, TerminalSampler, register_price};
+use super::clifford_register::{MAX_REGISTER_QUBITS, Pruning, TerminalSampler, register_price};
 
 /// Letter-level signed Pauli string. Each qubit's `(x, z)` bit pair encodes
 /// the Pauli letter directly: (0,0)=I, (1,0)=X, (0,1)=Z, (1,1)=Y. `phase4` is
@@ -392,26 +394,35 @@ struct WeightedMpsBranch {
 pub struct StabRankResult {
     pub probabilities: Vec<f64>,
     /// Terms held at the end: `2^k` merged coefficients for a Clifford register of
-    /// width `k` on the exact route, the branch count on the branch routes.
+    /// width `k` on the exact route, the branch count on the branch fallback, and the
+    /// nonzero register coefficients, at most the budget, on the pruned route.
     pub num_terms: usize,
     pub t_count: usize,
-    /// Number of terms pruned during approximate simulation (0 for exact).
+    /// Nonzero register coefficients pruning zeroed, summed over the cuts (0 for exact).
     pub pruned_count: usize,
-    /// Summed 1-norm of the coefficients pruning discarded, 0 for an exact
-    /// run. Four times this bounds the summed absolute difference from the
-    /// exact distribution; see [`run_stabilizer_rank_approx`].
+    /// Sum over the cuts of the exact 2-norm each one dropped, 0 for an exact run. It
+    /// bounds the distance from the exact state to the kept one; see
+    /// [`run_stabilizer_rank_approx`].
     pub discarded_weight: f64,
+    /// Squared norm of the kept state before renormalization, 1.0 for an exact run.
+    /// Equals `1 - sum of squared cut norms`.
+    pub kept_norm_sqr: f64,
 }
 
 impl StabRankResult {
     /// Certified lower bound on the fidelity with the exact state.
     ///
-    /// Squares the `1 - 2 * d * d` floor that the state distance in
-    /// [`run_stabilizer_rank_approx`] puts on the overlap. Returns 1.0 for a
-    /// run that pruned nothing.
+    /// `((1 + N^2 - D^2) / (2 N))^2` with `N^2` = [`Self::kept_norm_sqr`] and `D` =
+    /// [`Self::discarded_weight`], 0 when `1 + N^2 <= D^2`, and never below `1 - D^2`.
+    /// Returns 1.0 for a run that pruned nothing. Twice `sqrt(1 - bound)` bounds the
+    /// summed absolute difference from the exact distribution.
     pub fn fidelity_bound(&self) -> f64 {
-        let d = self.discarded_weight;
-        (1.0 - 2.0 * d * d).max(0.0).powi(2)
+        let (n2, d) = (self.kept_norm_sqr, self.discarded_weight);
+        let numerator = 1.0 + n2 - d * d;
+        if numerator <= 0.0 || n2 <= 0.0 {
+            return 0.0;
+        }
+        (numerator * numerator / (4.0 * n2)).min(1.0)
     }
 }
 
@@ -445,6 +456,7 @@ fn exact_probabilities(
             t_count: circuit.t_count(),
             pruned_count: 0,
             discarded_weight: 0.0,
+            kept_norm_sqr: 1.0,
         });
     }
     let (mut backend, mut branches) = stabilizer_rank_setup(&circuit, seed)?;
@@ -479,6 +491,7 @@ fn exact_probabilities(
         t_count,
         pruned_count: 0,
         discarded_weight: 0.0,
+        kept_norm_sqr: 1.0,
     })
 }
 
@@ -600,73 +613,54 @@ fn expand_t(branches: &mut Vec<WeightedBranch>, qubit: usize, is_dagger: bool) -
 
 /// Approximate stabilizer rank simulation with bounded term count.
 ///
-/// Like [`run_stabilizer_rank`], but after each T gate the smallest-magnitude
-/// surplus terms are dropped, exactly enough to return to `max_terms`.
+/// Runs the Clifford register of [`run_stabilizer_rank`] and, after each T gate, zeroes
+/// all but the `max_terms` largest register coefficients (at least 2), ties kept in
+/// index order. Cut `j` drops a vector of exact norm `d_j`, orthogonal to what it keeps;
+/// `discarded_weight` reports `D = sum d_j` and `kept_norm_sqr` the kept norm `N^2 = 1 -
+/// sum d_j^2`. The rotations are unitary, so the exact state lies within `D` of the kept
+/// one, and [`StabRankResult::fidelity_bound`] turns `(N, D)` into a fidelity floor `F`.
+/// The returned probabilities are renormalized; their summed absolute difference from
+/// the exact distribution is at most `2 sqrt(1 - F) <= 2 min(1, D)`. One cut gives `F =
+/// N^2` exactly. A run that prunes nothing is exact.
 ///
-/// The returned probabilities are renormalized. `discarded_weight` is the
-/// realized error bound: writing it as `d`, the branch states are normalized,
-/// so the dropped part of the state has norm at most `d` and rescaling to unit
-/// norm costs at most `d` again. The summed absolute difference from the exact
-/// distribution is therefore at most `4 * d`. A run that prunes nothing
-/// returns 0 and is exact.
+/// `n <= 25`, and a register wider than 20 qubits returns `BackendUnsupported`. The
+/// route is deterministic and ignores `seed`.
 pub fn run_stabilizer_rank_approx(
     circuit: &Circuit,
     max_terms: usize,
     seed: u64,
 ) -> Result<StabRankResult> {
+    let _ = seed;
     let n = circuit.num_qubits;
     let circuit = lower_probability_circuit(circuit)?;
     require_dense_width(n)?;
-    let (mut backend, mut branches) = stabilizer_rank_setup(&circuit, seed)?;
-
-    let max_terms = max_terms.max(2);
-
-    let mut t_count = 0usize;
-    let mut pruned_total = 0usize;
-    let mut discarded_weight = 0.0;
-
-    for inst in &circuit.instructions {
-        match inst {
-            Instruction::Gate { gate, targets } => match gate {
-                Gate::T => {
-                    t_count += 1;
-                    expand_t_unbounded(&mut branches, targets[0], false);
-                    let (pruned, dropped) = prune_terms(&mut branches, max_terms);
-                    pruned_total += pruned;
-                    discarded_weight += dropped;
-                }
-                Gate::Tdg => {
-                    t_count += 1;
-                    expand_t_unbounded(&mut branches, targets[0], true);
-                    let (pruned, dropped) = prune_terms(&mut branches, max_terms);
-                    pruned_total += pruned;
-                    discarded_weight += dropped;
-                }
-                _ => {
-                    backend.apply(inst)?;
-                    conjugate_all(&mut branches, gate, targets)?;
-                }
-            },
-            _ => {
-                backend.apply(inst)?;
-            }
-        }
+    let too_wide = || PrismError::BackendUnsupported {
+        backend: "stabilizer_rank".into(),
+        operation: format!(
+            "pruned probabilities with a Clifford register wider than {MAX_REGISTER_QUBITS} qubits"
+        ),
+    };
+    let t_count = circuit.t_count();
+    if n.min(t_count) > MAX_REGISTER_QUBITS
+        && register_price(&circuit, MAX_REGISTER_QUBITS)?.is_none()
+    {
+        return Err(too_wide());
     }
-
-    accumulate_probabilities(&backend, &branches, n).map(|mut probabilities| {
-        let kept: f64 = probabilities.iter().sum();
-        if kept > 0.0 {
-            for p in probabilities.iter_mut() {
-                *p /= kept;
-            }
-        }
-        StabRankResult {
-            probabilities,
-            num_terms: branches.len(),
-            t_count,
-            pruned_count: pruned_total,
-            discarded_weight,
-        }
+    let mut prune = Pruning::new(max_terms.max(2));
+    let sampler =
+        TerminalSampler::compile_every_qubit_pruned(&circuit, MAX_REGISTER_QUBITS, &mut prune)?
+            .ok_or_else(too_wide)?;
+    let mut probabilities = sampler.distribution();
+    for p in &mut probabilities {
+        *p /= prune.kept_norm_sqr;
+    }
+    Ok(StabRankResult {
+        probabilities,
+        num_terms: prune.held,
+        t_count,
+        pruned_count: prune.pruned,
+        discarded_weight: prune.discarded,
+        kept_norm_sqr: prune.kept_norm_sqr,
     })
 }
 
@@ -691,32 +685,6 @@ fn expand_t_unbounded(branches: &mut Vec<WeightedBranch>, qubit: usize, is_dagge
     }
 
     branches.extend(new_branches);
-}
-
-/// Drop the smallest-magnitude surplus terms to return to `max_terms`,
-/// returning how many went and the 1-norm of their coefficients.
-///
-/// The branch states are normalized but not orthogonal, so the discarded
-/// 1-norm is what bounds the state error by the triangle inequality; a sum of
-/// squares would not. Selection is unstable, so which of several branches of
-/// equal magnitude survives a cut through them is unspecified. The discarded
-/// magnitudes, and so the returned bound, are the same whichever way it falls.
-fn prune_terms(branches: &mut Vec<WeightedBranch>, max_terms: usize) -> (usize, f64) {
-    let surplus = branches.len().saturating_sub(max_terms);
-    if surplus == 0 {
-        return (0, 0.0);
-    }
-
-    branches.select_nth_unstable_by(max_terms, |a, b| {
-        b.weight.norm_sqr().total_cmp(&a.weight.norm_sqr())
-    });
-
-    let discarded = branches[max_terms..]
-        .iter()
-        .map(|branch| branch.weight.norm_sqr().sqrt())
-        .sum();
-    branches.truncate(max_terms);
-    (surplus, discarded)
 }
 
 /// Stabilizer inner product |⟨φ₁|φ₂⟩|² via combined stabilizer group method.

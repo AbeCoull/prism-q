@@ -618,57 +618,205 @@ fn eight_t_circuit() -> Circuit {
     c
 }
 
+fn classical_fidelity(p: &[f64], q: &[f64]) -> f64 {
+    p.iter()
+        .zip(q)
+        .map(|(a, b)| (a * b).sqrt())
+        .sum::<f64>()
+        .powi(2)
+}
+
+// Asserts only what holds for every order of tied coefficients: the cut norms and the
+// distribution move with the tie split once cuts follow one another.
+fn assert_inside_the_bound(exact: &StabRankResult, approx: &StabRankResult, budget: usize) {
+    let label = format!("budget {budget}");
+    assert!(approx.num_terms <= budget, "{label}");
+    let total: f64 = approx.probabilities.iter().sum();
+    assert!((total - 1.0).abs() < 1e-9, "{label}: summed to {total}");
+    let floor = approx.fidelity_bound();
+    let deviation: f64 = exact
+        .probabilities
+        .iter()
+        .zip(&approx.probabilities)
+        .map(|(e, a)| (e - a).abs())
+        .sum();
+    let bound = 2.0 * (1.0 - floor).sqrt();
+    assert!(
+        deviation <= bound + 1e-9,
+        "{label}: deviated {deviation} past {bound}"
+    );
+    let bc2 = classical_fidelity(&exact.probabilities, &approx.probabilities);
+    assert!(
+        bc2 >= floor - 1e-9,
+        "{label}: {bc2} below the floor {floor}"
+    );
+    assert!(approx.kept_norm_sqr <= 1.0 + 1e-12, "{label}");
+    assert!(
+        1.0 - approx.kept_norm_sqr <= approx.discarded_weight.powi(2) + 1e-12,
+        "{label}"
+    );
+    assert!(
+        floor >= 1.0 - approx.discarded_weight.powi(2) - 1e-12,
+        "{label}"
+    );
+    if approx.pruned_count == 0 {
+        assert_eq!(approx.discarded_weight, 0.0, "{label}");
+        assert_eq!(approx.kept_norm_sqr, 1.0, "{label}");
+        assert_eq!(floor, 1.0, "{label}");
+        for (e, a) in exact.probabilities.iter().zip(&approx.probabilities) {
+            assert!((e - a).abs() < 1e-10, "{label}");
+        }
+    }
+}
+
 #[test]
 fn pruned_runs_stay_inside_the_reported_error_bound() {
     let c = eight_t_circuit();
     let exact = run_stabilizer_rank(&c, 42).unwrap();
     assert_eq!(exact.num_terms, 16);
 
-    for budget in [64usize, 160, 224] {
+    for (budget, floor) in [(4usize, 0.6), (8, 0.94), (12, 0.99)] {
         let approx = run_stabilizer_rank_approx(&c, budget, 42).unwrap();
-        assert!(approx.num_terms <= budget);
         assert!(approx.pruned_count > 0);
+        assert_inside_the_bound(&exact, &approx, budget);
+        assert!(approx.fidelity_bound() > floor, "budget {budget}");
+    }
+}
 
-        let total: f64 = approx.probabilities.iter().sum();
-        assert!(
-            (total - 1.0).abs() < 1e-9,
-            "budget {budget} summed to {total}"
-        );
+#[test]
+fn budgets_past_the_register_are_exact() {
+    let c = eight_t_circuit();
+    let exact = run_stabilizer_rank(&c, 42).unwrap();
+    for budget in [16usize, 64, 160, 224] {
+        let approx = run_stabilizer_rank_approx(&c, budget, 42).unwrap();
+        assert_eq!(approx.pruned_count, 0);
+        assert_eq!(approx.discarded_weight, 0.0);
+        assert_eq!(approx.fidelity_bound(), 1.0);
+        assert_inside_the_bound(&exact, &approx, budget);
+    }
+}
 
-        let deviation: f64 = exact
-            .probabilities
-            .iter()
-            .zip(&approx.probabilities)
-            .map(|(e, a)| (e - a).abs())
-            .sum();
-        let bound = 4.0 * approx.discarded_weight;
+// The cut falls between the c^2 s and c s^2 coefficient groups, so it is tie invariant.
+#[test]
+fn one_cut_reports_the_exact_fidelity() {
+    let mut c = Circuit::new(3, 0);
+    for q in 0..3 {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+        c.add_gate(Gate::H, &[q]);
+    }
+    let exact = run_stabilizer_rank(&c, 42).unwrap();
+    let approx = run_stabilizer_rank_approx(&c, 4, 42).unwrap();
+    let (s, co) = std::f64::consts::FRAC_PI_8.sin_cos();
+    let want = co.powi(6) + 3.0 * co.powi(4) * s * s;
+    assert_eq!(approx.pruned_count, 4);
+    assert_eq!(approx.num_terms, 4);
+    assert!((approx.kept_norm_sqr - want).abs() < 1e-12);
+    assert!((approx.fidelity_bound() - want).abs() < 1e-12);
+    assert!((1.0 - approx.discarded_weight.powi(2) - want).abs() < 1e-12);
+    let bc2 = classical_fidelity(&exact.probabilities, &approx.probabilities);
+    assert!((bc2 - want).abs() < 1e-12, "{bc2} vs {want}");
+    assert_inside_the_bound(&exact, &approx, 4);
+}
+
+#[test]
+fn seeded_pruned_runs_stay_inside_the_bound() {
+    for seed in 42..47u64 {
+        let c = crate::circuits::clifford_t_circuit(8, 6, 0.25, seed);
+        let exact = run_stabilizer_rank(&c, 42).unwrap();
+        for budget in [8usize, 32, 128] {
+            let approx = run_stabilizer_rank_approx(&c, budget, 42).unwrap();
+            assert_inside_the_bound(&exact, &approx, budget);
+        }
+    }
+}
+
+// The `stabilizer_rank/approx_*` bench circuit.
+fn t_insertion_circuit(n: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n - 1 {
+        if rng.random_bool(0.5) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    for _ in 0..t_count {
+        let q = rng.random_range(0..n);
+        c.add_gate(Gate::T, &[q]);
+    }
+    for _ in 0..3 {
+        for q in 0..n {
+            let g = rng.random_range(0..cliffords.len());
+            c.add_gate(cliffords[g].clone(), &[q]);
+        }
+        for q in 0..n - 1 {
+            if rng.random_bool(0.5) {
+                c.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+    }
+    c
+}
+
+#[test]
+fn bench_circuits_certify_a_floor_at_budget_128() {
+    for (t, floor) in [(16usize, 0.8), (20, 0.5)] {
+        let c = t_insertion_circuit(10, t, 0xDEAD_BEEF);
+        let exact = run_stabilizer_rank(&c, 42).unwrap();
+        let approx = run_stabilizer_rank_approx(&c, 128, 42).unwrap();
+        assert!(approx.pruned_count > 0);
+        assert_inside_the_bound(&exact, &approx, 128);
         assert!(
-            deviation <= bound + 1e-9,
-            "budget {budget} deviated {deviation} past its bound {bound}"
+            approx.fidelity_bound() > floor,
+            "{t} T: floor {}",
+            approx.fidelity_bound()
         );
     }
 
-    let whole = run_stabilizer_rank_approx(&c, 256, 42).unwrap();
-    assert_eq!(whole.pruned_count, 0);
-    assert_eq!(whole.discarded_weight, 0.0);
+    let c = t_insertion_circuit(10, 16, 0xDEAD_BEEF);
+    let one_cut = run_stabilizer_rank_approx(&c, 256, 42).unwrap();
+    assert!((one_cut.fidelity_bound() - one_cut.kept_norm_sqr).abs() < 1e-12);
+    assert!((one_cut.kept_norm_sqr - 0.988898).abs() < 1e-6);
 }
 
-// The 1-norm bound is worst case over constructive interference between
-// non-orthogonal branches, so it certifies nothing at the budgets worth
-// taking. Both budgets here straddle a class of equal-magnitude branches, so
-// the assertions read the discarded magnitudes, which the tie-break cannot
-// move, rather than the distribution, which it can.
 #[test]
-fn the_error_bound_certifies_only_a_generous_budget() {
-    let c = eight_t_circuit();
+fn pruned_route_refuses_a_register_past_its_width() {
+    let width = MAX_REGISTER_QUBITS + 1;
+    let mut c = Circuit::new(width, 0);
+    for q in 0..width {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    let err = run_stabilizer_rank_approx(&c, 128, 42).unwrap_err();
+    assert!(
+        matches!(err, PrismError::BackendUnsupported { .. }),
+        "got {err:?}"
+    );
+}
 
-    let tight = run_stabilizer_rank_approx(&c, 64, 42).unwrap();
-    assert!(tight.pruned_count > 0);
-    assert_eq!(tight.fidelity_bound(), 0.0);
-
-    let generous = run_stabilizer_rank_approx(&c, 224, 42).unwrap();
-    assert!(generous.pruned_count > 0);
-    assert!(generous.fidelity_bound() > 0.97);
+#[cfg(feature = "parallel")]
+#[test]
+fn pruned_route_is_identical_on_one_and_many_threads() {
+    let c = t_insertion_circuit(10, 20, 0xDEAD_BEEF);
+    let run = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| run_stabilizer_rank_approx(&c, 128, 42).unwrap())
+    };
+    let (one, many) = (run(1), run(4));
+    assert_eq!(one.probabilities, many.probabilities);
+    assert_eq!(one.discarded_weight, many.discarded_weight);
+    assert_eq!(one.kept_norm_sqr, many.kept_norm_sqr);
+    assert_eq!(
+        (one.num_terms, one.pruned_count),
+        (many.num_terms, many.pruned_count)
+    );
 }
 
 #[test]
@@ -870,9 +1018,10 @@ fn approx_path_runs_with_pruning() {
         c.add_gate(Gate::T, &[q]);
         c.add_gate(Gate::T, &[q]);
     }
-    let result = run_stabilizer_rank_approx(&c, 42, 4).unwrap();
+    let result = run_stabilizer_rank_approx(&c, 4, 4).unwrap();
+    assert!(result.pruned_count > 0);
     let total: f64 = result.probabilities.iter().sum();
-    assert!(total.is_finite());
+    assert!((total - 1.0).abs() < 1e-9);
 }
 
 #[test]

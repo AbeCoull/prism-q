@@ -262,9 +262,10 @@ Clifford gates cost O(n²) for all branches together and each T gate doubles the
   sums branches that differ by a stabilizer of the base state, so they stop at 25 qubits
   and a register of 20 qubits at any T count. A wider register falls back to the branch
   sum, capped at `2^20` terms.
-- `run_stabilizer_rank_approx` drops the smallest surplus terms after each T gate. The
-  dropped weight `d` bounds the error: the summed absolute difference from the exact
-  distribution is at most `4d`.
+- `run_stabilizer_rank_approx` cuts the same register back to its budget after each T
+  gate. The coefficients are orthonormal, so each cut drops an exact norm `d_j`; the
+  exact state lies within `sum d_j` of the kept one, and `fidelity_bound()` turns that and
+  the kept norm into a fidelity floor. A register past 20 qubits is refused.
 - Terminal shots run on a Clifford tableau over a dense register holding only the qubits
   the T rotations reach (`src/sim/clifford_register.rs`, at most 20 such qubits). Shots
   with mid-circuit measurement keep coherent branches as MPS, project each outcome, and

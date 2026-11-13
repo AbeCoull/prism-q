@@ -137,6 +137,41 @@ impl CliffordRegister {
         true
     }
 
+    /// Zero all but the `budget` largest amplitudes, keeping every amplitude strictly
+    /// above the cut before any tie and ties in index order.
+    fn cut(&mut self, prune: &mut Pruning) {
+        let budget = prune.budget;
+        if self.amps.len() <= budget {
+            return;
+        }
+        prune.scratch.clear();
+        prune.scratch.extend(self.amps.iter().map(|a| a.norm_sqr()));
+        let (larger, &mut threshold, _) = prune
+            .scratch
+            .select_nth_unstable_by(budget - 1, |a, b| b.total_cmp(a));
+        if threshold == 0.0 {
+            return;
+        }
+        let mut ties_left = budget - larger.iter().filter(|&&m| m > threshold).count();
+        let mut lost = 0.0;
+        for amp in &mut self.amps {
+            let m = amp.norm_sqr();
+            if m > threshold {
+                continue;
+            }
+            if m == threshold && ties_left > 0 {
+                ties_left -= 1;
+                continue;
+            }
+            if m != 0.0 {
+                lost += m;
+                prune.pruned += 1;
+                *amp = Complex64::new(0.0, 0.0);
+            }
+        }
+        prune.discarded += lost.sqrt();
+    }
+
     /// Restrict a Pauli with no `X` on a `|0>` qubit to the register; its `Z` letters
     /// there act as `+1`.
     fn restrict(&self, p: &SignedPauli) -> RegisterPauli {
@@ -366,12 +401,44 @@ pub(super) struct TerminalSampler {
     reduction_passes: usize,
 }
 
+/// Amplitude budget of the register on the approximate probability route, with what its
+/// cuts dropped.
+pub(super) struct Pruning {
+    budget: usize,
+    /// Nonzero amplitudes zeroed, summed over the cuts.
+    pub(super) pruned: usize,
+    /// Sum over the cuts of the 2-norm of the amplitudes each one zeroed.
+    pub(super) discarded: f64,
+    /// `sum |φ|^2` once the circuit has run, before any renormalization; exactly 1.0 when
+    /// no cut dropped anything.
+    pub(super) kept_norm_sqr: f64,
+    /// Nonzero amplitudes held once the circuit has run.
+    pub(super) held: usize,
+    scratch: Vec<f64>,
+}
+
+impl Pruning {
+    /// `budget` must be at least 1.
+    pub(super) fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            pruned: 0,
+            discarded: 0.0,
+            kept_norm_sqr: 1.0,
+            held: 1,
+            scratch: Vec::new(),
+        }
+    }
+}
+
 /// Run `circuit` through a register, with its amplitudes only when `dense`, pushing its
 /// measurements onto `measures`; `None` when the register would pass `max_width` qubits.
+/// With `prune`, a dense register is cut back to the budget after every rotation.
 fn build_register(
     circuit: &Circuit,
     max_width: usize,
     dense: bool,
+    mut prune: Option<&mut Pruning>,
     measures: &mut Vec<(usize, usize)>,
 ) -> Result<Option<CliffordRegister>> {
     let mut state = CliffordRegister::new(circuit.num_qubits);
@@ -388,6 +455,9 @@ fn build_register(
                     };
                     if !admitted {
                         return Ok(None);
+                    }
+                    if let Some(prune) = prune.as_deref_mut() {
+                        state.cut(prune);
                     }
                     state.rotation_work += 1 << state.width;
                 }
@@ -419,8 +489,10 @@ fn build_register(
 /// Width and rotation work of the register of `circuit`, read off the tableau without
 /// amplitudes; `None` exactly when [`TerminalSampler::compile`] returns `None`.
 pub(super) fn register_price(circuit: &Circuit, max_width: usize) -> Result<Option<(usize, u64)>> {
-    Ok(build_register(circuit, max_width, false, &mut Vec::new())?
-        .map(|state| (state.width, state.rotation_work)))
+    Ok(
+        build_register(circuit, max_width, false, None, &mut Vec::new())?
+            .map(|state| (state.width, state.rotation_work)),
+    )
 }
 
 /// Register counts of one terminal Clifford+T circuit, read off the tableau without
@@ -445,7 +517,7 @@ pub struct CliffordRegisterCensus {
 #[cfg(feature = "bench-internal")]
 pub(super) fn census(circuit: &Circuit) -> Result<CliffordRegisterCensus> {
     let mut measures = Vec::new();
-    let state = build_register(circuit, circuit.num_qubits, false, &mut measures)?
+    let state = build_register(circuit, circuit.num_qubits, false, None, &mut measures)?
         .expect("an uncapped register always fits");
     let t_count = circuit
         .instructions
@@ -479,7 +551,7 @@ impl TerminalSampler {
     /// qubits.
     pub(super) fn compile(circuit: &Circuit, max_width: usize) -> Result<Option<Self>> {
         let mut measures = Vec::new();
-        let Some(state) = build_register(circuit, max_width, true, &mut measures)? else {
+        let Some(state) = build_register(circuit, max_width, true, None, &mut measures)? else {
             return Ok(None);
         };
         Ok(Some(Self::reduce(
@@ -493,9 +565,32 @@ impl TerminalSampler {
     /// the circuit's own measurements.
     pub(super) fn compile_every_qubit(circuit: &Circuit, max_width: usize) -> Result<Option<Self>> {
         let n = circuit.num_qubits;
-        let Some(state) = build_register(circuit, max_width, true, &mut Vec::new())? else {
+        let Some(state) = build_register(circuit, max_width, true, None, &mut Vec::new())? else {
             return Ok(None);
         };
+        Ok(Some(Self::reduce(
+            state,
+            (0..n).map(|q| (q, q)).collect(),
+            n,
+        )))
+    }
+
+    /// Like [`Self::compile_every_qubit`], with the register cut back to `prune`'s budget
+    /// after every rotation. [`Self::distribution`] then sums to `prune.kept_norm_sqr`.
+    pub(super) fn compile_every_qubit_pruned(
+        circuit: &Circuit,
+        max_width: usize,
+        prune: &mut Pruning,
+    ) -> Result<Option<Self>> {
+        let n = circuit.num_qubits;
+        let Some(state) = build_register(circuit, max_width, true, Some(prune), &mut Vec::new())?
+        else {
+            return Ok(None);
+        };
+        if prune.pruned > 0 {
+            prune.kept_norm_sqr = state.amps.iter().map(|a| a.norm_sqr()).sum();
+        }
+        prune.held = state.amps.iter().filter(|a| a.norm_sqr() != 0.0).count();
         Ok(Some(Self::reduce(
             state,
             (0..n).map(|q| (q, q)).collect(),

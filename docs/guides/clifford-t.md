@@ -88,19 +88,25 @@ register wider than 20 qubits falls back to one branch per T choice, capped at `
 | Function | Use |
 |----------|-----|
 | `run_stabilizer_rank` | Exact probabilities (register width ≤ 20, n ≤ 25) |
-| `run_stabilizer_rank_approx` | Approximate under a term budget (higher t counts) |
+| `run_stabilizer_rank_approx` | Approximate under a coefficient budget (register width ≤ 20, n ≤ 25) |
 | `run_stabilizer_rank_shots` | Shot sampling past the statevector cap (register of at most 20 qubits) |
 | `stabilizer_overlap_sq` | Inner product between stabilizer states |
 
-`run_stabilizer_rank_approx` truncates deterministically: after each `T` it drops the
-smallest-magnitude terms beyond the budget, renormalizes the probabilities it returns, and
-reports the summed 1-norm of what it dropped as `discarded_weight`. Writing that as `d`,
-the returned distribution differs from the exact one by at most `4 * d`, and
-`StabRankResult::fidelity_bound` converts `d` to a fidelity floor. The bound assumes
-worst-case interference between the non-orthogonal branch states, so an aggressive budget
-drives it to zero. `Auto` never selects this function, nor the exact expansion for
-probabilities: at every width the expansion can hold, a statevector also fits and is
-faster.
+`run_stabilizer_rank_approx` runs the same register and, after each `T`, zeroes all but
+the budget's largest coefficients, ties kept in index order. The coefficients are
+orthonormal, so each cut drops a known norm `d_j`. The result reports:
+
+- `discarded_weight`: `D = sum d_j`. The exact state lies within `D` of the kept one.
+- `kept_norm_sqr`: `N^2 = 1 - sum d_j^2`, the kept norm before the probabilities are
+  renormalized.
+- `fidelity_bound()`: `F >= ((1 + N^2 - D^2) / (2N))^2`, never below `1 - D^2`. The
+  returned distribution differs from the exact one by at most `2 sqrt(1 - F)` in summed
+  absolute difference. A single cut gives `F = N^2` exactly.
+
+On the 10-qubit benchmark circuits at budget 128 the floor is 0.880 at 16 T and 0.744 at
+20 T. A register wider than 20 qubits is refused. `Auto` never selects this function, nor
+the exact expansion for probabilities: while the register fits, the exact route answers
+without error, and past it a statevector also fits.
 
 ## Stochastic Pauli Propagation (`src/sim/unified_pauli.rs`)
 

@@ -2389,6 +2389,7 @@ pub fn prism_q::sim::noise::run_shots_noisy(&prism_q::circuit::Circuit, &prism_q
 pub mod prism_q::sim::stabilizer_rank
 pub struct prism_q::sim::stabilizer_rank::StabRankResult
 pub prism_q::sim::stabilizer_rank::StabRankResult::discarded_weight: f64
+pub prism_q::sim::stabilizer_rank::StabRankResult::kept_norm_sqr: f64
 pub prism_q::sim::stabilizer_rank::StabRankResult::num_terms: usize
 pub prism_q::sim::stabilizer_rank::StabRankResult::probabilities: alloc::vec::Vec<f64>
 pub prism_q::sim::stabilizer_rank::StabRankResult::pruned_count: usize
@@ -4381,6 +4382,7 @@ pub prism_q::SppResult::std_errors: alloc::vec::Vec<f64>
 pub prism_q::SppResult::t_count: usize
 pub struct prism_q::StabRankResult
 pub prism_q::StabRankResult::discarded_weight: f64
+pub prism_q::StabRankResult::kept_norm_sqr: f64
 pub prism_q::StabRankResult::num_terms: usize
 pub prism_q::StabRankResult::probabilities: alloc::vec::Vec<f64>
 pub prism_q::StabRankResult::pruned_count: usize

@@ -122,6 +122,7 @@ These rows have no CPU twin:
 | `qec_postselection` | A 1M-shot repetition memory postselected on 20 records, unchunked and at 16384-shot chunks, where counting accepted shots and their logical errors is a large share of the run |
 | `qec_parse` | Parsing distance-15 and distance-25 surface and color memory text written with `REPEAT` blocks |
 | `qec_compile` | Compiling distance-5, 15 and 25 surface and color memories at p = 1e-3 to their sampler without kept measurements, where the detector parity walk dominates |
+| `qec_first_shot` | Parsing a distance-5 or 25 surface memory at p = 1e-3 from text, compiling it, and drawing one shot, with measurements kept and dropped |
 
 ### Decoder benchmarks (qec_decoder)
 

@@ -37,6 +37,8 @@
 //! # Performance characteristics
 //!
 //! - Gate application: O(n) per gate (iterates 2n+1 rows, constant work per row)
+//! - Clifford runs on 256+ qubits with at least one cross-word gate per tableau word
+//!   run on qubit columns: one transpose each way, then O(n/64) words per gate
 //! - Measurement: O(n²) worst case (rowmul is O(n), applied to up to 2n rows)
 //! - Memory: n=1000 → ~500 KB, n=10000 → ~50 MB
 //! - Probability extraction: O(2^n * n), limited by dense output memory budget

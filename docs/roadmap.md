@@ -29,7 +29,6 @@ says what each release promises.
 | Item | Status |
 | --- | --- |
 | Exact stabilizer-rank simulation when the T gates reach more than 20 qubits, from decompositions that cover several T gates at once rather than one | Research |
-| A dense tableau mode for wide Clifford circuits whose generators fill in | Research |
 
 ## Large structured circuits
 

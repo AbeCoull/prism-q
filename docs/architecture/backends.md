@@ -131,6 +131,12 @@ phases. Supports H, S, Sdg, SX, SXdg, X, Y, Z, Id, CX, CZ, SWAP, measurement, re
 classical conditionals. Destabilizer rows materialize lazily, when probabilities are
 requested.
 
+On 256 qubits and up, a run of Clifford gates with at least one cross-word two-qubit
+gate per tableau word moves to a column-major copy of the gate rows: one 64x64 bit-block
+transpose each way, and each gate updates its qubits' columns, O(n/64) words, instead of
+a pass over every row. The run ends at the first measurement, reset, region or
+non-Clifford instruction.
+
 Probability extraction is coset enumeration with GF(2) Gaussian elimination, O(2^k) in
 the number k of non-diagonal generators rather than O(2^n).
 

@@ -101,6 +101,7 @@ pub(super) fn branch_shots(
     let walk = Walk {
         limits,
         program: None,
+        known_one: known_one_live(),
     };
     walk.shots(
         fused.num_qubits,
@@ -136,6 +137,7 @@ pub(super) fn branch_program_shots(
     let walk = Walk {
         limits,
         program: Some(program),
+        known_one: known_one_live(),
     };
     walk.shots(
         program.num_qubits(),
@@ -298,6 +300,10 @@ struct Branch {
     /// reset onto `|0>` and untouched since. A measurement or reset of such a qubit
     /// reads P(1) = 0 and leaves the state as it is, so it skips both passes.
     known_zero: u64,
+    /// Bit `q` set when the `|0>` half of qubit `q` holds exact zeros: measured as 1 and
+    /// untouched since. A measurement there skips both passes; a reset skips the P(1)
+    /// pass and keeps the fold.
+    known_one: u64,
 }
 
 fn qubit_bit(qubit: usize) -> u64 {
@@ -314,6 +320,20 @@ fn targets_mask(targets: &[usize]) -> u64 {
 struct Walk<'l> {
     limits: &'l BranchLimits,
     program: Option<&'l Prepared<'l>>,
+    /// Whether a measurement that projects onto 1 marks its qubit in
+    /// [`Branch::known_one`].
+    known_one: bool,
+}
+
+/// Whether the walk tracks qubits measured as 1: always in a shipping build, on
+/// `PRISM_BENCH_VARIANT=e` under `bench-internal`.
+#[cfg(feature = "bench-internal")]
+fn known_one_live() -> bool {
+    crate::bench_variant('e')
+}
+#[cfg(not(feature = "bench-internal"))]
+fn known_one_live() -> bool {
+    true
 }
 
 impl<'l> Walk<'l> {
@@ -339,6 +359,7 @@ impl<'l> Walk<'l> {
             shots: num_shots,
             rng: stream_rng(seed, SPLIT_STREAM),
             known_zero: (0..num_qubits).fold(0, |mask, q| mask | qubit_bit(q)),
+            known_one: 0,
         };
         let mut leaves = Vec::new();
         self.run(root, cursor, 1, 0, &mut leaves)?;
@@ -374,6 +395,7 @@ impl<'l> Walk<'l> {
                 return Ok(None);
             };
             branch.known_zero = 0;
+            branch.known_one = 0;
             let Some(at) = program.finish_block(cursor.block, &mut branch.sv, &mut cursor.vars)?
             else {
                 return Ok(None);
@@ -427,7 +449,9 @@ impl<'l> Walk<'l> {
                     continue;
                 }
                 Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => {
-                    branch.known_zero &= !targets_mask(targets);
+                    let touched = targets_mask(targets);
+                    branch.known_zero &= !touched;
+                    branch.known_one &= !touched;
                     sv.apply(inst)?;
                     continue;
                 }
@@ -439,8 +463,11 @@ impl<'l> Walk<'l> {
 
             let mask = qubit_bit(qubit);
             let known_zero = branch.known_zero & mask != 0;
+            let known_one = branch.known_one & mask != 0;
             let prob_one = if known_zero {
                 0.0
+            } else if known_one {
+                1.0
             } else {
                 sv.qubit_probability(qubit)?.clamp(0.0, 1.0)
             };
@@ -452,12 +479,16 @@ impl<'l> Walk<'l> {
                 if let Some(bit) = classical_bit {
                     sv.classical_bits[bit] = outcome;
                 }
-                if state_ahead && !known_zero {
+                if state_ahead && !known_zero && !(known_one && classical_bit.is_some()) {
                     project(sv, qubit, classical_bit, outcome, prob_one);
                     if outcome && classical_bit.is_some() {
                         branch.known_zero &= !mask;
+                        if self.known_one {
+                            branch.known_one |= mask;
+                        }
                     } else {
                         branch.known_zero |= mask;
+                        branch.known_one &= !mask;
                     }
                 }
                 continue;
@@ -496,6 +527,7 @@ impl<'l> Walk<'l> {
                 shots: shots - ones,
                 rng: ChaCha8Rng::seed_from_u64(seed_zero),
                 known_zero: branch.known_zero | mask,
+                known_one: branch.known_one & !mask,
             };
             let one = Branch {
                 sv: sv_one,
@@ -505,6 +537,11 @@ impl<'l> Walk<'l> {
                     branch.known_zero & !mask
                 } else {
                     branch.known_zero | mask
+                },
+                known_one: if classical_bit.is_some() && self.known_one {
+                    branch.known_one | mask
+                } else {
+                    branch.known_one & !mask
                 },
             };
             let (small, large) = if one.shots <= zero.shots {

@@ -680,3 +680,94 @@ fn a_measurement_and_reset_of_a_zero_qubit_take_no_pass() {
     };
     assert_eq!(ticks(true), ticks(false));
 }
+
+/// Shots of `c` by the walk with or without the qubits measured as 1 tracked, and the
+/// state passes they took on this thread.
+fn walk_with_known_one(c: &Circuit, shots: usize, known_one: bool) -> (Vec<Vec<bool>>, usize) {
+    let limits = BranchLimits::for_width(c.num_qubits, false, &ResolvedLimits::process_default());
+    let mut cursor = Cursor::default();
+    cursor.enter_last(&c.instructions);
+    let walk = Walk {
+        limits: &limits,
+        program: None,
+        known_one,
+    };
+    crate::backend::statevector::sweeps::take_ticks();
+    let result = walk
+        .shots(c.num_qubits, c.num_classical_bits, cursor, shots, 42, true)
+        .unwrap();
+    (
+        result.shots,
+        crate::backend::statevector::sweeps::take_ticks(),
+    )
+}
+
+// A reset after a measured 1 folds the qubit back with no P(1) pass, and a second
+// measurement of it takes no pass at all.
+#[test]
+fn a_reset_or_measurement_of_a_qubit_measured_as_one_skips_its_probability_pass() {
+    let mut reset = Circuit::new(1, 2);
+    reset.add_gate(Gate::X, &[0]);
+    reset.add_measure(0, 0);
+    reset.add_reset(0);
+    reset.add_gate(Gate::H, &[0]);
+    reset.add_measure(0, 1);
+    let (shots, ticks) = walk_with_known_one(&reset, 4_000, true);
+    let (base_shots, base_ticks) = walk_with_known_one(&reset, 4_000, false);
+    assert_eq!(ticks + 1, base_ticks);
+    assert!(shots.iter().all(|s| s[0]));
+    assert_near(frequency(&shots, 1), 0.5, shots.len(), "after the reset");
+    assert_near(frequency(&base_shots, 1), 0.5, shots.len(), "base");
+
+    let mut remeasured = Circuit::new(1, 3);
+    remeasured.add_gate(Gate::X, &[0]);
+    remeasured.add_measure(0, 0);
+    remeasured.add_measure(0, 1);
+    remeasured.add_gate(Gate::H, &[0]);
+    remeasured.add_measure(0, 2);
+    let (shots, ticks) = walk_with_known_one(&remeasured, 4_000, true);
+    let (_, base_ticks) = walk_with_known_one(&remeasured, 4_000, false);
+    assert_eq!(ticks + 2, base_ticks);
+    assert!(shots.iter().all(|s| s[0] && s[1]));
+}
+
+// Three attempts of a ten-qubit body, each measuring its flag qubit and resetting it,
+// the later ones run only while the flag read 1.
+#[test]
+fn repeat_until_success_with_known_one_resets_keeps_its_law() {
+    let n = 10;
+    let mut c = Circuit::new(n, 4 + n);
+    let attempt = |bit: usize| {
+        let mut body = Circuit::new(n, 4 + n);
+        rotation_layers(&mut body, n, 0.2 + 0.1 * bit as f64);
+        body.add_measure(n - 1, bit);
+        body.add_reset(n - 1);
+        body.instructions
+    };
+    c.instructions.extend(attempt(0));
+    for bit in 1..4 {
+        c.instructions
+            .push(guarded(ClassicalCondition::BitIsOne(bit - 1), attempt(bit)).unwrap());
+    }
+    for q in 0..n {
+        c.add_measure(q, 4 + q);
+    }
+    let shots = 20_000;
+    let (new, _) = walk_with_known_one(&c, shots, true);
+    let (old, _) = walk_with_known_one(&c, shots, false);
+    let count = |rows: &[Vec<bool>]| {
+        let mut counts = std::collections::HashMap::new();
+        for row in rows {
+            *counts.entry(row[..4].to_vec()).or_insert(0usize) += 1;
+        }
+        counts
+    };
+    let (new, old) = (count(&new), count(&old));
+    for key in new.keys().chain(old.keys()) {
+        let a = new.get(key).copied().unwrap_or(0) as f64 / shots as f64;
+        let b = old.get(key).copied().unwrap_or(0) as f64 / shots as f64;
+        let p = (a + b) / 2.0;
+        let bound = 5.0 * (p * (1.0 - p) * 2.0 / shots as f64).sqrt() + 1.0 / shots as f64;
+        assert!((a - b).abs() <= bound, "flags {key:?} at {a} against {b}");
+    }
+}

@@ -81,3 +81,8 @@ Seeded output has changed in these releases:
   is measured, and is then reset or left alone becomes a parity measurement on those data
   qubits, so the walk runs on a smaller register. Fixed-seed shots on those circuits
   changed; explicit `Statevector` keeps the ancillas and its shots.
+- 0.39.0 skips the probability pass of a reset, or of a repeated measurement, on the
+  host statevector walk when the qubit was last measured as 1 and nothing has touched it
+  since, taking the probability as exactly 1. The pass returned 1 to within about 1e-14,
+  so later probabilities on that branch move in the last bits, and a fixed-seed outcome
+  changes only where a draw lands that close to a boundary.

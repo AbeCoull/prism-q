@@ -178,8 +178,9 @@ pub(super) fn auto_spd_work_budget(circuit: &Circuit) -> usize {
 /// (Clifford-only circuits at 16 qubits and above with a block of 2 or more use
 /// FactoredStabilizer), and shot paths sample Clifford+T circuits through the
 /// StabilizerRank expansion: terminal shots when the Clifford register fits 20 qubits and
-/// is priced below the dense run, shots with mid-circuit measurements or a reset when the T
-/// count fits the size-derived stabilizer-rank budget, to 40 T gates. A probability
+/// is priced below the dense run or the dense run passes the statevector cap, shots with
+/// mid-circuit measurements or a reset when the T count fits the size-derived
+/// stabilizer-rank budget, to 40 T gates. A probability
 /// query never takes that expansion under `Auto`, since it is slower than the
 /// statevector at every width both can hold. The pruned expansion is reachable
 /// only through [`run_stabilizer_rank_approx`], never from `Auto`; marginal queries

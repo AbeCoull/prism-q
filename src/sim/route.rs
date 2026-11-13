@@ -176,10 +176,9 @@ pub(super) fn decide_tensor_over_mps(
 /// the Clifford register: 1.2 to 1.9 ns per register amplitude against 0.056 to 0.069 ns
 /// per dense instruction-amplitude on four cores. The register runs serially, so the
 /// ratio rises with core count.
-/// No bench row brackets this yet.
-/// Fitted on `auto/clifford_t_price` (`register/scrambled_22q_t20` and
-/// `register/scrambled_32q_t20` give 22 to 27); every row timed on both engines lands on
-/// the register side.
+/// Bracketed by `auto/clifford_t_price` (`distinct_17q_t16` flips at 11, `scrambled_22q_t20` at 86).
+/// Fitted on the same group (`register/scrambled_22q_t20` and `register/scrambled_32q_t20`
+/// give 22 to 27); `distinct_17q_t16` is the one row on the statevector side.
 #[cfg(not(prism_lowered_thresholds))]
 pub(super) const REGISTER_PASS_STATEVECTOR_AMPLITUDES: f64 = 25.0;
 #[cfg(prism_lowered_thresholds)]
@@ -200,10 +199,10 @@ fn clifford_register_work(width: usize, rotation_work: f64, measured: usize) -> 
 
 /// Whether `Auto` samples the terminal measurements of `circuit` from the Clifford
 /// register: a unitary Clifford+T circuit from [`MIN_AUTO_CLIFFORD_REGISTER_QUBITS`]
-/// qubits whose register fits [`clifford_register::MAX_REGISTER_QUBITS`] and costs less
-/// than the dense alternative, every independent block run at up to the statevector cap.
-/// Above the cap the alternative is the dense run at the cap, a work ceiling rather than
-/// a route, so the register is taken ahead of the tree whenever it fits within that work.
+/// qubits whose register fits [`clifford_register::MAX_REGISTER_QUBITS`]. Within the
+/// statevector cap the register must also cost less than the dense run over each
+/// independent block. When a block passes the cap no dense run is exact, so a register
+/// that fits is taken whatever the cap.
 ///
 /// A bound from the T count decides most circuits. The rest take a tableau dry run
 /// capped at the widest register that could still win.
@@ -222,22 +221,34 @@ pub(super) fn decide_clifford_register(circuit: &Circuit, limits: &ResolvedLimit
     let Some((t, _)) = auto_clifford_t_budget(circuit) else {
         return false;
     };
+    let max_width = clifford_register::MAX_REGISTER_QUBITS;
+    let bound = t.min(n);
+    let blocks = analyze_independence(circuit).0.map(|(blocks, _)| blocks);
+    let widest_block = blocks.as_ref().map_or(n, |blocks| {
+        blocks.iter().map(|block| block.len()).max().unwrap_or(0)
+    });
+    if widest_block > limits.statevector_qubits.value {
+        if bound <= max_width {
+            return true;
+        }
+        #[cfg(test)]
+        REGISTER_DRY_RUNS.with(|runs| runs.set(runs.get() + 1));
+        return stabilizer_rank::terminal_register_price(circuit, max_width).is_some();
+    }
+
     let mut is_measured = vec![false; n];
     for (q, _) in circuit.measurement_map() {
         is_measured[q] = true;
     }
     let measured = is_measured.iter().filter(|&&m| m).count();
-    let cap = limits.statevector_qubits.value;
     let instructions = circuit.instructions.len();
-    let dense = match analyze_independence(circuit).0 {
-        Some((blocks, _)) => blocks.iter().fold(0usize, |work, block| {
-            work.saturating_add(statevector_work(instructions, block.len().min(cap)))
+    let dense = match &blocks {
+        Some(blocks) => blocks.iter().fold(0usize, |work, block| {
+            work.saturating_add(statevector_work(instructions, block.len()))
         }),
-        None => statevector_work(instructions, n.min(cap)),
+        None => statevector_work(instructions, n),
     } as f64;
 
-    let max_width = clifford_register::MAX_REGISTER_QUBITS;
-    let bound = t.min(n);
     if bound <= max_width
         && clifford_register_work(bound, ((t - bound + 2) << bound) as f64, measured) < dense
     {

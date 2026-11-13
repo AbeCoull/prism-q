@@ -1458,7 +1458,7 @@ fn cost_rule_takes_the_register_above_the_cap_past_the_t_bound() {
     // truncating MPS took these shots before.
     let circuit = register_rounds(16, 6, 3);
     assert!(circuit.t_count() > stabilizer_rank_budget(circuit.num_qubits));
-    assert_eq!(register_dry_runs(&circuit, &statevector_cap(12)), (true, 1));
+    assert_eq!(register_dry_runs(&circuit, &statevector_cap(12)), (true, 0));
     assert_eq!(
         auto_shot_route(&circuit, statevector_cap(12)),
         (ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister)
@@ -1476,6 +1476,35 @@ fn cost_rule_takes_the_register_above_the_cap_past_the_t_bound() {
         statevector_cap(12),
         BackendKind::Statevector,
     );
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register constants price these circuits differently"
+)]
+fn cost_rule_takes_a_fitting_register_under_a_very_low_cap() {
+    // The full-width register the statevector wins under the host cap, and a narrow
+    // register past the T bound that needs a dry run, both with the cap at two qubits.
+    let full_width = register_rounds(17, 16, 1);
+    let narrow = register_rounds(22, 6, 4);
+    assert!(narrow.t_count().min(narrow.num_qubits) > clifford_register::MAX_REGISTER_QUBITS);
+    let cap = statevector_cap(2);
+    assert_eq!(register_dry_runs(&full_width, &cap), (true, 0));
+    assert_eq!(register_dry_runs(&narrow, &cap), (true, 1));
+    for circuit in [&full_width, &narrow] {
+        assert_eq!(
+            auto_shot_route(circuit, statevector_cap(2)),
+            (ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister)
+        );
+        let exact = simulate(circuit)
+            .limits(statevector_cap(2))
+            .seed(SEED)
+            .require_exact()
+            .shots(64)
+            .unwrap();
+        assert_eq!(exact.metadata.backend, ResolvedBackend::StabilizerRank);
+    }
 }
 
 #[test]

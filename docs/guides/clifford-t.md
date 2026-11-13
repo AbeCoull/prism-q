@@ -20,8 +20,8 @@ them.
   Clifford register (the form below) fits 20 qubits and costs less than the dense run.
   The T count sets no limit of its own: 24 T gates on a 14-qubit register at 26 qubits
   take about 1 ms for 1024 shots against 1.5 s on the statevector. Past the statevector
-  cap the dense run is priced at the cap, so a register that fits takes the shots ahead
-  of the MPS; a circuit that would grow it past 20 goes to the dispatch tree. Shots with
+  cap, a lowered one included, a register that fits takes the shots ahead of the MPS; a
+  circuit that would grow it past 20 goes to the dispatch tree. Shots with
   mid-circuit measurements take stabilizer rank inside a T bound derived from the width,
   at most 40.
 - Marginals on a unitary Clifford+T circuit of 12 qubits or more go to SPD.

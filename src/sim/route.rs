@@ -118,6 +118,23 @@ pub(super) fn decide_tensor_expectations(
 /// Bracketed by `auto/expectation_above_cap` (`su4_brick_d4/64` and `brickwork_d8_local/64` against `brickwork_d8_local/128`).
 const TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE: f64 = 8e4;
 
+/// Block-start cuts per observable from which the same route also weighs circuits under
+/// the estimate floor. At small bonds each block costs the MPS run about 12 us on
+/// one thread, which the estimate's cube term does not see, while a shallow cone keeps
+/// the contraction near 1.3 ms for eight observables at any width.
+/// Bracketed by `auto/expectation_above_cap` (`rcs_d4/64` and `su4_brick_d4/64` at 15.75
+/// against `rcs_d4/128` at 31.75).
+const TENSOR_ROUTE_MPS_BLOCKS_PER_OBSERVABLE: usize = 24;
+
+/// Block-start cuts per entangling gate in the observables' light cones that a circuit
+/// let through on [`TENSOR_ROUTE_MPS_BLOCKS_PER_OBSERVABLE`] alone must reach before the
+/// dry run. The MPS run pays for every block and the contraction for the cones, and on
+/// four-layer brickworks the speedup tracks about 0.75 times this ratio; a ladder or a
+/// deep brickwork, whose cones spread across the chain, would decline in the planner
+/// after 1 to 4 ms of dry run.
+/// Bracketed by `auto/expectation_above_cap` (`rcs_d4/128` against `brickwork_d8_local/64`).
+const TENSOR_ROUTE_MPS_BLOCKS_PER_CONE_GATE: usize = 2;
+
 /// [`mps_apply_cost`] units one planned tensor-network element costs: 60 to
 /// 140 ns per element contracted against 50 to 70 ns per unit on brickwork
 /// circuits, both on one thread.
@@ -127,7 +144,9 @@ const TENSOR_ELEMENT_MPS_COST: f64 = 2.0;
 /// The scalar tensor route for an `Auto` expectation above the statevector cap,
 /// where the alternative is the MPS `Auto` resolves to rather than a dense run.
 /// `None` when `Auto` resolves to another backend, when the MPS estimate is
-/// under [`TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE`] per observable, or when the
+/// under [`TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE`] per observable and the block count
+/// either under [`TENSOR_ROUTE_MPS_BLOCKS_PER_OBSERVABLE`] per observable or under
+/// [`TENSOR_ROUTE_MPS_BLOCKS_PER_CONE_GATE`] per cone gate, or when the
 /// planned contraction would cost more than the MPS estimate or hold an
 /// intermediate over the tensor peak cap. The dry run stops as soon as the planned
 /// elements overspend, so a declined plan costs a fraction of the MPS run.
@@ -139,8 +158,9 @@ pub(super) fn decide_tensor_over_mps(
     if observables.is_empty() {
         return None;
     }
-    let mps_cost = mps_apply_cost(circuit, limits.auto_mps_bond_dim.value);
-    if mps_cost < TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE * observables.len() as f64 {
+    let (mps_cost, block_cuts) = mps_apply_cost(circuit, limits.auto_mps_bond_dim.value);
+    let over_cost = mps_cost >= TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE * observables.len() as f64;
+    if !over_cost && block_cuts < TENSOR_ROUTE_MPS_BLOCKS_PER_OBSERVABLE * observables.len() {
         return None;
     }
     let (_, has_partial_independence) = analyze_independence(circuit);
@@ -159,6 +179,13 @@ pub(super) fn decide_tensor_over_mps(
         if let Err(e) = validate_observable(observable, circuit.num_qubits) {
             return Some(Err(e));
         }
+    }
+    let cone_limit = block_cuts / TENSOR_ROUTE_MPS_BLOCKS_PER_CONE_GATE;
+    if !over_cost
+        && crate::backend::tensornetwork::cone_entangling_gates(circuit, observables, cone_limit)
+            > cone_limit
+    {
+        return None;
     }
     let planned = match crate::backend::tensornetwork::plan_bounded_expectations(
         circuit,

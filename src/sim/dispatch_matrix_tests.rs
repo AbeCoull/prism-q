@@ -319,16 +319,18 @@ fn mps_apply_cost_merges_a_pair_block_and_breaks_it_on_a_neighbour() {
         block.add_gate(Gate::Cx, &[3, 4]);
         block.add_gate(Gate::Ry(0.4), &[4]);
     }
-    let cost = mps_apply_cost(&block, 256);
+    let (cost, block_cuts) = mps_apply_cost(&block, 256);
     assert_eq!(cost, 3.0 * overhead + 8.0 + 64.0 + 64.0);
+    assert_eq!(block_cuts, 1);
 
     let mut broken = Circuit::new(8, 0);
     broken.add_gate(Gate::Cx, &[3, 4]);
     broken.add_gate(Gate::Cx, &[3, 4]);
     broken.add_gate(Gate::Cx, &[2, 3]);
     broken.add_gate(Gate::Cx, &[3, 4]);
-    let cost = mps_apply_cost(&broken, 256);
+    let (cost, block_cuts) = mps_apply_cost(&broken, 256);
     assert_eq!(cost, 4.0 * overhead + 8.0 + 64.0 + 8.0 + 512.0);
+    assert_eq!(block_cuts, 3);
 }
 
 fn rcs_brickwork(n: usize, depth: usize) -> Circuit {
@@ -376,12 +378,13 @@ fn rcs_fixture_observables(n: usize) -> Vec<Vec<crate::PauliTerm>> {
     singles.into_iter().chain(pairs).collect()
 }
 
-// Above the cap, eight local observables on an eight-layer rcs brickwork
-// contract faster than the MPS run from 128 qubits, while four layers, or
-// eight at 64 qubits and below, stay on MPS. su4_brick_d4/64 under eight
-// two-local terms sits 6% under the floor.
+// Above the cap, eight local observables on an rcs brickwork contract faster
+// than the MPS run from 128 qubits at four or eight layers. Four layers pass on
+// the block count, 24 per observable from 97 qubits; eight layers at 64 qubits
+// have cones too wide for the block count, as does a two-layer ladder at 256
+// qubits. su4_brick_d4/64 under eight two-local terms sits under both floors.
 #[test]
-fn above_cap_tensor_route_takes_deep_rcs_brickworks_from_128_qubits() {
+fn above_cap_tensor_route_takes_rcs_brickworks_from_128_qubits() {
     let limits = ResolvedLimits::resolve(Some(&crate::Limits::new().max_statevector_qubits(24)));
     let takes_tensor = |circuit: &Circuit, observables: &[Vec<crate::PauliTerm>]| {
         crate::sim::route::decide_tensor_over_mps(circuit, observables, &limits)
@@ -390,8 +393,9 @@ fn above_cap_tensor_route_takes_deep_rcs_brickworks_from_128_qubits() {
     };
     for n in [32, 64, 128, 256] {
         let observables = rcs_fixture_observables(n);
-        assert!(
-            !takes_tensor(&rcs_brickwork(n, 4), &observables),
+        assert_eq!(
+            takes_tensor(&rcs_brickwork(n, 4), &observables),
+            n >= 128,
             "rcs d4 n{n}"
         );
         assert_eq!(
@@ -400,6 +404,23 @@ fn above_cap_tensor_route_takes_deep_rcs_brickworks_from_128_qubits() {
             "rcs d8 n{n}"
         );
     }
+    for n in [96, 97] {
+        let observables: Vec<Vec<crate::PauliTerm>> = (0..8)
+            .map(|k| vec![crate::PauliTerm::z(k * n / 8 + 5)])
+            .collect();
+        assert_eq!(
+            takes_tensor(&rcs_brickwork(n, 4), &observables),
+            n == 97,
+            "rcs d4 n{n}"
+        );
+    }
+    let ladder_observables: Vec<Vec<crate::PauliTerm>> = (0..8)
+        .map(|k| vec![crate::PauliTerm::z(k * 32 + 16)])
+        .collect();
+    assert!(!takes_tensor(
+        &crate::circuits::hardware_efficient_ansatz(256, 2, 42),
+        &ladder_observables
+    ));
     let two_local: Vec<Vec<crate::PauliTerm>> = (0..8)
         .map(|k| {
             let a = k * 8;

@@ -112,18 +112,6 @@ pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
     cost
 }
 
-/// No bench row brackets this yet.
-#[cfg_attr(not(feature = "bench-internal"), allow(dead_code))]
-pub(super) const MAX_AUTO_T_COUNT_SHOTS: usize = 40;
-
-/// No bench row brackets this yet.
-#[cfg(not(prism_lowered_thresholds))]
-#[cfg_attr(not(feature = "bench-internal"), allow(dead_code))]
-pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 25;
-#[cfg(prism_lowered_thresholds)]
-#[cfg_attr(not(feature = "bench-internal"), allow(dead_code))]
-pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 6;
-
 /// Most T gates, guarded ones included, at which `Auto` samples a circuit past the
 /// statevector cap on the stabilizer-rank branches when its measurements stay in place.
 /// Each T doubles the branches, and each measurement takes `B (B + 1)` MPS inner products
@@ -155,17 +143,6 @@ pub(super) const MIN_BLOCK_FOR_FACTORED_STAB: usize = 2;
 /// bond 2 about 2 us, so on a circuit that barely entangles the two tie near 256.
 /// Bracketed by `auto/sparse_support_shots` (`wide_k6/64` against `wide_k12/64`).
 const AUTO_SPARSE_MAX_SUPPORT: usize = 128;
-
-#[cfg(feature = "bench-internal")]
-#[inline]
-pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
-    let log2n = if num_qubits >= 2 {
-        (num_qubits as f64).log2().ceil() as usize * 2
-    } else {
-        0
-    };
-    num_qubits.saturating_sub(log2n)
-}
 
 /// Amplitude updates of `instructions` gates applied to a dense `width`-qubit state,
 /// saturating at `usize::MAX`.

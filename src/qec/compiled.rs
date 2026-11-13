@@ -158,22 +158,6 @@ impl QecProgram {
         }
         if has_noise || has_feedforward {
             let records = compile_qec_noisy_sampler(self)?;
-            #[cfg(feature = "bench-internal")]
-            if let Some(noiseless) = records.compiled_base() {
-                let (uncorrected, reference) = sampler.forced_zero_reference(
-                    self,
-                    noiseless,
-                    records.feedforward(),
-                    referenced,
-                )?;
-                let mut records = records;
-                if let Some(noiseless) = records.compiled_base_mut() {
-                    noiseless.rebase_reference(uncorrected);
-                }
-                sampler.reference = reference;
-                sampler.route = QecSamplerRoute::Records(Box::new(records));
-                return Ok(sampler);
-            }
             let uncorrected = records
                 .reference_records()
                 .expect("the shipping records sampler starts from the reference run");

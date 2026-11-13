@@ -3480,11 +3480,7 @@ impl<'a> DeferralWalk<'a> {
             Some(noise) => readout_flips_at_write(circuit, noise)?,
             None => Vec::new(),
         };
-        let copied_measurements = if copies_reused_measurements() {
-            reused_measurements(circuit, noise.is_some())
-        } else {
-            Vec::new()
-        };
+        let copied_measurements = reused_measurements(circuit, noise.is_some());
         Ok(Self {
             num_classical_bits: circuit.num_classical_bits,
             aliases: (0..circuit.num_qubits).collect(),
@@ -3706,16 +3702,6 @@ impl<'a> DeferralWalk<'a> {
                         Some(r) => written.push((r, want)),
                     }
                 }
-                if written.len() > 1 && !lands_register_comparisons() {
-                    return Err(PrismError::IncompatibleBackend {
-                        backend: "CompiledSampler".to_string(),
-                        reason: format!(
-                            "deferred measurement sampling applies a guard as a parity of \
-                             measured bits, and a comparison of the {size}-bit register at bit \
-                             {offset} that reads two measured bits is not one"
-                        ),
-                    });
-                }
                 Ok(match (feasible, written.as_slice()) {
                     (false, _) => parity(SmallVec::new(), not_equals),
                     (true, []) => parity(SmallVec::new(), !not_equals),
@@ -3926,36 +3912,6 @@ impl<'a> DeferralWalk<'a> {
     }
 }
 
-/// Whether asymmetric readout on a bit a guard reads lands after the compiled sample rather
-/// than declining the rewrite.
-fn lands_asymmetric_readout() -> bool {
-    #[cfg(feature = "bench-internal")]
-    if !crate::bench_variant('d') {
-        return false;
-    }
-    true
-}
-
-/// Whether a guard comparing several measured bits lands its body after the compiled
-/// sample rather than declining the rewrite.
-fn lands_register_comparisons() -> bool {
-    #[cfg(feature = "bench-internal")]
-    if !crate::bench_variant('c') {
-        return false;
-    }
-    true
-}
-
-/// Whether a measured qubit that a later instruction touches stays live behind a copy of
-/// its record.
-fn copies_reused_measurements() -> bool {
-    #[cfg(feature = "bench-internal")]
-    if !crate::bench_variant('b') {
-        return false;
-    }
-    true
-}
-
 /// Mark each top-level measurement whose qubit a later gate, guarded gate or region touches
 /// before the qubit's next reset; on the noisy walk a later measurement counts too. A marked
 /// measurement becomes `CX` onto a fresh alias measured at the end, the deferred-measurement
@@ -4010,16 +3966,6 @@ fn readout_flips_at_write(
         };
         if !read.get(bit).copied().unwrap_or(false) {
             continue;
-        }
-        if err.p01 != err.p10 && !lands_asymmetric_readout() {
-            return Err(PrismError::IncompatibleBackend {
-                backend: "CompiledSampler".to_string(),
-                reason: format!(
-                    "deferred noisy sampling lands readout error a guard reads as a Pauli on \
-                     the measured qubit, and classical bit {bit} flips 0 and 1 at different \
-                     rates"
-                ),
-            });
         }
         flips[bit] = Some((err.p01, err.p10));
     }

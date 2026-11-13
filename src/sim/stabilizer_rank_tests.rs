@@ -1494,6 +1494,7 @@ fn deferred_register_probabilities_match_a_dense_dilation() {
         ("guarded y", mid_circuit_case(6, 3, Gate::Y, 11)),
         ("reset twice", twice_reset_case()),
         ("parity guard", parity_guard_case()),
+        ("measured qubit reused", reused_measurement_case(6, 3)),
     ];
     for (label, circuit) in cases {
         let deferred = crate::sim::compiled::defer_clifford_t_circuit(&circuit).unwrap();
@@ -1510,8 +1511,26 @@ fn deferred_register_probabilities_match_a_dense_dilation() {
     }
 }
 
-/// `mid_circuit_case` with `gate` guarded in place of the Pauli, or with a gate on the
-/// measured qubit before its reset, or with a measurement inside a guarded body.
+/// `mid_circuit_case` with a gate on the measured qubit ahead of the guard, before its reset.
+fn reused_measurement_case(n: usize, t: usize) -> Circuit {
+    let mut reused = mid_circuit_case(n, t, Gate::X, 5);
+    let at = reused
+        .instructions
+        .iter()
+        .position(|i| matches!(i, Instruction::Conditional { .. }))
+        .unwrap();
+    reused.instructions.insert(
+        at,
+        Instruction::Gate {
+            gate: Gate::H,
+            targets: SmallVec::from_slice(&[0]),
+        },
+    );
+    reused
+}
+
+/// `mid_circuit_case` with `gate` guarded in place of the Pauli, or with a measurement
+/// inside a guarded body.
 fn declined_cases(n: usize, t: usize) -> Vec<(&'static str, Circuit)> {
     let mut guarded_t = mid_circuit_case(n, t, Gate::X, 5);
     let at = guarded_t
@@ -1530,14 +1549,6 @@ fn declined_cases(n: usize, t: usize) -> Vec<(&'static str, Circuit)> {
         gate: Gate::S,
         targets: SmallVec::from_slice(&[1]),
     };
-    let mut reused = mid_circuit_case(n, t, Gate::X, 5);
-    reused.instructions.insert(
-        at,
-        Instruction::Gate {
-            gate: Gate::H,
-            targets: SmallVec::from_slice(&[0]),
-        },
-    );
     let mut region = mid_circuit_case(n, t, Gate::X, 5);
     region.instructions[at] = Instruction::Region(Box::new(GuardedRegion::new(
         ClassicalCondition::BitIsOne(0),
@@ -1549,7 +1560,6 @@ fn declined_cases(n: usize, t: usize) -> Vec<(&'static str, Circuit)> {
     vec![
         ("guarded t", guarded_t),
         ("guarded s", guarded_s),
-        ("measured qubit reused", reused),
         ("measurement in a guarded body", region),
     ]
 }

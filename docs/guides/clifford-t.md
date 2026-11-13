@@ -65,12 +65,12 @@ that would grow it past 20 returns `BackendUnsupported`, and `Auto` checks the w
 from the tableau alone and sends such a circuit to the dispatch tree instead.
 
 A circuit with mid-circuit measurements, guards or resets first moves its measurements to
-the end: a reset hands the qubit's later gates to a fresh qubit in `|0>`, and a guarded
-Pauli becomes the same Pauli controlled by the measured qubit. The rewritten circuit is
-unitary with terminal measurements and the same T count, so the register above samples
-it. A guard on a gate other than a Pauli, a gate on a measured qubit with no reset
-between, a guard comparing two measured bits, or a guarded body holding a measurement
-keeps the measurements in place.
+the end: a reset hands the qubit's later gates to a fresh qubit in `|0>`, a measured qubit
+used again copies its record onto a fresh qubit with a CX, and a guarded Pauli becomes the
+same Pauli controlled by the measured qubit. The rewritten circuit is unitary with
+terminal measurements and the same T count, so the register above samples it. A guard on
+a gate other than a Pauli, a guard comparing two measured bits, or a guarded body holding
+a measurement keeps the measurements in place.
 
 Those circuits carry coherent weighted MPS branches instead. Clifford gates mutate each
 branch, `T` and `Tdg` split branches, and a measurement computes outcome probabilities

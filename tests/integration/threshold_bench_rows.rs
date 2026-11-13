@@ -9,8 +9,6 @@ const UNBRACKETED: &str = "/// No bench row brackets this yet.";
 
 const THRESHOLDS: &[(&str, &str)] = &[
     ("src/sim/dispatch.rs", "MPS_GATE_CUT_OVERHEAD"),
-    ("src/sim/dispatch.rs", "MAX_AUTO_T_COUNT_SHOTS"),
-    ("src/sim/dispatch.rs", "MAX_STABILIZER_RANK_QUBITS"),
     ("src/sim/dispatch.rs", "MAX_AUTO_MID_CIRCUIT_BRANCH_T"),
     ("src/sim/dispatch.rs", "MIN_QUBITS_FOR_SPD_AUTO"),
     ("src/sim/dispatch.rs", "AUTO_SPD_AMPLITUDES_PER_TERM"),

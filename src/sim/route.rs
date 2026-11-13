@@ -207,10 +207,6 @@ fn clifford_register_work(width: usize, rotation_work: f64, measured: usize) -> 
 /// A bound from the T count decides most circuits. The rest take a tableau dry run
 /// capped at the widest register that could still win.
 pub(super) fn decide_clifford_register(circuit: &Circuit, limits: &ResolvedLimits) -> bool {
-    #[cfg(feature = "bench-internal")]
-    if !crate::bench_variant_b() {
-        return legacy_prefers_clifford_register(circuit);
-    }
     let n = circuit.num_qubits;
     if n < MIN_AUTO_CLIFFORD_REGISTER_QUBITS
         || !circuit.has_terminal_measurements_only()
@@ -461,7 +457,6 @@ pub(super) fn decide_shots(
         return Ok(ShotRoute::StabilizerRank);
     }
     if kind.is_auto()
-        && mid_circuit_route_live()
         && decide_mid_circuit_clifford_t(circuit, num_shots, limits) != MidCircuitRoute::Decline
     {
         return Ok(ShotRoute::StabilizerRank);
@@ -483,10 +478,6 @@ pub(super) fn decide_shots(
         terminal => terminal,
     };
     if matches!(kind, BackendKind::StabilizerRank) && circuit.has_t_gates() {
-        return Ok(ShotRoute::StabilizerRank);
-    }
-    #[cfg(feature = "bench-internal")]
-    if kind.is_auto() && auto_samples_wide_by_stabilizer_rank(circuit) {
         return Ok(ShotRoute::StabilizerRank);
     }
     if terminal_only

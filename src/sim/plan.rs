@@ -618,14 +618,6 @@ pub(super) fn inspect<S>(
                     };
                     let mut p =
                         inspect_probability(kind, rewritten.as_ref().unwrap_or(circuit), limits)?;
-                    #[cfg(feature = "bench-internal")]
-                    if !mid_circuit_route_live()
-                        && kind.is_auto()
-                        && auto_samples_by_stabilizer_rank(circuit, limits)
-                    {
-                        p.backend = ResolvedBackend::StabilizerRank;
-                        p.exactness = PlannedExactness::Exact;
-                    }
                     p.rule = RouteRule::PerShot;
                     Ok(p)
                 }

@@ -1167,18 +1167,16 @@ pub fn run_stabilizer_rank_shots(
         )));
     }
 
-    if super::mid_circuit_route_live() {
-        if let Some(sampler) = deferred_sampler(circuit)? {
-            return Ok(super::ShotsResult::from_shots(
-                sampler.sample(num_shots, seed),
-                circuit.num_classical_bits,
-            )
-            .with_metadata(super::RunMetadata::exact(
-                super::ResolvedBackend::StabilizerRank,
-            )));
-        }
-        reject_branch_overflow(circuit)?;
+    if let Some(sampler) = deferred_sampler(circuit)? {
+        return Ok(super::ShotsResult::from_shots(
+            sampler.sample(num_shots, seed),
+            circuit.num_classical_bits,
+        )
+        .with_metadata(super::RunMetadata::exact(
+            super::ResolvedBackend::StabilizerRank,
+        )));
     }
+    reject_branch_overflow(circuit)?;
     sample_mps_branches_online(circuit, num_shots, seed)
 }
 

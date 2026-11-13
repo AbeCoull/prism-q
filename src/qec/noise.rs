@@ -15,7 +15,7 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 #[cfg(feature = "parallel")]
 use crate::sim::compiled::SendPtrU64;
-#[cfg(any(test, feature = "bench-internal"))]
+#[cfg(test)]
 use crate::sim::compiled::{CompiledSampler, compile_measurements};
 use crate::sim::compiled::{PackedShots, pair_rows_mut, rng::Xoshiro256PlusPlus, xor_words};
 use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, geometric_sample_xoshiro};
@@ -208,8 +208,9 @@ enum QecRecordBase {
     /// every alias whose Z can flip a record.
     Reference(Vec<u64>),
     /// Compiled sampler over the deferred circuit, whose draws already cover the
-    /// noiseless outcome space, so the frame walk carries faults alone.
-    #[cfg(any(test, feature = "bench-internal"))]
+    /// noiseless outcome space, so the frame walk carries faults alone. Kept to compare the
+    /// reference base against in distribution.
+    #[cfg(test)]
     Compiled(Box<CompiledSampler>),
 }
 
@@ -564,12 +565,12 @@ impl QecCompiledNoiseSampler {
     pub(super) fn reference_records(&self) -> Option<&[u64]> {
         match &self.base {
             QecRecordBase::Reference(records) => Some(records),
-            #[cfg(any(test, feature = "bench-internal"))]
+            #[cfg(test)]
             QecRecordBase::Compiled(_) => None,
         }
     }
 
-    #[cfg(any(test, feature = "bench-internal"))]
+    #[cfg(test)]
     pub(super) fn compiled_base(&self) -> Option<&CompiledSampler> {
         match &self.base {
             QecRecordBase::Compiled(sampler) => Some(sampler.as_ref()),
@@ -577,22 +578,14 @@ impl QecCompiledNoiseSampler {
         }
     }
 
-    #[cfg(feature = "bench-internal")]
-    pub(super) fn compiled_base_mut(&mut self) -> Option<&mut CompiledSampler> {
-        match &mut self.base {
-            QecRecordBase::Compiled(sampler) => Some(sampler.as_mut()),
-            QecRecordBase::Reference(_) => None,
-        }
-    }
-
-    #[cfg(any(test, feature = "bench-internal"))]
+    #[cfg(test)]
     pub(super) fn feedforward(&self) -> Option<&QecFeedforwardFlips> {
         self.feedforward.as_ref()
     }
 
     /// Restart every stream as a sampler compiled with `seed` starts it.
     pub(super) fn reseed(&mut self, seed: u64) {
-        #[cfg(any(test, feature = "bench-internal"))]
+        #[cfg(test)]
         if let QecRecordBase::Compiled(sampler) = &mut self.base {
             sampler.reseed(seed);
         }
@@ -612,7 +605,7 @@ impl QecCompiledNoiseSampler {
         #[allow(clippy::infallible_destructuring_match)]
         let reference = match &mut self.base {
             QecRecordBase::Reference(records) => records,
-            #[cfg(any(test, feature = "bench-internal"))]
+            #[cfg(test)]
             QecRecordBase::Compiled(sampler) => {
                 let measurements = sampler.try_sample_bulk_packed(num_shots)?;
                 return self.apply_noise_to_measurements(measurements, first_shot, total_shots);
@@ -647,8 +640,10 @@ impl QecCompiledNoiseSampler {
         &mut self,
         num_shots: usize,
     ) -> Result<PackedShots> {
+        #[allow(clippy::infallible_destructuring_match)]
         let reference = match &mut self.base {
             QecRecordBase::Reference(records) => records,
+            #[cfg(test)]
             QecRecordBase::Compiled(sampler) => return sampler.try_sample_bulk_packed(num_shots),
         };
         let mut data = broadcast_records(reference, self.num_measurements, num_shots);
@@ -1796,10 +1791,6 @@ pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompi
             "QEC record-noise sampler",
         ));
     }
-    #[cfg(feature = "bench-internal")]
-    if !crate::bench_variant_b() {
-        return compile_qec_noisy_sampler_on_compiled_base(program);
-    }
     let (reference, deferred) = super::runner::qec_join(
         || super::reference::forced_tableau_records(program, false),
         || lower_qec_program_to_deferred_circuit_inner(program, false, true),
@@ -1820,7 +1811,7 @@ pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompi
 
 /// [`compile_qec_noisy_sampler`] on a compiled sampler over the deferred circuit, the
 /// base before the reference run took its place.
-#[cfg(any(test, feature = "bench-internal"))]
+#[cfg(test)]
 pub(super) fn compile_qec_noisy_sampler_on_compiled_base(
     program: &QecProgram,
 ) -> Result<QecCompiledNoiseSampler> {

@@ -78,36 +78,38 @@ Seeded output has changed in these releases:
   state in one pass. Dynamic programs on the host statevector branch the same way, so
   their shots no longer follow `mix_seed(seed, i)`. Compiled Clifford counts at high shot
   counts draw from a corrected binomial sampler, which also fixes their spread.
-- 0.39.0 prices `Auto` terminal shots of a Clifford+T circuit between the Clifford
-  register and the dense run instead of capping the T count. Circuits with more than 20
-  T gates, or at least as many T gates as qubits, whose register fits 20 qubits move to
-  the register from the statevector, or past the statevector cap from the MPS. A register
-  nearly as wide as the circuit, or one wider than the independent blocks the circuit
-  splits into, moves the other way. Fixed-seed shots on those circuits changed.
-- 0.39.0 samples `Auto` shots of a Clifford+T circuit with a mid-circuit measurement, a
-  guard or a reset from the Clifford register once its measurements move to the end, in
-  place of the weighted MPS branches, and explicit `StabilizerRank` does the same. Within
-  the statevector cap, a circuit the register does not take runs on the statevector walk;
-  past the cap, one whose measurements stay in place keeps the branches up to 6 T gates
-  and goes to the dispatch tree beyond. Fixed-seed shots on those circuits changed.
-- 0.39.0 drops parity ancillas from `Auto` shots of a circuit that reaches the
-  mid-circuit walk. An ancilla that only collects CX gates from data qubits and X flips,
-  is measured, and is then reset or left alone becomes a parity measurement on those data
-  qubits, so the walk runs on a smaller register. Fixed-seed shots on those circuits
-  changed; explicit `Statevector` keeps the ancillas and its shots.
-- 0.39.0 skips the probability pass of a reset, or of a repeated measurement, on the
-  host statevector walk when the qubit was last measured as 1 and nothing has touched it
-  since, taking the probability as exactly 1. The pass returned 1 to within about 1e-14,
-  so later probabilities on that branch move in the last bits, and a fixed-seed outcome
-  changes only where a draw lands that close to a boundary.
-- 0.39.0 moves more noisy and noiseless Clifford circuits with mid-circuit measurements
-  from per-shot tableau replay to the compiled sampler, which draws a different stream:
-  circuits that use a measured qubit again without a reset, active reset by a guarded
-  `X` among them, and guarded Paulis under a register comparison reading several
-  measured bits, the form `switch` and lookup decoding take, and asymmetric readout error
-  on a bit a guard reads. Circuits that compiled before keep their shots.
-- 0.39.0 samples the QEC measurement records that a noisy or feed-forward program reads
-  from one noiseless reference run spread by random Pauli frames, in place of a compiled
-  sampler over the deferred circuit. Kept records, and detectors or observables that are
-  random without noise, change for a seed; detectors, observables and postselection counts
-  that are fixed without noise do not.
+- 0.39.0 changes the draws of these routes:
+  - `Auto` terminal shots of a Clifford+T circuit are priced between the Clifford
+    register and the dense run instead of capping the T count. Circuits with more than 20
+    T gates, or at least as many T gates as qubits, whose register fits 20 qubits move to
+    the register from the statevector, or past the statevector cap from the MPS. A
+    register nearly as wide as the circuit, or one wider than the independent blocks the
+    circuit splits into, moves the other way. Fixed-seed shots on those circuits changed.
+  - `Auto` shots of a Clifford+T circuit with a mid-circuit measurement, a guard or a
+    reset sample from the Clifford register once its measurements move to the end, in
+    place of the weighted MPS branches, and explicit `StabilizerRank` does the same.
+    Within the statevector cap, a circuit the register does not take runs on the
+    statevector walk; past the cap, one whose measurements stay in place keeps the
+    branches up to 6 T gates and goes to the dispatch tree beyond. Fixed-seed shots on
+    those circuits changed.
+  - `Auto` shots of a circuit that reaches the mid-circuit walk drop parity ancillas. An
+    ancilla that only collects CX gates from data qubits and X flips, is measured, and is
+    then reset or left alone becomes a parity measurement on those data qubits, so the
+    walk runs on a smaller register. Fixed-seed shots on those circuits changed;
+    explicit `Statevector` keeps the ancillas and its shots.
+  - The host statevector walk skips the probability pass of a reset, or of a repeated
+    measurement, when the qubit was last measured as 1 and nothing has touched it since,
+    taking the probability as exactly 1. The pass returned 1 to within about 1e-14, so
+    later probabilities on that branch move in the last bits, and a fixed-seed outcome
+    changes only where a draw lands that close to a boundary.
+  - More noisy and noiseless Clifford circuits with mid-circuit measurements move from
+    per-shot tableau replay to the compiled sampler, which draws a different stream:
+    circuits that use a measured qubit again without a reset, active reset by a guarded
+    `X` among them, guarded Paulis under a register comparison reading several measured
+    bits (the form `switch` and lookup decoding take), and asymmetric readout error on a
+    bit a guard reads. Circuits that compiled before keep their shots.
+  - QEC measurement records that a noisy or feed-forward program reads are sampled from
+    one noiseless reference run spread by random Pauli frames, in place of a compiled
+    sampler over the deferred circuit. Kept records, and detectors or observables that
+    are random without noise, change for a seed; detectors, observables and postselection
+    counts that are fixed without noise do not.

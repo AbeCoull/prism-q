@@ -43,8 +43,6 @@ use dispatch::{
     plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford, statevector_work,
     validate_explicit_backend,
 };
-#[cfg(feature = "bench-internal")]
-use dispatch::{MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS, stabilizer_rank_budget};
 pub use dynamic::{SimulateProgram, simulate_program};
 pub use metadata::{
     BondReport, Engine, Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata,
@@ -2794,40 +2792,11 @@ fn auto_clifford_t_count(circuit: &Circuit) -> Option<usize> {
     (circuit.is_clifford_plus_t() && circuit.has_t_gates()).then(|| circuit.t_count())
 }
 
-#[cfg(feature = "bench-internal")]
-fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> Option<usize> {
-    let t = auto_clifford_t_count(circuit)?;
-    (t <= max_t && t <= stabilizer_rank_budget(circuit.num_qubits)).then_some(t)
-}
-
-/// Whether the priced Clifford+T route for shots with a mid-circuit measurement, a guard
-/// or a reset is live: always in a shipping build, on `PRISM_BENCH_VARIANT=c` under
-/// `bench-internal`.
-#[cfg(feature = "bench-internal")]
-fn mid_circuit_route_live() -> bool {
-    crate::bench_variant('c')
-}
-#[cfg(not(feature = "bench-internal"))]
-fn mid_circuit_route_live() -> bool {
-    true
-}
-
-/// Whether `Auto` per-shot runs drop parity ancillas: always in a shipping build, on
-/// `PRISM_BENCH_VARIANT=d` under `bench-internal`.
-#[cfg(feature = "bench-internal")]
-fn parity_rewrite_live() -> bool {
-    crate::bench_variant('d')
-}
-#[cfg(not(feature = "bench-internal"))]
-fn parity_rewrite_live() -> bool {
-    true
-}
-
 /// The circuit an `Auto` per-shot run walks in place of `circuit`, once every route
 /// ahead of the walk has declined: its parity ancillas folded into parity measurements
 /// on the data qubits ([`rewrite_parity_ancillas`]).
 fn parity_rewrite(kind: &BackendKind, circuit: &Circuit) -> Option<Circuit> {
-    if !kind.is_auto() || !parity_rewrite_live() {
+    if !kind.is_auto() {
         return None;
     }
     rewrite_parity_ancillas(circuit)
@@ -2962,47 +2931,6 @@ impl ShotSource {
 const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 16;
 #[cfg(prism_lowered_thresholds)]
 const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 4;
-
-#[cfg(feature = "bench-internal")]
-fn legacy_prefers_clifford_register(circuit: &Circuit) -> bool {
-    circuit.num_qubits >= MIN_AUTO_CLIFFORD_REGISTER_QUBITS
-        && circuit.has_terminal_measurements_only()
-        && !circuit.has_resets()
-        && auto_clifford_t_count(circuit)
-            .is_some_and(|t| t < circuit.num_qubits && t <= clifford_register::MAX_REGISTER_QUBITS)
-}
-
-#[cfg(feature = "bench-internal")]
-fn auto_samples_wide_by_stabilizer_rank(circuit: &Circuit) -> bool {
-    let legacy = if circuit.has_resets() {
-        !mid_circuit_route_live()
-    } else {
-        !crate::bench_variant_b()
-    };
-    legacy
-        && circuit.has_terminal_measurements_only()
-        && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
-        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some_and(|t| {
-            t <= clifford_register::MAX_REGISTER_QUBITS
-                || stabilizer_rank::terminal_register_price(
-                    circuit,
-                    clifford_register::MAX_REGISTER_QUBITS,
-                )
-                .is_some()
-        })
-}
-
-#[cfg(feature = "bench-internal")]
-fn auto_samples_by_stabilizer_rank(circuit: &Circuit, limits: &ResolvedLimits) -> bool {
-    let folded = circuit.fold_static_guards();
-    let circuit = folded.as_ref();
-    if circuit.has_terminal_measurements_only() {
-        route::decide_clifford_register(circuit, limits)
-            || auto_samples_wide_by_stabilizer_rank(circuit)
-    } else {
-        auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
-    }
-}
 
 /// Select and prepare the sampling source for `circuit`.
 ///
@@ -4259,13 +4187,6 @@ fn run_shots_per_shot(
             backend: format!("{kind:?}"),
             reason: "Pauli propagation backends do not support mid-circuit measurements".into(),
         });
-    }
-    #[cfg(feature = "bench-internal")]
-    if !mid_circuit_route_live()
-        && kind.is_auto()
-        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
-    {
-        return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
 
     if has_temporal_clifford_opportunity(&kind, circuit, limits) {

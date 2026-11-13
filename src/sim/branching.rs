@@ -101,7 +101,8 @@ pub(super) fn branch_shots(
     let walk = Walk {
         limits,
         program: None,
-        known_one: known_one_live(),
+        #[cfg(test)]
+        known_one: true,
     };
     walk.shots(
         fused.num_qubits,
@@ -137,7 +138,8 @@ pub(super) fn branch_program_shots(
     let walk = Walk {
         limits,
         program: Some(program),
-        known_one: known_one_live(),
+        #[cfg(test)]
+        known_one: true,
     };
     walk.shots(
         program.num_qubits(),
@@ -321,22 +323,22 @@ struct Walk<'l> {
     limits: &'l BranchLimits,
     program: Option<&'l Prepared<'l>>,
     /// Whether a measurement that projects onto 1 marks its qubit in
-    /// [`Branch::known_one`].
+    /// [`Branch::known_one`], off only to compare against the untracked walk.
+    #[cfg(test)]
     known_one: bool,
 }
 
-/// Whether the walk tracks qubits measured as 1: always in a shipping build, on
-/// `PRISM_BENCH_VARIANT=e` under `bench-internal`.
-#[cfg(feature = "bench-internal")]
-fn known_one_live() -> bool {
-    crate::bench_variant('e')
-}
-#[cfg(not(feature = "bench-internal"))]
-fn known_one_live() -> bool {
-    true
-}
-
 impl<'l> Walk<'l> {
+    #[cfg(test)]
+    fn tracks_known_one(&self) -> bool {
+        self.known_one
+    }
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn tracks_known_one(&self) -> bool {
+        true
+    }
+
     fn shots(
         &self,
         num_qubits: usize,
@@ -483,7 +485,7 @@ impl<'l> Walk<'l> {
                     project(sv, qubit, classical_bit, outcome, prob_one);
                     if outcome && classical_bit.is_some() {
                         branch.known_zero &= !mask;
-                        if self.known_one {
+                        if self.tracks_known_one() {
                             branch.known_one |= mask;
                         }
                     } else {
@@ -538,7 +540,7 @@ impl<'l> Walk<'l> {
                 } else {
                     branch.known_zero | mask
                 },
-                known_one: if classical_bit.is_some() && self.known_one {
+                known_one: if classical_bit.is_some() && self.tracks_known_one() {
                     branch.known_one | mask
                 } else {
                     branch.known_one & !mask

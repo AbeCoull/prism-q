@@ -5,7 +5,7 @@
 // asserting a route the native constant keeps out of reach.
 
 use super::*;
-use crate::circuit::{ClassicalCondition, Parameters, PreparedCircuit};
+use crate::circuit::{ClassicalCondition, Parameters, PreparedCircuit, SmallVec};
 use crate::gates::Gate;
 use crate::sim::noise::{NoiseChannel, NoiseEvent};
 
@@ -131,7 +131,8 @@ const LEDGER: &[Entry] = &[
     here("sample_counts", "ShotSource::TerminalProbabilities", Sv, "terminal_probability_counts_follow_the_statevector"),
     here("shots", "ShotSource::StabilizerRank", Sv, "explicit_stabilizer_rank_shots_follow_the_statevector"),
     lowered("shots", "clifford_register", Sv, "auto_clifford_register_shots_follow_the_statevector"),
-    lowered("shots", "wide_stabilizer_rank", Sv, "auto_wide_stabilizer_rank_shots_follow_the_statevector"),
+    lowered("shots", "deferred_clifford_register", Sv, "auto_deferred_register_shots_follow_the_statevector"),
+    here("shots", "mid_circuit_branches", Sv, "mid_circuit_branches_take_a_declined_circuit_past_the_cap"),
     here("shots", "ShotSource::PerShot", ClosedForm, "per_shot_route_follows_the_closed_form"),
     here("shots", "initial_state", Sv, "initial_state_terminals_match_the_unfused_statevector"),
     here("sample_counts", "compiled_counts_multinomial", Sv, "compiled_count_regimes_follow_the_statevector"),
@@ -200,7 +201,8 @@ const PREDICATE_ROUTES: &[&str] = &[
     "run_batch_split",
     "probabilities_of",
     "clifford_register",
-    "wide_stabilizer_rank",
+    "deferred_clifford_register",
+    "mid_circuit_branches",
     "compiled_counts_multinomial",
     "compiled_counts_rank_space",
     "compiled_counts_chunked",
@@ -1185,10 +1187,9 @@ fn auto_clifford_register_shots_follow_the_statevector() {
     not(prism_lowered_thresholds),
     ignore = "reaches its route only under --cfg prism_lowered_thresholds"
 )]
-fn auto_wide_stabilizer_rank_shots_follow_the_statevector() {
-    // A reset on an untouched qubit keeps the circuit off the priced register test, and
-    // a detached Bell pair leaves it partly independent, which keeps it off the terminal
-    // statevector. Two T gates fit the lowered register cap, and the wide route takes it.
+fn auto_deferred_register_shots_follow_the_statevector() {
+    // A reset on an untouched qubit keeps the circuit off the terminal register test, so
+    // the deferred register takes it; two T gates fit the lowered register cap.
     let mut circuit = Circuit::new(13, 0);
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_gate(Gate::T, &[0]);
@@ -1207,12 +1208,15 @@ fn auto_wide_stabilizer_rank_shots_follow_the_statevector() {
         &circuit,
         &ResolvedLimits::process_default()
     ));
-    assert!(auto_samples_wide_by_stabilizer_rank(&circuit));
+    assert_eq!(
+        decide_mid_circuit_clifford_t(&circuit, 4000, &ResolvedLimits::process_default()),
+        MidCircuitRoute::Register
+    );
     let shots = 4000;
     let result = simulate(&circuit).seed(SEED).shots(shots).unwrap();
     assert_eq!(result.metadata.backend, ResolvedBackend::StabilizerRank);
     assert_counts_follow(
-        "wide stabilizer rank",
+        "deferred register",
         &shot_counts(&result),
         &unfused_probs(&circuit),
         shots,
@@ -1240,15 +1244,10 @@ fn statevector_cap(qubits: usize) -> Limits {
 
 #[test]
 fn auto_wide_register_past_its_cap_takes_the_tree() {
-    // 21 T gates at 31 qubits fit the wide T bound, but the register would reach 21
-    // qubits, so the shots take the MPS the tree picks past the statevector cap.
+    // The register would reach 21 qubits, so the shots take the MPS the tree picks past
+    // the statevector cap.
     let circuit = wide_register_circuit(21);
-    assert_eq!(
-        circuit.t_count(),
-        stabilizer_rank_budget(circuit.num_qubits)
-    );
-    assert!(!auto_samples_wide_by_stabilizer_rank(&circuit));
-    assert!(!auto_samples_by_stabilizer_rank(
+    assert!(!decide_clifford_register(
         &circuit,
         &ResolvedLimits::resolve(Some(&statevector_cap(20)))
     ));
@@ -1330,6 +1329,272 @@ fn auto_wide_register_within_its_cap_keeps_the_register() {
         .unwrap();
     assert_eq!(result.metadata.backend, ResolvedBackend::StabilizerRank);
     assert!(result.shots.iter().all(|s| s.iter().all(|&b| b == s[0])));
+}
+
+// The mid-circuit Clifford+T route: one circuit on each side of each tier, the plan
+// agreeing with the run on every one.
+
+/// `clifford_t(n, t)` with qubit 0 measured into bit 0, `guard` on qubit 1 when it reads
+/// one, qubit 0 reset and coupled back, and qubits 0 and 1 measured into bits 2 and 1.
+fn mid_circuit(n: usize, t: usize, guard: Gate) -> Circuit {
+    let mut circuit = clifford_t(n, t);
+    circuit.num_classical_bits = 3;
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: guard,
+        targets: SmallVec::from_slice(&[1]),
+    });
+    circuit.add_reset(0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_measure(0, 2);
+    circuit.add_measure(1, 1);
+    circuit
+}
+
+fn mid_route(circuit: &Circuit, shots: usize, limits: &Limits) -> MidCircuitRoute {
+    decide_mid_circuit_clifford_t(circuit, shots, &ResolvedLimits::resolve(Some(limits)))
+}
+
+/// The plan's backend for `shots` shots is the one the run reports, and a plan that
+/// promises an exact answer gets one.
+fn assert_plan_matches_run(
+    label: &str,
+    circuit: &Circuit,
+    limits: Limits,
+    shots: usize,
+) -> ShotsResult {
+    let plan = simulate(circuit)
+        .limits(limits)
+        .plan(Query::Shots(shots))
+        .unwrap();
+    let result = simulate(circuit)
+        .limits(limits)
+        .seed(SEED)
+        .shots(shots)
+        .unwrap();
+    assert_eq!(plan.backend, result.metadata.backend, "{label}: backend");
+    if plan.exactness == PlannedExactness::Exact {
+        assert!(result.metadata.is_exact(), "{label}: exactness");
+    }
+    result
+}
+
+/// `new` against the stabilizer-rank branches `Auto` took before, on the same seed.
+fn assert_matches_branches(label: &str, circuit: &Circuit, new: &ShotsResult) {
+    let old = stabilizer_rank::sample_mps_branches_online(circuit, new.shots.len(), SEED).unwrap();
+    assert_same_frequencies(label, new, &old);
+}
+
+/// Two samples outcome by outcome: frequencies within five standard deviations of their
+/// difference plus one shot, `p` their pooled frequency.
+fn assert_same_frequencies(label: &str, new: &ShotsResult, old: &ShotsResult) {
+    let shots = new.shots.len();
+    assert_eq!(old.shots.len(), shots, "{label}: shot totals");
+    let (new, old) = (shot_counts(new), shot_counts(old));
+    let keys: std::collections::BTreeSet<&Vec<u64>> = new.keys().chain(old.keys()).collect();
+    for key in keys {
+        let a = new.get(key).copied().unwrap_or(0) as f64 / shots as f64;
+        let b = old.get(key).copied().unwrap_or(0) as f64 / shots as f64;
+        let p = (a + b) / 2.0;
+        let bound = 5.0 * (p * (1.0 - p) * 2.0 / shots as f64).sqrt() + 1.0 / shots as f64;
+        assert!(
+            (a - b).abs() <= bound,
+            "{label}: outcome {key:?} at {a} against {b}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register constants price these circuits differently"
+)]
+fn mid_circuit_route_takes_the_register_from_sixteen_qubits() {
+    let circuit = mid_circuit(16, 2, Gate::X);
+    let limits = Limits::new();
+    assert_eq!(
+        mid_route(&circuit, 4000, &limits),
+        MidCircuitRoute::Register
+    );
+    let result = assert_plan_matches_run("16q register", &circuit, limits, 4000);
+    assert_eq!(result.metadata.backend, ResolvedBackend::StabilizerRank);
+    assert_matches_branches("16q register", &circuit, &result);
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register constants price these circuits differently"
+)]
+fn mid_circuit_route_leaves_narrow_circuits_to_the_walk() {
+    let circuit = mid_circuit(10, 4, Gate::Y);
+    let limits = Limits::new();
+    assert_eq!(mid_route(&circuit, 4000, &limits), MidCircuitRoute::Decline);
+    let result = assert_plan_matches_run("10q walk", &circuit, limits, 4000);
+    assert_eq!(result.metadata.backend, ResolvedBackend::Statevector);
+    assert_matches_branches("10q walk", &circuit, &result);
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register cap is narrower than this circuit's register"
+)]
+fn mid_circuit_route_takes_a_fitting_register_past_the_cap() {
+    let circuit = mid_circuit(12, 4, Gate::Z);
+    let limits = statevector_cap(8);
+    assert_eq!(
+        mid_route(&circuit, 4000, &limits),
+        MidCircuitRoute::Register
+    );
+    let result = assert_plan_matches_run("past the cap", &circuit, limits, 4000);
+    assert_eq!(result.metadata.backend, ResolvedBackend::StabilizerRank);
+    assert_matches_branches("past the cap", &circuit, &result);
+}
+
+/// `mid_circuit` with the guarded Pauli replaced by an `S`, which keeps the measurement in
+/// place.
+fn guarded_s(n: usize, t: usize) -> Circuit {
+    let mut circuit = mid_circuit(n, t, Gate::X);
+    for inst in &mut circuit.instructions {
+        if let Instruction::Conditional { gate, .. } = inst {
+            *gate = Gate::S;
+        }
+    }
+    circuit
+}
+
+#[test]
+fn mid_circuit_branches_take_a_declined_circuit_past_the_cap() {
+    let circuit = guarded_s(10, 2);
+    let limits = statevector_cap(8);
+    assert_eq!(
+        mid_route(&circuit, 4000, &limits),
+        MidCircuitRoute::Branches
+    );
+    let result = assert_plan_matches_run("branches", &circuit, limits, 4000);
+    assert_eq!(result.metadata.backend, ResolvedBackend::StabilizerRank);
+    let reference = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED + 1)
+        .shots(4000)
+        .unwrap();
+    assert_same_frequencies("branches", &result, &reference);
+}
+
+#[test]
+fn mid_circuit_route_declines_past_the_branch_bound() {
+    for n in [10, 24] {
+        let declined = guarded_s(n, MAX_AUTO_MID_CIRCUIT_BRANCH_T + 1);
+        assert_eq!(
+            mid_route(&declined, 64, &statevector_cap(8)),
+            MidCircuitRoute::Decline
+        );
+        assert_eq!(
+            mid_route(
+                &guarded_s(n, MAX_AUTO_MID_CIRCUIT_BRANCH_T),
+                64,
+                &statevector_cap(8)
+            ),
+            MidCircuitRoute::Branches
+        );
+        let result = assert_plan_matches_run("past the bound", &declined, statevector_cap(8), 64);
+        assert_ne!(result.metadata.backend, ResolvedBackend::StabilizerRank);
+    }
+    // Under the cap the walk takes a declined circuit whatever its T count.
+    assert_eq!(
+        mid_route(&guarded_s(10, 2), 64, &Limits::new()),
+        MidCircuitRoute::Decline
+    );
+}
+
+/// 31 qubits with `H` then `T` on each of qubits `0..21`, a CX chain, and a measurement of
+/// qubit 30 ahead of an `X` on qubit 29, then every qubit measured: the deferred register
+/// would reach 21 qubits.
+fn wide_mid_circuit() -> Circuit {
+    let mut circuit = wide_register_circuit(21);
+    circuit
+        .instructions
+        .retain(|i| !matches!(i, Instruction::Measure { .. }));
+    circuit.add_measure(30, 30);
+    circuit.add_gate(Gate::X, &[29]);
+    for q in 0..30 {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+#[test]
+fn wide_mid_circuit_past_the_register_takes_the_tree() {
+    let circuit = wide_mid_circuit();
+    assert!(!circuit.has_terminal_measurements_only());
+    assert_eq!(
+        mid_route(&circuit, 64, &statevector_cap(20)),
+        MidCircuitRoute::Decline
+    );
+    let result = assert_plan_matches_run("wide", &circuit, statevector_cap(20), 64);
+    assert_eq!(result.metadata.backend, ResolvedBackend::Mps);
+    assert_eq!(result.shots.len(), 64);
+
+    let err = simulate(&circuit)
+        .limits(statevector_cap(20))
+        .seed(SEED)
+        .require_exact()
+        .shots(64)
+        .unwrap_err();
+    match err {
+        PrismError::IncompatibleBackend { backend, reason } => {
+            assert_eq!(backend, "Mps");
+            assert!(reason.contains("drop the requirement"), "{reason}");
+        }
+        other => panic!("expected IncompatibleBackend, got {other:?}"),
+    }
+
+    let err = simulate(&circuit)
+        .backend(BackendKind::StabilizerRank)
+        .seed(SEED)
+        .shots(64)
+        .unwrap_err();
+    match err {
+        PrismError::BackendUnsupported { operation, .. } => {
+            assert!(operation.contains("21 T gates"), "{operation}");
+        }
+        other => panic!("expected BackendUnsupported, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register constants price these circuits differently"
+)]
+fn terminal_reset_takes_the_register() {
+    // A reset on a qubit no gate touches keeps the measurements terminal; the decision
+    // that prices the deferred register takes it as it would without the reset.
+    let mut circuit = register_rounds(20, 10, 1);
+    circuit.num_qubits = 21;
+    circuit
+        .instructions
+        .insert(0, Instruction::Reset { qubit: 20 });
+    circuit.num_classical_bits = 21;
+    circuit.add_measure(20, 20);
+    assert!(circuit.has_terminal_measurements_only());
+    assert_eq!(
+        mid_route(&circuit, 1024, &Limits::new()),
+        MidCircuitRoute::Register
+    );
+    assert_eq!(
+        auto_shot_route(&circuit, Limits::new()),
+        (ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister)
+    );
+    assert_auto_matches(
+        "terminal reset",
+        &circuit,
+        Limits::new(),
+        BackendKind::Statevector,
+    );
 }
 
 // The Clifford register cost rule: one circuit on each side of each decision it
@@ -1457,7 +1722,7 @@ fn cost_rule_takes_the_register_above_the_cap_past_the_t_bound() {
     // Past the cap of 12 the 18 T gates exceed the wide T bound of 8, so the tree's
     // truncating MPS took these shots before.
     let circuit = register_rounds(16, 6, 3);
-    assert!(circuit.t_count() > stabilizer_rank_budget(circuit.num_qubits));
+    assert_eq!(circuit.t_count(), 18);
     assert_eq!(register_dry_runs(&circuit, &statevector_cap(12)), (true, 0));
     assert_eq!(
         auto_shot_route(&circuit, statevector_cap(12)),

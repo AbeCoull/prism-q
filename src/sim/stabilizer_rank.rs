@@ -1122,7 +1122,7 @@ fn process_mps_instruction(
     }
 }
 
-fn sample_mps_branches_online(
+pub(super) fn sample_mps_branches_online(
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
@@ -1156,10 +1156,13 @@ fn sample_mps_branches_online(
 ///
 /// Terminal measurements of a unitary circuit are drawn from a Clifford tableau over a
 /// dense register holding only the qubits the T gates reach, at most 20 of them; a
-/// circuit whose register would grow past 20 returns `BackendUnsupported`. Mid-circuit
-/// measurements are sampled by projecting coherent weighted branches and contracting
-/// branch overlaps, up to 20 T gates. Neither route is bound by the dense statevector
-/// cap.
+/// circuit whose register would grow past 20 returns `BackendUnsupported`. A circuit with
+/// mid-circuit measurements, guards or resets takes the same register once its
+/// measurements move to the end, which holds when every guard applies a Pauli and no gate
+/// reuses a measured qubit before a reset. Otherwise its measurements are sampled by
+/// projecting coherent weighted branches and contracting branch overlaps, up to 20 T
+/// gates, guarded ones included; past that it returns `BackendUnsupported` before the
+/// first shot. Neither route is bound by the dense statevector cap.
 pub fn run_stabilizer_rank_shots(
     circuit: &Circuit,
     num_shots: usize,
@@ -1196,7 +1199,62 @@ pub fn run_stabilizer_rank_shots(
         )));
     }
 
+    if super::mid_circuit_route_live() {
+        if let Some(sampler) = deferred_sampler(circuit)? {
+            return Ok(super::ShotsResult::from_shots(
+                sampler.sample(num_shots, seed),
+                circuit.num_classical_bits,
+            )
+            .with_metadata(super::RunMetadata::exact(
+                super::ResolvedBackend::StabilizerRank,
+            )));
+        }
+        reject_branch_overflow(circuit)?;
+    }
     sample_mps_branches_online(circuit, num_shots, seed)
+}
+
+/// The register sampler of the lowered `circuit` with its measurements deferred to the
+/// end, `None` when the deferral declines or the register would pass
+/// [`MAX_REGISTER_QUBITS`]. Past that many T gates a tableau dry run checks the width
+/// before any amplitude is built.
+fn deferred_sampler(circuit: &Circuit) -> Result<Option<TerminalSampler>> {
+    let Ok(deferred) = super::compiled::defer_clifford_t_circuit(circuit) else {
+        return Ok(None);
+    };
+    if circuit.t_count() > MAX_REGISTER_QUBITS
+        && register_price(&deferred, MAX_REGISTER_QUBITS)?.is_none()
+    {
+        return Ok(None);
+    }
+    TerminalSampler::compile(&deferred, MAX_REGISTER_QUBITS)
+}
+
+/// Refuse a circuit whose branches would pass [`MAX_TERMS`] before the first shot: every
+/// T gate, guarded ones included, may double them.
+fn reject_branch_overflow(circuit: &Circuit) -> Result<()> {
+    let t = circuit.t_count();
+    if 1usize
+        .checked_shl(t as u32)
+        .is_some_and(|terms| terms <= MAX_TERMS)
+    {
+        return Ok(());
+    }
+    Err(PrismError::BackendUnsupported {
+        backend: "stabilizer_rank".into(),
+        operation: format!(
+            "mid-circuit sampling of {t} T gates: the measurements do not defer to a \
+             Clifford register of at most {MAX_REGISTER_QUBITS} qubits, and the branches \
+             would pass {MAX_TERMS} terms"
+        ),
+    })
+}
+
+/// The lowered `circuit` with its measurements deferred to the end, `None` when it does
+/// not lower to Clifford+T or a guard or measured qubit keeps a measurement in place.
+pub(super) fn deferred_register_circuit(circuit: &Circuit) -> Option<Circuit> {
+    let lowered = lower_clifford_t_circuit(circuit).ok()?;
+    super::compiled::defer_clifford_t_circuit(&lowered).ok()
 }
 
 /// Width and rotation work of the register [`run_stabilizer_rank_shots`] samples terminal

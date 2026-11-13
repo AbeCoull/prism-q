@@ -832,8 +832,9 @@ fn non_clifford_dynamic_routes_agree() {
         SHOTS,
     );
 
-    // Ten qubits leave a stabilizer-rank budget of two T gates, which Auto
-    // spends on the branch sampler instead of per-shot statevector runs.
+    // Under 16 qubits the tree takes the shots ahead of the Clifford register, factored
+    // since the circuit is partly independent; the lowered register constants reach the
+    // register at this width.
     let mut circuit = Circuit::new(10, 8);
     for q in [0, 1] {
         circuit.add_gate(Gate::H, &[q]);
@@ -843,11 +844,19 @@ fn non_clifford_dynamic_routes_agree() {
         .instructions
         .extend(dynamic_case(10, OneQubit::Clifford, true, SEED).instructions);
     assert_eq!(circuit.t_count(), 2);
+    let auto = if cfg!(prism_lowered_thresholds) {
+        simulate(&circuit)
+            .plan(prism_q::sim::Query::Shots(SHOTS))
+            .unwrap()
+            .backend
+    } else {
+        R::Factored
+    };
     check_routes(
-        "clifford+t auto stabilizer rank",
+        "clifford+t auto tree",
         &circuit,
-        &[route("auto", BackendKind::Auto, R::StabilizerRank)],
-        BRANCH_SHOTS,
+        &[route("auto", BackendKind::Auto, auto)],
+        SHOTS,
     );
 }
 

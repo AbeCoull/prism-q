@@ -113,13 +113,23 @@ pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
 }
 
 /// No bench row brackets this yet.
+#[cfg_attr(not(feature = "bench-internal"), allow(dead_code))]
 pub(super) const MAX_AUTO_T_COUNT_SHOTS: usize = 40;
 
 /// No bench row brackets this yet.
 #[cfg(not(prism_lowered_thresholds))]
+#[cfg_attr(not(feature = "bench-internal"), allow(dead_code))]
 pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 25;
 #[cfg(prism_lowered_thresholds)]
+#[cfg_attr(not(feature = "bench-internal"), allow(dead_code))]
 pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 6;
+
+/// Most T gates, guarded ones included, at which `Auto` samples a circuit past the
+/// statevector cap on the stabilizer-rank branches when its measurements stay in place.
+/// Each T doubles the branches, and each measurement takes `B (B + 1)` MPS inner products
+/// at `B` branches: 22 ms a shot at 6 T and 1.7 s at 8 T on 32 qubits.
+/// Bracketed by `auto/clifford_t_price` (`rank_mid/mid_32q_t6_16shots` and `rank_mid/mid_32q_t8_4shots` on the branches, `auto_mid/guarded_s_32q_t{6,8}` on the route `Auto` takes).
+pub(super) const MAX_AUTO_MID_CIRCUIT_BRANCH_T: usize = 6;
 
 /// Bracketed by `auto/crossover` (`spd_10q_8t`, `spd_12q_8t` and `spd_16q_8t` rows).
 pub(super) const MIN_QUBITS_FOR_SPD_AUTO: usize = 12;
@@ -146,6 +156,7 @@ pub(super) const MIN_BLOCK_FOR_FACTORED_STAB: usize = 2;
 /// Bracketed by `auto/sparse_support_shots` (`wide_k6/64` against `wide_k12/64`).
 const AUTO_SPARSE_MAX_SUPPORT: usize = 128;
 
+#[cfg(feature = "bench-internal")]
 #[inline]
 pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
     let log2n = if num_qubits >= 2 {
@@ -178,9 +189,11 @@ pub(super) fn auto_spd_work_budget(circuit: &Circuit) -> usize {
 /// (Clifford-only circuits at 16 qubits and above with a block of 2 or more use
 /// FactoredStabilizer), and shot paths sample Clifford+T circuits through the
 /// StabilizerRank expansion: terminal shots when the Clifford register fits 20 qubits and
-/// is priced below the dense run or the dense run passes the statevector cap, shots with
-/// mid-circuit measurements or a reset when the T count fits the size-derived
-/// stabilizer-rank budget, to 40 T gates. A probability
+/// is priced below the dense run or the dense run passes the statevector cap, and shots
+/// with a mid-circuit measurement, a guard or a reset on the same register once their
+/// measurements move to the end, the dense side priced per outcome history. Past the
+/// statevector cap, such a circuit whose measurements stay in place takes the weighted
+/// branches up to 6 T gates. A probability
 /// query never takes that expansion under `Auto`, since it is slower than the
 /// statevector at every width both can hold. The pruned expansion is reachable
 /// only through [`run_stabilizer_rank_approx`], never from `Auto`; marginal queries
@@ -996,15 +1009,12 @@ pub(super) enum ExecutionPlan {
 ///
 /// Resolved from the circuit rather than read off a finished run, so
 /// [`Simulate::require_exact`] rejects before paying for the state it would
-/// throw away. `sampling` marks a shot terminal with no noise model or start
-/// state, where `Auto` takes the exact stabilizer-rank expansion for a
-/// Clifford+T circuit before consulting the family tree.
+/// throw away.
 ///
 /// [`Simulate::require_exact`]: crate::sim::Simulate::require_exact
 pub(super) fn approximate_route_name(
     kind: &BackendKind,
     circuit: &Circuit,
-    sampling: bool,
     limits: &ResolvedLimits,
 ) -> Option<&'static str> {
     // Diagonal and permutation gates keep the all-zero start on a single basis
@@ -1034,9 +1044,6 @@ pub(super) fn approximate_route_name(
         _ => {}
     }
     if !kind.is_auto() {
-        return None;
-    }
-    if sampling && crate::sim::auto_samples_by_stabilizer_rank(circuit, limits) {
         return None;
     }
     let (_, has_partial_independence) = crate::sim::analyze_independence(circuit);

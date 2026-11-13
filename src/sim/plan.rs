@@ -604,7 +604,11 @@ pub(super) fn inspect<S>(
                 }
                 ShotRoute::PerShot => {
                     let mut p = inspect_probability(kind, circuit, limits)?;
-                    if kind.is_auto() && auto_samples_by_stabilizer_rank(circuit, limits) {
+                    #[cfg(feature = "bench-internal")]
+                    if !mid_circuit_route_live()
+                        && kind.is_auto()
+                        && auto_samples_by_stabilizer_rank(circuit, limits)
+                    {
                         p.backend = ResolvedBackend::StabilizerRank;
                         p.exactness = PlannedExactness::Exact;
                     }
@@ -1029,9 +1033,7 @@ pub(super) fn require_exact_marginal(
             backend_plan(b, kind, circuit, limits, RouteRule::Default).exactness
                 != PlannedExactness::Exact
         }
-        MarginalRoute::Probabilities => {
-            approximate_route_name(kind, circuit, false, limits).is_some()
-        }
+        MarginalRoute::Probabilities => approximate_route_name(kind, circuit, limits).is_some(),
 
         _ => false,
     };
@@ -1039,7 +1041,7 @@ pub(super) fn require_exact_marginal(
         MarginalRoute::Stochastic(_) => "StochasticPauli".into(),
         MarginalRoute::Deterministic(_) => "DeterministicPauli".into(),
         MarginalRoute::Native(b) => approximation_name(kind, b.resolved()),
-        MarginalRoute::Probabilities => approximate_route_name(kind, circuit, false, limits)
+        MarginalRoute::Probabilities => approximate_route_name(kind, circuit, limits)
             .unwrap_or_default()
             .into(),
         _ => String::new(),

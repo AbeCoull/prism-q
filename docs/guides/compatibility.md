@@ -70,3 +70,9 @@ Seeded output has changed in these releases:
   the register from the statevector, or past the statevector cap from the MPS. A register
   nearly as wide as the circuit, or one wider than the independent blocks the circuit
   splits into, moves the other way. Fixed-seed shots on those circuits changed.
+- 0.39.0 samples `Auto` shots of a Clifford+T circuit with a mid-circuit measurement, a
+  guard or a reset from the Clifford register once its measurements move to the end, in
+  place of the weighted MPS branches, and explicit `StabilizerRank` does the same. Within
+  the statevector cap, a circuit the register does not take runs on the statevector walk;
+  past the cap, one whose measurements stay in place keeps the branches up to 6 T gates
+  and goes to the dispatch tree beyond. Fixed-seed shots on those circuits changed.

@@ -3312,7 +3312,15 @@ fn compile_measurements_filtered(
 /// guarded Pauli becomes that Pauli controlled by the alias of each record its guard
 /// reads, the deferred-measurement form of classical feed-forward.
 pub(crate) fn defer_measure_reset_circuit(circuit: &Circuit) -> Result<Circuit> {
-    let mut walk = DeferralWalk::new(circuit, None)?;
+    let mut walk = DeferralWalk::new(circuit, None, false)?;
+    walk.run(&circuit.instructions)?;
+    Ok(walk.finish().circuit)
+}
+
+/// [`defer_measure_reset_circuit`] on a Clifford+T circuit. A guard still applies only a
+/// Pauli, so the rewrite keeps the T count and adds only Clifford gates.
+pub(crate) fn defer_clifford_t_circuit(circuit: &Circuit) -> Result<Circuit> {
+    let mut walk = DeferralWalk::new(circuit, None, true)?;
     walk.run(&circuit.instructions)?;
     Ok(walk.finish().circuit)
 }
@@ -3349,7 +3357,7 @@ pub(crate) fn defer_noisy_circuit(
     circuit: &Circuit,
     noise: &NoiseModel,
 ) -> Result<DeferredCircuit> {
-    let mut walk = DeferralWalk::new(circuit, Some(noise))?;
+    let mut walk = DeferralWalk::new(circuit, Some(noise), false)?;
     noise.ensure_only_pauli_channels()?;
     walk.run(&circuit.instructions)?;
     Ok(walk.finish())
@@ -3372,8 +3380,15 @@ struct DeferralWalk<'a> {
 }
 
 impl<'a> DeferralWalk<'a> {
-    fn new(circuit: &Circuit, noise: Option<&'a NoiseModel>) -> Result<Self> {
-        if !circuit.is_clifford_only() {
+    /// `with_t` admits Clifford+T gates outside guards in place of Clifford gates alone.
+    fn new(circuit: &Circuit, noise: Option<&'a NoiseModel>, with_t: bool) -> Result<Self> {
+        if with_t && !circuit.is_clifford_plus_t() {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "CompiledSampler".to_string(),
+                reason: "deferred measurement sampling requires Clifford+T gates".to_string(),
+            });
+        }
+        if !with_t && !circuit.is_clifford_only() {
             return Err(PrismError::IncompatibleBackend {
                 backend: "CompiledSampler".to_string(),
                 reason: "deferred measurement sampling requires Clifford gates".to_string(),

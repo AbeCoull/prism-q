@@ -702,6 +702,51 @@ fn clifford_register_terminal_shots_identical_across_thread_counts() {
     );
 }
 
+// `Auto` moves the measurements of a mid-circuit Clifford+T circuit to the end and draws
+// every shot from the Clifford register's table, so the words match at any thread count.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn deferred_clifford_register_shots_identical_across_thread_counts() {
+    let n = 16;
+    let mut circuit = Circuit::new(n, 3);
+    for q in 0..2 {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[1]),
+    });
+    circuit.add_reset(0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_measure(0, 2);
+    circuit.add_measure(1, 1);
+
+    let run = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .seed(SEED)
+                .shots(SAMPLING_SHOTS)
+                .expect("shots")
+        })
+    };
+    let single = run(1);
+    assert_eq!(single.metadata.backend, ResolvedBackend::StabilizerRank);
+    assert_eq!(single.shots.len(), SAMPLING_SHOTS);
+    assert_eq!(
+        single.shots,
+        run(THREADS_HI).shots,
+        "deferred register shots differ"
+    );
+}
+
 // The product and factored samplers draw 256-shot blocks on streams keyed by
 // the block index, so the words match at any thread count, including a
 // partial trailing block. Each fixture makes enough draws to fork its blocks.

@@ -21,9 +21,12 @@ them.
   The T count sets no limit of its own: 24 T gates on a 14-qubit register at 26 qubits
   take about 1 ms for 1024 shots against 1.5 s on the statevector. Past the statevector
   cap, a lowered one included, a register that fits takes the shots ahead of the MPS; a
-  circuit that would grow it past 20 goes to the dispatch tree. Shots with
-  mid-circuit measurements take stabilizer rank inside a T bound derived from the width,
-  at most 40.
+  circuit that would grow it past 20 goes to the dispatch tree. Shots with a mid-circuit
+  measurement, a classical guard or a reset move their measurements to the end when they
+  can and take the register under the same tests, the dense side priced as one run per
+  outcome history the shots can reach. Past the statevector cap, a circuit whose
+  measurements stay in place takes the weighted branches below up to 6 T gates; the rest
+  go to the dispatch tree.
 - Marginals on a unitary Clifford+T circuit of 12 qubits or more go to SPD.
 - Expectation values on a Clifford circuit go to SPD.
 
@@ -61,11 +64,20 @@ marginals. Random Clifford depth 10 with 10 T gates takes about 0.5 ms for 1024 
 that would grow it past 20 returns `BackendUnsupported`, and `Auto` checks the width
 from the tableau alone and sends such a circuit to the dispatch tree instead.
 
-Mid-circuit measurements carry coherent weighted MPS branches instead. Clifford gates mutate each branch, `T` and `Tdg` split branches, and a
-measurement computes outcome probabilities from the weighted ensemble before projecting
-every branch onto the sampled outcome. Branch count, MPS bond growth and measurement count
-set how far this form scales; past 20 T gates the branch count passes its cap and the run
-returns `BackendUnsupported`.
+A circuit with mid-circuit measurements, guards or resets first moves its measurements to
+the end: a reset hands the qubit's later gates to a fresh qubit in `|0>`, and a guarded
+Pauli becomes the same Pauli controlled by the measured qubit. The rewritten circuit is
+unitary with terminal measurements and the same T count, so the register above samples
+it. A guard on a gate other than a Pauli, a gate on a measured qubit with no reset
+between, a guard comparing two measured bits, or a guarded body holding a measurement
+keeps the measurements in place.
+
+Those circuits carry coherent weighted MPS branches instead. Clifford gates mutate each
+branch, `T` and `Tdg` split branches, and a measurement computes outcome probabilities
+from the weighted ensemble before projecting every branch onto the sampled outcome.
+Branch count, MPS bond growth and measurement count set how far this form scales; past 20
+T gates, guarded ones included, the branch count would pass its cap and the run returns
+`BackendUnsupported` before the first shot.
 
 The dense probability path reads its probabilities off the same Clifford register the
 terminal shots use. Branches of `T = alpha*I + beta*Z` that land on one basis state of the

@@ -218,37 +218,57 @@ pub(super) fn decide_clifford_register(circuit: &Circuit, limits: &ResolvedLimit
     {
         return false;
     }
-    let Some((t, _)) = auto_clifford_t_budget(circuit) else {
+    let Some(t) = auto_clifford_t_count(circuit) else {
         return false;
     };
-    let max_width = clifford_register::MAX_REGISTER_QUBITS;
-    let bound = t.min(n);
     let blocks = analyze_independence(circuit).0.map(|(blocks, _)| blocks);
     let widest_block = blocks.as_ref().map_or(n, |blocks| {
         blocks.iter().map(|block| block.len()).max().unwrap_or(0)
     });
-    if widest_block > limits.statevector_qubits.value {
+    let instructions = circuit.instructions.len();
+    let dense = (widest_block <= limits.statevector_qubits.value).then(|| {
+        let work = match &blocks {
+            Some(blocks) => blocks.iter().fold(0usize, |work, block| {
+                work.saturating_add(statevector_work(instructions, block.len()))
+            }),
+            None => statevector_work(instructions, n),
+        };
+        work as f64
+    });
+    register_wins(t, n, measured_qubits(circuit), dense, |max_width| {
+        stabilizer_rank::terminal_register_price(circuit, max_width)
+    })
+}
+
+fn measured_qubits(circuit: &Circuit) -> usize {
+    let mut is_measured = vec![false; circuit.num_qubits];
+    for (q, _) in circuit.measurement_map() {
+        is_measured[q] = true;
+    }
+    is_measured.iter().filter(|&&m| m).count()
+}
+
+/// Whether a register on `qubits` qubits under `t` T gates, `measured` of them read, costs
+/// less than `dense` statevector work, or fits [`clifford_register::MAX_REGISTER_QUBITS`]
+/// when `dense` is `None` because no dense run is exact. `price` dry runs the tableau
+/// capped at a width, returning the width and rotation work, `None` past the cap.
+fn register_wins(
+    t: usize,
+    qubits: usize,
+    measured: usize,
+    dense: Option<f64>,
+    price: impl FnOnce(usize) -> Option<(usize, u64)>,
+) -> bool {
+    let max_width = clifford_register::MAX_REGISTER_QUBITS;
+    let bound = t.min(qubits);
+    let Some(dense) = dense else {
         if bound <= max_width {
             return true;
         }
         #[cfg(test)]
         REGISTER_DRY_RUNS.with(|runs| runs.set(runs.get() + 1));
-        return stabilizer_rank::terminal_register_price(circuit, max_width).is_some();
-    }
-
-    let mut is_measured = vec![false; n];
-    for (q, _) in circuit.measurement_map() {
-        is_measured[q] = true;
-    }
-    let measured = is_measured.iter().filter(|&&m| m).count();
-    let instructions = circuit.instructions.len();
-    let dense = match &blocks {
-        Some(blocks) => blocks.iter().fold(0usize, |work, block| {
-            work.saturating_add(statevector_work(instructions, block.len()))
-        }),
-        None => statevector_work(instructions, n),
-    } as f64;
-
+        return price(max_width).is_some();
+    };
     if bound <= max_width
         && clifford_register_work(bound, ((t - bound + 2) << bound) as f64, measured) < dense
     {
@@ -262,8 +282,106 @@ pub(super) fn decide_clifford_register(circuit: &Circuit, limits: &ResolvedLimit
     };
     #[cfg(test)]
     REGISTER_DRY_RUNS.with(|runs| runs.set(runs.get() + 1));
-    stabilizer_rank::terminal_register_price(circuit, widest)
+    price(widest)
         .is_some_and(|(k, rotations)| clifford_register_work(k, rotations as f64, measured) < dense)
+}
+
+/// How `Auto` samples a Clifford+T circuit with a mid-circuit measurement, a guard or a
+/// reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MidCircuitRoute {
+    /// The Clifford register on the circuit with its measurements moved to the end.
+    Register,
+    /// The stabilizer-rank branches, walked once per shot.
+    Branches,
+    /// The tree's per-shot route, the statevector walk under the cap.
+    Decline,
+}
+
+fn split_events(instructions: &[Instruction]) -> usize {
+    instructions
+        .iter()
+        .map(|inst| match inst {
+            Instruction::Measure { .. } | Instruction::Reset { .. } => 1,
+            Instruction::Region(region) => split_events(region.body()),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Outcome histories the statevector walk can reach on `shots` shots: two per measurement
+/// or reset ahead of the closing run of measurements, which it samples in one pass. An
+/// upper bound, since a deterministic outcome does not split.
+fn walk_histories(circuit: &Circuit, shots: usize) -> usize {
+    if circuit.has_terminal_measurements_only() {
+        return 1;
+    }
+    let closing = circuit
+        .instructions
+        .iter()
+        .rev()
+        .take_while(|inst| {
+            matches!(
+                inst,
+                Instruction::Measure { .. } | Instruction::Barrier { .. }
+            )
+        })
+        .filter(|inst| matches!(inst, Instruction::Measure { .. }))
+        .count();
+    let splits = split_events(&circuit.instructions) - closing;
+    let reachable = 1usize.checked_shl(splits as u32).unwrap_or(usize::MAX);
+    shots.max(1).min(reachable)
+}
+
+/// Route for the shots of `circuit` when it is Clifford+T with a T gate and holds a
+/// mid-circuit measurement, a guard or a reset; [`MidCircuitRoute::Decline`] otherwise.
+///
+/// The register samples the circuit with its measurements deferred to the end. Past the
+/// statevector cap it is taken whenever it fits; within the cap, from
+/// [`MIN_AUTO_CLIFFORD_REGISTER_QUBITS`] qubits, when it costs less than one dense run per
+/// outcome history the walk can reach. Past the cap a circuit the register does not take
+/// goes to the branches up to [`MAX_AUTO_MID_CIRCUIT_BRANCH_T`] T gates, guarded ones
+/// included. The shot count enters only under the cap, where every route is exact.
+pub(super) fn decide_mid_circuit_clifford_t(
+    circuit: &Circuit,
+    shots: usize,
+    limits: &ResolvedLimits,
+) -> MidCircuitRoute {
+    if circuit.has_terminal_measurements_only() && !circuit.has_resets() {
+        return MidCircuitRoute::Decline;
+    }
+    let Some(t) = auto_clifford_t_count(circuit) else {
+        return MidCircuitRoute::Decline;
+    };
+    let n = circuit.num_qubits;
+    let over_cap = n > limits.statevector_qubits.value;
+    if (over_cap || n >= MIN_AUTO_CLIFFORD_REGISTER_QUBITS)
+        && let Some(deferred) = stabilizer_rank::deferred_register_circuit(circuit)
+    {
+        let dense = (!over_cap).then(|| {
+            statevector_work(circuit.instructions.len(), n) as f64
+                * walk_histories(circuit, shots) as f64
+        });
+        let price = |max_width| {
+            clifford_register::register_price(&deferred, max_width)
+                .ok()
+                .flatten()
+        };
+        if register_wins(
+            t,
+            deferred.num_qubits,
+            measured_qubits(&deferred),
+            dense,
+            price,
+        ) {
+            return MidCircuitRoute::Register;
+        }
+    }
+    if over_cap && t <= MAX_AUTO_MID_CIRCUIT_BRANCH_T {
+        MidCircuitRoute::Branches
+    } else {
+        MidCircuitRoute::Decline
+    }
 }
 
 pub(super) fn contract_tensor(
@@ -336,6 +454,12 @@ pub(super) fn decide_shots(
     if kind.is_auto() && decide_clifford_register(circuit, limits) {
         return Ok(ShotRoute::StabilizerRank);
     }
+    if kind.is_auto()
+        && mid_circuit_route_live()
+        && decide_mid_circuit_clifford_t(circuit, num_shots, limits) != MidCircuitRoute::Decline
+    {
+        return Ok(ShotRoute::StabilizerRank);
+    }
     let terminal_only = circuit.has_terminal_measurements_only();
     let terminal = if terminal_only {
         let meas_map = circuit.measurement_map();
@@ -352,9 +476,11 @@ pub(super) fn decide_shots(
         }
         terminal => terminal,
     };
-    if matches!(kind, BackendKind::StabilizerRank) && circuit.has_t_gates()
-        || kind.is_auto() && auto_samples_wide_by_stabilizer_rank(circuit)
-    {
+    if matches!(kind, BackendKind::StabilizerRank) && circuit.has_t_gates() {
+        return Ok(ShotRoute::StabilizerRank);
+    }
+    #[cfg(feature = "bench-internal")]
+    if kind.is_auto() && auto_samples_wide_by_stabilizer_rank(circuit) {
         return Ok(ShotRoute::StabilizerRank);
     }
     if terminal_only

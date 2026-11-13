@@ -36,13 +36,15 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
-    MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
-    accel_for, approximate_route_name, auto_selects_cpu_statevector, auto_spd_work_budget,
-    build_statevector, has_temporal_clifford_opportunity, initial_state_plan, mps_apply_cost,
-    plan_for_family, plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
-    stabilizer_rank_budget, statevector_work, validate_explicit_backend,
+    BackendPlan, ExecutionPlan, Family, MAX_AUTO_MID_CIRCUIT_BRANCH_T, MIN_BLOCK_FOR_FACTORED_STAB,
+    MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name,
+    auto_selects_cpu_statevector, auto_spd_work_budget, build_statevector,
+    has_temporal_clifford_opportunity, initial_state_plan, mps_apply_cost, plan_for_family,
+    plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford, statevector_work,
+    validate_explicit_backend,
 };
+#[cfg(feature = "bench-internal")]
+use dispatch::{MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS, stabilizer_rank_budget};
 pub use dynamic::{SimulateProgram, simulate_program};
 pub use metadata::{
     BondReport, Engine, Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata,
@@ -1720,7 +1722,7 @@ fn reject_approximate_route(
     circuit: &Circuit,
     limits: &ResolvedLimits,
 ) -> Result<()> {
-    reject_predicted_route(approximate_route_name(kind, circuit, false, limits))
+    reject_predicted_route(approximate_route_name(kind, circuit, limits))
 }
 
 /// The engine is named in the error, since a caller who asked for exactness
@@ -2786,23 +2788,27 @@ fn analyze_independence(circuit: &Circuit) -> (Option<Decomposition>, bool) {
     (None, false)
 }
 
-/// `(t_count, stabilizer_rank_budget)` when the auto Clifford+T family gate
-/// passes. Callers apply their own per-entry-point T-count ceilings.
-fn auto_clifford_t_budget(circuit: &Circuit) -> Option<(usize, usize)> {
-    (circuit.is_clifford_plus_t() && circuit.has_t_gates()).then(|| {
-        (
-            circuit.t_count(),
-            stabilizer_rank_budget(circuit.num_qubits),
-        )
-    })
+/// T count after lowering of a Clifford+T circuit holding a T gate, guarded ones included.
+fn auto_clifford_t_count(circuit: &Circuit) -> Option<usize> {
+    (circuit.is_clifford_plus_t() && circuit.has_t_gates()).then(|| circuit.t_count())
 }
 
-/// Auto-dispatch gate for the Clifford+T stabilizer-rank shortcut: the T
-/// count must fit both the caller's ceiling and the size-derived
-/// stabilizer-rank budget. Returns the T count when the shortcut applies.
-pub(super) fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> Option<usize> {
-    let (t, sr_budget) = auto_clifford_t_budget(circuit)?;
-    (t <= max_t && t <= sr_budget).then_some(t)
+#[cfg(feature = "bench-internal")]
+fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> Option<usize> {
+    let t = auto_clifford_t_count(circuit)?;
+    (t <= max_t && t <= stabilizer_rank_budget(circuit.num_qubits)).then_some(t)
+}
+
+/// Whether the priced Clifford+T route for shots with a mid-circuit measurement, a guard
+/// or a reset is live: always in a shipping build, on `PRISM_BENCH_VARIANT=c` under
+/// `bench-internal`.
+#[cfg(feature = "bench-internal")]
+fn mid_circuit_route_live() -> bool {
+    crate::bench_variant('c')
+}
+#[cfg(not(feature = "bench-internal"))]
+fn mid_circuit_route_live() -> bool {
+    true
 }
 
 fn prepare_terminal_statevector_backend(
@@ -2933,23 +2939,19 @@ fn legacy_prefers_clifford_register(circuit: &Circuit) -> bool {
     circuit.num_qubits >= MIN_AUTO_CLIFFORD_REGISTER_QUBITS
         && circuit.has_terminal_measurements_only()
         && !circuit.has_resets()
-        && auto_clifford_t_budget(circuit).is_some_and(|(t, _)| {
-            t < circuit.num_qubits && t <= clifford_register::MAX_REGISTER_QUBITS
-        })
+        && auto_clifford_t_count(circuit)
+            .is_some_and(|t| t < circuit.num_qubits && t <= clifford_register::MAX_REGISTER_QUBITS)
 }
 
-/// Whether terminal shots of a circuit with a reset, wider than
-/// [`MAX_STABILIZER_RANK_QUBITS`], go to the stabilizer-rank expansion once the
-/// statevector has declined them. Past [`clifford_register::MAX_REGISTER_QUBITS`] T gates
-/// a tableau dry run confirms the register stays within its cap. Circuits without a
-/// reset are priced by [`route::decide_clifford_register`] instead.
+#[cfg(feature = "bench-internal")]
 fn auto_samples_wide_by_stabilizer_rank(circuit: &Circuit) -> bool {
-    #[cfg(feature = "bench-internal")]
-    let reset_only = crate::bench_variant_b();
-    #[cfg(not(feature = "bench-internal"))]
-    let reset_only = true;
-    circuit.has_terminal_measurements_only()
-        && (circuit.has_resets() || !reset_only)
+    let legacy = if circuit.has_resets() {
+        !mid_circuit_route_live()
+    } else {
+        !crate::bench_variant_b()
+    };
+    legacy
+        && circuit.has_terminal_measurements_only()
         && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
         && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some_and(|t| {
             t <= clifford_register::MAX_REGISTER_QUBITS
@@ -2961,9 +2963,7 @@ fn auto_samples_wide_by_stabilizer_rank(circuit: &Circuit) -> bool {
         })
 }
 
-/// Whether `Auto` shots of `circuit`, without noise or a start state, run on the
-/// exact stabilizer-rank expansion: the register and wide-circuit tests in
-/// [`prepare_shot_source`], or the per-shot test in [`run_shots_per_shot`].
+#[cfg(feature = "bench-internal")]
 fn auto_samples_by_stabilizer_rank(circuit: &Circuit, limits: &ResolvedLimits) -> bool {
     let folded = circuit.fold_static_guards();
     let circuit = folded.as_ref();
@@ -4224,7 +4224,11 @@ fn run_shots_per_shot(
             reason: "Pauli propagation backends do not support mid-circuit measurements".into(),
         });
     }
-    if kind.is_auto() && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some() {
+    #[cfg(feature = "bench-internal")]
+    if !mid_circuit_route_live()
+        && kind.is_auto()
+        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
+    {
         return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
 

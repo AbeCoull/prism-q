@@ -1236,13 +1236,33 @@ fn clifford_t_price_rows_pin_their_engines() {
         );
     }
 
-    let rank_per_shot = (ResolvedBackend::StabilizerRank, RouteRule::PerShot);
+    // The deferral moves the layered and `mid` tails to the end, and the register takes
+    // them. A guarded `S` keeps its measurement in place: the tree takes it under the cap,
+    // the branches past it up to 6 T, and the tree beyond. The fixture's chain bonds drop
+    // with probability one half, so the tree splits it into blocks or factors it. The 32-qubit pins fix the
+    // cap at 30, below 32 as on the bench host, rather than reading this host's.
+    let factored = (ResolvedBackend::Factored, RouteRule::PerShot);
+    let blocks = (ResolvedBackend::Decomposed, RouteRule::PerShot);
+    let past_cap = |circuit: &prism_q::circuit::Circuit, shots| {
+        let plan = sim::simulate(circuit)
+            .limits(prism_q::Limits::new().max_statevector_qubits(30))
+            .seed(42)
+            .plan(sim::Query::Shots(shots))
+            .unwrap();
+        (plan.backend, plan.rule)
+    };
     for (label, circuit, shots) in auto_mid_rows() {
-        assert_eq!(
-            shot_plan(BackendKind::Auto, &circuit, shots),
-            rank_per_shot,
-            "auto_mid/{label}"
-        );
+        let route = if label.starts_with("guarded_s_32q") {
+            past_cap(&circuit, shots)
+        } else {
+            shot_plan(BackendKind::Auto, &circuit, shots)
+        };
+        let expected = match label.as_str() {
+            "guarded_s_24q_t6" => factored,
+            "guarded_s_24q_t8" | "guarded_s_32q_t8" => blocks,
+            _ => register,
+        };
+        assert_eq!(route, expected, "auto_mid/{label}");
     }
 }
 

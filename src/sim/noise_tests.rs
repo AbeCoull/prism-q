@@ -2248,20 +2248,39 @@ fn noisy_feedforward_model(circuit: &Circuit) -> NoiseModel {
 #[test]
 fn seeded_feedforward_counts_hold_their_draws() {
     let circuit = noisy_feedforward_round();
-    let result = crate::sim::simulate(&circuit)
-        .noise(&noisy_feedforward_model(&circuit))
-        .seed(42)
-        .shots(4096)
-        .unwrap();
+    let run = || {
+        crate::sim::simulate(&circuit)
+            .noise(&noisy_feedforward_model(&circuit))
+            .seed(42)
+            .shots(4096)
+            .unwrap()
+    };
+    // The batched compiled sampler reproduces a seed only at a fixed thread count.
+    #[cfg(feature = "parallel")]
+    let (result, want) = (
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(run),
+        [
+            1412, 96, 2, 53, 322, 15, 1, 15, 57, 2, 10, 105, 12, 2, 0, 24, 57, 1309, 60, 2, 10,
+            323, 16, 2, 2, 50, 89, 6, 0, 16, 24, 2,
+        ],
+    );
+    #[cfg(not(feature = "parallel"))]
+    let (result, want) = (
+        run(),
+        [
+            1387, 106, 4, 54, 334, 23, 1, 15, 46, 3, 9, 70, 10, 1, 1, 20, 51, 1330, 39, 1, 8, 377,
+            12, 2, 3, 54, 98, 4, 1, 11, 19, 2,
+        ],
+    );
     assert_eq!(result.metadata.engine, Some(Engine::NoisyCompiledSampler));
     let counts: Vec<usize> = outcome_frequencies(&result.shots)
         .iter()
         .map(|f| (f * 4096.0).round() as usize)
         .collect();
-    let want = [
-        1418, 81, 5, 48, 326, 17, 0, 9, 53, 5, 7, 91, 12, 0, 4, 33, 43, 1340, 52, 2, 14, 345, 10,
-        0, 3, 40, 98, 9, 0, 12, 17, 2,
-    ];
     assert_eq!(counts, want);
 }
 

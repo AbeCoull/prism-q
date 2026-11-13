@@ -215,6 +215,22 @@ pub fn stabilizer_rank_mid_circuit_shot_circuit(
     circuit
 }
 
+/// [`random_t_insertion_circuit`], then qubit 0 measured into bit 0, `S` on qubit 1 when
+/// that bit is one, and qubit 1 measured into bit 1. A guarded `S` has no controlled
+/// Pauli form, so the measurement cannot be deferred to the end.
+pub fn guarded_s_mid_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut circuit = random_t_insertion_circuit(n_qubits, t_count, seed);
+    circuit.num_classical_bits = 2;
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::S,
+        targets: SmallVec::from_slice(&[1]),
+    });
+    circuit.add_measure(1, 1);
+    circuit
+}
+
 /// Random Clifford layers with a full random CX pairing each, and `t_count` T gates at
 /// random spots ahead of a layer, every qubit measured.
 pub fn random_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {

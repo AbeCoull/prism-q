@@ -1235,6 +1235,34 @@ fn clifford_t_price_rows_pin_their_engines() {
             "statevector_mid/layers_{n}q_t8"
         );
     }
+
+    let rank_per_shot = (ResolvedBackend::StabilizerRank, RouteRule::PerShot);
+    for (label, circuit, shots) in auto_mid_rows() {
+        assert_eq!(
+            shot_plan(BackendKind::Auto, &circuit, shots),
+            rank_per_shot,
+            "auto_mid/{label}"
+        );
+    }
+}
+
+fn auto_mid_rows() -> Vec<(String, prism_q::circuit::Circuit, usize)> {
+    let mut rows = Vec::new();
+    for n in [22, 24, 26] {
+        let circuit = bench_fixtures::clifford_t_layers_mid_circuit(n, 10, 8, SEED);
+        rows.push((format!("layers_{n}q_t8"), circuit, 64));
+    }
+    for n in [26, 32] {
+        let circuit = bench_fixtures::stabilizer_rank_mid_circuit_shot_circuit(n, 6, SEED);
+        rows.push((format!("mid_{n}q_t6_16shots"), circuit, 16));
+    }
+    for n in [24, 32] {
+        for t in [6, 8] {
+            let circuit = bench_fixtures::guarded_s_mid_circuit(n, t, SEED);
+            rows.push((format!("guarded_s_{n}q_t{t}"), circuit, 4));
+        }
+    }
+    rows
 }
 
 // Deterministic counts behind `auto/clifford_t_price`, printed rather than asserted:
@@ -1336,6 +1364,9 @@ fn clifford_t_price_census() {
     for n in [22, 24, 26] {
         let circuit = bench_fixtures::clifford_t_layers_mid_circuit(n, 10, 8, SEED);
         mid.push((format!("statevector_mid/layers_{n}q_t8"), circuit, 64));
+    }
+    for (label, circuit, shots) in auto_mid_rows() {
+        mid.push((format!("auto_mid/{label}"), circuit, shots));
     }
     println!();
     println!(

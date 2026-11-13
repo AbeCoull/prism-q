@@ -32,8 +32,8 @@ use std::time::Duration;
 mod common;
 use common::fixtures::{
     DENSE_UNITARY_LAYERS, clifford_t_layers_mid_circuit, dense_unitary_layers, distinct_t_layers,
-    product_observables, random_clifford_t_layers, random_t_insertion_circuit,
-    scrambled_clifford_t_circuit, sparse_entanglement_circuit,
+    guarded_s_mid_circuit, product_observables, random_clifford_t_layers,
+    random_t_insertion_circuit, scrambled_clifford_t_circuit, sparse_entanglement_circuit,
     stabilizer_rank_mid_circuit_shot_circuit,
 };
 use common::{
@@ -4308,7 +4308,8 @@ fn bench_auto_clifford_t_shots(c: &mut Criterion) {
 /// Clifford+T shots priced on each engine that can take them: the Clifford register
 /// (`register`), the dense statevector (`statevector`), what `Auto` picks (`auto`), and,
 /// for circuits with a mid-circuit measurement, the stabilizer-rank branches (`rank_mid`)
-/// against the statevector walk (`statevector_mid`). Routes pinned in
+/// against the statevector walk (`statevector_mid`) and what `Auto` picks (`auto_mid`).
+/// Routes pinned in
 /// `tests/integration/bench_fixture_routing.rs`.
 fn bench_auto_clifford_t_price(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/clifford_t_price");
@@ -4401,13 +4402,24 @@ fn bench_auto_clifford_t_price(c: &mut Criterion) {
     }
     for n in [22, 24, 26] {
         let circuit = clifford_t_layers_mid_circuit(n, 10, 8, SEED);
-        shots_row(
-            "statevector_mid",
-            format!("layers_{n}q_t8"),
-            dense.clone(),
-            circuit,
-            64,
-        );
+        for (arm, kind) in [
+            ("statevector_mid", dense.clone()),
+            ("auto_mid", BackendKind::Auto),
+        ] {
+            shots_row(arm, format!("layers_{n}q_t8"), kind, circuit.clone(), 64);
+        }
+    }
+    for n in [26, 32] {
+        let id = format!("mid_{n}q_t6_16shots");
+        let circuit = stabilizer_rank_mid_circuit_shot_circuit(n, 6, SEED);
+        shots_row("auto_mid", id, BackendKind::Auto, circuit, 16);
+    }
+    for n in [24, 32] {
+        for t in [6, 8] {
+            let circuit = guarded_s_mid_circuit(n, t, SEED);
+            let id = format!("guarded_s_{n}q_t{t}");
+            shots_row("auto_mid", id, BackendKind::Auto, circuit, 4);
+        }
     }
 
     group.finish();

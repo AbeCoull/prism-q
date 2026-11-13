@@ -156,6 +156,11 @@ const LUT_MIN_RANK: usize = 8;
 /// straight from the rows, drawing the same bytes, so the shots do not change.
 const MAX_FLIP_LUT_BYTES: usize = 16 << 20;
 
+/// Shot-major shots a sampler draws before it builds the flip table. Filling a group's
+/// 256 entries costs about what 64 shots spend XORing its rows directly, and both draw the
+/// same bytes, so the shots do not change.
+const MIN_SHOTS_FOR_FLIP_LUT: usize = 64;
+
 struct FlipLut {
     data: Vec<u64>,
     m_words: usize,
@@ -233,6 +238,16 @@ impl<'a> FlipGroups<'a> {
         }
     }
 
+    /// The table only if an earlier call built it, else the rows.
+    fn existing(lut: &'a OnceLock<Option<FlipLut>>, rows: &'a [Vec<u64>]) -> Self {
+        Self {
+            table: lut.get().and_then(Option::as_ref),
+            rows,
+            num_full_groups: rows.len() / LUT_GROUP_SIZE,
+            remainder_size: rows.len() % LUT_GROUP_SIZE,
+        }
+    }
+
     fn total_groups(&self) -> usize {
         self.num_full_groups + usize::from(self.remainder_size > 0)
     }
@@ -293,6 +308,8 @@ pub struct CompiledSampler {
     num_measurements: usize,
     rng: ChaCha8Rng,
     lut: OnceLock<Option<FlipLut>>,
+    /// Shot-major shots drawn so far, toward [`MIN_SHOTS_FOR_FLIP_LUT`].
+    shot_major_shots: usize,
     sparse: Option<SparseParity>,
     parity_blocks: Option<ParityBlocks>,
     #[cfg(feature = "gpu")]
@@ -501,6 +518,7 @@ impl CompiledSampler {
             num_measurements,
             rng: ChaCha8Rng::seed_from_u64(seed),
             lut: OnceLock::new(),
+            shot_major_shots: 0,
             sparse,
             parity_blocks,
             #[cfg(feature = "gpu")]
@@ -644,7 +662,13 @@ impl CompiledSampler {
         }
 
         if self.rank >= LUT_MIN_RANK {
-            let lut = FlipGroups::new(&self.lut, &self.flip_rows, m_words);
+            self.shot_major_shots = self.shot_major_shots.saturating_add(num_shots);
+            let build_table = self.shot_major_shots >= MIN_SHOTS_FOR_FLIP_LUT;
+            let lut = if build_table {
+                FlipGroups::new(&self.lut, &self.flip_rows, m_words)
+            } else {
+                FlipGroups::existing(&self.lut, &self.flip_rows)
+            };
             let total_groups = lut.total_groups();
             let bytes_per_shot = total_groups;
             let total_bytes = num_shots * bytes_per_shot;
@@ -1301,7 +1325,13 @@ impl CompiledSampler {
                 return self.sample_counts_rank_space(total_shots);
             }
         }
-        counts_from_chunks(|acc| self.sample_chunked(total_shots, acc))
+        let mut acc = if shots_mostly_distinct(self.rank, total_shots) {
+            HistogramAccumulator::direct()
+        } else {
+            HistogramAccumulator::new()
+        };
+        self.sample_chunked(total_shots, &mut acc);
+        acc.into_counts()
     }
 
     fn sample_counts_multinomial(
@@ -2788,6 +2818,12 @@ const MAX_RANK_FOR_RANK_SPACE: usize = 20;
 const MIN_SHOTS_PER_OUTCOME: usize = 4;
 const MAX_LUT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Whether `shots` uniform draws over the `2^rank` outcomes are expected to repeat less
+/// than half a time (`shots^2 <= 2^rank`), so a count can skip the typed map.
+fn shots_mostly_distinct(rank: usize, shots: usize) -> bool {
+    rank >= 128 || (shots as u128).saturating_mul(shots as u128) <= 1u128 << rank
+}
+
 fn require_clifford(circuit: &Circuit) -> Result<()> {
     if circuit.is_clifford_only() {
         return Ok(());
@@ -2872,8 +2908,13 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
 }
 
 fn compile_forward_unchecked(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
+    let density_cap = LIVE_FORWARD_DENSITY * circuit.num_qubits;
+    let bound = live_forward::peak_live_lower_bound(circuit);
+    if bound * bound > density_cap {
+        return compile_forward_dense(circuit, seed);
+    }
     let schedule = live_forward::LiveSchedule::plan(circuit);
-    if schedule.peak_live * schedule.peak_live <= LIVE_FORWARD_DENSITY * circuit.num_qubits {
+    if schedule.peak_live * schedule.peak_live <= density_cap {
         return live_forward::compile_forward_live(circuit, seed, &schedule);
     }
     compile_forward_dense(circuit, seed)

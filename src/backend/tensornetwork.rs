@@ -876,11 +876,13 @@ fn queue_slot_pairs(
 /// Returns `None` as soon as a result exceeds `abort_above` elements: the pass
 /// can no longer beat the plan holding that peak, and abandoning it keeps a
 /// failed restart from paying for a full walk. Peak ties complete, since they
-/// can still win on `total`.
+/// can still win on `total`. Also `None` once the summed elements pass
+/// `total_budget`.
 fn plan_pairs(
     mut slots: Vec<Option<TensorMeta>>,
     noise: Option<(&mut ChaCha8Rng, f64)>,
     abort_above: usize,
+    total_budget: usize,
 ) -> Option<ContractionPlan> {
     let mut leg_holders: Vec<SmallVec<[usize; 2]>> = Vec::new();
     let mut queue = match noise {
@@ -914,6 +916,9 @@ fn plan_pairs(
         }
         plan.peak = plan.peak.max(elements);
         plan.total += elements;
+        if plan.total > total_budget {
+            return None;
+        }
         plan.pairs.push((i, j));
         slots.push(Some(result));
         queue_slot_pairs(&slots, slots.len() - 1, &mut leg_holders, &mut queue);
@@ -932,7 +937,7 @@ fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
     #[cfg(test)]
     PLANNER_CALLS.with(|calls| calls.set(calls.get() + 1));
     let slots: Vec<Option<TensorMeta>> = tensors.iter().map(|t| Some(TensorMeta::of(t))).collect();
-    let greedy = plan_pairs(slots, None, usize::MAX).expect("unbounded pass completes");
+    let greedy = plan_pairs(slots, None, usize::MAX, usize::MAX).expect("unbounded pass completes");
     if greedy.peak < RESTART_PEAK_THRESHOLD {
         return greedy;
     }
@@ -945,7 +950,7 @@ fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
         let pass_seed = PLAN_NOISE_SEED ^ ((temp_index << 32) | pass);
         let mut rng = ChaCha8Rng::seed_from_u64(pass_seed);
         let slots: Vec<Option<TensorMeta>> = metas.iter().cloned().map(Some).collect();
-        plan_pairs(slots, Some((&mut rng, temperature)), bound)
+        plan_pairs(slots, Some((&mut rng, temperature)), bound, usize::MAX)
     };
     let passes = PLAN_NOISE_TEMPERATURES.len() as u64 * PLAN_RESTARTS_PER_TEMPERATURE;
     #[cfg(feature = "parallel")]
@@ -1763,18 +1768,20 @@ struct ScalarExpectationNetwork {
 }
 
 impl ScalarExpectationNetwork {
-    fn new(num_qubits: usize) -> Self {
+    /// Network over `num_qubits` with a `|0>` ket and bra only for the qubits
+    /// `in_cone` marks; the others never receive a tensor.
+    fn new(num_qubits: usize, in_cone: &[bool]) -> Self {
         let mut network = Self {
             num_qubits,
-            tensors: Vec::with_capacity(num_qubits * 4),
-            ket_legs: Vec::with_capacity(num_qubits),
-            bra_legs: Vec::with_capacity(num_qubits),
+            tensors: Vec::new(),
+            ket_legs: vec![LegId::MAX; num_qubits],
+            bra_legs: vec![LegId::MAX; num_qubits],
             next_leg: 0,
         };
         let zero_state = vec![Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)];
-        for _ in 0..num_qubits {
+        for q in (0..num_qubits).filter(|&q| in_cone[q]) {
             let ket_leg = network.fresh_leg();
-            network.ket_legs.push(ket_leg);
+            network.ket_legs[q] = ket_leg;
             network.tensors.push(Tensor {
                 data: zero_state.clone(),
                 shape: smallvec::smallvec![2],
@@ -1782,7 +1789,7 @@ impl ScalarExpectationNetwork {
             });
 
             let bra_leg = network.fresh_leg();
-            network.bra_legs.push(bra_leg);
+            network.bra_legs[q] = bra_leg;
             network.tensors.push(Tensor {
                 data: zero_state.clone(),
                 shape: smallvec::smallvec![2],
@@ -1909,22 +1916,17 @@ impl ScalarExpectationNetwork {
     /// `<0| U^dag P U |0>` over the backward light cone of `terms`, rejecting any
     /// instruction that is not a unitary gate or a barrier. A gate whose qubits all
     /// lie outside the cone cancels against its adjoint, and a qubit no kept gate
-    /// touches closes to `<0|0> = 1`, so neither enters the network.
+    /// touches closes to `<0|0> = 1`, so neither enters the network. Gates are
+    /// screened by the qubits they touch before any matrix is built, so the build
+    /// costs the cone rather than the circuit.
     fn for_observable(circuit: &Circuit, terms: &[PauliTerm]) -> Result<Self> {
         let num_qubits = circuit.num_qubits;
         let mut axes = vec![None; num_qubits];
         observable_axes(terms, &mut axes, "tensor-network scalar")?;
 
-        let mut ops = Vec::new();
         for instruction in &circuit.instructions {
             match instruction {
-                Instruction::Gate { gate, targets } => {
-                    for_each_gate_tensor(gate, targets, num_qubits, |op| {
-                        ops.push(op);
-                        Ok(())
-                    })?;
-                }
-                Instruction::Barrier { .. } => {}
+                Instruction::Gate { .. } | Instruction::Barrier { .. } => {}
                 Instruction::Save { label, .. } => {
                     return Err(crate::backend::save_not_applied("TensorNetwork", label));
                 }
@@ -1941,6 +1943,42 @@ impl ScalarExpectationNetwork {
         }
 
         let mut in_cone: Vec<bool> = axes.iter().map(Option::is_some).collect();
+        let mut reached = vec![false; circuit.instructions.len()];
+        for (hit, instruction) in reached.iter_mut().zip(&circuit.instructions).rev() {
+            let Instruction::Gate { gate, targets } = instruction else {
+                continue;
+            };
+            let mut touches = false;
+            for_each_gate_tensor_qubit(gate, targets, |q| {
+                if q >= num_qubits {
+                    return Err(PrismError::InvalidQubit {
+                        index: q,
+                        register_size: num_qubits,
+                    });
+                }
+                touches |= in_cone[q];
+                Ok(())
+            })?;
+            if touches {
+                *hit = true;
+                for_each_gate_tensor_qubit(gate, targets, |q| {
+                    in_cone[q] = true;
+                    Ok(())
+                })?;
+            }
+        }
+
+        let mut ops = Vec::new();
+        for (instruction, reached) in circuit.instructions.iter().zip(reached) {
+            if let (true, Instruction::Gate { gate, targets }) = (reached, instruction) {
+                for_each_gate_tensor(gate, targets, num_qubits, |op| {
+                    ops.push(op);
+                    Ok(())
+                })?;
+            }
+        }
+
+        let mut in_cone: Vec<bool> = axes.iter().map(Option::is_some).collect();
         let mut keep = vec![false; ops.len()];
         for (kept, op) in keep.iter_mut().zip(&ops).rev() {
             let qubits = op.qubits();
@@ -1952,21 +1990,21 @@ impl ScalarExpectationNetwork {
             }
         }
 
-        let mut network = Self::new(num_qubits);
-        let mut idle_legs = vec![false; network.next_leg];
-        for q in (0..num_qubits).filter(|&q| !in_cone[q]) {
-            idle_legs[network.ket_legs[q]] = true;
-            idle_legs[network.bra_legs[q]] = true;
-        }
+        let mut network = Self::new(num_qubits, &in_cone);
         for (op, kept) in ops.into_iter().zip(keep) {
             if kept {
                 network.append_op(op)?;
             }
         }
-        network.append_observable(terms)?;
-        network
-            .tensors
-            .retain(|t| !t.legs.iter().all(|&leg| idle_legs.get(leg) == Some(&true)));
+        for (qubit, axis) in axes.into_iter().enumerate() {
+            if in_cone[qubit] {
+                network.tensors.push(pauli_tensor(
+                    axis,
+                    network.bra_legs[qubit],
+                    network.ket_legs[qubit],
+                ));
+            }
+        }
         Ok(network)
     }
 
@@ -1985,19 +2023,6 @@ impl ScalarExpectationNetwork {
                 self.append_nq_matrix(qubits, matrix, true)
             }
         }
-    }
-
-    fn append_observable(&mut self, terms: &[PauliTerm]) -> Result<()> {
-        let mut axes = vec![None; self.num_qubits];
-        observable_axes(terms, &mut axes, "tensor-network scalar")?;
-        for (qubit, axis) in axes.into_iter().enumerate() {
-            self.tensors.push(pauli_tensor(
-                axis,
-                self.bra_legs[qubit],
-                self.ket_legs[qubit],
-            ));
-        }
-        Ok(())
     }
 
     fn contract_on(self, plan: &ContractionPlan, limits: ContractionLimits) -> Result<f64> {
@@ -2099,10 +2124,10 @@ fn plan_scalar(
 }
 
 /// Largest greedy-tree intermediate, in elements, under which the `Auto`
-/// expectation route takes the scalar path. Measured over 24 circuits: every
-/// family the scalar path beat the statevector on stayed under it for every
-/// observable, every family it lost to crossed it, and the bounded pass that
-/// decides costs 1 to 22 ms.
+/// expectation route below the statevector cap takes the scalar path. Measured
+/// over 24 circuits: every family the scalar path beat the statevector on stayed
+/// under it for every observable, every family it lost to crossed it, and the
+/// bounded pass that decides costs 1 to 22 ms.
 pub(crate) const AUTO_EXPECTATION_PEAK_BOUND: usize = 1 << 12;
 
 /// Scalar networks with carried contraction trees and optional slice plans.
@@ -2112,11 +2137,6 @@ pub(crate) struct BoundedExpectations {
 }
 
 impl BoundedExpectations {
-    /// Sum of every planned intermediate's element count across the observables.
-    pub(crate) fn total_elements(&self) -> usize {
-        self.planned.iter().map(|(_, plan, _)| plan.total).sum()
-    }
-
     pub(crate) fn with_limits(mut self, limits: &ResolvedLimits) -> Self {
         let limits = ContractionLimits::new(limits, None);
         for (network, plan, slice) in &mut self.planned {
@@ -2154,17 +2174,19 @@ impl BoundedExpectations {
     }
 }
 
-/// Plan `<0| U^dag P U |0>` for every observable under `bound` elements. `None`
-/// when any observable's tree crosses the bound, or the circuit holds an
-/// instruction the network cannot append, so the caller falls back to another
-/// route.
+/// Plan `<0| U^dag P U |0>` for every observable with no intermediate over
+/// `peak_bound` elements and at most `budget` elements summed over every tree.
+/// `None` when a tree crosses either, or the circuit holds an instruction the
+/// network cannot append, so the caller falls back to another route.
 pub(crate) fn plan_bounded_expectations(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
-    bound: usize,
+    peak_bound: usize,
+    budget: usize,
 ) -> Option<Result<BoundedExpectations>> {
     let circuit = crate::circuit::expand_qft_blocks(circuit);
     let mut planned = Vec::with_capacity(observables.len());
+    let mut spent = 0usize;
     for observable in observables {
         let mut axes = vec![None; circuit.num_qubits];
         if let Err(e) = observable_axes(observable, &mut axes, "tensor-network scalar") {
@@ -2176,7 +2198,8 @@ pub(crate) fn plan_bounded_expectations(
             .iter()
             .map(|t| Some(TensorMeta::of(t)))
             .collect();
-        let plan = plan_pairs(slots, None, bound)?;
+        let plan = plan_pairs(slots, None, peak_bound, budget - spent)?;
+        spent += plan.total;
         planned.push((network, plan, None));
     }
     Some(Ok(BoundedExpectations {
@@ -2251,6 +2274,24 @@ impl GateTensorOp<'_> {
             GateTensorOp::NQ(qubits, _) => SmallVec::from_slice(qubits),
         }
     }
+}
+
+/// Call `visit` with every qubit an operation of [`for_each_gate_tensor`] on
+/// `gate` touches, without building a matrix. `BatchPhase` lists only its control
+/// in `targets`, so its phase targets are visited from the data.
+fn for_each_gate_tensor_qubit<F>(gate: &Gate, targets: &[usize], mut visit: F) -> Result<()>
+where
+    F: FnMut(usize) -> Result<()>,
+{
+    for &q in targets {
+        visit(q)?;
+    }
+    if let Gate::BatchPhase(data) = gate {
+        for &(q, _) in &data.phases {
+            visit(q)?;
+        }
+    }
+    Ok(())
 }
 
 /// Decompose `gate` into the elementary 1q/2q/nq matrix operations a tensor
@@ -2542,7 +2583,8 @@ impl TensorNetworkBackend {
         let (network, _, _) = self.double_for_partial_trace(0);
         let slots: Vec<Option<TensorMeta>> =
             network.iter().map(|t| Some(TensorMeta::of(t))).collect();
-        let plan = plan_pairs(slots, None, usize::MAX).expect("unbounded pass completes");
+        let plan =
+            plan_pairs(slots, None, usize::MAX, usize::MAX).expect("unbounded pass completes");
         let mut probe: Vec<Complex64> = Vec::new();
         reserve_dense_output(&mut probe, plan.peak, self.name(), "native sampling")?;
         drop(probe);

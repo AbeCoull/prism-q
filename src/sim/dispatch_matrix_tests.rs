@@ -330,3 +330,81 @@ fn mps_apply_cost_merges_a_pair_block_and_breaks_it_on_a_neighbour() {
     let cost = mps_apply_cost(&broken, 256);
     assert_eq!(cost, 4.0 * overhead + 8.0 + 64.0 + 8.0 + 512.0);
 }
+
+fn rcs_brickwork(n: usize, depth: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, 0);
+    for layer in 0..depth {
+        for q in 0..n {
+            circuit.add_gate(Gate::Rz(0.3 + q as f64 * 0.01), &[q]);
+            circuit.add_gate(Gate::Ry(1.1), &[q]);
+            circuit.add_gate(Gate::Rz(0.7), &[q]);
+        }
+        for i in (layer % 2..n - 1).step_by(2) {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+    }
+    circuit
+}
+
+fn su4_brickwork(n: usize, depth: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, 0);
+    for layer in 0..depth {
+        for i in (layer % 2..n - 1).step_by(2) {
+            for _ in 0..3 {
+                for q in [i, i + 1] {
+                    circuit.add_gate(Gate::Ry(0.9), &[q]);
+                    circuit.add_gate(Gate::Rz(0.4), &[q]);
+                }
+                circuit.add_gate(Gate::Cx, &[i, i + 1]);
+            }
+        }
+    }
+    circuit
+}
+
+// The cross-simulator comparison's rcs observables: four Z and four adjacent ZZ.
+fn rcs_fixture_observables(n: usize) -> Vec<Vec<crate::PauliTerm>> {
+    let (singles, pairs): ([usize; 4], [usize; 4]) = match n {
+        32 => ([2, 14, 20, 23], [2, 5, 16, 19]),
+        64 => ([5, 28, 41, 47], [5, 12, 33, 41]),
+        128 => ([11, 56, 83, 97], [11, 25, 66, 86]),
+        256 => ([22, 112, 166, 196], [23, 50, 134, 175]),
+        _ => unreachable!("no fixture at {n} qubits"),
+    };
+    let singles = singles.map(|q| vec![crate::PauliTerm::z(q)]);
+    let pairs = pairs.map(|q| vec![crate::PauliTerm::z(q), crate::PauliTerm::z(q + 1)]);
+    singles.into_iter().chain(pairs).collect()
+}
+
+// Above the cap, eight local observables on an eight-layer rcs brickwork
+// contract faster than the MPS run from 128 qubits, while four layers, or
+// eight at 64 qubits and below, stay on MPS. su4_brick_d4/64 under eight
+// two-local terms sits 6% under the floor.
+#[test]
+fn above_cap_tensor_route_takes_deep_rcs_brickworks_from_128_qubits() {
+    let limits = ResolvedLimits::resolve(Some(&crate::Limits::new().max_statevector_qubits(24)));
+    let takes_tensor = |circuit: &Circuit, observables: &[Vec<crate::PauliTerm>]| {
+        crate::sim::route::decide_tensor_over_mps(circuit, observables, &limits)
+            .map(|planned| planned.expect("observables are valid"))
+            .is_some()
+    };
+    for n in [32, 64, 128, 256] {
+        let observables = rcs_fixture_observables(n);
+        assert!(
+            !takes_tensor(&rcs_brickwork(n, 4), &observables),
+            "rcs d4 n{n}"
+        );
+        assert_eq!(
+            takes_tensor(&rcs_brickwork(n, 8), &observables),
+            n >= 128,
+            "rcs d8 n{n}"
+        );
+    }
+    let two_local: Vec<Vec<crate::PauliTerm>> = (0..8)
+        .map(|k| {
+            let a = k * 8;
+            vec![crate::PauliTerm::z(a), crate::PauliTerm::z((a + 22) % 64)]
+        })
+        .collect();
+    assert!(!takes_tensor(&su4_brickwork(64, 4), &two_local));
+}

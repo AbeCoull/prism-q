@@ -102,6 +102,7 @@ pub(super) fn decide_tensor_expectations(
         circuit,
         observables,
         crate::backend::tensornetwork::AUTO_EXPECTATION_PEAK_BOUND,
+        usize::MAX,
     )? {
         Ok(planned) => planned,
         Err(e) => return Some(Err(e)),
@@ -111,23 +112,25 @@ pub(super) fn decide_tensor_expectations(
 
 /// MPS work per observable, in [`mps_apply_cost`] units, from which an `Auto`
 /// expectation above the statevector cap plans the scalar tensor route before
-/// running MPS. About 2 ms of MPS time, the most one observable's dry run took
-/// across the calibration circuits (0.1 to 1.9 ms), so a declined or losing
-/// plan costs at most about the MPS run it tried to replace.
-/// Bracketed by `auto/expectation_above_cap` (`hea_l2/64` and `su4_brick_d4/64` against `su4_brick_d6/64`).
-const TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE: f64 = 1.5e5;
+/// running MPS, about 5 ms of MPS time per observable on one thread. Eight local
+/// observables on a four-layer brickwork stay under it at any width, and on an
+/// eight-layer one up to 64 qubits.
+/// Bracketed by `auto/expectation_above_cap` (`su4_brick_d4/64` and `brickwork_d8_local/64` against `brickwork_d8_local/128`).
+const TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE: f64 = 8e4;
 
-/// [`mps_apply_cost`] units one planned tensor-network element costs: about
-/// 40 ns per element contracted against 15 ns per unit.
-/// No bench row brackets this yet.
-const TENSOR_ELEMENT_MPS_COST: f64 = 3.0;
+/// [`mps_apply_cost`] units one planned tensor-network element costs: 60 to
+/// 140 ns per element contracted against 50 to 70 ns per unit on brickwork
+/// circuits, both on one thread.
+/// Bracketed by `auto/expectation_above_cap` (`brickwork_d8_local/128` against `brickwork_d10_zz/48`).
+const TENSOR_ELEMENT_MPS_COST: f64 = 2.0;
 
 /// The scalar tensor route for an `Auto` expectation above the statevector cap,
 /// where the alternative is the MPS `Auto` resolves to rather than a dense run.
 /// `None` when `Auto` resolves to another backend, when the MPS estimate is
-/// under [`TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE`] per observable, when a plan
-/// crosses the peak bound, or when the planned contraction costs more than the
-/// MPS estimate.
+/// under [`TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE`] per observable, or when the
+/// planned contraction would cost more than the MPS estimate or hold an
+/// intermediate over the tensor peak cap. The dry run stops as soon as the planned
+/// elements overspend, so a declined plan costs a fraction of the MPS run.
 pub(super) fn decide_tensor_over_mps(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
@@ -160,14 +163,12 @@ pub(super) fn decide_tensor_over_mps(
     let planned = match crate::backend::tensornetwork::plan_bounded_expectations(
         circuit,
         observables,
-        crate::backend::tensornetwork::AUTO_EXPECTATION_PEAK_BOUND,
+        limits.tn_peak_elements(),
+        (mps_cost / TENSOR_ELEMENT_MPS_COST) as usize,
     )? {
         Ok(planned) => planned,
         Err(e) => return Some(Err(e)),
     };
-    if planned.total_elements() as f64 * TENSOR_ELEMENT_MPS_COST >= mps_cost {
-        return None;
-    }
     Some(Ok(planned.with_limits(limits)))
 }
 

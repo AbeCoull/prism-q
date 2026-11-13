@@ -366,6 +366,127 @@ fn test_scalar_expectation_takes_the_fused_network_when_it_plans_lower() {
     assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
 }
 
+// The build before gates were screened by the cone: every gate's ops, then the
+// cone over ops, then idle tensors dropped from a network over every qubit.
+fn unscreened_network(circuit: &Circuit, terms: &[PauliTerm]) -> ScalarExpectationNetwork {
+    let n = circuit.num_qubits;
+    let mut axes = vec![None; n];
+    observable_axes(terms, &mut axes, "test").unwrap();
+    let mut ops = Vec::new();
+    for instruction in &circuit.instructions {
+        if let Instruction::Gate { gate, targets } = instruction {
+            for_each_gate_tensor(gate, targets, n, |op| {
+                ops.push(op);
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+    let mut in_cone: Vec<bool> = axes.iter().map(Option::is_some).collect();
+    let mut keep = vec![false; ops.len()];
+    for (kept, op) in keep.iter_mut().zip(&ops).rev() {
+        let qubits = op.qubits();
+        if qubits.iter().any(|&q| in_cone[q]) {
+            *kept = true;
+            for q in qubits {
+                in_cone[q] = true;
+            }
+        }
+    }
+    let mut network = ScalarExpectationNetwork::new(n, &vec![true; n]);
+    let mut idle_legs = vec![false; network.next_leg];
+    for q in (0..n).filter(|&q| !in_cone[q]) {
+        idle_legs[network.ket_legs[q]] = true;
+        idle_legs[network.bra_legs[q]] = true;
+    }
+    for (op, kept) in ops.into_iter().zip(keep) {
+        if kept {
+            network.append_op(op).unwrap();
+        }
+    }
+    for (qubit, axis) in axes.into_iter().enumerate() {
+        let tensor = pauli_tensor(axis, network.bra_legs[qubit], network.ket_legs[qubit]);
+        network.tensors.push(tensor);
+    }
+    network
+        .tensors
+        .retain(|t| !t.legs.iter().all(|&leg| idle_legs.get(leg) == Some(&true)));
+    network
+}
+
+// Screening gates by the cone before building them keeps the same tensors in
+// the same order, with legs renumbered in order, so the greedy plan and the
+// value are unchanged; the fused QFT carries BatchPhase, whose targets omit
+// the phase qubits.
+#[test]
+fn test_scalar_network_screened_by_the_cone_matches_the_unscreened_build() {
+    let mut prepared_qft = crate::circuits::hardware_efficient_ansatz(16, 1, 42);
+    let qft = crate::circuits::qft_circuit(16);
+    prepared_qft.instructions.extend(
+        crate::circuit::expand_qft_blocks(&qft)
+            .instructions
+            .iter()
+            .cloned(),
+    );
+    let fused_qft = crate::circuit::fusion::fuse_circuit(&prepared_qft, true).into_owned();
+    assert!(fused_qft.instructions.iter().any(|i| matches!(
+        i,
+        Instruction::Gate {
+            gate: Gate::BatchPhase(_),
+            ..
+        }
+    )));
+    let cases: Vec<(Circuit, Vec<PauliTerm>)> = vec![
+        (
+            crate::circuits::brickwork_circuit(14, 4, 42),
+            vec![PauliTerm::z(0)],
+        ),
+        (
+            crate::circuits::hardware_efficient_ansatz(12, 3, 42),
+            vec![PauliTerm::z(4), PauliTerm::x(5)],
+        ),
+        (
+            crate::circuits::quantum_volume_circuit(10, 3, 42),
+            vec![PauliTerm::y(2)],
+        ),
+        (fused_qft.clone(), vec![PauliTerm::z(3)]),
+        (fused_qft, vec![PauliTerm::x(9), PauliTerm::z(15)]),
+    ];
+    for (circuit, terms) in cases {
+        let screened = scalar_network(&circuit, &terms);
+        let reference = unscreened_network(&circuit, &terms);
+        assert_eq!(screened.tensors.len(), reference.tensors.len());
+        let mut leg_map = std::collections::BTreeMap::new();
+        for (a, b) in screened.tensors.iter().zip(&reference.tensors) {
+            assert_eq!(a.shape, b.shape);
+            assert_eq!(a.data, b.data);
+            for (&la, &lb) in a.legs.iter().zip(&b.legs) {
+                assert_eq!(*leg_map.entry(lb).or_insert(la), la);
+            }
+        }
+        let renumbered: Vec<_> = leg_map.values().collect();
+        assert!(renumbered.windows(2).all(|w| w[0] < w[1]));
+
+        let plan = |network: &ScalarExpectationNetwork| {
+            let slots = network
+                .tensors
+                .iter()
+                .map(|t| Some(TensorMeta::of(t)))
+                .collect();
+            plan_pairs(slots, None, usize::MAX, usize::MAX).unwrap()
+        };
+        let (a, b) = (plan(&screened), plan(&reference));
+        assert_eq!((a.pairs, a.peak, a.total), (b.pairs, b.peak, b.total));
+
+        let expected =
+            crate::sim::run_expectation_values(&circuit, std::slice::from_ref(&terms), 42).unwrap()
+                [0];
+        let actual =
+            expectation_zero_state(&circuit, &terms, &ResolvedLimits::process_default()).unwrap();
+        assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
+    }
+}
+
 fn scalar_network(circuit: &Circuit, terms: &[PauliTerm]) -> ScalarExpectationNetwork {
     ScalarExpectationNetwork::for_observable(circuit, terms).unwrap()
 }
@@ -421,7 +542,7 @@ fn test_plan_restarts_deterministic_and_never_worse() {
         .map(|t| Some(TensorMeta::of(t)))
         .collect();
 
-    let greedy = plan_pairs(slots, None, usize::MAX).unwrap();
+    let greedy = plan_pairs(slots, None, usize::MAX, usize::MAX).unwrap();
     assert!(
         greedy.peak >= RESTART_PEAK_THRESHOLD,
         "fixture no longer reaches the restart arm: greedy peak {}",
@@ -604,7 +725,7 @@ fn test_noisy_plans_execute_to_the_same_scalar() {
             .map(|t| Some(TensorMeta::of(t)))
             .collect();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let plan = plan_pairs(slots, Some((&mut rng, 1.0)), usize::MAX).unwrap();
+        let plan = plan_pairs(slots, Some((&mut rng, 1.0)), usize::MAX, usize::MAX).unwrap();
 
         let result = replay_plan(&mut network.tensors, &plan);
         assert_eq!(result.data.len(), 1);
@@ -659,9 +780,9 @@ fn test_exact_plans_match_the_heap_order() {
 
     for metas in &networks {
         let slots = || metas.iter().cloned().map(Some).collect::<Vec<_>>();
-        let exact = plan_pairs(slots(), None, usize::MAX).unwrap();
+        let exact = plan_pairs(slots(), None, usize::MAX, usize::MAX).unwrap();
         let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let heap = plan_pairs(slots(), Some((&mut rng, 0.0)), usize::MAX).unwrap();
+        let heap = plan_pairs(slots(), Some((&mut rng, 0.0)), usize::MAX, usize::MAX).unwrap();
         assert_eq!(exact.pairs, heap.pairs);
         assert_eq!((exact.peak, exact.total), (heap.peak, heap.total));
     }

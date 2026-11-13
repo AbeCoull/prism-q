@@ -48,10 +48,10 @@ const MPS_GATE_CUT_OVERHEAD: f64 = 256.0;
 /// resulting bond, the SVD it triggers there, plus [`MPS_GATE_CUT_OVERHEAD`].
 /// Gates on one pair with nothing between them on either qubit or any spanned
 /// cut form one block, whose rank stays at most 4, as fusion delivers them
-/// merged. At 15 ns per unit, MPS time measured 0.08 to 3.8 times the estimate
-/// (median 1.04) across the fitted circuits; the bond is an upper bound, and on
-/// shallow circuits whose gates entangle less than their rank allows the
-/// estimate runs far high.
+/// merged. On one thread an MPS run costs 50 to 70 ns per unit on CX and CZ
+/// brickworks at 32 to 256 qubits and 20 to 45 ns on hardware-efficient ladders;
+/// the bond is an upper bound, and on SU(4) brickworks, whose blocks reach it
+/// late, the estimate runs 2 to 40 times high.
 pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
     let n = circuit.num_qubits;
     if n < 2 {

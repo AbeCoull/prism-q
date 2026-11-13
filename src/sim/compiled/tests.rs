@@ -1347,6 +1347,67 @@ fn weight_minimization_reduces_weight() {
 }
 
 #[test]
+fn weight_minimization_matches_row_by_row_greedy() {
+    use rand::{RngExt, SeedableRng};
+
+    fn reference(rows: &mut [Vec<u64>]) -> usize {
+        let rank = rows.len();
+        let weight = |r: &[u64]| r.iter().map(|w| w.count_ones()).sum::<u32>();
+        let mut weights: Vec<u32> = rows.iter().map(|r| weight(r)).collect();
+        for _ in 0..5 {
+            let mut improved = false;
+            for i in 0..rank {
+                if weights[i] == 0 {
+                    continue;
+                }
+                let mut best = (usize::MAX, weights[i]);
+                for j in (0..rank).filter(|&j| j != i) {
+                    let w: u32 = rows[i]
+                        .iter()
+                        .zip(&rows[j])
+                        .map(|(a, b)| (a ^ b).count_ones())
+                        .sum();
+                    if w < best.1 {
+                        best = (j, w);
+                    }
+                }
+                if best.0 != usize::MAX {
+                    let src = rows[best.0].clone();
+                    for (d, s) in rows[i].iter_mut().zip(&src) {
+                        *d ^= s;
+                    }
+                    weights[i] = best.1;
+                    improved = true;
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        weights.iter().map(|&w| w as usize).sum()
+    }
+
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for words in 1..=6 {
+        for rank in [2, 7, 33, 90] {
+            let rows: Vec<Vec<u64>> = (0..rank)
+                .map(|_| {
+                    (0..words)
+                        .map(|_| rng.random::<u64>() & rng.random::<u64>() & rng.random::<u64>())
+                        .collect()
+                })
+                .collect();
+            let mut expected = rows.clone();
+            let expected_after = reference(&mut expected);
+            let mut actual = rows;
+            let (_, after) = minimize_flip_row_weight(&mut actual);
+            assert_eq!(actual, expected, "words {words}, rank {rank}");
+            assert_eq!(after, expected_after, "words {words}, rank {rank}");
+        }
+    }
+}
+
+#[test]
 fn weight_minimization_preserves_sampling() {
     let mut c = circuits::clifford_random_pairs(16, 20, 42);
     c.num_classical_bits = 16;
@@ -2836,4 +2897,233 @@ fn detector_chunks_are_sized_by_the_measurement_record() {
     c.measure_all();
     let sampler = compile_detector_sampler(&c, vec![vec![0]], vec![], 42).unwrap();
     assert_eq!(sampler.detector_chunk_size(), default_chunk_size(640));
+}
+
+fn random_finished_sampler(rank: usize, words: usize, seed: u64) -> CompiledSampler {
+    use rand::{RngExt, SeedableRng};
+    let m = 64 * words - 3;
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    let tail = (1u64 << (m % 64)) - 1;
+    let flip_rows: Vec<Vec<u64>> = (0..rank)
+        .map(|_| {
+            let mut row: Vec<u64> = (0..words)
+                .map(|_| rng.random::<u64>() & rng.random::<u64>() & rng.random::<u64>())
+                .collect();
+            row[words - 1] &= tail;
+            row
+        })
+        .collect();
+    let ref_bits: Vec<bool> = (0..m).map(|_| rng.random::<bool>()).collect();
+    finish_sampler(flip_rows, rank, m, &ref_bits, 42)
+}
+
+fn in_pools<T: Send + PartialEq + std::fmt::Debug>(sample: impl Fn() -> T + Sync) -> T {
+    let expected = sample();
+    #[cfg(feature = "parallel")]
+    for num_threads in [1, 4] {
+        let actual = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap()
+            .install(&sample);
+        assert_eq!(actual, expected, "{num_threads} threads");
+    }
+    expected
+}
+
+#[test]
+fn flip_table_floor_draws_the_same_shots() {
+    let batches = [1, 5, 40, 17, 63, 300];
+    for words in 1..=6 {
+        for rank in [8, 13, 40, 61] {
+            let draw = |prebuilt: bool| {
+                let mut sampler = random_finished_sampler(rank, words, 42);
+                let m_words = sampler.num_measurements().div_ceil(64);
+                if prebuilt {
+                    FlipGroups::new(&sampler.lut, &sampler.flip_rows, m_words);
+                }
+                let mut out = Vec::new();
+                for &shots in &batches {
+                    out.push(sampler.sample_bulk_words_shot_major(shots).0);
+                    let shots = sampler.sample_bulk_packed(shots).to_shots().concat();
+                    out.push(shots.into_iter().map(u64::from).collect());
+                }
+                out
+            };
+            let fresh = in_pools(|| draw(false));
+            assert_eq!(fresh, in_pools(|| draw(true)), "words {words}, rank {rank}");
+
+            let mut sampler = random_finished_sampler(rank, words, 42);
+            sampler.sample_bulk_words_shot_major(MIN_SHOTS_FOR_FLIP_LUT - 1);
+            assert!(sampler.lut.get().is_none(), "words {words}, rank {rank}");
+            sampler.sample_bulk_words_shot_major(1);
+            assert!(sampler.lut.get().is_some(), "words {words}, rank {rank}");
+        }
+    }
+}
+
+#[test]
+fn direct_counts_match_the_typed_histogram() {
+    for words in 1..=6 {
+        for rank in [9, 20, 23, 61, 89, 150] {
+            if rank > 64 * words - 3 {
+                continue;
+            }
+            for shots in [1, 64, 1000, 2000] {
+                if rank <= MAX_RANK_FOR_RANK_SPACE && shots >= MIN_SHOTS_PER_OUTCOME << rank {
+                    continue;
+                }
+                let direct = shots_mostly_distinct(rank, shots);
+                let actual = in_pools(|| {
+                    let mut sampler = random_finished_sampler(rank, words, 42);
+                    [sampler.sample_counts(shots), sampler.sample_counts(shots)]
+                });
+                let expected = in_pools(|| {
+                    let mut sampler = random_finished_sampler(rank, words, 42);
+                    [
+                        counts_from_chunks(|acc| sampler.sample_chunked(shots, acc)),
+                        counts_from_chunks(|acc| sampler.sample_chunked(shots, acc)),
+                    ]
+                });
+                assert_eq!(
+                    actual, expected,
+                    "words {words}, rank {rank}, {shots} shots, direct {direct}"
+                );
+            }
+        }
+    }
+    assert!(shots_mostly_distinct(20, 1024));
+    assert!(!shots_mostly_distinct(20, 1025));
+    assert!(shots_mostly_distinct(89, 1 << 44));
+    assert!(shots_mostly_distinct(909, usize::MAX));
+}
+
+#[test]
+fn set_bit_parity_build_matches_the_bit_probe() {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for words in 1..=6 {
+        for num_meas in [64 * words - 3, 64 * words] {
+            for rank in [0, 1, 7, 64, 89, 300] {
+                let flip_rows: Vec<Vec<u64>> = (0..rank)
+                    .map(|_| {
+                        (0..words)
+                            .map(|_| rng.random::<u64>() & rng.random::<u64>())
+                            .collect()
+                    })
+                    .collect();
+                let actual = SparseParity::from_flip_rows(&flip_rows, num_meas);
+                let expected = SparseParity::from_flip_rows_by_probe(&flip_rows, num_meas);
+                let label = format!("words {words}, {num_meas} measurements, rank {rank}");
+                assert_eq!(actual.row_offsets, expected.row_offsets, "{label}");
+                assert_eq!(actual.col_indices, expected.col_indices, "{label}");
+                assert_eq!(actual.non_det_rows, expected.non_det_rows, "{label}");
+                assert_eq!(actual.num_rows, expected.num_rows, "{label}");
+            }
+        }
+    }
+}
+
+#[test]
+fn early_exit_blocks_match_the_column_lists() {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    let mut split = 0;
+    for case in 0..300 {
+        let num_meas = rng.random_range(2..200usize);
+        let rank = rng.random_range(1..150usize);
+        let groups = rng.random_range(1..6usize);
+        let density = [0.02, 0.1, 0.5][case % 3];
+        let cover_every_row = case % 2 == 0;
+        let words = num_meas.div_ceil(64);
+        let mut flip_rows = vec![vec![0u64; words]; rank];
+        for m in 0..num_meas {
+            let group = m % groups;
+            let cols: Vec<usize> = (0..rank).filter(|c| c % groups == group).collect();
+            for &c in &cols {
+                if rng.random_bool(density) {
+                    flip_rows[c][m / 64] |= 1 << (m % 64);
+                }
+            }
+            if cover_every_row && !cols.is_empty() {
+                let c = cols[rng.random_range(0..cols.len())];
+                flip_rows[c][m / 64] |= 1 << (m % 64);
+            }
+        }
+        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
+        let expected = sparse.find_blocks_by_column_lists(rank);
+        assert_eq!(sparse.find_blocks(rank), expected, "case {case}");
+
+        let ref_bits = vec![0u64; words];
+        let expected_useful =
+            expected.filter(|blocks| blocks.len() >= 2 && blocks.iter().all(|b| b.len() >= 2));
+        let actual_useful = build_parity_blocks_if_useful(&sparse, rank, &ref_bits).map(|p| {
+            p.blocks
+                .into_iter()
+                .map(|b| b.meas_indices)
+                .collect::<Vec<_>>()
+        });
+        split += usize::from(actual_useful.is_some());
+        assert_eq!(actual_useful, expected_useful, "case {case}");
+    }
+    assert!(split > 0);
+}
+
+#[test]
+fn live_bound_routes_like_the_full_schedule() {
+    let mut cases = Vec::new();
+    for n in [8, 64, 100, 130] {
+        let mut c = circuits::clifford_heavy_circuit(n, 8, 42);
+        c.measure_all();
+        cases.push(c);
+        let mut c = circuits::clifford_random_pairs(n, 20, 42);
+        c.measure_all();
+        cases.push(c);
+        let mut c = Circuit::new(n, n);
+        for q in 0..n - 1 {
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        c.measure_all();
+        cases.push(c);
+        let mut c = circuits::clifford_heavy_circuit(n, 8, 7);
+        let mut tail = Circuit::new(n, n);
+        tail.add_measure(n - 1, 0);
+        for q in 0..n - 1 {
+            tail.add_measure(q, q + 1);
+        }
+        c.instructions.extend(tail.instructions);
+        c.num_classical_bits = n;
+        cases.push(c);
+    }
+
+    let mut bound_routed = 0;
+    for (index, c) in cases.iter().enumerate() {
+        let bound = live_forward::peak_live_lower_bound(c);
+        let schedule = live_forward::LiveSchedule::plan(c);
+        assert!(bound <= schedule.peak_live, "case {index}");
+        let cap = LIVE_FORWARD_DENSITY * c.num_qubits;
+        let dense = schedule.peak_live * schedule.peak_live > cap;
+        if bound * bound > cap {
+            assert!(dense, "case {index}");
+            bound_routed += 1;
+        }
+
+        let draw = |mut sampler: CompiledSampler| {
+            let counts = sampler.sample_counts(100);
+            (counts, sampler.sample_bulk_packed(70).to_shots())
+        };
+        let actual = in_pools(|| draw(compile_forward(c, 42).unwrap()));
+        let expected = in_pools(|| {
+            let schedule = live_forward::LiveSchedule::plan(c);
+            let sampler = if dense {
+                compile_forward_dense(c, 42)
+            } else {
+                live_forward::compile_forward_live(c, 42, &schedule)
+            };
+            draw(sampler.unwrap())
+        });
+        assert_eq!(actual, expected, "case {index}");
+    }
+    assert!(bound_routed >= 4);
 }

@@ -96,6 +96,7 @@ enum InlineCounts {
     W7(FxHashMap<[u64; 7], u64>),
     W8(FxHashMap<[u64; 8], u64>),
     Wide(FxHashMap<Vec<u64>, u64>),
+    Direct(HashMap<Vec<u64>, u64>),
 }
 
 impl InlineCounts {
@@ -125,6 +126,7 @@ impl InlineCounts {
             Self::W7(m) => m.into_iter().map(|(k, v)| (k.to_vec(), v)).collect(),
             Self::W8(m) => m.into_iter().map(|(k, v)| (k.to_vec(), v)).collect(),
             Self::Wide(m) => m.into_iter().collect(),
+            Self::Direct(m) => m,
         }
     }
 }
@@ -150,8 +152,104 @@ impl HistogramAccumulator {
         }
     }
 
+    /// Count straight into the returned map, for shots expected to be distinct: a typed
+    /// map would hold one entry per shot only to be rebuilt.
+    pub(crate) fn direct() -> Self {
+        Self {
+            counts: InlineCounts::Direct(HashMap::new()),
+            batch_buf: Vec::new(),
+        }
+    }
+
     pub fn into_counts(self) -> HashMap<Vec<u64>, u64> {
         self.counts.into_vec_counts()
+    }
+}
+
+#[inline]
+fn count_distinct_key(counts: &mut HashMap<Vec<u64>, u64>, key: &[u64], tail_mask: u64) {
+    let mut key = key.to_vec();
+    if let Some(last) = key.last_mut() {
+        *last &= tail_mask;
+    }
+    *counts.entry(key).or_insert(0) += 1;
+}
+
+fn accumulate_direct(
+    counts: &mut HashMap<Vec<u64>, u64>,
+    batch_buf: &mut Vec<u64>,
+    chunk: &PackedShots,
+) {
+    let n = chunk.num_shots();
+    let m = chunk.num_measurements();
+    let m_words = chunk.m_words();
+    let data = chunk.raw_data();
+    counts.reserve(n.min(1 << 18));
+
+    match chunk.layout() {
+        ShotLayout::MeasMajor => {
+            let s_words = chunk.s_words();
+            #[cfg(feature = "parallel")]
+            if n >= MIN_SHOTS_FOR_PAR_HISTOGRAM {
+                use rayon::prelude::*;
+                let num_threads = rayon::current_num_threads();
+                let shots_per_thread = s_words.div_ceil(num_threads).max(1) * 64;
+                let shards: Vec<FxHashMap<Vec<u64>, u64>> = (0..num_threads)
+                    .into_par_iter()
+                    .filter_map(|tid| {
+                        let start = tid * shots_per_thread;
+                        (start < n).then(|| {
+                            let end = (start + shots_per_thread).min(n);
+                            count_shard_wide(data, start, end, m, m_words, s_words)
+                        })
+                    })
+                    .collect();
+                for shard in shards {
+                    merge_shard_wide(counts, shard);
+                }
+                return;
+            }
+            let batch_size = 64;
+            batch_buf.resize(batch_buf.len().max(batch_size * m_words), 0);
+            for batch_start in (0..n).step_by(batch_size) {
+                let batch_len = (n - batch_start).min(batch_size);
+                transpose_batch(batch_buf, data, batch_start, batch_len, m, m_words, s_words);
+                for key in batch_buf[..batch_len * m_words].chunks_exact(m_words) {
+                    count_distinct_key(counts, key, u64::MAX);
+                }
+            }
+        }
+        ShotLayout::ShotMajor => {
+            let raw_tail_mask = chunk.measurement_tail_mask();
+            let tail_mask = if shot_major_padding_bits_set(data, n, m_words, raw_tail_mask) {
+                raw_tail_mask
+            } else {
+                u64::MAX
+            };
+            #[cfg(feature = "parallel")]
+            if n >= MIN_SHOTS_FOR_PAR_HISTOGRAM {
+                use rayon::prelude::*;
+                let num_threads = rayon::current_num_threads();
+                let shots_per_thread = n.div_ceil(num_threads);
+                let shards: Vec<FxHashMap<Vec<u64>, u64>> = (0..num_threads)
+                    .into_par_iter()
+                    .filter_map(|tid| {
+                        let start = tid * shots_per_thread;
+                        (start < n).then(|| {
+                            let end = (start + shots_per_thread).min(n);
+                            count_shard_shot_major_wide(data, start, end, m_words, tail_mask)
+                        })
+                    })
+                    .collect();
+                for shard in shards {
+                    merge_shard_wide(counts, shard);
+                }
+                return;
+            }
+            for s in 0..n {
+                count_distinct_key(counts, chunk.shot_words(s), tail_mask);
+            }
+        }
     }
 }
 
@@ -599,7 +697,10 @@ fn merge_shard_typed<const M: usize>(
 }
 
 #[cfg(feature = "parallel")]
-fn merge_shard_wide(dst: &mut FxHashMap<Vec<u64>, u64>, src: FxHashMap<Vec<u64>, u64>) {
+fn merge_shard_wide<S: std::hash::BuildHasher>(
+    dst: &mut HashMap<Vec<u64>, u64, S>,
+    src: FxHashMap<Vec<u64>, u64>,
+) {
     for (key, count) in src {
         *dst.entry(key).or_insert(0) += count;
     }
@@ -653,6 +754,10 @@ impl ShotAccumulator for HistogramAccumulator {
 
         if matches!(self.counts, InlineCounts::Uninit) {
             self.counts = InlineCounts::init(m_words, n.min(1 << 18));
+        }
+        if let InlineCounts::Direct(counts) = &mut self.counts {
+            accumulate_direct(counts, &mut self.batch_buf, chunk);
+            return;
         }
 
         match chunk.layout() {
@@ -708,7 +813,7 @@ impl ShotAccumulator for HistogramAccumulator {
                                     s_words,
                                 );
                             }
-                            InlineCounts::Uninit => unreachable!(),
+                            InlineCounts::Uninit | InlineCounts::Direct(_) => unreachable!(),
                         }
                     };
                 }
@@ -831,7 +936,7 @@ impl ShotAccumulator for HistogramAccumulator {
                                     }
                                 }
                             }
-                            InlineCounts::Uninit => unreachable!(),
+                            InlineCounts::Uninit | InlineCounts::Direct(_) => unreachable!(),
                         }
                     };
                 }

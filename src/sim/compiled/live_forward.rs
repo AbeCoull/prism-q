@@ -103,6 +103,38 @@ impl<'a> LiveSchedule<'a> {
     }
 }
 
+/// A lower bound on [`LiveSchedule::plan`]'s `peak_live` without building the schedule.
+/// Hoist points never decrease, so no slot retires before the first record's, the gate
+/// after its qubit's last: every qubit gated by then is live at once.
+pub(super) fn peak_live_lower_bound(circuit: &Circuit) -> usize {
+    let Some(first_measured) = circuit.instructions.iter().find_map(|inst| match inst {
+        Instruction::Measure { qubit, .. } => Some(*qubit),
+        _ => None,
+    }) else {
+        return 0;
+    };
+    let mut first = vec![NONE; circuit.num_qubits];
+    let mut last_on_measured = NONE;
+    let mut g = 0u32;
+    for inst in &circuit.instructions {
+        if let Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } = inst {
+            for &q in targets.iter() {
+                if first[q] == NONE {
+                    first[q] = g;
+                }
+                if q == first_measured {
+                    last_on_measured = g;
+                }
+            }
+            g += 1;
+        }
+    }
+    if last_on_measured == NONE {
+        return 0;
+    }
+    first.iter().filter(|&&f| f <= last_on_measured).count()
+}
+
 /// Column-major tableau over slots: column `c` holds words `c * words..`, destabilizer
 /// row of pair `s` is bit `s` of the first `dw` words and its stabilizer row is bit `s`
 /// of the last `dw`. `dep[k]` marks the stabilizer rows whose sign carries random bit `k`.

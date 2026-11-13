@@ -14,7 +14,7 @@ use crate::gates::{
     mat_mul_4x4, multi_2q_join, pauli_rot_join, pauli_rot_masks,
 };
 
-use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases};
+use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases, split_batch_phases};
 use super::fusion_rzz::{fuse_batch_rzz, fuse_rzz};
 use super::fusion_stage::{plan_stages, stages_at};
 
@@ -1720,7 +1720,8 @@ pub(super) fn fuse_at_width<'a>(
     profile: FusionProfile,
     t: &mut Tracer,
 ) -> Cow<'a, Circuit> {
-    let pass_r = fuse_region_bodies(circuit, n, profile);
+    let pass_s = split_batch_phases(circuit, t);
+    let pass_r = apply_pass(pass_s, t, |c, _| fuse_region_bodies(c, n, profile));
     let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
     let pass0r = apply_pass(pass0, t, fuse_rzz);
     if profile == FusionProfile::Device {

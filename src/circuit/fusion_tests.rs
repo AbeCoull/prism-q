@@ -1874,3 +1874,53 @@ fn device_profile_plan_replays_like_independent_fusion() {
         }
     }
 }
+
+// A BatchPhase lists only its control in its targets, so a pass reading a gate's
+// qubits from its targets would move or merge a 1q gate on a phase qubit across it.
+// Refusing a fused QFT took the wrong state on a 512 KiB tile budget.
+#[test]
+fn refusing_keeps_gates_on_batch_phase_qubits_in_order() {
+    use crate::backend::statevector::StatevectorBackend;
+    let n = 16;
+    let mut minimal = Circuit::new(n, 0);
+    for q in 0..n {
+        minimal.add_gate(Gate::H, &[q]);
+    }
+    minimal.instructions.push(Instruction::Gate {
+        gate: Gate::BatchPhase(Box::new(crate::gates::BatchPhaseData::new([
+            (1, Complex64::new(0.0, 1.0)),
+            (2, Complex64::new(-1.0, 0.0)),
+        ]))),
+        targets: smallvec![3],
+    });
+    minimal.add_gate(Gate::H, &[1]);
+    minimal.add_gate(Gate::T, &[2]);
+    minimal.add_gate(Gate::H, &[2]);
+
+    let mut fused_qft = crate::circuits::hardware_efficient_ansatz(n, 1, 42);
+    let qft = crate::circuits::qft_circuit(n);
+    fused_qft.instructions.extend(
+        crate::circuit::expand_qft_blocks(&qft)
+            .instructions
+            .iter()
+            .cloned(),
+    );
+    let fused_qft = fuse_circuit(&fused_qft, true).into_owned();
+
+    let state = |circuit: &Circuit| {
+        let mut sv = StatevectorBackend::new(42);
+        sv.init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        for inst in &circuit.instructions {
+            sv.apply(inst).unwrap();
+        }
+        sv.state_vector().to_vec()
+    };
+    for circuit in [minimal, fused_qft] {
+        let expected = state(&circuit);
+        let refused = fuse_circuit(&circuit, true);
+        for (a, b) in state(&refused).iter().zip(&expected) {
+            assert!((a - b).norm() < EPS, "{a} vs {b}");
+        }
+    }
+}

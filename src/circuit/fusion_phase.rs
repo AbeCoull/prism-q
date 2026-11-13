@@ -232,6 +232,51 @@ fn flush_phase_qubits_in_use(
     }
 }
 
+/// Split every `BatchPhase` back into its controlled phases, so the passes that read an
+/// instruction's qubits from its targets see the phase qubits a `BatchPhase` omits.
+/// Returns the input unchanged when it holds none. A traced template bails, since the
+/// split gates have no recipe of their own.
+pub(super) fn split_batch_phases<'a>(circuit: &'a Circuit, t: &mut Tracer) -> Cow<'a, Circuit> {
+    let is_batch_phase = |inst: &Instruction| {
+        matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::BatchPhase(_),
+                ..
+            }
+        )
+    };
+    if !circuit.instructions.iter().any(is_batch_phase) {
+        return Cow::Borrowed(circuit);
+    }
+
+    let one = Complex64::new(1.0, 0.0);
+    let zero = Complex64::new(0.0, 0.0);
+    let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
+    t.begin();
+    for (i, inst) in circuit.instructions.iter().enumerate() {
+        let Instruction::Gate {
+            gate: Gate::BatchPhase(data),
+            targets,
+        } = inst
+        else {
+            output.push(inst.clone());
+            t.keep(i);
+            continue;
+        };
+        for &(target, phase) in &data.phases {
+            output.push(Instruction::Gate {
+                gate: Gate::cu([[one, zero], [zero, phase]]),
+                targets: smallvec![targets[0], target],
+            });
+            t.keep(i);
+        }
+    }
+    t.bail();
+    t.commit();
+    Cow::Owned(circuit.with_instructions(output))
+}
+
 /// Returns the input unchanged unless at least one `BatchPhase` is emitted.
 pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
     if !circuit.instructions.iter().any(is_controlled_phase_2q) {

@@ -753,6 +753,35 @@ fn qec_compiled_runner_reuses_a_measured_qubit_without_reset() {
             .to_shots(),
         want
     );
+
+    let detector = program
+        .detector(&[QecRecordRef::absolute(0), QecRecordRef::absolute(1)])
+        .unwrap();
+    let mut detectors_only = QecProgram::with_options(
+        1,
+        QecOptions {
+            keep_measurements: false,
+            ..options
+        },
+    );
+    for op in program.ops() {
+        detectors_only.push_op(op.clone()).unwrap();
+    }
+    let result = run_qec_program(&detectors_only).unwrap();
+    assert!(
+        result
+            .detectors
+            .to_shots()
+            .iter()
+            .all(|shot| shot[detector])
+    );
+
+    program.noise(QecNoise::XError(0.1), &[0]).unwrap();
+    let err = run_qec_program(&program).unwrap_err().to_string();
+    assert!(
+        err.contains("noiseless compiled sampler accepts the reuse"),
+        "{err}"
+    );
 }
 
 #[test]

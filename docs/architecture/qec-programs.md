@@ -300,8 +300,9 @@ deferred to a terminal record. Each program qubit's final alias is recorded so t
 events for sensitivity compilation instead of applied to the circuit.
 
 ```admonish note title="V1 reset requirement"
-A measured qubit must be reset before any later gate reuses it, because the
-compiled lowering defers measurements to terminal records.
+In a noisy program a measured qubit must be reset before any later gate reuses it,
+because the compiled lowering defers measurements to terminal records. The noiseless
+compiled sampler copies the record onto a fresh alias instead and accepts the reuse.
 ```
 
 ## Noisy data flow

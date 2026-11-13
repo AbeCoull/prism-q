@@ -2298,7 +2298,9 @@ fn qec_deferred_target(
     if measured_aliases[alias] {
         return Err(PrismError::IncompatibleBackend {
             backend: "QEC compiled runner".to_string(),
-            reason: "compiled QEC runner requires reset before reusing a measured qubit"
+            reason: "noisy QEC sampling, the detector error model and the analytical \
+                     estimators require reset before reusing a measured qubit; the noiseless \
+                     compiled sampler accepts the reuse"
                 .to_string(),
         });
     }

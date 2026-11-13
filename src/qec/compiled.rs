@@ -137,15 +137,23 @@ impl QecProgram {
             let (detector_rows, observable_rows, projection) = rows?;
             sampler.detector_rows = detector_rows;
             sampler.observable_rows = observable_rows;
-            if let Some((pattern, noise)) =
-                compile_parity_noise(&deferred?, &projection, options.seed, None)?
-            {
-                sampler.route = QecSamplerRoute::Parity {
-                    projection,
-                    pattern: (!referenced).then_some(pattern),
-                    noise: has_noise.then(|| Box::new(noise)),
-                };
-                return Ok(sampler);
+            // The lowering refuses a measured qubit reused without a reset, which the
+            // noiseless record path below accepts.
+            match deferred {
+                Ok(deferred) => {
+                    if let Some((pattern, noise)) =
+                        compile_parity_noise(&deferred, &projection, options.seed, None)?
+                    {
+                        sampler.route = QecSamplerRoute::Parity {
+                            projection,
+                            pattern: (!referenced).then_some(pattern),
+                            noise: has_noise.then(|| Box::new(noise)),
+                        };
+                        return Ok(sampler);
+                    }
+                }
+                Err(_) if !has_noise => {}
+                Err(err) => return Err(err),
             }
         }
         if has_noise || has_feedforward {

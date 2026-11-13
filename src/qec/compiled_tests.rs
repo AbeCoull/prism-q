@@ -236,3 +236,33 @@ fn sampler_reports_the_program_shape() {
     assert_eq!(sampler.num_detectors(), 2);
     assert_eq!(sampler.num_observables(), 1);
 }
+
+#[test]
+fn feedforward_records_match_the_reference_runner_in_distribution() {
+    let options = QecOptions {
+        shots: 4000,
+        seed: 42,
+        chunk_size: None,
+        keep_measurements: true,
+        detector_reference: QecDetectorReference::Noiseless,
+    };
+    let program = feedforward_program(options);
+    let packed = run_qec_program(&program).unwrap().measurements.to_shots();
+    let reference = run_qec_program_reference(&program)
+        .unwrap()
+        .measurements
+        .to_shots();
+    let frequency = |shots: &[Vec<bool>], f: &dyn Fn(&[bool]) -> bool| {
+        shots.iter().filter(|shot| f(shot)).count() as f64 / shots.len() as f64
+    };
+    let tolerance = 6.0 * (0.5 / options.shots as f64).sqrt();
+    let reads: [fn(&[bool]) -> bool; 3] =
+        [|shot| shot[0], |shot| shot[1], |shot| shot[0] ^ shot[1]];
+    for (index, read) in reads.iter().enumerate() {
+        let (a, b) = (frequency(&packed, read), frequency(&reference, read));
+        assert!(
+            (a - b).abs() < tolerance,
+            "read {index}: {a:.4} against {b:.4}"
+        );
+    }
+}

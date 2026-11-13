@@ -36,7 +36,7 @@ Sampler semantics carry over. A measurement error argument (`M(p)`) is a
 pre-measurement Pauli fault on that record's detectors, noise on an already-measured
 qubit contributes nothing, and a two-qubit channel with one measured target enters as
 its exact one-qubit marginal. Non-Clifford gates and reuse of a measured qubit without
-reset are rejected, as on the compiled sampling path. So are leakage annotations, whose
+reset are rejected, as on the noisy compiled sampling path. So are leakage annotations, whose
 leak flag no independent mechanism expresses.
 
 Hypergraph mechanisms (more than two detectors, as `DEPOLARIZE2` produces) stay intact

@@ -9,8 +9,7 @@ const UNBRACKETED: &str = "/// No bench row brackets this yet.";
 
 const THRESHOLDS: &[(&str, &str)] = &[
     ("src/sim/dispatch.rs", "MPS_GATE_CUT_OVERHEAD"),
-    ("src/sim/dispatch.rs", "MAX_AUTO_T_COUNT_SHOTS"),
-    ("src/sim/dispatch.rs", "MAX_STABILIZER_RANK_QUBITS"),
+    ("src/sim/dispatch.rs", "MAX_AUTO_MID_CIRCUIT_BRANCH_T"),
     ("src/sim/dispatch.rs", "MIN_QUBITS_FOR_SPD_AUTO"),
     ("src/sim/dispatch.rs", "AUTO_SPD_AMPLITUDES_PER_TERM"),
     ("src/sim/dispatch.rs", "MIN_FACTORED_STABILIZER_QUBITS"),
@@ -19,6 +18,7 @@ const THRESHOLDS: &[(&str, &str)] = &[
     ("src/sim/route.rs", "TENSOR_ROUTE_MIN_QUBITS"),
     ("src/sim/route.rs", "TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE"),
     ("src/sim/route.rs", "TENSOR_ELEMENT_MPS_COST"),
+    ("src/sim/route.rs", "REGISTER_PASS_STATEVECTOR_AMPLITUDES"),
     ("src/circuit/fusion.rs", "MIN_QUBITS_FOR_FUSION"),
     ("src/circuit/fusion.rs", "MIN_QUBITS_FOR_MULTI_FUSION"),
     ("src/circuit/fusion.rs", "MIN_QUBITS_FOR_DIAG_BATCH"),

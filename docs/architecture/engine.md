@@ -165,8 +165,9 @@ Each of these is tested before the state route, with its own constants in
 | Route | Taken when |
 | --- | --- |
 | Compiled Clifford sampler | Shots on a Clifford circuit whose measurements are terminal or rewrite to terminal; see [Compiled Samplers](./samplers.md) |
-| Clifford register (stabilizer rank) | Shots on a Clifford+T circuit with terminal measurements only and no reset, at least 16 qubits, T count at most 20 and below the qubit count |
-| Stabilizer rank, sampled | Shots with terminal measurements only, above 25 qubits, T count at most 40 and at most `n - 2⌈log2 n⌉`, and past 20 T gates only when a tableau dry run keeps the register within 20 qubits; also runs per shot with mid-circuit measurement inside the same T bound |
+| Clifford register (stabilizer rank) | Shots on a Clifford+T circuit with terminal measurements only and no reset, at least 16 qubits, when the register fits 20 qubits and its priced work is below the dense run's. A register pass over `2^k` amplitudes costs 25 statevector instruction-amplitudes per amplitude, against the instruction count times `2^n`, summed over independent blocks. When a block passes the statevector cap, a register that fits is taken whatever the cap. A bound from the T count decides most circuits; the rest take a tableau dry run capped at the widest register that could still win |
+| Deferred Clifford register (stabilizer rank) | Shots on a Clifford+T circuit with a mid-circuit measurement, a guard or a reset whose measurements move to the end: every guard applies a Pauli and reads a parity of measured bits, and a measured qubit used again copies its record onto a fresh qubit. The register tests above apply to the rewritten circuit, with the dense side priced as one run per outcome history the statevector walk can reach, at most the shot count |
+| Stabilizer rank branches | The same shots past the statevector cap when the measurements stay in place, up to 6 T gates. Under the cap such a circuit takes the statevector walk, and past 6 T gates the tree |
 | Deterministic Pauli marginals | A marginals terminal on a unitary Clifford+T circuit of at least 12 qubits. The propagation is exact, and at or below the statevector cap it hands over to the tree once its summed term count passes the dense run's amplitude updates divided by 64 |
 | Deterministic Pauli expectations | An expectation terminal on a Clifford circuit |
 | Scalar tensor contraction | An expectation or marginals terminal on a unitary circuit whose bounded greedy plan for every observable stays under `2^12` elements: from 18 qubits under the statevector cap, and above it when the plan costs less than an estimate of the MPS run `Auto` would take |
@@ -183,6 +184,28 @@ amplitudes without building the `2^n` distribution. It falls back to the dense
 distribution on a circuit that splits into independent blocks, unless those blocks run
 as product states, and under a noise model, where the mixture is read densely and the
 density-matrix cap applies.
+
+### Parity ancillas on the walk
+
+`Auto` shots that reach the mid-circuit walk, after the compiled sampler, the Clifford
+register and the temporal Clifford prefix have declined, first drop their parity
+ancillas (`src/circuit/parity_ancilla.rs`). A qubit `a` qualifies when every instruction
+touching it reads
+
+```text
+( CX(d -> a) | X a )*   Measure a -> bit   ( Reset a | if (bit) x a )?
+```
+
+repeated, the closing group optional only on the last span, and each source `d` takes
+nothing but CX gates it controls from its pickup to the measurement. Each span becomes a
+measurement of the parity of its sources (the `X a` count inverts it): the sources fan
+onto the lowest one with CX gates, it is measured into the same bit, and the fan is
+undone. The ancilla leaves the register and the other qubits keep their order, so the
+walk, the independence analysis and `Simulate::plan` all see the smaller width. Any
+other gate, guard or region on the ancilla, an empty parity, a reset with no
+measurement, or a second measurement with no reset keeps that ancilla; a save keeps them
+all. Explicit backends, noisy runs, start states and dynamic programs never reach the
+rewrite.
 
 ### Auto dispatch policy
 

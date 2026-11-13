@@ -573,6 +573,14 @@ pub(super) fn inspect<S>(
                     p.engine = Some(Engine::CompiledSampler);
                     Ok(p)
                 }
+                ShotRoute::Guarded(_) => {
+                    let mut p = Plan::new(
+                        ResolvedBackend::CompiledStabilizer,
+                        RouteRule::CompiledCliffordSampler,
+                    );
+                    p.engine = Some(Engine::NoisyCompiledSampler);
+                    Ok(p)
+                }
                 ShotRoute::StabilizerRank => Ok(Plan::new(
                     ResolvedBackend::StabilizerRank,
                     RouteRule::CliffordRegister,
@@ -603,11 +611,13 @@ pub(super) fn inspect<S>(
                     Ok(p)
                 }
                 ShotRoute::PerShot => {
-                    let mut p = inspect_probability(kind, circuit, limits)?;
-                    if kind.is_auto() && auto_samples_by_stabilizer_rank(circuit) {
-                        p.backend = ResolvedBackend::StabilizerRank;
-                        p.exactness = PlannedExactness::Exact;
-                    }
+                    let rewritten = if has_temporal_clifford_opportunity(kind, circuit, limits) {
+                        None
+                    } else {
+                        parity_rewrite(kind, circuit)
+                    };
+                    let mut p =
+                        inspect_probability(kind, rewritten.as_ref().unwrap_or(circuit), limits)?;
                     p.rule = RouteRule::PerShot;
                     Ok(p)
                 }
@@ -1029,9 +1039,7 @@ pub(super) fn require_exact_marginal(
             backend_plan(b, kind, circuit, limits, RouteRule::Default).exactness
                 != PlannedExactness::Exact
         }
-        MarginalRoute::Probabilities => {
-            approximate_route_name(kind, circuit, false, limits).is_some()
-        }
+        MarginalRoute::Probabilities => approximate_route_name(kind, circuit, limits).is_some(),
 
         _ => false,
     };
@@ -1039,7 +1047,7 @@ pub(super) fn require_exact_marginal(
         MarginalRoute::Stochastic(_) => "StochasticPauli".into(),
         MarginalRoute::Deterministic(_) => "DeterministicPauli".into(),
         MarginalRoute::Native(b) => approximation_name(kind, b.resolved()),
-        MarginalRoute::Probabilities => approximate_route_name(kind, circuit, false, limits)
+        MarginalRoute::Probabilities => approximate_route_name(kind, circuit, limits)
             .unwrap_or_default()
             .into(),
         _ => String::new(),

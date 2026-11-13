@@ -81,15 +81,39 @@ fn defer_measure_reset_rewrites_reuse() {
 }
 
 #[test]
-fn defer_measure_reset_rejects_measured_qubit_reuse() {
+fn defer_measure_reset_copies_a_reused_measured_qubit() {
     let mut c = Circuit::new(1, 2);
-    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::X, &[0]);
     c.add_measure(0, 0);
+    c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[0]);
     c.add_measure(0, 1);
 
-    let result = defer_measure_reset_circuit(&c);
-    assert!(result.is_err());
+    let deferred = defer_measure_reset_circuit(&c).unwrap();
+    let gates: Vec<(Gate, Vec<usize>)> = deferred
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Gate { gate, targets } => Some((gate.clone(), targets.to_vec())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        gates,
+        vec![
+            (Gate::X, vec![0]),
+            (Gate::Cx, vec![0, 1]),
+            (Gate::H, vec![0]),
+            (Gate::H, vec![0]),
+        ]
+    );
+    assert_eq!(deferred.num_qubits, 2);
+    assert_eq!(deferred.measurement_map(), vec![(1, 0), (0, 1)]);
+
+    let mut sampler = compile_measurements(&deferred, 42).unwrap();
+    for shot in sampler.sample_bulk(64) {
+        assert!(shot[0] && shot[1]);
+    }
 }
 
 #[test]
@@ -165,6 +189,44 @@ fn defer_measure_reset_rejects_guards_no_controlled_pauli_expresses() {
             .to_string();
         assert!(err.contains(reason), "{err}");
     }
+}
+
+#[test]
+fn defer_guarded_keeps_a_comparison_of_two_bits_as_an_entry() {
+    let mut c = Circuit::new(3, 3);
+    c.add_measure(0, 0);
+    c.add_measure(1, 1);
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::RegisterNotEquals {
+            offset: 0,
+            size: 2,
+            value: 0b01,
+        },
+        gate: Gate::Z,
+        targets: smallvec![2],
+    });
+    c.add_measure(2, 2);
+
+    let deferred = defer_guarded_circuit(&c).unwrap();
+    assert!(
+        deferred
+            .circuit
+            .instructions
+            .iter()
+            .all(|inst| !matches!(inst, Instruction::Gate { .. }))
+    );
+    let [entry] = deferred.guarded.as_slice() else {
+        panic!("{} entries", deferred.guarded.len());
+    };
+    assert_eq!(entry.qubit, 2);
+    assert_eq!(entry.kind, GuardedKind::Gate(3));
+    assert_eq!(
+        entry.guard,
+        Guard::All {
+            terms: smallvec![(0, true), (1, false)],
+            negate: true,
+        }
+    );
 }
 
 #[test]

@@ -18,6 +18,7 @@ mod fusion_rzz;
 pub(crate) mod fusion_stage;
 pub mod openqasm;
 pub mod parameter;
+pub(crate) mod parity_ancilla;
 pub(crate) mod plan;
 pub mod prepared;
 pub(crate) mod qasm;

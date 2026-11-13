@@ -300,8 +300,9 @@ deferred to a terminal record. Each program qubit's final alias is recorded so t
 events for sensitivity compilation instead of applied to the circuit.
 
 ```admonish note title="V1 reset requirement"
-A measured qubit must be reset before any later gate reuses it, because the
-compiled lowering defers measurements to terminal records.
+In a noisy program a measured qubit must be reset before any later gate reuses it,
+because the compiled lowering defers measurements to terminal records. The noiseless
+compiled sampler copies the record onto a fresh alias instead and accepts the reuse.
 ```
 
 ## Noisy data flow
@@ -311,8 +312,11 @@ deferred lowering produces the noiseless circuit plus positioned noise events, a
 backward Pauli propagation walks the circuit in reverse, carrying each
 measurement's observable to each event position. Every event becomes sensitivity rows:
 for each noise branch, the records whose propagated Pauli anticommutes with the
-injected error, packed as flip masks. The noiseless sampler is compiled on the deferred
-circuit.
+injected error, packed as flip masks. A program whose records are read starts every shot
+from one noiseless reference run: a stabilizer tableau run of the program with every
+random outcome forced to 0. A fair-coin Pauli Z at the birth of each alias (an initial
+qubit, a reset, a Pauli-product scratch qubit) spreads it over the noiseless outcome
+space, and the backward walk drops the births whose Z flips no record.
 
 When records are neither kept nor postselected, the walk holds rows only for the
 aliases live at each position and projects each event onto detector and observable bits
@@ -323,7 +327,8 @@ noiseless program takes the same walk with no events, at cost live qubits times
 records. Compiling the deferred circuit forward grew with the square of the record
 count.
 
-At sample time the noiseless records are sampled first, then each noise event XORs its
+At sample time the reference records fill every shot, then the coins and faults land
+through a Pauli frame walked forward over the deferred circuit. Each noise event XORs its
 branch flip masks into the shot-major record buffer. Small-probability events skip
 between firing shots by geometric sampling. Dense events (probability at or above `0.5`,
 or a unit of fewer than 32 shots) iterate every shot. `DEPOLARIZE2` precomputes the flip
@@ -340,8 +345,10 @@ inside a unit continues that unit's draws, so seeded noise is independent of
 changing any bit. When records are neither kept nor postselected and every detector and
 observable is fixed in the noiseless circuit, the draws land directly on detector and
 observable rows, bit for bit what the record path produces. The unit size is part of
-the seeded output: changing it changes noisy results at a given seed. Noiseless records
-that are random in the circuit still draw from the compiled sampler per chunk.
+the seeded output: changing it changes noisy results at a given seed. The birth coins draw
+per unit from a stream of their own, so faults fire on the same shots with or without
+them. A noiseless program without feed-forward whose records are random still draws from
+a compiled sampler per chunk.
 
 Supported Pauli channels are `X_ERROR`, `Y_ERROR`, `Z_ERROR`, `DEPOLARIZE1`,
 `PAULI_CHANNEL_1(px, py, pz)`, `DEPOLARIZE2`, and `PAULI_CHANNEL_2` with its 15

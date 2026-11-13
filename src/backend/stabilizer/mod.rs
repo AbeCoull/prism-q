@@ -88,6 +88,9 @@ pub struct StabilizerBackend {
     pub(super) rng: ChaCha8Rng,
     /// Outcome every random measurement takes instead of a draw, when set.
     pub(crate) forced_outcome: Option<bool>,
+    /// Keep the sparse generator index past its longest-active-list cap, so only the
+    /// average row weight switches it off. Set by the QEC reference run alone.
+    pub(crate) sgi_uncapped: bool,
     pub(super) qubit_active: Vec<Vec<u32>>,
     pub(super) total_weight: usize,
     pub(super) sgi_merge_buf: Vec<u32>,
@@ -138,6 +141,7 @@ impl Clone for StabilizerBackend {
             classical_bits: self.classical_bits.clone(),
             rng: self.rng.clone(),
             forced_outcome: self.forced_outcome,
+            sgi_uncapped: self.sgi_uncapped,
             qubit_active: self.qubit_active.clone(),
             total_weight: self.total_weight,
             sgi_merge_buf: self.sgi_merge_buf.clone(),
@@ -177,6 +181,7 @@ impl StabilizerBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             forced_outcome: None,
+            sgi_uncapped: false,
             qubit_active: Vec::new(),
             total_weight: 0,
             sgi_merge_buf: Vec::new(),

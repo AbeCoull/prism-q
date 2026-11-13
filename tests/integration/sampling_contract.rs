@@ -631,11 +631,20 @@ fn clifford_t_terminal_routes_agree() {
     for seed in [SEED, SEED + 1] {
         let circuit = terminal_case(OneQubit::CliffordT, seed);
         assert!(circuit.has_t_gates());
+        // The lowered register constants price a register this small below the dense run.
+        let auto = if cfg!(prism_lowered_thresholds) {
+            simulate(&circuit)
+                .plan(prism_q::sim::Query::Shots(SHOTS))
+                .unwrap()
+                .backend
+        } else {
+            R::Statevector
+        };
         check_routes(
             &format!("clifford+t terminal seed {seed}"),
             &circuit,
             &[
-                route("auto", BackendKind::Auto, R::Statevector),
+                route("auto", BackendKind::Auto, auto),
                 route("statevector", BackendKind::Statevector, R::Statevector),
                 route(
                     "stabilizer rank",
@@ -774,7 +783,12 @@ fn clifford_dynamic_routes_agree() {
         "clifford conditional",
         &circuit,
         &[
-            route("auto", BackendKind::Auto, R::Stabilizer),
+            compiled("auto deferred", BackendKind::Auto),
+            noisy(
+                "zero noise deferred",
+                R::CompiledStabilizer,
+                Some(Engine::NoisyCompiledSampler),
+            ),
             route("statevector", BackendKind::Statevector, R::Statevector),
             route("factored", BackendKind::Factored, R::Factored),
             route("mps", mps(), R::Mps),
@@ -788,11 +802,20 @@ fn non_clifford_dynamic_routes_agree() {
     use ResolvedBackend as R;
     let circuit = dynamic_case(5, OneQubit::CliffordT, true, SEED);
     assert!(circuit.has_t_gates());
+    // The lowered register constants take the deferred register at this width.
+    let auto = if cfg!(prism_lowered_thresholds) {
+        simulate(&circuit)
+            .plan(prism_q::sim::Query::Shots(SHOTS))
+            .unwrap()
+            .backend
+    } else {
+        R::Statevector
+    };
     check_routes(
         "clifford+t conditional",
         &circuit,
         &[
-            route("auto", BackendKind::Auto, R::Statevector),
+            route("auto", BackendKind::Auto, auto),
             route("sparse", BackendKind::Sparse, R::Sparse),
             route("mps", mps(), R::Mps),
             noisy("zero noise", R::Statevector, None),
@@ -823,8 +846,9 @@ fn non_clifford_dynamic_routes_agree() {
         SHOTS,
     );
 
-    // Ten qubits leave a stabilizer-rank budget of two T gates, which Auto
-    // spends on the branch sampler instead of per-shot statevector runs.
+    // Under 16 qubits the tree takes the shots ahead of the Clifford register, factored
+    // since the circuit is partly independent; the lowered register constants reach the
+    // register at this width.
     let mut circuit = Circuit::new(10, 8);
     for q in [0, 1] {
         circuit.add_gate(Gate::H, &[q]);
@@ -834,11 +858,19 @@ fn non_clifford_dynamic_routes_agree() {
         .instructions
         .extend(dynamic_case(10, OneQubit::Clifford, true, SEED).instructions);
     assert_eq!(circuit.t_count(), 2);
+    let auto = if cfg!(prism_lowered_thresholds) {
+        simulate(&circuit)
+            .plan(prism_q::sim::Query::Shots(SHOTS))
+            .unwrap()
+            .backend
+    } else {
+        R::Factored
+    };
     check_routes(
-        "clifford+t auto stabilizer rank",
+        "clifford+t auto tree",
         &circuit,
-        &[route("auto", BackendKind::Auto, R::StabilizerRank)],
-        BRANCH_SHOTS,
+        &[route("auto", BackendKind::Auto, auto)],
+        SHOTS,
     );
 }
 

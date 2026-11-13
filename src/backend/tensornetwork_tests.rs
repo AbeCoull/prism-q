@@ -478,9 +478,13 @@ fn test_scalar_network_screened_by_the_cone_matches_the_unscreened_build() {
         let (a, b) = (plan(&screened), plan(&reference));
         assert_eq!((a.pairs, a.peak, a.total), (b.pairs, b.peak, b.total));
 
-        let expected =
-            crate::sim::run_expectation_values(&circuit, std::slice::from_ref(&terms), 42).unwrap()
-                [0];
+        let mut sv = StatevectorBackend::new(42);
+        sv.init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        for instruction in &circuit.instructions {
+            sv.apply(instruction).unwrap();
+        }
+        let expected = sv.pauli_expectations(std::slice::from_ref(&terms)).unwrap()[0];
         let actual =
             expectation_zero_state(&circuit, &terms, &ResolvedLimits::process_default()).unwrap();
         assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");

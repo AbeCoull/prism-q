@@ -57,8 +57,8 @@ change since the previous round. After the last round the data qubits are measur
 each final detector checks their parity against the last ancilla outcome. Every detector
 reads 0 when nothing went wrong.
 
-The observable is data qubit 0. Each ancilla is reset after measurement, since a program
-may not reuse a measured qubit before a reset.
+The observable is data qubit 0. Each ancilla is reset after measurement, since a noisy
+program may not reuse a measured qubit before a reset (a noiseless one may).
 
 ## Sample and decode
 

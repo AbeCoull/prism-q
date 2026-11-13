@@ -1079,6 +1079,37 @@ fn clifford_register_counts_row_fills_the_register() {
     assert_eq!(counts.metadata.reason, RouteRule::CliffordRegister);
 }
 
+// The noisy dynamic rows each price one form of the rewrite to terminal measurements: an
+// ancilla reused after its measurement, and a guard comparing several bits.
+#[test]
+fn noisy_dynamic_rows_take_their_route() {
+    for (label, circuit, rule) in [
+        (
+            "rep_d9_active_reset_p001",
+            bench_fixtures::active_reset_repetition_circuit(9, 9),
+            RouteRule::CompiledCliffordSampler,
+        ),
+        (
+            "rep_d5_lookup_p001",
+            bench_fixtures::lookup_repetition_circuit(5, 5),
+            RouteRule::CompiledCliffordSampler,
+        ),
+    ] {
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        let plan = sim::simulate(&circuit)
+            .noise(&noise)
+            .plan(sim::Query::Shots(2_000))
+            .unwrap();
+        let result = sim::simulate(&circuit)
+            .noise(&noise)
+            .seed(SEED)
+            .shots(64)
+            .unwrap();
+        assert_eq!(plan.rule, rule, "{label}: plan");
+        assert_eq!(result.metadata.reason, rule, "{label}: run");
+    }
+}
+
 fn price_layers(n: usize, t: usize) -> prism_q::circuit::Circuit {
     bench_fixtures::random_clifford_t_layers(n, 10, t, SEED)
 }
@@ -1087,6 +1118,10 @@ fn price_scrambled(n: usize, t: usize) -> prism_q::circuit::Circuit {
     let mut circuit = bench_fixtures::scrambled_clifford_t_circuit(n, t, SEED);
     circuit.measure_all();
     circuit
+}
+
+fn price_distinct() -> prism_q::circuit::Circuit {
+    bench_fixtures::distinct_t_layers(17, 10, 16, SEED)
 }
 
 fn price_onelayer() -> prism_q::circuit::Circuit {
@@ -1135,6 +1170,7 @@ fn clifford_t_price_rows_pin_their_engines() {
         register_rows.push((format!("scrambled_{n}q_t{t}"), price_scrambled(n, t)));
     }
     register_rows.push(("onelayer_20q_t80".into(), price_onelayer()));
+    register_rows.push(("distinct_17q_t16".into(), price_distinct()));
     for (label, circuit) in &register_rows {
         assert_eq!(
             shot_plan(BackendKind::StabilizerRank, circuit, 1024),
@@ -1160,6 +1196,7 @@ fn clifford_t_price_rows_pin_their_engines() {
         statevector_rows.push((format!("scrambled_{n}q_t20"), price_scrambled(n, 20)));
     }
     statevector_rows.push(("layers_20q_t40".into(), price_layers(20, 40)));
+    statevector_rows.push(("distinct_17q_t16".into(), price_distinct()));
     for (label, circuit) in &statevector_rows {
         assert_eq!(
             circuit.independent_subsystems().len(),
@@ -1174,17 +1211,32 @@ fn clifford_t_price_rows_pin_their_engines() {
     }
 
     let auto_rows = [
-        ("layers_22q_t24", price_layers(22, 24), terminal_statevector),
-        ("layers_24q_t24", price_layers(24, 24), terminal_statevector),
-        ("layers_26q_t24", price_layers(26, 24), terminal_statevector),
-        ("scrambled_22q_t20", price_scrambled(22, 20), register),
-        ("layers_20q_t40", price_layers(20, 40), terminal_statevector),
+        ("layers_22q_t24", price_layers(22, 24)),
+        ("layers_24q_t24", price_layers(24, 24)),
+        ("layers_26q_t24", price_layers(26, 24)),
+        ("scrambled_22q_t20", price_scrambled(22, 20)),
+        ("layers_20q_t40", price_layers(20, 40)),
     ];
-    for (label, circuit, route) in &auto_rows {
+    for (label, circuit) in &auto_rows {
         assert_eq!(
             shot_plan(BackendKind::Auto, circuit, 1024),
-            *route,
+            register,
             "auto/{label}"
+        );
+    }
+    // The bracket on the statevector side of the register's cost constant, and the
+    // single-layer row the factored route takes ahead of the register.
+    assert_eq!(
+        shot_plan(BackendKind::Auto, &price_distinct(), 1024),
+        terminal_statevector,
+        "auto/distinct_17q_t16"
+    );
+    let factored = (ResolvedBackend::Factored, RouteRule::NativeSampling);
+    for kind in [BackendKind::Factored, BackendKind::Auto] {
+        assert_eq!(
+            shot_plan(kind.clone(), &price_onelayer(), 1024),
+            factored,
+            "{kind:?}/onelayer_20q_t80"
         );
     }
     let wide = price_layers(28, 24);
@@ -1193,11 +1245,7 @@ fn clifford_t_price_rows_pin_their_engines() {
         .seed(42)
         .plan(sim::Query::Shots(1024))
         .unwrap();
-    assert_eq!(
-        (plan.backend, plan.rule),
-        terminal_statevector,
-        "auto/layers_28q_t24"
-    );
+    assert_eq!((plan.backend, plan.rule), register, "auto/layers_28q_t24");
 
     for (t, shots) in [(6, 16), (8, 4)] {
         for n in [26, 32] {
@@ -1218,6 +1266,54 @@ fn clifford_t_price_rows_pin_their_engines() {
             "statevector_mid/layers_{n}q_t8"
         );
     }
+
+    // The deferral moves the layered and `mid` tails to the end, and the register takes
+    // them. A guarded `S` keeps its measurement in place: the tree takes it under the cap,
+    // the branches past it up to 6 T, and the tree beyond. The fixture's chain bonds drop
+    // with probability one half, so the tree splits it into blocks or factors it. The 32-qubit pins fix the
+    // cap at 30, below 32 as on the bench host, rather than reading this host's.
+    let factored = (ResolvedBackend::Factored, RouteRule::PerShot);
+    let blocks = (ResolvedBackend::Decomposed, RouteRule::PerShot);
+    let past_cap = |circuit: &prism_q::circuit::Circuit, shots| {
+        let plan = sim::simulate(circuit)
+            .limits(prism_q::Limits::new().max_statevector_qubits(30))
+            .seed(42)
+            .plan(sim::Query::Shots(shots))
+            .unwrap();
+        (plan.backend, plan.rule)
+    };
+    for (label, circuit, shots) in auto_mid_rows() {
+        let route = if label.starts_with("guarded_s_32q") {
+            past_cap(&circuit, shots)
+        } else {
+            shot_plan(BackendKind::Auto, &circuit, shots)
+        };
+        let expected = match label.as_str() {
+            "guarded_s_24q_t6" => factored,
+            "guarded_s_24q_t8" | "guarded_s_32q_t8" => blocks,
+            _ => register,
+        };
+        assert_eq!(route, expected, "auto_mid/{label}");
+    }
+}
+
+fn auto_mid_rows() -> Vec<(String, prism_q::circuit::Circuit, usize)> {
+    let mut rows = Vec::new();
+    for n in [22, 24, 26] {
+        let circuit = bench_fixtures::clifford_t_layers_mid_circuit(n, 10, 8, SEED);
+        rows.push((format!("layers_{n}q_t8"), circuit, 64));
+    }
+    for n in [26, 32] {
+        let circuit = bench_fixtures::stabilizer_rank_mid_circuit_shot_circuit(n, 6, SEED);
+        rows.push((format!("mid_{n}q_t6_16shots"), circuit, 16));
+    }
+    for n in [24, 32] {
+        for t in [6, 8] {
+            let circuit = bench_fixtures::guarded_s_mid_circuit(n, t, SEED);
+            rows.push((format!("guarded_s_{n}q_t{t}"), circuit, 4));
+        }
+    }
+    rows
 }
 
 // Deterministic counts behind `auto/clifford_t_price`, printed rather than asserted:
@@ -1230,7 +1326,7 @@ fn clifford_t_price_rows_pin_their_engines() {
 fn clifford_t_price_census() {
     use prism_q::{Gate, Instruction};
 
-    const REGISTER_PASS_STATEVECTOR_AMPLITUDES: f64 = 20.0;
+    const REGISTER_PASS_STATEVECTOR_AMPLITUDES: f64 = 25.0;
     const MAX_REGISTER_QUBITS: usize = 20;
 
     let mut terminal = Vec::new();
@@ -1259,6 +1355,7 @@ fn clifford_t_price_census() {
         terminal.push((format!("scrambled_{n}q_t{t}"), price_scrambled(n, t)));
     }
     terminal.push(("onelayer_20q_t80".into(), price_onelayer()));
+    terminal.push(("distinct_17q_t16".into(), price_distinct()));
     let mut counts_row = circuits::clifford_t_circuit(40, 20, 0.05, SEED);
     counts_row.measure_all();
     terminal.push(("clifford_register_counts/40q_d20_t5pct".into(), counts_row));
@@ -1318,6 +1415,9 @@ fn clifford_t_price_census() {
     for n in [22, 24, 26] {
         let circuit = bench_fixtures::clifford_t_layers_mid_circuit(n, 10, 8, SEED);
         mid.push((format!("statevector_mid/layers_{n}q_t8"), circuit, 64));
+    }
+    for (label, circuit, shots) in auto_mid_rows() {
+        mid.push((format!("auto_mid/{label}"), circuit, shots));
     }
     println!();
     println!(

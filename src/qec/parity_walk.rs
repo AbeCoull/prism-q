@@ -118,12 +118,16 @@ pub(super) fn compile_fault_sites(
 }
 
 /// Compile the deferred circuit's kept events for the record sampler, in draw order,
-/// each with its anchor position and target aliases. The walk carries no output, only
-/// the record fingerprint, which is all the branch decisions need.
-pub(super) fn compile_record_events(deferred: &QecDeferredProgram) -> Result<Vec<QecRecordEvent>> {
+/// each with its anchor position and target aliases, and, unordered, the aliases whose
+/// creation a Z flips some record at. The walk carries no output, only the record
+/// fingerprint, which is all the branch and creation decisions need.
+pub(super) fn compile_record_events(
+    deferred: &QecDeferredProgram,
+) -> Result<(Vec<QecRecordEvent>, Vec<u32>)> {
     let projection = QecParityProjection::new(deferred.measurement_qubits.len(), &[], &[]);
     let plan = WalkPlan::new(deferred, &projection, None)?;
-    let walk = walk_outputs(&plan)?;
+    let mut walk = walk_outputs(&plan)?;
+    let flipping_births = std::mem::take(&mut walk.flipping_births);
     let mut site_of_candidate = vec![(0u32, 0u32); plan.candidates as usize];
     for (slot, &index) in plan.events_by_position.iter().enumerate() {
         let event = &deferred.noise_events[index as usize];
@@ -135,7 +139,7 @@ pub(super) fn compile_record_events(deferred: &QecDeferredProgram) -> Result<Vec
             *site = (index, offset as u32);
         }
     }
-    Ok(walk
+    let events = walk
         .events
         .iter()
         .map(|kept| {
@@ -158,7 +162,8 @@ pub(super) fn compile_record_events(deferred: &QecDeferredProgram) -> Result<Vec
                 targets,
             }
         })
-        .collect())
+        .collect();
+    Ok((events, flipping_births))
 }
 
 /// Fault sites of one program in program order (positions ascending, program order
@@ -194,6 +199,9 @@ struct ParityWalk {
     events: Vec<WalkEvent>,
     branch_offsets: Vec<u32>,
     outputs: Vec<u32>,
+    /// Aliases whose row has X support on the record fingerprint where they come into
+    /// use, so a Z there flips some record; unordered.
+    flipping_births: Vec<u32>,
 }
 
 struct WalkEvent {
@@ -246,6 +254,7 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
     let mut snapshots = Vec::new();
     let mut prepass_pattern = vec![0u64; projection.words];
     let mut random = None;
+    let mut flipping_births = Vec::new();
     if window_count > 1 {
         let mut rows = WindowRows::new(plan, u32::MAX, true);
         let mut visitor = PrepassVisitor {
@@ -258,6 +267,7 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
         rows.fold_observable_signs();
         random = rows.random;
         prepass_pattern = rows.pattern;
+        flipping_births = rows.flipping_births;
     }
 
     let run_window = |window: usize| -> Result<WindowResult> {
@@ -278,6 +288,7 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
             spill,
             pattern: rows.pattern,
             random: rows.random,
+            flipping_births: rows.flipping_births,
         })
     };
     #[cfg(feature = "parallel")]
@@ -303,6 +314,7 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
         for (word, &bits) in pattern.iter_mut().zip(&result.pattern) {
             *word ^= bits;
         }
+        flipping_births.extend(result.flipping_births);
         owns.push(result.own);
         spills.push(result.spill);
     }
@@ -315,6 +327,7 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
         events,
         branch_offsets,
         outputs,
+        flipping_births,
     })
 }
 
@@ -509,6 +522,9 @@ struct WindowRows<'a> {
     /// Whether this walk answers for the observables' pattern and randomness: the
     /// sequential pass, or the only window.
     checks_observables: bool,
+    /// Aliases retired with X support on the fingerprint word, collected only when
+    /// `checks_observables` holds, since that walk meets every alias.
+    flipping_births: Vec<u32>,
 }
 
 impl<'a> WindowRows<'a> {
@@ -541,6 +557,7 @@ impl<'a> WindowRows<'a> {
             random: None,
             pending_seeds,
             checks_observables,
+            flipping_births: Vec::new(),
         }
     }
 
@@ -739,6 +756,9 @@ impl<'a> WindowRows<'a> {
         let slot = slot as usize;
         let row = slot * self.words..(slot + 1) * self.words;
         let owned_words = if self.checks_observables {
+            if self.x[row.end - 1] != 0 {
+                self.flipping_births.push(alias as u32);
+            }
             0..self.det_words + self.obs_words
         } else {
             0..self.det_words
@@ -890,6 +910,7 @@ struct WindowResult {
     spill: SpillFlips,
     pattern: Vec<u64>,
     random: Option<u32>,
+    flipping_births: Vec<u32>,
 }
 
 /// Kept events of one window, with each branch's outputs in

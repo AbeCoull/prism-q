@@ -7,7 +7,7 @@
 use crate::common;
 
 use common::SEED;
-use prism_q::circuit::{Circuit, Instruction};
+use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
 use prism_q::gates::Gate;
 use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
 use prism_q::{
@@ -161,16 +161,21 @@ fn the_block_filtered_compile_carries_readout() {
     );
 }
 
-// A gate on a measured qubit with no reset between keeps `run_shots_noisy` on
+// A guarded H, which no controlled Pauli applies, keeps `run_shots_noisy` on
 // per-shot replay, the one route that applies readout to the unpacked record, on
 // the shot's own stream.
 #[test]
 fn the_replay_route_carries_readout() {
-    let mut circuit = Circuit::new(2, 2);
+    let mut circuit = Circuit::new(3, 2);
     circuit.add_gate(Gate::X, &[0]);
     circuit.add_measure(0, 0);
     circuit.add_gate(Gate::Cx, &[0, 1]);
     circuit.add_measure(1, 1);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(1),
+        gate: Gate::H,
+        targets: SmallVec::from_slice(&[2]),
+    });
 
     let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
     noise.set_bit_readout_error(0, 0.0, 0.25);

@@ -16,12 +16,17 @@ them.
 `Auto` reaches three of them ahead of the
 [dispatch tree](../architecture/engine.md#auto-dispatch-decision-tree):
 
-- Terminal shots go to stabilizer rank on a circuit of 16 qubits or more with fewer T
-  gates than qubits and at most 20 (the Clifford register form below). Past the
-  statevector cap, it takes terminal shots with a T count of at most 40, inside a bound
-  derived from the width, when the register stays within 20 qubits; a circuit that would
-  grow it further goes to the dispatch tree. Shots with mid-circuit measurements take it
-  inside the same T bound.
+- Terminal shots go to stabilizer rank on a circuit of 16 qubits or more when the
+  Clifford register (the form below) fits 20 qubits and costs less than the dense run.
+  The T count sets no limit of its own: 24 T gates on a 14-qubit register at 26 qubits
+  take about 1 ms for 1024 shots against 1.5 s on the statevector. Past the statevector
+  cap, a lowered one included, a register that fits takes the shots ahead of the MPS; a
+  circuit that would grow it past 20 goes to the dispatch tree. Shots with a mid-circuit
+  measurement, a classical guard or a reset move their measurements to the end when they
+  can and take the register under the same tests, the dense side priced as one run per
+  outcome history the shots can reach. Past the statevector cap, a circuit whose
+  measurements stay in place takes the weighted branches below up to 6 T gates; the rest
+  go to the dispatch tree.
 - Marginals on a unitary Clifford+T circuit of 12 qubits or more go to SPD.
 - Expectation values on a Clifford circuit go to SPD.
 
@@ -59,11 +64,20 @@ marginals. Random Clifford depth 10 with 10 T gates takes about 0.5 ms for 1024 
 that would grow it past 20 returns `BackendUnsupported`, and `Auto` checks the width
 from the tableau alone and sends such a circuit to the dispatch tree instead.
 
-Mid-circuit measurements carry coherent weighted MPS branches instead. Clifford gates mutate each branch, `T` and `Tdg` split branches, and a
-measurement computes outcome probabilities from the weighted ensemble before projecting
-every branch onto the sampled outcome. Branch count, MPS bond growth and measurement count
-set how far this form scales; past 20 T gates the branch count passes its cap and the run
-returns `BackendUnsupported`.
+A circuit with mid-circuit measurements, guards or resets first moves its measurements to
+the end: a reset hands the qubit's later gates to a fresh qubit in `|0>`, a measured qubit
+used again copies its record onto a fresh qubit with a CX, and a guarded Pauli becomes the
+same Pauli controlled by the measured qubit. The rewritten circuit is unitary with
+terminal measurements and the same T count, so the register above samples it. A guard on
+a gate other than a Pauli, a guard comparing two measured bits, or a guarded body holding
+a measurement keeps the measurements in place.
+
+Those circuits carry coherent weighted MPS branches instead. Clifford gates mutate each
+branch, `T` and `Tdg` split branches, and a measurement computes outcome probabilities
+from the weighted ensemble before projecting every branch onto the sampled outcome.
+Branch count, MPS bond growth and measurement count set how far this form scales; past 20
+T gates, guarded ones included, the branch count would pass its cap and the run returns
+`BackendUnsupported` before the first shot.
 
 The dense probability path reads its probabilities off the same Clifford register the
 terminal shots use. Branches of `T = alpha*I + beta*Z` that land on one basis state of the
@@ -74,19 +88,25 @@ register wider than 20 qubits falls back to one branch per T choice, capped at `
 | Function | Use |
 |----------|-----|
 | `run_stabilizer_rank` | Exact probabilities (register width ≤ 20, n ≤ 25) |
-| `run_stabilizer_rank_approx` | Approximate under a term budget (higher t counts) |
+| `run_stabilizer_rank_approx` | Approximate under a coefficient budget (register width ≤ 20, n ≤ 25) |
 | `run_stabilizer_rank_shots` | Shot sampling past the statevector cap (register of at most 20 qubits) |
 | `stabilizer_overlap_sq` | Inner product between stabilizer states |
 
-`run_stabilizer_rank_approx` truncates deterministically: after each `T` it drops the
-smallest-magnitude terms beyond the budget, renormalizes the probabilities it returns, and
-reports the summed 1-norm of what it dropped as `discarded_weight`. Writing that as `d`,
-the returned distribution differs from the exact one by at most `4 * d`, and
-`StabRankResult::fidelity_bound` converts `d` to a fidelity floor. The bound assumes
-worst-case interference between the non-orthogonal branch states, so an aggressive budget
-drives it to zero. `Auto` never selects this function, nor the exact expansion for
-probabilities: at every width the expansion can hold, a statevector also fits and is
-faster.
+`run_stabilizer_rank_approx` runs the same register and, after each `T`, zeroes all but
+the budget's largest coefficients, ties kept in index order. The coefficients are
+orthonormal, so each cut drops a known norm `d_j`. The result reports:
+
+- `discarded_weight`: `D = sum d_j`. The exact state lies within `D` of the kept one.
+- `kept_norm_sqr`: `N^2 = 1 - sum d_j^2`, the kept norm before the probabilities are
+  renormalized.
+- `fidelity_bound()`: `F >= ((1 + N^2 - D^2) / (2N))^2`, never below `1 - D^2`. The
+  returned distribution differs from the exact one by at most `2 sqrt(1 - F)` in summed
+  absolute difference. A single cut gives `F = N^2` exactly.
+
+On the 10-qubit benchmark circuits at budget 128 the floor is 0.880 at 16 T and 0.744 at
+20 T. A register wider than 20 qubits is refused. `Auto` never selects this function, nor
+the exact expansion for probabilities: while the register fits, the exact route answers
+without error, and past it a statevector also fits.
 
 ## Stochastic Pauli Propagation (`src/sim/unified_pauli.rs`)
 

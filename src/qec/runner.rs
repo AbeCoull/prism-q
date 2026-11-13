@@ -3,9 +3,7 @@
 //! between them for `EXP_VAL` and noisy programs.
 
 #[cfg(feature = "bench-internal")]
-use super::noise::QecCompiledNoiseSampler;
-#[cfg(any(test, feature = "bench-internal"))]
-use super::noise::compile_qec_noisy_sampler;
+use super::noise::{QecCompiledNoiseSampler, compile_qec_noisy_sampler};
 use super::noise::{QecParityNoise, feedforward_body_letter, feedforward_body_rejection};
 #[cfg(test)]
 use super::noise::{compile_qec_parity_noise, compile_qec_parity_noise_windows};
@@ -58,9 +56,10 @@ use rayon::prelude::*;
 ///
 /// Limitations:
 /// - Non-Clifford gates are rejected on the packed path; the `EXP_VAL` route accepts them.
-/// - A measured qubit must be `Reset` before a later gate reuses it, since the lowering
-///   defers measurements to terminal records. Reuse after a non-Z basis measurement is
-///   rejected, because it also leaves the qubit in the Z frame.
+/// - With noise, a measured qubit must be `Reset` before a later gate reuses it, since
+///   the noisy lowering defers measurements to terminal records; a noiseless program may
+///   reuse it. Reuse after a non-Z basis measurement is rejected, because it also leaves
+///   the qubit in the Z frame.
 /// - [`QecOptions::chunk_size`] bounds the per-batch shot count; with
 ///   `keep_measurements: false` peak memory stays at one chunk of records, plus the
 ///   record flips of one 8192-shot noise unit while chunks split it.

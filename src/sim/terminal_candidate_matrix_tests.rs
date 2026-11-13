@@ -42,13 +42,12 @@ fn partial_independent_circuit_is_not_candidate() {
     ));
 }
 
-// A Clifford+T circuit inside the stabilizer-rank budget stays a statevector
-// candidate: the probability route no longer diverts it to the rank engine.
+// A Clifford+T circuit with few T gates stays a statevector candidate: the probability
+// route does not divert it to the rank engine.
 #[test]
 fn clifford_t_inside_the_rank_budget_is_a_candidate() {
     let n = 10;
-    let budget = stabilizer_rank_budget(n);
-    assert_eq!(budget, 2);
+    let budget = 2;
 
     let mut within = Circuit::new(n, 0);
     within.add_gate(Gate::H, &[0]);

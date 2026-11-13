@@ -215,10 +215,42 @@ pub fn stabilizer_rank_mid_circuit_shot_circuit(
     circuit
 }
 
+/// [`random_t_insertion_circuit`], then qubit 0 measured into bit 0, `S` on qubit 1 when
+/// that bit is one, and qubit 1 measured into bit 1. A guarded `S` has no controlled
+/// Pauli form, so the measurement cannot be deferred to the end.
+pub fn guarded_s_mid_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut circuit = random_t_insertion_circuit(n_qubits, t_count, seed);
+    circuit.num_classical_bits = 2;
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::S,
+        targets: SmallVec::from_slice(&[1]),
+    });
+    circuit.add_measure(1, 1);
+    circuit
+}
+
 /// Random Clifford layers with a full random CX pairing each, and `t_count` T gates at
 /// random spots ahead of a layer, every qubit measured.
 pub fn random_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
     let mut c = clifford_t_layers(n, depth, t_count, seed);
+    c.measure_all();
+    c
+}
+
+/// H on every qubit and one T on each of qubits `0..t_count`, then `depth` Clifford layers
+/// of [`random_clifford_t_layers`], every qubit measured: a register `t_count` wide.
+pub fn distinct_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut c = Circuit::new(n, n);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..t_count {
+        c.add_gate(Gate::T, &[q]);
+    }
+    c.instructions
+        .extend(clifford_t_layers(n, depth, 0, seed).instructions);
     c.measure_all();
     c
 }
@@ -270,4 +302,95 @@ fn append_measure_guard_reset(circuit: &mut Circuit) {
     });
     circuit.add_reset(0);
     circuit.add_measure(1, 1);
+}
+
+/// Repetition memory on a GHZ data register: each round measures check `Z_q Z_{q+1}` onto
+/// ancilla `n_data + q`, then `X` on the ancilla when it read 1 returns it to zero, and the
+/// check reading 1 applies `X` on data qubits `0..=q`. Every guard reads one bit, and the
+/// ancilla is reused after its measurement with no reset between.
+pub fn active_reset_repetition_circuit(n_data: usize, rounds: usize) -> Circuit {
+    repetition_memory(n_data, rounds, |circuit, first_bit| {
+        for q in 0..n_data - 1 {
+            circuit.instructions.push(Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(first_bit + q),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[n_data + q]),
+            });
+        }
+        for q in 0..n_data - 1 {
+            let body = (0..=q).map(x_on).collect();
+            circuit.instructions.extend(prism_q::circuit::guarded(
+                ClassicalCondition::BitIsOne(first_bit + q),
+                body,
+            ));
+        }
+    })
+}
+
+/// Repetition memory on a GHZ data register decoded by lookup: each round measures check
+/// `Z_q Z_{q+1}` onto an ancilla it then resets, and one guarded body per nonzero syndrome,
+/// a comparison of the round's whole check register, applies `X` on the lower-weight data
+/// error with that syndrome.
+pub fn lookup_repetition_circuit(n_data: usize, rounds: usize) -> Circuit {
+    let n_checks = n_data - 1;
+    repetition_memory(n_data, rounds, |circuit, first_bit| {
+        for q in 0..n_checks {
+            circuit.add_reset(n_data + q);
+        }
+        for syndrome in 1..1u64 << n_checks {
+            let mut error = vec![false; n_data];
+            for q in 0..n_checks {
+                error[q + 1] = error[q] ^ ((syndrome >> q) & 1 == 1);
+            }
+            let flip = error.iter().filter(|&&e| e).count() > n_data / 2;
+            let body = (0..n_data)
+                .filter(|&q| error[q] != flip)
+                .map(x_on)
+                .collect();
+            circuit.instructions.extend(prism_q::circuit::guarded(
+                ClassicalCondition::RegisterEquals {
+                    offset: first_bit,
+                    size: n_checks,
+                    value: syndrome,
+                },
+                body,
+            ));
+        }
+    })
+}
+
+fn x_on(target: usize) -> Instruction {
+    Instruction::Gate {
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[target]),
+    }
+}
+
+/// GHZ data register, `rounds` rounds of check measurements each followed by
+/// `after_round(circuit, first_bit)`, then the data measured into the last `n_data` bits.
+fn repetition_memory(
+    n_data: usize,
+    rounds: usize,
+    mut after_round: impl FnMut(&mut Circuit, usize),
+) -> Circuit {
+    let n_checks = n_data - 1;
+    let mut circuit = Circuit::new(n_data + n_checks, rounds * n_checks + n_data);
+    circuit.add_gate(Gate::H, &[0]);
+    for q in 1..n_data {
+        circuit.add_gate(Gate::Cx, &[q - 1, q]);
+    }
+    for round in 0..rounds {
+        let first_bit = round * n_checks;
+        for q in 0..n_checks {
+            let ancilla = n_data + q;
+            circuit.add_gate(Gate::Cx, &[q, ancilla]);
+            circuit.add_gate(Gate::Cx, &[q + 1, ancilla]);
+            circuit.add_measure(ancilla, first_bit + q);
+        }
+        after_round(&mut circuit, first_bit);
+    }
+    for q in 0..n_data {
+        circuit.add_measure(q, rounds * n_checks + q);
+    }
+    circuit
 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::circuit::SmallVec;
+use crate::circuit::{ClassicalCondition, SmallVec};
 use crate::limits::ResolvedLimits;
 
 #[test]
@@ -117,7 +117,7 @@ fn shots_decline_a_register_past_its_cap() {
         c.add_measure(q, q);
     }
 
-    assert!(!terminal_register_fits(&c));
+    assert!(terminal_register_price(&c, MAX_REGISTER_QUBITS).is_none());
     let err = run_stabilizer_rank_shots(&c, 8, 42).unwrap_err();
     assert!(
         matches!(err, PrismError::BackendUnsupported { .. }),
@@ -618,57 +618,205 @@ fn eight_t_circuit() -> Circuit {
     c
 }
 
+fn classical_fidelity(p: &[f64], q: &[f64]) -> f64 {
+    p.iter()
+        .zip(q)
+        .map(|(a, b)| (a * b).sqrt())
+        .sum::<f64>()
+        .powi(2)
+}
+
+// Asserts only what holds for every order of tied coefficients: the cut norms and the
+// distribution move with the tie split once cuts follow one another.
+fn assert_inside_the_bound(exact: &StabRankResult, approx: &StabRankResult, budget: usize) {
+    let label = format!("budget {budget}");
+    assert!(approx.num_terms <= budget, "{label}");
+    let total: f64 = approx.probabilities.iter().sum();
+    assert!((total - 1.0).abs() < 1e-9, "{label}: summed to {total}");
+    let floor = approx.fidelity_bound();
+    let deviation: f64 = exact
+        .probabilities
+        .iter()
+        .zip(&approx.probabilities)
+        .map(|(e, a)| (e - a).abs())
+        .sum();
+    let bound = 2.0 * (1.0 - floor).sqrt();
+    assert!(
+        deviation <= bound + 1e-9,
+        "{label}: deviated {deviation} past {bound}"
+    );
+    let bc2 = classical_fidelity(&exact.probabilities, &approx.probabilities);
+    assert!(
+        bc2 >= floor - 1e-9,
+        "{label}: {bc2} below the floor {floor}"
+    );
+    assert!(approx.kept_norm_sqr <= 1.0 + 1e-12, "{label}");
+    assert!(
+        1.0 - approx.kept_norm_sqr <= approx.discarded_weight.powi(2) + 1e-12,
+        "{label}"
+    );
+    assert!(
+        floor >= 1.0 - approx.discarded_weight.powi(2) - 1e-12,
+        "{label}"
+    );
+    if approx.pruned_count == 0 {
+        assert_eq!(approx.discarded_weight, 0.0, "{label}");
+        assert_eq!(approx.kept_norm_sqr, 1.0, "{label}");
+        assert_eq!(floor, 1.0, "{label}");
+        for (e, a) in exact.probabilities.iter().zip(&approx.probabilities) {
+            assert!((e - a).abs() < 1e-10, "{label}");
+        }
+    }
+}
+
 #[test]
 fn pruned_runs_stay_inside_the_reported_error_bound() {
     let c = eight_t_circuit();
     let exact = run_stabilizer_rank(&c, 42).unwrap();
     assert_eq!(exact.num_terms, 16);
 
-    for budget in [64usize, 160, 224] {
+    for (budget, floor) in [(4usize, 0.6), (8, 0.94), (12, 0.99)] {
         let approx = run_stabilizer_rank_approx(&c, budget, 42).unwrap();
-        assert!(approx.num_terms <= budget);
         assert!(approx.pruned_count > 0);
+        assert_inside_the_bound(&exact, &approx, budget);
+        assert!(approx.fidelity_bound() > floor, "budget {budget}");
+    }
+}
 
-        let total: f64 = approx.probabilities.iter().sum();
-        assert!(
-            (total - 1.0).abs() < 1e-9,
-            "budget {budget} summed to {total}"
-        );
+#[test]
+fn budgets_past_the_register_are_exact() {
+    let c = eight_t_circuit();
+    let exact = run_stabilizer_rank(&c, 42).unwrap();
+    for budget in [16usize, 64, 160, 224] {
+        let approx = run_stabilizer_rank_approx(&c, budget, 42).unwrap();
+        assert_eq!(approx.pruned_count, 0);
+        assert_eq!(approx.discarded_weight, 0.0);
+        assert_eq!(approx.fidelity_bound(), 1.0);
+        assert_inside_the_bound(&exact, &approx, budget);
+    }
+}
 
-        let deviation: f64 = exact
-            .probabilities
-            .iter()
-            .zip(&approx.probabilities)
-            .map(|(e, a)| (e - a).abs())
-            .sum();
-        let bound = 4.0 * approx.discarded_weight;
+// The cut falls between the c^2 s and c s^2 coefficient groups, so it is tie invariant.
+#[test]
+fn one_cut_reports_the_exact_fidelity() {
+    let mut c = Circuit::new(3, 0);
+    for q in 0..3 {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+        c.add_gate(Gate::H, &[q]);
+    }
+    let exact = run_stabilizer_rank(&c, 42).unwrap();
+    let approx = run_stabilizer_rank_approx(&c, 4, 42).unwrap();
+    let (s, co) = std::f64::consts::FRAC_PI_8.sin_cos();
+    let want = co.powi(6) + 3.0 * co.powi(4) * s * s;
+    assert_eq!(approx.pruned_count, 4);
+    assert_eq!(approx.num_terms, 4);
+    assert!((approx.kept_norm_sqr - want).abs() < 1e-12);
+    assert!((approx.fidelity_bound() - want).abs() < 1e-12);
+    assert!((1.0 - approx.discarded_weight.powi(2) - want).abs() < 1e-12);
+    let bc2 = classical_fidelity(&exact.probabilities, &approx.probabilities);
+    assert!((bc2 - want).abs() < 1e-12, "{bc2} vs {want}");
+    assert_inside_the_bound(&exact, &approx, 4);
+}
+
+#[test]
+fn seeded_pruned_runs_stay_inside_the_bound() {
+    for seed in 42..47u64 {
+        let c = crate::circuits::clifford_t_circuit(8, 6, 0.25, seed);
+        let exact = run_stabilizer_rank(&c, 42).unwrap();
+        for budget in [8usize, 32, 128] {
+            let approx = run_stabilizer_rank_approx(&c, budget, 42).unwrap();
+            assert_inside_the_bound(&exact, &approx, budget);
+        }
+    }
+}
+
+// The `stabilizer_rank/approx_*` bench circuit.
+fn t_insertion_circuit(n: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n - 1 {
+        if rng.random_bool(0.5) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    for _ in 0..t_count {
+        let q = rng.random_range(0..n);
+        c.add_gate(Gate::T, &[q]);
+    }
+    for _ in 0..3 {
+        for q in 0..n {
+            let g = rng.random_range(0..cliffords.len());
+            c.add_gate(cliffords[g].clone(), &[q]);
+        }
+        for q in 0..n - 1 {
+            if rng.random_bool(0.5) {
+                c.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+    }
+    c
+}
+
+#[test]
+fn bench_circuits_certify_a_floor_at_budget_128() {
+    for (t, floor) in [(16usize, 0.8), (20, 0.5)] {
+        let c = t_insertion_circuit(10, t, 0xDEAD_BEEF);
+        let exact = run_stabilizer_rank(&c, 42).unwrap();
+        let approx = run_stabilizer_rank_approx(&c, 128, 42).unwrap();
+        assert!(approx.pruned_count > 0);
+        assert_inside_the_bound(&exact, &approx, 128);
         assert!(
-            deviation <= bound + 1e-9,
-            "budget {budget} deviated {deviation} past its bound {bound}"
+            approx.fidelity_bound() > floor,
+            "{t} T: floor {}",
+            approx.fidelity_bound()
         );
     }
 
-    let whole = run_stabilizer_rank_approx(&c, 256, 42).unwrap();
-    assert_eq!(whole.pruned_count, 0);
-    assert_eq!(whole.discarded_weight, 0.0);
+    let c = t_insertion_circuit(10, 16, 0xDEAD_BEEF);
+    let one_cut = run_stabilizer_rank_approx(&c, 256, 42).unwrap();
+    assert!((one_cut.fidelity_bound() - one_cut.kept_norm_sqr).abs() < 1e-12);
+    assert!((one_cut.kept_norm_sqr - 0.988898).abs() < 1e-6);
 }
 
-// The 1-norm bound is worst case over constructive interference between
-// non-orthogonal branches, so it certifies nothing at the budgets worth
-// taking. Both budgets here straddle a class of equal-magnitude branches, so
-// the assertions read the discarded magnitudes, which the tie-break cannot
-// move, rather than the distribution, which it can.
 #[test]
-fn the_error_bound_certifies_only_a_generous_budget() {
-    let c = eight_t_circuit();
+fn pruned_route_refuses_a_register_past_its_width() {
+    let width = MAX_REGISTER_QUBITS + 1;
+    let mut c = Circuit::new(width, 0);
+    for q in 0..width {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    let err = run_stabilizer_rank_approx(&c, 128, 42).unwrap_err();
+    assert!(
+        matches!(err, PrismError::BackendUnsupported { .. }),
+        "got {err:?}"
+    );
+}
 
-    let tight = run_stabilizer_rank_approx(&c, 64, 42).unwrap();
-    assert!(tight.pruned_count > 0);
-    assert_eq!(tight.fidelity_bound(), 0.0);
-
-    let generous = run_stabilizer_rank_approx(&c, 224, 42).unwrap();
-    assert!(generous.pruned_count > 0);
-    assert!(generous.fidelity_bound() > 0.97);
+#[cfg(feature = "parallel")]
+#[test]
+fn pruned_route_is_identical_on_one_and_many_threads() {
+    let c = t_insertion_circuit(10, 20, 0xDEAD_BEEF);
+    let run = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| run_stabilizer_rank_approx(&c, 128, 42).unwrap())
+    };
+    let (one, many) = (run(1), run(4));
+    assert_eq!(one.probabilities, many.probabilities);
+    assert_eq!(one.discarded_weight, many.discarded_weight);
+    assert_eq!(one.kept_norm_sqr, many.kept_norm_sqr);
+    assert_eq!(
+        (one.num_terms, one.pruned_count),
+        (many.num_terms, many.pruned_count)
+    );
 }
 
 #[test]
@@ -870,9 +1018,10 @@ fn approx_path_runs_with_pruning() {
         c.add_gate(Gate::T, &[q]);
         c.add_gate(Gate::T, &[q]);
     }
-    let result = run_stabilizer_rank_approx(&c, 42, 4).unwrap();
+    let result = run_stabilizer_rank_approx(&c, 4, 4).unwrap();
+    assert!(result.pruned_count > 0);
     let total: f64 = result.probabilities.iter().sum();
-    assert!(total.is_finite());
+    assert!((total - 1.0).abs() < 1e-9);
 }
 
 #[test]
@@ -1092,5 +1241,360 @@ fn declined_register_falls_back_to_one_branch_per_t() {
         .enumerate()
     {
         assert!((m - e).abs() < 1e-10, "prob[{i}]: merged {m}, expanded {e}");
+    }
+}
+
+// Mid-circuit shots on the deferred register, against the branch sampler they replace and
+// against a dense run.
+
+fn conditional(c: &mut Circuit, condition: ClassicalCondition, gate: Gate, qubit: usize) {
+    c.instructions.push(Instruction::Conditional {
+        condition,
+        gate,
+        targets: SmallVec::from_slice(&[qubit]),
+    });
+}
+
+/// `H` on every qubit, three layers of random one-qubit Cliffords and random neighbour CX with
+/// `t` T gates spread over them, then qubit 0 measured into bit 0, `guard` on qubit 1 when
+/// that bit is one, qubit 0 reset and coupled back to qubit 1, and qubits 0 and 1 measured
+/// into bits 2 and 1.
+fn mid_circuit_case(n: usize, t: usize, guard: Gate, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let ones = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Z];
+    let mut c = Circuit::new(n, 3);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for layer in 0..3 {
+        for i in (layer..t).step_by(3) {
+            c.add_gate(Gate::T, &[(i * 5 + layer) % n]);
+        }
+        for q in 0..n {
+            c.add_gate(ones[rng.random_range(0..ones.len())].clone(), &[q]);
+        }
+        for _ in 0..n / 2 {
+            let a = rng.random_range(0..n - 1);
+            c.add_gate(Gate::Cx, &[a, a + 1]);
+        }
+    }
+    c.add_measure(0, 0);
+    conditional(&mut c, ClassicalCondition::BitIsOne(0), guard, 1);
+    c.add_reset(0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_measure(0, 2);
+    c.add_measure(1, 1);
+    c
+}
+
+/// Qubit 0 measured and reset twice, with gates on the fresh qubit between.
+fn twice_reset_case() -> Circuit {
+    let mut c = Circuit::new(3, 4);
+    for q in 0..3 {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_measure(0, 0);
+    c.add_reset(0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::Cx, &[0, 2]);
+    c.add_measure(0, 1);
+    c.add_reset(0);
+    c.add_gate(Gate::Cx, &[2, 0]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_measure(0, 2);
+    c.add_measure(2, 3);
+    c
+}
+
+/// An `X` on qubit 2 guarded by the parity of two measured bits.
+fn parity_guard_case() -> Circuit {
+    let mut c = Circuit::new(4, 3);
+    for q in 0..4 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::Tdg, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::H, &[3]);
+    c.add_measure(0, 0);
+    c.add_measure(3, 1);
+    conditional(
+        &mut c,
+        ClassicalCondition::Parity {
+            bits: vec![0, 1].into(),
+            expected: true,
+        },
+        Gate::X,
+        2,
+    );
+    c.add_gate(Gate::H, &[2]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_measure(2, 2);
+    c
+}
+
+fn deferral_cases() -> Vec<(String, Circuit, usize)> {
+    // The branch sampler pays `B (B + 1)` MPS overlaps per measurement at `B = 2^t`
+    // branches, so the shot count falls as `t` and the width grow.
+    let mut cases = Vec::new();
+    for (n, t, shots) in [(8, 2, 2000), (8, 4, 1000), (12, 2, 1000), (12, 4, 1000)] {
+        let circuit = mid_circuit_case(n, t, Gate::X, 42);
+        cases.push((format!("{n}q {t}t"), circuit, shots));
+    }
+    cases.push(("8q 6t".into(), mid_circuit_case(8, 6, Gate::X, 42), 400));
+    cases.push(("guarded z".into(), mid_circuit_case(6, 3, Gate::Z, 7), 2000));
+    cases.push((
+        "guarded y".into(),
+        mid_circuit_case(6, 3, Gate::Y, 11),
+        2000,
+    ));
+    cases.push(("reset twice".into(), twice_reset_case(), 2000));
+    cases.push(("parity guard".into(), parity_guard_case(), 2000));
+    cases
+}
+
+/// Per-outcome frequencies of two samples of `shots` agree within five standard deviations
+/// of their difference plus one shot, `p` their pooled frequency.
+fn assert_same_distribution(
+    label: &str,
+    new: &crate::sim::ShotsResult,
+    old: &crate::sim::ShotsResult,
+) {
+    let shots = new.shots.len();
+    assert_eq!(old.shots.len(), shots, "{label}: shot totals");
+    let (new, old) = (new.counts(), old.counts());
+    let keys: std::collections::BTreeSet<&Vec<u64>> = new.keys().chain(old.keys()).collect();
+    for key in keys {
+        let a = new.get(key).copied().unwrap_or(0) as f64 / shots as f64;
+        let b = old.get(key).copied().unwrap_or(0) as f64 / shots as f64;
+        let p = (a + b) / 2.0;
+        let bound = 5.0 * (p * (1.0 - p) * 2.0 / shots as f64).sqrt() + 1.0 / shots as f64;
+        assert!(
+            (a - b).abs() <= bound,
+            "{label}: outcome {key:?} at {a} against {b}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register cap is narrower than these registers"
+)]
+fn deferred_register_shots_match_the_branch_sampler() {
+    for (label, circuit, shots) in deferral_cases() {
+        let lowered = lower_clifford_t_circuit(&circuit).unwrap();
+        assert!(
+            deferred_sampler(&lowered).unwrap().is_some(),
+            "{label}: the deferral declined"
+        );
+        let new = run_stabilizer_rank_shots(&circuit, shots, 42).unwrap();
+        let old = sample_mps_branches_online(&circuit, shots, 42).unwrap();
+        assert_same_distribution(&label, &new, &old);
+    }
+}
+
+/// Exact record distribution of a dynamic circuit, indexed by classical bits, from a dense
+/// run of its dilation: a CX copies each measured qubit onto a fresh ancilla, a reset hands
+/// the qubit's later gates to a fresh wire, and a guarded Pauli is applied controlled by
+/// the ancillas its guard reads.
+fn dilated_distribution(circuit: &Circuit) -> Vec<f64> {
+    let events = circuit
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, Instruction::Measure { .. } | Instruction::Reset { .. }))
+        .count();
+    let mut unitary = Circuit::new(circuit.num_qubits + events, 0);
+    let mut wire: Vec<usize> = (0..circuit.num_qubits).collect();
+    let mut bit_wire: Vec<Option<usize>> = vec![None; circuit.num_classical_bits];
+    let mut next = circuit.num_qubits;
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Gate { gate, targets } => {
+                let mapped: Vec<usize> = targets.iter().map(|&q| wire[q]).collect();
+                unitary.add_gate(gate.clone(), &mapped);
+            }
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => {
+                unitary.add_gate(Gate::Cx, &[wire[*qubit], next]);
+                bit_wire[*classical_bit] = Some(next);
+                next += 1;
+            }
+            Instruction::Reset { qubit } => {
+                wire[*qubit] = next;
+                next += 1;
+            }
+            Instruction::Conditional {
+                condition,
+                gate,
+                targets,
+            } => {
+                let bits: Vec<usize> = match condition {
+                    ClassicalCondition::BitIsOne(bit) => vec![*bit],
+                    ClassicalCondition::Parity {
+                        bits,
+                        expected: true,
+                    } => bits.to_vec(),
+                    other => panic!("no dilation for {other:?}"),
+                };
+                let controlled = Gate::cu(gate.matrix_2x2());
+                for bit in bits {
+                    if let Some(control) = bit_wire[bit] {
+                        unitary.add_gate(controlled.clone(), &[control, wire[targets[0]]]);
+                    }
+                }
+            }
+            other => panic!("no dilation for {other:?}"),
+        }
+    }
+    let probs = crate::sim::run_with(
+        crate::sim::BackendKind::Statevector,
+        &unitary,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap()
+    .probabilities
+    .unwrap()
+    .to_vec();
+    let mut dist = vec![0.0; 1 << circuit.num_classical_bits];
+    for (index, p) in probs.into_iter().enumerate() {
+        let key = bit_wire
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.is_some_and(|w| (index >> w) & 1 == 1))
+            .fold(0usize, |acc, (bit, _)| acc | 1 << bit);
+        dist[key] += p;
+    }
+    dist
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered register cap is narrower than these registers"
+)]
+fn deferred_register_probabilities_match_a_dense_dilation() {
+    let cases = [
+        ("guarded x", mid_circuit_case(5, 4, Gate::X, 3)),
+        ("guarded z", mid_circuit_case(6, 3, Gate::Z, 7)),
+        ("guarded y", mid_circuit_case(6, 3, Gate::Y, 11)),
+        ("reset twice", twice_reset_case()),
+        ("parity guard", parity_guard_case()),
+        ("measured qubit reused", reused_measurement_case(6, 3)),
+    ];
+    for (label, circuit) in cases {
+        let deferred = crate::sim::compiled::defer_clifford_t_circuit(&circuit).unwrap();
+        let sampler = TerminalSampler::compile(&deferred, MAX_REGISTER_QUBITS)
+            .unwrap()
+            .unwrap();
+        let want = dilated_distribution(&circuit);
+        for (key, (got, want)) in sampler.distribution().iter().zip(&want).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-10,
+                "{label}: outcome {key}: got {got}, want {want}"
+            );
+        }
+    }
+}
+
+/// `mid_circuit_case` with a gate on the measured qubit ahead of the guard, before its reset.
+fn reused_measurement_case(n: usize, t: usize) -> Circuit {
+    let mut reused = mid_circuit_case(n, t, Gate::X, 5);
+    let at = reused
+        .instructions
+        .iter()
+        .position(|i| matches!(i, Instruction::Conditional { .. }))
+        .unwrap();
+    reused.instructions.insert(
+        at,
+        Instruction::Gate {
+            gate: Gate::H,
+            targets: SmallVec::from_slice(&[0]),
+        },
+    );
+    reused
+}
+
+/// `mid_circuit_case` with `gate` guarded in place of the Pauli, or with a measurement
+/// inside a guarded body.
+fn declined_cases(n: usize, t: usize) -> Vec<(&'static str, Circuit)> {
+    let mut guarded_t = mid_circuit_case(n, t, Gate::X, 5);
+    let at = guarded_t
+        .instructions
+        .iter()
+        .position(|i| matches!(i, Instruction::Conditional { .. }))
+        .unwrap();
+    guarded_t.instructions[at] = Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::T,
+        targets: SmallVec::from_slice(&[1]),
+    };
+    let mut guarded_s = guarded_t.clone();
+    guarded_s.instructions[at] = Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::S,
+        targets: SmallVec::from_slice(&[1]),
+    };
+    let mut region = mid_circuit_case(n, t, Gate::X, 5);
+    region.instructions[at] = Instruction::Region(Box::new(GuardedRegion::new(
+        ClassicalCondition::BitIsOne(0),
+        vec![Instruction::Measure {
+            qubit: 1,
+            classical_bit: 1,
+        }],
+    )));
+    vec![
+        ("guarded t", guarded_t),
+        ("guarded s", guarded_s),
+        ("measurement in a guarded body", region),
+    ]
+}
+
+#[test]
+fn deferral_declines_what_it_cannot_move() {
+    for (label, circuit) in declined_cases(6, 2) {
+        assert!(
+            deferred_register_circuit(&circuit).is_none(),
+            "{label}: the deferral accepted"
+        );
+        let new = run_stabilizer_rank_shots(&circuit, 400, 42).unwrap();
+        let old = sample_mps_branches_online(&circuit, 400, 42).unwrap();
+        assert_eq!(
+            new.shots, old.shots,
+            "{label}: the branch sampler is unchanged"
+        );
+    }
+}
+
+#[test]
+fn branch_overflow_fails_before_the_first_shot() {
+    let mut circuit = Circuit::new(24, 2);
+    for q in 0..21 {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    circuit.add_measure(0, 0);
+    conditional(&mut circuit, ClassicalCondition::BitIsOne(0), Gate::S, 1);
+    circuit.add_measure(1, 1);
+    let err = run_stabilizer_rank_shots(&circuit, 1, 42).unwrap_err();
+    match err {
+        PrismError::BackendUnsupported { operation, .. } => {
+            assert!(operation.contains("21 T gates"), "{operation}");
+        }
+        other => panic!("expected BackendUnsupported, got {other:?}"),
     }
 }

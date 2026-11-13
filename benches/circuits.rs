@@ -31,13 +31,15 @@ use std::time::Duration;
 
 mod common;
 use common::fixtures::{
-    DENSE_UNITARY_LAYERS, clifford_t_layers_mid_circuit, dense_unitary_layers, product_observables,
-    random_clifford_t_layers, random_t_insertion_circuit, scrambled_clifford_t_circuit,
-    sparse_entanglement_circuit, stabilizer_rank_mid_circuit_shot_circuit,
+    DENSE_UNITARY_LAYERS, clifford_t_layers_mid_circuit, dense_unitary_layers, distinct_t_layers,
+    guarded_s_mid_circuit, product_observables, random_clifford_t_layers,
+    random_t_insertion_circuit, scrambled_clifford_t_circuit, sparse_entanglement_circuit,
+    stabilizer_rank_mid_circuit_shot_circuit,
 };
 use common::{
-    SEED, amplitude_damping_kraus, configure_group, configure_group_timed, correlated_zz_kraus,
-    h_conjugated_zz_kraus, heisenberg_hamiltonian, ising_hamiltonian, run_shots_with, run_with,
+    SEED, amplitude_damping_kraus, configure_group, configure_group_at, configure_group_timed,
+    correlated_zz_kraus, h_conjugated_zz_kraus, heisenberg_hamiltonian, ising_hamiltonian,
+    run_shots_with, run_with,
 };
 
 fn run_shots_with_noise(
@@ -4307,7 +4309,8 @@ fn bench_auto_clifford_t_shots(c: &mut Criterion) {
 /// Clifford+T shots priced on each engine that can take them: the Clifford register
 /// (`register`), the dense statevector (`statevector`), what `Auto` picks (`auto`), and,
 /// for circuits with a mid-circuit measurement, the stabilizer-rank branches (`rank_mid`)
-/// against the statevector walk (`statevector_mid`). Routes pinned in
+/// against the statevector walk (`statevector_mid`) and what `Auto` picks (`auto_mid`).
+/// Routes pinned in
 /// `tests/integration/bench_fixture_routing.rs`.
 fn bench_auto_clifford_t_price(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/clifford_t_price");
@@ -4354,13 +4357,21 @@ fn bench_auto_clifford_t_price(c: &mut Criterion) {
     }
     let mut onelayer = random_t_insertion_circuit(20, 80, SEED);
     onelayer.measure_all();
-    shots_row(
-        "register",
-        "onelayer_20q_t80".into(),
-        rank.clone(),
-        onelayer,
-        1024,
-    );
+    for (arm, kind) in [
+        ("register", rank.clone()),
+        ("factored", BackendKind::Factored),
+        ("auto", BackendKind::Auto),
+    ] {
+        shots_row(arm, "onelayer_20q_t80".into(), kind, onelayer.clone(), 1024);
+    }
+    for (arm, kind) in [
+        ("register", rank.clone()),
+        ("statevector", dense.clone()),
+        ("auto", BackendKind::Auto),
+    ] {
+        let circuit = distinct_t_layers(17, 10, 16, SEED);
+        shots_row(arm, "distinct_17q_t16".into(), kind, circuit, 1024);
+    }
 
     let layer_widths = [22, 24, 26].into_iter().chain(high.iter().copied());
     for n in layer_widths {
@@ -4392,13 +4403,24 @@ fn bench_auto_clifford_t_price(c: &mut Criterion) {
     }
     for n in [22, 24, 26] {
         let circuit = clifford_t_layers_mid_circuit(n, 10, 8, SEED);
-        shots_row(
-            "statevector_mid",
-            format!("layers_{n}q_t8"),
-            dense.clone(),
-            circuit,
-            64,
-        );
+        for (arm, kind) in [
+            ("statevector_mid", dense.clone()),
+            ("auto_mid", BackendKind::Auto),
+        ] {
+            shots_row(arm, format!("layers_{n}q_t8"), kind, circuit.clone(), 64);
+        }
+    }
+    for n in [26, 32] {
+        let id = format!("mid_{n}q_t6_16shots");
+        let circuit = stabilizer_rank_mid_circuit_shot_circuit(n, 6, SEED);
+        shots_row("auto_mid", id, BackendKind::Auto, circuit, 16);
+    }
+    for n in [24, 32] {
+        for t in [6, 8] {
+            let circuit = guarded_s_mid_circuit(n, t, SEED);
+            let id = format!("guarded_s_{n}q_t{t}");
+            shots_row("auto_mid", id, BackendKind::Auto, circuit, 4);
+        }
     }
 
     group.finish();
@@ -5755,6 +5777,62 @@ fn bench_dynamic_mid_circuit_measure_all(c: &mut Criterion) {
     group.finish();
 }
 
+/// `rounds` parity checks on `2n/3` data qubits and `n/3` ancillas: per round random
+/// Ry/Rz on the data and a CX brick layer, then each ancilla gathers a data pair's
+/// parity, is measured, conditions an X on the pair's first qubit, and is reset.
+/// The data qubits are measured at the end.
+fn parity_rounds_circuit(n: usize, rounds: usize) -> Circuit {
+    let anc = n / 3;
+    let data = 2 * anc;
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let mut circuit = Circuit::new(n, rounds * anc + data);
+    for r in 0..rounds {
+        for q in 0..data {
+            circuit.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            circuit.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+        }
+        for q in ((r % 2)..data - 1).step_by(2) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for j in 0..anc {
+            let a = data + j;
+            let bit = r * anc + j;
+            circuit.add_gate(Gate::Cx, &[2 * j, a]);
+            circuit.add_gate(Gate::Cx, &[2 * j + 1, a]);
+            circuit.add_measure(a, bit);
+            circuit.instructions.push(Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(bit),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[2 * j]),
+            });
+            circuit.add_reset(a);
+        }
+    }
+    for q in 0..data {
+        circuit.add_measure(q, rounds * anc + q);
+    }
+    circuit
+}
+
+/// Many mid-circuit measurements with feedback and reset: past the first dozen
+/// splits nearly every shot follows its own outcome history, so the 18-qubit row
+/// prices one `2^18` evolution per shot.
+fn bench_dynamic_parity_rounds(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dynamic/parity_rounds");
+    configure_group_at(&mut group, 10);
+    for &(n, shots) in &[(12usize, 1_000usize), (18, 100)] {
+        let circuit = parity_rounds_circuit(n, 3);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| run_shots_with(BackendKind::Auto, circ, shots, SEED).unwrap());
+            },
+        );
+    }
+    group.finish();
+}
+
 /// Clifford layers, a measurement of qubit 0 that conditions an X on qubit 1,
 /// a reset of qubit 0, more layers, then every qubit measured. The condition and
 /// the reset keep it off the compiled sampler, so Auto replays it per shot on a
@@ -5810,8 +5888,8 @@ fn bench_dynamic_clifford_shots(c: &mut Criterion) {
     }
 
     // A guard reading a bit under readout error. Symmetric readout stays on the
-    // compiled sampler as an X on the measured alias; asymmetric readout declines it
-    // to per-shot tableau replay, flipping each bit as its measurement writes it.
+    // compiled sampler as an X on the measured alias; asymmetric readout lands that X
+    // after the compiled sample, at the rate the record's value picks.
     let n = 16;
     let mut body = Circuit::new(n, n + 1);
     layered_clifford_body(&mut body, n, 4, SEED);
@@ -5831,7 +5909,7 @@ fn bench_dynamic_clifford_shots(c: &mut Criterion) {
             "readout_asymmetric",
             0.02,
             0.05,
-            prism_q::ResolvedBackend::Stabilizer,
+            prism_q::ResolvedBackend::CompiledStabilizer,
         ),
     ] {
         let noise = witness_readout_noise(&circuit, p01, p10);
@@ -6158,6 +6236,7 @@ criterion_group! {
     bench_dynamic_shots,
     bench_dynamic_mid_circuit_shots,
     bench_dynamic_mid_circuit_measure_all,
+    bench_dynamic_parity_rounds,
     bench_dynamic_clifford_shots,
     bench_dynamic_temporal_prefix_blocks,
     bench_dynamic_rus,

@@ -101,6 +101,8 @@ pub(super) fn branch_shots(
     let walk = Walk {
         limits,
         program: None,
+        #[cfg(test)]
+        known_one: true,
     };
     walk.shots(
         fused.num_qubits,
@@ -136,6 +138,8 @@ pub(super) fn branch_program_shots(
     let walk = Walk {
         limits,
         program: Some(program),
+        #[cfg(test)]
+        known_one: true,
     };
     walk.shots(
         program.num_qubits(),
@@ -294,14 +298,47 @@ struct Branch {
     sv: StatevectorBackend,
     shots: usize,
     rng: ChaCha8Rng,
+    /// Bit `q` set when the `|1>` half of qubit `q` holds exact zeros: projected or
+    /// reset onto `|0>` and untouched since. A measurement or reset of such a qubit
+    /// reads P(1) = 0 and leaves the state as it is, so it skips both passes.
+    known_zero: u64,
+    /// Bit `q` set when the `|0>` half of qubit `q` holds exact zeros: measured as 1 and
+    /// untouched since. A measurement there skips both passes; a reset skips the P(1)
+    /// pass and keeps the fold.
+    known_one: u64,
+}
+
+fn qubit_bit(qubit: usize) -> u64 {
+    u32::try_from(qubit)
+        .ok()
+        .and_then(|q| 1u64.checked_shl(q))
+        .unwrap_or(0)
+}
+
+fn targets_mask(targets: &[usize]) -> u64 {
+    targets.iter().fold(0, |mask, &q| mask | qubit_bit(q))
 }
 
 struct Walk<'l> {
     limits: &'l BranchLimits,
     program: Option<&'l Prepared<'l>>,
+    /// Whether a measurement that projects onto 1 marks its qubit in
+    /// [`Branch::known_one`], off only to compare against the untracked walk.
+    #[cfg(test)]
+    known_one: bool,
 }
 
 impl<'l> Walk<'l> {
+    #[cfg(test)]
+    fn tracks_known_one(&self) -> bool {
+        self.known_one
+    }
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn tracks_known_one(&self) -> bool {
+        true
+    }
+
     fn shots(
         &self,
         num_qubits: usize,
@@ -323,6 +360,8 @@ impl<'l> Walk<'l> {
             sv: root,
             shots: num_shots,
             rng: stream_rng(seed, SPLIT_STREAM),
+            known_zero: (0..num_qubits).fold(0, |mask, q| mask | qubit_bit(q)),
+            known_one: 0,
         };
         let mut leaves = Vec::new();
         self.run(root, cursor, 1, 0, &mut leaves)?;
@@ -348,7 +387,7 @@ impl<'l> Walk<'l> {
     fn next(
         &self,
         cursor: &mut Cursor<'l>,
-        sv: &mut StatevectorBackend,
+        branch: &mut Branch,
     ) -> Result<Option<&'l Instruction>> {
         loop {
             if let Some(inst) = cursor.next() {
@@ -357,7 +396,10 @@ impl<'l> Walk<'l> {
             let Some(program) = self.program else {
                 return Ok(None);
             };
-            let Some(at) = program.finish_block(cursor.block, sv, &mut cursor.vars)? else {
+            branch.known_zero = 0;
+            branch.known_one = 0;
+            let Some(at) = program.finish_block(cursor.block, &mut branch.sv, &mut cursor.vars)?
+            else {
                 return Ok(None);
             };
             program.count_step(at, &mut cursor.steps)?;
@@ -367,7 +409,9 @@ impl<'l> Walk<'l> {
 
     /// Carry `branch` from `cursor` to the end, pushing one leaf per outcome
     /// history. `live` counts the states held on this path, the branch's own
-    /// included, and `depth` the splits above it.
+    /// included, and `depth` the splits above it. Returns the finished branch's
+    /// state for the caller's next split to copy into, so a split reuses a buffer
+    /// rather than allocating one.
     fn run(
         &self,
         mut branch: Branch,
@@ -375,13 +419,14 @@ impl<'l> Walk<'l> {
         live: usize,
         depth: usize,
         leaves: &mut Vec<Leaf>,
-    ) -> Result<()> {
+    ) -> Result<StatevectorBackend> {
         #[cfg(not(feature = "parallel"))]
         let _ = depth;
-        while let Some(inst) = self.next(&mut cursor, &mut branch.sv)? {
+        let mut spare: Option<StatevectorBackend> = None;
+        while let Some(inst) = self.next(&mut cursor, &mut branch)? {
             if matches!(inst, Instruction::Measure { .. }) && cursor.opens_sampled_tail() {
                 sample_tail(&mut branch, inst, &cursor, leaves);
-                return Ok(());
+                return Ok(branch.sv);
             }
             let sv = &mut branch.sv;
             let (qubit, classical_bit) = match inst {
@@ -405,13 +450,29 @@ impl<'l> Walk<'l> {
                     read_save(sv, *spec, label)?;
                     continue;
                 }
+                Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => {
+                    let touched = targets_mask(targets);
+                    branch.known_zero &= !touched;
+                    branch.known_one &= !touched;
+                    sv.apply(inst)?;
+                    continue;
+                }
                 _ => {
                     sv.apply(inst)?;
                     continue;
                 }
             };
 
-            let prob_one = sv.qubit_probability(qubit)?.clamp(0.0, 1.0);
+            let mask = qubit_bit(qubit);
+            let known_zero = branch.known_zero & mask != 0;
+            let known_one = branch.known_one & mask != 0;
+            let prob_one = if known_zero {
+                0.0
+            } else if known_one {
+                1.0
+            } else {
+                sv.qubit_probability(qubit)?.clamp(0.0, 1.0)
+            };
             let shots = branch.shots;
             let ones = draw_ones(&mut branch.rng, shots, prob_one);
             let state_ahead = cursor.state_ahead();
@@ -420,8 +481,17 @@ impl<'l> Walk<'l> {
                 if let Some(bit) = classical_bit {
                     sv.classical_bits[bit] = outcome;
                 }
-                if state_ahead {
+                if state_ahead && !known_zero && !(known_one && classical_bit.is_some()) {
                     project(sv, qubit, classical_bit, outcome, prob_one);
+                    if outcome && classical_bit.is_some() {
+                        branch.known_zero &= !mask;
+                        if self.tracks_known_one() {
+                            branch.known_one |= mask;
+                        }
+                    } else {
+                        branch.known_zero |= mask;
+                        branch.known_one &= !mask;
+                    }
                 }
                 continue;
             }
@@ -432,15 +502,18 @@ impl<'l> Walk<'l> {
                 leaves.push((record.clone(), shots - ones));
                 record[bit] = true;
                 leaves.push((record, ones));
-                return Ok(());
+                return Ok(branch.sv);
             }
 
             if live.saturating_add(2) > self.limits.max_live_states {
                 cursor.rewind();
-                return self.per_shot(&mut branch, &cursor, leaves);
+                self.per_shot(&mut branch, &cursor, leaves)?;
+                return Ok(branch.sv);
             }
 
-            let mut sv_one = StatevectorBackend::with_limits(0, &self.limits.caps);
+            let mut sv_one = spare
+                .take()
+                .unwrap_or_else(|| StatevectorBackend::with_limits(0, &self.limits.caps));
             sv_one.copy_state_from(sv);
             if let Some(bit) = classical_bit {
                 sv.classical_bits[bit] = false;
@@ -455,11 +528,23 @@ impl<'l> Walk<'l> {
                 sv: branch.sv,
                 shots: shots - ones,
                 rng: ChaCha8Rng::seed_from_u64(seed_zero),
+                known_zero: branch.known_zero | mask,
+                known_one: branch.known_one & !mask,
             };
             let one = Branch {
                 sv: sv_one,
                 shots: ones,
                 rng: ChaCha8Rng::seed_from_u64(seed_one),
+                known_zero: if classical_bit.is_some() {
+                    branch.known_zero & !mask
+                } else {
+                    branch.known_zero | mask
+                },
+                known_one: if classical_bit.is_some() && self.tracks_known_one() {
+                    branch.known_one | mask
+                } else {
+                    branch.known_one & !mask
+                },
             };
             let (small, large) = if one.shots <= zero.shots {
                 (one, zero)
@@ -476,16 +561,16 @@ impl<'l> Walk<'l> {
                     || self.run(large, cursor, live + 1, depth + 1, leaves),
                 );
                 small_run?;
-                large_run?;
+                let finished = large_run?;
                 leaves.append(&mut small_leaves);
-                return Ok(());
+                return Ok(finished);
             }
 
-            self.run(small, cursor.clone(), live + 1, depth + 1, leaves)?;
+            spare = Some(self.run(small, cursor.clone(), live + 1, depth + 1, leaves)?);
             branch = large;
         }
-        leaves.push((branch.sv.classical_bits, branch.shots));
-        Ok(())
+        leaves.push((std::mem::take(&mut branch.sv.classical_bits), branch.shots));
+        Ok(branch.sv)
     }
 
     /// Run each of the branch's shots on its own from its state and `cursor`,

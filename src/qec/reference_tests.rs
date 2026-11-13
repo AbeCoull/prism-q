@@ -1,20 +1,20 @@
 use super::*;
 use crate::qec::QecPauli;
 use crate::qec::QecRecordRef;
-use crate::qec::noise::compile_qec_noisy_sampler;
+use crate::qec::noise::compile_qec_noisy_sampler_on_compiled_base;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 fn records(program: &QecProgram) -> Vec<bool> {
-    let packed = forced_tableau_records(program).unwrap().unwrap();
+    let packed = forced_tableau_records(program, true).unwrap().unwrap();
     (0..program.num_measurements())
         .map(|record| get_bit(&packed, record))
         .collect()
 }
 
 fn forced_zero(program: &QecProgram) -> (Vec<u64>, Vec<u64>) {
-    let sampler = compile_qec_noisy_sampler(program).unwrap();
-    forced_zero_records(sampler.noiseless(), sampler.feedforward())
+    let sampler = compile_qec_noisy_sampler_on_compiled_base(program).unwrap();
+    forced_zero_records(sampler.compiled_base().unwrap(), sampler.feedforward())
 }
 
 /// A random Clifford program over `num_qubits` qubits: gates, basis measurements,
@@ -147,9 +147,17 @@ fn forced_zero_matches_the_tableau_run_without_entangled_resets() {
     for seed in 0..400 {
         let program = random_program(seed, 2 + (seed as usize % 5), false);
         assert!(!has_entangled_reset(&program), "seed {seed}");
-        let (_, corrected) = forced_zero(&program);
-        let packed = forced_tableau_records(&program).unwrap().unwrap();
+        let (uncorrected, corrected) = forced_zero(&program);
+        let packed = forced_tableau_records(&program, true).unwrap().unwrap();
         assert_eq!(corrected, packed, "seed {seed}");
+        if !program
+            .ops()
+            .iter()
+            .any(|op| matches!(op, QecOp::Feedforward { .. }))
+        {
+            let skipped = forced_tableau_records(&program, false).unwrap().unwrap();
+            assert_eq!(uncorrected, skipped, "seed {seed}");
+        }
         compared += 1;
     }
     assert_eq!(compared, 400);
@@ -190,6 +198,74 @@ fn reference_parities_follow_the_rows() {
 #[test]
 fn non_clifford_programs_have_no_reference_run() {
     let program = QecProgram::from_text("H 0\nT 0\nM 0\nDETECTOR rec[-1]").unwrap();
-    assert!(forced_tableau_records(&program).unwrap().is_none());
+    assert!(forced_tableau_records(&program, true).unwrap().is_none());
     assert!(program_reference(&program).unwrap().is_none());
+}
+
+fn gf2_rank(mut rows: Vec<Vec<u64>>) -> usize {
+    let mut rank = 0;
+    let bits = rows.first().map_or(0, |row| row.len() * 64);
+    for bit in 0..bits {
+        let (word, mask) = (bit / 64, 1u64 << (bit % 64));
+        let Some(pivot) = (rank..rows.len()).find(|&r| rows[r][word] & mask != 0) else {
+            continue;
+        };
+        rows.swap(rank, pivot);
+        let pivot_row = rows[rank].clone();
+        for (r, row) in rows.iter_mut().enumerate() {
+            if r != rank && row[word] & mask != 0 {
+                xor_words(row, &pivot_row);
+            }
+        }
+        rank += 1;
+    }
+    rank
+}
+
+#[test]
+fn frame_records_cover_the_compiled_outcome_space() {
+    use crate::qec::noise::compile_qec_noisy_sampler;
+    const SHOTS: usize = 4096;
+    for seed in 0..400 {
+        let program = random_program(seed, 2 + (seed as usize % 5), seed % 2 == 1);
+        let m = program.num_measurements();
+        let shot_rows = |shots: &PackedShots| -> Vec<Vec<u64>> {
+            (0..SHOTS)
+                .map(|shot| {
+                    let mut row = vec![0u64; m.div_ceil(64).max(1)];
+                    for record in 0..m {
+                        row[record / 64] |= u64::from(shots.get_bit(shot, record)) << (record % 64);
+                    }
+                    row
+                })
+                .collect()
+        };
+        let differences = |rows: &[Vec<u64>]| -> Vec<Vec<u64>> {
+            rows.iter()
+                .map(|row| {
+                    let mut diff = row.clone();
+                    xor_words(&mut diff, &rows[0]);
+                    diff
+                })
+                .collect()
+        };
+        let mut frame = compile_qec_noisy_sampler(&program).unwrap();
+        let mut compiled = compile_qec_noisy_sampler_on_compiled_base(&program).unwrap();
+        let frame_rows = shot_rows(&frame.sample_measurements_packed(0, SHOTS, SHOTS).unwrap());
+        let compiled_rows = shot_rows(
+            &compiled
+                .sample_measurements_packed(0, SHOTS, SHOTS)
+                .unwrap(),
+        );
+        let frame_span = differences(&frame_rows);
+        let compiled_span = differences(&compiled_rows);
+        let mut joint = frame_span.clone();
+        joint.extend(compiled_span.iter().cloned());
+        let mut offset = frame_rows[0].clone();
+        xor_words(&mut offset, &compiled_rows[0]);
+        joint.push(offset);
+        let rank = gf2_rank(compiled_span);
+        assert_eq!(gf2_rank(frame_span), rank, "seed {seed}");
+        assert_eq!(gf2_rank(joint), rank, "seed {seed}");
+    }
 }

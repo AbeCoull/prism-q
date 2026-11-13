@@ -728,14 +728,60 @@ fn qec_compiled_runner_evaluates_noiseless_exp_val_via_analytic_route() {
 }
 
 #[test]
-fn qec_compiled_runner_rejects_measurement_reuse_without_reset() {
-    let mut program = QecProgram::new(1);
+fn qec_compiled_runner_reuses_a_measured_qubit_without_reset() {
+    let options = QecOptions {
+        shots: 4,
+        seed: 42,
+        chunk_size: None,
+        keep_measurements: true,
+        detector_reference: QecDetectorReference::Raw,
+    };
+    let mut program = QecProgram::with_options(1, options);
     program.measure_z(0).unwrap();
     program.push_gate(Gate::X, &[0]).unwrap();
     program.measure_z(0).unwrap();
 
-    let err = run_qec_program(&program).unwrap_err();
-    assert!(format!("{err}").contains("reset before reusing"));
+    let want = vec![vec![false, true]; 4];
+    assert_eq!(
+        run_qec_program(&program).unwrap().measurements.to_shots(),
+        want
+    );
+    assert_eq!(
+        run_qec_program_reference(&program)
+            .unwrap()
+            .measurements
+            .to_shots(),
+        want
+    );
+
+    let detector = program
+        .detector(&[QecRecordRef::absolute(0), QecRecordRef::absolute(1)])
+        .unwrap();
+    let mut detectors_only = QecProgram::with_options(
+        1,
+        QecOptions {
+            keep_measurements: false,
+            ..options
+        },
+    );
+    for op in program.ops() {
+        detectors_only.push_op(op.clone()).unwrap();
+    }
+    let result = run_qec_program(&detectors_only).unwrap();
+    assert!(
+        result
+            .detectors
+            .to_shots()
+            .iter()
+            .all(|shot| shot[detector])
+    );
+
+    program.noise(QecNoise::XError(0.1), &[0]).unwrap();
+    let err = run_qec_program(&program).unwrap_err().to_string();
+    assert!(
+        err.contains("noiseless compiled sampler accepts the reuse"),
+        "{err}"
+    );
 }
 
 #[test]

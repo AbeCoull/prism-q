@@ -8,7 +8,7 @@ use super::noise::QecFeedforwardFlips;
 use super::{QecBasis, QecDetectorReference, QecOp, QecProgram};
 use crate::backend::Backend;
 use crate::backend::stabilizer::StabilizerBackend;
-use crate::circuit::{Instruction, SmallVec};
+use crate::circuit::{ClassicalCondition, GuardedRegion, Instruction, SmallVec};
 use crate::error::Result;
 use crate::gates::Gate;
 use crate::sim::compiled::{CompiledSampler, PackedShots, get_bit, xor_words};
@@ -62,7 +62,7 @@ pub(super) fn program_reference(program: &QecProgram) -> Result<Option<QecRefere
     {
         return Ok(None);
     }
-    let Some(records) = forced_tableau_records(program)? else {
+    let Some(records) = forced_tableau_records(program, true)? else {
         return Ok(None);
     };
     Ok(Some(QecReference::from_records(
@@ -182,11 +182,15 @@ pub(super) fn has_entangled_reset(program: &QecProgram) -> bool {
     })
 }
 
-/// Records of the noiseless reference run, executed op by op on a stabilizer tableau
-/// whose random outcomes are all 0. A reset collapses its qubit in the reset's basis,
-/// and a feed-forward body runs when its predicate holds on the records so far. `None`
-/// when a gate is not Clifford.
-pub(super) fn forced_tableau_records(program: &QecProgram) -> Result<Option<Vec<u64>>> {
+/// Records of the noiseless reference run on a stabilizer tableau whose random outcomes
+/// are all 0, applied as one instruction batch so the sparse generator index can carry
+/// it. A reset collapses its qubit in the reset's basis. With `run_feedforward` a
+/// feed-forward body runs when its predicate holds on the records so far; without it
+/// every body is skipped. `None` when a gate is not Clifford.
+pub(super) fn forced_tableau_records(
+    program: &QecProgram,
+    run_feedforward: bool,
+) -> Result<Option<Vec<u64>>> {
     let gates_are_clifford = |ops: &[QecOp]| {
         ops.iter()
             .all(|op| !matches!(op, QecOp::Gate { gate, .. } if !gate.is_clifford()))
@@ -200,120 +204,131 @@ pub(super) fn forced_tableau_records(program: &QecProgram) -> Result<Option<Vec<
 
     let num_measurements = program.num_measurements();
     let scratch = program.num_qubits();
-    let mut backend = StabilizerBackend::new(0);
-    backend.forced_outcome = Some(false);
-    backend.init(super::qec_lowered_num_qubits(program), num_measurements)?;
-    let mut records = vec![0u64; num_measurements.div_ceil(64)];
+    let mut instructions = Vec::with_capacity(program.ops().len());
     let mut next_record = 0usize;
     for op in program.ops() {
-        let outcome = match op {
-            QecOp::Gate { gate, targets } => {
-                apply_gate(&mut backend, gate.clone(), targets)?;
-                None
-            }
-            QecOp::Reset { basis, qubit } => {
-                reset_in_basis(&mut backend, *basis, *qubit)?;
-                None
-            }
+        match op {
+            QecOp::Gate { gate, targets } => push_gate(&mut instructions, gate.clone(), targets),
+            QecOp::Reset { basis, qubit } => push_reset(&mut instructions, *basis, *qubit),
             QecOp::Measure { basis, qubit } => {
-                rotate_basis_to_z(&mut backend, *basis, *qubit)?;
-                Some(measure(&mut backend, *qubit, next_record)?)
+                push_basis_to_z(&mut instructions, *basis, *qubit);
+                instructions.push(Instruction::Measure {
+                    qubit: *qubit,
+                    classical_bit: next_record,
+                });
+                next_record += 1;
             }
             QecOp::MeasurePauliProduct { terms } => {
-                backend.reset(scratch)?;
+                instructions.push(Instruction::Reset { qubit: scratch });
                 for term in terms {
-                    rotate_basis_to_z(&mut backend, term.basis, term.qubit)?;
-                    apply_gate(&mut backend, Gate::Cx, &[term.qubit, scratch])?;
+                    push_basis_to_z(&mut instructions, term.basis, term.qubit);
+                    push_gate(&mut instructions, Gate::Cx, &[term.qubit, scratch]);
                 }
                 for term in terms.iter().rev() {
-                    rotate_z_to_basis(&mut backend, term.basis, term.qubit)?;
+                    push_z_to_basis(&mut instructions, term.basis, term.qubit);
                 }
-                Some(measure(&mut backend, scratch, next_record)?)
+                instructions.push(Instruction::Measure {
+                    qubit: scratch,
+                    classical_bit: next_record,
+                });
+                next_record += 1;
             }
-            QecOp::HeraldedErase { .. } => Some(false),
-            QecOp::Pad { value } => Some(*value),
+            QecOp::HeraldedErase { .. } | QecOp::Pad { .. } => {
+                instructions.push(Instruction::Reset { qubit: scratch });
+                if matches!(op, QecOp::Pad { value: true }) {
+                    push_gate(&mut instructions, Gate::X, &[scratch]);
+                }
+                instructions.push(Instruction::Measure {
+                    qubit: scratch,
+                    classical_bit: next_record,
+                });
+                next_record += 1;
+            }
             QecOp::Feedforward {
                 records: condition,
                 expected,
                 body,
-            } => {
-                let parity = super::resolve_records(condition, next_record)?
-                    .into_iter()
-                    .fold(false, |acc, record| acc ^ get_bit(&records, record));
-                if parity == *expected {
-                    for inner in body {
-                        match inner {
-                            QecOp::Gate { gate, targets } => {
-                                apply_gate(&mut backend, gate.clone(), targets)?
-                            }
-                            QecOp::Reset { basis, qubit } => {
-                                reset_in_basis(&mut backend, *basis, *qubit)?
-                            }
-                            _ => {}
+            } if run_feedforward => {
+                let mut guarded = Vec::with_capacity(body.len());
+                for inner in body {
+                    match inner {
+                        QecOp::Gate { gate, targets } => {
+                            push_gate(&mut guarded, gate.clone(), targets)
                         }
+                        QecOp::Reset { basis, qubit } => push_reset(&mut guarded, *basis, *qubit),
+                        _ => {}
                     }
                 }
-                None
+                let bits = super::resolve_records(condition, next_record)?;
+                instructions.push(Instruction::Region(Box::new(GuardedRegion::new(
+                    ClassicalCondition::Parity {
+                        bits: bits.into_boxed_slice(),
+                        expected: *expected,
+                    },
+                    guarded,
+                ))));
             }
-            QecOp::Noise { .. }
+            QecOp::Feedforward { .. }
+            | QecOp::Noise { .. }
             | QecOp::CorrelatedError { .. }
             | QecOp::RecordFlip { .. }
             | QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }
             | QecOp::Postselect { .. }
             | QecOp::ExpectationValue { .. }
-            | QecOp::Tick => None,
-        };
-        if let Some(bit) = outcome {
-            records[next_record / 64] |= u64::from(bit) << (next_record % 64);
-            next_record += 1;
+            | QecOp::Tick => {}
         }
+    }
+
+    let mut backend = StabilizerBackend::new(0);
+    backend.forced_outcome = Some(false);
+    backend.sgi_uncapped = true;
+    backend.init(super::qec_lowered_num_qubits(program), num_measurements)?;
+    backend.apply_instructions(&instructions)?;
+    let mut records = vec![0u64; num_measurements.div_ceil(64)];
+    for (record, &bit) in backend.classical_results()[..num_measurements]
+        .iter()
+        .enumerate()
+    {
+        records[record / 64] |= u64::from(bit) << (record % 64);
     }
     Ok(Some(records))
 }
 
-fn apply_gate(backend: &mut StabilizerBackend, gate: Gate, targets: &[usize]) -> Result<()> {
+fn push_gate(instructions: &mut Vec<Instruction>, gate: Gate, targets: &[usize]) {
     let mut small = SmallVec::new();
     small.extend_from_slice(targets);
-    backend.apply(&Instruction::Gate {
+    instructions.push(Instruction::Gate {
         gate,
         targets: small,
-    })
+    });
 }
 
-fn measure(backend: &mut StabilizerBackend, qubit: usize, record: usize) -> Result<bool> {
-    backend.apply(&Instruction::Measure {
-        qubit,
-        classical_bit: record,
-    })?;
-    Ok(backend.classical_results()[record])
+fn push_reset(instructions: &mut Vec<Instruction>, basis: QecBasis, qubit: usize) {
+    push_basis_to_z(instructions, basis, qubit);
+    instructions.push(Instruction::Reset { qubit });
+    push_z_to_basis(instructions, basis, qubit);
 }
 
-fn reset_in_basis(backend: &mut StabilizerBackend, basis: QecBasis, qubit: usize) -> Result<()> {
-    rotate_basis_to_z(backend, basis, qubit)?;
-    backend.reset(qubit)?;
-    rotate_z_to_basis(backend, basis, qubit)
-}
-
-fn rotate_basis_to_z(backend: &mut StabilizerBackend, basis: QecBasis, qubit: usize) -> Result<()> {
+fn push_basis_to_z(instructions: &mut Vec<Instruction>, basis: QecBasis, qubit: usize) {
     match basis {
-        QecBasis::X => apply_gate(backend, Gate::H, &[qubit]),
+        QecBasis::X => push_gate(instructions, Gate::H, &[qubit]),
         QecBasis::Y => {
-            apply_gate(backend, Gate::Sdg, &[qubit])?;
-            apply_gate(backend, Gate::H, &[qubit])
+            push_gate(instructions, Gate::Sdg, &[qubit]);
+            push_gate(instructions, Gate::H, &[qubit]);
         }
-        QecBasis::Z => Ok(()),
+        QecBasis::Z => {}
     }
 }
 
-fn rotate_z_to_basis(backend: &mut StabilizerBackend, basis: QecBasis, qubit: usize) -> Result<()> {
+fn push_z_to_basis(instructions: &mut Vec<Instruction>, basis: QecBasis, qubit: usize) {
     match basis {
-        QecBasis::X => apply_gate(backend, Gate::H, &[qubit]),
+        QecBasis::X => push_gate(instructions, Gate::H, &[qubit]),
         QecBasis::Y => {
-            apply_gate(backend, Gate::H, &[qubit])?;
-            apply_gate(backend, Gate::S, &[qubit])
+            push_gate(instructions, Gate::H, &[qubit]);
+            push_gate(instructions, Gate::S, &[qubit]);
         }
-        QecBasis::Z => Ok(()),
+        QecBasis::Z => {}
     }
 }
 

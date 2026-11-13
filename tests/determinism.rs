@@ -661,6 +661,92 @@ fn mps_terminal_shots_identical_across_thread_counts() {
     );
 }
 
+// `Auto` sends 16 T gates on a four-qubit register to the Clifford register, which reduces
+// once and draws every shot from one table, so the words match at any thread count.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn clifford_register_terminal_shots_identical_across_thread_counts() {
+    let n = 16;
+    let mut circuit = Circuit::new(n, n);
+    for _ in 0..4 {
+        for q in 0..4 {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+        }
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.measure_all();
+
+    let run = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .seed(SEED)
+                .shots(SAMPLING_SHOTS)
+                .expect("shots")
+        })
+    };
+    let single = run(1);
+    assert_eq!(single.metadata.backend, ResolvedBackend::StabilizerRank);
+    assert_eq!(single.shots.len(), SAMPLING_SHOTS);
+    assert_eq!(
+        single.shots,
+        run(THREADS_HI).shots,
+        "clifford register shots differ"
+    );
+    assert_eq!(
+        single.shots,
+        run(1).shots,
+        "clifford register shots not seed stable"
+    );
+}
+
+// `Auto` moves the measurements of a mid-circuit Clifford+T circuit to the end and draws
+// every shot from the Clifford register's table, so the words match at any thread count.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn deferred_clifford_register_shots_identical_across_thread_counts() {
+    let n = 16;
+    let mut circuit = Circuit::new(n, 3);
+    for q in 0..2 {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[1]),
+    });
+    circuit.add_reset(0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_measure(0, 2);
+    circuit.add_measure(1, 1);
+
+    let run = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .seed(SEED)
+                .shots(SAMPLING_SHOTS)
+                .expect("shots")
+        })
+    };
+    let single = run(1);
+    assert_eq!(single.metadata.backend, ResolvedBackend::StabilizerRank);
+    assert_eq!(single.shots.len(), SAMPLING_SHOTS);
+    assert_eq!(
+        single.shots,
+        run(THREADS_HI).shots,
+        "deferred register shots differ"
+    );
+}
+
 // The product and factored samplers draw 256-shot blocks on streams keyed by
 // the block index, so the words match at any thread count, including a
 // partial trailing block. Each fixture makes enough draws to fork its blocks.
@@ -1080,28 +1166,133 @@ fn noisy_stabilizer_trajectories_identical_across_thread_counts() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn noisy_guarded_pauli_shots_identical_across_thread_counts() {
-    let circuit = dynamic_clifford_circuit(20, Gate::X);
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-    let shots = |threads: usize| {
-        in_pool(threads, || {
-            simulate(&circuit)
-                .noise(&noise)
-                .seed(SEED)
-                .shots(PER_SHOT_SHOTS)
-                .expect("noisy shots")
-        })
-    };
-    let single = shots(1);
-    let wide = shots(THREADS_HI);
-    assert_eq!(
-        single.metadata.backend,
-        ResolvedBackend::CompiledStabilizer,
-        "unexpected guarded route"
+    let guarded = dynamic_clifford_circuit(20, Gate::X);
+    let mut active_reset = guarded.clone();
+    for inst in &mut active_reset.instructions {
+        if matches!(inst, Instruction::Reset { qubit: 0 }) {
+            *inst = Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(0),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[0]),
+            };
+        }
+    }
+    let mut lookup = guarded.clone();
+    let reset = lookup
+        .instructions
+        .iter()
+        .position(|inst| matches!(inst, Instruction::Reset { qubit: 0 }))
+        .unwrap();
+    lookup.instructions.insert(
+        reset,
+        Instruction::Measure {
+            qubit: 1,
+            classical_bit: 1,
+        },
     );
-    assert_eq!(single.shots, wide.shots, "guarded record bits differ");
-    assert_eq!(
-        format!("{:?}", single.metadata),
-        format!("{:?}", wide.metadata),
-        "guarded metadata differs"
+    lookup.instructions.insert(
+        reset + 1,
+        Instruction::Conditional {
+            condition: ClassicalCondition::RegisterEquals {
+                offset: 0,
+                size: 2,
+                value: 0b11,
+            },
+            gate: Gate::X,
+            targets: SmallVec::from_slice(&[2]),
+        },
     );
+    for (label, circuit, asymmetric) in [
+        ("guarded", &guarded, false),
+        ("active reset", &active_reset, false),
+        ("lookup", &lookup, false),
+        ("asymmetric readout", &lookup, true),
+    ] {
+        let mut noise = NoiseModel::uniform_depolarizing(circuit, 0.01);
+        if asymmetric {
+            noise.set_bit_readout_error(0, 0.02, 0.05);
+            noise.set_bit_readout_error(1, 0.30, 0.05);
+        }
+        let shots = |threads: usize| {
+            in_pool(threads, || {
+                simulate(circuit)
+                    .noise(&noise)
+                    .seed(SEED)
+                    .shots(PER_SHOT_SHOTS)
+                    .expect("noisy shots")
+            })
+        };
+        let single = shots(1);
+        let wide = shots(THREADS_HI);
+        assert_eq!(
+            single.metadata.backend,
+            ResolvedBackend::CompiledStabilizer,
+            "{label}: unexpected route"
+        );
+        assert_eq!(single.shots, wide.shots, "{label}: record bits differ");
+        assert_eq!(
+            format!("{:?}", single.metadata),
+            format!("{:?}", wide.metadata),
+            "{label}: metadata differs"
+        );
+    }
+}
+
+/// Parity checks over `2k` rotated data qubits onto `k` ancillas (`n = 3k`), each
+/// measured, fed back onto its first data qubit and reset, then a data readout. With
+/// `declined` an `H` lands on each ancilla inside its span, which keeps the ancillas.
+fn parity_rounds(n: usize, rounds: usize, declined: bool) -> Circuit {
+    let anc = n / 3;
+    let data = 2 * anc;
+    let mut c = Circuit::new(n, rounds * anc + data);
+    for r in 0..rounds {
+        for q in 0..data {
+            c.add_gate(Gate::Ry(0.31 + 0.23 * (q + 3 * r) as f64), &[q]);
+        }
+        for q in ((r % 2)..data - 1).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for j in 0..anc {
+            let (a, bit) = (data + j, r * anc + j);
+            c.add_gate(Gate::Cx, &[2 * j, a]);
+            if declined {
+                c.add_gate(Gate::H, &[a]);
+            }
+            c.add_gate(Gate::Cx, &[2 * j + 1, a]);
+            c.add_measure(a, bit);
+            c.instructions.push(Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(bit),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[2 * j]),
+            });
+            c.add_reset(a);
+        }
+    }
+    for q in 0..data {
+        c.add_measure(q, rounds * anc + q);
+    }
+    c
+}
+
+// The 18-qubit circuit drops to 12 qubits, where splits run on separate workers.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn parity_ancilla_shots_identical_across_thread_counts() {
+    for (n, declined) in [(18, false), (12, true)] {
+        let circuit = parity_rounds(n, 3, declined);
+        let shots = |threads: usize| {
+            in_pool(threads, || {
+                simulate(&circuit)
+                    .seed(SEED)
+                    .shots(PER_SHOT_SHOTS)
+                    .expect("parity shots")
+                    .shots
+            })
+        };
+        assert_eq!(
+            shots(1),
+            shots(THREADS_HI),
+            "{n} qubits, declined {declined}"
+        );
+    }
 }

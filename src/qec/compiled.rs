@@ -137,27 +137,32 @@ impl QecProgram {
             let (detector_rows, observable_rows, projection) = rows?;
             sampler.detector_rows = detector_rows;
             sampler.observable_rows = observable_rows;
-            if let Some((pattern, noise)) =
-                compile_parity_noise(&deferred?, &projection, options.seed, None)?
-            {
-                sampler.route = QecSamplerRoute::Parity {
-                    projection,
-                    pattern: (!referenced).then_some(pattern),
-                    noise: has_noise.then(|| Box::new(noise)),
-                };
-                return Ok(sampler);
+            // The lowering refuses a measured qubit reused without a reset, which the
+            // noiseless record path below accepts.
+            match deferred {
+                Ok(deferred) => {
+                    if let Some((pattern, noise)) =
+                        compile_parity_noise(&deferred, &projection, options.seed, None)?
+                    {
+                        sampler.route = QecSamplerRoute::Parity {
+                            projection,
+                            pattern: (!referenced).then_some(pattern),
+                            noise: has_noise.then(|| Box::new(noise)),
+                        };
+                        return Ok(sampler);
+                    }
+                }
+                Err(_) if !has_noise => {}
+                Err(err) => return Err(err),
             }
         }
         if has_noise || has_feedforward {
-            let mut records = compile_qec_noisy_sampler(self)?;
-            let (uncorrected, reference) = sampler.forced_zero_reference(
-                self,
-                records.noiseless(),
-                records.feedforward(),
-                referenced,
-            )?;
-            records.noiseless_mut().rebase_reference(uncorrected);
-            sampler.reference = reference;
+            let records = compile_qec_noisy_sampler(self)?;
+            let uncorrected = records
+                .reference_records()
+                .expect("the shipping records sampler starts from the reference run");
+            sampler.reference =
+                sampler.tableau_reference(self, uncorrected, has_feedforward, referenced)?;
             sampler.route = QecSamplerRoute::Records(Box::new(records));
             return Ok(sampler);
         }
@@ -179,6 +184,34 @@ impl QecProgram {
 }
 
 impl QecCompiledSampler {
+    /// The reference results are measured against, `None` for raw parity: the tableau
+    /// run with every random outcome 0, whose records are `uncorrected` when no
+    /// feed-forward body can run in it.
+    fn tableau_reference(
+        &self,
+        program: &QecProgram,
+        uncorrected: &[u64],
+        has_feedforward: bool,
+        referenced: bool,
+    ) -> Result<Option<QecReference>> {
+        if !referenced || self.detector_rows.len() + self.observable_rows.len() == 0 {
+            return Ok(None);
+        }
+        let corrected;
+        let records = if has_feedforward {
+            corrected = forced_tableau_records(program, true)?
+                .expect("the packed path admits Clifford gates only, so the tableau run exists");
+            &corrected[..]
+        } else {
+            uncorrected
+        };
+        Ok(Some(QecReference::from_records(
+            records,
+            &self.detector_rows,
+            &self.observable_rows,
+        )))
+    }
+
     /// The forced-zero point of `noiseless` before `corrections`, which the sampler
     /// rebases onto so its draws depend on the seed alone, and the reference results are
     /// measured against, `None` for raw parity. The reference run's records are the
@@ -196,7 +229,7 @@ impl QecCompiledSampler {
             return Ok((uncorrected, None));
         }
         let records = if has_entangled_reset(program) {
-            forced_tableau_records(program)?
+            forced_tableau_records(program, true)?
                 .expect("the packed path admits Clifford gates only, so the tableau run exists")
         } else {
             corrected

@@ -36,12 +36,12 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
-    MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
-    accel_for, approximate_route_name, auto_selects_cpu_statevector, auto_spd_work_budget,
-    build_statevector, has_temporal_clifford_opportunity, initial_state_plan, mps_apply_cost,
-    plan_for_family, plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
-    stabilizer_rank_budget, validate_explicit_backend,
+    BackendPlan, ExecutionPlan, Family, MAX_AUTO_MID_CIRCUIT_BRANCH_T, MIN_BLOCK_FOR_FACTORED_STAB,
+    MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name,
+    auto_selects_cpu_statevector, auto_spd_work_budget, build_statevector,
+    has_temporal_clifford_opportunity, initial_state_plan, mps_apply_cost, plan_for_family,
+    plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford, statevector_work,
+    validate_explicit_backend,
 };
 pub use dynamic::{SimulateProgram, simulate_program};
 pub use metadata::{
@@ -64,6 +64,7 @@ use num_complex::Complex64;
 use crate::backend::Backend;
 use crate::backend::sparse::MAX_SPARSE_INDEX_QUBITS;
 use crate::backend::statevector::StatevectorBackend;
+use crate::circuit::parity_ancilla::rewrite_parity_ancillas;
 use crate::circuit::{Circuit, Instruction, SaveRecord, SaveSpec, SavedValue};
 use crate::error::{PrismError, Result};
 use crate::limits::{Limits, ResolvedLimits};
@@ -1720,7 +1721,7 @@ fn reject_approximate_route(
     circuit: &Circuit,
     limits: &ResolvedLimits,
 ) -> Result<()> {
-    reject_predicted_route(approximate_route_name(kind, circuit, false, limits))
+    reject_predicted_route(approximate_route_name(kind, circuit, limits))
 }
 
 /// The engine is named in the error, since a caller who asked for exactness
@@ -2786,23 +2787,19 @@ fn analyze_independence(circuit: &Circuit) -> (Option<Decomposition>, bool) {
     (None, false)
 }
 
-/// `(t_count, stabilizer_rank_budget)` when the auto Clifford+T family gate
-/// passes. Callers apply their own per-entry-point T-count ceilings.
-fn auto_clifford_t_budget(circuit: &Circuit) -> Option<(usize, usize)> {
-    (circuit.is_clifford_plus_t() && circuit.has_t_gates()).then(|| {
-        (
-            circuit.t_count(),
-            stabilizer_rank_budget(circuit.num_qubits),
-        )
-    })
+/// T count after lowering of a Clifford+T circuit holding a T gate, guarded ones included.
+fn auto_clifford_t_count(circuit: &Circuit) -> Option<usize> {
+    (circuit.is_clifford_plus_t() && circuit.has_t_gates()).then(|| circuit.t_count())
 }
 
-/// Auto-dispatch gate for the Clifford+T stabilizer-rank shortcut: the T
-/// count must fit both the caller's ceiling and the size-derived
-/// stabilizer-rank budget. Returns the T count when the shortcut applies.
-pub(super) fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> Option<usize> {
-    let (t, sr_budget) = auto_clifford_t_budget(circuit)?;
-    (t <= max_t && t <= sr_budget).then_some(t)
+/// The circuit an `Auto` per-shot run walks in place of `circuit`, once every route
+/// ahead of the walk has declined: its parity ancillas folded into parity measurements
+/// on the data qubits ([`rewrite_parity_ancillas`]).
+fn parity_rewrite(kind: &BackendKind, circuit: &Circuit) -> Option<Circuit> {
+    if !kind.is_auto() {
+        return None;
+    }
+    rewrite_parity_ancillas(circuit)
 }
 
 fn prepare_terminal_statevector_backend(
@@ -2865,6 +2862,8 @@ enum ShotSource {
         meas_map: Vec<(usize, usize)>,
         deferred: bool,
     },
+    /// The deferred rewrite whose guarded Paulis land after the compiled sample.
+    Guarded(Box<compiled::DeferredCircuit>),
     TerminalStatevector {
         backend: Box<StatevectorBackend>,
         expected_device: bool,
@@ -2895,6 +2894,11 @@ impl ShotSource {
             ShotSource::Compiled { .. } => Some(
                 RunMetadata::exact(ResolvedBackend::CompiledStabilizer)
                     .with_engine(Engine::CompiledSampler)
+                    .with_reason(RouteRule::CompiledCliffordSampler),
+            ),
+            ShotSource::Guarded(_) => Some(
+                RunMetadata::exact(ResolvedBackend::CompiledStabilizer)
+                    .with_engine(Engine::NoisyCompiledSampler)
                     .with_reason(RouteRule::CompiledCliffordSampler),
             ),
             ShotSource::TerminalStatevector {
@@ -2928,44 +2932,6 @@ const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 16;
 #[cfg(prism_lowered_thresholds)]
 const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 4;
 
-/// Whether terminal shots of `circuit` go to the Clifford register ahead of the
-/// statevector: Clifford+T, at least [`MIN_AUTO_CLIFFORD_REGISTER_QUBITS`] wide, and
-/// fewer T gates than qubits, within the register's width cap.
-fn auto_prefers_clifford_register(circuit: &Circuit) -> bool {
-    circuit.num_qubits >= MIN_AUTO_CLIFFORD_REGISTER_QUBITS
-        && circuit.has_terminal_measurements_only()
-        && !circuit.has_resets()
-        && auto_clifford_t_budget(circuit).is_some_and(|(t, _)| {
-            t < circuit.num_qubits && t <= clifford_register::MAX_REGISTER_QUBITS
-        })
-}
-
-/// Whether terminal shots of a circuit wider than [`MAX_STABILIZER_RANK_QUBITS`]
-/// go to the stabilizer-rank expansion once the statevector has declined them. Past
-/// [`clifford_register::MAX_REGISTER_QUBITS`] T gates a tableau dry run confirms the
-/// register stays within its cap; a circuit it would outgrow takes the family tree.
-fn auto_samples_wide_by_stabilizer_rank(circuit: &Circuit) -> bool {
-    circuit.has_terminal_measurements_only()
-        && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
-        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some_and(|t| {
-            t <= clifford_register::MAX_REGISTER_QUBITS
-                || stabilizer_rank::terminal_register_fits(circuit)
-        })
-}
-
-/// Whether `Auto` shots of `circuit`, without noise or a start state, run on the
-/// exact stabilizer-rank expansion: the register and wide-circuit tests in
-/// [`prepare_shot_source`], or the per-shot test in [`run_shots_per_shot`].
-fn auto_samples_by_stabilizer_rank(circuit: &Circuit) -> bool {
-    let folded = circuit.fold_static_guards();
-    let circuit = folded.as_ref();
-    if circuit.has_terminal_measurements_only() {
-        auto_prefers_clifford_register(circuit) || auto_samples_wide_by_stabilizer_rank(circuit)
-    } else {
-        auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
-    }
-}
-
 /// Select and prepare the sampling source for `circuit`.
 ///
 /// Preparation is real work: compiling a sampler, building and running a
@@ -2987,6 +2953,7 @@ fn prepare_shot_source(
                 deferred: deferred.is_some(),
             })
         }
+        ShotRoute::Guarded(deferred) => Ok(ShotSource::Guarded(deferred)),
         ShotRoute::StabilizerRank => Ok(ShotSource::StabilizerRank),
         ShotRoute::TerminalStatevector(terminal) => {
             let (backend, meas_map, expected_device) =
@@ -3134,6 +3101,9 @@ pub(crate) fn run_counts_with(
         ShotSource::TerminalProbabilities {
             probs, meas_map, ..
         } => counts_of(sample_shots(&probs, &meas_map, bits, num_shots, seed), bits),
+        ShotSource::Guarded(deferred) => {
+            noise::run_shots_noisy_guarded(&deferred, num_shots, seed)?.counts()
+        }
         ShotSource::StabilizerRank => {
             stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed)?.counts()
         }
@@ -4169,6 +4139,9 @@ pub(crate) fn run_shots_with(
         ShotSource::TerminalProbabilities {
             probs, meas_map, ..
         } => ShotsResult::from_shots(sample_shots(&probs, &meas_map, bits, num_shots, seed), bits),
+        ShotSource::Guarded(deferred) => {
+            noise::run_shots_noisy_guarded(&deferred, num_shots, seed)?
+        }
         ShotSource::StabilizerRank => {
             stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed)?
         }
@@ -4214,9 +4187,6 @@ fn run_shots_per_shot(
             backend: format!("{kind:?}"),
             reason: "Pauli propagation backends do not support mid-circuit measurements".into(),
         });
-    }
-    if kind.is_auto() && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some() {
-        return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
 
     if has_temporal_clifford_opportunity(&kind, circuit, limits) {
@@ -4271,6 +4241,14 @@ fn run_shots_per_shot(
         );
     }
 
+    let rewritten = parity_rewrite(&kind, circuit);
+    let (circuit, decompose, has_partial_independence) = match &rewritten {
+        Some(rewritten) => {
+            let (decompose, partial) = analyze_independence(rewritten);
+            (rewritten, decompose, partial)
+        }
+        None => (circuit, decompose, has_partial_independence),
+    };
     let opts = SimOptions::classical_only();
 
     if let Some((ref comps, _)) = decompose {

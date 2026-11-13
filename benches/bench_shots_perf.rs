@@ -25,6 +25,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 mod common;
+use common::fixtures::{active_reset_repetition_circuit, lookup_repetition_circuit};
 use common::{SEED, configure_group_timed, run_shots_with};
 
 const API_QUERY_SHOTS: usize = 100_000;
@@ -1365,7 +1366,8 @@ fn corrected_repetition_circuit(n_data: usize, rounds: usize) -> Circuit {
 }
 
 /// [`corrected_repetition_circuit`] under depolarizing noise on every gate, guarded ones
-/// included, sampled through the `Auto` noisy shot route.
+/// included, sampled through the `Auto` noisy shot route, and the same memory with active
+/// reset on the ancillas and with corrections decoded by a lookup over each round's checks.
 fn bench_noisy_dynamic_shots(c: &mut Criterion) {
     let mut group = c.benchmark_group("noisy_dynamic_shots");
     configure_group_timed(
@@ -1391,6 +1393,30 @@ fn bench_noisy_dynamic_shots(c: &mut Criterion) {
                 });
             },
         );
+    }
+
+    for (label, circuit, shots) in [
+        (
+            "rep_d9_active_reset_p001",
+            active_reset_repetition_circuit(9, 9),
+            2_000usize,
+        ),
+        (
+            "rep_d5_lookup_p001",
+            lookup_repetition_circuit(5, 5),
+            10_000,
+        ),
+    ] {
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        group.bench_with_input(BenchmarkId::new(label, shots), &circuit, |b, circuit| {
+            b.iter(|| {
+                sim::simulate(circuit)
+                    .noise(&noise)
+                    .seed(SEED)
+                    .shots(shots)
+                    .unwrap()
+            });
+        });
     }
 
     group.finish();

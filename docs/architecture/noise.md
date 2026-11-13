@@ -85,24 +85,29 @@ engines and the noiseless compiled sampler all resolve to
 
 `defer_noisy_circuit` (`src/sim/compiled/mod.rs`) rewrites a circuit with resets,
 mid-circuit measurements or guarded Pauli gates to terminal measurements. A reset moves
-its qubit to a fresh alias, and a measured alias is never touched again, so its
-measurement moves to the end unchanged. A guarded Pauli `P` on qubit `t` becomes `P`
+its qubit to a fresh alias. A measurement whose qubit nothing touches before its next
+reset moves to the end unchanged; one whose qubit a later gate, guard or measurement
+uses becomes a `CX` onto a fresh alias measured at the end, so the qubit stays live and
+the copy only ever controls. A guarded Pauli `P` on qubit `t` becomes `P`
 controlled by the alias of each record its condition reads, plus an unconditional `P`
-when the condition is inverted. The condition must be a single bit, a `Parity`, or a
-register comparison reading at most one written bit, and a guarded body holds Pauli
-gates only. An event on a measured alias drops, and a qubit measured twice without a
-reset between declines the rewrite. The noiseless shot route takes the same rewrite at
-two shots or more.
+when the condition is inverted. That holds for a single bit, a `Parity`, or a register
+comparison reading at most one written bit. A comparison reading several written bits is
+an AND of records, which no controlled Pauli applies, so its Pauli stays out of the
+circuit as a guarded entry. A guarded body holds Pauli gates only. An event on a measured
+alias drops. The noiseless shot route takes the same rewrite at two shots or more.
 
 An event in a guarded body fires only on shots whose guard holds, which no fixed linear
 map expresses. The compiled sampler draws every shot's records under the unguarded
-events. Each guarded event then draws at its rate on every shot, in execution order,
-and lands its precomputed record flips on the shots whose guard parity holds; readout
+events. Each guarded entry then lands its precomputed record flips in execution order:
+an event draws at its rate on every shot and lands where its guard holds, and a guarded
+Pauli lands on every shot its guard holds. When a guarded Pauli is among the entries,
+they land on measurement rows, so a guard is a few word operations per 64 shots; readout
 comes last. Readout error on a bit a guard reads is not left to the end: the rewrite
 places an `X` of that rate on each alias measured into the bit, which the guard's
-controls and the record then both see. Only a rate equal both ways is such a Pauli, so
-asymmetric readout on a guarded bit declines the rewrite. Such a circuit always takes the
-compiled sampler, never the frame sampler.
+controls and the record then both see. A rate equal both ways fires that `X` on every
+shot. Unequal rates make it a guarded entry instead, drawn at the rate the record's value
+picks after the earlier entries land. Such a circuit always takes the compiled sampler,
+never the frame sampler.
 
 ## Slots for guarded instructions
 

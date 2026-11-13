@@ -1089,6 +1089,10 @@ fn price_scrambled(n: usize, t: usize) -> prism_q::circuit::Circuit {
     circuit
 }
 
+fn price_distinct() -> prism_q::circuit::Circuit {
+    bench_fixtures::distinct_t_layers(17, 10, 16, SEED)
+}
+
 fn price_onelayer() -> prism_q::circuit::Circuit {
     let mut circuit = bench_fixtures::random_t_insertion_circuit(20, 80, SEED);
     circuit.measure_all();
@@ -1135,6 +1139,7 @@ fn clifford_t_price_rows_pin_their_engines() {
         register_rows.push((format!("scrambled_{n}q_t{t}"), price_scrambled(n, t)));
     }
     register_rows.push(("onelayer_20q_t80".into(), price_onelayer()));
+    register_rows.push(("distinct_17q_t16".into(), price_distinct()));
     for (label, circuit) in &register_rows {
         assert_eq!(
             shot_plan(BackendKind::StabilizerRank, circuit, 1024),
@@ -1160,6 +1165,7 @@ fn clifford_t_price_rows_pin_their_engines() {
         statevector_rows.push((format!("scrambled_{n}q_t20"), price_scrambled(n, 20)));
     }
     statevector_rows.push(("layers_20q_t40".into(), price_layers(20, 40)));
+    statevector_rows.push(("distinct_17q_t16".into(), price_distinct()));
     for (label, circuit) in &statevector_rows {
         assert_eq!(
             circuit.independent_subsystems().len(),
@@ -1185,6 +1191,21 @@ fn clifford_t_price_rows_pin_their_engines() {
             shot_plan(BackendKind::Auto, circuit, 1024),
             register,
             "auto/{label}"
+        );
+    }
+    // The bracket on the statevector side of the register's cost constant, and the
+    // single-layer row the factored route takes ahead of the register.
+    assert_eq!(
+        shot_plan(BackendKind::Auto, &price_distinct(), 1024),
+        terminal_statevector,
+        "auto/distinct_17q_t16"
+    );
+    let factored = (ResolvedBackend::Factored, RouteRule::NativeSampling);
+    for kind in [BackendKind::Factored, BackendKind::Auto] {
+        assert_eq!(
+            shot_plan(kind.clone(), &price_onelayer(), 1024),
+            factored,
+            "{kind:?}/onelayer_20q_t80"
         );
     }
     let wide = price_layers(28, 24);
@@ -1255,6 +1276,7 @@ fn clifford_t_price_census() {
         terminal.push((format!("scrambled_{n}q_t{t}"), price_scrambled(n, t)));
     }
     terminal.push(("onelayer_20q_t80".into(), price_onelayer()));
+    terminal.push(("distinct_17q_t16".into(), price_distinct()));
     let mut counts_row = circuits::clifford_t_circuit(40, 20, 0.05, SEED);
     counts_row.measure_all();
     terminal.push(("clifford_register_counts/40q_d20_t5pct".into(), counts_row));

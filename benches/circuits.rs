@@ -31,9 +31,10 @@ use std::time::Duration;
 
 mod common;
 use common::fixtures::{
-    DENSE_UNITARY_LAYERS, clifford_t_layers_mid_circuit, dense_unitary_layers, product_observables,
-    random_clifford_t_layers, random_t_insertion_circuit, scrambled_clifford_t_circuit,
-    sparse_entanglement_circuit, stabilizer_rank_mid_circuit_shot_circuit,
+    DENSE_UNITARY_LAYERS, clifford_t_layers_mid_circuit, dense_unitary_layers, distinct_t_layers,
+    product_observables, random_clifford_t_layers, random_t_insertion_circuit,
+    scrambled_clifford_t_circuit, sparse_entanglement_circuit,
+    stabilizer_rank_mid_circuit_shot_circuit,
 };
 use common::{
     SEED, amplitude_damping_kraus, configure_group, configure_group_timed, correlated_zz_kraus,
@@ -4354,13 +4355,21 @@ fn bench_auto_clifford_t_price(c: &mut Criterion) {
     }
     let mut onelayer = random_t_insertion_circuit(20, 80, SEED);
     onelayer.measure_all();
-    shots_row(
-        "register",
-        "onelayer_20q_t80".into(),
-        rank.clone(),
-        onelayer,
-        1024,
-    );
+    for (arm, kind) in [
+        ("register", rank.clone()),
+        ("factored", BackendKind::Factored),
+        ("auto", BackendKind::Auto),
+    ] {
+        shots_row(arm, "onelayer_20q_t80".into(), kind, onelayer.clone(), 1024);
+    }
+    for (arm, kind) in [
+        ("register", rank.clone()),
+        ("statevector", dense.clone()),
+        ("auto", BackendKind::Auto),
+    ] {
+        let circuit = distinct_t_layers(17, 10, 16, SEED);
+        shots_row(arm, "distinct_17q_t16".into(), kind, circuit, 1024);
+    }
 
     let layer_widths = [22, 24, 26].into_iter().chain(high.iter().copied());
     for n in layer_widths {

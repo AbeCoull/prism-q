@@ -223,6 +223,22 @@ pub fn random_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u6
     c
 }
 
+/// H on every qubit and one T on each of qubits `0..t_count`, then `depth` Clifford layers
+/// of [`random_clifford_t_layers`], every qubit measured: a register `t_count` wide.
+pub fn distinct_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut c = Circuit::new(n, n);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..t_count {
+        c.add_gate(Gate::T, &[q]);
+    }
+    c.instructions
+        .extend(clifford_t_layers(n, depth, 0, seed).instructions);
+    c.measure_all();
+    c
+}
+
 /// [`random_clifford_t_layers`] before its measurements, with the two-bit mid-circuit tail
 /// of [`append_measure_guard_reset`] in their place.
 pub fn clifford_t_layers_mid_circuit(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {

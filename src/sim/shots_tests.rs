@@ -267,3 +267,17 @@ fn packed_shots_out_of_range_classical_bit_skipped() {
     let shots = packed_shots_to_classical_bits(&packed, &meas_map, 2);
     assert_eq!(shots[0], vec![true, true]);
 }
+
+#[test]
+fn shots_result_display_breaks_count_ties_by_key() {
+    let shots = (0..8u8)
+        .map(|v| (0..3).map(|bit| (v >> bit) & 1 == 1).collect())
+        .collect();
+    let result = ShotsResult::from_shots(shots, 3);
+    let expected: String = (0..8u8)
+        .map(|v| format!("{}: 1\n", bitstring(&[v as u64], 3)))
+        .collect();
+    for _ in 0..16 {
+        assert_eq!(format!("{result}"), expected);
+    }
+}

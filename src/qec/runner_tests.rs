@@ -1,4 +1,5 @@
 use super::*;
+use crate::qec::noise::compile_qec_noisy_sampler_on_compiled_base;
 
 fn parse_dropping_records(text: &str) -> QecProgram {
     let mut program = QecProgram::from_text(text).unwrap();
@@ -114,8 +115,8 @@ DETECTOR rec[-1]",
             &program.detector_rows().unwrap(),
             &program.observable_rows().unwrap(),
         );
-        let sampler = compile_qec_noisy_sampler(&program).unwrap();
-        let expected = projection.constant_pattern(sampler.noiseless());
+        let sampler = compile_qec_noisy_sampler_on_compiled_base(&program).unwrap();
+        let expected = projection.constant_pattern(sampler.compiled_base().unwrap());
         let pattern = compile_qec_parity_noise(&program, &projection)
             .unwrap()
             .map(|(pattern, _)| pattern);
@@ -201,8 +202,8 @@ fn parity_compile_matches_the_record_sampler_on_random_clifford_programs() {
             &program.detector_rows().unwrap(),
             &program.observable_rows().unwrap(),
         );
-        let sampler = compile_qec_noisy_sampler(&program).unwrap();
-        let expected = projection.constant_pattern(sampler.noiseless());
+        let sampler = compile_qec_noisy_sampler_on_compiled_base(&program).unwrap();
+        let expected = projection.constant_pattern(sampler.compiled_base().unwrap());
         let compiled = compile_qec_parity_noise(&program, &projection).unwrap();
         let pattern = compiled.as_ref().map(|(pattern, _)| pattern.clone());
         assert_eq!(pattern, expected, "{text}");

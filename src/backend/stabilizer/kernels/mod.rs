@@ -200,7 +200,7 @@ impl StabilizerBackend {
         }
         let total_rows = 2 * n;
         let avg = self.total_weight / total_rows;
-        avg < n / 8 && self.sgi_max_active < total_rows / 16
+        avg < n / 8 && (self.sgi_max_active < total_rows / 16 || self.sgi_uncapped)
     }
 
     fn sgi_apply_1q(&mut self, gate: &Gate, q: usize) {

@@ -3,9 +3,7 @@
 //! between them for `EXP_VAL` and noisy programs.
 
 #[cfg(feature = "bench-internal")]
-use super::noise::QecCompiledNoiseSampler;
-#[cfg(any(test, feature = "bench-internal"))]
-use super::noise::compile_qec_noisy_sampler;
+use super::noise::{QecCompiledNoiseSampler, compile_qec_noisy_sampler};
 use super::noise::{QecParityNoise, feedforward_body_letter, feedforward_body_rejection};
 #[cfg(test)]
 use super::noise::{compile_qec_parity_noise, compile_qec_parity_noise_windows};

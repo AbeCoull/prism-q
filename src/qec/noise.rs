@@ -15,10 +15,9 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 #[cfg(feature = "parallel")]
 use crate::sim::compiled::SendPtrU64;
-use crate::sim::compiled::{
-    CompiledSampler, PackedShots, compile_measurements, pair_rows_mut, rng::Xoshiro256PlusPlus,
-    xor_words,
-};
+#[cfg(any(test, feature = "bench-internal"))]
+use crate::sim::compiled::{CompiledSampler, compile_measurements};
+use crate::sim::compiled::{PackedShots, pair_rows_mut, rng::Xoshiro256PlusPlus, xor_words};
 use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, geometric_sample_xoshiro};
 use num_complex::Complex64;
 use rand::SeedableRng;
@@ -196,10 +195,22 @@ impl QecDeferredProgram {
 }
 
 pub(super) struct QecCompiledNoiseSampler {
-    noiseless: CompiledSampler,
+    base: QecRecordBase,
     noise: Option<QecRecordNoise>,
     feedforward: Option<QecFeedforwardFlips>,
     num_measurements: usize,
+}
+
+/// Where a records sample starts before the frame walk lands on it.
+enum QecRecordBase {
+    /// Packed records of one noiseless run with every random outcome 0. The frame walk
+    /// spreads it over the noiseless outcome space with a fair-coin Z at the birth of
+    /// every alias whose Z can flip a record.
+    Reference(Vec<u64>),
+    /// Compiled sampler over the deferred circuit, whose draws already cover the
+    /// noiseless outcome space, so the frame walk carries faults alone.
+    #[cfg(any(test, feature = "bench-internal"))]
+    Compiled(Box<CompiledSampler>),
 }
 
 /// Record flips of a program's Pauli feed-forward corrections, applied in op order
@@ -232,9 +243,37 @@ pub(super) struct QecRecordNoise {
     /// Aliases the circuit touches, ascending by [`QecDeferredProgram::last_use`].
     aliases_by_last_use: Vec<u32>,
     record_of_alias: Vec<u32>,
+    /// `(position, alias)` of every alias that takes a fair-coin Z at its birth,
+    /// ascending.
+    births: Vec<(u32, u32)>,
     gate_count: usize,
     seed: u64,
     cached_unit: Option<QecUnitFlips>,
+}
+
+/// Which parts of the frame one walk lands: the birth coins that spread the reference
+/// over the noiseless outcome space, the faults, or both.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct QecFrameParts {
+    coins: bool,
+    events: bool,
+}
+
+impl QecFrameParts {
+    const ALL: Self = Self {
+        coins: true,
+        events: true,
+    };
+    #[cfg(any(test, feature = "bench-internal"))]
+    const EVENTS: Self = Self {
+        coins: false,
+        events: true,
+    };
+    #[cfg(any(test, feature = "bench-internal"))]
+    const COINS: Self = Self {
+        coins: true,
+        events: false,
+    };
 }
 
 /// Record flips of one noise unit, `words` per record in record order, kept while a
@@ -243,6 +282,7 @@ pub(super) struct QecRecordNoise {
 struct QecUnitFlips {
     unit: usize,
     total_shots: usize,
+    parts: QecFrameParts,
     rows: Vec<u64>,
 }
 
@@ -520,21 +560,42 @@ fn land_buckets(
 }
 
 impl QecCompiledNoiseSampler {
-    pub(super) fn noiseless(&self) -> &CompiledSampler {
-        &self.noiseless
+    /// Packed reference records the sampler starts from, `None` on the compiled base.
+    pub(super) fn reference_records(&self) -> Option<&[u64]> {
+        match &self.base {
+            QecRecordBase::Reference(records) => Some(records),
+            #[cfg(any(test, feature = "bench-internal"))]
+            QecRecordBase::Compiled(_) => None,
+        }
     }
 
-    pub(super) fn noiseless_mut(&mut self) -> &mut CompiledSampler {
-        &mut self.noiseless
+    #[cfg(any(test, feature = "bench-internal"))]
+    pub(super) fn compiled_base(&self) -> Option<&CompiledSampler> {
+        match &self.base {
+            QecRecordBase::Compiled(sampler) => Some(sampler.as_ref()),
+            QecRecordBase::Reference(_) => None,
+        }
     }
 
+    #[cfg(feature = "bench-internal")]
+    pub(super) fn compiled_base_mut(&mut self) -> Option<&mut CompiledSampler> {
+        match &mut self.base {
+            QecRecordBase::Compiled(sampler) => Some(sampler.as_mut()),
+            QecRecordBase::Reference(_) => None,
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-internal"))]
     pub(super) fn feedforward(&self) -> Option<&QecFeedforwardFlips> {
         self.feedforward.as_ref()
     }
 
     /// Restart every stream as a sampler compiled with `seed` starts it.
     pub(super) fn reseed(&mut self, seed: u64) {
-        self.noiseless.reseed(seed);
+        #[cfg(any(test, feature = "bench-internal"))]
+        if let QecRecordBase::Compiled(sampler) = &mut self.base {
+            sampler.reseed(seed);
+        }
         if let Some(noise) = &mut self.noise {
             noise.seed = seed;
             noise.cached_unit = None;
@@ -548,19 +609,64 @@ impl QecCompiledNoiseSampler {
         num_shots: usize,
         total_shots: usize,
     ) -> Result<PackedShots> {
-        let measurements = self.sample_noiseless_measurements_packed(num_shots)?;
-        self.apply_noise_to_measurements(measurements, first_shot, total_shots)
+        #[allow(clippy::infallible_destructuring_match)]
+        let reference = match &mut self.base {
+            QecRecordBase::Reference(records) => records,
+            #[cfg(any(test, feature = "bench-internal"))]
+            QecRecordBase::Compiled(sampler) => {
+                let measurements = sampler.try_sample_bulk_packed(num_shots)?;
+                return self.apply_noise_to_measurements(measurements, first_shot, total_shots);
+            }
+        };
+        let mut data = broadcast_records(reference, self.num_measurements, num_shots);
+        if num_shots > 0 {
+            if let Some(noise) = &mut self.noise {
+                noise.apply(
+                    &mut data,
+                    num_shots,
+                    first_shot,
+                    total_shots,
+                    QecFrameParts::ALL,
+                );
+            }
+            if let Some(feedforward) = &self.feedforward {
+                feedforward.apply(&mut data, num_shots);
+            }
+        }
+        Ok(PackedShots::from_meas_major(
+            data,
+            num_shots,
+            self.num_measurements,
+        ))
     }
 
+    /// Noiseless records of a `num_shots`-shot run: the reference with the birth coins
+    /// landed, or the compiled base's draw.
+    #[cfg(feature = "bench-internal")]
     pub(super) fn sample_noiseless_measurements_packed(
         &mut self,
         num_shots: usize,
     ) -> Result<PackedShots> {
-        self.noiseless.try_sample_bulk_packed(num_shots)
+        let reference = match &mut self.base {
+            QecRecordBase::Reference(records) => records,
+            QecRecordBase::Compiled(sampler) => return sampler.try_sample_bulk_packed(num_shots),
+        };
+        let mut data = broadcast_records(reference, self.num_measurements, num_shots);
+        if let Some(noise) = &mut self.noise
+            && num_shots > 0
+        {
+            noise.apply(&mut data, num_shots, 0, num_shots, QecFrameParts::COINS);
+        }
+        Ok(PackedShots::from_meas_major(
+            data,
+            num_shots,
+            self.num_measurements,
+        ))
     }
 
     /// Apply noise, then feed-forward corrections, to `measurements`, which hold shots
     /// from `first_shot` of a `total_shots`-shot run.
+    #[cfg(any(test, feature = "bench-internal"))]
     pub(super) fn apply_noise_to_measurements(
         &mut self,
         measurements: PackedShots,
@@ -587,7 +693,13 @@ impl QecCompiledNoiseSampler {
         debug_assert!(first_shot + num_shots <= total_shots);
         let mut data = measurements.into_meas_major_data();
         if let Some(noise) = &mut self.noise {
-            noise.apply(&mut data, num_shots, first_shot, total_shots);
+            noise.apply(
+                &mut data,
+                num_shots,
+                first_shot,
+                total_shots,
+                QecFrameParts::EVENTS,
+            );
         }
         if let Some(feedforward) = &self.feedforward {
             feedforward.apply(&mut data, num_shots);
@@ -601,12 +713,22 @@ impl QecCompiledNoiseSampler {
 }
 
 impl QecRecordNoise {
-    /// `None` when no event can flip a record.
-    fn compile(deferred: QecDeferredProgram, seed: u64) -> Result<Option<Self>> {
-        let events = super::parity_walk::compile_record_events(&deferred)?;
-        if events.is_empty() {
+    /// `None` when no event and no birth coin can flip a record. `with_coins` gives
+    /// every alias whose Z at its birth flips a record a fair coin there.
+    fn compile(deferred: QecDeferredProgram, seed: u64, with_coins: bool) -> Result<Option<Self>> {
+        let (events, flipping_births) = super::parity_walk::compile_record_events(&deferred)?;
+        let mut births: Vec<(u32, u32)> = if with_coins {
+            flipping_births
+                .into_iter()
+                .map(|alias| (deferred.alias_positions[alias as usize] as u32, alias))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if events.is_empty() && births.is_empty() {
             return Ok(None);
         }
+        births.sort_unstable();
         let (aliases_by_last_use, record_of_alias) = record_walk_order(&deferred);
         let gate_count = deferred.gates.len();
         let fire_rates = events.iter().map(|event| event.draw.rate()).collect();
@@ -616,6 +738,7 @@ impl QecRecordNoise {
             fire_rates,
             aliases_by_last_use,
             record_of_alias,
+            births,
             gate_count,
             seed,
             cached_unit: None,
@@ -627,7 +750,14 @@ impl QecRecordNoise {
     /// A unit the window covers only in part lands through [`Self::land_cached_unit`].
     /// Whole units run on the pool when the window starts on a word boundary, so no two
     /// touch one word.
-    fn apply(&mut self, data: &mut [u64], num_shots: usize, first_shot: usize, total_shots: usize) {
+    fn apply(
+        &mut self,
+        data: &mut [u64],
+        num_shots: usize,
+        first_shot: usize,
+        total_shots: usize,
+        parts: QecFrameParts,
+    ) {
         let s_words = num_shots.div_ceil(64);
         let end_shot = first_shot + num_shots;
         let first_unit = first_shot / QEC_NOISE_UNIT_SHOTS;
@@ -661,10 +791,10 @@ impl QecRecordNoise {
                 land(record, row, unit_first, shots, &flip)
             };
             if head_partial {
-                self.land_cached_unit(first_unit, total_shots, end_shot, &mut land_partial);
+                self.land_cached_unit(first_unit, total_shots, end_shot, parts, &mut land_partial);
             }
             if tail_partial {
-                self.land_cached_unit(last_unit, total_shots, end_shot, &mut land_partial);
+                self.land_cached_unit(last_unit, total_shots, end_shot, parts, &mut land_partial);
             }
         }
         let whole =
@@ -695,6 +825,7 @@ impl QecRecordNoise {
                 self.apply_unit(
                     unit,
                     total_shots,
+                    parts,
                     &mut |record, row, unit_first, unit_shots| {
                         land(record, row, unit_first, unit_shots, &flip)
                     },
@@ -708,6 +839,7 @@ impl QecRecordNoise {
             self.apply_unit(
                 unit,
                 total_shots,
+                parts,
                 &mut |record, row, unit_first, unit_shots| {
                     land(record, row, unit_first, unit_shots, &flip)
                 },
@@ -724,21 +856,29 @@ impl QecRecordNoise {
         unit: usize,
         total_shots: usize,
         end_shot: usize,
+        parts: QecFrameParts,
         land: &mut impl FnMut(usize, &[u64], usize, usize),
     ) {
         let unit_first = unit * QEC_NOISE_UNIT_SHOTS;
         let unit_shots = (total_shots - unit_first).min(QEC_NOISE_UNIT_SHOTS);
         let words = unit_shots.div_ceil(64);
         let cached = match self.cached_unit.take() {
-            Some(cached) if cached.unit == unit && cached.total_shots == total_shots => cached,
+            Some(cached)
+                if cached.unit == unit
+                    && cached.total_shots == total_shots
+                    && cached.parts == parts =>
+            {
+                cached
+            }
             _ => {
                 let mut rows = vec![0u64; self.deferred.measurement_qubits.len() * words];
-                self.apply_unit(unit, total_shots, &mut |record, row, _, _| {
+                self.apply_unit(unit, total_shots, parts, &mut |record, row, _, _| {
                     xor_words(&mut rows[record * words..(record + 1) * words], row)
                 });
                 QecUnitFlips {
                     unit,
                     total_shots,
+                    parts,
                     rows,
                 }
             }
@@ -751,25 +891,30 @@ impl QecRecordNoise {
         }
     }
 
-    /// Draw unit `unit` of a `total_shots`-shot run and push its faults through the
+    /// Draw unit `unit` of a `total_shots`-shot run and push its `parts` through the
     /// circuit, calling `land(record, x_row, unit_first_shot, unit_shots)` with the X
-    /// frame of each measured alias at its last use.
+    /// frame of each measured alias at its last use. Coins draw from their own stream,
+    /// so faults fire on the same shots with or without them.
     fn apply_unit(
         &self,
         unit: usize,
         total_shots: usize,
+        parts: QecFrameParts,
         land: &mut impl FnMut(usize, &[u64], usize, usize),
     ) {
         let unit_first = unit * QEC_NOISE_UNIT_SHOTS;
         let unit_shots = (total_shots - unit_first).min(QEC_NOISE_UNIT_SHOTS);
         let words = unit_shots.div_ceil(64);
 
+        let events: &[QecRecordEvent] = if parts.events { &self.events } else { &[] };
+        let births: &[(u32, u32)] = if parts.coins { &self.births } else { &[] };
         let mut rng = qec_noise_unit_rng(self.seed, unit);
+        let mut coin_rng = qec_coin_unit_rng(self.seed, unit);
         let mut firings: Vec<u64> = Vec::new();
         draw_qec_unit(
-            &self.events,
+            events,
             |event| &event.draw,
-            &self.fire_rates,
+            &self.fire_rates[..events.len()],
             &self.deferred.pair_tables,
             &self.deferred.product_tables,
             &mut rng,
@@ -778,11 +923,11 @@ impl QecRecordNoise {
                 firings.push(((index as u64) << 32) | ((shot as u64) << 16) | branch as u64);
             },
         );
-        let mut starts = vec![0u32; self.events.len() + 1];
+        let mut starts = vec![0u32; events.len() + 1];
         for &firing in &firings {
             starts[(firing >> 32) as usize + 1] += 1;
         }
-        for index in 0..self.events.len() {
+        for index in 0..events.len() {
             starts[index + 1] += starts[index];
         }
         let mut fill = starts.clone();
@@ -796,13 +941,21 @@ impl QecRecordNoise {
 
         let deferred = &self.deferred;
         let mut frame = Frame::new(words, deferred.num_aliases);
-        let mut next_event = self.events.len();
+        let mut next_event = events.len();
+        let mut next_birth = 0usize;
         let mut next_alias = 0usize;
         let mut slots = [0usize; 2];
         for position in 0..=self.gate_count {
-            while next_event > 0 && self.events[next_event - 1].position as usize == position {
+            while next_birth < births.len() && births[next_birth].0 as usize == position {
+                let slot = frame.slot(births[next_birth].1 as usize);
+                for word in frame.z_row_mut(slot) {
+                    *word ^= coin_rng.next_u64();
+                }
+                next_birth += 1;
+            }
+            while next_event > 0 && events[next_event - 1].position as usize == position {
                 next_event -= 1;
-                let event = &self.events[next_event];
+                let event = &events[next_event];
                 let fired = &by_event[starts[next_event] as usize..starts[next_event + 1] as usize];
                 if fired.is_empty() {
                     continue;
@@ -1154,6 +1307,10 @@ impl Frame {
         &self.x[slot * self.words..(slot + 1) * self.words]
     }
 
+    fn z_row_mut(&mut self, slot: usize) -> &mut [u64] {
+        &mut self.z[slot * self.words..(slot + 1) * self.words]
+    }
+
     /// XOR `x_bits` and `z_bits` into word `word` of `slot` where `mask` is set,
     /// which for uniform random bits is a uniformly random Pauli on those shots.
     #[inline(always)]
@@ -1426,6 +1583,35 @@ fn qec_noise_unit_rng(seed: u64, unit: usize) -> Xoshiro256PlusPlus {
     Xoshiro256PlusPlus::from_chacha(&mut seed_rng)
 }
 
+/// Stream of the birth coins of one unit, apart from [`qec_noise_unit_rng`] so the
+/// faults keep their draws.
+fn qec_coin_unit_rng(seed: u64, unit: usize) -> Xoshiro256PlusPlus {
+    let mut seed_rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xC014_B127));
+    seed_rng.set_stream(unit as u64);
+    Xoshiro256PlusPlus::from_chacha(&mut seed_rng)
+}
+
+/// Measurement-major rows of `num_shots` shots, each record's row all ones where its
+/// packed `reference` bit is set.
+fn broadcast_records(reference: &[u64], num_measurements: usize, num_shots: usize) -> Vec<u64> {
+    let s_words = num_shots.div_ceil(64);
+    let mut data = vec![0u64; num_measurements * s_words];
+    if s_words == 0 {
+        return data;
+    }
+    let tail = match num_shots % 64 {
+        0 => u64::MAX,
+        bits => (1u64 << bits) - 1,
+    };
+    for (record, row) in data.chunks_exact_mut(s_words).enumerate() {
+        if reference[record / 64] >> (record % 64) & 1 == 1 {
+            row.fill(u64::MAX);
+            row[s_words - 1] = tail;
+        }
+    }
+    data
+}
+
 /// Draw every event over one unit of `unit_shots` shots, event-major, calling
 /// `flip(event_index, event, shot, branch)` per fault. The record and parity paths both
 /// draw through here, so they consume each unit's stream identically. `fire_rates`
@@ -1610,13 +1796,46 @@ pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompi
             "QEC record-noise sampler",
         ));
     }
+    #[cfg(feature = "bench-internal")]
+    if !crate::bench_variant_b() {
+        return compile_qec_noisy_sampler_on_compiled_base(program);
+    }
+    let (reference, deferred) = super::runner::qec_join(
+        || super::reference::forced_tableau_records(program, false),
+        || lower_qec_program_to_deferred_circuit_inner(program, false, true),
+    );
+    let deferred = deferred?;
+    let reference = reference?
+        .expect("the deferred lowering admits Clifford gates only, so the reference run exists");
+    let num_measurements = deferred.measurement_qubits.len();
+    let feedforward = QecFeedforwardFlips::compile(&deferred);
+    let noise = QecRecordNoise::compile(deferred, program.options().seed, true)?;
+    Ok(QecCompiledNoiseSampler {
+        base: QecRecordBase::Reference(reference),
+        noise,
+        feedforward,
+        num_measurements,
+    })
+}
+
+/// [`compile_qec_noisy_sampler`] on a compiled sampler over the deferred circuit, the
+/// base before the reference run took its place.
+#[cfg(any(test, feature = "bench-internal"))]
+pub(super) fn compile_qec_noisy_sampler_on_compiled_base(
+    program: &QecProgram,
+) -> Result<QecCompiledNoiseSampler> {
+    if program.has_leakage() {
+        return Err(super::leakage::leakage_rejection(
+            "QEC record-noise sampler",
+        ));
+    }
     let deferred = lower_qec_program_to_deferred_circuit_inner(program, false, true)?;
     let noiseless = compile_measurements(&deferred.to_circuit(), program.options().seed)?;
     let num_measurements = deferred.measurement_qubits.len();
     let feedforward = QecFeedforwardFlips::compile(&deferred);
-    let noise = QecRecordNoise::compile(deferred, program.options().seed)?;
+    let noise = QecRecordNoise::compile(deferred, program.options().seed, false)?;
     Ok(QecCompiledNoiseSampler {
-        noiseless,
+        base: QecRecordBase::Compiled(Box::new(noiseless)),
         noise,
         feedforward,
         num_measurements,
@@ -2574,3 +2793,7 @@ fn qec_uniform_15(rng: &mut Xoshiro256PlusPlus) -> usize {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "noise_tests.rs"]
+mod tests;

@@ -106,3 +106,8 @@ Seeded output has changed in these releases:
   `X` among them, and guarded Paulis under a register comparison reading several
   measured bits, the form `switch` and lookup decoding take, and asymmetric readout error
   on a bit a guard reads. Circuits that compiled before keep their shots.
+- 0.39.0 samples the QEC measurement records that a noisy or feed-forward program reads
+  from one noiseless reference run spread by random Pauli frames, in place of a compiled
+  sampler over the deferred circuit. Kept records, and detectors or observables that are
+  random without noise, change for a seed; detectors, observables and postselection counts
+  that are fixed without noise do not.

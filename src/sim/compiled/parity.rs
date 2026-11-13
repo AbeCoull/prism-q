@@ -12,10 +12,6 @@ pub struct SparseParity {
 
 impl SparseParity {
     pub fn from_flip_rows(flip_rows: &[Vec<u64>], num_measurements: usize) -> Self {
-        #[cfg(feature = "bench-internal")]
-        if !crate::bench_variant('e') {
-            return Self::from_flip_rows_by_probe(flip_rows, num_measurements);
-        }
         let num_rows = num_measurements;
         let m_words = num_rows.div_ceil(64);
         let tail_mask = match num_rows % 64 {
@@ -69,7 +65,7 @@ impl SparseParity {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internal"))]
+    #[cfg(test)]
     pub(super) fn from_flip_rows_by_probe(flip_rows: &[Vec<u64>], num_measurements: usize) -> Self {
         let num_rows = num_measurements;
         let rank = flip_rows.len();
@@ -147,11 +143,6 @@ impl SparseParity {
         if self.num_rows <= 1 || rank == 0 {
             return None;
         }
-        #[cfg(feature = "bench-internal")]
-        if !crate::bench_variant('f') {
-            return self.find_blocks_by_column_lists(rank);
-        }
-
         let mut parent: Vec<usize> = (0..self.num_rows).collect();
         let mut size: Vec<usize> = vec![1; self.num_rows];
         let mut components = self.num_rows;
@@ -173,7 +164,7 @@ impl SparseParity {
         blocks_by_root(&mut parent)
     }
 
-    #[cfg(any(test, feature = "bench-internal"))]
+    #[cfg(test)]
     pub(super) fn find_blocks_by_column_lists(&self, rank: usize) -> Option<Vec<Vec<usize>>> {
         if self.num_rows <= 1 || rank == 0 {
             return None;
@@ -421,10 +412,7 @@ pub(super) fn build_parity_blocks_if_useful(
     ref_bits: &[u64],
 ) -> Option<ParityBlocks> {
     // A fixed outcome is a block of one row, which MIN_BLOCK_MEASUREMENTS rejects.
-    let has_fixed_row = sparse.non_det_rows.len() < sparse.num_rows;
-    #[cfg(feature = "bench-internal")]
-    let has_fixed_row = has_fixed_row && crate::bench_variant('f');
-    if has_fixed_row {
+    if sparse.non_det_rows.len() < sparse.num_rows {
         return None;
     }
     let block_meas = sparse.find_blocks(rank)?;
@@ -450,10 +438,6 @@ pub(super) fn minimize_flip_row_weight(flip_rows: &mut [Vec<u64>]) -> (usize, us
     let total: usize = flip_rows.iter().map(|r| row_weight(r) as usize).sum();
     if rank <= 1 || rank > MAX_RANK_FOR_WEIGHT_MIN {
         return (total, total);
-    }
-    #[cfg(feature = "bench-internal")]
-    if !crate::bench_variant('b') {
-        return (total, minimize_rows(flip_rows));
     }
     let words = flip_rows[0].len();
     let mut flat: Vec<u64> = Vec::with_capacity(rank * words);
@@ -536,48 +520,6 @@ fn minimize_flat_dyn(flat: &mut [u64], rank: usize, words: usize) -> usize {
             if best_j != usize::MAX {
                 for w in 0..words {
                     flat[i * words + w] ^= flat[best_j * words + w];
-                }
-                weights[i] = best_w;
-                improved = true;
-            }
-        }
-        if !improved {
-            break;
-        }
-    }
-    weights.iter().map(|&w| w as usize).sum()
-}
-
-#[cfg(feature = "bench-internal")]
-fn minimize_rows(flip_rows: &mut [Vec<u64>]) -> usize {
-    let rank = flip_rows.len();
-    let mut weights: Vec<u32> = flip_rows.iter().map(|r| row_weight(r)).collect();
-    for _round in 0..MAX_WEIGHT_MIN_ROUNDS {
-        let mut improved = false;
-        for i in 0..rank {
-            let wi = weights[i];
-            if wi == 0 {
-                continue;
-            }
-            let mut best_j = usize::MAX;
-            let mut best_w = wi;
-            for j in 0..rank {
-                if j == i {
-                    continue;
-                }
-                let xor_w: u32 = flip_rows[i]
-                    .iter()
-                    .zip(flip_rows[j].iter())
-                    .map(|(&a, &b)| (a ^ b).count_ones())
-                    .sum();
-                if xor_w < best_w {
-                    best_w = xor_w;
-                    best_j = j;
-                }
-            }
-            if best_j != usize::MAX {
-                for w in 0..flip_rows[i].len() {
-                    flip_rows[i][w] ^= flip_rows[best_j][w];
                 }
                 weights[i] = best_w;
                 improved = true;

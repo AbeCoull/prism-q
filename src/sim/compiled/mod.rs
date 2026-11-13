@@ -664,8 +664,6 @@ impl CompiledSampler {
         if self.rank >= LUT_MIN_RANK {
             self.shot_major_shots = self.shot_major_shots.saturating_add(num_shots);
             let build_table = self.shot_major_shots >= MIN_SHOTS_FOR_FLIP_LUT;
-            #[cfg(feature = "bench-internal")]
-            let build_table = build_table || !crate::bench_variant('c');
             let lut = if build_table {
                 FlipGroups::new(&self.lut, &self.flip_rows, m_words)
             } else {
@@ -1327,10 +1325,7 @@ impl CompiledSampler {
                 return self.sample_counts_rank_space(total_shots);
             }
         }
-        let direct = shots_mostly_distinct(self.rank, total_shots);
-        #[cfg(feature = "bench-internal")]
-        let direct = direct && crate::bench_variant('d');
-        let mut acc = if direct {
+        let mut acc = if shots_mostly_distinct(self.rank, total_shots) {
             HistogramAccumulator::direct()
         } else {
             HistogramAccumulator::new()
@@ -2914,15 +2909,9 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
 
 fn compile_forward_unchecked(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     let density_cap = LIVE_FORWARD_DENSITY * circuit.num_qubits;
-    #[cfg(feature = "bench-internal")]
-    let try_bound = crate::bench_variant('g');
-    #[cfg(not(feature = "bench-internal"))]
-    let try_bound = true;
-    if try_bound {
-        let bound = live_forward::peak_live_lower_bound(circuit);
-        if bound * bound > density_cap {
-            return compile_forward_dense(circuit, seed);
-        }
+    let bound = live_forward::peak_live_lower_bound(circuit);
+    if bound * bound > density_cap {
+        return compile_forward_dense(circuit, seed);
     }
     let schedule = live_forward::LiveSchedule::plan(circuit);
     if schedule.peak_live * schedule.peak_live <= density_cap {

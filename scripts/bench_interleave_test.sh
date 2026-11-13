@@ -7,7 +7,10 @@
 # expected verdict. The last cases run the whole script against a stub bench
 # binary to cover the A B B A order and its several-variant form, the smoke test,
 # the MEASURING marker, a TERM while a bench binary runs, and the host-load
-# guard.
+# guard. Further cases cover two-binary mode (--base-exe) and the bench_ab.sh
+# side of it: --interleave dispatch, the merge-base reference default, and the
+# clean-tree same-code error, in a scratch repository with both executables
+# supplied, so nothing builds.
 #
 # Usage: scripts/bench_interleave_test.sh
 
@@ -168,7 +171,9 @@ echo "=== bench_interleave end to end against a stub binary ==="
 # A stand-in for a Criterion bench binary: rows x/a, x/b, c/a; variant b is
 # slower on x/b by STUB_EFFECT; every invocation drifts the times up by 0.3%;
 # STUB_BURST lists invocations that run three times slow, as under load; STUB_PANIC
-# names a variant that panics in test mode.
+# names a variant that panics in test mode. STUB_SLOW_AS names an executable, by
+# file name, whose x/b runs slower by STUB_EFFECT whatever the variant, and every
+# invocation appends `mode variant name` to the state's `who` file.
 STUB="$SCRATCH/stub-exe"
 cat > "$STUB" <<'STUB'
 #!/usr/bin/env bash
@@ -190,6 +195,8 @@ fi
 calls=$(( $(cat "$STUB_STATE/calls" 2>/dev/null || echo 0) + 1 ))
 echo "$calls" > "$STUB_STATE/calls"
 [[ "$mode" == bench ]] && echo "$PRISM_BENCH_VARIANT" >> "$STUB_STATE/order"
+me="$(basename "$0")"
+echo "$mode ${PRISM_BENCH_VARIANT:-none} $me" >> "$STUB_STATE/who"
 for row in x/a x/b c/a; do
     [[ "$row" =~ $filter ]] || continue
     if [[ "$mode" == test ]]; then
@@ -201,8 +208,8 @@ for row in x/a x/b c/a; do
         continue
     fi
     ns="$(awk -v c="$calls" -v v="$PRISM_BENCH_VARIANT" -v row="$row" -v e="${STUB_EFFECT:-1}" \
-        -v burst=" ${STUB_BURST:-} " 'BEGIN {
-            ns = 1000 * (1 + 0.003 * c); if (v == "b" && row == "x/b") ns *= e
+        -v burst=" ${STUB_BURST:-} " -v slow="${STUB_SLOW_AS:-}" -v me="$me" 'BEGIN {
+            ns = 1000 * (1 + 0.003 * c); if ((v == "b" || me == slow) && row == "x/b") ns *= e
             if (index(burst, " " c " ") > 0) ns *= 3
             printf "%.3f", ns }')"
     mkdir -p "$home/$row/new"
@@ -304,6 +311,188 @@ if e2e host-busy 2 PRISM_BENCH_HOST_LOAD=50 -- --max-host-load 10; then
         PASS=$((PASS + 1)); printf 'ok    %-34s exit 2, nothing measured\n' e2e-host-busy
     else
         FAIL=$((FAIL + 1)); printf 'FAIL  %-34s measured on a busy host\n' e2e-host-busy
+    fi
+fi
+
+echo
+echo "=== bench_interleave two-binary mode ==="
+
+# The order the runner uses for one variant against a over six rounds, after the
+# warmup, each slot one target and one control invocation.
+ABBA_ORDER="a a b b"
+for (( r = 1; r <= 6; r++ )); do
+    if (( r % 2 )); then ABBA_ORDER+=" a a b b b b a a"; else ABBA_ORDER+=" b b a a a a b b"; fi
+done
+
+# Variant a runs base-exe and b the --exe stub, whose x/b is 10% slower; both see
+# PRISM_BENCH_VARIANT=a, so only the executable tells them apart.
+cp "$STUB" "$SCRATCH/base-exe"
+if e2e two-binary 1 STUB_EFFECT=1.10 STUB_SLOW_AS=stub-exe -- --max-host-load 0 --base-exe "$SCRATCH/base-exe"; then
+    who="$E2E_DIR/state/who"
+    got_order="$(awk '$1 == "bench" { print ($3 == "base-exe" ? "a" : "b") }' "$who" | tr '\n' ' ' | sed 's/ $//')"
+    if [[ "$got_order" == "$ABBA_ORDER" ]] && ! awk '$2 != "a"' "$who" | grep -q . \
+        && grep -q '^test a base-exe$' "$who" && grep -q '^test a stub-exe$' "$who" \
+        && grep -q '^## Interleaved two-binary A/B' "$E2E_DIR/report.md" \
+        && grep -q '^| Mode | two binaries' "$E2E_DIR/report.md" \
+        && grep -q '^| Layout check | .*control rows' "$E2E_DIR/report.md" \
+        && grep -q '`x/b`.*regressed' "$E2E_DIR/report.md" && grep -q $'^#two-binary\t' "$E2E_DIR/report.tsv"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 1, a on --base-exe, b on --exe\n' e2e-two-binary
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s order %s\n' e2e-two-binary "$got_order"
+        sed 's/^/      /' "$E2E_DIR/report.md"
+    fi
+    bash "$RUNNER" --from-tsv "$E2E_DIR/report.tsv" --out "$E2E_DIR/again.md" --max-host-load 0 > /dev/null 2>&1
+    got=$?
+    if [[ "$got" == 1 ]] && grep -q '^## Interleaved two-binary A/B' "$E2E_DIR/again.md" \
+        && grep -q '^| Binaries | from tsv |' "$E2E_DIR/again.md"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 1, mode read back from the tsv\n' two-binary-from-tsv
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s exit %s\n' two-binary-from-tsv "$got"
+        sed 's/^/      /' "$E2E_DIR/again.md"
+    fi
+fi
+
+# Two-binary options the runner refuses before running anything: LABEL MESSAGE OPTIONS.
+refuse() {
+    local label="$1" want="$2" dir="$SCRATCH/refuse-$1" got
+    shift 2
+    mkdir -p "$dir/state"
+    STUB_STATE="$dir/state" bash "$RUNNER" --project-dir "$SCRIPT_DIR/.." --max-host-load 0 \
+        --out "$dir/report.md" "$@" > "$dir/log" 2>&1
+    got=$?
+    if [[ "$got" == 5 ]] && grep -q -- "$want" "$dir/log" && [[ ! -e "$dir/state/who" ]]; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 5, nothing ran\n' "$label"
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s want exit 5 and %s, got %s\n' "$label" "$want" "$got"
+        sed 's/^/      /' "$dir/log"
+    fi
+}
+refuse two-binary-variants 'must stay b' -f '^x/' -c '^c/' --exe "$STUB" --base-exe "$SCRATCH/base-exe" --variants b,c
+refuse two-binary-no-control 'needs --control' -f '^x/' --exe "$STUB" --base-exe "$SCRATCH/base-exe"
+refuse two-binary-no-exe 'needs --exe' -f '^x/' -c '^c/' --base-exe "$SCRATCH/base-exe"
+refuse two-binary-missing-base 'does not exist' -f '^x/' -c '^c/' --exe "$STUB" --base-exe "$SCRATCH/nothing"
+
+echo
+echo "=== bench_ab.sh reference default and --interleave ==="
+
+# main holds c1 and c2, feat branches from c2 with c3. Without a remote the
+# default reference is the merge-base of HEAD and main.
+AB_REPO="$SCRATCH/ab-repo"
+git init -q -b main "$AB_REPO"
+g() { git -C "$AB_REPO" -c user.name=t -c user.email=t@t "$@"; }
+echo one > "$AB_REPO/f.txt"; g add f.txt; g commit -q -m c1
+echo two > "$AB_REPO/f.txt"; g commit -q -am c2
+g checkout -q -b feat
+echo three > "$AB_REPO/f.txt"; g commit -q -am c3
+C1="$(g rev-parse --short HEAD~2)"
+C2="$(g rev-parse --short HEAD~1)"
+
+# ab_run LABEL WANT_EXIT [ENV=VALUE...] -- [bench_ab.sh OPTIONS], with both
+# executables supplied, so nothing builds.
+ab_run() {
+    local label="$1" want="$2"
+    shift 2
+    local envs=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do envs+=("$1"); shift; done
+    shift
+    AB_DIR="$SCRATCH/ab-$label"
+    mkdir -p "$AB_DIR/state"
+    env STUB_STATE="$AB_DIR/state" ${envs[@]+"${envs[@]}"} bash "$SCRIPT_DIR/bench_ab.sh" \
+        --project-dir "$AB_REPO" --ref-exe "$STUB" --new-exe "$STUB" -f '^x/' -c '^c/' \
+        --light --max-host-load 0 --out "$AB_DIR/report.md" "$@" > "$AB_DIR/log" 2>&1
+    AB_STATUS=$?
+    if [[ "$AB_STATUS" == "$want" ]]; then
+        return 0
+    fi
+    FAIL=$((FAIL + 1))
+    printf 'FAIL  %-34s want exit %s, got %s\n' "$label" "$want" "$AB_STATUS"
+    sed 's/^/      /' "$AB_DIR/log"
+    return 1
+}
+
+if ab_run interleave-merge-base 1 STUB_EFFECT=1.10 STUB_SLOW_AS=exe-new -- --interleave; then
+    if grep -q "^| Reference | merge-base of HEAD and \`main\` ($C2) |" "$AB_DIR/report.md" \
+        && grep -q '^## Interleaved two-binary A/B' "$AB_DIR/report.md" \
+        && grep -q '^| Method | `bench_ab.sh --interleave` |' "$AB_DIR/report.md" \
+        && grep -q '`x/b`.*regressed' "$AB_DIR/report.md" \
+        && [[ "$(awk '$1 == "bench" { print $3; exit }' "$AB_DIR/state/who")" == exe-ref ]] \
+        && grep -q '^test a exe-ref$' "$AB_DIR/state/who" && grep -q '^test a exe-new$' "$AB_DIR/state/who"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 1, ref is a, reference %s\n' ab-interleave-merge-base "$C2"
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s report or order wrong\n' ab-interleave-merge-base
+        sed 's/^/      /' "$AB_DIR/report.md"
+    fi
+fi
+
+g update-ref refs/remotes/origin/main HEAD~2
+if ab_run origin-main-first 0 -- --interleave; then
+    if grep -q "^| Reference | merge-base of HEAD and \`origin/main\` ($C1) |" "$AB_DIR/report.md" \
+        && grep -q '^\*\*Regression verdict\*\*: PASS' "$AB_DIR/report.md"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 0, reference %s\n' ab-origin-main-first "$C1"
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s reference not from origin/main\n' ab-origin-main-first
+        sed 's/^/      /' "$AB_DIR/report.md"
+    fi
+fi
+g update-ref -d refs/remotes/origin/main
+
+g checkout -q main
+if ab_run clean-same-code 5 -- --interleave; then
+    if grep -q 'same code' "$AB_DIR/log" && grep -q -- '--ref' "$AB_DIR/log" && [[ ! -e "$AB_DIR/state/who" ]]; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 5, names --ref, nothing ran\n' ab-clean-same-code
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s message or a run\n' ab-clean-same-code
+        sed 's/^/      /' "$AB_DIR/log"
+    fi
+fi
+
+if ab_run explicit-head 0 -- --interleave --ref HEAD; then
+    if grep -q '^\*\*Regression verdict\*\*: CONTROL (same code)' "$AB_DIR/report.md" \
+        && grep -q '^| Same code |' "$AB_DIR/report.md"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 0, CONTROL (same code)\n' ab-explicit-head
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s no CONTROL verdict\n' ab-explicit-head
+        sed 's/^/      /' "$AB_DIR/report.md"
+    fi
+fi
+
+echo edit > "$AB_REPO/f.txt"
+if ab_run dirty-at-merge-base 0 -- --interleave; then
+    PASS=$((PASS + 1)); printf 'ok    %-34s exit 0, an uncommitted change runs\n' ab-dirty-at-merge-base
+fi
+g checkout -q -- f.txt
+
+if ab_run escalate-refused 5 -- --interleave --escalate; then
+    if grep -q -- '--escalate' "$AB_DIR/log" && [[ ! -e "$AB_DIR/state/who" ]]; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 5, nothing ran\n' ab-escalate-refused
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s message or a run\n' ab-escalate-refused
+    fi
+fi
+
+if ab_run interleave-no-control 5 -- --interleave -c ''; then
+    if grep -q 'needs --control' "$AB_DIR/log"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 5\n' ab-interleave-no-control
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s no message\n' ab-interleave-no-control
+    fi
+fi
+
+if ab_run smoke-failure 4 STUB_PANIC=a -- --interleave --ref HEAD; then
+    if [[ ! -s "$AB_DIR/state/order" ]]; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 4, nothing measured\n' ab-interleave-smoke-failure
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s measured after a smoke failure\n' ab-interleave-smoke-failure
+    fi
+fi
+
+git init -q -b other "$SCRATCH/ab-nomain"
+git -C "$SCRATCH/ab-nomain" -c user.name=t -c user.email=t@t commit -q --allow-empty -m one
+if ab_run no-base 5 -- --interleave --project-dir "$SCRATCH/ab-nomain"; then
+    if grep -q 'neither origin/main nor main' "$AB_DIR/log"; then
+        PASS=$((PASS + 1)); printf 'ok    %-34s exit 5, names both bases\n' ab-no-base
+    else
+        FAIL=$((FAIL + 1)); printf 'FAIL  %-34s no message\n' ab-no-base
     fi
 fi
 

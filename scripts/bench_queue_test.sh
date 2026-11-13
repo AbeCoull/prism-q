@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify RERUN retries, --build-only, the cache key of a checkout that changes
-# during its build, the build-phase lock wait, and a stop signal during a `run`
-# step in scripts/bench_queue.sh against a stub bench_ab.sh.
+# during its build, the build-phase lock wait, the default reference, and a stop
+# signal during a `run` step in scripts/bench_queue.sh against a stub bench_ab.sh.
 #
 # Each case copies bench_queue.sh and bench_lock.sh into a scratch tree beside a
 # stub that fills the cache on --build-only and otherwise writes a canned report
@@ -33,6 +33,7 @@ setup() {
     cat > "$tree/scripts/bench_ab.sh" <<'STUB'
 #!/usr/bin/env bash
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ARGS="$*"
 out=""
 build=""
 build_dir=""
@@ -52,6 +53,7 @@ if [[ -n "$build" ]]; then
 fi
 runs=$(( $(cat "$dir/runs" 2>/dev/null || echo 0) + 1 ))
 echo "$runs" > "$dir/runs"
+echo "$ARGS" >> "$dir/args"
 status="$(tr ' ' '\n' < "$dir/spec" | sed -n "${runs}p")"
 printf '**Regression verdict**: run %s exit %s\n' "$runs" "$status" > "$out"
 exit "$status"
@@ -142,6 +144,43 @@ fi
 setup lock-stale "0"
 printf 'pid: 999999\nby: test\n' > "$SCRATCH/lock-stale/MEASURING"
 check lock-stale 0 1 '^END step exit=0'
+
+# A step without -r measures against the merge-base of its HEAD and main, and
+# passes that commit on as --ref, so the A/B names the commit its cached
+# reference was built from. Options such as --interleave pass through untouched.
+DEF_REPO="$SCRATCH/def-repo"
+git init -q -b main "$DEF_REPO"
+git -C "$DEF_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m one
+git -C "$DEF_REPO" checkout -q -b feat
+git -C "$DEF_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m two
+base="$(git -C "$DEF_REPO" rev-parse main)"
+setup default-ref "0"
+printf 'ab step %q -f x -c y --interleave\n' "$DEF_REPO" > "$SCRATCH/default-ref/queue.sh"
+check default-ref 0 1 '^END step exit=0'
+if grep -q -- "--interleave --ref $base --new-exe" "$SCRATCH/default-ref/scripts/args" &&
+   grep -q "ref ${base:0:10}" "$SCRATCH/default-ref/log"; then
+    PASS=$((PASS + 1)); echo "ok    default-ref passes the merge-base on as --ref"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL  default-ref did not pass the merge-base on"
+    sed 's/^/      /' "$SCRATCH/default-ref/scripts/args" "$SCRATCH/default-ref/log" 2>/dev/null
+fi
+
+# The same step on a clean checkout of main has nothing to compare, and the plan
+# stops before any build.
+git -C "$DEF_REPO" checkout -q main
+setup default-ref-same-code "0"
+printf 'ab step %q -f x\n' "$DEF_REPO" > "$SCRATCH/default-ref-same-code/queue.sh"
+tree="$SCRATCH/default-ref-same-code"
+PRISM_BENCH_LOCK="$tree/MEASURING" bash "$tree/scripts/bench_queue.sh" --out "$tree/out" \
+    --cache "$tree/cache" --ref-root "$tree/refs" --wait-idle 0 "$tree/queue.sh" > "$tree/log" 2>&1
+got=$?
+if [[ "$got" == 1 ]] && grep -q 'same' "$tree/log" && grep -q -- '--ref' "$tree/log" &&
+   (( $(find "$tree/cache" -type f | wc -l) == 0 )); then
+    PASS=$((PASS + 1)); echo "ok    default-ref-same-code stops the plan"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL  default-ref-same-code exit $got"
+    sed 's/^/      /' "$tree/log"
+fi
 
 # A TERM to the queue ends a running `run` step's command, not only the shell
 # that started it, and removes the marker.

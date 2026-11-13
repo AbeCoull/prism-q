@@ -4,7 +4,11 @@
 #
 # A queue file is bash, sourced, and describes steps with two commands:
 #
-#   ab   NAME DIR [bench_ab.sh options]   an A/B of the checkout at DIR
+#   ab   NAME DIR [bench_ab.sh options]   an A/B of the checkout at DIR, against
+#                                         --ref or by default the merge-base of
+#                                         its HEAD and origin/main (or main);
+#                                         --interleave measures the two cached
+#                                         binaries through bench_interleave.sh
 #   ix   NAME DIR [bench_interleave.sh options]
 #                                         an interleaved A/B of the checkout at DIR,
 #                                         both variants from its one binary
@@ -226,7 +230,7 @@ fi
 # step, kind ix in $2, defaults to the features its switch needs.
 step_build_options() {
     split_args "$1"
-    REF_ARG="HEAD"; FEATURES_ARG="parallel"; BENCH_ARG="circuits"
+    REF_ARG=""; FEATURES_ARG="parallel"; BENCH_ARG="circuits"
     [[ "${2:-}" == ix ]] && FEATURES_ARG="parallel bench-internal"
     local i
     for (( i = 0; i < ${#SPLIT[@]}; i++ )); do
@@ -255,14 +259,32 @@ cache_path() {
 NEW_EXE_OF=()
 REF_EXE_OF=()
 REF_SHA_OF=()
+# The full sha of a defaulted reference, passed to bench_ab.sh as --ref so the
+# step measures the commit its cached reference binary was built from.
+REF_DEFAULT_OF=()
 for (( s = 0; s < ${#STEP_NAME[@]}; s++ )); do
-    NEW_EXE_OF+=(""); REF_EXE_OF+=(""); REF_SHA_OF+=("")
+    NEW_EXE_OF+=(""); REF_EXE_OF+=(""); REF_SHA_OF+=(""); REF_DEFAULT_OF+=("")
     [[ "${STEP_KIND[s]}" == ab || "${STEP_KIND[s]}" == ix ]] || continue
     step_build_options "${STEP_ARGS[s]}" "${STEP_KIND[s]}"
     dir="${STEP_DIR[s]}"
     new_sha="$(git -C "$dir" rev-parse --short=10 HEAD)"
     NEW_EXE_OF[s]="$(cache_path "$dir" "$new_sha" worktree)"
     [[ "${STEP_KIND[s]}" == ix ]] && continue
+    if [[ -z "$REF_ARG" ]]; then
+        if ! default_ref "$dir"; then
+            echo "Error: step ${STEP_NAME[s]} names no --ref, and neither origin/main nor main" >&2
+            echo "  resolves to a merge-base with HEAD in $dir." >&2
+            exit 1
+        fi
+        if [[ "$DEFAULT_REF" == "$(git -C "$dir" rev-parse HEAD)" && -z "$(git -C "$dir" status --porcelain)" ]]; then
+            echo "Error: step ${STEP_NAME[s]} names no --ref, and the merge-base of HEAD and" >&2
+            echo "  $DEFAULT_REF_BASE is HEAD itself on a clean tree, so both sides would be the same" >&2
+            echo "  code. Give the step --ref, or --ref HEAD for a deliberate same-code run." >&2
+            exit 1
+        fi
+        REF_ARG="$DEFAULT_REF"
+        REF_DEFAULT_OF[s]="$DEFAULT_REF"
+    fi
     ref_sha="$(git -C "$dir" rev-parse --short=10 "$REF_ARG")" || { echo "Error: step ${STEP_NAME[s]}: unknown ref $REF_ARG" >&2; exit 1; }
     REF_EXE_OF[s]="$(cache_path "$dir" "$ref_sha" ref)"
     REF_SHA_OF[s]="$ref_sha"
@@ -404,6 +426,7 @@ measure_step() {
     split_args "${STEP_ARGS[s]}"
     if [[ "${STEP_KIND[s]}" == ab ]]; then
         run_step "$OUT_DIR/$name.log" bash "$BENCH_AB" --project-dir "${STEP_DIR[s]}" "${SPLIT[@]}" \
+            ${REF_DEFAULT_OF[s]:+--ref "${REF_DEFAULT_OF[s]}"} \
             --new-exe "${NEW_EXE_OF[s]}" --ref-exe "${REF_EXE_OF[s]}" \
             --wait-idle "$WAIT_IDLE" --out "$OUT_DIR/$name.md"
     elif [[ "${STEP_KIND[s]}" == ix ]]; then

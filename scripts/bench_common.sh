@@ -32,6 +32,22 @@ tree_fingerprint() {
     } | git hash-object --stdin
 }
 
+# The reference an A/B takes when none is named: the merge-base of HEAD and
+# origin/main in the checkout at $1, or of HEAD and main where origin/main does
+# not exist. Sets DEFAULT_REF to the full sha and DEFAULT_REF_BASE to the branch
+# it came from, and returns 1 when neither resolves.
+default_ref() {
+    local dir="${1:-.}" base
+    DEFAULT_REF=""; DEFAULT_REF_BASE=""
+    for base in origin/main main; do
+        git -C "$dir" rev-parse --verify -q "$base^{commit}" >/dev/null || continue
+        DEFAULT_REF="$(git -C "$dir" merge-base HEAD "$base")" || return 1
+        DEFAULT_REF_BASE="$base"
+        return 0
+    done
+    return 1
+}
+
 # The verdict word of the first `**Regression verdict**:` line in report $1, such
 # as PASS, FAIL, RERUN, NO DATA, or CONTROL, or nothing when the report is absent
 # or carries none.

@@ -227,13 +227,13 @@ fn clifford_register_work(width: usize, rotation_work: f64, measured: usize) -> 
 
 /// Whether `Auto` samples the terminal measurements of `circuit` from the Clifford
 /// register: a unitary Clifford+T circuit from [`MIN_AUTO_CLIFFORD_REGISTER_QUBITS`]
-/// qubits whose register fits [`clifford_register::MAX_REGISTER_QUBITS`]. Within the
-/// statevector cap the register must also cost less than the dense run over each
-/// independent block. When a block passes the cap no dense run is exact, so a register
-/// that fits is taken whatever the cap.
+/// qubits whose register splits into parts the sampler takes. Within the statevector cap
+/// the register must also cost less than the dense run over each independent block. When
+/// a block passes the cap no dense run is exact, so a register that splits is taken
+/// whatever the cap.
 ///
-/// A bound from the T count decides most circuits. The rest take a tableau dry run
-/// capped at the widest register that could still win.
+/// A bound from the T count decides most circuits. The rest take a tableau dry run that
+/// plans the split.
 pub(super) fn decide_clifford_register(circuit: &Circuit, limits: &ResolvedLimits) -> bool {
     let n = circuit.num_qubits;
     if n < MIN_AUTO_CLIFFORD_REGISTER_QUBITS
@@ -259,8 +259,8 @@ pub(super) fn decide_clifford_register(circuit: &Circuit, limits: &ResolvedLimit
         };
         work as f64
     });
-    register_wins(t, n, measured_qubits(circuit), dense, |max_width| {
-        stabilizer_rank::terminal_register_price(circuit, max_width)
+    register_wins(t, n, measured_qubits(circuit), dense, || {
+        stabilizer_rank::terminal_split_work(circuit)
     })
 }
 
@@ -273,15 +273,17 @@ fn measured_qubits(circuit: &Circuit) -> usize {
 }
 
 /// Whether a register on `qubits` qubits under `t` T gates, `measured` of them read, costs
-/// less than `dense` statevector work, or fits [`clifford_register::MAX_REGISTER_QUBITS`]
-/// when `dense` is `None` because no dense run is exact. `price` dry runs the tableau
-/// capped at a width, returning the width and rotation work, `None` past the cap.
+/// less than `dense` statevector work, or splits when `dense` is `None` because no dense
+/// run is exact. Up to [`clifford_register::MAX_REGISTER_QUBITS`] register qubits every
+/// part is held whole, so the bound `min(t, qubits)` prices the register unsplit. Past
+/// it, `split` plans the split on the tableau and returns its work in register amplitude
+/// updates, `None` when the split declines.
 fn register_wins(
     t: usize,
     qubits: usize,
     measured: usize,
     dense: Option<f64>,
-    price: impl FnOnce(usize) -> Option<(usize, u64)>,
+    split: impl FnOnce() -> Option<f64>,
 ) -> bool {
     let max_width = clifford_register::MAX_REGISTER_QUBITS;
     let bound = t.min(qubits);
@@ -291,23 +293,16 @@ fn register_wins(
         }
         #[cfg(test)]
         REGISTER_DRY_RUNS.with(|runs| runs.set(runs.get() + 1));
-        return price(max_width).is_some();
+        return split().is_some();
     };
     if bound <= max_width
         && clifford_register_work(bound, ((t - bound + 2) << bound) as f64, measured) < dense
     {
         return true;
     }
-    let Some(widest) = (0..=bound.min(max_width))
-        .rev()
-        .find(|&k| clifford_register_work(k, (2usize << k) as f64, measured) < dense)
-    else {
-        return false;
-    };
     #[cfg(test)]
     REGISTER_DRY_RUNS.with(|runs| runs.set(runs.get() + 1));
-    price(widest)
-        .is_some_and(|(k, rotations)| clifford_register_work(k, rotations as f64, measured) < dense)
+    split().is_some_and(|work| REGISTER_PASS_STATEVECTOR_AMPLITUDES * work < dense)
 }
 
 /// Narrowest circuit whose `Auto` expectation values and marginals the product-gauge
@@ -451,17 +446,12 @@ pub(super) fn decide_mid_circuit_clifford_t(
             statevector_work(circuit.instructions.len(), n) as f64
                 * walk_histories(circuit, shots) as f64
         });
-        let price = |max_width| {
-            clifford_register::register_price(&deferred, max_width)
-                .ok()
-                .flatten()
-        };
         if register_wins(
             t,
             deferred.num_qubits,
             measured_qubits(&deferred),
             dense,
-            price,
+            || stabilizer_rank::split_work(&deferred),
         ) {
             return MidCircuitRoute::Register;
         }

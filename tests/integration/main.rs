@@ -18,6 +18,7 @@ mod bench_fixture_routing;
 mod braket_pragmas;
 mod braket_results;
 mod braket_sampling;
+mod clifford_register_seeds;
 mod conformance_matrix;
 mod degenerate_inputs;
 mod dense_unitary;

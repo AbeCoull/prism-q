@@ -5,10 +5,11 @@ use num_complex::Complex64;
 use std::f64::consts::FRAC_PI_8;
 
 use super::{
-    CliffordRegister, MAX_REGISTER_QUBITS, RegisterPauli, apply_rotation, bit, fold_anchor_rest,
-    groups, join, mul_rows,
+    CliffordRegister, MAX_REGISTER_QUBITS, RegisterPauli, apply_rotation, bit, find,
+    fold_anchor_rest, groups, join, mul_rows,
 };
 use crate::circuit::{Circuit, Instruction};
+use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::qec::camps_prefix::SignedPauli;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm, propagate_register_rotations};
@@ -26,12 +27,12 @@ const PROPAGATED_TERM_AMPLITUDES: f64 = 16.0;
 
 /// The state `C (|0> ⊗ E (⊗_b α_b))` of a unitary Clifford+T circuit. A T gate whose axis
 /// flips a qubit in `|0>` anchors it as register bit `b` in the one-qubit state `α_b`, with
-/// the rest of the axis folded into `C`; every other T gate is an excess rotation in `E`,
+/// the rest of the axis on register qubits folded into `C`; every other T gate is an excess rotation in `E`,
 /// applied in circuit order.
 pub(super) struct ProductGauge {
     pub(super) register: CliffordRegister,
     /// `[<0|α_b>, <1|α_b>]` per register bit.
-    anchors: Vec<[Complex64; 2]>,
+    pub(super) anchors: Vec<[Complex64; 2]>,
     /// `(R, θ)` for each excess rotation `exp(-i θ R)`, `R` over register bits.
     pub(super) excess: Vec<(RegisterPauli, f64)>,
 }
@@ -40,9 +41,26 @@ impl ProductGauge {
     /// `None` past 64 register qubits or on a gate the prefix does not hold. Measurements
     /// and barriers are skipped.
     pub(super) fn build(circuit: &Circuit) -> Option<Self> {
+        Self::walk(circuit, MAX_GAUGE_QUBITS, MAX_GAUGE_QUBITS, &mut Vec::new())
+            .ok()
+            .flatten()
+    }
+
+    /// Walk `circuit` into the gauge, pushing its measurements onto `measures`. `None` at
+    /// the anchor past `max_anchors`, at most 64, or at the T gate whose excess rotation
+    /// links a unit of register qubits wider than `max_unit`; units only grow.
+    pub(super) fn walk(
+        circuit: &Circuit,
+        max_anchors: usize,
+        max_unit: usize,
+        measures: &mut Vec<(usize, usize)>,
+    ) -> Result<Option<Self>> {
+        debug_assert!(max_anchors <= MAX_GAUGE_QUBITS);
         let mut register = CliffordRegister::new(circuit.num_qubits);
         let mut anchors = Vec::new();
         let mut excess = Vec::new();
+        let mut unit_parent: Vec<usize> = Vec::new();
+        let mut unit_width: Vec<usize> = Vec::new();
         for inst in &circuit.instructions {
             match inst {
                 Instruction::Gate {
@@ -56,25 +74,44 @@ impl ProductGauge {
                     };
                     let q = targets[0];
                     let width = register.width;
-                    let p = register.admit_z(q, MAX_GAUGE_QUBITS)?;
+                    let Some(p) = register.admit_z(q, max_anchors) else {
+                        return Ok(None);
+                    };
                     if register.width == width {
                         let axis = register.restrict(&p);
-                        if axis.x | axis.z != 0 {
-                            excess.push((axis, theta));
+                        let mask = axis.x | axis.z;
+                        if mask == 0 {
+                            continue;
                         }
+                        let first = find(&mut unit_parent, mask.trailing_zeros() as usize);
+                        let mut rest = mask & (mask - 1);
+                        while rest != 0 {
+                            let root = find(&mut unit_parent, rest.trailing_zeros() as usize);
+                            rest &= rest - 1;
+                            if root != first {
+                                unit_parent[root] = first;
+                                unit_width[first] += unit_width[root];
+                            }
+                        }
+                        if unit_width[first] > max_unit {
+                            return Ok(None);
+                        }
+                        excess.push((axis, theta));
                         continue;
                     }
+                    unit_parent.push(width);
+                    unit_width.push(1);
                     let anchor = register
                         .slot
                         .iter()
                         .position(|&s| s == Some(width))
                         .expect("the admitted qubit holds the last slot");
-                    fold_anchor_rest(&mut register.prefix, anchor, &p);
+                    fold_anchor_rest(&mut register.prefix, &register.slot, anchor, &p);
                     let axis = register.prefix.conjugate_z(q);
-                    debug_assert!(
-                        (0..circuit.num_qubits)
-                            .all(|j| { j == anchor || !(bit(&axis.x, j) || bit(&axis.z, j)) })
-                    );
+                    debug_assert!((0..circuit.num_qubits).all(|j| {
+                        j == anchor
+                            || !bit(&axis.x, j) && (register.slot[j].is_none() || !bit(&axis.z, j))
+                    }));
                     let angle = if axis.phase4 == 2 { -theta } else { theta };
                     let (sin, cos) = angle.sin_cos();
                     let one = if bit(&axis.z, anchor) {
@@ -85,17 +122,33 @@ impl ProductGauge {
                     anchors.push([Complex64::new(cos, 0.0), one]);
                 }
                 Instruction::Gate { gate, targets } => {
-                    register.prefix.apply_state_gate(gate, targets).ok()?;
+                    register
+                        .prefix
+                        .apply_state_gate(gate, targets)
+                        .map_err(|_| PrismError::BackendUnsupported {
+                            backend: "stabilizer_rank".into(),
+                            operation: format!("gate `{}` in the Clifford register", gate.name()),
+                        })?;
                 }
-                Instruction::Measure { .. } | Instruction::Barrier { .. } => {}
-                _ => return None,
+                Instruction::Measure {
+                    qubit,
+                    classical_bit,
+                } => measures.push((*qubit, *classical_bit)),
+                Instruction::Barrier { .. } => {}
+                _ => {
+                    return Err(PrismError::IncompatibleBackend {
+                        backend: "stabilizer_rank".into(),
+                        reason: "the Clifford register samples terminal measurements of a                                  unitary circuit"
+                            .into(),
+                    });
+                }
             }
         }
-        Some(Self {
+        Ok(Some(Self {
             register,
             anchors,
             excess,
-        })
+        }))
     }
 
     /// `C† P C` restricted to the register, or `None` when it flips a qubit held in `|0>`,
@@ -128,7 +181,7 @@ impl ProductGauge {
     }
 
     /// Amplitudes of the part on the register bits of `mask`, lowest bit first.
-    fn part_state(&self, mask: u64, excess: &[usize]) -> Vec<Complex64> {
+    pub(super) fn part_state(&self, mask: u64, excess: &[usize]) -> Vec<Complex64> {
         let mut amps = Vec::with_capacity(1 << mask.count_ones());
         amps.push(Complex64::new(1.0, 0.0));
         let mut rest = mask;
@@ -155,7 +208,7 @@ impl ProductGauge {
 }
 
 /// Bits of `word` at the set bits of `mask`, packed from bit 0 up.
-fn compress(word: u64, mask: u64) -> u64 {
+pub(super) fn compress(word: u64, mask: u64) -> u64 {
     let mut packed = 0;
     let mut rest = mask;
     let mut i = 0;

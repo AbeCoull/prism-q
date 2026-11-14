@@ -2,9 +2,6 @@
 //! tableau over a dense register that holds only the qubits the T rotations reach.
 
 use num_complex::Complex64;
-use rand::RngExt;
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_8};
 
 use crate::backend::simd::norm_sqr_to_slice;
@@ -13,8 +10,8 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::qec::camps_prefix::{SignedCliffordPrefix, SignedPauli};
 
-/// Widest register [`TerminalSampler::compile`] builds. Diagonalizing the measured Paulis on it
-/// costs about `k^2 2^k` amplitude updates.
+/// Widest register [`TerminalSampler::compile_every_qubit`] builds. Up to this width the
+/// split register holds every part whole.
 #[cfg(not(prism_lowered_thresholds))]
 pub(super) const MAX_REGISTER_QUBITS: usize = 20;
 #[cfg(prism_lowered_thresholds)]
@@ -321,10 +318,25 @@ fn register_marginals(
     mut rows: Vec<RegisterPauli>,
     width: usize,
 ) -> (Vec<f64>, Vec<bool>, usize) {
+    let independent = rows.len();
+    let (pivots, flips, passes) = diagonalize(amps, &mut rows, independent, width);
+    (fold_table(amps, &pivots, width), flips, passes)
+}
+
+/// Map the first `independent` of `rows`, independent and commuting, to single `Z` letters
+/// with a Clifford `W`, apply `W` to `amps`, and conjugate the rest of `rows` through it.
+/// Returns the letter each mapped row lands on, whether it lands on `-Z`, and the number of
+/// passes over `amps` that `W` took.
+fn diagonalize(
+    amps: &mut [Complex64],
+    rows: &mut [RegisterPauli],
+    independent: usize,
+    width: usize,
+) -> (Vec<usize>, Vec<bool>, usize) {
     let mut gates = Vec::new();
-    let mut pivots: Vec<usize> = Vec::with_capacity(rows.len());
-    let mut flips = Vec::with_capacity(rows.len());
-    for i in 0..rows.len() {
+    let mut pivots: Vec<usize> = Vec::with_capacity(independent);
+    let mut flips = Vec::with_capacity(independent);
+    for i in 0..independent {
         let p = rows[i];
         let c = (0..width)
             .find(|b| !pivots.contains(b) && ((p.x | p.z) >> b) & 1 == 1)
@@ -358,7 +370,7 @@ fn register_marginals(
     for gate in &gates {
         apply_to_amps(amps, gate);
     }
-    (fold_table(amps, &pivots, width), flips, gates.len())
+    (pivots, flips, gates.len())
 }
 
 /// Sum `|amps[b]|^2` into `table[i]` over every `b` whose bit `pivots[j]` is bit `j` of
@@ -417,12 +429,13 @@ enum RowOutcome {
     Register { index: usize, flip: bool },
 }
 
-/// Terminal measurements of a unitary Clifford+T circuit, reduced once and drawn per shot.
+/// Terminal measurements of a unitary Clifford+T circuit over one dense register, reduced
+/// once and read out as an exact distribution.
 ///
 /// The measured `Z` images `C† Z_q C` are row reduced: a row that flips a `|0>` qubit
 /// takes a uniform bit independent of the rest, and the remaining rows act on the
 /// register alone, where a Clifford maps the independent ones to single `Z` letters so
-/// one table of `|φ|^2` marginals draws them all.
+/// one table of `|φ|^2` marginals holds them all.
 pub(super) struct TerminalSampler {
     outcome: Vec<RowOutcome>,
     /// Column `r` of the inverse of the row-combination matrix: the measured qubits'
@@ -527,7 +540,7 @@ fn build_register(
 }
 
 /// Width and rotation work of the register of `circuit`, read off the tableau without
-/// amplitudes; `None` exactly when [`TerminalSampler::compile`] returns `None`.
+/// amplitudes; `None` exactly when [`TerminalSampler::compile_every_qubit`] returns `None`.
 pub(super) fn register_price(circuit: &Circuit, max_width: usize) -> Result<Option<(usize, u64)>> {
     Ok(
         build_register(circuit, max_width, false, None, &mut Vec::new())?
@@ -535,17 +548,23 @@ pub(super) fn register_price(circuit: &Circuit, max_width: usize) -> Result<Opti
     )
 }
 
-/// Fold the controlled rest of `p = A_anchor ⊗ R`, `A` an `X` or `Y` on `anchor`, into
-/// `prefix`. Controlled on a qubit in `|0>` it leaves the state alone, and it leaves the
-/// rotation about `p` acting on the anchor alone.
-fn fold_anchor_rest(prefix: &mut SignedCliffordPrefix, anchor: usize, p: &SignedPauli) {
-    let n = prefix.num_qubits();
+/// Fold the controlled register part of `p = A_anchor ⊗ R`, `A` an `X` or `Y` on `anchor`,
+/// into `prefix`. Controlled on a qubit in `|0>` it leaves the state alone, and it leaves
+/// the rotation about `p` acting on the anchor and on `Z` letters of qubits held in `|0>`,
+/// which act on the state as `+1`. Those letters stay unfolded: the choice sets the letters
+/// of later anchors, so seeded shots depend on it.
+fn fold_anchor_rest(
+    prefix: &mut SignedCliffordPrefix,
+    slot: &[Option<usize>],
+    anchor: usize,
+    p: &SignedPauli,
+) {
     let mut fold = |gate: Gate, targets: &[usize]| {
         prefix
             .fold_right_state_gate(&gate, targets)
             .expect("Clifford folds into the prefix");
     };
-    for j in (0..n).filter(|&j| j != anchor) {
+    for j in (0..slot.len()).filter(|&j| j != anchor && slot[j].is_some()) {
         match (bit(&p.x, j), bit(&p.z, j)) {
             (false, false) => {}
             (true, false) => fold(Gate::Cx, &[anchor, j]),
@@ -627,8 +646,8 @@ pub struct RegisterSplit {
     /// Whether the canonical merge yields the same parts as the fixed point; `false`
     /// when a canonical part holds several fixed point parts, which are still valid.
     pub canonical_agrees: bool,
-    /// Cheapest two-way cut of `parts[0]` whose sides are unions of units, so no rotation
-    /// crosses it; `None` when that part is one unit.
+    /// The cut the sampler would take of the widest canonical part, whose sides are unions
+    /// of units so no rotation crosses it; `None` when that part is one unit.
     pub cut: Option<RegisterCut>,
 }
 
@@ -664,14 +683,9 @@ pub struct RegisterCut {
     /// Row pairs whose pieces anticommute across the cut, `E`.
     pub pairs: usize,
     /// Amplitude updates at 1024 shots: `40 (2^kL + 2^kR)` to build the sides, then
-    /// `2^E (E + 2)` a shot.
+    /// `(E + 3) 2^E` a shot.
     pub work: f64,
 }
-
-#[cfg(feature = "bench-internal")]
-const CUT_DENSE_PASSES: f64 = 40.0;
-#[cfg(feature = "bench-internal")]
-const CUT_SHOTS: f64 = 1024.0;
 
 /// Parts of the register of `circuit` in the product gauge, from the tableau alone, or
 /// `None` past the 64 anchors [`ProductGauge::build`] holds. `circuit` must already have
@@ -679,58 +693,34 @@ const CUT_SHOTS: f64 = 1024.0;
 #[cfg(feature = "bench-internal")]
 fn register_parts(circuit: &Circuit) -> Option<RegisterSplit> {
     let gauge = ProductGauge::build(circuit)?;
-    let CliffordRegister { prefix, slot, .. } = &gauge.register;
-    let n = circuit.num_qubits;
+    let register = &gauge.register;
     let excess: Vec<u64> = gauge.excess.iter().map(|(p, _)| p.x | p.z).collect();
-    let mut parent: Vec<usize> = (0..gauge.register.width).collect();
-    for &mask in &excess {
-        join(&mut parent, mask);
-    }
-    let mut measured: Vec<usize> = Vec::new();
+    let mut measures = Vec::new();
     for inst in &circuit.instructions {
-        if let Instruction::Measure { qubit, .. } = inst
-            && !measured.contains(qubit)
+        if let Instruction::Measure {
+            qubit,
+            classical_bit,
+        } = inst
         {
-            measured.push(*qubit);
+            measures.push((*qubit, *classical_bit));
         }
     }
-    let slot_mask = |slot: &[Option<usize>], words: &[u64]| {
-        slot.iter()
-            .enumerate()
-            .filter_map(|(q, s)| s.filter(|_| bit(words, q)))
-            .fold(0u64, |m, b| m | 1 << b)
-    };
-
-    let mut rows: Vec<SignedPauli> = measured.iter().map(|&q| prefix.conjugate_z(q)).collect();
-    let mut random = vec![false; rows.len()];
-    for f in (0..n).filter(|&f| slot[f].is_none()) {
-        let Some(pivot) = (0..rows.len()).find(|&r| !random[r] && bit(&rows[r].x, f)) else {
-            continue;
-        };
-        random[pivot] = true;
-        let pivot_row = rows[pivot].clone();
-        for (r, row) in rows.iter_mut().enumerate() {
-            if r != pivot && bit(&row.x, f) {
-                mul_rows(row, &pivot_row);
-            }
-        }
-    }
-    let mut basis: Vec<u128> = Vec::new();
-    for (row, _) in rows.iter().zip(&random).filter(|(_, random)| !**random) {
-        let mut v = u128::from(slot_mask(slot, &row.x)) | u128::from(slot_mask(slot, &row.z)) << 64;
-        for b in &basis {
-            v = v.min(v ^ b);
-        }
-        if v != 0 {
-            basis.push(v);
-        }
-    }
+    let rows = measured_rows(&register.prefix, &register.slot, &measures);
+    let basis = split::row_basis(
+        (0..rows.rows.len())
+            .filter(|&r| !rows.uniform[r])
+            .map(|r| register.restrict(&rows.rows[r])),
+    );
 
     let anti = |a: u128, b: u128| {
         let (ax, az, bx, bz) = (a as u64, (a >> 64) as u64, b as u64, (b >> 64) as u64);
         (ax & bz) ^ (az & bx)
     };
-    let units = groups(&mut parent);
+    let units = split::units(register.width, &gauge.excess);
+    let mut parent: Vec<usize> = (0..register.width).collect();
+    for &mask in &excess {
+        join(&mut parent, mask);
+    }
     let mut checks = 0u64;
     let mut parts = units.clone();
     loop {
@@ -755,49 +745,8 @@ fn register_parts(circuit: &Circuit) -> Option<RegisterSplit> {
         }
     }
 
-    // Row `i` of a unit's form has bit `j` set when rows `i` and `j` anticommute on the
-    // unit's qubits.
-    let forms: Vec<Vec<u64>> = units
-        .iter()
-        .map(|&u| {
-            basis
-                .iter()
-                .map(|&a| {
-                    basis.iter().enumerate().fold(0u64, |row, (j, &b)| {
-                        row | u64::from((anti(a, b) & u).count_ones() & 1) << j
-                    })
-                })
-                .collect()
-        })
-        .collect();
-    // A unit whose form is a sum of earlier ones joins every unit in that sum: the
-    // fundamental circuits of one elimination span the matroid's components.
-    let mut unit_parent: Vec<usize> = (0..units.len()).collect();
-    let mut eliminated: Vec<(Vec<u64>, usize, u64)> = Vec::new();
-    for (i, form) in forms.iter().enumerate() {
-        let mut v = form.clone();
-        let mut combo = 1u64 << i;
-        for (row, pivot, sum) in &eliminated {
-            if bit(&v, *pivot) {
-                for (d, s) in v.iter_mut().zip(row) {
-                    *d ^= s;
-                }
-                combo ^= sum;
-            }
-        }
-        match v.iter().position(|&w| w != 0) {
-            Some(w) => {
-                let pivot = 64 * w + v[w].trailing_zeros() as usize;
-                eliminated.push((v, pivot, combo));
-            }
-            None => join(&mut unit_parent, combo),
-        }
-    }
-    let mut canonical = vec![0u64; units.len()];
-    for (i, &u) in units.iter().enumerate() {
-        canonical[find(&mut unit_parent, i)] |= u;
-    }
-    canonical.retain(|&m| m != 0);
+    let forms = split::unit_forms(&units, &basis);
+    let mut canonical = split::canonical_parts(&units, &forms);
     debug_assert!(
         canonical.iter().all(|&c| {
             let mut sum = vec![0u64; basis.len()];
@@ -814,6 +763,10 @@ fn register_parts(circuit: &Circuit) -> Option<RegisterSplit> {
     let mut canonical_widths: Vec<usize> =
         canonical.iter().map(|c| c.count_ones() as usize).collect();
     canonical_widths.sort_unstable_by(|a, b| b.cmp(a));
+    let widest = canonical
+        .iter()
+        .copied()
+        .max_by_key(|c| (c.count_ones(), std::cmp::Reverse(c.trailing_zeros())));
     let mut fixed = parts.clone();
     fixed.sort_unstable();
     canonical.sort_unstable();
@@ -842,11 +795,18 @@ fn register_parts(circuit: &Circuit) -> Option<RegisterSplit> {
         })
         .collect();
     out.sort_by(|(_, a), (_, b)| b.width.cmp(&a.width).then(b.excess.cmp(&a.excess)));
-    let cut = out.first().and_then(|&(part, _)| {
+    let cut = widest.and_then(|part| {
         let inside: Vec<usize> = (0..units.len()).filter(|&i| units[i] & part != 0).collect();
         let inside_units: Vec<u64> = inside.iter().map(|&i| units[i]).collect();
         let inside_forms: Vec<&[u64]> = inside.iter().map(|&i| &forms[i][..]).collect();
-        best_cut(&inside_units, &inside_forms)
+        split::frozen_cut(&inside_units, &inside_forms).map(|cut| RegisterCut {
+            sides: (
+                cut.left_width.max(cut.right_width),
+                cut.left_width.min(cut.right_width),
+            ),
+            pairs: cut.pairs,
+            work: cut.work as f64,
+        })
     });
     Some(RegisterSplit {
         parts: out.into_iter().map(|(_, part)| part).collect(),
@@ -855,119 +815,6 @@ fn register_parts(circuit: &Circuit) -> Option<RegisterSplit> {
         canonical_agrees,
         cut,
     })
-}
-
-/// Rank over F2 of a matrix given by its rows.
-#[cfg(feature = "bench-internal")]
-fn f2_rank(rows: &[u64]) -> usize {
-    let mut rows: Vec<u64> = rows.iter().copied().filter(|&r| r != 0).collect();
-    let mut rank = 0;
-    while let Some(p) = rows.pop() {
-        rank += 1;
-        let low = p & p.wrapping_neg();
-        for r in &mut rows {
-            if *r & low != 0 {
-                *r ^= p;
-            }
-        }
-        rows.retain(|&r| r != 0);
-    }
-    rank
-}
-
-/// Cheapest cut by [`RegisterCut::work`] of a part into two unions of `units`, where
-/// `forms[i]` is the row commutation form on `units[i]`. Every split is tried up to 18
-/// units; past that, a descent by single units from eight random halves.
-#[cfg(feature = "bench-internal")]
-fn best_cut(units: &[u64], forms: &[&[u64]]) -> Option<RegisterCut> {
-    let m = units.len();
-    if m < 2 {
-        return None;
-    }
-    let width: usize = units.iter().map(|u| u.count_ones() as usize).sum();
-    let rows = forms[0].len();
-    let compile = |left: usize| {
-        CUT_DENSE_PASSES * (2f64.powi(left as i32) + 2f64.powi((width - left) as i32))
-    };
-    let score = |left: usize, acc: &[u64]| {
-        let pairs = f2_rank(acc) / 2;
-        RegisterCut {
-            sides: (left.max(width - left), left.min(width - left)),
-            pairs,
-            work: compile(left) + CUT_SHOTS * 2f64.powi(pairs as i32) * (pairs as f64 + 2.0),
-        }
-    };
-    let mut best: Option<RegisterCut> = None;
-    if m <= 18 {
-        let mut acc = vec![0u64; rows];
-        let mut inside = 0u64;
-        let mut left = 0usize;
-        for step in 1usize..1 << (m - 1) {
-            let i = step.trailing_zeros() as usize + 1;
-            inside ^= 1 << i;
-            let w = units[i].count_ones() as usize;
-            left = if inside >> i & 1 == 1 {
-                left + w
-            } else {
-                left - w
-            };
-            for (a, f) in acc.iter_mut().zip(forms[i]) {
-                *a ^= f;
-            }
-            if best.is_some_and(|b| compile(left) >= b.work) {
-                continue;
-            }
-            let cut = score(left, &acc);
-            if best.is_none_or(|b| cut.work < b.work) {
-                best = Some(cut);
-            }
-        }
-        return best;
-    }
-    let mut rng = ChaCha8Rng::seed_from_u64(42);
-    let state = |inside: &[bool]| {
-        let mut acc = vec![0u64; rows];
-        let mut left = 0;
-        for i in (0..m).filter(|&i| inside[i]) {
-            left += units[i].count_ones() as usize;
-            for (a, f) in acc.iter_mut().zip(forms[i]) {
-                *a ^= f;
-            }
-        }
-        score(left, &acc)
-    };
-    for _ in 0..8 {
-        let mut order: Vec<usize> = (0..m).collect();
-        for i in (1..m).rev() {
-            order.swap(i, rng.random_range(0..=i));
-        }
-        let mut inside = vec![false; m];
-        for &i in &order[..m / 2] {
-            inside[i] = true;
-        }
-        let mut current = state(&inside);
-        let mut improved = true;
-        while improved {
-            improved = false;
-            for &i in &order {
-                inside[i] = !inside[i];
-                let count = inside.iter().filter(|&&x| x).count();
-                if count > 0 && count < m {
-                    let trial = state(&inside);
-                    if trial.work < current.work {
-                        current = trial;
-                        improved = true;
-                        continue;
-                    }
-                }
-                inside[i] = !inside[i];
-            }
-        }
-        if best.is_none_or(|b| current.work < b.work) {
-            best = Some(current);
-        }
-    }
-    best
 }
 
 #[cfg(feature = "bench-internal")]
@@ -1011,23 +858,78 @@ pub(super) fn census(circuit: &Circuit) -> Result<CliffordRegisterCensus> {
     })
 }
 
-impl TerminalSampler {
-    /// Reduce `circuit`, or return `None` when its register would pass `max_width`
-    /// qubits.
-    pub(super) fn compile(circuit: &Circuit, max_width: usize) -> Result<Option<Self>> {
-        let mut measures = Vec::new();
-        let Some(state) = build_register(circuit, max_width, true, None, &mut measures)? else {
-            return Ok(None);
-        };
-        Ok(Some(Self::reduce(
-            state,
-            measures,
-            circuit.num_classical_bits,
-        )))
-    }
+/// The `Z` images `C† Z_q C` of the measured qubits, in order of first measurement, with
+/// the rows that flip a qubit held in `|0>` split off as uniform bits.
+struct MeasuredRows {
+    row_of_qubit: Vec<usize>,
+    /// The rows after the reduction: a uniform row is the only one left flipping its
+    /// qubit, and no other row flips a qubit held in `|0>`.
+    rows: Vec<SignedPauli>,
+    uniform: Vec<bool>,
+    /// Column `r` of the inverse of the row-combination matrix: the measured qubits' bits
+    /// are the XOR of `inverse[r]` over rows `r` whose outcome is 1.
+    inverse: Vec<Vec<u64>>,
+}
 
-    /// Like [`Self::compile`], with qubit `q` measured into classical bit `q` in place of
-    /// the circuit's own measurements.
+fn measured_rows(
+    prefix: &SignedCliffordPrefix,
+    slot: &[Option<usize>],
+    measures: &[(usize, usize)],
+) -> MeasuredRows {
+    let n = slot.len();
+    let mut measured: Vec<usize> = Vec::new();
+    let mut row_of_qubit = vec![usize::MAX; n];
+    for &(q, _) in measures {
+        if row_of_qubit[q] == usize::MAX {
+            row_of_qubit[q] = measured.len();
+            measured.push(q);
+        }
+    }
+    let m = measured.len();
+    let words = m.div_ceil(64).max(1);
+    let mut rows: Vec<SignedPauli> = measured.iter().map(|&q| prefix.conjugate_z(q)).collect();
+    let mut inverse: Vec<Vec<u64>> = (0..m)
+        .map(|r| {
+            let mut col = vec![0u64; words];
+            col[r >> 6] |= 1 << (r & 63);
+            col
+        })
+        .collect();
+    let mut uniform = vec![false; m];
+    for f in (0..n).filter(|&f| slot[f].is_none()) {
+        let Some(pivot) = (0..m).find(|&r| !uniform[r] && bit(&rows[r].x, f)) else {
+            continue;
+        };
+        uniform[pivot] = true;
+        let pivot_row = rows[pivot].clone();
+        for r in 0..m {
+            if r == pivot || !bit(&rows[r].x, f) {
+                continue;
+            }
+            mul_rows(&mut rows[r], &pivot_row);
+            let (lo, hi) = inverse.split_at_mut(pivot.max(r));
+            let (dst, src) = if pivot < r {
+                (&mut lo[pivot], &hi[0])
+            } else {
+                (&mut hi[0], &lo[r])
+            };
+            for (d, s) in dst.iter_mut().zip(src) {
+                *d ^= s;
+            }
+        }
+    }
+    MeasuredRows {
+        row_of_qubit,
+        rows,
+        uniform,
+        inverse,
+    }
+}
+
+impl TerminalSampler {
+    /// Reduce `circuit` with qubit `q` measured into classical bit `q` in place of the
+    /// circuit's own measurements, or return `None` when its register would pass
+    /// `max_width` qubits.
     pub(super) fn compile_every_qubit(circuit: &Circuit, max_width: usize) -> Result<Option<Self>> {
         let n = circuit.num_qubits;
         let Some(state) = build_register(circuit, max_width, true, None, &mut Vec::new())? else {
@@ -1072,52 +974,17 @@ impl TerminalSampler {
         measures: Vec<(usize, usize)>,
         num_classical_bits: usize,
     ) -> Self {
-        let n = state.slot.len();
-        let mut measured: Vec<usize> = Vec::new();
-        let mut row_of_qubit = vec![usize::MAX; n];
-        for &(q, _) in &measures {
-            if row_of_qubit[q] == usize::MAX {
-                row_of_qubit[q] = measured.len();
-                measured.push(q);
-            }
-        }
-        let m = measured.len();
-        let words = m.div_ceil(64).max(1);
-        let mut rows: Vec<SignedPauli> = measured
+        let MeasuredRows {
+            row_of_qubit,
+            rows,
+            uniform,
+            mut inverse,
+        } = measured_rows(&state.prefix, &state.slot, &measures);
+        let m = rows.len();
+        let mut outcome: Vec<Option<RowOutcome>> = uniform
             .iter()
-            .map(|&q| state.prefix.conjugate_z(q))
+            .map(|&u| u.then_some(RowOutcome::Random))
             .collect();
-        let mut inverse: Vec<Vec<u64>> = (0..m)
-            .map(|r| {
-                let mut col = vec![0u64; words];
-                col[r >> 6] |= 1 << (r & 63);
-                col
-            })
-            .collect();
-        let mut outcome: Vec<Option<RowOutcome>> = (0..m).map(|_| None).collect();
-
-        for f in (0..n).filter(|&f| state.slot[f].is_none()) {
-            let Some(pivot) = (0..m).find(|&r| outcome[r].is_none() && bit(&rows[r].x, f)) else {
-                continue;
-            };
-            outcome[pivot] = Some(RowOutcome::Random);
-            let pivot_row = rows[pivot].clone();
-            for r in 0..m {
-                if r == pivot || !bit(&rows[r].x, f) {
-                    continue;
-                }
-                mul_rows(&mut rows[r], &pivot_row);
-                let (lo, hi) = inverse.split_at_mut(pivot.max(r));
-                let (dst, src) = if pivot < r {
-                    (&mut lo[pivot], &hi[0])
-                } else {
-                    (&mut hi[0], &lo[r])
-                };
-                for (d, s) in dst.iter_mut().zip(src) {
-                    *d ^= s;
-                }
-            }
-        }
 
         let mut reg_rows: Vec<(usize, RegisterPauli)> = (0..m)
             .filter(|&r| outcome[r].is_none())
@@ -1179,28 +1046,6 @@ impl TerminalSampler {
         }
     }
 
-    pub(super) fn sample(&self, num_shots: usize, seed: u64) -> Vec<Vec<bool>> {
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let mut total = 0.0;
-        let cumulative: Vec<f64> = self
-            .table
-            .iter()
-            .map(|p| {
-                total += p;
-                total
-            })
-            .collect();
-        (0..num_shots)
-            .map(|_| {
-                let draw = rng.random::<f64>() * total;
-                let index = cumulative
-                    .partition_point(|&c| c <= draw)
-                    .min(cumulative.len() - 1);
-                self.classical_bits(index, || rng.random::<bool>())
-            })
-            .collect()
-    }
-
     /// Exact probability of every classical outcome, indexed with classical bit `i` at
     /// bit `i`. Dense over `2^num_classical_bits` entries.
     pub(super) fn distribution(&self) -> Vec<f64> {
@@ -1258,36 +1103,16 @@ impl TerminalSampler {
         }
         dist
     }
-
-    /// Classical bits for register outcome `index`, drawing each uniform row from
-    /// `coin`.
-    fn classical_bits(&self, index: usize, mut coin: impl FnMut() -> bool) -> Vec<bool> {
-        let mut bits = vec![0u64; self.inverse.first().map_or(1, Vec::len)];
-        for (r, how) in self.outcome.iter().enumerate() {
-            let one = match *how {
-                RowOutcome::Random => coin(),
-                RowOutcome::Fixed(one) => one,
-                RowOutcome::Register { index: i, flip } => ((index >> i) & 1 == 1) ^ flip,
-            };
-            if one {
-                for (b, s) in bits.iter_mut().zip(&self.inverse[r]) {
-                    *b ^= s;
-                }
-            }
-        }
-        let mut classical = vec![false; self.num_classical_bits];
-        for &(q, cb) in &self.measures {
-            classical[cb] = bit(&bits, self.row_of_qubit[q]);
-        }
-        classical
-    }
 }
 
 #[path = "clifford_parts.rs"]
 mod parts;
+#[path = "clifford_split.rs"]
+mod split;
 #[cfg(feature = "bench-internal")]
 use parts::ProductGauge;
 pub(super) use parts::RegisterExpectations;
+pub(super) use split::{SplitPlan, SplitSampler};
 
 #[cfg(test)]
 #[path = "clifford_register_tests.rs"]

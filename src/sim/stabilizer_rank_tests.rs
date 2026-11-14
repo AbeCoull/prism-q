@@ -102,27 +102,33 @@ fn shots_with_t_bypass_statevector_qubit_cap_terminal() {
     assert_eq!(auto_result.shots.len(), 8);
 }
 
+// The split admits any register whose parts fit, so only an excess rotation that links 25
+// register qubits into one unit, past the widest table, declines it.
 #[test]
-fn shots_decline_a_register_past_its_cap() {
-    let width = MAX_REGISTER_QUBITS + 1;
+fn shots_decline_a_register_unit_past_its_cap() {
+    let width = 25;
     let mut c = Circuit::new(width + 1, width + 1);
     for q in 0..width {
         c.add_gate(Gate::H, &[q]);
         c.add_gate(Gate::T, &[q]);
     }
-    for q in 0..width {
-        c.add_gate(Gate::Cx, &[q, q + 1]);
+    for q in 1..width {
+        c.add_gate(Gate::Cx, &[q, 0]);
     }
+    c.add_gate(Gate::T, &[0]);
     for q in 0..=width {
         c.add_measure(q, q);
     }
 
-    assert!(terminal_register_price(&c, MAX_REGISTER_QUBITS).is_none());
+    assert!(terminal_split_work(&c).is_none());
     let err = run_stabilizer_rank_shots(&c, 8, 42).unwrap_err();
     assert!(
         matches!(err, PrismError::BackendUnsupported { .. }),
         "got {err:?}"
     );
+    c.instructions.truncate(c.instructions.len() - width - 2);
+    c.measure_all();
+    assert!(terminal_split_work(&c).is_some());
 }
 
 #[test]
@@ -1498,9 +1504,7 @@ fn deferred_register_probabilities_match_a_dense_dilation() {
     ];
     for (label, circuit) in cases {
         let deferred = crate::sim::compiled::defer_clifford_t_circuit(&circuit).unwrap();
-        let sampler = TerminalSampler::compile(&deferred, MAX_REGISTER_QUBITS)
-            .unwrap()
-            .unwrap();
+        let sampler = SplitSampler::compile(&deferred).unwrap().unwrap();
         let want = dilated_distribution(&circuit);
         for (key, (got, want)) in sampler.distribution().iter().zip(&want).enumerate() {
             assert!(

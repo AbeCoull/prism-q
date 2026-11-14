@@ -41,7 +41,8 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
 use super::clifford_register::{
-    MAX_REGISTER_QUBITS, Pruning, RegisterExpectations, TerminalSampler, register_price,
+    MAX_REGISTER_QUBITS, Pruning, RegisterExpectations, SplitPlan, SplitSampler, TerminalSampler,
+    register_price,
 };
 
 /// Letter-level signed Pauli string. Each qubit's `(x, z)` bit pair encodes
@@ -1125,14 +1126,16 @@ pub(super) fn sample_mps_branches_online(
 /// `[cos²(π/8), sin²(π/8)]`).
 ///
 /// Terminal measurements of a unitary circuit are drawn from a Clifford tableau over a
-/// dense register holding only the qubits the T gates reach, at most 20 of them; a
-/// circuit whose register would grow past 20 returns `BackendUnsupported`. A circuit with
-/// mid-circuit measurements, guards or resets takes the same register once its
-/// measurements move to the end, which holds when every guard applies a Pauli and no gate
-/// reuses a measured qubit before a reset. Otherwise its measurements are sampled by
-/// projecting coherent weighted branches and contracting branch overlaps, up to 20 T
-/// gates, guarded ones included; past that it returns `BackendUnsupported` before the
-/// first shot. Neither route is bound by the dense statevector cap.
+/// register holding only the qubits the T gates reach, split into independent parts: a
+/// part of up to 24 qubits is held as one dense table, a wider one cut in two sides of at
+/// most 20, up to 64 register qubits in all. A circuit whose register does not split that
+/// way returns `BackendUnsupported`. A circuit with mid-circuit measurements, guards or
+/// resets takes the same register once its measurements move to the end, which holds when
+/// every guard applies a Pauli and no gate reuses a measured qubit before a reset.
+/// Otherwise its measurements are sampled by projecting coherent weighted branches and
+/// contracting branch overlaps, up to 20 T gates, guarded ones included; past that it
+/// returns `BackendUnsupported` before the first shot. Neither route is bound by the dense
+/// statevector cap.
 pub fn run_stabilizer_rank_shots(
     circuit: &Circuit,
     num_shots: usize,
@@ -1151,13 +1154,12 @@ pub fn run_stabilizer_rank_shots(
     }
 
     if circuit.has_terminal_measurements_only() && !circuit.has_resets() {
-        let Some(sampler) = TerminalSampler::compile(circuit, MAX_REGISTER_QUBITS)? else {
+        let Some(sampler) = SplitSampler::compile(circuit)? else {
             return Err(PrismError::BackendUnsupported {
                 backend: "stabilizer_rank".into(),
-                operation: format!(
-                    "terminal sampling with a Clifford register wider than {MAX_REGISTER_QUBITS} \
-                     qubits"
-                ),
+                operation: "terminal sampling with a Clifford register that does not split \
+                            into parts of at most 24 qubits, or cuts of at most 20 a side"
+                    .into(),
             });
         };
         return Ok(super::ShotsResult::from_shots(
@@ -1183,19 +1185,13 @@ pub fn run_stabilizer_rank_shots(
 }
 
 /// The register sampler of the lowered `circuit` with its measurements deferred to the
-/// end, `None` when the deferral declines or the register would pass
-/// [`MAX_REGISTER_QUBITS`]. Past that many T gates a tableau dry run checks the width
-/// before any amplitude is built.
-fn deferred_sampler(circuit: &Circuit) -> Result<Option<TerminalSampler>> {
+/// end, `None` when the deferral or the split declines. The split is planned on the
+/// tableau before any amplitude is built.
+fn deferred_sampler(circuit: &Circuit) -> Result<Option<SplitSampler>> {
     let Ok(deferred) = super::compiled::defer_clifford_t_circuit(circuit) else {
         return Ok(None);
     };
-    if circuit.t_count() > MAX_REGISTER_QUBITS
-        && register_price(&deferred, MAX_REGISTER_QUBITS)?.is_none()
-    {
-        return Ok(None);
-    }
-    TerminalSampler::compile(&deferred, MAX_REGISTER_QUBITS)
+    SplitSampler::compile(&deferred)
 }
 
 /// Refuse a circuit whose branches would pass [`MAX_TERMS`] before the first shot: every
@@ -1212,8 +1208,7 @@ fn reject_branch_overflow(circuit: &Circuit) -> Result<()> {
         backend: "stabilizer_rank".into(),
         operation: format!(
             "mid-circuit sampling of {t} T gates: the measurements do not defer to a \
-             Clifford register of at most {MAX_REGISTER_QUBITS} qubits, and the branches \
-             would pass {MAX_TERMS} terms"
+             Clifford register that splits, and the branches would pass {MAX_TERMS} terms"
         ),
     })
 }
@@ -1225,12 +1220,16 @@ pub(super) fn deferred_register_circuit(circuit: &Circuit) -> Option<Circuit> {
     super::compiled::defer_clifford_t_circuit(&lowered).ok()
 }
 
-/// Width and rotation work of the register [`run_stabilizer_rank_shots`] samples terminal
-/// shots of `circuit` from, decided from the tableau alone. `None` past `max_width`
-/// qubits or when the circuit does not lower to Clifford+T.
-pub(super) fn terminal_register_price(circuit: &Circuit, max_width: usize) -> Option<(usize, u64)> {
-    let lowered = lower_clifford_t_circuit(circuit).ok()?;
-    register_price(&lowered, max_width).ok().flatten()
+/// Register amplitude updates [`run_stabilizer_rank_shots`] spends on the tables it draws
+/// terminal shots of `circuit` from, planned on the tableau alone. `None` when the split
+/// declines or the circuit does not lower to Clifford+T.
+pub(super) fn terminal_split_work(circuit: &Circuit) -> Option<f64> {
+    split_work(&*lower_clifford_t_circuit(circuit).ok()?)
+}
+
+/// [`terminal_split_work`] of a circuit already lowered to Clifford+T.
+pub(super) fn split_work(circuit: &Circuit) -> Option<f64> {
+    Some(SplitPlan::new(circuit).ok()??.work())
 }
 
 /// The product-gauge register plan of `observables` on the unitary `circuit`; `None` when

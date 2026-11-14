@@ -636,12 +636,12 @@ fn require_exact_predicts_the_stabilizer_rank_shot_route() {
     );
 }
 
-// Past the shot T ceiling the sampler falls through to the family tree, and a noise
-// model sends trajectories there too, so both stay rejected.
+// Past 64 register qubits the split register declines and the sampler falls through to
+// the family tree, and a noise model sends trajectories there too, so both stay rejected.
 #[test]
 fn require_exact_rejects_shots_the_family_tree_takes() {
     let is_mps = |err: &PrismError| matches!(err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps");
-    let deep = wide_clifford_t_chain(60, 45);
+    let deep = wide_clifford_t_chain(70, 66);
     let err = simulate(&deep)
         .seed(SEED)
         .require_exact()

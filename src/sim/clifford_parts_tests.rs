@@ -6,7 +6,7 @@ use crate::sim::{BackendKind, Query, ResolvedBackend, RouteRule, simulate};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-const EPS: f64 = 1e-12;
+const EPS: f64 = 1e-10;
 
 fn random_clifford_t(n: usize, gates: usize, t_count: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);

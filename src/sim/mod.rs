@@ -894,6 +894,14 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn probabilities_of(self, qubits: &[usize]) -> Result<Vec<f64>> {
         self.reject_saves("probabilities_of")?;
         crate::backend::schmidt::validate_qubit_set(qubits, self.circuit.num_qubits)?;
+        if self.kind.is_auto()
+            && self.noise_model.is_none()
+            && self.initial_state.is_none()
+            && let Some(plan) =
+                decide_register_subset(self.circuit, qubits, &self.resolved_limits())
+        {
+            return Ok(subset_probabilities(plan.values()));
+        }
         let kind = format!("{:?}", self.kind);
         let outcome = self.run()?;
         let probabilities = outcome
@@ -3166,6 +3174,26 @@ fn spd_metadata(truncation: &SpdTruncation) -> RunMetadata {
     }
 }
 
+/// Joint distribution from `<Z_S>` over every nonempty subset `S` in bitmask order from 1:
+/// `P(o) = 2^-k sum_S (-1)^|o & S| <Z_S>`, rounding below zero clamped.
+fn subset_probabilities(subset_values: Vec<f64>) -> Vec<f64> {
+    let mut table = Vec::with_capacity(subset_values.len() + 1);
+    table.push(1.0);
+    table.extend(subset_values);
+    let mut half = 1;
+    while half < table.len() {
+        for block in table.chunks_exact_mut(2 * half) {
+            let (lo, hi) = block.split_at_mut(half);
+            for (a, b) in lo.iter_mut().zip(hi) {
+                (*a, *b) = (*a + *b, *a - *b);
+            }
+        }
+        half *= 2;
+    }
+    let scale = 1.0 / table.len() as f64;
+    table.iter().map(|v| (v * scale).max(0.0)).collect()
+}
+
 pub(crate) fn expectations_to_marginals(expectations: &[f64]) -> Vec<(f64, f64)> {
     expectations
         .iter()
@@ -3264,6 +3292,11 @@ fn execute_marginals(
             result.metadata.reason = RouteRule::SpdBudgetFallback;
             Ok(result)
         }
+        MarginalRoute::Register(plan) => Ok(MarginalsResult {
+            marginals: expectations_to_marginals(&plan.values()),
+            metadata: RunMetadata::exact(ResolvedBackend::StabilizerRank)
+                .with_reason(RouteRule::CliffordRegister),
+        }),
         MarginalRoute::Tensor(planned, rule) => {
             let values = planned.contract(limits)?;
             Ok(MarginalsResult {
@@ -3390,6 +3423,10 @@ fn execute_expectations(
             }
             Ok(analytic_expectations(values, spd_metadata(&truncation)))
         }
+        ExpectationRoute::Register(plan) => Ok(analytic_expectations(
+            plan.values(),
+            RunMetadata::exact(ResolvedBackend::StabilizerRank),
+        )),
         ExpectationRoute::Tensor(planned, _) => contract_tensor(planned, limits),
         ExpectationRoute::Statevector => {
             expectation_values_statevector(kind, circuit, observables, seed, limits)

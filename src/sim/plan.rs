@@ -936,6 +936,7 @@ fn inspect_expectation(
             p
         }
         ExpectationRoute::Deterministic(truncation) => pauli_plan(truncation, rule),
+        ExpectationRoute::Register(_) => Plan::new(ResolvedBackend::StabilizerRank, rule),
         ExpectationRoute::Tensor(planned, _) => {
             let mut plan = Plan::new(ResolvedBackend::TensorNetwork, rule);
             plan.would_fail = planned.failure().cloned();
@@ -967,6 +968,10 @@ fn inspect_marginal(
         MarginalRoute::Deterministic(truncation) => {
             Ok(pauli_plan(truncation, RouteRule::ExplicitBackend))
         }
+        MarginalRoute::Register(_) => Ok(Plan::new(
+            ResolvedBackend::StabilizerRank,
+            RouteRule::CliffordRegister,
+        )),
         MarginalRoute::Spd { budget } => {
             let mut p = Plan::new(ResolvedBackend::DeterministicPauli, RouteRule::SpdExact);
             if budget.is_some() {

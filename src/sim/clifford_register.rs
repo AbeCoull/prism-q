@@ -58,7 +58,7 @@ impl RegisterPauli {
 
 /// Sum of the `i^k` factors from multiplying letters position by position, packed.
 #[inline]
-fn letter_phase(ax: u64, az: u64, bx: u64, bz: u64) -> u32 {
+pub(super) fn letter_phase(ax: u64, az: u64, bx: u64, bz: u64) -> u32 {
     let a_x = ax & !az;
     let a_y = ax & az;
     let a_z = !ax & az;
@@ -133,7 +133,7 @@ impl CliffordRegister {
             self.amps.resize(2 * len, Complex64::new(0.0, 0.0));
         }
         let reg = self.restrict(&p);
-        self.apply_rotation(reg, theta);
+        apply_rotation(&mut self.amps, reg, theta);
         true
     }
 
@@ -191,37 +191,37 @@ impl CliffordRegister {
         }
         reg
     }
+}
 
-    /// `φ ← cos θ φ - i sin θ P φ`, with `P|b> = i^(phase4 + #Y) (-1)^|b & z| |b ^ x>`.
-    fn apply_rotation(&mut self, p: RegisterPauli, theta: f64) {
-        let quarter = (u32::from(p.phase4) + (p.x & p.z).count_ones()) & 3;
-        let (sin, cos) = theta.sin_cos();
-        // -i sin θ · i^quarter
-        let coeff = Complex64::new(0.0, -sin) * Complex64::i().powu(quarter);
-        let sign = |b: usize| {
-            if (b as u64 & p.z).count_ones() & 1 == 1 {
-                -coeff
-            } else {
-                coeff
-            }
-        };
-        if p.x == 0 {
-            for (b, amp) in self.amps.iter_mut().enumerate() {
-                *amp *= cos + sign(b);
-            }
-            return;
+/// `φ ← cos θ φ - i sin θ P φ`, with `P|b> = i^(phase4 + #Y) (-1)^|b & z| |b ^ x>`.
+fn apply_rotation(amps: &mut [Complex64], p: RegisterPauli, theta: f64) {
+    let quarter = (u32::from(p.phase4) + (p.x & p.z).count_ones()) & 3;
+    let (sin, cos) = theta.sin_cos();
+    // -i sin θ · i^quarter
+    let coeff = Complex64::new(0.0, -sin) * Complex64::i().powu(quarter);
+    let sign = |b: usize| {
+        if (b as u64 & p.z).count_ones() & 1 == 1 {
+            -coeff
+        } else {
+            coeff
         }
-        let x = p.x as usize;
-        let low = x & x.wrapping_neg();
-        for b in 0..self.amps.len() {
-            if b & low != 0 {
-                continue;
-            }
-            let b2 = b ^ x;
-            let (a, a2) = (self.amps[b], self.amps[b2]);
-            self.amps[b] = a * cos + sign(b2) * a2;
-            self.amps[b2] = a2 * cos + sign(b) * a;
+    };
+    if p.x == 0 {
+        for (b, amp) in amps.iter_mut().enumerate() {
+            *amp *= cos + sign(b);
         }
+        return;
+    }
+    let x = p.x as usize;
+    let low = x & x.wrapping_neg();
+    for b in 0..amps.len() {
+        if b & low != 0 {
+            continue;
+        }
+        let b2 = b ^ x;
+        let (a, a2) = (amps[b], amps[b2]);
+        amps[b] = a * cos + sign(b2) * a2;
+        amps[b2] = a2 * cos + sign(b) * a;
     }
 }
 
@@ -495,6 +495,60 @@ pub(super) fn register_price(circuit: &Circuit, max_width: usize) -> Result<Opti
     )
 }
 
+/// Fold the controlled rest of `p = A_anchor ⊗ R`, `A` an `X` or `Y` on `anchor`, into
+/// `prefix`. Controlled on a qubit in `|0>` it leaves the state alone, and it leaves the
+/// rotation about `p` acting on the anchor alone.
+fn fold_anchor_rest(prefix: &mut SignedCliffordPrefix, anchor: usize, p: &SignedPauli) {
+    let n = prefix.num_qubits();
+    let mut fold = |gate: Gate, targets: &[usize]| {
+        prefix
+            .fold_right_state_gate(&gate, targets)
+            .expect("Clifford folds into the prefix");
+    };
+    for j in (0..n).filter(|&j| j != anchor) {
+        match (bit(&p.x, j), bit(&p.z, j)) {
+            (false, false) => {}
+            (true, false) => fold(Gate::Cx, &[anchor, j]),
+            (false, true) => fold(Gate::Cz, &[anchor, j]),
+            (true, true) => {
+                fold(Gate::S, &[j]);
+                fold(Gate::Cx, &[anchor, j]);
+                fold(Gate::Sdg, &[j]);
+            }
+        }
+    }
+}
+
+fn find(parent: &mut [usize], mut a: usize) -> usize {
+    while parent[a] != a {
+        parent[a] = parent[parent[a]];
+        a = parent[a];
+    }
+    a
+}
+
+/// Union every register bit of `mask` into one set.
+fn join(parent: &mut [usize], mask: u64) {
+    let first = mask.trailing_zeros() as usize;
+    let mut rest = mask & mask.wrapping_sub(1);
+    while rest != 0 {
+        let b = rest.trailing_zeros() as usize;
+        rest &= rest - 1;
+        let (ra, rb) = (find(parent, first), find(parent, b));
+        parent[rb] = ra;
+    }
+}
+
+/// The sets of `parent` as register bit masks.
+fn groups(parent: &mut [usize]) -> Vec<u64> {
+    let mut masks = vec![0u64; parent.len()];
+    for b in 0..parent.len() {
+        masks[find(parent, b)] |= 1 << b;
+    }
+    masks.retain(|&m| m != 0);
+    masks
+}
+
 /// Register counts of one terminal Clifford+T circuit, read off the tableau without
 /// amplitudes.
 #[cfg(feature = "bench-internal")]
@@ -536,32 +590,20 @@ pub struct RegisterPart {
 /// [`build_register`].
 #[cfg(feature = "bench-internal")]
 fn register_parts(circuit: &Circuit) -> (Vec<RegisterPart>, u64) {
+    let gauge = ProductGauge::build(circuit).expect("the product gauge holds the census circuit");
+    let CliffordRegister { prefix, slot, .. } = &gauge.register;
     let n = circuit.num_qubits;
-    let mut prefix = SignedCliffordPrefix::identity(n);
-    let mut slot: Vec<Option<usize>> = vec![None; n];
-    let mut parent: Vec<usize> = Vec::new();
-    let mut excess: Vec<u64> = Vec::new();
-    let mut measured: Vec<usize> = Vec::new();
-    let fold = |prefix: &mut SignedCliffordPrefix, gate: Gate, targets: &[usize]| {
-        prefix
-            .fold_right_state_gate(&gate, targets)
-            .expect("Clifford folds into the prefix");
-    };
-    fn find(parent: &mut [usize], mut a: usize) -> usize {
-        while parent[a] != a {
-            parent[a] = parent[parent[a]];
-            a = parent[a];
-        }
-        a
+    let excess: Vec<u64> = gauge.excess.iter().map(|(p, _)| p.x | p.z).collect();
+    let mut parent: Vec<usize> = (0..gauge.register.width).collect();
+    for &mask in &excess {
+        join(&mut parent, mask);
     }
-    fn join(parent: &mut [usize], mask: u64) {
-        let first = mask.trailing_zeros() as usize;
-        let mut rest = mask & mask.wrapping_sub(1);
-        while rest != 0 {
-            let b = rest.trailing_zeros() as usize;
-            rest &= rest - 1;
-            let (ra, rb) = (find(parent, first), find(parent, b));
-            parent[rb] = ra;
+    let mut measured: Vec<usize> = Vec::new();
+    for inst in &circuit.instructions {
+        if let Instruction::Measure { qubit, .. } = inst
+            && !measured.contains(qubit)
+        {
+            measured.push(*qubit);
         }
     }
     let slot_mask = |slot: &[Option<usize>], words: &[u64]| {
@@ -570,58 +612,6 @@ fn register_parts(circuit: &Circuit) -> (Vec<RegisterPart>, u64) {
             .filter_map(|(q, s)| s.filter(|_| bit(words, q)))
             .fold(0u64, |m, b| m | 1 << b)
     };
-
-    for inst in &circuit.instructions {
-        match inst {
-            Instruction::Gate {
-                gate: Gate::T | Gate::Tdg,
-                targets,
-            } => {
-                let q = targets[0];
-                let p = prefix.conjugate_z(q);
-                let Some(anchor) = (0..n).find(|&j| slot[j].is_none() && bit(&p.x, j)) else {
-                    let support: Vec<u64> = p.x.iter().zip(&p.z).map(|(x, z)| x | z).collect();
-                    let mask = slot_mask(&slot, &support);
-                    if mask != 0 {
-                        join(&mut parent, mask);
-                        excess.push(mask);
-                    }
-                    continue;
-                };
-                for i in (0..n).filter(|&i| i != anchor && slot[i].is_none() && bit(&p.x, i)) {
-                    fold(&mut prefix, Gate::Cx, &[anchor, i]);
-                }
-                // Fold the controlled rest of `P = A_anchor ⊗ R`: it fixes `|0>` on the
-                // anchor and leaves the rotation acting on the anchor alone.
-                let p = prefix.conjugate_z(q);
-                for j in (0..n).filter(|&j| j != anchor) {
-                    match (bit(&p.x, j), bit(&p.z, j)) {
-                        (false, false) => {}
-                        (true, false) => fold(&mut prefix, Gate::Cx, &[anchor, j]),
-                        (false, true) => fold(&mut prefix, Gate::Cz, &[anchor, j]),
-                        (true, true) => {
-                            fold(&mut prefix, Gate::S, &[j]);
-                            fold(&mut prefix, Gate::Cx, &[anchor, j]);
-                            fold(&mut prefix, Gate::Sdg, &[j]);
-                        }
-                    }
-                }
-                debug_assert!({
-                    let g = prefix.conjugate_z(q);
-                    (0..n).all(|j| j == anchor || !(bit(&g.x, j) || bit(&g.z, j)))
-                });
-                slot[anchor] = Some(parent.len());
-                parent.push(parent.len());
-            }
-            Instruction::Gate { gate, targets } => prefix
-                .apply_state_gate(gate, targets)
-                .expect("the register build accepted this gate"),
-            Instruction::Measure { qubit, .. } if !measured.contains(qubit) => {
-                measured.push(*qubit);
-            }
-            _ => {}
-        }
-    }
 
     let mut rows: Vec<SignedPauli> = measured.iter().map(|&q| prefix.conjugate_z(q)).collect();
     let mut random = vec![false; rows.len()];
@@ -639,8 +629,7 @@ fn register_parts(circuit: &Circuit) -> (Vec<RegisterPart>, u64) {
     }
     let mut basis: Vec<u128> = Vec::new();
     for (row, _) in rows.iter().zip(&random).filter(|(_, random)| !**random) {
-        let mut v =
-            u128::from(slot_mask(&slot, &row.x)) | u128::from(slot_mask(&slot, &row.z)) << 64;
+        let mut v = u128::from(slot_mask(slot, &row.x)) | u128::from(slot_mask(slot, &row.z)) << 64;
         for b in &basis {
             v = v.min(v ^ b);
         }
@@ -649,14 +638,6 @@ fn register_parts(circuit: &Circuit) -> (Vec<RegisterPart>, u64) {
         }
     }
 
-    let groups = |parent: &mut [usize]| {
-        let mut masks = vec![0u64; parent.len()];
-        for b in 0..parent.len() {
-            masks[find(parent, b)] |= 1 << b;
-        }
-        masks.retain(|&m| m != 0);
-        masks
-    };
     let mut checks = 0u64;
     let mut parts = groups(&mut parent);
     loop {
@@ -1018,6 +999,12 @@ impl TerminalSampler {
         classical
     }
 }
+
+#[path = "clifford_parts.rs"]
+mod parts;
+#[cfg(feature = "bench-internal")]
+use parts::ProductGauge;
+pub(super) use parts::RegisterExpectations;
 
 #[cfg(test)]
 #[path = "clifford_register_tests.rs"]

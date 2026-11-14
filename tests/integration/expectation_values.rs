@@ -1002,7 +1002,7 @@ fn auto_marginals_leave_a_pauli_sum_past_the_term_ceiling_to_the_statevector() {
 }
 
 #[test]
-fn auto_marginals_keep_a_few_t_gates_on_pauli_propagation() {
+fn auto_marginals_read_a_few_t_gates_off_the_clifford_register() {
     let n = 16;
     let mut c = Circuit::new(n, 0);
     for q in 0..n {
@@ -1023,7 +1023,7 @@ fn auto_marginals_keep_a_few_t_gates_on_pauli_propagation() {
     assert_eq!(c.t_count(), 8);
 
     let auto = simulate(&c).seed(42).marginals().unwrap();
-    assert_eq!(auto.metadata.backend, ResolvedBackend::DeterministicPauli);
+    assert_eq!(auto.metadata.backend, ResolvedBackend::StabilizerRank);
     assert!(auto.metadata.is_exact());
     assert_marginals_match_statevector(&c, &auto.marginals);
 }

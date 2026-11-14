@@ -1,6 +1,7 @@
 //! Shared route decisions and prepared contraction plans.
 
 use super::*;
+use clifford_register::RegisterExpectations;
 
 pub(super) enum ProbabilityRoute {
     FactoredStabilizer,
@@ -309,6 +310,71 @@ fn register_wins(
         .is_some_and(|(k, rotations)| clifford_register_work(k, rotations as f64, measured) < dense)
 }
 
+/// Narrowest circuit whose `Auto` expectation values and marginals the product-gauge
+/// register may take under the statevector cap; below it the dense run takes microseconds.
+/// No bench row brackets this yet.
+#[cfg(not(prism_lowered_thresholds))]
+pub(super) const MIN_AUTO_REGISTER_EXPECTATION_QUBITS: usize = 12;
+#[cfg(prism_lowered_thresholds)]
+pub(super) const MIN_AUTO_REGISTER_EXPECTATION_QUBITS: usize = 4;
+
+/// Most qubits whose joint distribution `Auto` reads off the product-gauge register, as
+/// the Walsh transform of one expectation value per subset.
+const MAX_REGISTER_SUBSET_QUBITS: usize = 10;
+
+/// The product-gauge register plan for `Auto` expectation values of `observables` on a
+/// unitary Clifford+T circuit holding a T gate. Above the statevector cap any exact plan is
+/// taken. Under it the circuit must reach [`MIN_AUTO_REGISTER_EXPECTATION_QUBITS`] and the
+/// tableau plus the parts must cost less than the dense run; the tableau is priced from
+/// the circuit size before it is built, at about `(instructions + t n) n` letter updates.
+pub(super) fn decide_register_expectations(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    limits: &ResolvedLimits,
+) -> Option<RegisterExpectations> {
+    let t = auto_clifford_t_count(circuit)?;
+    let n = circuit.num_qubits;
+    let instructions = circuit.instructions.len();
+    let dense =
+        (n <= limits.statevector_qubits.value).then(|| statevector_work(instructions, n) as f64);
+    let tableau = REGISTER_PASS_STATEVECTOR_AMPLITUDES * ((instructions + t * n) * n) as f64;
+    if dense.is_some_and(|dense| n < MIN_AUTO_REGISTER_EXPECTATION_QUBITS || tableau >= dense) {
+        return None;
+    }
+    let plan = stabilizer_rank::register_expectations(circuit, observables)?;
+    match dense {
+        Some(dense) if tableau + REGISTER_PASS_STATEVECTOR_AMPLITUDES * plan.work() >= dense => {
+            None
+        }
+        _ => Some(plan),
+    }
+}
+
+/// The register plan for the joint distribution over `qubits` of a unitary Clifford+T
+/// circuit under `Auto`: `<Z_S>` for every nonempty subset `S`, `S` read as a bitmask over
+/// `qubits` and counted from 1. `None` past [`MAX_REGISTER_SUBSET_QUBITS`] qubits or where
+/// [`decide_register_expectations`] declines.
+pub(super) fn decide_register_subset(
+    circuit: &Circuit,
+    qubits: &[usize],
+    limits: &ResolvedLimits,
+) -> Option<RegisterExpectations> {
+    if qubits.len() > MAX_REGISTER_SUBSET_QUBITS || has_nonunitary_or_classical_ops(circuit) {
+        return None;
+    }
+    let observables: Vec<Vec<PauliTerm>> = (1..1usize << qubits.len())
+        .map(|subset| {
+            qubits
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| (subset >> i) & 1 == 1)
+                .map(|(_, &q)| PauliTerm::z(q))
+                .collect()
+        })
+        .collect();
+    decide_register_expectations(circuit, &observables, limits)
+}
+
 /// How `Auto` samples a Clifford+T circuit with a mid-circuit measurement, a guard or a
 /// reset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -535,6 +601,7 @@ pub(super) fn decide_shots(
 pub(super) enum ExpectationRoute {
     Stochastic(usize),
     Deterministic(SpdTruncation),
+    Register(Box<RegisterExpectations>),
     Tensor(
         crate::backend::tensornetwork::BoundedExpectations,
         RouteRule,
@@ -567,6 +634,9 @@ pub(super) fn decide_expectations(
             }))
         }
         _ if kind.is_auto() => {
+            if let Some(plan) = decide_register_expectations(circuit, observables, limits) {
+                return Ok(ExpectationRoute::Register(Box::new(plan)));
+            }
             let above_cap = circuit.num_qubits > limits.statevector_qubits.value;
             let tensor = if above_cap {
                 decide_tensor_over_mps(circuit, observables, limits)
@@ -646,6 +716,7 @@ pub(super) fn grouped_statevector(
 pub(super) fn expectation_rule(route: &ExpectationRoute, kind: &BackendKind) -> RouteRule {
     match route {
         ExpectationRoute::Tensor(_, rule) => *rule,
+        ExpectationRoute::Register(_) => RouteRule::CliffordRegister,
         ExpectationRoute::Deterministic(truncation)
             if !truncation.can_discard() && kind.is_auto() =>
         {
@@ -659,6 +730,7 @@ pub(super) fn expectation_rule(route: &ExpectationRoute, kind: &BackendKind) -> 
 pub(super) enum MarginalRoute {
     Stochastic(usize),
     Deterministic(SpdTruncation),
+    Register(Box<RegisterExpectations>),
     Spd {
         budget: Option<usize>,
     },
@@ -685,6 +757,14 @@ pub(super) fn decide_marginals(
             return Ok(MarginalRoute::Deterministic(*truncation));
         }
         _ => {}
+    }
+    if kind.is_auto() && supports_pauli_marginal_backend(circuit) && circuit.has_t_gates() {
+        let observables: Vec<Vec<PauliTerm>> = (0..circuit.num_qubits)
+            .map(|q| vec![PauliTerm::z(q)])
+            .collect();
+        if let Some(plan) = decide_register_expectations(circuit, &observables, limits) {
+            return Ok(MarginalRoute::Register(Box::new(plan)));
+        }
     }
     if kind.is_auto()
         && supports_pauli_marginal_backend(circuit)

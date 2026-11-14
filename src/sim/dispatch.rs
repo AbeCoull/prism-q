@@ -176,10 +176,13 @@ pub(super) fn auto_spd_work_budget(circuit: &Circuit) -> usize {
 /// branches up to 6 T gates. A probability
 /// query never takes that expansion under `Auto`, since it is slower than the
 /// statevector at every width both can hold. The pruned expansion is reachable
-/// only through [`run_stabilizer_rank_approx`], never from `Auto`; marginal queries
-/// on Clifford+T circuits at 12 qubits and above answer via Sparse Pauli
-/// Dynamics, which hands a circuit that fits the statevector back to the tree
-/// once its Pauli sum costs more than the dense run would. The remaining tree:
+/// only through [`run_stabilizer_rank_approx`], never from `Auto`. Expectation and
+/// marginal queries on unitary Clifford+T circuits read the register exactly as one
+/// factor per set of qubits the T rotations link, when that costs less than the dense
+/// run or the circuit passes the statevector cap. Marginal queries it declines at 12
+/// qubits and above answer via Sparse Pauli Dynamics, which hands a circuit that fits
+/// the statevector back to the tree once its Pauli sum costs more than the dense run
+/// would. The remaining tree:
 ///
 /// 1. No entangling gates        → ProductState (O(n))
 /// 2. All Clifford gates         → Stabilizer (O(n²))

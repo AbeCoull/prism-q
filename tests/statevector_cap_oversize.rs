@@ -59,7 +59,8 @@ fn auto_non_clifford_oversize_evaluates_on_the_selected_backend() {
 }
 
 /// Reaches every basis state, so from 8 qubits its support passes the sparse
-/// route's bound and Auto takes the MPS branch of the oversize split.
+/// route's bound and Auto takes the MPS branch of the oversize split. The closing
+/// `Rz` layer leaves Clifford+T, which the Clifford register would answer exactly.
 fn oversize_dense(num_qubits: usize) -> Circuit {
     let mut circuit = Circuit::new(num_qubits, 0);
     for q in 0..num_qubits {
@@ -70,7 +71,7 @@ fn oversize_dense(num_qubits: usize) -> Circuit {
         circuit.add_gate(Gate::Cx, &[q, q + 1]);
     }
     for q in 0..num_qubits {
-        circuit.add_gate(Gate::T, &[q]);
+        circuit.add_gate(Gate::Rz(0.3), &[q]);
     }
     circuit
 }

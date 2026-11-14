@@ -384,10 +384,12 @@ the `resolved` default is named by `Backend::name`. They are reports, not predic
 `exactness` is read after the run, from the singular values actually discarded, and
 `placement` after any device fallback.
 
-The MPS sums discarded weight per SVD and returns `1 - total` as the fidelity lower bound.
-That is a first-order estimate, not a certificate: errors compound across SVDs, and the
-strict infidelity bound is the square of the summed square roots, which matches the sum
-only when one SVD truncates.
+The MPS sums discarded weight per SVD. A total at or under 1e-24, the weight of one
+singular value at the default 1e-12 cutoff, reports `Exact` at any bond cap; a larger total
+reports `Approximate` with `1 - total` as the fidelity lower bound. That is a first-order
+estimate, not a certificate: errors compound across SVDs, and the strict infidelity bound
+is the square of the summed square roots, which matches the sum only when one SVD
+truncates.
 
 The decomposed route runs one backend per independent block and merges: exactness is the
 weakest of the parts, the fidelity bound is the product, the bond report is the peak over

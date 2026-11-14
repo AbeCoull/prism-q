@@ -156,9 +156,9 @@ print(result.metadata.bond)                  # None unless the MPS ran
 print(result.metadata.blocks)                # per-block engines when 'Decomposed'
 ```
 
-`is_exact` is False when the engine can discard state weight or estimate by sampling. It
-marks the route, not the run: an MPS whose bond dimension the circuit never fills
-reports `is_exact == False` with `fidelity_lower_bound == 1.0`.
+`is_exact` is False when the engine can discard state weight or estimate by sampling. An
+MPS reports the run instead: one whose cuts discarded nothing past rounding reports
+`is_exact == True` at any bond cap.
 
 An MPS run also reports `bond`, a `BondReport`: `peak` (the widest bond any cut kept),
 `cap` (the configured maximum), and `saturated` (`peak >= cap`). A run whose peak stayed
@@ -236,7 +236,7 @@ one overrides it.
 | `factored()` | Partially independent subsystems |
 | `tensor_network()` | Contraction over a network |
 | `tensor_network_bounded(tolerance)` | The tensor network with bond truncation, discarding at most `tolerance` of each cut's squared weight; approximate |
-| `mps(max_bond_dim=256)` | Approximate, truncates at the bond dimension |
+| `mps(max_bond_dim=256)` | Truncates at the bond dimension; `is_exact` says whether a cut dropped weight |
 | `density_matrix()` | Exact mixed states, never chosen by `auto()` |
 | `stochastic_pauli(num_samples=1000)` | Sampled Pauli propagation |
 | `deterministic_pauli(epsilon=0.0, max_terms=65536)` | Truncated Pauli propagation |

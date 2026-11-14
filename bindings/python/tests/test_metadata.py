@@ -39,10 +39,9 @@ def test_shots_and_counts_carry_metadata():
     assert counts.metadata.is_exact
 
 
-# The flag marks the route and the bound reports the run, so a cap the circuit
-# never fills reports approximate at fidelity 1. One layer is not enough to get
-# there: a CX with both legs on |+> is the identity, so the chain is still a
-# product and a product is held exactly.
+# The MPS reports the run, so an entangled chain under a cap it never fills
+# cut nothing and reports exact. One layer is not enough to entangle: a CX with
+# both legs on |+> is the identity, so the chain is still a product.
 def test_mps_reports_a_fidelity_bound():
     roomy = (
         simulate(entangling_brickwork(6, 2))
@@ -50,8 +49,9 @@ def test_mps_reports_a_fidelity_bound():
         .seed(42)
         .run()
     )
-    assert not roomy.metadata.is_exact
-    assert roomy.metadata.fidelity_lower_bound == pytest.approx(1.0)
+    assert roomy.metadata.bond.peak > 1
+    assert roomy.metadata.is_exact
+    assert roomy.metadata.fidelity_lower_bound is None
 
     product = (
         simulate(entangling_brickwork(6, 1))

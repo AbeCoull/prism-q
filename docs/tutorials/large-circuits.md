@@ -92,13 +92,13 @@ from prism_q import circuits
 wide = circuits.hardware_efficient_ansatz(60, 2)
 result = simulate(wide).seed(42).expectation([[(q, "Z")] for q in range(60)])
 meta = result.metadata
-print(meta.backend, meta.is_exact, meta.fidelity_lower_bound)   # Mps False 1.0
+print(meta.backend, meta.is_exact, meta.fidelity_lower_bound)   # Mps True None
 print(meta.bond.peak, meta.bond.cap, meta.bond.saturated)       # 4 256 False
 ```
 
-`is_exact` is `False` because the MPS engine can truncate. The bond report says whether
-it did: the widest bond needed was 4, under the cap of 256, so nothing was cut and
-`fidelity_lower_bound` is 1.0. With the cap forced down to 2, the bond saturates:
+The MPS engine can truncate, but this run did not: the widest bond needed was 4, under the
+cap of 256, so no cut dropped weight and the result reports itself exact. With the cap
+forced down to 2, the bond saturates:
 
 ```python
 tight = simulate(wide).backend(BackendKind.mps(2)).seed(42).expectation(
@@ -124,7 +124,8 @@ except PrismError as exc:
     print(exc.kind)                 # incompatible_backend
 ```
 
-The check uses the circuit and the requested backend, before anything runs. The
+The check uses the circuit and the requested backend, before anything runs, so it rejects
+the ansatz above even though its MPS run cut nothing. The
 1000-qubit Clifford sample passes under automatic dispatch. The Clifford+T shots pass
 only with `.backend(BackendKind.stabilizer_rank())`, because automatic dispatch cannot
 promise the exact route in advance. Deterministic Pauli propagation is always rejected,

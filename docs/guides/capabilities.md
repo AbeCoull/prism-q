@@ -151,9 +151,12 @@ Every result type carries a `metadata` field describing how it was produced:
 | `bond` | Peak bond dimension against the cap, `None` unless the MPS ran |
 | `blocks` | The engine of each independent block when `backend` is `Decomposed`, ordered by each block's lowest qubit; empty otherwise |
 
-`Approximate` marks the route, not the run. An MPS at bond 256 on a circuit that never
-fills a bond truncates nothing and still reports `Approximate`, with a bound of 1.0: the
-variant says whether the answer could have been approximated, the bound whether it was.
+An MPS reports the run. When its cuts discarded no more than rounding, a summed squared
+weight of at most 1e-24 (one singular value at the default 1e-12 cutoff), the result is
+`Exact` at any bond cap; past that it is `Approximate` with the bound from the discarded
+weight. The sparse backend at a raised threshold and the bounded tensor network report the
+route instead: a run of theirs that dropped nothing is still `Approximate`, with a bound
+of 1.0.
 
 For an MPS run, `bond` carries `peak`, the widest bond any cut kept over the run, and
 `cap`, the configured maximum; `saturated()` reads `peak >= cap`. A run whose peak stayed

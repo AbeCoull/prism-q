@@ -46,8 +46,8 @@ fn small_circuit_reports_an_exact_backend() {
     assert_eq!(outcome.metadata.fidelity_lower_bound(), None);
 }
 
-// The flag marks the route and the bound reports the run, so a bond the
-// circuit never fills reports approximate at fidelity 1.
+// The MPS reports the run: a bond the circuit never fills discards nothing and
+// reports exact, and a cap that cuts reports the bound from what it cut.
 #[test]
 fn mps_reports_a_fidelity_bound() {
     let mut circuit = Circuit::new(6, 0);
@@ -61,17 +61,19 @@ fn mps_reports_a_fidelity_bound() {
         .seed(SEED)
         .run()
         .unwrap();
-    assert_eq!(
-        roomy.metadata.fidelity_lower_bound(),
-        Some(1.0),
-        "a GHZ chain needs bond 2, so bond 64 discards nothing"
+    assert!(
+        roomy.metadata.is_exact(),
+        "a GHZ chain needs bond 2, so bond 64 discards nothing: {:?}",
+        roomy.metadata
     );
+    assert_eq!(roomy.metadata.fidelity_lower_bound(), None);
 
     let clamped = simulate(&entangling_brickwork(10, 6))
         .backend(BackendKind::Mps { max_bond_dim: 2 })
         .seed(SEED)
         .run()
         .unwrap();
+    assert!(!clamped.metadata.is_exact(), "{:?}", clamped.metadata);
     let bound = clamped.metadata.fidelity_lower_bound().unwrap();
     assert!(
         bound < 1.0,
@@ -79,10 +81,9 @@ fn mps_reports_a_fidelity_bound() {
     );
 }
 
-// The exactness label marks the route, so it reads the same at a cap the chain
-// fills and at one it never reaches. The bond report is what tells the two
-// apart: eleven brickwork layers on 20 qubits carry the inner cuts past a bond
-// of 32 and nowhere near 4096.
+// The bond report tells a cap the chain fills from one it never reaches:
+// eleven brickwork layers on 20 qubits carry the inner cuts past a bond of 32
+// and nowhere near 4096.
 #[test]
 fn mps_reports_peak_bond_and_cap_saturation() {
     let circuit = brickwork_circuit(20, 11, SEED);
@@ -360,19 +361,20 @@ fn zero_shots_still_names_the_route() {
     }
 }
 
-// A chain that filled a bond keeps the route's claim even at a cap it never
-// reached, which is what separates the carve-out from a general reading of
-// realized truncation. One brickwork layer is not enough to get there: a CX
-// with both legs on |+> is the identity, so the first layer leaves a product.
+// An entangled chain that cut nothing reports exact, not only a product one.
+// One brickwork layer is not enough to entangle: a CX with both legs on |+> is
+// the identity, so the first layer leaves a product.
 #[test]
-fn a_chain_that_filled_a_bond_is_not_reported_exact() {
+fn an_entangled_chain_that_cut_nothing_is_reported_exact() {
     let outcome = simulate(&entangling_brickwork(6, 2))
         .backend(BackendKind::Mps { max_bond_dim: 64 })
         .seed(SEED)
         .run()
         .unwrap();
-    assert!(!outcome.metadata.is_exact(), "{:?}", outcome.metadata);
-    assert_eq!(outcome.metadata.fidelity_lower_bound(), Some(1.0));
+    let bond = outcome.metadata.bond.expect("an MPS run reports its bond");
+    assert!(bond.peak > 1 && !bond.saturated(), "{bond:?}");
+    assert!(outcome.metadata.is_exact(), "{:?}", outcome.metadata);
+    assert_eq!(outcome.metadata.fidelity_lower_bound(), None);
 
     let product = simulate(&entangling_brickwork(6, 1))
         .backend(BackendKind::Mps { max_bond_dim: 64 })
@@ -383,9 +385,8 @@ fn a_chain_that_filled_a_bond_is_not_reported_exact() {
 }
 
 // Mid-circuit measurement forces the per-shot route, where each shot evolves
-// its own state and the ensemble keeps the weakest claim. The pair left open on
-// qubits 1 and 2 is what makes the claim approximate: a chain whose bonds are
-// all 1 discarded nothing and says so.
+// its own state and the ensemble keeps the weakest claim. A cap of 1 cuts the
+// pair left open on qubits 1 and 2, which is what makes the claim approximate.
 #[test]
 fn per_shot_route_stamps_metadata() {
     let mut circuit = Circuit::new(3, 1);
@@ -396,7 +397,7 @@ fn per_shot_route_stamps_metadata() {
     circuit.add_gate(Gate::Cx, &[1, 2]);
 
     let shots = simulate(&circuit)
-        .backend(BackendKind::Mps { max_bond_dim: 8 })
+        .backend(BackendKind::Mps { max_bond_dim: 1 })
         .seed(SEED)
         .shots(8)
         .unwrap();

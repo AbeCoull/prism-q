@@ -9,8 +9,8 @@ use prism_q::gates::Gate;
 use prism_q::sim::gradient::run_expectation_gradient;
 use prism_q::sim::run_expectation_values;
 use prism_q::{
-    BackendKind, Circuit, Parameters, PauliObservable, PauliTerm, PrismError, ResolvedBackend,
-    simulate,
+    BackendKind, Circuit, Limits, Parameters, PauliObservable, PauliTerm, PrismError,
+    ResolvedBackend, simulate,
 };
 
 const CAP: usize = 4;
@@ -76,11 +76,12 @@ fn oversize_dense(num_qubits: usize) -> Circuit {
     circuit
 }
 
-// The dispatch-level half of the approximation contract: the same query above
-// and below the statevector cap must differ in the flag, asserted at the
-// `Simulate` level rather than on the backend.
+// The dispatch-level half of the approximation contract, asserted at the
+// `Simulate` level rather than on the backend: above the statevector cap the
+// flag reports what the MPS run cut. The ladder needs bond 2, so the default
+// cap holds it whole and a cap of 1 cuts it.
 #[test]
-fn auto_reports_approximate_above_the_statevector_cap() {
+fn auto_reports_what_the_mps_cut_above_the_statevector_cap() {
     small_sv_cap();
     let below = simulate(&oversize_dense(CAP - 2))
         .seed(SEED)
@@ -90,10 +91,18 @@ fn auto_reports_approximate_above_the_statevector_cap() {
         .seed(SEED)
         .marginals()
         .unwrap();
+    let clamped = simulate(&oversize_dense(CAP + 4))
+        .limits(Limits::new().auto_mps_bond_dim(1))
+        .seed(SEED)
+        .marginals()
+        .unwrap();
 
     assert!(below.metadata.is_exact(), "{:?}", below.metadata);
-    assert!(!above.metadata.is_exact(), "{:?}", above.metadata);
     assert_eq!(above.metadata.backend, ResolvedBackend::Mps);
+    assert!(above.metadata.is_exact(), "{:?}", above.metadata);
+    assert_eq!(clamped.metadata.backend, ResolvedBackend::Mps);
+    assert!(!clamped.metadata.is_exact(), "{:?}", clamped.metadata);
+    assert!(clamped.metadata.fidelity_lower_bound().unwrap() < 1.0);
 }
 
 #[test]

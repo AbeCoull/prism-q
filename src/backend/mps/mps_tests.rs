@@ -3353,3 +3353,44 @@ fn single_site_density_matches_the_statevector_wherever_the_center_sits() {
         }
     }
 }
+
+// Ten-qubit brickwork at depth 6 widens the middle cut to bond 8, so a cap of
+// 64 holds it whole and a cap of 4 cuts real weight.
+#[test]
+fn a_run_that_never_cuts_weight_reports_exact_at_any_cap() {
+    let circuit = crate::circuits::brickwork_circuit(10, 6, 42);
+    let mut b = MpsBackend::new(42, 64);
+    sim::run_on(&mut b, &circuit).unwrap();
+    let bond = b.bond_report().unwrap();
+    assert!(bond.peak > 1 && !bond.saturated(), "{bond:?}");
+    assert_eq!(b.exactness(), crate::sim::Exactness::Exact);
+}
+
+#[test]
+fn a_run_that_cuts_at_the_cap_reports_approximate() {
+    let circuit = crate::circuits::brickwork_circuit(10, 6, 42);
+    let mut b = MpsBackend::new(42, 4);
+    sim::run_on(&mut b, &circuit).unwrap();
+    assert!(b.bond_report().unwrap().saturated());
+    match b.exactness() {
+        crate::sim::Exactness::Approximate {
+            fidelity_lower_bound: Some(bound),
+        } => assert!(bound < 1.0, "{bound}"),
+        other => panic!("expected a reported bound, got {other:?}"),
+    }
+}
+
+#[test]
+fn exactness_holds_up_to_the_discard_bound() {
+    let mut b = MpsBackend::new(42, 4);
+    b.init(2, 0).unwrap();
+    b.truncation_discarded = EXACT_DISCARD_BOUND;
+    assert_eq!(b.exactness(), crate::sim::Exactness::Exact);
+    b.truncation_discarded = EXACT_DISCARD_BOUND.next_up();
+    assert!(matches!(
+        b.exactness(),
+        crate::sim::Exactness::Approximate {
+            fidelity_lower_bound: Some(_)
+        }
+    ));
+}

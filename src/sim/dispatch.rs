@@ -51,11 +51,12 @@ const MPS_GATE_CUT_OVERHEAD: f64 = 256.0;
 /// merged. On one thread an MPS run costs 50 to 70 ns per unit on CX and CZ
 /// brickworks at 32 to 256 qubits and 20 to 45 ns on hardware-efficient ladders;
 /// the bond is an upper bound, and on SU(4) brickworks, whose blocks reach it
-/// late, the estimate runs 2 to 40 times high.
-pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
+/// late, the estimate runs 2 to 40 times high. Also returns the cuts at which a
+/// block starts, each one SVD a merged run pays at whatever bond it reaches.
+pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> (f64, usize) {
     let n = circuit.num_qubits;
     if n < 2 {
-        return 0.0;
+        return (0.0, 0);
     }
     let limit: Vec<f64> = (0..n - 1)
         .map(|cut| {
@@ -70,6 +71,7 @@ pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
     let mut cut_block = vec![0usize; n - 1];
     let mut next_block = 1usize;
     let mut cost = 0.0;
+    let mut block_cuts = 0;
     for instruction in &circuit.instructions {
         let Instruction::Gate { gate, targets } = instruction else {
             continue;
@@ -91,6 +93,7 @@ pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
         let block = if continues {
             block
         } else {
+            block_cuts += hi - lo;
             next_block += 1;
             next_block - 1
         };
@@ -109,7 +112,7 @@ pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
             qubit_block[q] = if targets.len() == 2 { block } else { 0 };
         }
     }
-    cost
+    (cost, block_cuts)
 }
 
 /// Most T gates, guarded ones included, at which `Auto` samples a circuit past the

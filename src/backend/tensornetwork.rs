@@ -2208,6 +2208,52 @@ pub(crate) fn plan_bounded_expectations(
     }))
 }
 
+/// Gates on two or more qubits in the inverse light cones of `observables`,
+/// summed over the observables; stops counting once the sum passes `limit`.
+/// Observable qubits must lie in the register.
+pub(crate) fn cone_entangling_gates(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    limit: usize,
+) -> usize {
+    let mut in_cone = vec![false; circuit.num_qubits];
+    let mut count = 0;
+    for observable in observables {
+        in_cone.fill(false);
+        for term in observable {
+            in_cone[term.qubit] = true;
+        }
+        for instruction in circuit.instructions.iter().rev() {
+            let Instruction::Gate { gate, targets } = instruction else {
+                continue;
+            };
+            let mut touches = false;
+            let mut width = 0;
+            for_each_gate_tensor_qubit(gate, targets, |q| {
+                touches |= in_cone[q];
+                width += 1;
+                Ok(())
+            })
+            .expect("the visitor never fails");
+            if !touches {
+                continue;
+            }
+            for_each_gate_tensor_qubit(gate, targets, |q| {
+                in_cone[q] = true;
+                Ok(())
+            })
+            .expect("the visitor never fails");
+            if width > 1 {
+                count += 1;
+                if count > limit {
+                    return count;
+                }
+            }
+        }
+    }
+    count
+}
+
 pub(crate) fn plan_expectations(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],

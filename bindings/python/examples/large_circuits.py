@@ -35,7 +35,7 @@ print(f"shots on {shots.metadata.backend}: P(q59 = 1) = {shots.shots[:, 59].mean
 
 wide = circuits.hardware_efficient_ansatz(60, 2)
 for kind in [BackendKind.auto(), BackendKind.mps(2)]:
-    result = simulate(wide).backend(kind).seed(42).expectation([[(0, "Z")]])
+    result = simulate(wide).backend(kind).seed(42).expectation([[(q, "Z")] for q in range(60)])
     meta = result.metadata
     print(
         f"{meta.backend}: <Z0> = {result.values[0]:.4f}, exact {meta.is_exact}, "

@@ -154,6 +154,25 @@ fn su4_brickwork_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circuit {
     circuit
 }
 
+/// Random-circuit-sampling brick layers: random `Rz Ry Rz` on every qubit, then CX on
+/// alternating pairs.
+fn rcs_brickwork_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = Circuit::new(n_qubits, 0);
+    let tau = std::f64::consts::TAU;
+    for layer in 0..depth {
+        for q in 0..n_qubits {
+            circuit.add_gate(Gate::Rz(rng.random::<f64>() * tau), &[q]);
+            circuit.add_gate(Gate::Ry(rng.random::<f64>() * tau), &[q]);
+            circuit.add_gate(Gate::Rz(rng.random::<f64>() * tau), &[q]);
+        }
+        for i in (layer % 2..n_qubits - 1).step_by(2) {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+    }
+    circuit
+}
+
 fn random_clifford_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut circuit = Circuit::new(n_qubits, 0);
@@ -2687,7 +2706,8 @@ fn bench_auto_expectation(c: &mut Criterion) {
 /// while its `Z` and adjacent `ZZ` cones stay local, the MPS run growing with
 /// width and the contraction not (`/64` against `/128` brackets the crossover);
 /// `hea_l2` and `su4_brick_d4` stay under the MPS cost at which the dry run is
-/// worth attempting.
+/// worth attempting; `rcs_d4` holds the same observables on four layers, where the
+/// contraction stays flat with width and the MPS run does not.
 fn bench_auto_expectation_above_cap(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/expectation_above_cap");
     configure_group(&mut group);
@@ -2750,6 +2770,26 @@ fn bench_auto_expectation_above_cap(c: &mut Criterion) {
             "brickwork_d8_local/64",
             circuits::brickwork_circuit(64, 8, SEED),
             z_and_adjacent_zz(64),
+        ),
+        (
+            "rcs_d4/256",
+            rcs_brickwork_circuit(256, 4, SEED),
+            z_and_adjacent_zz(256),
+        ),
+        (
+            "rcs_d4/128",
+            rcs_brickwork_circuit(128, 4, SEED),
+            z_and_adjacent_zz(128),
+        ),
+        (
+            "rcs_d4/64",
+            rcs_brickwork_circuit(64, 4, SEED),
+            z_and_adjacent_zz(64),
+        ),
+        (
+            "rcs_d4/32",
+            rcs_brickwork_circuit(32, 4, SEED),
+            z_and_adjacent_zz(32),
         ),
     ];
     for (name, circuit, observables) in rows {

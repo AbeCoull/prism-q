@@ -2,9 +2,9 @@
 //! routing checks run on the circuits the rows time.
 
 use num_complex::Complex64;
-use prism_q::PauliTerm;
 use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
 use prism_q::gates::Gate;
+use prism_q::{PauliAxis, PauliTerm};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -245,6 +245,25 @@ pub fn local_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64
     let mut c = clifford_t_layers(n, depth, t_count, seed, true);
     c.measure_all();
     c
+}
+
+/// Eight two-local Pauli observables on `n` qubits, cycling `ZZ`, `XY`, `YZ` and `XX` over
+/// pairs a third of the register apart.
+pub fn clifford_t_expectation_observables(n: usize) -> Vec<Vec<PauliTerm>> {
+    let pairs = [
+        (PauliAxis::Z, PauliAxis::Z),
+        (PauliAxis::X, PauliAxis::Y),
+        (PauliAxis::Y, PauliAxis::Z),
+        (PauliAxis::X, PauliAxis::X),
+    ];
+    (0..8)
+        .map(|k| {
+            let a = (k * n / 8) % n;
+            let b = (a + n / 3 + 1) % n;
+            let (pa, pb) = pairs[k % pairs.len()];
+            vec![PauliTerm::new(a, pa), PauliTerm::new(b, pb)]
+        })
+        .collect()
 }
 
 /// H on every qubit and one T on each of qubits `0..t_count`, then `depth` Clifford layers

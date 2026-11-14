@@ -31,9 +31,10 @@ use std::time::Duration;
 
 mod common;
 use common::fixtures::{
-    DENSE_UNITARY_LAYERS, clifford_t_layers_mid_circuit, dense_unitary_layers, distinct_t_layers,
-    guarded_s_mid_circuit, product_observables, random_clifford_t_layers,
-    random_t_insertion_circuit, scrambled_clifford_t_circuit, sparse_entanglement_circuit,
+    DENSE_UNITARY_LAYERS, clifford_t_expectation_observables, clifford_t_layers_mid_circuit,
+    dense_unitary_layers, distinct_t_layers, guarded_s_mid_circuit, local_clifford_t_layers,
+    product_observables, random_clifford_t_layers, random_t_insertion_circuit,
+    scrambled_clifford_t_circuit, sparse_entanglement_circuit,
     stabilizer_rank_mid_circuit_shot_circuit,
 };
 use common::{
@@ -2654,9 +2655,10 @@ fn bench_compare_single_qubit(c: &mut Criterion) {
 // ---- Auto dispatch sweeps ----
 
 /// The expectation terminal under `Auto` at the widths where the scalar tensor
-/// route is tried first. The first three rows take it; the last three are the
-/// families the bounded dry run rejects, so they carry its overhead on top of
-/// the statevector run and gate it.
+/// route is tried first. `random_d10` is Clifford+T, so the Clifford register takes
+/// it ahead of the tensor route; the next two rows take the tensor route, and the last
+/// three are the families the bounded dry run rejects, so they carry its overhead on
+/// top of the statevector run and gate it.
 fn bench_auto_expectation(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/expectation");
     configure_group(&mut group);
@@ -4343,6 +4345,62 @@ fn bench_auto_clifford_t_shots(c: &mut Criterion) {
         );
     }
 
+    group.finish();
+}
+
+/// `Auto` expectation values and marginals on unitary Clifford+T circuits, the routes the
+/// product-gauge register takes part by part. The 30, 32 and 64 qubit rows pass the
+/// register's width cap of 20 and the statevector cap; `layers_24q_t24` fits both. Eight
+/// two-local observables of mixed axes per expectation row. Routes pinned in
+/// `tests/integration/bench_fixture_routing.rs`.
+fn bench_auto_clifford_t_expectation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auto/clifford_t_expectation");
+    configure_group(&mut group);
+
+    let rows: Vec<(&str, Circuit)> = vec![
+        ("layers_30q_t40", random_clifford_t_layers(30, 10, 40, SEED)),
+        ("layers_32q_t40", random_clifford_t_layers(32, 10, 40, SEED)),
+        (
+            "local_layers_64q_t40",
+            local_clifford_t_layers(64, 10, 40, SEED),
+        ),
+        ("layers_24q_t24", random_clifford_t_layers(24, 10, 24, SEED)),
+    ];
+    for (name, circuit) in rows {
+        let circuit = circuit.without_measurements();
+        let observables = clifford_t_expectation_observables(circuit.num_qubits);
+        group.bench_with_input(
+            BenchmarkId::new("expectation", name),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        sim::simulate(circ)
+                            .backend(BackendKind::Auto)
+                            .seed(42)
+                            .expectation_values(&observables)
+                            .unwrap(),
+                    )
+                });
+            },
+        );
+    }
+    let circuit = random_clifford_t_layers(24, 10, 24, SEED).without_measurements();
+    group.bench_with_input(
+        BenchmarkId::new("marginals", "layers_24q_t24"),
+        &circuit,
+        |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::Auto)
+                        .seed(42)
+                        .marginals()
+                        .unwrap(),
+                )
+            });
+        },
+    );
     group.finish();
 }
 
@@ -6242,6 +6300,7 @@ criterion_group! {
     bench_stabilizer_rank,
     bench_auto_clifford_t_shots,
     bench_auto_clifford_t_price,
+    bench_auto_clifford_t_expectation,
     bench_qasm_parse,
     // Compiled sampler (noiseless + noisy shot sampling)
     bench_compiled_sampler,

@@ -869,7 +869,7 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
     }
 
     let mut sorted: Vec<(&&str, &usize)> = gate_counts.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(a.1));
+    sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
     lines.push("Gate counts:".to_string());
     let mut gate_line = String::from("  ");

@@ -1244,7 +1244,9 @@ pub(super) fn register_expectations(
 }
 
 #[cfg(feature = "bench-internal")]
-pub use super::clifford_register::{CliffordRegisterCensus, RegisterPart};
+pub use super::clifford_register::{
+    CliffordRegisterCensus, RegisterCut, RegisterPart, RegisterSplit,
+};
 
 /// Counts of the register [`run_stabilizer_rank_shots`] builds for the terminal
 /// measurements of `circuit`, with the width cap lifted so a circuit past it still reports

@@ -82,14 +82,15 @@ their limits.
 ## Low entanglement: matrix product states
 
 A two-layer hardware-efficient ansatz on 60 qubits is neither Clifford nor small, but its
-entanglement stays low. Automatic dispatch sends it to a matrix product state with a bond
-cap of 256:
+entanglement stays low. Asked for `Z` on every qubit, automatic dispatch sends it to a
+matrix product state with a bond cap of 256. Asked for one local observable, it contracts
+that observable's light cone on the tensor network instead, which is exact and cheaper.
 
 ```python
 from prism_q import circuits
 
 wide = circuits.hardware_efficient_ansatz(60, 2)
-result = simulate(wide).seed(42).expectation([[(0, "Z")]])
+result = simulate(wide).seed(42).expectation([[(q, "Z")] for q in range(60)])
 meta = result.metadata
 print(meta.backend, meta.is_exact, meta.fidelity_lower_bound)   # Mps False 1.0
 print(meta.bond.peak, meta.bond.cap, meta.bond.saturated)       # 4 256 False

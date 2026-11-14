@@ -1188,3 +1188,22 @@ fn one_sided_ellipsis_leaves_no_barrier_beside_the_gap() {
         assert!((viewbox_width(&svg) - expected_width).abs() < 0.1);
     }
 }
+
+#[test]
+fn legend_svg_is_identical_across_renders() {
+    let circuit = CircuitBuilder::new(2)
+        .h(0)
+        .rx(0.3, 1)
+        .t(0)
+        .cx(0, 1)
+        .measure_all()
+        .build();
+    let opts = SvgOptions {
+        show_legend: true,
+        ..SvgOptions::default()
+    };
+    let first = circuit.to_svg(&opts);
+    for _ in 0..32 {
+        assert_eq!(circuit.to_svg(&opts), first);
+    }
+}

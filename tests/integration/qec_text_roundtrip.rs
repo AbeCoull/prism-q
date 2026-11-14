@@ -199,4 +199,23 @@ fn record_flips_must_follow_their_record() {
             .push_op(prism_q::QecOp::RecordFlip { probability: -0.1 })
             .is_err()
     );
+
+    let measure = prism_q::QecOp::Measure {
+        basis: QecBasis::Z,
+        qubit: 0,
+    };
+    let x = prism_q::QecOp::Gate {
+        gate: Gate::X,
+        targets: vec![0],
+    };
+    let from_ops = |ops: &[prism_q::QecOp]| {
+        QecProgram::from_ops(1, prism_q::QecOptions::default(), ops.to_vec())
+    };
+    let flip = prism_q::QecOp::RecordFlip { probability: 0.1 };
+    assert!(from_ops(std::slice::from_ref(&flip)).is_err());
+    assert!(from_ops(&[measure.clone(), x.clone(), flip.clone()]).is_err());
+    from_ops(&[x, measure.clone(), flip.clone()]).unwrap();
+    let program = from_ops(&[measure, flip.clone(), flip]).unwrap();
+    assert_eq!(program.num_measurements(), 1);
+    assert_eq!(program.ops().len(), 3);
 }

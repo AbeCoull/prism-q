@@ -657,7 +657,11 @@ fn render_svg(
             })
             .collect();
         let font = opts.font_size * 0.92;
-        let legend_width: f64 = present.iter().map(|cat| legend_item_width(cat, font)).sum();
+        let legend_width: f64 = LEGEND_ORDER
+            .iter()
+            .filter(|c| present.contains(c))
+            .map(|cat| legend_item_width(cat, font))
+            .sum();
         circuit_width = circuit_width.max(opts.padding_left + legend_width + opts.padding_right);
     }
     let header_extra = if opts.show_stats_header {

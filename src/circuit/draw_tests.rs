@@ -336,3 +336,15 @@ fn conditional_column_fits_its_condition() {
         ["q[0]: ─H──M0─────────", "q[1]: ─X──X───c[0]?X─"].join("\n"),
     );
 }
+
+#[test]
+fn summary_breaks_gate_count_ties_by_name() {
+    let circuit = CircuitBuilder::new(1).z(0).y(0).x(0).h(0).h(0).t(0).build();
+    for _ in 0..16 {
+        let summary = circuit.summary();
+        assert!(
+            summary.contains("  h: 2  t: 1  x: 1  y: 1  z: 1"),
+            "{summary}"
+        );
+    }
+}

@@ -1791,16 +1791,19 @@ pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompi
             "QEC record-noise sampler",
         ));
     }
-    let (reference, deferred) = super::runner::qec_join(
+    let (reference, records) = super::runner::qec_join(
         || super::reference::forced_tableau_records(program, false),
-        || lower_qec_program_to_deferred_circuit_inner(program, false, true),
+        || -> Result<_> {
+            let deferred = lower_qec_program_to_deferred_circuit_inner(program, false, true)?;
+            let num_measurements = deferred.measurement_qubits.len();
+            let feedforward = QecFeedforwardFlips::compile(&deferred);
+            let noise = QecRecordNoise::compile(deferred, program.options().seed, true)?;
+            Ok((num_measurements, feedforward, noise))
+        },
     );
-    let deferred = deferred?;
+    let (num_measurements, feedforward, noise) = records?;
     let reference = reference?
         .expect("the deferred lowering admits Clifford gates only, so the reference run exists");
-    let num_measurements = deferred.measurement_qubits.len();
-    let feedforward = QecFeedforwardFlips::compile(&deferred);
-    let noise = QecRecordNoise::compile(deferred, program.options().seed, true)?;
     Ok(QecCompiledNoiseSampler {
         base: QecRecordBase::Reference(reference),
         noise,

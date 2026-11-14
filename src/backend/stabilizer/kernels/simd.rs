@@ -57,6 +57,46 @@ pub(crate) fn rowmul_words(
     rowmul_words_scalar(dst_x, dst_z, src_x, src_z, initial_sum)
 }
 
+/// [`rowmul_words`] without the streaming stores, for a destination row that is read
+/// again before it would leave the cache.
+#[inline(always)]
+pub(crate) fn rowmul_words_cached(
+    dst_x: &mut [u64],
+    dst_z: &mut [u64],
+    src_x: &[u64],
+    src_z: &[u64],
+    initial_sum: u64,
+) -> u64 {
+    debug_assert_eq!(dst_x.len(), dst_z.len());
+    debug_assert_eq!(dst_x.len(), src_x.len());
+    debug_assert_eq!(dst_x.len(), src_z.len());
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let nw = dst_x.len();
+        let tier = word_tier();
+        if nw >= 8 && tier == WordTier::Avx512 {
+            // SAFETY: AVX-512F and VPOPCNTDQ detected at runtime; slices have equal
+            // lengths (debug_assert above).
+            return unsafe {
+                rowmul_words_avx512::<false>(dst_x, dst_z, src_x, src_z, initial_sum)
+            };
+        }
+        if nw >= 4 && tier != WordTier::Scalar {
+            // SAFETY: AVX2 detected at runtime; slices have equal lengths (debug_assert above).
+            return unsafe { rowmul_words_avx2(dst_x, dst_z, src_x, src_z, initial_sum) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if dst_x.len() >= 2 {
+        // SAFETY: NEON is baseline on aarch64; slices have equal lengths.
+        return unsafe { rowmul_words_neon(dst_x, dst_z, src_x, src_z, initial_sum) };
+    }
+
+    #[allow(unreachable_code)]
+    rowmul_words_scalar(dst_x, dst_z, src_x, src_z, initial_sum)
+}
+
 fn rowmul_words_scalar(
     dst_x: &mut [u64],
     dst_z: &mut [u64],

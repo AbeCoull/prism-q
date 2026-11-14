@@ -272,10 +272,16 @@ Clifford gates cost O(n²) for all branches together and each T gate doubles the
   gate. The coefficients are orthonormal, so each cut drops an exact norm `d_j`; the
   exact state lies within `sum d_j` of the kept one, and `fidelity_bound()` turns that and
   the kept norm into a fidelity floor. A register past 20 qubits is refused.
-- Terminal shots run on a Clifford tableau over a dense register holding only the qubits
-  the T rotations reach (`src/sim/clifford_register.rs`, at most 20 such qubits). Shots
-  with mid-circuit measurement keep coherent branches as MPS, project each outcome, and
-  contract pairwise branch overlaps with no dense state.
+- Terminal shots run on the same tableau in the product gauge, split into parts
+  (`src/sim/clifford_split.rs`): qubits an excess rotation links, joined where the
+  measured rows fail to commute part by part. A part of up to 24 qubits is one dense
+  table; a wider one, or one past 20 that pays few row pairs, is cut in two sides of at
+  most 20 that no rotation crosses. The sides are drawn apart, then each shot corrects the
+  draw over the row pairs across the cut, at most 12. Up to 64 register qubits in all. Small tables are packed, each shot
+  reads a fixed count of words from one ChaCha8 stream per 256 shots, and every drawn bit
+  carries a precomputed classical key. Shots with mid-circuit measurement keep coherent
+  branches as MPS, project each outcome, and contract pairwise branch overlaps with no
+  dense state.
 - Expectation values and marginals read the same tableau in the product gauge
   (`src/sim/clifford_parts.rs`): a T gate that reaches a qubit in `|0>` adds it as a
   one-qubit state, every other T gate is an excess rotation, and qubits an excess rotation

@@ -1232,7 +1232,7 @@ pub(super) fn terminal_register_price(circuit: &Circuit, max_width: usize) -> Op
 }
 
 #[cfg(feature = "bench-internal")]
-pub use super::clifford_register::CliffordRegisterCensus;
+pub use super::clifford_register::{CliffordRegisterCensus, RegisterPart};
 
 /// Counts of the register [`run_stabilizer_rank_shots`] builds for the terminal
 /// measurements of `circuit`, with the width cap lifted so a circuit past it still reports

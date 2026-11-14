@@ -1316,9 +1316,30 @@ fn auto_mid_rows() -> Vec<(String, prism_q::circuit::Circuit, usize)> {
     rows
 }
 
+#[test]
+fn local_clifford_t_layers_pairs_neighbours() {
+    use prism_q::{Gate, Instruction};
+
+    let circuit = bench_fixtures::local_clifford_t_layers(9, 4, 6, SEED);
+    let mut cx = 0;
+    for inst in &circuit.instructions {
+        if let Instruction::Gate {
+            gate: Gate::Cx,
+            targets,
+        } = inst
+        {
+            assert_eq!(targets[1], targets[0] + 1);
+            cx += 1;
+        }
+    }
+    assert_eq!(cx, 16);
+    assert_eq!(circuit.t_count(), 6);
+}
+
 // Deterministic counts behind `auto/clifford_t_price`, printed rather than asserted:
-// the register's width, rotation work and reduction passes per terminal fixture, the
-// route `Auto` takes, and whether a width-priced rule would need a tableau dry run;
+// the register's width, rotation work, reduction passes and parts in the product gauge
+// per terminal fixture, the route `Auto` takes, and whether a width-priced rule would
+// need a tableau dry run;
 // per mid-circuit fixture the branch count and the inner products one shot costs.
 // Run with `--features "parallel bench-internal" --no-capture`.
 #[cfg(feature = "bench-internal")]
@@ -1340,8 +1361,21 @@ fn clifford_t_price_census() {
         (28, 24),
         (30, 24),
         (32, 24),
+        (26, 40),
+        (30, 40),
+        (32, 40),
     ] {
         terminal.push((format!("layers_{n}q_t{t}"), price_layers(n, t)));
+    }
+    terminal.push((
+        "local_layers_64q_t40".into(),
+        bench_fixtures::local_clifford_t_layers(64, 10, 40, SEED),
+    ));
+    for n in [16, 20, 24] {
+        terminal.push((
+            format!("clifford_t_shots/{n}q_t10"),
+            bench_fixtures::random_clifford_t_layers(n, 10, 10, SEED),
+        ));
     }
     for (n, t) in [
         (20, 20),
@@ -1361,9 +1395,23 @@ fn clifford_t_price_census() {
     terminal.push(("clifford_register_counts/40q_d20_t5pct".into(), counts_row));
 
     println!(
-        "{:<40} {:>3} {:>3} {:>3} {:>4} {:>8} {:>6} {:>3} {:>7}  auto route",
-        "fixture", "n", "t", "k", "e", "R/2^k", "passes", "r", "dry_run"
+        "{:<40} {:>3} {:>3} {:>3} {:>4} {:>8} {:>6} {:>3} {:>7} {:>5} {:>4} {:>5} {:>5} {:>6}  auto route",
+        "fixture",
+        "n",
+        "t",
+        "k",
+        "e",
+        "R/2^k",
+        "passes",
+        "r",
+        "dry_run",
+        "parts",
+        "kmax",
+        "dense",
+        "split",
+        "pairs"
     );
+    let mut split_lines = Vec::new();
     for (label, circuit) in &terminal {
         let census = prism_q::clifford_register_census(circuit).unwrap();
         let (n, t, k) = (circuit.num_qubits, census.t_count, census.width);
@@ -1387,8 +1435,18 @@ fn clifford_t_price_census() {
         let dry_run = !bound_admits && k_stop.is_some();
         let (backend, rule) = shot_plan(BackendKind::Auto, circuit, 1024);
         let show = |v: Option<usize>| v.map_or("-".to_string(), |v| v.to_string());
+        // log2 of the rotation work `(e + 2) 2^k`, for the one register and summed over
+        // its parts in the product gauge.
+        let dense = ((t - k + 2) as f64).log2() + k as f64;
+        let split = census
+            .parts
+            .iter()
+            .map(|p| (p.excess + 2) as f64 * 2f64.powi(p.width as i32))
+            .sum::<f64>()
+            .log2();
+        let kmax = census.parts.first().map_or(0, |p| p.width);
         println!(
-            "{:<40} {:>3} {:>3} {:>3} {:>4} {:>8.2} {:>6} {:>3} {:>7}  {backend:?}/{rule:?}",
+            "{:<40} {:>3} {:>3} {:>3} {:>4} {:>8.2} {:>6} {:>3} {:>7} {:>5} {:>4} {:>5.1} {:>5.1} {:>6}  {backend:?}/{rule:?}",
             label,
             n,
             t,
@@ -1398,7 +1456,36 @@ fn clifford_t_price_census() {
             show(census.reduction_passes),
             show(census.register_rows),
             dry_run,
+            census.parts.len(),
+            kmax,
+            dense,
+            split,
+            census.row_pair_checks,
         );
+        let widest: Vec<String> = census
+            .parts
+            .iter()
+            .filter(|p| p.width > 1 || p.excess > 0)
+            .take(6)
+            .map(|p| format!("{}w{}e{}r", p.width, p.excess, p.rows))
+            .collect();
+        let singles = census
+            .parts
+            .iter()
+            .filter(|p| p.width == 1 && p.excess == 0)
+            .count();
+        split_lines.push(format!(
+            "{label:<40} {} + {singles} single",
+            widest.join(" ")
+        ));
+    }
+    println!();
+    println!(
+        "{:<40} parts past one qubit (width, excess, table bits)",
+        "fixture"
+    );
+    for line in &split_lines {
+        println!("{line}");
     }
 
     let mut mid = Vec::new();

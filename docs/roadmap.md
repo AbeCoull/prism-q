@@ -28,7 +28,7 @@ says what each release promises.
 
 | Item | Status |
 | --- | --- |
-| Exact stabilizer-rank simulation when the T gates reach more than 20 qubits, from decompositions that cover several T gates at once rather than one | Research |
+| Exact Clifford+T sampling when the T gates reach more than 20 qubits, by splitting the register into independent parts that each stay within the width cap | Research |
 
 ## Large structured circuits
 

@@ -119,7 +119,7 @@ and the fidelity bound drops to 0.0, the worst case it can certify.
 from prism_q import PrismError
 
 try:
-    simulate(wide).seed(42).require_exact().expectation([[(0, "Z")]])
+    simulate(wide).seed(42).require_exact().expectation([[(q, "Z")] for q in range(60)])
 except PrismError as exc:
     print(exc.kind)                 # incompatible_backend
 ```

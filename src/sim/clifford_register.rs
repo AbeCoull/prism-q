@@ -498,7 +498,8 @@ fn build_register(
                     if let Some(prune) = prune.as_deref_mut() {
                         state.cut(prune);
                     }
-                    state.rotation_work += 1 << state.width;
+                    let sweep = 1u64.checked_shl(state.width as u32).unwrap_or(u64::MAX);
+                    state.rotation_work = state.rotation_work.saturating_add(sweep);
                 }
                 _ => state.prefix.apply_state_gate(gate, targets).map_err(|_| {
                     PrismError::BackendUnsupported {
@@ -591,13 +592,13 @@ fn groups(parent: &mut [usize]) -> Vec<u64> {
 /// Register counts of one terminal Clifford+T circuit, read off the tableau without
 /// amplitudes.
 #[cfg(feature = "bench-internal")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CliffordRegisterCensus {
     /// T and Tdg gates after lowering.
     pub t_count: usize,
     /// Register qubits once every T gate is admitted, uncapped.
     pub width: usize,
-    /// Amplitudes the rotations sweep: `2^w` per T gate, `w` the width after it.
+    /// Amplitudes the rotations sweep: `2^w` per T gate, `w` the width after it, saturating.
     pub rotation_work: u64,
     /// Full-width passes of the readout reduction, the table fold included; `None` past
     /// the width cap.
@@ -605,10 +606,30 @@ pub struct CliffordRegisterCensus {
     /// Independent measured rows left on the register, the index bits of the outcome
     /// table; `None` past the width cap.
     pub register_rows: Option<usize>,
-    /// Linked sets of register qubits in the product gauge, widest first.
+    /// The register split into parts; `None` past 64 anchors.
+    pub split: Option<RegisterSplit>,
+}
+
+/// The register of one circuit split into parts in the product gauge.
+#[cfg(feature = "bench-internal")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegisterSplit {
+    /// Linked sets of register qubits, widest first, from the pairwise merge run to a
+    /// fixed point.
     pub parts: Vec<RegisterPart>,
     /// Pairs of register rows compared while merging parts whose rows anticommute.
     pub row_pair_checks: u64,
+    /// Part widths, widest first, of the canonical merge: the connected components of
+    /// the binary matroid of the row commutation forms of the units, the sets that excess
+    /// rotations alone link. They depend on the row space alone. A component can still
+    /// split into parts whose forms each sum to zero, so these can be wider than `parts`.
+    pub canonical_widths: Vec<usize>,
+    /// Whether the canonical merge yields the same parts as the fixed point; `false`
+    /// when a canonical part holds several fixed point parts, which are still valid.
+    pub canonical_agrees: bool,
+    /// Cheapest two-way cut of `parts[0]` whose sides are unions of units, so no rotation
+    /// crosses it; `None` when that part is one unit.
+    pub cut: Option<RegisterCut>,
 }
 
 /// One linked set of register qubits in the product gauge, where each anchoring T gate
@@ -624,12 +645,40 @@ pub struct RegisterPart {
     pub rows: usize,
 }
 
-/// Parts of the register of `circuit` in the product gauge, from the tableau alone, with
-/// the row pairs the merge compared. `circuit` must already have passed
-/// [`build_register`].
 #[cfg(feature = "bench-internal")]
-fn register_parts(circuit: &Circuit) -> (Vec<RegisterPart>, u64) {
-    let gauge = ProductGauge::build(circuit).expect("the product gauge holds the census circuit");
+impl RegisterPart {
+    /// Amplitude updates of the part's dense readout: about `3 (k + 1)` passes over its
+    /// `2^k` amplitudes.
+    pub fn readout_work(&self) -> f64 {
+        3.0 * (self.width + 1) as f64 * 2f64.powi(self.width as i32)
+    }
+}
+
+/// A part cut in two, each side held densely and the row pairs that anticommute across
+/// the cut paid per shot.
+#[cfg(feature = "bench-internal")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegisterCut {
+    /// Side widths, wider first.
+    pub sides: (usize, usize),
+    /// Row pairs whose pieces anticommute across the cut, `E`.
+    pub pairs: usize,
+    /// Amplitude updates at 1024 shots: `40 (2^kL + 2^kR)` to build the sides, then
+    /// `2^E (E + 2)` a shot.
+    pub work: f64,
+}
+
+#[cfg(feature = "bench-internal")]
+const CUT_DENSE_PASSES: f64 = 40.0;
+#[cfg(feature = "bench-internal")]
+const CUT_SHOTS: f64 = 1024.0;
+
+/// Parts of the register of `circuit` in the product gauge, from the tableau alone, or
+/// `None` past the 64 anchors [`ProductGauge::build`] holds. `circuit` must already have
+/// passed [`build_register`].
+#[cfg(feature = "bench-internal")]
+fn register_parts(circuit: &Circuit) -> Option<RegisterSplit> {
+    let gauge = ProductGauge::build(circuit)?;
     let CliffordRegister { prefix, slot, .. } = &gauge.register;
     let n = circuit.num_qubits;
     let excess: Vec<u64> = gauge.excess.iter().map(|(p, _)| p.x | p.z).collect();
@@ -677,15 +726,19 @@ fn register_parts(circuit: &Circuit) -> (Vec<RegisterPart>, u64) {
         }
     }
 
+    let anti = |a: u128, b: u128| {
+        let (ax, az, bx, bz) = (a as u64, (a >> 64) as u64, b as u64, (b >> 64) as u64);
+        (ax & bz) ^ (az & bx)
+    };
+    let units = groups(&mut parent);
     let mut checks = 0u64;
-    let mut parts = groups(&mut parent);
+    let mut parts = units.clone();
     loop {
         let mut merged = false;
         for (i, &a) in basis.iter().enumerate() {
             for &b in &basis[i + 1..] {
                 checks += 1;
-                let (ax, az, bx, bz) = (a as u64, (a >> 64) as u64, b as u64, (b >> 64) as u64);
-                let anti = (ax & bz) ^ (az & bx);
+                let anti = anti(a, b);
                 let clash = parts
                     .iter()
                     .filter(|&&c| (anti & c).count_ones() & 1 == 1)
@@ -702,7 +755,71 @@ fn register_parts(circuit: &Circuit) -> (Vec<RegisterPart>, u64) {
         }
     }
 
-    let mut out: Vec<RegisterPart> = parts
+    // Row `i` of a unit's form has bit `j` set when rows `i` and `j` anticommute on the
+    // unit's qubits.
+    let forms: Vec<Vec<u64>> = units
+        .iter()
+        .map(|&u| {
+            basis
+                .iter()
+                .map(|&a| {
+                    basis.iter().enumerate().fold(0u64, |row, (j, &b)| {
+                        row | u64::from((anti(a, b) & u).count_ones() & 1) << j
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    // A unit whose form is a sum of earlier ones joins every unit in that sum: the
+    // fundamental circuits of one elimination span the matroid's components.
+    let mut unit_parent: Vec<usize> = (0..units.len()).collect();
+    let mut eliminated: Vec<(Vec<u64>, usize, u64)> = Vec::new();
+    for (i, form) in forms.iter().enumerate() {
+        let mut v = form.clone();
+        let mut combo = 1u64 << i;
+        for (row, pivot, sum) in &eliminated {
+            if bit(&v, *pivot) {
+                for (d, s) in v.iter_mut().zip(row) {
+                    *d ^= s;
+                }
+                combo ^= sum;
+            }
+        }
+        match v.iter().position(|&w| w != 0) {
+            Some(w) => {
+                let pivot = 64 * w + v[w].trailing_zeros() as usize;
+                eliminated.push((v, pivot, combo));
+            }
+            None => join(&mut unit_parent, combo),
+        }
+    }
+    let mut canonical = vec![0u64; units.len()];
+    for (i, &u) in units.iter().enumerate() {
+        canonical[find(&mut unit_parent, i)] |= u;
+    }
+    canonical.retain(|&m| m != 0);
+    debug_assert!(
+        canonical.iter().all(|&c| {
+            let mut sum = vec![0u64; basis.len()];
+            for (u, form) in units.iter().zip(&forms).filter(|(u, _)| *u & c != 0) {
+                debug_assert_eq!(u & !c, 0, "a canonical part holds whole units");
+                for (s, f) in sum.iter_mut().zip(form) {
+                    *s ^= f;
+                }
+            }
+            sum.iter().all(|&w| w == 0)
+        }),
+        "the rows commute inside every canonical part"
+    );
+    let mut canonical_widths: Vec<usize> =
+        canonical.iter().map(|c| c.count_ones() as usize).collect();
+    canonical_widths.sort_unstable_by(|a, b| b.cmp(a));
+    let mut fixed = parts.clone();
+    fixed.sort_unstable();
+    canonical.sort_unstable();
+    let canonical_agrees = canonical == fixed;
+
+    let mut out: Vec<(u64, RegisterPart)> = parts
         .iter()
         .map(|&c| {
             let cut = u128::from(c) | u128::from(c) << 64;
@@ -716,15 +833,141 @@ fn register_parts(circuit: &Circuit) -> (Vec<RegisterPart>, u64) {
                     piece_basis.push(v);
                 }
             }
-            RegisterPart {
+            let part = RegisterPart {
                 width: c.count_ones() as usize,
                 excess: excess.iter().filter(|&&m| m & c != 0).count(),
                 rows: piece_basis.len(),
-            }
+            };
+            (c, part)
         })
         .collect();
-    out.sort_by(|a, b| b.width.cmp(&a.width).then(b.excess.cmp(&a.excess)));
-    (out, checks)
+    out.sort_by(|(_, a), (_, b)| b.width.cmp(&a.width).then(b.excess.cmp(&a.excess)));
+    let cut = out.first().and_then(|&(part, _)| {
+        let inside: Vec<usize> = (0..units.len()).filter(|&i| units[i] & part != 0).collect();
+        let inside_units: Vec<u64> = inside.iter().map(|&i| units[i]).collect();
+        let inside_forms: Vec<&[u64]> = inside.iter().map(|&i| &forms[i][..]).collect();
+        best_cut(&inside_units, &inside_forms)
+    });
+    Some(RegisterSplit {
+        parts: out.into_iter().map(|(_, part)| part).collect(),
+        row_pair_checks: checks,
+        canonical_widths,
+        canonical_agrees,
+        cut,
+    })
+}
+
+/// Rank over F2 of a matrix given by its rows.
+#[cfg(feature = "bench-internal")]
+fn f2_rank(rows: &[u64]) -> usize {
+    let mut rows: Vec<u64> = rows.iter().copied().filter(|&r| r != 0).collect();
+    let mut rank = 0;
+    while let Some(p) = rows.pop() {
+        rank += 1;
+        let low = p & p.wrapping_neg();
+        for r in &mut rows {
+            if *r & low != 0 {
+                *r ^= p;
+            }
+        }
+        rows.retain(|&r| r != 0);
+    }
+    rank
+}
+
+/// Cheapest cut by [`RegisterCut::work`] of a part into two unions of `units`, where
+/// `forms[i]` is the row commutation form on `units[i]`. Every split is tried up to 18
+/// units; past that, a descent by single units from eight random halves.
+#[cfg(feature = "bench-internal")]
+fn best_cut(units: &[u64], forms: &[&[u64]]) -> Option<RegisterCut> {
+    let m = units.len();
+    if m < 2 {
+        return None;
+    }
+    let width: usize = units.iter().map(|u| u.count_ones() as usize).sum();
+    let rows = forms[0].len();
+    let compile = |left: usize| {
+        CUT_DENSE_PASSES * (2f64.powi(left as i32) + 2f64.powi((width - left) as i32))
+    };
+    let score = |left: usize, acc: &[u64]| {
+        let pairs = f2_rank(acc) / 2;
+        RegisterCut {
+            sides: (left.max(width - left), left.min(width - left)),
+            pairs,
+            work: compile(left) + CUT_SHOTS * 2f64.powi(pairs as i32) * (pairs as f64 + 2.0),
+        }
+    };
+    let mut best: Option<RegisterCut> = None;
+    if m <= 18 {
+        let mut acc = vec![0u64; rows];
+        let mut inside = 0u64;
+        let mut left = 0usize;
+        for step in 1usize..1 << (m - 1) {
+            let i = step.trailing_zeros() as usize + 1;
+            inside ^= 1 << i;
+            let w = units[i].count_ones() as usize;
+            left = if inside >> i & 1 == 1 {
+                left + w
+            } else {
+                left - w
+            };
+            for (a, f) in acc.iter_mut().zip(forms[i]) {
+                *a ^= f;
+            }
+            if best.is_some_and(|b| compile(left) >= b.work) {
+                continue;
+            }
+            let cut = score(left, &acc);
+            if best.is_none_or(|b| cut.work < b.work) {
+                best = Some(cut);
+            }
+        }
+        return best;
+    }
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let state = |inside: &[bool]| {
+        let mut acc = vec![0u64; rows];
+        let mut left = 0;
+        for i in (0..m).filter(|&i| inside[i]) {
+            left += units[i].count_ones() as usize;
+            for (a, f) in acc.iter_mut().zip(forms[i]) {
+                *a ^= f;
+            }
+        }
+        score(left, &acc)
+    };
+    for _ in 0..8 {
+        let mut order: Vec<usize> = (0..m).collect();
+        for i in (1..m).rev() {
+            order.swap(i, rng.random_range(0..=i));
+        }
+        let mut inside = vec![false; m];
+        for &i in &order[..m / 2] {
+            inside[i] = true;
+        }
+        let mut current = state(&inside);
+        let mut improved = true;
+        while improved {
+            improved = false;
+            for &i in &order {
+                inside[i] = !inside[i];
+                let count = inside.iter().filter(|&&x| x).count();
+                if count > 0 && count < m {
+                    let trial = state(&inside);
+                    if trial.work < current.work {
+                        current = trial;
+                        improved = true;
+                        continue;
+                    }
+                }
+                inside[i] = !inside[i];
+            }
+        }
+        if best.is_none_or(|b| current.work < b.work) {
+            best = Some(current);
+        }
+    }
+    best
 }
 
 #[cfg(feature = "bench-internal")]
@@ -732,12 +975,14 @@ pub(super) fn census(circuit: &Circuit) -> Result<CliffordRegisterCensus> {
     let mut measures = Vec::new();
     let state = build_register(circuit, circuit.num_qubits, false, None, &mut measures)?
         .expect("an uncapped register always fits");
-    let (parts, row_pair_checks) = register_parts(circuit);
-    debug_assert_eq!(
-        parts.iter().map(|p| p.width).sum::<usize>(),
-        state.width,
-        "the product gauge anchors as many qubits as the register holds"
-    );
+    let split = register_parts(circuit);
+    if let Some(split) = &split {
+        debug_assert_eq!(
+            split.parts.iter().map(|p| p.width).sum::<usize>(),
+            state.width,
+            "the product gauge anchors as many qubits as the register holds"
+        );
+    }
     let t_count = circuit
         .instructions
         .iter()
@@ -762,8 +1007,7 @@ pub(super) fn census(circuit: &Circuit) -> Result<CliffordRegisterCensus> {
         register_rows: reduced
             .as_ref()
             .map(|s| s.table.len().trailing_zeros() as usize),
-        parts,
-        row_pair_checks,
+        split,
     })
 }
 

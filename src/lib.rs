@@ -127,7 +127,9 @@ pub use sim::noise::{
     run_shots_noisy,
 };
 #[cfg(feature = "bench-internal")]
-pub use sim::stabilizer_rank::{CliffordRegisterCensus, RegisterPart, clifford_register_census};
+pub use sim::stabilizer_rank::{
+    CliffordRegisterCensus, RegisterCut, RegisterPart, RegisterSplit, clifford_register_census,
+};
 pub use sim::stabilizer_rank::{
     StabRankResult, run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_inner_product,
     stabilizer_overlap_sq,

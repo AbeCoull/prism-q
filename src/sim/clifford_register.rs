@@ -498,7 +498,7 @@ pub(super) fn register_price(circuit: &Circuit, max_width: usize) -> Result<Opti
 /// Register counts of one terminal Clifford+T circuit, read off the tableau without
 /// amplitudes.
 #[cfg(feature = "bench-internal")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliffordRegisterCensus {
     /// T and Tdg gates after lowering.
     pub t_count: usize,
@@ -512,6 +512,199 @@ pub struct CliffordRegisterCensus {
     /// Independent measured rows left on the register, the index bits of the outcome
     /// table; `None` past the width cap.
     pub register_rows: Option<usize>,
+    /// Linked sets of register qubits in the product gauge, widest first.
+    pub parts: Vec<RegisterPart>,
+    /// Pairs of register rows compared while merging parts whose rows anticommute.
+    pub row_pair_checks: u64,
+}
+
+/// One linked set of register qubits in the product gauge, where each anchoring T gate
+/// adds a qubit in a known one-qubit state. Parts join where an excess rotation acts on
+/// both, or where two measured register rows anticommute inside each of them.
+#[cfg(feature = "bench-internal")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterPart {
+    pub width: usize,
+    /// T gates applied as a rotation over qubits already in the part.
+    pub excess: usize,
+    /// Rank of the register rows cut down to the part, the index bits of its table.
+    pub rows: usize,
+}
+
+/// Parts of the register of `circuit` in the product gauge, from the tableau alone, with
+/// the row pairs the merge compared. `circuit` must already have passed
+/// [`build_register`].
+#[cfg(feature = "bench-internal")]
+fn register_parts(circuit: &Circuit) -> (Vec<RegisterPart>, u64) {
+    let n = circuit.num_qubits;
+    let mut prefix = SignedCliffordPrefix::identity(n);
+    let mut slot: Vec<Option<usize>> = vec![None; n];
+    let mut parent: Vec<usize> = Vec::new();
+    let mut excess: Vec<u64> = Vec::new();
+    let mut measured: Vec<usize> = Vec::new();
+    let fold = |prefix: &mut SignedCliffordPrefix, gate: Gate, targets: &[usize]| {
+        prefix
+            .fold_right_state_gate(&gate, targets)
+            .expect("Clifford folds into the prefix");
+    };
+    fn find(parent: &mut [usize], mut a: usize) -> usize {
+        while parent[a] != a {
+            parent[a] = parent[parent[a]];
+            a = parent[a];
+        }
+        a
+    }
+    fn join(parent: &mut [usize], mask: u64) {
+        let first = mask.trailing_zeros() as usize;
+        let mut rest = mask & mask.wrapping_sub(1);
+        while rest != 0 {
+            let b = rest.trailing_zeros() as usize;
+            rest &= rest - 1;
+            let (ra, rb) = (find(parent, first), find(parent, b));
+            parent[rb] = ra;
+        }
+    }
+    let slot_mask = |slot: &[Option<usize>], words: &[u64]| {
+        slot.iter()
+            .enumerate()
+            .filter_map(|(q, s)| s.filter(|_| bit(words, q)))
+            .fold(0u64, |m, b| m | 1 << b)
+    };
+
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Gate {
+                gate: Gate::T | Gate::Tdg,
+                targets,
+            } => {
+                let q = targets[0];
+                let p = prefix.conjugate_z(q);
+                let Some(anchor) = (0..n).find(|&j| slot[j].is_none() && bit(&p.x, j)) else {
+                    let support: Vec<u64> = p.x.iter().zip(&p.z).map(|(x, z)| x | z).collect();
+                    let mask = slot_mask(&slot, &support);
+                    if mask != 0 {
+                        join(&mut parent, mask);
+                        excess.push(mask);
+                    }
+                    continue;
+                };
+                for i in (0..n).filter(|&i| i != anchor && slot[i].is_none() && bit(&p.x, i)) {
+                    fold(&mut prefix, Gate::Cx, &[anchor, i]);
+                }
+                // Fold the controlled rest of `P = A_anchor ⊗ R`: it fixes `|0>` on the
+                // anchor and leaves the rotation acting on the anchor alone.
+                let p = prefix.conjugate_z(q);
+                for j in (0..n).filter(|&j| j != anchor) {
+                    match (bit(&p.x, j), bit(&p.z, j)) {
+                        (false, false) => {}
+                        (true, false) => fold(&mut prefix, Gate::Cx, &[anchor, j]),
+                        (false, true) => fold(&mut prefix, Gate::Cz, &[anchor, j]),
+                        (true, true) => {
+                            fold(&mut prefix, Gate::S, &[j]);
+                            fold(&mut prefix, Gate::Cx, &[anchor, j]);
+                            fold(&mut prefix, Gate::Sdg, &[j]);
+                        }
+                    }
+                }
+                debug_assert!({
+                    let g = prefix.conjugate_z(q);
+                    (0..n).all(|j| j == anchor || !(bit(&g.x, j) || bit(&g.z, j)))
+                });
+                slot[anchor] = Some(parent.len());
+                parent.push(parent.len());
+            }
+            Instruction::Gate { gate, targets } => prefix
+                .apply_state_gate(gate, targets)
+                .expect("the register build accepted this gate"),
+            Instruction::Measure { qubit, .. } if !measured.contains(qubit) => {
+                measured.push(*qubit);
+            }
+            _ => {}
+        }
+    }
+
+    let mut rows: Vec<SignedPauli> = measured.iter().map(|&q| prefix.conjugate_z(q)).collect();
+    let mut random = vec![false; rows.len()];
+    for f in (0..n).filter(|&f| slot[f].is_none()) {
+        let Some(pivot) = (0..rows.len()).find(|&r| !random[r] && bit(&rows[r].x, f)) else {
+            continue;
+        };
+        random[pivot] = true;
+        let pivot_row = rows[pivot].clone();
+        for (r, row) in rows.iter_mut().enumerate() {
+            if r != pivot && bit(&row.x, f) {
+                mul_rows(row, &pivot_row);
+            }
+        }
+    }
+    let mut basis: Vec<u128> = Vec::new();
+    for (row, _) in rows.iter().zip(&random).filter(|(_, random)| !**random) {
+        let mut v =
+            u128::from(slot_mask(&slot, &row.x)) | u128::from(slot_mask(&slot, &row.z)) << 64;
+        for b in &basis {
+            v = v.min(v ^ b);
+        }
+        if v != 0 {
+            basis.push(v);
+        }
+    }
+
+    let groups = |parent: &mut [usize]| {
+        let mut masks = vec![0u64; parent.len()];
+        for b in 0..parent.len() {
+            masks[find(parent, b)] |= 1 << b;
+        }
+        masks.retain(|&m| m != 0);
+        masks
+    };
+    let mut checks = 0u64;
+    let mut parts = groups(&mut parent);
+    loop {
+        let mut merged = false;
+        for (i, &a) in basis.iter().enumerate() {
+            for &b in &basis[i + 1..] {
+                checks += 1;
+                let (ax, az, bx, bz) = (a as u64, (a >> 64) as u64, b as u64, (b >> 64) as u64);
+                let anti = (ax & bz) ^ (az & bx);
+                let clash = parts
+                    .iter()
+                    .filter(|&&c| (anti & c).count_ones() & 1 == 1)
+                    .fold(0u64, |m, &c| m | c);
+                if clash != 0 {
+                    join(&mut parent, clash);
+                    parts = groups(&mut parent);
+                    merged = true;
+                }
+            }
+        }
+        if !merged {
+            break;
+        }
+    }
+
+    let mut out: Vec<RegisterPart> = parts
+        .iter()
+        .map(|&c| {
+            let cut = u128::from(c) | u128::from(c) << 64;
+            let mut piece_basis: Vec<u128> = Vec::new();
+            for &row in &basis {
+                let mut v = row & cut;
+                for b in &piece_basis {
+                    v = v.min(v ^ b);
+                }
+                if v != 0 {
+                    piece_basis.push(v);
+                }
+            }
+            RegisterPart {
+                width: c.count_ones() as usize,
+                excess: excess.iter().filter(|&&m| m & c != 0).count(),
+                rows: piece_basis.len(),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.width.cmp(&a.width).then(b.excess.cmp(&a.excess)));
+    (out, checks)
 }
 
 #[cfg(feature = "bench-internal")]
@@ -519,6 +712,12 @@ pub(super) fn census(circuit: &Circuit) -> Result<CliffordRegisterCensus> {
     let mut measures = Vec::new();
     let state = build_register(circuit, circuit.num_qubits, false, None, &mut measures)?
         .expect("an uncapped register always fits");
+    let (parts, row_pair_checks) = register_parts(circuit);
+    debug_assert_eq!(
+        parts.iter().map(|p| p.width).sum::<usize>(),
+        state.width,
+        "the product gauge anchors as many qubits as the register holds"
+    );
     let t_count = circuit
         .instructions
         .iter()
@@ -543,6 +742,8 @@ pub(super) fn census(circuit: &Circuit) -> Result<CliffordRegisterCensus> {
         register_rows: reduced
             .as_ref()
             .map(|s| s.table.len().trailing_zeros() as usize),
+        parts,
+        row_pair_checks,
     })
 }
 

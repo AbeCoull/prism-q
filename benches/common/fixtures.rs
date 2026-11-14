@@ -234,7 +234,15 @@ pub fn guarded_s_mid_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circ
 /// Random Clifford layers with a full random CX pairing each, and `t_count` T gates at
 /// random spots ahead of a layer, every qubit measured.
 pub fn random_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
-    let mut c = clifford_t_layers(n, depth, t_count, seed);
+    let mut c = clifford_t_layers(n, depth, t_count, seed, false);
+    c.measure_all();
+    c
+}
+
+/// [`random_clifford_t_layers`] with CX on nearest neighbours in place of a random
+/// pairing: bonds `(2i, 2i + 1)` on even layers and `(2i + 1, 2i + 2)` on odd ones.
+pub fn local_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut c = clifford_t_layers(n, depth, t_count, seed, true);
     c.measure_all();
     c
 }
@@ -250,7 +258,7 @@ pub fn distinct_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> C
         c.add_gate(Gate::T, &[q]);
     }
     c.instructions
-        .extend(clifford_t_layers(n, depth, 0, seed).instructions);
+        .extend(clifford_t_layers(n, depth, 0, seed, false).instructions);
     c.measure_all();
     c
 }
@@ -258,12 +266,12 @@ pub fn distinct_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> C
 /// [`random_clifford_t_layers`] before its measurements, with the two-bit mid-circuit tail
 /// of [`append_measure_guard_reset`] in their place.
 pub fn clifford_t_layers_mid_circuit(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
-    let mut c = clifford_t_layers(n, depth, t_count, seed);
+    let mut c = clifford_t_layers(n, depth, t_count, seed, false);
     append_measure_guard_reset(&mut c);
     c
 }
 
-fn clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
+fn clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64, local: bool) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let ones = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Z];
     let mut spots: Vec<usize> = (0..depth * n).collect();
@@ -278,6 +286,12 @@ fn clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circu
         }
         for q in 0..n {
             c.add_gate(ones[rng.random_range(0..ones.len())].clone(), &[q]);
+        }
+        if local {
+            for q in (layer % 2..n.saturating_sub(1)).step_by(2) {
+                c.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+            continue;
         }
         let mut perm: Vec<usize> = (0..n).collect();
         for i in (1..n).rev() {

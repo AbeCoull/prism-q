@@ -489,19 +489,27 @@ fn device_plan_matches_execution_and_adjoint_keeps_host_limits() {
 
 #[test]
 fn successful_spd_primary_is_not_rejected_for_a_failed_tensor_fallback() {
-    let mut circuit = Circuit::new(18, 0);
-    for q in 0..18 {
+    // One register part spans all 22 qubits with 21 excess T rotations, so the Clifford
+    // register declines and the Pauli sum, one term per marginal, is the primary.
+    let n = 22;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
         circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
     }
-    for q in 1..18 {
+    for q in 1..n {
         circuit.add_gate(Gate::Cx, &[q - 1, q]);
     }
-    circuit.add_gate(Gate::T, &[0]);
+    for i in 0..21 {
+        let q = (7 * i + 3) % n;
+        circuit.add_gate(Gate::T, &[q]);
+        circuit.add_gate(Gate::Cx, &[q, (q + 11) % n]);
+    }
     let request = || {
         simulate(&circuit)
             .limits(
                 Limits::new()
-                    .max_statevector_qubits(20)
+                    .max_statevector_qubits(24)
                     .max_tn_peak_qubits(0)
                     .max_tn_slices(1),
             )

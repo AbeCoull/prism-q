@@ -1297,6 +1297,45 @@ fn clifford_t_price_rows_pin_their_engines() {
     }
 }
 
+// `auto/clifford_t_expectation` times the product-gauge register on every row. The cap is
+// fixed at 29, as on the bench host, so the 30, 32 and 64 qubit rows sit above it.
+#[test]
+fn clifford_t_expectation_rows_take_the_register() {
+    let register = (ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister);
+    let plan = |circuit: &prism_q::circuit::Circuit, query: sim::Query<'_>| {
+        let plan = sim::simulate(circuit)
+            .limits(prism_q::Limits::new().max_statevector_qubits(29))
+            .seed(42)
+            .plan(query)
+            .unwrap();
+        (plan.backend, plan.rule)
+    };
+    let rows = [
+        ("layers_30q_t40", price_layers(30, 40)),
+        ("layers_32q_t40", price_layers(32, 40)),
+        (
+            "local_layers_64q_t40",
+            bench_fixtures::local_clifford_t_layers(64, 10, 40, SEED),
+        ),
+        ("layers_24q_t24", price_layers(24, 24)),
+    ];
+    for (label, circuit) in &rows {
+        let circuit = circuit.without_measurements();
+        let observables = bench_fixtures::clifford_t_expectation_observables(circuit.num_qubits);
+        assert_eq!(
+            plan(&circuit, sim::Query::Expectation(&observables)),
+            register,
+            "expectation/{label}"
+        );
+    }
+    let marginals = price_layers(24, 24).without_measurements();
+    assert_eq!(
+        plan(&marginals, sim::Query::Marginals),
+        register,
+        "marginals/layers_24q_t24"
+    );
+}
+
 fn auto_mid_rows() -> Vec<(String, prism_q::circuit::Circuit, usize)> {
     let mut rows = Vec::new();
     for n in [22, 24, 26] {

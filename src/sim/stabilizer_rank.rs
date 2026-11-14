@@ -40,7 +40,9 @@ use crate::circuit::{Circuit, GuardedRegion, Instruction, SmallVec, any_gate};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
-use super::clifford_register::{MAX_REGISTER_QUBITS, Pruning, TerminalSampler, register_price};
+use super::clifford_register::{
+    MAX_REGISTER_QUBITS, Pruning, RegisterExpectations, TerminalSampler, register_price,
+};
 
 /// Letter-level signed Pauli string. Each qubit's `(x, z)` bit pair encodes
 /// the Pauli letter directly: (0,0)=I, (1,0)=X, (0,1)=Z, (1,1)=Y. `phase4` is
@@ -1229,6 +1231,16 @@ pub(super) fn deferred_register_circuit(circuit: &Circuit) -> Option<Circuit> {
 pub(super) fn terminal_register_price(circuit: &Circuit, max_width: usize) -> Option<(usize, u64)> {
     let lowered = lower_clifford_t_circuit(circuit).ok()?;
     register_price(&lowered, max_width).ok().flatten()
+}
+
+/// The product-gauge register plan of `observables` on the unitary `circuit`; `None` when
+/// the circuit does not lower to Clifford+T or [`RegisterExpectations::plan`] declines.
+pub(super) fn register_expectations(
+    circuit: &Circuit,
+    observables: &[Vec<super::unified_pauli::PauliTerm>],
+) -> Option<RegisterExpectations> {
+    let lowered = lower_clifford_t_circuit(circuit).ok()?;
+    RegisterExpectations::plan(&lowered, observables)
 }
 
 #[cfg(feature = "bench-internal")]

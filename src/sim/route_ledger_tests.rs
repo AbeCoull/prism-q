@@ -156,6 +156,7 @@ const LEDGER: &[Entry] = &[
     here("marginals", "ResolvedBackend::StochasticPauli", Sv, "pauli_engine_marginals_match_the_unfused_statevector"),
     here("marginals", "ResolvedBackend::DeterministicPauli", Sv, "pauli_engine_marginals_match_the_unfused_statevector"),
     here("marginals", "auto_spd_marginals", Sv, "auto_spd_marginals_match_the_unfused_statevector"),
+    here("marginals", "register_parts", Sv, "auto_register_parts_match_the_unfused_statevector"),
     lowered("marginals", "tensor_route", Sv, "auto_tensor_route_matches_the_unfused_statevector"),
     here("marginals", "exact_mixture", ClosedForm, "noisy_run_reads_the_exact_mixture"),
     here("marginals", "initial_state", Sv, "initial_state_terminals_match_the_unfused_statevector"),
@@ -163,6 +164,8 @@ const LEDGER: &[Entry] = &[
     here("expectation_values", "clifford_pauli_propagation", Sv, "expectation_routes_match_the_unfused_statevector"),
     here("expectation_values", "statevector_expectations", Sv, "expectation_routes_match_the_unfused_statevector"),
     here("expectation_values", "tensor_zero_state", Sv, "expectation_routes_match_the_unfused_statevector"),
+    here("expectation_values", "register_parts", Sv, "auto_register_parts_match_the_unfused_statevector"),
+    here("probabilities_of", "register_parts", Sv, "auto_register_parts_match_the_unfused_statevector"),
     here("expectation_values", "native_expectations", Sv, "expectation_routes_match_the_unfused_statevector"),
     lowered("expectation_values", "tensor_route", Sv, "auto_tensor_route_matches_the_unfused_statevector"),
     here("expectation_values_reported", "ResolvedBackend::StochasticPauli", Sv, "sampled_expectations_carry_errors_that_cover_the_statevector"),
@@ -219,6 +222,7 @@ const PREDICATE_ROUTES: &[&str] = &[
     "native_marginals",
     "probability_marginals",
     "auto_spd_marginals",
+    "register_parts",
     "tensor_route",
     "tensor_route_over_mps",
     "clifford_pauli_propagation",
@@ -2170,19 +2174,83 @@ fn pauli_engine_marginals_match_the_unfused_statevector() {
     assert_close("spp", &flatten(&spp.marginals), &want, 0.05);
 }
 
+/// Every qubit anchored by `H T`, a CX ladder, then 21 more T gates: each is an excess
+/// rotation with a `Z` axis along the ladder, so one register part spans all 22 qubits with
+/// more excess rotations than it propagates, and the register parts decline. The axes
+/// commute with every `Z` marginal, so the Pauli sum stays at one term.
+fn register_declined() -> Circuit {
+    let n = 22;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for i in 0..21 {
+        let q = (7 * i + 3) % n;
+        circuit.add_gate(Gate::T, &[q]);
+        circuit.add_gate(Gate::Cx, &[q, (q + 11) % n]);
+    }
+    circuit
+}
+
 #[test]
 fn auto_spd_marginals_match_the_unfused_statevector() {
-    // Twelve qubits is the native floor, and the dense run the Pauli sum is priced
-    // against grows as 2^n, so narrower registers rarely fit its budget anyway.
-    let circuit = clifford_t(12, 2);
+    let circuit = register_declined();
     let result = simulate(&circuit).seed(SEED).marginals().unwrap();
     assert_eq!(result.metadata.backend, ResolvedBackend::DeterministicPauli);
     assert_close(
         "auto spd",
         &flatten(&result.marginals),
-        &marginals_of(&unfused_probs(&circuit), 12),
+        &marginals_of(&unfused_probs(&circuit), circuit.num_qubits),
         EPS,
     );
+}
+
+#[test]
+fn auto_register_parts_match_the_unfused_statevector() {
+    let n = 12;
+    let circuit = clifford_t(n, 4);
+    let state = unfused_state(&circuit);
+    let probs = unfused_probs(&circuit);
+
+    let obs = observables(n);
+    let result = simulate(&circuit)
+        .seed(SEED)
+        .expectation_values_reported(&obs)
+        .unwrap();
+    assert_eq!(result.metadata.backend, ResolvedBackend::StabilizerRank);
+    let want: Vec<f64> = obs.iter().map(|o| pauli_value(&state, o)).collect();
+    assert_close("expectations", &result.values, &want, EPS);
+
+    let marginals = simulate(&circuit).seed(SEED).marginals().unwrap();
+    assert_eq!(marginals.metadata.backend, ResolvedBackend::StabilizerRank);
+    assert_close(
+        "marginals",
+        &flatten(&marginals.marginals),
+        &marginals_of(&probs, n),
+        EPS,
+    );
+
+    let qubits = [5, 0, 11];
+    assert!(
+        decide_register_subset(&circuit, &qubits, &ResolvedLimits::process_default()).is_some()
+    );
+    let mut want = vec![0.0; 8];
+    for (index, p) in probs.iter().enumerate() {
+        let key = qubits
+            .iter()
+            .enumerate()
+            .fold(0, |acc, (i, &q)| acc | ((index >> q) & 1) << i);
+        want[key] += p;
+    }
+    let got = simulate(&circuit)
+        .seed(SEED)
+        .probabilities_of(&qubits)
+        .unwrap();
+    assert_close("probabilities_of", &got, &want, EPS);
 }
 
 #[test]

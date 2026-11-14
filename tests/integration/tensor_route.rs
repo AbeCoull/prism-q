@@ -11,6 +11,17 @@ use prism_q::{BackendKind, Circuit, Gate, PauliTerm, ResolvedBackend, simulate};
 
 const SEED: u64 = 0xDEAD_BEEF;
 
+/// [`random_circuit`] at depth 10 behind an `Ry` on qubit 0, which takes it out of
+/// Clifford+T, where the Clifford register answers ahead of the tensor path.
+fn generic_random(n: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, 0);
+    circuit.add_gate(Gate::Ry(0.3), &[0]);
+    circuit
+        .instructions
+        .extend(random_circuit(n, 10, SEED).instructions);
+    circuit
+}
+
 fn two_local(n: usize) -> Vec<Vec<PauliTerm>> {
     (0..8)
         .map(|k| {
@@ -62,7 +73,7 @@ fn auto_backend(circuit: &Circuit, observables: &[Vec<PauliTerm>]) -> ResolvedBa
 
 #[test]
 fn auto_expectations_route_a_wide_shallow_circuit_to_the_tensor_path() {
-    let circuit = random_circuit(20, 10, SEED);
+    let circuit = generic_random(20);
     let observables = two_local(20);
     let auto = simulate(&circuit)
         .backend(BackendKind::Auto)
@@ -83,7 +94,7 @@ fn auto_expectations_route_a_wide_shallow_circuit_to_the_tensor_path() {
 
 #[test]
 fn an_identity_term_on_the_tensor_path_reads_one() {
-    let circuit = random_circuit(20, 10, SEED);
+    let circuit = generic_random(20);
     let mut observables = two_local(20);
     observables.push(Vec::new());
     let auto = simulate(&circuit)
@@ -127,7 +138,7 @@ fn a_deep_circuit_stays_on_the_statevector() {
 
 #[test]
 fn a_narrow_circuit_stays_on_the_statevector() {
-    let circuit = random_circuit(16, 10, SEED);
+    let circuit = generic_random(16);
     assert_eq!(
         auto_backend(&circuit, &two_local(16)),
         ResolvedBackend::Statevector

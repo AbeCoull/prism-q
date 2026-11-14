@@ -276,9 +276,15 @@ Clifford gates cost O(n²) for all branches together and each T gate doubles the
   the T rotations reach (`src/sim/clifford_register.rs`, at most 20 such qubits). Shots
   with mid-circuit measurement keep coherent branches as MPS, project each outcome, and
   contract pairwise branch overlaps with no dense state.
+- Expectation values and marginals read the same tableau in the product gauge
+  (`src/sim/clifford_parts.rs`): a T gate that reaches a qubit in `|0>` adds it as a
+  one-qubit state, every other T gate is an excess rotation, and qubits an excess rotation
+  links form a part. The state is a product over parts, so a part past the width cap
+  answers through its excess rotations and does not block the others.
 
 `BackendKind::StabilizerRank` rejects a circuit with no T gate, pointing at the
-stabilizer. `Auto` takes it for shots only; the thresholds are in
+stabilizer. `Auto` takes it for shots, expectation values and marginals; the thresholds
+are in
 [routes the tree does not show](./engine.md#routes-the-tree-does-not-show).
 
 ## SPP and SPD
@@ -298,7 +304,7 @@ passes `max_terms`, and `Budget { max_terms }` drops the smallest surplus to hol
 at the budget. With nothing to drop the run is exact and errors at a fixed term ceiling
 rather than truncating. Either way the discarded coefficient mass bounds the error,
 `|error| <= sum |discarded|`. `Auto` sends marginals on Clifford+T circuits from 12 qubits
-here, and expectation values on Clifford circuits.
+here when the register parts decline, and expectation values on Clifford circuits.
 
 ## Pauli Path
 

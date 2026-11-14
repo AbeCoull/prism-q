@@ -44,14 +44,20 @@ def test_gradient_query_takes_parameters_not_links():
 
 
 def test_conditional_fallback_error_does_not_reject_primary():
-    builder = CircuitBuilder(18)
-    for qubit in range(18):
-        builder.h(qubit)
-    for qubit in range(1, 18):
+    # One register part spans all 22 qubits with 21 excess T rotations, so the Clifford
+    # register declines and the Pauli sum is the primary.
+    n = 22
+    builder = CircuitBuilder(n)
+    for qubit in range(n):
+        builder.h(qubit).t(qubit)
+    for qubit in range(1, n):
         builder.cx(qubit - 1, qubit)
-    circuit = builder.t(0).build()
+    for i in range(21):
+        qubit = (7 * i + 3) % n
+        builder.t(qubit).cx(qubit, (qubit + 11) % n)
+    circuit = builder.build()
     request = simulate(circuit).limits(
-        Limits(max_statevector_qubits=20, max_tn_peak_qubits=0, max_tn_slices=1)
+        Limits(max_statevector_qubits=24, max_tn_peak_qubits=0, max_tn_slices=1)
     ).require_exact()
     plan = request.plan(Query.marginals())
     assert plan.would_fail is None

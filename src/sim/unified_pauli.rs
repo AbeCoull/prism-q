@@ -1187,6 +1187,48 @@ impl<K: SpdKey> WeightedPauliSum<K> {
     }
 }
 
+/// `U† P U` as weighted one-word Pauli strings in the letter convention of the Clifford
+/// register, where `X`, `Y` and `Z` letters are Hermitian: `P` is the string `(x, z)` and `U`
+/// the product of `exp(-i θ i^phase4 R)` over `rotations` given as `(R.x, R.z, phase4, θ)`,
+/// the first applied first.
+pub(super) fn propagate_register_rotations(
+    x: u64,
+    z: u64,
+    rotations: impl DoubleEndedIterator<Item = (u64, u64, u8, f64)>,
+) -> Vec<(u64, u64, Complex64)> {
+    const I_POW: [Complex64; 4] = [
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 1.0),
+        Complex64::new(-1.0, 0.0),
+        Complex64::new(0.0, -1.0),
+    ];
+    let mut sum = WeightedPauliSum::<InlinePauli<1>>::new();
+    sum.insert(InlinePauli { x: [x], z: [z] }, Complex64::new(1.0, 0.0));
+    for (rx, rz, phase4, theta) in rotations.rev() {
+        // One rotation `E` sends `P` anticommuting with `R` to `cos 2θ P + i sin 2θ R P`.
+        let (sin, cos) = (2.0 * theta).sin_cos();
+        sum.branch_with(
+            sin,
+            cos,
+            |p| ((p.x[0] & rz) ^ (p.z[0] & rx)).count_ones() & 1 == 1,
+            |p| {
+                p.x[0] ^= rx;
+                p.z[0] ^= rz;
+            },
+            |source, c| {
+                let quarter = 1
+                    + u32::from(phase4)
+                    + super::clifford_register::letter_phase(rx, rz, source.x[0], source.z[0]);
+                c * sin * I_POW[(quarter & 3) as usize]
+            },
+        );
+    }
+    sum.terms
+        .into_iter()
+        .map(|(p, coeff)| (p.x[0], p.z[0], coeff))
+        .collect()
+}
+
 /// Per-qubit `⟨Z_q⟩` values from a deterministic sparse Pauli dynamics run.
 pub struct SpdResult {
     /// `⟨Z_q⟩` per qubit; exact when nothing was truncated.

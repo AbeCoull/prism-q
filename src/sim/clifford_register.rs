@@ -7,6 +7,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_8};
 
+use crate::backend::simd::norm_sqr_to_slice;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -357,15 +358,53 @@ fn register_marginals(
     for gate in &gates {
         apply_to_amps(amps, gate);
     }
-    let mut table = vec![0.0f64; 1 << pivots.len()];
-    for (b, amp) in amps.iter().enumerate() {
-        let index = pivots
+    (fold_table(amps, &pivots, width), flips, gates.len())
+}
+
+/// Sum `|amps[b]|^2` into `table[i]` over every `b` whose bit `pivots[j]` is bit `j` of
+/// `i`, adding in increasing `b`.
+///
+/// When the low `lead` pivots are the identity, a block of `2^lead` amplitudes lands on
+/// one contiguous run of the table; otherwise a lookup over the low byte of `b` gives
+/// each amplitude's offset from its block's base.
+fn fold_table(amps: &[Complex64], pivots: &[usize], width: usize) -> Vec<f64> {
+    let gather = |b: usize| {
+        pivots
             .iter()
             .enumerate()
-            .fold(0, |acc, (i, &c)| acc | (((b >> c) & 1) << i));
-        table[index] += amp.norm_sqr();
+            .fold(0, |acc, (i, &c)| acc | (((b >> c) & 1) << i))
+    };
+    let lead = pivots
+        .iter()
+        .enumerate()
+        .take_while(|&(i, &c)| i == c)
+        .count();
+    let mut table = vec![0.0f64; 1 << pivots.len()];
+    if lead >= width.min(8) {
+        for (h, block) in amps.chunks(1 << lead).enumerate() {
+            let start = gather(h << lead);
+            let run = &mut table[start..start + block.len()];
+            if pivots.len() == width {
+                norm_sqr_to_slice(block, run);
+            } else {
+                for (t, amp) in run.iter_mut().zip(block) {
+                    *t += amp.norm_sqr();
+                }
+            }
+        }
+    } else {
+        let mut low = [0usize; 256];
+        for (j, offset) in low.iter_mut().enumerate() {
+            *offset = gather(j);
+        }
+        for (h, block) in amps.chunks(256).enumerate() {
+            let base = gather(h << 8);
+            for (amp, &offset) in block.iter().zip(&low) {
+                table[base | offset] += amp.norm_sqr();
+            }
+        }
     }
-    (table, flips, gates.len())
+    table
 }
 
 /// Where a measured row's outcome comes from.

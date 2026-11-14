@@ -650,10 +650,12 @@ impl QecProgram {
     /// operations are appended.
     pub fn from_ops(num_qubits: usize, options: QecOptions, ops: Vec<QecOp>) -> Result<Self> {
         let mut program = Self::with_options(num_qubits, options);
-        program.ops.reserve_exact(ops.len());
-        for op in ops {
-            program.push_op(op)?;
+        for (index, op) in ops.iter().enumerate() {
+            let previous = index.checked_sub(1).map(|at| &ops[at]);
+            program.validate_op(op, previous, program.num_measurements)?;
+            program.count_op(op);
         }
+        program.ops = ops;
         Ok(program)
     }
 
@@ -734,14 +736,18 @@ impl QecProgram {
     }
 
     pub fn push_op(&mut self, op: QecOp) -> Result<()> {
-        self.validate_op(&op, self.num_measurements)?;
+        self.validate_op(&op, self.ops.last(), self.num_measurements)?;
+        self.count_op(&op);
+        self.ops.push(op);
+        Ok(())
+    }
+
+    fn count_op(&mut self, op: &QecOp) {
         if op.produces_record() {
             self.num_measurements += 1;
         } else if matches!(op, QecOp::Detector { .. }) {
             self.num_detectors += 1;
         }
-        self.ops.push(op);
-        Ok(())
     }
 
     pub fn push_gate(&mut self, gate: Gate, targets: &[usize]) -> Result<()> {
@@ -914,7 +920,12 @@ impl QecProgram {
         )
     }
 
-    fn validate_op(&self, op: &QecOp, next_measurement: usize) -> Result<()> {
+    fn validate_op(
+        &self,
+        op: &QecOp,
+        previous: Option<&QecOp>,
+        next_measurement: usize,
+    ) -> Result<()> {
         match op {
             QecOp::Gate { gate, targets } => {
                 if gate.num_qubits() != targets.len() {
@@ -938,11 +949,11 @@ impl QecProgram {
                 validate_pauli_terms(terms, self.num_qubits)?;
             }
             QecOp::Detector { records, coords } => {
-                resolve_records(records, next_measurement)?;
+                validate_records(records, next_measurement)?;
                 validate_finite_values(coords, "detector coordinate")?;
             }
             QecOp::ObservableInclude { records, .. } | QecOp::Postselect { records, .. } => {
-                resolve_records(records, next_measurement)?;
+                validate_records(records, next_measurement)?;
             }
             QecOp::ExpectationValue { terms, coefficient } => {
                 if terms.is_empty() {
@@ -972,7 +983,7 @@ impl QecProgram {
                         message: "feed-forward body requires at least one operation".to_string(),
                     });
                 }
-                resolve_records(records, next_measurement)?;
+                validate_records(records, next_measurement)?;
                 for inner in body {
                     if !matches!(inner, QecOp::Gate { .. } | QecOp::Reset { .. }) {
                         return Err(PrismError::InvalidParameter {
@@ -982,7 +993,7 @@ impl QecProgram {
                             ),
                         });
                     }
-                    self.validate_op(inner, next_measurement)?;
+                    self.validate_op(inner, None, next_measurement)?;
                 }
             }
             QecOp::Noise { channel, targets } => {
@@ -1019,7 +1030,7 @@ impl QecProgram {
             }
             QecOp::RecordFlip { probability } => {
                 validate_probability(*probability, "record flip")?;
-                let follows_record = self.ops.last().is_some_and(|last| {
+                let follows_record = previous.is_some_and(|last| {
                     last.produces_record() || matches!(last, QecOp::RecordFlip { .. })
                 });
                 if !follows_record {
@@ -1354,6 +1365,12 @@ pub(super) fn ensure_lowered_record_count(
         });
     }
     Ok(())
+}
+
+fn validate_records(records: &[QecRecordRef], next_measurement: usize) -> Result<()> {
+    records
+        .iter()
+        .try_for_each(|record| record.resolve(next_measurement).map(drop))
 }
 
 fn resolve_records(records: &[QecRecordRef], next_measurement: usize) -> Result<Vec<usize>> {

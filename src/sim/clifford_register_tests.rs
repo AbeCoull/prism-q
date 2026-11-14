@@ -341,6 +341,58 @@ fn cut_keeps_strictly_larger_amplitudes_before_ties_in_index_order() {
     assert_eq!((prune.pruned, prune.discarded), (0, 0.0));
 }
 
+#[test]
+fn table_fold_matches_the_bit_gather_exactly() {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let swapped = |width: usize, a: usize, b: usize| {
+        let mut p: Vec<usize> = (0..width).collect();
+        p.swap(a, b);
+        p
+    };
+    let shapes: Vec<(usize, Vec<usize>)> = vec![
+        (0, vec![]),
+        (5, (0..5).collect()),
+        (8, (0..8).collect()),
+        (12, (0..12).collect()),
+        (5, vec![0, 1, 2, 4, 3]),
+        (12, swapped(12, 9, 11)),
+        (12, swapped(12, 0, 7)),
+        (12, vec![11, 3, 0, 8, 5, 1, 10, 2, 7, 4, 9, 6]),
+        (12, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]),
+        (12, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]),
+        (12, vec![1, 0, 2, 3, 5, 6, 7, 8, 9, 10, 11]),
+        (12, vec![9, 2, 5]),
+        (6, vec![2, 0, 5]),
+    ];
+    for (width, pivots) in shapes {
+        let amps: Vec<Complex64> = (0..1usize << width)
+            .map(|b| {
+                if b % 7 == 3 {
+                    Complex64::new(0.0, 0.0)
+                } else {
+                    let scale = 10f64.powi(rng.random_range(-6..1));
+                    Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5) * scale
+                }
+            })
+            .collect();
+        let mut want = vec![0.0f64; 1 << pivots.len()];
+        for (b, amp) in amps.iter().enumerate() {
+            let index = pivots
+                .iter()
+                .enumerate()
+                .fold(0, |acc, (i, &c)| acc | (((b >> c) & 1) << i));
+            want[index] += amp.norm_sqr();
+        }
+        let got = fold_table(&amps, &pivots, width);
+        assert!(
+            got.iter()
+                .map(|p| p.to_bits())
+                .eq(want.iter().map(|p| p.to_bits())),
+            "width {width}, pivots {pivots:?}"
+        );
+    }
+}
+
 fn register_pair(circuit: &Circuit, budget: usize) -> (Vec<Complex64>, Vec<Complex64>, Pruning) {
     let exact = build_register(circuit, MAX_REGISTER_QUBITS, true, None, &mut Vec::new())
         .unwrap()

@@ -4,6 +4,7 @@
 //! [`QecTStrategy::Reference`] within statistical tolerance on a small
 //! Clifford+T fixture.
 
+use crate::common::stats::assert_rate;
 use crate::qec_common;
 
 use prism_q::{
@@ -44,18 +45,14 @@ fn reference_strategy_dispatch_matches_direct_reference_runner() {
 #[test]
 fn reference_strategy_recovers_expected_t_rotation_rate() {
     // H · T · H |0> rotates around X by π/4. Probability of measuring
-    // 1 in the Z basis is sin²(π/8) ≈ 0.1464. Wide tolerance for
-    // 4k shots.
+    // 1 in the Z basis is sin²(π/8) ≈ 0.1464.
     let program = small_clifford_t_program();
     let result = run_qec_program_with_strategy(&program, QecTStrategy::Reference).unwrap();
     assert_eq!(result.total_shots, STAT_SHOTS);
     assert_eq!(result.accepted_shots, STAT_SHOTS);
     let rate = result.logical_errors[0] as f64 / result.accepted_shots as f64;
     let expected = (std::f64::consts::PI / 8.0).sin().powi(2);
-    assert!(
-        (rate - expected).abs() < 0.03,
-        "logical rate {rate:.4} not within tolerance of expected {expected:.4}"
-    );
+    assert_rate(rate, expected, STAT_SHOTS, "logical rate");
 }
 
 #[test]

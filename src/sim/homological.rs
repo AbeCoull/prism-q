@@ -9,10 +9,6 @@ use crate::sim::noise::NoiseModel;
 /// Dense binary matrix over GF(2) stored as packed u64 words per row.
 /// Row-major: row i is stored in words[i * row_words .. (i+1) * row_words].
 struct F2DenseMatrix {
-    #[cfg(test)]
-    num_rows: usize,
-    #[cfg(test)]
-    num_cols: usize,
     row_words: usize,
     data: Vec<u64>,
 }
@@ -21,10 +17,6 @@ impl F2DenseMatrix {
     fn new(num_rows: usize, num_cols: usize) -> Self {
         let row_words = num_cols.div_ceil(64);
         Self {
-            #[cfg(test)]
-            num_rows,
-            #[cfg(test)]
-            num_cols,
             row_words,
             data: vec![0u64; num_rows * row_words],
         }
@@ -34,114 +26,6 @@ impl F2DenseMatrix {
     fn set(&mut self, row: usize, col: usize) {
         self.data[row * self.row_words + col / 64] |= 1u64 << (col % 64);
     }
-
-    #[cfg(test)]
-    fn get(&self, row: usize, col: usize) -> bool {
-        (self.data[row * self.row_words + col / 64] >> (col % 64)) & 1 != 0
-    }
-
-    #[cfg(test)]
-    fn row(&self, row: usize) -> &[u64] {
-        let start = row * self.row_words;
-        &self.data[start..start + self.row_words]
-    }
-
-    #[cfg(test)]
-    fn xor_row(&mut self, dst_row: usize, src_row: usize) {
-        let rw = self.row_words;
-        let (dst_start, src_start) = (dst_row * rw, src_row * rw);
-        if dst_start < src_start {
-            let (left, right) = self.data.split_at_mut(src_start);
-            for w in 0..rw {
-                left[dst_start + w] ^= right[w];
-            }
-        } else {
-            let (left, right) = self.data.split_at_mut(dst_start);
-            for w in 0..rw {
-                right[w] ^= left[src_start + w];
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn swap_rows(&mut self, a: usize, b: usize) {
-        if a == b {
-            return;
-        }
-        let rw = self.row_words;
-        let (a_start, b_start) = (a * rw, b * rw);
-        for w in 0..rw {
-            self.data.swap(a_start + w, b_start + w);
-        }
-    }
-}
-
-/// Basis of ker(M) over GF(2) for M ∈ F₂^{m×n}, each vector packed into `u64`
-/// words of length n, read off a row reduction of `M^T` augmented with `I_n`.
-#[cfg(test)]
-fn gf2_kernel(matrix: &F2DenseMatrix) -> Vec<Vec<u64>> {
-    let m = matrix.num_rows;
-    let n = matrix.num_cols;
-    let n_words = n.div_ceil(64);
-
-    let aug_cols = m + n;
-    let mut aug = F2DenseMatrix::new(n, aug_cols);
-
-    for r in 0..m {
-        for c in 0..n {
-            if matrix.get(r, c) {
-                aug.set(c, r);
-            }
-        }
-    }
-    for i in 0..n {
-        aug.set(i, m + i);
-    }
-
-    let mut pivot_row = 0;
-    for col in 0..m {
-        let mut found = None;
-        for r in pivot_row..n {
-            if aug.get(r, col) {
-                found = Some(r);
-                break;
-            }
-        }
-        let Some(pr) = found else { continue };
-
-        aug.swap_rows(pivot_row, pr);
-
-        for r in 0..n {
-            if r != pivot_row && aug.get(r, col) {
-                aug.xor_row(r, pivot_row);
-            }
-        }
-        pivot_row += 1;
-    }
-
-    let mut kernel = Vec::new();
-    let m_words = m.div_ceil(64);
-    for r in 0..n {
-        let row = aug.row(r);
-        let mt_zero = row[..m_words].iter().enumerate().all(|(w, &val)| {
-            if w == m_words - 1 && !m.is_multiple_of(64) {
-                val & ((1u64 << (m % 64)) - 1) == 0
-            } else {
-                val == 0
-            }
-        });
-        if mt_zero {
-            let mut kv = vec![0u64; n_words];
-            for c in 0..n {
-                if aug.get(r, m + c) {
-                    kv[c / 64] |= 1u64 << (c % 64);
-                }
-            }
-            kernel.push(kv);
-        }
-    }
-
-    kernel
 }
 
 fn has_bit(words: &[u64], i: usize) -> bool {

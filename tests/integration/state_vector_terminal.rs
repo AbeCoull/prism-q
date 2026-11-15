@@ -13,17 +13,7 @@ use prism_q::gates::Gate;
 use prism_q::sim::noise::NoiseModel;
 use prism_q::{BackendKind, Circuit, PrismError, circuits, sim, simulate};
 
-use common::{SEED, SV_EPS};
-
-fn assert_state_close(actual: &[Complex64], expected: &[Complex64], label: &str) {
-    assert_eq!(actual.len(), expected.len(), "{label}: length");
-    for (i, (got, want)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (got - want).norm() < SV_EPS,
-            "{label}: [{i}] expected {want}, got {got}"
-        );
-    }
-}
+use common::{SEED, SV_EPS, assert_amps_close};
 
 fn amp(re: f64) -> Complex64 {
     Complex64::new(re, 0.0)
@@ -43,7 +33,12 @@ fn qubit_zero_is_the_least_significant_bit() {
         .seed(SEED)
         .state_vector()
         .unwrap();
-    assert_state_close(&state, &[zero(), amp(1.0), zero(), zero()], "x on qubit 0");
+    assert_amps_close(
+        &state,
+        &[zero(), amp(1.0), zero(), zero()],
+        SV_EPS,
+        "x on qubit 0",
+    );
 
     let mut builder = CircuitBuilder::new(2);
     builder.x(1);
@@ -51,7 +46,12 @@ fn qubit_zero_is_the_least_significant_bit() {
         .seed(SEED)
         .state_vector()
         .unwrap();
-    assert_state_close(&state, &[zero(), zero(), amp(1.0), zero()], "x on qubit 1");
+    assert_amps_close(
+        &state,
+        &[zero(), zero(), amp(1.0), zero()],
+        SV_EPS,
+        "x on qubit 1",
+    );
 }
 
 #[test]
@@ -62,9 +62,10 @@ fn bell_state_amplitudes() {
         .seed(SEED)
         .state_vector()
         .unwrap();
-    assert_state_close(
+    assert_amps_close(
         &state,
         &[amp(FRAC_1_SQRT_2), zero(), zero(), amp(FRAC_1_SQRT_2)],
+        SV_EPS,
         "bell",
     );
 }
@@ -111,7 +112,7 @@ fn every_pure_state_backend_answers_with_its_own_export() {
                 .backend(kind.clone())
                 .state_vector()
                 .unwrap_or_else(|e| panic!("{label} on {kind:?} declined: {e}"));
-            assert_state_close(&state, &expected, &format!("{label} on {kind:?}"));
+            assert_amps_close(&state, &expected, SV_EPS, &format!("{label} on {kind:?}"));
         }
     }
 }
@@ -127,7 +128,7 @@ fn clifford_circuit_answers_on_the_stabilizer_route() {
     let mut expected = vec![zero(); 8];
     expected[0] = amp(FRAC_1_SQRT_2);
     expected[7] = amp(FRAC_1_SQRT_2);
-    assert_state_close(&state, &expected, "stabilizer ghz");
+    assert_amps_close(&state, &expected, SV_EPS, "stabilizer ghz");
 }
 
 #[test]
@@ -140,7 +141,7 @@ fn initial_state_is_honoured() {
         .initial_state(&start)
         .state_vector()
         .unwrap();
-    assert_state_close(&state, &[amp(1.0), zero()], "x on |1>");
+    assert_amps_close(&state, &[amp(1.0), zero()], SV_EPS, "x on |1>");
 }
 
 // A mixture has no amplitude vector. The decline has to name that rather than

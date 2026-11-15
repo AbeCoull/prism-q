@@ -152,9 +152,9 @@ constants in `src/backend/statevector/kernels.rs`, so CPU and GPU share one valu
 `tests/golden_gpu.rs` compares GPU amplitudes against the CPU statevector within
 1e-12 for every gate variant, the fusion paths, and the `BackendKind::StatevectorGpu`
 public dispatch path at the crossover boundary. `tests/golden_gpu_density_matrix.rs`
-does the same for the full density matrix buffer. Both suites skip when no device
-opens, and no CI job opens one. `scripts/test-gpu.ps1` runs them with
-`PRISM_REQUIRE_GPU=1` so a missing or unusable device fails the run.
+does the same for the full density matrix buffer. Both suites fail when no device
+opens, unless `PRISM_ALLOW_NO_GPU=1` lets them skip on a host without a card. No CI job
+opens a device; `scripts/test-gpu.ps1` runs them on a host with one.
 
 ### Shot reproducibility
 

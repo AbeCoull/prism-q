@@ -2325,16 +2325,6 @@ pub(crate) fn backend_metadata(backend: &dyn Backend) -> RunMetadata {
     metadata
 }
 
-#[cfg(test)]
-fn run(circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
-    run_with(
-        BackendKind::Auto,
-        circuit,
-        seed,
-        &ResolvedLimits::process_default(),
-    )
-}
-
 /// Build the backend `kind` selects and run the circuit on it. For a
 /// pre-constructed backend, use [`run_on`].
 pub(crate) fn run_with(
@@ -2695,17 +2685,6 @@ pub fn run_qasm(qasm: &str, seed: u64) -> Result<RunOutcome> {
     simulate(&circuit).seed(seed).run()
 }
 
-#[cfg(test)]
-fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
-    run_shots_with(
-        BackendKind::Auto,
-        circuit,
-        num_shots,
-        seed,
-        &ResolvedLimits::process_default(),
-    )
-}
-
 pub(crate) fn supports_compiled_measurement_sampling(circuit: &Circuit) -> bool {
     circuit.is_clifford_only()
         && !circuit.has_resets()
@@ -2828,35 +2807,6 @@ fn prepare_terminal_statevector_backend(
     backend.apply_instructions(&fused.instructions)?;
 
     Ok((backend, meas_map, !matches!(accel, dispatch::Accel::Cpu)))
-}
-
-/// Build and run the backend for a terminal-measurement circuit when routing
-/// lands on a single backend that samples from its own representation.
-///
-/// Returns `None` when the route is not a direct single backend, or when that
-/// backend has no native sampler, leaving the dense probability path untouched.
-/// The capability is probed before `init`, so a backend without one costs an
-/// allocation and nothing else.
-///
-/// The product state is the one route taken past subsystem decomposition: it
-/// already stores one factor per qubit, so splitting the circuit into
-/// independent blocks pays a backend, a partition, and a merge per block to
-/// rebuild what one native draw reads straight off the state, and above 64
-/// qubits the merged block distribution does not exist at all. Every other
-/// backend keeps the block split.
-#[cfg(test)]
-fn try_native_terminal_backend(
-    kind: &BackendKind,
-    stripped: &Circuit,
-    seed: u64,
-    limits: &ResolvedLimits,
-) -> Result<Option<Box<dyn Backend>>> {
-    let Some(plan) = decide_native(kind, stripped, true, limits)? else {
-        return Ok(None);
-    };
-    let mut backend = plan.build(seed, limits);
-    execute(&mut *backend, stripped, &SimOptions::classical_only())?;
-    Ok(Some(backend))
 }
 
 /// A source that answers every measurement in a circuit from a single state,
@@ -3005,18 +2955,6 @@ fn prepare_shot_source(
     }
 }
 
-#[cfg(test)]
-fn run_counts(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<HashMap<Vec<u64>, u64>> {
-    run_counts_with(
-        BackendKind::Auto,
-        circuit,
-        num_shots,
-        seed,
-        &ResolvedLimits::process_default(),
-    )
-    .map(|(counts, _)| counts)
-}
-
 /// Execute a circuit multiple times with explicit backend selection and return counts.
 ///
 /// For Clifford circuits with terminal measurements and no resets, Auto,
@@ -3124,27 +3062,6 @@ fn counts_of(shots: Vec<Vec<bool>>, num_classical_bits: usize) -> HashMap<Vec<u6
     ShotsResult::from_shots(shots, num_classical_bits).counts()
 }
 
-#[cfg(test)]
-fn run_marginals(circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
-    run_marginals_result_with(
-        BackendKind::Auto,
-        circuit,
-        seed,
-        &ResolvedLimits::process_default(),
-    )
-    .map(MarginalsResult::into_vec)
-}
-
-#[cfg(test)]
-fn run_marginals_with(
-    kind: BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-    limits: &ResolvedLimits,
-) -> Result<Vec<(f64, f64)>> {
-    run_marginals_result_with(kind, circuit, seed, limits).map(MarginalsResult::into_vec)
-}
-
 /// Per-qubit marginals from native single-qubit Z expectations, for a backend
 /// whose own representation answers them without a dense probability vector.
 fn marginals_from_pauli_expectations(
@@ -3230,17 +3147,6 @@ fn validate_pauli_marginal_backend(kind: &BackendKind, circuit: &Circuit) -> Res
         });
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn run_marginals_result_with(
-    kind: BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-    limits: &ResolvedLimits,
-) -> Result<MarginalsResult> {
-    let route = decide_marginals(&kind, circuit, limits)?;
-    execute_marginals(route, &kind, circuit, seed, limits, false)
 }
 
 fn execute_marginals(

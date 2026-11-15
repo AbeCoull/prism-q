@@ -1,20 +1,12 @@
-//! Marginals either need the dense gather or they do not. Isolated in its own
-//! test binary: it overrides `PRISM_MAX_PROB_QUBITS`, which the cap helper
-//! caches per process.
+//! Marginals either need the dense gather or they do not.
 
-mod common;
-
-use common::{SEED, caps};
+use crate::common::SEED;
+use crate::{PROB_CAP, small_prob_cap};
 use prism_q::gates::Gate;
 use prism_q::{BackendKind, Circuit, circuits, simulate};
 
-const PROB_CAP: usize = 4;
 const N: usize = PROB_CAP + 2;
 const EPS: f64 = 1e-12;
-
-fn small_prob_cap() {
-    caps::set_once(&[("PRISM_MAX_PROB_QUBITS", "4")]);
-}
 
 fn assert_marginals(kind: BackendKind, circuit: &Circuit, want: &[(f64, f64)], label: &str) {
     let got = simulate(circuit)

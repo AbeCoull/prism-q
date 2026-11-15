@@ -70,11 +70,6 @@ fn sparse_hea_12q_fused() {
 // ===== ghz =====
 
 #[test]
-fn sparse_ghz_8q_sv() {
-    check_sv_cross("ghz 8q sv", &circuits::ghz_circuit(8));
-}
-
-#[test]
 fn sparse_ghz_12q_sv() {
     check_sv_cross("ghz 12q sv", &circuits::ghz_circuit(12));
 }

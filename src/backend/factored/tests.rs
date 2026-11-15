@@ -6,23 +6,7 @@ use crate::gates::Gate;
 use crate::limits::ResolvedLimits;
 use crate::sim;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
-
-fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "probability vector length mismatch: got {}, expected {}",
-        actual.len(),
-        expected.len()
-    );
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() < eps,
-            "prob[{i}]: expected {e}, got {a} (diff {})",
-            (a - e).abs()
-        );
-    }
-}
+use crate::test_support::assert_probs_close;
 
 fn compare_with_statevector(circuit: &Circuit, eps: f64) {
     let mut sv = StatevectorBackend::new(42);
@@ -231,8 +215,11 @@ fn test_measurement_in_substate() {
 
     let mut b = FactoredBackend::new(42);
     sim::run_on(&mut b, &c).unwrap();
-    // After measurement, q[0] and q[1] should be correlated (Bell state collapse)
-    // q[2] should still be |1⟩ independently
+    // q[1] collapses with q[0]; q[2] stays |1>.
+    let pair = if b.classical_results()[0] { 0b011 } else { 0 };
+    let mut expected = vec![0.0; 16];
+    expected[pair | 0b100] = 1.0;
+    assert_probs_close(&b.probabilities().unwrap(), &expected, 1e-12);
 }
 
 // ---- Golden tests: factored vs statevector on circuit builders ----
@@ -240,12 +227,6 @@ fn test_measurement_in_substate() {
 #[test]
 fn test_golden_qft_8() {
     let circuit = crate::circuits::qft_circuit(8);
-    compare_with_statevector(&circuit, 1e-10);
-}
-
-#[test]
-fn test_golden_qft_12() {
-    let circuit = crate::circuits::qft_circuit(12);
     compare_with_statevector(&circuit, 1e-10);
 }
 
@@ -258,12 +239,6 @@ fn test_golden_random_16() {
 #[test]
 fn test_golden_hea_8() {
     let circuit = crate::circuits::hardware_efficient_ansatz(8, 3, 42);
-    compare_with_statevector(&circuit, 1e-10);
-}
-
-#[test]
-fn test_golden_bell_pairs() {
-    let circuit = crate::circuits::independent_bell_pairs(6);
     compare_with_statevector(&circuit, 1e-10);
 }
 

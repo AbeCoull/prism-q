@@ -106,12 +106,11 @@ jobs:
 
       # `[profile.test]` keeps debug assertions on, so a wrong answer that only a
       # `debug_assert!` notices never reaches a test. This lane runs the unit
-      # tests and the conformance and golden suites with assertions off.
+      # tests and the integration and equivalence binaries with assertions off.
       - name: Tests with debug assertions off
         run: >-
           cargo nextest run --cargo-profile ci-release --features "$CI_FEATURES"
           --lib --test integration --test backend_equivalence
-          -E 'kind(lib) | binary(backend_equivalence) | test(/^(conformance_matrix|backend_matrix|measurement_matrix|golden_small_circuits|openqasm_goldens|density_matrix_correctness)::/)'
 
   # Routes behind a size or count crossover (the tensor expectation route, the
   # Clifford register, the factored stabilizer split, the wide frame sampler, the
@@ -835,9 +834,9 @@ jobs:
   # is needed to build, link, or start a test binary. The job only compiles and runs
   # the device-free KERNEL_NAMES test, enforcing the exhaustive GPU dispatch matches
   # and the golden_gpu registry at compile time. The device suites
-  # (tests/golden_gpu.rs, tests/golden_gpu_density_matrix.rs) skip without a card
-  # and are not run anywhere in CI; scripts/test-gpu.ps1 runs them on a host with a
-  # device under PRISM_REQUIRE_GPU=1.
+  # (tests/golden_gpu.rs, tests/golden_gpu_density_matrix.rs) fail without a card
+  # unless PRISM_ALLOW_NO_GPU is set, and the filter below keeps them out;
+  # scripts/test-gpu.ps1 runs them on a host with a device.
   gpu-check:
     name: GPU compile-check (no device)
     runs-on: ubuntu-latest
@@ -847,8 +846,10 @@ jobs:
         with:
           components: clippy
           nextest: true
+      # bench-internal adds the census tools and the pass counter asserts; the clippy
+      # step below still checks the arms that build without it.
       - name: Compile-check GPU dispatch + golden_gpu coverage
-        run: cargo check --all-targets --features "parallel gpu"
+        run: cargo check --all-targets --features "parallel gpu bench-internal"
       # The only build where all three feature-gated dispatch arms compile together.
       - name: Compile-check the combined feature matrix
         run: cargo check --all-targets --features "parallel gpu distributed"
@@ -858,8 +859,13 @@ jobs:
       # never reach their GPU arms.
       - name: Clippy Python bindings GPU paths
         run: cargo clippy -p prism-q-py --all-targets --features gpu -- -D warnings -D clippy::undocumented_unsafe_blocks
-      - name: KERNEL_NAMES consistency and tile planner (device-free)
-        run: cargo nextest run --features "parallel gpu" -E 'test(kernel_names_match_source_entry_points) | test(/gpu::tiles::/)'
+      # The tests that compile only under bench-internal ride along on this build.
+      - name: KERNEL_NAMES consistency, tile planner and bench-internal tests (device-free)
+        run: >-
+          cargo nextest run --features "parallel gpu bench-internal"
+          -E 'test(kernel_names_match_source_entry_points) | test(/gpu::tiles::/)
+          | test(/^qec::cut_selection::/) | test(/^bench_fixture_routing::register_split_/)
+          | test(=qec_noisy_validation::qec_profiled_sampler_stages_match_public_runner_result)'
 
   test-macos-arm:
     name: Test macOS ARM64

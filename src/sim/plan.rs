@@ -1153,3 +1153,7 @@ pub(super) fn approximation_name(kind: &BackendKind, backend: ResolvedBackend) -
         format!("{backend:?}")
     }
 }
+
+#[cfg(test)]
+#[path = "plan_tests.rs"]
+mod tests;

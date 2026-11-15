@@ -916,3 +916,7 @@ fn ladder_product(n: usize, ops: &[(usize, bool)]) -> Vec<PauliString> {
     }
     product
 }
+
+#[cfg(test)]
+#[path = "circuits_tests.rs"]
+mod tests;

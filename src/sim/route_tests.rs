@@ -1,0 +1,280 @@
+use super::*;
+use crate::gates::Gate;
+use std::cell::Cell;
+
+fn limits() -> ResolvedLimits {
+    ResolvedLimits::resolve(None)
+}
+
+fn h_measure_chain(splits: usize) -> Circuit {
+    let mut circuit = Circuit::new(1, 1);
+    for _ in 0..=splits {
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_measure(0, 0);
+    }
+    circuit
+}
+
+#[test]
+fn register_wins_without_a_dense_run_iff_the_register_fits() {
+    let max = clifford_register::MAX_REGISTER_QUBITS;
+    let calls = Cell::new(0);
+    let price = |width| {
+        calls.set(calls.get() + 1);
+        assert_eq!(width, max);
+        Some((width, 0))
+    };
+    assert!(register_wins(max, max + 5, max, None, price));
+    assert_eq!(
+        calls.get(),
+        0,
+        "a T bound within the register takes no dry run"
+    );
+
+    assert!(register_wins(max + 1, max + 5, max, None, price));
+    assert_eq!(calls.get(), 1);
+    assert!(!register_wins(max + 1, max + 5, max, None, |_| None));
+}
+
+#[test]
+fn register_wins_on_the_bound_alone_when_it_undercuts_the_dense_run() {
+    let never = |_| -> Option<(usize, u64)> { panic!("no dry run expected") };
+    assert!(register_wins(2, 4, 4, Some(f64::MAX), never));
+    // Even a width-zero register costs something, so a free dense run always wins.
+    assert!(!register_wins(2, 4, 4, Some(0.0), never));
+}
+
+#[test]
+fn register_dry_run_is_capped_at_the_widest_width_that_could_win() {
+    let max = clifford_register::MAX_REGISTER_QUBITS;
+    let (t, qubits, measured) = (3 * max, 3 * max, 3 * max);
+    // A dense cost between the cheapest registers of widths `k` and `k + 1`: the dry run
+    // may reach width `k` and no further.
+    let k = max - 1;
+    let floor = |w: usize| clifford_register_work(w, (2usize << w) as f64, measured);
+    let dense = (floor(k) + floor(k + 1)) / 2.0;
+    let seen = Cell::new(None);
+    let won = register_wins(t, qubits, measured, Some(dense), |width| {
+        seen.set(Some(width));
+        Some((width, 2u64 << width))
+    });
+    assert_eq!(seen.get(), Some(k));
+    assert!(won);
+
+    // The dry run answers with the width the tableau reached, priced afresh.
+    let lost = register_wins(t, qubits, measured, Some(dense), |_| {
+        Some((k + 1, 2u64 << (k + 1)))
+    });
+    assert!(!lost);
+}
+
+#[test]
+fn register_work_grows_with_width_and_caps_measured_rows_at_width() {
+    for width in 0..8 {
+        let here = clifford_register_work(width, 100.0, width);
+        assert!(clifford_register_work(width + 1, 100.0, width + 1) > here);
+        assert!(clifford_register_work(width, 200.0, width) > here);
+        assert_eq!(clifford_register_work(width, 100.0, width + 7), here);
+        if width > 0 {
+            assert!(clifford_register_work(width, 100.0, width - 1) < here);
+        }
+    }
+}
+
+#[test]
+fn walk_histories_counts_two_per_split_ahead_of_the_closing_measurements() {
+    let mut terminal = Circuit::new(2, 2);
+    terminal.add_gate(Gate::H, &[0]);
+    terminal.add_measure(0, 0);
+    terminal.add_measure(1, 1);
+    assert_eq!(walk_histories(&terminal, 1000), 1);
+
+    let chain = h_measure_chain(3);
+    assert_eq!(walk_histories(&chain, 1000), 8);
+    assert_eq!(walk_histories(&chain, 5), 5);
+    assert_eq!(walk_histories(&chain, 0), 1);
+
+    // A barrier inside the closing run does not end it.
+    let mut closing = h_measure_chain(1);
+    closing.add_barrier(&[0]);
+    closing.add_measure(0, 0);
+    assert_eq!(walk_histories(&closing, 1000), 2);
+
+    // A reset of an entangled qubit splits; one on a product qubit would not.
+    let mut reset = Circuit::new(2, 1);
+    reset.add_gate(Gate::H, &[0]);
+    reset.add_gate(Gate::Cx, &[0, 1]);
+    reset.add_reset(0);
+    reset.add_gate(Gate::H, &[0]);
+    reset.add_measure(0, 0);
+    assert_eq!(walk_histories(&reset, 1000), 2);
+
+    assert_eq!(walk_histories(&h_measure_chain(70), 12345), 12345);
+}
+
+#[test]
+fn tensor_expectations_start_at_their_width() {
+    let observables = vec![vec![PauliTerm::z(0)]];
+    let below = Circuit::new(TENSOR_ROUTE_MIN_QUBITS - 1, 0);
+    assert!(decide_tensor_expectations(&below, &observables, &limits()).is_none());
+
+    let at = Circuit::new(TENSOR_ROUTE_MIN_QUBITS, 0);
+    assert!(decide_tensor_expectations(&at, &[], &limits()).is_none());
+    // Observables are validated before any dry run.
+    let bad = vec![vec![PauliTerm::z(TENSOR_ROUTE_MIN_QUBITS)]];
+    assert!(matches!(
+        decide_tensor_expectations(&at, &bad, &limits()),
+        Some(Err(PrismError::InvalidQubit { .. }))
+    ));
+}
+
+#[test]
+fn tensor_over_mps_declines_without_observables() {
+    let mut circuit = Circuit::new(4, 0);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    assert!(decide_tensor_over_mps(&circuit, &[], &limits()).is_none());
+}
+
+#[test]
+fn register_subset_declines_past_its_width_and_on_measured_circuits() {
+    let mut circuit = Circuit::new(MAX_REGISTER_SUBSET_QUBITS + 2, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::T, &[0]);
+    let wide: Vec<usize> = (0..=MAX_REGISTER_SUBSET_QUBITS).collect();
+    assert!(decide_register_subset(&circuit, &wide, &limits()).is_none());
+
+    circuit.add_measure(0, 0);
+    assert!(decide_register_subset(&circuit, &[0], &limits()).is_none());
+}
+
+#[test]
+fn terminal_statevector_candidate_names_only_statevector_kinds_when_explicit() {
+    let mut circuit = Circuit::new(3, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::T, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let limits = limits();
+    assert!(terminal_statevector_candidate(
+        &BackendKind::Statevector,
+        &circuit,
+        &limits
+    ));
+    for kind in [
+        BackendKind::Stabilizer,
+        BackendKind::Sparse,
+        BackendKind::Mps { max_bond_dim: 8 },
+        BackendKind::TensorNetwork,
+        BackendKind::DensityMatrix,
+    ] {
+        assert!(
+            !terminal_statevector_candidate(&kind, &circuit, &limits),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn explicit_pauli_kinds_keep_their_expectation_route_after_validation() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::T, &[0]);
+    let observables = vec![vec![PauliTerm::z(0)]];
+    let limits = limits();
+    let stochastic = BackendKind::StochasticPauli { num_samples: 17 };
+    assert!(matches!(
+        decide_expectations(&stochastic, &circuit, &observables, &limits),
+        Ok(ExpectationRoute::Stochastic(17))
+    ));
+    let bad = vec![vec![PauliTerm::z(2)]];
+    assert!(matches!(
+        decide_expectations(&stochastic, &circuit, &bad, &limits),
+        Err(PrismError::InvalidQubit { .. })
+    ));
+}
+
+#[test]
+fn clifford_expectations_take_exact_pauli_propagation_under_auto() {
+    let mut circuit = Circuit::new(3, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let observables = vec![vec![PauliTerm::z(0), PauliTerm::z(1)]];
+    let route = decide_expectations(&BackendKind::Auto, &circuit, &observables, &limits()).unwrap();
+    let ExpectationRoute::Deterministic(truncation) = route else {
+        panic!("a Clifford circuit takes exact Pauli propagation");
+    };
+    assert!(!truncation.can_discard());
+    assert_eq!(
+        expectation_rule(&route, &BackendKind::Auto),
+        RouteRule::SpdExact
+    );
+}
+
+#[test]
+fn expectation_rule_reports_explicit_kinds_as_explicit() {
+    let exact = ExpectationRoute::Deterministic(SpdTruncation::Threshold {
+        epsilon: 0.0,
+        max_terms: 0,
+    });
+    let truncating = ExpectationRoute::Deterministic(SpdTruncation::Threshold {
+        epsilon: 1e-6,
+        max_terms: 0,
+    });
+    let explicit = BackendKind::DeterministicPauli {
+        truncation: SpdTruncation::Threshold {
+            epsilon: 0.0,
+            max_terms: 0,
+        },
+    };
+    assert_eq!(
+        expectation_rule(&exact, &explicit),
+        RouteRule::ExplicitBackend
+    );
+    assert_eq!(
+        expectation_rule(&truncating, &BackendKind::Auto),
+        RouteRule::Default
+    );
+    assert_eq!(
+        expectation_rule(&ExpectationRoute::Statevector, &BackendKind::Statevector),
+        RouteRule::ExplicitBackend
+    );
+    assert_eq!(
+        expectation_rule(&ExpectationRoute::Statevector, &BackendKind::Auto),
+        RouteRule::Default
+    );
+}
+
+#[test]
+fn backend_rule_names_the_auto_family_and_explicit_otherwise() {
+    let mut entangled = Circuit::new(2, 0);
+    entangled.add_gate(Gate::Cx, &[0, 1]);
+    let product = Circuit::new(2, 0);
+    for (plan, circuit, rule) in [
+        (
+            BackendPlan::ProductState,
+            &product,
+            RouteRule::NoEntanglingGates,
+        ),
+        (
+            BackendPlan::FactoredStabilizer,
+            &entangled,
+            RouteRule::LargeCliffordBlocks,
+        ),
+        (
+            BackendPlan::Sparse,
+            &entangled,
+            RouteRule::OverStatevectorCapSparse,
+        ),
+        (
+            BackendPlan::Factored,
+            &entangled,
+            RouteRule::PartialIndependence,
+        ),
+        (BackendPlan::Factored, &product, RouteRule::Default),
+    ] {
+        assert_eq!(backend_rule(&BackendKind::Auto, circuit, &plan), rule);
+        assert_eq!(
+            backend_rule(&BackendKind::Sparse, circuit, &plan),
+            RouteRule::ExplicitBackend
+        );
+    }
+}

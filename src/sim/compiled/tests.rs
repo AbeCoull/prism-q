@@ -2142,17 +2142,6 @@ fn marginals_non_64_aligned_shots() {
 }
 
 #[test]
-fn optimal_chunk_size_basic() {
-    let cs = optimal_chunk_size(200, 256 * 1024 * 1024);
-    assert!(cs >= 64);
-    assert_eq!(cs % 64, 0);
-
-    let cs_1000 = optimal_chunk_size(1000, 256 * 1024 * 1024);
-    assert!(cs_1000 < cs, "more measurements should give smaller chunks");
-    assert!(cs_1000 >= 64);
-}
-
-#[test]
 fn noisy_chunked_histogram_matches_direct() {
     use crate::sim::noise::{NoiseModel, compile_noisy};
 

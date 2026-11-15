@@ -109,10 +109,209 @@ fn test_parametric_gates() {
 }
 
 #[test]
-fn test_unsupported_def_with_measurement() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\ndef mygate(qubit q) { measure q -> c[0]; }";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::UnsupportedConstruct { .. }));
+fn malformed_programs_are_rejected_with_their_error_kind() {
+    type Kind = fn(&PrismError) -> bool;
+    let parse_error: Kind = |e| matches!(e, PrismError::Parse { .. });
+    let arity: Kind = |e| matches!(e, PrismError::GateArity { .. });
+    let unsupported: Kind = |e| matches!(e, PrismError::UnsupportedConstruct { .. });
+    let undefined: Kind = |e| matches!(e, PrismError::UndefinedRegister { .. });
+    let bad_qubit: Kind = |e| matches!(e, PrismError::InvalidQubit { .. });
+    let cases: [(&str, &str, Kind); 25] = [
+        (
+            "test_unsupported_def_with_measurement",
+            "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\ndef mygate(qubit q) { measure q -> c[0]; }",
+            unsupported,
+        ),
+        (
+            "test_undefined_register",
+            "OPENQASM 3.0;\nh q[0];",
+            undefined,
+        ),
+        (
+            "test_gate_def_missing_name_is_error",
+            "OPENQASM 3.0;\ngate {}",
+            parse_error,
+        ),
+        (
+            "test_qubit_out_of_bounds",
+            "OPENQASM 3.0;\nqubit[2] q;\nh q[5];",
+            bad_qubit,
+        ),
+        (
+            "test_gate_arity_mismatch",
+            "OPENQASM 3.0;\nqubit[3] q;\ncx q[0], q[1], q[2];",
+            arity,
+        ),
+        (
+            "test_cp_arity_mismatch",
+            "OPENQASM 3.0;\nqubit[1] q;\ncp(pi/4) q[0];",
+            arity,
+        ),
+        (
+            "test_broadcast_register_size_mismatch",
+            r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        qubit[3] r;
+        cx q, r;
+    "#,
+            parse_error,
+        ),
+        (
+            "test_if_missing_body",
+            "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\nif (c[0])",
+            parse_error,
+        ),
+        (
+            "test_if_undefined_creg",
+            "OPENQASM 3.0;\nqubit[1] q;\nif(c==0) x q[0];",
+            undefined,
+        ),
+        (
+            "test_gate_def_arity_mismatch",
+            r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        gate mygate a, b { cx a, b; }
+        mygate q[0];
+    "#,
+            arity,
+        ),
+        (
+            "test_missing_bracket_qubit_decl",
+            "OPENQASM 3.0;\nqubit[4 q;",
+            parse_error,
+        ),
+        (
+            "test_missing_bracket_bit_decl",
+            "OPENQASM 3.0;\nbit[4 c;",
+            parse_error,
+        ),
+        (
+            "test_pi_div_zero",
+            "OPENQASM 3.0;\nqubit[1] q;\nrz(pi/0) q[0];",
+            parse_error,
+        ),
+        (
+            "test_neg_pi_div_zero",
+            "OPENQASM 3.0;\nqubit[1] q;\nrz(-pi/0) q[0];",
+            parse_error,
+        ),
+        (
+            "test_nan_angle_rejected",
+            "OPENQASM 3.0;\nqubit[1] q;\nrz(NaN) q[0];",
+            parse_error,
+        ),
+        (
+            "test_inf_angle_rejected",
+            "OPENQASM 3.0;\nqubit[1] q;\nrz(inf) q[0];",
+            parse_error,
+        ),
+        (
+            "test_recursive_gate_def_rejected",
+            r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        gate loop a { loop a; }
+        loop q[0];
+    "#,
+            parse_error,
+        ),
+        (
+            "for_loop_unterminated_brace_rejected",
+            r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        for int i in [0:2] {
+            x q[i];
+    "#,
+            parse_error,
+        ),
+        (
+            "for_loop_zero_step_rejected",
+            r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        for int i in [0:0:2] {
+            x q[i];
+        }
+    "#,
+            parse_error,
+        ),
+        (
+            "for_loop_non_integer_bound_rejected",
+            r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        for int i in [0:pi] {
+            x q[i];
+        }
+    "#,
+            parse_error,
+        ),
+        (
+            "def_returning_a_literal_is_rejected",
+            r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        def measure_qubit(qubit a) -> bit {
+            return 0;
+        }
+    "#,
+            unsupported,
+        ),
+        (
+            "def_subroutine_arity_mismatch_rejected",
+            r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        def bell(qubit a, qubit b) {
+            h a;
+            cx a, b;
+        }
+        bell(q[0]);
+    "#,
+            arity,
+        ),
+        (
+            "def_subroutine_recursion_capped",
+            r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        def loop(qubit a) {
+            loop(a);
+        }
+        loop(q[0]);
+    "#,
+            parse_error,
+        ),
+        (
+            "if_negative_value_rejected",
+            r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[4] c;
+        if (c == -1) x q[0];
+    "#,
+            parse_error,
+        ),
+        (
+            "if_bit_compare_against_two_rejected",
+            r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[1] c;
+        if (c[0] == 2) x q[0];
+    "#,
+            parse_error,
+        ),
+    ];
+    for (name, source, kind) in cases {
+        match parse(source) {
+            Ok(_) => panic!("{name}: accepted"),
+            Err(err) => assert!(kind(&err), "{name}: {err:?}"),
+        }
+    }
 }
 
 #[test]
@@ -149,34 +348,6 @@ switch (c) { x q[0]; }";
         }
         other => panic!("expected a parse error, got {other:?}"),
     }
-}
-
-#[test]
-fn test_undefined_register() {
-    let qasm = "OPENQASM 3.0;\nh q[0];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::UndefinedRegister { .. }));
-}
-
-#[test]
-fn test_gate_def_missing_name_is_error() {
-    let qasm = "OPENQASM 3.0;\ngate {}";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn test_qubit_out_of_bounds() {
-    let qasm = "OPENQASM 3.0;\nqubit[2] q;\nh q[5];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::InvalidQubit { .. }));
-}
-
-#[test]
-fn test_gate_arity_mismatch() {
-    let qasm = "OPENQASM 3.0;\nqubit[3] q;\ncx q[0], q[1], q[2];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::GateArity { .. }));
 }
 
 #[test]
@@ -461,13 +632,6 @@ fn test_inv_cp() {
     } else {
         panic!("expected gate");
     }
-}
-
-#[test]
-fn test_cp_arity_mismatch() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\ncp(pi/4) q[0];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::GateArity { .. }));
 }
 
 #[test]
@@ -1180,18 +1344,6 @@ fn test_broadcast_mixed_indexed_and_register() {
 }
 
 #[test]
-fn test_broadcast_register_size_mismatch() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[2] q;
-        qubit[3] r;
-        cx q, r;
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
 fn test_broadcast_measure_arrow() {
     let qasm = r#"
         OPENQASM 2.0;
@@ -1362,20 +1514,6 @@ fn test_if_with_parametric_gate() {
 }
 
 #[test]
-fn test_if_missing_body() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\nif (c[0])";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn test_if_undefined_creg() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nif(c==0) x q[0];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::UndefinedRegister { .. }));
-}
-
-#[test]
 fn test_gate_def_no_params() {
     let qasm = r#"
         OPENQASM 3.0;
@@ -1439,18 +1577,6 @@ fn test_gate_def_single_line() {
 }
 
 #[test]
-fn test_gate_def_arity_mismatch() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[1] q;
-        gate mygate a, b { cx a, b; }
-        mygate q[0];
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::GateArity { .. }));
-}
-
-#[test]
 fn test_gate_def_nested() {
     let qasm = r#"
         OPENQASM 3.0;
@@ -1461,48 +1587,6 @@ fn test_gate_def_nested() {
     "#;
     let c = parse(qasm).unwrap();
     assert_eq!(c.gate_count(), 2);
-}
-
-#[test]
-fn test_missing_bracket_qubit_decl() {
-    let qasm = "OPENQASM 3.0;\nqubit[4 q;";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn test_missing_bracket_bit_decl() {
-    let qasm = "OPENQASM 3.0;\nbit[4 c;";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn test_pi_div_zero() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nrz(pi/0) q[0];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn test_neg_pi_div_zero() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nrz(-pi/0) q[0];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn test_nan_angle_rejected() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nrz(NaN) q[0];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn test_inf_angle_rejected() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nrz(inf) q[0];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
 }
 
 #[test]
@@ -1517,18 +1601,6 @@ fn test_large_bit_register_accepted() {
     let qasm = "OPENQASM 3.0;\nbit[999] c;";
     let circuit = parse(qasm).unwrap();
     assert_eq!(circuit.num_classical_bits, 999);
-}
-
-#[test]
-fn test_recursive_gate_def_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[1] q;
-        gate loop a { loop a; }
-        loop q[0];
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
 }
 
 #[test]
@@ -2207,44 +2279,6 @@ fn for_loop_uint_keyword_accepted() {
 }
 
 #[test]
-fn for_loop_unterminated_brace_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[3] q;
-        for int i in [0:2] {
-            x q[i];
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn for_loop_zero_step_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[3] q;
-        for int i in [0:0:2] {
-            x q[i];
-        }
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn for_loop_non_integer_bound_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[3] q;
-        for int i in [0:pi] {
-            x q[i];
-        }
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
 fn def_subroutine_basic_inlines() {
     let qasm = r#"
         OPENQASM 3.0;
@@ -2885,48 +2919,6 @@ fn def_subroutine_with_for_loop_inside_body() {
 }
 
 #[test]
-fn def_returning_a_literal_is_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[1] q;
-        def measure_qubit(qubit a) -> bit {
-            return 0;
-        }
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::UnsupportedConstruct { .. }));
-}
-
-#[test]
-fn def_subroutine_arity_mismatch_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[2] q;
-        def bell(qubit a, qubit b) {
-            h a;
-            cx a, b;
-        }
-        bell(q[0]);
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::GateArity { .. }));
-}
-
-#[test]
-fn def_subroutine_recursion_capped() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[1] q;
-        def loop(qubit a) {
-            loop(a);
-        }
-        loop(q[0]);
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
 fn def_subroutine_called_inside_for() {
     let qasm = r#"
         OPENQASM 3.0;
@@ -3182,30 +3174,6 @@ fn if_register_compare_with_int_var_in_def() {
         }
         _ => panic!("expected conditional"),
     }
-}
-
-#[test]
-fn if_negative_value_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[1] q;
-        bit[4] c;
-        if (c == -1) x q[0];
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
-}
-
-#[test]
-fn if_bit_compare_against_two_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[1] q;
-        bit[1] c;
-        if (c[0] == 2) x q[0];
-    "#;
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::Parse { .. }));
 }
 
 #[test]

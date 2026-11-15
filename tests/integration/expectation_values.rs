@@ -2,6 +2,7 @@
 //! `Simulate::expectation_values`.
 
 use crate::common;
+use common::circuits::bell;
 
 use prism_q::gates::Gate;
 use prism_q::sim::{run_expectation_values, run_observable_expectation};
@@ -11,17 +12,6 @@ use prism_q::{
 };
 
 const TOL: f64 = 1e-10;
-
-fn bell() -> Circuit {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c
-}
-
-fn assert_close(got: &[f64], want: &[f64], tol: f64) {
-    common::assert_probs_close(got, want, tol, "expectation");
-}
 
 #[test]
 fn clifford_expectations_are_exact() {
@@ -38,7 +28,7 @@ fn clifford_expectations_are_exact() {
         42,
     )
     .unwrap();
-    assert_close(&vals, &[1.0, 1.0, -1.0, 0.0, 1.0], TOL);
+    common::assert_probs_close(&vals, &[1.0, 1.0, -1.0, 0.0, 1.0], TOL, "expectation");
 }
 
 #[test]
@@ -55,7 +45,7 @@ fn plus_state_single_qubit() {
         42,
     )
     .unwrap();
-    assert_close(&vals, &[1.0, 0.0, 0.0], TOL);
+    common::assert_probs_close(&vals, &[1.0, 0.0, 0.0], TOL, "expectation");
 }
 
 #[test]
@@ -74,7 +64,7 @@ fn non_clifford_statevector_route_matches_analytic() {
         42,
     )
     .unwrap();
-    assert_close(&vals, &[0.0, -theta.sin(), theta.cos()], TOL);
+    common::assert_probs_close(&vals, &[0.0, -theta.sin(), theta.cos()], TOL, "expectation");
 }
 
 #[test]
@@ -95,7 +85,7 @@ fn clifford_route_matches_statevector_route() {
         .seed(42)
         .expectation_values(&observables)
         .unwrap();
-    assert_close(&auto, &sv, TOL);
+    common::assert_probs_close(&auto, &sv, TOL, "expectation");
 }
 
 #[test]
@@ -124,7 +114,7 @@ fn clifford_t_deterministic_pauli_matches_statevector() {
         .seed(42)
         .expectation_values(&observables)
         .unwrap();
-    assert_close(&spd, &sv, 1e-9);
+    common::assert_probs_close(&spd, &sv, 1e-9, "expectation");
 }
 
 #[test]
@@ -347,7 +337,7 @@ fn product_expectation_values_cover_each_axis_eigenstate() {
         .seed(42)
         .expectation_values(&observables)
         .unwrap();
-    assert_close(&got, &want, TOL);
+    common::assert_probs_close(&got, &want, TOL, "expectation");
 }
 
 // The tensor network contracts to a dense statevector by construction, so it
@@ -575,7 +565,12 @@ fn statevector_route_matches_scalar_reference_above_the_parallel_norm_threshold(
             expect_x += (state[i ^ xmask].conj() * amp).re;
         }
 
-        assert_close(&got, &[expect_zz / norm, expect_x / norm], TOL);
+        common::assert_probs_close(
+            &got,
+            &[expect_zz / norm, expect_x / norm],
+            TOL,
+            "expectation",
+        );
     }
 }
 
@@ -606,7 +601,7 @@ fn batched_observables_match_one_at_a_time() {
             .map(|obs| run_expectation_values(&circuit, std::slice::from_ref(obs), 42).unwrap()[0])
             .collect();
 
-        assert_close(&batched, &one_at_a_time, TOL);
+        common::assert_probs_close(&batched, &one_at_a_time, TOL, "expectation");
     }
 }
 
@@ -913,7 +908,7 @@ fn budgeted_spd_is_reachable_from_the_builder() {
             .total_discarded,
         0.0
     );
-    assert_close(&values, &reference, TOL);
+    common::assert_probs_close(&values, &reference, TOL, "expectation");
 }
 
 #[test]
@@ -1043,7 +1038,7 @@ fn density_matrix_serves_expectation_values_without_noise() {
         .expectation_values_reported(&observables)
         .unwrap();
 
-    assert_close(&reported.values, &[1.0, 1.0, 0.0], TOL);
+    common::assert_probs_close(&reported.values, &[1.0, 1.0, 0.0], TOL, "expectation");
     assert_eq!(reported.metadata.backend, ResolvedBackend::DensityMatrix);
 }
 
@@ -1133,7 +1128,7 @@ fn density_matrix_reset_reports_the_reset_free_metadata() {
         .seed(42)
         .expectation_values_reported(&observables)
         .unwrap();
-    assert_close(&reported.values, &[1.0, 0.0], TOL);
+    common::assert_probs_close(&reported.values, &[1.0, 0.0], TOL, "expectation");
     assert_eq!(
         reported.metadata.reason,
         prism_q::RouteRule::ExplicitBackend
@@ -1205,7 +1200,7 @@ fn density_matrix_reset_starts_from_the_initial_state() {
         .seed(42)
         .expectation_values(&[vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]])
         .unwrap();
-    assert_close(&values, &[1.0, -1.0], TOL);
+    common::assert_probs_close(&values, &[1.0, -1.0], TOL, "expectation");
 }
 
 #[test]

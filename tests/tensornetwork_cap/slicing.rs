@@ -1,30 +1,13 @@
-//! Index slicing at the tensor-network memory ceiling. Isolated in its own
-//! test binary: it pins `PRISM_MAX_TN_PEAK_QUBITS` and `PRISM_MAX_TN_SLICES`,
-//! which are cached per process, low enough that ordinary circuits cross the
-//! cap and have to be sliced.
+//! Index slicing at the tensor-network memory ceiling.
 
-mod common;
-
-use common::{SEED, caps};
+use crate::common::{SEED, caps};
+use crate::{PEAK_CAP, SLICE_BUDGET, small_caps};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::{TensorNetworkBackend, last_slice_count};
 use prism_q::gates::Gate;
 use prism_q::{Circuit, PauliTerm, PrismError, circuits};
-
-/// Peak cap of `2^10` elements against a slice budget of 64, so a 14-qubit
-/// ansatz slices under the cap and a 12-qubit register behind one 10-qubit
-/// multi-controlled gate cannot.
-const PEAK_CAP: usize = 10;
-const SLICE_BUDGET: usize = 64;
-
-fn small_caps() {
-    caps::set_once(&[
-        ("PRISM_MAX_TN_PEAK_QUBITS", "10"),
-        ("PRISM_MAX_TN_SLICES", "64"),
-    ]);
-}
 
 fn loaded(circuit: &Circuit) -> TensorNetworkBackend {
     let mut tn = TensorNetworkBackend::new(SEED);

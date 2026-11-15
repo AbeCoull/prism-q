@@ -7,6 +7,7 @@
 
 use crate::common;
 
+use common::stats::assert_rates;
 use common::{SEED, assert_probs_close};
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
@@ -22,9 +23,6 @@ use prism_q::gates::Gate;
 use prism_q::sim;
 
 const TRIALS: usize = 2_000;
-/// Band on a seed-averaged probability at `TRIALS` samples. The tightest
-/// entry is a fair coin, whose standard error here is 0.011.
-const AVERAGED_EPS: f64 = 0.05;
 const EXACT_EPS: f64 = 1e-9;
 
 struct BackendEntry {
@@ -216,10 +214,10 @@ fn assert_reset_case(case: &ResetCase) {
                 );
             }
             Branches::Differ => {
-                assert_probs_close(
+                assert_rates(
                     &averaged_probabilities(entry, &circuit),
                     &case.expected,
-                    AVERAGED_EPS,
+                    TRIALS,
                     &format!("{label} seed-averaged"),
                 );
             }

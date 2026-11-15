@@ -3,7 +3,9 @@
 
 use crate::common;
 
-use common::{DM_EPS, FACTORED_EPS, MPS_EPS, SEED, SV_EPS, TN_EPS, circuit_unitary};
+use common::{
+    DM_EPS, FACTORED_EPS, MPS_EPS, SEED, SV_EPS, TN_EPS, assert_probs_close, circuit_unitary,
+};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
@@ -92,25 +94,15 @@ fn probs<B: Backend>(backend: &mut B, circuit: &Circuit) -> Vec<f64> {
     backend.probabilities().expect("probabilities")
 }
 
-fn assert_close(actual: &[f64], expected: &[f64], eps: f64, label: &str) {
-    assert_eq!(actual.len(), expected.len(), "{label}: length");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() < eps,
-            "{label}: prob[{i}] expected {e:.12}, got {a:.12}"
-        );
-    }
-}
-
 fn assert_matches_gate_sequence(k: usize, targets: &[usize]) {
     let (dense, reference) = pair(k, targets);
     let expected = probs(&mut StatevectorBackend::new(SEED), &reference);
 
     let mut sv = StatevectorBackend::new(SEED);
-    assert_close(&probs(&mut sv, &dense), &expected, SV_EPS, "statevector");
+    assert_probs_close(&probs(&mut sv, &dense), &expected, SV_EPS, "statevector");
 
     let mut factored = FactoredBackend::new(SEED);
-    assert_close(
+    assert_probs_close(
         &probs(&mut factored, &dense),
         &expected,
         FACTORED_EPS,
@@ -118,13 +110,13 @@ fn assert_matches_gate_sequence(k: usize, targets: &[usize]) {
     );
 
     let mut mps = MpsBackend::new(SEED, 64);
-    assert_close(&probs(&mut mps, &dense), &expected, MPS_EPS, "mps");
+    assert_probs_close(&probs(&mut mps, &dense), &expected, MPS_EPS, "mps");
 
     let mut tn = TensorNetworkBackend::new(SEED);
-    assert_close(&probs(&mut tn, &dense), &expected, TN_EPS, "tensor network");
+    assert_probs_close(&probs(&mut tn, &dense), &expected, TN_EPS, "tensor network");
 
     let mut dm = DensityMatrixBackend::new(SEED);
-    assert_close(&probs(&mut dm, &dense), &expected, DM_EPS, "density matrix");
+    assert_probs_close(&probs(&mut dm, &dense), &expected, DM_EPS, "density matrix");
 }
 
 #[test]
@@ -157,7 +149,7 @@ fn the_first_target_is_the_most_significant_matrix_index_bit() {
 
     let expected = probs(&mut StatevectorBackend::new(SEED), &reference);
     let actual = probs(&mut StatevectorBackend::new(SEED), &dense);
-    assert_close(&actual, &expected, SV_EPS, "index convention");
+    assert_probs_close(&actual, &expected, SV_EPS, "index convention");
 }
 
 #[test]
@@ -173,7 +165,7 @@ fn applying_the_inverse_returns_the_state() {
 
     let expected = probs(&mut StatevectorBackend::new(SEED), &start);
     let actual = probs(&mut StatevectorBackend::new(SEED), &round);
-    assert_close(&actual, &expected, 1e-12, "inverse round trip");
+    assert_probs_close(&actual, &expected, 1e-12, "inverse round trip");
 }
 
 /// One-qubit gates the declining backends all accept, then the dense gate, so
@@ -310,7 +302,7 @@ fn a_two_qubit_diagonal_becomes_the_diagonal_batch() {
 
     let actual = probs(&mut StatevectorBackend::new(SEED), &prepared);
     let expected = probs(&mut StatevectorBackend::new(SEED), &prepared_reference);
-    assert_close(&actual, &expected, SV_EPS, "diagonal lowering");
+    assert_probs_close(&actual, &expected, SV_EPS, "diagonal lowering");
 }
 
 #[test]
@@ -400,5 +392,5 @@ fn fusion_treats_a_dense_unitary_as_a_barrier() {
     let mut sv = StatevectorBackend::new(SEED);
     sv.init(num_qubits, 0).unwrap();
     sv.apply_instructions(&fused.instructions).unwrap();
-    assert_close(&sv.probabilities().unwrap(), &plain, SV_EPS, "fused stream");
+    assert_probs_close(&sv.probabilities().unwrap(), &plain, SV_EPS, "fused stream");
 }

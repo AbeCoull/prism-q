@@ -100,34 +100,188 @@ fn test_clifford_classification() {
     assert!(!Gate::Cu(Box::new([[Complex64::new(1.0, 0.0); 2]; 2])).is_clifford());
 }
 
+/// Position of `gate`'s variant in declaration order. No wildcard arm, so a new variant
+/// fails to compile here until `one_of_each_variant` lists it.
+fn variant_index(gate: &Gate) -> usize {
+    match gate {
+        Gate::Id => 0,
+        Gate::X => 1,
+        Gate::Y => 2,
+        Gate::Z => 3,
+        Gate::H => 4,
+        Gate::S => 5,
+        Gate::Sdg => 6,
+        Gate::T => 7,
+        Gate::Tdg => 8,
+        Gate::SX => 9,
+        Gate::SXdg => 10,
+        Gate::Rx(_) => 11,
+        Gate::Ry(_) => 12,
+        Gate::Rz(_) => 13,
+        Gate::P(_) => 14,
+        Gate::Rzz(_) => 15,
+        Gate::Cx => 16,
+        Gate::Cz => 17,
+        Gate::Swap => 18,
+        Gate::Cu(_) => 19,
+        Gate::Mcu(_) => 20,
+        Gate::Fused(_) => 21,
+        Gate::BatchPhase(_) => 22,
+        Gate::BatchRzz(_) => 23,
+        Gate::DiagonalBatch(_) => 24,
+        Gate::MultiFused(_) => 25,
+        Gate::Fused2q(_) => 26,
+        Gate::Multi2q(_) => 27,
+        Gate::QftBlock { .. } => 28,
+        Gate::PauliRot(_) => 29,
+        Gate::MultiPauliRot(_) => 30,
+        Gate::Unitary(_) => 31,
+    }
+}
+
+const GATE_VARIANTS: usize = 32;
+
+/// One instance of every variant, in declaration order. The batched and tiled variants
+/// span three qubits, where `dense_matrix` reports none.
+fn one_of_each_variant() -> Vec<Gate> {
+    let one = Complex64::new(1.0, 0.0);
+    let i = Complex64::new(0.0, 1.0);
+    let h = Gate::H.matrix_2x2();
+    let dft: Vec<Complex64> = (0..64)
+        .map(|k| {
+            let angle = std::f64::consts::TAU * ((k / 8) * (k % 8)) as f64 / 8.0;
+            Complex64::from_polar(8f64.sqrt().recip(), angle)
+        })
+        .collect();
+    let mut h_on_first = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (r, row) in h_on_first.iter_mut().enumerate() {
+        for (c, value) in row.iter_mut().enumerate() {
+            if r % 2 == c % 2 {
+                *value = h[r / 2][c / 2];
+            }
+        }
+    }
+    vec![
+        Gate::Id,
+        Gate::X,
+        Gate::Y,
+        Gate::Z,
+        Gate::H,
+        Gate::S,
+        Gate::Sdg,
+        Gate::T,
+        Gate::Tdg,
+        Gate::SX,
+        Gate::SXdg,
+        Gate::Rx(0.3),
+        Gate::Ry(0.3),
+        Gate::Rz(0.3),
+        Gate::P(0.3),
+        Gate::Rzz(0.3),
+        Gate::Cx,
+        Gate::Cz,
+        Gate::Swap,
+        Gate::Cu(Box::new(h)),
+        Gate::mcu(Gate::X.matrix_2x2(), 2),
+        Gate::Fused(Box::new(h)),
+        Gate::BatchPhase(Box::new(BatchPhaseData::new([(1, i), (2, -one)]))),
+        Gate::BatchRzz(Box::new(BatchRzzData::new(vec![(0, 1, 0.3), (1, 2, 0.5)]))),
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 0,
+                d0: one,
+                d1: i,
+            },
+            DiagEntry::Phase2q {
+                q0: 1,
+                q1: 2,
+                phase: -one,
+            },
+        ]))),
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![
+            (0, h),
+            (1, Gate::T.matrix_2x2()),
+            (2, Gate::X.matrix_2x2()),
+        ]))),
+        Gate::Fused2q(Box::new(h_on_first)),
+        Gate::Multi2q(Box::new(Multi2qData::new(vec![
+            (0, 1, Gate::Cx.matrix_4x4()),
+            (1, 2, Gate::Cz.matrix_4x4()),
+        ]))),
+        Gate::QftBlock {
+            start: 0,
+            num: 3,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+        Gate::PauliRot(Box::new(PauliRotData {
+            theta: 0.3,
+            axes: vec![PauliAxis::X, PauliAxis::Z],
+        })),
+        Gate::MultiPauliRot(Box::new(MultiPauliRotData {
+            rotations: vec![(0b011, 0, 0.3), (0, 0b110, 0.2)],
+        })),
+        Gate::Unitary(Box::new(UnitaryData {
+            mat: dft,
+            num_qubits: 3,
+        })),
+    ]
+}
+
+/// Instances whose classification depends on their data rather than their variant.
+fn data_dependent_instances() -> Vec<Gate> {
+    let x = Gate::X.matrix_2x2();
+    let t = Gate::T.matrix_2x2();
+    let h = Gate::H.matrix_2x2();
+    vec![
+        Gate::Cu(Box::new(t)),
+        Gate::Cu(Box::new(x)),
+        Gate::Fused(Box::new(t)),
+        Gate::Fused(Box::new(x)),
+        Gate::mcu(h, 2),
+        Gate::PauliRot(Box::new(PauliRotData {
+            theta: 0.3,
+            axes: vec![PauliAxis::Z, PauliAxis::Z],
+        })),
+    ]
+}
+
+/// Whether every column of the row-major square `mat` holds exactly one nonzero entry.
+fn is_monomial(mat: &[Complex64]) -> bool {
+    let dim = mat.len().isqrt();
+    (0..dim).all(|c| {
+        (0..dim)
+            .filter(|&r| mat[r * dim + c].norm() > 1e-12)
+            .count()
+            == 1
+    })
+}
+
+#[test]
+fn one_of_each_variant_covers_every_variant() {
+    let indices: Vec<usize> = one_of_each_variant().iter().map(variant_index).collect();
+    assert_eq!(indices, (0..GATE_VARIANTS).collect::<Vec<_>>());
+}
+
 #[test]
 fn test_preserves_sparsity() {
-    assert!(Gate::Id.preserves_sparsity());
-    assert!(Gate::X.preserves_sparsity());
-    assert!(Gate::Y.preserves_sparsity());
-    assert!(Gate::Z.preserves_sparsity());
-    assert!(Gate::S.preserves_sparsity());
-    assert!(Gate::T.preserves_sparsity());
-    assert!(Gate::Rz(1.0).preserves_sparsity());
-    assert!(Gate::P(0.5).preserves_sparsity());
-    assert!(Gate::Cx.preserves_sparsity());
-    assert!(Gate::Cz.preserves_sparsity());
-    assert!(Gate::Swap.preserves_sparsity());
-
-    assert!(!Gate::H.preserves_sparsity());
-    assert!(!Gate::Rx(0.5).preserves_sparsity());
-    assert!(!Gate::Ry(0.5).preserves_sparsity());
-    assert!(!Gate::SX.preserves_sparsity());
-    assert!(!Gate::SXdg.preserves_sparsity());
-
-    let diag = Box::new([
-        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
-        [Complex64::new(0.0, 0.0), Complex64::new(0.0, 1.0)],
-    ]);
-    assert!(Gate::Cu(diag).preserves_sparsity());
-
-    let h_mat = Box::new(Gate::H.matrix_2x2());
-    assert!(!Gate::Cu(h_mat).preserves_sparsity());
+    // A gate keeps the nonzero count iff it maps basis states to basis states, one
+    // nonzero per column. The diagonal batches carry no dense matrix and are diagonal by
+    // construction; the tiled variants report false whatever their factors.
+    for gate in one_of_each_variant()
+        .into_iter()
+        .chain(data_dependent_instances())
+    {
+        let expected = match gate.dense_matrix() {
+            Some(mat) => is_monomial(&mat),
+            None => matches!(
+                gate,
+                Gate::BatchPhase(_) | Gate::BatchRzz(_) | Gate::DiagonalBatch(_)
+            ),
+        };
+        assert_eq!(gate.preserves_sparsity(), expected, "{gate:?}");
+    }
 }
 
 #[test]
@@ -393,26 +547,16 @@ fn test_sx_inverse_pair() {
 
 #[test]
 fn test_is_diagonal_1q() {
-    assert!(Gate::Id.is_diagonal_1q());
-    assert!(Gate::Z.is_diagonal_1q());
-    assert!(Gate::S.is_diagonal_1q());
-    assert!(Gate::Sdg.is_diagonal_1q());
-    assert!(Gate::T.is_diagonal_1q());
-    assert!(Gate::Tdg.is_diagonal_1q());
-    assert!(Gate::Rz(0.5).is_diagonal_1q());
-    assert!(Gate::P(0.5).is_diagonal_1q());
-    assert!(!Gate::H.is_diagonal_1q());
-    assert!(!Gate::X.is_diagonal_1q());
-    assert!(!Gate::Y.is_diagonal_1q());
-    assert!(!Gate::Rx(0.5).is_diagonal_1q());
-    assert!(!Gate::Ry(0.5).is_diagonal_1q());
-    assert!(!Gate::SX.is_diagonal_1q());
-    assert!(!Gate::Cx.is_diagonal_1q());
-
-    let diag_fused = Gate::Fused(Box::new(Gate::T.matrix_2x2()));
-    assert!(diag_fused.is_diagonal_1q());
-    let nondiag_fused = Gate::Fused(Box::new(Gate::H.matrix_2x2()));
-    assert!(!nondiag_fused.is_diagonal_1q());
+    for gate in one_of_each_variant()
+        .into_iter()
+        .chain(data_dependent_instances())
+    {
+        let expected = gate.num_qubits() == 1 && {
+            let m = gate.matrix_2x2();
+            m[0][1].norm() < 1e-12 && m[1][0].norm() < 1e-12
+        };
+        assert_eq!(gate.is_diagonal_1q(), expected, "{gate:?}");
+    }
 }
 
 #[test]
@@ -584,6 +728,68 @@ fn test_recognize_up_to_phase_returns_the_scalar() {
 #[should_panic(expected = "at least one control qubit")]
 fn mcu_with_zero_controls_panics() {
     let _ = Gate::mcu(Gate::X.matrix_2x2(), 0);
+}
+
+#[test]
+#[should_panic(expected = "McuData needs at least 2 controls")]
+fn mcu_data_with_one_control_panics() {
+    let _ = McuData::new(Gate::X.matrix_2x2(), 1);
+}
+
+#[test]
+#[should_panic(expected = "BatchPhaseData holds at most 40 entries")]
+fn batch_phase_data_past_its_capacity_panics() {
+    let one = Complex64::new(1.0, 0.0);
+    let _ = BatchPhaseData::new((1..=BatchPhaseData::MAX_PHASES + 1).map(|q| (q, one)));
+}
+
+#[test]
+#[should_panic(expected = "BatchRzzData holds at most 32 edges")]
+fn batch_rzz_data_past_its_capacity_panics() {
+    let edges = (0..=BatchRzzData::MAX_EDGES)
+        .map(|q| (q, q + 1, 0.1))
+        .collect();
+    let _ = BatchRzzData::new(edges);
+}
+
+#[test]
+#[should_panic(expected = "matrix_2x2 called on 2-qubit gate `cx`")]
+fn matrix_2x2_on_a_two_qubit_gate_panics() {
+    let _ = Gate::Cx.matrix_2x2();
+}
+
+#[test]
+#[should_panic(expected = "matrix_2x2 called on 2-qubit gate")]
+fn matrix_2x2_on_a_weight_two_pauli_rotation_panics() {
+    let _ = Gate::PauliRot(Box::new(PauliRotData {
+        theta: 0.3,
+        axes: vec![PauliAxis::X, PauliAxis::Z],
+    }))
+    .matrix_2x2();
+}
+
+#[test]
+#[should_panic(expected = "matrix_4x4 called on non-standard-2q gate `h`")]
+fn matrix_4x4_on_a_single_qubit_gate_panics() {
+    let _ = Gate::H.matrix_4x4();
+}
+
+#[test]
+#[should_panic(expected = "matrix_4x4 called on non-standard-2q gate")]
+fn matrix_4x4_on_a_weight_three_pauli_rotation_panics() {
+    let _ = Gate::PauliRot(Box::new(PauliRotData {
+        theta: 0.3,
+        axes: vec![PauliAxis::X, PauliAxis::Y, PauliAxis::Z],
+    }))
+    .matrix_4x4();
+}
+
+// The check is a `debug_assert`, so the release-profile lane skips this case.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "matrix_power_real only for single-qubit gates")]
+fn matrix_power_real_on_a_two_qubit_gate_panics() {
+    let _ = Gate::Cx.matrix_power_real(0.5);
 }
 
 /// Flatten a nested matrix into the row-major form `Gate::unitary` takes.

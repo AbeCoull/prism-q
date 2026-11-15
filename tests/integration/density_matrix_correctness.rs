@@ -4,6 +4,7 @@
 
 use crate::common;
 
+use common::stats::{assert_rate, assert_rates};
 use common::{
     DM_EPS, SEED, all_pauli_masks, amplitude_damping, assert_fused_matches_unfused,
     assert_probs_close, count_gates, depolarizing_2q_kraus,
@@ -260,17 +261,8 @@ fn histogram(shots: &[Vec<bool>], num_outcomes: usize) -> Vec<u64> {
     counts
 }
 
-fn assert_within_5_sigma(counts: &[u64], exact: &[f64], total: f64, label: &str) {
-    for (idx, &count) in counts.iter().enumerate() {
-        let p = exact[idx];
-        let sigma = (p * (1.0 - p) / total).sqrt();
-        let observed = count as f64 / total;
-        assert!(
-            (observed - p).abs() <= 5.0 * sigma,
-            "{label}: outcome {idx} exact {p}, sampled {observed}, tolerance {}",
-            5.0 * sigma
-        );
-    }
+fn frequencies(counts: &[u64], total: usize) -> Vec<f64> {
+    counts.iter().map(|&c| c as f64 / total as f64).collect()
 }
 
 #[test]
@@ -298,8 +290,13 @@ fn dm_exact_noisy_distribution_is_seed_independent_and_matches_the_trajectory_me
             counts[idx] += count;
         }
     }
-    let total = (NOISY_SEEDS * shots_per_seed as u64) as f64;
-    assert_within_5_sigma(&counts, &exact, total, "trajectory mean vs exact mixture");
+    let total = NOISY_SEEDS as usize * shots_per_seed;
+    assert_rates(
+        &frequencies(&counts, total),
+        &exact,
+        total,
+        "trajectory mean vs exact mixture",
+    );
 }
 
 #[test]
@@ -317,10 +314,10 @@ fn dm_noisy_shots_and_counts_sample_the_exact_distribution() {
         .shots(num_shots)
         .unwrap();
     assert_eq!(shots.num_shots(), num_shots);
-    assert_within_5_sigma(
-        &histogram(&shots.shots, exact.len()),
+    assert_rates(
+        &frequencies(&histogram(&shots.shots, exact.len()), num_shots),
         &exact,
-        num_shots as f64,
+        num_shots,
         "density-matrix shots",
     );
 
@@ -1348,7 +1345,7 @@ fn dm_conditional_applies_on_measured_one() {
 }
 
 #[test]
-fn dm_measurement_marginals_match_statevector() {
+fn dm_measured_bell_pair_yields_only_correlated_outcomes() {
     // Measuring a Bell pair yields 00 or 11 with probability 0.5 each; 01 and
     // 10 never occur.
     let mut c = Circuit::new(2, 2);
@@ -1366,8 +1363,7 @@ fn dm_measurement_marginals_match_statevector() {
     }
     assert_eq!(counts[1], 0, "01 forbidden by correlation");
     assert_eq!(counts[2], 0, "10 forbidden by correlation");
-    let p00 = counts[0] as f64 / shots as f64;
-    assert!((p00 - 0.5).abs() < 0.05, "p00={p00}");
+    assert_rate(counts[0] as f64 / shots as f64, 0.5, shots, "p00");
 }
 
 #[test]

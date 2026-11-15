@@ -11,7 +11,7 @@ use prism_q::gates::Gate;
 use prism_q::sim::unified_pauli::{PauliAxis, PauliTerm};
 use prism_q::{CircuitBuilder, simulate};
 
-const SEED: u64 = 42;
+use crate::common::SEED;
 
 fn region(inst: &Instruction) -> &GuardedRegion {
     match inst {

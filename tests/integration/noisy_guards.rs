@@ -13,7 +13,8 @@ use prism_q::{
 };
 use smallvec::smallvec;
 
-const SEED: u64 = 42;
+use crate::common::SEED;
+use crate::common::stats::{assert_rates, fnv1a};
 
 fn gate(gate: Gate, targets: &[usize]) -> Instruction {
     Instruction::Gate {
@@ -41,16 +42,6 @@ fn histogram(shots: &[Vec<bool>], bits: usize) -> Vec<f64> {
         counts[index] += 1.0;
     }
     counts.iter().map(|c| c / shots.len() as f64).collect()
-}
-
-fn assert_within_5_sigma(sampled: &[f64], exact: &[f64], shots: usize, label: &str) {
-    for (outcome, (&f, &p)) in sampled.iter().zip(exact).enumerate() {
-        let sigma = (p * (1.0 - p) / shots as f64).sqrt();
-        assert!(
-            (f - p).abs() <= 5.0 * sigma + 1e-3,
-            "{label}: outcome {outcome:#b} sampled {f}, exact {p}"
-        );
-    }
 }
 
 #[test]
@@ -304,11 +295,11 @@ fn a_depolarized_feedforward_round_matches_its_deferred_lowering() {
             .noise(&noise)
             .shots(shots)
             .expect("noisy feed-forward shots");
-        assert_within_5_sigma(&histogram(&result.shots, 5), &exact, shots, label);
+        assert_rates(&histogram(&result.shots, 5), &exact, shots, label);
     }
     let replay = run_shots_noisy(&circuit, &noise, shots, SEED).expect("stabilizer replay");
     let replayed = histogram(&replay.shots, 5);
-    assert_within_5_sigma(&replayed, &exact, shots, "replay");
+    assert_rates(&replayed, &exact, shots, "replay");
 
     let (unconditional, unconditional_noise) = deferred_round(p, false);
     let wrong = simulate(&unconditional)
@@ -553,18 +544,13 @@ fn each_measurement_into_a_bit_draws_its_own_flip() {
         ("statevector", BackendKind::Statevector),
     ] {
         let rates = histogram(&noisy_shots(&circuit, &noise, kind, shots), 2);
-        assert_within_5_sigma(&rates, &[0.25; 4], shots, label);
+        assert_rates(&rates, &[0.25; 4], shots, label);
     }
 }
 
 /// FNV-1a over every bit of every shot, in order.
 fn fingerprint(shots: &[Vec<bool>]) -> u64 {
-    shots
-        .iter()
-        .flatten()
-        .fold(0xcbf2_9ce4_8422_2325, |hash, &bit| {
-            (hash ^ u64::from(bit)).wrapping_mul(0x0000_0100_0000_01b3)
-        })
+    fnv1a(shots.iter().flatten().map(|&bit| u64::from(bit)))
 }
 
 /// [`fingerprint`] of each run in `readout_no_condition_reads_keeps_its_seeded_shots`,

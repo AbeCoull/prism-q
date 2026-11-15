@@ -1,21 +1,13 @@
 //! Native tensor-network sampling on the public route past the dense
 //! probability ceiling, where `sample_basis_states` takes the conditional
-//! sweep and its per-call plan cache. Isolated in its own test binary: it
-//! overrides `PRISM_MAX_PROB_QUBITS`, which the cap helper caches per process.
+//! sweep and its per-call plan cache.
 
-mod common;
-
-use common::{SEED, caps};
+use crate::common::SEED;
+use crate::{PROB_CAP, small_prob_cap};
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuits;
-
-const PROB_CAP: usize = 4;
-
-fn small_prob_cap() {
-    caps::set_once(&[("PRISM_MAX_PROB_QUBITS", "4")]);
-}
 
 // A random 6-qubit circuit two qubits over the pinned cap, so the public
 // route runs the sweep with the plan cache read on every shot after the

@@ -187,6 +187,11 @@ name = "bench_suite"
 path = "tools/bench_suite.rs"
 
 [[example]]
+name = "clifford_t_census"
+path = "tools/clifford_t_census.rs"
+required-features = ["bench-internal"]
+
+[[example]]
 name = "compare_runner"
 path = "tools/compare_runner.rs"
 

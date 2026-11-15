@@ -9,7 +9,8 @@ use prism_q::{
     run_qec_program_reference,
 };
 
-const SEED: u64 = 42;
+use crate::common::SEED;
+use crate::common::stats::assert_rate;
 
 const COLOR_CODE_MEMORY_XYZ: &str = include_str!("../fixtures/qec/color_code_memory_xyz.txt");
 const LATTICE_SURGERY_ZZ: &str = include_str!("../fixtures/qec/lattice_surgery_zz.txt");
@@ -31,14 +32,6 @@ fn rate(shots: &PackedShots, column: usize) -> f64 {
         .filter(|&shot| shots.get_bit(shot, column))
         .count() as f64
         / shots.num_shots() as f64
-}
-
-fn assert_rate(observed: f64, p: f64, n: usize, label: &str) {
-    let tolerance = 5.0 * (p * (1.0 - p) / n as f64).sqrt().max(1e-3);
-    assert!(
-        (observed - p).abs() <= tolerance,
-        "{label}: observed {observed}, expected {p} +- {tolerance}"
-    );
 }
 
 fn records(result: &QecSampleResult, shot: usize) -> Vec<bool> {

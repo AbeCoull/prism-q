@@ -2,12 +2,12 @@
 //! gate shape runs on both, and the full `4^n` buffer must agree within 1e-12.
 //! A diagonal sandwich leaves every diagonal entry of rho alone, so a
 //! probabilities comparison would pass on a broken arm; the buffer is what is
-//! compared. Without a usable GPU every test returns before asserting; set
-//! `PRISM_REQUIRE_GPU=1` to make that a hard failure.
+//! compared. A missing device fails every test unless `PRISM_ALLOW_NO_GPU=1` is set.
 
 #![cfg(feature = "gpu")]
 
 mod common;
+mod gpu_device;
 
 use std::sync::Arc;
 
@@ -36,18 +36,7 @@ struct Fixture {
 
 impl Fixture {
     fn try_new() -> Option<Self> {
-        match GpuContext::new(0) {
-            Ok(ctx) => Some(Self { ctx }),
-            Err(e) => {
-                assert!(
-                    std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
-                    "PRISM_REQUIRE_GPU is set but no usable GPU was found ({e}). \
-                     Unset it to allow this suite to skip."
-                );
-                eprintln!("SKIP: no usable GPU ({e})");
-                None
-            }
-        }
+        gpu_device::context().map(|ctx| Self { ctx })
     }
 
     fn kind(&self) -> BackendKind {

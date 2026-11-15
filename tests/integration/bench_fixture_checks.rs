@@ -2,8 +2,8 @@
 //! reference simulator: mirror circuits, closed forms, and the invariants of a
 //! dense or density-matrix result.
 //!
-//! Checks too large or too slow for a CI runner, and the one row a known defect
-//! breaks, are `#[ignore]`d with the reason; run them with `cargo nextest run
+//! Checks too large or too slow for a CI runner are `#[ignore]`d with the reason;
+//! run them with `cargo nextest run
 //! --features parallel --test integration --run-ignored all -E
 //! 'test(/^bench_fixture_checks::/)'`.
 
@@ -527,8 +527,6 @@ fn pauli_sum_grouped_arms_agree_at_16() {
 }
 
 #[test]
-#[ignore = "the bounded tensor-network expectation route panics on an identity \
-            observable term at 18 qubits and above, which the ungrouped arm reaches"]
 fn pauli_sum_grouped_arms_agree_at_20() {
     assert_grouped_matches_ungrouped(20);
 }

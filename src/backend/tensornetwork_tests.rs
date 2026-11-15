@@ -3,19 +3,9 @@ use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::Circuit;
 use crate::gates::{Gate, MultiFusedData};
+use crate::test_support::assert_probs_close;
 
 const EPS: f64 = 1e-10;
-
-fn assert_probs_close(a: &[f64], b: &[f64]) {
-    assert_eq!(a.len(), b.len());
-    for (i, (&x, &y)) in a.iter().zip(b.iter()).enumerate() {
-        assert!(
-            (x - y).abs() < EPS,
-            "prob[{i}]: TN={x}, expected={y}, diff={}",
-            (x - y).abs()
-        );
-    }
-}
 
 #[test]
 fn test_init_zero_state() {
@@ -161,6 +151,7 @@ fn test_fused_gate() {
     assert_probs_close(
         &tn_fused.probabilities().unwrap(),
         &tn_individual.probabilities().unwrap(),
+        EPS,
     );
 }
 
@@ -206,6 +197,7 @@ fn test_multi_fused() {
     assert_probs_close(
         &tn_mf.probabilities().unwrap(),
         &tn_ind.probabilities().unwrap(),
+        EPS,
     );
 }
 
@@ -236,7 +228,7 @@ fn test_golden_vs_statevector() {
     }
     let tn_probs = tn.probabilities().unwrap();
 
-    assert_probs_close(&tn_probs, &sv_probs);
+    assert_probs_close(&tn_probs, &sv_probs, EPS);
 }
 
 #[test]
@@ -293,7 +285,11 @@ fn test_cu_gate() {
     })
     .unwrap();
 
-    assert_probs_close(&tn.probabilities().unwrap(), &sv.probabilities().unwrap());
+    assert_probs_close(
+        &tn.probabilities().unwrap(),
+        &sv.probabilities().unwrap(),
+        EPS,
+    );
 }
 
 #[test]
@@ -823,7 +819,11 @@ fn test_mid_circuit_measure_reset_matches_statevector() {
             sv.classical_results(),
             "seed {seed}"
         );
-        assert_probs_close(&tn.probabilities().unwrap(), &sv.probabilities().unwrap());
+        assert_probs_close(
+            &tn.probabilities().unwrap(),
+            &sv.probabilities().unwrap(),
+            EPS,
+        );
     }
 }
 
@@ -912,7 +912,7 @@ fn test_native_sampling_matches_dense_distribution() {
         );
     }
 
-    assert_probs_close(&tn.probabilities().unwrap(), &probs_before);
+    assert_probs_close(&tn.probabilities().unwrap(), &probs_before, EPS);
 }
 
 // Per-qubit counts convergence where the dense route cannot answer at

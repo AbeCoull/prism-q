@@ -59,7 +59,7 @@ a local A/B on the same two commits before merging through it.
       signature do not carry, and stay concise; none restate the signature
 - [ ] New gate, backend, or fusion pass has golden tests against the statevector backend
 - [ ] GPU-affecting change runs `scripts/test-gpu.ps1` on a host with a device (CI opens
-      none; the script sets `PRISM_REQUIRE_GPU=1` so the golden suites cannot skip)
+      none; without one the golden suites fail unless `PRISM_ALLOW_NO_GPU=1` is set)
 
 `--all-features` pulls `distributed-mpi`, whose build script needs an MPI toolkit, so CI
 enumerates features instead. Reach for it only when the diff touches the MPI surface or

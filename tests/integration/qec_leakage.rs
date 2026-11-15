@@ -10,7 +10,8 @@ use prism_q::{
     QecSampleResult, run_qec_program, run_qec_program_reference, simulate,
 };
 
-const SEED: u64 = 42;
+use crate::common::SEED;
+use crate::common::stats::assert_rate;
 
 fn program(text: &str, shots: usize, chunk_size: Option<usize>) -> QecProgram {
     let mut program = QecProgram::from_text(text).unwrap();
@@ -29,14 +30,6 @@ fn rate(shots: &PackedShots, column: usize) -> f64 {
         .filter(|&shot| shots.get_bit(shot, column))
         .count() as f64
         / shots.num_shots() as f64
-}
-
-fn assert_rate(observed: f64, p: f64, n: usize, label: &str) {
-    let tolerance = 5.0 * (p * (1.0 - p) / n as f64).sqrt().max(1e-3);
-    assert!(
-        (observed - p).abs() <= tolerance,
-        "{label}: observed {observed}, expected {p} +- {tolerance}"
-    );
 }
 
 #[test]

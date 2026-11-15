@@ -61,6 +61,7 @@ fn qasm_seeds_and_their_truncations_parse_without_panic() {
 #[test]
 fn spliced_qasm_seeds_parse_without_panic() {
     let corpus = seeds("qasm_parse");
+    assert!(!corpus.is_empty(), "qasm_parse seed corpus is empty");
     let mut rng = SplitMix(42);
     for _ in 0..3000 {
         let text = String::from_utf8_lossy(&corpus[rng.below(corpus.len())]).into_owned();
@@ -85,7 +86,9 @@ fn floor_char_boundary(s: &str, mut i: usize) -> usize {
 
 #[test]
 fn seeded_token_programs_parse_without_panic() {
-    for seed in seeds("qasm_tokens") {
+    let corpus = seeds("qasm_tokens");
+    assert!(!corpus.is_empty(), "qasm_tokens seed corpus is empty");
+    for seed in corpus {
         check_parse_tokens(&seed);
     }
     let mut rng = SplitMix(42);
@@ -97,7 +100,9 @@ fn seeded_token_programs_parse_without_panic() {
 
 #[test]
 fn seeded_fusion_circuits_match_unfused() {
-    for seed in seeds("fusion") {
+    let corpus = seeds("fusion");
+    assert!(!corpus.is_empty(), "fusion seed corpus is empty");
+    for seed in corpus {
         check_fusion(&seed);
     }
     let mut rng = SplitMix(0xDEAD_BEEF);

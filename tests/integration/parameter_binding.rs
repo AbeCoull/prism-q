@@ -12,7 +12,7 @@ use prism_q::{
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-const SEED: u64 = 42;
+use crate::common::SEED;
 
 fn angles(count: usize, seed: u64) -> Vec<f64> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -1329,7 +1329,7 @@ fn prepared_density_matrix_expectations_match_a_direct_run() {
 
 #[test]
 fn diagonal_mixed_bindings_reuse_the_captured_plan() {
-    let template = circuits::diagonal_mixed_circuit(16, 6, 0xDEAD_BEEF);
+    let template = circuits::diagonal_mixed_circuit(16, 6, SEED);
     let params = Parameters::all_rotations(&template);
     let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
     assert!(prepared.reuses_fusion_plan());

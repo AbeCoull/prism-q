@@ -1,24 +1,14 @@
 //! Bounded tensor-network contraction: intermediate bonds truncated at a
-//! caller-supplied tolerance. Isolated in its own test binary: it pins
-//! `PRISM_MAX_TN_PEAK_QUBITS` and `PRISM_MAX_TN_SLICES`, which are cached per
-//! process, low enough that the contractions here cross the cap.
+//! caller-supplied tolerance.
 
-mod common;
-
-use common::{SEED, caps};
+use crate::common::SEED;
+use crate::small_caps;
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::gates::Gate;
 use prism_q::sim::Exactness;
 use prism_q::{BackendKind, Circuit, PauliTerm, PrismError, simulate};
-
-fn small_caps() {
-    caps::set_once(&[
-        ("PRISM_MAX_TN_PEAK_QUBITS", "10"),
-        ("PRISM_MAX_TN_SLICES", "64"),
-    ]);
-}
 
 /// A weakly entangling chain: small rotations ahead of each CZ ladder, so
 /// the intermediates the contraction builds are close to low rank and the

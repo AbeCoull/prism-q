@@ -3,6 +3,7 @@
 use crate::circuit_case_tests;
 use crate::common;
 
+use common::assert_amps_close;
 use common::assert_probs_close as assert_probs_close_labeled;
 use common::circuits as corpus;
 use num_complex::Complex64;
@@ -45,21 +46,10 @@ fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
     assert_probs_close_labeled(actual, expected, eps, "fusion");
 }
 
-fn assert_state_close(actual: &[Complex64], expected: &[Complex64], eps: f64) {
-    assert_eq!(actual.len(), expected.len(), "state vector length mismatch");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (*a - *e).norm() < eps,
-            "amp[{i}]: expected {e}, got {a} (diff {})",
-            (*a - *e).norm()
-        );
-    }
-}
-
 fn assert_fusion_preserves_state(circuit: &Circuit) {
     let unfused = run_unfused_state(circuit);
     let fused = run_fused_state(circuit);
-    assert_state_close(&fused, &unfused, EPS);
+    assert_amps_close(&fused, &unfused, EPS, "fusion");
 }
 
 #[test]
@@ -1166,10 +1156,11 @@ fn fusion_batch_phase_folds_duplicate_pair() {
 fn fusion_multi_1q_high_targets_match_unfused() {
     for n in [18usize, 19, 20] {
         let circuit = circuits::qaoa_circuit(n, 3, 42);
-        assert_state_close(
+        assert_amps_close(
             &run_fused_state(&circuit),
             &run_unfused_state(&circuit),
             EPS,
+            "fusion",
         );
     }
 }
@@ -1216,10 +1207,11 @@ fn fusion_expanded_qft_below_staging_matches_unfused() {
             ..
         }
     )));
-    assert_state_close(
+    assert_amps_close(
         &run_unfused_state(&fused),
         &run_unfused_state(&circuit),
         EPS,
+        "fusion",
     );
 }
 

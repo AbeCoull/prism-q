@@ -1247,6 +1247,17 @@ fn clifford_t_price_rows_pin_their_engines() {
         register,
         "auto/onelayer_20q_t80"
     );
+    // The split declines this register on the tableau, and the bond dimension takes the
+    // shallow local layers.
+    assert_eq!(
+        shot_plan(
+            BackendKind::Auto,
+            &bench_fixtures::local_clifford_t_layers(72, 20, 72, SEED),
+            1024
+        ),
+        (ResolvedBackend::Mps, RouteRule::NativeSampling),
+        "auto/local_layers_72q_d20_t72"
+    );
     let wide = price_layers(28, 24);
     let plan = sim::simulate(&wide)
         .limits(prism_q::Limits::new().max_statevector_qubits(28))

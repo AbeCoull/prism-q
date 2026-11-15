@@ -1,8 +1,6 @@
 name: Fuzz
 
 on:
-  schedule:
-    - cron: '0 3 * * 0'
   workflow_dispatch:
     inputs:
       seconds:
@@ -58,14 +56,14 @@ jobs:
         working-directory: fuzz
         run: |
           mkdir -p corpus/${{ matrix.target }}
-          cargo +nightly fuzz run ${{ matrix.target }} \
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} \
             corpus/${{ matrix.target }} seeds/${{ matrix.target }} -- \
             -max_total_time=${{ inputs.seconds || '900' }} -timeout=60 -rss_limit_mb=4096 \
             ${{ matrix.flags }}
 
       - name: Minimize the corpus
         working-directory: fuzz
-        run: cargo +nightly fuzz cmin ${{ matrix.target }} corpus/${{ matrix.target }}
+        run: cargo +nightly fuzz cmin --target x86_64-unknown-linux-gnu ${{ matrix.target }} corpus/${{ matrix.target }}
 
       - name: Upload crash inputs
         if: failure()

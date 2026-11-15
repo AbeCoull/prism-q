@@ -20,7 +20,9 @@ use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuit::Circuit;
-use prism_q::circuits::{brickwork_circuit, ghz_circuit, random_circuit};
+use prism_q::circuits::{
+    brickwork_circuit, cz_chain_circuit, ghz_circuit, hardware_efficient_ansatz, random_circuit,
+};
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{BackendKind, GateFilter, NoiseBuilder, NoiseChannel, simulate};
@@ -661,6 +663,109 @@ fn the_terminal_matches_the_statevector_on_the_separable_corpus() {
         &[(BackendKind::ProductState, PRODUCT_EPS)],
         &product_separable_cases(),
     );
+}
+
+// Past the naive sum's reach, so the reference is the statevector kernel the
+// naive sums above pin. Reversed pairs and spread triples exercise the
+// permutation out of the contraction's leg order.
+#[test]
+fn tensor_network_matches_the_statevector_at_20_qubits() {
+    let subsystems: [&[usize]; 6] = [
+        &[10],
+        &[3, 16],
+        &[16, 3],
+        &[9, 10],
+        &[0, 9, 19],
+        &[12, 4, 8],
+    ];
+    for circuit in [
+        cz_chain_circuit(20, 6, SEED),
+        hardware_efficient_ansatz(20, 2, SEED),
+    ] {
+        let mut sv = StatevectorBackend::new(SEED);
+        sim::run_on(&mut sv, &circuit).unwrap();
+        let mut tn = TensorNetworkBackend::new(SEED);
+        sim::run_on(&mut tn, &circuit).unwrap();
+        for subsystem in subsystems {
+            let expected = sv.reduced_density_matrix(subsystem).unwrap();
+            let rho = rdm_of(&mut tn, subsystem);
+            assert_matrix_close(&rho, &expected, TN_EPS, &format!("{subsystem:?}"));
+        }
+    }
+}
+
+/// Apply `circuit` without a run, which would read probabilities past their cap.
+fn load_wide(backend: &mut dyn Backend, circuit: &Circuit) {
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+}
+
+// Any k qubits of the 40-qubit GHZ state read the two corners at 1/2.
+#[test]
+fn ghz_40_pair_and_triple_are_the_two_branch_mixture() {
+    let mut tn = TensorNetworkBackend::new(SEED);
+    load_wide(&mut tn, &ghz_circuit(40));
+    for subsystem in [vec![0usize, 39], vec![25, 7], vec![3, 20, 38]] {
+        let dim = 1usize << subsystem.len();
+        let mut expected = vec![Complex64::new(0.0, 0.0); dim * dim];
+        expected[0] = Complex64::new(0.5, 0.0);
+        expected[dim * dim - 1] = Complex64::new(0.5, 0.0);
+        let rho = rdm_of(&mut tn, &subsystem);
+        assert_matrix_close(&rho, &expected, EPS, &format!("{subsystem:?}"));
+    }
+}
+
+// H and CX on each rung (2j, 2j + 1) of 40 qubits: a rung reads
+// |Phi+><Phi+|, four entries of 1/2 at rows 0 and 3, and a pair taken from two
+// rungs reads I / 4.
+#[test]
+fn bell_ladder_40_reads_a_pure_pair_or_the_identity() {
+    let mut circuit = Circuit::new(40, 0);
+    for j in 0..20 {
+        circuit.add_gate(Gate::H, &[2 * j]);
+        circuit.add_gate(Gate::Cx, &[2 * j, 2 * j + 1]);
+    }
+    let mut tn = TensorNetworkBackend::new(SEED);
+    load_wide(&mut tn, &circuit);
+    let c = |re: f64| Complex64::new(re, 0.0);
+    let mut rung = vec![c(0.0); 16];
+    for (t, tp) in [(0, 0), (0, 3), (3, 0), (3, 3)] {
+        rung[t * 4 + tp] = c(0.5);
+    }
+    let mut straddle = vec![c(0.0); 16];
+    for t in 0..4 {
+        straddle[t * 4 + t] = c(0.25);
+    }
+    for (subsystem, expected) in [
+        ([12usize, 13], &rung),
+        ([39, 38], &rung),
+        ([13, 14], &straddle),
+        ([0, 39], &straddle),
+    ] {
+        let rho = rdm_of(&mut tn, &subsystem);
+        assert_matrix_close(&rho, expected, EPS, &format!("{subsystem:?}"));
+    }
+}
+
+// Depth 4 holds the chain's bond at 4, so a 64 bond MPS is exact and stands in
+// for the statevector at 40 qubits. Once through the backend and once through
+// the terminal, which runs the fused gate tensors.
+#[test]
+fn tensor_network_pair_matches_an_untruncated_chain_at_40_qubits() {
+    let circuit = cz_chain_circuit(40, 4, SEED);
+    let mut mps = MpsBackend::new(SEED, 64);
+    load_wide(&mut mps, &circuit);
+    let mut tn = TensorNetworkBackend::new(SEED);
+    load_wide(&mut tn, &circuit);
+    for subsystem in [[19usize, 20], [20, 19], [5, 30]] {
+        let expected = mps.reduced_density_matrix(&subsystem).unwrap();
+        let label = format!("{subsystem:?}");
+        assert_matrix_close(&rdm_of(&mut tn, &subsystem), &expected, TN_EPS, &label);
+        let from_terminal = terminal_rdm(BackendKind::TensorNetwork, &circuit, &subsystem);
+        assert_matrix_close(&from_terminal, &expected, TN_EPS, &label);
+    }
 }
 
 // Depolarizing noise on a Bell pair leaves the pair mixed, so the two-qubit

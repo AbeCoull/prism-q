@@ -48,17 +48,22 @@ fn terminal_disjoint_rows_keep_ten_qubit_statevector_blocks() {
 
 #[track_caller]
 fn assert_resolves(label: &str, kind: BackendKind, circuit: &prism_q::circuit::Circuit) {
-    let outcome = sim::simulate(circuit)
+    let plan = sim::simulate(circuit)
         .backend(kind.clone())
         .seed(42)
-        .run()
+        .plan(sim::Query::Run)
         .unwrap();
     assert!(
-        !matches!(outcome.metadata.backend, ResolvedBackend::Decomposed),
-        "{label}: asked for {kind:?}, ran on {:?}. The fixture's interaction \
+        plan.would_fail.is_none(),
+        "{label}: {kind:?} would fail: {:?}",
+        plan.would_fail
+    );
+    assert!(
+        !matches!(plan.backend, ResolvedBackend::Decomposed),
+        "{label}: asked for {kind:?}, plans onto {:?}. The fixture's interaction \
          graph splits, so this row measures the decomposed route rather than \
          the backend it names.",
-        outcome.metadata.backend
+        plan.backend
     );
 }
 

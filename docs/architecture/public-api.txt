@@ -2677,6 +2677,7 @@ pub prism_q::sim::Plan::fallbacks: alloc::vec::Vec<prism_q::PlanFallback>
 pub prism_q::sim::Plan::peak_memory: prism_q::MemoryEstimate
 pub prism_q::sim::Plan::placement: prism_q::Placement
 pub prism_q::sim::Plan::rule: prism_q::RouteRule
+pub prism_q::sim::Plan::units_per_shot: core::option::Option<u64>
 pub prism_q::sim::Plan::would_fail: core::option::Option<prism_q::error::PrismError>
 pub struct prism_q::sim::PlanFallback
 pub prism_q::sim::PlanFallback::backend: prism_q::ResolvedBackend
@@ -3998,6 +3999,7 @@ pub prism_q::Plan::fallbacks: alloc::vec::Vec<prism_q::PlanFallback>
 pub prism_q::Plan::peak_memory: prism_q::MemoryEstimate
 pub prism_q::Plan::placement: prism_q::Placement
 pub prism_q::Plan::rule: prism_q::RouteRule
+pub prism_q::Plan::units_per_shot: core::option::Option<u64>
 pub prism_q::Plan::would_fail: core::option::Option<prism_q::error::PrismError>
 pub struct prism_q::PlanFallback
 pub prism_q::PlanFallback::backend: prism_q::ResolvedBackend

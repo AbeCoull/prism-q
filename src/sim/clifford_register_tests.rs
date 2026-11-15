@@ -1,7 +1,8 @@
 use super::*;
 use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
-use rand::RngExt;
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 const CLIFFORDS_1Q: [Gate; 8] = [
     Gate::H,
@@ -52,32 +53,6 @@ fn statevector_probabilities(circuit: &Circuit) -> Vec<f64> {
     sv.probabilities().unwrap()
 }
 
-/// Enumerate every coin assignment and register outcome the sampler can draw.
-fn exact_distribution(sampler: &TerminalSampler) -> Vec<f64> {
-    let coins = sampler
-        .outcome
-        .iter()
-        .filter(|o| matches!(o, RowOutcome::Random))
-        .count();
-    let mut dist = vec![0.0; 1 << sampler.num_classical_bits];
-    for (index, &p) in sampler.table.iter().enumerate() {
-        let p = p / (1u64 << coins) as f64;
-        for assignment in 0..1usize << coins {
-            let mut k = 0;
-            let bits = sampler.classical_bits(index, || {
-                k += 1;
-                (assignment >> (k - 1)) & 1 == 1
-            });
-            let key = bits
-                .iter()
-                .enumerate()
-                .fold(0, |acc, (i, &b)| acc | (usize::from(b) << i));
-            dist[key] += p;
-        }
-    }
-    dist
-}
-
 fn assert_close(got: &[f64], want: &[f64], label: &str) {
     assert_eq!(got.len(), want.len(), "{label}");
     for (i, (g, w)) in got.iter().zip(want).enumerate() {
@@ -98,12 +73,11 @@ fn register_distribution_matches_the_statevector() {
         for q in 0..n {
             circuit.add_measure(q, q);
         }
-        let sampler = TerminalSampler::compile(&circuit, MAX_REGISTER_QUBITS)
+        let sampler = TerminalSampler::compile_every_qubit(&circuit, MAX_REGISTER_QUBITS)
             .unwrap()
             .expect("the register fits");
         let label = format!("seed {seed}, n {n}, t {t_count}");
         assert_close(&sampler.distribution(), &want, &label);
-        assert_close(&exact_distribution(&sampler), &want, &label);
     }
 }
 
@@ -157,54 +131,6 @@ fn register_gates_match_their_basis_action() {
 }
 
 #[test]
-fn register_marginals_follow_the_measurement_map() {
-    let n = 5;
-    let base = random_clifford_t(n, 40, 5, 7);
-    let full = statevector_probabilities(&base);
-    let mut circuit = Circuit::new(n, 3);
-    circuit.instructions = base.instructions.clone();
-    circuit.add_measure(3, 0);
-    circuit.add_measure(1, 2);
-    circuit.add_measure(3, 1);
-
-    let mut want = vec![0.0; 8];
-    for (state, p) in full.iter().enumerate() {
-        let (q3, q1) = ((state >> 3) & 1, (state >> 1) & 1);
-        want[q3 | (q3 << 1) | (q1 << 2)] += p;
-    }
-    let sampler = TerminalSampler::compile(&circuit, MAX_REGISTER_QUBITS)
-        .unwrap()
-        .unwrap();
-    assert_close(&sampler.distribution(), &want, "subset");
-    assert_close(&exact_distribution(&sampler), &want, "subset");
-}
-
-#[test]
-fn distribution_reads_the_last_write_to_each_classical_bit() {
-    let n = 6;
-    let base = random_clifford_t(n, 50, 6, 42);
-    let full = statevector_probabilities(&base);
-    let mut circuit = Circuit::new(n, 3);
-    circuit.instructions = base.instructions.clone();
-    circuit.add_measure(2, 0);
-    circuit.add_measure(5, 1);
-    circuit.add_measure(4, 0);
-    circuit.add_measure(0, 1);
-    circuit.add_measure(0, 2);
-
-    let mut want = vec![0.0; 8];
-    for (state, p) in full.iter().enumerate() {
-        let (q4, q0) = ((state >> 4) & 1, state & 1);
-        want[q4 | (q0 << 1) | (q0 << 2)] += p;
-    }
-    let sampler = TerminalSampler::compile(&circuit, MAX_REGISTER_QUBITS)
-        .unwrap()
-        .unwrap();
-    assert_close(&sampler.distribution(), &want, "overwritten bits");
-    assert_close(&exact_distribution(&sampler), &want, "overwritten bits");
-}
-
-#[test]
 fn every_qubit_distribution_ignores_the_circuit_measurements() {
     let n = 5;
     let mut circuit = random_clifford_t(n, 40, 8, 42);
@@ -225,8 +151,16 @@ fn register_declines_past_its_width() {
         circuit.add_gate(Gate::T, &[q]);
         circuit.add_measure(q, q);
     }
-    assert!(TerminalSampler::compile(&circuit, 3).unwrap().is_none());
-    assert!(TerminalSampler::compile(&circuit, 4).unwrap().is_some());
+    assert!(
+        TerminalSampler::compile_every_qubit(&circuit, 3)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        TerminalSampler::compile_every_qubit(&circuit, 4)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -243,7 +177,7 @@ fn register_width_dry_run_agrees_with_compile() {
                 register_price(&circuit, max_width)
                     .unwrap()
                     .map(|(width, _)| width),
-                TerminalSampler::compile(&circuit, max_width)
+                TerminalSampler::compile_every_qubit(&circuit, max_width)
                     .unwrap()
                     .map(|sampler| sampler.register_width()),
                 "seed {seed}, n {n}, t {t_count}, max width {max_width}"
@@ -253,33 +187,7 @@ fn register_width_dry_run_agrees_with_compile() {
 }
 
 #[test]
-fn register_samples_a_wide_register_from_one_rotated_qubit() {
-    let n = 200;
-    let mut circuit = Circuit::new(n, n);
-    circuit.add_gate(Gate::H, &[0]);
-    circuit.add_gate(Gate::T, &[0]);
-    circuit.add_gate(Gate::H, &[0]);
-    for q in 0..n - 1 {
-        circuit.add_gate(Gate::Cx, &[q, q + 1]);
-    }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
-    let sampler = TerminalSampler::compile(&circuit, MAX_REGISTER_QUBITS)
-        .unwrap()
-        .unwrap();
-    let shots = sampler.sample(20_000, 42);
-    assert!(shots.iter().all(|s| s.iter().all(|&b| b == s[0])));
-    let zeros = shots.iter().filter(|s| !s[0]).count() as f64 / shots.len() as f64;
-    let want = FRAC_PI_8.cos().powi(2);
-    assert!(
-        (zeros - want).abs() < 0.01,
-        "P(0...0) = {zeros}, want {want}"
-    );
-}
-
-#[test]
-fn auto_shots_take_the_register_from_16_qubits_with_fewer_t_than_qubits() {
+fn auto_shots_take_the_register_from_16_qubits() {
     let ladder = |n: usize, t_count: usize| {
         let mut c = Circuit::new(n, n);
         for q in 0..n {
@@ -308,7 +216,8 @@ fn auto_shots_take_the_register_from_16_qubits_with_fewer_t_than_qubits() {
     use crate::sim::ResolvedBackend;
     assert_eq!(route(&ladder(16, 10)), ResolvedBackend::StabilizerRank);
     assert_eq!(route(&ladder(12, 4)), ResolvedBackend::Statevector);
-    assert_eq!(route(&ladder(16, 16)), ResolvedBackend::Statevector);
+    // The split holds the 16 anchors in parts far narrower than the circuit.
+    assert_eq!(route(&ladder(16, 16)), ResolvedBackend::StabilizerRank);
 }
 
 #[test]

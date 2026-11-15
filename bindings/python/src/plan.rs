@@ -224,6 +224,10 @@ impl PyPlan {
         Ok(result.unbind())
     }
     #[getter]
+    fn units_per_shot(&self) -> Option<u64> {
+        self.0.units_per_shot
+    }
+    #[getter]
     fn would_fail(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.0.would_fail.clone().map(|error| {
             let error: PyErr = PyPrismError(error).into();

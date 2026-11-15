@@ -114,6 +114,10 @@ pub struct Plan {
     pub evaluations: Vec<Plan>,
     /// A predictable execution failure; malformed query input is returned as `Err` instead.
     pub would_fail: Option<PrismError>,
+    /// Register amplitude units each shot pays past its table draws, for shots on the
+    /// Clifford register: `(E + 3) 2^E` for each part cut in two with `E` row pairs across
+    /// the cut. `None` on every other route.
+    pub units_per_shot: Option<u64>,
 }
 
 impl Plan {
@@ -132,6 +136,7 @@ impl Plan {
             fallbacks: Vec::new(),
             evaluations: Vec::new(),
             would_fail: None,
+            units_per_shot: None,
         }
     }
 }
@@ -581,10 +586,12 @@ pub(super) fn inspect<S>(
                     p.engine = Some(Engine::NoisyCompiledSampler);
                     Ok(p)
                 }
-                ShotRoute::StabilizerRank => Ok(Plan::new(
-                    ResolvedBackend::StabilizerRank,
-                    RouteRule::CliffordRegister,
-                )),
+                ShotRoute::StabilizerRank => {
+                    let mut p =
+                        Plan::new(ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister);
+                    p.units_per_shot = stabilizer_rank::register_units_per_shot(circuit);
+                    Ok(p)
+                }
                 ShotRoute::TerminalStatevector(_) => Ok(backend_plan(
                     &plan_for_family(kind, Family::Statevector, n, limits),
                     kind,

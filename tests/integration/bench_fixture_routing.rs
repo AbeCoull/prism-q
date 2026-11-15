@@ -1229,21 +1229,35 @@ fn clifford_t_price_rows_pin_their_engines() {
             "auto/{label}"
         );
     }
-    // The bracket on the statevector side of the register's cost constant, and the
-    // single-layer row the factored route takes ahead of the register.
+    // The bracket on the statevector side of the register's cost constant. The split
+    // holds the single-layer row in parts of at most two qubits, ahead of the factored
+    // route its own arm pins.
     assert_eq!(
         shot_plan(BackendKind::Auto, &price_distinct(), 1024),
         terminal_statevector,
         "auto/distinct_17q_t16"
     );
-    let factored = (ResolvedBackend::Factored, RouteRule::NativeSampling);
-    for kind in [BackendKind::Factored, BackendKind::Auto] {
-        assert_eq!(
-            shot_plan(kind.clone(), &price_onelayer(), 1024),
-            factored,
-            "{kind:?}/onelayer_20q_t80"
-        );
-    }
+    assert_eq!(
+        shot_plan(BackendKind::Factored, &price_onelayer(), 1024),
+        (ResolvedBackend::Factored, RouteRule::NativeSampling),
+        "factored/onelayer_20q_t80"
+    );
+    assert_eq!(
+        shot_plan(BackendKind::Auto, &price_onelayer(), 1024),
+        register,
+        "auto/onelayer_20q_t80"
+    );
+    // The split declines this register on the tableau, and the bond dimension takes the
+    // shallow local layers.
+    assert_eq!(
+        shot_plan(
+            BackendKind::Auto,
+            &bench_fixtures::local_clifford_t_layers(72, 20, 72, SEED),
+            1024
+        ),
+        (ResolvedBackend::Mps, RouteRule::NativeSampling),
+        "auto/local_layers_72q_d20_t72"
+    );
     let wide = price_layers(28, 24);
     let plan = sim::simulate(&wide)
         .limits(prism_q::Limits::new().max_statevector_qubits(28))
@@ -1300,6 +1314,24 @@ fn clifford_t_price_rows_pin_their_engines() {
         };
         assert_eq!(route, expected, "auto_mid/{label}");
     }
+}
+
+// A shot on the register pays `(E + 3) 2^E` amplitude units for each cut with `E` row pairs,
+// and the plan reports it before any table is built.
+#[test]
+fn register_plans_report_their_units_per_shot() {
+    let units = |kind: BackendKind, circuit: &prism_q::circuit::Circuit| {
+        sim::simulate(circuit)
+            .backend(kind)
+            .plan(sim::Query::Shots(1024))
+            .unwrap()
+            .units_per_shot
+    };
+    let rank = BackendKind::StabilizerRank;
+    assert_eq!(units(rank.clone(), &price_layers(32, 24)), Some(0));
+    assert_eq!(units(rank.clone(), &price_scrambled(32, 24)), Some(10 << 7));
+    assert_eq!(units(rank, &price_scrambled(32, 28)), Some(12 << 9));
+    assert_eq!(units(BackendKind::Statevector, &price_layers(22, 24)), None);
 }
 
 // `auto/clifford_t_expectation` times the product-gauge register on every row. The cap is
@@ -1467,7 +1499,7 @@ fn register_split_declines_past_64_anchors() {
 // two register rows `X` and `Z` on the qubits listed, so every unit those rows meet an
 // odd number of times carries the commutation form [[0, 1], [1, 0]]. A cut of a part
 // whose sides each hold an even count of such units has no row pair across it. Work at
-// 1024 shots is `40 (2^kL + 2^kR) + 1024 2^E (E + 2)`.
+// 1024 shots is `40 (2^kL + 2^kR) + 1024 (E + 3) 2^E`.
 #[cfg(feature = "bench-internal")]
 #[test]
 fn register_split_cuts_hand_built_registers() {
@@ -1508,7 +1540,7 @@ fn register_split_cuts_hand_built_registers() {
 
     // Units {0}, {1}, {2}, {3, 4, 5}, met once or three times by rows X^6 and Z^6: one
     // part and one canonical component. The cheapest cut puts {3, 4, 5} with one single
-    // unit, sides 4 and 2 with no pair across: 40 (16 + 4) + 1024 * 2.
+    // unit, sides 4 and 2 with no pair across: 40 (16 + 4) + 1024 * 3.
     let split = split_of(
         anchored(6, (3, 5)),
         &[(1, 0), (2, 0), (5, 0), (1, 2), (1, 3), (1, 5)],
@@ -1523,12 +1555,12 @@ fn register_split_cuts_hand_built_registers() {
         Some(RegisterCut {
             sides: (4, 2),
             pairs: 0,
-            work: 2848.0,
+            work: 3872.0,
         })
     );
 
     // Units {0} and {1, 2, 3} under rows X^4 and Z^4: the one cut keeps a row pair across,
-    // sides 3 and 1: 40 (8 + 2) + 1024 * 2 * 3.
+    // sides 3 and 1: 40 (8 + 2) + 1024 * 4 * 2.
     let split = split_of(anchored(4, (1, 3)), &[(3, 0), (1, 3)], 1, [0, 1]);
     assert_eq!(split.parts, [part(4, 2, 2)]);
     assert_eq!(split.canonical_widths, [4]);
@@ -1538,7 +1570,7 @@ fn register_split_cuts_hand_built_registers() {
         Some(RegisterCut {
             sides: (3, 1),
             pairs: 1,
-            work: 6544.0,
+            work: 8592.0,
         })
     );
 
@@ -1553,4 +1585,37 @@ fn register_split_cuts_hand_built_registers() {
     assert_eq!(split.canonical_widths, [2, 2]);
     assert!(split.canonical_agrees);
     assert_eq!(split.cut, None);
+}
+
+// The parts the split register holds for the circuits whose seeded shots
+// `clifford_register_seeds` pins, and the cut it takes of the widest part.
+#[cfg(feature = "bench-internal")]
+#[test]
+fn register_split_pins_the_seeded_fixtures() {
+    let split = |circuit: &prism_q::circuit::Circuit| {
+        let split = prism_q::clifford_register_census(circuit)
+            .unwrap()
+            .split
+            .unwrap();
+        let cut = split.cut.map(|cut| (cut.sides, cut.pairs));
+        (split.canonical_widths, cut)
+    };
+    // Held whole: no part passes 20 qubits.
+    assert_eq!(
+        split(&price_layers(32, 24)),
+        (vec![10, 2, 1, 1, 1, 1, 1, 1], Some(((8, 2), 1)))
+    );
+    assert_eq!(
+        split(&price_scrambled(22, 20)),
+        (vec![18, 1, 1], Some(((13, 5), 5)))
+    );
+    // Cut at 7 pairs ahead of a whole part of 23, and at 9 pairs past 24.
+    assert_eq!(
+        split(&price_scrambled(32, 24)),
+        (vec![23, 1], Some(((15, 8), 7)))
+    );
+    assert_eq!(
+        split(&price_scrambled(32, 28)),
+        (vec![26, 1, 1], Some(((16, 10), 9)))
+    );
 }

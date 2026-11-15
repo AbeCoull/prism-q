@@ -709,4 +709,5 @@ exclude = [
 "Plan::alternatives" = "Plan.alternatives"
 "Plan::fallbacks" = "Plan.fallbacks"
 "Plan::would_fail" = "Plan.would_fail"
+"Plan::units_per_shot" = "Plan.units_per_shot"
 "Plan::evaluations" = "Plan.evaluations"

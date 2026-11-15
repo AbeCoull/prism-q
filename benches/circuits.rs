@@ -4491,6 +4491,13 @@ fn bench_auto_clifford_t_price(c: &mut Criterion) {
     for (arm, kind) in [("statevector", dense.clone()), ("auto", BackendKind::Auto)] {
         shots_row(arm, "layers_20q_t40".into(), kind, layers(20, 40), 1024);
     }
+    shots_row(
+        "auto",
+        "local_layers_72q_d20_t72".into(),
+        BackendKind::Auto,
+        local_clifford_t_layers(72, 20, 72, SEED),
+        1024,
+    );
 
     for (t, shots) in [(6, 16), (8, 4)] {
         for n in [26, 32] {

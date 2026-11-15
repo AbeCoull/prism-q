@@ -1264,8 +1264,9 @@ fn auto_deferred_register_shots_follow_the_statevector() {
     );
 }
 
-/// 31 qubits with `H` then `T` on each of `rotated` qubits, then a CX chain over all of
-/// them, measured: each rotated qubit joins the Clifford register.
+/// 31 qubits with `H` then `T` on each of `rotated` qubits, a `T` on qubit 0 after CX
+/// gates from the others, then a CX chain over all of them, measured: each rotated qubit
+/// joins the Clifford register, and the last `T` links them all into one unit.
 fn wide_register_circuit(rotated: usize) -> Circuit {
     let n = 31;
     let mut circuit = Circuit::new(n, 0);
@@ -1273,6 +1274,10 @@ fn wide_register_circuit(rotated: usize) -> Circuit {
         circuit.add_gate(Gate::H, &[q]);
         circuit.add_gate(Gate::T, &[q]);
     }
+    for q in 1..rotated {
+        circuit.add_gate(Gate::Cx, &[q, 0]);
+    }
+    circuit.add_gate(Gate::T, &[0]);
     for q in 0..n - 1 {
         circuit.add_gate(Gate::Cx, &[q, q + 1]);
     }
@@ -1285,9 +1290,9 @@ fn statevector_cap(qubits: usize) -> Limits {
 
 #[test]
 fn auto_wide_register_past_its_cap_takes_the_tree() {
-    // The register would reach 21 qubits, so the shots take the MPS the tree picks past
-    // the statevector cap.
-    let circuit = wide_register_circuit(21);
+    // One unit of 25 register qubits passes the widest table the split holds, so the
+    // shots take the MPS the tree picks past the statevector cap.
+    let circuit = wide_register_circuit(25);
     assert!(!decide_clifford_register(
         &circuit,
         &ResolvedLimits::resolve(Some(&statevector_cap(20)))
@@ -1311,7 +1316,7 @@ fn auto_wide_register_past_its_cap_takes_the_tree() {
 
 #[test]
 fn require_exact_rejects_a_wide_register_past_its_cap_before_running() {
-    let circuit = wide_register_circuit(21);
+    let circuit = wide_register_circuit(25);
     let plan = simulate(&circuit)
         .limits(statevector_cap(20))
         .plan(Query::Shots(64))
@@ -1551,11 +1556,10 @@ fn mid_circuit_route_declines_past_the_branch_bound() {
     );
 }
 
-/// 31 qubits with `H` then `T` on each of qubits `0..21`, a CX chain, and a measurement of
-/// qubit 30 ahead of an `X` on qubit 29, then every qubit measured: the deferred register
-/// would reach 21 qubits.
+/// [`wide_register_circuit`] over 25 qubits with a measurement of qubit 30 ahead of an `X`
+/// on qubit 29, then every qubit measured: the deferred register holds a unit of 25.
 fn wide_mid_circuit() -> Circuit {
-    let mut circuit = wide_register_circuit(21);
+    let mut circuit = wide_register_circuit(25);
     circuit
         .instructions
         .retain(|i| !matches!(i, Instruction::Measure { .. }));
@@ -1600,7 +1604,7 @@ fn wide_mid_circuit_past_the_register_takes_the_tree() {
         .unwrap_err();
     match err {
         PrismError::BackendUnsupported { operation, .. } => {
-            assert!(operation.contains("21 T gates"), "{operation}");
+            assert!(operation.contains("26 T gates"), "{operation}");
         }
         other => panic!("expected BackendUnsupported, got {other:?}"),
     }
@@ -1737,20 +1741,20 @@ fn cost_rule_takes_a_narrow_register_past_the_t_count() {
     prism_lowered_thresholds,
     ignore = "the lowered register constants price these circuits differently"
 )]
-fn cost_rule_leaves_a_register_near_full_width_to_the_statevector() {
-    // 16 T gates on distinct qubits of 17: the register would be 16 wide over a short
-    // circuit, where one dense pass is cheaper.
+fn cost_rule_takes_a_full_width_register_that_splits() {
+    // 16 T gates on distinct qubits of 17: the register is 16 wide over a short circuit,
+    // and the split holds it in parts far narrower than the dense pass.
     let circuit = register_rounds(17, 16, 1);
-    assert_eq!(register_dry_runs(&circuit, &Limits::new()), (false, 1));
+    assert_eq!(register_dry_runs(&circuit, &Limits::new()), (true, 1));
     assert_eq!(
         auto_shot_route(&circuit, Limits::new()),
-        (ResolvedBackend::Statevector, RouteRule::TerminalStatevector)
+        (ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister)
     );
     assert_auto_matches(
         "full-width register",
         &circuit,
         Limits::new(),
-        BackendKind::StabilizerRank,
+        BackendKind::Statevector,
     );
 }
 
@@ -1818,9 +1822,9 @@ fn cost_rule_takes_a_fitting_register_under_a_very_low_cap() {
     prism_lowered_thresholds,
     ignore = "the lowered register constants price these circuits differently"
 )]
-fn cost_rule_leaves_small_blocks_to_the_decomposed_route() {
-    // Two independent 8-qubit blocks with five rotated qubits each: one 10-wide register
-    // against two 8-qubit dense runs.
+fn cost_rule_prices_small_blocks_by_their_register_parts() {
+    // Two independent 8-qubit blocks with five rotated qubits each: the split prices the
+    // register's parts, never wider than a block, below two 8-qubit dense runs.
     let mut circuit = Circuit::new(16, 0);
     for offset in [0, 8] {
         for q in offset..offset + 5 {
@@ -1834,15 +1838,16 @@ fn cost_rule_leaves_small_blocks_to_the_decomposed_route() {
     }
     let circuit = measure_all(&circuit);
     assert_eq!(circuit.t_count(), 10);
-    assert_eq!(register_dry_runs(&circuit, &Limits::new()), (false, 1));
-    let (backend, rule) = auto_shot_route(&circuit, Limits::new());
-    assert_ne!(backend, ResolvedBackend::StabilizerRank);
-    assert_ne!(rule, RouteRule::CliffordRegister);
+    assert_eq!(register_dry_runs(&circuit, &Limits::new()), (true, 1));
+    assert_eq!(
+        auto_shot_route(&circuit, Limits::new()),
+        (ResolvedBackend::StabilizerRank, RouteRule::CliffordRegister)
+    );
     assert_auto_matches(
-        "decomposed blocks",
+        "register over blocks",
         &circuit,
         Limits::new(),
-        BackendKind::StabilizerRank,
+        BackendKind::Statevector,
     );
 }
 

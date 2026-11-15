@@ -79,6 +79,15 @@ Seeded output has changed in these releases:
   their shots no longer follow `mix_seed(seed, i)`. Compiled Clifford counts at high shot
   counts draw from a corrected binomial sampler, which also fixes their spread.
 - Unreleased: these routes draw differently:
+  - Shots from the Clifford register draw differently on every circuit that route
+    serves: `Auto` and explicit `StabilizerRank` terminal shots of a Clifford+T circuit,
+    and circuits whose mid-circuit measurements move to the end. The register is split
+    into independent parts, and shots are drawn in blocks of 256 with one ChaCha8 stream
+    per block. More circuits reach the register: one wider than 20 qubits qualifies when
+    each part fits 24 qubits or divides into two sides of at most 20, up to 64 register
+    qubits in all, and those circuits move from the statevector, or past the statevector
+    cap from the MPS. Fixed-seed shots on all of these circuits changed. Probabilities
+    from `run_stabilizer_rank` are unchanged.
   - `Auto` terminal shots of a Clifford+T circuit are priced between the Clifford
     register and the dense run instead of capping the T count. Circuits with more than 20
     T gates, or at least as many T gates as qubits, whose register fits 20 qubits move to

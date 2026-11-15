@@ -106,12 +106,11 @@ jobs:
 
       # `[profile.test]` keeps debug assertions on, so a wrong answer that only a
       # `debug_assert!` notices never reaches a test. This lane runs the unit
-      # tests and the conformance and golden suites with assertions off.
+      # tests and the integration and equivalence binaries with assertions off.
       - name: Tests with debug assertions off
         run: >-
           cargo nextest run --cargo-profile ci-release --features "$CI_FEATURES"
           --lib --test integration --test backend_equivalence
-          -E 'kind(lib) | binary(backend_equivalence) | test(/^(conformance_matrix|backend_matrix|measurement_matrix|golden_small_circuits|openqasm_goldens|density_matrix_correctness)::/)'
 
   # Routes behind a size or count crossover (the tensor expectation route, the
   # Clifford register, the factored stabilizer split, the wide frame sampler, the

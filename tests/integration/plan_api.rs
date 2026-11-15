@@ -558,3 +558,19 @@ fn plan_reduced_density_matrix_matches_execution() {
         }
     }
 }
+
+#[test]
+fn plan_reduced_density_matrix_on_the_tensor_network_answers() {
+    let circuit = circuits().pop().unwrap();
+    let request = || {
+        simulate(&circuit)
+            .backend(BackendKind::TensorNetwork)
+            .seed(42)
+    };
+    let plan = request()
+        .plan(Query::ReducedDensityMatrix(&[2, 0]))
+        .unwrap();
+    assert!(plan.would_fail.is_none(), "{:?}", plan.would_fail);
+    let result = request().reduced_density_matrix(&[2, 0]).unwrap();
+    assert_eq!(plan.backend, result.metadata.backend);
+}

@@ -1,12 +1,12 @@
 //! `Backend::reduced_density_matrix` and the `Simulate` terminal over it:
 //! closed forms, agreement with the statevector over the shared small-circuit
 //! corpus, the row-index convention, the trajectory routines at one and two
-//! qubits, and the declines. The cap is pinned in `export_cap_oversize.rs`.
+//! qubits, and subsystem validation. The cap is pinned in `export_cap_oversize.rs`.
 
 use crate::common;
 
 use common::circuits::{CircuitCase, exact_small_cases, product_separable_cases};
-use common::{DM_EPS, FACTORED_EPS, MPS_EPS, PRODUCT_EPS, SEED, SPARSE_EPS, SV_EPS};
+use common::{DM_EPS, FACTORED_EPS, MPS_EPS, PRODUCT_EPS, SEED, SPARSE_EPS, SV_EPS, TN_EPS};
 use num_complex::Complex64;
 use prism_q::PrismError;
 use prism_q::backend::Backend;
@@ -104,12 +104,13 @@ fn rdm_on(backend: &mut dyn Backend, circuit: &Circuit, subsystem: &[usize]) -> 
 }
 
 /// Every backend that answers a general (entangling) circuit.
-fn entangling_backends() -> [Box<dyn Backend>; 4] {
+fn entangling_backends() -> [Box<dyn Backend>; 5] {
     [
         Box::new(StatevectorBackend::new(SEED)),
         Box::new(SparseBackend::new(SEED)),
         Box::new(FactoredBackend::new(SEED)),
         Box::new(DensityMatrixBackend::new(SEED)),
+        Box::new(TensorNetworkBackend::new(SEED)),
     ]
 }
 
@@ -239,6 +240,31 @@ fn w_4_rdm_on_one_and_two_qubits() {
     }
 }
 
+// S H |0> = (|0> + i|1>) / sqrt 2 reads [[1/2, -i/2], [i/2, 1/2]]: the
+// imaginary entry sits at <1|rho|0>, and a swapped ket and bra conjugates it.
+#[test]
+fn s_h_reads_an_imaginary_off_diagonal() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::S, &[1]);
+    let expected = [
+        Complex64::new(0.5, 0.0),
+        Complex64::new(0.0, -0.5),
+        Complex64::new(0.0, 0.5),
+        Complex64::new(0.5, 0.0),
+    ];
+    let backends = entangling_backends().into_iter().chain([
+        Box::new(MpsBackend::new(SEED, 4)) as Box<dyn Backend>,
+        Box::new(ProductStateBackend::new(SEED)),
+        Box::new(StabilizerBackend::new(SEED)),
+        Box::new(FactoredStabilizerBackend::new(SEED)),
+    ]);
+    for mut backend in backends {
+        let rho = rdm_on(backend.as_mut(), &circuit, &[1]);
+        assert_matrix_close(&rho, &expected, EPS, backend.name());
+    }
+}
+
 #[test]
 fn sparse_matches_the_statevector_on_the_small_corpus() {
     assert_matches_statevector(
@@ -277,6 +303,15 @@ fn density_matrix_matches_the_statevector_on_the_small_corpus() {
         &|| Box::new(DensityMatrixBackend::new(SEED)),
         &exact_small_cases(),
         DM_EPS,
+    );
+}
+
+#[test]
+fn tensor_network_matches_the_statevector_on_the_small_corpus() {
+    assert_matches_statevector(
+        &|| Box::new(TensorNetworkBackend::new(SEED)),
+        &exact_small_cases(),
+        TN_EPS,
     );
 }
 
@@ -336,12 +371,13 @@ fn the_row_index_takes_subsystem_0_as_its_lowest_bit() {
         }
         rho
     };
-    let backends: [Box<dyn Backend>; 5] = [
+    let backends: [Box<dyn Backend>; 6] = [
         Box::new(StatevectorBackend::new(SEED)),
         Box::new(SparseBackend::new(SEED)),
         Box::new(FactoredBackend::new(SEED)),
         Box::new(DensityMatrixBackend::new(SEED)),
         Box::new(ProductStateBackend::new(SEED)),
+        Box::new(TensorNetworkBackend::new(SEED)),
     ];
     for mut backend in backends {
         let rho = rdm_on(backend.as_mut(), &circuit, &[0, 1]);
@@ -504,22 +540,6 @@ fn the_trace_is_one_whatever_norm_the_state_carries() {
     assert_matrix_close(&rho, &expected, 1e-14, "statevector after two measurements");
 }
 
-fn assert_declines(backend: &mut dyn Backend) {
-    sim::run_on(backend, &ghz_circuit(4)).unwrap();
-    assert_eq!(
-        backend.reduced_density_matrix(&[0, 2]).unwrap_err(),
-        PrismError::BackendUnsupported {
-            backend: backend.name().to_string(),
-            operation: "reduced density matrix".to_string(),
-        }
-    );
-}
-
-#[test]
-fn tensor_network_declines_the_reduced_density_matrix() {
-    assert_declines(&mut TensorNetworkBackend::new(SEED));
-}
-
 // Both tableau backends read the marginal off the projector onto the
 // generators supported inside the subsystem, never off a dense export.
 #[test]
@@ -548,12 +568,13 @@ fn a_subsystem_is_a_non_empty_set_of_distinct_qubits_up_to_the_whole_register() 
     for q in 0..4 {
         circuit.add_gate(Gate::Ry(0.5 * q as f64 + 0.2), &[q]);
     }
-    let backends: [Box<dyn Backend>; 5] = [
+    let backends: [Box<dyn Backend>; 6] = [
         Box::new(StatevectorBackend::new(SEED)),
         Box::new(SparseBackend::new(SEED)),
         Box::new(FactoredBackend::new(SEED)),
         Box::new(DensityMatrixBackend::new(SEED)),
         Box::new(ProductStateBackend::new(SEED)),
+        Box::new(TensorNetworkBackend::new(SEED)),
     ];
     for mut backend in backends {
         sim::run_on(backend.as_mut(), &circuit).unwrap();
@@ -628,6 +649,7 @@ fn the_terminal_matches_the_statevector_on_the_small_corpus() {
             (BackendKind::Factored, FACTORED_EPS),
             (BackendKind::Mps { max_bond_dim: 64 }, MPS_EPS),
             (BackendKind::DensityMatrix, DM_EPS),
+            (BackendKind::TensorNetwork, TN_EPS),
         ],
         &exact_small_cases(),
     );
@@ -638,24 +660,6 @@ fn the_terminal_matches_the_statevector_on_the_separable_corpus() {
     assert_terminal_matches_statevector(
         &[(BackendKind::ProductState, PRODUCT_EPS)],
         &product_separable_cases(),
-    );
-}
-
-// A backend without a partial trace is named by the terminal, not by the
-// route that selected it.
-#[test]
-fn the_terminal_names_the_backend_that_declines() {
-    let circuit = ghz_circuit(4);
-    assert_eq!(
-        simulate(&circuit)
-            .backend(BackendKind::TensorNetwork)
-            .seed(SEED)
-            .reduced_density_matrix(&[0, 2])
-            .unwrap_err(),
-        PrismError::BackendUnsupported {
-            backend: "tensornetwork".to_string(),
-            operation: "reduced density matrix".to_string(),
-        }
     );
 }
 

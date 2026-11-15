@@ -167,9 +167,6 @@ fn assert_terminal_matches_statevector(rows: &[(BackendKind, f64)], cases: &[Cir
             let subsystem: Vec<usize> = (0..cut).collect();
             let expected = sv.entanglement_entropy(&subsystem).unwrap();
             for (kind, eps) in rows {
-                if matches!(kind, BackendKind::Mps { .. }) && !case.capabilities.safe_for_mps {
-                    continue;
-                }
                 let entropy = terminal_entropy(kind.clone(), &circuit, &subsystem);
                 assert!(
                     (entropy - expected).abs() < *eps,

@@ -2,6 +2,7 @@
 //! `Simulate::expectation_values`.
 
 use crate::common;
+use common::circuits::bell;
 
 use prism_q::gates::Gate;
 use prism_q::sim::{run_expectation_values, run_observable_expectation};
@@ -11,13 +12,6 @@ use prism_q::{
 };
 
 const TOL: f64 = 1e-10;
-
-fn bell() -> Circuit {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c
-}
 
 fn assert_close(got: &[f64], want: &[f64], tol: f64) {
     common::assert_probs_close(got, want, tol, "expectation");

@@ -6,13 +6,8 @@ use crate::common;
 use prism_q::sim::noise::{NoiseEvent, NoiseModel};
 use prism_q::{BackendKind, Circuit, CircuitBuilder, PrismError, simulate};
 
+use common::circuits::bell;
 use common::{SEED, SV_EPS};
-
-fn bell() -> Circuit {
-    let mut builder = CircuitBuilder::new(2);
-    builder.h(0).cx(0, 1);
-    builder.build()
-}
 
 /// Three entangled qubits and one independent of them, so a factored route has
 /// a block boundary to cross and a subset can straddle it.

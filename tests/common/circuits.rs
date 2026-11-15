@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec, guarded};
 use prism_q::circuits as builtins;
 use prism_q::gates::Gate;
@@ -50,8 +48,6 @@ impl BackendSupport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CircuitCapabilities {
     pub requires_non_clifford: bool,
-    pub safe_for_mps: bool,
-    pub safe_for_tensor_network: bool,
     pub product_separable: bool,
 }
 
@@ -59,24 +55,12 @@ impl CircuitCapabilities {
     pub const fn new() -> Self {
         Self {
             requires_non_clifford: false,
-            safe_for_mps: true,
-            safe_for_tensor_network: true,
             product_separable: false,
         }
     }
 
     pub const fn requires_non_clifford(mut self) -> Self {
         self.requires_non_clifford = true;
-        self
-    }
-
-    pub const fn unsafe_for_mps(mut self) -> Self {
-        self.safe_for_mps = false;
-        self
-    }
-
-    pub const fn unsafe_for_tensor_network(mut self) -> Self {
-        self.safe_for_tensor_network = false;
         self
     }
 
@@ -114,9 +98,10 @@ impl CircuitCase {
         let supported = BackendSupport::Supported;
         let rejected = BackendSupport::Rejected;
         match backend {
-            BackendKind::Sparse | BackendKind::Factored => supported,
-            BackendKind::Mps if self.capabilities.safe_for_mps => supported,
-            BackendKind::TensorNetwork if self.capabilities.safe_for_tensor_network => supported,
+            BackendKind::Sparse
+            | BackendKind::Factored
+            | BackendKind::Mps
+            | BackendKind::TensorNetwork => supported,
             BackendKind::Stabilizer if !self.capabilities.requires_non_clifford => supported,
             BackendKind::Product if self.capabilities.product_separable => supported,
             _ => rejected,

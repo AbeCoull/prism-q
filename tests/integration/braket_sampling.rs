@@ -9,7 +9,7 @@ use prism_q::circuit::openqasm;
 use prism_q::sim::ResultValue;
 use prism_q::simulate;
 
-use common::SEED;
+use common::{SEED, assert_probs_close};
 
 /// Enough shots that a mean sits inside `STATISTICAL_EPS` of its exact value
 /// for every fixture here, with the seed fixed so the margin is not a gamble.
@@ -73,16 +73,6 @@ fn assert_constant(single: &[f64], expected: f64, shots: usize, label: &str) {
 fn assert_all_constant(value: &ResultValue, expected: f64, shots: usize, label: &str) {
     for (index, single) in series(value).iter().enumerate() {
         assert_constant(single, expected, shots, &format!("{label}: series {index}"));
-    }
-}
-
-fn assert_close(actual: &[f64], expected: &[f64], eps: f64, label: &str) {
-    assert_eq!(actual.len(), expected.len(), "{label}: wrong length");
-    for (index, (got, want)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (got - want).abs() <= eps,
-            "{label}: entry {index} is {got}, expected {want}"
-        );
     }
 }
 
@@ -201,13 +191,13 @@ fn sampled_statistics_converge_on_the_exact_values() {
             let label = format!("{body} / {observable}");
             let shot = sampled(2, &request, SHOTS);
             let closed = exact(2, &request);
-            assert_close(
+            assert_probs_close(
                 numbers(&shot[0]),
                 numbers(&closed[0]),
                 STATISTICAL_EPS,
                 &format!("{label}: expectation"),
             );
-            assert_close(
+            assert_probs_close(
                 numbers(&shot[1]),
                 numbers(&closed[1]),
                 STATISTICAL_EPS,
@@ -228,7 +218,7 @@ fn a_probability_stays_in_the_computational_basis() {
         &format!("{bell}\n#pragma braket result probability"),
         SHOTS,
     );
-    assert_close(
+    assert_probs_close(
         numbers(&alone[0]),
         &[0.5, 0.0, 0.0, 0.5],
         STATISTICAL_EPS,
@@ -243,13 +233,13 @@ fn a_probability_stays_in_the_computational_basis() {
         ),
         SHOTS,
     );
-    assert_close(
+    assert_probs_close(
         numbers(&beside[1]),
         &[0.5, 0.0, 0.0, 0.5],
         STATISTICAL_EPS,
         "probability beside a rotated observable",
     );
-    assert_close(
+    assert_probs_close(
         numbers(&beside[0]),
         &[1.0],
         STATISTICAL_EPS,
@@ -267,8 +257,8 @@ fn a_probability_target_list_is_ordered() {
          #pragma braket result probability q[1], q[0]",
         64,
     );
-    assert_close(numbers(&computed[0]), &[0.0, 0.0, 1.0, 0.0], 0.0, "q0, q1");
-    assert_close(numbers(&computed[1]), &[0.0, 1.0, 0.0, 0.0], 0.0, "q1, q0");
+    assert_eq!(numbers(&computed[0]), [0.0, 0.0, 1.0, 0.0], "q0, q1");
+    assert_eq!(numbers(&computed[1]), [0.0, 1.0, 0.0, 0.0], "q1, q0");
 }
 
 // Two observables reading one qubit in different bases cannot share a
@@ -295,8 +285,8 @@ fn observables_that_cannot_share_a_measurement_are_rejected() {
          #pragma braket result expectation i q[0]",
         64,
     );
-    assert_close(numbers(&shared[0]), &[1.0], 1e-9, "x on its eigenstate");
-    assert_close(numbers(&shared[1]), &[1.0], 1e-9, "identity");
+    assert_probs_close(numbers(&shared[0]), &[1.0], 1e-9, "x on its eigenstate");
+    assert_probs_close(numbers(&shared[1]), &[1.0], 1e-9, "identity");
 
     // Different qubits never conflict.
     let apart = sampled(
@@ -305,8 +295,8 @@ fn observables_that_cannot_share_a_measurement_are_rejected() {
          #pragma braket result expectation z q[1]",
         64,
     );
-    assert_close(numbers(&apart[0]), &[1.0], 1e-9, "x on q0");
-    assert_close(numbers(&apart[1]), &[1.0], 1e-9, "z on q1");
+    assert_probs_close(numbers(&apart[0]), &[1.0], 1e-9, "x on q0");
+    assert_probs_close(numbers(&apart[1]), &[1.0], 1e-9, "z on q1");
 }
 
 // The three requests that report the state itself have no shot-based reading,
@@ -362,7 +352,7 @@ fn a_noisy_program_samples_from_the_mixture() {
         .noise(&noise)
         .braket_results_sampled(&program.results, SHOTS)
         .unwrap();
-    assert_close(numbers(&values[0]), &[0.5], STATISTICAL_EPS, "bit flip");
+    assert_probs_close(numbers(&values[0]), &[0.5], STATISTICAL_EPS, "bit flip");
 }
 
 // A three-qubit Hermitian observable has no gate wide enough to carry its
@@ -417,7 +407,7 @@ fn a_wide_hermitian_observable_agrees_with_the_exact_value() {
         format!("{body}\n#pragma braket result expectation hermitian({MATRIX}) q[0], q[1], q[2]");
     let shot = sampled(3, &request, SHOTS);
     let closed = exact(3, &request);
-    assert_close(
+    assert_probs_close(
         numbers(&shot[0]),
         numbers(&closed[0]),
         0.15,
@@ -435,6 +425,6 @@ fn the_same_basis_written_two_ways_shares_one_measurement() {
          #pragma braket result expectation x all",
         512,
     );
-    assert_close(numbers(&computed[0]), &[1.0], 1e-9, "x on q0");
-    assert_close(numbers(&computed[1]), &[1.0, 1.0], 1e-9, "x on all");
+    assert_probs_close(numbers(&computed[0]), &[1.0], 1e-9, "x on q0");
+    assert_probs_close(numbers(&computed[1]), &[1.0, 1.0], 1e-9, "x on all");
 }

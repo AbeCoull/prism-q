@@ -7,6 +7,7 @@
 use crate::common;
 
 use common::SEED;
+use common::stats::assert_rate;
 use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
 use prism_q::gates::Gate;
 use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
@@ -16,8 +17,6 @@ use prism_q::{
 };
 
 const SHOTS: usize = 20_000;
-/// Five sigma on a rate estimated from [`SHOTS`] draws, rounded up.
-const RATE_EPS: f64 = 0.02;
 /// Five sigma on a Z expectation estimated from [`SHOTS`] draws at the
 /// worst-case variance, rounded up.
 const BAND: f64 = 0.036;
@@ -74,10 +73,7 @@ fn a_classical_bit_no_measurement_writes_is_never_flipped() {
     // The entry on the unwritten bit must not consume the draws the written
     // record needs, so bit 0 still reads its own rate.
     let flipped = rate(&result.shots, 0, false);
-    assert!(
-        (flipped - 0.30).abs() < RATE_EPS,
-        "bit 0 takes p10 = 0.30, got {flipped}"
-    );
+    assert_rate(flipped, 0.30, SHOTS, "bit 0 takes p10 = 0.30");
 }
 
 #[test]
@@ -100,16 +96,18 @@ fn compiled_sampler_counts_and_marginals_carry_readout() {
 
     let mut sampler = compile_noisy(&circuit, &noise, SEED).unwrap();
     let marginals = sampler.sample_marginals(SHOTS);
-    assert!(
-        (marginals[0] - 0.95).abs() < RATE_EPS,
-        "record 0 reads 1 unless p10 = 0.05 fires, got {}",
-        marginals[0]
+    assert_rate(
+        marginals[0],
+        0.95,
+        SHOTS,
+        "record 0 reads 1 unless p10 = 0.05 fires",
     );
     assert_eq!(marginals[1], 1.0);
-    assert!(
-        (marginals[2] - 0.20).abs() < RATE_EPS,
-        "record 2 reads 1 when p01 = 0.20 fires, got {}",
-        marginals[2]
+    assert_rate(
+        marginals[2],
+        0.20,
+        SHOTS,
+        "record 2 reads 1 when p01 = 0.20 fires",
     );
 
     let mut sampler = compile_noisy(&circuit, &noise, SEED).unwrap();
@@ -122,9 +120,11 @@ fn compiled_sampler_counts_and_marginals_carry_readout() {
         .map(|(_, n)| n)
         .sum();
     let observed = record_two_set as f64 / total as f64;
-    assert!(
-        (observed - 0.20).abs() < RATE_EPS,
-        "record 2 reads 1 when p01 = 0.20 fires, got {observed}"
+    assert_rate(
+        observed,
+        0.20,
+        SHOTS,
+        "record 2 reads 1 when p01 = 0.20 fires",
     );
 }
 
@@ -147,17 +147,19 @@ fn the_block_filtered_compile_carries_readout() {
 
     let mut sampler = compile_noisy(&circuit, &noise, SEED).unwrap();
     let marginals = sampler.sample_marginals(SHOTS);
-    assert!(
-        (marginals[0] - 0.75).abs() < RATE_EPS,
-        "record 0 reads 1 unless p10 = 0.25 fires, got {}",
-        marginals[0]
+    assert_rate(
+        marginals[0],
+        0.75,
+        SHOTS,
+        "record 0 reads 1 unless p10 = 0.25 fires",
     );
     assert_eq!(marginals[1], 1.0);
     assert_eq!(marginals[2], 0.0);
-    assert!(
-        (marginals[3] - 0.35).abs() < RATE_EPS,
-        "record 3 reads 1 when p01 = 0.35 fires, got {}",
-        marginals[3]
+    assert_rate(
+        marginals[3],
+        0.35,
+        SHOTS,
+        "record 3 reads 1 when p01 = 0.35 fires",
     );
 }
 
@@ -183,10 +185,7 @@ fn the_replay_route_carries_readout() {
     let result = run_shots_noisy(&circuit, &noise, SHOTS, SEED).unwrap();
     assert_eq!(result.metadata.backend, ResolvedBackend::Stabilizer);
     let flipped = rate(&result.shots, 0, false);
-    assert!(
-        (flipped - 0.25).abs() < RATE_EPS,
-        "bit 0 takes p10 = 0.25, got {flipped}"
-    );
+    assert_rate(flipped, 0.25, SHOTS, "bit 0 takes p10 = 0.25");
     assert!(
         result.shots.iter().all(|s| s[1]),
         "bit 1 carries no readout entry and must keep its noiseless value"

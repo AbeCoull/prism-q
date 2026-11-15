@@ -10,7 +10,7 @@ use prism_q::circuit::openqasm;
 use prism_q::circuit::{ClassicalCondition, Instruction, SmallVec};
 use prism_q::{BackendKind, Circuit, DynamicProgram, Gate, PrismError, simulate, simulate_program};
 
-const SEED: u64 = 42;
+use crate::common::SEED;
 
 fn parse(source: &str) -> DynamicProgram {
     openqasm::parse_dynamic(source).unwrap_or_else(|err| panic!("{err}\n{source}"))

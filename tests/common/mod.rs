@@ -7,6 +7,7 @@ pub mod circuits;
 pub mod framework;
 pub mod gate_fixtures;
 pub mod matrix;
+pub mod stats;
 
 use num_complex::Complex64;
 use prism_q::Parameters;
@@ -102,6 +103,23 @@ pub fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64, label: &st
         assert!(
             diff < eps,
             "{label} prob[{i}]: expected {e:.12}, got {a:.12} (diff {diff:.2e}, eps {eps:.0e})"
+        );
+    }
+}
+
+pub fn assert_amps_close(actual: &[Complex64], expected: &[Complex64], eps: f64, label: &str) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{label}: amplitude count mismatch ({} vs {})",
+        actual.len(),
+        expected.len()
+    );
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        let diff = (a - e).norm();
+        assert!(
+            diff < eps,
+            "{label} amp[{i}]: expected {e:.12}, got {a:.12} (diff {diff:.2e}, eps {eps:.0e})"
         );
     }
 }

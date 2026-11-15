@@ -9,6 +9,7 @@ use prism_q::{
     run_qec_program, run_qec_program_reference,
 };
 
+use crate::common::stats::assert_rate;
 use crate::qec_common;
 
 const STAT_SHOTS: usize = 20_000;
@@ -42,11 +43,11 @@ fn qec_noisy_single_qubit_channels_match_expected_rates() {
     x_program.noise(QecNoise::XError(p), &[0]).unwrap();
     x_program.measure_z(0).unwrap();
     let x_result = run_qec_program(&x_program).unwrap();
-    assert_rate_close(
-        "X_ERROR before MZ",
+    assert_rate(
         bit_rate(&x_result.measurements, 0),
         p,
-        0.025,
+        STAT_SHOTS,
+        "X_ERROR before MZ",
     );
 
     let mut z_program = QecProgram::with_options(1, qec_options(STAT_SHOTS, true));
@@ -54,22 +55,22 @@ fn qec_noisy_single_qubit_channels_match_expected_rates() {
     z_program.noise(QecNoise::ZError(p), &[0]).unwrap();
     z_program.measure_x(0).unwrap();
     let z_result = run_qec_program(&z_program).unwrap();
-    assert_rate_close(
-        "Z_ERROR before MX",
+    assert_rate(
         bit_rate(&z_result.measurements, 0),
         p,
-        0.025,
+        STAT_SHOTS,
+        "Z_ERROR before MX",
     );
 
     let mut depol_program = QecProgram::with_options(1, qec_options(STAT_SHOTS, true));
     depol_program.noise(QecNoise::Depolarize1(p), &[0]).unwrap();
     depol_program.measure_z(0).unwrap();
     let depol_result = run_qec_program(&depol_program).unwrap();
-    assert_rate_close(
-        "DEPOLARIZE1 before MZ",
+    assert_rate(
         bit_rate(&depol_result.measurements, 0),
         2.0 * p / 3.0,
-        0.025,
+        STAT_SHOTS,
+        "DEPOLARIZE1 before MZ",
     );
 }
 
@@ -86,23 +87,23 @@ fn qec_noisy_depolarize2_matches_marginal_and_detector_rates() {
         .unwrap();
 
     let result = run_qec_program(&program).unwrap();
-    assert_rate_close(
-        "DEPOLARIZE2 first target MZ",
+    assert_rate(
         bit_rate(&result.measurements, 0),
         expected,
-        0.025,
+        STAT_SHOTS,
+        "DEPOLARIZE2 first target MZ",
     );
-    assert_rate_close(
-        "DEPOLARIZE2 second target MZ",
+    assert_rate(
         bit_rate(&result.measurements, 1),
         expected,
-        0.025,
+        STAT_SHOTS,
+        "DEPOLARIZE2 second target MZ",
     );
-    assert_rate_close(
-        "DEPOLARIZE2 detector parity",
+    assert_rate(
         bit_rate(&result.detectors, 0),
         expected,
-        0.025,
+        STAT_SHOTS,
+        "DEPOLARIZE2 detector parity",
     );
 }
 
@@ -121,7 +122,12 @@ fn qec_noisy_postselection_counts_use_noisy_measurement_records() {
 
     let result = run_qec_program(&program).unwrap();
     let accepted_rate = result.accepted_shots as f64 / result.total_shots as f64;
-    assert_rate_close("noisy postselection acceptance", accepted_rate, p, 0.025);
+    assert_rate(
+        accepted_rate,
+        p,
+        STAT_SHOTS,
+        "noisy postselection acceptance",
+    );
     assert_eq!(
         result.discarded_shots,
         result.total_shots - result.accepted_shots
@@ -135,21 +141,21 @@ fn qec_text_measurement_error_arguments_match_expected_rates() {
     let mut z_program = parse_qec_program("M(0.2) 0").unwrap();
     z_program.set_options(qec_options(STAT_SHOTS, true));
     let z_result = run_qec_program(&z_program).unwrap();
-    assert_rate_close(
-        "M measurement error",
+    assert_rate(
         bit_rate(&z_result.measurements, 0),
         0.2,
-        0.025,
+        STAT_SHOTS,
+        "M measurement error",
     );
 
     let mut x_program = parse_qec_program("H 0\nMX(0.2) 0").unwrap();
     x_program.set_options(qec_options(STAT_SHOTS, true));
     let x_result = run_qec_program(&x_program).unwrap();
-    assert_rate_close(
-        "MX measurement error",
+    assert_rate(
         bit_rate(&x_result.measurements, 0),
         0.2,
-        0.025,
+        STAT_SHOTS,
+        "MX measurement error",
     );
 }
 

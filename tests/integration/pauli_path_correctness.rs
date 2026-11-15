@@ -13,7 +13,8 @@ use prism_q::{
     sim,
 };
 
-const SEED: u64 = 42;
+use crate::common::SEED;
+
 const EXACT: f64 = 1e-10;
 
 fn noise_after_every_gate(circuit: &Circuit, channel: NoiseChannel) -> NoiseModel {

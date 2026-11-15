@@ -4,30 +4,26 @@
 
 use prism_q::{PackedShots, QecNoise, QecOptions, QecProgram, parse_qec_program, run_qec_program};
 
+use crate::common::stats::fnv1a;
 use crate::qec_common;
 
-const SEED: u64 = 42;
-
-fn fnv1a(digest: &mut u64, byte: u8) {
-    *digest ^= u64::from(byte);
-    *digest = digest.wrapping_mul(0x0000_0100_0000_01B3);
-}
+use crate::qec_common::SEED;
 
 /// Layout-independent digest of the shots, shot-major bit order.
 fn digest(shots: &PackedShots) -> u64 {
-    let mut digest = 0xCBF2_9CE4_8422_2325u64;
+    let mut bytes = Vec::new();
     for shot in 0..shots.num_shots() {
         let mut byte = 0u8;
         for measurement in 0..shots.num_measurements() {
             byte = (byte << 1) | u8::from(shots.get_bit(shot, measurement));
             if measurement % 8 == 7 {
-                fnv1a(&mut digest, byte);
+                bytes.push(u64::from(byte));
                 byte = 0;
             }
         }
-        fnv1a(&mut digest, byte);
+        bytes.push(u64::from(byte));
     }
-    digest
+    fnv1a(bytes)
 }
 
 struct Fixture {

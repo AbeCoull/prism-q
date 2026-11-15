@@ -9,7 +9,7 @@ use prism_q::circuits::{
 };
 use prism_q::{BackendKind, Circuit, Gate, PauliTerm, ResolvedBackend, simulate};
 
-const SEED: u64 = 0xDEAD_BEEF;
+use crate::common::SEED;
 
 /// [`random_circuit`] at depth 10 behind an `Ry` on qubit 0, which takes it out of
 /// Clifford+T, where the Clifford register answers ahead of the tensor path.

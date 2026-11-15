@@ -2,7 +2,8 @@
 
 use prism_q::{BackendKind, Circuit, Gate, SaveSpec, SavedValue, simulate};
 
-const SEED: u64 = 42;
+use crate::common::{SEED, assert_amps_close};
+
 const EPS: f64 = 1e-12;
 
 /// Four layers of entangling rotations, deterministic in `n`.
@@ -21,17 +22,6 @@ fn saved_statevector(value: &SavedValue) -> &[num_complex::Complex64] {
     match value {
         SavedValue::StateVector(amps) => amps,
         other => panic!("expected a statevector, got {other:?}"),
-    }
-}
-
-fn assert_close(a: &[num_complex::Complex64], b: &[num_complex::Complex64]) {
-    assert_eq!(a.len(), b.len(), "length mismatch");
-    for (i, (x, y)) in a.iter().zip(b).enumerate() {
-        assert!(
-            (x - y).norm() < EPS,
-            "amplitude {i}: {x} vs {y} differ by {}",
-            (x - y).norm()
-        );
     }
 }
 
@@ -67,7 +57,12 @@ fn a_save_matches_running_the_prefix_alone() {
 
         assert_eq!(outcome.saves.len(), 1, "{kind:?}");
         assert_eq!(outcome.saves[0].label, "midpoint", "{kind:?}");
-        assert_close(saved_statevector(&outcome.saves[0].value), &reference);
+        assert_amps_close(
+            saved_statevector(&outcome.saves[0].value),
+            &reference,
+            EPS,
+            "saved statevector",
+        );
     }
 }
 
@@ -94,7 +89,12 @@ fn fusion_does_not_move_a_gate_across_a_save() {
         .run()
         .unwrap();
 
-    assert_close(saved_statevector(&outcome.saves[0].value), &reference);
+    assert_amps_close(
+        saved_statevector(&outcome.saves[0].value),
+        &reference,
+        EPS,
+        "saved statevector",
+    );
 }
 
 #[test]
@@ -126,7 +126,12 @@ fn saves_come_back_in_the_order_their_points_were_reached() {
             .seed(SEED)
             .state_vector()
             .unwrap();
-        assert_close(saved_statevector(&record.value), &reference);
+        assert_amps_close(
+            saved_statevector(&record.value),
+            &reference,
+            EPS,
+            "saved statevector",
+        );
     }
 }
 
@@ -190,7 +195,7 @@ fn a_density_matrix_save_matches_the_prefix_on_the_density_matrix_backend() {
             outcome.saves[0].value
         );
     };
-    assert_close(saved, &reference.data);
+    assert_amps_close(saved, &reference.data, EPS, "saved statevector");
 }
 
 // A save after a measurement records the collapsed state, so the two halves of

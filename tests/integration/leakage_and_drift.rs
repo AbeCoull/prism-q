@@ -11,7 +11,8 @@ use prism_q::{
 };
 use smallvec::smallvec;
 
-const SEED: u64 = 42;
+use crate::common::SEED;
+use crate::common::stats::assert_rate;
 
 fn empty_model(circuit: &Circuit) -> NoiseModel {
     NoiseModel {
@@ -46,15 +47,6 @@ fn herald_rate(result: &ShotsResult, qubit: usize) -> f64 {
         .as_ref()
         .expect("leakage model carries a herald record");
     leaked.iter().filter(|shot| shot[qubit]).count() as f64 / leaked.len() as f64
-}
-
-/// Five binomial standard errors around `p` over `n` shots, floored for rates near 0 or 1.
-fn assert_rate(observed: f64, p: f64, n: usize, label: &str) {
-    let tolerance = 5.0 * (p * (1.0 - p) / n as f64).sqrt().max(1e-3);
-    assert!(
-        (observed - p).abs() <= tolerance,
-        "{label}: observed {observed}, expected {p} +- {tolerance}"
-    );
 }
 
 /// `x` on qubit 0, a two-qubit gate pairing it with qubit 1, then `extra` on 1.

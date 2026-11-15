@@ -3,7 +3,8 @@
 use prism_q::sim::run_batch;
 use prism_q::{BackendKind, Circuit, Gate, simulate};
 
-const SEED: u64 = 42;
+use crate::common::SEED;
+
 const EPS: f64 = 1e-12;
 
 fn unitary(n: usize, layers: usize, seed: usize) -> Circuit {

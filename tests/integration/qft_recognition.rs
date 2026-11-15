@@ -18,7 +18,8 @@ use prism_q::sim;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-const SEED: u64 = 42;
+use crate::common::{SEED, assert_amps_close};
+
 const EPS: f64 = 1e-10;
 
 #[derive(Clone, Copy, Debug)]
@@ -150,23 +151,13 @@ fn routed(circuit: &Circuit, init: &[Complex64]) -> Vec<Complex64> {
 }
 
 #[track_caller]
-fn assert_close(actual: &[Complex64], expected: &[Complex64], label: &str) {
-    assert_eq!(actual.len(), expected.len(), "{label}: length");
-    let worst = actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (a - e).norm())
-        .fold(0.0f64, f64::max);
-    assert!(worst < EPS, "{label}: max amplitude error {worst:e}");
-}
-
-#[track_caller]
 fn assert_routed_matches_gates(circuit: &Circuit, seeds: u64, label: &str) {
     for s in 0..seeds {
         let init = random_state(circuit.num_qubits, SEED + s);
-        assert_close(
+        assert_amps_close(
             &routed(circuit, &init),
             &gate_by_gate(circuit, &init),
+            EPS,
             &format!("{label}, seed {}", SEED + s),
         );
     }
@@ -336,9 +327,10 @@ fn native_kernel_matches_expansion_on_every_chunk_width() {
     ] {
         for form in FORMS {
             let init = random_state(n, SEED + num as u64);
-            assert_close(
+            assert_amps_close(
                 &gate_by_gate(&with_block(n, 0, num, form), &init),
                 &gate_by_gate(&expanded(n, 0, num, form), &init),
+                EPS,
                 &format!("0..{num} of {n}, {form:?}"),
             );
         }
@@ -349,9 +341,10 @@ fn native_kernel_matches_expansion_on_every_chunk_width() {
 fn blocks_off_qubit_zero_match_their_expansion() {
     for form in FORMS {
         let init = random_state(9, SEED);
-        assert_close(
+        assert_amps_close(
             &gate_by_gate(&with_block(9, 3, 5, form), &init),
             &gate_by_gate(&expanded(9, 3, 5, form), &init),
+            EPS,
             &format!("3..8 of 9, {form:?}"),
         );
     }
@@ -364,9 +357,10 @@ fn block_inverse_undoes_the_block() {
         let targets: Vec<usize> = (0..10).collect();
         circuit.add_gate(block(0, 10, form).inverse(), &targets);
         let init = random_state(10, SEED);
-        assert_close(
+        assert_amps_close(
             &gate_by_gate(&circuit, &init),
             &init,
+            EPS,
             &format!("{form:?} then its inverse"),
         );
     }

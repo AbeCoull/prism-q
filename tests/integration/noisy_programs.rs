@@ -16,7 +16,7 @@ use prism_q::{
 };
 use smallvec::smallvec;
 
-const SEED: u64 = 42;
+use crate::common::SEED;
 
 /// Upper 0.1% quantiles of the chi-square distribution, indexed by degrees of
 /// freedom. A correct sampler exceeds one at fixed seed with probability 1e-3.

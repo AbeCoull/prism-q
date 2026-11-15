@@ -9,6 +9,7 @@ use prism_q::{
     compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference,
 };
 
+use crate::common::stats::fnv1a;
 use crate::qec_common;
 
 fn assert_f64_close(actual: f64, expected: f64, tolerance: f64) {
@@ -1873,9 +1874,7 @@ fn qec_noise_matches_analytic_flip_rates() {
 }
 
 fn fingerprint(words: &[u64]) -> u64 {
-    words.iter().fold(0xCBF2_9CE4_8422_2325, |hash, &word| {
-        (hash ^ word).wrapping_mul(0x0000_0100_0000_01B3)
-    })
+    fnv1a(words.iter().copied())
 }
 
 // Pinned from the sampler before noise moved to per-unit streams. The X checks make the

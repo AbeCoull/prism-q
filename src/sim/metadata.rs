@@ -83,12 +83,12 @@ pub enum Exactness {
     Exact,
     /// The engine that ran can discard state weight or estimate by sampling.
     ///
-    /// This marks the route, not the run: an MPS at bond 256 on a circuit that
-    /// never fills a bond truncates nothing and still reports `Approximate`,
-    /// with `fidelity_lower_bound` of 1.0. The variant answers whether the
-    /// answer could have been approximated, the bound answers whether it was.
-    /// `None` means the engine reports no bound. For the MPS,
-    /// [`RunMetadata::bond`] says whether the cap was reached at all.
+    /// The MPS reports the run: a chain whose cuts discarded no more than
+    /// rounding reports [`Exactness::Exact`] at any bond cap, so this variant
+    /// means its cuts dropped real weight. The sparse backend at a raised
+    /// threshold and the bounded tensor network report the route, and a run of
+    /// theirs that dropped nothing still lands here with `fidelity_lower_bound`
+    /// of 1.0. `None` means the engine reports no bound.
     Approximate {
         fidelity_lower_bound: Option<f64>,
     },
@@ -124,7 +124,8 @@ impl BondReport {
 ///
 /// A GPU-attached run below the device crossover reports [`Placement::Host`],
 /// and automatic dispatch onto an approximate backend reports
-/// [`Exactness::Approximate`].
+/// [`Exactness::Approximate`], unless that backend is an MPS whose run
+/// discarded nothing.
 ///
 /// [`Simulate`]: crate::sim::Simulate
 #[derive(Debug, Clone)]
@@ -143,8 +144,8 @@ pub struct RunMetadata {
     pub shots: Option<usize>,
     /// Peak bond dimension against the cap, `Some` when the route resolved to
     /// the MPS and `None` on every other backend. Its
-    /// [`BondReport::saturated`] is the signal that the cap bound the run;
-    /// [`Exactness`] marks the route and cannot say.
+    /// [`BondReport::saturated`] says whether any cut reached the cap;
+    /// [`Exactness`] says whether the cuts discarded weight.
     pub bond: Option<BondReport>,
     /// Engine each independent block ran on, ordered by the lowest qubit each
     /// block holds, when `backend` is [`ResolvedBackend::Decomposed`]. Empty on

@@ -50,6 +50,11 @@ changed meaning:
   coefficients, not branches. The new field `kept_norm_sqr` carries the kept norm, and
   `fidelity_bound()` uses both. A register wider than 20 qubits now returns
   `BackendUnsupported`, and `seed` is ignored.
+- Unreleased: `RunMetadata::exactness` on an MPS run reports the run instead of the route.
+  A run whose cuts discarded a summed squared weight of at most 1e-24 is `Exact` at any
+  bond cap, where any chain wider than bond 1 was `Approximate` with a bound of 1.0.
+  Python's `is_exact` follows it. `require_exact` still declines the MPS route before the
+  run.
 
 ## Seeded output
 

@@ -839,8 +839,8 @@ impl PyRunMetadata {
     }
 
     /// False when the engine that ran can discard state weight or estimate by
-    /// sampling. Marks the route rather than the run; `fidelity_lower_bound`
-    /// reports what this run discarded.
+    /// sampling. An MPS run that discarded nothing past rounding reports True;
+    /// `fidelity_lower_bound` reports what an approximate run discarded.
     #[getter]
     fn is_exact(&self) -> bool {
         self.inner.is_exact()

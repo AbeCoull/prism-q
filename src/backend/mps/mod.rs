@@ -81,6 +81,10 @@ use svd::{
 const ZERO: Complex64 = Complex64::new(0.0, 0.0);
 const ONE: Complex64 = Complex64::new(1.0, 0.0);
 const DEFAULT_SVD_EPSILON: f64 = 1e-12;
+/// Summed relative squared weight, in the unit of
+/// [`MpsBackend::truncation_discarded`], at or under which a run reports
+/// `Exact`: the weight of one singular value at the default threshold.
+const EXACT_DISCARD_BOUND: f64 = DEFAULT_SVD_EPSILON * DEFAULT_SVD_EPSILON;
 /// Bond dimension at or above which a threshold cut takes the orthogonality
 /// center whatever it drops. The environment of an ungauged chain amplifies
 /// what a cut sheds by its own conditioning, which grows with the bonds:
@@ -2988,14 +2992,11 @@ impl Backend for MpsBackend {
         crate::sim::ResolvedBackend::Mps
     }
 
-    /// A chain whose bonds are all 1 certifies itself: it is a product state,
-    /// and with nothing discarded on the way to it there was no approximation
-    /// to make. Any wider chain reports `Approximate` whether or not this run
-    /// truncated, since the bond cap can discard weight. The claim comes from
-    /// the chain rather than from the cut history, which records what a cut
-    /// wrote and so passes over a bond a center move widened.
+    /// A run whose [`Self::truncation_discarded`] stays at or under
+    /// `EXACT_DISCARD_BOUND` reports `Exact` at any bond cap; past it, the run
+    /// reports `Approximate` with the bound that total implies.
     fn exactness(&self) -> crate::sim::Exactness {
-        if self.current_max_bond_dim() == 1 && self.truncation_discarded <= 0.0 {
+        if self.truncation_discarded <= EXACT_DISCARD_BOUND {
             return crate::sim::Exactness::Exact;
         }
         crate::sim::Exactness::Approximate {

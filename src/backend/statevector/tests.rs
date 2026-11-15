@@ -2,32 +2,7 @@ use super::*;
 use crate::circuit::Circuit;
 use crate::circuit::plan::Tracer;
 use crate::sim;
-
-fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "probability vector length mismatch"
-    );
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() < eps,
-            "prob[{i}]: expected {e}, got {a} (diff {})",
-            (a - e).abs()
-        );
-    }
-}
-
-fn assert_state_close(actual: &[Complex64], expected: &[Complex64], eps: f64) {
-    assert_eq!(actual.len(), expected.len(), "state vector length mismatch");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (*a - *e).norm() < eps,
-            "amp[{i}]: expected {e}, got {a} (diff {})",
-            (*a - *e).norm()
-        );
-    }
-}
+use crate::test_support::{assert_amps_close, assert_probs_close};
 
 fn run_manual_state(circuit: &Circuit) -> Vec<Complex64> {
     let mut backend = StatevectorBackend::new(42);
@@ -272,7 +247,7 @@ fn test_adjacent_fused_2q_matches_cx_low_high() {
 
     let fused_state = run_manual_state(&fused);
     let direct_state = run_manual_state(&direct);
-    assert_state_close(&fused_state, &direct_state, 1e-12);
+    assert_amps_close(&fused_state, &direct_state, 1e-12);
 }
 
 #[test]
@@ -287,7 +262,7 @@ fn test_adjacent_fused_2q_matches_cx_high_low() {
 
     let fused_state = run_manual_state(&fused);
     let direct_state = run_manual_state(&direct);
-    assert_state_close(&fused_state, &direct_state, 1e-12);
+    assert_amps_close(&fused_state, &direct_state, 1e-12);
 }
 
 #[test]
@@ -302,7 +277,7 @@ fn test_nonadjacent_fused_2q_fallback_matches_cx() {
 
     let fused_state = run_manual_state(&fused);
     let direct_state = run_manual_state(&direct);
-    assert_state_close(&fused_state, &direct_state, 1e-12);
+    assert_amps_close(&fused_state, &direct_state, 1e-12);
 }
 
 #[cfg(feature = "parallel")]
@@ -318,7 +293,7 @@ fn test_parallel_adjacent_fused_2q_20q() {
 
     let fused_state = run_manual_state(&fused);
     let direct_state = run_manual_state(&direct);
-    assert_state_close(&fused_state, &direct_state, 1e-12);
+    assert_amps_close(&fused_state, &direct_state, 1e-12);
 }
 
 #[cfg(feature = "parallel")]
@@ -428,7 +403,7 @@ fn cu_against_reference(n: usize, pairs: &[(usize, usize)]) {
                 expected[j] = mat[1][0] * a + mat[1][1] * b;
             }
         }
-        assert_state_close(&run_manual_state(&circuit), &expected, 1e-12);
+        assert_amps_close(&run_manual_state(&circuit), &expected, 1e-12);
     }
 }
 
@@ -1488,7 +1463,7 @@ fn batch_phase_matches_independent_reference() {
             }
         }
     }
-    assert_state_close(&got, &expected, 1e-12);
+    assert_amps_close(&got, &expected, 1e-12);
 }
 
 // `apply_diagonal_batch` vs an independent reference at the parallel threshold, so a
@@ -1562,7 +1537,7 @@ fn diagonal_batch_par_matches_independent_reference() {
             }
         }
     }
-    assert_state_close(&got, &expected, 1e-12);
+    assert_amps_close(&got, &expected, 1e-12);
 }
 
 // Setup shared by the high-target rows below: a state with distinct amplitudes
@@ -2499,6 +2474,6 @@ fn parallel_nonadjacent_fused_2q_matches_the_reference() {
                 expected[k] = (0..4).map(|c| mat[r][c] * a[c]).sum();
             }
         }
-        assert_state_close(&run_manual_state(&circuit), &expected, 1e-12);
+        assert_amps_close(&run_manual_state(&circuit), &expected, 1e-12);
     }
 }

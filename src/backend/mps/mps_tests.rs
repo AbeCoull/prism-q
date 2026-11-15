@@ -1,6 +1,7 @@
 use super::*;
 use crate::circuit::Circuit;
 use crate::sim;
+use crate::test_support::assert_probs_close;
 
 const EPS: f64 = 1e-10;
 
@@ -13,13 +14,6 @@ fn run_mps(circuit: &Circuit) -> MpsBackend {
 fn run_mps_probs(circuit: &Circuit) -> Vec<f64> {
     let b = run_mps(circuit);
     b.probabilities().unwrap()
-}
-
-fn assert_probs_close(actual: &[f64], expected: &[f64]) {
-    assert_eq!(actual.len(), expected.len(), "length mismatch");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!((a - e).abs() < EPS, "prob[{i}]: expected {e}, got {a}");
-    }
 }
 
 fn statevector_pauli_expectation(
@@ -711,14 +705,14 @@ fn test_init_zero_state() {
 fn test_x_gate() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::X, &[0]);
-    assert_probs_close(&run_mps_probs(&c), &[0.0, 1.0]);
+    assert_probs_close(&run_mps_probs(&c), &[0.0, 1.0], EPS);
 }
 
 #[test]
 fn test_h_gate() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::H, &[0]);
-    assert_probs_close(&run_mps_probs(&c), &[0.5, 0.5]);
+    assert_probs_close(&run_mps_probs(&c), &[0.5, 0.5], EPS);
 }
 
 #[test]
@@ -726,21 +720,21 @@ fn test_hh_is_identity() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[0]);
-    assert_probs_close(&run_mps_probs(&c), &[1.0, 0.0]);
+    assert_probs_close(&run_mps_probs(&c), &[1.0, 0.0], EPS);
 }
 
 #[test]
 fn test_rz_preserves_zero() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::Rz(1.234), &[0]);
-    assert_probs_close(&run_mps_probs(&c), &[1.0, 0.0]);
+    assert_probs_close(&run_mps_probs(&c), &[1.0, 0.0], EPS);
 }
 
 #[test]
 fn test_rx_pi() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::Rx(std::f64::consts::PI), &[0]);
-    assert_probs_close(&run_mps_probs(&c), &[0.0, 1.0]);
+    assert_probs_close(&run_mps_probs(&c), &[0.0, 1.0], EPS);
 }
 
 #[test]
@@ -748,7 +742,7 @@ fn test_bell_state() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
-    assert_probs_close(&run_mps_probs(&c), &[0.5, 0.0, 0.0, 0.5]);
+    assert_probs_close(&run_mps_probs(&c), &[0.5, 0.0, 0.0, 0.5], EPS);
 }
 
 #[test]
@@ -765,7 +759,7 @@ fn test_bell_bond_dim() {
 fn test_cx_no_flip() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::Cx, &[0, 1]);
-    assert_probs_close(&run_mps_probs(&c), &[1.0, 0.0, 0.0, 0.0]);
+    assert_probs_close(&run_mps_probs(&c), &[1.0, 0.0, 0.0, 0.0], EPS);
 }
 
 #[test]
@@ -774,7 +768,7 @@ fn test_cz_phase() {
     c.add_gate(Gate::X, &[0]);
     c.add_gate(Gate::X, &[1]);
     c.add_gate(Gate::Cz, &[0, 1]);
-    assert_probs_close(&run_mps_probs(&c), &[0.0, 0.0, 0.0, 1.0]);
+    assert_probs_close(&run_mps_probs(&c), &[0.0, 0.0, 0.0, 1.0], EPS);
 }
 
 #[test]
@@ -782,7 +776,7 @@ fn test_swap() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::X, &[1]);
     c.add_gate(Gate::Swap, &[0, 1]);
-    assert_probs_close(&run_mps_probs(&c), &[0.0, 1.0, 0.0, 0.0]);
+    assert_probs_close(&run_mps_probs(&c), &[0.0, 1.0, 0.0, 0.0], EPS);
 }
 
 #[test]
@@ -792,7 +786,7 @@ fn test_ghz_3() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Cx, &[1, 2]);
     let probs = run_mps_probs(&c);
-    assert_probs_close(&probs, &[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5]);
+    assert_probs_close(&probs, &[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5], EPS);
 }
 
 #[test]
@@ -803,6 +797,7 @@ fn test_non_adjacent_cx() {
     assert_probs_close(
         &run_mps_probs(&c),
         &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        EPS,
     );
 }
 
@@ -847,7 +842,7 @@ fn test_fused_gate() {
     c2.add_gate(Gate::Fused(Box::new(fused)), &[0]);
     let p2 = run_mps_probs(&c2);
 
-    assert_probs_close(&p1, &p2);
+    assert_probs_close(&p1, &p2, EPS);
 }
 
 #[test]

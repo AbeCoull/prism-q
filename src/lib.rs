@@ -67,6 +67,8 @@ mod limits;
 pub mod pulse;
 pub mod qec;
 pub mod sim;
+#[cfg(test)]
+mod test_support;
 #[cfg(feature = "parallel")]
 pub mod threading;
 

@@ -6,23 +6,7 @@ use crate::gates::Gate;
 use crate::limits::ResolvedLimits;
 use crate::sim;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
-
-fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "probability vector length mismatch: got {}, expected {}",
-        actual.len(),
-        expected.len()
-    );
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() < eps,
-            "prob[{i}]: expected {e}, got {a} (diff {})",
-            (a - e).abs()
-        );
-    }
-}
+use crate::test_support::assert_probs_close;
 
 fn compare_with_statevector(circuit: &Circuit, eps: f64) {
     let mut sv = StatevectorBackend::new(42);

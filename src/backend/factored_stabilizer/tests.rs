@@ -4,6 +4,7 @@ use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::Circuit;
 use crate::gates::Gate;
 use crate::sim::unified_pauli::PauliTerm;
+use crate::test_support::assert_probs_close;
 
 fn run_both(circuit: &Circuit, seed: u64) -> (Vec<f64>, Vec<f64>) {
     let mut mono = StabilizerBackend::new(seed);
@@ -42,25 +43,12 @@ fn run_vs_statevector(circuit: &Circuit, seed: u64) -> (Vec<f64>, Vec<f64>) {
     (sv.probabilities().unwrap(), fact.probabilities().unwrap())
 }
 
-fn assert_probs_eq(a: &[f64], b: &[f64], tol: f64) {
-    assert_eq!(a.len(), b.len(), "probability vector length mismatch");
-    for (i, (pa, pb)) in a.iter().zip(b.iter()).enumerate() {
-        assert!(
-            (pa - pb).abs() < tol,
-            "prob[{}] differs: mono={} fact={}",
-            i,
-            pa,
-            pb
-        );
-    }
-}
-
 #[test]
 fn single_qubit_h() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::H, &[0]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -69,7 +57,7 @@ fn bell_state() {
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -79,7 +67,7 @@ fn ghz_3() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Cx, &[1, 2]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -87,42 +75,42 @@ fn ghz_8() {
     let n = 8;
     let circ = crate::circuits::ghz_circuit(n);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn independent_bell_pairs() {
     let circ = crate::circuits::independent_bell_pairs(4);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn clifford_heavy_small() {
     let circ = crate::circuits::clifford_heavy_circuit(6, 5, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn clifford_heavy_10q() {
     let circ = crate::circuits::clifford_heavy_circuit(10, 10, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn local_blocks_4x4() {
     let circ = crate::circuits::local_clifford_blocks(4, 4, 5, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn local_blocks_5x3() {
     let circ = crate::circuits::local_clifford_blocks(5, 3, 8, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -146,7 +134,7 @@ fn all_clifford_gates() {
     c.add_gate(Gate::Cx, &[0, 3]);
     c.add_gate(Gate::Cz, &[1, 2]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -379,7 +367,7 @@ fn merge_then_probabilities() {
 fn clifford_random_pairs_12q() {
     let circ = crate::circuits::clifford_random_pairs(12, 5, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -389,7 +377,7 @@ fn diag_cz_only() {
     c.add_gate(Gate::H, &[1]);
     c.add_gate(Gate::Cz, &[0, 1]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -399,42 +387,42 @@ fn diag_swap_only() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Swap, &[0, 1]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn diag_single_block_3q() {
     let circ = crate::circuits::local_clifford_blocks(1, 3, 8, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn diag_two_blocks_3q() {
     let circ = crate::circuits::local_clifford_blocks(2, 3, 8, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn diag_three_blocks_3q() {
     let circ = crate::circuits::local_clifford_blocks(3, 3, 8, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn diag_four_blocks_3q() {
     let circ = crate::circuits::local_clifford_blocks(4, 3, 8, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
 fn diag_five_blocks_3q() {
     let circ = crate::circuits::local_clifford_blocks(5, 3, 8, 0xDEAD_BEEF);
     let (mono, fact) = run_both(&circ, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 // CZ and SWAP only, no CX: the pairwise CZs build three disjoint blocks,
@@ -460,7 +448,7 @@ fn diag_cz_swap_sequence() {
         c.add_gate(Gate::H, &[q]);
     }
     let (sv, fact) = run_vs_statevector(&c, 42);
-    assert_probs_eq(&sv, &fact, 1e-12);
+    assert_probs_close(&sv, &fact, 1e-12);
 }
 
 #[test]
@@ -472,7 +460,7 @@ fn diag_merge_via_cx() {
     c.add_gate(Gate::Cx, &[2, 3]);
     c.add_gate(Gate::Cx, &[1, 2]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -484,7 +472,7 @@ fn diag_merge_via_swap() {
     c.add_gate(Gate::Cx, &[2, 3]);
     c.add_gate(Gate::Swap, &[1, 2]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -498,7 +486,7 @@ fn diag_1q_then_merge() {
     c.add_gate(Gate::Cx, &[2, 3]);
     c.add_gate(Gate::Cx, &[1, 2]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -516,7 +504,7 @@ fn diag_full_1q_merge_cz_swap() {
     c.add_gate(Gate::Cz, &[2, 3]);
     c.add_gate(Gate::Swap, &[1, 2]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -534,7 +522,7 @@ fn diag_full_1q_merge_all_cx() {
     c.add_gate(Gate::Cx, &[2, 3]);
     c.add_gate(Gate::Cx, &[1, 2]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -556,7 +544,7 @@ fn diag_post_merge_h() {
     c.add_gate(Gate::H, &[2]);
     c.add_gate(Gate::H, &[3]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 #[test]
@@ -579,7 +567,7 @@ fn diag_post_merge_h_cx() {
     c.add_gate(Gate::H, &[3]);
     c.add_gate(Gate::Cx, &[0, 3]);
     let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    assert_probs_close(&mono, &fact, 1e-12);
 }
 
 // Three Bell blocks are joined into one tableau by a CX and a SWAP, then the
@@ -604,7 +592,7 @@ fn diag_post_merge_h_cx_cz() {
     c.add_gate(Gate::Cx, &[2, 5]);
     c.add_gate(Gate::Cz, &[0, 3]);
     let (sv, fact) = run_vs_statevector(&c, 42);
-    assert_probs_eq(&sv, &fact, 1e-12);
+    assert_probs_close(&sv, &fact, 1e-12);
 }
 
 #[test]
@@ -1154,7 +1142,7 @@ fn measurement_keeps_clusters_reduced_and_matches_the_dense_tableau() {
             );
             if n <= 12 {
                 let (a, b) = (mono.probabilities().unwrap(), fact.probabilities().unwrap());
-                assert_probs_eq(&a, &b, 1e-12);
+                assert_probs_close(&a, &b, 1e-12);
             }
             let observables: Vec<Vec<PauliTerm>> = (0..n.min(40))
                 .map(|q| vec![PauliTerm::z(q), PauliTerm::x((q + 1) % n)])
@@ -1245,7 +1233,7 @@ fn measurement_moves_a_pivot_inside_its_own_row() {
                 }
             }
             assert_eq!(mono.classical_results(), fact.classical_results());
-            assert_probs_eq(
+            assert_probs_close(
                 &mono.probabilities().unwrap(),
                 &fact.probabilities().unwrap(),
                 1e-12,

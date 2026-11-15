@@ -1,7 +1,7 @@
 use super::*;
-use crate::qec::QecPauli;
 use crate::qec::QecRecordRef;
 use crate::qec::noise::compile_qec_noisy_sampler_on_compiled_base;
+use crate::qec::{QecCircuitNoise, QecPauli};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -268,4 +268,58 @@ fn frame_records_cover_the_compiled_outcome_space() {
         assert_eq!(gf2_rank(frame_span), rank, "seed {seed}");
         assert_eq!(gf2_rank(joint), rank, "seed {seed}");
     }
+}
+
+#[test]
+fn inverse_tableau_records_match_the_backend_run() {
+    let assert_same = |program: &QecProgram, label: &str| {
+        for run_feedforward in [false, true] {
+            assert_eq!(
+                forced_tableau_records(program, run_feedforward).unwrap(),
+                forced_backend_records(program, run_feedforward).unwrap(),
+                "{label}, feed-forward {run_feedforward}"
+            );
+        }
+    };
+    for seed in 0..600 {
+        let program = random_program(seed, 2 + (seed as usize % 7), seed % 3 != 0);
+        assert_same(&program, &format!("random seed {seed}"));
+    }
+
+    let noise = QecCircuitNoise::uniform(0.001);
+    for (distance, rounds) in [(2, 1), (3, 3), (5, 2), (7, 7), (11, 3)] {
+        let repetition = QecProgram::repetition_memory(distance, rounds, &noise).unwrap();
+        assert_same(&repetition, &format!("repetition d={distance} r={rounds}"));
+        for basis in [QecBasis::Z, QecBasis::X] {
+            let surface = QecProgram::surface_memory(distance, rounds, basis, &noise).unwrap();
+            assert_same(
+                &surface,
+                &format!("surface {basis:?} d={distance} r={rounds}"),
+            );
+            let color = QecProgram::color_memory(distance | 1, rounds, basis, &noise).unwrap();
+            assert_same(&color, &format!("color {basis:?} d={distance} r={rounds}"));
+        }
+    }
+
+    let repeated = "R 0 1 2 3 4\nH 0\nCX 0 1\nRX 4\n\
+        REPEAT 4 {\n\
+        CX 0 2 1 3\nSQRT_Y 2\nCY 2 4\nISWAP 3 4\nMR 2\nMRX 3\nMPP X0*Z1*Y4\n\
+        M 1\nR 1\nH 1\nCX 1 0\nMY 4\nRY 4\n\
+        HERALDED_ERASE(0.1) 0\nMPAD 1\nDETECTOR rec[-1] rec[-5]\n\
+        }\n\
+        R 0\nMX 1 2 3 4\nOBSERVABLE_INCLUDE(0) rec[-1]";
+    let mut program = QecProgram::from_text(repeated).unwrap();
+    assert_same(&program, "repeat block");
+    program
+        .feedforward(
+            &[QecRecordRef::lookback(2).unwrap()],
+            true,
+            vec![QecOp::Gate {
+                gate: Gate::Y,
+                targets: vec![0],
+            }],
+        )
+        .unwrap();
+    program.measure_z(0).unwrap();
+    assert_same(&program, "repeat block with feed-forward");
 }

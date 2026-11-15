@@ -10,7 +10,7 @@ mod simd;
 pub(crate) use batch::{BatchTarget, GateRows, MIN_WORDS_FOR_BATCH, apply_gates_word_batch};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use simd::rowmul_words_avx512;
-pub(crate) use simd::{rowmul_words, xor_words};
+pub(crate) use simd::{rowmul_words, rowmul_words_cached, xor_words};
 
 use smallvec::SmallVec;
 

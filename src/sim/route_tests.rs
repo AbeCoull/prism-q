@@ -19,53 +19,40 @@ fn h_measure_chain(splits: usize) -> Circuit {
 fn register_wins_without_a_dense_run_iff_the_register_fits() {
     let max = clifford_register::MAX_REGISTER_QUBITS;
     let calls = Cell::new(0);
-    let price = |width| {
+    let split = || {
         calls.set(calls.get() + 1);
-        assert_eq!(width, max);
-        Some((width, 0))
+        Some(1.0)
     };
-    assert!(register_wins(max, max + 5, max, None, price));
+    assert!(register_wins(max, max + 5, max, None, split));
     assert_eq!(
         calls.get(),
         0,
         "a T bound within the register takes no dry run"
     );
 
-    assert!(register_wins(max + 1, max + 5, max, None, price));
+    assert!(register_wins(max + 1, max + 5, max, None, split));
     assert_eq!(calls.get(), 1);
-    assert!(!register_wins(max + 1, max + 5, max, None, |_| None));
+    assert!(!register_wins(max + 1, max + 5, max, None, || None));
 }
 
 #[test]
 fn register_wins_on_the_bound_alone_when_it_undercuts_the_dense_run() {
-    let never = |_| -> Option<(usize, u64)> { panic!("no dry run expected") };
+    let never = || -> Option<f64> { panic!("no dry run expected") };
     assert!(register_wins(2, 4, 4, Some(f64::MAX), never));
-    // Even a width-zero register costs something, so a free dense run always wins.
-    assert!(!register_wins(2, 4, 4, Some(0.0), never));
+    // Even a width-zero register costs something, so a free dense run beats a free split.
+    assert!(!register_wins(2, 4, 4, Some(0.0), || Some(0.0)));
 }
 
 #[test]
-fn register_dry_run_is_capped_at_the_widest_width_that_could_win() {
+fn register_split_wins_iff_its_passes_undercut_the_dense_run() {
     let max = clifford_register::MAX_REGISTER_QUBITS;
     let (t, qubits, measured) = (3 * max, 3 * max, 3 * max);
-    // A dense cost between the cheapest registers of widths `k` and `k + 1`: the dry run
-    // may reach width `k` and no further.
-    let k = max - 1;
-    let floor = |w: usize| clifford_register_work(w, (2usize << w) as f64, measured);
-    let dense = (floor(k) + floor(k + 1)) / 2.0;
-    let seen = Cell::new(None);
-    let won = register_wins(t, qubits, measured, Some(dense), |width| {
-        seen.set(Some(width));
-        Some((width, 2u64 << width))
-    });
-    assert_eq!(seen.get(), Some(k));
-    assert!(won);
-
-    // The dry run answers with the width the tableau reached, priced afresh.
-    let lost = register_wins(t, qubits, measured, Some(dense), |_| {
-        Some((k + 1, 2u64 << (k + 1)))
-    });
-    assert!(!lost);
+    let dense = 1.0e6;
+    let even = dense / REGISTER_PASS_STATEVECTOR_AMPLITUDES;
+    let wins = |split: Option<f64>| register_wins(t, qubits, measured, Some(dense), || split);
+    assert!(wins(Some(0.9 * even)));
+    assert!(!wins(Some(1.1 * even)));
+    assert!(!wins(None));
 }
 
 #[test]

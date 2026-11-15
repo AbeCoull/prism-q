@@ -36,9 +36,9 @@ packing `Gate::matrix_4x4` uses. The density matrix compiles the set into a 16x1
 superoperator (`apply_2q_kraus`, which `apply_2q_depolarizing` lowers onto). The
 trajectory engine draws a branch from `Tr(Kdagger K rho)` over
 `Backend::reduced_density_matrix_2q` and applies the normalized operator as a `Fused2q`.
-The host statevector, sparse, factored, MPS and distributed statevector backends answer
-that reduction, the distributed one through `Backend::reduced_density_matrix`. The
-tableau backends, the product state and the tensor network decline it.
+The host statevector, sparse, factored, MPS, tensor network and distributed statevector
+backends answer that reduction, the distributed one through
+`Backend::reduced_density_matrix`. The tableau backends and the product state decline it.
 
 `Auto` counts a two-qubit Kraus event as entangling when it picks the trajectory
 backend, so one-qubit gates carrying a crosstalk channel run on the statevector (or the

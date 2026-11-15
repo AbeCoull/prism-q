@@ -1001,18 +1001,17 @@ fn trajectory_plan(
     if noise_model.has_two_qubit_kraus() && !plan.supports_two_qubit_kraus(limits) {
         #[cfg(feature = "distributed")]
         const PAIR_ROUTES: &str =
-            "a host statevector, sparse, factored, MPS or distributed statevector";
+            "a host statevector, sparse, factored, MPS, tensor network or distributed statevector";
         #[cfg(not(feature = "distributed"))]
-        const PAIR_ROUTES: &str = "a host statevector, sparse, factored or MPS";
+        const PAIR_ROUTES: &str = "a host statevector, sparse, factored, MPS or tensor network";
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{:?}", plan.resolved()),
             reason: format!(
                 "a two-qubit Kraus channel needs the pair's reduced density matrix its \
                  branch probabilities are drawn from, and a kernel for the branch operator, \
                  which is not unitary. A tableau and a product state have no such kernel, \
-                 a tensor network traces out no arbitrary pair, and a device-resident \
-                 statevector reads no pair; run on {PAIR_ROUTES} route, or evaluate the \
-                 channel exactly on BackendKind::DensityMatrix"
+                 and a device-resident statevector reads no pair; run on {PAIR_ROUTES} \
+                 route, or evaluate the channel exactly on BackendKind::DensityMatrix"
             ),
         });
     }

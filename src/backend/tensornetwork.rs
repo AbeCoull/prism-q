@@ -3144,6 +3144,10 @@ impl Backend for TensorNetworkBackend {
         Ok(data)
     }
 
+    fn supports_two_qubit_kraus(&self) -> bool {
+        true
+    }
+
     fn supports_pauli_expectation(&self) -> bool {
         true
     }

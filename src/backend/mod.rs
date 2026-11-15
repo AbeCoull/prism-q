@@ -25,7 +25,6 @@
 //! | --- | --- | --- |
 //! | `apply_1q_matrix` | Stabilizer, FactoredStabilizer | A tableau stores a state by its stabilizer group, closed under Clifford conjugation. A general 2x2 has no image in that group, and a Kraus branch is not even unitary. |
 //! | `reduced_density_matrix_1q` | Stabilizer, FactoredStabilizer | Derivable from a tableau, but the operator it feeds cannot be applied (row above), so the branch would be sampled and never used. |
-//! | `reduced_density_matrix_2q` | TensorNetwork | Feeds the branch weights of a correlated two-qubit Kraus channel, which needs the joint state of the pair. The default reads it out of `Backend::reduced_density_matrix`, so the decline follows that one. Answering is necessary and not sufficient: the branch operator is a general 2x2 block on the pair, so `Backend::supports_two_qubit_kraus` also requires a `Gate::Fused2q` kernel, which is what holds the two tableau backends and the product state out. `run_shots_with_noise` rejects on that query before allocating state. |
 //! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
 //! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
 //! | `init_from_density_matrix` | Everything except DensityMatrix | The input is a dense `4^n` mixture, and every other representation holds a pure state. The density matrix takes the buffer as its own, uploading it when the mixture is device resident. |
@@ -713,8 +712,10 @@ pub trait Backend: sealed::Sealed {
 
     /// Whether this backend can run a [`NoiseChannel::Kraus2q`](crate::sim::noise::NoiseChannel)
     /// branch, which needs both [`Backend::reduced_density_matrix_2q`] and a
-    /// `Gate::Fused2q` kernel. Checked before a shot starts, so an incapable
-    /// backend is named at dispatch rather than part way through a trajectory.
+    /// `Gate::Fused2q` kernel for the branch operator, a general operator on the
+    /// pair. The missing kernel is what holds the two tableau backends and the
+    /// product state out. Checked before a shot starts, so an incapable backend
+    /// is named at dispatch rather than part way through a trajectory.
     fn supports_two_qubit_kraus(&self) -> bool {
         false
     }

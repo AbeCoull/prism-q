@@ -35,7 +35,6 @@ says what each release promises.
 | Item | Status |
 | --- | --- |
 | Per-slice engine choice when a tensor-network contraction is sliced, so a Clifford slice runs on the stabilizer tableau | Research |
-| Reduced density matrices on several qubits from the tensor network, which would also let it take two-qubit Kraus noise | Planned |
 | Entanglement entropy and Schmidt values on the sparse, tensor-network and distributed backends | Needs a use case |
 | Device SVD for MPS runs at high bond dimension | Research |
 

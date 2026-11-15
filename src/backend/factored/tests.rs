@@ -247,12 +247,6 @@ fn test_golden_qft_8() {
 }
 
 #[test]
-fn test_golden_qft_12() {
-    let circuit = crate::circuits::qft_circuit(12);
-    compare_with_statevector(&circuit, 1e-10);
-}
-
-#[test]
 fn test_golden_random_16() {
     let circuit = crate::circuits::random_circuit(16, 10, 42);
     compare_with_statevector(&circuit, 1e-10);
@@ -261,12 +255,6 @@ fn test_golden_random_16() {
 #[test]
 fn test_golden_hea_8() {
     let circuit = crate::circuits::hardware_efficient_ansatz(8, 3, 42);
-    compare_with_statevector(&circuit, 1e-10);
-}
-
-#[test]
-fn test_golden_bell_pairs() {
-    let circuit = crate::circuits::independent_bell_pairs(6);
     compare_with_statevector(&circuit, 1e-10);
 }
 

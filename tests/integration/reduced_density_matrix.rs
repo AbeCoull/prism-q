@@ -626,6 +626,7 @@ fn the_terminal_matches_the_statevector_on_the_small_corpus() {
             (BackendKind::Statevector, SV_EPS),
             (BackendKind::Sparse, SPARSE_EPS),
             (BackendKind::Factored, FACTORED_EPS),
+            (BackendKind::Mps { max_bond_dim: 64 }, MPS_EPS),
             (BackendKind::DensityMatrix, DM_EPS),
         ],
         &exact_small_cases(),

@@ -3766,6 +3766,7 @@ fn plan_answers(plan: &BackendPlan, diagnostic: Diagnostic) -> bool {
             BackendPlan::Statevector { .. }
                 | BackendPlan::Sparse
                 | BackendPlan::Factored
+                | BackendPlan::Mps { .. }
                 | BackendPlan::ProductState
                 | BackendPlan::DensityMatrix { .. }
                 | BackendPlan::Stabilizer { .. }

@@ -1227,6 +1227,19 @@ pub(super) fn terminal_split_work(circuit: &Circuit) -> Option<f64> {
     split_work(&*lower_clifford_t_circuit(circuit).ok()?)
 }
 
+/// [`SplitPlan::units_per_shot`] of the register [`run_stabilizer_rank_shots`] samples
+/// `circuit` from, its measurements deferred to the end when they are not terminal.
+/// `None` when no register takes it.
+pub(super) fn register_units_per_shot(circuit: &Circuit) -> Option<u64> {
+    let lowered = lower_clifford_t_circuit(circuit).ok()?;
+    let plan = if lowered.has_terminal_measurements_only() && !lowered.has_resets() {
+        SplitPlan::new(&lowered)
+    } else {
+        SplitPlan::new(&super::compiled::defer_clifford_t_circuit(&lowered).ok()?)
+    };
+    Some(plan.ok()??.units_per_shot())
+}
+
 /// [`terminal_split_work`] of a circuit already lowered to Clifford+T.
 pub(super) fn split_work(circuit: &Circuit) -> Option<f64> {
     Some(SplitPlan::new(circuit).ok()??.work())

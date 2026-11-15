@@ -422,6 +422,15 @@ impl SplitPlan {
             .sum()
     }
 
+    /// Amplitude units each shot pays past its table draws: `(E + 3) 2^E` per cut.
+    pub(in crate::sim) fn units_per_shot(&self) -> u64 {
+        self.parts
+            .iter()
+            .filter_map(|part| part.cut)
+            .map(|cut| (cut.pairs as u64 + 3) << cut.pairs)
+            .sum()
+    }
+
     /// Build every table and the classical key of every drawn bit.
     pub(in crate::sim) fn sampler(self) -> SplitSampler {
         let words = self.num_classical_bits.div_ceil(64).max(1);

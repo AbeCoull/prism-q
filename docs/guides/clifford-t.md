@@ -66,7 +66,9 @@ as a one-qubit state, and split the register into parts: the qubits that a T rot
 over earlier register qubits links, joined where the measured rows anticommute part by
 part. Each part up to 24 qubits draws from its own table, small tables packed into one,
 and a wider part is cut in two sides of at most 20 that no rotation crosses, each shot
-correcting the draw over the row pairs that anticommute across the cut, at most 12. A
+correcting the draw over the row pairs that anticommute across the cut, at most 12. A cut
+with `E` such pairs costs each shot `(E + 3) 2^E` amplitude units, which
+`Simulate::plan` reports as `units_per_shot` before any table is built. A
 register that does not split that way, or holds more than 64 qubits, returns
 `BackendUnsupported`, and `Auto` plans the split from the tableau alone and sends such a
 circuit to the dispatch tree instead.

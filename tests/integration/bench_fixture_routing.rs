@@ -1305,6 +1305,24 @@ fn clifford_t_price_rows_pin_their_engines() {
     }
 }
 
+// A shot on the register pays `(E + 3) 2^E` amplitude units for each cut with `E` row pairs,
+// and the plan reports it before any table is built.
+#[test]
+fn register_plans_report_their_units_per_shot() {
+    let units = |kind: BackendKind, circuit: &prism_q::circuit::Circuit| {
+        sim::simulate(circuit)
+            .backend(kind)
+            .plan(sim::Query::Shots(1024))
+            .unwrap()
+            .units_per_shot
+    };
+    let rank = BackendKind::StabilizerRank;
+    assert_eq!(units(rank.clone(), &price_layers(32, 24)), Some(0));
+    assert_eq!(units(rank.clone(), &price_scrambled(32, 24)), Some(10 << 7));
+    assert_eq!(units(rank, &price_scrambled(32, 28)), Some(12 << 9));
+    assert_eq!(units(BackendKind::Statevector, &price_layers(22, 24)), None);
+}
+
 // `auto/clifford_t_expectation` times the product-gauge register on every row. The cap is
 // fixed at 29, as on the bench host, so the 30, 32 and 64 qubit rows sit above it.
 #[test]

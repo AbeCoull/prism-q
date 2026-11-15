@@ -10,6 +10,93 @@ use crate::circuit::smallvec;
 use crate::gates::Gate;
 use crate::sim::unified_pauli::SpdTruncation;
 
+fn run(circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
+    run_with(
+        BackendKind::Auto,
+        circuit,
+        seed,
+        &ResolvedLimits::process_default(),
+    )
+}
+
+fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
+    run_shots_with(
+        BackendKind::Auto,
+        circuit,
+        num_shots,
+        seed,
+        &ResolvedLimits::process_default(),
+    )
+}
+
+/// Build and run the backend for a terminal-measurement circuit when routing
+/// lands on a single backend that samples from its own representation.
+///
+/// Returns `None` when the route is not a direct single backend, or when that
+/// backend has no native sampler, leaving the dense probability path untouched.
+/// The capability is probed before `init`, so a backend without one costs an
+/// allocation and nothing else.
+///
+/// The product state is the one route taken past subsystem decomposition: it
+/// already stores one factor per qubit, so splitting the circuit into
+/// independent blocks pays a backend, a partition, and a merge per block to
+/// rebuild what one native draw reads straight off the state, and above 64
+/// qubits the merged block distribution does not exist at all. Every other
+/// backend keeps the block split.
+fn try_native_terminal_backend(
+    kind: &BackendKind,
+    stripped: &Circuit,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<Option<Box<dyn Backend>>> {
+    let Some(plan) = decide_native(kind, stripped, true, limits)? else {
+        return Ok(None);
+    };
+    let mut backend = plan.build(seed, limits);
+    execute(&mut *backend, stripped, &SimOptions::classical_only())?;
+    Ok(Some(backend))
+}
+
+fn run_counts(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<HashMap<Vec<u64>, u64>> {
+    run_counts_with(
+        BackendKind::Auto,
+        circuit,
+        num_shots,
+        seed,
+        &ResolvedLimits::process_default(),
+    )
+    .map(|(counts, _)| counts)
+}
+
+fn run_marginals(circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
+    run_marginals_result_with(
+        BackendKind::Auto,
+        circuit,
+        seed,
+        &ResolvedLimits::process_default(),
+    )
+    .map(MarginalsResult::into_vec)
+}
+
+fn run_marginals_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<Vec<(f64, f64)>> {
+    run_marginals_result_with(kind, circuit, seed, limits).map(MarginalsResult::into_vec)
+}
+
+fn run_marginals_result_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<MarginalsResult> {
+    let route = decide_marginals(&kind, circuit, limits)?;
+    execute_marginals(route, &kind, circuit, seed, limits, false)
+}
+
 fn make_clifford_circuit() -> Circuit {
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::H, &[0]);

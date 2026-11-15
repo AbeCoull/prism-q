@@ -134,7 +134,7 @@ fn parity_compile_returns_the_noiseless_pattern_or_none() {
 #[test]
 fn record_events_come_in_draw_order_with_their_targets() {
     let (deferred, _) = lower("X_ERROR(0.1) 1\nCX 0 1\nX_ERROR(0.2) 0\nM 0 1");
-    let (events, _) = compile_record_events(&deferred).unwrap();
+    let (events, _) = compile_record_events(&deferred, None).unwrap();
     let sites: Vec<(u32, [u32; 2])> = events.iter().map(|e| (e.position, e.targets)).collect();
     assert_eq!(sites, vec![(1, [0, u32::MAX]), (0, [1, u32::MAX])]);
 }
@@ -142,7 +142,7 @@ fn record_events_come_in_draw_order_with_their_targets() {
 #[test]
 fn record_events_drop_faults_that_flip_no_record() {
     let (deferred, _) = lower("Z_ERROR(0.1) 0\nM 0");
-    let (events, _) = compile_record_events(&deferred).unwrap();
+    let (events, _) = compile_record_events(&deferred, None).unwrap();
     assert!(events.is_empty());
 }
 
@@ -151,8 +151,116 @@ fn flipping_births_are_the_aliases_whose_z_reaches_a_record() {
     // A Z at the birth of qubit 0 becomes an X through H and flips its record; qubit 1
     // is measured in Z directly, so its birth Z does nothing.
     let (deferred, _) = lower("H 0\nM 0 1");
-    let (_, births) = compile_record_events(&deferred).unwrap();
+    let (_, births) = compile_record_events(&deferred, None).unwrap();
     assert_eq!(births, vec![0]);
+}
+
+/// The record events as the output walk derives them over no outputs: its kept events,
+/// each mapped back through its candidate to the deferred event and target it came from.
+fn record_events_through_output_walk(
+    deferred: &QecDeferredProgram,
+    windows: Option<usize>,
+) -> Vec<QecRecordEvent> {
+    let projection = QecParityProjection::new(deferred.measurement_qubits.len(), &[], &[]);
+    let plan = WalkPlan::new(deferred, &projection, windows).unwrap();
+    let walk = walk_outputs(&plan).unwrap();
+    let mut site_of_candidate = vec![(0u32, 0u32); plan.candidates as usize];
+    for (slot, &index) in plan.events_by_position.iter().enumerate() {
+        let event = &deferred.noise_events[index as usize];
+        let base = plan.candidate_base[slot] as usize;
+        for (offset, site) in site_of_candidate[base..base + candidate_count(event)]
+            .iter_mut()
+            .enumerate()
+        {
+            *site = (index, offset as u32);
+        }
+    }
+    walk.events
+        .iter()
+        .map(|kept| {
+            let (index, offset) = site_of_candidate[kept.kept.candidate as usize];
+            let event = &deferred.noise_events[index as usize];
+            let offset = offset as usize;
+            let pair = matches!(
+                event.channel,
+                QecDeferredChannel::Depolarize2(_) | QecDeferredChannel::PairTable { .. }
+            );
+            let targets = if pair {
+                [
+                    event.targets[2 * offset] as u32,
+                    event.targets[2 * offset + 1] as u32,
+                ]
+            } else if matches!(event.channel, QecDeferredChannel::Products { .. }) {
+                [index, u32::MAX]
+            } else {
+                [event.targets[offset] as u32, u32::MAX]
+            };
+            QecRecordEvent {
+                draw: kept.kept.draw,
+                position: event.position as u32,
+                targets,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn record_events_match_the_output_walk_for_any_window_count() {
+    let noise = crate::qec::QecCircuitNoise::uniform(0.01);
+    let mut programs = vec![
+        QecProgram::surface_memory(3, 4, crate::qec::QecBasis::Z, &noise).unwrap(),
+        QecProgram::color_memory(3, 3, crate::qec::QecBasis::X, &noise).unwrap(),
+        QecProgram::repetition_memory(5, 3, &noise).unwrap(),
+    ];
+    programs.push(
+        QecProgram::from_text(
+            "RX 0
+H 1
+CX 0 1 1 2
+PAULI_CHANNEL_2(0, 0.25, 0, 0.25, 0, 0, 0, 0.1, 0, 0, 0, 0, 0, 0, 0.05) 0 1 1 2
+             E(0.1) X0 Z2
+ELSE_CORRELATED_ERROR(0.2) Y1
+HERALDED_ERASE(0.1) 2
+             PAULI_CHANNEL_1(0.1, 0.2, 0.3) 0 1 2
+MPP X0*Z1 Y2
+Z_ERROR(0.2) 0
+MX 0
+             DEPOLARIZE2(0.1) 1 2
+S 1
+X_ERROR(0.1) 1 2
+MR 1 2
+H 1
+Y_ERROR(0.1) 1
+M 1",
+        )
+        .unwrap(),
+    );
+    for program in &programs {
+        let deferred = lower_qec_program_to_deferred_circuit(program).unwrap();
+        let gates = deferred.gates.len();
+        let (_, mut one_window_births) = compile_record_events(&deferred, Some(1)).unwrap();
+        one_window_births.sort_unstable();
+        for windows in [
+            None,
+            Some(1),
+            Some(2),
+            Some(5),
+            Some(gates / 3),
+            Some(gates + 1),
+        ] {
+            let (events, mut births) = compile_record_events(&deferred, windows).unwrap();
+            let expected = record_events_through_output_walk(&deferred, windows);
+            let key = |e: &QecRecordEvent| (e.draw, e.position, e.targets);
+            assert_eq!(
+                events.iter().map(key).collect::<Vec<_>>(),
+                expected.iter().map(key).collect::<Vec<_>>(),
+                "{windows:?}"
+            );
+            assert!(!events.is_empty());
+            births.sort_unstable();
+            assert_eq!(births, one_window_births, "{windows:?}");
+        }
+    }
 }
 
 #[test]

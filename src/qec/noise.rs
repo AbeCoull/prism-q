@@ -77,12 +77,6 @@ pub(super) enum QecDeferredChannel {
     },
 }
 
-impl QecDeferredChannel {
-    pub(super) fn is_pair(self) -> bool {
-        matches!(self, Self::Depolarize2(_) | Self::PairTable { .. })
-    }
-}
-
 /// Branches of a correlated event: `rates[b]` is the absolute rate of branch `b`, which
 /// applies letter `letters[b * width + t]` (1 X, 2 Y, 3 Z, 0 none) to the event's
 /// target `t`.
@@ -711,7 +705,7 @@ impl QecRecordNoise {
     /// `None` when no event and no birth coin can flip a record. `with_coins` gives
     /// every alias whose Z at its birth flips a record a fair coin there.
     fn compile(deferred: QecDeferredProgram, seed: u64, with_coins: bool) -> Result<Option<Self>> {
-        let (events, flipping_births) = super::parity_walk::compile_record_events(&deferred)?;
+        let (events, flipping_births) = super::parity_walk::compile_record_events(&deferred, None)?;
         let mut births: Vec<(u32, u32)> = if with_coins {
             flipping_births
                 .into_iter()

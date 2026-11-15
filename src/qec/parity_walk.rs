@@ -120,49 +120,58 @@ pub(super) fn compile_fault_sites(
 /// Compile the deferred circuit's kept events for the record sampler, in draw order,
 /// each with its anchor position and target aliases, and, unordered, the aliases whose
 /// creation a Z flips some record at. The walk carries no output, only the record
-/// fingerprint, which is all the branch and creation decisions need.
+/// fingerprint, which is all the branch and creation decisions need. The result does not
+/// depend on `windows`.
 pub(super) fn compile_record_events(
     deferred: &QecDeferredProgram,
+    windows: Option<usize>,
 ) -> Result<(Vec<QecRecordEvent>, Vec<u32>)> {
     let projection = QecParityProjection::new(deferred.measurement_qubits.len(), &[], &[]);
-    let plan = WalkPlan::new(deferred, &projection, None)?;
-    let mut walk = walk_outputs(&plan)?;
-    let flipping_births = std::mem::take(&mut walk.flipping_births);
-    let mut site_of_candidate = vec![(0u32, 0u32); plan.candidates as usize];
-    for (slot, &index) in plan.events_by_position.iter().enumerate() {
-        let event = &deferred.noise_events[index as usize];
-        let base = plan.candidate_base[slot] as usize;
-        for (offset, site) in site_of_candidate[base..base + candidate_count(event)]
-            .iter_mut()
-            .enumerate()
-        {
-            *site = (index, offset as u32);
-        }
+    let plan = WalkPlan::new(deferred, &projection, windows)?;
+    let window_count = plan.windows.len();
+
+    let mut snapshots = Vec::new();
+    let mut flipping_births = Vec::new();
+    if window_count > 1 {
+        let rows;
+        (snapshots, rows) = walk_prepass(&plan)?;
+        flipping_births = rows.flipping_births;
     }
-    let events = walk
-        .events
-        .iter()
-        .map(|kept| {
-            let (index, offset) = site_of_candidate[kept.kept.candidate as usize];
-            let event = &deferred.noise_events[index as usize];
-            let offset = offset as usize;
-            let targets = if event.channel.is_pair() {
-                [
-                    event.targets[2 * offset] as u32,
-                    event.targets[2 * offset + 1] as u32,
-                ]
-            } else if matches!(event.channel, QecDeferredChannel::Products { .. }) {
-                [index, u32::MAX]
-            } else {
-                [event.targets[offset] as u32, u32::MAX]
-            };
-            QecRecordEvent {
-                draw: kept.kept.draw,
-                position: event.position as u32,
-                targets,
-            }
-        })
-        .collect();
+
+    let run_window = |window: usize| -> Result<(Vec<QecRecordEvent>, Vec<u32>)> {
+        let mut rows = WindowRows::new(&plan, window as u32, window_count == 1);
+        if window + 1 < window_count {
+            rows.load_snapshot(&snapshots[window_count - 2 - window]);
+        }
+        let [lo, hi] = plan.windows[window];
+        let mut visitor = RecordVisitor::new(&plan, lo, hi);
+        walk(&plan, &mut rows, hi, &mut visitor)?;
+        Ok((visitor.events, rows.flipping_births))
+    };
+    #[cfg(feature = "parallel")]
+    let mut results: Vec<(Vec<QecRecordEvent>, Vec<u32>)> = if window_count > 1 {
+        (0..window_count)
+            .into_par_iter()
+            .map(run_window)
+            .collect::<Result<_>>()?
+    } else {
+        vec![run_window(0)?]
+    };
+    #[cfg(not(feature = "parallel"))]
+    let mut results: Vec<(Vec<QecRecordEvent>, Vec<u32>)> =
+        (0..window_count).map(run_window).collect::<Result<_>>()?;
+
+    for (_, births) in &results {
+        flipping_births.extend_from_slice(births);
+    }
+    if window_count == 1 {
+        let (events, _) = results.pop().expect("one window ran");
+        return Ok((events, flipping_births));
+    }
+    let mut events = Vec::with_capacity(results.iter().map(|(events, _)| events.len()).sum());
+    for (window_events, _) in results.iter().rev() {
+        events.extend_from_slice(window_events);
+    }
     Ok((events, flipping_births))
 }
 
@@ -199,9 +208,6 @@ struct ParityWalk {
     events: Vec<WalkEvent>,
     branch_offsets: Vec<u32>,
     outputs: Vec<u32>,
-    /// Aliases whose row has X support on the record fingerprint where they come into
-    /// use, so a Z there flips some record; unordered.
-    flipping_births: Vec<u32>,
 }
 
 struct WalkEvent {
@@ -254,20 +260,12 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
     let mut snapshots = Vec::new();
     let mut prepass_pattern = vec![0u64; projection.words];
     let mut random = None;
-    let mut flipping_births = Vec::new();
     if window_count > 1 {
-        let mut rows = WindowRows::new(plan, u32::MAX, true);
-        let mut visitor = PrepassVisitor {
-            plan,
-            snapshots: Vec::with_capacity(window_count - 1),
-            next: window_count - 1,
-        };
-        walk(plan, &mut rows, plan.gate_count, &mut visitor)?;
-        snapshots = visitor.snapshots;
+        let mut rows;
+        (snapshots, rows) = walk_prepass(plan)?;
         rows.fold_observable_signs();
         random = rows.random;
         prepass_pattern = rows.pattern;
-        flipping_births = rows.flipping_births;
     }
 
     let run_window = |window: usize| -> Result<WindowResult> {
@@ -288,7 +286,6 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
             spill,
             pattern: rows.pattern,
             random: rows.random,
-            flipping_births: rows.flipping_births,
         })
     };
     #[cfg(feature = "parallel")]
@@ -314,7 +311,6 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
         for (word, &bits) in pattern.iter_mut().zip(&result.pattern) {
             *word ^= bits;
         }
-        flipping_births.extend(result.flipping_births);
         owns.push(result.own);
         spills.push(result.spill);
     }
@@ -327,8 +323,21 @@ fn walk_outputs(plan: &WalkPlan<'_>) -> Result<ParityWalk> {
         events,
         branch_offsets,
         outputs,
-        flipping_births,
     })
+}
+
+/// The sequential pass ahead of more than one window: the rows at each window's upper
+/// boundary, the last window's first, and the pass's rows at position 0.
+fn walk_prepass<'a>(plan: &'a WalkPlan<'a>) -> Result<(Vec<Snapshot>, WindowRows<'a>)> {
+    let window_count = plan.windows.len();
+    let mut rows = WindowRows::new(plan, u32::MAX, true);
+    let mut visitor = PrepassVisitor {
+        plan,
+        snapshots: Vec::with_capacity(window_count - 1),
+        next: window_count - 1,
+    };
+    walk(plan, &mut rows, plan.gate_count, &mut visitor)?;
+    Ok((visitor.snapshots, rows))
 }
 
 /// The deferred circuit laid out for the walk: events and alias creations in position
@@ -794,6 +803,13 @@ impl<'a> WindowRows<'a> {
         (&self.x[range.clone()], &self.z[range])
     }
 
+    /// X and Z words of the record fingerprint in the row at `slot`.
+    #[inline(always)]
+    fn fingerprint(&self, slot: usize) -> (u64, u64) {
+        let at = (slot + 1) * self.words - 1;
+        (self.x[at], self.z[at])
+    }
+
     /// Whether any owned detector column still has support somewhere.
     fn detectors_live(&self) -> bool {
         let words = self.words;
@@ -817,12 +833,14 @@ struct Snapshot {
 trait WalkVisitor {
     /// Called before the walk handles `position`; `false` stops the walk there.
     fn at_position(&mut self, rows: &mut WindowRows<'_>, position: usize) -> bool;
+    /// Visit the event at `noise_events[index]`, whose first candidate is `candidate`.
     fn event(
         &mut self,
         rows: &WindowRows<'_>,
         event: &QecDeferredNoiseEvent,
         slots: &[usize],
         candidate: u32,
+        index: u32,
     );
 }
 
@@ -860,7 +878,13 @@ fn walk<V: WalkVisitor>(
             for &target in &event.targets {
                 event_slots.push(rows.slot(target));
             }
-            visitor.event(rows, event, &event_slots, plan.candidate_base[slot]);
+            visitor.event(
+                rows,
+                event,
+                &event_slots,
+                plan.candidate_base[slot],
+                order[slot],
+            );
         }
         let alias_end = next_alias;
         while next_alias > 0 && alias_positions[created[next_alias - 1] as usize] == position {
@@ -899,7 +923,15 @@ impl WalkVisitor for PrepassVisitor<'_> {
         true
     }
 
-    fn event(&mut self, _: &WindowRows<'_>, _: &QecDeferredNoiseEvent, _: &[usize], _: u32) {}
+    fn event(
+        &mut self,
+        _: &WindowRows<'_>,
+        _: &QecDeferredNoiseEvent,
+        _: &[usize],
+        _: u32,
+        _: u32,
+    ) {
+    }
 }
 
 /// What one window's walk produced: the events it owns with their kept branches'
@@ -910,7 +942,6 @@ struct WindowResult {
     spill: SpillFlips,
     pattern: Vec<u64>,
     random: Option<u32>,
-    flipping_births: Vec<u32>,
 }
 
 /// Kept events of one window, with each branch's outputs in
@@ -1204,6 +1235,7 @@ impl WalkVisitor for WindowVisitor {
         event: &QecDeferredNoiseEvent,
         slots: &[usize],
         candidate: u32,
+        _: u32,
     ) {
         debug_assert!(self.position <= self.hi);
         let pair_draw = match event.channel {
@@ -1228,6 +1260,133 @@ impl WalkVisitor for WindowVisitor {
                 candidate + offset as u32,
                 pair_draw,
             );
+        }
+    }
+}
+
+/// Kept events of one window of the record walk, straight in [`QecRecordEvent`] form. The
+/// walk carries the fingerprint word alone, so an event is kept exactly when some branch
+/// moves it, and the window stops at its own range: events below it would only add
+/// detector flips, of which this walk has none.
+struct RecordVisitor<'a> {
+    product_tables: &'a [QecProductTable],
+    lo: usize,
+    events: Vec<QecRecordEvent>,
+    /// Merged rates and draw of the last single-qubit candidate kept, which most of the
+    /// next ones share.
+    last_single: Option<([u64; 3], QecNoiseDraw)>,
+}
+
+impl<'a> RecordVisitor<'a> {
+    /// A visitor whose events are reserved for every candidate in `lo..=hi`.
+    fn new(plan: &'a WalkPlan<'a>, lo: usize, hi: usize) -> Self {
+        let events = &plan.deferred.noise_events;
+        let position_of = |&e: &u32| events[e as usize].position;
+        let order = &plan.events_by_position;
+        let first = order.partition_point(|e| position_of(e) < lo);
+        let last = order.partition_point(|e| position_of(e) <= hi);
+        let candidates = order[first..last]
+            .iter()
+            .map(|&e| candidate_count(&events[e as usize]))
+            .sum();
+        Self {
+            product_tables: &plan.deferred.product_tables,
+            lo,
+            events: Vec::with_capacity(candidates),
+            last_single: None,
+        }
+    }
+
+    fn single_draw(&mut self, px: f64, py: f64, pz: f64) -> QecNoiseDraw {
+        let key = [px.to_bits(), py.to_bits(), pz.to_bits()];
+        match self.last_single {
+            Some((last, draw)) if last == key => draw,
+            _ => {
+                let draw = QecNoiseDraw::single(px, py, pz);
+                self.last_single = Some((key, draw));
+                draw
+            }
+        }
+    }
+}
+
+impl WalkVisitor for RecordVisitor<'_> {
+    fn at_position(&mut self, _: &mut WindowRows<'_>, position: usize) -> bool {
+        position >= self.lo
+    }
+
+    fn event(
+        &mut self,
+        rows: &WindowRows<'_>,
+        event: &QecDeferredNoiseEvent,
+        slots: &[usize],
+        _: u32,
+        index: u32,
+    ) {
+        let position = event.position as u32;
+        let draw = match event.channel {
+            QecDeferredChannel::Depolarize2(p) => QecNoiseDraw::pair(p),
+            QecDeferredChannel::PairTable { p, table } => QecNoiseDraw::pair_table(p, table),
+            QecDeferredChannel::Single([px, py, pz]) => {
+                for (&slot, &alias) in slots.iter().zip(&event.targets) {
+                    let (x, z) = rows.fingerprint(slot);
+                    if let Some((px, py, pz)) = qec_single_noise_rates(&[x], &[z], px, py, pz) {
+                        let draw = self.single_draw(px, py, pz);
+                        self.events.push(QecRecordEvent {
+                            draw,
+                            position,
+                            targets: [alias as u32, u32::MAX],
+                        });
+                    }
+                }
+                return;
+            }
+            QecDeferredChannel::Products { p, table } => {
+                let product = &self.product_tables[table as usize];
+                let moves = (0..product.rates.len()).any(|branch| {
+                    let mut flips = 0u64;
+                    for (&slot, &letter) in slots.iter().zip(product.branch_letters(branch)) {
+                        let (x, z) = rows.fingerprint(slot);
+                        flips ^= match letter {
+                            0 => 0,
+                            1 => z,
+                            2 => x ^ z,
+                            _ => x,
+                        };
+                    }
+                    flips != 0
+                });
+                if moves {
+                    self.events.push(QecRecordEvent {
+                        draw: QecNoiseDraw::products(p, table),
+                        position,
+                        targets: [index, u32::MAX],
+                    });
+                }
+                return;
+            }
+        };
+        if draw.pair_rate() == 0.0 {
+            return;
+        }
+        // A branch flips the fingerprint by one of the targets' X, Z or X^Z words, and the
+        // four branches with one non-identity letter reach each word alone, so some branch
+        // moves it exactly when some word is nonzero.
+        for (pair, targets) in slots
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(event.targets.as_chunks::<2>().0)
+        {
+            let (x0, z0) = rows.fingerprint(pair[0]);
+            let (x1, z1) = rows.fingerprint(pair[1]);
+            if x0 | z0 | x1 | z1 != 0 {
+                self.events.push(QecRecordEvent {
+                    draw,
+                    position,
+                    targets: [targets[0] as u32, targets[1] as u32],
+                });
+            }
         }
     }
 }

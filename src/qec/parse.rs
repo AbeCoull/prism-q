@@ -1385,3 +1385,7 @@ fn qec_parse_error(line: usize, message: impl Into<String>) -> PrismError {
         message: message.into(),
     }
 }
+
+#[cfg(test)]
+#[path = "parse_tests.rs"]
+mod tests;

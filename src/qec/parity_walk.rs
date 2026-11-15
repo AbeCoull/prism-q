@@ -1382,3 +1382,7 @@ fn merge_window(
     }
     debug_assert_eq!(written, out.len());
 }
+
+#[cfg(test)]
+#[path = "parity_walk_tests.rs"]
+mod tests;

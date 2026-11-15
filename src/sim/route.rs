@@ -1047,3 +1047,7 @@ fn trajectory_plan(
     }
     Ok(plan)
 }
+
+#[cfg(test)]
+#[path = "route_tests.rs"]
+mod tests;

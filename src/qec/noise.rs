@@ -24,6 +24,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+use smallvec::smallvec;
 
 /// Shots per noise unit, part of the seeded-output contract. Unit `k` covers shots
 /// `[k * QEC_NOISE_UNIT_SHOTS, (k + 1) * QEC_NOISE_UNIT_SHOTS)` and draws from ChaCha
@@ -52,7 +53,7 @@ const QEC_PARALLEL_LAND_FLIPS: usize = 1 << 15;
 #[derive(Clone)]
 pub(super) struct QecDeferredNoiseEvent {
     pub(super) channel: QecDeferredChannel,
-    pub(super) targets: Vec<usize>,
+    pub(super) targets: SmallVec<[usize; 2]>,
     pub(super) position: usize,
 }
 
@@ -2246,7 +2247,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
                     let position = gates.len();
                     noise_events.push(QecDeferredNoiseEvent {
                         channel: QecDeferredChannel::Single([*probability, 0.0, 0.0]),
-                        targets: vec![alias],
+                        targets: smallvec![alias],
                         position,
                     });
                     last_use[alias] = Some(position);
@@ -2411,7 +2412,7 @@ fn push_qec_deferred_product_event(
             p,
             table: (product_tables.len() - 1) as u32,
         },
-        targets,
+        targets: SmallVec::from_vec(targets),
         position,
     });
 }
@@ -2533,7 +2534,7 @@ fn push_qec_deferred_noise_events(
         if !live_targets.is_empty() {
             noise_events.push(QecDeferredNoiseEvent {
                 channel: QecDeferredChannel::Single([px, py, pz]),
-                targets: live_targets,
+                targets: SmallVec::from_vec(live_targets),
                 position,
             });
         }
@@ -2558,7 +2559,7 @@ fn push_qec_deferred_noise_events(
             (Some(q0), Some(q1)) => {
                 noise_events.push(QecDeferredNoiseEvent {
                     channel: pair_channel,
-                    targets: vec![q0, q1],
+                    targets: smallvec![q0, q1],
                     position,
                 });
                 continue;
@@ -2569,7 +2570,7 @@ fn push_qec_deferred_noise_events(
         };
         noise_events.push(QecDeferredNoiseEvent {
             channel: QecDeferredChannel::Single(pair_marginal(channel, side)),
-            targets: vec![alias],
+            targets: smallvec![alias],
             position,
         });
     }

@@ -324,7 +324,7 @@ fn walk_plan_rejects_an_event_past_the_last_gate() {
 fn candidate_count_follows_the_channel_arity() {
     let event = |channel, targets: Vec<usize>| QecDeferredNoiseEvent {
         channel,
-        targets,
+        targets: targets.into(),
         position: 0,
     };
     assert_eq!(

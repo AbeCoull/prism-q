@@ -24,15 +24,11 @@ fn optimal_chunk_size_zero_meas() {
 }
 
 #[test]
-fn optimal_chunk_size_aligned_and_min() {
-    let c = optimal_chunk_size(64, 1 << 10);
-    assert!(c >= 64);
-    assert_eq!(c % 64, 0);
-}
-
-#[test]
-fn default_chunk_size_nonzero() {
-    assert!(default_chunk_size(100) >= 64);
+fn optimal_chunk_size_rounds_down_to_64_with_a_floor_of_64() {
+    assert_eq!(optimal_chunk_size(64, 8 * 200), 192);
+    assert_eq!(optimal_chunk_size(64, 8 * 10), 64);
+    assert_eq!(optimal_chunk_size(1000, 256 << 20), 2_097_152);
+    assert_eq!(default_chunk_size(100), 16_777_216);
 }
 
 #[test]

@@ -231,8 +231,11 @@ fn test_measurement_in_substate() {
 
     let mut b = FactoredBackend::new(42);
     sim::run_on(&mut b, &c).unwrap();
-    // After measurement, q[0] and q[1] should be correlated (Bell state collapse)
-    // q[2] should still be |1⟩ independently
+    // q[1] collapses with q[0]; q[2] stays |1>.
+    let pair = if b.classical_results()[0] { 0b011 } else { 0 };
+    let mut expected = vec![0.0; 16];
+    expected[pair | 0b100] = 1.0;
+    assert_probs_close(&b.probabilities().unwrap(), &expected, 1e-12);
 }
 
 // ---- Golden tests: factored vs statevector on circuit builders ----

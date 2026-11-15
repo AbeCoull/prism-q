@@ -205,37 +205,56 @@ fn batch_x_y_z_avx2_paths() {
     }
 }
 
+// Run `gates` over `m_words` measurement words at once, then over each word on its
+// own (the scalar path), and require the two to agree word for word.
+fn assert_batch_matches_single_words(gates: &[(Gate, &[usize])], m_words: usize) {
+    let rows = |patterns: [u64; 2]| -> Vec<Vec<u64>> {
+        patterns
+            .iter()
+            .map(|p| {
+                (0..m_words)
+                    .map(|w| p.rotate_left(7 * w as u32 + 1))
+                    .collect()
+            })
+            .collect()
+    };
+    let x0 = rows([0xA5A5_A5A5_A5A5_A5A5, 0x3C3C_3C3C_3C3C_3C3C]);
+    let z0 = rows([0x5A5A_5A5A_5A5A_5A5A, 0x0FF0_0FF0_0FF0_0FF0]);
+    let (mut x, mut z, mut sign) = (x0.clone(), z0.clone(), vec![0u64; m_words]);
+    for (gate, targets) in gates {
+        batch_propagate_backward(&mut x, &mut z, &mut sign, gate, targets, m_words);
+    }
+    for w in 0..m_words {
+        let mut xw: Vec<Vec<u64>> = x0.iter().map(|r| vec![r[w]]).collect();
+        let mut zw: Vec<Vec<u64>> = z0.iter().map(|r| vec![r[w]]).collect();
+        let mut sw = vec![0u64];
+        for (gate, targets) in gates {
+            batch_propagate_backward(&mut xw, &mut zw, &mut sw, gate, targets, 1);
+        }
+        for q in 0..2 {
+            assert_eq!(x[q][w], xw[q][0], "x[{q}] word {w}");
+            assert_eq!(z[q][w], zw[q][0], "z[{q}] word {w}");
+        }
+        assert_eq!(sign[w], sw[0], "sign word {w}");
+    }
+}
+
 #[test]
 fn batch_sx_avx2_paths() {
-    let m_words = 4;
-    let mut x = build_avx_pauli(2, m_words);
-    let mut z = build_avx_pauli(2, m_words);
-    let mut sign = vec![0u64; m_words];
-    batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::SX, &[0], m_words);
-    batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::SXdg, &[0], m_words);
+    assert_batch_matches_single_words(&[(Gate::SX, &[0])], 4);
+    assert_batch_matches_single_words(&[(Gate::SXdg, &[0])], 4);
 }
 
 #[test]
 fn batch_cx_cz_swap_avx2_paths() {
-    let m_words = 4;
-    let mut x = build_avx_pauli(2, m_words);
-    let mut z = build_avx_pauli(2, m_words);
-    let mut sign = vec![0u64; m_words];
-    batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::Cx, &[0, 1], m_words);
-    batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::Cz, &[0, 1], m_words);
-    batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::Swap, &[0, 1], m_words);
-    assert_eq!(x.len(), 2);
+    for gate in [Gate::Cx, Gate::Cz, Gate::Swap] {
+        assert_batch_matches_single_words(&[(gate, &[0, 1])], 4);
+    }
 }
 
 #[test]
 fn batch_path_with_tail_words() {
-    let m_words = 5;
-    let mut x = vec![vec![0xFFu64; m_words]; 2];
-    let mut z = vec![vec![0xAAu64; m_words]; 2];
-    let mut sign = vec![0u64; m_words];
-    batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::H, &[0], m_words);
-    batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::S, &[1], m_words);
-    batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::Cx, &[0, 1], m_words);
+    assert_batch_matches_single_words(&[(Gate::H, &[0]), (Gate::S, &[1]), (Gate::Cx, &[0, 1])], 5);
 }
 
 #[test]

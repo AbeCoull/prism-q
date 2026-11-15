@@ -2778,8 +2778,9 @@ fn test_noise_auto_general_noise_avoids_stabilizer_dispatch() {
         16,
         42,
         &ResolvedLimits::process_default(),
-    );
-    assert!(result.is_ok());
+    )
+    .unwrap();
+    assert_eq!(result.metadata.backend, ResolvedBackend::Statevector);
 }
 
 #[cfg(feature = "gpu")]

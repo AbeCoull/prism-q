@@ -4,10 +4,7 @@
 
 use crate::common;
 
-use common::circuits as corpus;
-use common::{
-    PRODUCT_EPS, SEED, assert_backend_matches_sv, assert_fused_matches_unfused, run_unfused_probs,
-};
+use common::{PRODUCT_EPS, SEED, assert_backend_matches_sv, assert_fused_matches_unfused};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::product::ProductStateBackend;
@@ -196,12 +193,4 @@ fn product_unfused_apply_is_separable_only() {
         }
     }
     assert!(had_err, "raw apply must reject Cx on ProductStateBackend");
-}
-
-#[test]
-fn product_unfused_runs_separable_circuit() {
-    // Sanity: the unfused helper itself must succeed on a separable circuit.
-    let c = corpus::single_qubit_rotations();
-    let mut backend = ProductStateBackend::new(SEED);
-    let _ = run_unfused_probs(&mut backend, &c);
 }

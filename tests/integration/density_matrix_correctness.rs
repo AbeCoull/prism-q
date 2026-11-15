@@ -1348,7 +1348,7 @@ fn dm_conditional_applies_on_measured_one() {
 }
 
 #[test]
-fn dm_measurement_marginals_match_statevector() {
+fn dm_measured_bell_pair_yields_only_correlated_outcomes() {
     // Measuring a Bell pair yields 00 or 11 with probability 0.5 each; 01 and
     // 10 never occur.
     let mut c = Circuit::new(2, 2);

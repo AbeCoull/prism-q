@@ -711,8 +711,12 @@ fn par_path_128q_all_clifford_gates() {
     }
     c.add_gate(Gate::Cz, &[0, n - 1]);
     c.add_gate(Gate::Swap, &[1, n - 2]);
-    let mut b = FactoredStabilizerBackend::new(42);
-    crate::sim::run_on(&mut b, &c).unwrap();
+    let mut mono = StabilizerBackend::new(42);
+    expectations_on(&mut mono, &c, &[]);
+    let observables = group_strings(&mono);
+    let expected = mono.pauli_expectations(&observables).unwrap();
+    let got = expectations_on(&mut FactoredStabilizerBackend::new(42), &c, &observables);
+    assert_eq!(got, expected);
 }
 
 // Pins the interleaved-measure bench shape: a linear cluster state on qubits

@@ -75,11 +75,10 @@ stays its own `tests/<name>.rs` binary, since `cargo test` runs a binary's tests
 process.
 
 The GPU golden tests (`--test golden_gpu --test golden_gpu_density_matrix` under
-`--features "parallel gpu"`) skip without a CUDA device, so a green run on a host
-without a card means untested, and no CI job opens a device. Before merging a change to
-`src/gpu/`, the gate set, the fusion pipeline, or a kernel table shape, run
-`scripts/test-gpu.ps1` on a host with a card. It sets `PRISM_REQUIRE_GPU=1`, so a
-missing device fails the run.
+`--features "parallel gpu"`) fail without a CUDA device. On a host without a card, set
+`PRISM_ALLOW_NO_GPU=1` to let them skip; a green run there means untested, and no CI job
+opens a device. Before merging a change to `src/gpu/`, the gate set, the fusion
+pipeline, or a kernel table shape, run `scripts/test-gpu.ps1` on a host with a card.
 
 ## Coverage
 

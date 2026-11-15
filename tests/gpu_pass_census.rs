@@ -1,7 +1,9 @@
-//! Launch, pass and drain counters on a real device. Without a usable GPU every test
-//! returns before asserting; set `PRISM_REQUIRE_GPU=1` to make that a hard failure.
+//! Launch, pass and drain counters on a real device. A missing device fails every test
+//! unless `PRISM_ALLOW_NO_GPU=1` is set.
 
 #![cfg(all(feature = "gpu", feature = "bench-internal"))]
+
+mod gpu_device;
 
 use std::sync::Arc;
 
@@ -13,21 +15,6 @@ use prism_q::gates::{BatchPhaseData, Gate};
 use prism_q::gpu::{GpuContext, GpuPassCensus};
 
 const NUM_QUBITS: usize = 12;
-
-fn context_or_skip() -> Option<Arc<GpuContext>> {
-    match GpuContext::new(0) {
-        Ok(ctx) => Some(ctx),
-        Err(e) => {
-            assert!(
-                std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
-                "PRISM_REQUIRE_GPU is set but no usable GPU was found ({e}). \
-                 Unset it to allow this suite to skip."
-            );
-            eprintln!("SKIP: no usable GPU ({e})");
-            None
-        }
-    }
-}
 
 fn census_of(ctx: &Arc<GpuContext>, circuit: &Circuit) -> GpuPassCensus {
     let mut backend = StatevectorBackend::new(42).with_gpu(ctx.clone());
@@ -41,7 +28,7 @@ fn census_of(ctx: &Arc<GpuContext>, circuit: &Circuit) -> GpuPassCensus {
 
 #[test]
 fn each_gate_kernel_is_one_launch_and_one_pass() {
-    let Some(ctx) = context_or_skip() else {
+    let Some(ctx) = gpu_device::context() else {
         return;
     };
     let mut circuit = Circuit::new(NUM_QUBITS, 0);
@@ -67,7 +54,7 @@ fn each_gate_kernel_is_one_launch_and_one_pass() {
 
 #[test]
 fn staged_tables_and_measurement_readbacks_drain_the_stream() {
-    let Some(ctx) = context_or_skip() else {
+    let Some(ctx) = gpu_device::context() else {
         return;
     };
     let mut circuit = Circuit::new(NUM_QUBITS, 1);
@@ -94,7 +81,7 @@ fn staged_tables_and_measurement_readbacks_drain_the_stream() {
 
 #[test]
 fn recognized_qft_runs_as_tiled_passes_with_one_drain() {
-    let Some(ctx) = context_or_skip() else {
+    let Some(ctx) = gpu_device::context() else {
         return;
     };
     let expanded =

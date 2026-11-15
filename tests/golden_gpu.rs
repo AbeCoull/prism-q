@@ -1,13 +1,12 @@
 //! Per-kernel GPU vs CPU amplitude equivalence: each gate-dispatch path runs
 //! on both backends from |0...0> (or a chosen non-trivial state) and the
-//! amplitudes must agree within 1e-12. Without a usable GPU every test
-//! returns before asserting, so a green CPU-only run means "not tested", not
-//! "passed"; set `PRISM_REQUIRE_GPU=1` on any machine with a GPU to make that
-//! a hard failure.
+//! amplitudes must agree within 1e-12. A missing device fails every test unless
+//! `PRISM_ALLOW_NO_GPU=1` is set.
 
 #![cfg(feature = "gpu")]
 
 mod common;
+mod gpu_device;
 
 use common::assert_probs_close;
 use common::gate_fixtures::{g, pauli_rot_sample, sample_2x2, sample_4x4};
@@ -30,18 +29,7 @@ struct Fixture {
 
 impl Fixture {
     fn try_new() -> Option<Self> {
-        match GpuContext::new(0) {
-            Ok(ctx) => Some(Self { ctx }),
-            Err(e) => {
-                assert!(
-                    std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
-                    "PRISM_REQUIRE_GPU is set but no usable GPU was found ({e}). \
-                     Unset it to allow this suite to skip."
-                );
-                eprintln!("SKIP: no usable GPU ({e})");
-                None
-            }
-        }
+        gpu_device::context().map(|ctx| Self { ctx })
     }
 
     fn compare(&self, num_qubits: usize, instructions: &[Instruction]) {

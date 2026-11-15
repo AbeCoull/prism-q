@@ -464,7 +464,7 @@ run_if sh-syntax "${SH_FILES[0]:-}" "no shell script changed" check_sh_syntax
 
 GPU_HIT="$(first_file '^src/gpu/')"
 [[ -n "$GPU_HIT" ]] && add owed-gpu owed "$GPU_HIT" \
-    "scripts/test-gpu.ps1 on a host with a card; a run without one skips the GPU goldens"
+    "scripts/test-gpu.ps1 on a host with a card; the GPU goldens fail without one"
 MPI_HIT="$(first_file '^src/.*mpi[^/]*$|^tools/dist_mpi_check\.rs$')"
 MPI_HIT="${MPI_HIT:-$(first_hit '^[+-]$' '\.(rs|toml)$' 'MpiComm|distributed-mpi')}"
 [[ -n "$MPI_HIT" ]] && add owed-mpi owed "$MPI_HIT" \

@@ -834,9 +834,9 @@ jobs:
   # is needed to build, link, or start a test binary. The job only compiles and runs
   # the device-free KERNEL_NAMES test, enforcing the exhaustive GPU dispatch matches
   # and the golden_gpu registry at compile time. The device suites
-  # (tests/golden_gpu.rs, tests/golden_gpu_density_matrix.rs) skip without a card
-  # and are not run anywhere in CI; scripts/test-gpu.ps1 runs them on a host with a
-  # device under PRISM_REQUIRE_GPU=1.
+  # (tests/golden_gpu.rs, tests/golden_gpu_density_matrix.rs) fail without a card
+  # unless PRISM_ALLOW_NO_GPU is set, and the filter below keeps them out;
+  # scripts/test-gpu.ps1 runs them on a host with a device.
   gpu-check:
     name: GPU compile-check (no device)
     runs-on: ubuntu-latest

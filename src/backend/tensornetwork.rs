@@ -2626,7 +2626,7 @@ impl TensorNetworkBackend {
         let n = self.num_qubits;
         let mut samples = BasisSamples::new(num_shots, n);
 
-        let (network, _, _) = self.double_for_partial_trace(0);
+        let network = self.double_for_partial_trace(&[0]);
         let slots: Vec<Option<TensorMeta>> =
             network.iter().map(|t| Some(TensorMeta::of(t))).collect();
         let plan =
@@ -2766,21 +2766,19 @@ impl TensorNetworkBackend {
         network
     }
 
-    /// Build the network for `tr_{q != qubit} |psi><psi|`, leaving `qubit`'s ket
-    /// and bra indices open.
+    /// Build the network for the partial trace of `|psi><psi|` over every qubit
+    /// outside `kept`, leaving each kept qubit's ket and bra indices open.
     ///
-    /// Returns the network and the two open leg ids as `(ket, bra)`.
-    fn double_for_partial_trace(&self, qubit: usize) -> (Vec<Tensor>, LegId, LegId) {
-        let ket_leg = self.output_legs[qubit];
+    /// A kept qubit's ket leg is its output leg and its bra leg is that id plus
+    /// [`Self::next_leg`].
+    fn double_for_partial_trace(&self, kept: &[usize]) -> Vec<Tensor> {
         let mut bra_legs = self.bra_leg_map();
         for (q, &leg) in self.output_legs.iter().enumerate() {
-            if q != qubit {
+            if !kept.contains(&q) {
                 bra_legs[leg] = leg;
             }
         }
-
-        let network = self.double_through(&bra_legs);
-        (network, ket_leg, ket_leg + self.next_leg)
+        self.double_through(&bra_legs)
     }
 
     /// Contract `tr_{q != qubit} |psi><psi|` to its four entries, replaying
@@ -2790,7 +2788,9 @@ impl TensorNetworkBackend {
         qubit: usize,
         plan: Option<&mut Option<CachedPlan>>,
     ) -> Result<[[Complex64; 2]; 2]> {
-        let (mut network, ket_leg, bra_leg) = self.double_for_partial_trace(qubit);
+        let mut network = self.double_for_partial_trace(&[qubit]);
+        let ket_leg = self.output_legs[qubit];
+        let bra_leg = ket_leg + self.next_leg;
         let operation = "reduced density matrix";
         let rho = match plan {
             Some(slot) => {

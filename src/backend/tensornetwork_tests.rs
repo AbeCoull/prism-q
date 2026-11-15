@@ -775,7 +775,7 @@ fn test_exact_plans_match_the_heap_order() {
         networks.push(network.tensors.iter().map(TensorMeta::of).collect());
     }
     let chain = loaded_backend(&crate::circuits::cz_chain_circuit(40, 8, 42));
-    let (doubled, _, _) = chain.double_for_partial_trace(20);
+    let doubled = chain.double_for_partial_trace(&[20]);
     networks.push(doubled.iter().map(TensorMeta::of).collect());
 
     for metas in &networks {

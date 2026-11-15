@@ -586,6 +586,68 @@ fn mcu_with_zero_controls_panics() {
     let _ = Gate::mcu(Gate::X.matrix_2x2(), 0);
 }
 
+#[test]
+#[should_panic(expected = "McuData needs at least 2 controls")]
+fn mcu_data_with_one_control_panics() {
+    let _ = McuData::new(Gate::X.matrix_2x2(), 1);
+}
+
+#[test]
+#[should_panic(expected = "BatchPhaseData holds at most 40 entries")]
+fn batch_phase_data_past_its_capacity_panics() {
+    let one = Complex64::new(1.0, 0.0);
+    let _ = BatchPhaseData::new((1..=BatchPhaseData::MAX_PHASES + 1).map(|q| (q, one)));
+}
+
+#[test]
+#[should_panic(expected = "BatchRzzData holds at most 32 edges")]
+fn batch_rzz_data_past_its_capacity_panics() {
+    let edges = (0..=BatchRzzData::MAX_EDGES)
+        .map(|q| (q, q + 1, 0.1))
+        .collect();
+    let _ = BatchRzzData::new(edges);
+}
+
+#[test]
+#[should_panic(expected = "matrix_2x2 called on 2-qubit gate `cx`")]
+fn matrix_2x2_on_a_two_qubit_gate_panics() {
+    let _ = Gate::Cx.matrix_2x2();
+}
+
+#[test]
+#[should_panic(expected = "matrix_2x2 called on 2-qubit gate")]
+fn matrix_2x2_on_a_weight_two_pauli_rotation_panics() {
+    let _ = Gate::PauliRot(Box::new(PauliRotData {
+        theta: 0.3,
+        axes: vec![PauliAxis::X, PauliAxis::Z],
+    }))
+    .matrix_2x2();
+}
+
+#[test]
+#[should_panic(expected = "matrix_4x4 called on non-standard-2q gate `h`")]
+fn matrix_4x4_on_a_single_qubit_gate_panics() {
+    let _ = Gate::H.matrix_4x4();
+}
+
+#[test]
+#[should_panic(expected = "matrix_4x4 called on non-standard-2q gate")]
+fn matrix_4x4_on_a_weight_three_pauli_rotation_panics() {
+    let _ = Gate::PauliRot(Box::new(PauliRotData {
+        theta: 0.3,
+        axes: vec![PauliAxis::X, PauliAxis::Y, PauliAxis::Z],
+    }))
+    .matrix_4x4();
+}
+
+// The check is a `debug_assert`, so the release-profile lane skips this case.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "matrix_power_real only for single-qubit gates")]
+fn matrix_power_real_on_a_two_qubit_gate_panics() {
+    let _ = Gate::Cx.matrix_power_real(0.5);
+}
+
 /// Flatten a nested matrix into the row-major form `Gate::unitary` takes.
 fn flat<const N: usize>(rows: &[[Complex64; N]; N]) -> Vec<Complex64> {
     rows.iter().flat_map(|row| row.iter().copied()).collect()

@@ -108,8 +108,8 @@ cargo +nightly fuzz run qasm_parse corpus/qasm_parse seeds/qasm_parse -- -dict=q
 On Windows MSVC the AddressSanitizer runtime (`clang_rt.asan_dynamic-x86_64.dll`, in the
 MSVC `bin\Hostx64\x64` directory) must be on `PATH`.
 `tests/integration/fuzz_replay.rs` replays `fuzz/seeds/` and a seeded sweep through the
-same checks on stable, and the `Fuzz` workflow runs each target weekly and uploads any
-crash input.
+same checks on stable on every push. The `Fuzz` workflow runs each target when dispatched
+by hand and uploads any crash input.
 
 ## Documentation site
 

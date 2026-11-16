@@ -93,4 +93,9 @@ fn doubled_contraction_over_the_peak_cap_errors_before_allocating() {
         cap_message(err).contains("reduced density matrix"),
         "the marginal path shares the guard"
     );
+    let err = tn.reduced_density_matrix(&[0, 5]).unwrap_err();
+    assert!(
+        cap_message(err).contains("reduced density matrix"),
+        "the pair path shares the guard"
+    );
 }

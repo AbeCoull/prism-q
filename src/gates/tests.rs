@@ -141,8 +141,7 @@ fn variant_index(gate: &Gate) -> usize {
 
 const GATE_VARIANTS: usize = 32;
 
-/// One instance of every variant, in declaration order. The batched and tiled variants
-/// span three qubits, where `dense_matrix` reports none.
+/// One instance of every variant, in declaration order.
 fn one_of_each_variant() -> Vec<Gate> {
     let one = Complex64::new(1.0, 0.0);
     let i = Complex64::new(0.0, 1.0);
@@ -281,6 +280,42 @@ fn test_preserves_sparsity() {
             ),
         };
         assert_eq!(gate.preserves_sparsity(), expected, "{gate:?}");
+    }
+}
+
+#[test]
+fn dense_matrix_is_none_for_narrow_batched_and_tiled_variants() {
+    let one = Complex64::new(1.0, 0.0);
+    let h = Gate::H.matrix_2x2();
+    let narrow = [
+        Gate::BatchPhase(Box::new(BatchPhaseData::new([(1, -one)]))),
+        Gate::BatchRzz(Box::new(BatchRzzData::new(vec![(0, 1, 0.3)]))),
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![DiagEntry::Phase1q {
+            qubit: 0,
+            d0: one,
+            d1: -one,
+        }]))),
+        Gate::MultiPauliRot(Box::new(MultiPauliRotData {
+            rotations: vec![(0b11, 0, 0.3)],
+        })),
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![(0, h)]))),
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![(0, h), (1, h)]))),
+        Gate::Multi2q(Box::new(Multi2qData::new(vec![(
+            0,
+            1,
+            Gate::Cx.matrix_4x4(),
+        )]))),
+        Gate::QftBlock {
+            start: 0,
+            num: 2,
+            inverse: false,
+            swaps: true,
+            big_endian: false,
+        },
+    ];
+    for gate in narrow {
+        assert!(gate.num_qubits() <= 2, "{gate:?}");
+        assert!(gate.dense_matrix().is_none(), "{gate:?}");
     }
 }
 

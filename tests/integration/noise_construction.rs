@@ -613,47 +613,51 @@ fn two_qubit_kraus_trajectory_dephases_the_first_named_qubit() {
     let p = 0.5;
     let shots = 2048;
 
-    for (q0, q1, x0, x1) in [(0usize, 1usize, 0.0, 1.0), (1, 0, 1.0, 0.0)] {
-        let mut circuit = Circuit::new(2, 2);
-        circuit.add_gate(Gate::H, &[0]);
-        circuit.add_gate(Gate::H, &[1]);
-        let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
-        noise.after_gate[1] = vec![NoiseEvent {
-            channel: dephase_high_qubit(p),
-            qubits: smallvec![q0, q1],
-        }];
-        // Read <X> by rotating into the Z basis before measuring.
-        circuit.add_gate(Gate::H, &[0]);
-        circuit.add_gate(Gate::H, &[1]);
-        circuit.add_measure(0, 0);
-        circuit.add_measure(1, 1);
-        noise
-            .after_gate
-            .resize_with(circuit.instructions.len(), Vec::new);
+    // The tensor network reaches the pair through the default two-qubit read,
+    // the one place its order is set.
+    for kind in [BackendKind::Statevector, BackendKind::TensorNetwork] {
+        for (q0, q1, x0, x1) in [(0usize, 1usize, 0.0, 1.0), (1, 0, 1.0, 0.0)] {
+            let mut circuit = Circuit::new(2, 2);
+            circuit.add_gate(Gate::H, &[0]);
+            circuit.add_gate(Gate::H, &[1]);
+            let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+            noise.after_gate[1] = vec![NoiseEvent {
+                channel: dephase_high_qubit(p),
+                qubits: smallvec![q0, q1],
+            }];
+            // Read <X> by rotating into the Z basis before measuring.
+            circuit.add_gate(Gate::H, &[0]);
+            circuit.add_gate(Gate::H, &[1]);
+            circuit.add_measure(0, 0);
+            circuit.add_measure(1, 1);
+            noise
+                .after_gate
+                .resize_with(circuit.instructions.len(), Vec::new);
 
-        let result = simulate(&circuit)
-            .backend(BackendKind::Statevector)
-            .noise(&noise)
-            .seed(SEED)
-            .shots(shots)
-            .unwrap();
+            let result = simulate(&circuit)
+                .backend(kind.clone())
+                .noise(&noise)
+                .seed(SEED)
+                .shots(shots)
+                .unwrap();
 
-        let mean = |bit: usize| {
-            let ones = result.shots.iter().filter(|s| s[bit]).count();
-            1.0 - 2.0 * (ones as f64 / shots as f64)
-        };
-        // Dephasing at p = 0.5 takes <X> to 0 on the named qubit and leaves the
-        // other at 1. Three standard errors at 2048 shots is 0.033.
-        assert!(
-            (mean(0) - x0).abs() < 0.04,
-            "({q0},{q1}) <X0>: expected {x0}, got {}",
-            mean(0)
-        );
-        assert!(
-            (mean(1) - x1).abs() < 0.04,
-            "({q0},{q1}) <X1>: expected {x1}, got {}",
-            mean(1)
-        );
+            let mean = |bit: usize| {
+                let ones = result.shots.iter().filter(|s| s[bit]).count();
+                1.0 - 2.0 * (ones as f64 / shots as f64)
+            };
+            // Dephasing at p = 0.5 takes <X> to 0 on the named qubit and leaves the
+            // other at 1. Three standard errors at 2048 shots is 0.033.
+            assert!(
+                (mean(0) - x0).abs() < 0.04,
+                "{kind:?} ({q0},{q1}) <X0>: expected {x0}, got {}",
+                mean(0)
+            );
+            assert!(
+                (mean(1) - x1).abs() < 0.04,
+                "{kind:?} ({q0},{q1}) <X1>: expected {x1}, got {}",
+                mean(1)
+            );
+        }
     }
 }
 
@@ -711,6 +715,7 @@ fn two_qubit_kraus_trajectory_branch_weight_reads_the_state() {
         BackendKind::Sparse,
         BackendKind::Factored,
         BackendKind::Mps { max_bond_dim: 16 },
+        BackendKind::TensorNetwork,
     ] {
         let result = simulate(&circuit)
             .backend(kind.clone())
@@ -736,34 +741,38 @@ fn two_qubit_kraus_trajectory_branch_weight_reads_the_state() {
     }
 }
 
-// A tensor network holds the state as a contraction with no partial trace, so
-// it cannot weigh the branches. The rejection lands at dispatch, before a shot
-// allocates state, rather than part way through the first trajectory. The other
-// two declines never reach this door: a tableau is refused by the Pauli-only
-// check and a product state by the entangling gate the channel rule needs.
+// Past the dense cap: a correlated flip after a CX on each of 20 pairs from
+// |0...0>, so every pair reads 00 or 11 and reads 11 at the flip rate.
 #[test]
-fn two_qubit_kraus_rejected_before_a_shot_allocates_state() {
-    let mut circuit = Circuit::new(2, 2);
-    circuit.add_gate(Gate::Cx, &[0, 1]);
-    circuit.add_measure(0, 0);
-    circuit.add_measure(1, 1);
-
+fn two_qubit_kraus_trajectories_run_on_the_tensor_network_at_40_qubits() {
+    let p = 0.3;
+    let shots = 128;
+    let pairs = 20;
+    let mut circuit = Circuit::new(2 * pairs, 2 * pairs);
+    for j in 0..pairs {
+        circuit.add_gate(Gate::Cx, &[2 * j, 2 * j + 1]);
+    }
+    circuit.measure_all();
     let noise = NoiseBuilder::new()
-        .after_gates_joint(GateFilter::all().arity(2), correlated_bit_flip(0.1))
+        .after_gates_joint(GateFilter::all().arity(2), correlated_bit_flip(p))
         .build(&circuit)
         .unwrap();
 
-    let err = simulate(&circuit)
+    let result = simulate(&circuit)
         .backend(BackendKind::TensorNetwork)
         .noise(&noise)
         .seed(SEED)
-        .shots(4)
-        .unwrap_err();
-    assert!(
-        matches!(&err, PrismError::IncompatibleBackend { reason, .. }
-            if reason.contains("reduced density matrix")),
-        "{err:?}"
-    );
+        .shots(shots)
+        .unwrap();
+    let mut flips = 0;
+    for shot in &result.shots {
+        for j in 0..pairs {
+            assert_eq!(shot[2 * j], shot[2 * j + 1], "pair {j} split");
+            flips += usize::from(shot[2 * j]);
+        }
+    }
+    let samples = shots * pairs;
+    common::stats::assert_rate(flips as f64 / samples as f64, p, samples, "flip rate");
 }
 
 // Crosstalk hangs a two-qubit channel on a one-qubit gate, so a circuit with no
@@ -806,6 +815,8 @@ fn auto_routes_crosstalk_kraus_on_one_qubit_gates_to_the_statevector() {
     let flipped = auto.shots.iter().filter(|s| s[1]).count() as f64 / shots as f64;
     assert!((flipped - 0.3).abs() < 0.04, "flip rate {flipped}");
 
+    // The product state has no kernel for the branch operator, and the
+    // rejection lands at dispatch, before a shot allocates state.
     let err = simulate(&circuit)
         .backend(BackendKind::ProductState)
         .noise(&noise)

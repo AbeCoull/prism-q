@@ -1158,8 +1158,9 @@ impl Gate {
     /// Dense matrix over the gate's own targets, row major with `targets[0]`
     /// the most significant bit of both indices.
     ///
-    /// `None` for the batched and tiled variants, whose targets the fusion
-    /// passes assign rather than a caller, and which no lowering here reaches.
+    /// `None` for the batched and tiled variants and `QftBlock`, at any width: the
+    /// fusion passes assign their targets rather than a caller, and no lowering here
+    /// reaches them.
     pub(crate) fn dense_matrix(&self) -> Option<Vec<Complex64>> {
         let zero = Complex64::new(0.0, 0.0);
         match self {
@@ -1208,6 +1209,13 @@ impl Gate {
                 Some(out)
             }
             Gate::Unitary(data) => Some(data.mat.clone()),
+            Gate::BatchPhase(_)
+            | Gate::BatchRzz(_)
+            | Gate::DiagonalBatch(_)
+            | Gate::MultiPauliRot(_)
+            | Gate::MultiFused(_)
+            | Gate::Multi2q(_)
+            | Gate::QftBlock { .. } => None,
             _ if self.num_qubits() == 1 => {
                 let m = self.matrix_2x2();
                 Some(vec![m[0][0], m[0][1], m[1][0], m[1][1]])

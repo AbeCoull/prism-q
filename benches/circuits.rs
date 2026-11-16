@@ -2500,7 +2500,9 @@ fn bench_tn_grid_expectation(c: &mut Criterion) {
 /// low-treewidth network at widths where `probabilities()` cannot answer.
 /// Depth 4 peaks at 64 elements whatever the width, so those rows weigh
 /// per-contraction overhead; depth 8 at 60 qubits peaks at 1M elements and
-/// weighs the arithmetic.
+/// weighs the arithmetic. The `40_d4_k*` rows open two or three qubits on the
+/// same backend: a neighbouring pair and a pair half the chain apart both peak
+/// at 256 elements, and the triple at 1024.
 fn bench_tn_rdm_chain(c: &mut Criterion) {
     let mut group = c.benchmark_group("tn/rdm_chain");
     configure_group(&mut group);
@@ -2513,11 +2515,26 @@ fn bench_tn_rdm_chain(c: &mut Criterion) {
             tn.apply(inst).unwrap();
         }
         let label = format!("{n}_d{depth}");
-        group.bench_with_input(BenchmarkId::from_parameter(label), &tn, |b, backend| {
+        group.bench_with_input(BenchmarkId::from_parameter(&label), &tn, |b, backend| {
             b.iter(|| {
                 black_box(backend.reduced_density_matrix_1q(n / 2).unwrap());
             });
         });
+        if (n, depth) != (40, 4) {
+            continue;
+        }
+        for (suffix, subsystem) in [
+            ("k2", vec![n / 2, n / 2 + 1]),
+            ("k2_far", vec![n / 4, 3 * n / 4]),
+            ("k3", vec![n / 4, n / 2, 3 * n / 4]),
+        ] {
+            let id = BenchmarkId::from_parameter(format!("{label}_{suffix}"));
+            group.bench_function(id, |b| {
+                b.iter(|| {
+                    black_box(tn.reduced_density_matrix(&subsystem).unwrap());
+                });
+            });
+        }
     }
     group.finish();
 }

@@ -775,7 +775,7 @@ fn test_exact_plans_match_the_heap_order() {
         networks.push(network.tensors.iter().map(TensorMeta::of).collect());
     }
     let chain = loaded_backend(&crate::circuits::cz_chain_circuit(40, 8, 42));
-    let (doubled, _, _) = chain.double_for_partial_trace(20);
+    let doubled = chain.double_for_partial_trace(&[20]);
     networks.push(doubled.iter().map(TensorMeta::of).collect());
 
     for metas in &networks {
@@ -1065,4 +1065,121 @@ fn test_scalar_expectation_unequal_disjoint_components() {
     let actual =
         expectation_zero_state(&circuit, &terms, &ResolvedLimits::process_default()).unwrap();
     assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
+}
+
+fn pauli_2x2(letter: usize) -> [[Complex64; 2]; 2] {
+    let (o, l, i) = (
+        Complex64::new(0.0, 0.0),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 1.0),
+    );
+    match letter {
+        0 => [[l, o], [o, l]],
+        1 => [[o, l], [l, o]],
+        2 => [[o, -i], [i, o]],
+        _ => [[l, o], [o, -l]],
+    }
+}
+
+// Tr(rho P) for every Pauli string on the subsystem, against the sandwich
+// contraction, at a width where no dense kernel is consulted: a swapped bit
+// order or a conjugated ket and bra moves a Y string's sign.
+#[test]
+fn rdm_traces_against_pauli_strings_match_pauli_expectations() {
+    let mut tn = loaded_backend(&crate::circuits::cz_chain_circuit(24, 4, 42));
+    for subsystem in [vec![11usize, 12], vec![20, 3], vec![2, 13, 21]] {
+        let k = subsystem.len();
+        let dim = 1usize << k;
+        let rho = tn.reduced_density_matrix(&subsystem).unwrap();
+        for word in 1..1usize << (2 * k) {
+            let letters: Vec<usize> = (0..k).map(|i| (word >> (2 * i)) & 3).collect();
+            let terms: Vec<PauliTerm> = subsystem
+                .iter()
+                .zip(&letters)
+                .filter_map(|(&q, &letter)| match letter {
+                    1 => Some(PauliTerm::x(q)),
+                    2 => Some(PauliTerm::y(q)),
+                    3 => Some(PauliTerm::z(q)),
+                    _ => None,
+                })
+                .collect();
+            let mut trace = Complex64::new(0.0, 0.0);
+            for t in 0..dim {
+                for tp in 0..dim {
+                    let p = (0..k).fold(Complex64::new(1.0, 0.0), |acc, i| {
+                        acc * pauli_2x2(letters[i])[(tp >> i) & 1][(t >> i) & 1]
+                    });
+                    trace += rho[t * dim + tp] * p;
+                }
+            }
+            let expected = tn.pauli_expectations(&[terms]).unwrap()[0];
+            assert!(
+                (trace.re - expected).abs() < 1e-10 && trace.im.abs() < 1e-10,
+                "{subsystem:?} word {word}: {trace} against {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn one_qubit_general_matches_marginal_1q() {
+    let mut tn = loaded_backend(&crate::circuits::random_circuit(8, 4, 42));
+    for q in 0..8 {
+        let one = tn.reduced_density_matrix_1q(q).unwrap();
+        let rho = tn.reduced_density_matrix(&[q]).unwrap();
+        for (a, b) in rho.iter().zip(one.iter().flatten()) {
+            assert!((a - b).norm() < 1e-12, "qubit {q}: {a} against {b}");
+        }
+    }
+}
+
+// A Bell pair on (0, 1), Ry(theta) on 3, nothing on 2 and 4: the kept qubits
+// sit in disconnected components, so the result is an outer product of the
+// pair's projector onto |00> + |11>, the pure Ry state, and |0><0|.
+#[test]
+fn rdm_with_idle_and_disconnected_qubits() {
+    let theta = 0.7f64;
+    let mut circuit = Circuit::new(5, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Ry(theta), &[3]);
+    let mut tn = loaded_backend(&circuit);
+    let (c, s) = ((theta / 2.0).cos(), (theta / 2.0).sin());
+    let amp = |q: usize, bit: usize| match (q, bit) {
+        (3, 0) => c,
+        (3, _) => s,
+        (_, 0) => 1.0,
+        _ => 0.0,
+    };
+    for subsystem in [vec![2usize, 0], vec![4, 3], vec![1, 0, 3]] {
+        let k = subsystem.len();
+        let dim = 1usize << k;
+        let rho = tn.reduced_density_matrix(&subsystem).unwrap();
+        for t in 0..dim {
+            for tp in 0..dim {
+                let bit = |i: usize, x: usize| (x >> i) & 1;
+                let mut expected = 1.0;
+                let mut pair = [None, None];
+                for (i, &q) in subsystem.iter().enumerate() {
+                    if q < 2 {
+                        pair[q] = Some((bit(i, t), bit(i, tp)));
+                    } else {
+                        expected *= amp(q, bit(i, t)) * amp(q, bit(i, tp));
+                    }
+                }
+                expected *= match pair {
+                    [Some((a, ap)), Some((b, bp))] if a == b && ap == bp => 0.5,
+                    [Some(_), Some(_)] => 0.0,
+                    [Some((a, ap)), None] | [None, Some((a, ap))] if a == ap => 0.5,
+                    [Some(_), None] | [None, Some(_)] => 0.0,
+                    [None, None] => 1.0,
+                };
+                let entry = rho[t * dim + tp];
+                assert!(
+                    (entry - Complex64::new(expected, 0.0)).norm() < 1e-12,
+                    "{subsystem:?} ({t}, {tp}): {entry} against {expected}"
+                );
+            }
+        }
+    }
 }

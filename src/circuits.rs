@@ -268,8 +268,9 @@ pub fn independent_random_blocks(
 /// Build a GHZ state preparation circuit: H on qubit 0, then CX chain.
 ///
 /// # Panics
-/// Panics if `n == 0` (underflow in CX chain loop).
+/// Panics if `n == 0`.
 pub fn ghz_circuit(n: usize) -> Circuit {
+    assert!(n >= 1, "ghz_circuit needs at least 1 qubit");
     let mut c = Circuit::new(n, 0);
     c.add_gate(Gate::H, &[0]);
     for q in 0..n - 1 {
@@ -368,8 +369,9 @@ pub fn disjoint_block_layers_circuit(n: usize, k: usize, layers: usize, seed: u6
 /// `layers >= 2` so the decomposed route cannot claim the circuit.
 ///
 /// # Panics
-/// Panics if `n < 2` (stride selection divides by `n / 2`).
+/// Panics if `n < 2`.
 pub fn diagonal_mixed_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
+    assert!(n >= 2, "diagonal_mixed_circuit needs at least 2 qubits");
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);
     for q in 0..n {
@@ -744,6 +746,7 @@ pub(crate) fn apply_inverse_qft(c: &mut Circuit, start: usize, n: usize) {
 /// # Panics
 /// Panics if `n < 2` (need at least 1 counting qubit + 1 target qubit).
 pub fn phase_estimation_circuit(n: usize) -> Circuit {
+    assert!(n >= 2, "phase_estimation_circuit needs at least 2 qubits");
     let n_counting = n - 1;
     let target = n_counting;
     let mut c = Circuit::new(n, 0);

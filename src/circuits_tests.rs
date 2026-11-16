@@ -9,7 +9,7 @@ fn measure_split_circuit_rejects_fewer_than_eight_qubits() {
 }
 
 #[test]
-#[should_panic(expected = "qubit index 0 out of bounds")]
+#[should_panic(expected = "ghz_circuit needs at least 1 qubit")]
 fn ghz_circuit_rejects_zero_qubits() {
     ghz_circuit(0);
 }
@@ -39,9 +39,15 @@ fn disjoint_block_layers_circuit_rejects_a_single_block() {
 }
 
 #[test]
-#[should_panic(expected = "remainder with a divisor of zero")]
+#[should_panic(expected = "diagonal_mixed_circuit needs at least 2 qubits")]
 fn diagonal_mixed_circuit_rejects_one_qubit() {
     diagonal_mixed_circuit(1, 1, SEED);
+}
+
+#[test]
+#[should_panic(expected = "diagonal_mixed_circuit needs at least 2 qubits")]
+fn diagonal_mixed_circuit_rejects_one_qubit_without_layers() {
+    diagonal_mixed_circuit(1, 0, SEED);
 }
 
 #[test]
@@ -62,10 +68,14 @@ fn sparse_walk_circuit_rejects_one_qubit() {
     sparse_walk_circuit(1, 1, 1, SEED);
 }
 
-// The message depends on overflow checks: a subtraction overflow under the test
-// profile, an out-of-bounds target where the subtraction wraps.
 #[test]
-#[should_panic]
+#[should_panic(expected = "phase_estimation_circuit needs at least 2 qubits")]
 fn phase_estimation_circuit_rejects_zero_qubits() {
     phase_estimation_circuit(0);
+}
+
+#[test]
+#[should_panic(expected = "phase_estimation_circuit needs at least 2 qubits")]
+fn phase_estimation_circuit_rejects_one_qubit() {
+    phase_estimation_circuit(1);
 }

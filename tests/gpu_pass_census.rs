@@ -8,11 +8,11 @@ mod gpu_device;
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use prism_q::StatevectorBackend;
 use prism_q::backend::Backend;
 use prism_q::circuit::{Circuit, Instruction, recognize_qft_blocks, smallvec};
 use prism_q::gates::{BatchPhaseData, Gate};
 use prism_q::gpu::{GpuContext, GpuPassCensus};
+use prism_q::{StabilizerBackend, StatevectorBackend};
 
 const NUM_QUBITS: usize = 12;
 
@@ -22,6 +22,16 @@ fn census_of(ctx: &Arc<GpuContext>, circuit: &Circuit) -> GpuPassCensus {
         .init(circuit.num_qubits, circuit.num_classical_bits)
         .unwrap();
     let before = ctx.pass_census();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    ctx.pass_census() - before
+}
+
+fn stabilizer_census_of(ctx: &Arc<GpuContext>, circuit: &Circuit) -> GpuPassCensus {
+    let mut backend = StabilizerBackend::new(42).with_gpu(ctx.clone());
+    let before = ctx.pass_census();
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
     backend.apply_instructions(&circuit.instructions).unwrap();
     ctx.pass_census() - before
 }
@@ -96,6 +106,53 @@ fn recognized_qft_runs_as_tiled_passes_with_one_drain() {
             launches: 3,
             passes: 3,
             drains: 1,
+            dense_2q: 0,
+            tiles: 0,
+        }
+    );
+}
+
+#[test]
+fn stabilizer_ghz_measure_all_counts_one_readback_chain_per_qubit() {
+    let Some(ctx) = gpu_device::context() else {
+        return;
+    };
+    let mut circuit = prism_q::circuits::ghz_circuit(1000);
+    circuit.measure_all();
+    // Init, then 16 Clifford batches (a flush at each of the 15 word boundaries the CX
+    // chain crosses, plus the final one), each staging 4 tables. Qubit 0 measures
+    // random (pivot, cascade, fixup); the other 999 are deterministic (pivot, chain).
+    // Each pivot and each chain uploads a reset word and reads one back.
+    assert_eq!(
+        stabilizer_census_of(&ctx, &circuit),
+        GpuPassCensus {
+            launches: 1 + 16 + 3 + 999 * 2,
+            passes: 1 + 16 + 1,
+            drains: 16 * 4 + 2 + 999 * 4,
+            dense_2q: 0,
+            tiles: 0,
+        }
+    );
+}
+
+#[test]
+fn stabilizer_h_wall_measure_all_is_random_on_every_qubit() {
+    let Some(ctx) = gpu_device::context() else {
+        return;
+    };
+    let n = 512;
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.measure_all();
+    // Init and one Clifford batch, then pivot, cascade and fixup for each qubit.
+    assert_eq!(
+        stabilizer_census_of(&ctx, &circuit),
+        GpuPassCensus {
+            launches: 1 + 1 + n as u64 * 3,
+            passes: 1 + 1 + n as u64,
+            drains: 4 + n as u64 * 2,
             dense_2q: 0,
             tiles: 0,
         }

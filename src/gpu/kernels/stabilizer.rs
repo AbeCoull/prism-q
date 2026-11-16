@@ -62,6 +62,7 @@ pub(crate) fn launch_set_initial_tableau(ctx: &GpuContext, tableau: &mut GpuTabl
             .launch(cfg)
             .map_err(|e| driver_err("stab_set_initial_tableau", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -256,6 +257,7 @@ impl CliffordBatchScratch {
 /// Upload `host`, or one zero word when it is empty, into the start of the grow-only
 /// `slot` and return a view of the uploaded words.
 fn stage_u32<'a>(
+    ctx: &GpuContext,
     stream: &Arc<CudaStream>,
     slot: &'a mut Option<CudaSlice<u32>>,
     host: &[u32],
@@ -273,6 +275,7 @@ fn stage_u32<'a>(
     stream
         .memcpy_htod(src, &mut dev.slice_mut(0..src.len()))
         .map_err(|e| driver_err(&format!("upload {name}"), e))?;
+    ctx.device().count_drain();
     let dev: &'a CudaSlice<u32> = dev;
     Ok(dev.slice(0..src.len()))
 }
@@ -294,19 +297,28 @@ fn launch_word_grouped_kernel(
     let (stream, func) = stream_and_fn(ctx, "stab_apply_word_grouped")?;
 
     let group_words_dev = stage_u32(
+        ctx,
         stream,
         &mut scratch.group_words_dev,
         &scratch.group_words,
         "group_words",
     )?;
     let group_offsets_dev = stage_u32(
+        ctx,
         stream,
         &mut scratch.group_offsets_dev,
         &scratch.group_offsets,
         "group_offsets",
     )?;
-    let ops_dev = stage_u32(stream, &mut scratch.ops_dev, &scratch.ops_flat, "ops_flat")?;
+    let ops_dev = stage_u32(
+        ctx,
+        stream,
+        &mut scratch.ops_dev,
+        &scratch.ops_flat,
+        "ops_flat",
+    )?;
     let cross_dev = stage_u32(
+        ctx,
         stream,
         &mut scratch.cross_dev,
         &scratch.cross_word,
@@ -345,6 +357,7 @@ fn launch_word_grouped_kernel(
             .launch(cfg)
             .map_err(|e| driver_err("stab_apply_word_grouped", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -385,6 +398,7 @@ pub(crate) fn launch_rowmul_words(
             .launch(cfg)
             .map_err(|e| driver_err("stab_rowmul_words", e))?;
     }
+    ctx.device().count_launch(0);
     Ok(())
 }
 
@@ -433,6 +447,7 @@ pub(crate) fn launch_measure_find_pivot(
         stream
             .memcpy_htod(&[sentinel], out_pivot)
             .map_err(|e| driver_err("reset find_pivot sentinel", e))?;
+        ctx.device().count_drain();
         let mut builder = stream.launch_builder(&func);
         builder
             .arg(xz)
@@ -448,9 +463,11 @@ pub(crate) fn launch_measure_find_pivot(
                 .launch(cfg)
                 .map_err(|e| driver_err("stab_measure_find_pivot", e))?;
         }
+        ctx.device().count_launch(0);
         stream
             .memcpy_dtoh(out_pivot, &mut host_pivot)
             .map_err(|e| driver_err("find_pivot dtoh", e))?;
+        ctx.device().count_drain();
     }
     if host_pivot[0] >= sentinel {
         Ok(None)
@@ -501,6 +518,7 @@ pub(crate) fn launch_measure_cascade(
             .launch(cfg)
             .map_err(|e| driver_err("stab_measure_cascade", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -546,6 +564,7 @@ pub(crate) fn launch_measure_fixup(
             .launch(cfg)
             .map_err(|e| driver_err("stab_measure_fixup", e))?;
     }
+    ctx.device().count_launch(0);
     Ok(())
 }
 
@@ -581,6 +600,7 @@ pub(crate) fn launch_measure_deterministic(
         stream
             .memcpy_htod(&[0u8], out_outcome)
             .map_err(|e| driver_err("reset deterministic outcome", e))?;
+        ctx.device().count_drain();
         let mut builder = stream.launch_builder(&func);
         builder
             .arg(xz)
@@ -597,9 +617,11 @@ pub(crate) fn launch_measure_deterministic(
                 .launch(cfg)
                 .map_err(|e| driver_err("stab_measure_deterministic", e))?;
         }
+        ctx.device().count_launch(0);
         stream
             .memcpy_dtoh(out_outcome, &mut host_out)
             .map_err(|e| driver_err("deterministic outcome dtoh", e))?;
+        ctx.device().count_drain();
     }
     Ok(host_out[0] != 0)
 }

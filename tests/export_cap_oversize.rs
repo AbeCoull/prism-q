@@ -14,6 +14,7 @@ use prism_q::backend::mps::MpsBackend;
 use prism_q::backend::product::ProductStateBackend;
 use prism_q::backend::sparse::SparseBackend;
 use prism_q::backend::statevector::StatevectorBackend;
+use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuit::Circuit;
 use prism_q::circuits::ghz_circuit;
 use prism_q::gates::Gate;
@@ -24,8 +25,13 @@ fn small_export_cap() {
     caps::set_once(&[("PRISM_MAX_EXPORT_QUBITS", "4")]);
 }
 
+// Loaded without a run, which would read probabilities: the tensor network
+// prices that dense readout against the same cap.
 fn assert_answers_at_the_cap_and_declines_past_it(backend: &mut dyn Backend, circuit: &Circuit) {
-    sim::run_on(backend, circuit).unwrap();
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
     let name = backend.name();
     let rho = backend.reduced_density_matrix(&[0, 3]).unwrap();
     assert_eq!(rho.len(), 16, "{name}");
@@ -60,6 +66,7 @@ fn a_matrix_declines_when_its_entries_price_past_the_export_cap() {
     assert_answers_at_the_cap_and_declines_past_it(&mut SparseBackend::new(SEED), &ghz);
     assert_answers_at_the_cap_and_declines_past_it(&mut FactoredBackend::new(SEED), &ghz);
     assert_answers_at_the_cap_and_declines_past_it(&mut DensityMatrixBackend::new(SEED), &ghz);
+    assert_answers_at_the_cap_and_declines_past_it(&mut TensorNetworkBackend::new(SEED), &ghz);
 
     let mut rotations = Circuit::new(5, 0);
     for q in 0..5 {

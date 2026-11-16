@@ -67,6 +67,27 @@ fn a_sliced_marginal_matches_the_unsliced_one() {
     }
 }
 
+// The open ket and bra legs of both qubits ride through the sliced tree, and
+// every slice result carries them in the same order, so the slices sum
+// elementwise into the pair's matrix.
+#[test]
+fn a_sliced_pair_density_matches_the_unsliced_one() {
+    small_caps();
+    let circuit = circuits::hardware_efficient_ansatz(14, 4, SEED);
+
+    let mut tn = loaded(&circuit);
+    let rho = tn.reduced_density_matrix(&[7, 8]).unwrap();
+    assert!(last_slice_count() > 1, "the fixture contracted whole");
+
+    let mut sv = StatevectorBackend::new(SEED);
+    sv.init(14, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+    let expected = sv.reduced_density_matrix(&[7, 8]).unwrap();
+    for (entry, want) in rho.iter().zip(&expected) {
+        assert!((entry - want).norm() < 1e-10, "{entry} vs {want}");
+    }
+}
+
 // A 12-qubit register behind one 10-qubit multi-controlled gate: the doubled
 // network cannot be brought under the pinned cap inside the slice budget, so
 // the cap rejects by name exactly as it did before slicing existed.
@@ -107,7 +128,9 @@ fn the_rejection_is_a_resource_limit_error() {
     ];
     circuit.add_gate(Gate::mcu(x_mat, 9), &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
-    let tn = loaded(&circuit);
+    let mut tn = loaded(&circuit);
     let err = tn.reduced_density_matrix_1q(0).unwrap_err();
+    assert!(matches!(err, PrismError::ResourceLimit(_)), "{err:?}");
+    let err = tn.reduced_density_matrix(&[0, 11]).unwrap_err();
     assert!(matches!(err, PrismError::ResourceLimit(_)), "{err:?}");
 }

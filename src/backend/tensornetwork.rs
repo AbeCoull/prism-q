@@ -75,11 +75,12 @@
 //!
 //! # Observables and shots both contract natively
 //!
-//! `Backend::pauli_expectations` and `Backend::reduced_density_matrix_1q` both
-//! answer by doubling the network against its conjugate: the bra copy's legs are
-//! shifted clear of the ket id space, and each qubit's boundary is either closed
-//! against its twin (a trace) or joined through an operator. No `2^n` vector is
-//! built, so neither query passes the dense ceiling.
+//! `Backend::pauli_expectations`, `Backend::reduced_density_matrix_1q` and
+//! `Backend::reduced_density_matrix` answer by doubling the network against its
+//! conjugate: the bra copy's legs are shifted clear of the ket id space, and each
+//! qubit's boundary is closed against its twin (a trace), joined through an
+//! operator, or left open. No `2^n` vector is built, so none of them passes the
+//! dense ceiling.
 //!
 //! An identity factor is a closed leg rather than an appended tensor, so a
 //! weight-`k` observable adds `k` tensors to a network of `2T`, not `n`.
@@ -2626,7 +2627,7 @@ impl TensorNetworkBackend {
         let n = self.num_qubits;
         let mut samples = BasisSamples::new(num_shots, n);
 
-        let (network, _, _) = self.double_for_partial_trace(0);
+        let network = self.double_for_partial_trace(&[0]);
         let slots: Vec<Option<TensorMeta>> =
             network.iter().map(|t| Some(TensorMeta::of(t))).collect();
         let plan =
@@ -2766,21 +2767,19 @@ impl TensorNetworkBackend {
         network
     }
 
-    /// Build the network for `tr_{q != qubit} |psi><psi|`, leaving `qubit`'s ket
-    /// and bra indices open.
+    /// Build the network for the partial trace of `|psi><psi|` over every qubit
+    /// outside `kept`, leaving each kept qubit's ket and bra indices open.
     ///
-    /// Returns the network and the two open leg ids as `(ket, bra)`.
-    fn double_for_partial_trace(&self, qubit: usize) -> (Vec<Tensor>, LegId, LegId) {
-        let ket_leg = self.output_legs[qubit];
+    /// A kept qubit's ket leg is its output leg and its bra leg is that id plus
+    /// [`Self::next_leg`].
+    fn double_for_partial_trace(&self, kept: &[usize]) -> Vec<Tensor> {
         let mut bra_legs = self.bra_leg_map();
         for (q, &leg) in self.output_legs.iter().enumerate() {
-            if q != qubit {
+            if !kept.contains(&q) {
                 bra_legs[leg] = leg;
             }
         }
-
-        let network = self.double_through(&bra_legs);
-        (network, ket_leg, ket_leg + self.next_leg)
+        self.double_through(&bra_legs)
     }
 
     /// Contract `tr_{q != qubit} |psi><psi|` to its four entries, replaying
@@ -2790,7 +2789,9 @@ impl TensorNetworkBackend {
         qubit: usize,
         plan: Option<&mut Option<CachedPlan>>,
     ) -> Result<[[Complex64; 2]; 2]> {
-        let (mut network, ket_leg, bra_leg) = self.double_for_partial_trace(qubit);
+        let mut network = self.double_for_partial_trace(&[qubit]);
+        let ket_leg = self.output_legs[qubit];
+        let bra_leg = ket_leg + self.next_leg;
         let operation = "reduced density matrix";
         let rho = match plan {
             Some(slot) => {
@@ -2942,10 +2943,12 @@ impl Backend for TensorNetworkBackend {
     /// across cuts, and summing the weights understates the compounded error,
     /// since the strict bound on the infidelity is the square of the summed
     /// square roots. The two agree only when a single cut truncates. A
-    /// doubled contraction, which `pauli_expectations` and
-    /// `reduced_density_matrix_1q` both run, cuts in the doubled space, so
-    /// what the bound describes there is the quadratic form rather than the
-    /// state.
+    /// doubled contraction, which `pauli_expectations` and both reduced
+    /// density matrix methods run, cuts in the doubled space, so what the
+    /// bound describes there is the quadratic form rather than the state. A
+    /// truncated `reduced_density_matrix` is made Hermitian again by
+    /// averaging it with its conjugate transpose; positivity is not
+    /// restored.
     fn exactness(&self) -> crate::sim::Exactness {
         match self.tolerance {
             Some(tolerance) if tolerance > 0.0 => crate::sim::Exactness::Approximate {
@@ -3087,6 +3090,62 @@ impl Backend for TensorNetworkBackend {
     /// If `qubit` is outside the register.
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         self.marginal_1q(qubit, None)
+    }
+
+    /// One doubled contraction with the subsystem's ket and bra legs open, so
+    /// the cost follows the doubled network's treewidth, widened by those open
+    /// legs, rather than `2^n`.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        crate::backend::schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let k = subsystem.len();
+        let dim =
+            crate::backend::reduced_density::reduced_density_side(self.name(), k, &self.limits)?;
+
+        let mut network = self.double_for_partial_trace(subsystem);
+        let rho = greedy_contract(
+            &mut network,
+            self.contraction_limits(),
+            self.name(),
+            "reduced density matrix",
+        )?;
+        self.book_truncation();
+        debug_assert_eq!(rho.rank(), 2 * k);
+
+        // Row major with the last axis lowest, so `subsystem[0]` takes the last
+        // ket axis and the last bra axis: ket legs carry the row index.
+        let kets = subsystem.iter().rev().map(|&q| self.output_legs[q]);
+        let bras = kets.clone().map(|leg| leg + self.next_leg);
+        let perm: SmallVec<[usize; 6]> = kets
+            .chain(bras)
+            .map(|target| {
+                rho.legs
+                    .iter()
+                    .position(|&leg| leg == target)
+                    .expect("partial trace leaves every kept leg open on the result")
+            })
+            .collect();
+        let mut data = if perm.iter().enumerate().any(|(i, &p)| i != p) {
+            transpose(&rho, &perm).data
+        } else {
+            rho.data
+        };
+
+        if self.tolerance.is_some_and(|tolerance| tolerance > 0.0) {
+            for t in 0..dim {
+                data[t * dim + t].im = 0.0;
+                for tp in t + 1..dim {
+                    let mean = 0.5 * (data[t * dim + tp] + data[tp * dim + t].conj());
+                    data[t * dim + tp] = mean;
+                    data[tp * dim + t] = mean.conj();
+                }
+            }
+        }
+        crate::backend::reduced_density::normalize_trace(&mut data, dim);
+        Ok(data)
+    }
+
+    fn supports_two_qubit_kraus(&self) -> bool {
+        true
     }
 
     fn supports_pauli_expectation(&self) -> bool {

@@ -3,6 +3,7 @@
 
 use crate::common::SEED;
 use crate::small_caps;
+use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
@@ -70,6 +71,59 @@ fn a_bounded_contraction_stays_inside_the_bound_it_reports() {
         (approximate - exact).abs() <= allowed,
         "{approximate} vs {exact}, outside {allowed} at bound {bound}"
     );
+}
+
+// A truncating pair read is Hermitian and trace one, sits within the
+// reported bound of the exact pair, and the terminal reports the bound the
+// query's own contraction left rather than the one before it.
+#[test]
+fn a_bounded_pair_density_is_hermitian_and_inside_its_bound() {
+    small_caps();
+    let circuit = weak_chain(14, 4);
+    let subsystem = [3usize, 10];
+
+    let mut tn = loaded(&circuit, 1e-3);
+    let rho = tn.reduced_density_matrix(&subsystem).unwrap();
+    assert!(
+        tn.truncation_discarded() > 0.0,
+        "the fixture contracted without cutting anything"
+    );
+    let trace: Complex64 = (0..4).map(|t| rho[t * 4 + t]).sum();
+    assert!((trace - 1.0).norm() < 1e-12, "trace {trace}");
+    for t in 0..4 {
+        for tp in 0..4 {
+            assert_eq!(rho[t * 4 + tp], rho[tp * 4 + t].conj(), "({t}, {tp})");
+        }
+    }
+
+    let Exactness::Approximate {
+        fidelity_lower_bound: Some(bound),
+    } = tn.exactness()
+    else {
+        panic!("a tolerance must report Approximate with a bound");
+    };
+    let mut sv = StatevectorBackend::new(SEED);
+    sv.init(circuit.num_qubits, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+    let exact = sv.reduced_density_matrix(&subsystem).unwrap();
+    let allowed = 2.0 * (1.0 - bound).max(0.0).sqrt() + 1e-9;
+    for (entry, want) in rho.iter().zip(&exact) {
+        assert!(
+            (entry - want).norm() <= allowed,
+            "{entry} vs {want}, outside {allowed} at bound {bound}"
+        );
+    }
+
+    let result = simulate(&circuit)
+        .backend(BackendKind::TensorNetworkBounded { tolerance: 1e-3 })
+        .seed(SEED)
+        .reduced_density_matrix(&subsystem)
+        .unwrap();
+    let reported = result
+        .metadata
+        .fidelity_lower_bound()
+        .expect("the bounded route reports a bound");
+    assert!(reported < 1.0, "the terminal read the bound before the cut");
 }
 
 #[test]

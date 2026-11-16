@@ -1015,12 +1015,17 @@ impl<'c> Simulate<'c, Seeded> {
             qubits.len(),
             limits,
         )?;
-        let metadata = backend_metadata(&*backend).with_reason(reason);
-        ensure_exact_result(self.require_exact, &metadata)?;
+        ensure_exact_result(
+            self.require_exact,
+            &backend_metadata(&*backend).with_reason(reason),
+        )?;
+        let data = backend.reduced_density_matrix(qubits)?;
+        // A tensor network truncates while contracting the query itself, so the
+        // bound is read after it.
         Ok(ReducedDensityMatrix {
             qubits: qubits.to_vec(),
-            data: backend.reduced_density_matrix(qubits)?,
-            metadata,
+            data,
+            metadata: backend_metadata(&*backend).with_reason(reason),
         })
     }
 
@@ -3766,6 +3771,8 @@ fn plan_answers(plan: &BackendPlan, diagnostic: Diagnostic) -> bool {
             BackendPlan::Statevector { .. }
                 | BackendPlan::Sparse
                 | BackendPlan::Factored
+                | BackendPlan::Mps { .. }
+                | BackendPlan::TensorNetwork { .. }
                 | BackendPlan::ProductState
                 | BackendPlan::DensityMatrix { .. }
                 | BackendPlan::Stabilizer { .. }

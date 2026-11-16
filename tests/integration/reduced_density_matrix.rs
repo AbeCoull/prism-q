@@ -1,12 +1,12 @@
 //! `Backend::reduced_density_matrix` and the `Simulate` terminal over it:
 //! closed forms, agreement with the statevector over the shared small-circuit
 //! corpus, the row-index convention, the trajectory routines at one and two
-//! qubits, and the declines. The cap is pinned in `export_cap_oversize.rs`.
+//! qubits, and subsystem validation. The cap is pinned in `export_cap_oversize.rs`.
 
 use crate::common;
 
 use common::circuits::{CircuitCase, exact_small_cases, product_separable_cases};
-use common::{DM_EPS, FACTORED_EPS, MPS_EPS, PRODUCT_EPS, SEED, SPARSE_EPS, SV_EPS};
+use common::{DM_EPS, FACTORED_EPS, MPS_EPS, PRODUCT_EPS, SEED, SPARSE_EPS, SV_EPS, TN_EPS};
 use num_complex::Complex64;
 use prism_q::PrismError;
 use prism_q::backend::Backend;
@@ -20,7 +20,9 @@ use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuit::Circuit;
-use prism_q::circuits::{brickwork_circuit, ghz_circuit, random_circuit};
+use prism_q::circuits::{
+    brickwork_circuit, cz_chain_circuit, ghz_circuit, hardware_efficient_ansatz, random_circuit,
+};
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{BackendKind, GateFilter, NoiseBuilder, NoiseChannel, simulate};
@@ -104,12 +106,13 @@ fn rdm_on(backend: &mut dyn Backend, circuit: &Circuit, subsystem: &[usize]) -> 
 }
 
 /// Every backend that answers a general (entangling) circuit.
-fn entangling_backends() -> [Box<dyn Backend>; 4] {
+fn entangling_backends() -> [Box<dyn Backend>; 5] {
     [
         Box::new(StatevectorBackend::new(SEED)),
         Box::new(SparseBackend::new(SEED)),
         Box::new(FactoredBackend::new(SEED)),
         Box::new(DensityMatrixBackend::new(SEED)),
+        Box::new(TensorNetworkBackend::new(SEED)),
     ]
 }
 
@@ -239,6 +242,31 @@ fn w_4_rdm_on_one_and_two_qubits() {
     }
 }
 
+// S H |0> = (|0> + i|1>) / sqrt 2 reads [[1/2, -i/2], [i/2, 1/2]]: the
+// imaginary entry sits at <1|rho|0>, and a swapped ket and bra conjugates it.
+#[test]
+fn s_h_reads_an_imaginary_off_diagonal() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::S, &[1]);
+    let expected = [
+        Complex64::new(0.5, 0.0),
+        Complex64::new(0.0, -0.5),
+        Complex64::new(0.0, 0.5),
+        Complex64::new(0.5, 0.0),
+    ];
+    let backends = entangling_backends().into_iter().chain([
+        Box::new(MpsBackend::new(SEED, 4)) as Box<dyn Backend>,
+        Box::new(ProductStateBackend::new(SEED)),
+        Box::new(StabilizerBackend::new(SEED)),
+        Box::new(FactoredStabilizerBackend::new(SEED)),
+    ]);
+    for mut backend in backends {
+        let rho = rdm_on(backend.as_mut(), &circuit, &[1]);
+        assert_matrix_close(&rho, &expected, EPS, backend.name());
+    }
+}
+
 #[test]
 fn sparse_matches_the_statevector_on_the_small_corpus() {
     assert_matches_statevector(
@@ -277,6 +305,15 @@ fn density_matrix_matches_the_statevector_on_the_small_corpus() {
         &|| Box::new(DensityMatrixBackend::new(SEED)),
         &exact_small_cases(),
         DM_EPS,
+    );
+}
+
+#[test]
+fn tensor_network_matches_the_statevector_on_the_small_corpus() {
+    assert_matches_statevector(
+        &|| Box::new(TensorNetworkBackend::new(SEED)),
+        &exact_small_cases(),
+        TN_EPS,
     );
 }
 
@@ -336,12 +373,13 @@ fn the_row_index_takes_subsystem_0_as_its_lowest_bit() {
         }
         rho
     };
-    let backends: [Box<dyn Backend>; 5] = [
+    let backends: [Box<dyn Backend>; 6] = [
         Box::new(StatevectorBackend::new(SEED)),
         Box::new(SparseBackend::new(SEED)),
         Box::new(FactoredBackend::new(SEED)),
         Box::new(DensityMatrixBackend::new(SEED)),
         Box::new(ProductStateBackend::new(SEED)),
+        Box::new(TensorNetworkBackend::new(SEED)),
     ];
     for mut backend in backends {
         let rho = rdm_on(backend.as_mut(), &circuit, &[0, 1]);
@@ -504,22 +542,6 @@ fn the_trace_is_one_whatever_norm_the_state_carries() {
     assert_matrix_close(&rho, &expected, 1e-14, "statevector after two measurements");
 }
 
-fn assert_declines(backend: &mut dyn Backend) {
-    sim::run_on(backend, &ghz_circuit(4)).unwrap();
-    assert_eq!(
-        backend.reduced_density_matrix(&[0, 2]).unwrap_err(),
-        PrismError::BackendUnsupported {
-            backend: backend.name().to_string(),
-            operation: "reduced density matrix".to_string(),
-        }
-    );
-}
-
-#[test]
-fn tensor_network_declines_the_reduced_density_matrix() {
-    assert_declines(&mut TensorNetworkBackend::new(SEED));
-}
-
 // Both tableau backends read the marginal off the projector onto the
 // generators supported inside the subsystem, never off a dense export.
 #[test]
@@ -548,12 +570,13 @@ fn a_subsystem_is_a_non_empty_set_of_distinct_qubits_up_to_the_whole_register() 
     for q in 0..4 {
         circuit.add_gate(Gate::Ry(0.5 * q as f64 + 0.2), &[q]);
     }
-    let backends: [Box<dyn Backend>; 5] = [
+    let backends: [Box<dyn Backend>; 6] = [
         Box::new(StatevectorBackend::new(SEED)),
         Box::new(SparseBackend::new(SEED)),
         Box::new(FactoredBackend::new(SEED)),
         Box::new(DensityMatrixBackend::new(SEED)),
         Box::new(ProductStateBackend::new(SEED)),
+        Box::new(TensorNetworkBackend::new(SEED)),
     ];
     for mut backend in backends {
         sim::run_on(backend.as_mut(), &circuit).unwrap();
@@ -626,7 +649,9 @@ fn the_terminal_matches_the_statevector_on_the_small_corpus() {
             (BackendKind::Statevector, SV_EPS),
             (BackendKind::Sparse, SPARSE_EPS),
             (BackendKind::Factored, FACTORED_EPS),
+            (BackendKind::Mps { max_bond_dim: 64 }, MPS_EPS),
             (BackendKind::DensityMatrix, DM_EPS),
+            (BackendKind::TensorNetwork, TN_EPS),
         ],
         &exact_small_cases(),
     );
@@ -640,22 +665,107 @@ fn the_terminal_matches_the_statevector_on_the_separable_corpus() {
     );
 }
 
-// A backend without a partial trace is named by the terminal, not by the
-// route that selected it.
+// Past the naive sum's reach, so the reference is the statevector kernel the
+// naive sums above pin. Reversed pairs and spread triples exercise the
+// permutation out of the contraction's leg order.
 #[test]
-fn the_terminal_names_the_backend_that_declines() {
-    let circuit = ghz_circuit(4);
-    assert_eq!(
-        simulate(&circuit)
-            .backend(BackendKind::TensorNetwork)
-            .seed(SEED)
-            .reduced_density_matrix(&[0, 2])
-            .unwrap_err(),
-        PrismError::BackendUnsupported {
-            backend: "tensornetwork".to_string(),
-            operation: "reduced density matrix".to_string(),
+fn tensor_network_matches_the_statevector_at_20_qubits() {
+    let subsystems: [&[usize]; 6] = [
+        &[10],
+        &[3, 16],
+        &[16, 3],
+        &[9, 10],
+        &[0, 9, 19],
+        &[12, 4, 8],
+    ];
+    for circuit in [
+        cz_chain_circuit(20, 6, SEED),
+        hardware_efficient_ansatz(20, 2, SEED),
+    ] {
+        let mut sv = StatevectorBackend::new(SEED);
+        sim::run_on(&mut sv, &circuit).unwrap();
+        let mut tn = TensorNetworkBackend::new(SEED);
+        sim::run_on(&mut tn, &circuit).unwrap();
+        for subsystem in subsystems {
+            let expected = sv.reduced_density_matrix(subsystem).unwrap();
+            let rho = rdm_of(&mut tn, subsystem);
+            assert_matrix_close(&rho, &expected, TN_EPS, &format!("{subsystem:?}"));
         }
-    );
+    }
+}
+
+/// Apply `circuit` without a run, which would read probabilities past their cap.
+fn load_wide(backend: &mut dyn Backend, circuit: &Circuit) {
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+}
+
+// Any k qubits of the 40-qubit GHZ state read the two corners at 1/2.
+#[test]
+fn ghz_40_pair_and_triple_are_the_two_branch_mixture() {
+    let mut tn = TensorNetworkBackend::new(SEED);
+    load_wide(&mut tn, &ghz_circuit(40));
+    for subsystem in [vec![0usize, 39], vec![25, 7], vec![3, 20, 38]] {
+        let dim = 1usize << subsystem.len();
+        let mut expected = vec![Complex64::new(0.0, 0.0); dim * dim];
+        expected[0] = Complex64::new(0.5, 0.0);
+        expected[dim * dim - 1] = Complex64::new(0.5, 0.0);
+        let rho = rdm_of(&mut tn, &subsystem);
+        assert_matrix_close(&rho, &expected, EPS, &format!("{subsystem:?}"));
+    }
+}
+
+// H and CX on each rung (2j, 2j + 1) of 40 qubits: a rung reads
+// |Phi+><Phi+|, four entries of 1/2 at rows 0 and 3, and a pair taken from two
+// rungs reads I / 4.
+#[test]
+fn bell_ladder_40_reads_a_pure_pair_or_the_identity() {
+    let mut circuit = Circuit::new(40, 0);
+    for j in 0..20 {
+        circuit.add_gate(Gate::H, &[2 * j]);
+        circuit.add_gate(Gate::Cx, &[2 * j, 2 * j + 1]);
+    }
+    let mut tn = TensorNetworkBackend::new(SEED);
+    load_wide(&mut tn, &circuit);
+    let c = |re: f64| Complex64::new(re, 0.0);
+    let mut rung = vec![c(0.0); 16];
+    for (t, tp) in [(0, 0), (0, 3), (3, 0), (3, 3)] {
+        rung[t * 4 + tp] = c(0.5);
+    }
+    let mut straddle = vec![c(0.0); 16];
+    for t in 0..4 {
+        straddle[t * 4 + t] = c(0.25);
+    }
+    for (subsystem, expected) in [
+        ([12usize, 13], &rung),
+        ([39, 38], &rung),
+        ([13, 14], &straddle),
+        ([0, 39], &straddle),
+    ] {
+        let rho = rdm_of(&mut tn, &subsystem);
+        assert_matrix_close(&rho, expected, EPS, &format!("{subsystem:?}"));
+    }
+}
+
+// Depth 4 holds the chain's bond at 4, so a 64 bond MPS is exact and stands in
+// for the statevector at 40 qubits. Once through the backend and once through
+// the terminal, which runs the fused gate tensors.
+#[test]
+fn tensor_network_pair_matches_an_untruncated_chain_at_40_qubits() {
+    let circuit = cz_chain_circuit(40, 4, SEED);
+    let mut mps = MpsBackend::new(SEED, 64);
+    load_wide(&mut mps, &circuit);
+    let mut tn = TensorNetworkBackend::new(SEED);
+    load_wide(&mut tn, &circuit);
+    for subsystem in [[19usize, 20], [20, 19], [5, 30]] {
+        let expected = mps.reduced_density_matrix(&subsystem).unwrap();
+        let label = format!("{subsystem:?}");
+        assert_matrix_close(&rdm_of(&mut tn, &subsystem), &expected, TN_EPS, &label);
+        let from_terminal = terminal_rdm(BackendKind::TensorNetwork, &circuit, &subsystem);
+        assert_matrix_close(&from_terminal, &expected, TN_EPS, &label);
+    }
 }
 
 // Depolarizing noise on a Bell pair leaves the pair mixed, so the two-qubit

@@ -881,9 +881,9 @@ fn bench_gpu_noisy_readout_counts(c: &mut Criterion) {
 fn bench_stab_bts_device_counts_explicit(c: &mut Criterion) {
     let shot_sizes = bts_gpu_shot_sizes();
     let qubit_sizes: &[(usize, usize)] = if is_fast() {
-        &[(512, 12)]
+        &[(128, 12), (512, 12)]
     } else {
-        &[(512, 12), (1024, 12)]
+        &[(128, 12), (512, 12), (1024, 12)]
     };
 
     for &(n, rank) in qubit_sizes {

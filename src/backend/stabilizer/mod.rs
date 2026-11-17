@@ -916,8 +916,9 @@ impl StabilizerBackend {
     /// tableau index pass instead of two strided full-tableau scans per
     /// measurement.
     ///
-    /// Bit-identical to applying the measurements sequentially: a random
-    /// outcome invalidates the index, which is rebuilt before continuing.
+    /// Bit-identical to applying the measurements sequentially. The index keeps, per
+    /// measured qubit, one stabilizer row with X on it; after a random outcome only
+    /// the measurements whose row the collapse rewrote look for another.
     /// Returns, per measurement, whether the outcome was random, the X-support
     /// of the pivot row for random outcomes (empty unless `with_support`), and
     /// the outcome bit.
@@ -987,23 +988,102 @@ impl StabilizerBackend {
             num_meas,
         );
 
+        let mut row_changed = vec![false; n];
+        let mut changed_rows: Vec<usize> = Vec::new();
+        let mut lost = vec![0u64; nw];
+        let mut unseen = vec![0u64; nw];
+
+        // Fill `first_destab` for the measured qubits flagged in `want` from `rows`, one
+        // row-major pass that stops once every flag has a witness.
+        fn find_witnesses(
+            first_destab: &mut [usize],
+            want: &mut [u64],
+            mut pending: usize,
+            rows: impl Iterator<Item = usize>,
+            xz: &[u64],
+            stride: usize,
+            qubit_to_meas: &[usize],
+        ) {
+            for r in rows {
+                if pending == 0 {
+                    break;
+                }
+                let row = &xz[r * stride..r * stride + want.len()];
+                for (w, (&x_word, want_word)) in row.iter().zip(want.iter_mut()).enumerate() {
+                    let mut hits = x_word & *want_word;
+                    if hits == 0 {
+                        continue;
+                    }
+                    *want_word &= !hits;
+                    while hits != 0 {
+                        let q = w * 64 + hits.trailing_zeros() as usize;
+                        first_destab[qubit_to_meas[q]] = r;
+                        pending -= 1;
+                        hits &= hits - 1;
+                    }
+                }
+            }
+            want.fill(0);
+        }
+
         for mi in 0..num_meas {
             let (qubit, classical_bit) = measurements[mi];
             if first_destab[mi] != usize::MAX {
+                let word = qubit / 64;
+                let bit_mask = 1u64 << (qubit % 64);
+                changed_rows.clear();
+                changed_rows
+                    .extend((n..2 * n).filter(|&r| self.xz[r * stride + word] & bit_mask != 0));
                 let p_row = self.measure_qubit(qubit, classical_bit).unwrap();
                 is_random[mi] = true;
                 outcomes[mi] = self.classical_bits[classical_bit];
                 if with_support {
                     random_x_support[mi] = self.x_support(p_row - n);
                 }
-                build_index(
+                // The collapse rewrote only the stabilizer rows that carried X on
+                // `qubit`. A witness outside them, or one that still carries X on its
+                // qubit, stands. A lost witness may be replaced by any row; a qubit
+                // that had none can only gain one from the rewritten rows.
+                for &r in &changed_rows {
+                    row_changed[r - n] = true;
+                }
+                let (mut num_lost, mut num_unseen) = (0, 0);
+                for mj in mi + 1..num_meas {
+                    let target = measurements[mj].0;
+                    let target_word = target / 64;
+                    let target_mask = 1u64 << (target % 64);
+                    let witness = first_destab[mj];
+                    if witness == usize::MAX {
+                        unseen[target_word] |= target_mask;
+                        num_unseen += 1;
+                    } else if row_changed[witness - n]
+                        && self.xz[witness * stride + target_word] & target_mask == 0
+                    {
+                        first_destab[mj] = usize::MAX;
+                        lost[target_word] |= target_mask;
+                        num_lost += 1;
+                    }
+                }
+                for &r in &changed_rows {
+                    row_changed[r - n] = false;
+                }
+                find_witnesses(
                     &mut first_destab,
+                    &mut lost,
+                    num_lost,
+                    n..2 * n,
                     &self.xz,
-                    &qubit_to_meas,
-                    n,
-                    nw,
                     stride,
-                    num_meas,
+                    &qubit_to_meas,
+                );
+                find_witnesses(
+                    &mut first_destab,
+                    &mut unseen,
+                    num_unseen,
+                    changed_rows.iter().copied(),
+                    &self.xz,
+                    stride,
+                    &qubit_to_meas,
                 );
             }
         }

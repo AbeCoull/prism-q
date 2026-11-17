@@ -574,6 +574,8 @@ impl GpuTableau {
         Ok(())
     }
 
+    /// Borrow the rows, phases and measurement run buffers together.
+    ///
     /// # Panics
     /// When [`Self::ensure_measure_run`] has not run on this tableau.
     pub(crate) fn xz_phase_run_mut(

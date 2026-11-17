@@ -70,8 +70,8 @@ mod tests;
 
 use kernels::{MIN_WORDS_FOR_BATCH, rowmul_words};
 
-/// Most collapses a device measurement run launches between two random-mask
-/// readbacks. The chunk starts at one and doubles, so a run that one collapse settles
+/// Most collapses a device measurement run launches between two readbacks of the
+/// random mask. The chunk starts at one and doubles, so a run that one collapse settles
 /// wastes one target of launches and an all-random run pays `log2` of this plus
 /// `M / 256` readbacks.
 #[cfg(feature = "gpu")]
@@ -524,9 +524,10 @@ impl StabilizerBackend {
     /// host reads back only the random mask between chunks of collapses. A target whose
     /// mask bit is clear stays deterministic for the rest of the run and is resolved at
     /// the end: from the stabilizer signs in two launches when the last mask is empty
-    /// (every stabilizer is diagonal), otherwise by the serial kernel. The random bits are drawn up front from a clone of the RNG and taken in
-    /// collapse order, and the RNG then advances by the number taken, so outcomes match
-    /// the host run bit for bit under one seed.
+    /// (every stabilizer is diagonal), otherwise by the serial kernel. The random bits
+    /// are drawn up front from a clone of the RNG and taken in collapse order, and the
+    /// RNG then advances by the number taken, so outcomes match the host run bit for
+    /// bit under one seed.
     #[cfg(feature = "gpu")]
     fn apply_measure_run_gpu(&mut self, run: &[Instruction]) -> Result<()> {
         use crate::gpu::kernels::stabilizer as k;

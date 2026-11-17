@@ -1509,6 +1509,22 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
             });
         },
     );
+
+    // Random pairs leave a dense tableau, so nearly every outcome is random and each
+    // collapse rewrites most stabilizer rows, where the wall above keeps rows local.
+    for &n in &[500, 1000] {
+        let mut circuit = circuits::clifford_random_pairs(n, 20, SEED);
+        circuit.measure_all();
+        group.bench_with_input(
+            BenchmarkId::new("dense_measure_all", n),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+                });
+            },
+        );
+    }
     group.finish();
 }
 

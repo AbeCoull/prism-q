@@ -1964,6 +1964,61 @@ fn stabilizer_gpu_partial_measure_runs_match_cpu() {
     );
 }
 
+/// Push `CX(k, k + 1)` for `k` in `start..end`.
+fn push_cx_chain(circuit: &mut Vec<Instruction>, start: usize, end: usize) {
+    circuit.extend((start..end).map(|k| g(Gate::Cx, &[k, k + 1])));
+}
+
+/// Run `instructions` through `apply_instructions` on the host and on the device and
+/// require the exported tableaus to match word for word.
+fn stab_chain_compare(f: &Fixture, num_qubits: usize, instructions: &[Instruction]) {
+    use prism_q::StabilizerBackend;
+
+    let mut cpu = StabilizerBackend::new(42);
+    cpu.init(num_qubits, 0).unwrap();
+    cpu.apply_instructions(instructions).unwrap();
+    let mut gpu = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    gpu.init(num_qubits, 0).unwrap();
+    gpu.apply_instructions(instructions).unwrap();
+    assert_eq!(cpu.export_tableau().unwrap(), gpu.export_tableau().unwrap());
+}
+
+// Chains inside one word, across one boundary, and ending on the last qubit, each
+// over a random layer so every row carries X and Z bits on the chain. A gate queued
+// right after a chain checks that the chain is not reordered past it.
+#[test]
+fn stabilizer_gpu_cx_chain_100_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 100;
+    let mut circuit = prism_q::circuits::clifford_random_pairs(n, 2, 11).instructions;
+    push_cx_chain(&mut circuit, 10, 40);
+    circuit.push(g(Gate::H, &[25]));
+    push_cx_chain(&mut circuit, 45, 99);
+    stab_chain_compare(&f, n, &circuit);
+}
+
+#[test]
+fn stabilizer_gpu_cx_chain_130_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 130;
+    let mut circuit = prism_q::circuits::clifford_random_pairs(n, 2, 12).instructions;
+    push_cx_chain(&mut circuit, 5, 121);
+    circuit.push(g(Gate::S, &[64]));
+    push_cx_chain(&mut circuit, 70, 129);
+    stab_chain_compare(&f, n, &circuit);
+}
+
+#[test]
+fn stabilizer_gpu_cx_chain_1000_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 1000;
+    let mut circuit = prism_q::circuits::clifford_random_pairs(n, 2, 13).instructions;
+    push_cx_chain(&mut circuit, 37, 961);
+    circuit.push(g(Gate::Cz, &[500, 37]));
+    push_cx_chain(&mut circuit, 300, 999);
+    stab_chain_compare(&f, n, &circuit);
+}
+
 // ============================================================================
 // Stabilizer GPU public dispatch
 // ============================================================================

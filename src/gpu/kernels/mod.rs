@@ -343,6 +343,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     // Stabilizer tableau kernels.
     "stab_set_initial_tableau",
     "stab_apply_word_grouped",
+    "stab_apply_cx_chain",
     "stab_rowmul_words",
     "stab_measure_find_pivot",
     "stab_measure_cascade",

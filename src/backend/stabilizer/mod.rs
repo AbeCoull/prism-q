@@ -464,14 +464,41 @@ impl StabilizerBackend {
         Ok(())
     }
 
-    /// Device instruction loop: a measurement run of at least
-    /// `MIN_MEASURES_FOR_BATCH` goes through [`Self::apply_measure_run_gpu`], the same
-    /// spans the host batches; everything else takes `apply`.
+    /// Device instruction loop: a `CX(k, k + 1)` chain of at least `MIN_CX_CHAIN` takes
+    /// the chain kernel and a measurement run of at least `MIN_MEASURES_FOR_BATCH` goes
+    /// through [`Self::apply_measure_run_gpu`], the same spans the host batches;
+    /// everything else takes `apply`.
     #[cfg(feature = "gpu")]
     fn apply_instructions_gpu(&mut self, instructions: &[Instruction]) -> Result<()> {
-        use kernels::batch::MIN_MEASURES_FOR_BATCH;
+        use kernels::batch::{MIN_CX_CHAIN, MIN_MEASURES_FOR_BATCH, cx_chain_len};
         let mut idx = 0;
         while idx < instructions.len() {
+            if let Instruction::Gate {
+                gate: Gate::Cx,
+                targets,
+            } = &instructions[idx]
+            {
+                let chain = cx_chain_len(&instructions[idx..]);
+                if chain >= MIN_CX_CHAIN {
+                    self.flush_gpu_ops()?;
+                    let ctx = self
+                        .gpu_context
+                        .as_ref()
+                        .expect("apply_instructions_gpu called without gpu_context");
+                    let Some(tableau) = self.gpu_tableau.as_mut() else {
+                        unreachable!("apply_instructions_gpu called without gpu_tableau")
+                    };
+                    let start = targets[0];
+                    crate::gpu::kernels::stabilizer::launch_cx_chain(
+                        ctx,
+                        tableau,
+                        start,
+                        start + chain,
+                    )?;
+                    idx += chain;
+                    continue;
+                }
+            }
             if matches!(instructions[idx], Instruction::Measure { .. })
                 && matches!(
                     instructions.get(idx + MIN_MEASURES_FOR_BATCH - 1),

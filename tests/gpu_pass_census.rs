@@ -124,19 +124,18 @@ fn stabilizer_ghz_measure_all_runs_one_collapse_on_the_device() {
     };
     let mut circuit = prism_q::circuits::ghz_circuit(1000);
     circuit.measure_all();
-    // Init, then 16 Clifford batches (a flush at each of the 15 word boundaries the CX
-    // chain crosses, plus the final one), each uploading 4 tables. The measure run
-    // uploads its state once. The first random mask has every bit set, so qubit 0
+    // Init, one Clifford batch for H(0) that uploads 4 tables, and one launch of the CX
+    // chain kernel with no upload. The measure run uploads its state once. The first random mask has every bit set, so qubit 0
     // collapses (pivot, cascade, fixup); the second mask is clear, so every stabilizer
     // is diagonal and the other 999 outcomes come from the sign accumulation and its
     // readout, two launches. Drains: two masks and one readback of the run.
     assert_eq!(
         stabilizer_census_of(&ctx, &circuit),
         GpuPassCensus {
-            launches: 1 + 16 + 2 + 3 + 2,
-            passes: 1 + 16 + 2 + 1 + 1,
+            launches: 1 + 1 + 1 + 2 + 3 + 2,
+            passes: 1 + 1 + 1 + 2 + 1 + 1,
             drains: 2 + 1,
-            uploads: 16 * 4 + 1,
+            uploads: 4 + 1,
             dense_2q: 0,
             tiles: 0,
         }

@@ -790,3 +790,86 @@ extern "C" __global__ void stab_run_det_outcomes(
     unsigned int q = stab_run_targets(run)[m];
     stab_run_outcomes(run, num_meas)[m] = (unsigned int)((acc[q >> 6] >> (q & 63u)) & 1ULL);
 }
+
+// ============================================================================
+// CX chains
+// ============================================================================
+//
+// `CX(k, k + 1)` for `k` in `start..end`, in that order, with one thread per row walking
+// words `start / 64 ..= end / 64` in series. Port of `apply_cx_chain` and
+// `GateRows::apply_cx_chain_run` in src/backend/stabilizer/kernels/batch.rs.
+
+// The chain over bits `first..last` of one word. Control k reads the prefix parity of
+// the original X bits from `first`, each target's bits are the originals, and each
+// control's Z bit is still its original, so every phase term comes from the input
+// words alone.
+__device__ __forceinline__ void stab_cx_chain_word(
+    unsigned long long *xw,
+    unsigned long long *zw,
+    unsigned int *p,
+    int first,
+    int last
+) {
+    unsigned long long range = (~0ULL >> (63 - last)) & (~0ULL << first);
+    unsigned long long controls = range & ~(1ULL << last);
+    unsigned long long prefix = *xw & range;
+    prefix ^= prefix << 1;
+    prefix ^= prefix << 2;
+    prefix ^= prefix << 4;
+    prefix ^= prefix << 8;
+    prefix ^= prefix << 16;
+    prefix ^= prefix << 32;
+    prefix &= range;
+    unsigned long long z = *zw;
+    unsigned long long x = *xw;
+    unsigned long long terms = prefix & controls & (z >> 1) & ~((x >> 1) ^ z);
+    *p ^= (unsigned int)__popcll((long long)terms) & 1u;
+    *xw = (x & ~range) | prefix;
+    *zw = (z & ~controls) | ((z ^ (z >> 1)) & controls);
+}
+
+// The prefix parity of each word carries into the next word's low bit, and the gate
+// across the boundary runs between the two words: its control is that carry, its
+// target's bits are read before anything touches them, and its control's Z bit is
+// the original because the chain inside a word never writes the last bit of its range.
+extern "C" __global__ void stab_apply_cx_chain(
+    unsigned long long *xz,
+    unsigned char *phase,
+    int num_rows,
+    int num_words,
+    int start,
+    int end
+) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+    unsigned long long *rx = xz + stab_row(row, 2 * num_words);
+    unsigned long long *rz = rx + num_words;
+    int ws = start / 64;
+    int we = end / 64;
+    unsigned int p = 0u;
+    unsigned long long carry = 0ULL;
+    for (int w = ws; w <= we; ++w) {
+        int lo = (w == ws) ? start % 64 : 0;
+        int hi = (w == we) ? end % 64 : 63;
+        unsigned long long z_next = (w < we) ? (rz[w + 1] & 1ULL) : 0ULL;
+        unsigned long long xw = rx[w] ^ carry;
+        unsigned long long zw = rz[w];
+        if ((xw | zw) == 0ULL && z_next == 0ULL) {
+            if (carry != 0ULL) rx[w] = 0ULL;
+            carry = 0ULL;
+            continue;
+        }
+        stab_cx_chain_word(&xw, &zw, &p, lo, hi);
+        if (w < we) {
+            unsigned long long x_next = rx[w + 1] & 1ULL;
+            unsigned long long control = xw >> 63;
+            unsigned long long z_control = zw >> 63;
+            p ^= (unsigned int)((control & z_next & ~(x_next ^ z_control)) & 1ULL);
+            zw ^= z_next << 63;
+            carry = control;
+        }
+        rx[w] = xw;
+        rz[w] = zw;
+    }
+    if (p != 0u) phase[row] ^= 1;
+}

@@ -942,3 +942,40 @@ pub(crate) fn launch_run_diagonal_finish(
     ctx.device().count_launch(0);
     Ok(())
 }
+
+/// Apply `CX(k, k + 1)` for `k` in `start..end` in one launch with no upload, in place
+/// of a word group flush at each word boundary the chain crosses.
+pub(crate) fn launch_cx_chain(
+    ctx: &GpuContext,
+    tableau: &mut GpuTableau,
+    start: usize,
+    end: usize,
+) -> Result<()> {
+    let (stream, func) = stream_and_fn(ctx, "stab_apply_cx_chain")?;
+    let rows_usize = tableau.total_rows();
+    let num_rows = require_i32("stab_apply_cx_chain", "num_rows", rows_usize)?;
+    let nw = require_i32("stab_apply_cx_chain", "num_words", tableau.num_words())?;
+    let start_i = require_i32("stab_apply_cx_chain", "start", start)?;
+    let end_i = require_i32("stab_apply_cx_chain", "end", end)?;
+    let blocks = div_ceil_grid("stab_apply_cx_chain", "num_rows", rows_usize, BLOCK_SIZE)?;
+
+    let (xz_buf, phase_buf) = tableau.xz_phase_mut();
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(xz_buf.raw_mut())
+        .arg(phase_buf.raw_mut())
+        .arg(&num_rows)
+        .arg(&nw)
+        .arg(&start_i)
+        .arg(&end_i);
+    // SAFETY: signature (u64*, u8*, i32, i32, i32, i32). Thread `r` alone reads and
+    // writes row `r` and phase[r], and `end` is below num_qubits, so every word index
+    // stays inside the row.
+    unsafe {
+        builder
+            .launch(linear_cfg(BLOCK_SIZE, blocks))
+            .map_err(|e| driver_err("stab_apply_cx_chain", e))?;
+    }
+    ctx.device().count_launch(1);
+    Ok(())
+}

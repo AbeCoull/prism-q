@@ -10,7 +10,7 @@ use std::sync::Arc;
 use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 
 use crate::error::Result;
-use crate::gpu::GpuBuffer;
+use crate::gpu::{GpuBuffer, GpuDevice};
 use crate::sim::compiled::parity::SparseParity;
 use crate::sim::compiled::rng::Xoshiro256PlusPlus;
 use crate::sim::compiled::shot_tail_mask;
@@ -198,6 +198,7 @@ impl GpuBtsCache {
     #[allow(clippy::too_many_arguments)]
     fn launch_sample_chunk(
         &mut self,
+        device: &GpuDevice,
         stream: &Arc<CudaStream>,
         func: &CudaFunction,
         rank: usize,
@@ -220,6 +221,7 @@ impl GpuBtsCache {
                     &mut random_bits_view,
                 )
                 .map_err(|e| driver_err("upload bts random_bits", e))?;
+            device.count_upload();
         }
 
         let num_meas_i = require_i32("bts_sample_meas_major", "num_meas", num_meas)?;
@@ -273,6 +275,7 @@ impl GpuBtsCache {
                 .launch(cfg)
                 .map_err(|e| driver_err("bts_sample_meas_major", e))?;
         }
+        device.count_launch(0);
         Ok(())
     }
 }
@@ -382,7 +385,16 @@ pub(crate) fn launch_bts_sample(
         cache.ensure_chunk_capacity(ctx, chunk_random_len, chunk_output_len)?;
         cache.fill_random_bits(rng, rank, chunk_shots, chunk_s_words);
 
-        cache.launch_sample_chunk(stream, &func, rank, chunk_shots, chunk_s_words, 0, None)?;
+        cache.launch_sample_chunk(
+            ctx.device(),
+            stream,
+            &func,
+            rank,
+            chunk_shots,
+            chunk_s_words,
+            0,
+            None,
+        )?;
 
         stream
             .memcpy_dtoh(
@@ -393,6 +405,7 @@ pub(crate) fn launch_bts_sample(
                 &mut cache.chunk_output_host[..chunk_output_len.max(1)],
             )
             .map_err(|e| driver_err("bts output dtoh", e))?;
+        ctx.device().count_drain();
 
         let chunk_word_offset = shots_done / 64;
         for m in 0..num_meas {
@@ -438,6 +451,7 @@ pub(crate) fn launch_bts_sample_device(
         cache.fill_random_bits(rng, rank, chunk_shots, chunk_s_words);
 
         cache.launch_sample_chunk(
+            device,
             stream,
             &func,
             rank,
@@ -503,6 +517,7 @@ pub(crate) fn launch_bts_transpose_meas_to_shot(
                 .launch(cfg)
                 .map_err(|e| driver_err("bts_transpose_meas_to_shot", e))?;
         }
+        ctx.device().count_launch(0);
     }
     Ok(shot_major)
 }
@@ -626,6 +641,7 @@ pub(crate) fn generate_and_apply_noise_masks_meas_major_by_row(
             .launch(cfg)
             .map_err(|e| driver_err("bts_generate_and_apply_noise_meas_major_by_row", e))?;
     }
+    ctx.device().count_launch(0);
     Ok(())
 }
 
@@ -706,6 +722,7 @@ pub(crate) fn apply_noise_masks_meas_major(
             .launch(cfg)
             .map_err(|e| driver_err("bts_apply_noise_masks_meas_major", e))?;
     }
+    ctx.device().count_launch(0);
     Ok(())
 }
 
@@ -761,6 +778,7 @@ pub(crate) fn apply_readout_meas_major(
                 .launch(cfg)
                 .map_err(|e| driver_err("bts_apply_readout_meas_major", e))?;
         }
+        ctx.device().count_launch(0);
     }
     Ok(())
 }
@@ -826,6 +844,7 @@ pub(crate) fn count_meas_major_marginals(
             .launch(cfg)
             .map_err(|e| driver_err("bts_popcount_rows", e))?;
     }
+    ctx.device().count_launch(0);
 
     row_counts.copy_to_host(device, &mut host_counts)?;
     Ok(host_counts)
@@ -864,6 +883,7 @@ fn count_used_slots(
             .launch(cfg)
             .map_err(|e| driver_err("bts_count_used_slots", e))?;
     }
+    ctx.device().count_launch(0);
 
     let mut used_host = [0u32; 1];
     used_out.copy_to_host(device, &mut used_host)?;
@@ -980,6 +1000,7 @@ fn compact_count_table(
             .launch(compact_cfg)
             .map_err(|e| driver_err("bts_compact_counts_upto8", e))?;
     }
+    ctx.device().count_launch(0);
 
     let mut out_len_host = [0u32; 1];
     out_len.copy_to_host(device, &mut out_len_host)?;
@@ -1055,6 +1076,7 @@ pub(crate) fn try_count_shot_major(
             .launch(cfg)
             .map_err(|e| driver_err("bts_count_shot_major_upto8", e))?;
     }
+    ctx.device().count_launch(0);
 
     table.finish(ctx, m_words, raw_transfer_bytes)
 }
@@ -1136,6 +1158,7 @@ pub(crate) fn try_count_meas_major(
             .launch(cfg)
             .map_err(|e| driver_err("bts_count_meas_major_upto8", e))?;
     }
+    ctx.device().count_launch(0);
 
     table.finish(ctx, m_words, raw_transfer_bytes)
 }

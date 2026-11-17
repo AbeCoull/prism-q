@@ -269,8 +269,10 @@ pub struct GpuPassCensus {
     pub launches: u64,
     /// Sweeps over the state; a finalize over block partials is a launch with none.
     pub passes: u64,
-    /// Host copies, each of which waits for every queued kernel to finish.
+    /// Readbacks to the host, each of which waits for every queued kernel to finish.
     pub drains: u64,
+    /// Uploads from the host, which return without waiting for the stream.
+    pub uploads: u64,
     /// Launches of the dense 4x4 kernel, a subset of `launches`.
     pub dense_2q: u64,
     /// Launches of the mixed shared-memory tile kernel, a subset of `launches`.
@@ -286,6 +288,7 @@ impl std::ops::Sub for GpuPassCensus {
             launches: self.launches - earlier.launches,
             passes: self.passes - earlier.passes,
             drains: self.drains - earlier.drains,
+            uploads: self.uploads - earlier.uploads,
             dense_2q: self.dense_2q - earlier.dense_2q,
             tiles: self.tiles - earlier.tiles,
         }
@@ -305,6 +308,9 @@ pub struct GpuState {
     /// Reused across `probabilities()` calls so shot sampling does not reallocate `2^n`
     /// f64s per read.
     probs_scratch: std::cell::RefCell<Option<GpuBuffer<f64>>>,
+    /// Measurements decided on the device: the pending norm at index 0, then one outcome
+    /// per slot, read back once per run of deferred measurements.
+    measure_log: Option<GpuBuffer<f64>>,
 }
 
 impl GpuState {
@@ -327,6 +333,7 @@ impl GpuState {
             num_qubits,
             pending_norm: 1.0,
             probs_scratch: std::cell::RefCell::new(None),
+            measure_log: None,
         };
         kernels::dense::launch_set_initial_state(&context, &mut state)?;
         Ok(state)
@@ -345,6 +352,7 @@ impl GpuState {
             num_qubits,
             pending_norm: 1.0,
             probs_scratch: std::cell::RefCell::new(None),
+            measure_log: None,
         })
     }
 
@@ -359,6 +367,7 @@ impl GpuState {
             num_qubits: self.num_qubits,
             pending_norm: self.pending_norm,
             probs_scratch: std::cell::RefCell::new(None),
+            measure_log: None,
         })
     }
 

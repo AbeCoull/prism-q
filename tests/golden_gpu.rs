@@ -857,8 +857,13 @@ fn qft_block_all_flag_forms_and_offsets_match_cpu() {
                         + u64::from(big_endian != (swaps || inverse));
                     let passes = device_qft_passes(start, num) + reversals;
                     assert_eq!(
-                        (census.launches, census.passes, census.drains),
-                        (passes, passes, 1),
+                        (
+                            census.launches,
+                            census.passes,
+                            census.drains,
+                            census.uploads
+                        ),
+                        (passes, passes, 0, 1),
                         "census n={n} start={start} num={num} form={form}"
                     );
                 }
@@ -3687,7 +3692,7 @@ fn mixed_tiles_split_at_measurements_and_match_cpu() {
     circuit.add_gate(Gate::Cx, &[n - 1, 2]);
     if let Some(census) = compare_lowered(&f, &circuit) {
         assert!(census.tiles >= 2);
-        assert!(census.drains >= 2);
+        assert_eq!(census.drains, 1, "both outcomes come back in one readback");
     }
 }
 
@@ -3748,5 +3753,47 @@ fn prepared_device_runs_replay_the_lowered_stream() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn deferred_device_measurements_match_immediate_ones_bit_for_bit() {
+    use prism_q::circuit::ClassicalCondition;
+
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 12;
+    let mut circuit = prism_q::circuits::random_circuit(n, 4, common::SEED);
+    circuit.num_classical_bits = 6;
+    for round in 0..3 {
+        circuit.add_measure(round, round);
+        circuit.add_reset(round + 3);
+        circuit.instructions.push(Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(round),
+            gate: Gate::H,
+            targets: smallvec![round + 6],
+        });
+        circuit.add_gate(Gate::Rx(0.3 + 0.1 * round as f64), &[round + 6]);
+        circuit.add_gate(Gate::Cx, &[round + 6, round + 9]);
+        circuit.add_measure(round + 9, round + 3);
+    }
+
+    let mut deferred = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    deferred.init(n, circuit.num_classical_bits).unwrap();
+    deferred.apply_instructions(&circuit.instructions).unwrap();
+
+    let mut immediate = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    immediate.init(n, circuit.num_classical_bits).unwrap();
+    for inst in &circuit.instructions {
+        immediate.apply(inst).unwrap();
+    }
+
+    assert_eq!(deferred.classical_results(), immediate.classical_results());
+    let got = deferred.export_statevector().unwrap();
+    let want = immediate.export_statevector().unwrap();
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            g.re.to_bits() == w.re.to_bits() && g.im.to_bits() == w.im.to_bits(),
+            "amplitude {i}: deferred {g} immediate {w}"
+        );
     }
 }

@@ -1,4 +1,4 @@
-//! Kernel launches, state passes and stream drains per `gpu/throughput` row.
+//! Kernel launches, state passes, stream drains and uploads per `gpu/throughput` row.
 //!
 //! Counts only, no timing: each row expands and fuses the circuit as `simulate` does for
 //! the device backend, applies it once to a resident state, and prints the counter
@@ -53,8 +53,17 @@ fn fuse_for(backend: &StatevectorBackend, circuit: &Circuit) -> Circuit {
 fn main() {
     let ctx = GpuContext::new(0).expect("no usable GPU");
     println!(
-        "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>8} {:>6}",
-        "circuit", "n", "gates", "fused", "launches", "passes", "drains", "dense2q", "tiles"
+        "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>7} {:>8} {:>6}",
+        "circuit",
+        "n",
+        "gates",
+        "fused",
+        "launches",
+        "passes",
+        "drains",
+        "uploads",
+        "dense2q",
+        "tiles"
     );
     for name in CIRCUITS {
         let sizes: &[usize] = if name == "diag_mixed_l6" {
@@ -76,7 +85,7 @@ fn main() {
             ctx.synchronize().unwrap();
             let census = ctx.pass_census() - before;
             println!(
-                "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>8} {:>6}",
+                "{:<12} {:>3} {:>7} {:>7} {:>9} {:>7} {:>7} {:>7} {:>8} {:>6}",
                 name,
                 n,
                 circuit.instructions.len(),
@@ -84,6 +93,7 @@ fn main() {
                 census.launches,
                 census.passes,
                 census.drains,
+                census.uploads,
                 census.dense_2q,
                 census.tiles
             );

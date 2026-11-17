@@ -487,10 +487,9 @@ extern "C" __global__ void measure_prob_one(
 // at `result[0]`. Caller launches with a single block of `blockDim.x` threads;
 // each thread loops with stride `blockDim.x` over `partials` to accumulate.
 // Replaces a num_blocks-element D2H plus a host sum with one 8-byte D2H.
-extern "C" __global__ void measure_prob_one_finalize(
-    const double *partials, unsigned int count, double *result)
+__device__ __forceinline__ double sum_partials(
+    const double *partials, unsigned int count, double *sdata)
 {
-    extern __shared__ double sdata[];
     unsigned int tid = threadIdx.x;
     double s = 0.0;
     for (unsigned int i = tid; i < count; i += blockDim.x) {
@@ -502,7 +501,36 @@ extern "C" __global__ void measure_prob_one_finalize(
         if (tid < stride) sdata[tid] += sdata[tid + stride];
         __syncthreads();
     }
-    if (tid == 0) result[0] = sdata[0];
+    return sdata[0];
+}
+
+extern "C" __global__ void measure_prob_one_finalize(
+    const double *partials, unsigned int count, double *result)
+{
+    extern __shared__ double sdata[];
+    double s = sum_partials(partials, count, sdata);
+    if (threadIdx.x == 0) result[0] = s;
+}
+
+// measure_decide: the host's measurement step on the device. log[0] holds the pending
+// norm; the outcome goes to log[1 + slot] as 0.0 or 1.0 and the updated norm back to
+// log[0]. Each operation is rounded as the host rounds it (no contraction), so the
+// outcome and norm match a host decision on the same reduction bit for bit.
+extern "C" __global__ void measure_decide(
+    const double *partials, unsigned int count, double *log, int slot, double u,
+    double clamp_min)
+{
+    extern __shared__ double sdata[];
+    double p_raw = sum_partials(partials, count, sdata);
+    if (threadIdx.x != 0) return;
+    double norm = log[0];
+    double prob = __dmul_rn(p_raw, __dmul_rn(norm, norm));
+    prob = prob < 0.0 ? 0.0 : (prob > 1.0 ? 1.0 : prob);
+    int outcome = u < prob;
+    double p_out = outcome ? prob : __dsub_rn(1.0, prob);
+    p_out = p_out < clamp_min ? clamp_min : (p_out > 1.0 ? 1.0 : p_out);
+    log[0] = __dmul_rn(norm, __ddiv_rn(1.0, __dsqrt_rn(p_out)));
+    log[1 + slot] = outcome ? 1.0 : 0.0;
 }
 
 // rdm_qubit: per-block reduction of the four 1q reduced-density-matrix sums over
@@ -785,6 +813,40 @@ extern "C" __global__ void measure_collapse(
         state[i].x = 0.0;
         state[i].y = 0.0;
     }
+}
+
+// measure_collapse_logged: measure_collapse with the outcome read from log[1 + slot].
+
+extern "C" __global__ void measure_collapse_logged(
+    double2 *state, unsigned long long dim, int qubit, const double *log, int slot)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= dim) return;
+    int outcome = log[1 + slot] != 0.0;
+    int bit = (int)((i >> qubit) & 1ULL);
+    if (bit != outcome) {
+        state[i].x = 0.0;
+        state[i].y = 0.0;
+    }
+}
+
+// reset_fold_logged: collapse to the outcome in log[1 + slot], then move the kept half
+// to |0> on `qubit` and zero |1>, the collapse plus X of a host reset in one pass. Launch
+// over the 2^(n-1) amplitude pairs.
+
+extern "C" __global__ void reset_fold_logged(
+    double2 *state, unsigned long long pairs, int qubit, const double *log, int slot)
+{
+    unsigned long long p = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= pairs) return;
+    unsigned long long low = p & ((1ULL << qubit) - 1ULL);
+    unsigned long long i0 = ((p >> qubit) << (qubit + 1)) | low;
+    unsigned long long i1 = i0 | (1ULL << qubit);
+    if (log[1 + slot] != 0.0) {
+        state[i0] = state[i1];
+    }
+    state[i1].x = 0.0;
+    state[i1].y = 0.0;
 }
 
 // compute_probabilities: out[i] = (amp.x² + amp.y²) * norm_sq for every basis state.

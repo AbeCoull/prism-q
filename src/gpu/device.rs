@@ -36,6 +36,7 @@ struct PassCounters {
     launches: AtomicU64,
     passes: AtomicU64,
     drains: AtomicU64,
+    uploads: AtomicU64,
     dense_2q: AtomicU64,
     tiles: AtomicU64,
 }
@@ -168,12 +169,21 @@ impl GpuDevice {
         let _ = passes;
     }
 
-    /// Record one host copy, which waits for the stream to drain. Compiles to nothing
-    /// without `bench-internal`.
+    /// Record one readback to the host, which waits for the stream to drain. Compiles
+    /// to nothing without `bench-internal`.
     #[inline(always)]
     pub(crate) fn count_drain(&self) {
         #[cfg(feature = "bench-internal")]
         self.census.drains.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one upload from the host. An upload from pageable memory is staged and
+    /// returns without waiting for the stream. Compiles to nothing without
+    /// `bench-internal`.
+    #[inline(always)]
+    pub(crate) fn count_upload(&self) {
+        #[cfg(feature = "bench-internal")]
+        self.census.uploads.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one launch of the dense 4x4 kernel, on top of its `count_launch`. Compiles
@@ -198,6 +208,7 @@ impl GpuDevice {
             launches: self.census.launches.load(Ordering::Relaxed),
             passes: self.census.passes.load(Ordering::Relaxed),
             drains: self.census.drains.load(Ordering::Relaxed),
+            uploads: self.census.uploads.load(Ordering::Relaxed),
             dense_2q: self.census.dense_2q.load(Ordering::Relaxed),
             tiles: self.census.tiles.load(Ordering::Relaxed),
         }

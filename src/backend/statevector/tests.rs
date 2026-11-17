@@ -1798,6 +1798,53 @@ mod gpu_scaffold {
         }
     }
 
+    // An upload from pageable memory is staged and returns without waiting for the
+    // stream; a readback waits for it. The pass census counts drains on that basis.
+    #[test]
+    fn small_uploads_return_before_queued_kernels_and_readbacks_wait() {
+        use crate::gpu::GpuBuffer;
+        use std::time::Instant;
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        let n = 24;
+        let mut gpu = StatevectorBackend::new(42).with_gpu(ctx.clone());
+        gpu.init(n, 0).unwrap();
+        let gates: Vec<Instruction> = (0..200)
+            .map(|i| Instruction::Gate {
+                gate: Gate::H,
+                targets: crate::circuit::smallvec![i % n],
+            })
+            .collect();
+        let device = ctx.device();
+        let host = [7u64; 64];
+        let mut back = [0u64; 64];
+        let mut buffer = GpuBuffer::<u64>::alloc_zeros(device, host.len()).unwrap();
+        ctx.synchronize().unwrap();
+
+        gpu.apply_instructions(&gates).unwrap();
+        let start = Instant::now();
+        buffer.copy_from_host(device, &host).unwrap();
+        let upload = start.elapsed();
+        ctx.synchronize().unwrap();
+        let queue = start.elapsed();
+
+        gpu.apply_instructions(&gates).unwrap();
+        let start = Instant::now();
+        buffer.copy_to_host(device, &mut back).unwrap();
+        let readback = start.elapsed();
+
+        assert_eq!(back, host);
+        assert!(
+            upload * 10 < queue,
+            "upload {upload:?} waited on a queue of {queue:?}"
+        );
+        assert!(
+            readback * 2 > queue,
+            "readback {readback:?} returned ahead of a queue of {queue:?}"
+        );
+    }
+
     #[test]
     fn gpu_group_moments_match_host() {
         let Some(ctx) = device_or_skip() else {

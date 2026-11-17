@@ -648,16 +648,36 @@ fn bench_stab_direct_gpu_clifford_d10(c: &mut Criterion) {
     group.finish();
 }
 
+fn ghz_measure_sizes() -> &'static [usize] {
+    if is_fast() {
+        &[512]
+    } else {
+        &[200, 1000, 2000, 10000]
+    }
+}
+
+/// Host twin of `gpu_stab/ghz_measure`, same circuits through `simulate(...).run()`.
+fn bench_stab_cpu_ghz_measure(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gpu_stab_cpu/ghz_measure");
+    configure_group(&mut group);
+    for &n in ghz_measure_sizes() {
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.measure_all();
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
 /// GHZ-measure stress test: one H + chained CX over n qubits, then measure
 /// every qubit. The group skips unless the process was launched with a low
 /// enough `PRISM_STABILIZER_GPU_MIN_QUBITS` value to reach the GPU path.
 fn bench_stab_gpu_ghz_measure(c: &mut Criterion) {
     let Some(ctx) = shared_ctx() else { return };
-    let sizes: &[usize] = if is_fast() {
-        &[512]
-    } else {
-        &[200, 1000, 2000]
-    };
+    let sizes = ghz_measure_sizes();
     if !stabilizer_dispatch_enabled(
         "gpu_stab/ghz_measure",
         sizes.iter().copied().max().unwrap_or(0),
@@ -675,6 +695,76 @@ fn bench_stab_gpu_ghz_measure(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 run_with(kind.clone(), circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+fn scrambled_measure_sizes() -> &'static [usize] {
+    if is_fast() { &[2000] } else { &[2000, 4000] }
+}
+
+/// `clifford_random_pairs(n, 20)` and a measurement of every qubit, split so the
+/// preparation can run untimed.
+fn scrambled_measure_all(n: usize) -> (Vec<Instruction>, Vec<Instruction>) {
+    let prep = circuits::clifford_random_pairs(n, 20, SEED).instructions;
+    let measures = (0..n)
+        .map(|q| Instruction::Measure {
+            qubit: q,
+            classical_bit: q,
+        })
+        .collect();
+    (prep, measures)
+}
+
+/// Host twin of `gpu_stab_direct/scrambled_measure_all`: the dense state is prepared
+/// untimed and only the measure run is timed.
+fn bench_stab_direct_cpu_scrambled_measure_all(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gpu_stab_direct_cpu/scrambled_measure_all");
+    configure_group(&mut group);
+    for &n in scrambled_measure_sizes() {
+        let (prep, measures) = scrambled_measure_all(n);
+        group.bench_function(BenchmarkId::from_parameter(n), |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut backend = StabilizerBackend::new(42);
+                    backend.init(n, n).unwrap();
+                    backend.apply_instructions(&prep).unwrap();
+                    let start = Instant::now();
+                    backend.apply_instructions(&measures).unwrap();
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Device measure run on a dense state: preparation untimed, then the run of `n`
+/// measurements timed up to a synchronize.
+fn bench_stab_direct_gpu_scrambled_measure_all(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu_stab_direct/scrambled_measure_all");
+    configure_group(&mut group);
+    for &n in scrambled_measure_sizes() {
+        let (prep, measures) = scrambled_measure_all(n);
+        group.bench_function(BenchmarkId::from_parameter(n), |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut backend = StabilizerBackend::new(42).with_gpu(ctx.clone());
+                    backend.init(n, n).unwrap();
+                    backend.apply_instructions(&prep).unwrap();
+                    ctx.synchronize().unwrap();
+                    let start = Instant::now();
+                    backend.apply_instructions(&measures).unwrap();
+                    ctx.synchronize().unwrap();
+                    total += start.elapsed();
+                }
+                total
             });
         });
     }
@@ -1250,7 +1340,10 @@ criterion_group! {
     bench_stab_gpu_clifford_d10,
     bench_stab_direct_cpu_clifford_d10,
     bench_stab_direct_gpu_clifford_d10,
+    bench_stab_cpu_ghz_measure,
     bench_stab_gpu_ghz_measure,
+    bench_stab_direct_cpu_scrambled_measure_all,
+    bench_stab_direct_gpu_scrambled_measure_all,
     bench_stab_bts_cpu_vs_gpu,
     bench_stab_bts_packed_cpu_vs_gpu,
     bench_stab_bts_marginals_cpu_vs_gpu,

@@ -4032,3 +4032,60 @@ fn stabilizer_gpu_measure_run_permuted_then_single_matches_cpu() {
     }
     stab_run_compare(&f, n, &circuit);
 }
+
+// `rank` random qubits, each other qubit the parity of three of them. At 128 qubits and
+// rank 64 the total parity weight (256) sits where the sampler prefers BTS over its lookup
+// tables and is dense enough for the device, so the host path runs on the GPU.
+fn low_rank_measured_circuit(n: usize, rank: usize) -> prism_q::Circuit {
+    let mut circuit = prism_q::Circuit::new(n, n);
+    for q in 0..rank {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for t in rank..n {
+        for k in 0..3 {
+            circuit.add_gate(Gate::Cx, &[(t + k) % rank, t]);
+        }
+    }
+    circuit.measure_all();
+    circuit
+}
+
+#[test]
+fn host_and_device_sampling_draw_the_same_shots() {
+    let Some(f) = Fixture::try_new() else { return };
+    let circuit = low_rank_measured_circuit(128, 64);
+    let shots = 131_072;
+    let mut host = prism_q::compile_measurements(&circuit, 42)
+        .unwrap()
+        .with_gpu(f.ctx.clone());
+    let mut device = prism_q::compile_measurements(&circuit, 42)
+        .unwrap()
+        .with_gpu(f.ctx.clone());
+    let host_shots = host.sample_bulk_packed(shots);
+    let device_shots = device
+        .sample_bulk_packed_device(shots)
+        .unwrap()
+        .to_host()
+        .unwrap();
+    assert_eq!(host_shots.raw_data(), device_shots.raw_data());
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn device_sampling_does_not_depend_on_the_host_thread_count() {
+    let Some(f) = Fixture::try_new() else { return };
+    let circuit = low_rank_measured_circuit(128, 64);
+    let sample = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let mut sampler = prism_q::compile_measurements(&circuit, 42)
+                .unwrap()
+                .with_gpu(f.ctx.clone());
+            sampler.sample_bulk_packed(262_144)
+        })
+    };
+    assert_eq!(sample(1).raw_data(), sample(4).raw_data());
+}

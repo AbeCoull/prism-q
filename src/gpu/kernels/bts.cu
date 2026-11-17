@@ -404,6 +404,46 @@ __device__ __forceinline__ unsigned long long bts_rotl64(unsigned long long x, i
     return (x << k) | (x >> (64 - k));
 }
 
+// bts_fill_random: the random bits one chunk of sampling reads, `rank` words per 64-shot
+// batch. Each thread owns one batch and a block of BTS_FILL_COLS columns and draws them
+// from its own xoshiro256++ stream, seeded from the master seed, the absolute batch and
+// the block, so the bits depend on none of chunking, launch shape or host threads.
+#define BTS_FILL_COLS 32
+extern "C" __global__ void bts_fill_random(
+    unsigned long long *random_bits,
+    int rank,
+    int chunk_s_words,
+    unsigned long long master_seed,
+    unsigned long long batch_offset
+) {
+    int col_blocks = (rank + BTS_FILL_COLS - 1) / BTS_FILL_COLS;
+    unsigned long long t = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= (unsigned long long)chunk_s_words * (unsigned long long)col_blocks) return;
+    int batch = (int)(t / (unsigned long long)col_blocks);
+    int block = (int)(t % (unsigned long long)col_blocks);
+
+    unsigned long long seed = master_seed
+        ^ bts_splitmix64_step(batch_offset + (unsigned long long)batch)
+        ^ ((unsigned long long)(block + 1) * 0xd1b54a32d192ed03ULL);
+    unsigned long long s0 = bts_splitmix64_step(seed);
+    unsigned long long s1 = bts_splitmix64_step(s0);
+    unsigned long long s2 = bts_splitmix64_step(s1);
+    unsigned long long s3 = bts_splitmix64_step(s2);
+
+    unsigned long long *row = random_bits + (unsigned long long)batch * (unsigned long long)rank;
+    int end = min(rank, (block + 1) * BTS_FILL_COLS);
+    for (int col = block * BTS_FILL_COLS; col < end; ++col) {
+        row[col] = bts_rotl64(s0 + s3, 23) + s0;
+        unsigned long long sh = s1 << 17;
+        s2 ^= s0;
+        s3 ^= s1;
+        s1 ^= s2;
+        s0 ^= s3;
+        s2 ^= sh;
+        s3 = bts_rotl64(s3, 45);
+    }
+}
+
 // Per-(row, batch) fused noise generator and XOR accumulator. Each thread
 // owns one (row, batch) output word, walks that row's event list, and
 // accumulates the 64-bit masks in a register. The single `^=` write at the

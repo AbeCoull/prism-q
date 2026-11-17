@@ -172,7 +172,7 @@ fn stabilizer_h_wall_measure_all_collapses_in_doubling_chunks() {
 }
 
 #[test]
-fn device_sampling_uploads_random_bits_per_chunk() {
+fn device_sampling_draws_random_bits_on_the_device() {
     let Some(ctx) = gpu_device::context() else {
         return;
     };
@@ -186,18 +186,56 @@ fn device_sampling_uploads_random_bits_per_chunk() {
         .unwrap()
         .with_gpu(ctx.clone());
     sampler.sample_bulk_packed_device(64).unwrap();
-    // Two chunks of 65,536 shots: each uploads its host drawn random bits and launches
-    // one sampling kernel; the shots stay on the device. The parity tables went up on
-    // the first call.
+    // Two chunks of 65,536 shots: each fills its random bits on the device and launches
+    // one sampling kernel, so nothing goes up and the shots stay on the device. The
+    // parity tables went up on the first call.
     let before = ctx.pass_census();
     sampler.sample_bulk_packed_device(131_072).unwrap();
     assert_eq!(
         ctx.pass_census() - before,
         GpuPassCensus {
-            launches: 2,
+            launches: 4,
             passes: 0,
             drains: 0,
-            uploads: 2,
+            uploads: 0,
+            dense_2q: 0,
+            tiles: 0,
+        }
+    );
+}
+
+#[test]
+fn host_sampling_reads_the_shots_back_once() {
+    let Some(ctx) = gpu_device::context() else {
+        return;
+    };
+    let n = 128;
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..64 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for t in 64..n {
+        for k in 0..3 {
+            circuit.add_gate(Gate::Cx, &[(t + k) % 64, t]);
+        }
+    }
+    circuit.measure_all();
+    let mut sampler = prism_q::compile_measurements(&circuit, 42)
+        .unwrap()
+        .with_gpu(ctx.clone());
+    sampler.sample_bulk_packed_device(64).unwrap();
+    // Rank 64 with weight 256 keeps the host path on the device BTS sampler. Two chunks
+    // fill and sample into one device matrix, which comes back in one copy.
+    let before = ctx.pass_census();
+    let shots = sampler.sample_bulk_packed(131_072);
+    assert_eq!(shots.num_shots(), 131_072);
+    assert_eq!(
+        ctx.pass_census() - before,
+        GpuPassCensus {
+            launches: 4,
+            passes: 0,
+            drains: 1,
+            uploads: 0,
             dense_2q: 0,
             tiles: 0,
         }

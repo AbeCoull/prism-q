@@ -670,6 +670,19 @@ impl MeasureRunLayout {
     }
 }
 
+/// The run buffer was last sized and uploaded for `layout`, so every index the run
+/// kernels form from it lies inside the buffer.
+fn debug_assert_run_buffer_holds(tableau: &GpuTableau, layout: MeasureRunLayout) {
+    debug_assert!(
+        tableau
+            .measure_run
+            .as_ref()
+            .is_some_and(|bufs| bufs.run.len() >= layout.len()),
+        "run buffer shorter than a layout of {} measurements",
+        layout.num_meas
+    );
+}
+
 /// Threads per block for the run kernels whose threads stripe over row words, so
 /// narrow rows do not hold idle threads.
 fn run_row_block(num_words: usize) -> u32 {
@@ -758,6 +771,12 @@ struct RunArgs {
 
 impl RunArgs {
     fn new(op: &str, tableau: &GpuTableau, layout: MeasureRunLayout, m: usize) -> Result<Self> {
+        debug_assert!(
+            m < layout.num_meas,
+            "{op}: measurement {m} past {}",
+            layout.num_meas
+        );
+        debug_assert_run_buffer_holds(tableau, layout);
         Ok(Self {
             n: require_i32(op, "num_qubits", tableau.num_qubits())?,
             nw: require_i32(op, "num_words", tableau.num_words())?,
@@ -801,7 +820,8 @@ pub(crate) fn launch_run_collapse(
         .arg(&args.num_meas)
         .arg(&args.m);
     // SAFETY: signature (const u64*, i32, i32, u32*, i32, i32). Threads read one word
-    // per stabilizer row and atomicMin into pivots[m] inside the run buffer.
+    // per stabilizer row and atomicMin into pivots[m]; m < num_meas and the run buffer
+    // holds the uploaded layout (checked in `RunArgs::new`), so the slot is in bounds.
     unsafe {
         builder
             .launch(linear_cfg(MEASURE_BLOCK_SIZE, pivot_blocks))
@@ -820,7 +840,8 @@ pub(crate) fn launch_run_collapse(
         .arg(&args.num_meas)
         .arg(&args.m);
     // SAFETY: signature (u64*, u8*, i32, i32, u32*, i32, i32). Each block owns one
-    // destination row; the pivot row and the run buffer are read only.
+    // destination row; the pivot row and the run buffer are read only, at slots inside
+    // the uploaded layout because m < num_meas.
     unsafe {
         builder
             .launch(linear_cfg(row_block, cascade_blocks))
@@ -840,7 +861,8 @@ pub(crate) fn launch_run_collapse(
         .arg(&args.m);
     // SAFETY: signature (u64*, u8*, i32, i32, u32*, i32, i32). A single block writes
     // the pivot and destabilizer rows; thread 0 alone writes the cursor and
-    // outcomes[m]. Stream order puts it after the cascade.
+    // outcomes[m], inside the layout because m < num_meas. Stream order puts it after
+    // the cascade.
     unsafe {
         builder
             .launch(linear_cfg(row_block, 1))
@@ -873,7 +895,7 @@ pub(crate) fn launch_run_deterministic(
         .arg(&args.m);
     // SAFETY: signature (u64*, u8*, i32, i32, u32*, i32, i32). A single block runs a
     // serial loop whose only destination is the scratch row; thread 0 alone writes
-    // outcomes[m].
+    // outcomes[m], inside the uploaded layout because m < num_meas.
     unsafe {
         builder
             .launch(linear_cfg(row_block, 1))
@@ -905,6 +927,7 @@ pub(crate) fn launch_run_diagonal_finish(
         layout.num_meas,
         MEASURE_BLOCK_SIZE,
     )?;
+    debug_assert_run_buffer_holds(tableau, layout);
     let (xz_buf, phase_buf, bufs) = tableau.xz_phase_run_mut();
 
     let (stream, func) = stream_and_fn(ctx, "stab_run_det_accumulate")?;
@@ -932,8 +955,9 @@ pub(crate) fn launch_run_diagonal_finish(
         .arg(&n)
         .arg(bufs.run.raw_mut())
         .arg(&num_meas);
-    // SAFETY: signature (const u64*, i32, u32*, i32). Thread `m` reads acc and writes
-    // outcomes[m] alone; the run buffer holds the layout's words.
+    // SAFETY: signature (const u64*, i32, u32*, i32). Thread `m < num_meas` reads acc
+    // and writes outcomes[m] alone; the run buffer holds the layout's words, checked
+    // above.
     unsafe {
         builder
             .launch(linear_cfg(MEASURE_BLOCK_SIZE, outcome_blocks))
@@ -951,6 +975,11 @@ pub(crate) fn launch_cx_chain(
     start: usize,
     end: usize,
 ) -> Result<()> {
+    debug_assert!(
+        start < end && end < tableau.num_qubits(),
+        "CX chain {start}..{end} outside {} qubits",
+        tableau.num_qubits()
+    );
     let (stream, func) = stream_and_fn(ctx, "stab_apply_cx_chain")?;
     let rows_usize = tableau.total_rows();
     let num_rows = require_i32("stab_apply_cx_chain", "num_rows", rows_usize)?;

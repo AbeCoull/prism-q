@@ -3996,3 +3996,39 @@ fn deferred_device_measurements_match_immediate_ones_bit_for_bit() {
         );
     }
 }
+
+// A run in permuted order into permuted bits, then a lone measurement (below the run
+// length, so it takes the single measurement path and must resume the RNG where the
+// run left it), then a second run.
+#[test]
+fn stabilizer_gpu_measure_run_permuted_then_single_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 200;
+    let mut circuit = prism_q::circuits::clifford_random_pairs(n, 20, common::SEED).instructions;
+    for i in 0..100 {
+        let q = (i * 37 + 11) % n;
+        circuit.push(Instruction::Measure {
+            qubit: q,
+            classical_bit: (q * 7 + 3) % n,
+        });
+    }
+    circuit.push(Instruction::Gate {
+        gate: Gate::H,
+        targets: smallvec![5],
+    });
+    circuit.push(Instruction::Measure {
+        qubit: 5,
+        classical_bit: 5,
+    });
+    circuit.push(Instruction::Gate {
+        gate: Gate::S,
+        targets: smallvec![6],
+    });
+    for q in (100..n).rev() {
+        circuit.push(Instruction::Measure {
+            qubit: q,
+            classical_bit: q,
+        });
+    }
+    stab_run_compare(&f, n, &circuit);
+}

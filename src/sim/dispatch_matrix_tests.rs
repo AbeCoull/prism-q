@@ -308,6 +308,45 @@ fn explicit_gpu_kind_matrix() {
     assert_cpu_family(&stab_kind, &clifford(8), false, Family::Stabilizer);
 }
 
+// Measurements reach the device tableau in runs of at least eight; a shorter group, a
+// reset or a guarded region sends the plan back to the host at any width.
+#[cfg(feature = "gpu")]
+#[test]
+fn stabilizer_gpu_plans_on_the_host_when_measurements_leave_runs() {
+    let kind = BackendKind::StabilizerGpu {
+        context: GpuContext::stub_for_tests(),
+    };
+    let n = crate::gpu::stabilizer_min_qubits();
+    let with = |tail: &dyn Fn(&mut Circuit)| {
+        let mut c = Circuit::new(n, n);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+        }
+        tail(&mut c);
+        resolved(&kind, &c, false)
+    };
+    let on_device = |plan: BackendPlan| matches!(plan.accel(), Accel::Gpu { soft: false, .. });
+
+    assert!(on_device(with(&|c| c.measure_all())));
+    assert!(on_device(with(&|c| {
+        for q in 0..8 {
+            c.add_measure(q, q);
+        }
+        c.add_gate(Gate::H, &[0]);
+    })));
+    assert!(!on_device(with(&|c| {
+        for q in 0..7 {
+            c.add_measure(q, q);
+        }
+        c.add_gate(Gate::H, &[0]);
+        c.measure_all();
+    })));
+    assert!(!on_device(with(&|c| {
+        c.add_reset(0);
+        c.measure_all();
+    })));
+}
+
 // Three CX on one pair form a block of rank at most 4, so the middle cut
 // reads bonds 2, 4, 4; a CX on a neighbouring pair in between ends the block
 // and the next CX doubles the bond from where it stands.

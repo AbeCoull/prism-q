@@ -94,7 +94,7 @@ memory by default), and a layer that sets it discards the per-cap values below i
 | `PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB` | `256` | Soft cap on cached QFT twiddle tables; `0` disables the cache |
 | `PRISM_AVX512` | unset | `1` runs on AVX-512 the statevector gate kernels (single-qubit, `Multi2q` tiles, parallel `Fused2q` runs), QFT butterflies and bulk amplitude ops, the density-matrix two-qubit Kraus block, the stabilizer row kernel (with its streaming-store form), bulk word XOR, and the compiled sampler's propagation, BTS, random-word and transpose kernels where the CPU has `avx512f` and `avx512vpopcntdq`; verified under emulation, not yet timed on AVX-512 hardware |
 | `PRISM_GPU_MIN_QUBITS` | `14` | Auto GPU crossover qubit count (`gpu` feature) |
-| `PRISM_STABILIZER_GPU_MIN_QUBITS` | `100000` | Stabilizer GPU crossover qubit count |
+| `PRISM_STABILIZER_GPU_MIN_QUBITS` | `1000` | Stabilizer GPU crossover qubit count |
 | `PRISM_GPU_BTS_MIN_SHOTS` | `131072` | Shot count from which compiled BTS sampling runs on the device |
 | `PRISM_GPU_BTS_MIN_RANK` | `4` | Compiled-sampler rank from which BTS sampling runs on the device (minimum 1) |
 | `PRISM_GPU_BTS_MIN_WEIGHT_FACTOR` | `2` | Parity-weight factor for the BTS device route (minimum 1) |

@@ -324,8 +324,9 @@ pub enum BackendKind {
     /// [`crate::gpu::stabilizer_min_qubits()`] qubits (tunable via
     /// `PRISM_STABILIZER_GPU_MIN_QUBITS`, default
     /// [`crate::gpu::STABILIZER_MIN_QUBITS_DEFAULT`]) fall back to the CPU
-    /// stabilizer path. Measurement and reset stay on device; probabilities and
-    /// exports read back to the CPU algorithms.
+    /// stabilizer path, as do circuits with a measurement group shorter than eight, a
+    /// reset or a guarded region. Measurement and reset stay on device; probabilities
+    /// and exports read back to the CPU algorithms.
     ///
     /// Compose with `simulate(...).backend(...).seed(...).run()` to pick up
     /// independent-subsystem decomposition; non-Clifford circuits are rejected
@@ -738,6 +739,30 @@ fn stabilizer_can_run_lazy(circuit: &Circuit) -> bool {
     })
 }
 
+/// Whether every measurement and reset of `circuit` reaches the device tableau inside a
+/// run it keeps on the device: consecutive measurements at least
+/// `MIN_MEASURES_FOR_BATCH` long. A shorter group or a reset takes a host round trip
+/// each, about ten times the host's own cost, and a guarded region reads classical bits
+/// between its instructions.
+#[cfg(feature = "gpu")]
+fn stabilizer_measurements_stay_on_device(circuit: &Circuit) -> bool {
+    use crate::backend::stabilizer::kernels::batch::MIN_MEASURES_FOR_BATCH;
+    let mut run = 0usize;
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Measure { .. } => run += 1,
+            Instruction::Reset { .. } | Instruction::Region(_) => return false,
+            _ => {
+                if run > 0 && run < MIN_MEASURES_FOR_BATCH {
+                    return false;
+                }
+                run = 0;
+            }
+        }
+    }
+    run == 0 || run >= MIN_MEASURES_FOR_BATCH
+}
+
 fn build_stabilizer(
     accel: &Accel,
     lazy: bool,
@@ -1130,8 +1155,14 @@ pub(super) fn resolve(
         }
     };
     let mut plan = plan_for_family(kind, family, circuit.num_qubits, limits);
-    if let BackendPlan::Stabilizer { lazy, .. } = &mut plan {
+    if let BackendPlan::Stabilizer { lazy, accel } = &mut plan {
         *lazy = stabilizer_can_run_lazy(circuit);
+        #[cfg(feature = "gpu")]
+        if matches!(accel, Accel::Gpu { .. }) && !stabilizer_measurements_stay_on_device(circuit) {
+            *accel = Accel::Cpu;
+        }
+        #[cfg(not(feature = "gpu"))]
+        let _ = accel;
     }
     ExecutionPlan::Backend(plan)
 }

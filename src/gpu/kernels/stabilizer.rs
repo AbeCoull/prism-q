@@ -882,3 +882,63 @@ pub(crate) fn launch_run_deterministic(
     ctx.device().count_launch(0);
     Ok(())
 }
+
+/// Resolve every measurement of the run left without a pivot from the stabilizer
+/// signs, for a state whose stabilizers carry no X. Two launches, no host copy.
+pub(crate) fn launch_run_diagonal_finish(
+    ctx: &GpuContext,
+    tableau: &mut GpuTableau,
+    layout: MeasureRunLayout,
+) -> Result<()> {
+    let nw_usize = tableau.num_words();
+    let n = require_i32(
+        "stab_run_det_accumulate",
+        "num_qubits",
+        tableau.num_qubits(),
+    )?;
+    let nw = require_i32("stab_run_det_accumulate", "num_words", nw_usize)?;
+    let num_meas = require_i32("stab_run_det_outcomes", "num_meas", layout.num_meas)?;
+    let acc_blocks = require_u32("stab_run_det_accumulate", "num_words", nw_usize)?;
+    let outcome_blocks = div_ceil_grid(
+        "stab_run_det_outcomes",
+        "num_meas",
+        layout.num_meas,
+        MEASURE_BLOCK_SIZE,
+    )?;
+    let (xz_buf, phase_buf, bufs) = tableau.xz_phase_run_mut();
+
+    let (stream, func) = stream_and_fn(ctx, "stab_run_det_accumulate")?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(xz_buf.raw_mut())
+        .arg(phase_buf.raw_mut())
+        .arg(&n)
+        .arg(&nw)
+        .arg(bufs.acc.raw_mut());
+    // SAFETY: signature (const u64*, const u8*, i32, i32, u64*). Block `w` reads X
+    // word `w` of the destabilizer rows and alone writes acc[w]; acc holds num_words
+    // words.
+    unsafe {
+        builder
+            .launch(linear_cfg(MEASURE_BLOCK_SIZE, acc_blocks))
+            .map_err(|e| driver_err("stab_run_det_accumulate", e))?;
+    }
+    ctx.device().count_launch(1);
+
+    let (_, func) = stream_and_fn(ctx, "stab_run_det_outcomes")?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(bufs.acc.raw_mut())
+        .arg(&n)
+        .arg(bufs.run.raw_mut())
+        .arg(&num_meas);
+    // SAFETY: signature (const u64*, i32, u32*, i32). Thread `m` reads acc and writes
+    // outcomes[m] alone; the run buffer holds the layout's words.
+    unsafe {
+        builder
+            .launch(linear_cfg(MEASURE_BLOCK_SIZE, outcome_blocks))
+            .map_err(|e| driver_err("stab_run_det_outcomes", e))?;
+    }
+    ctx.device().count_launch(0);
+    Ok(())
+}

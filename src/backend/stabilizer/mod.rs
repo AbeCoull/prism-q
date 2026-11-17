@@ -496,7 +496,8 @@ impl StabilizerBackend {
     /// Collapses chain through stream order with their state in device cells, so the
     /// host reads back only the random mask between chunks of collapses. A target whose
     /// mask bit is clear stays deterministic for the rest of the run and is resolved at
-    /// the end. The random bits are drawn up front from a clone of the RNG and taken in
+    /// the end: from the stabilizer signs in two launches when the last mask is empty
+    /// (every stabilizer is diagonal), otherwise by the serial kernel. The random bits are drawn up front from a clone of the RNG and taken in
     /// collapse order, and the RNG then advances by the number taken, so outcomes match
     /// the host run bit for bit under one seed.
     #[cfg(feature = "gpu")]
@@ -565,15 +566,20 @@ impl StabilizerBackend {
             chunk = (chunk * 2).min(MAX_COLLAPSE_CHUNK);
         }
 
-        k::read_measure_run(&ctx, tableau, &mut words)?;
-        let deterministic: Vec<usize> = (0..num_meas)
-            .filter(|&m| words[layout.pivots()][m] == sentinel)
-            .collect();
-        if !deterministic.is_empty() {
-            for &m in &deterministic {
-                k::launch_run_deterministic(&ctx, tableau, layout, m)?;
-            }
+        if mask.iter().all(|&w| w == 0) {
+            k::launch_run_diagonal_finish(&ctx, tableau, layout)?;
             k::read_measure_run(&ctx, tableau, &mut words)?;
+        } else {
+            k::read_measure_run(&ctx, tableau, &mut words)?;
+            let deterministic: Vec<usize> = (0..num_meas)
+                .filter(|&m| words[layout.pivots()][m] == sentinel)
+                .collect();
+            if !deterministic.is_empty() {
+                for &m in &deterministic {
+                    k::launch_run_deterministic(&ctx, tableau, layout, m)?;
+                }
+                k::read_measure_run(&ctx, tableau, &mut words)?;
+            }
         }
 
         for (&cbit, &outcome) in cbits.iter().zip(&words[layout.outcomes()]) {

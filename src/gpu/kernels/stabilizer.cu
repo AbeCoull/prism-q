@@ -751,3 +751,42 @@ extern "C" __global__ void stab_run_deterministic(
         stab_deterministic_body(xz, phase, num_qubits, num_words, target);
     if (threadIdx.x == 0) stab_run_outcomes(run, num_meas)[m] = outcome;
 }
+
+// Block `w` stores the XOR of X word `w` over the destabilizer rows whose paired
+// stabilizer carries phase -1. With every stabilizer diagonal, a deterministic outcome
+// on qubit q is bit q of that word: multiplying the selected stabilizers adds no
+// phase, so only their signs count.
+extern "C" __global__ void stab_run_det_accumulate(
+    const unsigned long long *xz,
+    const unsigned char *phase,
+    int num_qubits,
+    int num_words,
+    unsigned long long *acc
+) {
+    int w = blockIdx.x;
+    if (w >= num_words) return;
+    unsigned int tid = threadIdx.x;
+    unsigned int bsz = blockDim.x;
+    int stride = 2 * num_words;
+    unsigned long long a = 0ULL;
+    for (int i = (int)tid; i < num_qubits; i += (int)bsz) {
+        if (phase[num_qubits + i] != 0) a ^= xz[stab_row(i, stride) + w];
+    }
+    __shared__ unsigned long long buf[32];
+    unsigned long long total = stab_reduce_bits(a, true, tid, bsz, buf);
+    if (tid == 0u) acc[w] = total;
+}
+
+// Outcome of every measurement left without a pivot, read off `acc`.
+extern "C" __global__ void stab_run_det_outcomes(
+    const unsigned long long *acc,
+    int num_qubits,
+    unsigned int *run,
+    int num_meas
+) {
+    int m = blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= num_meas) return;
+    if (stab_run_pivots(run, num_meas)[m] < (unsigned int)(2 * num_qubits)) return;
+    unsigned int q = stab_run_targets(run)[m];
+    stab_run_outcomes(run, num_meas)[m] = (unsigned int)((acc[q >> 6] >> (q & 63u)) & 1ULL);
+}

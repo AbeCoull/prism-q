@@ -492,11 +492,12 @@ pub struct GpuTableau {
 
 /// Device state of a measurement run, allocated on the first run and grown only when
 /// a longer run needs it. `run` holds the u32 layout `stabilizer.cu` documents under
-/// "Measurement runs"; `mask` holds one word per row half.
+/// "Measurement runs"; `mask` and `acc` hold one word per row half.
 #[derive(Debug)]
 pub(crate) struct MeasureRunBuffers {
     pub(crate) run: GpuBuffer<u32>,
     pub(crate) mask: GpuBuffer<u64>,
+    pub(crate) acc: GpuBuffer<u64>,
 }
 
 impl GpuTableau {
@@ -566,6 +567,7 @@ impl GpuTableau {
                 self.measure_run = Some(MeasureRunBuffers {
                     run: GpuBuffer::alloc_zeros(device, run_len)?,
                     mask: GpuBuffer::alloc_zeros(device, self.num_words.max(1))?,
+                    acc: GpuBuffer::alloc_zeros(device, self.num_words.max(1))?,
                 });
             }
         }

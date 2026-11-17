@@ -353,6 +353,8 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "stab_run_cascade",
     "stab_run_fixup",
     "stab_run_deterministic",
+    "stab_run_det_accumulate",
+    "stab_run_det_outcomes",
     // Block-triangular sampling.
     "bts_sample_meas_major",
     "bts_popcount_rows",

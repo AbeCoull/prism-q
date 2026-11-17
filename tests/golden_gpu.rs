@@ -1891,6 +1891,22 @@ fn stabilizer_gpu_measure_run_ghz_500_matches_cpu() {
     );
 }
 
+// X on a few qubits, across word boundaries, makes their deterministic bits read the
+// opposite of qubit 0 after the one collapse.
+#[test]
+fn stabilizer_gpu_measure_run_flipped_ghz_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 400;
+    let flipped = [3, 63, 64, 200, 399];
+    let mut circuit = prism_q::circuits::ghz_circuit(n).instructions;
+    circuit.extend(flipped.iter().map(|&q| g(Gate::X, &[q])));
+    measure_range(&mut circuit, 0..n);
+    let bits = stab_run_compare(&f, n, &circuit);
+    for (q, &b) in bits.iter().enumerate() {
+        assert_eq!(b != bits[0], flipped.contains(&q), "qubit {q}");
+    }
+}
+
 #[test]
 fn stabilizer_gpu_measure_run_h_wall_512_matches_cpu() {
     let Some(f) = Fixture::try_new() else { return };

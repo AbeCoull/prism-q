@@ -127,3 +127,7 @@ Seeded output has changed in these releases:
     sampler over the deferred circuit. Kept records, and detectors or observables that
     are random without noise, change for a seed; detectors, observables and postselection
     counts that are fixed without noise do not.
+  - Compiled Clifford sampling with a GPU context draws its random bits on the device,
+    from one seed per call and one stream per 64 shots and 32 parity columns, in place of
+    bits drawn on the host. Fixed-seed shots, counts and marginals from the device
+    sampler changed, and they no longer depend on the Rayon thread count.

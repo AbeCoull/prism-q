@@ -171,12 +171,10 @@ The golden equality tests do not cover two limits on what a seed guarantees.
   `statevector_gpu_mid_measure_shots_match_cpu` pins.
   `statevector_gpu_shot_frequencies_match_cpu_off_dyadic` pins the general case: equal
   frequencies within 5 sigma after `Rx(0.3)`.
-- GPU BTS sampling: reproducible at a fixed Rayon thread count. Above
-  `MIN_PAR_DRAWS` random bits per chunk, `fill_random_bits` seeds one stream per worker
-  and partitions the draws by `rayon::current_num_threads()`, so another worker count
-  gives other shots. Below that threshold the serial single-stream path runs and the
-  seed reproduces outright. Pin `RAYON_NUM_THREADS` when byte-identical shot payloads
-  matter across machines.
+- GPU BTS sampling: reproducible outright. The random bits are drawn on the device from
+  one seed per call, one xoshiro256++ stream per 64-shot batch and block of 32 parity
+  columns, so the shots do not depend on the Rayon thread count or on how a call is split
+  into chunks, and the host and device result paths return the same shots.
 
 ## Current limits
 

@@ -19,6 +19,8 @@ use super::super::GpuContext;
 use super::{div_ceil_grid, driver_err, linear_cfg, require_i32, require_u32, stream_and_fn};
 
 const SAMPLE_BLOCK_SIZE: u32 = 128;
+/// Columns of random bits one `bts_fill_random` thread draws; matches `BTS_FILL_COLS`.
+const FILL_COLS: usize = 32;
 const NOISE_BLOCK_SIZE: u32 = 128;
 const POPCOUNT_BLOCK_SIZE: u32 = 256;
 const COUNT_MEAS_BATCH_SIZE: u32 = 64;
@@ -32,6 +34,9 @@ pub(crate) const GPU_COUNTS_MAX_WORDS: usize = 8;
 /// Shots per device chunk, which bounds peak memory at any shot count. Matches the CPU
 /// `BTS_BATCH_SHOTS` boundary.
 const CHUNK_SHOTS: usize = 65_536;
+/// Largest sampled shot matrix, in bytes, that [`launch_bts_sample`] holds whole on the
+/// device and reads back in one copy; past it the chunks come back one at a time.
+const SINGLE_READBACK_BYTES: usize = 512 << 20;
 
 const KERNEL_SOURCE: &str = include_str!("bts.cu");
 
@@ -58,7 +63,6 @@ pub(crate) struct GpuBtsCache {
     ref_bits_dev: GpuBuffer<u64>,
     random_bits_dev: GpuBuffer<u64>,
     chunk_output_dev: GpuBuffer<u64>,
-    random_bits_host: Vec<u64>,
     chunk_output_host: Vec<u64>,
 }
 
@@ -86,7 +90,6 @@ impl GpuBtsCache {
             ref_bits_dev,
             random_bits_dev: GpuBuffer::<u64>::alloc_zeros(device, 1)?,
             chunk_output_dev: GpuBuffer::<u64>::alloc_zeros(device, 1)?,
-            random_bits_host: Vec::new(),
             chunk_output_host: Vec::new(),
         })
     }
@@ -105,96 +108,17 @@ impl GpuBtsCache {
         if self.chunk_output_dev.len() < output_len.max(1) {
             self.chunk_output_dev = GpuBuffer::<u64>::alloc_zeros(device, output_len.max(1))?;
         }
-        if self.random_bits_host.len() < random_needed {
-            self.random_bits_host.resize(random_needed, 0);
-        }
         if self.chunk_output_host.len() < output_len.max(1) {
             self.chunk_output_host.resize(output_len.max(1), 0);
         }
         Ok(())
     }
 
-    fn fill_random_bits(
-        &mut self,
-        rng: &mut Xoshiro256PlusPlus,
-        rank: usize,
-        chunk_shots: usize,
-        chunk_s_words: usize,
-    ) {
-        // Parallel path: seed one fresh xoshiro stream per worker from the
-        // master rng, matching the CPU BTS batched path in
-        // `src/sim/compiled/bts.rs`. Partitioning by `current_num_threads()`
-        // means a seed reproduces only at a fixed thread count; the serial
-        // fallback below `MIN_PAR_DRAWS` reproduces outright.
-        let required = chunk_s_words * rank;
-        #[cfg(not(feature = "parallel"))]
-        let _ = required;
-        #[cfg(feature = "parallel")]
-        {
-            const MIN_PAR_DRAWS: usize = 16_384;
-            let num_threads = rayon::current_num_threads();
-            if num_threads > 1 && required >= MIN_PAR_DRAWS {
-                let batches_per_thread = chunk_s_words.div_ceil(num_threads);
-                if batches_per_thread > 0 {
-                    let thread_seeds: Vec<[u64; 4]> = (0..num_threads)
-                        .map(|_| {
-                            [
-                                rng.next_u64(),
-                                rng.next_u64(),
-                                rng.next_u64(),
-                                rng.next_u64(),
-                            ]
-                        })
-                        .collect();
-                    let tail_mask = shot_tail_mask(chunk_shots);
-                    let last_batch = chunk_s_words - 1;
-                    use rayon::prelude::*;
-                    self.random_bits_host[..required]
-                        .par_chunks_mut(batches_per_thread * rank)
-                        .enumerate()
-                        .for_each(|(tid, slab)| {
-                            let mut trng = Xoshiro256PlusPlus::from_seeds(thread_seeds[tid]);
-                            let first_batch = tid * batches_per_thread;
-                            let batches_here = slab.len() / rank;
-                            for b in 0..batches_here {
-                                let start = b * rank;
-                                let end = start + rank;
-                                for word in &mut slab[start..end] {
-                                    *word = trng.next_u64();
-                                }
-                                let absolute_batch = first_batch + b;
-                                if absolute_batch == last_batch && tail_mask != u64::MAX {
-                                    for word in &mut slab[start..end] {
-                                        *word &= tail_mask;
-                                    }
-                                }
-                            }
-                        });
-                    return;
-                }
-            }
-        }
-
-        for batch in 0..chunk_s_words {
-            let start = batch * rank;
-            let end = start + rank;
-            for word in &mut self.random_bits_host[start..end] {
-                *word = rng.next_u64();
-            }
-            if batch == chunk_s_words - 1 {
-                let mask = shot_tail_mask(chunk_shots);
-                if mask != u64::MAX {
-                    for word in &mut self.random_bits_host[start..end] {
-                        *word &= mask;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Upload the filled random bits and launch `bts_sample_meas_major` into `out` (the
-    /// chunk output buffer when `None`), laid out as `num_meas` rows of `out_stride_words`
-    /// words with the chunk starting at word `out_word_offset` of each row.
+    /// Fill the chunk's random bits on the device from `master_seed`, the chunk starting
+    /// at absolute 64-shot batch `batch_offset`, and launch `bts_sample_meas_major` into
+    /// `out` (the chunk output buffer when `None`), laid out as `num_meas` rows of
+    /// `out_stride_words` words with the chunk starting at word `out_word_offset` of each
+    /// row.
     #[allow(clippy::too_many_arguments)]
     fn launch_sample_chunk(
         &mut self,
@@ -206,22 +130,38 @@ impl GpuBtsCache {
         out_stride_words: usize,
         out_word_offset: usize,
         out: Option<&mut GpuBuffer<u64>>,
+        master_seed: u64,
+        batch_offset: u64,
     ) -> Result<()> {
         let num_meas = self.num_meas;
         let chunk_s_words = chunk_shots.div_ceil(64);
         let chunk_random_len = chunk_s_words * rank;
         {
+            let fill = device.function("bts_fill_random")?;
+            let rank_i = require_i32("bts_fill_random", "rank", rank)?;
+            let chunk_s_words_i = require_i32("bts_fill_random", "chunk_s_words", chunk_s_words)?;
+            let threads = chunk_s_words * rank.div_ceil(FILL_COLS);
+            let blocks = div_ceil_grid("bts_fill_random", "threads", threads, SAMPLE_BLOCK_SIZE)?;
             let mut random_bits_view = self
                 .random_bits_dev
                 .raw_mut()
                 .slice_mut(0..chunk_random_len.max(1));
-            stream
-                .memcpy_htod(
-                    &self.random_bits_host[..chunk_random_len],
-                    &mut random_bits_view,
-                )
-                .map_err(|e| driver_err("upload bts random_bits", e))?;
-            device.count_upload();
+            let mut builder = stream.launch_builder(&fill);
+            builder
+                .arg(&mut random_bits_view)
+                .arg(&rank_i)
+                .arg(&chunk_s_words_i)
+                .arg(&master_seed)
+                .arg(&batch_offset);
+            // SAFETY: kernel signature matches the call shape. Each thread writes the
+            // columns of one (batch, column block) pair, disjoint from every other thread,
+            // inside the `chunk_s_words * rank` words the view covers.
+            unsafe {
+                builder
+                    .launch(linear_cfg(SAMPLE_BLOCK_SIZE, blocks))
+                    .map_err(|e| driver_err("bts_fill_random", e))?;
+            }
+            device.count_launch(0);
         }
 
         let num_meas_i = require_i32("bts_sample_meas_major", "num_meas", num_meas)?;
@@ -358,8 +298,9 @@ fn plan_count_table_slots(
 /// measurement-major, `num_meas * num_shots.div_ceil(64)` words, and deterministic rows
 /// (empty `row_cols`) carrying only the `ref_bits` flip.
 ///
-/// Shots stream through the device in `CHUNK_SHOTS` chunks. The parity CSR and
-/// `ref_bits` stay resident in `cache`; only random bits and chunk output move.
+/// Shots are sampled in `CHUNK_SHOTS` chunks from random bits drawn on the device. The
+/// parity CSR and `ref_bits` stay resident in `cache`. A result up to
+/// `SINGLE_READBACK_BYTES` comes back in one copy, a larger one a chunk at a time.
 pub(crate) fn launch_bts_sample(
     ctx: &GpuContext,
     rng: &mut Xoshiro256PlusPlus,
@@ -373,7 +314,15 @@ pub(crate) fn launch_bts_sample(
         return Ok(vec![0u64; num_meas * s_words]);
     }
 
+    if num_meas * s_words * std::mem::size_of::<u64>() <= SINGLE_READBACK_BYTES {
+        let device_output = launch_bts_sample_device(ctx, rng, rank, num_shots, cache)?;
+        let mut output = vec![0u64; num_meas * s_words];
+        device_output.copy_to_host(ctx.device(), &mut output)?;
+        return Ok(output);
+    }
+
     let (stream, func) = stream_and_fn(ctx, "bts_sample_meas_major")?;
+    let master_seed = rng.next_u64();
 
     let mut output = vec![0u64; num_meas * s_words];
     let mut shots_done = 0usize;
@@ -383,7 +332,6 @@ pub(crate) fn launch_bts_sample(
         let chunk_random_len = chunk_s_words * rank;
         let chunk_output_len = num_meas * chunk_s_words;
         cache.ensure_chunk_capacity(ctx, chunk_random_len, chunk_output_len)?;
-        cache.fill_random_bits(rng, rank, chunk_shots, chunk_s_words);
 
         cache.launch_sample_chunk(
             ctx.device(),
@@ -394,6 +342,8 @@ pub(crate) fn launch_bts_sample(
             chunk_s_words,
             0,
             None,
+            master_seed,
+            (shots_done / 64) as u64,
         )?;
 
         stream
@@ -441,6 +391,7 @@ pub(crate) fn launch_bts_sample_device(
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "bts_sample_meas_major")?;
     let mut output_dev = GpuBuffer::<u64>::alloc_zeros(device, output_len.max(1))?;
+    let master_seed = rng.next_u64();
 
     let mut shots_done = 0usize;
     while shots_done < num_shots {
@@ -448,7 +399,6 @@ pub(crate) fn launch_bts_sample_device(
         let chunk_s_words = chunk_shots.div_ceil(64);
         let chunk_random_len = chunk_s_words * rank;
         cache.ensure_chunk_capacity(ctx, chunk_random_len, 1)?;
-        cache.fill_random_bits(rng, rank, chunk_shots, chunk_s_words);
 
         cache.launch_sample_chunk(
             device,
@@ -459,6 +409,8 @@ pub(crate) fn launch_bts_sample_device(
             s_words,
             shots_done / 64,
             Some(&mut output_dev),
+            master_seed,
+            (shots_done / 64) as u64,
         )?;
 
         shots_done += chunk_shots;

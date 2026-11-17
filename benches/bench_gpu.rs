@@ -771,6 +771,33 @@ fn bench_stab_direct_gpu_scrambled_measure_all(c: &mut Criterion) {
     group.finish();
 }
 
+/// H on every qubit, then every qubit measured, on the device tableau directly: one Clifford
+/// batch and three launches per random collapse, with no rowmul chain. Against
+/// `gpu_stab/ghz_measure` it separates launch, host copy and fixed costs per run.
+fn bench_stab_direct_gpu_h_wall_measure(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let sizes: &[usize] = if is_fast() { &[512] } else { &[512, 1024] };
+    let mut group = c.benchmark_group("gpu_stab_direct/h_wall_measure");
+    configure_group(&mut group);
+    for &n in sizes {
+        let mut circuit = Circuit::new(n, n);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        circuit.measure_all();
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                let mut backend = StabilizerBackend::new(42).with_gpu(ctx.clone());
+                backend
+                    .init(circ.num_qubits, circ.num_classical_bits)
+                    .unwrap();
+                backend.apply_instructions(&circ.instructions).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
 /// The BTS sampling fixture: `n / 2` random qubits, each other qubit the parity of three
 /// of them, every qubit measured. Rank `n / 2` at total parity weight `2n` keeps the
 /// sampler on BTS rather than its lookup tables and meets the device's weight floor, so
@@ -1350,6 +1377,7 @@ criterion_group! {
     bench_stab_gpu_ghz_measure,
     bench_stab_direct_cpu_scrambled_measure_all,
     bench_stab_direct_gpu_scrambled_measure_all,
+    bench_stab_direct_gpu_h_wall_measure,
     bench_stab_bts_cpu_vs_gpu,
     bench_stab_bts_packed_cpu_vs_gpu,
     bench_stab_bts_marginals_cpu_vs_gpu,

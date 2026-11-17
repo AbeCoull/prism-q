@@ -29,8 +29,19 @@ __device__ __forceinline__ unsigned long long hash_words(
     return acc;
 }
 
+// Acquire load of a slot state. It pairs with the claimer's fence before it publishes
+// state 2, so a reader that sees 2 also sees the key, and the key reads that follow
+// cannot run ahead of it. Pre-Volta PTX has no acquire load, so a full fence stands in.
 __device__ __forceinline__ unsigned int load_state(const unsigned int *state) {
-    return atomicAdd((unsigned int *)state, 0U);
+#if __CUDA_ARCH__ >= 700
+    unsigned int value;
+    asm volatile("ld.acquire.gpu.u32 %0, [%1];" : "=r"(value) : "l"(state) : "memory");
+    return value;
+#else
+    unsigned int value = atomicAdd((unsigned int *)state, 0U);
+    __threadfence();
+    return value;
+#endif
 }
 
 __device__ __forceinline__ int keys_equal(

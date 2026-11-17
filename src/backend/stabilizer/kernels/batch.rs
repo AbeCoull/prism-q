@@ -881,7 +881,10 @@ impl StabilizerBackend {
     /// Batching matches sequential semantics only while every qubit and
     /// classical bit in the run is distinct, so the run stops at the first
     /// repeat or non-measure instruction.
-    fn measure_run_len(&self, instructions: &[Instruction]) -> usize {
+    pub(in crate::backend::stabilizer) fn measure_run_len(
+        &self,
+        instructions: &[Instruction],
+    ) -> usize {
         let qubit_words = self.num_words;
         let cbit_words = self.classical_bits.len().div_ceil(64).max(1);
         let mut seen_qubits = vec![0u64; qubit_words];

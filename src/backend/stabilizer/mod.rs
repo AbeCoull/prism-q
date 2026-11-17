@@ -70,6 +70,13 @@ mod tests;
 
 use kernels::{MIN_WORDS_FOR_BATCH, rowmul_words};
 
+/// Most collapses a device measurement run launches between two readbacks of the
+/// random mask. The chunk starts at one and doubles, so a run that one collapse settles
+/// wastes one target of launches and an all-random run pays `log2` of this plus
+/// `M / 256` readbacks.
+#[cfg(feature = "gpu")]
+const MAX_COLLAPSE_CHUNK: usize = 256;
+
 #[cfg(feature = "gpu")]
 use crate::gpu::kernels::stabilizer::CliffordBatchScratch;
 #[cfg(feature = "gpu")]
@@ -453,6 +460,163 @@ impl StabilizerBackend {
         self.classical_bits.truncate(prev_len);
         if outcome {
             self.queue_1q_gpu(op::X, qubit);
+        }
+        Ok(())
+    }
+
+    /// Device instruction loop: a `CX(k, k + 1)` chain of at least `MIN_CX_CHAIN` takes
+    /// the chain kernel and a measurement run of at least `MIN_MEASURES_FOR_BATCH` goes
+    /// through [`Self::apply_measure_run_gpu`], the same spans the host batches;
+    /// everything else takes `apply`.
+    #[cfg(feature = "gpu")]
+    fn apply_instructions_gpu(&mut self, instructions: &[Instruction]) -> Result<()> {
+        use kernels::batch::{MIN_CX_CHAIN, MIN_MEASURES_FOR_BATCH, cx_chain_len};
+        let mut idx = 0;
+        while idx < instructions.len() {
+            if let Instruction::Gate {
+                gate: Gate::Cx,
+                targets,
+            } = &instructions[idx]
+            {
+                let chain = cx_chain_len(&instructions[idx..]);
+                if chain >= MIN_CX_CHAIN {
+                    self.flush_gpu_ops()?;
+                    let ctx = self
+                        .gpu_context
+                        .as_ref()
+                        .expect("apply_instructions_gpu called without gpu_context");
+                    let Some(tableau) = self.gpu_tableau.as_mut() else {
+                        unreachable!("apply_instructions_gpu called without gpu_tableau")
+                    };
+                    let start = targets[0];
+                    crate::gpu::kernels::stabilizer::launch_cx_chain(
+                        ctx,
+                        tableau,
+                        start,
+                        start + chain,
+                    )?;
+                    idx += chain;
+                    continue;
+                }
+            }
+            if matches!(instructions[idx], Instruction::Measure { .. })
+                && matches!(
+                    instructions.get(idx + MIN_MEASURES_FOR_BATCH - 1),
+                    Some(Instruction::Measure { .. })
+                )
+            {
+                let run = self.measure_run_len(&instructions[idx..]);
+                if run >= MIN_MEASURES_FOR_BATCH {
+                    self.apply_measure_run_gpu(&instructions[idx..idx + run])?;
+                    idx += run;
+                    continue;
+                }
+            }
+            self.apply(&instructions[idx])?;
+            idx += 1;
+        }
+        self.flush_gpu_ops()
+    }
+
+    /// Measure a run of distinct qubits into distinct classical bits on the device.
+    ///
+    /// Collapses chain through stream order with their state in device cells, so the
+    /// host reads back only the random mask between chunks of collapses. A target whose
+    /// mask bit is clear stays deterministic for the rest of the run and is resolved at
+    /// the end: from the stabilizer signs in two launches when the last mask is empty
+    /// (every stabilizer is diagonal), otherwise by the serial kernel. The random bits
+    /// are drawn up front from a clone of the RNG and taken in collapse order, and the
+    /// RNG then advances by the number taken, so outcomes match the host run bit for
+    /// bit under one seed.
+    #[cfg(feature = "gpu")]
+    fn apply_measure_run_gpu(&mut self, run: &[Instruction]) -> Result<()> {
+        use crate::gpu::kernels::stabilizer as k;
+        use rand::RngExt;
+        self.flush_gpu_ops()?;
+        let ctx = self
+            .gpu_context
+            .as_ref()
+            .expect("apply_measure_run_gpu called without gpu_context")
+            .clone();
+        let Some(tableau) = self.gpu_tableau.as_mut() else {
+            unreachable!("apply_measure_run_gpu called without gpu_tableau")
+        };
+        let num_meas = run.len();
+        let layout = k::MeasureRunLayout::new(num_meas);
+        let sentinel = (2 * self.n) as u32;
+        let mut words = vec![0u32; layout.len()];
+        let mut cbits = Vec::with_capacity(num_meas);
+        for (slot, inst) in words[layout.targets()].iter_mut().zip(run) {
+            let Instruction::Measure {
+                qubit,
+                classical_bit,
+            } = inst
+            else {
+                unreachable!("measure_run_len returns only measure runs")
+            };
+            *slot = *qubit as u32;
+            cbits.push(*classical_bit);
+        }
+        words[layout.pivots()].fill(sentinel);
+        let rand = &mut words[layout.rand()];
+        match self.forced_outcome {
+            Some(true) => rand.fill(u32::MAX),
+            Some(false) => {}
+            None => {
+                let mut draws = self.rng.clone();
+                for i in 0..num_meas {
+                    if draws.random::<bool>() {
+                        rand[i / 32] |= 1 << (i % 32);
+                    }
+                }
+            }
+        }
+        k::upload_measure_run(&ctx, tableau, layout, &words[..layout.upload_len()])?;
+
+        let targets = &words[layout.targets()];
+        let mut mask = vec![0u64; self.num_words];
+        let mut remaining: Vec<usize> = (0..num_meas).collect();
+        let mut chunk = 1;
+        loop {
+            k::launch_run_random_mask(&ctx, tableau, &mut mask)?;
+            remaining.retain(|&m| {
+                let q = targets[m] as usize;
+                (mask[q / 64] >> (q % 64)) & 1 != 0
+            });
+            if remaining.is_empty() {
+                break;
+            }
+            let take = chunk.min(remaining.len());
+            for &m in &remaining[..take] {
+                k::launch_run_collapse(&ctx, tableau, layout, m)?;
+            }
+            remaining.drain(..take);
+            chunk = (chunk * 2).min(MAX_COLLAPSE_CHUNK);
+        }
+
+        if mask.iter().all(|&w| w == 0) {
+            k::launch_run_diagonal_finish(&ctx, tableau, layout)?;
+            k::read_measure_run(&ctx, tableau, &mut words)?;
+        } else {
+            k::read_measure_run(&ctx, tableau, &mut words)?;
+            let deterministic: Vec<usize> = (0..num_meas)
+                .filter(|&m| words[layout.pivots()][m] == sentinel)
+                .collect();
+            if !deterministic.is_empty() {
+                for &m in &deterministic {
+                    k::launch_run_deterministic(&ctx, tableau, layout, m)?;
+                }
+                k::read_measure_run(&ctx, tableau, &mut words)?;
+            }
+        }
+
+        for (&cbit, &outcome) in cbits.iter().zip(&words[layout.outcomes()]) {
+            self.classical_bits[cbit] = outcome != 0;
+        }
+        if self.forced_outcome.is_none() {
+            for _ in 0..words[0] {
+                let _: bool = self.rng.random();
+            }
         }
         Ok(())
     }
@@ -1304,14 +1468,7 @@ impl Backend for StabilizerBackend {
     fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
         #[cfg(feature = "gpu")]
         if self.gpu_tableau.is_some() {
-            for instruction in instructions {
-                self.apply(instruction)?;
-            }
-            // Flush here so the device tableau matches the queued ops before
-            // the next read (probabilities, export, classical bit access).
-            // Measurement and reset flush mid-sequence via `gpu_sync_to_host`.
-            self.flush_gpu_ops()?;
-            return Ok(());
+            return self.apply_instructions_gpu(instructions);
         }
         let nw = self.num_words;
         if nw < MIN_WORDS_FOR_BATCH {

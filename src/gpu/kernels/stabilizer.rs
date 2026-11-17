@@ -13,6 +13,10 @@
 //! the pivot data into the paired destabilizer and installs the measured `Z_q`; and a
 //! deterministic-branch kernel that serially rowmuls, into the scratch row, the
 //! stabilizers whose paired destabilizers anticommute with `Z_q`, then reads its phase.
+//!
+//! A run of measurements on distinct qubits keeps its state in a device buffer, so its
+//! collapses chain through stream order and the host reads back only a random mask
+//! between chunks of collapses.
 
 use std::sync::Arc;
 
@@ -624,4 +628,383 @@ pub(crate) fn launch_measure_deterministic(
         ctx.device().count_drain();
     }
     Ok(host_out[0] != 0)
+}
+
+/// Word offsets into the measurement run buffer for a run of `num_meas` measurements,
+/// in the layout `stabilizer.cu` documents under "Measurement runs".
+#[derive(Clone, Copy)]
+pub(crate) struct MeasureRunLayout {
+    num_meas: usize,
+}
+
+impl MeasureRunLayout {
+    pub(crate) fn new(num_meas: usize) -> Self {
+        Self { num_meas }
+    }
+
+    pub(crate) fn targets(self) -> std::ops::Range<usize> {
+        1..1 + self.num_meas
+    }
+
+    pub(crate) fn pivots(self) -> std::ops::Range<usize> {
+        1 + self.num_meas..1 + 2 * self.num_meas
+    }
+
+    pub(crate) fn rand(self) -> std::ops::Range<usize> {
+        let start = 1 + 2 * self.num_meas;
+        start..start + self.num_meas.div_ceil(32)
+    }
+
+    pub(crate) fn outcomes(self) -> std::ops::Range<usize> {
+        let start = self.rand().end;
+        start..start + self.num_meas
+    }
+
+    /// Words the host uploads: everything before the outcomes, which kernels write.
+    pub(crate) fn upload_len(self) -> usize {
+        self.rand().end
+    }
+
+    pub(crate) fn len(self) -> usize {
+        self.outcomes().end
+    }
+}
+
+/// The run buffer was last sized and uploaded for `layout`, so every index the run
+/// kernels form from it lies inside the buffer.
+fn debug_assert_run_buffer_holds(tableau: &GpuTableau, layout: MeasureRunLayout) {
+    debug_assert!(
+        tableau
+            .measure_run
+            .as_ref()
+            .is_some_and(|bufs| bufs.run.len() >= layout.len()),
+        "run buffer shorter than a layout of {} measurements",
+        layout.num_meas
+    );
+}
+
+/// Threads per block for the run kernels whose threads stripe over row words, so
+/// narrow rows do not hold idle threads.
+fn run_row_block(num_words: usize) -> u32 {
+    num_words
+        .next_power_of_two()
+        .clamp(32, MEASURE_BLOCK_SIZE as usize) as u32
+}
+
+/// Upload the host part of a measurement run (cursor, targets, sentinel pivots and
+/// random bits) into the tableau's grow-only run buffer.
+pub(crate) fn upload_measure_run(
+    ctx: &GpuContext,
+    tableau: &mut GpuTableau,
+    layout: MeasureRunLayout,
+    host: &[u32],
+) -> Result<()> {
+    debug_assert_eq!(host.len(), layout.upload_len());
+    tableau.ensure_measure_run(layout.len())?;
+    let stream = ctx.device().stream()?;
+    let (_, _, bufs) = tableau.xz_phase_run_mut();
+    stream
+        .memcpy_htod(host, &mut bufs.run.raw_mut().slice_mut(0..host.len()))
+        .map_err(|e| driver_err("upload measure run", e))?;
+    ctx.device().count_upload();
+    Ok(())
+}
+
+/// Read the first `host.len()` words of the run buffer back.
+pub(crate) fn read_measure_run(
+    ctx: &GpuContext,
+    tableau: &mut GpuTableau,
+    host: &mut [u32],
+) -> Result<()> {
+    let stream = ctx.device().stream()?;
+    let (_, _, bufs) = tableau.xz_phase_run_mut();
+    stream
+        .memcpy_dtoh(&bufs.run.raw().slice(0..host.len()), host)
+        .map_err(|e| driver_err("measure run dtoh", e))?;
+    ctx.device().count_drain();
+    Ok(())
+}
+
+/// Store in `host_mask` the OR of each X word over the stabilizer rows: a qubit with
+/// its bit clear measures deterministically. One launch and one readback.
+pub(crate) fn launch_run_random_mask(
+    ctx: &GpuContext,
+    tableau: &mut GpuTableau,
+    host_mask: &mut [u64],
+) -> Result<()> {
+    let (stream, func) = stream_and_fn(ctx, "stab_run_random_mask")?;
+    let nw_usize = tableau.num_words();
+    let n = require_i32("stab_run_random_mask", "num_qubits", tableau.num_qubits())?;
+    let nw = require_i32("stab_run_random_mask", "num_words", nw_usize)?;
+    let blocks = require_u32("stab_run_random_mask", "num_words", nw_usize)?;
+    let cfg = linear_cfg(MEASURE_BLOCK_SIZE, blocks);
+
+    let (xz_buf, _, bufs) = tableau.xz_phase_run_mut();
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(xz_buf.raw_mut())
+        .arg(&n)
+        .arg(&nw)
+        .arg(bufs.mask.raw_mut());
+    // SAFETY: signature (const u64*, i32, i32, u64*). Block `w` reads X word `w` of
+    // the stabilizer rows and alone writes mask[w]; mask holds num_words words.
+    unsafe {
+        builder
+            .launch(cfg)
+            .map_err(|e| driver_err("stab_run_random_mask", e))?;
+    }
+    ctx.device().count_launch(1);
+    stream
+        .memcpy_dtoh(&bufs.mask.raw().slice(0..nw_usize), host_mask)
+        .map_err(|e| driver_err("random mask dtoh", e))?;
+    ctx.device().count_drain();
+    Ok(())
+}
+
+/// Shape arguments shared by the run kernels that take `(run, num_meas, m)`.
+struct RunArgs {
+    n: i32,
+    nw: i32,
+    num_meas: i32,
+    m: i32,
+}
+
+impl RunArgs {
+    fn new(op: &str, tableau: &GpuTableau, layout: MeasureRunLayout, m: usize) -> Result<Self> {
+        debug_assert!(
+            m < layout.num_meas,
+            "{op}: measurement {m} past {}",
+            layout.num_meas
+        );
+        debug_assert_run_buffer_holds(tableau, layout);
+        Ok(Self {
+            n: require_i32(op, "num_qubits", tableau.num_qubits())?,
+            nw: require_i32(op, "num_words", tableau.num_words())?,
+            num_meas: require_i32(op, "num_meas", layout.num_meas)?,
+            m: require_i32(op, "m", m)?,
+        })
+    }
+}
+
+/// Collapse measurement `m` of the run: pivot search, cascade and fixup, three launches
+/// with no host copy. The cascade and fixup return at once when `m` has no pivot, and
+/// the fixup takes the run's next random bit as the outcome.
+pub(crate) fn launch_run_collapse(
+    ctx: &GpuContext,
+    tableau: &mut GpuTableau,
+    layout: MeasureRunLayout,
+    m: usize,
+) -> Result<()> {
+    let n_usize = tableau.num_qubits();
+    let row_block = run_row_block(tableau.num_words());
+    let pivot_blocks = div_ceil_grid(
+        "stab_run_find_pivot",
+        "num_qubits",
+        n_usize,
+        MEASURE_BLOCK_SIZE,
+    )?;
+    let cascade_blocks = require_u32("stab_run_cascade", "num_rows", 2 * n_usize)?;
+    let args = RunArgs::new("stab_run_collapse", tableau, layout, m)?;
+    let (xz_buf, phase_buf, bufs) = tableau.xz_phase_run_mut();
+    let xz = xz_buf.raw_mut();
+    let phase = phase_buf.raw_mut();
+    let run = bufs.run.raw_mut();
+
+    let (stream, func) = stream_and_fn(ctx, "stab_run_find_pivot")?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(&mut *xz)
+        .arg(&args.n)
+        .arg(&args.nw)
+        .arg(&mut *run)
+        .arg(&args.num_meas)
+        .arg(&args.m);
+    // SAFETY: signature (const u64*, i32, i32, u32*, i32, i32). Threads read one word
+    // per stabilizer row and atomicMin into pivots[m]; m < num_meas and the run buffer
+    // holds the uploaded layout (checked in `RunArgs::new`), so the slot is in bounds.
+    unsafe {
+        builder
+            .launch(linear_cfg(MEASURE_BLOCK_SIZE, pivot_blocks))
+            .map_err(|e| driver_err("stab_run_find_pivot", e))?;
+    }
+    ctx.device().count_launch(0);
+
+    let (_, func) = stream_and_fn(ctx, "stab_run_cascade")?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(&mut *xz)
+        .arg(&mut *phase)
+        .arg(&args.n)
+        .arg(&args.nw)
+        .arg(&mut *run)
+        .arg(&args.num_meas)
+        .arg(&args.m);
+    // SAFETY: signature (u64*, u8*, i32, i32, u32*, i32, i32). Each block owns one
+    // destination row; the pivot row and the run buffer are read only, at slots inside
+    // the uploaded layout because m < num_meas.
+    unsafe {
+        builder
+            .launch(linear_cfg(row_block, cascade_blocks))
+            .map_err(|e| driver_err("stab_run_cascade", e))?;
+    }
+    ctx.device().count_launch(1);
+
+    let (_, func) = stream_and_fn(ctx, "stab_run_fixup")?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(&mut *xz)
+        .arg(&mut *phase)
+        .arg(&args.n)
+        .arg(&args.nw)
+        .arg(&mut *run)
+        .arg(&args.num_meas)
+        .arg(&args.m);
+    // SAFETY: signature (u64*, u8*, i32, i32, u32*, i32, i32). A single block writes
+    // the pivot and destabilizer rows; thread 0 alone writes the cursor and
+    // outcomes[m], inside the layout because m < num_meas. Stream order puts it after
+    // the cascade.
+    unsafe {
+        builder
+            .launch(linear_cfg(row_block, 1))
+            .map_err(|e| driver_err("stab_run_fixup", e))?;
+    }
+    ctx.device().count_launch(0);
+    Ok(())
+}
+
+/// Resolve measurement `m` of the run into `outcomes[m]` by the serial deterministic
+/// product, for a state that keeps X support.
+pub(crate) fn launch_run_deterministic(
+    ctx: &GpuContext,
+    tableau: &mut GpuTableau,
+    layout: MeasureRunLayout,
+    m: usize,
+) -> Result<()> {
+    let (stream, func) = stream_and_fn(ctx, "stab_run_deterministic")?;
+    let row_block = run_row_block(tableau.num_words());
+    let args = RunArgs::new("stab_run_deterministic", tableau, layout, m)?;
+    let (xz_buf, phase_buf, bufs) = tableau.xz_phase_run_mut();
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(xz_buf.raw_mut())
+        .arg(phase_buf.raw_mut())
+        .arg(&args.n)
+        .arg(&args.nw)
+        .arg(bufs.run.raw_mut())
+        .arg(&args.num_meas)
+        .arg(&args.m);
+    // SAFETY: signature (u64*, u8*, i32, i32, u32*, i32, i32). A single block runs a
+    // serial loop whose only destination is the scratch row; thread 0 alone writes
+    // outcomes[m], inside the uploaded layout because m < num_meas.
+    unsafe {
+        builder
+            .launch(linear_cfg(row_block, 1))
+            .map_err(|e| driver_err("stab_run_deterministic", e))?;
+    }
+    ctx.device().count_launch(0);
+    Ok(())
+}
+
+/// Resolve every measurement of the run left without a pivot from the stabilizer
+/// signs, for a state whose stabilizers carry no X. Two launches, no host copy.
+pub(crate) fn launch_run_diagonal_finish(
+    ctx: &GpuContext,
+    tableau: &mut GpuTableau,
+    layout: MeasureRunLayout,
+) -> Result<()> {
+    let nw_usize = tableau.num_words();
+    let n = require_i32(
+        "stab_run_det_accumulate",
+        "num_qubits",
+        tableau.num_qubits(),
+    )?;
+    let nw = require_i32("stab_run_det_accumulate", "num_words", nw_usize)?;
+    let num_meas = require_i32("stab_run_det_outcomes", "num_meas", layout.num_meas)?;
+    let acc_blocks = require_u32("stab_run_det_accumulate", "num_words", nw_usize)?;
+    let outcome_blocks = div_ceil_grid(
+        "stab_run_det_outcomes",
+        "num_meas",
+        layout.num_meas,
+        MEASURE_BLOCK_SIZE,
+    )?;
+    debug_assert_run_buffer_holds(tableau, layout);
+    let (xz_buf, phase_buf, bufs) = tableau.xz_phase_run_mut();
+
+    let (stream, func) = stream_and_fn(ctx, "stab_run_det_accumulate")?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(xz_buf.raw_mut())
+        .arg(phase_buf.raw_mut())
+        .arg(&n)
+        .arg(&nw)
+        .arg(bufs.acc.raw_mut());
+    // SAFETY: signature (const u64*, const u8*, i32, i32, u64*). Block `w` reads X
+    // word `w` of the destabilizer rows and alone writes acc[w]; acc holds num_words
+    // words.
+    unsafe {
+        builder
+            .launch(linear_cfg(MEASURE_BLOCK_SIZE, acc_blocks))
+            .map_err(|e| driver_err("stab_run_det_accumulate", e))?;
+    }
+    ctx.device().count_launch(1);
+
+    let (_, func) = stream_and_fn(ctx, "stab_run_det_outcomes")?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(bufs.acc.raw_mut())
+        .arg(&n)
+        .arg(bufs.run.raw_mut())
+        .arg(&num_meas);
+    // SAFETY: signature (const u64*, i32, u32*, i32). Thread `m < num_meas` reads acc
+    // and writes outcomes[m] alone; the run buffer holds the layout's words, checked
+    // above.
+    unsafe {
+        builder
+            .launch(linear_cfg(MEASURE_BLOCK_SIZE, outcome_blocks))
+            .map_err(|e| driver_err("stab_run_det_outcomes", e))?;
+    }
+    ctx.device().count_launch(0);
+    Ok(())
+}
+
+/// Apply `CX(k, k + 1)` for `k` in `start..end` in one launch with no upload, in place
+/// of a word group flush at each word boundary the chain crosses.
+pub(crate) fn launch_cx_chain(
+    ctx: &GpuContext,
+    tableau: &mut GpuTableau,
+    start: usize,
+    end: usize,
+) -> Result<()> {
+    debug_assert!(
+        start < end && end < tableau.num_qubits(),
+        "CX chain {start}..{end} outside {} qubits",
+        tableau.num_qubits()
+    );
+    let (stream, func) = stream_and_fn(ctx, "stab_apply_cx_chain")?;
+    let rows_usize = tableau.total_rows();
+    let num_rows = require_i32("stab_apply_cx_chain", "num_rows", rows_usize)?;
+    let nw = require_i32("stab_apply_cx_chain", "num_words", tableau.num_words())?;
+    let start_i = require_i32("stab_apply_cx_chain", "start", start)?;
+    let end_i = require_i32("stab_apply_cx_chain", "end", end)?;
+    let blocks = div_ceil_grid("stab_apply_cx_chain", "num_rows", rows_usize, BLOCK_SIZE)?;
+
+    let (xz_buf, phase_buf) = tableau.xz_phase_mut();
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(xz_buf.raw_mut())
+        .arg(phase_buf.raw_mut())
+        .arg(&num_rows)
+        .arg(&nw)
+        .arg(&start_i)
+        .arg(&end_i);
+    // SAFETY: signature (u64*, u8*, i32, i32, i32, i32). Thread `r` alone reads and
+    // writes row `r` and phase[r], and `end` is below num_qubits, so every word index
+    // stays inside the row.
+    unsafe {
+        builder
+            .launch(linear_cfg(BLOCK_SIZE, blocks))
+            .map_err(|e| driver_err("stab_apply_cx_chain", e))?;
+    }
+    ctx.device().count_launch(1);
+    Ok(())
 }

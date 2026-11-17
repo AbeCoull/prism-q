@@ -118,24 +118,24 @@ fn recognized_qft_runs_as_tiled_passes_with_one_upload() {
 }
 
 #[test]
-fn stabilizer_ghz_measure_all_counts_one_readback_chain_per_qubit() {
+fn stabilizer_ghz_measure_all_runs_one_collapse_on_the_device() {
     let Some(ctx) = gpu_device::context() else {
         return;
     };
     let mut circuit = prism_q::circuits::ghz_circuit(1000);
     circuit.measure_all();
-    // Init, then 16 Clifford batches (a flush at each of the 15 word boundaries the CX
-    // chain crosses, plus the final one), each staging 4 tables. Qubit 0 measures
-    // random (pivot, cascade, fixup); the other 999 are deterministic (pivot, chain).
-    // Each pivot and each chain uploads a reset word and reads one back; only the
-    // readbacks drain the stream.
+    // Init, one Clifford batch for H(0) that uploads 4 tables, and one launch of the CX
+    // chain kernel with no upload. The measure run uploads its state once. The first random mask has every bit set, so qubit 0
+    // collapses (pivot, cascade, fixup); the second mask is clear, so every stabilizer
+    // is diagonal and the other 999 outcomes come from the sign accumulation and its
+    // readout, two launches. Drains: two masks and one readback of the run.
     assert_eq!(
         stabilizer_census_of(&ctx, &circuit),
         GpuPassCensus {
-            launches: 1 + 16 + 3 + 999 * 2,
-            passes: 1 + 16 + 1,
-            drains: 1000 + 999,
-            uploads: 16 * 4 + 1000 + 999,
+            launches: 1 + 1 + 1 + 2 + 3 + 2,
+            passes: 1 + 1 + 1 + 2 + 1 + 1,
+            drains: 2 + 1,
+            uploads: 4 + 1,
             dense_2q: 0,
             tiles: 0,
         }
@@ -143,7 +143,7 @@ fn stabilizer_ghz_measure_all_counts_one_readback_chain_per_qubit() {
 }
 
 #[test]
-fn stabilizer_h_wall_measure_all_is_random_on_every_qubit() {
+fn stabilizer_h_wall_measure_all_collapses_in_doubling_chunks() {
     let Some(ctx) = gpu_device::context() else {
         return;
     };
@@ -153,14 +153,18 @@ fn stabilizer_h_wall_measure_all_is_random_on_every_qubit() {
         circuit.add_gate(Gate::H, &[q]);
     }
     circuit.measure_all();
-    // Init and one Clifford batch, then pivot, cascade and fixup for each qubit.
+    // Init and one Clifford batch (4 table uploads), then the run upload. Every outcome
+    // is random: chunks of 1, 2, 4, ..., 256 and a last one of 1 make 10 chunks behind
+    // 11 random masks, each mask a launch and a readback. Every qubit collapses
+    // (pivot, cascade, fixup). The last mask is clear, so the diagonal finish runs
+    // (two launches, nothing left to resolve) before one readback of the run.
     assert_eq!(
         stabilizer_census_of(&ctx, &circuit),
         GpuPassCensus {
-            launches: 1 + 1 + n as u64 * 3,
-            passes: 1 + 1 + n as u64,
-            drains: n as u64,
-            uploads: 4 + n as u64,
+            launches: 1 + 1 + 11 + n as u64 * 3 + 2,
+            passes: 1 + 1 + 11 + n as u64 + 1,
+            drains: 11 + 1,
+            uploads: 4 + 1,
             dense_2q: 0,
             tiles: 0,
         }

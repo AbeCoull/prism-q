@@ -485,8 +485,18 @@ pub struct GpuTableau {
     phase: GpuBuffer<u8>,
     measure_pivot: GpuBuffer<i32>,
     measure_outcome: GpuBuffer<u8>,
+    measure_run: Option<MeasureRunBuffers>,
     num_qubits: usize,
     num_words: usize,
+}
+
+/// Device state of a measurement run, allocated on the first run and grown only when
+/// a longer run needs it. `run` holds the u32 layout `stabilizer.cu` documents under
+/// "Measurement runs"; `mask` holds one word per row half.
+#[derive(Debug)]
+pub(crate) struct MeasureRunBuffers {
+    pub(crate) run: GpuBuffer<u32>,
+    pub(crate) mask: GpuBuffer<u64>,
 }
 
 impl GpuTableau {
@@ -508,6 +518,7 @@ impl GpuTableau {
             phase,
             measure_pivot,
             measure_outcome,
+            measure_run: None,
             num_qubits,
             num_words,
         };
@@ -542,6 +553,39 @@ impl GpuTableau {
         &mut self,
     ) -> (&mut GpuBuffer<u64>, &mut GpuBuffer<u8>, &mut GpuBuffer<u8>) {
         (&mut self.xz, &mut self.phase, &mut self.measure_outcome)
+    }
+
+    /// Make the measurement run buffers hold at least `run_len` words, keeping the
+    /// current allocation when it already does.
+    pub(crate) fn ensure_measure_run(&mut self, run_len: usize) -> Result<()> {
+        let device = self.context.device();
+        match &mut self.measure_run {
+            Some(bufs) if bufs.run.len() >= run_len => {}
+            Some(bufs) => bufs.run = GpuBuffer::alloc_zeros(device, run_len)?,
+            None => {
+                self.measure_run = Some(MeasureRunBuffers {
+                    run: GpuBuffer::alloc_zeros(device, run_len)?,
+                    mask: GpuBuffer::alloc_zeros(device, self.num_words.max(1))?,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// # Panics
+    /// When [`Self::ensure_measure_run`] has not run on this tableau.
+    pub(crate) fn xz_phase_run_mut(
+        &mut self,
+    ) -> (
+        &mut GpuBuffer<u64>,
+        &mut GpuBuffer<u8>,
+        &mut MeasureRunBuffers,
+    ) {
+        let run = self
+            .measure_run
+            .as_mut()
+            .expect("ensure_measure_run allocates the run buffers first");
+        (&mut self.xz, &mut self.phase, run)
     }
 
     pub(crate) fn total_rows(&self) -> usize {

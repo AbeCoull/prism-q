@@ -1821,6 +1821,134 @@ fn stabilizer_gpu_export_statevector_matches_cpu() {
 }
 
 // ============================================================================
+// Stabilizer GPU measurement runs
+// ============================================================================
+
+/// Run `instructions` through `apply_instructions` on the host, on the device, and on
+/// the device one instruction at a time (the path without measurement runs). Every
+/// classical bit and every generator row must agree; the scratch row is left out
+/// because only the serial deterministic product writes it.
+fn stab_run_compare(f: &Fixture, num_qubits: usize, instructions: &[Instruction]) -> Vec<bool> {
+    use prism_q::StabilizerBackend;
+
+    let mut cpu = StabilizerBackend::new(42);
+    cpu.init(num_qubits, num_qubits).unwrap();
+    cpu.apply_instructions(instructions).unwrap();
+
+    let mut gpu = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    gpu.init(num_qubits, num_qubits).unwrap();
+    gpu.apply_instructions(instructions).unwrap();
+
+    let mut gpu_serial = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    gpu_serial.init(num_qubits, num_qubits).unwrap();
+    for inst in instructions {
+        gpu_serial.apply(inst).unwrap();
+    }
+
+    assert_eq!(
+        cpu.classical_results(),
+        gpu.classical_results(),
+        "device run bits must match the host"
+    );
+    assert_eq!(
+        gpu_serial.classical_results(),
+        gpu.classical_results(),
+        "device run bits must match the device path without runs"
+    );
+
+    let generator_words = 2 * num_qubits * 2 * num_qubits.div_ceil(64);
+    let (cpu_xz, cpu_phase) = cpu.export_tableau().unwrap();
+    let (gpu_xz, gpu_phase) = gpu.export_tableau().unwrap();
+    assert!(
+        cpu_xz[..generator_words] == gpu_xz[..generator_words],
+        "generator rows must match the host after the run"
+    );
+    assert_eq!(
+        cpu_phase[..2 * num_qubits],
+        gpu_phase[..2 * num_qubits],
+        "generator phases must match the host after the run"
+    );
+    gpu.classical_results().to_vec()
+}
+
+fn measure_range(circuit: &mut Vec<Instruction>, qubits: std::ops::Range<usize>) {
+    circuit.extend(qubits.map(|q| Instruction::Measure {
+        qubit: q,
+        classical_bit: q,
+    }));
+}
+
+#[test]
+fn stabilizer_gpu_measure_run_ghz_500_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 500;
+    let mut circuit = prism_q::circuits::ghz_circuit(n).instructions;
+    measure_range(&mut circuit, 0..n);
+    let bits = stab_run_compare(&f, n, &circuit);
+    assert!(
+        bits.iter().all(|&b| b == bits[0]),
+        "GHZ bits must all agree"
+    );
+}
+
+#[test]
+fn stabilizer_gpu_measure_run_h_wall_512_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 512;
+    let mut circuit: Vec<Instruction> = (0..n).map(|q| g(Gate::H, &[q])).collect();
+    measure_range(&mut circuit, 0..n);
+    let bits = stab_run_compare(&f, n, &circuit);
+    assert!(bits.iter().any(|&b| b) && bits.iter().any(|&b| !b));
+}
+
+#[test]
+fn stabilizer_gpu_measure_run_random_pairs_256_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 256;
+    let mut circuit = prism_q::circuits::clifford_random_pairs(n, 20, 42).instructions;
+    measure_range(&mut circuit, 0..n);
+    stab_run_compare(&f, n, &circuit);
+}
+
+// The first run measures Bell pairs, some flipped, while the unmeasured half keeps X
+// support, so its deterministic bits take the serial fallback. The gates in between
+// entangle the two halves before the second run draws from the RNG where the first
+// left it.
+#[test]
+fn stabilizer_gpu_partial_measure_runs_match_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 300;
+    let half = n / 2;
+    let mut circuit = Vec::new();
+    for q in (0..half).step_by(2) {
+        circuit.push(g(Gate::H, &[q]));
+        circuit.push(g(Gate::Cx, &[q, q + 1]));
+        if q % 6 == 0 {
+            circuit.push(g(Gate::X, &[q + 1]));
+        }
+    }
+    for q in half..n {
+        circuit.push(g(Gate::H, &[q]));
+    }
+    for q in half..n - 1 {
+        circuit.push(g(Gate::Cz, &[q, q + 1]));
+    }
+    measure_range(&mut circuit, 0..half);
+    for q in 0..half {
+        circuit.push(g(Gate::Cx, &[half + q, q]));
+        circuit.push(g(Gate::S, &[q]));
+    }
+    measure_range(&mut circuit, half..n);
+    let bits = stab_run_compare(&f, n, &circuit);
+    assert!(
+        (0..half)
+            .step_by(2)
+            .all(|q| (bits[q] != bits[q + 1]) == (q % 6 == 0)),
+        "each Bell pair agrees unless its second qubit was flipped"
+    );
+}
+
+// ============================================================================
 // Stabilizer GPU public dispatch
 // ============================================================================
 

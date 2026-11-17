@@ -422,32 +422,21 @@ extern "C" __global__ void stab_rowmul_words(
 // Reset reuses the same path and queues an X onto the Clifford batch queue
 // when the outcome is 1.
 
-// Scan stabilizer rows n..2n for the minimum row index with an X-bit at
-// `target`. `out_pivot` must be initialised to a sentinel >= 2n on the host;
-// atomicMin leaves the sentinel untouched when no row carries the X-bit.
-extern "C" __global__ void stab_measure_find_pivot(
+/// True when stabilizer row `n + i` carries an X-bit at `target`.
+__device__ __forceinline__ bool stab_pivot_candidate(
     const unsigned long long *xz,
     int num_qubits,
     int num_words,
     int target,
-    int *out_pivot
+    int i
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= num_qubits) return;
-    int row = num_qubits + i;
     int stride = 2 * num_words;
-    int word_idx = target / 64;
     unsigned long long bit = 1ULL << (target % 64);
-    if ((xz[stab_row(row, stride) + word_idx] & bit) != 0ULL) {
-        atomicMin(out_pivot, row);
-    }
+    return (xz[stab_row(num_qubits + i, stride) + target / 64] & bit) != 0ULL;
 }
 
-// Rowmul `pivot_row` into every row in [0, 2n) that carries an X-bit at
-// `target`, skipping `pivot_row` itself. One block per candidate row; blocks
-// that do not carry the X-bit early-exit. `pivot_row` is read-only throughout
-// (the fixup kernel runs afterwards and is the only writer).
-extern "C" __global__ void stab_measure_cascade(
+// Rowmul `pivot_row` into row `blockIdx.x` when that row carries an X-bit at `target`.
+__device__ __forceinline__ void stab_cascade_body(
     unsigned long long *xz,
     unsigned char *phase,
     int num_qubits,
@@ -456,14 +445,12 @@ extern "C" __global__ void stab_measure_cascade(
     int pivot_row
 ) {
     int r = blockIdx.x;
-    int total_rows = 2 * num_qubits;
-    if (r >= total_rows) return;
+    if (r >= 2 * num_qubits) return;
     if (r == pivot_row) return;
 
     int stride = 2 * num_words;
-    int word_idx = target / 64;
     unsigned long long bit = 1ULL << (target % 64);
-    if ((xz[stab_row(r, stride) + word_idx] & bit) == 0ULL) return;
+    if ((xz[stab_row(r, stride) + target / 64] & bit) == 0ULL) return;
 
     int tid = threadIdx.x;
     int bsz = blockDim.x;
@@ -473,11 +460,9 @@ extern "C" __global__ void stab_measure_cascade(
     if (tid == 0) stab_rowmul_phase(phase, pivot_row, r, sum);
 }
 
-// After the cascade: copy pivot row into the paired destabiliser row
-// (`pivot_row - num_qubits`), zero the pivot row, set its Z-bit at `target`,
-// and store the measured outcome in the pivot's phase. Single-block launch
-// so thread 0 can hand-off the pre-zero phase value via shared memory.
-extern "C" __global__ void stab_measure_fixup(
+// Move the pivot row into its paired destabilizer and install `Z_target` with
+// `outcome` as its phase. `outcome` is read on thread 0 only.
+__device__ __forceinline__ void stab_fixup_body(
     unsigned long long *xz,
     unsigned char *phase,
     int num_qubits,
@@ -506,24 +491,19 @@ extern "C" __global__ void stab_measure_fixup(
     if (tid == 0) {
         phase[destab_row] = pivot_phase_saved;
         phase[pivot_row] = outcome;
-        int word_idx = target / 64;
         unsigned long long bit = 1ULL << (target % 64);
-        pivot[num_words + word_idx] = bit;
+        pivot[num_words + target / 64] = bit;
     }
 }
 
-// Deterministic branch: build the scratch row at index 2n by serially
-// rowmul'ing stabiliser row n+i into it whenever destabiliser row i carries
-// an X-bit at `target`. Single block; the serial loop keeps scratch's phase
-// consistent across rowmul iterations. Thread 0 writes the scratch phase to
-// `out_outcome` on exit.
-extern "C" __global__ void stab_measure_deterministic(
+// Rowmul into the scratch row every stabilizer whose paired destabilizer carries an
+// X-bit at `target`, in row order. Returns the scratch phase, valid on thread 0.
+__device__ __forceinline__ unsigned char stab_deterministic_body(
     unsigned long long *xz,
     unsigned char *phase,
     int num_qubits,
     int num_words,
-    int target,
-    unsigned char *out_outcome
+    int target
 ) {
     int tid = threadIdx.x;
     int bsz = blockDim.x;
@@ -549,6 +529,225 @@ extern "C" __global__ void stab_measure_deterministic(
         if (tid == 0) stab_rowmul_phase(phase, src_row, scratch, sum);
         __syncthreads();
     }
+    return phase[scratch];
+}
 
-    if (tid == 0) *out_outcome = phase[scratch];
+// Scan stabilizer rows n..2n for the minimum row index with an X-bit at
+// `target`. `out_pivot` must be initialised to a sentinel >= 2n on the host;
+// atomicMin leaves the sentinel untouched when no row carries the X-bit.
+extern "C" __global__ void stab_measure_find_pivot(
+    const unsigned long long *xz,
+    int num_qubits,
+    int num_words,
+    int target,
+    int *out_pivot
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_qubits) return;
+    if (stab_pivot_candidate(xz, num_qubits, num_words, target, i)) {
+        atomicMin(out_pivot, num_qubits + i);
+    }
+}
+
+// Rowmul `pivot_row` into every row in [0, 2n) that carries an X-bit at
+// `target`, skipping `pivot_row` itself. One block per candidate row; blocks
+// that do not carry the X-bit early-exit. `pivot_row` is read-only throughout
+// (the fixup kernel runs afterwards and is the only writer).
+extern "C" __global__ void stab_measure_cascade(
+    unsigned long long *xz,
+    unsigned char *phase,
+    int num_qubits,
+    int num_words,
+    int target,
+    int pivot_row
+) {
+    stab_cascade_body(xz, phase, num_qubits, num_words, target, pivot_row);
+}
+
+// After the cascade: copy pivot row into the paired destabiliser row
+// (`pivot_row - num_qubits`), zero the pivot row, set its Z-bit at `target`,
+// and store the measured outcome in the pivot's phase. Single-block launch
+// so thread 0 can hand-off the pre-zero phase value via shared memory.
+extern "C" __global__ void stab_measure_fixup(
+    unsigned long long *xz,
+    unsigned char *phase,
+    int num_qubits,
+    int num_words,
+    int target,
+    int pivot_row,
+    unsigned char outcome
+) {
+    stab_fixup_body(xz, phase, num_qubits, num_words, target, pivot_row, outcome);
+}
+
+// Deterministic branch: build the scratch row at index 2n by serially
+// rowmul'ing stabiliser row n+i into it whenever destabiliser row i carries
+// an X-bit at `target`. Single block; the serial loop keeps scratch's phase
+// consistent across rowmul iterations. Thread 0 writes the scratch phase to
+// `out_outcome` on exit.
+extern "C" __global__ void stab_measure_deterministic(
+    unsigned long long *xz,
+    unsigned char *phase,
+    int num_qubits,
+    int num_words,
+    int target,
+    unsigned char *out_outcome
+) {
+    unsigned char outcome =
+        stab_deterministic_body(xz, phase, num_qubits, num_words, target);
+    if (threadIdx.x == 0) *out_outcome = outcome;
+}
+
+// ============================================================================
+// Measurement runs
+// ============================================================================
+//
+// A run of `M` measurements on distinct qubits keeps its state in one u32 buffer, so
+// collapses chain through stream order with no readback between them:
+//
+//   run[0]                          cursor: random bits consumed so far
+//   run[1 .. 1+M]                   target qubit of measurement m
+//   run[1+M .. 1+2M]                pivot row of m, the sentinel 2n until one is found
+//   run[1+2M .. 1+2M+ceil(M/32)]    random bits drawn on the host, taken in collapse order
+//   then M words                    outcome of m, written by kernels only
+//
+// Every run kernel takes `m` by value, so a collapse launches with no upload.
+
+__device__ __forceinline__ unsigned int *stab_run_targets(unsigned int *run) {
+    return run + 1;
+}
+
+__device__ __forceinline__ unsigned int *stab_run_pivots(unsigned int *run, int num_meas) {
+    return run + 1 + num_meas;
+}
+
+__device__ __forceinline__ unsigned int *stab_run_rand(unsigned int *run, int num_meas) {
+    return run + 1 + 2 * num_meas;
+}
+
+__device__ __forceinline__ unsigned int *stab_run_outcomes(unsigned int *run, int num_meas) {
+    return run + 1 + 2 * num_meas + (num_meas + 31) / 32;
+}
+
+// OR (`use_xor` false) or XOR (`use_xor` true) of `v` over the block, returned on
+// every thread. `buf` is a 32-slot shared buffer.
+__device__ __forceinline__ unsigned long long stab_reduce_bits(
+    unsigned long long v,
+    bool use_xor,
+    unsigned int tid,
+    unsigned int bsz,
+    unsigned long long *buf
+) {
+    for (int off = 16; off > 0; off /= 2) {
+        unsigned long long o = __shfl_down_sync(0xffffffffu, v, off);
+        v = use_xor ? (v ^ o) : (v | o);
+    }
+    unsigned int lane = tid & 31u;
+    unsigned int warp = tid >> 5;
+    if (lane == 0u) buf[warp] = v;
+    __syncthreads();
+    if (warp == 0u) {
+        unsigned int nwarps = (bsz + 31u) >> 5;
+        unsigned long long s = (lane < nwarps) ? buf[lane] : 0ULL;
+        for (int off = 16; off > 0; off /= 2) {
+            unsigned long long o = __shfl_down_sync(0xffffffffu, s, off);
+            s = use_xor ? (s ^ o) : (s | o);
+        }
+        if (lane == 0u) buf[0] = s;
+    }
+    __syncthreads();
+    return buf[0];
+}
+
+// Block `w` stores the OR of X word `w` over the stabilizer rows. A qubit whose bit
+// is clear commutes with every stabilizer, so its measurement is deterministic.
+extern "C" __global__ void stab_run_random_mask(
+    const unsigned long long *xz,
+    int num_qubits,
+    int num_words,
+    unsigned long long *mask
+) {
+    int w = blockIdx.x;
+    if (w >= num_words) return;
+    unsigned int tid = threadIdx.x;
+    unsigned int bsz = blockDim.x;
+    int stride = 2 * num_words;
+    unsigned long long acc = 0ULL;
+    for (int i = (int)tid; i < num_qubits; i += (int)bsz) {
+        acc |= xz[stab_row(num_qubits + i, stride) + w];
+    }
+    __shared__ unsigned long long buf[32];
+    unsigned long long total = stab_reduce_bits(acc, false, tid, bsz, buf);
+    if (tid == 0u) mask[w] = total;
+}
+
+extern "C" __global__ void stab_run_find_pivot(
+    const unsigned long long *xz,
+    int num_qubits,
+    int num_words,
+    unsigned int *run,
+    int num_meas,
+    int m
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_qubits) return;
+    int target = (int)stab_run_targets(run)[m];
+    if (stab_pivot_candidate(xz, num_qubits, num_words, target, i)) {
+        atomicMin(&stab_run_pivots(run, num_meas)[m], (unsigned int)(num_qubits + i));
+    }
+}
+
+// A no-op when measurement `m` turned deterministic after an earlier collapse.
+extern "C" __global__ void stab_run_cascade(
+    unsigned long long *xz,
+    unsigned char *phase,
+    int num_qubits,
+    int num_words,
+    unsigned int *run,
+    int num_meas,
+    int m
+) {
+    unsigned int pivot = stab_run_pivots(run, num_meas)[m];
+    if (pivot >= (unsigned int)(2 * num_qubits)) return;
+    int target = (int)stab_run_targets(run)[m];
+    stab_cascade_body(xz, phase, num_qubits, num_words, target, (int)pivot);
+}
+
+// Takes random bit `cursor` as the outcome of `m`, records it, and advances the cursor.
+extern "C" __global__ void stab_run_fixup(
+    unsigned long long *xz,
+    unsigned char *phase,
+    int num_qubits,
+    int num_words,
+    unsigned int *run,
+    int num_meas,
+    int m
+) {
+    unsigned int pivot = stab_run_pivots(run, num_meas)[m];
+    if (pivot >= (unsigned int)(2 * num_qubits)) return;
+    int target = (int)stab_run_targets(run)[m];
+    unsigned char outcome = 0;
+    if (threadIdx.x == 0) {
+        unsigned int c = run[0];
+        outcome = (unsigned char)((stab_run_rand(run, num_meas)[c >> 5] >> (c & 31u)) & 1u);
+        stab_run_outcomes(run, num_meas)[m] = outcome;
+        run[0] = c + 1u;
+    }
+    stab_fixup_body(xz, phase, num_qubits, num_words, target, (int)pivot, outcome);
+}
+
+// Serial deterministic outcome of measurement `m`, for a state that keeps X support.
+extern "C" __global__ void stab_run_deterministic(
+    unsigned long long *xz,
+    unsigned char *phase,
+    int num_qubits,
+    int num_words,
+    unsigned int *run,
+    int num_meas,
+    int m
+) {
+    int target = (int)stab_run_targets(run)[m];
+    unsigned char outcome =
+        stab_deterministic_body(xz, phase, num_qubits, num_words, target);
+    if (threadIdx.x == 0) stab_run_outcomes(run, num_meas)[m] = outcome;
 }

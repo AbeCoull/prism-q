@@ -348,6 +348,11 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "stab_measure_cascade",
     "stab_measure_fixup",
     "stab_measure_deterministic",
+    "stab_run_random_mask",
+    "stab_run_find_pivot",
+    "stab_run_cascade",
+    "stab_run_fixup",
+    "stab_run_deterministic",
     // Block-triangular sampling.
     "bts_sample_meas_major",
     "bts_popcount_rows",

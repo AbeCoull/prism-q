@@ -308,6 +308,9 @@ pub struct GpuState {
     /// Reused across `probabilities()` calls so shot sampling does not reallocate `2^n`
     /// f64s per read.
     probs_scratch: std::cell::RefCell<Option<GpuBuffer<f64>>>,
+    /// Measurements decided on the device: the pending norm at index 0, then one outcome
+    /// per slot, read back once per run of deferred measurements.
+    measure_log: Option<GpuBuffer<f64>>,
 }
 
 impl GpuState {
@@ -330,6 +333,7 @@ impl GpuState {
             num_qubits,
             pending_norm: 1.0,
             probs_scratch: std::cell::RefCell::new(None),
+            measure_log: None,
         };
         kernels::dense::launch_set_initial_state(&context, &mut state)?;
         Ok(state)
@@ -348,6 +352,7 @@ impl GpuState {
             num_qubits,
             pending_norm: 1.0,
             probs_scratch: std::cell::RefCell::new(None),
+            measure_log: None,
         })
     }
 
@@ -362,6 +367,7 @@ impl GpuState {
             num_qubits: self.num_qubits,
             pending_norm: self.pending_norm,
             probs_scratch: std::cell::RefCell::new(None),
+            measure_log: None,
         })
     }
 

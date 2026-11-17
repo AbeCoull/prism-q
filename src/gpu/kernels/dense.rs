@@ -15,8 +15,10 @@ use crate::backend::statevector::kernels as cpu_k;
 use crate::error::{PrismError, Result};
 
 use super::super::tiles::{Geometry, TileOp};
-use super::super::{GpuContext, GpuState};
-use super::{check_pair, check_qubit, driver_err, launch_limit_err, linear_cfg, stream_and_fn};
+use super::super::{GpuBuffer, GpuContext, GpuState};
+use super::{
+    check_pair, check_qubit, driver_err, launch_limit_err, linear_cfg, require_i32, stream_and_fn,
+};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -173,7 +175,6 @@ pub(crate) fn launch_set_initial_state(ctx: &GpuContext, state: &mut GpuState) -
 }
 
 pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -> Result<Vec<f64>> {
-    use super::super::GpuBuffer;
     let n = state.num_qubits();
     let dim: u64 = 1u64 << n;
     let device = ctx.device();
@@ -1185,6 +1186,155 @@ pub(crate) fn measure_collapse(
     }
     ctx.device().count_launch(1);
     Ok(())
+}
+
+/// Start a run of measurements decided on the device: size the log for `capacity`
+/// outcomes and upload the pending norm into its first slot.
+pub(crate) fn begin_measure_log(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    capacity: usize,
+) -> Result<()> {
+    let device = ctx.device();
+    if state
+        .measure_log
+        .as_ref()
+        .is_none_or(|log| log.len() < capacity + 1)
+    {
+        state.measure_log = Some(GpuBuffer::<f64>::alloc_zeros(device, capacity + 1)?);
+    }
+    let log = state
+        .measure_log
+        .as_mut()
+        .expect("measure log allocated above");
+    device
+        .stream()?
+        .memcpy_htod(&[state.pending_norm], &mut log.raw_mut().slice_mut(0..1))
+        .map_err(|e| driver_err("upload measure log norm", e))?;
+    device.count_upload();
+    Ok(())
+}
+
+/// Measure `qubit` with the outcome decided on the device into log slot `slot`, from the
+/// uniform draw `u`, and collapse; `reset` also folds the kept half onto |0>. Requires
+/// [`begin_measure_log`] with a capacity above `slot`.
+pub(crate) fn measure_logged(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    qubit: usize,
+    slot: usize,
+    u: f64,
+    reset: bool,
+) -> Result<()> {
+    let n = state.num_qubits();
+    check_qubit(n, qubit)?;
+    let dim: u64 = 1u64 << n;
+    let elems_per_block = 2u64 * BLOCK_SIZE as u64;
+    let num_blocks = dim.div_ceil(elems_per_block).max(1) as u32;
+    let device = ctx.device();
+    let stream = device.stream()?;
+    let shared_bytes = BLOCK_SIZE * std::mem::size_of::<f64>() as u32;
+    let qubit_i = qubit as i32;
+    let slot_i = require_i32("measure_decide", "slot", slot)?;
+    let log = state
+        .measure_log
+        .as_mut()
+        .expect("measure_logged called before begin_measure_log");
+    debug_assert!(slot < log.len() - 1, "measure log slot {slot} out of range");
+
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let partials =
+        super::ensure_capacity(&mut scratch.measure_partials, device, num_blocks as usize)?;
+    {
+        let func = device.function("measure_prob_one")?;
+        let mut builder = stream.launch_builder(&func);
+        builder
+            .arg(state.buffer.raw())
+            .arg(&dim)
+            .arg(&qubit_i)
+            .arg(partials.raw_mut());
+        let cfg = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: shared_bytes,
+        };
+        // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers dim.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| driver_err("measure_prob_one", e))?;
+        }
+        device.count_launch(1);
+    }
+    {
+        let func = device.function("measure_decide")?;
+        let mut builder = stream.launch_builder(&func);
+        builder
+            .arg(scratch.measure_partials.as_ref().unwrap().raw())
+            .arg(&num_blocks)
+            .arg(log.raw_mut())
+            .arg(&slot_i)
+            .arg(&u)
+            .arg(&crate::backend::NORM_CLAMP_MIN);
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: shared_bytes,
+        };
+        // SAFETY: signature matches kernel; one block reduces `num_blocks` partials and
+        // thread 0 writes log[0] and log[1 + slot], inside the log by the capacity check.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| driver_err("measure_decide", e))?;
+        }
+        device.count_launch(0);
+    }
+    let (name, count) = if reset {
+        ("reset_fold_logged", dim / 2)
+    } else {
+        ("measure_collapse_logged", dim)
+    };
+    let func = device.function(name)?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(state.buffer.raw_mut())
+        .arg(&count)
+        .arg(&qubit_i)
+        .arg(log.raw())
+        .arg(&slot_i);
+    // SAFETY: signature matches kernel; the grid covers `count` amplitudes (or pairs),
+    // and each thread writes only its own amplitude (or its own pair).
+    unsafe {
+        builder
+            .launch(linear_cfg(BLOCK_SIZE, grid_for(count)))
+            .map_err(|e| driver_err(name, e))?;
+    }
+    device.count_launch(1);
+    Ok(())
+}
+
+/// Read back the first `slots` outcomes of the measure log as booleans and take its norm
+/// as the pending norm: the one readback for a run of device measurements.
+pub(crate) fn read_measure_log(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    slots: usize,
+) -> Result<Vec<bool>> {
+    let device = ctx.device();
+    let log = state
+        .measure_log
+        .as_ref()
+        .expect("read_measure_log called before begin_measure_log");
+    let mut host = vec![0.0_f64; slots + 1];
+    device
+        .stream()?
+        .memcpy_dtoh(&log.raw().slice(0..slots + 1), &mut host)
+        .map_err(|e| driver_err("measure log dtoh", e))?;
+    device.count_drain();
+    state.pending_norm = host[0];
+    Ok(host[1..].iter().map(|&v| v != 0.0).collect())
 }
 
 pub(crate) fn launch_apply_multi_fused_diagonal(

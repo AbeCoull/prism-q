@@ -35,7 +35,9 @@ directly:
   `RunMetadata::placement` reports `Host` or `Device` for the run.
 - `BackendKind::StatevectorGpu { context }` (`simulate(circuit).gpu(ctx)`). Keeps fusion
   and subsystem decomposition, and leaves sub-circuits below `crate::gpu::min_qubits()`
-  (default 14, `PRISM_GPU_MIN_QUBITS` override) on the CPU.
+  (default 14, `PRISM_GPU_MIN_QUBITS` override) on the CPU. Measurements and resets in
+  one instruction run are decided on the device and read back together, at the end of
+  the run or before a classically conditioned gate or region.
 - `BackendKind::StabilizerGpu { context }`. Gates apply to a device tableau through
   one word-grouped batched Clifford kernel (`stab_apply_word_grouped`). Measurement and
   reset keep pivot search, row cascade, phase fixup and deterministic outcomes on the

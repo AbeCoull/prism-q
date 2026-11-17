@@ -265,6 +265,10 @@ pub struct StatevectorBackend {
     gpu_state: Option<GpuState>,
     #[cfg(feature = "gpu")]
     gpu_soft: bool,
+    /// Classical bit of each measurement decided on the device since the last readback
+    /// (`None` for a reset), while an instruction run defers its readbacks.
+    #[cfg(feature = "gpu")]
+    measure_defer: Option<Vec<Option<usize>>>,
 }
 
 /// Kill switch for the native `QftBlock` FFT path and the QFT recognition that feeds it.
@@ -299,6 +303,8 @@ impl StatevectorBackend {
             gpu_state: None,
             #[cfg(feature = "gpu")]
             gpu_soft: false,
+            #[cfg(feature = "gpu")]
+            measure_defer: None,
         }
     }
 
@@ -339,10 +345,23 @@ impl StatevectorBackend {
             Instruction::Measure {
                 qubit,
                 classical_bit,
-            } => self.apply_measure_gpu(*qubit, *classical_bit),
-            Instruction::Reset { qubit } => self.apply_reset_gpu(*qubit),
+            } => {
+                if self.measure_defer.is_some() {
+                    self.measure_logged_gpu(*qubit, Some(*classical_bit))
+                } else {
+                    self.apply_measure_gpu(*qubit, *classical_bit)
+                }
+            }
+            Instruction::Reset { qubit } => {
+                if self.measure_defer.is_some() {
+                    self.measure_logged_gpu(*qubit, None)
+                } else {
+                    self.apply_reset_gpu(*qubit)
+                }
+            }
             Instruction::Barrier { .. } => Ok(()),
             Instruction::Save { label, .. } => {
+                self.sync_measure_log()?;
                 Err(crate::backend::save_not_applied("Statevector", label))
             }
             Instruction::Conditional {
@@ -350,14 +369,74 @@ impl StatevectorBackend {
                 gate,
                 targets,
             } => {
+                self.sync_measure_log()?;
                 if condition.evaluate(&self.classical_bits) {
                     self.dispatch_gate_gpu(gate, targets)
                 } else {
                     Ok(())
                 }
             }
-            Instruction::Region(region) => self.apply_region(region),
+            Instruction::Region(region) => {
+                // A region's control flow reads classical bits between its own
+                // instructions, so it runs with every readback immediate.
+                self.sync_measure_log()?;
+                let deferred = self.measure_defer.take();
+                let result = self.apply_region(region);
+                self.measure_defer = deferred;
+                result
+            }
         }
+    }
+
+    /// Measure (or, with no classical bit, reset) `qubit` with the outcome left in the
+    /// device log; [`Self::sync_measure_log`] reads it back.
+    #[cfg(feature = "gpu")]
+    fn measure_logged_gpu(&mut self, qubit: usize, classical_bit: Option<usize>) -> Result<()> {
+        use rand::RngExt;
+        let u: f64 = self.rng.random();
+        let slots = self
+            .measure_defer
+            .as_mut()
+            .expect("measure_logged_gpu called outside a deferred run");
+        let slot = slots.len();
+        slots.push(classical_bit);
+        let gpu = self
+            .gpu_state
+            .as_mut()
+            .expect("measure_logged_gpu called without gpu_state");
+        let ctx = gpu.context().clone();
+        crate::gpu::kernels::dense::measure_logged(
+            &ctx,
+            gpu,
+            qubit,
+            slot,
+            u,
+            classical_bit.is_none(),
+        )
+    }
+
+    /// Read back the outcomes and norm of the measurements decided on the device since
+    /// the last readback, so classical bits and `pending_norm` are current.
+    #[cfg(feature = "gpu")]
+    fn sync_measure_log(&mut self) -> Result<()> {
+        let Some(slots) = self.measure_defer.as_mut() else {
+            return Ok(());
+        };
+        if slots.is_empty() {
+            return Ok(());
+        }
+        let gpu = self
+            .gpu_state
+            .as_mut()
+            .expect("sync_measure_log called without gpu_state");
+        let ctx = gpu.context().clone();
+        let outcomes = crate::gpu::kernels::dense::read_measure_log(&ctx, gpu, slots.len())?;
+        for (bit, outcome) in slots.drain(..).zip(outcomes) {
+            if let Some(bit) = bit {
+                self.classical_bits[bit] = outcome;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "gpu")]
@@ -952,6 +1031,23 @@ impl Backend for StatevectorBackend {
     }
 
     fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_state.is_some() && self.measure_defer.is_none() {
+            let capacity = instructions
+                .iter()
+                .filter(|i| matches!(i, Instruction::Measure { .. } | Instruction::Reset { .. }))
+                .count();
+            if capacity > 0 {
+                let gpu = self.gpu_state.as_mut().expect("checked above");
+                let ctx = gpu.context().clone();
+                crate::gpu::kernels::dense::begin_measure_log(&ctx, gpu, capacity)?;
+                self.measure_defer = Some(Vec::with_capacity(capacity));
+                let result = self.apply_instructions(instructions);
+                let synced = self.sync_measure_log();
+                self.measure_defer = None;
+                return result.and(synced);
+            }
+        }
         #[cfg(feature = "gpu")]
         if self
             .gpu_state

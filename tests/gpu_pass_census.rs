@@ -76,16 +76,17 @@ fn staged_tables_upload_and_measurement_readbacks_drain_the_stream() {
         targets: smallvec![0],
     });
     circuit.add_measure(0, 0);
-    // H and the batch phase are one pass each, the batch phase uploads its table, and
-    // the measurement reduces (pass plus finalize), reads back (the one drain), then
-    // collapses (pass).
+    // H and the batch phase are one pass each and the batch phase uploads its table. The
+    // run uploads the pending norm once; the measurement reduces (pass), decides on the
+    // device (launch with no pass) and collapses (pass); the run reads the outcome back
+    // once at its end.
     assert_eq!(
         census_of(&ctx, &circuit),
         GpuPassCensus {
             launches: 5,
             passes: 4,
             drains: 1,
-            uploads: 1,
+            uploads: 2,
             dense_2q: 0,
             tiles: 0,
         }
@@ -193,6 +194,35 @@ fn device_sampling_uploads_random_bits_per_chunk() {
             passes: 0,
             drains: 0,
             uploads: 2,
+            dense_2q: 0,
+            tiles: 0,
+        }
+    );
+}
+
+#[test]
+fn measurements_in_one_run_read_back_once() {
+    let Some(ctx) = gpu_device::context() else {
+        return;
+    };
+    let mut circuit = Circuit::new(NUM_QUBITS, 6);
+    for q in 0..NUM_QUBITS {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for m in 0..6 {
+        circuit.add_measure(m, m);
+        circuit.add_gate(Gate::Rz(0.2), &[m + 6]);
+    }
+    let gates = NUM_QUBITS as u64 + 6;
+    // Each measurement reduces, decides and collapses on the device; the pending norm
+    // goes up once and every outcome comes back in one readback at the end of the run.
+    assert_eq!(
+        census_of(&ctx, &circuit),
+        GpuPassCensus {
+            launches: gates + 6 * 3,
+            passes: gates + 6 * 2,
+            drains: 1,
+            uploads: 1,
             dense_2q: 0,
             tiles: 0,
         }

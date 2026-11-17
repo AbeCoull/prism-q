@@ -771,14 +771,20 @@ fn bench_stab_direct_gpu_scrambled_measure_all(c: &mut Criterion) {
     group.finish();
 }
 
-/// H on every qubit, a CX chain, then every qubit measured: the BTS sampling fixture.
-fn h_chain_measured(n: usize) -> Circuit {
+/// The BTS sampling fixture: `n / 2` random qubits, each other qubit the parity of three
+/// of them, every qubit measured. Rank `n / 2` at total parity weight `2n` keeps the
+/// sampler on BTS rather than its lookup tables and meets the device's weight floor, so
+/// the GPU rows time the device; an H wall with a CX chain routed to the host tables.
+fn bts_device_measured(n: usize) -> Circuit {
+    let rank = n / 2;
     let mut circuit = Circuit::new(n, n);
-    for q in 0..n {
+    for q in 0..rank {
         circuit.add_gate(Gate::H, &[q]);
     }
-    for i in 0..n - 1 {
-        circuit.add_gate(Gate::Cx, &[i, i + 1]);
+    for t in rank..n {
+        for k in 0..3 {
+            circuit.add_gate(Gate::Cx, &[(t + k) % rank, t]);
+        }
     }
     circuit.measure_all();
     circuit
@@ -790,7 +796,7 @@ fn bench_stab_bts_cpu_vs_gpu(c: &mut Criterion) {
     let shot_sizes = bts_gpu_shot_sizes();
 
     for &n in qubit_sizes {
-        let circuit = h_chain_measured(n);
+        let circuit = bts_device_measured(n);
 
         let mut cpu_group = c.benchmark_group(format!("gpu_bts_cpu/n{}", n));
         configure_group(&mut cpu_group);
@@ -826,7 +832,7 @@ fn bench_stab_bts_packed_cpu_vs_gpu(c: &mut Criterion) {
     let shot_sizes = bts_gpu_shot_sizes();
 
     for &n in qubit_sizes {
-        let circuit = h_chain_measured(n);
+        let circuit = bts_device_measured(n);
 
         let mut cpu_group = c.benchmark_group(format!("gpu_bts_packed_cpu/n{}", n));
         configure_group(&mut cpu_group);
@@ -887,7 +893,7 @@ fn bench_stab_bts_marginals_cpu_vs_gpu(c: &mut Criterion) {
     let shot_sizes = bts_gpu_shot_sizes();
 
     for &n in qubit_sizes {
-        let circuit = h_chain_measured(n);
+        let circuit = bts_device_measured(n);
 
         let mut cpu_group = c.benchmark_group(format!("gpu_bts_marginals_cpu/n{}", n));
         configure_group(&mut cpu_group);
@@ -1038,7 +1044,7 @@ fn bench_stab_gpu_shots_explicit(c: &mut Criterion) {
     let shot_sizes = bts_gpu_shot_sizes();
 
     for &n in qubit_sizes {
-        let circuit = h_chain_measured(n);
+        let circuit = bts_device_measured(n);
 
         let mut group = c.benchmark_group(format!("gpu_stab_shots/n{}", n));
         configure_group(&mut group);

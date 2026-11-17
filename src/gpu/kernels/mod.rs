@@ -137,9 +137,9 @@ pub(crate) struct BlobScratch {
 ///
 /// Everything a kernel can take by value goes in parameter space instead; this is for
 /// the lookup tables and metadata of the batched diagonal gates and the density-matrix
-/// tables, which exceed the 4 KB parameter limit. The copy is synchronous from pageable
-/// memory, so it costs one stream drain per gate, and the buffer is reused as soon as
-/// the copy returns because that drain has already retired the kernel that read it.
+/// tables, which exceed the 4 KB parameter limit. An upload from pageable memory is
+/// staged before it returns, so the host buffer can be refilled at once, and it lands in
+/// stream order, after any kernel queued earlier that still reads the device buffer.
 pub(crate) fn stage_blob(
     scratch: &mut BlobScratch,
     device: &GpuDevice,

@@ -55,6 +55,7 @@ pub(crate) fn diagonal(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<V
             .launch(cfg)
             .map_err(|e| driver_err("dm_diagonal", e))?;
     }
+    ctx.device().count_launch(0);
     let mut host = vec![0.0_f64; d as usize];
     out.copy_to_host(device, &mut host)?;
     Ok(host)
@@ -86,6 +87,7 @@ pub(crate) fn norm_sqr(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<f
                 .launch(shared_cfg(num_blocks, 1))
                 .map_err(|e| driver_err("dm_norm_sqr", e))?;
         }
+        ctx.device().count_launch(0);
     }
     let result = super::ensure_capacity(&mut scratch.measure_result, device, 1)?;
     {
@@ -101,6 +103,7 @@ pub(crate) fn norm_sqr(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<f
                 .launch(shared_cfg(1, 1))
                 .map_err(|e| driver_err("measure_prob_one_finalize", e))?;
         }
+        ctx.device().count_launch(0);
     }
     let mut host = [0.0_f64];
     scratch
@@ -141,6 +144,7 @@ pub(crate) fn project(
             .launch(cfg)
             .map_err(|e| driver_err("dm_project", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -164,6 +168,7 @@ pub(crate) fn reset(ctx: &GpuContext, state: &mut GpuState, n: usize, qubit: usi
     unsafe {
         builder.launch(cfg).map_err(|e| driver_err("dm_reset", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -179,6 +184,7 @@ pub(crate) fn conjugate(ctx: &GpuContext, state: &mut GpuState, n: usize) -> Res
             .launch(cfg)
             .map_err(|e| driver_err("dm_conjugate", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -210,6 +216,7 @@ pub(crate) fn diagonal_sandwich(
             .launch(cfg)
             .map_err(|e| driver_err("dm_diagonal_sandwich", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -246,6 +253,7 @@ pub(crate) fn kraus_2q_diagonal(
             .launch(cfg)
             .map_err(|e| driver_err("dm_kraus_2q_diagonal", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -293,6 +301,7 @@ pub(crate) fn kraus_2q_dense(
             .launch(cfg)
             .map_err(|e| driver_err("dm_kraus_2q_dense", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -327,6 +336,7 @@ pub(crate) fn depolarizing_2q(
             .launch(cfg)
             .map_err(|e| driver_err("dm_depolarizing_2q", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -358,6 +368,7 @@ pub(crate) fn outer_product(
             .launch(cfg)
             .map_err(|e| driver_err("dm_outer_product", e))?;
     }
+    ctx.device().count_launch(1);
     Ok(())
 }
 
@@ -415,6 +426,7 @@ pub(crate) fn pauli_sums(
                 .launch(cfg)
                 .map_err(|e| driver_err("dm_pauli_expect", e))?;
         }
+        ctx.device().count_launch(0);
     }
     super::finalize_pauli_sums(device, scratch, num_masks, blocks_per_mask, BLOCK_SIZE, 1.0)
 }

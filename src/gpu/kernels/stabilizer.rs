@@ -275,7 +275,7 @@ fn stage_u32<'a>(
     stream
         .memcpy_htod(src, &mut dev.slice_mut(0..src.len()))
         .map_err(|e| driver_err(&format!("upload {name}"), e))?;
-    ctx.device().count_drain();
+    ctx.device().count_upload();
     let dev: &'a CudaSlice<u32> = dev;
     Ok(dev.slice(0..src.len()))
 }
@@ -447,7 +447,7 @@ pub(crate) fn launch_measure_find_pivot(
         stream
             .memcpy_htod(&[sentinel], out_pivot)
             .map_err(|e| driver_err("reset find_pivot sentinel", e))?;
-        ctx.device().count_drain();
+        ctx.device().count_upload();
         let mut builder = stream.launch_builder(&func);
         builder
             .arg(xz)
@@ -600,7 +600,7 @@ pub(crate) fn launch_measure_deterministic(
         stream
             .memcpy_htod(&[0u8], out_outcome)
             .map_err(|e| driver_err("reset deterministic outcome", e))?;
-        ctx.device().count_drain();
+        ctx.device().count_upload();
         let mut builder = stream.launch_builder(&func);
         builder
             .arg(xz)

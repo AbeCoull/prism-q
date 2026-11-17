@@ -269,8 +269,10 @@ pub struct GpuPassCensus {
     pub launches: u64,
     /// Sweeps over the state; a finalize over block partials is a launch with none.
     pub passes: u64,
-    /// Host copies, each of which waits for every queued kernel to finish.
+    /// Readbacks to the host, each of which waits for every queued kernel to finish.
     pub drains: u64,
+    /// Uploads from the host, which return without waiting for the stream.
+    pub uploads: u64,
     /// Launches of the dense 4x4 kernel, a subset of `launches`.
     pub dense_2q: u64,
     /// Launches of the mixed shared-memory tile kernel, a subset of `launches`.
@@ -286,6 +288,7 @@ impl std::ops::Sub for GpuPassCensus {
             launches: self.launches - earlier.launches,
             passes: self.passes - earlier.passes,
             drains: self.drains - earlier.drains,
+            uploads: self.uploads - earlier.uploads,
             dense_2q: self.dense_2q - earlier.dense_2q,
             tiles: self.tiles - earlier.tiles,
         }

@@ -31,7 +31,7 @@ impl<T: DeviceRepr> GpuBuffer<T> {
         let slice = stream
             .clone_htod(host)
             .map_err(|e| driver_err("from_host", e))?;
-        device.count_drain();
+        device.count_upload();
         Ok(Self { slice })
     }
 
@@ -41,7 +41,7 @@ impl<T: DeviceRepr> GpuBuffer<T> {
         stream
             .memcpy_htod(host, &mut self.slice)
             .map_err(|e| driver_err("copy_from_host", e))?;
-        device.count_drain();
+        device.count_upload();
         Ok(())
     }
 

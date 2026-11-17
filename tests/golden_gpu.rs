@@ -857,8 +857,13 @@ fn qft_block_all_flag_forms_and_offsets_match_cpu() {
                         + u64::from(big_endian != (swaps || inverse));
                     let passes = device_qft_passes(start, num) + reversals;
                     assert_eq!(
-                        (census.launches, census.passes, census.drains),
-                        (passes, passes, 1),
+                        (
+                            census.launches,
+                            census.passes,
+                            census.drains,
+                            census.uploads
+                        ),
+                        (passes, passes, 0, 1),
                         "census n={n} start={start} num={num} form={form}"
                     );
                 }

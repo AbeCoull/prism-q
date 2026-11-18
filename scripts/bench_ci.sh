@@ -64,7 +64,9 @@ fi
 # same code for a few seconds each. Rows are also chosen against noise, measured
 # as the drift between two runs of one binary. `statevector/qv/16` is absent for
 # that reason (same-code controls of 6.3% to 8.0%), and the guarded region runs
-# at 20 qubits, where the 16-qubit row drifted.
+# at 20 qubits, where the 16-qubit row drifted. The stochastic Pauli engine is
+# gated at 10 qubits rather than through `spp/spp_10k/20q_8t`, which the CI
+# runner read at +6.5% to +15.6% on changes that never reach the engine.
 #
 # The `auto/` sweep twins are absent on purpose: dispatch resolves them to the
 # statevector rows below, doubling the most expensive pair for nothing.
@@ -125,7 +127,7 @@ CIRCUITS_ROW_LIST=(
     # Clifford+T: the deterministic and stochastic Pauli engines, and the
     # approximate stabilizer-rank route with its pruning.
     clifford_t/spd/10q_12t
-    spp/spp_10k/20q_8t
+    clifford_t/spp_10k/10q_12t
     stabilizer_rank/approx_1024/10q_20t
 
     # Analytic terminals: adjoint gradients, Pauli-sum expectations, and the

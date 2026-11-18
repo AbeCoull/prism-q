@@ -120,6 +120,9 @@ strip = "none"
 
 [package.metadata.release]
 pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md", "--tag", "v{{version}}"]
+pre-release-replacements = [
+  { file = "docs/guides/compatibility.md", search = "- Unreleased:", replace = "- {{version}}:", min = 0 },
+]
 sign-commit = false
 sign-tag = false
 push-remote = "origin"

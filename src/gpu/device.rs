@@ -1,7 +1,6 @@
 //! CUDA device handle, kernel module loading, and the on-disk kernel image cache.
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "bench-internal")]
@@ -9,9 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream, DriverError};
-use cudarc::nvrtc::{
-    CompileOptions, Ptx, compile_ptx_with_opts, result as nvrtc, sys as nvrtc_sys,
-};
+use cudarc::nvrtc::Ptx;
 
 use crate::error::{PrismError, Result};
 
@@ -358,12 +355,11 @@ fn load_or_compile(
     }
     if !nvrtc_present() {
         return try_load(&cached("ptx")).ok_or_else(|| {
-            gpu_unusable(
-                "NVRTC, the CUDA runtime compiler, did not load (looked for libnvrtc.so.12 or \
-                 nvrtc64_120_0.dll); install a CUDA 12 toolkit or put its NVRTC library on the \
-                 loader path"
-                    .to_string(),
-            )
+            gpu_unusable(format!(
+                "NVRTC, the CUDA runtime compiler, did not load (looked for {}); install a \
+                 CUDA 12 or 13 toolkit or put its NVRTC library on the loader path",
+                super::nvrtc::library_names()
+            ))
         });
     }
     let version =
@@ -388,75 +384,20 @@ fn compile_kernels(source: &str, capability: (i32, i32)) -> Result<KernelImage> 
         return compile_cubin(source, &arch).map(KernelImage::Cubin);
     }
     let arch = arch_for_capability(capability).ok_or_else(|| below_floor(capability))?;
-    let opts = CompileOptions {
-        arch: Some(arch),
-        ..Default::default()
-    };
-    let ptx = compile_ptx_with_opts(source, opts)
+    let ptx = super::nvrtc::compile(source, arch, false)
         .map_err(|e| driver_err(&format!("PTX compilation (arch={arch})"), e))?;
-    Ok(KernelImage::Ptx(ptx.to_src()))
+    Ok(KernelImage::Ptx(String::from_utf8_lossy(&ptx).into_owned()))
 }
 
-/// NVRTC program handle, destroyed on drop.
-struct NvrtcProgram(nvrtc_sys::nvrtcProgram);
-
-impl Drop for NvrtcProgram {
-    fn drop(&mut self) {
-        // SAFETY: the handle came from create_program and is destroyed only here.
-        let _ = unsafe { nvrtc::destroy_program(self.0) };
-    }
-}
-
-/// Compile `source` to a cubin for `arch`. cudarc's safe wrapper returns PTX only, so
-/// this drives the NVRTC calls directly.
+/// Compile `source` to a cubin for `arch`.
 fn compile_cubin(source: &str, arch: &str) -> Result<Vec<u8>> {
-    let src = CString::new(source).expect("kernel source contains no NUL byte");
-    let program = NvrtcProgram(
-        nvrtc::create_program(&src, None).map_err(|e| driver_err("NVRTC create_program", e))?,
-    );
-    let options = [format!("--gpu-architecture={arch}")];
-    // SAFETY: `program` is live, and `src` outlives it.
-    if let Err(e) = unsafe { nvrtc::compile_program(program.0, &options) } {
-        // SAFETY: `program` is live.
-        let log = unsafe { nvrtc::get_program_log(program.0) }
-            .map(|log| {
-                // SAFETY: NVRTC NUL-terminates the log it writes.
-                unsafe { CStr::from_ptr(log.as_ptr()) }
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .unwrap_or_default();
-        return Err(driver_err(
-            &format!("SASS compilation (arch={arch})"),
-            format!("{e}: {}", log.trim()),
-        ));
-    }
-    let mut size = 0;
-    // SAFETY: `program` compiled; nvrtcGetCUBINSize only writes its out-parameter.
-    unsafe { nvrtc_sys::nvrtcGetCUBINSize(program.0, &mut size) }
-        .result()
-        .map_err(|e| driver_err("NVRTC cubin size", e))?;
-    let mut cubin = vec![0u8; size];
-    // SAFETY: `cubin` holds the `size` bytes nvrtcGetCUBINSize reported.
-    unsafe { nvrtc_sys::nvrtcGetCUBIN(program.0, cubin.as_mut_ptr().cast()) }
-        .result()
-        .map_err(|e| driver_err("NVRTC cubin", e))?;
-    Ok(cubin)
+    super::nvrtc::compile(source, arch, true)
+        .map_err(|e| driver_err(&format!("SASS compilation (arch={arch})"), e))
 }
 
 /// Real architectures this NVRTC emits SASS for, as `10 * major + minor`.
 fn nvrtc_sass_archs() -> Result<Vec<i32>> {
-    let mut count = 0;
-    // SAFETY: NVRTC loads (checked by the caller); the call only writes its out-parameter.
-    unsafe { nvrtc_sys::nvrtcGetNumSupportedArchs(&mut count) }
-        .result()
-        .map_err(|e| driver_err("NVRTC supported archs", e))?;
-    let mut archs = vec![0; usize::try_from(count).unwrap_or(0)];
-    // SAFETY: `archs` holds the `count` entries nvrtcGetNumSupportedArchs reported.
-    unsafe { nvrtc_sys::nvrtcGetSupportedArchs(archs.as_mut_ptr()) }
-        .result()
-        .map_err(|e| driver_err("NVRTC supported archs", e))?;
-    Ok(archs)
+    super::nvrtc::supported_archs().map_err(|e| driver_err("NVRTC supported archs", e))
 }
 
 /// Per-user cache location: `XDG_CACHE_HOME`, `LOCALAPPDATA`, or `HOME/.cache`, falling
@@ -528,19 +469,13 @@ fn driver_version() -> Result<i32> {
     Ok(version)
 }
 
-/// Whether the NVRTC library loads under any name `cudarc` searches for.
+/// Whether NVRTC loads under a CUDA 12 or CUDA 13 library name.
 pub(crate) fn nvrtc_present() -> bool {
-    // SAFETY: probing loads the NVRTC library by name, which runs only its own
-    // initialisers and asks nothing of this process.
-    unsafe { cudarc::nvrtc::sys::is_culib_present() }
+    super::nvrtc::present()
 }
 
 fn nvrtc_version() -> Option<(i32, i32)> {
-    let (mut major, mut minor) = (0, 0);
-    // SAFETY: NVRTC loads (checked by the caller); nvrtcVersion only writes its
-    // out-parameters.
-    let status = unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor) };
-    (status == cudarc::nvrtc::sys::nvrtcResult::NVRTC_SUCCESS).then_some((major, minor))
+    super::nvrtc::version()
 }
 
 fn cuda_version(encoded: i32) -> String {

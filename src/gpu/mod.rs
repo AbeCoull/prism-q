@@ -7,6 +7,7 @@
 pub(crate) mod device;
 pub(crate) mod kernels;
 pub(crate) mod memory;
+pub(crate) mod nvrtc;
 pub(crate) mod tiles;
 
 use std::sync::Arc;
@@ -34,7 +35,8 @@ pub fn is_available() -> bool {
 }
 
 /// Whether NVRTC, which compiles the kernels when no cached image matches, loads in this
-/// process under one of the names `cudarc` searches (`libnvrtc.so.12`, `nvrtc64_120_0.dll`).
+/// process from a CUDA 12 or CUDA 13 toolkit (`nvrtc64_120_0.dll`, `nvrtc64_130_0.dll`,
+/// `libnvrtc.so.12`, `libnvrtc.so.13`).
 pub fn nvrtc_available() -> bool {
     device::nvrtc_present()
 }

@@ -5,8 +5,10 @@ The GPU backend is optional and gated behind the `gpu` feature. Building it need
 CUDA toolkit: the NVIDIA driver loads when the first `GpuContext` opens, and NVRTC
 when kernels need compiling.
 Running it needs a CUDA-capable device, a driver for CUDA 12.0 or newer, and NVRTC
-from a CUDA 12 toolkit on the loader path (`PATH` on Windows, the `ld.so` search path
-on Linux). A missing driver or NVRTC surfaces as a `PrismError` from `GpuContext::new`.
+from a CUDA 12 or CUDA 13 toolkit on the loader path (`PATH` on Windows, the `ld.so`
+search path on Linux). NVRTC 12 is preferred when both load, since NVRTC 13 does not
+compile for cards older than Turing. A missing driver or NVRTC surfaces as a
+`PrismError` from `GpuContext::new`.
 ```
 
 ```bash

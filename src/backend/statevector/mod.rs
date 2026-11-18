@@ -754,6 +754,22 @@ impl StatevectorBackend {
         crate::gpu::kernels::dense::group_moments(gpu.context(), gpu, groups).transpose()
     }
 
+    /// `(<H>, <H^2>)` of the operator in `table` over the state, on the device when it
+    /// lives there, from one pass. See [`crate::sim::observable::operator_moments`].
+    pub(crate) fn operator_moments(
+        &self,
+        table: &crate::sim::observable::OperatorTable,
+    ) -> Result<(f64, f64)> {
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu_state.as_ref() {
+            return crate::gpu::kernels::dense::operator_moments(gpu.context(), gpu, table);
+        }
+        Ok(crate::sim::observable::operator_moments(
+            self.state_vector(),
+            table,
+        ))
+    }
+
     #[cfg(not(feature = "gpu"))]
     pub(crate) fn group_moments_on_device(
         &self,

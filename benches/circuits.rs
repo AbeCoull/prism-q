@@ -3520,6 +3520,33 @@ fn bench_prepared_energy(c: &mut Criterion) {
     group.finish();
 }
 
+/// `observable_variance` of a Hamiltonian through the default route, which lands on the
+/// host statevector at these widths: one run, then `<H>` and `<H^2>` together.
+fn bench_observable_variance(c: &mut Criterion) {
+    let mut group = c.benchmark_group("observable/variance");
+    configure_group(&mut group);
+    for (name, build) in [
+        ("tfim", ising_hamiltonian as fn(usize) -> PauliObservable),
+        ("heisenberg", heisenberg_hamiltonian),
+    ] {
+        for &n in &[16, 20] {
+            let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+            let observable = build(n);
+            group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        sim::simulate(circ)
+                            .seed(SEED)
+                            .observable_variance(&observable)
+                            .unwrap(),
+                    )
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 /// MaxCut cost on a ring: `n` `ZZ` edges, one Z-only commuting group.
 fn maxcut_ring_hamiltonian(n: usize) -> PauliObservable {
     let edges = (0..n).map(|q| (0.5, vec![PauliTerm::z(q), PauliTerm::z((q + 1) % n)]));
@@ -6315,6 +6342,7 @@ criterion_group! {
     bench_prepared_energy,
     bench_prepared_sweep,
     bench_observable_reduction,
+    bench_observable_variance,
     // Variational loop iteration (rebuild vs rebind under simulation cost)
     bench_vqe_loop,
     // Forward Pauli-sum expectation (parallel-sandwich neutrality)

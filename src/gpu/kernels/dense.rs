@@ -8,7 +8,7 @@
 //! `Multi2q` launches once per sub-gate, on the permutation or diagonal kernel when the
 //! sub-gate's matrix is exactly one.
 
-use cudarc::driver::{LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaViewMut, LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
 
 use crate::backend::statevector::kernels as cpu_k;
@@ -1061,9 +1061,15 @@ pub(crate) fn group_moments(
         }
     }
     let n = state.num_qubits();
+    let device = ctx.device();
+    let dim: u64 = 1u64 << n;
+    let grid = dim
+        .div_ceil(64)
+        .div_ceil(u64::from(BLOCK_SIZE / 32))
+        .min(MOMENT_MAX_BLOCKS) as usize;
+    let stride = 3 * grid;
     let mut fresh = true;
-    let mut out = Vec::with_capacity(groups.len());
-    for (zmasks, coefficients, x_bits, y_bits) in groups {
+    for (g, (zmasks, coefficients, x_bits, y_bits)) in groups.iter().enumerate() {
         let rotation = x_bits | y_bits;
         let source = if rotation == 0 {
             state
@@ -1088,55 +1094,145 @@ pub(crate) fn group_moments(
             launch_apply_multi_fused_nondiag(ctx, copy, &gates)?;
             &*copy
         };
-        out.push(group_moments_pass(ctx, source, zmasks, coefficients)?);
+        let mut scratch = ctx.launcher_scratch();
+        let scratch = &mut *scratch;
+        let result =
+            super::ensure_exact(&mut scratch.moment_partials, device, stride * groups.len())?;
+        let mut slice = result.raw_mut().slice_mut(g * stride..(g + 1) * stride);
+        launch_group_moments(
+            ctx,
+            source,
+            zmasks,
+            coefficients,
+            &mut scratch.u64_a,
+            &mut scratch.f64_a,
+            &mut slice,
+            grid as u32,
+        )?;
     }
-    Ok(Some(out))
+    let mut partials = vec![0.0_f64; stride * groups.len()];
+    ctx.launcher_scratch()
+        .moment_partials
+        .as_ref()
+        .expect("moment partials sized above")
+        .copy_to_host(device, &mut partials)?;
+    Ok(Some(
+        partials
+            .chunks_exact(stride)
+            .map(|group| {
+                let (s0, s1, s2) = group
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .fold((0.0, 0.0, 0.0), |acc, p| {
+                        (acc.0 + p[0], acc.1 + p[1], acc.2 + p[2])
+                    });
+                if s0 == 0.0 {
+                    (0.0, 0.0)
+                } else {
+                    (s1 / s0, s2 / s0)
+                }
+            })
+            .collect(),
+    ))
 }
 
-/// `(<h>, <h^2>)` of one group operator over `state` through `sv_group_moments`. The
-/// kernel also sums `p`, so the ratio cancels the pending norm and any rotation growth.
-fn group_moments_pass(
+/// Queue `sv_group_moments` for one group operator over `state` into `result`, three
+/// partials per block; the kernel also sums `p`, so the host ratio cancels the pending
+/// norm and any rotation growth. Every group of a call reads back in one copy.
+#[allow(clippy::too_many_arguments)]
+fn launch_group_moments(
     ctx: &GpuContext,
     state: &GpuState,
     zmasks: &[u64],
     coefficients: &[f64],
-) -> Result<(f64, f64)> {
+    masks_slot: &mut Option<GpuBuffer<u64>>,
+    coefficients_slot: &mut Option<GpuBuffer<f64>>,
+    result: &mut CudaViewMut<'_, f64>,
+    grid: u32,
+) -> Result<()> {
     let device = ctx.device();
     let stream = device.stream()?;
     let func = device.function("sv_group_moments")?;
     let dim: u64 = 1u64 << state.num_qubits();
     let num_terms = super::require_u32("sv_group_moments", "terms", zmasks.len())?;
-    let grid = dim
-        .div_ceil(64)
-        .div_ceil(u64::from(BLOCK_SIZE / 32))
-        .min(MOMENT_MAX_BLOCKS) as u32;
-
-    let mut scratch = ctx.launcher_scratch();
-    let scratch = &mut *scratch;
-    super::ensure_scratch(&mut scratch.u64_a, device, zmasks)?;
-    super::ensure_scratch(&mut scratch.f64_a, device, coefficients)?;
-    let result = super::ensure_exact(&mut scratch.moment_partials, device, 3 * grid as usize)?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid);
+    super::ensure_scratch(masks_slot, device, zmasks)?;
+    super::ensure_scratch(coefficients_slot, device, coefficients)?;
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer().raw())
         .arg(&dim)
-        .arg(scratch.u64_a.as_ref().unwrap().raw())
-        .arg(scratch.f64_a.as_ref().unwrap().raw())
+        .arg(masks_slot.as_ref().unwrap().raw())
+        .arg(coefficients_slot.as_ref().unwrap().raw())
         .arg(&num_terms)
-        .arg(result.raw_mut());
+        .arg(result);
     // SAFETY: signature matches the kernel. The state holds `dim` amplitudes, the mask
     // and coefficient buffers hold at least `num_terms` entries, every read index is
-    // checked against `dim`, and `result` holds three f64s per block. All buffers are
-    // held by the scratch guard until the readback below drains the stream.
+    // checked against `dim`, and `result` is this group's slice of three f64s per block.
+    // A later group's upload into the same mask buffers lands in stream order after this
+    // kernel, and a reallocated buffer is freed in stream order.
     unsafe {
         builder
-            .launch(cfg)
+            .launch(linear_cfg(BLOCK_SIZE, grid))
             .map_err(|e| driver_err("sv_group_moments", e))?;
     }
-    ctx.device().count_launch(1);
+    device.count_launch(1);
+    Ok(())
+}
+
+/// `(<H>, <H^2>)` of the operator in `table` over the device `state` from one
+/// `sv_operator_moments` pass and one readback; the kernel also sums `|psi|^2`, so the
+/// ratios cancel the pending norm. `(0, 0)` for a zero state.
+pub(crate) fn operator_moments(
+    ctx: &GpuContext,
+    state: &GpuState,
+    table: &crate::sim::observable::OperatorTable,
+) -> Result<(f64, f64)> {
+    let device = ctx.device();
+    let stream = device.stream()?;
+    let func = device.function("sv_operator_moments")?;
+    let dim: u64 = 1u64 << state.num_qubits();
+    let num_groups = super::require_u32("sv_operator_moments", "groups", table.xs.len())?;
+    let xs: Vec<u64> = table.xs.iter().map(|&x| x as u64).collect();
+    let offsets = table
+        .offsets
+        .iter()
+        .map(|&o| super::require_u32("sv_operator_moments", "offset", o))
+        .collect::<Result<Vec<u32>>>()?;
+    let zs: Vec<u64> = table.zs.iter().map(|&z| z as u64).collect();
+    let coefficients: Vec<f64> = table
+        .coefficients
+        .iter()
+        .flat_map(|c| [c.re, c.im])
+        .collect();
+    let xs_dev = GpuBuffer::from_host(device, &xs)?;
+    let offsets_dev = GpuBuffer::from_host(device, &offsets)?;
+    let zs_dev = GpuBuffer::from_host(device, &zs)?;
+    let coefficients_dev = GpuBuffer::from_host(device, &coefficients)?;
+    let grid = dim.div_ceil(u64::from(BLOCK_SIZE)).min(MOMENT_MAX_BLOCKS) as u32;
+    let mut partials_dev = GpuBuffer::<f64>::alloc_zeros(device, 3 * grid as usize)?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(state.buffer().raw())
+        .arg(&dim)
+        .arg(xs_dev.raw())
+        .arg(offsets_dev.raw())
+        .arg(&num_groups)
+        .arg(zs_dev.raw())
+        .arg(coefficients_dev.raw())
+        .arg(partials_dev.raw_mut());
+    // SAFETY: signature matches the kernel. The state holds `dim` amplitudes and every
+    // read index `k ^ x` stays below `dim` because each X mask addresses only the
+    // state's qubits; `offsets` holds `num_groups + 1` entries bounding `zs` and the
+    // interleaved `coefficients`, and `partials` holds three f64s per block.
+    unsafe {
+        builder
+            .launch(linear_cfg(BLOCK_SIZE, grid))
+            .map_err(|e| driver_err("sv_operator_moments", e))?;
+    }
+    device.count_launch(1);
     let mut partials = vec![0.0_f64; 3 * grid as usize];
-    result.copy_to_host(device, &mut partials)?;
+    partials_dev.copy_to_host(device, &mut partials)?;
     let (s0, s1, s2) = partials
         .as_chunks::<3>()
         .0

@@ -330,6 +330,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "rdm_qubit_finalize",
     "sv_pauli_expect",
     "sv_group_moments",
+    "sv_operator_moments",
     "measure_collapse",
     "measure_collapse_logged",
     "reset_fold_logged",

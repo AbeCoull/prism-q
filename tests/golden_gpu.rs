@@ -4089,3 +4089,48 @@ fn device_sampling_does_not_depend_on_the_host_thread_count() {
     };
     assert_eq!(sample(1).raw_data(), sample(4).raw_data());
 }
+
+#[test]
+fn observable_variance_on_the_device_matches_the_host() {
+    use prism_q::{BackendKind, PauliObservable, PauliTerm};
+
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 14;
+    let mut terms = vec![(0.7, vec![])];
+    for q in 0..n - 1 {
+        terms.push((1.0, vec![PauliTerm::x(q), PauliTerm::x(q + 1)]));
+        terms.push((0.9, vec![PauliTerm::y(q), PauliTerm::y(q + 1)]));
+        terms.push((0.8, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]));
+        terms.push((-0.4, vec![PauliTerm::x(q), PauliTerm::y(q + 1)]));
+    }
+    for q in 0..n {
+        terms.push((0.3, vec![PauliTerm::x(q)]));
+        terms.push((0.2, vec![PauliTerm::y(q)]));
+        terms.push((0.1, vec![PauliTerm::z(q)]));
+    }
+    let observable = PauliObservable::from_terms(terms).unwrap();
+    let circuit = prism_q::circuits::random_circuit(n, 6, common::SEED);
+    let run = |kind: BackendKind| {
+        prism_q::sim::simulate(&circuit)
+            .backend(kind)
+            .seed(common::SEED)
+            .observable_variance(&observable)
+            .unwrap()
+    };
+    let host = run(BackendKind::Statevector);
+    let device = run(BackendKind::StatevectorGpu {
+        context: f.ctx.clone(),
+    });
+    assert!(
+        (host.mean - device.mean).abs() < 1e-9,
+        "mean: host {} device {}",
+        host.mean,
+        device.mean
+    );
+    assert!(
+        (host.variance - device.variance).abs() < 1e-9,
+        "variance: host {} device {}",
+        host.variance,
+        device.variance
+    );
+}

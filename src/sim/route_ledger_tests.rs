@@ -815,6 +815,35 @@ fn run_stabilizer_rank_matches_the_unfused_statevector() {
 }
 
 #[test]
+#[cfg_attr(
+    not(prism_lowered_thresholds),
+    ignore = "past the full probability cap the branch fallback needs millions of terms"
+)]
+fn run_stabilizer_rank_holds_its_probability_cap() {
+    let cap = stabilizer_rank::MAX_PROBABILITY_REGISTER_QUBITS;
+    for (width, register) in [(cap, true), (cap + 1, false)] {
+        let mut circuit = Circuit::new(width, 0);
+        for q in 0..width {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+        }
+        for q in 0..width {
+            circuit.add_gate(Gate::Cx, &[q, (q + 1) % width]);
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        circuit.add_gate(Gate::T, &[0]);
+        let sr = stabilizer_rank::run_stabilizer_rank(&circuit, SEED).unwrap();
+        assert_eq!(sr.num_terms == 1 << width, register, "{width} qubits");
+        assert_close(
+            "stabilizer rank cap",
+            &sr.probabilities,
+            &unfused_probs(&circuit),
+            EPS,
+        );
+    }
+}
+
+#[test]
 fn run_declines_the_pauli_engines_cleanly() {
     let circuit = clifford_t(4, 1);
     let kinds = [

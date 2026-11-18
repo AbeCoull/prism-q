@@ -1602,3 +1602,37 @@ fn branch_overflow_fails_before_the_first_shot() {
         other => panic!("expected BackendUnsupported, got {other:?}"),
     }
 }
+
+/// A T on every qubit, so the register spans all `n`, then `extra` more T gates after a
+/// scrambling layer, so the branch fallback would need `2^(n + extra)` terms.
+fn full_register_circuit(n: usize, extra: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..n {
+        let partner = (q + 1 + rng.random_range(0..n - 1)) % n;
+        c.add_gate(Gate::Cx, &[q, partner]);
+        c.add_gate(Gate::H, &[q]);
+    }
+    for _ in 0..extra {
+        c.add_gate(Gate::T, &[rng.random_range(0..n)]);
+    }
+    c
+}
+
+#[test]
+#[cfg_attr(
+    prism_lowered_thresholds,
+    ignore = "the lowered probability cap equals the route cap"
+)]
+fn probabilities_past_the_route_cap_match_statevector() {
+    for width in MAX_REGISTER_QUBITS + 1..=MAX_PROBABILITY_REGISTER_QUBITS {
+        let c = full_register_circuit(width, 4, 0xDEAD_BEEF);
+        assert!(c.t_count() > 20);
+        let sr = assert_matches_statevector(&c, 1e-10);
+        assert_eq!(sr.num_terms, 1 << width, "{width} qubits left the register");
+    }
+}

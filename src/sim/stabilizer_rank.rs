@@ -438,11 +438,19 @@ const MIN_TERMS_FOR_PAR: usize = 16;
 /// `T = α·I + β·Z` expansion that land on one basis state of the `k` qubits the
 /// T gates reach are summed into one coefficient, so the cost follows `2^k`
 /// with `k <= min(n, t)` and no T-count limit applies. A register wider than
-/// 20 qubits falls back to one branch per T choice, at most `2^20` of them.
+/// 24 qubits falls back to one branch per T choice, at most `2^20` of them.
 /// `n <= 25`.
 pub fn run_stabilizer_rank(circuit: &Circuit, seed: u64) -> Result<StabRankResult> {
-    exact_probabilities(circuit, seed, MAX_REGISTER_QUBITS)
+    exact_probabilities(circuit, seed, MAX_PROBABILITY_REGISTER_QUBITS)
 }
+
+/// Widest register an exact probability run builds. Wider than [`MAX_REGISTER_QUBITS`],
+/// which also bounds the route shortcut and the pruned route, because the call already
+/// returns all `2^n` probabilities.
+#[cfg(not(prism_lowered_thresholds))]
+pub(super) const MAX_PROBABILITY_REGISTER_QUBITS: usize = 24;
+#[cfg(prism_lowered_thresholds)]
+pub(super) const MAX_PROBABILITY_REGISTER_QUBITS: usize = 2;
 
 fn exact_probabilities(
     circuit: &Circuit,

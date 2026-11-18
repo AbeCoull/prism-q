@@ -211,6 +211,12 @@ asserting the level and the resulting version (a `feat!:` commit on 0.27.0 resol
 `minor` and publishes 0.28.0). The `release-bump-level` CI job runs it on every pull
 request, and the release workflow runs it again before reading the commit range.
 
+A squash merge takes its subject from the pull request title, so the title is what the
+release reads. A pull request that adds an entry under "Changed results" or "Seeded
+output" in [Compatibility](docs/guides/compatibility.md) needs a `!` before the colon of
+its title. `scripts/compat_breaking_title.sh` enforces this in the `PR title` workflow,
+which reruns when the title is edited.
+
 The wheel follows in the same run: the workflow writes the new version into
 `bindings/python/Cargo.toml` and tags it `py-v<version>`, so the two never drift. What a
 version promises, which feature flags are part of the surface, and the MSRV pin are in

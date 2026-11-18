@@ -37,6 +37,7 @@ thiserror = "2"
 rayon = { version = "1.12", optional = true }
 faer = { version = "0.24", optional = true, default-features = false, features = ["std", "rayon", "linalg"] }
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["cuda-12040", "dynamic-loading", "driver", "nvrtc", "std"] }
+libloading = { version = "0.9", optional = true }
 mpi = { version = "0.8", optional = true }
 stacker = "0.1"
 
@@ -51,7 +52,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(prism_lowered_thresholds)"
 [features]
 default = ["parallel"]
 parallel = ["rayon", "faer"]
-gpu = ["dep:cudarc"]
+gpu = ["dep:cudarc", "dep:libloading"]
 distributed = []
 distributed-mpi = ["distributed", "dep:mpi"]
 bench-fast = []

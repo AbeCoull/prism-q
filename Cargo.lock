@@ -1210,6 +1210,7 @@ dependencies = [
  "cudarc",
  "faer",
  "iai-callgrind",
+ "libloading 0.9.0",
  "mpi",
  "num-complex",
  "rand",

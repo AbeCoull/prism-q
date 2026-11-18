@@ -4157,6 +4157,14 @@ fn device_noise_trajectory(
         for q in 0..n - 1 {
             backend.apply(&g(Gate::Cx, &[q, q + 1])).unwrap();
         }
+        if round == 2 {
+            backend
+                .apply(&Instruction::Measure {
+                    qubit: 0,
+                    classical_bit: 0,
+                })
+                .unwrap();
+        }
         prism_q::apply_noise_sites(&mut backend, sites, 7 + round, host_decided).unwrap();
     }
     let state = backend.export_statevector().unwrap();
@@ -4207,8 +4215,8 @@ fn device_thermal_decisions_match_host_decisions() {
     assert_device_noise_matches_host_decisions(&[prism_q::NoiseChannel::ThermalRelaxation {
         t1: 50.0,
         t2: 40.0,
-        gate_time: 12.0,
-        excited_population: 0.2,
+        gate_time: 30.0,
+        excited_population: 0.4,
     }]);
 }
 

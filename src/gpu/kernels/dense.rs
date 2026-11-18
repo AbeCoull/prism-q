@@ -72,6 +72,24 @@ struct TileGatesArg {
 // SAFETY: a plain `repr(C)` f64 array and two u64s with the layout the kernel declares.
 unsafe impl cudarc::driver::DeviceRepr for TileGatesArg {}
 
+/// Most operators a one-qubit Kraus channel carries into `noise_decide_kraus`.
+pub(crate) const NOISE_MAX_KRAUS: usize = 16;
+
+/// A one-qubit Kraus channel as a by-value kernel parameter: per operator its matrix then
+/// its effect, row-major re/im pairs, and whether the normalized operator takes the
+/// diagonal kernel; mirrors `struct KrausSet`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KrausSetArg {
+    v: [f64; 16 * NOISE_MAX_KRAUS],
+    diagonal: [i32; NOISE_MAX_KRAUS],
+    count: i32,
+}
+
+// SAFETY: plain `repr(C)` arrays of f64 and i32 then an i32 with the layout the kernel
+// declares.
+unsafe impl cudarc::driver::DeviceRepr for KrausSetArg {}
+
 /// Packed `meta` argument of the three LUT kernels: the per-group index lists, then
 /// one length and one table offset per group.
 const BATCH_PHASE_META_LEN: usize = cpu_k::MAX_BATCH_PHASE_GROUPS * cpu_k::BATCH_PHASE_GROUP_SIZE
@@ -151,6 +169,7 @@ pub(crate) fn kernel_source() -> String {
         .replace("{{MIX_BLOCK_LOG}}", &MIXED_BLOCK_LOG.to_string())
         .replace("{{MIX_MAX_OPS}}", &MIXED_MAX_OPS.to_string())
         .replace("{{MIX_MAX_COEFS}}", &MIXED_MAX_COEFS.to_string())
+        .replace("{{NOISE_MAX_KRAUS}}", &NOISE_MAX_KRAUS.to_string())
 }
 
 fn grid_for(count: u64) -> u32 {
@@ -943,6 +962,223 @@ pub(crate) fn reduced_density_matrix_1q(
         [Complex64::new(p0, 0.0), r.conj()],
         [r, Complex64::new(p1, 0.0)],
     ])
+}
+
+/// The decide kernel of one trajectory noise site and its arguments.
+enum NoiseDecide<'a> {
+    Damping {
+        gamma: f64,
+        keep: f64,
+        moves: i32,
+        r: f64,
+    },
+    Thermal {
+        branches: &'a crate::sim::trajectory::ThermalBranches,
+        r: f64,
+    },
+    Kraus {
+        set: &'a KrausSetArg,
+        r_unit: f64,
+    },
+}
+
+/// Amplitude damping (`jump_moves_population`) or phase damping on `qubit`, decided on
+/// the device from the draw `r`.
+pub(crate) fn noise_damping(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    qubit: usize,
+    gamma: f64,
+    keep: f64,
+    jump_moves_population: bool,
+    r: f64,
+) -> Result<()> {
+    let moves = i32::from(jump_moves_population);
+    noise_site(
+        ctx,
+        state,
+        qubit,
+        NoiseDecide::Damping {
+            gamma,
+            keep,
+            moves,
+            r,
+        },
+    )
+}
+
+/// Thermal relaxation on `qubit`, decided on the device from the draw `r`.
+pub(crate) fn noise_thermal(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    qubit: usize,
+    branches: &crate::sim::trajectory::ThermalBranches,
+    r: f64,
+) -> Result<()> {
+    noise_site(ctx, state, qubit, NoiseDecide::Thermal { branches, r })
+}
+
+/// A one-qubit Kraus channel on `qubit`, decided on the device from the uniform draw
+/// `r_unit`. Needs at most [`NOISE_MAX_KRAUS`] operators, each with its kernel settled.
+pub(crate) fn noise_kraus(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    qubit: usize,
+    kraus: &[crate::sim::trajectory::Kraus1q],
+    r_unit: f64,
+) -> Result<()> {
+    assert!(kraus.len() <= NOISE_MAX_KRAUS, "too many Kraus operators");
+    let mut set = KrausSetArg {
+        v: [0.0; 16 * NOISE_MAX_KRAUS],
+        diagonal: [0; NOISE_MAX_KRAUS],
+        count: kraus.len() as i32,
+    };
+    for (k, kraus) in kraus.iter().enumerate() {
+        let diagonal = kraus.diagonal.expect("Kraus operator kernel unsettled");
+        set.diagonal[k] = i32::from(diagonal);
+        let entries = kraus.op.iter().chain(&kraus.effect).flatten();
+        for (pair, z) in set.v[16 * k..16 * (k + 1)]
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip(entries)
+        {
+            pair[0] = z.re;
+            pair[1] = z.im;
+        }
+    }
+    noise_site(ctx, state, qubit, NoiseDecide::Kraus { set: &set, r_unit })
+}
+
+/// One trajectory noise site on `qubit` in three launches and no readback: stage 1 of
+/// [`measure_prob_one`] (or of [`reduced_density_matrix_1q`] for a Kraus channel), the
+/// decide kernel on its partials, and `apply_gate_1q_from_buffer`. The pending norm is
+/// read, not changed: each branch matrix carries its own normalization.
+fn noise_site(
+    ctx: &GpuContext,
+    state: &mut GpuState,
+    qubit: usize,
+    decide: NoiseDecide<'_>,
+) -> Result<()> {
+    let n = state.num_qubits();
+    check_qubit(n, qubit)?;
+    let pairs: u64 = 1u64 << (n - 1);
+    let (reduce, count, columns) = match decide {
+        NoiseDecide::Kraus { .. } => ("rdm_qubit", pairs, 4u32),
+        _ => ("measure_prob_one", 1u64 << n, 1u32),
+    };
+    let elems_per_block = 2u64 * BLOCK_SIZE as u64;
+    let num_blocks = count.div_ceil(elems_per_block).max(1) as u32;
+    let shared_bytes = columns * BLOCK_SIZE * std::mem::size_of::<f64>() as u32;
+    let device = ctx.device();
+    let stream = device.stream()?;
+
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    super::ensure_capacity(
+        &mut scratch.measure_partials,
+        device,
+        (columns * num_blocks) as usize,
+    )?;
+    super::ensure_capacity(&mut scratch.noise_decision, device, 9)?;
+    let partials = scratch.measure_partials.as_mut().unwrap();
+    let decision = scratch.noise_decision.as_mut().unwrap();
+
+    let qubit_i = qubit as i32;
+    {
+        let func = device.function(reduce)?;
+        let mut builder = stream.launch_builder(&func);
+        builder
+            .arg(state.buffer().raw())
+            .arg(&count)
+            .arg(&qubit_i)
+            .arg(partials.raw_mut());
+        let cfg = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: shared_bytes,
+        };
+        // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers `count`
+        // elements (or pairs) and the partials hold `columns` f64s per block.
+        unsafe {
+            builder.launch(cfg).map_err(|e| driver_err(reduce, e))?;
+        }
+        device.count_launch(1);
+    }
+
+    let norm = state.pending_norm();
+    let eps = crate::sim::trajectory::JUMP_EPSILON;
+    {
+        let name = match decide {
+            NoiseDecide::Damping { .. } => "noise_decide_damping",
+            NoiseDecide::Thermal { .. } => "noise_decide_thermal",
+            NoiseDecide::Kraus { .. } => "noise_decide_kraus",
+        };
+        let func = device.function(name)?;
+        let mut builder = stream.launch_builder(&func);
+        builder
+            .arg(partials.raw())
+            .arg(&num_blocks)
+            .arg(decision.raw_mut())
+            .arg(&norm);
+        match &decide {
+            NoiseDecide::Damping {
+                gamma,
+                keep,
+                moves,
+                r,
+            } => {
+                builder.arg(gamma).arg(keep).arg(moves).arg(r);
+            }
+            NoiseDecide::Thermal { branches, r } => {
+                builder
+                    .arg(&branches.relax)
+                    .arg(&branches.dephase)
+                    .arg(&branches.excite)
+                    .arg(&branches.excited)
+                    .arg(&branches.decay_keep)
+                    .arg(&branches.dephase_keep)
+                    .arg(&branches.hot[0])
+                    .arg(&branches.hot[1])
+                    .arg(&branches.cold_scale)
+                    .arg(&branches.cold_keep)
+                    .arg(r);
+            }
+            NoiseDecide::Kraus { set, r_unit } => {
+                builder.arg(*set).arg(r_unit);
+            }
+        }
+        builder.arg(&eps);
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: shared_bytes,
+        };
+        // SAFETY: signature matches kernel; one block reduces `num_blocks` partials as
+        // the finalize kernel does, and thread 0 writes the nine f64s of `decision`.
+        unsafe {
+            builder.launch(cfg).map_err(|e| driver_err(name, e))?;
+        }
+        device.count_launch(0);
+    }
+
+    let func = device.function("apply_gate_1q_from_buffer")?;
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(state.buffer_mut().raw_mut())
+        .arg(&pairs)
+        .arg(&qubit_i)
+        .arg(decision.raw());
+    // SAFETY: signature matches kernel; the grid covers `pairs` and each thread writes
+    // only its own amplitude pair. `decision` is written by the launch before, in stream
+    // order.
+    unsafe {
+        builder
+            .launch(linear_cfg(BLOCK_SIZE, grid_for(pairs)))
+            .map_err(|e| driver_err("apply_gate_1q_from_buffer", e))?;
+    }
+    device.count_launch(1);
+    Ok(())
 }
 
 /// `sum_j conj(psi[j ^ xmask]) psi[j] (-1)^{popcount(j & zmask)}` per

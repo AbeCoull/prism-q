@@ -475,6 +475,42 @@ pub(crate) mod sealed {
         fn damp_no_jump(&mut self, _qubit: usize, _gamma: f64, _keep: f64) -> Option<f64> {
             None
         }
+
+        /// Apply amplitude damping (`jump_moves_population`) or phase damping from the
+        /// draw `r` with the branch chosen on the device, bit for bit as the trajectory
+        /// chooses it on the host from the same reduction, so nothing is read back.
+        /// `None`, with the state untouched, where the backend cannot.
+        fn damp_on_device(
+            &mut self,
+            _qubit: usize,
+            _gamma: f64,
+            _keep: f64,
+            _jump_moves_population: bool,
+            _r: f64,
+        ) -> Option<crate::error::Result<()>> {
+            None
+        }
+
+        /// [`Self::damp_on_device`] for thermal relaxation's five branches.
+        fn thermal_on_device(
+            &mut self,
+            _qubit: usize,
+            _branches: &crate::sim::trajectory::ThermalBranches,
+            _r: f64,
+        ) -> Option<crate::error::Result<()>> {
+            None
+        }
+
+        /// [`Self::damp_on_device`] for a one-qubit Kraus channel, drawing the branch
+        /// from `rng` only once accepted.
+        fn kraus_on_device(
+            &mut self,
+            _qubit: usize,
+            _kraus: &[crate::sim::trajectory::Kraus1q],
+            _rng: &mut rand_chacha::ChaCha8Rng,
+        ) -> Option<crate::error::Result<()>> {
+            None
+        }
     }
 }
 

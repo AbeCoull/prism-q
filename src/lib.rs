@@ -136,6 +136,9 @@ pub use sim::stabilizer_rank::{
     StabRankResult, run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_inner_product,
     stabilizer_overlap_sq,
 };
+#[cfg(feature = "bench-internal")]
+#[doc(hidden)]
+pub use sim::trajectory::apply_noise_sites;
 pub use sim::unified_pauli::{
     PauliAxis, PauliTerm, SpdObservableResult, SpdResult, SpdTruncation, SppObservableResult,
     SppResult, inverse_light_cone, run_spd, run_spd_observable, run_spd_observable_budgeted,

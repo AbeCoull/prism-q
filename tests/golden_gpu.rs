@@ -4134,3 +4134,110 @@ fn observable_variance_on_the_device_matches_the_host() {
         device.variance
     );
 }
+
+// ============================================================================
+// Trajectory noise decided on the device
+// ============================================================================
+
+#[cfg(feature = "bench-internal")]
+fn device_noise_trajectory(
+    f: &Fixture,
+    sites: &[(usize, prism_q::NoiseChannel)],
+    host_decided: bool,
+) -> (Vec<bool>, Vec<Complex64>) {
+    let n = 10;
+    let mut backend = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    backend.init(n, n).unwrap();
+    for round in 0..8u64 {
+        for q in 0..n {
+            let theta = 0.3 + 0.17 * q as f64 + 0.05 * round as f64;
+            backend.apply(&g(Gate::Rx(theta), &[q])).unwrap();
+            backend.apply(&g(Gate::Rz(0.7 * theta), &[q])).unwrap();
+        }
+        for q in 0..n - 1 {
+            backend.apply(&g(Gate::Cx, &[q, q + 1])).unwrap();
+        }
+        if round == 2 {
+            backend
+                .apply(&Instruction::Measure {
+                    qubit: 0,
+                    classical_bit: 0,
+                })
+                .unwrap();
+        }
+        prism_q::apply_noise_sites(&mut backend, sites, 7 + round, host_decided).unwrap();
+    }
+    let state = backend.export_statevector().unwrap();
+    for q in 0..n {
+        backend
+            .apply(&Instruction::Measure {
+                qubit: q,
+                classical_bit: q,
+            })
+            .unwrap();
+    }
+    (backend.classical_results().to_vec(), state)
+}
+
+// Every damping, thermal and one-qubit Kraus site picks its branch on the device; the
+// same sites read back to the host for each decision must leave the same state bit for
+// bit and the same measurement record.
+#[cfg(feature = "bench-internal")]
+fn assert_device_noise_matches_host_decisions(channels: &[prism_q::NoiseChannel]) {
+    let Some(f) = Fixture::try_new() else { return };
+    let sites: Vec<_> = (0..10)
+        .flat_map(|q| channels.iter().map(move |c| (q, c.clone())))
+        .collect();
+    let (device_bits, device_state) = device_noise_trajectory(&f, &sites, false);
+    let (host_bits, host_state) = device_noise_trajectory(&f, &sites, true);
+    assert_eq!(device_bits, host_bits, "measurement record differs");
+    for (i, (d, h)) in device_state.iter().zip(&host_state).enumerate() {
+        assert!(
+            d.re.to_bits() == h.re.to_bits() && d.im.to_bits() == h.im.to_bits(),
+            "amplitude {i}: device decisions {d:?}, host decisions {h:?}"
+        );
+    }
+}
+
+#[cfg(feature = "bench-internal")]
+#[test]
+fn device_damping_decisions_match_host_decisions() {
+    use prism_q::NoiseChannel;
+    assert_device_noise_matches_host_decisions(&[
+        NoiseChannel::AmplitudeDamping { gamma: 0.2 },
+        NoiseChannel::PhaseDamping { gamma: 0.3 },
+    ]);
+}
+
+#[cfg(feature = "bench-internal")]
+#[test]
+fn device_thermal_decisions_match_host_decisions() {
+    assert_device_noise_matches_host_decisions(&[prism_q::NoiseChannel::ThermalRelaxation {
+        t1: 50.0,
+        t2: 40.0,
+        gate_time: 30.0,
+        excited_population: 0.4,
+    }]);
+}
+
+// Amplitude damping turned by a Hadamard has effects off the diagonal, so its branch
+// weights read the coherence; the phase flip beside it takes the diagonal kernel.
+#[cfg(feature = "bench-internal")]
+#[test]
+fn device_kraus_decisions_match_host_decisions() {
+    let (gamma, flip) = (0.3_f64, 0.1_f64);
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let a = (1.0 - flip).sqrt() * h;
+    let keep = (1.0 - gamma).sqrt();
+    let jump = gamma.sqrt();
+    let c = |re: f64| Complex64::new(re, 0.0);
+    let kraus = vec![
+        [[c(a), c(a)], [c(a * keep), c(-a * keep)]],
+        [[c(a * jump), c(-a * jump)], [c(0.0), c(0.0)]],
+        [
+            [c(flip.sqrt()), c(0.0)],
+            [c(0.0), Complex64::new(0.0, -flip.sqrt())],
+        ],
+    ];
+    assert_device_noise_matches_host_decisions(&[prism_q::NoiseChannel::Custom { kraus }]);
+}

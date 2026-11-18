@@ -170,15 +170,9 @@ impl PreparedChannel {
                 p: *p,
                 branch_width: p / 15.0,
             },
-            NoiseChannel::Custom { kraus } => Self::Custom(
-                kraus
-                    .iter()
-                    .map(|op| Kraus1q {
-                        op: *op,
-                        effect: kdagger_k(op),
-                    })
-                    .collect(),
-            ),
+            NoiseChannel::Custom { kraus } => {
+                Self::Custom(kraus.iter().map(Kraus1q::new).collect())
+            }
             NoiseChannel::Kraus2q { kraus } => Self::Kraus2q(
                 kraus
                     .iter()
@@ -265,16 +259,16 @@ impl Damping {
 
 /// The state-independent factors of [`apply_thermal_relaxation`]'s five branch
 /// weights and operators.
-pub(crate) struct ThermalBranches {
-    relax: f64,
-    dephase: f64,
-    excite: f64,
-    excited: f64,
-    decay_keep: f64,
-    dephase_keep: f64,
-    hot: [f64; 2],
-    cold_scale: f64,
-    cold_keep: f64,
+pub struct ThermalBranches {
+    pub(crate) relax: f64,
+    pub(crate) dephase: f64,
+    pub(crate) excite: f64,
+    pub(crate) excited: f64,
+    pub(crate) decay_keep: f64,
+    pub(crate) dephase_keep: f64,
+    pub(crate) hot: [f64; 2],
+    pub(crate) cold_scale: f64,
+    pub(crate) cold_keep: f64,
 }
 
 impl ThermalBranches {
@@ -295,9 +289,45 @@ impl ThermalBranches {
 }
 
 /// A one-qubit Kraus operator with its effect `Kdagger K`.
-pub(crate) struct Kraus1q {
-    op: [[Complex64; 2]; 2],
-    effect: [[Complex64; 2]; 2],
+pub struct Kraus1q {
+    pub(crate) op: [[Complex64; 2]; 2],
+    pub(crate) effect: [[Complex64; 2]; 2],
+    /// Whether [`apply_custom_kraus`]'s normalized branch `K / sqrt(p_k)` meets the
+    /// backend's diagonal test (both off-diagonal norms below `1e-14`) for every
+    /// branch weight `p_k`: `Some(true)` when both off-diagonals are zero, `Some(false)`
+    /// when one is at least `1e-12` of the Frobenius norm, `None` when `p_k` decides.
+    #[cfg(feature = "gpu")]
+    pub(crate) diagonal: Option<bool>,
+}
+
+impl Kraus1q {
+    fn new(op: &[[Complex64; 2]; 2]) -> Self {
+        Self {
+            op: *op,
+            effect: kdagger_k(op),
+            #[cfg(feature = "gpu")]
+            diagonal: branch_is_diagonal(op),
+        }
+    }
+}
+
+/// [`Kraus1q::diagonal`] for `op`.
+#[cfg(feature = "gpu")]
+fn branch_is_diagonal(op: &[[Complex64; 2]; 2]) -> Option<bool> {
+    let zero = Complex64::new(0.0, 0.0);
+    if op[0][1] == zero && op[1][0] == zero {
+        return Some(true);
+    }
+    // p_k = Tr(E rho) <= Tr(E) = |K|_F^2 on a unit trace, so an off-diagonal at
+    // 1e-12 |K|_F leaves the normalized one near 1e-12, far above the cut.
+    let off = op[0][1].norm().max(op[1][0].norm());
+    let frobenius = op
+        .iter()
+        .flatten()
+        .map(|z| z.norm_sqr())
+        .sum::<f64>()
+        .sqrt();
+    (off >= 1e-12 * frobenius).then_some(false)
 }
 
 /// A two-qubit Kraus operator, indexed as [`NoiseChannel::Kraus2q`] is, with its
@@ -352,8 +382,24 @@ fn apply_diagonal_kraus_2op(
     apply_damping_two_step(backend, qubit, damping, jump_moves_population, r)
 }
 
-/// [`apply_diagonal_kraus_2op`] as a `p1` read followed by a matrix pass.
+/// [`apply_diagonal_kraus_2op`] as a `p1` read followed by a matrix pass, with the
+/// branch chosen on the device where the backend can.
 fn apply_damping_two_step(
+    backend: &mut dyn Backend,
+    qubit: usize,
+    damping: Damping,
+    jump_moves_population: bool,
+    r: f64,
+) -> Result<()> {
+    if let Some(applied) =
+        backend.damp_on_device(qubit, damping.gamma, damping.keep, jump_moves_population, r)
+    {
+        return applied;
+    }
+    damping_host_decided(backend, qubit, damping, jump_moves_population, r)
+}
+
+fn damping_host_decided(
     backend: &mut dyn Backend,
     qubit: usize,
     Damping { gamma, keep }: Damping,
@@ -488,6 +534,19 @@ fn apply_thermal_relaxation(
     branches: &ThermalBranches,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
+    let r: f64 = rand::RngExt::random(rng);
+    if let Some(applied) = backend.thermal_on_device(qubit, branches, r) {
+        return applied;
+    }
+    thermal_host_decided(backend, qubit, branches, r)
+}
+
+fn thermal_host_decided(
+    backend: &mut dyn Backend,
+    qubit: usize,
+    branches: &ThermalBranches,
+    r: f64,
+) -> Result<()> {
     let p1 = backend.qubit_probability(qubit)?;
     let p0 = 1.0 - p1;
 
@@ -497,7 +556,6 @@ fn apply_thermal_relaxation(
     let p_hold_hot = branches.excited * (branches.decay_keep * p0 + branches.dephase_keep * p1);
 
     let zero = Complex64::new(0.0, 0.0);
-    let r: f64 = rand::RngExt::random(rng);
     let mat = if r < p_relax {
         let s = (1.0 / p1).sqrt();
         [[zero, Complex64::new(s, 0.0)], [zero, zero]]
@@ -626,7 +684,23 @@ fn effect_probability(effect: &[[Complex64; 2]; 2], rho: &[[Complex64; 2]; 2]) -
 /// Branch probabilities use `p_k = Tr(Kdagger K rho_q)`, where `rho_q` is
 /// the qubit's reduced density matrix. This handles dense Kraus operators
 /// whose branch probabilities depend on coherence.
+///
+/// A backend deciding on the device draws the branch unconditionally, where the host
+/// skips the draw at `total <= JUMP_EPSILON`. A trace preserving channel has
+/// `total = Tr(rho) = 1`, so the streams part only on a zero state.
 fn apply_custom_kraus(
+    backend: &mut dyn Backend,
+    qubit: usize,
+    kraus: &[Kraus1q],
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    if let Some(applied) = backend.kraus_on_device(qubit, kraus, rng) {
+        return applied;
+    }
+    kraus_host_decided(backend, qubit, kraus, rng)
+}
+
+fn kraus_host_decided(
     backend: &mut dyn Backend,
     qubit: usize,
     kraus: &[Kraus1q],
@@ -780,6 +854,54 @@ fn apply_noise_event(
             unreachable!("channels with per-shot memory run through apply_memory_event")
         }
     }
+}
+
+/// Apply each `(qubit, channel)` site in turn on `backend` as a trajectory does, drawing
+/// from the noise stream of `seed`. `host_decided` reads every damping, thermal and
+/// one-qubit Kraus branch back to the host as a backend without device decisions does,
+/// so the two runs can be compared bit for bit.
+#[cfg(feature = "bench-internal")]
+#[doc(hidden)]
+pub fn apply_noise_sites(
+    backend: &mut dyn Backend,
+    sites: &[(usize, NoiseChannel)],
+    seed: u64,
+    host_decided: bool,
+) -> Result<()> {
+    let mut rng = noise_rng(seed);
+    for (qubit, channel) in sites {
+        let event = PreparedEvent {
+            channel: PreparedChannel::new(channel),
+            qubits: [*qubit; 2],
+        };
+        if !host_decided {
+            apply_noise_event(backend, &event, &mut rng)?;
+            continue;
+        }
+        match &event.channel {
+            PreparedChannel::AmplitudeDamping(damping) => damping_host_decided(
+                backend,
+                *qubit,
+                *damping,
+                true,
+                rand::RngExt::random(&mut rng),
+            )?,
+            PreparedChannel::PhaseDamping(damping) => damping_host_decided(
+                backend,
+                *qubit,
+                *damping,
+                false,
+                rand::RngExt::random(&mut rng),
+            )?,
+            PreparedChannel::Thermal(branches) => {
+                let r: f64 = rand::RngExt::random(&mut rng);
+                thermal_host_decided(backend, *qubit, branches, r)?
+            }
+            PreparedChannel::Custom(kraus) => kraus_host_decided(backend, *qubit, kraus, &mut rng)?,
+            _ => apply_noise_event(backend, &event, &mut rng)?,
+        }
+    }
+    Ok(())
 }
 
 /// What a model asks of each shot beyond its event stream: leak flags when it

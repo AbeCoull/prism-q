@@ -103,6 +103,9 @@ pub(crate) struct LauncherScratch {
     /// Four-element output for the reduced-density-matrix finalize reduction.
     /// Separate from `measure_result`: readback length must match the buffer.
     pub(crate) rdm_result: Option<GpuBuffer<f64>>,
+    /// The kernel flag and 2x2 matrix a trajectory noise site decides on the device;
+    /// see [`super::dense::noise_damping`].
+    pub(crate) noise_decision: Option<GpuBuffer<f64>>,
     /// The `2^n` diagonal of a density matrix, sized to the mixture width.
     pub(crate) dm_diag: Option<GpuBuffer<f64>>,
     /// Two f64s per Pauli mask for the Pauli expectation finalize, pure or
@@ -328,6 +331,10 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "measure_decide",
     "rdm_qubit",
     "rdm_qubit_finalize",
+    "noise_decide_damping",
+    "noise_decide_thermal",
+    "noise_decide_kraus",
+    "apply_gate_1q_from_buffer",
     "sv_pauli_expect",
     "sv_group_moments",
     "sv_operator_moments",

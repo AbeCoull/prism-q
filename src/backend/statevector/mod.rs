@@ -999,6 +999,61 @@ impl crate::backend::sealed::Sealed for StatevectorBackend {
         }
         Some(p1)
     }
+
+    #[cfg(feature = "gpu")]
+    fn damp_on_device(
+        &mut self,
+        qubit: usize,
+        gamma: f64,
+        keep: f64,
+        jump_moves_population: bool,
+        r: f64,
+    ) -> Option<Result<()>> {
+        let gpu = self.gpu_state.as_mut()?;
+        let ctx = gpu.context().clone();
+        Some(crate::gpu::kernels::dense::noise_damping(
+            &ctx,
+            gpu,
+            qubit,
+            gamma,
+            keep,
+            jump_moves_population,
+            r,
+        ))
+    }
+
+    #[cfg(feature = "gpu")]
+    fn thermal_on_device(
+        &mut self,
+        qubit: usize,
+        branches: &crate::sim::trajectory::ThermalBranches,
+        r: f64,
+    ) -> Option<Result<()>> {
+        let gpu = self.gpu_state.as_mut()?;
+        let ctx = gpu.context().clone();
+        Some(crate::gpu::kernels::dense::noise_thermal(
+            &ctx, gpu, qubit, branches, r,
+        ))
+    }
+
+    /// Declines a channel past the kernel's operator cap or with an operator whose
+    /// diagonal test hangs on the branch weight.
+    #[cfg(feature = "gpu")]
+    fn kraus_on_device(
+        &mut self,
+        qubit: usize,
+        kraus: &[crate::sim::trajectory::Kraus1q],
+        rng: &mut rand_chacha::ChaCha8Rng,
+    ) -> Option<Result<()>> {
+        use crate::gpu::kernels::dense;
+        let gpu = self.gpu_state.as_mut()?;
+        if kraus.len() > dense::NOISE_MAX_KRAUS || kraus.iter().any(|k| k.diagonal.is_none()) {
+            return None;
+        }
+        let r_unit: f64 = rand::RngExt::random(rng);
+        let ctx = gpu.context().clone();
+        Some(dense::noise_kraus(&ctx, gpu, qubit, kraus, r_unit))
+    }
 }
 
 impl Backend for StatevectorBackend {

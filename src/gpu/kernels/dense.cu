@@ -582,13 +582,11 @@ extern "C" __global__ void rdm_qubit(
     }
 }
 
-// Single-block reduction of the four-column partials (length 4*count) into
-// result[0..4]. Same shape as measure_prob_one_finalize; replaces a
-// 4*num_blocks-element D2H plus a host sum with one 32-byte D2H.
-extern "C" __global__ void rdm_qubit_finalize(
-    const double *partials, unsigned int count, double *result)
+// Single-block reduction of the four-column partials (length 4*count) into the column
+// heads sdata[0], sdata[blockDim.x], sdata[2 * blockDim.x] and sdata[3 * blockDim.x].
+__device__ __forceinline__ void sum_partials4(
+    const double *partials, unsigned int count, double *sdata)
 {
-    extern __shared__ double sdata[];
     double *s0 = sdata;
     double *s1 = sdata + blockDim.x;
     double *sr = sdata + 2 * blockDim.x;
@@ -612,11 +610,220 @@ extern "C" __global__ void rdm_qubit_finalize(
         }
         __syncthreads();
     }
-    if (tid == 0) {
-        result[0] = s0[0];
-        result[1] = s1[0];
-        result[2] = sr[0];
-        result[3] = si[0];
+}
+
+// rdm_qubit_finalize: sum_partials4 into result[0..4]. Same shape as
+// measure_prob_one_finalize; replaces a 4*num_blocks-element D2H plus a host sum with
+// one 32-byte D2H.
+extern "C" __global__ void rdm_qubit_finalize(
+    const double *partials, unsigned int count, double *result)
+{
+    extern __shared__ double sdata[];
+    sum_partials4(partials, count, sdata);
+    if (threadIdx.x == 0) {
+        result[0] = sdata[0];
+        result[1] = sdata[blockDim.x];
+        result[2] = sdata[2 * blockDim.x];
+        result[3] = sdata[3 * blockDim.x];
+    }
+}
+
+// ============================================================================
+// Trajectory noise decisions
+// ============================================================================
+//
+// One noise site of a trajectory on the device: a single block reduces the partials of
+// measure_prob_one or rdm_qubit exactly as their finalize kernels do, thread 0 replays
+// the host's branch choice on that value, and apply_gate_1q_from_buffer applies the
+// matrix the host would have passed to apply_1q_matrix. Every step after the reduction
+// is rounded as the host rounds it (no contraction), and complex products follow the
+// host's (ac - bd) + (ad + bc)i, so the branch and the matrix match the host's bit for
+// bit. decision[0] is the kernel the host would pick, decision[1..9] the matrix
+// row-major as re, im pairs.
+
+#define NOISE_SKIP 0.0
+#define NOISE_DENSE 1.0
+#define NOISE_DIAGONAL 2.0
+#define NOISE_MAX_KRAUS {{NOISE_MAX_KRAUS}}
+
+// Operator then effect per Kraus operator, 16 doubles each as row-major re, im pairs,
+// and whether the normalized operator takes the diagonal kernel. Mirrors `KrausSetArg`.
+struct KrausSet { double v[16 * NOISE_MAX_KRAUS]; int diagonal[NOISE_MAX_KRAUS]; int count; };
+
+__device__ __forceinline__ void noise_write(double *decision, double kernel,
+    double m00r, double m00i, double m01r, double m01i,
+    double m10r, double m10i, double m11r, double m11i)
+{
+    decision[0] = kernel;
+    decision[1] = m00r; decision[2] = m00i; decision[3] = m01r; decision[4] = m01i;
+    decision[5] = m10r; decision[6] = m10i; decision[7] = m11r; decision[8] = m11i;
+}
+
+// The host's qubit_probability: the raw sum times pending_norm^2, clamped to [0, 1].
+__device__ __forceinline__ double noise_prob_one(double p_raw, double norm)
+{
+    double prob = __dmul_rn(p_raw, __dmul_rn(norm, norm));
+    return prob < 0.0 ? 0.0 : (prob > 1.0 ? 1.0 : prob);
+}
+
+extern "C" __global__ void noise_decide_damping(
+    const double *partials, unsigned int count, double *decision, double norm,
+    double gamma, double keep, int moves, double r, double eps)
+{
+    extern __shared__ double sdata[];
+    double p_raw = sum_partials(partials, count, sdata);
+    if (threadIdx.x != 0) return;
+    double p1 = noise_prob_one(p_raw, norm);
+    double p_jump = __dmul_rn(gamma, p1);
+    if (r < p_jump && p_jump > eps) {
+        double s = __dsqrt_rn(__ddiv_rn(gamma, p_jump));
+        if (moves) {
+            noise_write(decision, NOISE_DENSE, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0, 0.0);
+        } else {
+            noise_write(decision, NOISE_DIAGONAL, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s, 0.0);
+        }
+        return;
+    }
+    double denom = __dsub_rn(1.0, p_jump);
+    if (denom <= eps) {
+        decision[0] = NOISE_SKIP;
+        return;
+    }
+    double inv = __ddiv_rn(1.0, __dsqrt_rn(denom));
+    noise_write(decision, NOISE_DIAGONAL, inv, 0.0, 0.0, 0.0, 0.0, 0.0,
+        __dmul_rn(keep, inv), 0.0);
+}
+
+// Branch factors in ThermalBranches field order.
+extern "C" __global__ void noise_decide_thermal(
+    const double *partials, unsigned int count, double *decision, double norm,
+    double relax, double dephase, double excite, double excited,
+    double decay_keep, double dephase_keep, double hot0, double hot1,
+    double cold_scale, double cold_keep, double r, double eps)
+{
+    extern __shared__ double sdata[];
+    double p_raw = sum_partials(partials, count, sdata);
+    if (threadIdx.x != 0) return;
+    double p1 = noise_prob_one(p_raw, norm);
+    double p0 = __dsub_rn(1.0, p1);
+    double p_relax = __dmul_rn(relax, p1);
+    double p_dephase = __dmul_rn(dephase, p1);
+    double p_excite = __dmul_rn(excite, p0);
+    double p_hold_hot = __dmul_rn(excited,
+        __dadd_rn(__dmul_rn(decay_keep, p0), __dmul_rn(dephase_keep, p1)));
+    double c1 = __dadd_rn(p_relax, p_dephase);
+    double c2 = __dadd_rn(c1, p_excite);
+    double c3 = __dadd_rn(c2, p_hold_hot);
+    if (r < p_relax) {
+        double s = __dsqrt_rn(__ddiv_rn(1.0, p1));
+        noise_write(decision, NOISE_DENSE, 0.0, 0.0, s, 0.0, 0.0, 0.0, 0.0, 0.0);
+    } else if (r < c1) {
+        double s = __dsqrt_rn(__ddiv_rn(1.0, p1));
+        noise_write(decision, NOISE_DIAGONAL, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, s, 0.0);
+    } else if (r < c2) {
+        double s = __dsqrt_rn(__ddiv_rn(1.0, p0));
+        noise_write(decision, NOISE_DENSE, 0.0, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0);
+    } else if (r < c3) {
+        if (p_hold_hot <= eps) {
+            decision[0] = NOISE_SKIP;
+            return;
+        }
+        double inv = __dsqrt_rn(__ddiv_rn(excited, p_hold_hot));
+        noise_write(decision, NOISE_DIAGONAL, __dmul_rn(hot0, inv), 0.0, 0.0, 0.0,
+            0.0, 0.0, __dmul_rn(hot1, inv), 0.0);
+    } else {
+        double denom = __dsub_rn(__dsub_rn(__dsub_rn(__dsub_rn(1.0, p_relax), p_dephase),
+            p_excite), p_hold_hot);
+        if (denom <= eps) {
+            decision[0] = NOISE_SKIP;
+            return;
+        }
+        double inv = __ddiv_rn(cold_scale, __dsqrt_rn(denom));
+        noise_write(decision, NOISE_DIAGONAL, inv, 0.0, 0.0, 0.0, 0.0, 0.0,
+            __dmul_rn(cold_keep, inv), 0.0);
+    }
+}
+
+// Real part of the complex product (ar + ai i)(br + bi i).
+__device__ __forceinline__ double noise_mul_re(double ar, double ai, double br, double bi)
+{
+    return __dsub_rn(__dmul_rn(ar, br), __dmul_rn(ai, bi));
+}
+
+// r_unit is the uniform draw the host scales by the total branch weight.
+extern "C" __global__ void noise_decide_kraus(
+    const double *partials, unsigned int count, double *decision, double norm,
+    KrausSet set, double r_unit, double eps)
+{
+    extern __shared__ double sdata[];
+    sum_partials4(partials, count, sdata);
+    if (threadIdx.x != 0) return;
+    double norm_sq = __dmul_rn(norm, norm);
+    double p0 = __dmul_rn(sdata[0], norm_sq);
+    double p1 = __dmul_rn(sdata[blockDim.x], norm_sq);
+    double rr = __dmul_rn(sdata[2 * blockDim.x], norm_sq);
+    double ri = __dmul_rn(sdata[3 * blockDim.x], norm_sq);
+    double cumulative[NOISE_MAX_KRAUS];
+    double total = 0.0;
+    for (int k = 0; k < set.count; ++k) {
+        const double *e = set.v + 16 * k + 8;
+        double p = noise_mul_re(e[0], e[1], p0, 0.0);
+        p = __dadd_rn(p, noise_mul_re(e[2], e[3], rr, ri));
+        p = __dadd_rn(p, noise_mul_re(e[4], e[5], rr, -ri));
+        p = __dadd_rn(p, noise_mul_re(e[6], e[7], p1, 0.0));
+        p = p >= 0.0 ? p : 0.0;
+        total = __dadd_rn(total, p);
+        cumulative[k] = total;
+    }
+    if (total <= eps) {
+        decision[0] = NOISE_SKIP;
+        return;
+    }
+    double r = __dmul_rn(r_unit, total);
+    int chosen = set.count - 1;
+    for (int k = 0; k < set.count; ++k) {
+        if (r < cumulative[k]) {
+            chosen = k;
+            break;
+        }
+    }
+    double pk = chosen == 0 ? cumulative[0]
+                            : __dsub_rn(cumulative[chosen], cumulative[chosen - 1]);
+    if (pk <= eps) {
+        decision[0] = NOISE_SKIP;
+        return;
+    }
+    double inv = __ddiv_rn(1.0, __dsqrt_rn(pk));
+    const double *op = set.v + 16 * chosen;
+    decision[0] = set.diagonal[chosen] ? NOISE_DIAGONAL : NOISE_DENSE;
+    for (int j = 0; j < 4; ++j) {
+        double re = op[2 * j];
+        double im = op[2 * j + 1];
+        decision[1 + 2 * j] = __dsub_rn(__dmul_rn(re, inv), __dmul_rn(im, 0.0));
+        decision[2 + 2 * j] = __dadd_rn(__dmul_rn(re, 0.0), __dmul_rn(im, inv));
+    }
+}
+
+// apply_gate_1q or apply_diagonal_1q, as decision[0] names, on the matrix in
+// decision[1..9]; NOISE_SKIP leaves the state alone.
+extern "C" __global__ void apply_gate_1q_from_buffer(
+    double2 *state, unsigned long long pair_count, int target, const double *decision)
+{
+    unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= pair_count) return;
+    double kernel = decision[0];
+    if (kernel == NOISE_SKIP) return;
+
+    unsigned long long mask = (1ULL << target) - 1;
+    unsigned long long i0 = ((k & ~mask) << 1) | (k & mask);
+    unsigned long long i1 = i0 | (1ULL << target);
+
+    if (kernel == NOISE_DIAGONAL) {
+        apply_phase(state, i0, decision[1], decision[2]);
+        apply_phase(state, i1, decision[7], decision[8]);
+    } else {
+        apply2x2(state, i0, i1, decision[1], decision[2], decision[3], decision[4],
+            decision[5], decision[6], decision[7], decision[8]);
     }
 }
 

@@ -270,3 +270,51 @@ fn measurements_in_one_run_read_back_once() {
         }
     );
 }
+
+// A damping, thermal or one-qubit Kraus site reduces, decides on the device and applies
+// its branch: three launches, two passes over the state, nothing read back.
+#[test]
+fn trajectory_noise_sites_decide_on_the_device_without_a_readback() {
+    use prism_q::NoiseChannel;
+    let Some(ctx) = gpu_device::context() else {
+        return;
+    };
+    let zero = Complex64::new(0.0, 0.0);
+    let half = Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
+    let channels = [
+        NoiseChannel::AmplitudeDamping { gamma: 0.2 },
+        NoiseChannel::PhaseDamping { gamma: 0.2 },
+        NoiseChannel::ThermalRelaxation {
+            t1: 50.0,
+            t2: 40.0,
+            gate_time: 12.0,
+            excited_population: 0.2,
+        },
+        NoiseChannel::Custom {
+            kraus: vec![[[half, zero], [zero, half]], [[zero, half], [half, zero]]],
+        },
+    ];
+    for channel in channels {
+        let mut backend = StatevectorBackend::new(42).with_gpu(ctx.clone());
+        backend.init(NUM_QUBITS, 0).unwrap();
+        backend
+            .apply_instructions(&[Instruction::Gate {
+                gate: Gate::H,
+                targets: smallvec![3],
+            }])
+            .unwrap();
+        let before = ctx.pass_census();
+        prism_q::apply_noise_sites(&mut backend, &[(3, channel)], 42, false).unwrap();
+        assert_eq!(
+            ctx.pass_census() - before,
+            GpuPassCensus {
+                launches: 3,
+                passes: 2,
+                drains: 0,
+                uploads: 0,
+                dense_2q: 0,
+                tiles: 0,
+            }
+        );
+    }
+}

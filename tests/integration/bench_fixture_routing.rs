@@ -1171,7 +1171,17 @@ fn clifford_t_price_rows_pin_their_engines() {
     ] {
         register_rows.push((format!("layers_{n}q_t{t}"), price_layers(n, t)));
     }
-    for (n, t) in [(26, 16), (26, 18), (26, 20), (20, 20), (22, 20), (32, 20)] {
+    for (n, t) in [
+        (26, 16),
+        (26, 18),
+        (26, 20),
+        (20, 20),
+        (22, 20),
+        (32, 20),
+        (32, 24),
+        (32, 28),
+        (32, 30),
+    ] {
         register_rows.push((format!("scrambled_{n}q_t{t}"), price_scrambled(n, t)));
     }
     register_rows.push(("onelayer_20q_t80".into(), price_onelayer()));
@@ -1197,8 +1207,8 @@ fn clifford_t_price_rows_pin_their_engines() {
     for n in [22, 24, 26, 28] {
         statevector_rows.push((format!("layers_{n}q_t24"), price_layers(n, 24)));
     }
-    for n in [20, 22, 24] {
-        statevector_rows.push((format!("scrambled_{n}q_t20"), price_scrambled(n, 20)));
+    for (n, t) in [(20, 20), (22, 20), (24, 20), (28, 26)] {
+        statevector_rows.push((format!("scrambled_{n}q_t{t}"), price_scrambled(n, t)));
     }
     statevector_rows.push(("layers_20q_t40".into(), price_layers(20, 40)));
     statevector_rows.push(("distinct_17q_t16".into(), price_distinct()));

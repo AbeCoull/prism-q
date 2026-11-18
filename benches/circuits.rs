@@ -4527,7 +4527,17 @@ fn bench_auto_clifford_t_price(c: &mut Criterion) {
             1024,
         );
     }
-    for (n, t) in [(26, 16), (26, 18), (26, 20), (20, 20), (22, 20), (32, 20)] {
+    for (n, t) in [
+        (26, 16),
+        (26, 18),
+        (26, 20),
+        (20, 20),
+        (22, 20),
+        (32, 20),
+        (32, 24),
+        (32, 28),
+        (32, 30),
+    ] {
         let id = format!("scrambled_{n}q_t{t}");
         shots_row("register", id, rank.clone(), scrambled(n, t), 1024);
     }
@@ -4555,9 +4565,9 @@ fn bench_auto_clifford_t_price(c: &mut Criterion) {
             shots_row(arm, format!("layers_{n}q_t24"), kind, layers(n, 24), 1024);
         }
     }
-    for n in [20, 22, 24] {
-        let id = format!("scrambled_{n}q_t20");
-        shots_row("statevector", id, dense.clone(), scrambled(n, 20), 1024);
+    for (n, t) in [(20, 20), (22, 20), (24, 20), (28, 26)] {
+        let id = format!("scrambled_{n}q_t{t}");
+        shots_row("statevector", id, dense.clone(), scrambled(n, t), 1024);
     }
     shots_row(
         "auto",

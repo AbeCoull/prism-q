@@ -1418,16 +1418,25 @@ pub(crate) fn run_trajectories(
 
     let readout = ShotReadout::new(circuit, &noise.readout);
     let memory = MemorySpec::of(noise);
-    run_serial(circuit, memory, num_shots, seed, route, |shot_seed, rng| {
-        let mut backend = backend_factory(shot_seed);
-        let (result, leaked) =
-            run_shot(backend.as_mut(), circuit, &prepared, &readout, memory, rng)?;
-        Ok((
-            result,
-            leaked,
-            crate::sim::backend_metadata(backend.as_ref()),
-        ))
-    })
+    let serial = || {
+        run_serial(circuit, memory, num_shots, seed, route, |shot_seed, rng| {
+            let mut backend = backend_factory(shot_seed);
+            let (result, leaked) =
+                run_shot(backend.as_mut(), circuit, &prepared, &readout, memory, rng)?;
+            Ok((
+                result,
+                leaked,
+                crate::sim::backend_metadata(backend.as_ref()),
+            ))
+        })
+    };
+    #[cfg(feature = "parallel")]
+    return crate::backend::hybrid::on_narrow_pool(
+        !force_serial && crate::backend::hybrid::route_wants_narrow_pool(route, circuit.num_qubits),
+        serial,
+    );
+    #[cfg(not(feature = "parallel"))]
+    serial()
 }
 
 /// Serial trajectories on one held `backend`, which `reseed` hands each shot's seed

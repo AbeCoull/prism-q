@@ -820,6 +820,17 @@ impl StatevectorBackend {
         self.gpu_state.as_mut()
     }
 
+    fn apply_stream(&mut self, instructions: &[Instruction]) -> crate::error::Result<()> {
+        use crate::backend::Backend;
+        if !self.is_gpu_resident() && schedule::enabled(self.num_qubits) {
+            return self.apply_mixed_schedule(instructions);
+        }
+        for instruction in instructions {
+            self.apply(instruction)?;
+        }
+        Ok(())
+    }
+
     /// Initialize the backend from a pre-computed state vector.
     ///
     /// Accepts ownership of the amplitude vector, bypassing the default |0...0⟩
@@ -1127,13 +1138,16 @@ impl Backend for StatevectorBackend {
         {
             return self.apply_tiled_gpu(instructions);
         }
-        if !self.is_gpu_resident() && schedule::enabled(self.num_qubits) {
-            return self.apply_mixed_schedule(instructions);
+        #[cfg(feature = "parallel")]
+        if !self.is_gpu_resident() {
+            use crate::backend::hybrid;
+            let wanted = hybrid::route_wants_narrow_pool(
+                crate::sim::ResolvedBackend::Statevector,
+                self.num_qubits,
+            );
+            return hybrid::on_narrow_pool(wanted, || self.apply_stream(instructions));
         }
-        for instruction in instructions {
-            self.apply(instruction)?;
-        }
-        Ok(())
+        self.apply_stream(instructions)
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {

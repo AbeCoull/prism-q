@@ -47,6 +47,8 @@ pub mod density_matrix;
 pub mod distributed_statevector;
 pub mod factored;
 pub mod factored_stabilizer;
+#[cfg(feature = "parallel")]
+pub(crate) mod hybrid;
 pub(crate) mod memory;
 pub mod mps;
 #[cfg(all(target_arch = "aarch64", any(kani, test)))]

@@ -3063,6 +3063,9 @@ impl Backend for MpsBackend {
     }
 
     fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
+        #[cfg(feature = "parallel")]
+        return crate::backend::hybrid::on_narrow_pool(true, || self.apply_by_center(instructions));
+        #[cfg(not(feature = "parallel"))]
         self.apply_by_center(instructions)
     }
 

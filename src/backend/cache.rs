@@ -351,7 +351,7 @@ fn parse_sysfs_size(text: &str) -> Option<usize> {
 
 /// Count the CPUs in a sysfs list such as `0-7` or `0-3,8-11`.
 #[cfg_attr(not(all(unix, not(target_os = "macos"), not(miri))), allow(dead_code))]
-fn count_cpu_list(text: &str) -> Option<usize> {
+pub(crate) fn count_cpu_list(text: &str) -> Option<usize> {
     let mut count = 0usize;
     for part in text.trim().split(',').filter(|part| !part.is_empty()) {
         count += match part.split_once('-') {

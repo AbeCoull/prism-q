@@ -29,6 +29,13 @@ The pool is the process-wide Rayon pool, sized on the first simulation call to e
 logical core, and `RAYON_NUM_THREADS` overrides it. Hyperthreads help from 24 qubits by
 hiding memory latency.
 
+On a CPU with two core classes (Intel's performance and efficiency cores), MPS runs and
+host statevector runs of 15 and 16 qubits, noisy trajectories included, use a second
+pool sized to the performance cores. Their kernels split work evenly and wait for the
+slowest share: on an 8 performance plus 16 efficiency core part, 8 workers beat 24 by
+6% to 48% on those runs and lost 16% on a 20 qubit statevector, which keeps the full
+pool. `RAYON_NUM_THREADS`, or a call inside a caller's pool, turns the second pool off.
+
 An application that owns the global pool can hand PRISM-Q a bounded one instead:
 `ThreadPool::with_threads(n)` builds it and `install` runs a closure on it, leaving the
 global pool unbuilt and unresized. Calls outside `install` take the global path. Pool

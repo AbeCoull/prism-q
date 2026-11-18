@@ -72,7 +72,7 @@ struct TileGatesArg {
 // SAFETY: a plain `repr(C)` f64 array and two u64s with the layout the kernel declares.
 unsafe impl cudarc::driver::DeviceRepr for TileGatesArg {}
 
-/// Most operators a one-qubit Kraus channel carries into `noise_decide_kraus`.
+/// Most operators a one-qubit Kraus channel carries into `noise_site_kraus`.
 pub(crate) const NOISE_MAX_KRAUS: usize = 16;
 
 /// A one-qubit Kraus channel as a by-value kernel parameter: per operator its matrix then
@@ -1050,10 +1050,11 @@ pub(crate) fn noise_kraus(
     noise_site(ctx, state, qubit, NoiseDecide::Kraus { set: &set, r_unit })
 }
 
-/// One trajectory noise site on `qubit` in three launches and no readback: stage 1 of
-/// [`measure_prob_one`] (or of [`reduced_density_matrix_1q`] for a Kraus channel), the
-/// decide kernel on its partials, and `apply_gate_1q_from_buffer`. The pending norm is
-/// read, not changed: each branch matrix carries its own normalization.
+/// One trajectory noise site on `qubit` in two launches and no readback: a
+/// `noise_site_*` kernel that runs stage 1 of [`measure_prob_one`] (or of
+/// [`reduced_density_matrix_1q`] for a Kraus channel) and decides the branch in the block
+/// that finishes last, then `apply_gate_1q_from_buffer`. The pending norm is read, not
+/// changed: each branch matrix carries its own normalization.
 fn noise_site(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1063,9 +1064,9 @@ fn noise_site(
     let n = state.num_qubits();
     check_qubit(n, qubit)?;
     let pairs: u64 = 1u64 << (n - 1);
-    let (reduce, count, columns) = match decide {
-        NoiseDecide::Kraus { .. } => ("rdm_qubit", pairs, 4u32),
-        _ => ("measure_prob_one", 1u64 << n, 1u32),
+    let (count, columns) = match decide {
+        NoiseDecide::Kraus { .. } => (pairs, 4u32),
+        _ => (1u64 << n, 1u32),
     };
     let elems_per_block = 2u64 * BLOCK_SIZE as u64;
     let num_blocks = count.div_ceil(elems_per_block).max(1) as u32;
@@ -1081,44 +1082,28 @@ fn noise_site(
         (columns * num_blocks) as usize,
     )?;
     super::ensure_capacity(&mut scratch.noise_decision, device, 9)?;
+    super::ensure_capacity(&mut scratch.noise_ticket, device, 1)?;
     let partials = scratch.measure_partials.as_mut().unwrap();
     let decision = scratch.noise_decision.as_mut().unwrap();
+    let ticket = scratch.noise_ticket.as_mut().unwrap();
 
+    let norm = state.pending_norm();
+    let eps = crate::sim::trajectory::JUMP_EPSILON;
     let qubit_i = qubit as i32;
     {
-        let func = device.function(reduce)?;
+        let name = match decide {
+            NoiseDecide::Damping { .. } => "noise_site_damping",
+            NoiseDecide::Thermal { .. } => "noise_site_thermal",
+            NoiseDecide::Kraus { .. } => "noise_site_kraus",
+        };
+        let func = device.function(name)?;
         let mut builder = stream.launch_builder(&func);
         builder
             .arg(state.buffer().raw())
             .arg(&count)
             .arg(&qubit_i)
-            .arg(partials.raw_mut());
-        let cfg = LaunchConfig {
-            grid_dim: (num_blocks, 1, 1),
-            block_dim: (BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: shared_bytes,
-        };
-        // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers `count`
-        // elements (or pairs) and the partials hold `columns` f64s per block.
-        unsafe {
-            builder.launch(cfg).map_err(|e| driver_err(reduce, e))?;
-        }
-        device.count_launch(1);
-    }
-
-    let norm = state.pending_norm();
-    let eps = crate::sim::trajectory::JUMP_EPSILON;
-    {
-        let name = match decide {
-            NoiseDecide::Damping { .. } => "noise_decide_damping",
-            NoiseDecide::Thermal { .. } => "noise_decide_thermal",
-            NoiseDecide::Kraus { .. } => "noise_decide_kraus",
-        };
-        let func = device.function(name)?;
-        let mut builder = stream.launch_builder(&func);
-        builder
-            .arg(partials.raw())
-            .arg(&num_blocks)
+            .arg(partials.raw_mut())
+            .arg(ticket.raw_mut())
             .arg(decision.raw_mut())
             .arg(&norm);
         match &decide {
@@ -1150,16 +1135,18 @@ fn noise_site(
         }
         builder.arg(&eps);
         let cfg = LaunchConfig {
-            grid_dim: (1, 1, 1),
+            grid_dim: (num_blocks, 1, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: shared_bytes,
         };
-        // SAFETY: signature matches kernel; one block reduces `num_blocks` partials as
-        // the finalize kernel does, and thread 0 writes the nine f64s of `decision`.
+        // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers `count`
+        // elements (or pairs), the partials hold `columns` f64s per block, the ticket is
+        // zero between launches, and only thread 0 of the last block writes the nine f64s
+        // of `decision`.
         unsafe {
             builder.launch(cfg).map_err(|e| driver_err(name, e))?;
         }
-        device.count_launch(0);
+        device.count_launch(1);
     }
 
     let func = device.function("apply_gate_1q_from_buffer")?;

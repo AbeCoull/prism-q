@@ -271,8 +271,8 @@ fn measurements_in_one_run_read_back_once() {
     );
 }
 
-// A damping, thermal or one-qubit Kraus site reduces, decides on the device and applies
-// its branch: three launches, two passes over the state, nothing read back.
+// A damping, thermal or one-qubit Kraus site reduces and decides in one launch, then
+// applies its branch: two launches, two passes over the state, nothing read back.
 #[test]
 fn trajectory_noise_sites_decide_on_the_device_without_a_readback() {
     use prism_q::NoiseChannel;
@@ -308,7 +308,7 @@ fn trajectory_noise_sites_decide_on_the_device_without_a_readback() {
         assert_eq!(
             ctx.pass_census() - before,
             GpuPassCensus {
-                launches: 3,
+                launches: 2,
                 passes: 2,
                 drains: 0,
                 uploads: 0,

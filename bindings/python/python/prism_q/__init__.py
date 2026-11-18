@@ -5,7 +5,6 @@ Thin Python bindings over the Rust ``prism-q`` crate. The compiled extension
 """
 
 import sys as _sys
-import warnings as _warnings
 
 from ._prism_q import (
     __version__,
@@ -156,22 +155,3 @@ __all__ = [
     "simulate",
     "simulate_program",
 ]
-
-_DEPRECATED_NAMES = {
-    "Decoder": "UnionFindDecoder",
-    "QecResult": "QecSampleResult",
-    "RecordRef": "QecRecordRef",
-}
-
-
-def __getattr__(name):
-    replacement = _DEPRECATED_NAMES.get(name)
-    if replacement is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    _warnings.warn(
-        f"prism_q.{name} is deprecated and will be removed in the next minor release; "
-        f"use prism_q.{replacement}",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return globals()[replacement]

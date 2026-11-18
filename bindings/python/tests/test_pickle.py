@@ -222,16 +222,6 @@ def test_circuits_cross_a_process_boundary():
     assert counts == _counts_in_a_worker(circuit)
 
 
-def test_a_record_ref_pickled_under_its_old_name_still_loads():
-    record = QecRecordRef.lookback(2)
-    payload = pickle.dumps(record, protocol=0)
-    assert b"QecRecordRef" in payload
-    legacy = payload.replace(b"QecRecordRef", b"RecordRef")
-    with pytest.warns(DeprecationWarning):
-        restored = pickle.loads(legacy)
-    assert pickle.dumps(restored, protocol=0) == payload
-
-
 def test_expectation_result_round_trips_with_its_metadata():
     circuit = CircuitBuilder(2).h(0).cx(0, 1).build()
     result = simulate(circuit).seed(42).expectation(["ZI", "ZZ"])

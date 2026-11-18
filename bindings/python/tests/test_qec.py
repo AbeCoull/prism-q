@@ -519,16 +519,9 @@ def test_wilson_intervals_bracket_the_rates():
     assert low <= res.logical_error_rates()[0] <= high
 
 
-def test_renamed_qec_types_keep_deprecated_aliases():
-    import pytest
-
-    for old, new in (
-        ("Decoder", "UnionFindDecoder"),
-        ("QecResult", "QecSampleResult"),
-        ("RecordRef", "QecRecordRef"),
-    ):
-        with pytest.warns(DeprecationWarning, match=new):
-            assert getattr(prism_q, old) is getattr(prism_q, new)
+def test_renamed_qec_types_drop_their_old_names():
+    for old in ("Decoder", "QecResult", "RecordRef"):
+        assert not hasattr(prism_q, old)
     assert isinstance(QecProgram(1).run(), prism_q.QecSampleResult)
 
 

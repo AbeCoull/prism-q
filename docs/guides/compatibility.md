@@ -50,6 +50,11 @@ changed meaning:
   coefficients, not branches. The new field `kept_norm_sqr` carries the kept norm, and
   `fidelity_bound()` uses both. A register wider than 20 qubits now returns
   `BackendUnsupported`, and `seed` is ignored.
+- Unreleased: `run_stabilizer_rank`, and `run()` on `BackendKind::StabilizerRank`, build
+  the Clifford register up to 24 qubits wide, where the cap was 20. A circuit whose
+  register is 21 to 24 qubits wide and carries more than 20 T gates now returns its
+  probabilities, where it returned `BackendUnsupported` for too many terms.
+  `run_stabilizer_rank_approx` keeps the 20 qubit cap.
 - Unreleased: `RunMetadata::exactness` on an MPS run reports the run instead of the route.
   A run whose cuts discarded a summed squared weight of at most 1e-24 is `Exact` at any
   bond cap, where any chain wider than bond 1 was `Approximate` with a bound of 1.0.

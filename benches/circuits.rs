@@ -4340,6 +4340,24 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
         );
     }
 
+    for &t in &[22, 24] {
+        let circuit = scrambled_clifford_t_circuit(24, t, SEED);
+        group.bench_function(
+            BenchmarkId::new("stab_rank_scrambled", format!("24q_{t}t")),
+            |b| {
+                b.iter(|| {
+                    prism_q::run_stabilizer_rank(&circuit, 42).unwrap();
+                });
+            },
+        );
+    }
+    let circuit = scrambled_clifford_t_circuit(24, 24, SEED);
+    group.bench_function(BenchmarkId::new("statevector_probs", "24q_24t"), |b| {
+        b.iter(|| {
+            run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+        });
+    });
+
     // Approximate mode: higher T-counts with bounded terms
     for &t in &[16, 20] {
         let circuit = random_t_insertion_circuit(n, t, SEED);

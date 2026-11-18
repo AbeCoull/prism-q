@@ -798,6 +798,48 @@ fn bench_stab_direct_gpu_h_wall_measure(c: &mut Criterion) {
     group.finish();
 }
 
+/// `BackendKind::StabilizerGpu` through dispatch at fixed widths, so the rows time the
+/// routing the crossover and the measurement condition pick: dense Clifford layers, a
+/// GHZ state measured in full, and Clifford layers followed by isolated measurements,
+/// which stay on the host.
+fn bench_stab_gpu_route(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let kind = BackendKind::StabilizerGpu {
+        context: ctx.clone(),
+    };
+    let mut group = c.benchmark_group("gpu_stab_route");
+    configure_group(&mut group);
+    let mut rows: Vec<(String, Circuit)> = Vec::new();
+    for &n in &[500, 1000, 2000] {
+        rows.push((
+            format!("clifford_d10/{n}"),
+            circuits::clifford_heavy_circuit(n, 10, SEED),
+        ));
+    }
+    for &n in &[1000, 2000] {
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.measure_all();
+        rows.push((format!("ghz_measure/{n}"), circuit));
+    }
+    let n = 1000;
+    let mut isolated = circuits::clifford_heavy_circuit(n, 10, SEED);
+    isolated.num_classical_bits = n;
+    for i in 0..200 {
+        let q = (i * 7) % n;
+        isolated.add_measure(q, q);
+        isolated.add_gate(Gate::H, &[q]);
+    }
+    rows.push((format!("isolated_measure/{n}"), isolated));
+    for (id, circuit) in &rows {
+        group.bench_with_input(BenchmarkId::from_parameter(id), circuit, |b, circ| {
+            b.iter(|| {
+                run_with(kind.clone(), circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
 /// The BTS sampling fixture: `n / 2` random qubits, each other qubit the parity of three
 /// of them, every qubit measured. Rank `n / 2` at total parity weight `2n` keeps the
 /// sampler on BTS rather than its lookup tables and meets the device's weight floor, so
@@ -1375,6 +1417,7 @@ criterion_group! {
     bench_stab_direct_gpu_clifford_d10,
     bench_stab_cpu_ghz_measure,
     bench_stab_gpu_ghz_measure,
+    bench_stab_gpu_route,
     bench_stab_direct_cpu_scrambled_measure_all,
     bench_stab_direct_gpu_scrambled_measure_all,
     bench_stab_direct_gpu_h_wall_measure,

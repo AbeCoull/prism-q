@@ -41,8 +41,11 @@ directly:
 - `BackendKind::StabilizerGpu { context }`. Gates apply to a device tableau through
   one word-grouped batched Clifford kernel (`stab_apply_word_grouped`). Measurement and
   reset keep pivot search, row cascade, phase fixup and deterministic outcomes on the
-  device. The default crossover is conservative (`STABILIZER_MIN_QUBITS_DEFAULT =
-  100_000`, `PRISM_STABILIZER_GPU_MIN_QUBITS` override). Direct backend benchmarks should
+  device, a run of measurements with a few launches and no host copy per measurement.
+  Circuits from 1,000 qubits run on the device (`STABILIZER_MIN_QUBITS_DEFAULT`,
+  `PRISM_STABILIZER_GPU_MIN_QUBITS` override), unless a measurement group shorter than
+  eight, a reset or a guarded region would take a host round trip each; those stay on
+  the CPU at any width. Direct backend benchmarks should
   use `StabilizerBackend::with_gpu(ctx)` to exclude diagnostic readbacks from
   `probabilities()`, `export_tableau()` and `export_statevector()`. Golden tests cover
   every kernel path, including 500q GHZ measure-all.

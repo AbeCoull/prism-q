@@ -85,12 +85,11 @@ pub(crate) fn bts_min_weight_factor() -> usize {
     })
 }
 
-/// Default for `PRISM_STABILIZER_GPU_MIN_QUBITS`, set high so
-/// [`crate::BackendKind::StabilizerGpu`] stays on the host path.
-///
-/// The device path is correct, but no direct backend benchmark yet justifies a lower
-/// crossover. Set the variable to `0` to opt in.
-pub const STABILIZER_MIN_QUBITS_DEFAULT: usize = 100_000;
+/// Default for `PRISM_STABILIZER_GPU_MIN_QUBITS`: the width from which the device tableau
+/// beats the host on dense Clifford layers, a GHZ state measured in full and a dense
+/// measure-all alike. A circuit with measurements or resets outside runs stays on the
+/// host at any width.
+pub const STABILIZER_MIN_QUBITS_DEFAULT: usize = 1_000;
 
 /// Stabilizer GPU crossover in qubits, read from `PRISM_STABILIZER_GPU_MIN_QUBITS` once
 /// per process.

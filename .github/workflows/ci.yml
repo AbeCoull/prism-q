@@ -535,6 +535,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Verify the conventional-commit mapping and the pre-1.0 clamp
         run: bash scripts/release_bump_level_test.sh
+      - name: Verify the breaking title check for compatibility entries
+        run: bash scripts/compat_breaking_title_test.sh
 
   bench-gate-confirmation:
     name: Bench gate confirmation

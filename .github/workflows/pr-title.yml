@@ -1,0 +1,25 @@
+name: PR title
+
+# A separate workflow so that retitling a pull request reruns this check alone
+# rather than the whole CI, whose concurrency group would cancel a run in flight.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  breaking-title:
+    name: Breaking title for compatibility entries
+    runs-on: ubuntu-latest
+    steps:
+      # The merge commit's first parent is the base branch, so HEAD^1 diffs the
+      # pull request alone.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Require a `!` when the compatibility page records a changed result
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: bash scripts/compat_breaking_title.sh HEAD^1

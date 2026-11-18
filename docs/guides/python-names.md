@@ -43,6 +43,5 @@ Rust only; a test keeps the record complete as the Rust API grows.
 [Python API](../reference/python-api.md) lists the free functions.
 
 Three classes have taken their Rust names: `Decoder` is now `UnionFindDecoder`,
-`QecResult` is `QecSampleResult`, and `RecordRef` is `QecRecordRef`. The old names
-still resolve, with a `DeprecationWarning`, until the next minor release, and pickles
-written under the old names load.
+`QecResult` is `QecSampleResult`, and `RecordRef` is `QecRecordRef`. The old names no
+longer resolve, and pickles written under them no longer load.

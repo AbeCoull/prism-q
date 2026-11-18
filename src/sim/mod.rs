@@ -13,7 +13,7 @@ pub mod gradient;
 pub mod homological;
 mod metadata;
 pub mod noise;
-mod observable;
+pub(crate) mod observable;
 mod plan;
 mod probability;
 mod route;
@@ -869,6 +869,21 @@ impl<'c> Simulate<'c, Seeded> {
     /// terms over `H`'s `T`; see [`PauliObservable::square`].
     pub fn observable_variance(self, observable: &PauliObservable) -> Result<ObservableVariance> {
         self.reject_saves("observable_variance")?;
+        let limits = &self.resolved_limits();
+        if self.noise_model.is_none()
+            && self.initial_state.is_none()
+            && !matches!(self.kind, BackendKind::PauliPath { .. })
+            && !evolves_resets_as_channels(&self.kind, self.circuit)
+            && grouped_statevector(&self.kind, self.circuit, limits)
+        {
+            return operator_variance_statevector(
+                &self.kind,
+                self.circuit,
+                observable,
+                self.seed_value(),
+                limits,
+            );
+        }
         let (offset, traceless) = observable.split_identity();
         let mean = self.observable_expectation_ref(observable)?;
         let second = self.observable_expectation_ref(&traceless.square())?;
@@ -3547,6 +3562,50 @@ fn grouped_expectation_statevector(
     result.metadata.reason =
         route_metadata(&backend, !matches!(accel, dispatch::Accel::Cpu), reason).reason;
     Ok(result)
+}
+
+/// `observable_variance` on the statevector route: the circuit runs once and `<T>` and
+/// `<T^2>` of the traceless part come out of one pass over `(T psi)[k]`, in place of a
+/// second run over the expanded square.
+fn operator_variance_statevector(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    observable: &PauliObservable,
+    seed: u64,
+    limits: &ResolvedLimits,
+) -> Result<ObservableVariance> {
+    require_unitary_expectation_circuit(kind, circuit)?;
+    for (_, factors) in observable.terms() {
+        validate_observable(factors, circuit.num_qubits)?;
+    }
+    let (offset, traceless) = observable.split_identity();
+    let terms = traceless
+        .terms()
+        .iter()
+        .map(|(c, factors)| Ok((*c, pauli_masks(factors, circuit.num_qubits)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let table = observable::OperatorTable::new(&terms);
+
+    let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
+    let mut backend = build_statevector(&accel, seed, limits);
+    let expanded = expand_for_backend(&backend, circuit);
+    let fused = fuse_for_backend(&backend, &expanded);
+    backend.init(fused.num_qubits, fused.num_classical_bits)?;
+    backend.apply_instructions(&fused.instructions)?;
+    let (first, second) = backend.operator_moments(&table)?;
+    let reason = if kind.is_auto() {
+        RouteRule::Default
+    } else {
+        RouteRule::ExplicitBackend
+    };
+    let mut metadata = backend_metadata(&backend);
+    metadata.reason =
+        route_metadata(&backend, !matches!(accel, dispatch::Accel::Cpu), reason).reason;
+    Ok(ObservableVariance {
+        variance: second - first * first,
+        mean: first + offset,
+        metadata,
+    })
 }
 
 /// The reduction half of [`grouped_expectation_statevector`], on a backend

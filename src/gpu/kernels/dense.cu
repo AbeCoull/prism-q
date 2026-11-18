@@ -800,6 +800,73 @@ extern "C" __global__ void sv_group_moments(
     }
 }
 
+// sv_operator_moments: (H psi)[k] for every index k, summed over the X groups of H:
+// psi[k ^ xs[g]] times the sum of group g's coefficients (re, im) signed by the parity of
+// (k ^ xs[g]) & zs[t]. Each block writes (sum |psi|^2, sum Re conj(psi_k) h_k,
+// sum |h_k|^2) to out_partials[3 * blockIdx.x ..], so <H> and <H^2> come out of one pass.
+extern "C" __global__ void sv_operator_moments(
+    const double2 *state, unsigned long long dim,
+    const unsigned long long *xs, const unsigned int *offsets, unsigned int num_groups,
+    const unsigned long long *zs, const double2 *coeffs, double *out_partials)
+{
+    __shared__ double warp_sums[3][32];
+    unsigned int lane = threadIdx.x & 31;
+    unsigned int warp = threadIdx.x >> 5;
+    unsigned int num_warps = blockDim.x >> 5;
+    double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+    for (unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+         k < dim; k += (unsigned long long)gridDim.x * blockDim.x) {
+        double2 a = state[k];
+        double hr = 0.0, hi = 0.0;
+        for (unsigned int g = 0; g < num_groups; ++g) {
+            unsigned long long source = k ^ xs[g];
+            double dr = 0.0, di = 0.0;
+            for (unsigned int t = offsets[g]; t < offsets[g + 1]; ++t) {
+                double2 c = coeffs[t];
+                if (__popcll(source & zs[t]) & 1) {
+                    dr -= c.x;
+                    di -= c.y;
+                } else {
+                    dr += c.x;
+                    di += c.y;
+                }
+            }
+            double2 p = state[source];
+            hr += dr * p.x - di * p.y;
+            hi += dr * p.y + di * p.x;
+        }
+        s0 += a.x * a.x + a.y * a.y;
+        s1 += a.x * hr + a.y * hi;
+        s2 += hr * hr + hi * hi;
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        s0 += __shfl_down_sync(0xffffffffu, s0, offset);
+        s1 += __shfl_down_sync(0xffffffffu, s1, offset);
+        s2 += __shfl_down_sync(0xffffffffu, s2, offset);
+    }
+    if (lane == 0) {
+        warp_sums[0][warp] = s0;
+        warp_sums[1][warp] = s1;
+        warp_sums[2][warp] = s2;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        s0 = lane < num_warps ? warp_sums[0][lane] : 0.0;
+        s1 = lane < num_warps ? warp_sums[1][lane] : 0.0;
+        s2 = lane < num_warps ? warp_sums[2][lane] : 0.0;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            s0 += __shfl_down_sync(0xffffffffu, s0, offset);
+            s1 += __shfl_down_sync(0xffffffffu, s1, offset);
+            s2 += __shfl_down_sync(0xffffffffu, s2, offset);
+        }
+        if (lane == 0) {
+            out_partials[3ULL * blockIdx.x] = s0;
+            out_partials[3ULL * blockIdx.x + 1] = s1;
+            out_partials[3ULL * blockIdx.x + 2] = s2;
+        }
+    }
+}
+
 // measure_collapse: zero amplitudes where qubit bit != outcome.
 // Launch over 2^n threads, block size BLOCK_SIZE.
 

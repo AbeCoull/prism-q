@@ -1355,6 +1355,37 @@ fn bench_gpu_pauli_sum_grouped(c: &mut Criterion) {
     group.finish();
 }
 
+/// `observable_variance` of a Hamiltonian on the device statevector, one moment pass per
+/// commuting group with a rotated copy for the X and Y groups.
+fn bench_gpu_observable_variance(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/observable_variance");
+    configure_group(&mut group);
+    let kind = gpu_kind(&ctx);
+    let sizes: &[usize] = if is_fast() { &[20] } else { &[20, 22] };
+    for (name, build) in [
+        ("tfim", ising_hamiltonian as fn(usize) -> PauliObservable),
+        ("heisenberg", heisenberg_hamiltonian),
+    ] {
+        for &n in sizes {
+            let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+            let observable = build(n);
+            group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        sim::simulate(circ)
+                            .backend(kind.clone())
+                            .seed(SEED)
+                            .observable_variance(&observable)
+                            .unwrap(),
+                    )
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 /// Device-to-host readback of a prepared state through `export_statevector`.
 /// The plain rows leave the deferred norm at one; the `scaled` rows measure
 /// one qubit of the uniform superposition first so the in-place norm pass
@@ -1406,6 +1437,7 @@ criterion_group! {
     bench_gpu_pauli_expect,
     bench_gpu_marginals,
     bench_gpu_pauli_sum_grouped,
+    bench_gpu_observable_variance,
     bench_gpu_export,
     bench_gpu_throughput,
     bench_gpu_floor,

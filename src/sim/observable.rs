@@ -911,6 +911,101 @@ pub(crate) fn pauli_expectations_from_masks(
     (finish_expectations(masks, &z_sum, &g_sum, norm), norm)
 }
 
+/// A weighted Pauli sum grouped by X pattern, for evaluating `H|psi>` one index at a
+/// time: group `g` covers terms `offsets[g]..offsets[g + 1]`, all with X mask `xs[g]`,
+/// and term `t` carries its Z mask and `coefficient * i^num_y`.
+pub(crate) struct OperatorTable {
+    pub(crate) xs: Vec<usize>,
+    pub(crate) offsets: Vec<usize>,
+    pub(crate) zs: Vec<usize>,
+    pub(crate) coefficients: Vec<Complex64>,
+}
+
+impl OperatorTable {
+    pub(crate) fn new(terms: &[(f64, (usize, usize, u32))]) -> Self {
+        let mut by_x: BTreeMap<usize, Vec<(usize, Complex64)>> = BTreeMap::new();
+        for &(c, (xmask, zmask, num_y)) in terms {
+            by_x.entry(xmask)
+                .or_default()
+                .push((zmask, i_pow(num_y) * c));
+        }
+        let mut table = OperatorTable {
+            xs: Vec::with_capacity(by_x.len()),
+            offsets: vec![0],
+            zs: Vec::with_capacity(terms.len()),
+            coefficients: Vec::with_capacity(terms.len()),
+        };
+        for (xmask, group) in by_x {
+            table.xs.push(xmask);
+            for (zmask, coefficient) in group {
+                table.zs.push(zmask);
+                table.coefficients.push(coefficient);
+            }
+            table.offsets.push(table.zs.len());
+        }
+        table
+    }
+}
+
+/// `(<H>, <H^2>)` of the operator in `table` over `state`, normalized by the state's
+/// norm, from one pass: `(H psi)[k]` sums every term's `psi[k ^ x]` with its sign and
+/// phase, then `<H> = Re <psi|H psi>` and `<H^2> = |H psi|^2`. `(0, 0)` for a zero state.
+pub(crate) fn operator_moments(state: &[Complex64], table: &OperatorTable) -> (f64, f64) {
+    let accumulate = |acc: &mut (f64, f64, f64), base: usize, len: usize| {
+        for k in base..base + len {
+            let amp = state[k];
+            let mut h = Complex64::new(0.0, 0.0);
+            for (g, &xmask) in table.xs.iter().enumerate() {
+                let source = k ^ xmask;
+                let mut d = Complex64::new(0.0, 0.0);
+                for t in table.offsets[g]..table.offsets[g + 1] {
+                    if (source & table.zs[t]).count_ones() & 1 == 1 {
+                        d -= table.coefficients[t];
+                    } else {
+                        d += table.coefficients[t];
+                    }
+                }
+                h += d * state[source];
+            }
+            acc.0 += amp.norm_sqr();
+            acc.1 += (amp.conj() * h).re;
+            acc.2 += h.norm_sqr();
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    let (s0, s1, s2) = if state.len() >= crate::backend::MIN_PAR_REDUCE_ELEMS {
+        use rayon::prelude::*;
+        let chunk = crate::backend::MIN_PAR_ELEMS;
+        state
+            .par_chunks(chunk)
+            .enumerate()
+            .fold(
+                || (0.0, 0.0, 0.0),
+                |mut acc, (c, block)| {
+                    accumulate(&mut acc, c * chunk, block.len());
+                    acc
+                },
+            )
+            .reduce(|| (0.0, 0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2))
+    } else {
+        let mut acc = (0.0, 0.0, 0.0);
+        accumulate(&mut acc, 0, state.len());
+        acc
+    };
+    #[cfg(not(feature = "parallel"))]
+    let (s0, s1, s2) = {
+        let mut acc = (0.0, 0.0, 0.0);
+        accumulate(&mut acc, 0, state.len());
+        acc
+    };
+    if s0 == 0.0 {
+        (0.0, 0.0)
+    } else {
+        (s1 / s0, s2 / s0)
+    }
+}
+
 /// Unnormalized sums of the two families [`finish_expectations`] interleaves,
 /// and `Σ|amp|^2`.
 fn expectation_sums(

@@ -1845,6 +1845,28 @@ mod gpu_scaffold {
         );
     }
 
+    // Every group of one call queues its moment kernel into its own slice and the
+    // partials come back in a single readback.
+    #[cfg(feature = "bench-internal")]
+    #[test]
+    fn gpu_group_moments_read_back_once() {
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        let n = 10;
+        let mut gpu = StatevectorBackend::new(42).with_gpu(ctx.clone());
+        sim::run_on(&mut gpu, &crate::circuits::random_circuit(n, 4, 42)).unwrap();
+        let requests: Vec<(Vec<u64>, Vec<f64>, u64, u64)> = vec![
+            (vec![0b1, 0b11], vec![0.5, -0.25], 0, 0),
+            (vec![0b10], vec![1.0], 0b100, 0),
+            (vec![0b101, 0b1], vec![0.3, 0.7], 0, 0b1000),
+            (vec![0b1111], vec![-1.0], 0, 0),
+        ];
+        let before = ctx.pass_census();
+        gpu.group_moments_on_device(&requests).unwrap().unwrap();
+        assert_eq!((ctx.pass_census() - before).drains, 1);
+    }
+
     #[test]
     fn gpu_group_moments_match_host() {
         let Some(ctx) = device_or_skip() else {

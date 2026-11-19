@@ -1706,3 +1706,63 @@ fn shared_prefix_declines_what_it_cannot_share() {
         );
     }
 }
+
+#[cfg(feature = "parallel")]
+#[test]
+fn split_statevector_trajectories_stay_within_a_single_state_cap() {
+    let cap = ResolvedLimits::process_default().statevector_qubits.value;
+    let statevector = crate::sim::ResolvedBackend::Statevector;
+    let replica_cap = (1..)
+        .find(|&n| !trajectories_split(statevector, n))
+        .unwrap();
+    assert!(
+        replica_cap <= cap,
+        "split trajectory cap {replica_cap} exceeds the statevector cap {cap}"
+    );
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn serial_kernels_hold_only_inside_their_scope() {
+    use crate::backend::{PARALLEL_THRESHOLD_QUBITS, kernel_parallel_qubits, with_serial_kernels};
+    assert_eq!(kernel_parallel_qubits(), PARALLEL_THRESHOLD_QUBITS);
+    with_serial_kernels(|| {
+        assert!(kernel_parallel_qubits() >= usize::BITS as usize - 1);
+        with_serial_kernels(|| {});
+        assert!(kernel_parallel_qubits() >= usize::BITS as usize - 1);
+    });
+    assert_eq!(kernel_parallel_qubits(), PARALLEL_THRESHOLD_QUBITS);
+}
+
+// Split shots at the kernels' own parallel width run their kernels serially, so the
+// records match whatever the pool width.
+#[cfg(feature = "parallel")]
+#[test]
+fn split_statevector_trajectories_match_on_one_and_many_threads() {
+    let n = crate::backend::PARALLEL_THRESHOLD_QUBITS;
+    let statevector = crate::sim::ResolvedBackend::Statevector;
+    assert!(trajectories_split(statevector, n));
+    let circuit = damping_ansatz(n, 1);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let run = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                run_trajectories(
+                    |s: u64| -> Box<dyn Backend> {
+                        Box::new(crate::backend::statevector::StatevectorBackend::new(s))
+                    },
+                    &circuit,
+                    &noise,
+                    16,
+                    42,
+                    false,
+                    statevector,
+                )
+                .unwrap()
+            })
+    };
+    assert_same_records(&run(1), &run(4), "one against four threads");
+}

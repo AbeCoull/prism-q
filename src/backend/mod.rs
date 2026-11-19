@@ -89,6 +89,38 @@ pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 15;
 #[cfg(miri)]
 pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 8;
 
+#[cfg(feature = "parallel")]
+std::thread_local! {
+    static SERIAL_KERNELS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Qubit count from which statevector kernels split across workers on this thread:
+/// [`PARALLEL_THRESHOLD_QUBITS`], or never inside [`with_serial_kernels`].
+#[cfg(feature = "parallel")]
+#[inline(always)]
+pub(crate) fn kernel_parallel_qubits() -> usize {
+    if SERIAL_KERNELS.with(std::cell::Cell::get) {
+        usize::BITS as usize - 1
+    } else {
+        PARALLEL_THRESHOLD_QUBITS
+    }
+}
+
+/// Run `f` with this thread's statevector kernels serial, for a task that already holds
+/// one worker of a split run: a kernel join inside it could otherwise steal another task
+/// onto this worker's stack.
+#[cfg(feature = "parallel")]
+pub(crate) fn with_serial_kernels<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SERIAL_KERNELS.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(SERIAL_KERNELS.with(|cell| cell.replace(true)));
+    f()
+}
+
 /// Minimum elements per Rayon task in amplitude loops.
 #[cfg(all(feature = "parallel", not(miri)))]
 pub(crate) const MIN_PAR_ELEMS: usize = 4096;

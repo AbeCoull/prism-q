@@ -79,7 +79,7 @@ use crate::gpu::{GpuContext, GpuState};
 use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
-pub(crate) use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS};
+pub(crate) use super::MIN_PAR_ELEMS;
 
 /// Width from which `init` zeroes the state with the thread pool, which spreads the first
 /// touch of every page of a fresh buffer: 157 ms to 63 ms at 26 qubits. At 16 qubits
@@ -687,7 +687,7 @@ impl StatevectorBackend {
         let mut probs = vec![0.0_f64; self.state.len()];
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= crate::backend::kernel_parallel_qubits() {
             let src_chunks = self.state.par_chunks(MIN_PAR_ELEMS);
             let dst_chunks = probs.par_chunks_mut(MIN_PAR_ELEMS);
             if norm_sq == 1.0 {

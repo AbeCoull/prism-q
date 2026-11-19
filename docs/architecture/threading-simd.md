@@ -120,7 +120,9 @@ payloads change whenever its width differs from the comparison run's.
   mid-circuit measurement, a condition or a region runs once per shot off the host
   statevector, and below the width where the resolved engine's own kernels go parallel
   those runs split across workers: 15 qubits for dense engines, 128 for a tableau, any
-  width for a product state. Noisy trajectories follow the same rule, on every engine.
+  width for a product state. Noisy trajectories follow the same rule, except on the host
+  statevector, where they split below 19 qubits and each shot runs its kernels serially,
+  so their reductions keep one order at any thread count.
   Shot `i` runs on a seed hashed from the run seed and `i` with SplitMix64, and results
   fold in shot order. Adjacent run seeds draw unrelated shots, not the same shots offset
   by one. Pinned for decomposed, tableau and product-state circuits, and for tableau

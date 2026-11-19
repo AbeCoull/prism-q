@@ -959,7 +959,7 @@ pub fn prism_q::circuit::builder::CircuitBuilder::build_parametric(&mut self) ->
 pub fn prism_q::circuit::builder::CircuitBuilder::ccx(&mut self, usize, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::ch(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::circuit(&self) -> &prism_q::circuit::Circuit
-pub fn prism_q::circuit::builder::CircuitBuilder::conditional(&mut self, prism_q::circuit::ClassicalCondition, prism_q::gates::Gate, &[usize]) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::conditional(&mut self, prism_q::ClassicalCondition, prism_q::gates::Gate, &[usize]) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cphase(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::crx(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cry(&mut self, f64, usize, usize) -> &mut Self
@@ -970,7 +970,7 @@ pub fn prism_q::circuit::builder::CircuitBuilder::cx(&mut self, usize, usize) ->
 pub fn prism_q::circuit::builder::CircuitBuilder::cy(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cz(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::gate(&mut self, prism_q::gates::Gate, &[usize]) -> &mut Self
-pub fn prism_q::circuit::builder::CircuitBuilder::guarded(&mut self, prism_q::circuit::ClassicalCondition, impl core::ops::function::FnOnce(&mut prism_q::circuit::builder::CircuitBuilder)) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::guarded(&mut self, prism_q::ClassicalCondition, impl core::ops::function::FnOnce(&mut prism_q::circuit::builder::CircuitBuilder)) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::h(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::id(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::iswap(&mut self, usize, usize) -> &mut Self
@@ -1261,14 +1261,14 @@ pub prism_q::circuit::ClassicalCondition::RegisterNotEquals
 pub prism_q::circuit::ClassicalCondition::RegisterNotEquals::offset: usize
 pub prism_q::circuit::ClassicalCondition::RegisterNotEquals::size: usize
 pub prism_q::circuit::ClassicalCondition::RegisterNotEquals::value: u64
-impl prism_q::circuit::ClassicalCondition
-pub fn prism_q::circuit::ClassicalCondition::evaluate(&self, &[bool]) -> bool
-pub fn prism_q::circuit::ClassicalCondition::negate(&self) -> prism_q::circuit::ClassicalCondition
+impl prism_q::ClassicalCondition
+pub fn prism_q::ClassicalCondition::evaluate(&self, &[bool]) -> bool
+pub fn prism_q::ClassicalCondition::negate(&self) -> prism_q::ClassicalCondition
 pub enum prism_q::circuit::Instruction
 pub prism_q::circuit::Instruction::Barrier
 pub prism_q::circuit::Instruction::Barrier::qubits: smallvec::SmallVec<[usize; 4]>
 pub prism_q::circuit::Instruction::Conditional
-pub prism_q::circuit::Instruction::Conditional::condition: prism_q::circuit::ClassicalCondition
+pub prism_q::circuit::Instruction::Conditional::condition: prism_q::ClassicalCondition
 pub prism_q::circuit::Instruction::Conditional::gate: prism_q::gates::Gate
 pub prism_q::circuit::Instruction::Conditional::targets: smallvec::SmallVec<[usize; 4]>
 pub prism_q::circuit::Instruction::Gate
@@ -1347,9 +1347,9 @@ pub fn prism_q::circuit::Circuit::fmt(&self, &mut core::fmt::Formatter<'_>) -> c
 pub struct prism_q::circuit::GuardedRegion
 impl prism_q::circuit::GuardedRegion
 pub fn prism_q::circuit::GuardedRegion::body(&self) -> &[prism_q::circuit::Instruction]
-pub fn prism_q::circuit::GuardedRegion::condition(&self) -> &prism_q::circuit::ClassicalCondition
+pub fn prism_q::circuit::GuardedRegion::condition(&self) -> &prism_q::ClassicalCondition
 pub fn prism_q::circuit::GuardedRegion::depth(&self) -> usize
-pub fn prism_q::circuit::GuardedRegion::new(prism_q::circuit::ClassicalCondition, alloc::vec::Vec<prism_q::circuit::Instruction>) -> Self
+pub fn prism_q::circuit::GuardedRegion::new(prism_q::ClassicalCondition, alloc::vec::Vec<prism_q::circuit::Instruction>) -> Self
 pub fn prism_q::circuit::GuardedRegion::qubits(&self) -> &[usize]
 pub struct prism_q::circuit::ParamLink
 pub prism_q::circuit::ParamLink::instruction: usize
@@ -1437,7 +1437,7 @@ pub fn prism_q::TextOptions::default() -> Self
 pub const prism_q::circuit::MAX_REGION_DEPTH: usize
 pub fn prism_q::circuit::expand_pauli_rotations(&prism_q::circuit::Circuit) -> alloc::borrow::Cow<'_, prism_q::circuit::Circuit>
 pub fn prism_q::circuit::expand_qft_blocks(&prism_q::circuit::Circuit) -> alloc::borrow::Cow<'_, prism_q::circuit::Circuit>
-pub fn prism_q::circuit::guarded(prism_q::circuit::ClassicalCondition, alloc::vec::Vec<prism_q::circuit::Instruction>) -> core::option::Option<prism_q::circuit::Instruction>
+pub fn prism_q::circuit::guarded(prism_q::ClassicalCondition, alloc::vec::Vec<prism_q::circuit::Instruction>) -> core::option::Option<prism_q::circuit::Instruction>
 pub fn prism_q::circuit::qft_textbook_steps(usize, usize, bool, bool, bool) -> impl core::iter::traits::iterator::Iterator<Item = prism_q::circuit::QftTextbookStep>
 pub fn prism_q::circuit::recognize_qft_blocks(&prism_q::circuit::Circuit) -> alloc::borrow::Cow<'_, prism_q::circuit::Circuit>
 pub mod prism_q::circuits
@@ -1904,23 +1904,23 @@ pub prism_q::qec::QecCircuitNoise::before_round_data_depolarization: f64
 impl prism_q::QecCircuitNoise
 pub fn prism_q::QecCircuitNoise::uniform(f64) -> Self
 pub struct prism_q::qec::QecCompiledRows
-impl prism_q::qec::QecCompiledRows
-pub fn prism_q::qec::QecCompiledRows::detector_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::qec::QecCompiledRows::detector_rows(&self) -> &[alloc::vec::Vec<usize>]
-pub fn prism_q::qec::QecCompiledRows::measurement_mask_bytes(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::measurement_rows(&self) -> &[prism_q::qec::QecMeasurementRow]
-pub fn prism_q::qec::QecCompiledRows::num_detectors(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::num_measurements(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::num_observables(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::num_postselections(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::num_qubits(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::observable_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::qec::QecCompiledRows::observable_rows(&self) -> &[alloc::vec::Vec<usize>]
-pub fn prism_q::qec::QecCompiledRows::packed_row_words(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::postselection_expected(&self) -> &[bool]
-pub fn prism_q::qec::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::qec::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
-pub fn prism_q::qec::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
+impl prism_q::QecCompiledRows
+pub fn prism_q::QecCompiledRows::detector_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::detector_rows(&self) -> &[alloc::vec::Vec<usize>]
+pub fn prism_q::QecCompiledRows::measurement_mask_bytes(&self) -> usize
+pub fn prism_q::QecCompiledRows::measurement_rows(&self) -> &[prism_q::QecMeasurementRow]
+pub fn prism_q::QecCompiledRows::num_detectors(&self) -> usize
+pub fn prism_q::QecCompiledRows::num_measurements(&self) -> usize
+pub fn prism_q::QecCompiledRows::num_observables(&self) -> usize
+pub fn prism_q::QecCompiledRows::num_postselections(&self) -> usize
+pub fn prism_q::QecCompiledRows::num_qubits(&self) -> usize
+pub fn prism_q::QecCompiledRows::observable_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::observable_rows(&self) -> &[alloc::vec::Vec<usize>]
+pub fn prism_q::QecCompiledRows::packed_row_words(&self) -> usize
+pub fn prism_q::QecCompiledRows::postselection_expected(&self) -> &[bool]
+pub fn prism_q::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
+pub fn prism_q::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
 pub struct prism_q::qec::QecCompiledSampler
 impl prism_q::QecCompiledSampler
 pub fn prism_q::QecCompiledSampler::num_detectors(&self) -> usize
@@ -1931,15 +1931,15 @@ pub struct prism_q::qec::QecCorrelatedBranch
 pub prism_q::qec::QecCorrelatedBranch::probability: f64
 pub prism_q::qec::QecCorrelatedBranch::terms: alloc::vec::Vec<prism_q::qec::QecPauli>
 pub struct prism_q::qec::QecMeasurementRow
-impl prism_q::qec::QecMeasurementRow
-pub fn prism_q::qec::QecMeasurementRow::from_terms(usize, &[prism_q::qec::QecPauli]) -> prism_q::error::Result<Self>
-pub fn prism_q::qec::QecMeasurementRow::num_qubits(&self) -> usize
-pub fn prism_q::qec::QecMeasurementRow::pauli_at(&self, usize) -> core::option::Option<prism_q::qec::QecBasis>
-pub fn prism_q::qec::QecMeasurementRow::single(usize, prism_q::qec::QecBasis, usize) -> prism_q::error::Result<Self>
-pub fn prism_q::qec::QecMeasurementRow::terms(&self) -> alloc::vec::Vec<prism_q::qec::QecPauli>
-pub fn prism_q::qec::QecMeasurementRow::weight(&self) -> usize
-pub fn prism_q::qec::QecMeasurementRow::x_mask(&self) -> &[u64]
-pub fn prism_q::qec::QecMeasurementRow::z_mask(&self) -> &[u64]
+impl prism_q::QecMeasurementRow
+pub fn prism_q::QecMeasurementRow::from_terms(usize, &[prism_q::qec::QecPauli]) -> prism_q::error::Result<Self>
+pub fn prism_q::QecMeasurementRow::num_qubits(&self) -> usize
+pub fn prism_q::QecMeasurementRow::pauli_at(&self, usize) -> core::option::Option<prism_q::qec::QecBasis>
+pub fn prism_q::QecMeasurementRow::single(usize, prism_q::qec::QecBasis, usize) -> prism_q::error::Result<Self>
+pub fn prism_q::QecMeasurementRow::terms(&self) -> alloc::vec::Vec<prism_q::qec::QecPauli>
+pub fn prism_q::QecMeasurementRow::weight(&self) -> usize
+pub fn prism_q::QecMeasurementRow::x_mask(&self) -> &[u64]
+pub fn prism_q::QecMeasurementRow::z_mask(&self) -> &[u64]
 pub struct prism_q::qec::QecObservableEstimate
 pub prism_q::qec::QecObservableEstimate::mean: f64
 pub prism_q::qec::QecObservableEstimate::num_shots: usize
@@ -2037,7 +2037,7 @@ pub fn prism_q::UnionFindDecoder::from_model(&prism_q::DetectorErrorModel) -> pr
 pub fn prism_q::UnionFindDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
 pub fn prism_q::UnionFindDecoder::num_detectors(&self) -> usize
 pub fn prism_q::UnionFindDecoder::num_observables(&self) -> usize
-pub fn prism_q::qec::compile_qec_program_rows(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::qec::QecCompiledRows>
+pub fn prism_q::qec::compile_qec_program_rows(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::QecCompiledRows>
 pub fn prism_q::qec::parse_qec_program(&str) -> prism_q::error::Result<prism_q::qec::QecProgram>
 pub fn prism_q::qec::parse_stim_circuit(&str) -> prism_q::error::Result<prism_q::qec::QecProgram>
 pub fn prism_q::qec::run_qec_program(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::QecSampleResult>
@@ -2841,9 +2841,9 @@ pub prism_q::ClassicalCondition::RegisterNotEquals
 pub prism_q::ClassicalCondition::RegisterNotEquals::offset: usize
 pub prism_q::ClassicalCondition::RegisterNotEquals::size: usize
 pub prism_q::ClassicalCondition::RegisterNotEquals::value: u64
-impl prism_q::circuit::ClassicalCondition
-pub fn prism_q::circuit::ClassicalCondition::evaluate(&self, &[bool]) -> bool
-pub fn prism_q::circuit::ClassicalCondition::negate(&self) -> prism_q::circuit::ClassicalCondition
+impl prism_q::ClassicalCondition
+pub fn prism_q::ClassicalCondition::evaluate(&self, &[bool]) -> bool
+pub fn prism_q::ClassicalCondition::negate(&self) -> prism_q::ClassicalCondition
 #[non_exhaustive] pub enum prism_q::Engine
 pub prism_q::Engine::CompiledSampler
 pub prism_q::Engine::FrameSampler
@@ -2917,7 +2917,7 @@ pub enum prism_q::Instruction
 pub prism_q::Instruction::Barrier
 pub prism_q::Instruction::Barrier::qubits: smallvec::SmallVec<[usize; 4]>
 pub prism_q::Instruction::Conditional
-pub prism_q::Instruction::Conditional::condition: prism_q::circuit::ClassicalCondition
+pub prism_q::Instruction::Conditional::condition: prism_q::ClassicalCondition
 pub prism_q::Instruction::Conditional::gate: prism_q::gates::Gate
 pub prism_q::Instruction::Conditional::targets: smallvec::SmallVec<[usize; 4]>
 pub prism_q::Instruction::Gate
@@ -3300,7 +3300,7 @@ pub fn prism_q::circuit::builder::CircuitBuilder::build_parametric(&mut self) ->
 pub fn prism_q::circuit::builder::CircuitBuilder::ccx(&mut self, usize, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::ch(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::circuit(&self) -> &prism_q::circuit::Circuit
-pub fn prism_q::circuit::builder::CircuitBuilder::conditional(&mut self, prism_q::circuit::ClassicalCondition, prism_q::gates::Gate, &[usize]) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::conditional(&mut self, prism_q::ClassicalCondition, prism_q::gates::Gate, &[usize]) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cphase(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::crx(&mut self, f64, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cry(&mut self, f64, usize, usize) -> &mut Self
@@ -3311,7 +3311,7 @@ pub fn prism_q::circuit::builder::CircuitBuilder::cx(&mut self, usize, usize) ->
 pub fn prism_q::circuit::builder::CircuitBuilder::cy(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::cz(&mut self, usize, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::gate(&mut self, prism_q::gates::Gate, &[usize]) -> &mut Self
-pub fn prism_q::circuit::builder::CircuitBuilder::guarded(&mut self, prism_q::circuit::ClassicalCondition, impl core::ops::function::FnOnce(&mut prism_q::circuit::builder::CircuitBuilder)) -> &mut Self
+pub fn prism_q::circuit::builder::CircuitBuilder::guarded(&mut self, prism_q::ClassicalCondition, impl core::ops::function::FnOnce(&mut prism_q::circuit::builder::CircuitBuilder)) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::h(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::id(&mut self, usize) -> &mut Self
 pub fn prism_q::circuit::builder::CircuitBuilder::iswap(&mut self, usize, usize) -> &mut Self
@@ -4078,23 +4078,23 @@ pub prism_q::QecCircuitNoise::before_round_data_depolarization: f64
 impl prism_q::QecCircuitNoise
 pub fn prism_q::QecCircuitNoise::uniform(f64) -> Self
 pub struct prism_q::QecCompiledRows
-impl prism_q::qec::QecCompiledRows
-pub fn prism_q::qec::QecCompiledRows::detector_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::qec::QecCompiledRows::detector_rows(&self) -> &[alloc::vec::Vec<usize>]
-pub fn prism_q::qec::QecCompiledRows::measurement_mask_bytes(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::measurement_rows(&self) -> &[prism_q::qec::QecMeasurementRow]
-pub fn prism_q::qec::QecCompiledRows::num_detectors(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::num_measurements(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::num_observables(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::num_postselections(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::num_qubits(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::observable_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::qec::QecCompiledRows::observable_rows(&self) -> &[alloc::vec::Vec<usize>]
-pub fn prism_q::qec::QecCompiledRows::packed_row_words(&self) -> usize
-pub fn prism_q::qec::QecCompiledRows::postselection_expected(&self) -> &[bool]
-pub fn prism_q::qec::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::qec::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
-pub fn prism_q::qec::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
+impl prism_q::QecCompiledRows
+pub fn prism_q::QecCompiledRows::detector_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::detector_rows(&self) -> &[alloc::vec::Vec<usize>]
+pub fn prism_q::QecCompiledRows::measurement_mask_bytes(&self) -> usize
+pub fn prism_q::QecCompiledRows::measurement_rows(&self) -> &[prism_q::QecMeasurementRow]
+pub fn prism_q::QecCompiledRows::num_detectors(&self) -> usize
+pub fn prism_q::QecCompiledRows::num_measurements(&self) -> usize
+pub fn prism_q::QecCompiledRows::num_observables(&self) -> usize
+pub fn prism_q::QecCompiledRows::num_postselections(&self) -> usize
+pub fn prism_q::QecCompiledRows::num_qubits(&self) -> usize
+pub fn prism_q::QecCompiledRows::observable_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::observable_rows(&self) -> &[alloc::vec::Vec<usize>]
+pub fn prism_q::QecCompiledRows::packed_row_words(&self) -> usize
+pub fn prism_q::QecCompiledRows::postselection_expected(&self) -> &[bool]
+pub fn prism_q::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
+pub fn prism_q::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
 pub struct prism_q::QecCompiledSampler
 impl prism_q::QecCompiledSampler
 pub fn prism_q::QecCompiledSampler::num_detectors(&self) -> usize
@@ -4105,15 +4105,15 @@ pub struct prism_q::QecCorrelatedBranch
 pub prism_q::QecCorrelatedBranch::probability: f64
 pub prism_q::QecCorrelatedBranch::terms: alloc::vec::Vec<prism_q::qec::QecPauli>
 pub struct prism_q::QecMeasurementRow
-impl prism_q::qec::QecMeasurementRow
-pub fn prism_q::qec::QecMeasurementRow::from_terms(usize, &[prism_q::qec::QecPauli]) -> prism_q::error::Result<Self>
-pub fn prism_q::qec::QecMeasurementRow::num_qubits(&self) -> usize
-pub fn prism_q::qec::QecMeasurementRow::pauli_at(&self, usize) -> core::option::Option<prism_q::qec::QecBasis>
-pub fn prism_q::qec::QecMeasurementRow::single(usize, prism_q::qec::QecBasis, usize) -> prism_q::error::Result<Self>
-pub fn prism_q::qec::QecMeasurementRow::terms(&self) -> alloc::vec::Vec<prism_q::qec::QecPauli>
-pub fn prism_q::qec::QecMeasurementRow::weight(&self) -> usize
-pub fn prism_q::qec::QecMeasurementRow::x_mask(&self) -> &[u64]
-pub fn prism_q::qec::QecMeasurementRow::z_mask(&self) -> &[u64]
+impl prism_q::QecMeasurementRow
+pub fn prism_q::QecMeasurementRow::from_terms(usize, &[prism_q::qec::QecPauli]) -> prism_q::error::Result<Self>
+pub fn prism_q::QecMeasurementRow::num_qubits(&self) -> usize
+pub fn prism_q::QecMeasurementRow::pauli_at(&self, usize) -> core::option::Option<prism_q::qec::QecBasis>
+pub fn prism_q::QecMeasurementRow::single(usize, prism_q::qec::QecBasis, usize) -> prism_q::error::Result<Self>
+pub fn prism_q::QecMeasurementRow::terms(&self) -> alloc::vec::Vec<prism_q::qec::QecPauli>
+pub fn prism_q::QecMeasurementRow::weight(&self) -> usize
+pub fn prism_q::QecMeasurementRow::x_mask(&self) -> &[u64]
+pub fn prism_q::QecMeasurementRow::z_mask(&self) -> &[u64]
 pub struct prism_q::QecObservableEstimate
 pub prism_q::QecObservableEstimate::mean: f64
 pub prism_q::QecObservableEstimate::num_shots: usize
@@ -4621,7 +4621,7 @@ pub fn prism_q::compile_detector_sampler(&prism_q::circuit::Circuit, alloc::vec:
 pub fn prism_q::compile_forward(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::compiled::CompiledSampler>
 pub fn prism_q::compile_measurements(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::compiled::CompiledSampler>
 pub fn prism_q::compile_noisy(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<prism_q::sim::noise::NoisyCompiledSampler>
-pub fn prism_q::compile_qec_program_rows(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::qec::QecCompiledRows>
+pub fn prism_q::compile_qec_program_rows(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::QecCompiledRows>
 pub fn prism_q::default_limits() -> prism_q::Limits
 pub fn prism_q::density_matrix_expectation_values(&prism_q::circuit::Circuit, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>], core::option::Option<&prism_q::sim::noise::NoiseModel>, u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::inverse_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm]) -> alloc::vec::Vec<bool>

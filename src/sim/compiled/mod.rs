@@ -309,6 +309,114 @@ fn draw_flip_groups(rng: &mut ChaCha8Rng, lut: &FlipGroups<'_>, mut xor: impl Fn
     }
 }
 
+/// Write one random byte per flip group for each of the first `num_shots` shots of `buf`,
+/// eight bytes per `next_u64` draw in order, then mask each shot's remainder group byte to
+/// the rows that group holds.
+#[inline]
+fn fill_group_bytes(
+    buf: &mut [u8],
+    num_shots: usize,
+    lut: &FlipGroups<'_>,
+    mut next_u64: impl FnMut() -> u64,
+) {
+    let bytes_per_shot = lut.total_groups();
+    let total_bytes = num_shots * bytes_per_shot;
+    let full_chunks = total_bytes / 8;
+    let tail = full_chunks * 8;
+    for i in 0..full_chunks {
+        let r = next_u64();
+        buf[i * 8..(i + 1) * 8].copy_from_slice(&r.to_le_bytes());
+    }
+    if tail < total_bytes {
+        let r = next_u64();
+        let bytes = r.to_le_bytes();
+        buf[tail..total_bytes].copy_from_slice(&bytes[..total_bytes - tail]);
+    }
+    if lut.remainder_size > 0 {
+        let remainder_mask = (1u8 << lut.remainder_size) - 1;
+        let last_group = lut.num_full_groups;
+        for s in 0..num_shots {
+            buf[s * bytes_per_shot + last_group] &= remainder_mask;
+        }
+    }
+}
+
+/// XOR into `dst`, the shot-major rows of the shots from `first_shot` on, the flip groups
+/// each shot's bytes in `rand_buf` select, every group over a tile of `max_batch` shots
+/// before the next.
+#[inline(always)]
+fn xor_tiles(
+    dst: &mut [u64],
+    first_shot: usize,
+    rand_buf: &[u8],
+    lut: &FlipGroups<'_>,
+    m_words: usize,
+    max_batch: usize,
+) {
+    let shots = dst.len() / m_words;
+    let bytes_per_shot = lut.total_groups();
+    for tile_start in (0..shots).step_by(max_batch) {
+        let tile_end = (tile_start + max_batch).min(shots);
+        for g in 0..bytes_per_shot {
+            for s in tile_start..tile_end {
+                let byte = rand_buf[(first_shot + s) * bytes_per_shot + g] as usize;
+                let base = s * m_words;
+                lut.xor_into(&mut dst[base..base + m_words], g, byte);
+            }
+        }
+    }
+}
+
+/// The reference bits XOR the flip rows `key` selects, bit `j` of `key` choosing row `j`:
+/// through `lut` a byte per flip group, else row by row.
+#[inline]
+fn outcome_for_key(
+    ref_bits: &[u64],
+    lut: Option<FlipGroups<'_>>,
+    flip_rows: &[Vec<u64>],
+    key: usize,
+) -> Vec<u64> {
+    let mut outcome = ref_bits.to_vec();
+    if let Some(lut) = lut {
+        for g in 0..lut.total_groups() {
+            let byte = (key >> (g * 8)) & 0xFF;
+            lut.xor_into(&mut outcome, g, byte);
+        }
+    } else {
+        for (j, row) in flip_rows.iter().enumerate() {
+            if (key >> j) & 1 != 0 {
+                xor_words(&mut outcome, row);
+            }
+        }
+    }
+    outcome
+}
+
+/// Split `total_shots` over `num_outcomes` equally likely keys with one binomial draw per
+/// key in key order, stopping once no shots remain, and hand each drawn key its count.
+#[inline]
+fn for_each_multinomial_count(
+    rng: &mut Xoshiro256PlusPlus,
+    total_shots: usize,
+    num_outcomes: usize,
+    mut f: impl FnMut(usize, usize),
+) {
+    let mut remaining = total_shots;
+    for key in 0..num_outcomes {
+        if remaining == 0 {
+            break;
+        }
+        let outcomes_left = num_outcomes - key;
+        let count = if outcomes_left == 1 {
+            remaining
+        } else {
+            binomial_sample(rng, remaining, 1.0 / outcomes_left as f64)
+        };
+        f(key, count);
+        remaining -= count;
+    }
+}
+
 /// Sampler for a compiled Clifford measurement circuit, built by
 /// [`compile_measurements`] or [`compile_forward`]. Shots XOR a random subset
 /// of `rank` flip rows into fixed reference bits; deterministic per seed.
@@ -696,48 +804,14 @@ impl CompiledSampler {
             } else {
                 FlipGroups::existing(&self.lut, &self.flip_rows)
             };
-            let total_groups = lut.total_groups();
-            let bytes_per_shot = total_groups;
-            let total_bytes = num_shots * bytes_per_shot;
-            rand_buf.resize(total_bytes, 0);
-            {
-                let full_chunks = total_bytes / 8;
-                let tail = full_chunks * 8;
-                for i in 0..full_chunks {
-                    let r = self.rng.next_u64();
-                    rand_buf[i * 8..(i + 1) * 8].copy_from_slice(&r.to_le_bytes());
-                }
-                if tail < total_bytes {
-                    let r = self.rng.next_u64();
-                    let bytes = r.to_le_bytes();
-                    rand_buf[tail..total_bytes].copy_from_slice(&bytes[..total_bytes - tail]);
-                }
-                if lut.remainder_size > 0 {
-                    let remainder_mask = (1u8 << lut.remainder_size) - 1;
-                    let last_group = lut.num_full_groups;
-                    for s in 0..num_shots {
-                        rand_buf[s * bytes_per_shot + last_group] &= remainder_mask;
-                    }
-                }
-            }
+            rand_buf.resize(num_shots * lut.total_groups(), 0);
+            fill_group_bytes(rand_buf, num_shots, &lut, || self.rng.next_u64());
+            let rand_buf: &[u8] = rand_buf;
 
             let max_batch = if m_words > 0 {
                 (256 * 1024 / (m_words * 8)).max(64)
             } else {
                 num_shots
-            };
-
-            let apply_seq = |dst: &mut [u64]| {
-                for tile_start in (0..num_shots).step_by(max_batch) {
-                    let tile_end = (tile_start + max_batch).min(num_shots);
-                    for g in 0..total_groups {
-                        for s in tile_start..tile_end {
-                            let byte = rand_buf[s * bytes_per_shot + g] as usize;
-                            let shot_base = s * m_words;
-                            lut.xor_into(&mut dst[shot_base..shot_base + m_words], g, byte);
-                        }
-                    }
-                }
             };
 
             #[cfg(feature = "parallel")]
@@ -753,41 +827,37 @@ impl CompiledSampler {
                     .par_chunks_mut(chunk_m)
                     .enumerate()
                     .for_each(|(ci, chunk)| {
-                        let chunk_shots = chunk.len() / m_words;
-                        let chunk_start = ci * shots_per_chunk;
-                        for tile_start in (0..chunk_shots).step_by(max_batch) {
-                            let tile_end = (tile_start + max_batch).min(chunk_shots);
-                            for g in 0..total_groups {
-                                for s in tile_start..tile_end {
-                                    let gs = chunk_start + s;
-                                    let byte = rand_buf[gs * bytes_per_shot + g] as usize;
-                                    let base = s * m_words;
-                                    lut.xor_into(&mut chunk[base..base + m_words], g, byte);
-                                }
-                            }
-                        }
+                        xor_tiles(
+                            chunk,
+                            ci * shots_per_chunk,
+                            rand_buf,
+                            &lut,
+                            m_words,
+                            max_batch,
+                        );
                     });
-            } else {
-                apply_seq(accum);
+                return m_words;
             }
-
-            #[cfg(not(feature = "parallel"))]
-            apply_seq(accum);
-
+            xor_tiles(accum, 0, rand_buf, &lut, m_words, max_batch);
             m_words
         } else {
             for s in 0..num_shots {
                 let shot_base = s * m_words;
-                let shot_accum = &mut accum[shot_base..shot_base + m_words];
-                for j in 0..self.rank {
-                    let bit = self.rng.next_u32() & 1;
-                    if bit != 0 {
-                        let row = &self.flip_rows[j];
-                        xor_words(shot_accum, row);
-                    }
-                }
+                self.xor_random_rows(&mut accum[shot_base..shot_base + m_words]);
             }
             m_words
+        }
+    }
+
+    /// XOR into `accum` each flip row whose random bit is set, one `next_u32` per row.
+    #[inline(always)]
+    fn xor_random_rows(&mut self, accum: &mut [u64]) {
+        for j in 0..self.rank {
+            let bit = self.rng.next_u32() & 1;
+            if bit != 0 {
+                let row = &self.flip_rows[j];
+                xor_words(accum, row);
+            }
         }
     }
 
@@ -950,13 +1020,7 @@ impl CompiledSampler {
                 None => draw_flip_groups(rng, &lut, |g, byte| lut.xor_rows(accum, g, byte)),
             }
         } else {
-            for j in 0..self.rank {
-                let bit = self.rng.next_u32() & 1;
-                if bit != 0 {
-                    let row = &self.flip_rows[j];
-                    xor_words(accum, row);
-                }
-            }
+            self.xor_random_rows(accum);
         }
     }
 
@@ -1317,49 +1381,21 @@ impl CompiledSampler {
         use std::collections::HashMap;
 
         let m_words = self.num_measurements.div_ceil(64);
-
-        if total_shots == 0 || self.num_measurements == 0 {
-            return HashMap::new();
-        }
+        debug_assert!(total_shots > 0 && self.num_measurements > 0);
 
         let rank = self.rank;
         let num_outcomes = 1usize << rank;
         let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
         let lut =
             (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
+        let ref_bits = &self.ref_bits_packed[..m_words];
         let mut counts = HashMap::new();
-        let mut remaining = total_shots;
-
-        for key in 0..num_outcomes {
-            if remaining == 0 {
-                break;
-            }
-            let outcomes_left = num_outcomes - key;
-            let count = if outcomes_left == 1 {
-                remaining
-            } else {
-                binomial_sample(&mut fast_rng, remaining, 1.0 / outcomes_left as f64)
-            };
-
+        for_each_multinomial_count(&mut fast_rng, total_shots, num_outcomes, |key, count| {
             if count > 0 {
-                let mut outcome = self.ref_bits_packed[..m_words].to_vec();
-                if let Some(lut) = lut {
-                    for g in 0..lut.total_groups() {
-                        let byte = (key >> (g * 8)) & 0xFF;
-                        lut.xor_into(&mut outcome, g, byte);
-                    }
-                } else {
-                    for j in 0..rank {
-                        if (key >> j) & 1 != 0 {
-                            xor_words(&mut outcome, &self.flip_rows[j]);
-                        }
-                    }
-                }
+                let outcome = outcome_for_key(ref_bits, lut, &self.flip_rows, key);
                 counts.insert(outcome, count as u64);
             }
-            remaining -= count;
-        }
-
+        });
         counts
     }
 
@@ -1372,52 +1408,23 @@ impl CompiledSampler {
         use std::collections::HashMap;
 
         let m_words = self.num_measurements.div_ceil(64);
-
-        if total_shots == 0 || self.num_measurements == 0 {
-            return HashMap::new();
-        }
+        debug_assert!(total_shots > 0 && self.num_measurements > 0);
 
         let rank = self.rank;
         let num_outcomes = 1usize << rank;
         let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
         let mut key_counts = vec![0u64; num_outcomes];
         let mut nonzero_keys = 0;
-        let mut remaining = total_shots;
-        for (key, key_count) in key_counts.iter_mut().enumerate() {
-            if remaining == 0 {
-                break;
-            }
-            let outcomes_left = num_outcomes - key;
-            let count = if outcomes_left == 1 {
-                remaining
-            } else {
-                binomial_sample(&mut fast_rng, remaining, 1.0 / outcomes_left as f64)
-            };
-            *key_count = count as u64;
+        for_each_multinomial_count(&mut fast_rng, total_shots, num_outcomes, |key, count| {
+            key_counts[key] = count as u64;
             nonzero_keys += usize::from(count > 0);
-            remaining -= count;
-        }
+        });
 
         let lut =
             (rank >= LUT_MIN_RANK).then(|| FlipGroups::new(&self.lut, &self.flip_rows, m_words));
         let ref_bits = &self.ref_bits_packed[..m_words];
         let flip_rows = &self.flip_rows;
-        let outcome = |key: usize| {
-            let mut outcome = ref_bits.to_vec();
-            if let Some(lut) = lut {
-                for g in 0..lut.total_groups() {
-                    let byte = (key >> (g * 8)) & 0xFF;
-                    lut.xor_into(&mut outcome, g, byte);
-                }
-            } else {
-                for (j, row) in flip_rows.iter().enumerate() {
-                    if (key >> j) & 1 != 0 {
-                        xor_words(&mut outcome, row);
-                    }
-                }
-            }
-            outcome
-        };
+        let outcome = |key: usize| outcome_for_key(ref_bits, lut, flip_rows, key);
 
         let keys_per_thread = num_outcomes.div_ceil(rayon::current_num_threads());
         let shards: Vec<Vec<(Vec<u64>, u64)>> = key_counts
@@ -1448,10 +1455,7 @@ impl CompiledSampler {
         use std::collections::HashMap;
 
         let m_words = self.num_measurements.div_ceil(64);
-
-        if total_shots == 0 || self.num_measurements == 0 {
-            return HashMap::new();
-        }
+        debug_assert!(total_shots > 0 && self.num_measurements > 0);
 
         let rank = self.rank;
         let num_outcomes = 1usize << rank;
@@ -1462,38 +1466,13 @@ impl CompiledSampler {
 
         if let Some(lut) = lut {
             let bytes_per_shot = lut.total_groups();
-            let remainder_mask: u8 = if lut.remainder_size > 0 {
-                (1u8 << lut.remainder_size) - 1
-            } else {
-                0xFF
-            };
-
             let chunk_size = (32 * 1024 * 1024 / bytes_per_shot).max(64);
             let mut rand_buf = vec![0u8; chunk_size * bytes_per_shot];
             let mut remaining = total_shots;
 
             while remaining > 0 {
                 let this_chunk = remaining.min(chunk_size);
-                let total_bytes = this_chunk * bytes_per_shot;
-
-                let full_chunks = total_bytes / 8;
-                let tail = full_chunks * 8;
-                for i in 0..full_chunks {
-                    let r = fast_rng.next_u64();
-                    rand_buf[i * 8..(i + 1) * 8].copy_from_slice(&r.to_le_bytes());
-                }
-                if tail < total_bytes {
-                    let r = fast_rng.next_u64();
-                    let bytes = r.to_le_bytes();
-                    rand_buf[tail..total_bytes].copy_from_slice(&bytes[..total_bytes - tail]);
-                }
-
-                if lut.remainder_size > 0 {
-                    let last_group = lut.num_full_groups;
-                    for s in 0..this_chunk {
-                        rand_buf[s * bytes_per_shot + last_group] &= remainder_mask;
-                    }
-                }
+                fill_group_bytes(&mut rand_buf, this_chunk, &lut, || fast_rng.next_u64());
 
                 for s in 0..this_chunk {
                     let base = s * bytes_per_shot;
@@ -1519,25 +1498,13 @@ impl CompiledSampler {
             }
         }
 
+        let ref_bits = &self.ref_bits_packed[..m_words];
         let mut counts = HashMap::new();
         for (key, &count) in rank_counts.iter().enumerate() {
             if count == 0 {
                 continue;
             }
-            let mut outcome = self.ref_bits_packed[..m_words].to_vec();
-            if let Some(lut) = lut {
-                for g in 0..lut.total_groups() {
-                    let byte = (key >> (g * 8)) & 0xFF;
-                    lut.xor_into(&mut outcome, g, byte);
-                }
-            } else {
-                for j in 0..rank {
-                    if (key >> j) & 1 != 0 {
-                        xor_words(&mut outcome, &self.flip_rows[j]);
-                    }
-                }
-            }
-            counts.insert(outcome, count);
+            counts.insert(outcome_for_key(ref_bits, lut, &self.flip_rows, key), count);
         }
 
         counts

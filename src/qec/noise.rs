@@ -2170,7 +2170,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
                             if let Some(alias) =
                                 qec_deferred_noise_target(term.qubit, &aliases, &measured_aliases)?
                             {
-                                letters.push((alias, pauli_letter(term.basis)));
+                                letters.push((alias, term.basis.pauli_index()));
                             }
                         }
                         lowered.push((remaining * branch.probability, letters));
@@ -2355,14 +2355,6 @@ fn qec_scratch_alias(
         )
     } else {
         aliases[scratch_qubit]
-    }
-}
-
-fn pauli_letter(basis: QecBasis) -> u8 {
-    match basis {
-        QecBasis::X => 1,
-        QecBasis::Y => 2,
-        QecBasis::Z => 3,
     }
 }
 

@@ -1,5 +1,7 @@
 use super::*;
 use crate::qec::noise::compile_qec_noisy_sampler_on_compiled_base;
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 fn parse_dropping_records(text: &str) -> QecProgram {
     let mut program = QecProgram::from_text(text).unwrap();

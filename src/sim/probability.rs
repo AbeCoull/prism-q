@@ -3,7 +3,7 @@
 //! [`Probabilities`] serves dense vectors and lazily factored per-block
 //! marginals through one interface.
 
-use crate::backend::simd::pack_masked_bits_scalar;
+use crate::backend::simd::pack_masked_bits;
 
 /// Marginal distribution of one independent subsystem: `mask` marks its global
 /// qubit positions and `probs` holds its `2^k` entries.
@@ -158,7 +158,7 @@ impl Probabilities {
             Probabilities::Factored { blocks, .. } => {
                 let mut p = 1.0;
                 for block in blocks {
-                    let local = extract_block_bits(index, block.mask);
+                    let local = pack_masked_bits(index, block.mask);
                     p *= block.probs[local];
                 }
                 p
@@ -206,7 +206,7 @@ impl Probabilities {
                         result.par_iter_mut().enumerate().for_each(|(i, slot)| {
                             let mut p = 1.0;
                             for block in blocks {
-                                let local = extract_block_bits(i, block.mask);
+                                let local = pack_masked_bits(i, block.mask);
                                 p *= block.probs[local];
                             }
                             *slot = p;
@@ -217,7 +217,7 @@ impl Probabilities {
                 for (i, slot) in result.iter_mut().enumerate() {
                     let mut p = 1.0;
                     for block in blocks {
-                        let local = extract_block_bits(i, block.mask);
+                        let local = pack_masked_bits(i, block.mask);
                         p *= block.probs[local];
                     }
                     *slot = p;
@@ -271,7 +271,7 @@ impl Iterator for ProbabilitiesIter<'_> {
                 *next += 1;
                 let mut p = 1.0;
                 for block in *blocks {
-                    let local = extract_block_bits(index, block.mask);
+                    let local = pack_masked_bits(index, block.mask);
                     p *= block.probs[local];
                 }
                 Some(p)
@@ -291,20 +291,6 @@ impl Iterator for ProbabilitiesIter<'_> {
 }
 
 impl ExactSizeIterator for ProbabilitiesIter<'_> {}
-
-/// Form of [`crate::backend::simd::pack_masked_bits`] that runs the std BMI2 detection
-/// macro per call instead of the cached check.
-#[inline]
-fn extract_block_bits(global_index: usize, mask: u64) -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("bmi2") {
-            // SAFETY: BMI2 availability is checked immediately before this call.
-            return unsafe { core::arch::x86_64::_pext_u64(global_index as u64, mask) as usize };
-        }
-    }
-    pack_masked_bits_scalar(global_index, mask)
-}
 
 #[cfg(test)]
 #[path = "probability_tests.rs"]

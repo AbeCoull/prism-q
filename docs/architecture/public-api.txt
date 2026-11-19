@@ -340,6 +340,7 @@ pub fn prism_q::backend::stabilizer::StabilizerBackend::init_from_tableau(&mut s
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new_lazy(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::raw_tableau(&self) -> (&[u64], &[bool])
+impl prism_q::backend::stabilizer::StabilizerBackend
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 impl core::clone::Clone for prism_q::backend::stabilizer::StabilizerBackend
@@ -4401,6 +4402,7 @@ pub fn prism_q::backend::stabilizer::StabilizerBackend::init_from_tableau(&mut s
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new_lazy(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::raw_tableau(&self) -> (&[u64], &[bool])
+impl prism_q::backend::stabilizer::StabilizerBackend
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 impl core::clone::Clone for prism_q::backend::stabilizer::StabilizerBackend

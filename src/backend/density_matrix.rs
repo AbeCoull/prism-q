@@ -59,8 +59,9 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
+use crate::backend::insert_zero_bit;
 use crate::backend::simd;
-use crate::backend::statevector::{StatevectorBackend, insert_zero_bit, kernels};
+use crate::backend::statevector::{StatevectorBackend, kernels};
 use crate::backend::{Backend, NORM_CLAMP_MIN, reduced_density, schmidt};
 use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
@@ -1275,7 +1276,7 @@ impl DensityMatrixBackend {
         #[cfg(feature = "parallel")]
         if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             use crate::backend::MIN_PAR_ITERS;
-            use crate::backend::statevector::SendPtr;
+            use crate::backend::SendPtr;
             use rayon::prelude::*;
 
             let ptr = SendPtr(self.sv.state.as_mut_ptr());
@@ -1459,7 +1460,7 @@ impl DensityMatrixBackend {
         #[cfg(feature = "parallel")]
         if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             use crate::backend::MIN_PAR_ITERS;
-            use crate::backend::statevector::SendPtr;
+            use crate::backend::SendPtr;
             use rayon::prelude::*;
 
             let ptr = SendPtr(self.sv.state.as_mut_ptr());
@@ -1624,7 +1625,7 @@ impl DensityMatrixBackend {
         #[cfg(feature = "parallel")]
         if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             use crate::backend::MIN_PAR_ITERS;
-            use crate::backend::statevector::SendPtr;
+            use crate::backend::SendPtr;
             use rayon::prelude::*;
 
             let ptr = SendPtr(self.sv.state.as_mut_ptr());

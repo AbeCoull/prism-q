@@ -79,7 +79,7 @@ use crate::gpu::{GpuContext, GpuState};
 use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
-pub(crate) use super::MIN_PAR_ELEMS;
+use super::{MIN_PAR_ELEMS, SendPtr};
 
 /// Width from which `init` zeroes the state with the thread pool, which spreads the first
 /// touch of every page of a fresh buffer: 157 ms to 63 ms at 26 qubits. At 16 qubits
@@ -177,62 +177,6 @@ fn check_device_budget(context: &GpuContext, num_qubits: usize) -> crate::error:
         format!("the {num_qubits}-qubit state on the device"),
         needed,
     )
-}
-
-/// Insert a zero bit at `bit_pos`, shifting all higher bits left by one.
-///
-/// Maps a compact iteration index to a state-vector index with a gap at
-/// `bit_pos`. Chaining multiple calls (in ascending `bit_pos` order) creates
-/// gaps at all controlled-gate qubit positions.
-#[inline(always)]
-pub(crate) fn insert_zero_bit(val: usize, bit_pos: usize) -> usize {
-    let lo = val & ((1 << bit_pos) - 1);
-    let hi = val >> bit_pos;
-    (hi << (bit_pos + 1)) | lo
-}
-
-/// Wrapper to send a raw pointer across Rayon threads.
-///
-/// Callers must partition the state so each thread touches disjoint elements.
-/// The mask-based index bijection establishes that for controlled-gate kernels.
-#[cfg(feature = "parallel")]
-#[derive(Copy, Clone)]
-pub(crate) struct SendPtr(pub(crate) *mut Complex64);
-
-#[cfg(feature = "parallel")]
-// SAFETY: SendPtr is only used by kernels that partition the state into
-// disjoint mutable indices before entering Rayon work.
-unsafe impl Send for SendPtr {}
-#[cfg(feature = "parallel")]
-// SAFETY: Sharing the pointer wrapper is sound because mutation happens only
-// through disjoint indices established by each caller's index bijection.
-unsafe impl Sync for SendPtr {}
-
-#[cfg(feature = "parallel")]
-impl SendPtr {
-    #[inline(always)]
-    pub(crate) unsafe fn load(self, idx: usize) -> Complex64 {
-        // SAFETY: same contract as the enclosing unsafe fn.
-        unsafe { *self.0.add(idx) }
-    }
-
-    #[inline(always)]
-    pub(crate) unsafe fn store(self, idx: usize, val: Complex64) {
-        // SAFETY: same contract as the enclosing unsafe fn.
-        unsafe {
-            *self.0.add(idx) = val;
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn as_f64_ptr(self) -> *mut f64 {
-        self.0 as *mut f64
-    }
-
-    #[inline(always)]
-    pub(crate) fn as_complex_ptr(self) -> *mut Complex64 {
-        self.0
-    }
 }
 
 pub struct StatevectorBackend {

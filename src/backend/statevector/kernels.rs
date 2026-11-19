@@ -14,13 +14,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use super::StatevectorBackend;
-use super::insert_zero_bit;
-#[cfg(feature = "parallel")]
-use super::{MIN_PAR_ELEMS, SendPtr};
+use crate::backend::insert_zero_bit;
 #[cfg(feature = "parallel")]
 use crate::backend::kernel_parallel_qubits;
 use crate::backend::simd;
 use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
+#[cfg(feature = "parallel")]
+use crate::backend::{MIN_PAR_ELEMS, SendPtr};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::gates::{
     BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData, Gate, MAX_UNITARY_QUBITS,

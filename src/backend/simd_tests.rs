@@ -290,10 +290,7 @@ fn apply_2q_reference(state: &mut [Complex64], mat: &[[Complex64; 4]; 4], q0: us
     let n = state.len();
     let n_iter = n >> 2;
     for k in 0..n_iter {
-        let idx = crate::backend::statevector::insert_zero_bit(
-            crate::backend::statevector::insert_zero_bit(k, lo),
-            hi,
-        );
+        let idx = crate::backend::insert_zero_bit(crate::backend::insert_zero_bit(k, lo), hi);
         let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
         let a = [state[i[0]], state[i[1]], state[i[2]], state[i[3]]];
         for (r, &ii) in i.iter().enumerate() {

@@ -136,10 +136,10 @@ use num_complex::Complex64;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+#[cfg(feature = "parallel")]
+use crate::backend::SendPtr;
 use crate::backend::reduced_density::{dense_reduced_density, normalize_trace};
 use crate::backend::simd;
-#[cfg(feature = "parallel")]
-use crate::backend::statevector::SendPtr;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::statevector::kernels::multi_2q_keeps_order;
 use crate::backend::statevector::rdm_pair_sums;

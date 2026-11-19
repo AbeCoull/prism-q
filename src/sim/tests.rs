@@ -352,6 +352,11 @@ impl Backend for ProbabilityFailureBackend {
         &self.classical_bits
     }
 
+    fn set_classical_bit(&mut self, bit: usize, value: bool) -> Result<()> {
+        self.classical_bits[bit] = value;
+        Ok(())
+    }
+
     fn probabilities(&self) -> Result<Vec<f64>> {
         match self.failure {
             ProbabilityFailure::Unsupported => Err(PrismError::BackendUnsupported {

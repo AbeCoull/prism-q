@@ -6,7 +6,7 @@ use num_complex::Complex64;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use super::statevector::insert_zero_bit;
+use super::insert_zero_bit;
 #[cfg(feature = "parallel")]
 use super::{MIN_PAR_ITERS, PARALLEL_THRESHOLD_QUBITS};
 use crate::error::Result;

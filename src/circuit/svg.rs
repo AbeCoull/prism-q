@@ -460,37 +460,61 @@ fn tooltip(op: &PlacedOp) -> String {
 }
 
 const CLASSICAL_WIRE_SPACING: f64 = 30.0;
+const ELLIPSIS_GAP: f64 = 40.0;
 
-fn render_svg(
-    moments: &[Vec<PlacedOp>],
+/// Geometry of one wire diagram, computed before anything is written.
+///
+/// `moments` is already cut to `max_moments`, and a column hidden by the ellipsis
+/// has a NaN `col_x`.
+struct SvgLayout<'a> {
+    moments: &'a [Vec<PlacedOp>],
+    num_qubits: usize,
+    num_classical_bits: usize,
+    max_moments: usize,
+    show_qubits: Vec<usize>,
+    qubit_to_row: Vec<Option<usize>>,
+    num_rows: usize,
+    ellipsis: Option<(usize, usize)>,
+    ellipsis_x: f64,
+    col_widths: Vec<f64>,
+    col_x: Vec<f64>,
+    stats: String,
+    circuit_width: f64,
+    circuit_height: f64,
+    pad_top: f64,
+    classical_gap: f64,
+    topo_edges: Vec<TopoEdge>,
+    has_topo: bool,
+    topo_diameter: f64,
+    total_width: f64,
+    total_height: f64,
+}
+
+impl SvgLayout<'_> {
+    fn wire_y(&self, row: usize, opts: &SvgOptions) -> f64 {
+        self.pad_top + row as f64 * opts.wire_spacing
+    }
+
+    fn classical_y(&self, cbit: usize, opts: &SvgOptions) -> f64 {
+        self.wire_y(self.num_rows - 1, opts)
+            + self.classical_gap
+            + cbit as f64 * CLASSICAL_WIRE_SPACING
+    }
+
+    fn row_of(&self, q: usize) -> Option<usize> {
+        self.qubit_to_row.get(q).copied().flatten()
+    }
+}
+
+/// Lay out the diagram, or `None` when no qubit wire would be drawn.
+fn layout<'a>(
+    moments: &'a [Vec<PlacedOp>],
     num_qubits: usize,
     num_classical_bits: usize,
     opts: &SvgOptions,
-) -> String {
-    let compact_opts;
-    let opts = if opts.compact {
-        compact_opts = SvgOptions {
-            wire_spacing: 32.0,
-            moment_width: 44.0,
-            gate_height: 26.0,
-            gate_min_width: 28.0,
-            padding_left: 48.0,
-            padding_top: 18.0,
-            padding_right: 14.0,
-            padding_bottom: 18.0,
-            font_size: 11.0,
-            control_radius: 3.0,
-            ..*opts
-        };
-        &compact_opts
-    } else {
-        opts
-    };
-
-    let theme = if opts.dark_mode { &DARK } else { &LIGHT };
-
+) -> Option<SvgLayout<'a>> {
     if moments.is_empty() || num_qubits == 0 {
-        return empty_svg(theme);
+        return None;
     }
 
     let content_columns: Vec<usize> = moments
@@ -534,14 +558,14 @@ fn render_svg(
 
     let visible_qubits: Vec<usize> = (0..num_qubits).filter(|&q| active_qubits[q]).collect();
     if visible_qubits.is_empty() {
-        return empty_svg(theme);
+        return None;
     }
 
     let max_vis = opts
         .max_qubits
         .unwrap_or(visible_qubits.len())
         .min(visible_qubits.len());
-    let show_qubits = &visible_qubits[..max_vis];
+    let show_qubits = visible_qubits[..max_vis].to_vec();
 
     let qubit_to_row: Vec<Option<usize>> = {
         let mut map = vec![None; num_qubits];
@@ -599,7 +623,6 @@ fn render_svg(
             .push((max_w + LABEL_GAP).max(opts.moment_width) * (measurements + shared_lane) as f64);
     }
 
-    let ellipsis_gap = 40.0;
     let mut col_x: Vec<f64> = Vec::with_capacity(moments.len());
     let mut cx_pos = opts.padding_left;
     let mut ellipsis_x = 0.0_f64;
@@ -607,7 +630,7 @@ fn render_svg(
         if let Some((first_end, last_start)) = ellipsis {
             if i == first_end {
                 ellipsis_x = cx_pos;
-                cx_pos += ellipsis_gap;
+                cx_pos += ELLIPSIS_GAP;
             }
             if i >= first_end && i < last_start {
                 col_x.push(f64::NAN);
@@ -703,14 +726,39 @@ fn render_svg(
     let total_width = circuit_width + topo_extra;
     let total_height = circuit_height + legend_extra;
 
-    let wire_y = |row: usize| -> f64 { pad_top + row as f64 * opts.wire_spacing };
-    let last_quantum_y = wire_y(num_rows - 1);
-    let classical_y = |cbit: usize| -> f64 {
-        last_quantum_y + classical_gap + cbit as f64 * CLASSICAL_WIRE_SPACING
-    };
+    Some(SvgLayout {
+        moments,
+        num_qubits,
+        num_classical_bits,
+        max_moments,
+        show_qubits,
+        qubit_to_row,
+        num_rows,
+        ellipsis,
+        ellipsis_x,
+        col_widths,
+        col_x,
+        stats,
+        circuit_width,
+        circuit_height,
+        pad_top,
+        classical_gap,
+        topo_edges,
+        has_topo,
+        topo_diameter,
+        total_width,
+        total_height,
+    })
+}
 
-    let mut svg = String::with_capacity(moments.len() * num_rows * 150 + 4096);
-
+/// Write the root element, marker defs, stylesheet, background layer and stats line.
+fn emit_header_defs(svg: &mut String, l: &SvgLayout, theme: &Theme, opts: &SvgOptions) {
+    let total_width = l.total_width;
+    let total_height = l.total_height;
+    let num_qubits = l.num_qubits;
+    let max_moments = l.max_moments;
+    let moments = l.moments;
+    let stats = &l.stats;
     let _ = writeln!(
         svg,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{total_width:.1}\" height=\"{total_height:.1}\" \
@@ -728,7 +776,7 @@ fn render_svg(
     );
     let _ = writeln!(svg, "</defs>");
 
-    emit_theme_vars(&mut svg, theme, opts.auto_theme);
+    emit_theme_vars(svg, theme, opts.auto_theme);
     let anim_gate = if opts.animate {
         "animation:gate-in 0.3s ease both;"
     } else {
@@ -808,20 +856,23 @@ fn render_svg(
             opts.font_size,
         );
     }
+}
 
+/// Write the wire layer: qubit labels and wires, then the classical register.
+fn emit_wires(svg: &mut String, l: &SvgLayout, opts: &SvgOptions) {
     svg.push_str("<g id=\"layer-wires\">\n");
-    for (row, &q) in show_qubits.iter().enumerate() {
-        let y = wire_y(row);
-        emit_register_label(&mut svg, "q", q, opts.padding_left - LABEL_GAP, y, opts);
+    for (row, &q) in l.show_qubits.iter().enumerate() {
+        let y = l.wire_y(row, opts);
+        emit_register_label(svg, "q", q, opts.padding_left - LABEL_GAP, y, opts);
     }
-    let wire_end = circuit_width - opts.padding_right;
+    let wire_end = l.circuit_width - opts.padding_right;
     let wire_extra = if opts.animate {
         "class=\"wire-anim\""
     } else {
         "shape-rendering=\"crispEdges\""
     };
-    for row in 0..num_rows {
-        let y = wire_y(row);
+    for row in 0..l.num_rows {
+        let y = l.wire_y(row, opts);
         let _ = writeln!(
             svg,
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" \
@@ -830,9 +881,16 @@ fn render_svg(
             opts.padding_left, y, wire_end, y,
         );
     }
-    for c in 0..num_classical_bits {
-        let cy = classical_y(c);
-        emit_register_label(&mut svg, "c", c, opts.padding_left - LABEL_GAP, cy, opts);
+    emit_classical(svg, l, opts);
+    svg.push_str("</g>\n");
+}
+
+/// Write each classical bit's label and double wire.
+fn emit_classical(svg: &mut String, l: &SvgLayout, opts: &SvgOptions) {
+    let wire_end = l.circuit_width - opts.padding_right;
+    for c in 0..l.num_classical_bits {
+        let cy = l.classical_y(c, opts);
+        emit_register_label(svg, "c", c, opts.padding_left - LABEL_GAP, cy, opts);
         let _ = writeln!(
             svg,
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" \
@@ -852,15 +910,20 @@ fn render_svg(
             cy + 1.0,
         );
     }
-    svg.push_str("</g>\n");
+}
 
+/// Write the gate layer and return the categories drawn, for the legend.
+fn emit_moment_ops(svg: &mut String, l: &SvgLayout, opts: &SvgOptions) -> HashSet<GateCategory> {
     svg.push_str("<g id=\"layer-gates\">\n");
-    let row_of = |q: usize| -> Option<usize> { qubit_to_row.get(q).copied().flatten() };
+    let num_classical_bits = l.num_classical_bits;
+    let wire_y = |row: usize| -> f64 { l.wire_y(row, opts) };
+    let classical_y = |cbit: usize| -> f64 { l.classical_y(cbit, opts) };
+    let row_of = |q: usize| -> Option<usize> { l.row_of(q) };
     let mut present_cats: HashSet<GateCategory> = HashSet::new();
 
-    if ellipsis.is_some() {
-        let ecx = ellipsis_x + ellipsis_gap / 2.0;
-        for row in 0..num_rows {
+    if l.ellipsis.is_some() {
+        let ecx = l.ellipsis_x + ELLIPSIS_GAP / 2.0;
+        for row in 0..l.num_rows {
             let y = wire_y(row);
             let _ = writeln!(
                 svg,
@@ -872,12 +935,12 @@ fn render_svg(
         }
     }
 
-    for (m_idx, moment) in moments.iter().enumerate() {
-        let mx = col_x[m_idx];
+    for (m_idx, moment) in l.moments.iter().enumerate() {
+        let mx = l.col_x[m_idx];
         if mx.is_nan() {
             continue;
         }
-        let mw = col_widths[m_idx];
+        let mw = l.col_widths[m_idx];
         let measurements = moment
             .iter()
             .filter(|op| matches!(op.kind, OpKind::Measure { .. }))
@@ -908,16 +971,7 @@ fn render_svg(
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            emit_gate_box(
-                                &mut svg,
-                                center_x,
-                                cy,
-                                &gate_label(op),
-                                opts,
-                                cls,
-                                &tip,
-                                &mc,
-                            );
+                            emit_gate_box(svg, center_x, cy, &gate_label(op), opts, cls, &tip, &mc);
                         }
                     }
                 }
@@ -928,16 +982,7 @@ fn render_svg(
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            emit_gate_box(
-                                &mut svg,
-                                center_x,
-                                cy,
-                                &gate_label(op),
-                                opts,
-                                cls,
-                                &tip,
-                                &mc,
-                            );
+                            emit_gate_box(svg, center_x, cy, &gate_label(op), opts, cls, &tip, &mc);
                         }
                     }
                 }
@@ -982,11 +1027,11 @@ fn render_svg(
                         let cy = wire_y(row);
                         let is_cx = op.label == "CX";
                         if is_cx {
-                            emit_cnot_target(&mut svg, center_x, cy, opts, &tip, &mc);
+                            emit_cnot_target(svg, center_x, cy, opts, &tip, &mc);
                         } else {
                             let tgt_label = controlled_target_label(op);
                             let cls = GateCategory::Controlled.css_class();
-                            emit_gate_box(&mut svg, center_x, cy, &tgt_label, opts, cls, &tip, &mc);
+                            emit_gate_box(svg, center_x, cy, &tgt_label, opts, cls, &tip, &mc);
                         }
                     }
                 }
@@ -1020,16 +1065,7 @@ fn render_svg(
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            emit_gate_box(
-                                &mut svg,
-                                center_x,
-                                cy,
-                                &gate_label(op),
-                                opts,
-                                cls,
-                                &tip,
-                                &mc,
-                            );
+                            emit_gate_box(svg, center_x, cy, &gate_label(op), opts, cls, &tip, &mc);
                         }
                     }
                 }
@@ -1054,7 +1090,7 @@ fn render_svg(
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            emit_swap_cross(&mut svg, center_x, cy, opts, &tip, &mc);
+                            emit_swap_cross(svg, center_x, cy, opts, &tip, &mc);
                         }
                     }
                 }
@@ -1089,7 +1125,7 @@ fn render_svg(
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {
                             let cy = wire_y(row);
-                            emit_gate_box(&mut svg, center_x, cy, &op.label, opts, cls, &tip, &mc);
+                            emit_gate_box(svg, center_x, cy, &op.label, opts, cls, &tip, &mc);
                         }
                     }
                 }
@@ -1100,7 +1136,7 @@ fn render_svg(
                     measurement_lane += 1;
                     if let Some(row) = op.qubits.first().and_then(|&q| row_of(q)) {
                         let cy = wire_y(row);
-                        emit_measure_box(&mut svg, meter_x, cy, opts, &tip, &mc);
+                        emit_measure_box(svg, meter_x, cy, opts, &tip, &mc);
                         if *cbit < num_classical_bits {
                             let cbit_y = classical_y(*cbit);
                             let arrow_top = cy + opts.gate_height / 2.0;
@@ -1127,7 +1163,7 @@ fn render_svg(
                             let lbl = conditional_label(op, cbit_label);
                             let cls = cat.css_class();
                             emit_gate_box_inner(
-                                &mut svg, center_x, cy, &lbl, opts, cls, &tip, &mc, true,
+                                svg, center_x, cy, &lbl, opts, cls, &tip, &mc, true,
                             );
                             let cbit_idx = cbit_label
                                 .strip_prefix("c[")
@@ -1155,19 +1191,64 @@ fn render_svg(
     }
 
     svg.push_str("</g>\n");
+    present_cats
+}
+
+fn render_svg(
+    moments: &[Vec<PlacedOp>],
+    num_qubits: usize,
+    num_classical_bits: usize,
+    opts: &SvgOptions,
+) -> String {
+    let compact_opts;
+    let opts = if opts.compact {
+        compact_opts = SvgOptions {
+            wire_spacing: 32.0,
+            moment_width: 44.0,
+            gate_height: 26.0,
+            gate_min_width: 28.0,
+            padding_left: 48.0,
+            padding_top: 18.0,
+            padding_right: 14.0,
+            padding_bottom: 18.0,
+            font_size: 11.0,
+            control_radius: 3.0,
+            ..*opts
+        };
+        &compact_opts
+    } else {
+        opts
+    };
+
+    let theme = if opts.dark_mode { &DARK } else { &LIGHT };
+
+    let Some(l) = layout(moments, num_qubits, num_classical_bits, opts) else {
+        return empty_svg(theme);
+    };
+
+    let mut svg = String::with_capacity(l.moments.len() * l.num_rows * 150 + 4096);
+    emit_header_defs(&mut svg, &l, theme, opts);
+    emit_wires(&mut svg, &l, opts);
+    let present_cats = emit_moment_ops(&mut svg, &l, opts);
 
     if opts.show_legend && !present_cats.is_empty() {
-        emit_legend(&mut svg, opts, &present_cats, circuit_height, total_width);
+        emit_legend(
+            &mut svg,
+            opts,
+            &present_cats,
+            l.circuit_height,
+            l.total_width,
+        );
     }
 
-    if has_topo {
+    if l.has_topo {
         emit_topology(
             &mut svg,
-            &topo_edges,
+            &l.topo_edges,
             num_qubits,
-            circuit_width + 20.0,
-            pad_top,
-            topo_diameter,
+            l.circuit_width + 20.0,
+            l.pad_top,
+            l.topo_diameter,
         );
     }
 

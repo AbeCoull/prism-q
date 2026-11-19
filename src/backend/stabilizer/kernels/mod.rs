@@ -60,22 +60,23 @@ unsafe impl Send for SendBoolPtr {}
 // SAFETY: The pointer itself is read-only; mutation goes through distinct indices.
 unsafe impl Sync for SendBoolPtr {}
 
+/// Whether a gate sweep over the rows of an `n`-qubit tableau runs under Rayon.
+#[cfg(feature = "parallel")]
+#[inline(always)]
+pub(crate) fn par_rows(n: usize) -> bool {
+    n >= MIN_QUBITS_FOR_PAR_GATES
+}
+
+#[cfg(not(feature = "parallel"))]
+#[inline(always)]
+pub(crate) fn par_rows(_n: usize) -> bool {
+    false
+}
+
 impl StabilizerBackend {
     #[inline(always)]
     pub(super) fn stride(&self) -> usize {
         2 * self.num_words
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn par_rows(&self) -> bool {
-        self.n >= MIN_QUBITS_FOR_PAR_GATES
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    #[inline(always)]
-    fn par_rows(&self) -> bool {
-        false
     }
 
     /// Tableau rows a gate must update: the full tableau when eager, the
@@ -85,94 +86,6 @@ impl StabilizerBackend {
         let start = self.gate_row_start;
         let stride = 2 * self.num_words;
         (&mut self.xz[start * stride..], &mut self.phase[start..])
-    }
-
-    #[inline(always)]
-    fn apply_h(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::h_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_s(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::s_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_sdg(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::sdg_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_x(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::x_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_y(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::y_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_z(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::z_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_sx(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::sx_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_sxdg(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::sxdg_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_cx(&mut self, control: usize, target: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::cx_all(xz, phase, nw, par, control, target);
-    }
-
-    #[inline(always)]
-    fn apply_cz(&mut self, a: usize, b: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::cz_all(xz, phase, nw, par, a, b);
-    }
-
-    #[inline(always)]
-    fn apply_swap(&mut self, a: usize, b: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::swap_all(xz, phase, nw, par, a, b);
     }
 
     /// Whether the sparse-generator route applies, rebuilding the index first if
@@ -823,49 +736,18 @@ impl StabilizerBackend {
 
     pub(super) fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         self.sgi_stale = true;
-        match gate {
-            Gate::Id => {}
-            Gate::X => self.apply_x(targets[0]),
-            Gate::Y => self.apply_y(targets[0]),
-            Gate::Z => self.apply_z(targets[0]),
-            Gate::H => self.apply_h(targets[0]),
-            Gate::S => self.apply_s(targets[0]),
-            Gate::Sdg => self.apply_sdg(targets[0]),
-            Gate::SX => self.apply_sx(targets[0]),
-            Gate::SXdg => self.apply_sxdg(targets[0]),
-            Gate::Cx => self.apply_cx(targets[0], targets[1]),
-            Gate::Cz => self.apply_cz(targets[0], targets[1]),
-            Gate::Swap => self.apply_swap(targets[0], targets[1]),
-            Gate::T
-            | Gate::Tdg
-            | Gate::Rx(_)
-            | Gate::Ry(_)
-            | Gate::Rz(_)
-            | Gate::P(_)
-            | Gate::Rzz(_)
-            | Gate::Cu(_)
-            | Gate::Mcu(_)
-            | Gate::Fused(_)
-            | Gate::BatchPhase(_)
-            | Gate::BatchRzz(_)
-            | Gate::DiagonalBatch(_)
-            | Gate::MultiFused(_)
-            | Gate::Fused2q(_)
-            | Gate::Multi2q(_)
-            | Gate::QftBlock { .. }
-            | Gate::PauliRot(_)
-            | Gate::MultiPauliRot(_)
-            | Gate::Unitary(_) => {
-                return Err(PrismError::BackendUnsupported {
-                    backend: self.name().to_string(),
-                    operation: format!(
-                        "non-Clifford gate `{}` (stabilizer backend supports Clifford gates only)",
-                        gate.name()
-                    ),
-                });
-            }
+        let par = par_rows(self.n);
+        let nw = self.num_words;
+        if rowops::apply_clifford_all(gate, targets, nw, par, || self.gate_rows()) {
+            return Ok(());
         }
-        Ok(())
+        Err(PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: format!(
+                "non-Clifford gate `{}` (stabilizer backend supports Clifford gates only)",
+                gate.name()
+            ),
+        })
     }
 
     pub(super) fn apply_gates_only_sgi(&mut self, instructions: &[Instruction]) -> Result<()> {

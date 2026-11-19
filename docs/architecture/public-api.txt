@@ -2729,49 +2729,49 @@ pub fn prism_q::ShotsResult::num_shots(&self) -> usize
 impl core::fmt::Display for prism_q::ShotsResult
 pub fn prism_q::ShotsResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct prism_q::sim::Simulate<'c, SeedState>
-impl<'c, SeedState> prism_q::sim::Simulate<'c, SeedState>
-pub fn prism_q::sim::Simulate<'c, SeedState>::backend(self, prism_q::BackendKind) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::distributed(self, alloc::sync::Arc<prism_q::distributed::DistributedContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::require_exact(self) -> Self
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results(self, &[prism_q::circuit::braket::ResultSpec]) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::overlap(self, prism_q::sim::Simulate<'_, prism_q::sim::Seeded>) -> prism_q::error::Result<prism_q::sim::OverlapResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::probabilities_of(self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::reduced_density_matrix(self, &[usize]) -> prism_q::error::Result<prism_q::sim::ReducedDensityMatrix>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::run(self) -> prism_q::error::Result<prism_q::sim::RunOutcome>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-impl<SeedState> prism_q::sim::Simulate<'_, SeedState>
-pub fn prism_q::sim::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
+impl<'c, SeedState> prism_q::Simulate<'c, SeedState>
+pub fn prism_q::Simulate<'c, SeedState>::backend(self, prism_q::BackendKind) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::distributed(self, alloc::sync::Arc<prism_q::distributed::DistributedContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::require_exact(self) -> Self
+impl<'c> prism_q::Simulate<'c, prism_q::Seeded>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::braket_results(self, &[prism_q::circuit::braket::ResultSpec]) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
+impl<'c> prism_q::Simulate<'c, prism_q::Seeded>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::overlap(self, prism_q::Simulate<'_, prism_q::Seeded>) -> prism_q::error::Result<prism_q::sim::OverlapResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::probabilities_of(self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::reduced_density_matrix(self, &[usize]) -> prism_q::error::Result<prism_q::sim::ReducedDensityMatrix>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::run(self) -> prism_q::error::Result<prism_q::sim::RunOutcome>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
+impl<'c> prism_q::Simulate<'c, prism_q::Unseeded>
+pub fn prism_q::Simulate<'c, prism_q::Unseeded>::seed(self, u64) -> prism_q::Simulate<'c, prism_q::Seeded>
+impl<SeedState> prism_q::Simulate<'_, SeedState>
+pub fn prism_q::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
 pub struct prism_q::sim::SimulateProgram<'p, SeedState>
-impl prism_q::SimulateProgram<'_, prism_q::sim::Seeded>
-pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
-pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+impl prism_q::SimulateProgram<'_, prism_q::Seeded>
+pub fn prism_q::SimulateProgram<'_, prism_q::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::SimulateProgram<'_, prism_q::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
 impl<'p, SeedState> prism_q::SimulateProgram<'p, SeedState>
 pub fn prism_q::SimulateProgram<'p, SeedState>::backend(self, prism_q::BackendKind) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::max_steps(self, u64) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::noise(self, &'p prism_q::sim::noise::builder::NoiseBuilder) -> Self
-impl<'p> prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>
-pub fn prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::sim::Seeded>
+impl<'p> prism_q::SimulateProgram<'p, prism_q::Unseeded>
+pub fn prism_q::SimulateProgram<'p, prism_q::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::Seeded>
 pub struct prism_q::sim::Unseeded
 pub fn prism_q::sim::bitstring(&[u64], usize) -> alloc::string::String
 pub fn prism_q::sim::run_batch(&[prism_q::circuit::Circuit], prism_q::BackendKind, u64) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::RunOutcome>>
@@ -2780,8 +2780,8 @@ pub fn prism_q::sim::run_observable_expectation(&prism_q::circuit::Circuit, &pri
 pub fn prism_q::sim::run_on(&mut dyn prism_q::backend::Backend, &prism_q::circuit::Circuit) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::sim::run_on_state(&mut dyn prism_q::backend::Backend, &prism_q::circuit::Circuit, &[num_complex::Complex64]) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::sim::run_qasm(&str, u64) -> prism_q::error::Result<prism_q::sim::RunOutcome>
-pub fn prism_q::sim::simulate(&prism_q::circuit::Circuit) -> prism_q::sim::Simulate<'_, prism_q::sim::Unseeded>
-pub fn prism_q::sim::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::sim::Unseeded>
+pub fn prism_q::sim::simulate(&prism_q::circuit::Circuit) -> prism_q::Simulate<'_, prism_q::Unseeded>
+pub fn prism_q::sim::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::Unseeded>
 pub mod prism_q::threading
 pub struct prism_q::threading::ThreadPool
 impl prism_q::threading::ThreadPool
@@ -4273,49 +4273,49 @@ pub fn prism_q::ShotsResult::num_shots(&self) -> usize
 impl core::fmt::Display for prism_q::ShotsResult
 pub fn prism_q::ShotsResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct prism_q::Simulate<'c, SeedState>
-impl<'c, SeedState> prism_q::sim::Simulate<'c, SeedState>
-pub fn prism_q::sim::Simulate<'c, SeedState>::backend(self, prism_q::BackendKind) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::distributed(self, alloc::sync::Arc<prism_q::distributed::DistributedContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::require_exact(self) -> Self
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results(self, &[prism_q::circuit::braket::ResultSpec]) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::overlap(self, prism_q::sim::Simulate<'_, prism_q::sim::Seeded>) -> prism_q::error::Result<prism_q::sim::OverlapResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::probabilities_of(self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::reduced_density_matrix(self, &[usize]) -> prism_q::error::Result<prism_q::sim::ReducedDensityMatrix>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::run(self) -> prism_q::error::Result<prism_q::sim::RunOutcome>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-impl<SeedState> prism_q::sim::Simulate<'_, SeedState>
-pub fn prism_q::sim::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
+impl<'c, SeedState> prism_q::Simulate<'c, SeedState>
+pub fn prism_q::Simulate<'c, SeedState>::backend(self, prism_q::BackendKind) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::distributed(self, alloc::sync::Arc<prism_q::distributed::DistributedContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::require_exact(self) -> Self
+impl<'c> prism_q::Simulate<'c, prism_q::Seeded>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::braket_results(self, &[prism_q::circuit::braket::ResultSpec]) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
+impl<'c> prism_q::Simulate<'c, prism_q::Seeded>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::overlap(self, prism_q::Simulate<'_, prism_q::Seeded>) -> prism_q::error::Result<prism_q::sim::OverlapResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::probabilities_of(self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::reduced_density_matrix(self, &[usize]) -> prism_q::error::Result<prism_q::sim::ReducedDensityMatrix>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::run(self) -> prism_q::error::Result<prism_q::sim::RunOutcome>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
+impl<'c> prism_q::Simulate<'c, prism_q::Unseeded>
+pub fn prism_q::Simulate<'c, prism_q::Unseeded>::seed(self, u64) -> prism_q::Simulate<'c, prism_q::Seeded>
+impl<SeedState> prism_q::Simulate<'_, SeedState>
+pub fn prism_q::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
 pub struct prism_q::SimulateProgram<'p, SeedState>
-impl prism_q::SimulateProgram<'_, prism_q::sim::Seeded>
-pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
-pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+impl prism_q::SimulateProgram<'_, prism_q::Seeded>
+pub fn prism_q::SimulateProgram<'_, prism_q::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::SimulateProgram<'_, prism_q::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
 impl<'p, SeedState> prism_q::SimulateProgram<'p, SeedState>
 pub fn prism_q::SimulateProgram<'p, SeedState>::backend(self, prism_q::BackendKind) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::max_steps(self, u64) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::noise(self, &'p prism_q::sim::noise::builder::NoiseBuilder) -> Self
-impl<'p> prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>
-pub fn prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::sim::Seeded>
+impl<'p> prism_q::SimulateProgram<'p, prism_q::Unseeded>
+pub fn prism_q::SimulateProgram<'p, prism_q::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::Seeded>
 pub struct prism_q::SparseBackend
 impl prism_q::backend::sparse::SparseBackend
 pub fn prism_q::backend::sparse::SparseBackend::entry_count(&self) -> usize
@@ -4648,8 +4648,8 @@ pub fn prism_q::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::u
 pub fn prism_q::run_stabilizer_rank(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
 pub fn prism_q::run_stabilizer_rank_approx(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
 pub fn prism_q::set_default_limits(prism_q::Limits)
-pub fn prism_q::simulate(&prism_q::circuit::Circuit) -> prism_q::sim::Simulate<'_, prism_q::sim::Unseeded>
-pub fn prism_q::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::sim::Unseeded>
+pub fn prism_q::simulate(&prism_q::circuit::Circuit) -> prism_q::Simulate<'_, prism_q::Unseeded>
+pub fn prism_q::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::Unseeded>
 pub fn prism_q::stabilizer_inner_product(&prism_q::backend::stabilizer::StabilizerBackend, &prism_q::backend::stabilizer::StabilizerBackend, usize) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::stabilizer_overlap_sq(&prism_q::backend::stabilizer::StabilizerBackend, &prism_q::backend::stabilizer::StabilizerBackend, usize) -> f64
 pub type prism_q::Result<T> = core::result::Result<T, prism_q::error::PrismError>

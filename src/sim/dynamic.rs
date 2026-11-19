@@ -330,9 +330,7 @@ impl<'p> Prepared<'p> {
     }
 
     fn plan(kind: &BackendKind, summary: &Circuit, limits: &ResolvedLimits) -> Result<BackendPlan> {
-        if !kind.is_auto() {
-            validate_explicit_backend(kind, summary, limits)?;
-        }
+        validate_explicit_backend(kind, summary, limits)?;
         match resolve(kind, summary, false, limits) {
             #[cfg(feature = "distributed")]
             ExecutionPlan::Backend(BackendPlan::Distributed(_)) => {

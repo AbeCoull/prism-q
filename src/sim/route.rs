@@ -497,9 +497,7 @@ pub(super) fn decide_native(
     sampling: bool,
     limits: &ResolvedLimits,
 ) -> Result<Option<BackendPlan>> {
-    if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit, limits)?;
-    }
+    validate_explicit_backend(kind, circuit, limits)?;
     let (decomposed, partial) = match plan_probability_route(kind, circuit, limits) {
         ProbabilityRoute::Direct {
             has_partial_independence,
@@ -666,9 +664,7 @@ pub(super) fn decide_native_expectations(
     circuit: &Circuit,
     limits: &ResolvedLimits,
 ) -> Result<BackendPlan> {
-    if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit, limits)?;
-    }
+    validate_explicit_backend(kind, circuit, limits)?;
     let (_, partial) = analyze_independence(circuit);
     let ExecutionPlan::Backend(plan) = resolve(kind, circuit, partial, limits) else {
         return Err(PrismError::IncompatibleBackend {
@@ -814,9 +810,7 @@ pub(super) fn decide_diagnostic(
             RouteRule::StartState,
         ));
     }
-    if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit, limits)?;
-    }
+    validate_explicit_backend(kind, circuit, limits)?;
     let (_, partial) = analyze_independence(circuit);
     let mut plan = match resolve(kind, circuit, partial, limits) {
         ExecutionPlan::Backend(plan) => plan,
@@ -952,9 +946,7 @@ fn check_noisy_per_shot(
         });
     }
 
-    if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit, limits)?;
-    }
+    validate_explicit_backend(kind, circuit, limits)?;
     Ok(())
 }
 

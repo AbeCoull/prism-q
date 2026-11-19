@@ -13,7 +13,7 @@ mod model;
 
 pub use builder::{DriftDistribution, GateFilter, NoiseBuilder};
 pub use compiled::*;
-pub(crate) use frame::*;
+pub(in crate::sim) use frame::*;
 pub(crate) use guarded::*;
 pub use mixture::*;
 pub use model::*;

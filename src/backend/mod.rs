@@ -47,6 +47,7 @@ pub mod density_matrix;
 pub mod distributed_statevector;
 pub mod factored;
 pub mod factored_stabilizer;
+mod gemm;
 #[cfg(feature = "parallel")]
 pub(crate) mod hybrid;
 pub(crate) mod memory;

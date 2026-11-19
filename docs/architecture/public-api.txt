@@ -193,14 +193,15 @@ pub prism_q::backend::mps::MpsPauliAxis::Z
 pub struct prism_q::backend::mps::MpsBackend
 impl prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::current_max_bond_dim(&self) -> usize
-pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::backend::mps::MpsBackend::is_qubit_in_zero_state(&self, usize, f64) -> prism_q::error::Result<bool>
 pub fn prism_q::backend::mps::MpsBackend::new(u64, usize) -> Self
-pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::backend::mps::MpsBackend::reset_truncation_tracking(&mut self)
 pub fn prism_q::backend::mps::MpsBackend::set_svd_epsilon(&mut self, f64)
 pub fn prism_q::backend::mps::MpsBackend::site_for_qubit(&self, usize) -> usize
 pub fn prism_q::backend::mps::MpsBackend::truncation_discarded(&self) -> f64
+impl prism_q::backend::mps::MpsBackend
+pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
+pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 impl core::clone::Clone for prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::clone(&self) -> Self
 impl prism_q::backend::Backend for prism_q::backend::mps::MpsBackend
@@ -3776,14 +3777,15 @@ pub prism_q::MemoryEstimate::kind: prism_q::MemoryEstimateKind
 pub struct prism_q::MpsBackend
 impl prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::current_max_bond_dim(&self) -> usize
-pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::backend::mps::MpsBackend::is_qubit_in_zero_state(&self, usize, f64) -> prism_q::error::Result<bool>
 pub fn prism_q::backend::mps::MpsBackend::new(u64, usize) -> Self
-pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::backend::mps::MpsBackend::reset_truncation_tracking(&mut self)
 pub fn prism_q::backend::mps::MpsBackend::set_svd_epsilon(&mut self, f64)
 pub fn prism_q::backend::mps::MpsBackend::site_for_qubit(&self, usize) -> usize
 pub fn prism_q::backend::mps::MpsBackend::truncation_discarded(&self) -> f64
+impl prism_q::backend::mps::MpsBackend
+pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
+pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 impl core::clone::Clone for prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::clone(&self) -> Self
 impl prism_q::backend::Backend for prism_q::backend::mps::MpsBackend

@@ -1,6 +1,15 @@
+use num_complex::Complex64;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+use smallvec::smallvec;
+
 use super::*;
+use crate::backend::Backend;
+use crate::circuit::Instruction;
 use crate::circuits;
-use crate::sim::{Engine, ResolvedBackend};
+use crate::gates::Gate;
+use crate::sim::unified_pauli::PauliAxis;
+use crate::sim::{BackendKind, Engine, ResolvedBackend};
 
 /// Exact per-classical-bit measurement marginals under a noise model, evolved
 /// on the density-matrix backend. Measurements are read as `Tr(P_1 rho)` on the

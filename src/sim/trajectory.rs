@@ -3,6 +3,7 @@
 //! per distinct error pattern when every shot's Pauli errors can be drawn first.
 
 use std::collections::{BTreeMap, HashMap};
+use std::marker::PhantomData;
 
 use num_complex::Complex64;
 use rand::SeedableRng;
@@ -11,14 +12,12 @@ use smallvec::smallvec;
 
 use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
-use crate::circuit::{Circuit, Instruction};
+use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
 use crate::gates::Gate;
 use crate::limits::ResolvedLimits;
 use crate::sim::ShotsResult;
-use crate::sim::noise::{
-    NoiseChannel, NoiseEvent, NoiseModel, ReadoutError, SlotWalk, walk_noise_slots,
-};
+use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError, pair_branch};
 use crate::sim::unified_pauli::PauliAxis;
 
 #[cfg(feature = "parallel")]
@@ -178,7 +177,7 @@ impl PreparedChannel {
                     .iter()
                     .map(|op| Kraus2q {
                         op: *op,
-                        effect: kdagger_k_2q(op),
+                        effect: kdagger_k(op),
                     })
                     .collect(),
             ),
@@ -462,15 +461,78 @@ fn apply_phase_damping(
     apply_diagonal_kraus_2op(backend, qubit, damping, false, rand::RngExt::random(rng))
 }
 
-/// A trajectory over a model with guarded slots.
-struct TrajectoryWalk<'a> {
+/// One shot's pass over a circuit and its noise slots, driven by
+/// [`walk_noise_slots`].
+pub(crate) trait SlotWalk {
+    /// The classical bits, current for a guard to read.
+    fn classical(&mut self) -> Result<&[bool]>;
+    /// Apply an instruction other than a region, whose body the walk descends
+    /// into itself.
+    fn apply(&mut self, instruction: &Instruction) -> Result<()>;
+    /// Fire the events of [`NoiseModel::after_gate`] slot `slot`.
+    fn fire(&mut self, slot: usize) -> Result<()>;
+}
+
+/// Run `circuit.instructions[from..]` in execution order under a model laying
+/// out guarded slots, firing each slot after its instruction and a guarded
+/// body's slots only when the body runs. See [`NoiseModel::after_gate`].
+pub(crate) fn walk_noise_slots(
+    circuit: &Circuit,
+    from: usize,
+    walk: &mut impl SlotWalk,
+) -> Result<()> {
+    let nested = circuit.instructions.len() + circuit.guarded_noise_slots_before(from);
+    walk_slot_list(&circuit.instructions[from..], from, nested, walk)
+}
+
+fn walk_slot_list(
+    list: &[Instruction],
+    base: usize,
+    mut nested: usize,
+    walk: &mut impl SlotWalk,
+) -> Result<()> {
+    for (offset, instruction) in list.iter().enumerate() {
+        match instruction {
+            Instruction::Region(region) => {
+                if region.condition().evaluate(walk.classical()?) {
+                    walk_region_body(region, nested, walk)?;
+                }
+                nested += region.noise_slots();
+            }
+            Instruction::Conditional { condition, .. } => {
+                let taken = condition.evaluate(walk.classical()?);
+                walk.apply(instruction)?;
+                if taken {
+                    walk.fire(nested)?;
+                }
+                nested += 1;
+            }
+            _ => walk.apply(instruction)?,
+        }
+        walk.fire(base + offset)?;
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn walk_region_body(
+    region: &crate::circuit::GuardedRegion,
+    base: usize,
+    walk: &mut impl SlotWalk,
+) -> Result<()> {
+    walk_slot_list(region.body(), base, base + region.body().len(), walk)
+}
+
+/// A trajectory over a model with guarded slots, firing each event through `A`.
+struct TrajectoryWalk<'a, A> {
     backend: &'a mut dyn Backend,
     noise: &'a PreparedNoise,
     readout: &'a [Option<ReadoutError>],
     rng: &'a mut ChaCha8Rng,
+    events: PhantomData<A>,
 }
 
-impl SlotWalk for TrajectoryWalk<'_> {
+impl<A: EventApplier> SlotWalk for TrajectoryWalk<'_, A> {
     fn classical(&mut self) -> Result<&[bool]> {
         self.backend.sync_deferred_measurements()?;
         Ok(self.backend.classical_results())
@@ -483,7 +545,7 @@ impl SlotWalk for TrajectoryWalk<'_> {
 
     fn fire(&mut self, slot: usize) -> Result<()> {
         for event in self.noise.laid_out_slot(slot) {
-            apply_noise_event(self.backend, event, self.rng)?;
+            A::apply(self.backend, event, self.rng)?;
         }
         Ok(())
     }
@@ -656,28 +718,63 @@ fn apply_pauli_op<B: Backend + ?Sized>(backend: &mut B, qubit: usize, op: PauliO
     })
 }
 
-/// Compute the branch effect `Kdagger K` for a single-qubit Kraus operator.
+/// `Kdagger K`, entry `[i][j] = sum_r conj(K[r][i]) K[r][j]`.
 #[inline]
-fn kdagger_k(k: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
-    [
-        [
-            k[0][0].conj() * k[0][0] + k[1][0].conj() * k[1][0],
-            k[0][0].conj() * k[0][1] + k[1][0].conj() * k[1][1],
-        ],
-        [
-            k[0][1].conj() * k[0][0] + k[1][1].conj() * k[1][0],
-            k[0][1].conj() * k[0][1] + k[1][1].conj() * k[1][1],
-        ],
-    ]
+fn kdagger_k<const D: usize>(k: &[[Complex64; D]; D]) -> [[Complex64; D]; D] {
+    let mut effect = [[Complex64::new(0.0, 0.0); D]; D];
+    for (i, effect_row) in effect.iter_mut().enumerate() {
+        for (j, entry) in effect_row.iter_mut().enumerate() {
+            for row in k.iter() {
+                *entry += row[i].conj() * row[j];
+            }
+        }
+    }
+    effect
 }
 
+/// `Tr(E rho) = sum_{i,j} E[i][j] rho[j][i]` for a branch effect `E`, clamped
+/// at zero.
 #[inline]
-fn effect_probability(effect: &[[Complex64; 2]; 2], rho: &[[Complex64; 2]; 2]) -> f64 {
-    let p = effect[0][0] * rho[0][0]
-        + effect[0][1] * rho[1][0]
-        + effect[1][0] * rho[0][1]
-        + effect[1][1] * rho[1][1];
+fn effect_probability<const D: usize>(
+    effect: &[[Complex64; D]; D],
+    rho: &[[Complex64; D]; D],
+) -> f64 {
+    let mut p = Complex64::new(0.0, 0.0);
+    for i in 0..D {
+        for j in 0..D {
+            p += effect[i][j] * rho[j][i];
+        }
+    }
     p.re.max(0.0)
+}
+
+/// Draw a branch with probability proportional to its entry of `probs`, returning its
+/// index and probability. `None` when the total or the drawn branch is at most
+/// [`JUMP_EPSILON`], and a total that small makes no draw.
+#[inline]
+fn pick_branch(probs: impl Iterator<Item = f64>, rng: &mut ChaCha8Rng) -> Option<(usize, f64)> {
+    let mut cumulative: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
+    let mut total = 0.0;
+    for pk in probs {
+        total += pk;
+        cumulative.push(total);
+    }
+
+    if total <= JUMP_EPSILON {
+        return None;
+    }
+
+    let r: f64 = rand::RngExt::random::<f64>(rng) * total;
+    let chosen = cumulative
+        .iter()
+        .position(|&c| r < c)
+        .unwrap_or(cumulative.len() - 1);
+    let pk = if chosen == 0 {
+        cumulative[0]
+    } else {
+        cumulative[chosen] - cumulative[chosen - 1]
+    };
+    (pk > JUMP_EPSILON).then_some((chosen, pk))
 }
 
 /// Sample and apply one of a set of 1-qubit Kraus operators.
@@ -710,31 +807,10 @@ fn kraus_host_decided(
     backend.sync_deferred_measurements()?;
     let rho = backend.reduced_density_matrix_1q(qubit)?;
 
-    let mut cumulative: smallvec::SmallVec<[f64; 8]> = smallvec::SmallVec::new();
-    let mut total = 0.0;
-    for k in kraus {
-        let pk = effect_probability(&k.effect, &rho);
-        total += pk;
-        cumulative.push(total);
-    }
-
-    if total <= JUMP_EPSILON {
+    let probs = kraus.iter().map(|k| effect_probability(&k.effect, &rho));
+    let Some((chosen, pk)) = pick_branch(probs, rng) else {
         return Ok(());
-    }
-
-    let r: f64 = rand::RngExt::random::<f64>(rng) * total;
-    let chosen = cumulative
-        .iter()
-        .position(|&c| r < c)
-        .unwrap_or(kraus.len() - 1);
-    let pk = if chosen == 0 {
-        cumulative[0]
-    } else {
-        cumulative[chosen] - cumulative[chosen - 1]
     };
-    if pk <= JUMP_EPSILON {
-        return Ok(());
-    }
     let inv = 1.0 / pk.sqrt();
     let inv_c = Complex64::new(inv, 0.0);
     let k = kraus[chosen].op;
@@ -762,30 +838,10 @@ fn apply_custom_kraus_2q(
 ) -> Result<()> {
     let rho = backend.reduced_density_matrix_2q(q0, q1)?;
 
-    let mut cumulative: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
-    let mut total = 0.0;
-    for k in kraus {
-        total += effect_probability_2q(&k.effect, &rho);
-        cumulative.push(total);
-    }
-
-    if total <= JUMP_EPSILON {
+    let probs = kraus.iter().map(|k| effect_probability(&k.effect, &rho));
+    let Some((chosen, pk)) = pick_branch(probs, rng) else {
         return Ok(());
-    }
-
-    let r: f64 = rand::RngExt::random::<f64>(rng) * total;
-    let chosen = cumulative
-        .iter()
-        .position(|&c| r < c)
-        .unwrap_or(kraus.len() - 1);
-    let pk = if chosen == 0 {
-        cumulative[0]
-    } else {
-        cumulative[chosen] - cumulative[chosen - 1]
     };
-    if pk <= JUMP_EPSILON {
-        return Ok(());
-    }
 
     let inv = Complex64::new(1.0 / pk.sqrt(), 0.0);
     let mut normalized = kraus[chosen].op;
@@ -798,32 +854,6 @@ fn apply_custom_kraus_2q(
         gate: Gate::Fused2q(Box::new(normalized)),
         targets: smallvec![q0, q1],
     })
-}
-
-/// `Kdagger K`, entry `[i][j] = sum_r conj(K[r][i]) K[r][j]`.
-fn kdagger_k_2q(k: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
-    let mut effect = [[Complex64::new(0.0, 0.0); 4]; 4];
-    for (i, effect_row) in effect.iter_mut().enumerate() {
-        for (j, entry) in effect_row.iter_mut().enumerate() {
-            for row in k.iter() {
-                *entry += row[i].conj() * row[j];
-            }
-        }
-    }
-    effect
-}
-
-/// `Tr(E rho) = sum_{i,j} E[i][j] rho[j][i]` for a branch effect `E`, clamped
-/// at zero.
-#[inline]
-fn effect_probability_2q(effect: &[[Complex64; 4]; 4], rho: &[[Complex64; 4]; 4]) -> f64 {
-    let mut p = Complex64::new(0.0, 0.0);
-    for i in 0..4 {
-        for j in 0..4 {
-            p += effect[i][j] * rho[j][i];
-        }
-    }
-    p.re.max(0.0)
 }
 
 fn apply_noise_event(
@@ -856,6 +886,69 @@ fn apply_noise_event(
             unreachable!("channels with per-shot memory run through apply_memory_event")
         }
     }
+}
+
+/// How a trajectory fires one noise event.
+trait EventApplier {
+    fn apply(backend: &mut dyn Backend, event: &PreparedEvent, rng: &mut ChaCha8Rng) -> Result<()>;
+}
+
+/// Every channel unraveled by [`apply_noise_event`].
+struct NoiseEvents;
+
+impl EventApplier for NoiseEvents {
+    #[inline(always)]
+    fn apply(backend: &mut dyn Backend, event: &PreparedEvent, rng: &mut ChaCha8Rng) -> Result<()> {
+        apply_noise_event(backend, event, rng)
+    }
+}
+
+/// Pauli events drawn by [`apply_frame_event`], on the frame sampler's branch stream
+/// rather than the [`TWO_QUBIT_PAULIS`] draw.
+struct FrameEvents;
+
+impl EventApplier for FrameEvents {
+    #[inline(always)]
+    fn apply(backend: &mut dyn Backend, event: &PreparedEvent, rng: &mut ChaCha8Rng) -> Result<()> {
+        apply_frame_event(backend, event, rng)
+    }
+}
+
+/// Draw one Pauli event and apply the letters it fires.
+#[inline]
+fn apply_frame_event(
+    backend: &mut dyn Backend,
+    event: &PreparedEvent,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    match &event.channel {
+        PreparedChannel::PauliPair { p, .. } => {
+            let r: f64 = rand::RngExt::random(rng);
+            if r < *p {
+                let (l0, l1) = pair_branch(r / p);
+                apply_pauli_letter(backend, event.qubits[0], l0)?;
+                apply_pauli_letter(backend, event.qubits[1], l1)?;
+            }
+            Ok(())
+        }
+        PreparedChannel::Pauli(thresholds) => thresholds.apply(backend, event.qubits[0], rng),
+        _ => unreachable!("frame replay runs Pauli-frame channels only"),
+    }
+}
+
+/// Apply one letter of a two-qubit branch, indexed as [`pair_branch`] returns
+/// it. Identity applies nothing.
+fn apply_pauli_letter(backend: &mut dyn Backend, qubit: usize, letter: usize) -> Result<()> {
+    let gate = match letter {
+        1 => Gate::X,
+        2 => Gate::Y,
+        3 => Gate::Z,
+        _ => return Ok(()),
+    };
+    backend.apply(&Instruction::Gate {
+        gate,
+        targets: SmallVec::from_elem(qubit, 1),
+    })
 }
 
 /// Apply each `(qubit, channel)` site in turn on `backend` as a trajectory does, drawing
@@ -926,7 +1019,14 @@ pub fn run_noisy_shot(
     if defer {
         evolve_noisy(backend, circuit, &prepared, 0, &readout.at_write, &mut rng)?;
     } else {
-        evolve_noisy_eager(backend, circuit, &prepared, 0, &readout.at_write, &mut rng)?;
+        evolve_noisy_eager::<NoiseEvents>(
+            backend,
+            circuit,
+            &prepared,
+            0,
+            &readout.at_write,
+            &mut rng,
+        )?;
     }
     let mut results = backend.classical_results().to_vec();
     apply_readout_errors(&mut results, &readout.record, &mut rng);
@@ -1365,7 +1465,7 @@ pub(crate) fn evolve_noisy(
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     backend.begin_deferred_measurements(measurement_count(&circuit.instructions[from..]))?;
-    let evolved = evolve_noisy_eager(backend, circuit, noise, from, readout, rng);
+    let evolved = evolve_noisy_eager::<NoiseEvents>(backend, circuit, noise, from, readout, rng);
     evolved.and(backend.end_deferred_measurements())
 }
 
@@ -1382,7 +1482,7 @@ fn measurement_count(instructions: &[Instruction]) -> usize {
 }
 
 /// [`evolve_noisy`] with each outcome read back as its measurement lands.
-fn evolve_noisy_eager(
+fn evolve_noisy_eager<A: EventApplier>(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &PreparedNoise,
@@ -1397,16 +1497,17 @@ fn evolve_noisy_eager(
         {
             backend.apply(instr)?;
             for event in events {
-                apply_noise_event(backend, event, rng)?;
+                A::apply(backend, event, rng)?;
             }
         }
         return Ok(());
     }
-    let mut walk = TrajectoryWalk {
+    let mut walk = TrajectoryWalk::<A> {
         backend,
         noise,
         readout,
         rng,
+        events: PhantomData,
     };
     walk_noise_slots(circuit, from, &mut walk)
 }
@@ -1517,6 +1618,39 @@ pub(crate) fn run_trajectories_held<B: Backend>(
         reseed(backend, shot_seed);
         let (result, leaked) = run_shot(backend, circuit, &prepared, &readout, memory, rng)?;
         Ok((result, leaked, crate::sim::backend_metadata(backend)))
+    })
+}
+
+/// Replay a Pauli `noise` model shot by shot on the backend `backend_factory` builds
+/// from each shot's seed, drawing pair events as the frame sampler does.
+pub(crate) fn run_shots_noisy_brute_with(
+    backend_factory: impl Fn(u64) -> Box<dyn Backend>,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    let readout = ShotReadout::new(circuit, &noise.readout);
+    let prepared = PreparedNoise::new(noise);
+    let route = crate::sim::ResolvedBackend::Stabilizer;
+    run_serial(circuit, None, num_shots, seed, route, |shot_seed, rng| {
+        let mut backend = backend_factory(shot_seed);
+        backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+        evolve_noisy_eager::<FrameEvents>(
+            backend.as_mut(),
+            circuit,
+            &prepared,
+            0,
+            &readout.at_write,
+            rng,
+        )?;
+        let mut results = backend.classical_results().to_vec();
+        apply_readout_errors(&mut results, &readout.record, rng);
+        Ok((
+            results,
+            Vec::new(),
+            crate::sim::backend_metadata(backend.as_ref()),
+        ))
     })
 }
 

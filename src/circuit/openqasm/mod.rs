@@ -1617,6 +1617,7 @@ impl<'a> Parser<'a> {
 
 mod dynamic;
 mod eval;
+mod runtime_analysis;
 mod timing;
 
 pub(crate) use dynamic::builder_expr;

@@ -3872,9 +3872,9 @@ c[0] = measure q[0];
         source
     };
     let walked = |depth: usize| {
-        super::dynamic::WALKED.with(|walked| walked.set(0));
+        super::runtime_analysis::WALKED.with(|walked| walked.set(0));
         parse_dynamic(&nested(depth)).unwrap();
-        super::dynamic::WALKED.with(Cell::get)
+        super::runtime_analysis::WALKED.with(Cell::get)
     };
     let (shallow, deep) = (walked(8), walked(16));
     assert!(

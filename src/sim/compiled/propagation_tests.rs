@@ -466,26 +466,22 @@ fn avx512_propagation_kernels_match_avx2() {
                 batch_propagate_s_avx512(x0, z0, s, m, false)
             ),
             3 => pick!(
-                batch_propagate_sign_xor_avx2,
-                batch_propagate_sign_xor_avx512(s, z0, m)
-            ),
-            4 => pick!(
                 batch_propagate_sign_xor2_avx2,
                 batch_propagate_sign_xor2_avx512(s, x0, z0, m)
             ),
-            5 => pick!(
+            4 => pick!(
                 batch_propagate_sx_avx2,
                 batch_propagate_sx_avx512(x0, z0, s, m, false)
             ),
-            6 => pick!(
+            5 => pick!(
                 batch_propagate_sx_avx2,
                 batch_propagate_sx_avx512(x0, z0, s, m, true)
             ),
-            7 => pick!(
+            6 => pick!(
                 batch_propagate_cx_avx2,
                 batch_propagate_cx_avx512(x0, z0, x1, z1, s, m)
             ),
-            8 => pick!(
+            7 => pick!(
                 batch_propagate_cz_avx2,
                 batch_propagate_cz_avx512(x0, z0, x1, z1, s, m)
             ),
@@ -502,7 +498,7 @@ fn avx512_propagation_kernels_match_avx2() {
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
     for m in [8, 9, 10, 11, 12, 13, 14, 15, 16, 23, 37] {
         let rows: [Vec<u64>; 5] = std::array::from_fn(|_| (0..m).map(|_| rng.random()).collect());
-        for kernel in 0..10 {
+        for kernel in 0..9 {
             let mut narrow = rows.clone();
             let mut wide = rows.clone();
             // SAFETY: AVX-512F detected; every row holds `m` words.

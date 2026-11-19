@@ -668,3 +668,154 @@ fn the_split_declines_past_its_anchors_its_widest_unit_and_its_pairs() {
         "{pairs} past the pairs, {partial} partial"
     );
 }
+
+#[test]
+fn walsh_hadamard_matches_the_radix_2_sweep_bit_for_bit() {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    for r in [0, 1, 2, 3, 4, 5, 10, 11, 12, 14, 15, 16, 17, 18, 20] {
+        let values: Vec<f64> = (0..1usize << r)
+            .map(|_| rng.random::<f64>() - 0.5)
+            .collect();
+        let mut want = values.clone();
+        walsh(&mut want);
+        let mut got = values;
+        walsh_hadamard(&mut got);
+        assert_eq!(got, want, "2^{r} entries");
+    }
+}
+
+/// Every whole part with a row of each circuit, as the plan and the part's basis.
+fn whole_parts(plan: &SplitPlan) -> Vec<(&Part, Vec<Letters>)> {
+    plan.parts
+        .iter()
+        .filter(|part| part.cut.is_none() && part.rank > 0)
+        .map(|part| {
+            let mut pieces: Vec<Letters> = plan
+                .register_rows
+                .iter()
+                .map(|(_, p)| (p.x & part.mask, p.z & part.mask))
+                .collect();
+            (part, ordered_basis(&mut pieces, part.mask))
+        })
+        .collect()
+}
+
+#[test]
+fn walsh_tables_match_the_dense_tables() {
+    let (mut excess, mut partial) = (0, 0);
+    // One measurement dropped from two linked units leaves a part read on fewer rows than
+    // its width.
+    let partial_rank = (0..40u64).map(|seed| {
+        let mut circuit = linked_units(&[4, 3], 30, 8000 + seed);
+        let first = circuit
+            .instructions
+            .iter()
+            .position(|i| matches!(i, Instruction::Measure { .. }))
+            .unwrap();
+        circuit.instructions.remove(first);
+        (format!("partial seed {seed}"), circuit, SPLIT_LIMITS)
+    });
+    let tiers = tier_circuits()
+        .into_iter()
+        .map(|(label, circuit)| (label, circuit, TIER_LIMITS));
+    for (label, circuit, limits) in tiers.chain(partial_rank) {
+        let Some(plan) = SplitPlan::with_limits(&circuit, limits).unwrap() else {
+            continue;
+        };
+        for (part, basis) in whole_parts(&plan) {
+            excess += usize::from(!part.excess.is_empty());
+            partial += usize::from(part.rank < part.mask.count_ones() as usize);
+            let walsh = plan.walsh_table(part, &basis);
+            let dense = plan.dense_table(part, &basis);
+            assert_eq!(walsh.len(), dense.len(), "{label}");
+            for (t, (w, d)) in walsh.iter().zip(&dense).enumerate() {
+                assert!((w - d).abs() < 1e-12, "{label}: entry {t}: {w} against {d}");
+            }
+        }
+    }
+    assert!(
+        excess > 0 && partial > 0,
+        "{excess} with excess, {partial} partial"
+    );
+}
+
+/// `plan` with every whole part read out from its dense amplitudes, as before the Walsh
+/// readout.
+fn dense_route(mut plan: SplitPlan) -> SplitPlan {
+    for part in &mut plan.parts {
+        part.walsh = false;
+    }
+    plan
+}
+
+#[test]
+fn walsh_readout_draws_the_dense_route_distribution() {
+    let mut walsh_parts = 0;
+    for (label, circuit) in tier_circuits().into_iter().step_by(5) {
+        let Some(plan) = SplitPlan::new(&circuit).unwrap() else {
+            continue;
+        };
+        walsh_parts += plan.parts.iter().filter(|p| p.walsh).count();
+        let want = dense_route(SplitPlan::new(&circuit).unwrap().unwrap())
+            .sampler()
+            .distribution();
+        let got = plan.sampler().distribution();
+        let distance: f64 = got.iter().zip(&want).map(|(g, w)| (g - w).abs()).sum();
+        assert!(distance < 1e-11, "{label}: total variation {distance}");
+    }
+    assert!(walsh_parts > 0);
+
+    for seed in 0..4u64 {
+        let mut circuit = scrambled_clifford_t(12, 36, 12, 9000 + seed);
+        circuit.measure_all();
+        let plan = SplitPlan::new(&circuit).unwrap().unwrap();
+        assert!(
+            plan.parts.iter().any(|p| p.walsh && p.rank >= 8),
+            "seed {seed}"
+        );
+        let want = dense_route(SplitPlan::new(&circuit).unwrap().unwrap())
+            .sampler()
+            .distribution();
+        let shots = plan.sampler().sample(100_000, 42);
+        let (stat, df) = chi_square(&shots, &want);
+        let bound = df as f64 + 6.0 * (2.0 * df as f64).sqrt();
+        assert!(
+            stat < bound,
+            "seed {seed}: chi-square {stat} on {df} degrees"
+        );
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn walsh_readout_is_identical_on_one_and_many_threads() {
+    let circuit = (0..20u64)
+        .map(|seed| {
+            let mut circuit = scrambled_clifford_t(18, 54, 18, 9100 + seed);
+            circuit.measure_all();
+            circuit
+        })
+        .find(|circuit| {
+            SplitPlan::new(circuit)
+                .unwrap()
+                .is_some_and(|plan| plan.parts.iter().any(|p| p.walsh && p.rank >= 16))
+        })
+        .expect("a whole part of at least 16 rows");
+    let run = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let plan = SplitPlan::new(&circuit).unwrap().unwrap();
+                let tables: Vec<Vec<f64>> = whole_parts(&plan)
+                    .into_iter()
+                    .map(|(part, basis)| plan.walsh_table(part, &basis))
+                    .collect();
+                (tables, plan.sampler().sample(4096, 42))
+            })
+    };
+    let (one, many) = (run(1), run(4));
+    assert_eq!(one.0, many.0);
+    assert_eq!(one.1, many.1);
+}

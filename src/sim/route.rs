@@ -204,9 +204,12 @@ pub(super) fn decide_tensor_over_mps(
 /// the Clifford register: 1.2 to 1.9 ns per register amplitude against 0.056 to 0.069 ns
 /// per dense instruction-amplitude on four cores. The register runs serially, so the
 /// ratio rises with core count.
-/// Bracketed by `auto/clifford_t_price` (`distinct_17q_t16` flips at 11, `scrambled_22q_t20` at 86).
-/// Fitted on the same group (`register/scrambled_22q_t20` and `register/scrambled_32q_t20`
-/// give 22 to 27); `distinct_17q_t16` is the one row on the statevector side.
+/// Fitted on `auto/clifford_t_price` (`register/scrambled_22q_t20` and
+/// `register/scrambled_32q_t20` give 22 to 27). On a 24-core host the dense readout runs
+/// 0.24 to 0.43 ns per register amplitude against 0.014 to 0.026 ns per instruction-amplitude
+/// on the statevector rows of 20 to 24 qubits, 13 to 24. With whole parts on the Walsh
+/// readout every row of the group sits on the register side (`distinct_17q_t16` flips at 43).
+/// Bracketed by `auto/clifford_t_price` (register side only).
 #[cfg(not(prism_lowered_thresholds))]
 pub(super) const REGISTER_PASS_STATEVECTOR_AMPLITUDES: f64 = 25.0;
 #[cfg(prism_lowered_thresholds)]

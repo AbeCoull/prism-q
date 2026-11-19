@@ -1231,6 +1231,7 @@ fn clifford_t_price_rows_pin_their_engines() {
         ("layers_26q_t24", price_layers(26, 24)),
         ("scrambled_22q_t20", price_scrambled(22, 20)),
         ("layers_20q_t40", price_layers(20, 40)),
+        ("distinct_17q_t16", price_distinct()),
     ];
     for (label, circuit) in &auto_rows {
         assert_eq!(
@@ -1239,14 +1240,8 @@ fn clifford_t_price_rows_pin_their_engines() {
             "auto/{label}"
         );
     }
-    // The bracket on the statevector side of the register's cost constant. The split
-    // holds the single-layer row in parts of at most two qubits, ahead of the factored
-    // route its own arm pins.
-    assert_eq!(
-        shot_plan(BackendKind::Auto, &price_distinct(), 1024),
-        terminal_statevector,
-        "auto/distinct_17q_t16"
-    );
+    // The split holds the single-layer row in parts of at most two qubits, ahead of the
+    // factored route its own arm pins.
     assert_eq!(
         shot_plan(BackendKind::Factored, &price_onelayer(), 1024),
         (ResolvedBackend::Factored, RouteRule::NativeSampling),

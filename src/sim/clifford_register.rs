@@ -41,7 +41,7 @@ struct RegisterPauli {
 }
 
 impl RegisterPauli {
-    /// `self · other`, both Hermitian and commuting.
+    /// `self · other`; anticommuting Hermitian factors leave an odd `phase4`.
     fn mul(self, other: RegisterPauli) -> RegisterPauli {
         let phase = u32::from(self.phase4)
             + u32::from(other.phase4)

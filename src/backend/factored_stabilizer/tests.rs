@@ -4,7 +4,7 @@ use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::Circuit;
 use crate::gates::Gate;
 use crate::sim::unified_pauli::PauliTerm;
-use crate::test_support::assert_probs_close;
+use crate::test_support::{assert_probs_close, group_strings};
 
 fn run_both(circuit: &Circuit, seed: u64) -> (Vec<f64>, Vec<f64>) {
     let mut mono = StabilizerBackend::new(seed);
@@ -781,34 +781,6 @@ fn expectations_on(
         backend.apply(inst).unwrap();
     }
     backend.pauli_expectations(observables).unwrap()
-}
-
-/// Pauli strings read off the stabilizer half of an eager tableau: each
-/// generator, then the product of each adjacent pair. Every one is in the
-/// group, so its expectation is +1 or -1.
-fn group_strings(backend: &StabilizerBackend) -> Vec<Vec<PauliTerm>> {
-    let n = backend.num_qubits();
-    let nw = n.div_ceil(64);
-    let (xz, _) = backend.raw_tableau();
-    let string_of = |rows: &[usize]| -> Vec<PauliTerm> {
-        (0..n)
-            .filter_map(|q| {
-                let bit =
-                    |r: usize, half: usize| (xz[r * 2 * nw + half * nw + q / 64] >> (q % 64)) & 1;
-                let x = rows.iter().fold(0, |acc, &r| acc ^ bit(r, 0)) == 1;
-                let z = rows.iter().fold(0, |acc, &r| acc ^ bit(r, 1)) == 1;
-                match (x, z) {
-                    (true, false) => Some(PauliTerm::x(q)),
-                    (false, true) => Some(PauliTerm::z(q)),
-                    (true, true) => Some(PauliTerm::y(q)),
-                    (false, false) => None,
-                }
-            })
-            .collect()
-    };
-    let mut strings: Vec<Vec<PauliTerm>> = (n..2 * n).map(|r| string_of(&[r])).collect();
-    strings.extend((n..2 * n - 1).map(|r| string_of(&[r, r + 1])));
-    strings
 }
 
 #[test]

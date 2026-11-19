@@ -2,17 +2,9 @@ use super::*;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-const TOL: f64 = 1e-12;
+use crate::test_support::random_state;
 
-fn random_state(bits: usize, seed: u64) -> Vec<Complex64> {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut state: Vec<Complex64> = (0..1usize << bits)
-        .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
-        .collect();
-    let norm = state.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
-    state.iter_mut().for_each(|a| *a /= norm);
-    state
-}
+const TOL: f64 = 1e-12;
 
 fn max_diff(a: &[Complex64], b: &[Complex64]) -> f64 {
     a.iter()
@@ -46,7 +38,10 @@ fn forms() -> impl Iterator<Item = (bool, bool, bool)> {
 }
 
 fn assert_routes_agree(state_bits: usize, num: usize, textbook: bool) {
-    let state = random_state(state_bits, 42 + (state_bits * 64 + num) as u64);
+    let state = random_state(
+        state_bits,
+        &mut ChaCha8Rng::seed_from_u64(42 + (state_bits * 64 + num) as u64),
+    );
     for form in forms() {
         let gathered = run(&state, num, form, Route::Gathered);
         let mut against = vec![Route::Paired];
@@ -91,7 +86,10 @@ fn gathered_passes_match_the_dif_definition_for_any_split() {
     ];
     for &(state_bits, n, split) in cases {
         for inverse in [false, true] {
-            let mut expected = random_state(state_bits, 42 + state_bits as u64);
+            let mut expected = random_state(
+                state_bits,
+                &mut ChaCha8Rng::seed_from_u64(42 + state_bits as u64),
+            );
             let mut actual = expected.clone();
             let bottom = n - split.iter().sum::<usize>();
             dif_stages(&mut expected, n, bottom..n, inverse);
@@ -132,7 +130,9 @@ fn row_kernels_match_scalar_butterflies() {
         return;
     }
     let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
-    let rows: Vec<Vec<Complex64>> = (0..4).map(|r| random_state(4, 7 + r)).collect();
+    let rows: Vec<Vec<Complex64>> = (0..4)
+        .map(|r| random_state(4, &mut ChaCha8Rng::seed_from_u64(7 + r)))
+        .collect();
     let w = [0.3, 1.7, -2.4].map(|angle| Complex64::from_polar(inv_sqrt2, angle));
 
     let (mut lo, mut hi) = (rows[0].clone(), rows[1].clone());
@@ -181,7 +181,7 @@ fn avx512_row_kernels_match_avx2() {
     let phases = qft_gather_phases(16, true);
     for len in [2usize, 4, 6, 8, 10, 16] {
         let rows: Vec<Vec<Complex64>> = (0..4)
-            .map(|r| random_state(5, 7 + r)[..len].to_vec())
+            .map(|r| random_state(5, &mut ChaCha8Rng::seed_from_u64(7 + r))[..len].to_vec())
             .collect();
         let close = |got: &[Complex64], want: &[Complex64], what: &str| {
             assert!(max_diff(got, want) < TOL, "{what} len {len}");
@@ -224,7 +224,9 @@ fn avx512_row_kernels_match_avx2() {
     let twiddles: Vec<[Complex64; 4]> = (0..3)
         .map(|t| std::array::from_fn(|j| Complex64::from_polar(1.0, 0.4 * (4 * t + j) as f64)))
         .collect();
-    let rows: Vec<Vec<Complex64>> = (0..4).map(|r| random_state(2, 11 + r)).collect();
+    let rows: Vec<Vec<Complex64>> = (0..4)
+        .map(|r| random_state(2, &mut ChaCha8Rng::seed_from_u64(11 + r)))
+        .collect();
     let mut want: [Vec<Complex64>; 4] = std::array::from_fn(|r| rows[r].clone());
     let mut got = want.clone();
     // SAFETY: AVX-512F detected; every row holds four amplitudes, two AVX2 pairs.
@@ -270,7 +272,7 @@ fn avx512_radix4_groups_match_avx2_bitwise() {
         for inverse in [false, true] {
             let whole = qft_twiddles_scaled(n, inverse);
             let compact = qft_compact_twiddles(inverse);
-            let mut want = random_state(n, 42 + n as u64);
+            let mut want = random_state(n, &mut ChaCha8Rng::seed_from_u64(42 + n as u64));
             let mut got = want.clone();
             for top in (4..=n).rev() {
                 let s = 1usize << (top - 2);

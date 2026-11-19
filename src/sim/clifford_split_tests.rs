@@ -48,10 +48,9 @@ fn canonical_parts_follow_the_row_space_in_every_order() {
     assert_eq!(orders, 24);
 }
 
-use crate::backend::Backend;
-use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::Instruction;
 use crate::gates::Gate;
+use crate::test_support::{assert_close, gate_only_statevector_probabilities};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -108,21 +107,10 @@ fn layered_clifford_t(n: usize, depth: usize, t_count: usize, pairs: usize, seed
     c
 }
 
-fn statevector_probabilities(circuit: &Circuit) -> Vec<f64> {
-    let mut sv = StatevectorBackend::new(42);
-    sv.init(circuit.num_qubits, 0).unwrap();
-    for inst in &circuit.instructions {
-        if matches!(inst, Instruction::Gate { .. }) {
-            sv.apply(inst).unwrap();
-        }
-    }
-    sv.probabilities().unwrap()
-}
-
 /// The distribution of the classical bits under the circuit's measurement map, a later
 /// measurement into a bit winning.
 fn measured_distribution(circuit: &Circuit) -> Vec<f64> {
-    let full = statevector_probabilities(circuit);
+    let full = gate_only_statevector_probabilities(circuit);
     let mut writer = vec![None; circuit.num_classical_bits];
     for inst in &circuit.instructions {
         if let Instruction::Measure {
@@ -141,16 +129,6 @@ fn measured_distribution(circuit: &Circuit) -> Vec<f64> {
         want[key] += p;
     }
     want
-}
-
-fn assert_close(got: &[f64], want: &[f64], label: &str) {
-    assert_eq!(got.len(), want.len(), "{label}");
-    for (i, (g, w)) in got.iter().zip(want).enumerate() {
-        assert!(
-            (g - w).abs() < 1e-10,
-            "{label}: outcome {i}: got {g}, want {w}"
-        );
-    }
 }
 
 /// What a plan exercises, for the coverage the tier tests require.
@@ -374,7 +352,7 @@ fn every_tier_draws_the_statevector_distribution() {
         admitted += 1;
         coverage.record(&circuit, &plan);
         let got = plan.sampler().distribution();
-        assert_close(&got, &measured_distribution(&circuit), &label);
+        assert_close(&label, &got, &measured_distribution(&circuit), 1e-10);
     }
     assert!(admitted >= 600, "{admitted} admitted");
     // A cut needs every row independent on the part. A side whose forms sum to zero would
@@ -405,9 +383,10 @@ fn default_limits_draw_the_statevector_distribution() {
             .unwrap()
             .expect("every part fits at the default limits");
         assert_close(
+            &label,
             &sampler.distribution(),
             &measured_distribution(&circuit),
-            &label,
+            1e-10,
         );
     }
 }

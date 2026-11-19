@@ -1,6 +1,5 @@
 use super::*;
-use crate::backend::Backend;
-use crate::backend::statevector::StatevectorBackend;
+use crate::test_support::{assert_close, gate_only_statevector_probabilities};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -42,34 +41,13 @@ fn random_clifford_t(n: usize, gates: usize, t_count: usize, seed: u64) -> Circu
     c
 }
 
-fn statevector_probabilities(circuit: &Circuit) -> Vec<f64> {
-    let mut sv = StatevectorBackend::new(42);
-    sv.init(circuit.num_qubits, 0).unwrap();
-    for inst in &circuit.instructions {
-        if matches!(inst, Instruction::Gate { .. }) {
-            sv.apply(inst).unwrap();
-        }
-    }
-    sv.probabilities().unwrap()
-}
-
-fn assert_close(got: &[f64], want: &[f64], label: &str) {
-    assert_eq!(got.len(), want.len(), "{label}");
-    for (i, (g, w)) in got.iter().zip(want).enumerate() {
-        assert!(
-            (g - w).abs() < 1e-10,
-            "{label}: outcome {i}: got {g}, want {w}"
-        );
-    }
-}
-
 #[test]
 fn register_distribution_matches_the_statevector() {
     for seed in 0..60u64 {
         let n = 1 + (seed as usize % 6);
         let t_count = (seed as usize / 6) % 7;
         let mut circuit = random_clifford_t(n, 12 + 4 * n, t_count, seed);
-        let want = statevector_probabilities(&circuit);
+        let want = gate_only_statevector_probabilities(&circuit);
         for q in 0..n {
             circuit.add_measure(q, q);
         }
@@ -77,7 +55,7 @@ fn register_distribution_matches_the_statevector() {
             .unwrap()
             .expect("the register fits");
         let label = format!("seed {seed}, n {n}, t {t_count}");
-        assert_close(&sampler.distribution(), &want, &label);
+        assert_close(&label, &sampler.distribution(), &want, 1e-10);
     }
 }
 
@@ -134,13 +112,13 @@ fn register_gates_match_their_basis_action() {
 fn every_qubit_distribution_ignores_the_circuit_measurements() {
     let n = 5;
     let mut circuit = random_clifford_t(n, 40, 8, 42);
-    let want = statevector_probabilities(&circuit);
+    let want = gate_only_statevector_probabilities(&circuit);
     circuit.add_measure(3, 0);
     let sampler = TerminalSampler::compile_every_qubit(&circuit, MAX_REGISTER_QUBITS)
         .unwrap()
         .unwrap();
     assert!(sampler.register_width() <= n);
-    assert_close(&sampler.distribution(), &want, "every qubit");
+    assert_close("every qubit", &sampler.distribution(), &want, 1e-10);
 }
 
 #[test]

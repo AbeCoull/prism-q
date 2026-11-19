@@ -1,6 +1,6 @@
 //! Products, adjoints and shape predicates on dense 2x2 and 4x4 matrices.
 
-use super::IDENTITY_EPS;
+use super::{Gate, IDENTITY_EPS};
 use num_complex::Complex64;
 
 /// Controlled `mat` as a 4x4 with the control on the high bit of the basis index.
@@ -50,6 +50,13 @@ pub(crate) fn mat_mul_4x4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4]) -> [
         }
     }
     result
+}
+
+/// `mat` with its two qubits exchanged, `SWAP * mat * SWAP`.
+#[inline]
+pub(crate) fn swap_qubit_order_4x4(mat: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
+    let swap = Gate::Swap.matrix_4x4();
+    mat_mul_4x4(&swap, &mat_mul_4x4(mat, &swap))
 }
 
 pub(super) fn adjoint_4x4(m: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {

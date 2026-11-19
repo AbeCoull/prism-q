@@ -11,7 +11,7 @@ use super::{Circuit, GuardedRegion, Instruction, SmallVec, smallvec};
 use crate::gates::{
     DiagEntry, DiagonalBatchData, Gate, IDENTITY_EPS, MULTI_2Q_HIGH_BUDGET, Multi2qData,
     MultiFusedData, MultiPauliRotData, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2,
-    mat_mul_4x4, multi_2q_join, pauli_rot_join, pauli_rot_masks,
+    mat_mul_4x4, multi_2q_join, pauli_rot_join, pauli_rot_masks, swap_qubit_order_4x4,
 };
 
 use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases, split_batch_phases};
@@ -232,14 +232,6 @@ pub(super) fn is_identity(mat: &[[Complex64; 2]; 2]) -> bool {
         && mat[1][0].norm() < IDENTITY_EPS
         && (mat[1][1].re - 1.0).abs() < IDENTITY_EPS
         && mat[1][1].im.abs() < IDENTITY_EPS
-}
-
-#[inline]
-pub(super) fn gate_1q_matrix(gate: &Gate) -> [[Complex64; 2]; 2] {
-    match gate {
-        Gate::Fused(m) => **m,
-        _ => gate.matrix_2x2(),
-    }
 }
 
 #[inline]
@@ -492,7 +484,7 @@ pub(crate) fn fuse_multi_1q_gates<'a>(
         match inst {
             Instruction::Gate { gate, targets } if gate.num_qubits() == 1 => {
                 let q = targets[0];
-                let mat = gate_1q_matrix(gate);
+                let mat = gate.matrix_2x2();
                 if accumulate_1q(&mut pending[q], mat) {
                     pending_count += 1;
                 }
@@ -638,7 +630,7 @@ fn fuse_2q_gates_where<'a>(
         match inst {
             Instruction::Gate { gate, targets } if gate.num_qubits() == 1 => {
                 let q = targets[0];
-                let mat = gate_1q_matrix(gate);
+                let mat = gate.matrix_2x2();
                 accumulate_1q(&mut pending_1q[q], mat);
                 t.note(&mut srcs[q], i, Place::Plain);
             }
@@ -768,12 +760,6 @@ fn settle_trailing_1q(
 }
 
 #[inline]
-fn swap_order_4x4(mat: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
-    let swap = Gate::Swap.matrix_4x4();
-    mat_mul_4x4(&swap, &mat_mul_4x4(mat, &swap))
-}
-
-#[inline]
 fn same_unordered_pair(a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
     (a0 == b0 && a1 == b1) || (a0 == b1 && a1 == b0)
 }
@@ -788,7 +774,7 @@ fn orient_2q_matrix(
     if targets[0] == q0 && targets[1] == q1 {
         *mat
     } else {
-        swap_order_4x4(mat)
+        swap_qubit_order_4x4(mat)
     }
 }
 
@@ -1016,7 +1002,7 @@ fn fuse_same_pair_2q_blocks<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<
             Instruction::Gate { gate, targets } if gate.num_qubits() == 1 => {
                 if let Some(active) = &mut run {
                     if active.can_accept_1q(targets[0]) {
-                        let mat = gate_1q_matrix(gate);
+                        let mat = gate.matrix_2x2();
                         active.push_1q(mat, targets[0], inst.clone(), i, t);
                     } else {
                         flush_pair_run(&mut run, &mut output, &mut changed, t);

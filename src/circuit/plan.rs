@@ -11,6 +11,7 @@ use super::parameter::angle_of;
 use super::{Circuit, Instruction};
 use crate::gates::{
     DiagEntry, Gate, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4,
+    swap_qubit_order_4x4,
 };
 
 /// One factor of a fused payload, naming a template instruction and how its
@@ -782,7 +783,11 @@ fn product_4x4(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64
         }
         Step::M2 { src, swapped } => {
             let m = gate_4x4(bound, *src);
-            if *swapped { swap_order(&m) } else { m }
+            if *swapped {
+                swap_qubit_order_4x4(&m)
+            } else {
+                m
+            }
         }
         Step::Rzz { src } => Gate::Rzz(angle_of(&bound.instructions[*src as usize])).matrix_4x4(),
         Step::Project {
@@ -825,11 +830,6 @@ fn projected_1q(steps: &[Step], part: DiagPart, bound: &Circuit) -> [[Complex64;
         DiagPart::Phase => unreachable!("phase projection is two-qubit"),
     };
     [[d0, zero], [zero, d1]]
-}
-
-fn swap_order(mat: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
-    let swap = Gate::Swap.matrix_4x4();
-    mat_mul_4x4(&swap, &mat_mul_4x4(mat, &swap))
 }
 
 fn gate_2x2(circuit: &Circuit, src: u32) -> [[Complex64; 2]; 2] {

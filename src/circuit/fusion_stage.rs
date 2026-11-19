@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use num_complex::Complex64;
 
-use super::fusion::{fuse_diagonal_batch, gate_1q_matrix, push_unique};
+use super::fusion::{fuse_diagonal_batch, push_unique};
 use super::fusion_phase::fuse_controlled_phases;
 use super::fusion_rzz::fuse_batch_rzz;
 use super::plan::{Place, Tracer, WHOLE};
@@ -670,7 +670,7 @@ impl<'a> Planner<'a> {
     /// Fold 1q `op` into the run on its qubit in `runs`, starting one if none is open.
     fn fold_1q(&self, op: &Op, runs: &mut SmallVec<[Run1q; 8]>) {
         let (gate, targets) = self.gate(op);
-        let mat = gate_1q_matrix(gate);
+        let mat = gate.matrix_2x2();
         match runs.iter_mut().find(|run| run.qubit == targets[0]) {
             Some(run) => {
                 run.mat = mat_mul_2x2(&mat, &run.mat);

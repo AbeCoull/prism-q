@@ -377,30 +377,18 @@ impl Parameters {
 /// Angle of a gate already validated as bindable.
 pub(crate) fn angle_of(instruction: &Instruction) -> f64 {
     match instruction {
-        Instruction::Gate {
-            gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
-            ..
-        } => *t,
-        Instruction::Gate {
-            gate: Gate::PauliRot(data),
-            ..
-        } => data.theta(),
-        _ => unreachable!("parameter link validated as bindable"),
+        Instruction::Gate { gate, .. } => gate.angle(),
+        _ => None,
     }
+    .unwrap_or_else(|| unreachable!("parameter link validated as bindable"))
 }
 
 pub(crate) fn angle_mut(instruction: &mut Instruction) -> &mut f64 {
     match instruction {
-        Instruction::Gate {
-            gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
-            ..
-        } => t,
-        Instruction::Gate {
-            gate: Gate::PauliRot(data),
-            ..
-        } => &mut data.theta,
-        _ => unreachable!("parameter link validated as bindable"),
+        Instruction::Gate { gate, .. } => gate.angle_mut(),
+        _ => None,
     }
+    .unwrap_or_else(|| unreachable!("parameter link validated as bindable"))
 }
 
 #[cfg(test)]

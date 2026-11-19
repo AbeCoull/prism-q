@@ -789,6 +789,27 @@ impl Gate {
         }
     }
 
+    /// Angle a parameter binds: the rotation angle of `Rx`, `Ry`, `Rz`, `Rzz`, `P`
+    /// and `PauliRot`, or `None` for every other variant.
+    #[inline]
+    pub(crate) fn angle(&self) -> Option<f64> {
+        match self {
+            Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t) => Some(*t),
+            Gate::PauliRot(data) => Some(data.theta),
+            _ => None,
+        }
+    }
+
+    /// Mutable form of [`Self::angle`].
+    #[inline]
+    pub(crate) fn angle_mut(&mut self) -> Option<&mut f64> {
+        match self {
+            Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t) => Some(t),
+            Gate::PauliRot(data) => Some(&mut data.theta),
+            _ => None,
+        }
+    }
+
     /// `U^k` for a single-qubit gate; negative `k` inverts first.
     pub(crate) fn matrix_power(&self, k: i64) -> Gate {
         debug_assert_eq!(

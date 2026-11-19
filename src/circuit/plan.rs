@@ -1166,15 +1166,11 @@ pub(super) fn write_angle(inst: &mut Instruction, entry: usize, theta: f64) -> b
     let Instruction::Gate { gate, .. } = inst else {
         return false;
     };
+    if let Some(angle) = gate.angle_mut() {
+        *angle = theta;
+        return true;
+    }
     match gate {
-        Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::P(t) | Gate::Rzz(t) => {
-            *t = theta;
-            true
-        }
-        Gate::PauliRot(d) => {
-            d.set_theta(theta);
-            true
-        }
         Gate::BatchRzz(d) => match d.edges.get_mut(entry) {
             Some(edge) => {
                 edge.2 = theta;

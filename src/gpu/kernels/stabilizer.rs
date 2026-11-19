@@ -25,7 +25,9 @@ use cudarc::driver::{CudaSlice, CudaStream, CudaView, PushKernelArg};
 use crate::error::Result;
 
 use super::super::{GpuContext, GpuTableau};
-use super::{div_ceil_grid, driver_err, linear_cfg, require_i32, require_u32, stream_and_fn};
+use super::{
+    div_ceil_grid, driver_err, launch_counted, linear_cfg, require_i32, require_u32, stream_and_fn,
+};
 
 const BLOCK_SIZE: u32 = 128;
 
@@ -61,13 +63,7 @@ pub(crate) fn launch_set_initial_tableau(ctx: &GpuContext, tableau: &mut GpuTabl
     builder.arg(xz).arg(&n).arg(&nw);
     // SAFETY: kernel signature is (u64*, i32, i32); xz buffer is at least
     // (2n+1) * 2 * num_words u64s and each thread writes two disjoint words.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("stab_set_initial_tableau", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "stab_set_initial_tableau", ctx.device(), 1) }
 }
 
 /// Clifford opcodes consumed by `stab_apply_word_grouped`. The values must match the
@@ -356,13 +352,7 @@ fn launch_word_grouped_kernel(
     // SAFETY: signature matches the kernel declaration. Each block owns one
     // row. Threads stripe over word-disjoint groups within that row, and
     // thread 0 alone handles the cross-word tail plus final phase write.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("stab_apply_word_grouped", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "stab_apply_word_grouped", ctx.device(), 1) }
 }
 
 /// Block size for `stab_rowmul_words`. Chosen so a single warp-shuffle round
@@ -397,13 +387,7 @@ pub(crate) fn launch_rowmul_words(
     // SAFETY: signature (u64*, u8*, i32, i32, i32); single block operates on
     // one (src, dst) row pair. All threads of the block write to disjoint
     // words of dst_row and a single phase byte; no inter-block hazard.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("stab_rowmul_words", e))?;
-    }
-    ctx.device().count_launch(0);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "stab_rowmul_words", ctx.device(), 0) }
 }
 
 /// Block size for the measurement kernels that use one block per row
@@ -462,12 +446,7 @@ pub(crate) fn launch_measure_find_pivot(
         // SAFETY: signature (const u64*, i32, i32, i32, int*). The kernel only
         // reads xz at (row, target-word) positions and atomicMin's into
         // out_pivot.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("stab_measure_find_pivot", e))?;
-        }
-        ctx.device().count_launch(0);
+        unsafe { launch_counted(builder, cfg, "stab_measure_find_pivot", ctx.device(), 0) }?;
         stream
             .memcpy_dtoh(out_pivot, &mut host_pivot)
             .map_err(|e| driver_err("find_pivot dtoh", e))?;
@@ -517,13 +496,7 @@ pub(crate) fn launch_measure_cascade(
     // unique destination row (blockIdx.x); pivot_row is read-only throughout.
     // No inter-block hazard on xz or phase because writes target disjoint
     // rows.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("stab_measure_cascade", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "stab_measure_cascade", ctx.device(), 1) }
 }
 
 /// Post-cascade fixup: move pivot data into the paired destabiliser, install
@@ -563,13 +536,7 @@ pub(crate) fn launch_measure_fixup(
     // SAFETY: signature (u64*, u8*, i32, i32, i32, i32, u8). Single block
     // writes pivot_row and destab_row disjointly; runs only after the cascade
     // launch completes (single stream, serial ordering).
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("stab_measure_fixup", e))?;
-    }
-    ctx.device().count_launch(0);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "stab_measure_fixup", ctx.device(), 0) }
 }
 
 /// Deterministic branch: rowmul stabiliser rows `n+i` for every `i` whose
@@ -616,12 +583,7 @@ pub(crate) fn launch_measure_deterministic(
         // SAFETY: signature (u64*, u8*, i32, i32, i32, u8*). Single block runs
         // a serial loop over i=0..n; scratch row (index 2n) is the only
         // destination.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("stab_measure_deterministic", e))?;
-        }
-        ctx.device().count_launch(0);
+        unsafe { launch_counted(builder, cfg, "stab_measure_deterministic", ctx.device(), 0) }?;
         stream
             .memcpy_dtoh(out_outcome, &mut host_out)
             .map_err(|e| driver_err("deterministic outcome dtoh", e))?;
@@ -748,12 +710,7 @@ pub(crate) fn launch_run_random_mask(
         .arg(bufs.mask.raw_mut());
     // SAFETY: signature (const u64*, i32, i32, u64*). Block `w` reads X word `w` of
     // the stabilizer rows and alone writes mask[w]; mask holds num_words words.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("stab_run_random_mask", e))?;
-    }
-    ctx.device().count_launch(1);
+    unsafe { launch_counted(builder, cfg, "stab_run_random_mask", ctx.device(), 1) }?;
     stream
         .memcpy_dtoh(&bufs.mask.raw().slice(0..nw_usize), host_mask)
         .map_err(|e| driver_err("random mask dtoh", e))?;
@@ -823,11 +780,14 @@ pub(crate) fn launch_run_collapse(
     // per stabilizer row and atomicMin into pivots[m]; m < num_meas and the run buffer
     // holds the uploaded layout (checked in `RunArgs::new`), so the slot is in bounds.
     unsafe {
-        builder
-            .launch(linear_cfg(MEASURE_BLOCK_SIZE, pivot_blocks))
-            .map_err(|e| driver_err("stab_run_find_pivot", e))?;
-    }
-    ctx.device().count_launch(0);
+        launch_counted(
+            builder,
+            linear_cfg(MEASURE_BLOCK_SIZE, pivot_blocks),
+            "stab_run_find_pivot",
+            ctx.device(),
+            0,
+        )
+    }?;
 
     let (_, func) = stream_and_fn(ctx, "stab_run_cascade")?;
     let mut builder = stream.launch_builder(&func);
@@ -843,11 +803,14 @@ pub(crate) fn launch_run_collapse(
     // destination row; the pivot row and the run buffer are read only, at slots inside
     // the uploaded layout because m < num_meas.
     unsafe {
-        builder
-            .launch(linear_cfg(row_block, cascade_blocks))
-            .map_err(|e| driver_err("stab_run_cascade", e))?;
-    }
-    ctx.device().count_launch(1);
+        launch_counted(
+            builder,
+            linear_cfg(row_block, cascade_blocks),
+            "stab_run_cascade",
+            ctx.device(),
+            1,
+        )
+    }?;
 
     let (_, func) = stream_and_fn(ctx, "stab_run_fixup")?;
     let mut builder = stream.launch_builder(&func);
@@ -864,12 +827,14 @@ pub(crate) fn launch_run_collapse(
     // outcomes[m], inside the layout because m < num_meas. Stream order puts it after
     // the cascade.
     unsafe {
-        builder
-            .launch(linear_cfg(row_block, 1))
-            .map_err(|e| driver_err("stab_run_fixup", e))?;
+        launch_counted(
+            builder,
+            linear_cfg(row_block, 1),
+            "stab_run_fixup",
+            ctx.device(),
+            0,
+        )
     }
-    ctx.device().count_launch(0);
-    Ok(())
 }
 
 /// Resolve measurement `m` of the run into `outcomes[m]` by the serial deterministic
@@ -897,12 +862,14 @@ pub(crate) fn launch_run_deterministic(
     // serial loop whose only destination is the scratch row; thread 0 alone writes
     // outcomes[m], inside the uploaded layout because m < num_meas.
     unsafe {
-        builder
-            .launch(linear_cfg(row_block, 1))
-            .map_err(|e| driver_err("stab_run_deterministic", e))?;
+        launch_counted(
+            builder,
+            linear_cfg(row_block, 1),
+            "stab_run_deterministic",
+            ctx.device(),
+            0,
+        )
     }
-    ctx.device().count_launch(0);
-    Ok(())
 }
 
 /// Resolve every measurement of the run left without a pivot from the stabilizer
@@ -942,11 +909,14 @@ pub(crate) fn launch_run_diagonal_finish(
     // word `w` of the destabilizer rows and alone writes acc[w]; acc holds num_words
     // words.
     unsafe {
-        builder
-            .launch(linear_cfg(MEASURE_BLOCK_SIZE, acc_blocks))
-            .map_err(|e| driver_err("stab_run_det_accumulate", e))?;
-    }
-    ctx.device().count_launch(1);
+        launch_counted(
+            builder,
+            linear_cfg(MEASURE_BLOCK_SIZE, acc_blocks),
+            "stab_run_det_accumulate",
+            ctx.device(),
+            1,
+        )
+    }?;
 
     let (_, func) = stream_and_fn(ctx, "stab_run_det_outcomes")?;
     let mut builder = stream.launch_builder(&func);
@@ -959,12 +929,14 @@ pub(crate) fn launch_run_diagonal_finish(
     // and writes outcomes[m] alone; the run buffer holds the layout's words, checked
     // above.
     unsafe {
-        builder
-            .launch(linear_cfg(MEASURE_BLOCK_SIZE, outcome_blocks))
-            .map_err(|e| driver_err("stab_run_det_outcomes", e))?;
+        launch_counted(
+            builder,
+            linear_cfg(MEASURE_BLOCK_SIZE, outcome_blocks),
+            "stab_run_det_outcomes",
+            ctx.device(),
+            0,
+        )
     }
-    ctx.device().count_launch(0);
-    Ok(())
 }
 
 /// Apply `CX(k, k + 1)` for `k` in `start..end` in one launch with no upload, in place
@@ -1001,10 +973,12 @@ pub(crate) fn launch_cx_chain(
     // writes row `r` and phase[r], and `end` is below num_qubits, so every word index
     // stays inside the row.
     unsafe {
-        builder
-            .launch(linear_cfg(BLOCK_SIZE, blocks))
-            .map_err(|e| driver_err("stab_apply_cx_chain", e))?;
+        launch_counted(
+            builder,
+            linear_cfg(BLOCK_SIZE, blocks),
+            "stab_apply_cx_chain",
+            ctx.device(),
+            1,
+        )
     }
-    ctx.device().count_launch(1);
-    Ok(())
 }

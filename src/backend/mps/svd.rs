@@ -3,8 +3,16 @@
 
 use num_complex::Complex64;
 
-use super::{JACOBI_REL_TOL, MAX_SVD_SWEEPS, ONE, SVD_RESOLUTION, ZERO};
+use super::{ONE, SVD_RESOLUTION, ZERO};
 use crate::backend::NORM_CLAMP_MIN;
+
+const MAX_SVD_SWEEPS: usize = 100;
+/// Relative pair threshold of the one-sided Jacobi sweep: a pair rotates while
+/// `|a_p^H a_q|` exceeds this times `|a_p| |a_q|`. Judged against the pair's
+/// own norms rather than the whole matrix, so the columns of `U` come out
+/// orthogonal on the small singular values too; an absolute residual left
+/// them 0.56 apart on an 8x8 whose values span six decades.
+const JACOBI_REL_TOL: f64 = 1e-15;
 
 /// Thin SVD result: A = U · diag(S) · V†
 #[doc(hidden)]

@@ -2,7 +2,7 @@
 //!
 //! Each kernel has a sequential implementation and, when the `parallel` feature
 //! is enabled, a Rayon-parallelized variant dispatched above
-//! `PARALLEL_THRESHOLD_QUBITS`.
+//! `kernel_parallel_qubits()`.
 
 #[path = "mixed.rs"]
 mod mixed;
@@ -16,7 +16,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 use super::StatevectorBackend;
 use super::insert_zero_bit;
 #[cfg(feature = "parallel")]
-use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS, SendPtr};
+use super::{MIN_PAR_ELEMS, SendPtr};
+#[cfg(feature = "parallel")]
+use crate::backend::kernel_parallel_qubits;
 use crate::backend::simd;
 use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
@@ -521,7 +523,7 @@ fn apply_multi_1q_subcubes(
     let rest = plan.rest(num_qubits);
     let subcubes = 1usize << (num_qubits - plan.tile_bits);
     #[cfg(feature = "parallel")]
-    if num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+    if num_qubits >= kernel_parallel_qubits() {
         let ptr = SendPtr(state.as_mut_ptr());
         (0..subcubes).into_par_iter().for_each(|outer| {
             // SAFETY: `ptr` holds 2^num_qubits amplitudes and distinct `outer`
@@ -1024,7 +1026,7 @@ fn apply_bit_reverse_permutation(state: &mut [Complex64], bits: usize) {
     let owns_pair = move |&b: &usize| reverse_low_bits(b, middle) >= b;
 
     #[cfg(feature = "parallel")]
-    if bits >= PARALLEL_THRESHOLD_QUBITS {
+    if bits >= kernel_parallel_qubits() {
         let ptr = SendPtr(state.as_mut_ptr());
         (0..1usize << middle)
             .into_par_iter()
@@ -1055,7 +1057,7 @@ fn apply_bit_reverse_chunks(state: &mut [Complex64], bits: usize) {
         return;
     }
     #[cfg(feature = "parallel")]
-    if state.len() >= 1usize << PARALLEL_THRESHOLD_QUBITS {
+    if state.len() >= 1usize << kernel_parallel_qubits() {
         state
             .par_chunks_mut(chunk.max(MIN_PAR_ELEMS))
             .for_each(|task| {
@@ -2739,7 +2741,7 @@ fn qft_gather_pass(state: &mut [Complex64], pass: QftGatherPass) {
     let len = pass.row_len << pass.bits;
 
     #[cfg(feature = "parallel")]
-    if state.len() >= 1usize << PARALLEL_THRESHOLD_QUBITS {
+    if state.len() >= 1usize << kernel_parallel_qubits() {
         let ptr = SendPtr(state.as_mut_ptr());
         (0..groups).into_par_iter().for_each_init(
             || vec![Complex64::new(0.0, 0.0); len],
@@ -3732,7 +3734,7 @@ pub(crate) fn split_multi_1q_diagonal_tiers(
 /// weigh it against the passes of another route.
 pub(crate) fn multi_1q_sweeps(gates: &[(usize, [[Complex64; 2]; 2])], num_qubits: usize) -> usize {
     #[cfg(feature = "parallel")]
-    if num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+    if num_qubits >= kernel_parallel_qubits() {
         let state_len = 1usize << num_qubits;
         return multi_1q_route(
             gates,
@@ -3864,7 +3866,7 @@ fn apply_multi_1q_runs(
             continue;
         }
         #[cfg(feature = "parallel")]
-        if state.len() >= 1 << PARALLEL_THRESHOLD_QUBITS {
+        if state.len() >= 1 << kernel_parallel_qubits() {
             for chunk in run.chunks(MAX_SHARED_1Q_TARGETS) {
                 if chunk.len() > 1 {
                     apply_multi_1q_shared(state, chunk);
@@ -3980,7 +3982,7 @@ impl StatevectorBackend {
     #[inline(always)]
     pub(super) fn apply_single_gate(&mut self, target: usize, mat: [[Complex64; 2]; 2]) {
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             apply_single_gate_par(&mut self.state, target, &mat);
             return;
         }
@@ -3996,7 +3998,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_diagonal_gate_par(target, d0, d1);
             return;
         }
@@ -4031,7 +4033,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_cx_par(control, target);
             return;
         }
@@ -4146,7 +4148,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_cz_par(q0, q1);
             return;
         }
@@ -4206,7 +4208,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_rzz_par(q0, q1, theta);
             return;
         }
@@ -4270,7 +4272,7 @@ impl StatevectorBackend {
         let xlow = xmask ^ half;
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_pauli_rot_pairs_par(pivot, xlow, zmask, &pair);
             return;
         }
@@ -4333,7 +4335,7 @@ impl StatevectorBackend {
     #[inline(always)]
     fn apply_parity_phase(&mut self, zmask: usize, even: Complex64, odd: Complex64) {
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_parity_phase_par(zmask, even, odd);
             return;
         }
@@ -4382,7 +4384,7 @@ impl StatevectorBackend {
             let rest = plan.rest(self.num_qubits);
             let subcubes = 1usize << (self.num_qubits - plan.tile_bits);
             #[cfg(feature = "parallel")]
-            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            if self.num_qubits >= kernel_parallel_qubits() {
                 let ptr = SendPtr(self.state.as_mut_ptr());
                 (0..subcubes).into_par_iter().for_each(|outer| {
                     // SAFETY: `ptr` holds 2^num_qubits amplitudes and distinct
@@ -4419,7 +4421,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.state
                 .par_chunks_mut(tile_len)
                 .with_min_len(chunk_min_len(tile_len))
@@ -4444,7 +4446,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_batch_rzz_par(edges);
             return;
         }
@@ -4520,7 +4522,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_cu_par(control, target, mat);
             return;
         }
@@ -4626,7 +4628,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             par_apply_unitary(&mut self.state, targets, mat);
             return;
         }
@@ -4643,7 +4645,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_mcu_par(controls, target, mat);
             return;
         }
@@ -4710,7 +4712,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_cu_phase_par(control, target, phase);
             return;
         }
@@ -4775,7 +4777,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_mcu_phase_par(controls, target, phase);
             return;
         }
@@ -4838,7 +4840,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_swap_par(q0, q1);
             return;
         }
@@ -4913,7 +4915,7 @@ impl StatevectorBackend {
         super::sweeps::tick();
         if q0.max(q1) - q0.min(q1) == 1 {
             #[cfg(feature = "parallel")]
-            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            if self.num_qubits >= kernel_parallel_qubits() {
                 self.apply_fused_2q_adjacent_par(q0, q1, mat);
                 return;
             }
@@ -4923,7 +4925,7 @@ impl StatevectorBackend {
         }
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_fused_2q_par(q0, q1, mat);
             return;
         }
@@ -5024,7 +5026,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_batch_phase_par(control, phases);
             return;
         }
@@ -5192,7 +5194,7 @@ impl StatevectorBackend {
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
         let low_done_parallel =
-            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS && self.state.len() / tile_size >= 4 {
+            if self.num_qubits >= kernel_parallel_qubits() && self.state.len() / tile_size >= 4 {
                 self.state
                     .par_chunks_mut(tile_size)
                     .for_each(apply_low_stages_in_tile);
@@ -5234,7 +5236,7 @@ impl StatevectorBackend {
             let twiddle_step = fft_len / block_size;
 
             #[cfg(feature = "parallel")]
-            if state.len() >= 1usize << PARALLEL_THRESHOLD_QUBITS {
+            if state.len() >= 1usize << kernel_parallel_qubits() {
                 fft_stage_par(
                     state,
                     stride,
@@ -5296,7 +5298,7 @@ impl StatevectorBackend {
     #[inline(always)]
     pub(super) fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_measure_par(qubit, classical_bit);
             return;
         }
@@ -5348,7 +5350,7 @@ impl StatevectorBackend {
         let block_size = half << 1;
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             if self.state.len() / block_size >= 4 {
                 self.state
                     .par_chunks_mut(block_size)
@@ -5386,7 +5388,7 @@ impl StatevectorBackend {
         let inv_norm = measurement_inv_norm(outcome, prob_one);
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.fold_reset_par(qubit, outcome);
             self.pending_norm *= inv_norm;
             return;
@@ -5403,7 +5405,7 @@ impl StatevectorBackend {
     #[inline(always)]
     pub(super) fn qubit_probability_one(&self, qubit: usize) -> f64 {
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             return self.qubit_probability_one_par(qubit);
         }
 
@@ -5454,7 +5456,7 @@ impl StatevectorBackend {
     /// sums it.
     pub(super) fn scale_qubit_one(&mut self, qubit: usize, factor: f64) -> f64 {
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             return self.scale_qubit_one_par(qubit, factor);
         }
 
@@ -5508,7 +5510,7 @@ impl StatevectorBackend {
         self.pending_norm = 1.0;
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.state
                 .par_chunks_mut(MIN_PAR_ELEMS)
                 .for_each(|chunk| simd::scale_complex_slice(chunk, factor));
@@ -5520,7 +5522,7 @@ impl StatevectorBackend {
     #[inline(always)]
     pub(super) fn reduced_density_matrix_one(&self, qubit: usize) -> [[Complex64; 2]; 2] {
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             return self.reduced_density_matrix_one_par(qubit);
         }
 
@@ -5586,7 +5588,7 @@ impl StatevectorBackend {
         let zero = || [[Complex64::new(0.0, 0.0); 4]; 4];
 
         #[cfg(feature = "parallel")]
-        let mut rho = if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        let mut rho = if self.num_qubits >= kernel_parallel_qubits() {
             (0..groups)
                 .into_par_iter()
                 .with_min_len(MIN_PAR_ITERS)
@@ -5677,7 +5679,7 @@ impl StatevectorBackend {
         }
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             apply_multi_1q_par(&mut self.state, gates);
             return;
         }
@@ -5745,7 +5747,7 @@ impl StatevectorBackend {
         }
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_multi_1q_diagonal_par(gates);
             return;
         }
@@ -5913,7 +5915,7 @@ impl StatevectorBackend {
         }
         if let Some(plan) = subcube_plan(gates, self.num_qubits) {
             #[cfg(feature = "parallel")]
-            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            if self.num_qubits >= kernel_parallel_qubits() {
                 self.apply_multi_2q_subcube_par(gates, &plan);
                 return;
             }
@@ -5922,7 +5924,7 @@ impl StatevectorBackend {
         }
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_multi_2q_par(gates);
             return;
         }
@@ -6065,7 +6067,7 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= kernel_parallel_qubits() {
             self.apply_diagonal_batch_par(entries);
             return;
         }

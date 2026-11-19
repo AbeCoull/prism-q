@@ -4,8 +4,6 @@
 use num_complex::Complex64;
 use smallvec::SmallVec;
 
-#[cfg(feature = "parallel")]
-use super::PARALLEL_THRESHOLD_QUBITS;
 use super::StatevectorBackend;
 use super::kernels::{self, Multi1qRoute, TargetedGate1q};
 use crate::backend::Backend;
@@ -356,7 +354,7 @@ impl Profiler {
     /// The L2 tier's highest target, as the sequential or the parallel kernel cuts it.
     fn max_l2_target(&self) -> usize {
         #[cfg(feature = "parallel")]
-        if self.n >= PARALLEL_THRESHOLD_QUBITS {
+        if self.n >= crate::backend::kernel_parallel_qubits() {
             return kernels::max_target_for_tile(kernels::multi_gate_l2_tile_par(1 << self.n));
         }
         kernels::multi_gate_max_l2_target()
@@ -431,7 +429,7 @@ impl Profiler {
     /// The L3 tier switch and the shared traversal width the `MultiFused` route reads.
     fn shared_tiers(&mut self) -> (bool, usize) {
         #[cfg(feature = "parallel")]
-        if self.n >= PARALLEL_THRESHOLD_QUBITS {
+        if self.n >= crate::backend::kernel_parallel_qubits() {
             return (self.medium_tiled(), kernels::MAX_SHARED_1Q_TARGETS);
         }
         (true, 1)

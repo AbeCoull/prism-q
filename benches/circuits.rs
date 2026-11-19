@@ -4886,6 +4886,21 @@ fn bench_noisy_sampling(c: &mut Criterion) {
         );
     }
 
+    // Either side of the width where host statevector trajectories stop splitting one
+    // shot per worker.
+    for n in [16usize, 18, 20] {
+        let circuit = non_clifford_noise_circuit(n, 4);
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        group.bench_function(
+            BenchmarkId::new("trajectory_pauli", format!("non_clifford_{n}q_512")),
+            |b| {
+                b.iter(|| {
+                    run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 512, SEED).unwrap();
+                });
+            },
+        );
+    }
+
     let non_clifford = non_clifford_noise_circuit(12, 4);
     let non_clifford_noise = prism_q::NoiseModel::uniform_depolarizing(&non_clifford, 0.001);
     group.bench_function(

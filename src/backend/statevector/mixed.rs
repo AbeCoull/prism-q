@@ -309,7 +309,7 @@ impl StatevectorBackend {
         if plan.high.is_empty() {
             let len = 1usize << bits;
             #[cfg(feature = "parallel")]
-            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            if self.num_qubits >= crate::backend::kernel_parallel_qubits() {
                 self.state
                     .par_chunks_mut(len)
                     .enumerate()
@@ -323,7 +323,7 @@ impl StatevectorBackend {
         }
         let count = 1usize << (self.num_qubits - plan.tile_bits);
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+        if self.num_qubits >= crate::backend::kernel_parallel_qubits() {
             let ptr = SendPtr(self.state.as_mut_ptr());
             (0..count).into_par_iter().for_each(|outer| {
                 // SAFETY: each outer index owns a disjoint subcube of the initialized state.

@@ -1400,10 +1400,7 @@ pub(crate) fn run_trajectories(
     let _ = force_serial;
     #[cfg(feature = "parallel")]
     {
-        if !force_serial
-            && num_shots >= 4
-            && crate::sim::state_splits_across_workers(route, circuit.num_qubits)
-        {
+        if !force_serial && num_shots >= 4 && trajectories_split(route, circuit.num_qubits) {
             return run_trajectories_par(
                 &backend_factory,
                 circuit,
@@ -1510,6 +1507,26 @@ pub(crate) fn with_leak_record(
     }
 }
 
+/// Width below which trajectory runs on the host statevector split across workers, each
+/// shot or group with its kernels serial: on an 8P+16E host, 512 shots split one task per
+/// worker took 17% of the unsplit time at 16 qubits, 78% at 18 and 159% at 20.
+/// Bracketed by `noisy_sampling/trajectory_pauli/non_clifford_{16,18,20}q_512`.
+#[cfg(all(feature = "parallel", not(miri)))]
+const SPLIT_STATEVECTOR_QUBITS: usize = 19;
+#[cfg(all(feature = "parallel", miri))]
+const SPLIT_STATEVECTOR_QUBITS: usize = crate::backend::PARALLEL_THRESHOLD_QUBITS;
+
+/// Whether trajectory runs of `width` qubits on `route` split across workers: below
+/// [`SPLIT_STATEVECTOR_QUBITS`] on the host statevector, and by
+/// [`crate::sim::state_splits_across_workers`] on every other route.
+#[cfg(feature = "parallel")]
+fn trajectories_split(route: crate::sim::ResolvedBackend, width: usize) -> bool {
+    match route {
+        crate::sim::ResolvedBackend::Statevector => width < SPLIT_STATEVECTOR_QUBITS,
+        _ => crate::sim::state_splits_across_workers(route, width),
+    }
+}
+
 #[cfg(feature = "parallel")]
 fn run_trajectories_par(
     backend_factory: &(impl Fn(u64) -> Box<dyn Backend> + Sync),
@@ -1526,18 +1543,20 @@ fn run_trajectories_par(
     let results: Result<Vec<ParShot>> = (0..num_shots)
         .into_par_iter()
         .map(|i| {
-            let shot_seed = crate::sim::mix_seed(seed, i);
-            let mut rng = noise_rng(shot_seed);
-            let mut backend = backend_factory(shot_seed);
-            let (bits, leaked) = run_shot(
-                backend.as_mut(),
-                circuit,
-                prepared,
-                &readout,
-                memory,
-                &mut rng,
-            )?;
-            Ok((bits, leaked, crate::sim::backend_metadata(backend.as_ref())))
+            crate::backend::with_serial_kernels(|| {
+                let shot_seed = crate::sim::mix_seed(seed, i);
+                let mut rng = noise_rng(shot_seed);
+                let mut backend = backend_factory(shot_seed);
+                let (bits, leaked) = run_shot(
+                    backend.as_mut(),
+                    circuit,
+                    prepared,
+                    &readout,
+                    memory,
+                    &mut rng,
+                )?;
+                Ok((bits, leaked, crate::sim::backend_metadata(backend.as_ref())))
+            })
         })
         .collect();
 
@@ -2097,8 +2116,7 @@ pub(crate) fn run_pauli_groups(
     let meas_map = circuit.measurement_map();
     let readout = written_readout(circuit, &noise.readout);
     #[cfg(feature = "parallel")]
-    let split = groups.num_groups() > 1
-        && crate::sim::state_splits_across_workers(route, circuit.num_qubits);
+    let split = groups.num_groups() > 1 && trajectories_split(route, circuit.num_qubits);
 
     let Some(build) = build else {
         let mut order: Vec<usize> = (0..groups.num_groups()).collect();
@@ -2111,7 +2129,10 @@ pub(crate) fn run_pauli_groups(
         #[cfg(feature = "parallel")]
         if split {
             let chunks = work_chunks(groups, &order, rayon::current_num_threads());
-            let runs: Result<Vec<Vec<GroupRun>>> = chunks.into_par_iter().map(run).collect();
+            let runs: Result<Vec<Vec<GroupRun>>> = chunks
+                .into_par_iter()
+                .map(|chunk| crate::backend::with_serial_kernels(|| run(chunk)))
+                .collect();
             return collect_groups(groups, circuit, route, runs?.into_iter().flatten());
         }
         return collect_groups(groups, circuit, route, run(&order)?);
@@ -2165,10 +2186,13 @@ pub(crate) fn run_replayed_groups(
     };
     let num_shots = groups.members.len();
     #[cfg(feature = "parallel")]
-    if num_shots >= 4 && crate::sim::state_splits_across_workers(route, circuit.num_qubits) {
+    if num_shots >= 4 && trajectories_split(route, circuit.num_qubits) {
         let suffix = circuit.instructions.len() - groups.prefix;
         let chunks = replay_chunks(groups, &order, rayon::current_num_threads(), suffix);
-        let runs: Result<Vec<Vec<ShotRun>>> = chunks.into_par_iter().map(run).collect();
+        let runs: Result<Vec<Vec<ShotRun>>> = chunks
+            .into_par_iter()
+            .map(|chunk| crate::backend::with_serial_kernels(|| run(chunk)))
+            .collect();
         return fold_replayed(circuit, route, num_shots, runs?.into_iter().flatten());
     }
     let whole = order

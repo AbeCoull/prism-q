@@ -155,7 +155,7 @@ fn gathered_routes_match_per_gate_application() {
             assert_matches(&backend.state, &expected, &label);
 
             #[cfg(feature = "parallel")]
-            if num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            if num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
                 let mut tiered = start.clone();
                 let medium_tiled = keep_l3_tier(tiered.len());
                 apply_multi_1q_par_routed(&mut tiered, &gates, medium_tiled, &Multi1qRoute::Tiered);

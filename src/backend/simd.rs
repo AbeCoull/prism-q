@@ -819,6 +819,22 @@ impl PreparedGate1q {
     /// avoiding per-chunk function call overhead that hurts small qubit counts.
     #[inline(always)]
     pub(crate) fn apply_full_sequential(&self, state: &mut [Complex64], target: usize) {
+        self.apply_loop::<true>(state, target);
+    }
+
+    /// Apply the gate within a cache-resident tile, preferring AVX2 when available.
+    ///
+    /// Unlike `apply_full_sequential`, does not restrict AVX2 by state size.
+    /// Use when the slice is known to be L2/L3-resident (e.g. MultiFused tiles).
+    #[inline(always)]
+    pub(crate) fn apply_tiled(&self, state: &mut [Complex64], target: usize) {
+        self.apply_loop::<false>(state, target);
+    }
+
+    /// Shared body of [`Self::apply_full_sequential`] and [`Self::apply_tiled`]. With
+    /// `CAP_AVX2_STATE` the AVX2 and AVX-512 loops take states of at most 8192 amplitudes.
+    #[inline(always)]
+    fn apply_loop<const CAP_AVX2_STATE: bool>(&self, state: &mut [Complex64], target: usize) {
         #[cfg(target_arch = "x86_64")]
         {
             // SAFETY: The selected tier is guarded by runtime feature checks
@@ -826,9 +842,11 @@ impl PreparedGate1q {
             unsafe {
                 const MAX_AVX2_STATE: usize = 8192;
                 const MIN_AVX2_TARGET: usize = 2;
+                let wide =
+                    target >= MIN_AVX2_TARGET && (!CAP_AVX2_STATE || state.len() <= MAX_AVX2_STATE);
                 match self.tier {
                     SimdTier::Avx512 => {
-                        if target >= MIN_AVX2_TARGET && state.len() <= MAX_AVX2_STATE {
+                        if wide {
                             let b256 = self.broadcast256.as_ref().unwrap_unchecked();
                             apply_full_loop_avx512(state, target, b256);
                         } else {
@@ -836,7 +854,7 @@ impl PreparedGate1q {
                         }
                     }
                     SimdTier::Avx2Fma => {
-                        if target >= MIN_AVX2_TARGET && state.len() <= MAX_AVX2_STATE {
+                        if wide {
                             let b256 = self.broadcast256.as_ref().unwrap_unchecked();
                             apply_full_loop_avx2fma_inline(state, target, b256);
                         } else {
@@ -869,53 +887,6 @@ impl PreparedGate1q {
                 state[i0] = self.mat[0][0] * a + self.mat[0][1] * b;
                 state[i1] = self.mat[1][0] * a + self.mat[1][1] * b;
             }
-        }
-    }
-
-    /// Apply the gate within a cache-resident tile, preferring AVX2 when available.
-    ///
-    /// Unlike `apply_full_sequential`, does not restrict AVX2 by state size.
-    /// Use when the slice is known to be L2/L3-resident (e.g. MultiFused tiles).
-    #[inline(always)]
-    pub(crate) fn apply_tiled(&self, state: &mut [Complex64], target: usize) {
-        #[cfg(target_arch = "x86_64")]
-        {
-            // SAFETY: The selected tier is guarded by runtime feature checks
-            // in the constructor. Tile indices are validated by callers.
-            unsafe {
-                match self.tier {
-                    SimdTier::Avx512 => {
-                        if target >= 2 {
-                            let b256 = self.broadcast256.as_ref().unwrap_unchecked();
-                            apply_full_loop_avx512(state, target, b256);
-                        } else {
-                            apply_full_loop_fma(state, target, &self.broadcast);
-                        }
-                    }
-                    SimdTier::Avx2Fma => {
-                        if target >= 2 {
-                            let b256 = self.broadcast256.as_ref().unwrap_unchecked();
-                            apply_full_loop_avx2fma_inline(state, target, b256);
-                        } else {
-                            apply_full_loop_fma(state, target, &self.broadcast);
-                        }
-                    }
-                    SimdTier::Fma => apply_full_loop_fma(state, target, &self.broadcast),
-                    SimdTier::Sse2 => apply_full_loop_sse2(state, target, &self.broadcast),
-                }
-            }
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            // SAFETY: NEON is baseline on aarch64. Tile
-            // indices are validated by callers.
-            unsafe { apply_full_loop_neon(state, target, &self.broadcast) };
-        }
-
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        {
-            self.apply_full_sequential(state, target);
         }
     }
 
@@ -1453,18 +1424,25 @@ pub(crate) fn negate_slice(slice: &mut [Complex64]) {
     if slice.len() >= MIN_SIMD_SLICE {
         // SAFETY: NEON is baseline on aarch64, and the loop
         // only touches elements inside the mutable slice.
-        unsafe {
-            let ptr = slice.as_mut_ptr() as *mut f64;
-            for i in 0..slice.len() {
-                let p = ptr.add(i * 2);
-                let v = vld1q_f64(p);
-                vst1q_f64(p, vnegq_f64(v));
-            }
-        }
+        unsafe { negate_slice_neon(slice) };
         return;
     }
     for amp in slice.iter_mut() {
         *amp = -*amp;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn negate_slice_neon(slice: &mut [Complex64]) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        for i in 0..slice.len() {
+            let p = ptr.add(i * 2);
+            let v = vld1q_f64(p);
+            vst1q_f64(p, vnegq_f64(v));
+        }
     }
 }
 
@@ -1534,21 +1512,28 @@ pub(crate) fn swap_slices(a: &mut [Complex64], b: &mut [Complex64]) {
     if a.len() >= MIN_SIMD_SLICE {
         // SAFETY: NEON is baseline on aarch64, slices have
         // equal length, and Rust's two mutable references guarantee non-overlap.
-        unsafe {
-            let ap = a.as_mut_ptr() as *mut f64;
-            let bp = b.as_mut_ptr() as *mut f64;
-            for i in 0..a.len() {
-                let off = i * 2;
-                let va = vld1q_f64(ap.add(off));
-                let vb = vld1q_f64(bp.add(off));
-                vst1q_f64(ap.add(off), vb);
-                vst1q_f64(bp.add(off), va);
-            }
-        }
+        unsafe { swap_slices_neon(a, b) };
         return;
     }
     for (x, y) in a.iter_mut().zip(b.iter_mut()) {
         std::mem::swap(x, y);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn swap_slices_neon(a: &mut [Complex64], b: &mut [Complex64]) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let ap = a.as_mut_ptr() as *mut f64;
+        let bp = b.as_mut_ptr() as *mut f64;
+        for i in 0..a.len() {
+            let off = i * 2;
+            let va = vld1q_f64(ap.add(off));
+            let vb = vld1q_f64(bp.add(off));
+            vst1q_f64(ap.add(off), vb);
+            vst1q_f64(bp.add(off), va);
+        }
     }
 }
 
@@ -1852,14 +1837,21 @@ pub(crate) fn norm_sqr_sum_scale(slice: &mut [Complex64], factor: f64) -> f64 {
     sum
 }
 
+/// Four norms per step from two vectors: `hadd` pairs the squared lanes and a permute puts
+/// them back in amplitude order. `SCALED` multiplies by `scale`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn norm_sqr_to_slice_avx2(src: &[Complex64], dst: &mut [f64]) {
+unsafe fn norm_sqr_to_slice_avx2<const SCALED: bool>(
+    src: &[Complex64],
+    dst: &mut [f64],
+    scale: f64,
+) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         debug_assert!(dst.len() >= src.len());
         let inp = src.as_ptr() as *const f64;
         let out = dst.as_mut_ptr();
+        let s = _mm256_set1_pd(scale);
         let quads = src.len() / 4;
 
         for i in 0..quads {
@@ -1869,17 +1861,25 @@ unsafe fn norm_sqr_to_slice_avx2(src: &[Complex64], dst: &mut [f64]) {
             let v1 = _mm256_loadu_pd(inp.add(base_in + 4));
             let sq0 = _mm256_mul_pd(v0, v0);
             let sq1 = _mm256_mul_pd(v1, v1);
-            // hadd: lane0=[sq0[0]+sq0[1], sq1[0]+sq1[1]], lane1=[sq0[2]+sq0[3], sq1[2]+sq1[3]]
-            //      = [norm0, norm2, norm1, norm3]
             let h = _mm256_hadd_pd(sq0, sq1);
-            // permute to [norm0, norm1, norm2, norm3]
             let ordered = _mm256_permute4x64_pd(h, 0b11_01_10_00);
-            _mm256_storeu_pd(out.add(base_out), ordered);
+            _mm256_storeu_pd(
+                out.add(base_out),
+                if SCALED {
+                    _mm256_mul_pd(ordered, s)
+                } else {
+                    ordered
+                },
+            );
         }
 
         let tail = quads * 4;
         for (j, c) in src[tail..].iter().enumerate() {
-            *out.add(tail + j) = c.norm_sqr();
+            *out.add(tail + j) = if SCALED {
+                c.norm_sqr() * scale
+            } else {
+                c.norm_sqr()
+            };
         }
     }
 }
@@ -1935,85 +1935,15 @@ unsafe fn norm_sqr_to_slice_avx512<const SCALED: bool>(
 }
 
 pub(crate) fn norm_sqr_to_slice(src: &[Complex64], dst: &mut [f64]) {
-    debug_assert!(dst.len() >= src.len());
-    #[cfg(target_arch = "x86_64")]
-    if src.len() >= MIN_SIMD_SLICE {
-        match simd_tier() {
-            SimdTier::Avx512 => {
-                // SAFETY: AVX-512F detected. The destination length debug assert keeps
-                // all stores in bounds.
-                unsafe { norm_sqr_to_slice_avx512::<false>(src, dst, 1.0) };
-                return;
-            }
-            SimdTier::Avx2Fma => {
-                // SAFETY: AVX2 checked above. The destination length debug
-                // assert keeps all stores in bounds.
-                unsafe { norm_sqr_to_slice_avx2(src, dst) };
-                return;
-            }
-            SimdTier::Fma | SimdTier::Sse2 => {}
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    if src.len() >= MIN_SIMD_SLICE {
-        // SAFETY: NEON is baseline on aarch64. The
-        // destination length debug assert keeps all stores in bounds.
-        unsafe {
-            let inp = src.as_ptr() as *const f64;
-            let out = dst.as_mut_ptr();
-            let pairs = src.len() / 2;
-            for i in 0..pairs {
-                let base = i * 4;
-                let v0 = vld1q_f64(inp.add(base));
-                let v1 = vld1q_f64(inp.add(base + 2));
-                let sq0 = vmulq_f64(v0, v0);
-                let sq1 = vmulq_f64(v1, v1);
-                let ns = vpaddq_f64(sq0, sq1);
-                vst1q_f64(out.add(i * 2), ns);
-            }
-            if !src.len().is_multiple_of(2) {
-                let last = src.len() - 1;
-                *out.add(last) = src[last].norm_sqr();
-            }
-        }
-        return;
-    }
-    for (i, c) in src.iter().enumerate() {
-        dst[i] = c.norm_sqr();
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn norm_sqr_to_slice_scaled_avx2(src: &[Complex64], dst: &mut [f64], scale: f64) {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        debug_assert!(dst.len() >= src.len());
-        let inp = src.as_ptr() as *const f64;
-        let out = dst.as_mut_ptr();
-        let s = _mm256_set1_pd(scale);
-        let quads = src.len() / 4;
-
-        for i in 0..quads {
-            let base_in = i * 8;
-            let base_out = i * 4;
-            let v0 = _mm256_loadu_pd(inp.add(base_in));
-            let v1 = _mm256_loadu_pd(inp.add(base_in + 4));
-            let sq0 = _mm256_mul_pd(v0, v0);
-            let sq1 = _mm256_mul_pd(v1, v1);
-            let h = _mm256_hadd_pd(sq0, sq1);
-            let ordered = _mm256_permute4x64_pd(h, 0b11_01_10_00);
-            _mm256_storeu_pd(out.add(base_out), _mm256_mul_pd(ordered, s));
-        }
-
-        let tail = quads * 4;
-        for (j, c) in src[tail..].iter().enumerate() {
-            *out.add(tail + j) = c.norm_sqr() * scale;
-        }
-    }
+    norm_sqr_to_slice_impl::<false>(src, dst, 1.0);
 }
 
 pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale: f64) {
+    norm_sqr_to_slice_impl::<true>(src, dst, scale);
+}
+
+#[inline(always)]
+fn norm_sqr_to_slice_impl<const SCALED: bool>(src: &[Complex64], dst: &mut [f64], scale: f64) {
     debug_assert!(dst.len() >= src.len());
     #[cfg(target_arch = "x86_64")]
     if src.len() >= MIN_SIMD_SLICE {
@@ -2021,13 +1951,13 @@ pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale
             SimdTier::Avx512 => {
                 // SAFETY: AVX-512F detected. The destination length debug assert keeps
                 // all stores in bounds.
-                unsafe { norm_sqr_to_slice_avx512::<true>(src, dst, scale) };
+                unsafe { norm_sqr_to_slice_avx512::<SCALED>(src, dst, scale) };
                 return;
             }
             SimdTier::Avx2Fma => {
                 // SAFETY: AVX2 checked above. The destination length debug
                 // assert keeps all stores in bounds.
-                unsafe { norm_sqr_to_slice_scaled_avx2(src, dst, scale) };
+                unsafe { norm_sqr_to_slice_avx2::<SCALED>(src, dst, scale) };
                 return;
             }
             SimdTier::Fma | SimdTier::Sse2 => {}
@@ -2037,29 +1967,48 @@ pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale
     if src.len() >= MIN_SIMD_SLICE {
         // SAFETY: NEON is baseline on aarch64. The
         // destination length debug assert keeps all stores in bounds.
-        unsafe {
-            let inp = src.as_ptr() as *const f64;
-            let out = dst.as_mut_ptr();
-            let s = vdupq_n_f64(scale);
-            let pairs = src.len() / 2;
-            for i in 0..pairs {
-                let base = i * 4;
-                let v0 = vld1q_f64(inp.add(base));
-                let v1 = vld1q_f64(inp.add(base + 2));
-                let sq0 = vmulq_f64(v0, v0);
-                let sq1 = vmulq_f64(v1, v1);
-                let ns = vmulq_f64(vpaddq_f64(sq0, sq1), s);
-                vst1q_f64(out.add(i * 2), ns);
-            }
-            if !src.len().is_multiple_of(2) {
-                let last = src.len() - 1;
-                *out.add(last) = src[last].norm_sqr() * scale;
-            }
-        }
+        unsafe { norm_sqr_to_slice_neon::<SCALED>(src, dst, scale) };
         return;
     }
     for (i, c) in src.iter().enumerate() {
-        dst[i] = c.norm_sqr() * scale;
+        dst[i] = if SCALED {
+            c.norm_sqr() * scale
+        } else {
+            c.norm_sqr()
+        };
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn norm_sqr_to_slice_neon<const SCALED: bool>(
+    src: &[Complex64],
+    dst: &mut [f64],
+    scale: f64,
+) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let inp = src.as_ptr() as *const f64;
+        let out = dst.as_mut_ptr();
+        let s = vdupq_n_f64(scale);
+        let pairs = src.len() / 2;
+        for i in 0..pairs {
+            let base = i * 4;
+            let v0 = vld1q_f64(inp.add(base));
+            let v1 = vld1q_f64(inp.add(base + 2));
+            let sq0 = vmulq_f64(v0, v0);
+            let sq1 = vmulq_f64(v1, v1);
+            let ns = vpaddq_f64(sq0, sq1);
+            vst1q_f64(out.add(i * 2), if SCALED { vmulq_f64(ns, s) } else { ns });
+        }
+        if !src.len().is_multiple_of(2) {
+            let last = src.len() - 1;
+            *out.add(last) = if SCALED {
+                src[last].norm_sqr() * scale
+            } else {
+                src[last].norm_sqr()
+            };
+        }
     }
 }
 

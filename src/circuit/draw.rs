@@ -910,15 +910,10 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
     let n = circuit.num_qubits;
     let mut qubit_gate_count = vec![0usize; n];
     for inst in &circuit.instructions {
-        let targets: &[usize] = match inst {
-            Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => targets,
-            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
-                std::slice::from_ref(qubit)
-            }
-            Instruction::Region(region) => region.qubits(),
-            Instruction::Barrier { .. } | Instruction::Save { .. } => continue,
-        };
-        for &q in targets {
+        if matches!(inst, Instruction::Barrier { .. } | Instruction::Save { .. }) {
+            continue;
+        }
+        for &q in inst.qubits() {
             if q < n {
                 qubit_gate_count[q] += 1;
             }

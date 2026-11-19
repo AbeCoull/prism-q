@@ -8,6 +8,7 @@
 
 use super::simd::rowmul_words;
 use crate::error::{PrismError, Result};
+use crate::gates::Gate;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use std::borrow::Cow;
 
@@ -251,6 +252,88 @@ pub(crate) fn swap_all(
     let a = QubitBit::of(a);
     let b = QubitBit::of(b);
     sweep(xz, phase, nw, par, |row, _phase| swap_row(row, nw, a, b));
+}
+
+/// Apply `gate` to every row `rows` yields, returning false for a non-Clifford gate.
+///
+/// `rows` runs only for a gate that changes the tableau, so `Id` and a rejected gate
+/// never call it. The factored sub-tableau marks its destabilizers stale inside `rows`.
+#[inline(always)]
+pub(crate) fn apply_clifford_all<'a>(
+    gate: &Gate,
+    targets: &[usize],
+    nw: usize,
+    par: bool,
+    rows: impl FnOnce() -> (&'a mut [u64], &'a mut [bool]),
+) -> bool {
+    match gate {
+        Gate::Id => {}
+        Gate::X => {
+            let (xz, phase) = rows();
+            x_all(xz, phase, nw, par, targets[0]);
+        }
+        Gate::Y => {
+            let (xz, phase) = rows();
+            y_all(xz, phase, nw, par, targets[0]);
+        }
+        Gate::Z => {
+            let (xz, phase) = rows();
+            z_all(xz, phase, nw, par, targets[0]);
+        }
+        Gate::H => {
+            let (xz, phase) = rows();
+            h_all(xz, phase, nw, par, targets[0]);
+        }
+        Gate::S => {
+            let (xz, phase) = rows();
+            s_all(xz, phase, nw, par, targets[0]);
+        }
+        Gate::Sdg => {
+            let (xz, phase) = rows();
+            sdg_all(xz, phase, nw, par, targets[0]);
+        }
+        Gate::SX => {
+            let (xz, phase) = rows();
+            sx_all(xz, phase, nw, par, targets[0]);
+        }
+        Gate::SXdg => {
+            let (xz, phase) = rows();
+            sxdg_all(xz, phase, nw, par, targets[0]);
+        }
+        Gate::Cx => {
+            let (xz, phase) = rows();
+            cx_all(xz, phase, nw, par, targets[0], targets[1]);
+        }
+        Gate::Cz => {
+            let (xz, phase) = rows();
+            cz_all(xz, phase, nw, par, targets[0], targets[1]);
+        }
+        Gate::Swap => {
+            let (xz, phase) = rows();
+            swap_all(xz, phase, nw, par, targets[0], targets[1]);
+        }
+        Gate::T
+        | Gate::Tdg
+        | Gate::Rx(_)
+        | Gate::Ry(_)
+        | Gate::Rz(_)
+        | Gate::P(_)
+        | Gate::Rzz(_)
+        | Gate::Cu(_)
+        | Gate::Mcu(_)
+        | Gate::Fused(_)
+        | Gate::BatchPhase(_)
+        | Gate::BatchRzz(_)
+        | Gate::DiagonalBatch(_)
+        | Gate::MultiFused(_)
+        | Gate::Fused2q(_)
+        | Gate::Multi2q(_)
+        | Gate::QftBlock { .. }
+        | Gate::PauliRot(_)
+        | Gate::MultiPauliRot(_)
+        | Gate::Unitary(_) => return false,
+    }
+    true
 }
 
 /// Multiply row `h` by row `i` (replace `h` with the Pauli product).

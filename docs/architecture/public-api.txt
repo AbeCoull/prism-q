@@ -193,14 +193,15 @@ pub prism_q::backend::mps::MpsPauliAxis::Z
 pub struct prism_q::backend::mps::MpsBackend
 impl prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::current_max_bond_dim(&self) -> usize
-pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::backend::mps::MpsBackend::is_qubit_in_zero_state(&self, usize, f64) -> prism_q::error::Result<bool>
 pub fn prism_q::backend::mps::MpsBackend::new(u64, usize) -> Self
-pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::backend::mps::MpsBackend::reset_truncation_tracking(&mut self)
 pub fn prism_q::backend::mps::MpsBackend::set_svd_epsilon(&mut self, f64)
 pub fn prism_q::backend::mps::MpsBackend::site_for_qubit(&self, usize) -> usize
 pub fn prism_q::backend::mps::MpsBackend::truncation_discarded(&self) -> f64
+impl prism_q::backend::mps::MpsBackend
+pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
+pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 impl core::clone::Clone for prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::clone(&self) -> Self
 impl prism_q::backend::Backend for prism_q::backend::mps::MpsBackend
@@ -340,6 +341,7 @@ pub fn prism_q::backend::stabilizer::StabilizerBackend::init_from_tableau(&mut s
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new_lazy(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::raw_tableau(&self) -> (&[u64], &[bool])
+impl prism_q::backend::stabilizer::StabilizerBackend
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 impl core::clone::Clone for prism_q::backend::stabilizer::StabilizerBackend
@@ -1860,9 +1862,9 @@ impl prism_q::QecTStrategy
 pub fn prism_q::QecTStrategy::label(self) -> &'static str
 pub struct prism_q::qec::BpOsdDecoder
 impl prism_q::BpOsdDecoder
-pub fn prism_q::BpOsdDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::BpOsdDecoder::decode_packed(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::BpOsdDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
-pub fn prism_q::BpOsdDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::BpOsdDecoder::logical_error_rate(&self, &prism_q::PackedShots, &prism_q::PackedShots) -> prism_q::error::Result<f64>
 pub fn prism_q::BpOsdDecoder::num_detectors(&self) -> usize
 pub fn prism_q::BpOsdDecoder::num_observables(&self) -> usize
 pub fn prism_q::BpOsdDecoder::options(&self) -> prism_q::BpOsdOptions
@@ -1891,9 +1893,9 @@ pub fn prism_q::ErrorMechanism::probability(&self) -> f64
 pub fn prism_q::ErrorMechanism::suggested_decomposition(&self) -> &[(alloc::vec::Vec<usize>, alloc::vec::Vec<usize>)]
 pub struct prism_q::qec::MatchingDecoder
 impl prism_q::MatchingDecoder
-pub fn prism_q::MatchingDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::MatchingDecoder::decode_packed(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::MatchingDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
-pub fn prism_q::MatchingDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::MatchingDecoder::logical_error_rate(&self, &prism_q::PackedShots, &prism_q::PackedShots) -> prism_q::error::Result<f64>
 pub fn prism_q::MatchingDecoder::num_detectors(&self) -> usize
 pub fn prism_q::MatchingDecoder::num_observables(&self) -> usize
 pub struct prism_q::qec::QecCircuitNoise
@@ -1905,7 +1907,7 @@ impl prism_q::QecCircuitNoise
 pub fn prism_q::QecCircuitNoise::uniform(f64) -> Self
 pub struct prism_q::qec::QecCompiledRows
 impl prism_q::QecCompiledRows
-pub fn prism_q::QecCompiledRows::detector_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::detector_parities(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::QecCompiledRows::detector_rows(&self) -> &[alloc::vec::Vec<usize>]
 pub fn prism_q::QecCompiledRows::measurement_mask_bytes(&self) -> usize
 pub fn prism_q::QecCompiledRows::measurement_rows(&self) -> &[prism_q::QecMeasurementRow]
@@ -1914,11 +1916,11 @@ pub fn prism_q::QecCompiledRows::num_measurements(&self) -> usize
 pub fn prism_q::QecCompiledRows::num_observables(&self) -> usize
 pub fn prism_q::QecCompiledRows::num_postselections(&self) -> usize
 pub fn prism_q::QecCompiledRows::num_qubits(&self) -> usize
-pub fn prism_q::QecCompiledRows::observable_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::observable_parities(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::QecCompiledRows::observable_rows(&self) -> &[alloc::vec::Vec<usize>]
 pub fn prism_q::QecCompiledRows::packed_row_words(&self) -> usize
 pub fn prism_q::QecCompiledRows::postselection_expected(&self) -> &[bool]
-pub fn prism_q::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::postselection_parities(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
 pub fn prism_q::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
 pub struct prism_q::qec::QecCompiledSampler
@@ -2010,31 +2012,31 @@ impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::to_text(&self) -> prism_q::error::Result<alloc::string::String>
 #[non_exhaustive] pub struct prism_q::qec::QecSampleResult
 pub prism_q::qec::QecSampleResult::accepted_shots: usize
-pub prism_q::qec::QecSampleResult::detectors: prism_q::sim::compiled::PackedShots
+pub prism_q::qec::QecSampleResult::detectors: prism_q::PackedShots
 pub prism_q::qec::QecSampleResult::discarded_shots: usize
 pub prism_q::qec::QecSampleResult::expectation_values: core::option::Option<alloc::vec::Vec<prism_q::QecObservableEstimate>>
-pub prism_q::qec::QecSampleResult::heralds: core::option::Option<prism_q::sim::compiled::PackedShots>
+pub prism_q::qec::QecSampleResult::heralds: core::option::Option<prism_q::PackedShots>
 pub prism_q::qec::QecSampleResult::logical_errors: alloc::vec::Vec<u64>
-pub prism_q::qec::QecSampleResult::measurements: prism_q::sim::compiled::PackedShots
+pub prism_q::qec::QecSampleResult::measurements: prism_q::PackedShots
 pub prism_q::qec::QecSampleResult::observable_expectations: core::option::Option<alloc::vec::Vec<prism_q::QecObservableEstimate>>
-pub prism_q::qec::QecSampleResult::observables: prism_q::sim::compiled::PackedShots
+pub prism_q::qec::QecSampleResult::observables: prism_q::PackedShots
 pub prism_q::qec::QecSampleResult::total_shots: usize
 impl prism_q::QecSampleResult
 pub fn prism_q::QecSampleResult::empty(usize, usize, usize) -> Self
 pub fn prism_q::QecSampleResult::logical_error_rate_wilson_intervals(&self, f64) -> alloc::vec::Vec<(f64, f64)>
 pub fn prism_q::QecSampleResult::logical_error_rates(&self) -> alloc::vec::Vec<f64>
-pub fn prism_q::QecSampleResult::new(prism_q::sim::compiled::PackedShots, prism_q::sim::compiled::PackedShots, prism_q::sim::compiled::PackedShots, usize, usize, alloc::vec::Vec<u64>) -> prism_q::error::Result<Self>
-pub fn prism_q::QecSampleResult::new_with_total_shots(usize, prism_q::sim::compiled::PackedShots, prism_q::sim::compiled::PackedShots, prism_q::sim::compiled::PackedShots, usize, usize, alloc::vec::Vec<u64>) -> prism_q::error::Result<Self>
+pub fn prism_q::QecSampleResult::new(prism_q::PackedShots, prism_q::PackedShots, prism_q::PackedShots, usize, usize, alloc::vec::Vec<u64>) -> prism_q::error::Result<Self>
+pub fn prism_q::QecSampleResult::new_with_total_shots(usize, prism_q::PackedShots, prism_q::PackedShots, prism_q::PackedShots, usize, usize, alloc::vec::Vec<u64>) -> prism_q::error::Result<Self>
 pub fn prism_q::QecSampleResult::survivor_rate(&self) -> f64
 pub fn prism_q::QecSampleResult::survivor_rate_wilson_interval(&self, f64) -> (f64, f64)
 pub fn prism_q::QecSampleResult::with_expectation_values(self, alloc::vec::Vec<prism_q::QecObservableEstimate>) -> Self
-pub fn prism_q::QecSampleResult::with_heralds(self, prism_q::sim::compiled::PackedShots) -> Self
+pub fn prism_q::QecSampleResult::with_heralds(self, prism_q::PackedShots) -> Self
 pub fn prism_q::QecSampleResult::with_observable_expectations(self, alloc::vec::Vec<prism_q::QecObservableEstimate>) -> prism_q::error::Result<Self>
 pub struct prism_q::qec::UnionFindDecoder
 impl prism_q::UnionFindDecoder
-pub fn prism_q::UnionFindDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::UnionFindDecoder::decode_packed(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::UnionFindDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
-pub fn prism_q::UnionFindDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::UnionFindDecoder::logical_error_rate(&self, &prism_q::PackedShots, &prism_q::PackedShots) -> prism_q::error::Result<f64>
 pub fn prism_q::UnionFindDecoder::num_detectors(&self) -> usize
 pub fn prism_q::UnionFindDecoder::num_observables(&self) -> usize
 pub fn prism_q::qec::compile_qec_program_rows(&prism_q::qec::QecProgram) -> prism_q::error::Result<prism_q::QecCompiledRows>
@@ -2102,9 +2104,9 @@ pub fn prism_q::sim::compiled::CompiledDetectorSampler::observable_rows(&self) -
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::rank(&self) -> usize
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_detector_counts(&mut self, usize) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_detectors_chunked<A: prism_q::ShotAccumulator>(&mut self, usize, &mut A) -> prism_q::error::Result<()>
-pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_detectors_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_measurements_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_observables_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_detectors_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
+pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_measurements_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
+pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_observables_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::DetectorSampleBatch>
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub struct prism_q::sim::compiled::CompiledSampler
@@ -2116,15 +2118,15 @@ pub fn prism_q::sim::compiled::CompiledSampler::parity_stats(&self) -> core::opt
 pub fn prism_q::sim::compiled::CompiledSampler::rank(&self) -> usize
 pub fn prism_q::sim::compiled::CompiledSampler::sample(&mut self) -> alloc::vec::Vec<bool>
 pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk(&mut self, usize) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
-pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk_packed(&mut self, usize) -> prism_q::sim::compiled::PackedShots
-pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk_packed_device(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::DevicePackedShots>
+pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk_packed(&mut self, usize) -> prism_q::PackedShots
+pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk_packed_device(&mut self, usize) -> prism_q::error::Result<prism_q::DevicePackedShots>
 pub fn prism_q::sim::compiled::CompiledSampler::sample_chunked<A: prism_q::ShotAccumulator>(&mut self, usize, &mut A)
 pub fn prism_q::sim::compiled::CompiledSampler::sample_chunked_with_size<A: prism_q::ShotAccumulator>(&mut self, usize, usize, &mut A)
 pub fn prism_q::sim::compiled::CompiledSampler::sample_counts(&mut self, usize) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
-pub fn prism_q::sim::compiled::CompiledSampler::sample_detection_events(&mut self, &[(usize, usize)], usize) -> prism_q::sim::compiled::PackedShots
+pub fn prism_q::sim::compiled::CompiledSampler::sample_detection_events(&mut self, &[(usize, usize)], usize) -> prism_q::PackedShots
 pub fn prism_q::sim::compiled::CompiledSampler::sample_marginals(&mut self, usize) -> alloc::vec::Vec<f64>
 pub fn prism_q::sim::compiled::CompiledSampler::sparse(&self) -> core::option::Option<&prism_q::sim::compiled::parity::SparseParity>
-pub fn prism_q::sim::compiled::CompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::sim::compiled::CompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_counts(&mut self, usize) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_marginals(&mut self, usize) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::sim::compiled::CompiledSampler::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
@@ -2134,22 +2136,22 @@ pub fn prism_q::CorrelatorAccumulator::correlators(&self) -> alloc::vec::Vec<f64
 pub fn prism_q::CorrelatorAccumulator::new(alloc::vec::Vec<(usize, usize)>) -> Self
 pub fn prism_q::CorrelatorAccumulator::total_shots(&self) -> u64
 impl prism_q::ShotAccumulator for prism_q::CorrelatorAccumulator
-pub fn prism_q::CorrelatorAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::CorrelatorAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub struct prism_q::sim::compiled::DetectorSampleBatch
-pub prism_q::sim::compiled::DetectorSampleBatch::detectors: prism_q::sim::compiled::PackedShots
-pub prism_q::sim::compiled::DetectorSampleBatch::measurements: prism_q::sim::compiled::PackedShots
-pub prism_q::sim::compiled::DetectorSampleBatch::observables: prism_q::sim::compiled::PackedShots
+pub prism_q::sim::compiled::DetectorSampleBatch::detectors: prism_q::PackedShots
+pub prism_q::sim::compiled::DetectorSampleBatch::measurements: prism_q::PackedShots
+pub prism_q::sim::compiled::DetectorSampleBatch::observables: prism_q::PackedShots
 pub struct prism_q::sim::compiled::DevicePackedShots
-impl prism_q::sim::compiled::DevicePackedShots
-pub fn prism_q::sim::compiled::DevicePackedShots::counts(&self) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
-pub fn prism_q::sim::compiled::DevicePackedShots::layout(&self) -> prism_q::sim::compiled::ShotLayout
-pub fn prism_q::sim::compiled::DevicePackedShots::m_words(&self) -> usize
-pub fn prism_q::sim::compiled::DevicePackedShots::marginal_counts(&self) -> prism_q::error::Result<alloc::vec::Vec<u64>>
-pub fn prism_q::sim::compiled::DevicePackedShots::marginals(&self) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::compiled::DevicePackedShots::num_measurements(&self) -> usize
-pub fn prism_q::sim::compiled::DevicePackedShots::num_shots(&self) -> usize
-pub fn prism_q::sim::compiled::DevicePackedShots::s_words(&self) -> usize
-pub fn prism_q::sim::compiled::DevicePackedShots::to_host(&self) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+impl prism_q::DevicePackedShots
+pub fn prism_q::DevicePackedShots::counts(&self) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
+pub fn prism_q::DevicePackedShots::layout(&self) -> prism_q::ShotLayout
+pub fn prism_q::DevicePackedShots::m_words(&self) -> usize
+pub fn prism_q::DevicePackedShots::marginal_counts(&self) -> prism_q::error::Result<alloc::vec::Vec<u64>>
+pub fn prism_q::DevicePackedShots::marginals(&self) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::DevicePackedShots::num_measurements(&self) -> usize
+pub fn prism_q::DevicePackedShots::num_shots(&self) -> usize
+pub fn prism_q::DevicePackedShots::s_words(&self) -> usize
+pub fn prism_q::DevicePackedShots::to_host(&self) -> prism_q::error::Result<prism_q::PackedShots>
 pub struct prism_q::sim::compiled::HistogramAccumulator
 impl prism_q::HistogramAccumulator
 pub fn prism_q::HistogramAccumulator::into_counts(self) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
@@ -2157,14 +2159,14 @@ pub fn prism_q::HistogramAccumulator::new() -> Self
 impl core::default::Default for prism_q::HistogramAccumulator
 pub fn prism_q::HistogramAccumulator::default() -> Self
 impl prism_q::ShotAccumulator for prism_q::HistogramAccumulator
-pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub struct prism_q::sim::compiled::MarginalsAccumulator
 impl prism_q::MarginalsAccumulator
 pub fn prism_q::MarginalsAccumulator::marginals(&self) -> alloc::vec::Vec<f64>
 pub fn prism_q::MarginalsAccumulator::new(usize) -> Self
 pub fn prism_q::MarginalsAccumulator::total_shots(&self) -> u64
 impl prism_q::ShotAccumulator for prism_q::MarginalsAccumulator
-pub fn prism_q::MarginalsAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::MarginalsAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub struct prism_q::sim::compiled::NullAccumulator
 impl prism_q::NullAccumulator
 pub fn prism_q::NullAccumulator::new() -> Self
@@ -2172,31 +2174,31 @@ pub fn prism_q::NullAccumulator::total_shots(&self) -> u64
 impl core::default::Default for prism_q::NullAccumulator
 pub fn prism_q::NullAccumulator::default() -> Self
 impl prism_q::ShotAccumulator for prism_q::NullAccumulator
-pub fn prism_q::NullAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::NullAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub struct prism_q::sim::compiled::PackedShots
-impl prism_q::sim::compiled::PackedShots
-pub const prism_q::sim::compiled::PackedShots::RAW_FORMAT_VERSION: u32
-pub fn prism_q::sim::compiled::PackedShots::counts(&self) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
-pub fn prism_q::sim::compiled::PackedShots::from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> Self
-pub fn prism_q::sim::compiled::PackedShots::from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> Self
-pub fn prism_q::sim::compiled::PackedShots::get_bit(&self, usize, usize) -> bool
-pub fn prism_q::sim::compiled::PackedShots::into_data(self) -> alloc::vec::Vec<u64>
-pub fn prism_q::sim::compiled::PackedShots::layout(&self) -> prism_q::sim::compiled::ShotLayout
-pub fn prism_q::sim::compiled::PackedShots::m_words(&self) -> usize
-pub fn prism_q::sim::compiled::PackedShots::meas_words(&self, usize) -> &[u64]
-pub fn prism_q::sim::compiled::PackedShots::num_measurements(&self) -> usize
-pub fn prism_q::sim::compiled::PackedShots::num_shots(&self) -> usize
-pub fn prism_q::sim::compiled::PackedShots::parity_rows(&self, &[alloc::vec::Vec<usize>]) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::sim::compiled::PackedShots::raw_data(&self) -> &[u64]
-pub fn prism_q::sim::compiled::PackedShots::raw_format_version(&self) -> u32
-pub fn prism_q::sim::compiled::PackedShots::s_words(&self) -> usize
-pub fn prism_q::sim::compiled::PackedShots::shot_words(&self, usize) -> &[u64]
-pub fn prism_q::sim::compiled::PackedShots::to_meas_major(&self) -> prism_q::sim::compiled::PackedShots
-pub fn prism_q::sim::compiled::PackedShots::to_shot_major(&self) -> prism_q::sim::compiled::PackedShots
-pub fn prism_q::sim::compiled::PackedShots::to_shot_major_bytes(&self) -> alloc::vec::Vec<u8>
-pub fn prism_q::sim::compiled::PackedShots::to_shots(&self) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
-pub fn prism_q::sim::compiled::PackedShots::try_from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
-pub fn prism_q::sim::compiled::PackedShots::try_from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
+impl prism_q::PackedShots
+pub const prism_q::PackedShots::RAW_FORMAT_VERSION: u32
+pub fn prism_q::PackedShots::counts(&self) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
+pub fn prism_q::PackedShots::from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> Self
+pub fn prism_q::PackedShots::from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> Self
+pub fn prism_q::PackedShots::get_bit(&self, usize, usize) -> bool
+pub fn prism_q::PackedShots::into_data(self) -> alloc::vec::Vec<u64>
+pub fn prism_q::PackedShots::layout(&self) -> prism_q::ShotLayout
+pub fn prism_q::PackedShots::m_words(&self) -> usize
+pub fn prism_q::PackedShots::meas_words(&self, usize) -> &[u64]
+pub fn prism_q::PackedShots::num_measurements(&self) -> usize
+pub fn prism_q::PackedShots::num_shots(&self) -> usize
+pub fn prism_q::PackedShots::parity_rows(&self, &[alloc::vec::Vec<usize>]) -> prism_q::error::Result<prism_q::PackedShots>
+pub fn prism_q::PackedShots::raw_data(&self) -> &[u64]
+pub fn prism_q::PackedShots::raw_format_version(&self) -> u32
+pub fn prism_q::PackedShots::s_words(&self) -> usize
+pub fn prism_q::PackedShots::shot_words(&self, usize) -> &[u64]
+pub fn prism_q::PackedShots::to_meas_major(&self) -> prism_q::PackedShots
+pub fn prism_q::PackedShots::to_shot_major(&self) -> prism_q::PackedShots
+pub fn prism_q::PackedShots::to_shot_major_bytes(&self) -> alloc::vec::Vec<u8>
+pub fn prism_q::PackedShots::to_shots(&self) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
+pub fn prism_q::PackedShots::try_from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
+pub fn prism_q::PackedShots::try_from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
 pub struct prism_q::sim::compiled::ParityStats
 pub prism_q::sim::compiled::ParityStats::max_weight: usize
 pub prism_q::sim::compiled::ParityStats::mean_weight: f64
@@ -2209,19 +2211,19 @@ pub fn prism_q::PauliExpectationAccumulator::expectations(&self) -> alloc::vec::
 pub fn prism_q::PauliExpectationAccumulator::new(alloc::vec::Vec<alloc::vec::Vec<usize>>) -> Self
 pub fn prism_q::PauliExpectationAccumulator::total_shots(&self) -> u64
 impl prism_q::ShotAccumulator for prism_q::PauliExpectationAccumulator
-pub fn prism_q::PauliExpectationAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::PauliExpectationAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub trait prism_q::sim::compiled::ShotAccumulator
-pub fn prism_q::sim::compiled::ShotAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::sim::compiled::ShotAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::CorrelatorAccumulator
-pub fn prism_q::CorrelatorAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::CorrelatorAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::HistogramAccumulator
-pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::MarginalsAccumulator
-pub fn prism_q::MarginalsAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::MarginalsAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::NullAccumulator
-pub fn prism_q::NullAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::NullAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::PauliExpectationAccumulator
-pub fn prism_q::PauliExpectationAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::PauliExpectationAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub fn prism_q::sim::compiled::compile_detector_sampler(&prism_q::circuit::Circuit, alloc::vec::Vec<alloc::vec::Vec<usize>>, alloc::vec::Vec<alloc::vec::Vec<usize>>, u64) -> prism_q::error::Result<prism_q::sim::compiled::CompiledDetectorSampler>
 pub fn prism_q::sim::compiled::compile_forward(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::compiled::CompiledSampler>
 pub fn prism_q::sim::compiled::compile_measurements(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::compiled::CompiledSampler>
@@ -2371,12 +2373,12 @@ pub fn prism_q::sim::noise::NoiseModel::with_amplitude_damping(&prism_q::circuit
 pub fn prism_q::sim::noise::NoiseModel::with_readout_error(&mut self, f64, f64) -> &mut Self
 pub struct prism_q::sim::noise::NoisyCompiledSampler
 impl prism_q::sim::noise::NoisyCompiledSampler
-pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_bulk_packed(&mut self, usize) -> prism_q::sim::compiled::PackedShots
+pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_bulk_packed(&mut self, usize) -> prism_q::PackedShots
 pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_chunked<A: prism_q::ShotAccumulator>(&mut self, usize, &mut A)
 pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_chunked_with_size<A: prism_q::ShotAccumulator>(&mut self, usize, usize, &mut A)
 pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_counts(&mut self, usize) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
 pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_marginals(&mut self, usize) -> alloc::vec::Vec<f64>
-pub fn prism_q::sim::noise::NoisyCompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::sim::noise::NoisyCompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::sim::noise::NoisyCompiledSampler::try_sample_counts(&mut self, usize) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
 pub fn prism_q::sim::noise::NoisyCompiledSampler::try_sample_marginals(&mut self, usize) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::sim::noise::NoisyCompiledSampler::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
@@ -2454,13 +2456,13 @@ pub prism_q::sim::unified_pauli::SppResult::std_errors: alloc::vec::Vec<f64>
 pub prism_q::sim::unified_pauli::SppResult::t_count: usize
 pub fn prism_q::sim::unified_pauli::inverse_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm]) -> alloc::vec::Vec<bool>
 pub fn prism_q::sim::unified_pauli::run_pauli_path_observable(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::PauliPathResult>
-pub fn prism_q::sim::unified_pauli::run_spd(&prism_q::circuit::Circuit, f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdResult>
-pub fn prism_q::sim::unified_pauli::run_spd_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::sim::unified_pauli::run_spd_observable_budgeted(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::sim::unified_pauli::run_spd_observable_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::sim::unified_pauli::run_spd_with(&prism_q::circuit::Circuit, &prism_q::sim::unified_pauli::SpdTruncation) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdResult>
-pub fn prism_q::sim::unified_pauli::run_spp(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::sim::unified_pauli::SppResult>
-pub fn prism_q::sim::unified_pauli::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize, u64) -> prism_q::error::Result<prism_q::sim::unified_pauli::SppObservableResult>
+pub fn prism_q::sim::unified_pauli::run_spd(&prism_q::circuit::Circuit, f64, usize) -> prism_q::error::Result<prism_q::SpdResult>
+pub fn prism_q::sim::unified_pauli::run_spd_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::sim::unified_pauli::run_spd_observable_budgeted(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::sim::unified_pauli::run_spd_observable_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::sim::unified_pauli::run_spd_with(&prism_q::circuit::Circuit, &prism_q::SpdTruncation) -> prism_q::error::Result<prism_q::SpdResult>
+pub fn prism_q::sim::unified_pauli::run_spp(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::SppResult>
+pub fn prism_q::sim::unified_pauli::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize, u64) -> prism_q::error::Result<prism_q::SppObservableResult>
 #[non_exhaustive] pub enum prism_q::sim::BackendKind
 pub prism_q::sim::BackendKind::Auto
 pub prism_q::sim::BackendKind::AutoGpu
@@ -2469,7 +2471,7 @@ pub prism_q::sim::BackendKind::DensityMatrix
 pub prism_q::sim::BackendKind::DensityMatrixGpu
 pub prism_q::sim::BackendKind::DensityMatrixGpu::context: alloc::sync::Arc<prism_q::gpu::GpuContext>
 pub prism_q::sim::BackendKind::DeterministicPauli
-pub prism_q::sim::BackendKind::DeterministicPauli::truncation: prism_q::sim::unified_pauli::SpdTruncation
+pub prism_q::sim::BackendKind::DeterministicPauli::truncation: prism_q::SpdTruncation
 pub prism_q::sim::BackendKind::Factored
 pub prism_q::sim::BackendKind::FactoredStabilizer
 pub prism_q::sim::BackendKind::Mps
@@ -2729,49 +2731,49 @@ pub fn prism_q::ShotsResult::num_shots(&self) -> usize
 impl core::fmt::Display for prism_q::ShotsResult
 pub fn prism_q::ShotsResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct prism_q::sim::Simulate<'c, SeedState>
-impl<'c, SeedState> prism_q::sim::Simulate<'c, SeedState>
-pub fn prism_q::sim::Simulate<'c, SeedState>::backend(self, prism_q::BackendKind) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::distributed(self, alloc::sync::Arc<prism_q::distributed::DistributedContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::require_exact(self) -> Self
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results(self, &[prism_q::circuit::braket::ResultSpec]) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::overlap(self, prism_q::sim::Simulate<'_, prism_q::sim::Seeded>) -> prism_q::error::Result<prism_q::sim::OverlapResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::probabilities_of(self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::reduced_density_matrix(self, &[usize]) -> prism_q::error::Result<prism_q::sim::ReducedDensityMatrix>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::run(self) -> prism_q::error::Result<prism_q::sim::RunOutcome>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-impl<SeedState> prism_q::sim::Simulate<'_, SeedState>
-pub fn prism_q::sim::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
+impl<'c, SeedState> prism_q::Simulate<'c, SeedState>
+pub fn prism_q::Simulate<'c, SeedState>::backend(self, prism_q::BackendKind) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::distributed(self, alloc::sync::Arc<prism_q::distributed::DistributedContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::require_exact(self) -> Self
+impl<'c> prism_q::Simulate<'c, prism_q::Seeded>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::braket_results(self, &[prism_q::circuit::braket::ResultSpec]) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
+impl<'c> prism_q::Simulate<'c, prism_q::Seeded>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::overlap(self, prism_q::Simulate<'_, prism_q::Seeded>) -> prism_q::error::Result<prism_q::sim::OverlapResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::probabilities_of(self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::reduced_density_matrix(self, &[usize]) -> prism_q::error::Result<prism_q::sim::ReducedDensityMatrix>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::run(self) -> prism_q::error::Result<prism_q::sim::RunOutcome>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
+impl<'c> prism_q::Simulate<'c, prism_q::Unseeded>
+pub fn prism_q::Simulate<'c, prism_q::Unseeded>::seed(self, u64) -> prism_q::Simulate<'c, prism_q::Seeded>
+impl<SeedState> prism_q::Simulate<'_, SeedState>
+pub fn prism_q::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
 pub struct prism_q::sim::SimulateProgram<'p, SeedState>
-impl prism_q::SimulateProgram<'_, prism_q::sim::Seeded>
-pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
-pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+impl prism_q::SimulateProgram<'_, prism_q::Seeded>
+pub fn prism_q::SimulateProgram<'_, prism_q::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::SimulateProgram<'_, prism_q::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
 impl<'p, SeedState> prism_q::SimulateProgram<'p, SeedState>
 pub fn prism_q::SimulateProgram<'p, SeedState>::backend(self, prism_q::BackendKind) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::max_steps(self, u64) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::noise(self, &'p prism_q::sim::noise::builder::NoiseBuilder) -> Self
-impl<'p> prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>
-pub fn prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::sim::Seeded>
+impl<'p> prism_q::SimulateProgram<'p, prism_q::Unseeded>
+pub fn prism_q::SimulateProgram<'p, prism_q::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::Seeded>
 pub struct prism_q::sim::Unseeded
 pub fn prism_q::sim::bitstring(&[u64], usize) -> alloc::string::String
 pub fn prism_q::sim::run_batch(&[prism_q::circuit::Circuit], prism_q::BackendKind, u64) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::RunOutcome>>
@@ -2780,8 +2782,8 @@ pub fn prism_q::sim::run_observable_expectation(&prism_q::circuit::Circuit, &pri
 pub fn prism_q::sim::run_on(&mut dyn prism_q::backend::Backend, &prism_q::circuit::Circuit) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::sim::run_on_state(&mut dyn prism_q::backend::Backend, &prism_q::circuit::Circuit, &[num_complex::Complex64]) -> prism_q::error::Result<prism_q::sim::RunOutcome>
 pub fn prism_q::sim::run_qasm(&str, u64) -> prism_q::error::Result<prism_q::sim::RunOutcome>
-pub fn prism_q::sim::simulate(&prism_q::circuit::Circuit) -> prism_q::sim::Simulate<'_, prism_q::sim::Unseeded>
-pub fn prism_q::sim::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::sim::Unseeded>
+pub fn prism_q::sim::simulate(&prism_q::circuit::Circuit) -> prism_q::Simulate<'_, prism_q::Unseeded>
+pub fn prism_q::sim::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::Unseeded>
 pub mod prism_q::threading
 pub struct prism_q::threading::ThreadPool
 impl prism_q::threading::ThreadPool
@@ -2796,7 +2798,7 @@ pub prism_q::BackendKind::DensityMatrix
 pub prism_q::BackendKind::DensityMatrixGpu
 pub prism_q::BackendKind::DensityMatrixGpu::context: alloc::sync::Arc<prism_q::gpu::GpuContext>
 pub prism_q::BackendKind::DeterministicPauli
-pub prism_q::BackendKind::DeterministicPauli::truncation: prism_q::sim::unified_pauli::SpdTruncation
+pub prism_q::BackendKind::DeterministicPauli::truncation: prism_q::SpdTruncation
 pub prism_q::BackendKind::Factored
 pub prism_q::BackendKind::FactoredStabilizer
 pub prism_q::BackendKind::Mps
@@ -3238,9 +3240,9 @@ impl prism_q::BondReport
 pub fn prism_q::BondReport::saturated(&self) -> bool
 pub struct prism_q::BpOsdDecoder
 impl prism_q::BpOsdDecoder
-pub fn prism_q::BpOsdDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::BpOsdDecoder::decode_packed(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::BpOsdDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
-pub fn prism_q::BpOsdDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::BpOsdDecoder::logical_error_rate(&self, &prism_q::PackedShots, &prism_q::PackedShots) -> prism_q::error::Result<f64>
 pub fn prism_q::BpOsdDecoder::num_detectors(&self) -> usize
 pub fn prism_q::BpOsdDecoder::num_observables(&self) -> usize
 pub fn prism_q::BpOsdDecoder::options(&self) -> prism_q::BpOsdOptions
@@ -3358,9 +3360,9 @@ pub fn prism_q::sim::compiled::CompiledDetectorSampler::observable_rows(&self) -
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::rank(&self) -> usize
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_detector_counts(&mut self, usize) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_detectors_chunked<A: prism_q::ShotAccumulator>(&mut self, usize, &mut A) -> prism_q::error::Result<()>
-pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_detectors_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_measurements_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_observables_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_detectors_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
+pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_measurements_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
+pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_observables_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::sample_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::DetectorSampleBatch>
 pub fn prism_q::sim::compiled::CompiledDetectorSampler::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub struct prism_q::CompiledSampler
@@ -3372,15 +3374,15 @@ pub fn prism_q::sim::compiled::CompiledSampler::parity_stats(&self) -> core::opt
 pub fn prism_q::sim::compiled::CompiledSampler::rank(&self) -> usize
 pub fn prism_q::sim::compiled::CompiledSampler::sample(&mut self) -> alloc::vec::Vec<bool>
 pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk(&mut self, usize) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
-pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk_packed(&mut self, usize) -> prism_q::sim::compiled::PackedShots
-pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk_packed_device(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::DevicePackedShots>
+pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk_packed(&mut self, usize) -> prism_q::PackedShots
+pub fn prism_q::sim::compiled::CompiledSampler::sample_bulk_packed_device(&mut self, usize) -> prism_q::error::Result<prism_q::DevicePackedShots>
 pub fn prism_q::sim::compiled::CompiledSampler::sample_chunked<A: prism_q::ShotAccumulator>(&mut self, usize, &mut A)
 pub fn prism_q::sim::compiled::CompiledSampler::sample_chunked_with_size<A: prism_q::ShotAccumulator>(&mut self, usize, usize, &mut A)
 pub fn prism_q::sim::compiled::CompiledSampler::sample_counts(&mut self, usize) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
-pub fn prism_q::sim::compiled::CompiledSampler::sample_detection_events(&mut self, &[(usize, usize)], usize) -> prism_q::sim::compiled::PackedShots
+pub fn prism_q::sim::compiled::CompiledSampler::sample_detection_events(&mut self, &[(usize, usize)], usize) -> prism_q::PackedShots
 pub fn prism_q::sim::compiled::CompiledSampler::sample_marginals(&mut self, usize) -> alloc::vec::Vec<f64>
 pub fn prism_q::sim::compiled::CompiledSampler::sparse(&self) -> core::option::Option<&prism_q::sim::compiled::parity::SparseParity>
-pub fn prism_q::sim::compiled::CompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::sim::compiled::CompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_counts(&mut self, usize) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
 pub fn prism_q::sim::compiled::CompiledSampler::try_sample_marginals(&mut self, usize) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::sim::compiled::CompiledSampler::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
@@ -3390,7 +3392,7 @@ pub fn prism_q::CorrelatorAccumulator::correlators(&self) -> alloc::vec::Vec<f64
 pub fn prism_q::CorrelatorAccumulator::new(alloc::vec::Vec<(usize, usize)>) -> Self
 pub fn prism_q::CorrelatorAccumulator::total_shots(&self) -> u64
 impl prism_q::ShotAccumulator for prism_q::CorrelatorAccumulator
-pub fn prism_q::CorrelatorAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::CorrelatorAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub struct prism_q::CountsResult
 pub prism_q::CountsResult::counts: std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
 pub prism_q::CountsResult::metadata: prism_q::RunMetadata
@@ -3457,9 +3459,9 @@ pub fn prism_q::DetectorErrorModel::num_mechanisms(&self) -> usize
 pub fn prism_q::DetectorErrorModel::num_observables(&self) -> usize
 pub fn prism_q::DetectorErrorModel::to_text(&self) -> alloc::string::String
 pub struct prism_q::DetectorSampleBatch
-pub prism_q::DetectorSampleBatch::detectors: prism_q::sim::compiled::PackedShots
-pub prism_q::DetectorSampleBatch::measurements: prism_q::sim::compiled::PackedShots
-pub prism_q::DetectorSampleBatch::observables: prism_q::sim::compiled::PackedShots
+pub prism_q::DetectorSampleBatch::detectors: prism_q::PackedShots
+pub prism_q::DetectorSampleBatch::measurements: prism_q::PackedShots
+pub prism_q::DetectorSampleBatch::observables: prism_q::PackedShots
 pub struct prism_q::DeviceCalibration
 impl prism_q::sim::calibration::DeviceCalibration
 pub fn prism_q::sim::calibration::DeviceCalibration::gate1q(&self) -> &prism_q::sim::calibration::GateCalibration
@@ -3475,16 +3477,16 @@ pub fn prism_q::sim::calibration::DeviceCalibration::to_noise_model(&self, &pris
 pub fn prism_q::sim::calibration::DeviceCalibration::to_scheduled_noise_model(&self, &prism_q::circuit::Circuit) -> prism_q::error::Result<prism_q::sim::noise::NoiseModel>
 pub fn prism_q::sim::calibration::DeviceCalibration::with_pair(self, usize, usize, prism_q::sim::calibration::GateCalibration) -> prism_q::error::Result<Self>
 pub struct prism_q::DevicePackedShots
-impl prism_q::sim::compiled::DevicePackedShots
-pub fn prism_q::sim::compiled::DevicePackedShots::counts(&self) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
-pub fn prism_q::sim::compiled::DevicePackedShots::layout(&self) -> prism_q::sim::compiled::ShotLayout
-pub fn prism_q::sim::compiled::DevicePackedShots::m_words(&self) -> usize
-pub fn prism_q::sim::compiled::DevicePackedShots::marginal_counts(&self) -> prism_q::error::Result<alloc::vec::Vec<u64>>
-pub fn prism_q::sim::compiled::DevicePackedShots::marginals(&self) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::compiled::DevicePackedShots::num_measurements(&self) -> usize
-pub fn prism_q::sim::compiled::DevicePackedShots::num_shots(&self) -> usize
-pub fn prism_q::sim::compiled::DevicePackedShots::s_words(&self) -> usize
-pub fn prism_q::sim::compiled::DevicePackedShots::to_host(&self) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+impl prism_q::DevicePackedShots
+pub fn prism_q::DevicePackedShots::counts(&self) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
+pub fn prism_q::DevicePackedShots::layout(&self) -> prism_q::ShotLayout
+pub fn prism_q::DevicePackedShots::m_words(&self) -> usize
+pub fn prism_q::DevicePackedShots::marginal_counts(&self) -> prism_q::error::Result<alloc::vec::Vec<u64>>
+pub fn prism_q::DevicePackedShots::marginals(&self) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::DevicePackedShots::num_measurements(&self) -> usize
+pub fn prism_q::DevicePackedShots::num_shots(&self) -> usize
+pub fn prism_q::DevicePackedShots::s_words(&self) -> usize
+pub fn prism_q::DevicePackedShots::to_host(&self) -> prism_q::error::Result<prism_q::PackedShots>
 pub struct prism_q::DistributedContext
 impl prism_q::distributed::DistributedContext
 pub fn prism_q::distributed::DistributedContext::from_comm(alloc::sync::Arc<dyn prism_q::distributed::comm::RankComm>) -> alloc::sync::Arc<Self>
@@ -3718,7 +3720,7 @@ pub fn prism_q::HistogramAccumulator::new() -> Self
 impl core::default::Default for prism_q::HistogramAccumulator
 pub fn prism_q::HistogramAccumulator::default() -> Self
 impl prism_q::ShotAccumulator for prism_q::HistogramAccumulator
-pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 #[non_exhaustive] pub struct prism_q::Limits
 pub prism_q::Limits::auto_mps_bond_dim: core::option::Option<usize>
 pub prism_q::Limits::max_density_matrix_qubits: core::option::Option<usize>
@@ -3752,7 +3754,7 @@ pub fn prism_q::MarginalsAccumulator::marginals(&self) -> alloc::vec::Vec<f64>
 pub fn prism_q::MarginalsAccumulator::new(usize) -> Self
 pub fn prism_q::MarginalsAccumulator::total_shots(&self) -> u64
 impl prism_q::ShotAccumulator for prism_q::MarginalsAccumulator
-pub fn prism_q::MarginalsAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::MarginalsAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub struct prism_q::MarginalsResult
 pub prism_q::MarginalsResult::marginals: alloc::vec::Vec<(f64, f64)>
 pub prism_q::MarginalsResult::metadata: prism_q::RunMetadata
@@ -3760,9 +3762,9 @@ impl prism_q::sim::MarginalsResult
 pub fn prism_q::sim::MarginalsResult::into_vec(self) -> alloc::vec::Vec<(f64, f64)>
 pub struct prism_q::MatchingDecoder
 impl prism_q::MatchingDecoder
-pub fn prism_q::MatchingDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::MatchingDecoder::decode_packed(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::MatchingDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
-pub fn prism_q::MatchingDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::MatchingDecoder::logical_error_rate(&self, &prism_q::PackedShots, &prism_q::PackedShots) -> prism_q::error::Result<f64>
 pub fn prism_q::MatchingDecoder::num_detectors(&self) -> usize
 pub fn prism_q::MatchingDecoder::num_observables(&self) -> usize
 pub struct prism_q::McuData
@@ -3776,14 +3778,15 @@ pub prism_q::MemoryEstimate::kind: prism_q::MemoryEstimateKind
 pub struct prism_q::MpsBackend
 impl prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::current_max_bond_dim(&self) -> usize
-pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::backend::mps::MpsBackend::is_qubit_in_zero_state(&self, usize, f64) -> prism_q::error::Result<bool>
 pub fn prism_q::backend::mps::MpsBackend::new(u64, usize) -> Self
-pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::backend::mps::MpsBackend::reset_truncation_tracking(&mut self)
 pub fn prism_q::backend::mps::MpsBackend::set_svd_epsilon(&mut self, f64)
 pub fn prism_q::backend::mps::MpsBackend::site_for_qubit(&self, usize) -> usize
 pub fn prism_q::backend::mps::MpsBackend::truncation_discarded(&self) -> f64
+impl prism_q::backend::mps::MpsBackend
+pub fn prism_q::backend::mps::MpsBackend::inner_product(&self, &Self) -> prism_q::error::Result<num_complex::Complex64>
+pub fn prism_q::backend::mps::MpsBackend::pauli_expectation(&self, &[(usize, prism_q::backend::mps::MpsPauliAxis)]) -> prism_q::error::Result<num_complex::Complex64>
 impl core::clone::Clone for prism_q::backend::mps::MpsBackend
 pub fn prism_q::backend::mps::MpsBackend::clone(&self) -> Self
 impl prism_q::backend::Backend for prism_q::backend::mps::MpsBackend
@@ -3865,12 +3868,12 @@ pub fn prism_q::sim::noise::NoiseModel::with_amplitude_damping(&prism_q::circuit
 pub fn prism_q::sim::noise::NoiseModel::with_readout_error(&mut self, f64, f64) -> &mut Self
 pub struct prism_q::NoisyCompiledSampler
 impl prism_q::sim::noise::NoisyCompiledSampler
-pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_bulk_packed(&mut self, usize) -> prism_q::sim::compiled::PackedShots
+pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_bulk_packed(&mut self, usize) -> prism_q::PackedShots
 pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_chunked<A: prism_q::ShotAccumulator>(&mut self, usize, &mut A)
 pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_chunked_with_size<A: prism_q::ShotAccumulator>(&mut self, usize, usize, &mut A)
 pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_counts(&mut self, usize) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
 pub fn prism_q::sim::noise::NoisyCompiledSampler::sample_marginals(&mut self, usize) -> alloc::vec::Vec<f64>
-pub fn prism_q::sim::noise::NoisyCompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::sim::noise::NoisyCompiledSampler::try_sample_bulk_packed(&mut self, usize) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::sim::noise::NoisyCompiledSampler::try_sample_counts(&mut self, usize) -> prism_q::error::Result<std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>>
 pub fn prism_q::sim::noise::NoisyCompiledSampler::try_sample_marginals(&mut self, usize) -> prism_q::error::Result<alloc::vec::Vec<f64>>
 pub fn prism_q::sim::noise::NoisyCompiledSampler::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
@@ -3881,7 +3884,7 @@ pub fn prism_q::NullAccumulator::total_shots(&self) -> u64
 impl core::default::Default for prism_q::NullAccumulator
 pub fn prism_q::NullAccumulator::default() -> Self
 impl prism_q::ShotAccumulator for prism_q::NullAccumulator
-pub fn prism_q::NullAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::NullAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub struct prism_q::ObservableExpectation
 pub prism_q::ObservableExpectation::group_variances: core::option::Option<alloc::vec::Vec<f64>>
 pub prism_q::ObservableExpectation::mean: f64
@@ -3897,29 +3900,29 @@ pub prism_q::OverlapResult::fidelity: f64
 pub prism_q::OverlapResult::left: prism_q::RunMetadata
 pub prism_q::OverlapResult::right: prism_q::RunMetadata
 pub struct prism_q::PackedShots
-impl prism_q::sim::compiled::PackedShots
-pub const prism_q::sim::compiled::PackedShots::RAW_FORMAT_VERSION: u32
-pub fn prism_q::sim::compiled::PackedShots::counts(&self) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
-pub fn prism_q::sim::compiled::PackedShots::from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> Self
-pub fn prism_q::sim::compiled::PackedShots::from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> Self
-pub fn prism_q::sim::compiled::PackedShots::get_bit(&self, usize, usize) -> bool
-pub fn prism_q::sim::compiled::PackedShots::into_data(self) -> alloc::vec::Vec<u64>
-pub fn prism_q::sim::compiled::PackedShots::layout(&self) -> prism_q::sim::compiled::ShotLayout
-pub fn prism_q::sim::compiled::PackedShots::m_words(&self) -> usize
-pub fn prism_q::sim::compiled::PackedShots::meas_words(&self, usize) -> &[u64]
-pub fn prism_q::sim::compiled::PackedShots::num_measurements(&self) -> usize
-pub fn prism_q::sim::compiled::PackedShots::num_shots(&self) -> usize
-pub fn prism_q::sim::compiled::PackedShots::parity_rows(&self, &[alloc::vec::Vec<usize>]) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
-pub fn prism_q::sim::compiled::PackedShots::raw_data(&self) -> &[u64]
-pub fn prism_q::sim::compiled::PackedShots::raw_format_version(&self) -> u32
-pub fn prism_q::sim::compiled::PackedShots::s_words(&self) -> usize
-pub fn prism_q::sim::compiled::PackedShots::shot_words(&self, usize) -> &[u64]
-pub fn prism_q::sim::compiled::PackedShots::to_meas_major(&self) -> prism_q::sim::compiled::PackedShots
-pub fn prism_q::sim::compiled::PackedShots::to_shot_major(&self) -> prism_q::sim::compiled::PackedShots
-pub fn prism_q::sim::compiled::PackedShots::to_shot_major_bytes(&self) -> alloc::vec::Vec<u8>
-pub fn prism_q::sim::compiled::PackedShots::to_shots(&self) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
-pub fn prism_q::sim::compiled::PackedShots::try_from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
-pub fn prism_q::sim::compiled::PackedShots::try_from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
+impl prism_q::PackedShots
+pub const prism_q::PackedShots::RAW_FORMAT_VERSION: u32
+pub fn prism_q::PackedShots::counts(&self) -> std::collections::hash::map::HashMap<alloc::vec::Vec<u64>, u64>
+pub fn prism_q::PackedShots::from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> Self
+pub fn prism_q::PackedShots::from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> Self
+pub fn prism_q::PackedShots::get_bit(&self, usize, usize) -> bool
+pub fn prism_q::PackedShots::into_data(self) -> alloc::vec::Vec<u64>
+pub fn prism_q::PackedShots::layout(&self) -> prism_q::ShotLayout
+pub fn prism_q::PackedShots::m_words(&self) -> usize
+pub fn prism_q::PackedShots::meas_words(&self, usize) -> &[u64]
+pub fn prism_q::PackedShots::num_measurements(&self) -> usize
+pub fn prism_q::PackedShots::num_shots(&self) -> usize
+pub fn prism_q::PackedShots::parity_rows(&self, &[alloc::vec::Vec<usize>]) -> prism_q::error::Result<prism_q::PackedShots>
+pub fn prism_q::PackedShots::raw_data(&self) -> &[u64]
+pub fn prism_q::PackedShots::raw_format_version(&self) -> u32
+pub fn prism_q::PackedShots::s_words(&self) -> usize
+pub fn prism_q::PackedShots::shot_words(&self, usize) -> &[u64]
+pub fn prism_q::PackedShots::to_meas_major(&self) -> prism_q::PackedShots
+pub fn prism_q::PackedShots::to_shot_major(&self) -> prism_q::PackedShots
+pub fn prism_q::PackedShots::to_shot_major_bytes(&self) -> alloc::vec::Vec<u8>
+pub fn prism_q::PackedShots::to_shots(&self) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
+pub fn prism_q::PackedShots::try_from_meas_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
+pub fn prism_q::PackedShots::try_from_shot_major(alloc::vec::Vec<u64>, usize, usize) -> prism_q::error::Result<Self>
 pub struct prism_q::ParamLink
 pub prism_q::ParamLink::instruction: usize
 pub prism_q::ParamLink::offset: f64
@@ -3958,7 +3961,7 @@ pub fn prism_q::PauliExpectationAccumulator::expectations(&self) -> alloc::vec::
 pub fn prism_q::PauliExpectationAccumulator::new(alloc::vec::Vec<alloc::vec::Vec<usize>>) -> Self
 pub fn prism_q::PauliExpectationAccumulator::total_shots(&self) -> u64
 impl prism_q::ShotAccumulator for prism_q::PauliExpectationAccumulator
-pub fn prism_q::PauliExpectationAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::PauliExpectationAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub struct prism_q::PauliObservable
 impl prism_q::PauliObservable
 pub fn prism_q::PauliObservable::add_term(&mut self, f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>) -> prism_q::error::Result<()>
@@ -4079,7 +4082,7 @@ impl prism_q::QecCircuitNoise
 pub fn prism_q::QecCircuitNoise::uniform(f64) -> Self
 pub struct prism_q::QecCompiledRows
 impl prism_q::QecCompiledRows
-pub fn prism_q::QecCompiledRows::detector_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::detector_parities(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::QecCompiledRows::detector_rows(&self) -> &[alloc::vec::Vec<usize>]
 pub fn prism_q::QecCompiledRows::measurement_mask_bytes(&self) -> usize
 pub fn prism_q::QecCompiledRows::measurement_rows(&self) -> &[prism_q::QecMeasurementRow]
@@ -4088,11 +4091,11 @@ pub fn prism_q::QecCompiledRows::num_measurements(&self) -> usize
 pub fn prism_q::QecCompiledRows::num_observables(&self) -> usize
 pub fn prism_q::QecCompiledRows::num_postselections(&self) -> usize
 pub fn prism_q::QecCompiledRows::num_qubits(&self) -> usize
-pub fn prism_q::QecCompiledRows::observable_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::observable_parities(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::QecCompiledRows::observable_rows(&self) -> &[alloc::vec::Vec<usize>]
 pub fn prism_q::QecCompiledRows::packed_row_words(&self) -> usize
 pub fn prism_q::QecCompiledRows::postselection_expected(&self) -> &[bool]
-pub fn prism_q::QecCompiledRows::postselection_parities(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::QecCompiledRows::postselection_parities(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::QecCompiledRows::postselection_predicates(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = (&[usize], bool)> + '_
 pub fn prism_q::QecCompiledRows::postselection_rows(&self) -> &[alloc::vec::Vec<usize>]
 pub struct prism_q::QecCompiledSampler
@@ -4184,25 +4187,25 @@ impl prism_q::qec::QecProgram
 pub fn prism_q::qec::QecProgram::to_text(&self) -> prism_q::error::Result<alloc::string::String>
 #[non_exhaustive] pub struct prism_q::QecSampleResult
 pub prism_q::QecSampleResult::accepted_shots: usize
-pub prism_q::QecSampleResult::detectors: prism_q::sim::compiled::PackedShots
+pub prism_q::QecSampleResult::detectors: prism_q::PackedShots
 pub prism_q::QecSampleResult::discarded_shots: usize
 pub prism_q::QecSampleResult::expectation_values: core::option::Option<alloc::vec::Vec<prism_q::QecObservableEstimate>>
-pub prism_q::QecSampleResult::heralds: core::option::Option<prism_q::sim::compiled::PackedShots>
+pub prism_q::QecSampleResult::heralds: core::option::Option<prism_q::PackedShots>
 pub prism_q::QecSampleResult::logical_errors: alloc::vec::Vec<u64>
-pub prism_q::QecSampleResult::measurements: prism_q::sim::compiled::PackedShots
+pub prism_q::QecSampleResult::measurements: prism_q::PackedShots
 pub prism_q::QecSampleResult::observable_expectations: core::option::Option<alloc::vec::Vec<prism_q::QecObservableEstimate>>
-pub prism_q::QecSampleResult::observables: prism_q::sim::compiled::PackedShots
+pub prism_q::QecSampleResult::observables: prism_q::PackedShots
 pub prism_q::QecSampleResult::total_shots: usize
 impl prism_q::QecSampleResult
 pub fn prism_q::QecSampleResult::empty(usize, usize, usize) -> Self
 pub fn prism_q::QecSampleResult::logical_error_rate_wilson_intervals(&self, f64) -> alloc::vec::Vec<(f64, f64)>
 pub fn prism_q::QecSampleResult::logical_error_rates(&self) -> alloc::vec::Vec<f64>
-pub fn prism_q::QecSampleResult::new(prism_q::sim::compiled::PackedShots, prism_q::sim::compiled::PackedShots, prism_q::sim::compiled::PackedShots, usize, usize, alloc::vec::Vec<u64>) -> prism_q::error::Result<Self>
-pub fn prism_q::QecSampleResult::new_with_total_shots(usize, prism_q::sim::compiled::PackedShots, prism_q::sim::compiled::PackedShots, prism_q::sim::compiled::PackedShots, usize, usize, alloc::vec::Vec<u64>) -> prism_q::error::Result<Self>
+pub fn prism_q::QecSampleResult::new(prism_q::PackedShots, prism_q::PackedShots, prism_q::PackedShots, usize, usize, alloc::vec::Vec<u64>) -> prism_q::error::Result<Self>
+pub fn prism_q::QecSampleResult::new_with_total_shots(usize, prism_q::PackedShots, prism_q::PackedShots, prism_q::PackedShots, usize, usize, alloc::vec::Vec<u64>) -> prism_q::error::Result<Self>
 pub fn prism_q::QecSampleResult::survivor_rate(&self) -> f64
 pub fn prism_q::QecSampleResult::survivor_rate_wilson_interval(&self, f64) -> (f64, f64)
 pub fn prism_q::QecSampleResult::with_expectation_values(self, alloc::vec::Vec<prism_q::QecObservableEstimate>) -> Self
-pub fn prism_q::QecSampleResult::with_heralds(self, prism_q::sim::compiled::PackedShots) -> Self
+pub fn prism_q::QecSampleResult::with_heralds(self, prism_q::PackedShots) -> Self
 pub fn prism_q::QecSampleResult::with_observable_expectations(self, alloc::vec::Vec<prism_q::QecObservableEstimate>) -> prism_q::error::Result<Self>
 pub struct prism_q::QubitCalibration
 pub prism_q::QubitCalibration::p01: f64
@@ -4273,49 +4276,49 @@ pub fn prism_q::ShotsResult::num_shots(&self) -> usize
 impl core::fmt::Display for prism_q::ShotsResult
 pub fn prism_q::ShotsResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct prism_q::Simulate<'c, SeedState>
-impl<'c, SeedState> prism_q::sim::Simulate<'c, SeedState>
-pub fn prism_q::sim::Simulate<'c, SeedState>::backend(self, prism_q::BackendKind) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::distributed(self, alloc::sync::Arc<prism_q::distributed::DistributedContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
-pub fn prism_q::sim::Simulate<'c, SeedState>::require_exact(self) -> Self
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results(self, &[prism_q::circuit::braket::ResultSpec]) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::overlap(self, prism_q::sim::Simulate<'_, prism_q::sim::Seeded>) -> prism_q::error::Result<prism_q::sim::OverlapResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::probabilities_of(self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::reduced_density_matrix(self, &[usize]) -> prism_q::error::Result<prism_q::sim::ReducedDensityMatrix>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::run(self) -> prism_q::error::Result<prism_q::sim::RunOutcome>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
-impl<'c> prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>
-pub fn prism_q::sim::Simulate<'c, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::sim::Simulate<'c, prism_q::sim::Seeded>
-impl<SeedState> prism_q::sim::Simulate<'_, SeedState>
-pub fn prism_q::sim::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
+impl<'c, SeedState> prism_q::Simulate<'c, SeedState>
+pub fn prism_q::Simulate<'c, SeedState>::backend(self, prism_q::BackendKind) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::distributed(self, alloc::sync::Arc<prism_q::distributed::DistributedContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::initial_density_matrix(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::initial_state(self, &'c [num_complex::Complex64]) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::limits(self, prism_q::Limits) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::noise(self, &'c prism_q::sim::noise::NoiseModel) -> Self
+pub fn prism_q::Simulate<'c, SeedState>::require_exact(self) -> Self
+impl<'c> prism_q::Simulate<'c, prism_q::Seeded>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::braket_results(self, &[prism_q::circuit::braket::ResultSpec]) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::braket_results_sampled(self, &[prism_q::circuit::braket::ResultSpec], usize) -> prism_q::error::Result<alloc::vec::Vec<prism_q::sim::braket::ResultValue>>
+impl<'c> prism_q::Simulate<'c, prism_q::Seeded>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::entanglement_entropy(self, &[usize]) -> prism_q::error::Result<prism_q::sim::EntropyResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_gradient_shift(self, &prism_q::PauliObservable, &prism_q::circuit::parameter::Parameters) -> prism_q::error::Result<prism_q::sim::gradient::ExpectationGradient>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::expectation_values_reported(self, &[alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>]) -> prism_q::error::Result<prism_q::ExpectationResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::marginals(self) -> prism_q::error::Result<prism_q::sim::MarginalsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_expectation(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::ObservableExpectation>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::observable_variance(self, &prism_q::PauliObservable) -> prism_q::error::Result<prism_q::sim::ObservableVariance>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::overlap(self, prism_q::Simulate<'_, prism_q::Seeded>) -> prism_q::error::Result<prism_q::sim::OverlapResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::probabilities_of(self, &[usize]) -> prism_q::error::Result<alloc::vec::Vec<f64>>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::reduced_density_matrix(self, &[usize]) -> prism_q::error::Result<prism_q::sim::ReducedDensityMatrix>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::run(self) -> prism_q::error::Result<prism_q::sim::RunOutcome>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+pub fn prism_q::Simulate<'c, prism_q::Seeded>::state_vector(self) -> prism_q::error::Result<alloc::vec::Vec<num_complex::Complex64>>
+impl<'c> prism_q::Simulate<'c, prism_q::Unseeded>
+pub fn prism_q::Simulate<'c, prism_q::Unseeded>::seed(self, u64) -> prism_q::Simulate<'c, prism_q::Seeded>
+impl<SeedState> prism_q::Simulate<'_, SeedState>
+pub fn prism_q::Simulate<'_, SeedState>::plan(&self, prism_q::Query<'_>) -> prism_q::error::Result<prism_q::Plan>
 pub struct prism_q::SimulateProgram<'p, SeedState>
-impl prism_q::SimulateProgram<'_, prism_q::sim::Seeded>
-pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
-pub fn prism_q::SimulateProgram<'_, prism_q::sim::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
+impl prism_q::SimulateProgram<'_, prism_q::Seeded>
+pub fn prism_q::SimulateProgram<'_, prism_q::Seeded>::sample_counts(self, usize) -> prism_q::error::Result<prism_q::sim::CountsResult>
+pub fn prism_q::SimulateProgram<'_, prism_q::Seeded>::shots(self, usize) -> prism_q::error::Result<prism_q::ShotsResult>
 impl<'p, SeedState> prism_q::SimulateProgram<'p, SeedState>
 pub fn prism_q::SimulateProgram<'p, SeedState>::backend(self, prism_q::BackendKind) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::max_steps(self, u64) -> Self
 pub fn prism_q::SimulateProgram<'p, SeedState>::noise(self, &'p prism_q::sim::noise::builder::NoiseBuilder) -> Self
-impl<'p> prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>
-pub fn prism_q::SimulateProgram<'p, prism_q::sim::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::sim::Seeded>
+impl<'p> prism_q::SimulateProgram<'p, prism_q::Unseeded>
+pub fn prism_q::SimulateProgram<'p, prism_q::Unseeded>::seed(self, u64) -> prism_q::SimulateProgram<'p, prism_q::Seeded>
 pub struct prism_q::SparseBackend
 impl prism_q::backend::sparse::SparseBackend
 pub fn prism_q::backend::sparse::SparseBackend::entry_count(&self) -> usize
@@ -4401,6 +4404,7 @@ pub fn prism_q::backend::stabilizer::StabilizerBackend::init_from_tableau(&mut s
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::new_lazy(u64) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::raw_tableau(&self) -> (&[u64], &[bool])
+impl prism_q::backend::stabilizer::StabilizerBackend
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 pub fn prism_q::backend::stabilizer::StabilizerBackend::with_gpu_auto(self, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> Self
 impl core::clone::Clone for prism_q::backend::stabilizer::StabilizerBackend
@@ -4574,9 +4578,9 @@ pub fn prism_q::threading::ThreadPool::num_threads(&self) -> usize
 pub fn prism_q::threading::ThreadPool::with_threads(usize) -> prism_q::error::Result<Self>
 pub struct prism_q::UnionFindDecoder
 impl prism_q::UnionFindDecoder
-pub fn prism_q::UnionFindDecoder::decode_packed(&self, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<prism_q::sim::compiled::PackedShots>
+pub fn prism_q::UnionFindDecoder::decode_packed(&self, &prism_q::PackedShots) -> prism_q::error::Result<prism_q::PackedShots>
 pub fn prism_q::UnionFindDecoder::from_model(&prism_q::DetectorErrorModel) -> prism_q::error::Result<Self>
-pub fn prism_q::UnionFindDecoder::logical_error_rate(&self, &prism_q::sim::compiled::PackedShots, &prism_q::sim::compiled::PackedShots) -> prism_q::error::Result<f64>
+pub fn prism_q::UnionFindDecoder::logical_error_rate(&self, &prism_q::PackedShots, &prism_q::PackedShots) -> prism_q::error::Result<f64>
 pub fn prism_q::UnionFindDecoder::num_detectors(&self) -> usize
 pub fn prism_q::UnionFindDecoder::num_observables(&self) -> usize
 pub struct prism_q::UnitaryData
@@ -4605,17 +4609,17 @@ pub fn prism_q::distributed::comm::SerialComm::rank(&self) -> usize
 pub fn prism_q::distributed::comm::SerialComm::sendrecv_c64(&self, usize, &[num_complex::Complex64], &mut [num_complex::Complex64])
 pub fn prism_q::distributed::comm::SerialComm::size(&self) -> usize
 pub trait prism_q::ShotAccumulator
-pub fn prism_q::ShotAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::ShotAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::CorrelatorAccumulator
-pub fn prism_q::CorrelatorAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::CorrelatorAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::HistogramAccumulator
-pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::MarginalsAccumulator
-pub fn prism_q::MarginalsAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::MarginalsAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::NullAccumulator
-pub fn prism_q::NullAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::NullAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 impl prism_q::ShotAccumulator for prism_q::PauliExpectationAccumulator
-pub fn prism_q::PauliExpectationAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
+pub fn prism_q::PauliExpectationAccumulator::accumulate(&mut self, &prism_q::PackedShots)
 pub fn prism_q::bitstring(&[u64], usize) -> alloc::string::String
 pub fn prism_q::compile_detector_sampler(&prism_q::circuit::Circuit, alloc::vec::Vec<alloc::vec::Vec<usize>>, alloc::vec::Vec<alloc::vec::Vec<usize>>, u64) -> prism_q::error::Result<prism_q::sim::compiled::CompiledDetectorSampler>
 pub fn prism_q::compile_forward(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::compiled::CompiledSampler>
@@ -4638,18 +4642,18 @@ pub fn prism_q::run_qec_program_with_strategy(&prism_q::qec::QecProgram, prism_q
 pub fn prism_q::run_shots_compiled(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
 pub fn prism_q::run_shots_compiled_with_gpu(&prism_q::circuit::Circuit, usize, u64, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> prism_q::error::Result<prism_q::ShotsResult>
 pub fn prism_q::run_shots_noisy(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
-pub fn prism_q::run_spd(&prism_q::circuit::Circuit, f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdResult>
-pub fn prism_q::run_spd_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::run_spd_observable_budgeted(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::run_spd_observable_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::run_spd_with(&prism_q::circuit::Circuit, &prism_q::sim::unified_pauli::SpdTruncation) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdResult>
-pub fn prism_q::run_spp(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::sim::unified_pauli::SppResult>
-pub fn prism_q::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize, u64) -> prism_q::error::Result<prism_q::sim::unified_pauli::SppObservableResult>
+pub fn prism_q::run_spd(&prism_q::circuit::Circuit, f64, usize) -> prism_q::error::Result<prism_q::SpdResult>
+pub fn prism_q::run_spd_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::run_spd_observable_budgeted(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::run_spd_observable_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::run_spd_with(&prism_q::circuit::Circuit, &prism_q::SpdTruncation) -> prism_q::error::Result<prism_q::SpdResult>
+pub fn prism_q::run_spp(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::SppResult>
+pub fn prism_q::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize, u64) -> prism_q::error::Result<prism_q::SppObservableResult>
 pub fn prism_q::run_stabilizer_rank(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
 pub fn prism_q::run_stabilizer_rank_approx(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
 pub fn prism_q::set_default_limits(prism_q::Limits)
-pub fn prism_q::simulate(&prism_q::circuit::Circuit) -> prism_q::sim::Simulate<'_, prism_q::sim::Unseeded>
-pub fn prism_q::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::sim::Unseeded>
+pub fn prism_q::simulate(&prism_q::circuit::Circuit) -> prism_q::Simulate<'_, prism_q::Unseeded>
+pub fn prism_q::simulate_program(&prism_q::circuit::dynamic::DynamicProgram) -> prism_q::SimulateProgram<'_, prism_q::Unseeded>
 pub fn prism_q::stabilizer_inner_product(&prism_q::backend::stabilizer::StabilizerBackend, &prism_q::backend::stabilizer::StabilizerBackend, usize) -> prism_q::error::Result<num_complex::Complex64>
 pub fn prism_q::stabilizer_overlap_sq(&prism_q::backend::stabilizer::StabilizerBackend, &prism_q::backend::stabilizer::StabilizerBackend, usize) -> f64
 pub type prism_q::Result<T> = core::result::Result<T, prism_q::error::PrismError>

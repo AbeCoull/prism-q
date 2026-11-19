@@ -450,7 +450,7 @@ fn bts_batched_correctness() {
     assert!(sampler.should_use_bts(num_shots));
 
     let packed = sampler.sample_bulk_packed(num_shots);
-    assert_eq!(packed.num_shots, num_shots);
+    assert_eq!(packed.num_shots(), num_shots);
     let counts = packed.counts();
     let total: u64 = counts.values().sum();
     assert_eq!(total, num_shots as u64);

@@ -105,9 +105,10 @@ fn values_round_trip_through_bind() {
     assert_eq!(p.values(&bound).unwrap(), vec![0.3, 0.4]);
 }
 
-// `pauli_generator` decides which gates bind, and `angle_of`, `angle_mut`,
-// and the replay recipe's `write_angle` each match the same variants by
-// hand. A new angle-carrying variant fails here until all four agree.
+// `pauli_generator` decides which gates bind, and `Gate::angle` and
+// `Gate::angle_mut`, behind `angle_of`, `angle_mut` and the replay recipe's
+// `write_angle`, match the same variants by hand. A new angle-carrying
+// variant fails here until all three agree.
 // `BatchRzz` is the one deliberate exception: replay writes its edges
 // although the fused gate itself is not bindable.
 #[test]

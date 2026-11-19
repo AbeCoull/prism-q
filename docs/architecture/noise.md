@@ -4,7 +4,7 @@ How a noise model becomes events, and which engine samples them. The user-facing
 version is the [noise guide](../guides/noise.md), and the native QEC path is on
 [QEC programs](./qec-programs.md).
 
-## Noise models (`src/sim/noise.rs`)
+## Noise models (`src/sim/noise/`)
 
 `NoiseModel` holds one list of noise events per instruction slot. Every noisy engine
 supports Pauli and depolarizing channels, and every one but `noisy_marginals_analytical`
@@ -13,7 +13,7 @@ and one- and two-qubit custom Kraus operators need the trajectory engine. Readou
 acts on the measurement record rather than the state, so the route is chosen on the
 channels alone and each engine applies readout itself.
 
-`NoiseBuilder` (`src/sim/noise_builder.rs`) compiles declarative rules into the same
+`NoiseBuilder` (`src/sim/noise/builder.rs`) compiles declarative rules into the same
 slot vector. The rules cover rates by gate type and by qubit, idle decoherence against
 circuit layers, crosstalk through a coupling map, and coherent over-rotation
 proportional to a rotation gate's angle. They also cover reset error, error before
@@ -65,11 +65,11 @@ Noisy sampling is reachable through `simulate(...).noise(...).shots(n)` and
 `.sample_counts(n)` on trajectory backends. The density matrix also serves `run`,
 `marginals` and `expectation_values`
 ([noise across the terminals](./engine.md#noise-across-the-terminals)).
-`run_shots_with_noise` (`src/sim/mod.rs`) routes Pauli-only noise on Clifford circuits
+`run_shots_with_noise` (`src/sim/shot_routes.rs`) routes Pauli-only noise on Clifford circuits
 to the compiled family when the backend is `Auto` or a stabilizer kind and the
 measurements are terminal or rewrite to terminal (below). Every other accepted
 combination runs the trajectory engine over the resolved backend. Within the compiled
-family, `run_shots_noisy` (`src/sim/noise.rs`) picks one engine per call:
+family, `run_shots_noisy` (`src/sim/noise/mod.rs`) picks one engine per call:
 
 | Engine | Selected when | Limitations |
 |---|---|---|

@@ -123,7 +123,9 @@
 //! channel by a reduced density matrix, both gathered and summed in rank order, so
 //! every rank compares its draw against the same value.
 
+mod layout;
 mod plan;
+mod shard;
 #[cfg(test)]
 mod tests;
 #[cfg(any(test, feature = "bench-internal"))]
@@ -136,394 +138,38 @@ use num_complex::Complex64;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-#[cfg(feature = "parallel")]
-use crate::backend::SendPtr;
 use crate::backend::reduced_density::{dense_reduced_density, normalize_trace};
 use crate::backend::simd;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::statevector::kernels::multi_2q_keeps_order;
-use crate::backend::statevector::rdm_pair_sums;
-#[cfg(feature = "parallel")]
-use crate::backend::statevector::rdm_sum_add;
 use crate::backend::{
     Backend, BasisSamples, dense_probability_len, dense_statevector_len, measurement_inv_norm,
 };
 #[cfg(feature = "parallel")]
-use crate::backend::{MIN_PAR_ELEMS, MIN_PAR_REDUCE_ELEMS, chunk_min_len};
+use crate::backend::{MIN_PAR_ELEMS, chunk_min_len};
 use crate::circuit::{Instruction, SmallVec, smallvec};
 use crate::distributed::DistributedContext;
 use crate::error::{PrismError, Result};
-use crate::gates::{DiagEntry, Gate, is_diagonal_2x2};
+use crate::gates::{Gate, is_diagonal_2x2};
 use crate::sim::unified_pauli::PauliTerm;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+#[cfg(feature = "parallel")]
+use shard::PAR_SHARD_LEN;
+#[cfg(any(test, feature = "bench-internal"))]
+use shard::for_each_gate_qubit;
+use shard::{
+    add_shard, butterfly_shard, combine_shard, for_each_pair_tile, gather_indexed, half_norm_sqr,
+    pair_rdm_sums, required_local_qubits, scale_shard, scale_shard_masked, scatter_indexed,
+    zero_shard,
+};
 
 pub(crate) const BACKEND_NAME: &str = "distributed_statevector";
 
 /// Amplitudes per message when a rank-bit qubit's coherence is read in place, which
 /// bounds the receive buffer a per-event noise read allocates (1 MiB).
 const RDM_READ_CHUNK: usize = 1 << 16;
-
-/// Shard length at which the combine loops below fan out to Rayon. Not tied to
-/// `PARALLEL_THRESHOLD_QUBITS`, whose move to 15 was measured on dense kernels only.
-#[cfg(feature = "parallel")]
-const PAR_SHARD_LEN: usize = 1 << 14;
-
-fn scale_shard(state: &mut [Complex64], factor: Complex64) {
-    #[cfg(feature = "parallel")]
-    if state.len() >= PAR_SHARD_LEN {
-        state
-            .par_chunks_mut(MIN_PAR_ELEMS)
-            .for_each(|tile| simd::scale_complex_slice(tile, factor));
-        return;
-    }
-    simd::scale_complex_slice(state, factor);
-}
-
-/// Scale the amplitudes whose index has every bit of `mask` set.
-fn scale_shard_masked(state: &mut [Complex64], mask: usize, factor: Complex64) {
-    let tile = |base: usize, tile: &mut [Complex64]| {
-        for (k, amp) in tile.iter_mut().enumerate() {
-            if (base + k) & mask == mask {
-                *amp *= factor;
-            }
-        }
-    };
-    #[cfg(feature = "parallel")]
-    if state.len() >= PAR_SHARD_LEN {
-        state
-            .par_chunks_mut(MIN_PAR_ELEMS)
-            .enumerate()
-            .for_each(|(t, chunk)| tile(t * MIN_PAR_ELEMS, chunk));
-        return;
-    }
-    tile(0, state);
-}
-
-fn zero_shard(state: &mut [Complex64]) {
-    #[cfg(feature = "parallel")]
-    if state.len() >= PAR_SHARD_LEN {
-        state
-            .par_chunks_mut(MIN_PAR_ELEMS)
-            .for_each(simd::zero_slice);
-        return;
-    }
-    simd::zero_slice(state);
-}
-
-/// `dst[i] = c_self * dst[i] + c_remote * remote[i]` over a received block.
-fn combine_shard(
-    dst: &mut [Complex64],
-    remote: &[Complex64],
-    c_self: Complex64,
-    c_remote: Complex64,
-) {
-    #[cfg(feature = "parallel")]
-    if dst.len() >= PAR_SHARD_LEN {
-        dst.par_chunks_mut(MIN_PAR_ELEMS)
-            .zip(remote.par_chunks(MIN_PAR_ELEMS))
-            .for_each(|(d, r)| simd::combine_global_half(d, r, c_self, c_remote));
-        return;
-    }
-    simd::combine_global_half(dst, remote, c_self, c_remote);
-}
-
-/// `pack[k] = state[index_of(k)]` for every `k`.
-fn gather_indexed(
-    pack: &mut [Complex64],
-    state: &[Complex64],
-    index_of: impl Fn(usize) -> usize + Sync,
-) {
-    #[cfg(feature = "parallel")]
-    if pack.len() >= PAR_SHARD_LEN {
-        pack.par_chunks_mut(MIN_PAR_ELEMS)
-            .enumerate()
-            .for_each(|(t, tile)| {
-                let base = t * MIN_PAR_ELEMS;
-                for (k, slot) in tile.iter_mut().enumerate() {
-                    *slot = state[index_of(base + k)];
-                }
-            });
-        return;
-    }
-    for (k, slot) in pack.iter_mut().enumerate() {
-        *slot = state[index_of(k)];
-    }
-}
-
-/// `state[index_of(k)] = f(state[index_of(k)], recv[k])` for every `k`.
-/// `index_of` must be injective on `0..recv.len()`: the parallel arm relies on
-/// it to keep the tasks' writes disjoint.
-fn scatter_indexed(
-    state: &mut [Complex64],
-    recv: &[Complex64],
-    index_of: impl Fn(usize) -> usize + Sync,
-    f: impl Fn(Complex64, Complex64) -> Complex64 + Sync,
-) {
-    #[cfg(feature = "parallel")]
-    if recv.len() >= PAR_SHARD_LEN {
-        let ptr = SendPtr(state.as_mut_ptr());
-        recv.par_chunks(MIN_PAR_ELEMS)
-            .enumerate()
-            .for_each(|(t, tile)| {
-                let base = t * MIN_PAR_ELEMS;
-                for (k, &r) in tile.iter().enumerate() {
-                    let i = index_of(base + k);
-                    // SAFETY: `index_of` is injective and maps into `state`, so
-                    // each index is read and written by exactly one task and no
-                    // two tasks touch the same amplitude.
-                    unsafe { ptr.store(i, f(ptr.load(i), r)) };
-                }
-            });
-        return;
-    }
-    for (k, &r) in recv.iter().enumerate() {
-        let i = index_of(k);
-        state[i] = f(state[i], r);
-    }
-}
-
-/// Visit the `(lo, hi)` halves of every `2^(local_q + 1)` block of `state`
-/// together with the same halves of `recv`, as four equal-length tiles whose
-/// `k`-th elements share a basis index apart from the `local_q` bit.
-fn for_each_pair_tile<F>(state: &mut [Complex64], recv: &mut [Complex64], local_q: usize, f: F)
-where
-    F: Fn(&mut [Complex64], &mut [Complex64], &mut [Complex64], &mut [Complex64]) + Sync,
-{
-    let half = 1usize << local_q;
-    let block = half << 1;
-    #[cfg(feature = "parallel")]
-    if state.len() >= PAR_SHARD_LEN {
-        if state.len() / block >= 4 {
-            state
-                .par_chunks_mut(block)
-                .zip(recv.par_chunks_mut(block))
-                .with_min_len(chunk_min_len(block))
-                .for_each(|(s, r)| {
-                    let (lo, hi) = s.split_at_mut(half);
-                    let (rlo, rhi) = r.split_at_mut(half);
-                    f(lo, hi, rlo, rhi);
-                });
-        } else {
-            for (s, r) in state.chunks_mut(block).zip(recv.chunks_mut(block)) {
-                let (lo, hi) = s.split_at_mut(half);
-                let (rlo, rhi) = r.split_at_mut(half);
-                lo.par_chunks_mut(MIN_PAR_ELEMS)
-                    .zip(hi.par_chunks_mut(MIN_PAR_ELEMS))
-                    .zip(rlo.par_chunks_mut(MIN_PAR_ELEMS))
-                    .zip(rhi.par_chunks_mut(MIN_PAR_ELEMS))
-                    .for_each(|(((lo, hi), rlo), rhi)| f(lo, hi, rlo, rhi));
-            }
-        }
-        return;
-    }
-    for (s, r) in state.chunks_mut(block).zip(recv.chunks_mut(block)) {
-        let (lo, hi) = s.split_at_mut(half);
-        let (rlo, rhi) = r.split_at_mut(half);
-        f(lo, hi, rlo, rhi);
-    }
-}
-
-/// Butterfly step over a received block: `pack[i] = forward[0] * state[i] +
-/// forward[1] * remote[i]` is the partial sum forwarded to the next partner,
-/// then `state[i] = keep[0] * state[i] + keep[1] * remote[i]`.
-fn butterfly_shard(
-    state: &mut [Complex64],
-    remote: &[Complex64],
-    pack: &mut [Complex64],
-    keep: [Complex64; 2],
-    forward: [Complex64; 2],
-) {
-    let tile = |state: &mut [Complex64], remote: &[Complex64], pack: &mut [Complex64]| {
-        for ((s, &r), p) in state.iter_mut().zip(remote).zip(pack.iter_mut()) {
-            let own = *s;
-            *p = forward[0] * own + forward[1] * r;
-            *s = keep[0] * own + keep[1] * r;
-        }
-    };
-    #[cfg(feature = "parallel")]
-    if state.len() >= PAR_SHARD_LEN {
-        state
-            .par_chunks_mut(MIN_PAR_ELEMS)
-            .zip(remote.par_chunks(MIN_PAR_ELEMS))
-            .zip(pack.par_chunks_mut(MIN_PAR_ELEMS))
-            .for_each(|((s, r), p)| tile(s, r, p));
-        return;
-    }
-    tile(state, remote, pack);
-}
-
-/// `dst[i] += src[i]` over a received block.
-fn add_shard(dst: &mut [Complex64], src: &[Complex64]) {
-    let tile = |dst: &mut [Complex64], src: &[Complex64]| {
-        for (d, &s) in dst.iter_mut().zip(src) {
-            *d += s;
-        }
-    };
-    #[cfg(feature = "parallel")]
-    if dst.len() >= PAR_SHARD_LEN {
-        dst.par_chunks_mut(MIN_PAR_ELEMS)
-            .zip(src.par_chunks(MIN_PAR_ELEMS))
-            .for_each(|(d, s)| tile(d, s));
-        return;
-    }
-    tile(dst, src);
-}
-
-/// `sum |a|^2` over the `qubit == outcome` half of every block of a shard,
-/// parallel above `MIN_PAR_REDUCE_ELEMS` like `state_norm_sqr`.
-fn half_norm_sqr(state: &[Complex64], qubit: usize, outcome: bool) -> f64 {
-    fn select(block: &[Complex64], half: usize, outcome: bool) -> &[Complex64] {
-        if outcome {
-            &block[half..]
-        } else {
-            &block[..half]
-        }
-    }
-    let half = 1usize << qubit;
-    let block = half << 1;
-    #[cfg(feature = "parallel")]
-    if state.len() >= MIN_PAR_REDUCE_ELEMS {
-        if state.len() / block >= 4 {
-            return state
-                .par_chunks(block)
-                .with_min_len(chunk_min_len(block))
-                .map(|b| simd::norm_sqr_sum(select(b, half, outcome)))
-                .sum();
-        }
-        return state
-            .chunks(block)
-            .map(|b| {
-                select(b, half, outcome)
-                    .par_chunks(MIN_PAR_ELEMS)
-                    .map(simd::norm_sqr_sum)
-                    .sum::<f64>()
-            })
-            .sum();
-    }
-    state
-        .chunks(block)
-        .map(|b| simd::norm_sqr_sum(select(b, half, outcome)))
-        .sum()
-}
-
-/// `(sum |lo|^2, sum |hi|^2, sum hi * conj(lo))` over paired halves, parallel
-/// above `MIN_PAR_REDUCE_ELEMS`.
-fn pair_rdm_sums(lo: &[Complex64], hi: &[Complex64]) -> (f64, f64, Complex64) {
-    #[cfg(feature = "parallel")]
-    if lo.len() >= MIN_PAR_REDUCE_ELEMS {
-        return lo
-            .par_chunks(MIN_PAR_ELEMS)
-            .zip(hi.par_chunks(MIN_PAR_ELEMS))
-            .map(|(l, h)| rdm_pair_sums(l, h))
-            .reduce(|| (0.0, 0.0, Complex64::new(0.0, 0.0)), rdm_sum_add);
-    }
-    rdm_pair_sums(lo, hi)
-}
-
-/// Visit every circuit qubit an instruction touches: the instruction targets
-/// plus qubit indices stored inside batched gate data. Indices may repeat.
-fn for_each_gate_qubit(gate: &Gate, targets: &[usize], mut f: impl FnMut(usize)) {
-    for &q in targets {
-        f(q);
-    }
-    match gate {
-        Gate::BatchPhase(data) => {
-            for &(target, _) in &data.phases {
-                f(target);
-            }
-        }
-        Gate::BatchRzz(data) => {
-            for &(q0, q1, _) in &data.edges {
-                f(q0);
-                f(q1);
-            }
-        }
-        Gate::MultiFused(data) => {
-            for &(q, _) in &data.gates {
-                f(q);
-            }
-        }
-        Gate::Multi2q(data) => {
-            for &(q0, q1, _) in &data.gates {
-                f(q0);
-                f(q1);
-            }
-        }
-        Gate::DiagonalBatch(data) => {
-            for entry in &data.entries {
-                match *entry {
-                    DiagEntry::Phase1q { qubit, .. } => f(qubit),
-                    DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
-                        f(q0);
-                        f(q1);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Circuit qubits that must occupy local positions for the gate to apply
-/// without a per-gate amplitude exchange. Diagonal action and control bits
-/// are free on global qubits, so only non-diagonal application targets count.
-fn required_local_qubits(gate: &Gate, targets: &[usize]) -> SmallVec<[usize; 8]> {
-    let mut req: SmallVec<[usize; 8]> = SmallVec::new();
-    fn push(req: &mut SmallVec<[usize; 8]>, q: usize) {
-        if !req.contains(&q) {
-            req.push(q);
-        }
-    }
-    match gate {
-        Gate::Cx => push(&mut req, targets[1]),
-        Gate::Cz
-        | Gate::Swap
-        | Gate::Rzz(_)
-        | Gate::BatchPhase(_)
-        | Gate::BatchRzz(_)
-        | Gate::DiagonalBatch(_) => {}
-        Gate::Cu(_) | Gate::Mcu(_) => {
-            if gate.controlled_phase().is_none() {
-                let (target, mat) = match gate {
-                    Gate::Mcu(data) => (targets[data.num_controls as usize], &data.mat),
-                    Gate::Cu(mat) => (targets[1], &**mat),
-                    _ => unreachable!("outer match arm is Cu | Mcu"),
-                };
-                if !is_diagonal_2x2(mat) {
-                    push(&mut req, target);
-                }
-            }
-        }
-        Gate::Fused2q(_) => {
-            push(&mut req, targets[0]);
-            push(&mut req, targets[1]);
-        }
-        Gate::Multi2q(data) => {
-            for &(q0, q1, _) in &data.gates {
-                push(&mut req, q0);
-                push(&mut req, q1);
-            }
-        }
-        Gate::MultiFused(data) => {
-            for &(q, ref mat) in &data.gates {
-                if !is_diagonal_2x2(mat) {
-                    push(&mut req, q);
-                }
-            }
-        }
-        Gate::Unitary(_) => {
-            for &q in targets {
-                push(&mut req, q);
-            }
-        }
-        g if g.num_qubits() == 1 && !g.is_diagonal_1q() => {
-            push(&mut req, targets[0]);
-        }
-        _ => {}
-    }
-    req
-}
 
 /// Distributed state vector backend over an `Arc`-shared [`DistributedContext`].
 pub struct DistributedStatevectorBackend {
@@ -701,291 +347,6 @@ impl DistributedStatevectorBackend {
         ((self.exchange_chunk / block).max(1) * block).min(len)
     }
 
-    #[inline]
-    fn local_qubits(&self) -> usize {
-        self.num_qubits - self.global_qubits
-    }
-
-    #[inline]
-    fn is_single_rank(&self) -> bool {
-        self.context.size() == 1
-    }
-
-    /// Bit position within the rank id for global qubit `q` (`q >= local`).
-    #[inline]
-    fn global_bit(&self, q: usize) -> usize {
-        q - self.local_qubits()
-    }
-
-    /// Whether this rank holds the `|1>` half of global qubit `q`.
-    #[inline]
-    fn rank_bit_set(&self, q: usize) -> bool {
-        (self.context.rank() >> self.global_bit(q)) & 1 == 1
-    }
-
-    /// Advance the instruction tick and mark every circuit qubit the
-    /// instruction references. Marked qubits are exempt from eviction until the
-    /// next instruction. Identical on every rank because the instruction stream
-    /// is identical.
-    fn touch_instruction(&mut self, gate: &Gate, targets: &[usize]) {
-        self.tick += 1;
-        let tick = self.tick;
-        for_each_gate_qubit(gate, targets, |q| self.last_used[q] = tick);
-    }
-
-    fn refresh_map_identity(&mut self) {
-        self.map_identity = self.qubit_map.iter().enumerate().all(|(q, &p)| q == p);
-    }
-
-    /// Apply SWAP as a pure relabeling: exchange the two circuit qubits' map
-    /// entries. No amplitudes move and no rank communicates.
-    fn swap_circuit_qubits(&mut self, a: usize, b: usize) {
-        if a == b {
-            return;
-        }
-        let pa = self.qubit_map[a];
-        let pb = self.qubit_map[b];
-        self.qubit_map.swap(a, b);
-        self.phys_map.swap(pa, pb);
-        self.refresh_map_identity();
-    }
-
-    /// Local position holding the least recently used circuit qubit that the
-    /// current instruction does not reference. `None` when every local qubit is
-    /// referenced this tick.
-    fn pick_victim(&self) -> Option<usize> {
-        let local = self.local_qubits();
-        let mut best: Option<(u64, usize)> = None;
-        for pos in 0..local {
-            let used = self.last_used[self.phys_map[pos]];
-            if used == self.tick {
-                continue;
-            }
-            match best {
-                Some((b, _)) if used >= b => {}
-                _ => best = Some((used, pos)),
-            }
-        }
-        best.map(|(_, pos)| pos)
-    }
-
-    /// Bring each requested circuit qubit into a local position. Best effort:
-    /// stops when no eviction victim remains, leaving the rest to the direct
-    /// exchange paths. Each relabel costs one half-slice exchange. Inside a
-    /// planned window every requested qubit is already local and this returns
-    /// without work.
-    fn make_local(&mut self, req: &[usize]) {
-        for &q in req {
-            let pos = self.qubit_map[q];
-            if pos < self.local_qubits() {
-                continue;
-            }
-            let Some(victim) = self.pick_victim() else {
-                return;
-            };
-            self.relabel_swap(victim, pos);
-        }
-    }
-
-    /// Exchange the moving half of a local/global SWAP with the partner rank.
-    /// Only amplitudes whose local bit differs from this rank's bit of the
-    /// global position move, so each rank exchanges half its slice. Both ranks
-    /// enumerate their moving halves in ascending index order, which the
-    /// single-bit XOR relation between the two sets preserves, so the k-th
-    /// received amplitude lands at the k-th moving index. Tiled by
-    /// `exchange_chunk` like the direct global exchange. Pure data movement:
-    /// the qubit map is untouched.
-    fn half_slice_swap(&mut self, local_pos: usize, global_pos: usize) {
-        let partner = self.context.rank() ^ (1usize << self.global_bit(global_pos));
-        let gbit = self.rank_bit_set(global_pos);
-        let stride = 1usize << local_pos;
-        let fixed = if gbit { 0 } else { stride };
-        let moving = self.inner.state.len() / 2;
-        let chunk = self.exchange_chunk.min(moving).max(1);
-        self.ensure_pack(chunk);
-        self.ensure_recv(chunk);
-        let index_of =
-            |flat: usize| ((flat >> local_pos) << (local_pos + 1)) | fixed | (flat & (stride - 1));
-        let mut off = 0;
-        while off < moving {
-            let count = (off + chunk).min(moving) - off;
-            gather_indexed(&mut self.pack[..count], &self.inner.state, |k| {
-                index_of(off + k)
-            });
-            self.count_exchange(count);
-            self.context
-                .comm()
-                .sendrecv_c64(partner, &self.pack[..count], &mut self.recv[..count]);
-            scatter_indexed(
-                &mut self.inner.state,
-                &self.recv[..count],
-                |k| index_of(off + k),
-                |_, remote| remote,
-            );
-            off += count;
-        }
-    }
-
-    /// Physically swap the qubits at a local and a global position, then update
-    /// the map.
-    fn relabel_swap(&mut self, local_pos: usize, global_pos: usize) {
-        self.half_slice_swap(local_pos, global_pos);
-
-        let local_q = self.phys_map[local_pos];
-        let global_q = self.phys_map[global_pos];
-        self.qubit_map[local_q] = global_pos;
-        self.qubit_map[global_q] = local_pos;
-        self.phys_map.swap(local_pos, global_pos);
-        self.refresh_map_identity();
-    }
-
-    /// Physically swap the qubits at positions `a < b` and update the map.
-    /// When both positions are local, this runs the inner SWAP kernel. When one
-    /// position is local and one is global, this reuses the half-slice relabel
-    /// exchange. When both positions are global, this exchanges full slices
-    /// between rank pairs whose two bits differ.
-    fn swap_physical_positions(&mut self, a: usize, b: usize) {
-        debug_assert!(
-            a < b,
-            "positions must be ordered: branch selection assumes a < b"
-        );
-        let local = self.local_qubits();
-        if b < local {
-            self.inner
-                .apply(&Instruction::Gate {
-                    gate: Gate::Swap,
-                    targets: smallvec![a, b],
-                })
-                .expect("local SWAP cannot fail");
-        } else if a < local {
-            self.relabel_swap(a, b);
-            return;
-        } else {
-            self.swap_global_slices(a, b);
-        }
-        let qa = self.phys_map[a];
-        let qb = self.phys_map[b];
-        self.qubit_map[qa] = b;
-        self.qubit_map[qb] = a;
-        self.phys_map.swap(a, b);
-        self.refresh_map_identity();
-    }
-
-    /// Physically reorder the state until every circuit qubit occupies its own
-    /// position. Runs in lockstep on every rank because the maps are identical.
-    /// Each misplaced qubit costs at most one exchange. The identity map
-    /// returns without work.
-    fn restore_identity_map(&mut self) {
-        while !self.map_identity {
-            let Some(pos) = (0..self.num_qubits).find(|&p| self.phys_map[p] != p) else {
-                break;
-            };
-            let src = self.qubit_map[pos];
-            self.swap_physical_positions(pos, src);
-        }
-    }
-
-    /// Translate an instruction into physical positions: map the targets and
-    /// rewrite qubit indices stored inside batched gate data. Borrows the gate
-    /// unchanged while the map is the identity.
-    fn to_physical<'g>(
-        &self,
-        gate: &'g Gate,
-        targets: &[usize],
-    ) -> (Cow<'g, Gate>, SmallVec<[usize; 4]>) {
-        if self.map_identity {
-            return (Cow::Borrowed(gate), targets.into());
-        }
-        let ptargets: SmallVec<[usize; 4]> = targets.iter().map(|&q| self.qubit_map[q]).collect();
-        // A payload whose every index maps to itself is borrowed unchanged:
-        // once any relabel leaves the map non-identity, a per-application deep
-        // clone of every batched payload is the steady state otherwise.
-        let fixed = |q: usize| self.qubit_map[q] == q;
-        let pgate = match gate {
-            Gate::MultiFused(data) => {
-                if data.gates.iter().all(|&(q, _)| fixed(q)) {
-                    Cow::Borrowed(gate)
-                } else {
-                    let mut data = data.clone();
-                    for entry in &mut data.gates {
-                        entry.0 = self.qubit_map[entry.0];
-                    }
-                    Cow::Owned(Gate::MultiFused(data))
-                }
-            }
-            Gate::Multi2q(data) => {
-                if data.gates.iter().all(|&(q0, q1, _)| fixed(q0) && fixed(q1)) {
-                    Cow::Borrowed(gate)
-                } else {
-                    let mut data = data.clone();
-                    for entry in &mut data.gates {
-                        entry.0 = self.qubit_map[entry.0];
-                        entry.1 = self.qubit_map[entry.1];
-                    }
-                    Cow::Owned(Gate::Multi2q(data))
-                }
-            }
-            Gate::BatchPhase(data) => {
-                if data.phases.iter().all(|&(q, _)| fixed(q)) {
-                    Cow::Borrowed(gate)
-                } else {
-                    let mut data = data.clone();
-                    for entry in &mut data.phases {
-                        entry.0 = self.qubit_map[entry.0];
-                    }
-                    Cow::Owned(Gate::BatchPhase(data))
-                }
-            }
-            Gate::BatchRzz(data) => {
-                if data.edges.iter().all(|&(q0, q1, _)| fixed(q0) && fixed(q1)) {
-                    Cow::Borrowed(gate)
-                } else {
-                    let mut data = data.clone();
-                    for entry in &mut data.edges {
-                        entry.0 = self.qubit_map[entry.0];
-                        entry.1 = self.qubit_map[entry.1];
-                    }
-                    Cow::Owned(Gate::BatchRzz(data))
-                }
-            }
-            Gate::DiagonalBatch(data) => {
-                let entry_fixed = |entry: &DiagEntry| match *entry {
-                    DiagEntry::Phase1q { qubit, .. } => fixed(qubit),
-                    DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
-                        fixed(q0) && fixed(q1)
-                    }
-                };
-                if data.entries.iter().all(entry_fixed) {
-                    Cow::Borrowed(gate)
-                } else {
-                    let mut data = data.clone();
-                    for entry in &mut data.entries {
-                        match entry {
-                            DiagEntry::Phase1q { qubit, .. } => *qubit = self.qubit_map[*qubit],
-                            DiagEntry::Phase2q { q0, q1, .. }
-                            | DiagEntry::Parity2q { q0, q1, .. } => {
-                                *q0 = self.qubit_map[*q0];
-                                *q1 = self.qubit_map[*q1];
-                            }
-                        }
-                    }
-                    Cow::Owned(Gate::DiagonalBatch(data))
-                }
-            }
-            _ => Cow::Borrowed(gate),
-        };
-        (pgate, ptargets)
-    }
-
-    /// Whether every physical position the translated instruction touches,
-    /// including indices inside batched gate data, is below the local boundary.
-    fn instruction_qubits_local(&self, gate: &Gate, targets: &[usize]) -> bool {
-        let local = self.local_qubits();
-        let mut all = true;
-        for_each_gate_qubit(gate, targets, |q| all &= q < local);
-        all
-    }
-
     /// Fingerprint of every setting the collective sequence assumes is shared.
     /// Rank id and rank count are excluded; they legitimately differ.
     fn config_fingerprint(&self, num_qubits: usize, num_classical_bits: usize) -> u64 {
@@ -1119,34 +480,6 @@ impl DistributedStatevectorBackend {
         self.last_used = vec![0; num_qubits];
         self.tick = 0;
         Ok(num_qubits - p)
-    }
-
-    /// Translate a circuit-qubit bit mask into physical positions.
-    fn to_physical_mask(&self, mask: usize) -> usize {
-        if self.map_identity {
-            return mask;
-        }
-        let mut out = 0usize;
-        for (q, &pos) in self.qubit_map.iter().enumerate() {
-            out |= ((mask >> q) & 1) << pos;
-        }
-        out
-    }
-
-    /// Reorder a gathered dense vector from physical to circuit qubit order.
-    fn unpermuted<T: Copy + Default>(&self, phys: Vec<T>) -> Vec<T> {
-        if self.map_identity {
-            return phys;
-        }
-        let mut out = vec![T::default(); phys.len()];
-        for (c, slot) in out.iter_mut().enumerate() {
-            let mut p = 0usize;
-            for (q, &pos) in self.qubit_map.iter().enumerate() {
-                p |= ((c >> q) & 1) << pos;
-            }
-            *slot = phys[p];
-        }
-        out
     }
 
     /// Apply a one qubit gate whose target is stored in the rank id.
@@ -1804,7 +1137,7 @@ impl DistributedStatevectorBackend {
         }
     }
 
-    /// Apply a single [`DiagEntry`] across any local or global split.
+    /// Apply a single [`DiagEntry`](crate::gates::DiagEntry) across any local or global split.
     fn apply_diag_entry_dist(&mut self, entry: &crate::gates::DiagEntry) {
         use crate::gates::DiagEntry;
         match *entry {
@@ -1867,17 +1200,6 @@ impl DistributedStatevectorBackend {
         self.inner.classical_bits[classical_bit] = outcome;
         self.collapse(qubit, outcome);
         self.inner.pending_norm *= measurement_inv_norm(outcome, prob_one);
-    }
-
-    /// Physical position of a circuit qubit. Identity before `init` runs the
-    /// map setup or while no relabeling has occurred.
-    #[inline]
-    fn physical_qubit(&self, qubit: usize) -> usize {
-        if self.map_identity {
-            qubit
-        } else {
-            self.qubit_map[qubit]
-        }
     }
 
     /// Sample `num_shots` computational basis indices in circuit qubit order

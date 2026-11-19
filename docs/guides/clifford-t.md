@@ -118,7 +118,7 @@ On the 10-qubit benchmark circuits at budget 128 the floor is 0.880 at 16 T and 
 the exact expansion for probabilities: while the register fits, the exact route answers
 without error, and past it a statevector also fits.
 
-## Stochastic Pauli Propagation (`src/sim/unified_pauli.rs`)
+## Stochastic Pauli Propagation (`src/sim/unified_pauli/spp.rs`)
 
 Backward-propagates measurement observables as Pauli strings. Clifford gates conjugate in
 O(1), and T gates branch stochastically into two weighted Pauli paths. A path costs
@@ -132,7 +132,7 @@ let result = run_spp(&circuit, num_samples, seed)?; // SppResult
 # Ok::<(), prism_q::PrismError>(())
 ```
 
-## Deterministic Sparse Pauli Dynamics (`src/sim/unified_pauli.rs`)
+## Deterministic Sparse Pauli Dynamics (`src/sim/unified_pauli/spd.rs`)
 
 Backward-propagates a weighted sum of Pauli strings stored in a HashMap. T gates branch
 X and Y terms deterministically, and identical strings merge. The result is exact for
@@ -183,7 +183,7 @@ term's weight on its coefficient. `max_terms` caps that whole sum rather than ea
 whole), and the bound applies to the weighted value. The same holds on `PauliPath`. A
 merged sum past the internal ceiling falls back to one propagation per term.
 
-## Pauli path propagation under noise (`src/sim/unified_pauli.rs`)
+## Pauli path propagation under noise (`src/sim/unified_pauli/pauli_path.rs`)
 
 The same weighted Pauli sum, carried through a noise model. Select
 `BackendKind::PauliPath { epsilon, max_terms }` and attach a noise model; the engine

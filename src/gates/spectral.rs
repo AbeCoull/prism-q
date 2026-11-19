@@ -104,15 +104,26 @@ pub(crate) fn unitary_eigen(matrix: &[Complex64], dim: usize) -> (Vec<Complex64>
 /// angle the caller wrote.
 pub(crate) fn unitary_power(matrix: &[Complex64], dim: usize, t: f64) -> Vec<Complex64> {
     let (values, vectors) = unitary_eigen(matrix, dim);
-    let scaled: Vec<Complex64> = values
-        .iter()
-        .map(|value| Complex64::from_polar(1.0, t * crate::gates::principal_angle(value.arg())))
-        .collect();
+    spectral_map(&values, &vectors, dim, |value| {
+        Complex64::from_polar(1.0, t * crate::gates::principal_angle(value.arg()))
+    })
+}
+
+/// `V f(D) V^dagger` for the eigenvalues `values` and the column major
+/// eigenvectors `vectors` of a normal matrix, column major. `f` runs once per
+/// eigenvalue.
+pub(crate) fn spectral_map<T: Copy>(
+    values: &[T],
+    vectors: &[Complex64],
+    dim: usize,
+    f: impl Fn(T) -> Complex64,
+) -> Vec<Complex64> {
+    let mapped: Vec<Complex64> = values.iter().map(|&value| f(value)).collect();
     let mut out = vec![ZERO; dim * dim];
     for column in 0..dim {
         for row in 0..dim {
             out[column * dim + row] = (0..dim)
-                .map(|k| vectors[k * dim + row] * scaled[k] * vectors[k * dim + column].conj())
+                .map(|k| vectors[k * dim + row] * mapped[k] * vectors[k * dim + column].conj())
                 .sum();
         }
     }

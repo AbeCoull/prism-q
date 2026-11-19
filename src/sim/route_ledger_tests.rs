@@ -351,10 +351,10 @@ const OTHER_SOURCES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Public method names of the seeded `Simulate` builder, read from this module's
-/// parent source so a new terminal shows up without a ledger edit.
+/// Public method names of the seeded `Simulate` builder, read from its source so a new
+/// terminal shows up without a ledger edit.
 fn simulate_terminals() -> Vec<&'static str> {
-    let source = include_str!("mod.rs");
+    let source = include_str!("simulate.rs");
     let start = source
         .find("impl<'c> Simulate<'c, Seeded> {")
         .expect("seeded Simulate impl");

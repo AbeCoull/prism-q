@@ -172,7 +172,7 @@ impl<'a> DeferralWalk<'a> {
         }
 
         let flips_at_write = match noise {
-            Some(noise) => readout_flips_at_write(circuit, noise)?,
+            Some(noise) => readout_flips_at_write(circuit, noise),
             None => Vec::new(),
         };
         let copied_measurements = reused_measurements(circuit, noise.is_some());
@@ -640,10 +640,7 @@ fn reused_measurements(circuit: &Circuit, noisy: bool) -> Vec<bool> {
 /// an `X` on it flips the record and every guard reading it and leaves the rest of the state
 /// alone. Equal rates fire that `X` whatever the outcome; unequal ones pick the rate by the
 /// record's value after the compiled sample.
-fn readout_flips_at_write(
-    circuit: &Circuit,
-    noise: &NoiseModel,
-) -> Result<Vec<Option<(f64, f64)>>> {
+fn readout_flips_at_write(circuit: &Circuit, noise: &NoiseModel) -> Vec<Option<(f64, f64)>> {
     let read = circuit.condition_bits();
     let mut flips = vec![None; read.len()];
     for (bit, err) in noise.readout.iter().enumerate() {
@@ -655,7 +652,7 @@ fn readout_flips_at_write(
         }
         flips[bit] = Some((err.p01, err.p10));
     }
-    Ok(flips)
+    flips
 }
 
 /// Reject a guarded gate other than a Pauli, which no controlled Clifford applies.

@@ -8,15 +8,13 @@ use num_complex::Complex64;
 use crate::error::Result;
 
 use super::super::{GpuContext, GpuState, complex_as_interleaved};
-use super::{check_pair, driver_err, ensure_exact, ensure_scratch, linear_cfg, stream_and_fn};
+use super::{
+    check_pair, ensure_exact, ensure_scratch, grid_for, launch_counted, linear_cfg, stream_and_fn,
+};
 
 const BLOCK_SIZE: u32 = 256;
 
 pub(crate) const KERNEL_SOURCE: &str = include_str!("density.cu");
-
-fn grid_for(count: u64) -> u32 {
-    count.div_ceil(BLOCK_SIZE as u64).max(1) as u32
-}
 
 fn shared_cfg(grid: u32, columns: u32) -> LaunchConfig {
     LaunchConfig {
@@ -43,19 +41,14 @@ pub(crate) fn diagonal(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<V
     let d: u64 = 1u64 << n;
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "dm_diagonal")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(d));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(d, BLOCK_SIZE));
     let mut scratch = ctx.launcher_scratch();
     let out = ensure_exact(&mut scratch.dm_diag, device, d as usize)?;
     let mut builder = stream.launch_builder(&func);
     builder.arg(state.buffer().raw()).arg(&d).arg(out.raw_mut());
     // SAFETY: signature matches the kernel; the grid covers `d` rows, each read
     // at `r * d + r` inside the `d * d` buffer, and `out` holds `d` f64s.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("dm_diagonal", e))?;
-    }
-    ctx.device().count_launch(0);
+    unsafe { launch_counted(builder, cfg, "dm_diagonal", ctx.device(), 0) }?;
     let mut host = vec![0.0_f64; d as usize];
     out.copy_to_host(device, &mut host)?;
     Ok(host)
@@ -83,11 +76,14 @@ pub(crate) fn norm_sqr(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<f
         // SAFETY: signature matches the kernel; `num_blocks` blocks of two
         // elements per thread cover `len`, and `partials` holds one f64 per block.
         unsafe {
-            builder
-                .launch(shared_cfg(num_blocks, 1))
-                .map_err(|e| driver_err("dm_norm_sqr", e))?;
-        }
-        ctx.device().count_launch(0);
+            launch_counted(
+                builder,
+                shared_cfg(num_blocks, 1),
+                "dm_norm_sqr",
+                ctx.device(),
+                0,
+            )
+        }?;
     }
     let result = super::ensure_capacity(&mut scratch.measure_result, device, 1)?;
     {
@@ -99,11 +95,14 @@ pub(crate) fn norm_sqr(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<f
         // SAFETY: signature matches the kernel; one block strides over
         // `num_blocks` partials, both buffers held by the scratch guard.
         unsafe {
-            builder
-                .launch(shared_cfg(1, 1))
-                .map_err(|e| driver_err("measure_prob_one_finalize", e))?;
-        }
-        ctx.device().count_launch(0);
+            launch_counted(
+                builder,
+                shared_cfg(1, 1),
+                "measure_prob_one_finalize",
+                ctx.device(),
+                0,
+            )
+        }?;
     }
     let mut host = [0.0_f64];
     scratch
@@ -128,7 +127,7 @@ pub(crate) fn project(
     let cmask: u64 = 1u64 << qubit;
     let outcome_i: i32 = i32::from(outcome);
     let (stream, func) = stream_and_fn(ctx, "dm_project")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len, BLOCK_SIZE));
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer_mut().raw_mut())
@@ -139,13 +138,7 @@ pub(crate) fn project(
         .arg(&scale);
     // SAFETY: signature matches the kernel and the grid covers `len`; each
     // thread touches its own amplitude only.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("dm_project", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "dm_project", ctx.device(), 1) }
 }
 
 /// `rho -> |0><0| (x) tr_q rho` for `qubit`.
@@ -154,7 +147,7 @@ pub(crate) fn reset(ctx: &GpuContext, state: &mut GpuState, n: usize, qubit: usi
     let qubit_i = qubit as i32;
     let n_i = n as i32;
     let (stream, func) = stream_and_fn(ctx, "dm_reset")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(groups));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(groups, BLOCK_SIZE));
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer_mut().raw_mut())
@@ -165,27 +158,17 @@ pub(crate) fn reset(ctx: &GpuContext, state: &mut GpuState, n: usize, qubit: usi
     // `qubit + n` is a bijection from the `4^n / 4` compacted indices onto the
     // block bases, so the four amplitudes one thread touches are disjoint from
     // every other thread's.
-    unsafe {
-        builder.launch(cfg).map_err(|e| driver_err("dm_reset", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "dm_reset", ctx.device(), 1) }
 }
 
 pub(crate) fn conjugate(ctx: &GpuContext, state: &mut GpuState, n: usize) -> Result<()> {
     let len = buffer_len(state, n);
     let (stream, func) = stream_and_fn(ctx, "dm_conjugate")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len, BLOCK_SIZE));
     let mut builder = stream.launch_builder(&func);
     builder.arg(state.buffer_mut().raw_mut()).arg(&len);
     // SAFETY: signature matches the kernel and the grid covers `len`.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("dm_conjugate", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "dm_conjugate", ctx.device(), 1) }
 }
 
 /// `rho[r][c] *= table[r] * conj(table[c])` for a `2^n`-entry phase table.
@@ -200,7 +183,7 @@ pub(crate) fn diagonal_sandwich(
     let n_i = n as i32;
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "dm_diagonal_sandwich")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len, BLOCK_SIZE));
     let mut scratch = ctx.launcher_scratch();
     let table_buf = super::stage_complex(&mut scratch.blob, device, table)?;
     let mut builder = stream.launch_builder(&func);
@@ -211,13 +194,7 @@ pub(crate) fn diagonal_sandwich(
         .arg(&table_buf.f64s);
     // SAFETY: signature matches the kernel; the grid covers `len`, every table
     // read is below `2^n`, and the table is held by the scratch guard.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("dm_diagonal_sandwich", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "dm_diagonal_sandwich", ctx.device(), 1) }
 }
 
 /// One complex multiply per amplitude by the diagonal block superoperator
@@ -235,7 +212,7 @@ pub(crate) fn kraus_2q_diagonal(
     let (q0_i, q1_i, n_i) = (q0 as i32, q1 as i32, n as i32);
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "dm_kraus_2q_diagonal")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len, BLOCK_SIZE));
     let mut scratch = ctx.launcher_scratch();
     let diag_buf = super::stage_complex(&mut scratch.blob, device, diag)?;
     let mut builder = stream.launch_builder(&func);
@@ -248,13 +225,7 @@ pub(crate) fn kraus_2q_diagonal(
         .arg(&diag_buf.f64s);
     // SAFETY: signature matches the kernel; the grid covers `len` and the slot
     // index is four bits, inside the 16-entry table the scratch guard holds.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("dm_kraus_2q_diagonal", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "dm_kraus_2q_diagonal", ctx.device(), 1) }
 }
 
 /// Dense 16x16 block superoperator sweep, `s` indexed `[4 * tr + tc][4 * trp + tcp]`.
@@ -271,7 +242,7 @@ pub(crate) fn kraus_2q_dense(
     let (q0_i, q1_i, n_i) = (q0 as i32, q1 as i32, n as i32);
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "dm_kraus_2q_dense")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(groups));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(groups, BLOCK_SIZE));
     let mut scratch = ctx.launcher_scratch();
     let s_buf = super::stage_blob(
         &mut scratch.blob,
@@ -296,13 +267,7 @@ pub(crate) fn kraus_2q_dense(
     // four block positions is a bijection from the compacted index onto the
     // block bases, so the 16 amplitudes one thread touches are disjoint from
     // every other thread's; the superoperator is held by the scratch guard.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("dm_kraus_2q_dense", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "dm_kraus_2q_dense", ctx.device(), 1) }
 }
 
 /// `B -> alpha B + beta Tr(B) I` on every `(q0, q1)` block.
@@ -319,7 +284,7 @@ pub(crate) fn depolarizing_2q(
     let groups = buffer_len(state, n) >> 4;
     let (q0_i, q1_i, n_i) = (q0 as i32, q1 as i32, n as i32);
     let (stream, func) = stream_and_fn(ctx, "dm_depolarizing_2q")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(groups));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(groups, BLOCK_SIZE));
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer_mut().raw_mut())
@@ -331,13 +296,7 @@ pub(crate) fn depolarizing_2q(
         .arg(&beta);
     // SAFETY: signature matches the kernel; block bases are disjoint as in
     // `kraus_2q_dense`, so each thread owns its 16 amplitudes.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("dm_depolarizing_2q", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "dm_depolarizing_2q", ctx.device(), 1) }
 }
 
 /// Fill the buffer with `|psi><psi|` for the `2^n` amplitudes `amps`.
@@ -352,7 +311,7 @@ pub(crate) fn outer_product(
     let n_i = n as i32;
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "dm_outer_product")?;
-    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len));
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(len, BLOCK_SIZE));
     let mut scratch = ctx.launcher_scratch();
     let amps_buf = ensure_scratch(&mut scratch.f64_a, device, complex_as_interleaved(amps))?;
     let mut builder = stream.launch_builder(&func);
@@ -363,13 +322,7 @@ pub(crate) fn outer_product(
         .arg(amps_buf.raw());
     // SAFETY: signature matches the kernel; the grid covers `len`, every
     // amplitude read is below `2^n`, and the table is held by the scratch guard.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| driver_err("dm_outer_product", e))?;
-    }
-    ctx.device().count_launch(1);
-    Ok(())
+    unsafe { launch_counted(builder, cfg, "dm_outer_product", ctx.device(), 1) }
 }
 
 /// `sum_j (-1)^{popcount(j & zmask)} rho[j][j ^ xmask]` per `(xmask, zmask)`
@@ -421,12 +374,7 @@ pub(crate) fn pauli_sums(
         // from `mask_base`, which end at or below `num_masks`,
         // every read `j * d + (j ^ x)` stays inside the `d * d` buffer because
         // `x < d`, and `partials` holds two f64s per (mask, block).
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("dm_pauli_expect", e))?;
-        }
-        ctx.device().count_launch(0);
+        unsafe { launch_counted(builder, cfg, "dm_pauli_expect", ctx.device(), 0) }?;
     }
     super::finalize_pauli_sums(device, scratch, num_masks, blocks_per_mask, BLOCK_SIZE, 1.0)
 }

@@ -3,7 +3,7 @@
 //! column-major forward stabilizer simulation.
 
 use super::accumulator::transpose_64x64_dispatch;
-use super::{PauliVec, flip_bit, get_bit, incompatible, set_bit};
+use super::{PauliVec, flip_bit, get_bit, incompatible, set_bit, xor_words};
 #[cfg(target_arch = "x86_64")]
 use crate::backend::stabilizer::kernels::rowmul_words_avx512;
 #[cfg(target_arch = "x86_64")]
@@ -16,7 +16,7 @@ use crate::gates::Gate;
 /// `P <- U†·P·U`, up to sign: the frame carries no phase, so `HYH = -Y` lands
 /// as `Y`.
 #[inline]
-pub fn propagate_backward(pauli: &mut PauliVec, gate: &Gate, targets: &[usize]) {
+pub(crate) fn propagate_backward(pauli: &mut PauliVec, gate: &Gate, targets: &[usize]) {
     propagate_backward_words(&mut pauli.x, &mut pauli.z, gate, targets);
 }
 
@@ -35,28 +35,13 @@ pub(crate) fn propagate_backward_words(
             set_bit(x, q, zb);
             set_bit(z, q, xb);
         }
-        Gate::S => {
+        Gate::S | Gate::Sdg => {
             let q = targets[0];
             if get_bit(x, q) {
                 flip_bit(z, q);
             }
         }
-        Gate::Sdg => {
-            let q = targets[0];
-            if get_bit(x, q) {
-                flip_bit(z, q);
-            }
-        }
-        Gate::X => {}
-        Gate::Y => {}
-        Gate::Z => {}
-        Gate::SX => {
-            let q = targets[0];
-            if get_bit(z, q) {
-                flip_bit(x, q);
-            }
-        }
-        Gate::SXdg => {
+        Gate::SX | Gate::SXdg => {
             let q = targets[0];
             if get_bit(z, q) {
                 flip_bit(x, q);
@@ -96,7 +81,6 @@ pub(crate) fn propagate_backward_words(
             set_bit(z, q0, z1);
             set_bit(z, q1, z0);
         }
-        Gate::Id => {}
         _ => {}
     }
 }
@@ -138,17 +122,17 @@ pub(super) fn build_measurement_rows(circuit: &Circuit) -> Vec<(PauliVec, usize,
         z_packed[qubit][meas_idx / 64] |= 1u64 << (meas_idx % 64);
     }
 
-    let gate_instructions: Vec<(&Gate, &[usize])> = circuit
+    let gates_reversed = circuit
         .instructions
         .iter()
+        .rev()
         .filter_map(|inst| match inst {
             Instruction::Gate { gate, targets } => Some((gate, targets.as_slice())),
             Instruction::Conditional { gate, targets, .. } => Some((gate, targets.as_slice())),
             _ => None,
-        })
-        .collect();
+        });
 
-    for &(gate, targets) in gate_instructions.iter().rev() {
+    for (gate, targets) in gates_reversed {
         batch_propagate_backward(
             &mut x_packed,
             &mut z_packed,
@@ -249,27 +233,6 @@ unsafe fn batch_propagate_s_avx2(
                 *sign.get_unchecked_mut(w) ^= *xq.get_unchecked(w) & *zq.get_unchecked(w);
                 *zq.get_unchecked_mut(w) ^= *xq.get_unchecked(w);
             }
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn batch_propagate_sign_xor_avx2(dst: &mut [u64], src: &[u64], m_words: usize) {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        use std::arch::x86_64::*;
-        let chunks = m_words / 4;
-        let dp = dst.as_mut_ptr() as *mut __m256i;
-        let sp = src.as_ptr() as *const __m256i;
-        for i in 0..chunks {
-            let dv = _mm256_loadu_si256(dp.add(i));
-            let sv = _mm256_loadu_si256(sp.add(i));
-            _mm256_storeu_si256(dp.add(i), _mm256_xor_si256(dv, sv));
-        }
-        let tail = chunks * 4;
-        for w in tail..m_words {
-            *dst.get_unchecked_mut(w) ^= *src.get_unchecked(w);
         }
     }
 }
@@ -591,21 +554,6 @@ unsafe fn batch_propagate_s_avx512(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-unsafe fn batch_propagate_sign_xor_avx512(dst: &mut [u64], src: &[u64], m_words: usize) {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        use std::arch::x86_64::*;
-        let (dp, sp) = (dst.as_mut_ptr(), src.as_ptr());
-        for_each_word_oct!(m_words, |off, k| {
-            let dv = load_words(dp.add(off), k);
-            let sv = load_words(sp.add(off), k);
-            store_words(dp.add(off), k, _mm512_xor_si512(dv, sv));
-        });
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
 unsafe fn batch_propagate_sign_xor2_avx512(dst: &mut [u64], a: &[u64], b: &[u64], m_words: usize) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
@@ -838,28 +786,6 @@ unsafe fn batch_propagate_s_neon(
                 *sign.get_unchecked_mut(w) ^= *xq.get_unchecked(w) & *zq.get_unchecked(w);
                 *zq.get_unchecked_mut(w) ^= *xq.get_unchecked(w);
             }
-        }
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[allow(dead_code)]
-unsafe fn batch_propagate_sign_xor_neon(dst: &mut [u64], src: &[u64], m_words: usize) {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        use std::arch::aarch64::*;
-        let chunks = m_words / 2;
-        let dp = dst.as_mut_ptr();
-        let sp = src.as_ptr();
-        for i in 0..chunks {
-            let off = i * 2;
-            let dv = vld1q_u64(dp.add(off));
-            let sv = vld1q_u64(sp.add(off));
-            vst1q_u64(dp.add(off), veorq_u64(dv, sv));
-        }
-        let tail = chunks * 2;
-        for w in tail..m_words {
-            *dst.get_unchecked_mut(w) ^= *src.get_unchecked(w);
         }
     }
 }
@@ -1143,6 +1069,31 @@ pub(crate) fn pair_rows_mut(
     }
 }
 
+/// Run the first SIMD kernel whose flag is set and return, or fall through to the
+/// scalar loop after the call. Each kernel takes slices of at least `m_words` words.
+macro_rules! simd_dispatch {
+    ($avx512:ident: $a:expr, $avx2:ident: $b:expr, $neon:ident: $c:expr $(,)?) => {
+        #[cfg(target_arch = "x86_64")]
+        if $avx512 {
+            // SAFETY: AVX-512F detected, slices are disjoint and valid with m_words elements
+            unsafe { $a };
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if $avx2 {
+            // SAFETY: AVX2 detected, slices are disjoint and valid with m_words elements
+            unsafe { $b };
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if $neon {
+            // SAFETY: NEON is baseline on aarch64, slices are disjoint and valid with m_words elements
+            unsafe { $c };
+            return;
+        }
+    };
+}
+
 #[inline(always)]
 fn propagate_rows_1q(
     gate: &Gate,
@@ -1162,189 +1113,67 @@ fn propagate_rows_1q(
 
     match gate {
         Gate::H => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid with m_words elements
-                unsafe { batch_propagate_h_avx512(xq, zq, sign, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_h_avx2(xq, zq, sign, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_h_neon(xq, zq, sign, m_words) };
-                return;
-            }
+            simd_dispatch!(
+                use_avx512: batch_propagate_h_avx512(xq, zq, sign, m_words),
+                use_avx2: batch_propagate_h_avx2(xq, zq, sign, m_words),
+                use_neon: batch_propagate_h_neon(xq, zq, sign, m_words),
+            );
             for w in 0..m_words {
                 sign[w] ^= xq[w] & zq[w];
             }
             xq[..m_words].swap_with_slice(&mut zq[..m_words]);
         }
         Gate::S => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid with m_words elements
-                unsafe { batch_propagate_s_avx512(xq, zq, sign, m_words, true) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_s_avx2(xq, zq, sign, m_words, true) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_s_neon(xq, zq, sign, m_words, true) };
-                return;
-            }
+            simd_dispatch!(
+                use_avx512: batch_propagate_s_avx512(xq, zq, sign, m_words, true),
+                use_avx2: batch_propagate_s_avx2(xq, zq, sign, m_words, true),
+                use_neon: batch_propagate_s_neon(xq, zq, sign, m_words, true),
+            );
             for w in 0..m_words {
                 sign[w] ^= xq[w] & !zq[w];
                 zq[w] ^= xq[w];
             }
         }
         Gate::Sdg => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid with m_words elements
-                unsafe { batch_propagate_s_avx512(xq, zq, sign, m_words, false) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_s_avx2(xq, zq, sign, m_words, false) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_s_neon(xq, zq, sign, m_words, false) };
-                return;
-            }
+            simd_dispatch!(
+                use_avx512: batch_propagate_s_avx512(xq, zq, sign, m_words, false),
+                use_avx2: batch_propagate_s_avx2(xq, zq, sign, m_words, false),
+                use_neon: batch_propagate_s_neon(xq, zq, sign, m_words, false),
+            );
             for w in 0..m_words {
                 sign[w] ^= xq[w] & zq[w];
                 zq[w] ^= xq[w];
             }
         }
-        Gate::X => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_avx512(sign, zq, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_avx2(sign, zq, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_neon(sign, zq, m_words) };
-                return;
-            }
-            for w in 0..m_words {
-                sign[w] ^= zq[w];
-            }
-        }
+        Gate::X => xor_words(&mut sign[..m_words], &zq[..m_words]),
         Gate::Y => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor2_avx512(sign, xq, zq, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor2_avx2(sign, xq, zq, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor2_neon(sign, xq, zq, m_words) };
-                return;
-            }
+            simd_dispatch!(
+                use_avx512: batch_propagate_sign_xor2_avx512(sign, xq, zq, m_words),
+                use_avx2: batch_propagate_sign_xor2_avx2(sign, xq, zq, m_words),
+                use_neon: batch_propagate_sign_xor2_neon(sign, xq, zq, m_words),
+            );
             for w in 0..m_words {
                 sign[w] ^= xq[w] ^ zq[w];
             }
         }
-        Gate::Z => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_avx512(sign, xq, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_avx2(sign, xq, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_neon(sign, xq, m_words) };
-                return;
-            }
-            for w in 0..m_words {
-                sign[w] ^= xq[w];
-            }
-        }
+        Gate::Z => xor_words(&mut sign[..m_words], &xq[..m_words]),
         Gate::SX => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_avx512(xq, zq, sign, m_words, false) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_avx2(xq, zq, sign, m_words, false) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_neon(xq, zq, sign, m_words, false) };
-                return;
-            }
+            simd_dispatch!(
+                use_avx512: batch_propagate_sx_avx512(xq, zq, sign, m_words, false),
+                use_avx2: batch_propagate_sx_avx2(xq, zq, sign, m_words, false),
+                use_neon: batch_propagate_sx_neon(xq, zq, sign, m_words, false),
+            );
             for w in 0..m_words {
                 sign[w] ^= xq[w] & zq[w];
                 xq[w] ^= zq[w];
             }
         }
         Gate::SXdg => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_avx512(xq, zq, sign, m_words, true) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_avx2(xq, zq, sign, m_words, true) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_neon(xq, zq, sign, m_words, true) };
-                return;
-            }
+            simd_dispatch!(
+                use_avx512: batch_propagate_sx_avx512(xq, zq, sign, m_words, true),
+                use_avx2: batch_propagate_sx_avx2(xq, zq, sign, m_words, true),
+                use_neon: batch_propagate_sx_neon(xq, zq, sign, m_words, true),
+            );
             for w in 0..m_words {
                 sign[w] ^= !xq[w] & zq[w];
                 xq[w] ^= zq[w];
@@ -1375,24 +1204,11 @@ fn propagate_rows_2q(
 
     match gate {
         Gate::Cx => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid, ctrl != tgt
-                unsafe { batch_propagate_cx_avx512(x0, z0, x1, z1, sign, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid, ctrl != tgt
-                unsafe { batch_propagate_cx_avx2(x0, z0, x1, z1, sign, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid, ctrl != tgt
-                unsafe { batch_propagate_cx_neon(x0, z0, x1, z1, sign, m_words) };
-                return;
-            }
+            simd_dispatch!(
+                use_avx512: batch_propagate_cx_avx512(x0, z0, x1, z1, sign, m_words),
+                use_avx2: batch_propagate_cx_avx2(x0, z0, x1, z1, sign, m_words),
+                use_neon: batch_propagate_cx_neon(x0, z0, x1, z1, sign, m_words),
+            );
             for w in 0..m_words {
                 sign[w] ^= x0[w] & z1[w] & !(z0[w] ^ x1[w]);
                 x1[w] ^= x0[w];
@@ -1400,24 +1216,11 @@ fn propagate_rows_2q(
             }
         }
         Gate::Cz => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid, q0 != q1
-                unsafe { batch_propagate_cz_avx512(x0, z0, x1, z1, sign, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid, q0 != q1
-                unsafe { batch_propagate_cz_avx2(x0, z0, x1, z1, sign, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid, q0 != q1
-                unsafe { batch_propagate_cz_neon(x0, z0, x1, z1, sign, m_words) };
-                return;
-            }
+            simd_dispatch!(
+                use_avx512: batch_propagate_cz_avx512(x0, z0, x1, z1, sign, m_words),
+                use_avx2: batch_propagate_cz_avx2(x0, z0, x1, z1, sign, m_words),
+                use_neon: batch_propagate_cz_neon(x0, z0, x1, z1, sign, m_words),
+            );
             for w in 0..m_words {
                 sign[w] ^= x0[w] & x1[w] & (z0[w] ^ z1[w]);
                 z0[w] ^= x1[w];
@@ -1425,24 +1228,11 @@ fn propagate_rows_2q(
             }
         }
         Gate::Swap => {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx512 {
-                // SAFETY: AVX-512F detected, slices are valid, q0 != q1
-                unsafe { batch_propagate_swap_avx512(x0, z0, x1, z1, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid, q0 != q1
-                unsafe { batch_propagate_swap_avx2(x0, z0, x1, z1, m_words) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid, q0 != q1
-                unsafe { batch_propagate_swap_neon(x0, z0, x1, z1, m_words) };
-                return;
-            }
+            simd_dispatch!(
+                use_avx512: batch_propagate_swap_avx512(x0, z0, x1, z1, m_words),
+                use_avx2: batch_propagate_swap_avx2(x0, z0, x1, z1, m_words),
+                use_neon: batch_propagate_swap_neon(x0, z0, x1, z1, m_words),
+            );
             x0[..m_words].swap_with_slice(&mut x1[..m_words]);
             z0[..m_words].swap_with_slice(&mut z1[..m_words]);
         }
@@ -1760,6 +1550,20 @@ pub(super) fn rowmul_phase_into(
     (sum & 3) >= 2
 }
 
+/// Whether `pauli` anticommutes with a tableau row laid out as `[x(nw) | z(nw)]`.
+#[inline(always)]
+fn anticommutes(pauli: &PauliVec, row: &[u64], nw: usize) -> bool {
+    let (row_x, row_z) = row.split_at(nw);
+    let inner = pauli.x[..nw]
+        .iter()
+        .zip(&pauli.z[..nw])
+        .zip(row_x.iter().zip(row_z))
+        .fold(0u64, |acc, ((&px, &pz), (&rx, &rz))| {
+            acc ^ (px & rz) ^ (pz & rx)
+        });
+    inner.count_ones() % 2 == 1
+}
+
 /// Compute reference measurement outcomes by simulating measurements of the
 /// propagated Paulis on |0⟩^n using the Aaronson-Gottesman measurement protocol.
 /// O(m x n^2/64), avoids re-simulating all T circuit gates through the stabilizer.
@@ -1787,12 +1591,7 @@ pub(super) fn compute_reference_bits(
     for (meas_idx, (pauli, _, _)) in measurement_rows.iter().enumerate() {
         let mut anti_idx = None;
         for g in n..2 * n {
-            let base = g * stride;
-            let mut inner = 0u64;
-            for w in 0..nw {
-                inner ^= (pauli.x[w] & xz[base + nw + w]) ^ (pauli.z[w] & xz[base + w]);
-            }
-            if inner.count_ones() % 2 == 1 {
+            if anticommutes(pauli, &xz[g * stride..(g + 1) * stride], nw) {
                 anti_idx = Some(g);
                 break;
             }
@@ -1808,11 +1607,7 @@ pub(super) fn compute_reference_bits(
                         continue;
                     }
                     let r_base = r * stride;
-                    let mut inner = 0u64;
-                    for w in 0..nw {
-                        inner ^= (pauli.x[w] & xz[r_base + nw + w]) ^ (pauli.z[w] & xz[r_base + w]);
-                    }
-                    if inner.count_ones() % 2 == 1 {
+                    if anticommutes(pauli, &xz[r_base..r_base + stride], nw) {
                         phase[r] = rowmul_phase(&p_data, &mut xz, r_base, nw, p_phase, phase[r]);
                     }
                 }
@@ -1836,12 +1631,7 @@ pub(super) fn compute_reference_bits(
                 let mut scratch_phase = false;
 
                 for g in 0..n {
-                    let d_base = g * stride;
-                    let mut inner = 0u64;
-                    for w in 0..nw {
-                        inner ^= (pauli.x[w] & xz[d_base + nw + w]) ^ (pauli.z[w] & xz[d_base + w]);
-                    }
-                    if inner.count_ones() % 2 == 1 {
+                    if anticommutes(pauli, &xz[g * stride..(g + 1) * stride], nw) {
                         let s_base = (g + n) * stride;
                         let s_phase = phase[g + n];
                         scratch_phase = rowmul_phase_into(

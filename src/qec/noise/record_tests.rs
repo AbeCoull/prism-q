@@ -11,7 +11,10 @@ fn frame_and_compiled(program: &QecProgram) -> (PackedShots, PackedShots) {
     let mut frame = compile_qec_noisy_sampler(program).unwrap();
     let mut compiled = compile_qec_noisy_sampler_on_compiled_base(program).unwrap();
     compiled.reseed(0x5EED);
-    (sample(&mut frame, SHOTS), sample(&mut compiled, SHOTS))
+    let compiled = compiled
+        .sample_measurements_packed(0, SHOTS, SHOTS)
+        .unwrap();
+    (sample(&mut frame, SHOTS), compiled)
 }
 
 fn distribution_programs() -> Vec<(&'static str, QecProgram)> {

@@ -6,7 +6,7 @@ use num_complex::Complex64;
 
 use super::schedule::{Timeline, Update};
 use super::{Device, MAX_DIMENSION, PulseError, Schedule};
-use crate::gates::spectral::hermitian_eigen;
+use crate::gates::spectral::{hermitian_eigen, spectral_map};
 
 const ZERO: Complex64 = Complex64::new(0.0, 0.0);
 const ONE: Complex64 = Complex64::new(1.0, 0.0);
@@ -280,19 +280,9 @@ fn reference_frequency(timeline: &Timeline<'_>, site_hz: &[f64]) -> f64 {
 /// `exp(-i H)` for a Hermitian `H` of dimensionless phases, column major.
 fn exponential(hamiltonian: &[Complex64], dim: usize) -> Vec<Complex64> {
     let (values, vectors) = hermitian_eigen(hamiltonian, dim);
-    let phases: Vec<Complex64> = values
-        .iter()
-        .map(|&value| Complex64::from_polar(1.0, -value))
-        .collect();
-    let mut out = vec![ZERO; dim * dim];
-    for column in 0..dim {
-        for row in 0..dim {
-            out[column * dim + row] = (0..dim)
-                .map(|k| vectors[k * dim + row] * phases[k] * vectors[k * dim + column].conj())
-                .sum();
-        }
-    }
-    out
+    spectral_map(&values, &vectors, dim, |value| {
+        Complex64::from_polar(1.0, -value)
+    })
 }
 
 /// `a * b` for column-major square matrices.

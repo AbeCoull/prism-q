@@ -67,7 +67,7 @@ fn dif_stages(state: &mut [Complex64], n: usize, stages: std::ops::Range<usize>,
         for t in stages.clone().rev() {
             let stride = 1usize << t;
             let step = (1usize << n) / (2 * stride);
-            run_radix2_stage_seq(chunk, stride, &table, step, std::f64::consts::FRAC_1_SQRT_2);
+            run_radix2_stage_seq(chunk, stride, &table, step);
         }
     }
 }
@@ -129,17 +129,16 @@ fn row_kernels_match_scalar_butterflies() {
     if !simd::has_avx2_fma() {
         return;
     }
-    let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
     let rows: Vec<Vec<Complex64>> = (0..4)
         .map(|r| random_state(4, &mut ChaCha8Rng::seed_from_u64(7 + r)))
         .collect();
-    let w = [0.3, 1.7, -2.4].map(|angle| Complex64::from_polar(inv_sqrt2, angle));
+    let w = [0.3, 1.7, -2.4].map(|angle| Complex64::from_polar(INV_SQRT2, angle));
 
     let (mut lo, mut hi) = (rows[0].clone(), rows[1].clone());
     // SAFETY: AVX2 detected above; the rows share one even length.
     unsafe { radix2_rows_avx2fma(&mut lo, &mut hi, w[0]) };
     for j in 0..lo.len() {
-        let (elo, ehi) = radix2_butterfly_values(rows[0][j], rows[1][j], w[0], inv_sqrt2);
+        let (elo, ehi) = radix2_butterfly_values(rows[0][j], rows[1][j], w[0]);
         assert!((lo[j] - elo).norm() < TOL && (hi[j] - ehi).norm() < TOL);
     }
 
@@ -149,7 +148,7 @@ fn row_kernels_match_scalar_butterflies() {
     unsafe { radix4_rows_avx2fma(qa, qb, qc, qd, w[0], w[1], w[2]) };
     for j in 0..rows[0].len() {
         let expected = radix4_butterfly_values(
-            rows[0][j], rows[1][j], rows[2][j], rows[3][j], w[0], w[1], w[2], inv_sqrt2,
+            rows[0][j], rows[1][j], rows[2][j], rows[3][j], w[0], w[1], w[2],
         );
         let expected = [expected.0, expected.1, expected.2, expected.3];
         for (row, e) in q.iter().zip(expected) {

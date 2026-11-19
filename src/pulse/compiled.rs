@@ -4,7 +4,7 @@ use num_complex::Complex64;
 
 use super::integrate::multiply;
 use super::{Device, PulseError};
-use crate::gates::spectral::hermitian_eigen;
+use crate::gates::spectral::{hermitian_eigen, spectral_map};
 use crate::{Gate, NoiseChannel};
 
 const ZERO: Complex64 = Complex64::new(0.0, 0.0);
@@ -188,16 +188,9 @@ fn nearest_unitary(block: &[Complex64], width: usize) -> Result<Vec<Complex64>, 
     if smallest < MIN_SINGULAR_VALUE {
         return Err(PulseError::Leaked(smallest));
     }
-    let mut inverse_root = vec![ZERO; width * width];
-    for column in 0..width {
-        for row in 0..width {
-            inverse_root[column * width + row] = (0..width)
-                .map(|k| {
-                    vectors[k * width + row] * vectors[k * width + column].conj() / values[k].sqrt()
-                })
-                .sum();
-        }
-    }
+    let inverse_root = spectral_map(&values, &vectors, width, |value| {
+        Complex64::new(1.0 / value.sqrt(), 0.0)
+    });
     Ok(multiply(block, &inverse_root, width))
 }
 

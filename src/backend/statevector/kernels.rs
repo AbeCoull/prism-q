@@ -136,52 +136,7 @@ pub(crate) fn subcube_plan(
     gates: &[(usize, usize, [[Complex64; 4]; 4])],
     num_qubits: usize,
 ) -> Option<SubcubePlan> {
-    let tile_bits = multi_2q_tile_bits_for(num_qubits);
-    if num_qubits <= tile_bits {
-        return None;
-    }
-    let max_q = gates.iter().map(|&(q0, q1, _)| q0.max(q1)).max()?;
-    if max_q < tile_bits {
-        return None;
-    }
-    let budget = multi_2q_high_budget_for(num_qubits);
-    let low_bits = multi_2q_low_bits();
-    let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
-    for &(q0, q1, _) in gates {
-        for q in [q0, q1] {
-            if q >= low_bits && !high.contains(&q) {
-                if high.len() == budget {
-                    return None;
-                }
-                high.push(q);
-            }
-        }
-    }
-    // A high qubit that lands inside the contiguous run rides there instead,
-    // which lengthens the run and can free another; iterate to a fixed point.
-    let mut low = tile_bits - high.len();
-    loop {
-        let before = high.len();
-        high.retain(|&mut q| q >= low);
-        if high.len() == before {
-            break;
-        }
-        low = tile_bits - high.len();
-    }
-    high.sort_unstable();
-    let mut map = vec![usize::MAX; num_qubits];
-    for (q, slot) in map.iter_mut().enumerate().take(low) {
-        *slot = q;
-    }
-    for (j, &h) in high.iter().enumerate() {
-        map[h] = low + j;
-    }
-    Some(SubcubePlan {
-        tile_bits,
-        low,
-        high,
-        map,
-    })
+    qubit_subcube_plan(gates.iter().flat_map(|&(q0, q1, _)| [q0, q1]), num_qubits)
 }
 
 /// [`subcube_plan`] over `qubits`, the qubits a batch needs inside the tile (the X and
@@ -566,32 +521,174 @@ fn adjacent_2q_indices(offset: usize, stride: usize, q0_is_lo: bool) -> [usize; 
     }
 }
 
+/// Run `f` on the high half of every `2 * half` block of `state`.
+///
+/// From [`kernel_parallel_qubits`] up, the blocks run as Rayon tasks, or, with fewer than
+/// four blocks, each high half splits into tiles of `MIN_PAR_ELEMS.max(sub_block)`. `f`
+/// must accept any slice that is a whole number of `sub_block` runs.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
 #[inline(always)]
-fn swap_slices_kernel(a: &mut [Complex64], b: &mut [Complex64]) {
-    debug_assert_eq!(a.len(), b.len());
-    if a.len() < 4 {
-        for (x, y) in a.iter_mut().zip(b.iter_mut()) {
-            std::mem::swap(x, y);
+fn for_each_hi_half(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    half: usize,
+    sub_block: usize,
+    f: impl Fn(&mut [Complex64]) + Sync,
+) {
+    let block_size = half << 1;
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        if state.len() / block_size >= 4 {
+            state
+                .par_chunks_mut(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .for_each(|chunk| f(&mut chunk[half..]));
+        } else {
+            let inner_tile = MIN_PAR_ELEMS.max(sub_block);
+            for chunk in state.chunks_mut(block_size) {
+                chunk[half..].par_chunks_mut(inner_tile).for_each(&f);
+            }
         }
-    } else {
-        simd::swap_slices(a, b);
+        return;
+    }
+    for chunk in state.chunks_mut(block_size) {
+        f(&mut chunk[half..]);
     }
 }
 
+/// Run `f` on the `(lo, hi)` halves of every `2 * half` block of `state`, split as
+/// [`for_each_hi_half`] splits, with both halves tiled in step.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
 #[inline(always)]
-fn negate_slice_kernel(slice: &mut [Complex64]) {
-    if slice.len() < 4 {
-        for amp in slice {
-            *amp = -*amp;
+fn for_each_half_pair(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    half: usize,
+    sub_block: usize,
+    f: impl Fn(&mut [Complex64], &mut [Complex64]) + Sync,
+) {
+    let block_size = half << 1;
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        if state.len() / block_size >= 4 {
+            state
+                .par_chunks_mut(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .for_each(|chunk| {
+                    let (lo, hi) = chunk.split_at_mut(half);
+                    f(lo, hi);
+                });
+        } else {
+            let inner_tile = MIN_PAR_ELEMS.max(sub_block);
+            for chunk in state.chunks_mut(block_size) {
+                let (lo, hi) = chunk.split_at_mut(half);
+                lo.par_chunks_mut(inner_tile)
+                    .zip(hi.par_chunks_mut(inner_tile))
+                    .for_each(|(lo_tile, hi_tile)| f(lo_tile, hi_tile));
+            }
         }
-    } else {
-        simd::negate_slice(slice);
+        return;
+    }
+    for chunk in state.chunks_mut(block_size) {
+        let (lo, hi) = chunk.split_at_mut(half);
+        f(lo, hi);
+    }
+}
+
+/// Sum `f` over the high half of every `2 * half` block of `state`, split as
+/// [`for_each_hi_half`] splits with `MIN_PAR_ELEMS` tiles.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+#[inline(always)]
+fn sum_hi_halves(
+    state: &[Complex64],
+    num_qubits: usize,
+    half: usize,
+    f: impl Fn(&[Complex64]) -> f64 + Sync,
+) -> f64 {
+    let block_size = half << 1;
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        return if state.len() / block_size >= 4 {
+            state
+                .par_chunks(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .map(|chunk| f(&chunk[half..]))
+                .sum::<f64>()
+        } else {
+            state
+                .chunks(block_size)
+                .map(|chunk| chunk[half..].par_chunks(MIN_PAR_ELEMS).map(&f).sum::<f64>())
+                .sum::<f64>()
+        };
+    }
+    let mut sum = 0.0f64;
+    for chunk in state.chunks(block_size) {
+        sum += f(&chunk[half..]);
+    }
+    sum
+}
+
+/// [`sum_hi_halves`] for an `f` that also writes the half it reads.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+#[inline(always)]
+fn sum_hi_halves_mut(
+    state: &mut [Complex64],
+    num_qubits: usize,
+    half: usize,
+    f: impl Fn(&mut [Complex64]) -> f64 + Sync,
+) -> f64 {
+    let block_size = half << 1;
+    #[cfg(feature = "parallel")]
+    if num_qubits >= kernel_parallel_qubits() {
+        return if state.len() / block_size >= 4 {
+            state
+                .par_chunks_mut(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .map(|chunk| f(&mut chunk[half..]))
+                .sum::<f64>()
+        } else {
+            state
+                .chunks_mut(block_size)
+                .map(|chunk| {
+                    chunk[half..]
+                        .par_chunks_mut(MIN_PAR_ELEMS)
+                        .map(&f)
+                        .sum::<f64>()
+                })
+                .sum::<f64>()
+        };
+    }
+    let mut sum = 0.0f64;
+    for chunk in state.chunks_mut(block_size) {
+        sum += f(&mut chunk[half..]);
+    }
+    sum
+}
+
+/// Run `f` on each `tile_size` tile of `state`, as Rayon tasks when `parallel`.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+#[inline(always)]
+fn tile_pass(
+    state: &mut [Complex64],
+    tile_size: usize,
+    parallel: bool,
+    f: impl Fn(&mut [Complex64]) + Sync,
+) {
+    #[cfg(feature = "parallel")]
+    if parallel {
+        state
+            .par_chunks_mut(tile_size)
+            .with_min_len(chunk_min_len(tile_size))
+            .for_each(&f);
+        return;
+    }
+    for tile in state.chunks_mut(tile_size) {
+        f(tile);
     }
 }
 
 /// Fold the `|1>` branch of a reset onto the `|0>` branch over one aligned
-/// `(lo, hi)` pair, then clear `hi`. Shared by the sequential reset and the
-/// block and sub-tile arms of [`StatevectorBackend::fold_reset_par`].
+/// `(lo, hi)` pair, then clear `hi`.
 #[inline(always)]
 fn fold_reset_pair(lo: &mut [Complex64], hi: &mut [Complex64], outcome: bool) {
     if outcome {
@@ -688,6 +785,8 @@ impl QftTwiddleCache {
     }
 }
 
+const INV_SQRT2: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
 const QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_MB: usize = 256;
 
 // Soft LRU cap for QFT twiddles. One oversized table may occupy the cache
@@ -740,12 +839,11 @@ fn cached_qft_twiddles(cache: &RwLock<QftTwiddleCache>, n: usize) -> QftTwiddleT
         (guard.limit_bytes, guard.inverse)
     };
 
-    let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
     let qft_size = 1usize << n;
     let mut twiddles = Vec::with_capacity(qft_size / 2);
     for k in 0..qft_size / 2 {
         let angle = std::f64::consts::TAU * k as f64 / qft_size as f64;
-        let w = Complex64::from_polar(inv_sqrt2, angle);
+        let w = Complex64::from_polar(INV_SQRT2, angle);
         twiddles.push(if inverse { w.conj() } else { w });
     }
     let twiddles: Arc<[Complex64]> = twiddles.into();
@@ -921,13 +1019,12 @@ fn qft_compact_twiddles(inverse: bool) -> &'static [Complex64] {
     static FORWARD: OnceLock<Box<[Complex64]>> = OnceLock::new();
     static INVERSE: OnceLock<Box<[Complex64]>> = OnceLock::new();
     let build = || {
-        let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
         let mut table = vec![Complex64::new(0.0, 0.0); 1 << qft_max_tile_bits()];
         let mut s = 1;
         while s < table.len() {
             for k in 0..s {
                 let angle = std::f64::consts::TAU * k as f64 / (2 * s) as f64;
-                let w = Complex64::from_polar(inv_sqrt2, angle);
+                let w = Complex64::from_polar(INV_SQRT2, angle);
                 table[s + k] = if inverse { w.conj() } else { w };
             }
             s <<= 1;
@@ -942,7 +1039,7 @@ fn qft_compact_twiddles(inverse: bool) -> &'static [Complex64] {
 }
 
 #[inline(always)]
-fn reverse_low_bits(x: usize, bits: usize) -> usize {
+pub(crate) fn reverse_low_bits(x: usize, bits: usize) -> usize {
     if bits == 0 {
         return 0;
     }
@@ -1217,10 +1314,9 @@ unsafe fn batch_rzz_tile_bmi2(
     num_groups: usize,
 ) {
     use std::arch::x86_64::_pext_u64;
-    let one = Complex64::new(1.0, 0.0);
     for (j, amp) in tile.iter_mut().enumerate() {
         let i = base_idx + j;
-        let mut combined = one;
+        let mut combined = ONE;
         for group in groups.iter().take(num_groups) {
             let bits = _pext_u64(i as u64, group.pext_mask) as usize;
             combined *= group.table[bits];
@@ -1238,6 +1334,26 @@ pub(crate) struct BatchPhaseGroup {
 }
 
 const ONE: Complex64 = Complex64::new(1.0, 0.0);
+
+/// Product of the first `num_groups` rzz group phases at basis index `i`.
+#[inline(always)]
+fn rzz_phase_at(i: usize, groups: &[BatchRzzGroup], num_groups: usize) -> Complex64 {
+    let mut combined = ONE;
+    for group in groups.iter().take(num_groups) {
+        combined *= group.table[extract_rzz_bits(i, group)];
+    }
+    combined
+}
+
+/// Product of the first `num_groups` batch phase group phases at basis index `i`.
+#[inline(always)]
+fn batch_phase_at(i: usize, groups: &[BatchPhaseGroup], num_groups: usize) -> Complex64 {
+    let mut combined = ONE;
+    for group in groups.iter().take(num_groups) {
+        combined *= group.table[extract_bits(i, &group.shifts, group.len)];
+    }
+    combined
+}
 
 impl BatchRzzGroup {
     const EMPTY: Self = Self {
@@ -1311,7 +1427,6 @@ pub(crate) fn build_batch_phase_tables(
     phases: &[(usize, Complex64)],
     groups: &mut [BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS],
 ) -> usize {
-    let one = Complex64::new(1.0, 0.0);
     let num_groups = phases.len().div_ceil(BATCH_PHASE_GROUP_SIZE);
     assert!(
         num_groups <= MAX_BATCH_PHASE_GROUPS,
@@ -1327,7 +1442,7 @@ pub(crate) fn build_batch_phase_tables(
         group.len = group_len;
 
         let mut sorted: [(usize, Complex64); BATCH_PHASE_GROUP_SIZE] =
-            [(0, one); BATCH_PHASE_GROUP_SIZE];
+            [(0, ONE); BATCH_PHASE_GROUP_SIZE];
         sorted[..group_len].copy_from_slice(&phases[start..end]);
         sorted[..group_len].sort_unstable_by_key(|&(q, _)| q);
 
@@ -1338,7 +1453,7 @@ pub(crate) fn build_batch_phase_tables(
         }
         group.pext_mask = mask;
 
-        group.table[0] = one;
+        group.table[0] = ONE;
         for (j, &(_, phase)) in sorted.iter().enumerate().take(group_len) {
             let prev_entries = 1usize << j;
             for k in 0..prev_entries {
@@ -1572,7 +1687,7 @@ unsafe fn apply_batch_phase_bmi2(
         let half = state.len() >> 1;
         for k in 0..half {
             let i = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
-            let mut combined = Complex64::new(1.0, 0.0);
+            let mut combined = ONE;
             for group in groups.iter().take(num_groups) {
                 let bits = _pext_u64(i as u64, group.pext_mask) as usize;
                 combined *= group.table[bits];
@@ -1604,7 +1719,7 @@ unsafe fn batch_phase_tile_bmi2(
             }
             for (j, amp) in tile.iter_mut().enumerate() {
                 let i = base_idx + j;
-                let mut combined = Complex64::new(1.0, 0.0);
+                let mut combined = ONE;
                 for group in groups.iter().take(num_groups) {
                     let bits = _pext_u64(i as u64, group.pext_mask) as usize;
                     combined *= group.table[bits];
@@ -1616,7 +1731,7 @@ unsafe fn batch_phase_tile_bmi2(
             for k in 0..half {
                 let j = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
                 let i = base_idx + j;
-                let mut combined = Complex64::new(1.0, 0.0);
+                let mut combined = ONE;
                 for group in groups.iter().take(num_groups) {
                     let bits = _pext_u64(i as u64, group.pext_mask) as usize;
                     combined *= group.table[bits];
@@ -1640,7 +1755,6 @@ fn fft_stage_par(
     block_size: usize,
     twiddle_step: usize,
     twiddles_scaled: &[Complex64],
-    inv_sqrt2: f64,
 ) {
     let total = state.len();
     let num_groups = total / block_size;
@@ -1650,7 +1764,7 @@ fn fft_stage_par(
         for j in 0..lo.len() {
             let k = k_base + j;
             let w = twiddles_scaled[k * twiddle_step];
-            let (out_lo, out_hi) = radix2_butterfly_values(lo[j], hi[j], w, inv_sqrt2);
+            let (out_lo, out_hi) = radix2_butterfly_values(lo[j], hi[j], w);
             lo[j] = out_lo;
             hi[j] = out_hi;
         }
@@ -1694,13 +1808,8 @@ fn fft_stage_par(
 
 /// Scalar radix-2 DIF butterfly. `w` includes the `1/sqrt(2)` factor.
 #[inline(always)]
-fn radix2_butterfly_values(
-    a: Complex64,
-    b: Complex64,
-    w: Complex64,
-    inv_sqrt2: f64,
-) -> (Complex64, Complex64) {
-    let lo = Complex64::new((a.re + b.re) * inv_sqrt2, (a.im + b.im) * inv_sqrt2);
+fn radix2_butterfly_values(a: Complex64, b: Complex64, w: Complex64) -> (Complex64, Complex64) {
+    let lo = Complex64::new((a.re + b.re) * INV_SQRT2, (a.im + b.im) * INV_SQRT2);
     let hi = (a - b) * w;
     (lo, hi)
 }
@@ -1714,7 +1823,6 @@ fn run_radix2_stage_seq(
     stride: usize,
     twiddles_scaled: &[Complex64],
     twiddle_step: usize,
-    inv_sqrt2: f64,
 ) {
     let block_size = stride << 1;
     let total = state.len();
@@ -1724,7 +1832,7 @@ fn run_radix2_stage_seq(
             let i0 = group_start + k;
             let i1 = i0 + stride;
             let w = twiddles_scaled[k * twiddle_step];
-            let (lo, hi) = radix2_butterfly_values(state[i0], state[i1], w, inv_sqrt2);
+            let (lo, hi) = radix2_butterfly_values(state[i0], state[i1], w);
             state[i0] = lo;
             state[i1] = hi;
         }
@@ -1734,7 +1842,6 @@ fn run_radix2_stage_seq(
 
 /// Scalar radix-4 butterfly math. Twiddles include the `1/sqrt(2)` factor.
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
 fn radix4_butterfly_values(
     a: Complex64,
     b: Complex64,
@@ -1743,21 +1850,20 @@ fn radix4_butterfly_values(
     w_2s_k: Complex64,
     w_2s_kps: Complex64,
     w_s_k: Complex64,
-    inv_sqrt2: f64,
 ) -> (Complex64, Complex64, Complex64, Complex64) {
-    let t_ac_sum = Complex64::new((a.re + c.re) * inv_sqrt2, (a.im + c.im) * inv_sqrt2);
+    let t_ac_sum = Complex64::new((a.re + c.re) * INV_SQRT2, (a.im + c.im) * INV_SQRT2);
     let t_ac_diff = (a - c) * w_2s_k;
-    let t_bd_sum = Complex64::new((b.re + d.re) * inv_sqrt2, (b.im + d.im) * inv_sqrt2);
+    let t_bd_sum = Complex64::new((b.re + d.re) * INV_SQRT2, (b.im + d.im) * INV_SQRT2);
     let t_bd_diff = (b - d) * w_2s_kps;
 
     let oa = Complex64::new(
-        (t_ac_sum.re + t_bd_sum.re) * inv_sqrt2,
-        (t_ac_sum.im + t_bd_sum.im) * inv_sqrt2,
+        (t_ac_sum.re + t_bd_sum.re) * INV_SQRT2,
+        (t_ac_sum.im + t_bd_sum.im) * INV_SQRT2,
     );
     let ob = (t_ac_sum - t_bd_sum) * w_s_k;
     let oc = Complex64::new(
-        (t_ac_diff.re + t_bd_diff.re) * inv_sqrt2,
-        (t_ac_diff.im + t_bd_diff.im) * inv_sqrt2,
+        (t_ac_diff.re + t_bd_diff.re) * INV_SQRT2,
+        (t_ac_diff.im + t_bd_diff.im) * INV_SQRT2,
     );
     let od = (t_ac_diff - t_bd_diff) * w_s_k;
     (oa, ob, oc, od)
@@ -1773,7 +1879,6 @@ fn radix4_butterfly_scalar(
     w_2s_k: Complex64,
     w_2s_kps: Complex64,
     w_s_k: Complex64,
-    inv_sqrt2: f64,
 ) {
     let s = inner_stride;
     let (oa, ob, oc, od) = radix4_butterfly_values(
@@ -1784,7 +1889,6 @@ fn radix4_butterfly_scalar(
         w_2s_k,
         w_2s_kps,
         w_s_k,
-        inv_sqrt2,
     );
     state[i] = oa;
     state[i + s] = ob;
@@ -1808,11 +1912,9 @@ fn radix4_butterfly_quartet_scalar(
     w_2s_k: Complex64,
     w_2s_kps: Complex64,
     w_s_k: Complex64,
-    inv_sqrt2: f64,
 ) {
-    let (oa, ob, oc, od) = radix4_butterfly_values(
-        qa[j], qb[j], qc[j], qd[j], w_2s_k, w_2s_kps, w_s_k, inv_sqrt2,
-    );
+    let (oa, ob, oc, od) =
+        radix4_butterfly_values(qa[j], qb[j], qc[j], qd[j], w_2s_k, w_2s_kps, w_s_k);
     qa[j] = oa;
     qb[j] = ob;
     qc[j] = oc;
@@ -2334,12 +2436,9 @@ fn apply_radix4_groups(
     step_outer: usize,
     step_inner: usize,
     twiddles_scaled: &[Complex64],
-    inv_sqrt2: f64,
 ) {
     debug_assert_eq!(group.len() % (s * 4), 0);
     let groups = group.len() / (s * 4);
-    #[cfg(target_arch = "aarch64")]
-    let _ = inv_sqrt2;
 
     #[cfg(target_arch = "x86_64")]
     {
@@ -2454,15 +2553,7 @@ fn apply_radix4_groups(
                 let w_2s_k = twiddles_scaled[k * step_outer];
                 let w_2s_kps = twiddles_scaled[(k + s) * step_outer];
                 let w_s_k = twiddles_scaled[k * step_inner];
-                radix4_butterfly_scalar(
-                    group,
-                    base + k_offset,
-                    s,
-                    w_2s_k,
-                    w_2s_kps,
-                    w_s_k,
-                    inv_sqrt2,
-                );
+                radix4_butterfly_scalar(group, base + k_offset, s, w_2s_k, w_2s_kps, w_s_k);
             }
         }
     }
@@ -2470,13 +2561,8 @@ fn apply_radix4_groups(
 
 /// Run two DIF stages at inner stride `s` within `slice`, reading [`qft_compact_twiddles`].
 #[inline]
-fn fft_stage_pair_in_slice(
-    slice: &mut [Complex64],
-    s: usize,
-    compact: &[Complex64],
-    inv_sqrt2: f64,
-) {
-    apply_radix4_groups(slice, s, 0, 1, 2, &compact[s << 1..s << 2], inv_sqrt2);
+fn fft_stage_pair_in_slice(slice: &mut [Complex64], s: usize, compact: &[Complex64]) {
+    apply_radix4_groups(slice, s, 0, 1, 2, &compact[s << 1..s << 2]);
 }
 
 /// Offsets per quarter that one task of [`fft_stage_pair_chunked`] covers.
@@ -2499,7 +2585,6 @@ fn fft_stage_pair_chunked(
     step_outer: usize,
     step_inner: usize,
     twiddles_scaled: &[Complex64],
-    inv_sqrt2: f64,
 ) {
     const CHUNK: usize = QFT_PAIR_CHUNK;
     debug_assert_eq!(s % CHUNK, 0);
@@ -2522,7 +2607,6 @@ fn fft_stage_pair_chunked(
                 step_outer,
                 step_inner,
                 twiddles_scaled,
-                inv_sqrt2,
             );
         }
     });
@@ -2538,7 +2622,6 @@ fn fft_stage_pair_chunked(
 /// those offsets of any quarter of these groups during the call.
 #[cfg(feature = "parallel")]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
 unsafe fn fft_stage_pair_chunk(
     state: *mut Complex64,
     s: usize,
@@ -2547,7 +2630,6 @@ unsafe fn fft_stage_pair_chunk(
     step_outer: usize,
     step_inner: usize,
     twiddles_scaled: &[Complex64],
-    inv_sqrt2: f64,
 ) {
     const CHUNK: usize = QFT_PAIR_CHUNK;
     let w_outer: [Complex64; CHUNK] =
@@ -2567,7 +2649,7 @@ unsafe fn fft_stage_pair_chunk(
                 std::slice::from_raw_parts_mut(state.add(base + 3 * s), CHUNK),
             )
         };
-        radix4_runs(qa, qb, qc, qd, &w_outer, &w_outer_s, &w_inner, inv_sqrt2);
+        radix4_runs(qa, qb, qc, qd, &w_outer, &w_outer_s, &w_inner);
     }
 }
 
@@ -2575,7 +2657,6 @@ unsafe fn fft_stage_pair_chunk(
 /// `j` taking index `j` of each twiddle slice.
 #[cfg(feature = "parallel")]
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
 fn radix4_runs(
     qa: &mut [Complex64],
     qb: &mut [Complex64],
@@ -2584,11 +2665,8 @@ fn radix4_runs(
     w_outer: &[Complex64],
     w_outer_s: &[Complex64],
     w_inner: &[Complex64],
-    inv_sqrt2: f64,
 ) {
     let n = qa.len();
-    #[cfg(target_arch = "aarch64")]
-    let _ = inv_sqrt2;
 
     #[cfg(target_arch = "x86_64")]
     let tier = simd::simd_tier();
@@ -2645,7 +2723,6 @@ fn radix4_runs(
                 w_outer[j],
                 w_outer_s[j],
                 w_inner[j],
-                inv_sqrt2,
             );
         }
         return;
@@ -2676,17 +2753,7 @@ fn radix4_runs(
 
     #[cfg(not(target_arch = "aarch64"))]
     for j in 0..n {
-        radix4_butterfly_quartet_scalar(
-            qa,
-            qb,
-            qc,
-            qd,
-            j,
-            w_outer[j],
-            w_outer_s[j],
-            w_inner[j],
-            inv_sqrt2,
-        );
+        radix4_butterfly_quartet_scalar(qa, qb, qc, qd, j, w_outer[j], w_outer_s[j], w_inner[j]);
     }
 }
 
@@ -2696,30 +2763,17 @@ fn radix4_runs(
 /// `inner_stride = 2^(outer_stage - 1)`. Falls back to a sequential loop when
 /// the `parallel` feature is off.
 #[inline]
-fn fft_stage_pair_par(
-    state: &mut [Complex64],
-    inner_stride: usize,
-    twiddles_scaled: &[Complex64],
-    inv_sqrt2: f64,
-) {
+fn fft_stage_pair_par(state: &mut [Complex64], inner_stride: usize, twiddles_scaled: &[Complex64]) {
     let s = inner_stride;
     let fft_len = 2 * twiddles_scaled.len();
     let step_outer = fft_len / (s << 2);
     let step_inner = fft_len / (s << 1);
 
     #[cfg(feature = "parallel")]
-    fft_stage_pair_chunked(state, s, step_outer, step_inner, twiddles_scaled, inv_sqrt2);
+    fft_stage_pair_chunked(state, s, step_outer, step_inner, twiddles_scaled);
 
     #[cfg(not(feature = "parallel"))]
-    apply_radix4_groups(
-        state,
-        s,
-        0,
-        step_outer,
-        step_inner,
-        twiddles_scaled,
-        inv_sqrt2,
-    );
+    apply_radix4_groups(state, s, 0, step_outer, step_inner, twiddles_scaled);
 }
 
 /// Run the DIF stages above `tile_bits` of every `2^n` chunk as gathered passes of at
@@ -2895,9 +2949,8 @@ fn radix2_rows(lo: &mut [Complex64], hi: &mut [Complex64], w: Complex64) {
         }
         simd::SimdTier::Fma | simd::SimdTier::Sse2 => {}
     }
-    let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
     for (a, b) in lo.iter_mut().zip(hi.iter_mut()) {
-        (*a, *b) = radix2_butterfly_values(*a, *b, w, inv_sqrt2);
+        (*a, *b) = radix2_butterfly_values(*a, *b, w);
     }
 }
 
@@ -3010,17 +3063,7 @@ fn radix4_rows(
 
     #[cfg(not(target_arch = "aarch64"))]
     for j in 0..n {
-        radix4_butterfly_quartet_scalar(
-            qa,
-            qb,
-            qc,
-            qd,
-            j,
-            w_outer,
-            w_outer_s,
-            w_inner,
-            std::f64::consts::FRAC_1_SQRT_2,
-        );
+        radix4_butterfly_quartet_scalar(qa, qb, qc, qd, j, w_outer, w_outer_s, w_inner);
     }
 }
 
@@ -3939,29 +3982,21 @@ fn apply_multi_1q_par_routed(
     if !small_gates.is_empty() {
         #[cfg(test)]
         super::sweeps::tick();
-        state
-            .par_chunks_mut(tile_size)
-            .with_min_len(chunk_min_len(tile_size))
-            .for_each(|tile| {
-                for &(target, ref prepared) in &small_gates {
-                    prepared.apply_tiled(tile, target);
-                }
-            });
+        tile_pass(state, tile_size, true, |tile| {
+            for &(target, ref prepared) in &small_gates {
+                prepared.apply_tiled(tile, target);
+            }
+        });
     }
 
     if !medium_gates.is_empty() {
         #[cfg(test)]
         super::sweeps::tick();
-        let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
-        let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
-        state
-            .par_chunks_mut(tile_size)
-            .with_min_len(chunk_min_len(tile_size))
-            .for_each(|tile| {
-                for &(target, ref prepared) in &medium_gates {
-                    prepared.apply_tiled(tile, target);
-                }
-            });
+        tile_pass(state, MULTI_GATE_L3_TILE, true, |tile| {
+            for &(target, ref prepared) in &medium_gates {
+                prepared.apply_tiled(tile, target);
+            }
+        });
     }
 
     if let Multi1qRoute::Split(runs) = route {
@@ -4032,114 +4067,38 @@ impl StatevectorBackend {
     pub(super) fn apply_cx(&mut self, control: usize, target: usize) {
         #[cfg(test)]
         super::sweeps::tick();
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_cx_par(control, target);
-            return;
-        }
-
+        let ctrl_half = 1usize << control;
+        let tgt_half = 1usize << target;
         if control > target {
-            let ctrl_half = 1usize << control;
-            let block_size = ctrl_half << 1;
-            let tgt_half = 1usize << target;
             let tgt_block = tgt_half << 1;
-
-            for chunk in self.state.chunks_mut(block_size) {
-                let (_, hi) = chunk.split_at_mut(ctrl_half);
-                for sub in hi.chunks_mut(tgt_block) {
-                    let (sub_lo, sub_hi) = sub.split_at_mut(tgt_half);
-                    swap_slices_kernel(sub_lo, sub_hi);
-                }
-            }
+            for_each_hi_half(
+                &mut self.state,
+                self.num_qubits,
+                ctrl_half,
+                tgt_block,
+                |hi| {
+                    for sub in hi.chunks_mut(tgt_block) {
+                        let (sub_lo, sub_hi) = sub.split_at_mut(tgt_half);
+                        simd::swap_slices(sub_lo, sub_hi);
+                    }
+                },
+            );
         } else {
-            let ctrl_half = 1usize << control;
             let ctrl_block = ctrl_half << 1;
-            let tgt_half = 1usize << target;
-            let block_size = tgt_half << 1;
-
-            for chunk in self.state.chunks_mut(block_size) {
-                let (lo, hi) = chunk.split_at_mut(tgt_half);
-                for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block)) {
-                    let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
-                    let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
-                    swap_slices_kernel(lo_active, hi_active);
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_cx_par(&mut self, control: usize, target: usize) {
-        if control > target {
-            let ctrl_half = 1usize << control;
-            let block_size = ctrl_half << 1;
-            let tgt_half = 1usize << target;
-            let tgt_block = tgt_half << 1;
-            let num_blocks = self.state.len() / block_size;
-
-            if num_blocks >= 4 {
-                self.state
-                    .par_chunks_mut(block_size)
-                    .with_min_len(chunk_min_len(block_size))
-                    .for_each(|chunk| {
-                        let (_, hi) = chunk.split_at_mut(ctrl_half);
-                        for sub in hi.chunks_mut(tgt_block) {
-                            let (sub_lo, sub_hi) = sub.split_at_mut(tgt_half);
-                            swap_slices_kernel(sub_lo, sub_hi);
-                        }
-                    });
-            } else {
-                let inner_tile = MIN_PAR_ELEMS.max(tgt_block);
-                for chunk in self.state.chunks_mut(block_size) {
-                    let (_, hi) = chunk.split_at_mut(ctrl_half);
-                    hi.par_chunks_mut(inner_tile).for_each(|tile| {
-                        for sub in tile.chunks_mut(tgt_block) {
-                            let (sub_lo, sub_hi) = sub.split_at_mut(tgt_half);
-                            swap_slices_kernel(sub_lo, sub_hi);
-                        }
-                    });
-                }
-            }
-        } else {
-            let ctrl_half = 1usize << control;
-            let ctrl_block = ctrl_half << 1;
-            let tgt_half = 1usize << target;
-            let block_size = tgt_half << 1;
-            let num_blocks = self.state.len() / block_size;
-
-            if num_blocks >= 4 {
-                self.state
-                    .par_chunks_mut(block_size)
-                    .with_min_len(chunk_min_len(block_size))
-                    .for_each(|chunk| {
-                        let (lo, hi) = chunk.split_at_mut(tgt_half);
-                        for (lo_sub, hi_sub) in
-                            lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block))
-                        {
-                            let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
-                            let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
-                            swap_slices_kernel(lo_active, hi_active);
-                        }
-                    });
-            } else {
-                let inner_tile = MIN_PAR_ELEMS.max(ctrl_block);
-                for chunk in self.state.chunks_mut(block_size) {
-                    let (lo, hi) = chunk.split_at_mut(tgt_half);
-                    lo.par_chunks_mut(inner_tile)
-                        .zip(hi.par_chunks_mut(inner_tile))
-                        .for_each(|(lo_tile, hi_tile)| {
-                            for (lo_sub, hi_sub) in lo_tile
-                                .chunks_mut(ctrl_block)
-                                .zip(hi_tile.chunks_mut(ctrl_block))
-                            {
-                                let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
-                                let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
-                                swap_slices_kernel(lo_active, hi_active);
-                            }
-                        });
-                }
-            }
+            for_each_half_pair(
+                &mut self.state,
+                self.num_qubits,
+                tgt_half,
+                ctrl_block,
+                |lo, hi| {
+                    for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block))
+                    {
+                        let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                        let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                        simd::swap_slices(lo_active, hi_active);
+                    }
+                },
+            );
         }
     }
 
@@ -4147,60 +4106,20 @@ impl StatevectorBackend {
     pub(super) fn apply_cz(&mut self, q0: usize, q1: usize) {
         #[cfg(test)]
         super::sweeps::tick();
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_cz_par(q0, q1);
-            return;
-        }
-
         let (lo_q, hi_q) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
         let lo_half = 1usize << lo_q;
         let lo_block = lo_half << 1;
-        let hi_half = 1usize << hi_q;
-        let block_size = hi_half << 1;
-
-        for chunk in self.state.chunks_mut(block_size) {
-            let (_, hi_group) = chunk.split_at_mut(hi_half);
-            for sub in hi_group.chunks_mut(lo_block) {
-                let (_, sub_hi) = sub.split_at_mut(lo_half);
-                negate_slice_kernel(sub_hi);
-            }
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_cz_par(&mut self, q0: usize, q1: usize) {
-        let (lo_q, hi_q) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
-        let lo_half = 1usize << lo_q;
-        let lo_block = lo_half << 1;
-        let hi_half = 1usize << hi_q;
-        let block_size = hi_half << 1;
-        let num_blocks = self.state.len() / block_size;
-
-        if num_blocks >= 4 {
-            self.state
-                .par_chunks_mut(block_size)
-                .with_min_len(chunk_min_len(block_size))
-                .for_each(|chunk| {
-                    let (_, hi_group) = chunk.split_at_mut(hi_half);
-                    for sub in hi_group.chunks_mut(lo_block) {
-                        let (_, sub_hi) = sub.split_at_mut(lo_half);
-                        negate_slice_kernel(sub_hi);
-                    }
-                });
-        } else {
-            let inner_tile = MIN_PAR_ELEMS.max(lo_block);
-            for chunk in self.state.chunks_mut(block_size) {
-                let (_, hi_group) = chunk.split_at_mut(hi_half);
-                hi_group.par_chunks_mut(inner_tile).for_each(|tile| {
-                    for sub in tile.chunks_mut(lo_block) {
-                        let (_, sub_hi) = sub.split_at_mut(lo_half);
-                        negate_slice_kernel(sub_hi);
-                    }
-                });
-            }
-        }
+        for_each_hi_half(
+            &mut self.state,
+            self.num_qubits,
+            1usize << hi_q,
+            lo_block,
+            |hi_group| {
+                for sub in hi_group.chunks_mut(lo_block) {
+                    simd::negate_slice(&mut sub[lo_half..]);
+                }
+            },
+        );
     }
 
     #[inline(always)]
@@ -4465,12 +4384,7 @@ impl StatevectorBackend {
         let num_groups = build_batch_rzz_tables(edges, groups);
 
         for (i, amp) in self.state.iter_mut().enumerate() {
-            let mut combined = ONE;
-            for group in groups.iter().take(num_groups) {
-                let bits = extract_rzz_bits(i, group);
-                combined *= group.table[bits];
-            }
-            *amp *= combined;
+            *amp *= rzz_phase_at(i, groups, num_groups);
         }
     }
 
@@ -4506,13 +4420,7 @@ impl StatevectorBackend {
             .for_each(|(chunk_idx, chunk)| {
                 let base = chunk_idx * MIN_PAR_ELEMS;
                 for (j, amp) in chunk.iter_mut().enumerate() {
-                    let i = base + j;
-                    let mut combined = Complex64::new(1.0, 0.0);
-                    for group in groups.iter().take(num_groups) {
-                        let bits = extract_rzz_bits(i, group);
-                        combined *= group.table[bits];
-                    }
-                    *amp *= combined;
+                    *amp *= rzz_phase_at(base + j, groups, num_groups);
                 }
             });
     }
@@ -4521,105 +4429,33 @@ impl StatevectorBackend {
     pub(super) fn apply_cu(&mut self, control: usize, target: usize, mat: [[Complex64; 2]; 2]) {
         #[cfg(test)]
         super::sweeps::tick();
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_cu_par(control, target, mat);
-            return;
-        }
-
         let prepared = simd::PreparedGate1q::new(&mat);
-
+        let ctrl_half = 1usize << control;
+        let tgt_half = 1usize << target;
         if control > target {
-            let ctrl_half = 1usize << control;
-            let block_size = ctrl_half << 1;
-            for chunk in self.state.chunks_mut(block_size) {
-                let (_, hi) = chunk.split_at_mut(ctrl_half);
-                prepared.apply_full_sequential(hi, target);
-            }
+            for_each_hi_half(
+                &mut self.state,
+                self.num_qubits,
+                ctrl_half,
+                tgt_half << 1,
+                |hi| prepared.apply_full_sequential(hi, target),
+            );
         } else {
-            let ctrl_half = 1usize << control;
             let ctrl_block = ctrl_half << 1;
-            let tgt_half = 1usize << target;
-            let block_size = tgt_half << 1;
-            for chunk in self.state.chunks_mut(block_size) {
-                let (lo, hi) = chunk.split_at_mut(tgt_half);
-                for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block)) {
-                    let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
-                    let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
-                    prepared.apply(lo_active, hi_active);
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_cu_par(&mut self, control: usize, target: usize, mat: [[Complex64; 2]; 2]) {
-        if control > target {
-            let ctrl_half = 1usize << control;
-            let block_size = ctrl_half << 1;
-            let prepared = simd::PreparedGate1q::new(&mat);
-            let num_blocks = self.state.len() / block_size;
-
-            if num_blocks >= 4 {
-                self.state
-                    .par_chunks_mut(block_size)
-                    .with_min_len(chunk_min_len(block_size))
-                    .for_each(|chunk| {
-                        let (_, hi) = chunk.split_at_mut(ctrl_half);
-                        prepared.apply_full_sequential(hi, target);
-                    });
-            } else {
-                let tgt_half = 1usize << target;
-                let tgt_block = tgt_half << 1;
-                let inner_tile = MIN_PAR_ELEMS.max(tgt_block);
-                for chunk in self.state.chunks_mut(block_size) {
-                    let (_, hi) = chunk.split_at_mut(ctrl_half);
-                    hi.par_chunks_mut(inner_tile).for_each(|tile| {
-                        prepared.apply_full_sequential(tile, target);
-                    });
-                }
-            }
-        } else {
-            let ctrl_half = 1usize << control;
-            let ctrl_block = ctrl_half << 1;
-            let tgt_half = 1usize << target;
-            let block_size = tgt_half << 1;
-            let prepared = simd::PreparedGate1q::new(&mat);
-            let num_blocks = self.state.len() / block_size;
-
-            if num_blocks >= 4 {
-                self.state
-                    .par_chunks_mut(block_size)
-                    .with_min_len(chunk_min_len(block_size))
-                    .for_each(|chunk| {
-                        let (lo, hi) = chunk.split_at_mut(tgt_half);
-                        for (lo_sub, hi_sub) in
-                            lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block))
-                        {
-                            let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
-                            let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
-                            prepared.apply(lo_active, hi_active);
-                        }
-                    });
-            } else {
-                let inner_tile = MIN_PAR_ELEMS.max(ctrl_block);
-                for chunk in self.state.chunks_mut(block_size) {
-                    let (lo, hi) = chunk.split_at_mut(tgt_half);
-                    lo.par_chunks_mut(inner_tile)
-                        .zip(hi.par_chunks_mut(inner_tile))
-                        .for_each(|(lo_tile, hi_tile)| {
-                            for (lo_sub, hi_sub) in lo_tile
-                                .chunks_mut(ctrl_block)
-                                .zip(hi_tile.chunks_mut(ctrl_block))
-                            {
-                                let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
-                                let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
-                                prepared.apply(lo_active, hi_active);
-                            }
-                        });
-                }
-            }
+            for_each_half_pair(
+                &mut self.state,
+                self.num_qubits,
+                tgt_half,
+                ctrl_block,
+                |lo, hi| {
+                    for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block))
+                    {
+                        let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                        let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                        prepared.apply(lo_active, hi_active);
+                    }
+                },
+            );
         }
     }
 
@@ -4711,12 +4547,6 @@ impl StatevectorBackend {
     pub(super) fn apply_cu_phase(&mut self, control: usize, target: usize, phase: Complex64) {
         #[cfg(test)]
         super::sweeps::tick();
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_cu_phase_par(control, target, phase);
-            return;
-        }
-
         let (lo, hi) = if control < target {
             (control, target)
         } else {
@@ -4724,52 +4554,17 @@ impl StatevectorBackend {
         };
         let lo_half = 1usize << lo;
         let lo_block = lo_half << 1;
-        let hi_half = 1usize << hi;
-        let block_size = hi_half << 1;
-
-        for chunk in self.state.chunks_mut(block_size) {
-            let hi_group = &mut chunk[hi_half..];
-            for sub in hi_group.chunks_mut(lo_block) {
-                simd::scale_complex_slice(&mut sub[lo_half..], phase);
-            }
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_cu_phase_par(&mut self, control: usize, target: usize, phase: Complex64) {
-        let (lo, hi) = if control < target {
-            (control, target)
-        } else {
-            (target, control)
-        };
-        let lo_half = 1usize << lo;
-        let lo_block = lo_half << 1;
-        let hi_half = 1usize << hi;
-        let block_size = hi_half << 1;
-        let num_blocks = self.state.len() / block_size;
-
-        if num_blocks >= 4 {
-            self.state
-                .par_chunks_mut(block_size)
-                .with_min_len(chunk_min_len(block_size))
-                .for_each(|chunk| {
-                    let hi_group = &mut chunk[hi_half..];
-                    for sub in hi_group.chunks_mut(lo_block) {
-                        simd::scale_complex_slice(&mut sub[lo_half..], phase);
-                    }
-                });
-        } else {
-            let inner_tile = MIN_PAR_ELEMS.max(lo_block);
-            for chunk in self.state.chunks_mut(block_size) {
-                let hi_group = &mut chunk[hi_half..];
-                hi_group.par_chunks_mut(inner_tile).for_each(|tile| {
-                    for sub in tile.chunks_mut(lo_block) {
-                        simd::scale_complex_slice(&mut sub[lo_half..], phase);
-                    }
-                });
-            }
-        }
+        for_each_hi_half(
+            &mut self.state,
+            self.num_qubits,
+            1usize << hi,
+            lo_block,
+            |hi_group| {
+                for sub in hi_group.chunks_mut(lo_block) {
+                    simd::scale_complex_slice(&mut sub[lo_half..], phase);
+                }
+            },
+        );
     }
 
     #[inline(always)]
@@ -4839,74 +4634,25 @@ impl StatevectorBackend {
     pub(super) fn apply_swap(&mut self, q0: usize, q1: usize) {
         #[cfg(test)]
         super::sweeps::tick();
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_swap_par(q0, q1);
-            return;
-        }
-
         let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
         let lo_half = 1usize << lo;
         let lo_block = lo_half << 1;
-        let hi_half = 1usize << hi;
-        let block_size = hi_half << 1;
-
-        for chunk in self.state.chunks_mut(block_size) {
-            let (lo_group, hi_group) = chunk.split_at_mut(hi_half);
-            for (lo_sub, hi_sub) in lo_group
-                .chunks_mut(lo_block)
-                .zip(hi_group.chunks_mut(lo_block))
-            {
-                let (_, lo_sub_hi) = lo_sub.split_at_mut(lo_half);
-                let (hi_sub_lo, _) = hi_sub.split_at_mut(lo_half);
-                simd::swap_slices(lo_sub_hi, hi_sub_lo);
-            }
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_swap_par(&mut self, q0: usize, q1: usize) {
-        let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
-        let lo_half = 1usize << lo;
-        let lo_block = lo_half << 1;
-        let hi_half = 1usize << hi;
-        let block_size = hi_half << 1;
-        let num_blocks = self.state.len() / block_size;
-
-        if num_blocks >= 4 {
-            self.state
-                .par_chunks_mut(block_size)
-                .with_min_len(chunk_min_len(block_size))
-                .for_each(|chunk| {
-                    let (lo_group, hi_group) = chunk.split_at_mut(hi_half);
-                    let lo_subs = lo_group.chunks_mut(lo_block);
-                    let hi_subs = hi_group.chunks_mut(lo_block);
-                    for (lo_sub, hi_sub) in lo_subs.zip(hi_subs) {
-                        let (_, lo_sub_hi) = lo_sub.split_at_mut(lo_half);
-                        let (hi_sub_lo, _) = hi_sub.split_at_mut(lo_half);
-                        simd::swap_slices(lo_sub_hi, hi_sub_lo);
-                    }
-                });
-        } else {
-            let inner_tile = MIN_PAR_ELEMS.max(lo_block);
-            for chunk in self.state.chunks_mut(block_size) {
-                let (lo_group, hi_group) = chunk.split_at_mut(hi_half);
-                lo_group
-                    .par_chunks_mut(inner_tile)
-                    .zip(hi_group.par_chunks_mut(inner_tile))
-                    .for_each(|(lo_tile, hi_tile)| {
-                        for (lo_sub, hi_sub) in lo_tile
-                            .chunks_mut(lo_block)
-                            .zip(hi_tile.chunks_mut(lo_block))
-                        {
-                            let (_, lo_sub_hi) = lo_sub.split_at_mut(lo_half);
-                            let (hi_sub_lo, _) = hi_sub.split_at_mut(lo_half);
-                            simd::swap_slices(lo_sub_hi, hi_sub_lo);
-                        }
-                    });
-            }
-        }
+        for_each_half_pair(
+            &mut self.state,
+            self.num_qubits,
+            1usize << hi,
+            lo_block,
+            |lo_group, hi_group| {
+                for (lo_sub, hi_sub) in lo_group
+                    .chunks_mut(lo_block)
+                    .zip(hi_group.chunks_mut(lo_block))
+                {
+                    let (_, lo_sub_hi) = lo_sub.split_at_mut(lo_half);
+                    let (hi_sub_lo, _) = hi_sub.split_at_mut(lo_half);
+                    simd::swap_slices(lo_sub_hi, hi_sub_lo);
+                }
+            },
+        );
     }
 
     #[inline(always)]
@@ -5047,12 +4793,7 @@ impl StatevectorBackend {
         let half = 1usize << (self.num_qubits - 1);
         for k in 0..half {
             let i = insert_zero_bit(k, control) | ctrl_mask;
-            let mut combined = ONE;
-            for group in groups.iter().take(num_groups) {
-                let bits = extract_bits(i, &group.shifts, group.len);
-                combined *= group.table[bits];
-            }
-            self.state[i] *= combined;
+            self.state[i] *= batch_phase_at(i, groups, num_groups);
         }
     }
 
@@ -5088,25 +4829,13 @@ impl StatevectorBackend {
                         return;
                     }
                     for (j, amp) in tile.iter_mut().enumerate() {
-                        let i = base + j;
-                        let mut combined = ONE;
-                        for group in groups.iter().take(num_groups) {
-                            let bits = extract_bits(i, &group.shifts, group.len);
-                            combined *= group.table[bits];
-                        }
-                        *amp *= combined;
+                        *amp *= batch_phase_at(base + j, groups, num_groups);
                     }
                 } else {
                     let half = tile.len() >> 1;
                     for k in 0..half {
                         let j = insert_zero_bit(k, control) | ctrl_mask;
-                        let i = base + j;
-                        let mut combined = ONE;
-                        for group in groups.iter().take(num_groups) {
-                            let bits = extract_bits(i, &group.shifts, group.len);
-                            combined *= group.table[bits];
-                        }
-                        tile[j] *= combined;
+                        tile[j] *= batch_phase_at(base + j, groups, num_groups);
                     }
                 }
             });
@@ -5146,7 +4875,6 @@ impl StatevectorBackend {
         let reverse_output = big_endian != (swaps || inverse);
 
         let n = num;
-        let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
 
         if reverse_input {
             apply_bit_reverse_chunks(&mut self.state, n);
@@ -5179,12 +4907,12 @@ impl StatevectorBackend {
             if stages_left % 2 == 1 {
                 stage_top -= 1;
                 let stride = 1usize << stage_top;
-                run_radix2_stage_seq(tile, stride, &compact[stride..stride << 1], 1, inv_sqrt2);
+                run_radix2_stage_seq(tile, stride, &compact[stride..stride << 1], 1);
                 stages_left -= 1;
             }
             while stages_left > 0 {
                 let inner_stride = 1usize << (stage_top - 2);
-                fft_stage_pair_in_slice(tile, inner_stride, compact, inv_sqrt2);
+                fft_stage_pair_in_slice(tile, inner_stride, compact);
                 stage_top -= 2;
                 stages_left -= 2;
             }
@@ -5220,7 +4948,6 @@ impl StatevectorBackend {
     /// one radix-2 stage when the count is odd.
     fn qft_high_stage_pairs(&mut self, n: usize, tile_bits: usize, inverse: bool) {
         let fft_len = 1usize << n;
-        let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
         let twiddles_scaled = qft_twiddles_scaled(n, inverse);
         let twiddles_scaled = twiddles_scaled.as_ref();
 
@@ -5237,18 +4964,11 @@ impl StatevectorBackend {
 
             #[cfg(feature = "parallel")]
             if state.len() >= 1usize << kernel_parallel_qubits() {
-                fft_stage_par(
-                    state,
-                    stride,
-                    block_size,
-                    twiddle_step,
-                    twiddles_scaled,
-                    inv_sqrt2,
-                );
+                fft_stage_par(state, stride, block_size, twiddle_step, twiddles_scaled);
                 return;
             }
 
-            run_radix2_stage_seq(state, stride, twiddles_scaled, twiddle_step, inv_sqrt2);
+            run_radix2_stage_seq(state, stride, twiddles_scaled, twiddle_step);
         };
 
         if stages_left % 2 == 1 {
@@ -5263,7 +4983,7 @@ impl StatevectorBackend {
             #[cfg(test)]
             super::sweeps::tick();
             let inner_stride = 1usize << (stage_top - 2);
-            fft_stage_pair_par(&mut self.state, inner_stride, twiddles_scaled, inv_sqrt2);
+            fft_stage_pair_par(&mut self.state, inner_stride, twiddles_scaled);
             stage_top -= 2;
             stages_left -= 2;
         }
@@ -5297,47 +5017,10 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_measure_par(qubit, classical_bit);
-            return;
-        }
-
-        let half = 1usize << qubit;
-        let block_size = half << 1;
-        let norm_sq = self.pending_norm * self.pending_norm;
-        let zero = Complex64::new(0.0, 0.0);
-
-        #[cfg(test)]
-        super::sweeps::tick();
-        let mut prob_one = 0.0f64;
-        for block in self.state.chunks(block_size) {
-            for amp in &block[half..] {
-                prob_one += amp.norm_sqr();
-            }
-        }
-        prob_one *= norm_sq;
-
+        let prob_one = self.qubit_probability_one(qubit);
         let outcome = self.rng.random::<f64>() < prob_one;
         self.classical_bits[classical_bit] = outcome;
-
-        let inv_norm = measurement_inv_norm(outcome, prob_one);
-
-        #[cfg(test)]
-        super::sweeps::tick();
-        for block in self.state.chunks_mut(block_size) {
-            if outcome {
-                for amp in &mut block[..half] {
-                    *amp = zero;
-                }
-            } else {
-                for amp in &mut block[half..] {
-                    *amp = zero;
-                }
-            }
-        }
-
-        self.pending_norm *= inv_norm;
+        self.collapse_qubit(qubit, outcome, prob_one);
     }
 
     /// Project `qubit` onto `outcome` without drawing, given the probability of
@@ -5346,36 +5029,15 @@ impl StatevectorBackend {
     pub(crate) fn collapse_qubit(&mut self, qubit: usize, outcome: bool, prob_one: f64) {
         #[cfg(test)]
         super::sweeps::tick();
-        let half = 1usize << qubit;
-        let block_size = half << 1;
-
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            if self.state.len() / block_size >= 4 {
-                self.state
-                    .par_chunks_mut(block_size)
-                    .with_min_len(chunk_min_len(block_size))
-                    .for_each(|chunk| {
-                        let (lo, hi) = chunk.split_at_mut(half);
-                        simd::zero_slice(if outcome { lo } else { hi });
-                    });
-            } else {
-                for chunk in self.state.chunks_mut(block_size) {
-                    let (lo, hi) = chunk.split_at_mut(half);
-                    let dropped = if outcome { lo } else { hi };
-                    dropped
-                        .par_chunks_mut(MIN_PAR_ELEMS)
-                        .for_each(simd::zero_slice);
-                }
-            }
-            self.pending_norm *= measurement_inv_norm(outcome, prob_one);
-            return;
-        }
-
-        for chunk in self.state.chunks_mut(block_size) {
-            let (lo, hi) = chunk.split_at_mut(half);
-            simd::zero_slice(if outcome { lo } else { hi });
-        }
+        for_each_half_pair(
+            &mut self.state,
+            self.num_qubits,
+            1usize << qubit,
+            1,
+            |lo, hi| {
+                simd::zero_slice(if outcome { lo } else { hi });
+            },
+        );
         self.pending_norm *= measurement_inv_norm(outcome, prob_one);
     }
 
@@ -5386,120 +5048,41 @@ impl StatevectorBackend {
         #[cfg(test)]
         super::sweeps::tick();
         let inv_norm = measurement_inv_norm(outcome, prob_one);
-
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.fold_reset_par(qubit, outcome);
-            self.pending_norm *= inv_norm;
-            return;
-        }
-
-        let half = 1usize << qubit;
-        for block in self.state.chunks_mut(half << 1) {
-            let (lo, hi) = block.split_at_mut(half);
-            fold_reset_pair(lo, hi, outcome);
-        }
+        for_each_half_pair(
+            &mut self.state,
+            self.num_qubits,
+            1usize << qubit,
+            1,
+            |lo, hi| {
+                fold_reset_pair(lo, hi, outcome);
+            },
+        );
         self.pending_norm *= inv_norm;
     }
 
     #[inline(always)]
     pub(super) fn qubit_probability_one(&self, qubit: usize) -> f64 {
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            return self.qubit_probability_one_par(qubit);
-        }
-
         #[cfg(test)]
         super::sweeps::tick();
-        let half = 1usize << qubit;
-        let block_size = half << 1;
         let norm_sq = self.pending_norm * self.pending_norm;
-
-        let mut prob_one = 0.0f64;
-        for block in self.state.chunks(block_size) {
-            prob_one += simd::norm_sqr_sum(&block[half..]);
-        }
-        prob_one * norm_sq
-    }
-
-    #[cfg(feature = "parallel")]
-    fn qubit_probability_one_par(&self, qubit: usize) -> f64 {
-        #[cfg(test)]
-        super::sweeps::tick();
-        let half = 1usize << qubit;
-        let block_size = half << 1;
-        let norm_sq = self.pending_norm * self.pending_norm;
-        let num_blocks = self.state.len() / block_size;
-
-        let prob_one = if num_blocks >= 4 {
-            self.state
-                .par_chunks(block_size)
-                .with_min_len(chunk_min_len(block_size))
-                .map(|chunk| simd::norm_sqr_sum(&chunk[half..]))
-                .sum::<f64>()
-        } else {
-            self.state
-                .chunks(block_size)
-                .map(|chunk| {
-                    chunk[half..]
-                        .par_chunks(MIN_PAR_ELEMS)
-                        .map(simd::norm_sqr_sum)
-                        .sum::<f64>()
-                })
-                .sum::<f64>()
-        };
-        prob_one * norm_sq
+        sum_hi_halves(
+            &self.state,
+            self.num_qubits,
+            1usize << qubit,
+            simd::norm_sqr_sum,
+        ) * norm_sq
     }
 
     /// Scale the `|1>` half of `qubit` by `factor` in the pass that reads P(1), and
     /// return P(1) from before the scaling, summed as [`Self::qubit_probability_one`]
     /// sums it.
     pub(super) fn scale_qubit_one(&mut self, qubit: usize, factor: f64) -> f64 {
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            return self.scale_qubit_one_par(qubit, factor);
-        }
-
         #[cfg(test)]
         super::sweeps::tick();
-        let half = 1usize << qubit;
-        let block_size = half << 1;
         let norm_sq = self.pending_norm * self.pending_norm;
-
-        let mut prob_one = 0.0f64;
-        for block in self.state.chunks_mut(block_size) {
-            prob_one += simd::norm_sqr_sum_scale(&mut block[half..], factor);
-        }
-        prob_one * norm_sq
-    }
-
-    #[cfg(feature = "parallel")]
-    fn scale_qubit_one_par(&mut self, qubit: usize, factor: f64) -> f64 {
-        #[cfg(test)]
-        super::sweeps::tick();
-        let half = 1usize << qubit;
-        let block_size = half << 1;
-        let norm_sq = self.pending_norm * self.pending_norm;
-        let num_blocks = self.state.len() / block_size;
-
-        let prob_one = if num_blocks >= 4 {
-            self.state
-                .par_chunks_mut(block_size)
-                .with_min_len(chunk_min_len(block_size))
-                .map(|chunk| simd::norm_sqr_sum_scale(&mut chunk[half..], factor))
-                .sum::<f64>()
-        } else {
-            self.state
-                .chunks_mut(block_size)
-                .map(|chunk| {
-                    chunk[half..]
-                        .par_chunks_mut(MIN_PAR_ELEMS)
-                        .map(|tile| simd::norm_sqr_sum_scale(tile, factor))
-                        .sum::<f64>()
-                })
-                .sum::<f64>()
-        };
-        prob_one * norm_sq
+        sum_hi_halves_mut(&mut self.state, self.num_qubits, 1usize << qubit, |hi| {
+            simd::norm_sqr_sum_scale(hi, factor)
+        }) * norm_sq
     }
 
     /// Multiply the amplitudes by `pending_norm` and reset it to one.
@@ -5707,24 +5290,21 @@ impl StatevectorBackend {
         if !small_gates.is_empty() {
             #[cfg(test)]
             super::sweeps::tick();
-            let tile_size = multi_gate_l2_tile();
-            for tile in self.state.chunks_mut(tile_size) {
+            tile_pass(&mut self.state, multi_gate_l2_tile(), false, |tile| {
                 for &(target, ref prepared) in &small_gates {
                     prepared.apply_tiled(tile, target);
                 }
-            }
+            });
         }
 
         if !medium_gates.is_empty() {
             #[cfg(test)]
             super::sweeps::tick();
-            let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
-            let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
-            for tile in self.state.chunks_mut(tile_size) {
+            tile_pass(&mut self.state, MULTI_GATE_L3_TILE, false, |tile| {
                 for &(target, ref prepared) in &medium_gates {
                     prepared.apply_tiled(tile, target);
                 }
-            }
+            });
         }
 
         if let Multi1qRoute::Split(runs) = &route {
@@ -5747,60 +5327,21 @@ impl StatevectorBackend {
         }
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_multi_1q_diagonal_par(gates);
-            return;
-        }
+        let parallel = self.num_qubits >= kernel_parallel_qubits();
+        #[cfg(not(feature = "parallel"))]
+        let parallel = false;
+        #[cfg(feature = "parallel")]
+        let tile_size = if parallel {
+            multi_gate_l2_tile_par(self.state.len())
+        } else {
+            multi_gate_l2_tile()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let tile_size = multi_gate_l2_tile();
 
         let mut small_gates = SmallVec::new();
         let mut medium_gates = SmallVec::new();
         let mut large_gates = SmallVec::new();
-        split_multi_1q_diagonal_tiers(
-            gates,
-            multi_gate_max_l2_target(),
-            &mut small_gates,
-            &mut medium_gates,
-            &mut large_gates,
-        );
-
-        if !small_gates.is_empty() {
-            #[cfg(test)]
-            super::sweeps::tick();
-            let tile_size = multi_gate_l2_tile();
-            for tile in self.state.chunks_mut(tile_size) {
-                for &(target, d0, d1, skip_lo) in &small_gates {
-                    simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
-                }
-            }
-        }
-
-        if !medium_gates.is_empty() {
-            #[cfg(test)]
-            super::sweeps::tick();
-            let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
-            let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
-            for tile in self.state.chunks_mut(tile_size) {
-                for &(target, d0, d1, skip_lo) in &medium_gates {
-                    simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
-                }
-            }
-        }
-
-        for (target, d0, d1) in large_gates {
-            #[cfg(test)]
-            super::sweeps::tick();
-            let skip_lo = is_phase_one(d0);
-            simd::apply_diagonal_sequential(&mut self.state, target, d0, d1, skip_lo);
-        }
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_multi_1q_diagonal_par(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
-        let mut small_gates = SmallVec::new();
-        let mut medium_gates = SmallVec::new();
-        let mut large_gates = SmallVec::new();
-        let tile_size = multi_gate_l2_tile_par(self.state.len());
         split_multi_1q_diagonal_tiers(
             gates,
             max_target_for_tile(tile_size),
@@ -5812,45 +5353,42 @@ impl StatevectorBackend {
         if !small_gates.is_empty() {
             #[cfg(test)]
             super::sweeps::tick();
-            self.state
-                .par_chunks_mut(tile_size)
-                .with_min_len(chunk_min_len(tile_size))
-                .for_each(|tile| {
-                    for &(target, d0, d1, skip_lo) in &small_gates {
-                        simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
-                    }
-                });
+            tile_pass(&mut self.state, tile_size, parallel, |tile| {
+                for &(target, d0, d1, skip_lo) in &small_gates {
+                    simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
+                }
+            });
         }
 
         if !medium_gates.is_empty() {
             #[cfg(test)]
             super::sweeps::tick();
-            let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
-            let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
-            self.state
-                .par_chunks_mut(tile_size)
-                .with_min_len(chunk_min_len(tile_size))
-                .for_each(|tile| {
-                    for &(target, d0, d1, skip_lo) in &medium_gates {
-                        simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
-                    }
-                });
+            tile_pass(&mut self.state, MULTI_GATE_L3_TILE, parallel, |tile| {
+                for &(target, d0, d1, skip_lo) in &medium_gates {
+                    simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
+                }
+            });
         }
 
         for (target, d0, d1) in large_gates {
             #[cfg(test)]
             super::sweeps::tick();
             let skip_lo = is_phase_one(d0);
-            let block_size = 1usize << (target + 1);
-            let num_blocks = self.state.len() / block_size;
-            if num_blocks < 4 {
-                apply_diagonal_high_target_par(&mut self.state, target, d0, d1, skip_lo);
+            #[cfg(feature = "parallel")]
+            if parallel {
+                let block_size = 1usize << (target + 1);
+                let num_blocks = self.state.len() / block_size;
+                if num_blocks < 4 {
+                    apply_diagonal_high_target_par(&mut self.state, target, d0, d1, skip_lo);
+                    continue;
+                }
+                let tile_size = block_size.max(MIN_PAR_ELEMS);
+                self.state.par_chunks_mut(tile_size).for_each(|tile| {
+                    simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
+                });
                 continue;
             }
-            let tile_size = block_size.max(MIN_PAR_ELEMS);
-            self.state.par_chunks_mut(tile_size).for_each(|tile| {
-                simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
-            });
+            simd::apply_diagonal_sequential(&mut self.state, target, d0, d1, skip_lo);
         }
     }
 
@@ -5903,7 +5441,9 @@ impl StatevectorBackend {
     /// state in place. Any other list falls back to the tiered pass by
     /// `max(q0, q1)`: L2 tiles up to qubit 13, L3 tiles up to 16, one full pass
     /// per gate above that. That pass runs tier by tier, so it keeps application
-    /// order only within a tier.
+    /// order only within a tier. In a parallel pass the L3 tier stays one sweep even
+    /// where the state is a single L3 tile: at 17 qubits per-gate parallel passes in
+    /// its place read 28% slower on `statevector/random_d10/17`.
     #[inline(always)]
     pub(crate) fn apply_multi_2q(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
         if gates.is_empty() {
@@ -5924,10 +5464,9 @@ impl StatevectorBackend {
         }
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= kernel_parallel_qubits() {
-            self.apply_multi_2q_par(gates);
-            return;
-        }
+        let parallel = self.num_qubits >= kernel_parallel_qubits();
+        #[cfg(not(feature = "parallel"))]
+        let parallel = false;
 
         let tile_size = multi_2q_small_tile(self.num_qubits);
         let mut small_gates = SmallVec::new();
@@ -5945,25 +5484,24 @@ impl StatevectorBackend {
             #[cfg(test)]
             super::sweeps::tick();
             let tile_qubits = tile_size.trailing_zeros() as usize;
-            for tile in self.state.chunks_mut(tile_size) {
+            tile_pass(&mut self.state, tile_size, parallel, |tile| {
                 let n = tile.len().trailing_zeros() as usize;
                 for &(q0, q1, ref prepared) in &small_gates {
                     prepared.apply_tiled(tile, n.min(tile_qubits), q0, q1);
                 }
-            }
+            });
         }
 
         if !medium_gates.is_empty() {
             #[cfg(test)]
             super::sweeps::tick();
-            let tile_size = MULTI_GATE_L3_TILE;
-            let tile_qubits = tile_size.trailing_zeros() as usize;
-            for tile in self.state.chunks_mut(tile_size) {
+            let tile_qubits = MULTI_GATE_L3_TILE.trailing_zeros() as usize;
+            tile_pass(&mut self.state, MULTI_GATE_L3_TILE, parallel, |tile| {
                 let n = tile.len().trailing_zeros() as usize;
                 for &(q0, q1, ref prepared) in &medium_gates {
                     prepared.apply_tiled(tile, n.min(tile_qubits), q0, q1);
                 }
-            }
+            });
         }
 
         self.apply_multi_2q_untiled(&large_gates);
@@ -5974,92 +5512,6 @@ impl StatevectorBackend {
     fn apply_multi_2q_untiled(&mut self, gates: &[&TargetedGate2q]) {
         for &&(q0, q1, ref mat) in gates {
             self.apply_fused_2q(q0, q1, mat);
-        }
-    }
-
-    /// The tiered pass with the in-place tile cut for the pool. The L3 tier stays one
-    /// sweep even where the state is a single L3 tile: at 17 qubits per-gate parallel
-    /// passes in its place read 28% slower on `statevector/random_d10/17`.
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_multi_2q_par(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
-        let tile_size = multi_2q_small_tile(self.num_qubits);
-        let mut small_gates = SmallVec::new();
-        let mut medium_gates = SmallVec::new();
-        let mut large_gates = SmallVec::new();
-        split_multi_2q_tiers(
-            gates,
-            max_target_for_tile(tile_size),
-            &mut small_gates,
-            &mut medium_gates,
-            &mut large_gates,
-        );
-
-        if !small_gates.is_empty() {
-            #[cfg(test)]
-            super::sweeps::tick();
-            let tile_qubits = tile_size.trailing_zeros() as usize;
-            self.state
-                .par_chunks_mut(tile_size)
-                .with_min_len(chunk_min_len(tile_size))
-                .for_each(|tile| {
-                    let n = tile.len().trailing_zeros() as usize;
-                    for &(q0, q1, ref prepared) in &small_gates {
-                        prepared.apply_tiled(tile, n.min(tile_qubits), q0, q1);
-                    }
-                });
-        }
-
-        if !medium_gates.is_empty() {
-            #[cfg(test)]
-            super::sweeps::tick();
-            let tile_size = MULTI_GATE_L3_TILE;
-            let tile_qubits = tile_size.trailing_zeros() as usize;
-            self.state
-                .par_chunks_mut(tile_size)
-                .with_min_len(chunk_min_len(tile_size))
-                .for_each(|tile| {
-                    let n = tile.len().trailing_zeros() as usize;
-                    for &(q0, q1, ref prepared) in &medium_gates {
-                        prepared.apply_tiled(tile, n.min(tile_qubits), q0, q1);
-                    }
-                });
-        }
-
-        self.apply_multi_2q_untiled(&large_gates);
-    }
-
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn apply_measure_par(&mut self, qubit: usize, classical_bit: usize) {
-        let prob_one = self.qubit_probability_one_par(qubit);
-        let outcome = self.rng.random::<f64>() < prob_one;
-        self.classical_bits[classical_bit] = outcome;
-        self.collapse_qubit(qubit, outcome, prob_one);
-    }
-
-    #[cfg(feature = "parallel")]
-    fn fold_reset_par(&mut self, qubit: usize, outcome: bool) {
-        let half = 1usize << qubit;
-        let block_size = half << 1;
-        let num_blocks = self.state.len() / block_size;
-
-        if num_blocks >= 4 {
-            self.state
-                .par_chunks_mut(block_size)
-                .with_min_len(chunk_min_len(block_size))
-                .for_each(|chunk| {
-                    let (lo, hi) = chunk.split_at_mut(half);
-                    fold_reset_pair(lo, hi, outcome);
-                });
-            return;
-        }
-
-        for chunk in self.state.chunks_mut(block_size) {
-            let (lo, hi) = chunk.split_at_mut(half);
-            lo.par_chunks_mut(MIN_PAR_ELEMS)
-                .zip(hi.par_chunks_mut(MIN_PAR_ELEMS))
-                .for_each(|(lo_t, hi_t)| fold_reset_pair(lo_t, hi_t, outcome));
         }
     }
 
@@ -6108,15 +5560,7 @@ impl StatevectorBackend {
     #[cfg(feature = "parallel")]
     fn apply_diagonal_batch_par(&mut self, entries: &[DiagEntry]) {
         if !fill_diagonal_batch_tables(entries, self.batch_tables.diag()) {
-            self.state
-                .par_chunks_mut(MIN_PAR_ELEMS)
-                .enumerate()
-                .for_each(|(chunk_idx, chunk)| {
-                    let base = chunk_idx * MIN_PAR_ELEMS;
-                    for (j, amp) in chunk.iter_mut().enumerate() {
-                        *amp *= diag_entries_phase(base + j, entries);
-                    }
-                });
+            self.apply_diagonal_batch_fallback(entries);
             return;
         }
         let built = &*self.batch_tables.diag();
@@ -6162,6 +5606,19 @@ impl StatevectorBackend {
     }
 
     fn apply_diagonal_batch_fallback(&mut self, entries: &[DiagEntry]) {
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= kernel_parallel_qubits() {
+            self.state
+                .par_chunks_mut(MIN_PAR_ELEMS)
+                .enumerate()
+                .for_each(|(chunk_idx, chunk)| {
+                    let base = chunk_idx * MIN_PAR_ELEMS;
+                    for (j, amp) in chunk.iter_mut().enumerate() {
+                        *amp *= diag_entries_phase(base + j, entries);
+                    }
+                });
+            return;
+        }
         for (i, amp) in self.state.iter_mut().enumerate() {
             *amp *= diag_entries_phase(i, entries);
         }
@@ -6178,10 +5635,9 @@ unsafe fn diagonal_batch_tile_bmi2(
     num_groups: usize,
 ) {
     use std::arch::x86_64::_pext_u64;
-    let one = Complex64::new(1.0, 0.0);
     for (j, amp) in tile.iter_mut().enumerate() {
         let i = base_idx + j;
-        let mut combined = one;
+        let mut combined = ONE;
         for g in 0..num_groups {
             let bits = _pext_u64(i as u64, pext_masks[g]) as usize;
             combined *= tables[g][bits];
@@ -6215,10 +5671,9 @@ fn diagonal_batch_tile_scalar(
     group_sizes: &[usize; MAX_DIAG_BATCH_GROUPS],
     num_groups: usize,
 ) {
-    let one = Complex64::new(1.0, 0.0);
     for (j, amp) in tile.iter_mut().enumerate() {
         let i = base_idx + j;
-        let mut combined = one;
+        let mut combined = ONE;
         for (g, shifts) in group_shifts.iter().enumerate().take(num_groups) {
             let mut bits = 0usize;
             for (p, &shift) in shifts[..group_sizes[g]].iter().enumerate() {
@@ -6253,18 +5708,6 @@ mod pext_agreement_tests {
     // PEXT over a mask), so a table shape that indexes one bit per unique qubit
     // silently diverges from a producer that emits a repeated qubit. Both batch
     // families are checked against the same amplitude for every basis index.
-    fn combined_phase_scalar_batch_phase(
-        idx: usize,
-        groups: &[BatchPhaseGroup],
-        n: usize,
-    ) -> Complex64 {
-        let mut combined = Complex64::new(1.0, 0.0);
-        for group in groups.iter().take(n) {
-            combined *= group.table[extract_bits(idx, &group.shifts, group.len)];
-        }
-        combined
-    }
-
     #[test]
     fn batch_phase_pext_matches_scalar_lookup() {
         if !std::is_x86_feature_detected!("bmi2") {
@@ -6293,7 +5736,7 @@ mod pext_agreement_tests {
             let num_groups = build_batch_phase_tables(&phases, &mut groups);
 
             for idx in 0..(1usize << NUM_QUBITS) {
-                let scalar = combined_phase_scalar_batch_phase(idx, &groups, num_groups);
+                let scalar = batch_phase_at(idx, &groups, num_groups);
                 let mut pext = one;
                 for group in groups.iter().take(num_groups) {
                     // SAFETY: BMI2 checked above.

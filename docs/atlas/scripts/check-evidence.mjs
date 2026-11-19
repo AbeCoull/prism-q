@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -37,8 +37,9 @@ for (const record of records) {
   for (const source of record.sources) {
     assert(!source.path.includes(".."), `Invalid path: ${source.path}`);
     if (!sourceFiles.has(source.path)) {
-      let text = canonical(readFileSync(new URL(source.path, root)));
-      if (hash(text) !== manifest.files[source.path]) {
+      const current = new URL(source.path, root);
+      let text = existsSync(current) ? canonical(readFileSync(current)) : null;
+      if (text === null || hash(text) !== manifest.files[source.path]) {
         const historical = spawnSync(
           "git",
           ["show", `${manifest.revision}:${source.path}`],

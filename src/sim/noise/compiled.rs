@@ -161,11 +161,11 @@ trait EventRng {
 
 #[cfg(feature = "gpu")]
 impl EventRng for ChaCha8Rng {
-    #[inline]
+    #[inline(always)]
     fn uniform(&mut self) -> f64 {
         rand::RngExt::random::<f64>(self)
     }
-    #[inline]
+    #[inline(always)]
     fn geom(&mut self, ln_1mp: f64) -> usize {
         geometric_sample(self, ln_1mp)
     }
@@ -173,11 +173,11 @@ impl EventRng for ChaCha8Rng {
 
 #[cfg(feature = "gpu")]
 impl EventRng for crate::sim::compiled::rng::Xoshiro256PlusPlus {
-    #[inline]
+    #[inline(always)]
     fn uniform(&mut self) -> f64 {
         self.next_f64()
     }
-    #[inline]
+    #[inline(always)]
     fn geom(&mut self, ln_1mp: f64) -> usize {
         geometric_sample_xoshiro(self, ln_1mp)
     }
@@ -193,7 +193,7 @@ fn fill_one_event(
     z_slot: &mut [u64],
     probs: [f64; 3],
     chunk_shots: usize,
-    rng: &mut dyn EventRng,
+    rng: &mut impl EventRng,
 ) {
     let [px, py, pz] = probs;
     let p_event = px + py + pz;

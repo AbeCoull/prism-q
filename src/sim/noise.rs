@@ -460,6 +460,14 @@ impl NoiseModel {
         })
     }
 
+    /// No noise events and ideal readout, sized for `circuit`.
+    pub(crate) fn noiseless_for(circuit: &Circuit) -> Self {
+        Self {
+            after_gate: vec![Vec::new(); circuit.noise_slot_count()],
+            readout: vec![None; circuit.num_classical_bits],
+        }
+    }
+
     fn per_gate_target(circuit: &Circuit, event: impl Fn(usize) -> NoiseEvent) -> Self {
         let mut after_gate = vec![Vec::new(); circuit.noise_slot_count()];
         circuit.for_each_noise_slot(|slot, instr| {

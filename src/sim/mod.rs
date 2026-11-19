@@ -1363,10 +1363,7 @@ fn pauli_path_expectations(
     let noise = match noise {
         Some(model) => model,
         None => {
-            empty = NoiseModel {
-                after_gate: vec![Vec::new(); circuit.instructions.len()],
-                readout: vec![None; circuit.num_classical_bits],
-            };
+            empty = NoiseModel::noiseless_for(circuit);
             &empty
         }
     };
@@ -1378,12 +1375,10 @@ fn pauli_path_expectations(
         discarded = discarded.max(result.total_discarded);
         values.push(result.mean);
     }
-    let metadata = if discarded > 0.0 {
-        RunMetadata::approximate(ResolvedBackend::PauliPath).with_reason(RouteRule::ExplicitBackend)
-    } else {
-        RunMetadata::exact(ResolvedBackend::PauliPath).with_reason(RouteRule::ExplicitBackend)
-    };
-    Ok(analytic_expectations(values, metadata))
+    Ok(analytic_expectations(
+        values,
+        pauli_path_metadata(discarded),
+    ))
 }
 
 /// [`pauli_path_expectations`] for a weighted observable, propagated as one sum.
@@ -1398,10 +1393,7 @@ fn pauli_path_observable(
     let noise = match noise {
         Some(model) => model,
         None => {
-            empty = NoiseModel {
-                after_gate: vec![Vec::new(); circuit.instructions.len()],
-                readout: vec![None; circuit.num_classical_bits],
-            };
+            empty = NoiseModel::noiseless_for(circuit);
             &empty
         }
     };
@@ -1412,15 +1404,20 @@ fn pauli_path_observable(
         epsilon,
         max_terms,
     )?;
-    let metadata = if result.total_discarded > 0.0 {
+    Ok(analytic_observable(
+        result.mean,
+        pauli_path_metadata(result.total_discarded),
+    ))
+}
+
+/// Metadata for an explicit Pauli path run, approximate once any term was discarded.
+fn pauli_path_metadata(total_discarded: f64) -> RunMetadata {
+    let metadata = if total_discarded > 0.0 {
         RunMetadata::approximate(ResolvedBackend::PauliPath)
     } else {
         RunMetadata::exact(ResolvedBackend::PauliPath)
     };
-    Ok(analytic_observable(
-        result.mean,
-        metadata.with_reason(RouteRule::ExplicitBackend),
-    ))
+    metadata.with_reason(RouteRule::ExplicitBackend)
 }
 
 fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {

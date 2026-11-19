@@ -870,10 +870,7 @@ impl<'a> Parser<'a> {
         if self.noise_specs.is_empty() {
             return Ok(None);
         }
-        let mut model = NoiseModel {
-            after_gate: vec![Vec::new(); circuit.noise_slot_count()],
-            readout: vec![None; circuit.num_classical_bits],
-        };
+        let mut model = NoiseModel::noiseless_for(circuit);
         for (index, spec) in std::mem::take(&mut self.noise_specs) {
             model.after_gate[index].push(NoiseEvent {
                 channel: spec.channel,

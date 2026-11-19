@@ -3079,7 +3079,14 @@ impl PreparedGate2q {
             }
             // SAFETY: x86_64 guarantees SSE2, and the loop builds in-bounds,
             // disjoint 4-amplitude groups.
-            unsafe { self.run_group_loop(base, n_iter, lo, hi, mask0, mask1) };
+            unsafe {
+                use crate::backend::insert_zero_bit;
+                for k in 0..n_iter {
+                    let idx = insert_zero_bit(insert_zero_bit(k, lo), hi);
+                    let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
+                    apply_fused_2q_group_sse2(base, i, &self.broadcast);
+                }
+            }
         }
 
         #[cfg(target_arch = "aarch64")]
@@ -3129,8 +3136,59 @@ impl PreparedGate2q {
             let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
             let n_iter = 1usize << (num_qubits - 2);
             let base = state.as_mut_ptr() as *mut f64;
-            // SAFETY: the loop builds disjoint 4-amplitude groups inside `state`.
-            unsafe { self.run_group_loop(base, n_iter, lo, hi, mask0, mask1) };
+            // SAFETY: The selected tier is guarded by runtime feature checks
+            // in the constructor. The loop builds disjoint 4-amplitude groups.
+            unsafe {
+                match self.tier {
+                    SimdTier::Avx512 if avx2_2q_enabled() => {
+                        // SAFETY: broadcast256 is Some whenever tier is Avx512 (constructor invariant).
+                        let mat256 = self.broadcast256.as_ref().unwrap_unchecked();
+                        apply_fused_2q_loop_avx512(
+                            base,
+                            n_iter,
+                            lo,
+                            hi,
+                            mask0,
+                            mask1,
+                            mat256,
+                            &self.broadcast,
+                        );
+                    }
+                    SimdTier::Avx2Fma if avx2_2q_enabled() => {
+                        // SAFETY: broadcast256 is Some whenever tier is Avx2Fma (constructor invariant).
+                        let mat256 = self.broadcast256.as_ref().unwrap_unchecked();
+                        apply_fused_2q_loop_avx2(
+                            base,
+                            n_iter,
+                            lo,
+                            hi,
+                            mask0,
+                            mask1,
+                            mat256,
+                            &self.broadcast,
+                        );
+                    }
+                    SimdTier::Avx512 | SimdTier::Avx2Fma | SimdTier::Fma => {
+                        apply_fused_2q_loop_fma(
+                            base,
+                            n_iter,
+                            lo,
+                            hi,
+                            mask0,
+                            mask1,
+                            &self.broadcast,
+                        );
+                    }
+                    SimdTier::Sse2 => {
+                        use crate::backend::insert_zero_bit;
+                        for k in 0..n_iter {
+                            let idx = insert_zero_bit(insert_zero_bit(k, lo), hi);
+                            let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
+                            apply_fused_2q_group_sse2(base, i, &self.broadcast);
+                        }
+                    }
+                }
+            }
         }
 
         #[cfg(not(target_arch = "x86_64"))]
@@ -3166,40 +3224,11 @@ impl PreparedGate2q {
         let run_hi = hi.min(bits + 1);
         let start = insert_zero_bit(insert_zero_bit(first, lo), hi);
 
-        // SAFETY: same contract as the enclosing unsafe fn.
-        unsafe {
-            let base = state.add(start * 2);
-            #[cfg(target_arch = "x86_64")]
-            self.run_group_loop(base, n_iter, run_lo, run_hi, mask0, mask1);
-            #[cfg(target_arch = "aarch64")]
-            apply_fused_2q_loop_neon(base, n_iter, run_lo, run_hi, mask0, mask1, &self.broadcast);
-            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-            for_each_2q_base(n_iter, run_lo, run_hi, 1, |b| {
-                self.apply_group_ptr(base, [b, b + mask1, b + mask0, b + mask0 + mask1]);
-            });
-        }
-    }
-
-    /// Run this tier's group loop over `n_iter` groups from `base`, the walk
-    /// [`for_each_2q_base`] makes over bits `lo < hi`.
-    ///
-    /// # Safety
-    /// `base` must cover every group the walk names, and no other thread may
-    /// touch those groups during the call.
-    #[cfg(target_arch = "x86_64")]
-    #[inline(always)]
-    unsafe fn run_group_loop(
-        &self,
-        base: *mut f64,
-        n_iter: usize,
-        lo: usize,
-        hi: usize,
-        mask0: usize,
-        mask1: usize,
-    ) {
         // SAFETY: same contract as the enclosing unsafe fn. The selected tier
         // is guarded by runtime feature checks in the constructor.
         unsafe {
+            let base = state.add(start * 2);
+            #[cfg(target_arch = "x86_64")]
             match self.tier {
                 SimdTier::Avx512 if avx2_2q_enabled() => {
                     // SAFETY: broadcast256 is Some whenever tier is Avx512 (constructor invariant).
@@ -3207,8 +3236,8 @@ impl PreparedGate2q {
                     apply_fused_2q_loop_avx512(
                         base,
                         n_iter,
-                        lo,
-                        hi,
+                        run_lo,
+                        run_hi,
                         mask0,
                         mask1,
                         mat256,
@@ -3221,8 +3250,8 @@ impl PreparedGate2q {
                     apply_fused_2q_loop_avx2(
                         base,
                         n_iter,
-                        lo,
-                        hi,
+                        run_lo,
+                        run_hi,
                         mask0,
                         mask1,
                         mat256,
@@ -3230,15 +3259,29 @@ impl PreparedGate2q {
                     );
                 }
                 SimdTier::Avx512 | SimdTier::Avx2Fma | SimdTier::Fma => {
-                    apply_fused_2q_loop_fma(base, n_iter, lo, hi, mask0, mask1, &self.broadcast);
+                    apply_fused_2q_loop_fma(
+                        base,
+                        n_iter,
+                        run_lo,
+                        run_hi,
+                        mask0,
+                        mask1,
+                        &self.broadcast,
+                    );
                 }
                 SimdTier::Sse2 => {
-                    for_each_2q_base(n_iter, lo, hi, 1, |b| {
+                    for_each_2q_base(n_iter, run_lo, run_hi, 1, |b| {
                         let i = [b, b + mask1, b + mask0, b + mask0 + mask1];
                         apply_fused_2q_group_sse2(base, i, &self.broadcast);
                     });
                 }
             }
+            #[cfg(target_arch = "aarch64")]
+            apply_fused_2q_loop_neon(base, n_iter, run_lo, run_hi, mask0, mask1, &self.broadcast);
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            for_each_2q_base(n_iter, run_lo, run_hi, 1, |b| {
+                self.apply_group_ptr(base, [b, b + mask1, b + mask0, b + mask0 + mask1]);
+            });
         }
     }
 

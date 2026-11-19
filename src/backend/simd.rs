@@ -3131,7 +3131,7 @@ impl PreparedGate2q {
             // SAFETY: x86_64 guarantees SSE2, and the loop builds in-bounds,
             // disjoint 4-amplitude groups.
             unsafe {
-                use crate::backend::statevector::insert_zero_bit;
+                use crate::backend::insert_zero_bit;
                 for k in 0..n_iter {
                     let idx = insert_zero_bit(insert_zero_bit(k, lo), hi);
                     let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
@@ -3152,7 +3152,7 @@ impl PreparedGate2q {
 
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
-            use crate::backend::statevector::insert_zero_bit;
+            use crate::backend::insert_zero_bit;
             for k in 0..n_iter {
                 let idx = insert_zero_bit(insert_zero_bit(k, lo), hi);
                 let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
@@ -3231,7 +3231,7 @@ impl PreparedGate2q {
                         );
                     }
                     SimdTier::Sse2 => {
-                        use crate::backend::statevector::insert_zero_bit;
+                        use crate::backend::insert_zero_bit;
                         for k in 0..n_iter {
                             let idx = insert_zero_bit(insert_zero_bit(k, lo), hi);
                             let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
@@ -3264,7 +3264,7 @@ impl PreparedGate2q {
         q0: usize,
         q1: usize,
     ) {
-        use crate::backend::statevector::insert_zero_bit;
+        use crate::backend::insert_zero_bit;
         let mask0 = 1usize << q0;
         let mask1 = 1usize << q1;
         let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
@@ -3575,7 +3575,7 @@ fn walsh_blocked<const AVX: bool>(a: &mut [f64]) {
         let h = 1usize << level;
         #[cfg(feature = "parallel")]
         if parallel {
-            use crate::backend::statevector::SendPtr;
+            use crate::backend::SendPtr;
             use rayon::prelude::*;
             let span = h << step;
             let per_block = h / WALSH_SWEEP_CHUNK;

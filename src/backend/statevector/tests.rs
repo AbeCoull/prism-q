@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::insert_zero_bit;
 use crate::circuit::Circuit;
 use crate::circuit::plan::Tracer;
 use crate::sim;

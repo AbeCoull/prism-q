@@ -177,13 +177,7 @@ impl GpuContext {
         if num_qubits >= usize::BITS as usize - 4 {
             return Ok(false);
         }
-        let amplitude_bytes = (1usize << num_qubits).checked_mul(16).ok_or_else(|| {
-            crate::error::PrismError::InvalidParameter {
-                message: format!("num_qubits={num_qubits} overflows usize"),
-            }
-        })?;
-        let available = self.vram_available()?;
-        Ok(amplitude_bytes <= available)
+        self.fits_bytes(num_qubits, 16)
     }
 
     /// Whether the currently-available VRAM holds a dense statevector for
@@ -199,12 +193,49 @@ impl GpuContext {
         if num_qubits >= usize::BITS as usize - 5 {
             return Ok(false);
         }
+        self.fits_bytes(num_qubits, STATEVECTOR_BYTES_PER_AMPLITUDE)
+    }
+
+    fn fits_bytes(&self, num_qubits: usize, bytes_per_amplitude: usize) -> Result<bool> {
         let bytes = (1usize << num_qubits)
-            .checked_mul(STATEVECTOR_BYTES_PER_AMPLITUDE)
+            .checked_mul(bytes_per_amplitude)
             .ok_or_else(|| crate::error::PrismError::InvalidParameter {
                 message: format!("num_qubits={num_qubits} overflows usize"),
             })?;
         Ok(bytes <= self.vram_available()?)
+    }
+
+    /// Fail with a [`ResourceKind::DeviceBytes`](crate::error::ResourceKind::DeviceBytes)
+    /// limit when `needed` bytes exceed the free VRAM. `None` (a byte count that
+    /// overflows) and a context that cannot report free memory both pass, leaving the
+    /// allocation's own error authoritative.
+    pub(crate) fn require_device_bytes(
+        &self,
+        backend: &str,
+        operation: String,
+        needed: Option<usize>,
+    ) -> Result<()> {
+        let Some(needed) = needed else {
+            return Ok(());
+        };
+        let Ok(free) = self.vram_available() else {
+            return Ok(());
+        };
+        if needed > free {
+            return Err(crate::error::PrismError::ResourceLimit(Box::new(
+                crate::error::ResourceLimit {
+                    backend: backend.to_string(),
+                    operation,
+                    resource: crate::error::ResourceKind::DeviceBytes,
+                    required: needed as u128,
+                    limit: free as u128,
+                    env_var: None,
+                    knob: None,
+                    limit_source: crate::limits::LimitSource::Detected,
+                },
+            )));
+        }
+        Ok(())
     }
 
     /// Whether the currently-available VRAM holds a stabilizer tableau for

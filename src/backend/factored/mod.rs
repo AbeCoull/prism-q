@@ -43,8 +43,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::{SmallVec, smallvec};
 
+use crate::backend::insert_zero_bit;
 use crate::backend::memory::{dense_probability_len, dense_statevector_len};
-use crate::backend::statevector::insert_zero_bit;
 use crate::backend::{
     Backend, BasisSamples, MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits,
 };
@@ -56,7 +56,7 @@ use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 #[cfg(feature = "parallel")]
-use crate::backend::statevector::SendPtr;
+use crate::backend::SendPtr;
 use crate::backend::statevector::kernels::apply_unitary_seq;
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::kernels::{

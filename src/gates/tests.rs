@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::assert_mat_close;
 
 #[test]
 fn format_angle_pi_fractions() {
@@ -323,19 +324,6 @@ fn dense_matrix_is_none_for_narrow_batched_and_tiled_variants() {
 fn test_cu_arity() {
     let mat = Gate::H.matrix_2x2();
     assert_eq!(Gate::Cu(Box::new(mat)).num_qubits(), 2);
-}
-
-fn assert_mat_close(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], eps: f64) {
-    for i in 0..2 {
-        for j in 0..2 {
-            assert!(
-                (a[i][j] - b[i][j]).norm() < eps,
-                "mat[{i}][{j}]: expected {:?}, got {:?}",
-                b[i][j],
-                a[i][j]
-            );
-        }
-    }
 }
 
 #[test]

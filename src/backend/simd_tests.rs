@@ -178,15 +178,6 @@ fn test_bulk_zero() {
 }
 
 #[test]
-fn test_bulk_scale() {
-    let mut slice = vec![c(1.0, 2.0), c(3.0, 4.0), c(5.0, 0.0)];
-    scale_slice(&mut slice, 2.0);
-    assert_complex_close(slice[0], c(2.0, 4.0));
-    assert_complex_close(slice[1], c(6.0, 8.0));
-    assert_complex_close(slice[2], c(10.0, 0.0));
-}
-
-#[test]
 fn test_scale_complex_slice() {
     let phase = c(0.0, 1.0);
     let mut slice = vec![c(1.0, 0.0), c(0.0, 1.0), c(3.0, 4.0)];
@@ -299,10 +290,7 @@ fn apply_2q_reference(state: &mut [Complex64], mat: &[[Complex64; 4]; 4], q0: us
     let n = state.len();
     let n_iter = n >> 2;
     for k in 0..n_iter {
-        let idx = crate::backend::statevector::insert_zero_bit(
-            crate::backend::statevector::insert_zero_bit(k, lo),
-            hi,
-        );
+        let idx = crate::backend::insert_zero_bit(crate::backend::insert_zero_bit(k, lo), hi);
         let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
         let a = [state[i[0]], state[i[1]], state[i[2]], state[i[3]]];
         for (r, &ii) in i.iter().enumerate() {
@@ -719,11 +707,6 @@ fn avx512_slice_ops_match_avx2() {
             assert_eq!(got, vec![c(0.0, 0.0); n], "zero n={n}");
 
             let (mut want, mut got) = (a0.clone(), a0.clone());
-            scale_slice_avx2(&mut want, -1.75);
-            scale_slice_avx512(&mut got, -1.75);
-            assert_state_close(&got, &want, &format!("scale n={n}"));
-
-            let (mut want, mut got) = (a0.clone(), a0.clone());
             scale_complex_slice_avx2fma(&mut want, factor);
             scale_complex_slice_avx512(&mut got, factor);
             assert_state_close(&got, &want, &format!("scale_complex n={n}"));
@@ -956,7 +939,7 @@ fn target_feature_kernel_count_is_pinned() {
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
     let expected: [(&str, usize); 8] = [
-        ("src/backend/simd.rs", 54),
+        ("src/backend/simd.rs", 52),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
         ("src/backend/statevector/kernels.rs", 19),

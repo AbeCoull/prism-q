@@ -1,4 +1,10 @@
 use super::*;
+use crate::circuit::Circuit;
+use crate::circuits;
+use crate::gates::Gate;
+use crate::limits::ResolvedLimits;
+use crate::sim::BackendKind;
+use crate::sim::compiled::{ShotLayout, compile_forward, compile_measurements};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
@@ -333,4 +339,125 @@ fn bts_batched_preserves_batch_and_worker_streams() {
     }
     #[cfg(not(feature = "parallel"))]
     check_batched_stream(1);
+}
+
+#[test]
+fn bts_meas_major_ghz_counts() {
+    let mut c = circuits::ghz_circuit(8);
+    c.num_classical_bits = 8;
+    for i in 0..8 {
+        c.add_measure(i, i);
+    }
+    let mut sampler = compile_forward(&c, 42).unwrap();
+    let packed = sampler.sample_bulk_packed(10_000);
+
+    assert_eq!(packed.layout(), ShotLayout::MeasMajor);
+
+    let counts = packed.counts();
+    assert_eq!(counts.len(), 2, "GHZ should have exactly 2 outcomes");
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, 10_000);
+}
+
+#[test]
+fn bts_meas_major_get_bit_consistency() {
+    let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
+    c.num_classical_bits = 20;
+    for i in 0..20 {
+        c.add_measure(i, i);
+    }
+    let mut sampler = compile_forward(&c, 42).unwrap();
+    let packed = sampler.sample_bulk_packed(500);
+
+    let shots = packed.to_shots();
+    for (s, shot) in shots.iter().enumerate() {
+        for (m, &val) in shot.iter().enumerate().take(20) {
+            assert_eq!(packed.get_bit(s, m), val, "Mismatch at shot={s} meas={m}");
+        }
+    }
+}
+
+#[test]
+fn bts_meas_major_marginals_match_stabilizer() {
+    let mut c = circuits::clifford_heavy_circuit(50, 5, 42);
+    c.num_classical_bits = 50;
+    for i in 0..50 {
+        c.add_measure(i, i);
+    }
+    let mut sampler = compile_forward(&c, 42).unwrap();
+    let packed = sampler.sample_bulk_packed(5_000);
+
+    let reference = crate::sim::run_shots_with(
+        BackendKind::Stabilizer,
+        &c,
+        5_000,
+        42,
+        &ResolvedLimits::process_default(),
+    )
+    .unwrap();
+
+    for q in 0..50 {
+        let bts_ones: usize = (0..5_000).filter(|&s| packed.get_bit(s, q)).count();
+        let ref_ones: usize = reference.shots.iter().filter(|s| s[q]).count();
+        let bts_frac = bts_ones as f64 / 5_000.0;
+        let ref_frac = ref_ones as f64 / 5_000.0;
+        assert!(
+            (bts_frac - ref_frac).abs() < 0.05,
+            "q{q}: bts={bts_frac:.3} ref={ref_frac:.3}"
+        );
+    }
+}
+
+#[test]
+fn block_parallel_bts_correctness() {
+    let mut c = circuits::independent_bell_pairs(8);
+    c.num_classical_bits = 16;
+    for i in 0..16 {
+        c.add_measure(i, i);
+    }
+
+    let mut sampler_block = compile_measurements(&c, 42).unwrap();
+    assert!(sampler_block.parity_blocks.is_some());
+
+    let packed = sampler_block.sample_bulk_packed(10_000);
+    let counts = packed.counts();
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, 10_000);
+
+    let shots = packed.to_shots();
+    for shot in &shots {
+        for pair in 0..8 {
+            let b0 = shot[2 * pair];
+            let b1 = shot[2 * pair + 1];
+            assert_eq!(b0, b1, "Bell pair {pair} must be correlated");
+        }
+    }
+}
+
+#[test]
+fn bts_batched_correctness() {
+    let mut c = Circuit::new(4, 4);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    for i in 0..4 {
+        c.add_measure(i, i);
+    }
+
+    let num_shots = BTS_BATCH_SHOTS * 3 + 100;
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    assert!(sampler.should_use_bts(num_shots));
+
+    let packed = sampler.sample_bulk_packed(num_shots);
+    assert_eq!(packed.num_shots, num_shots);
+    let counts = packed.counts();
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, num_shots as u64);
+
+    let shots = packed.to_shots();
+    for shot in &shots {
+        assert_eq!(shot[0], shot[1], "Bell pair 0 must be correlated");
+        assert_eq!(shot[2], shot[3], "Bell pair 1 must be correlated");
+    }
 }

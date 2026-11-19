@@ -59,8 +59,9 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
+use crate::backend::insert_zero_bit;
 use crate::backend::simd;
-use crate::backend::statevector::{StatevectorBackend, insert_zero_bit, kernels};
+use crate::backend::statevector::{StatevectorBackend, kernels};
 use crate::backend::{Backend, NORM_CLAMP_MIN, reduced_density, schmidt};
 use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
@@ -589,33 +590,16 @@ fn ket_register_gate(gate: &Gate, n: usize) -> Cow<'_, Gate> {
 }
 
 /// Reject a mixture the device cannot hold before anything is allocated: the
-/// `4^n` buffer at 16 bytes per entry plus the `2^n` diagonal scratch. A
-/// context that cannot report free memory falls through to the allocation,
-/// whose own error stays authoritative.
+/// `4^n` buffer at 16 bytes per entry plus the `2^n` diagonal scratch.
 #[cfg(feature = "gpu")]
 fn check_device_budget(context: &GpuContext, num_qubits: usize) -> Result<()> {
-    if 2 * num_qubits >= usize::BITS as usize - 4 {
-        return Ok(());
-    }
-    let Ok(free) = context.vram_available() else {
-        return Ok(());
-    };
-    let needed = (1usize << (2 * num_qubits)) * 16 + (1usize << num_qubits) * 8;
-    if needed > free {
-        return Err(crate::error::PrismError::ResourceLimit(Box::new(
-            crate::error::ResourceLimit {
-                backend: "density_matrix-gpu".to_string(),
-                operation: format!("the 4^n mixture of a {num_qubits}-qubit circuit on the device"),
-                resource: crate::error::ResourceKind::DeviceBytes,
-                required: needed as u128,
-                limit: free as u128,
-                env_var: None,
-                knob: None,
-                limit_source: crate::limits::LimitSource::Detected,
-            },
-        )));
-    }
-    Ok(())
+    let needed = (2 * num_qubits < usize::BITS as usize - 4)
+        .then(|| (1usize << (2 * num_qubits)) * 16 + (1usize << num_qubits) * 8);
+    context.require_device_bytes(
+        "density_matrix-gpu",
+        format!("the 4^n mixture of a {num_qubits}-qubit circuit on the device"),
+        needed,
+    )
 }
 
 /// The channel entry points are infallible by signature, so a device launch
@@ -1292,7 +1276,7 @@ impl DensityMatrixBackend {
         #[cfg(feature = "parallel")]
         if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             use crate::backend::MIN_PAR_ITERS;
-            use crate::backend::statevector::SendPtr;
+            use crate::backend::SendPtr;
             use rayon::prelude::*;
 
             let ptr = SendPtr(self.sv.state.as_mut_ptr());
@@ -1476,7 +1460,7 @@ impl DensityMatrixBackend {
         #[cfg(feature = "parallel")]
         if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             use crate::backend::MIN_PAR_ITERS;
-            use crate::backend::statevector::SendPtr;
+            use crate::backend::SendPtr;
             use rayon::prelude::*;
 
             let ptr = SendPtr(self.sv.state.as_mut_ptr());
@@ -1641,7 +1625,7 @@ impl DensityMatrixBackend {
         #[cfg(feature = "parallel")]
         if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             use crate::backend::MIN_PAR_ITERS;
-            use crate::backend::statevector::SendPtr;
+            use crate::backend::SendPtr;
             use rayon::prelude::*;
 
             let ptr = SendPtr(self.sv.state.as_mut_ptr());

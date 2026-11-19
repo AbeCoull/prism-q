@@ -460,6 +460,14 @@ impl NoiseModel {
         })
     }
 
+    /// No noise events and ideal readout, sized for `circuit`.
+    pub(crate) fn noiseless_for(circuit: &Circuit) -> Self {
+        Self {
+            after_gate: vec![Vec::new(); circuit.noise_slot_count()],
+            readout: vec![None; circuit.num_classical_bits],
+        }
+    }
+
     fn per_gate_target(circuit: &Circuit, event: impl Fn(usize) -> NoiseEvent) -> Self {
         let mut after_gate = vec![Vec::new(); circuit.noise_slot_count()];
         circuit.for_each_noise_slot(|slot, instr| {
@@ -4049,38 +4057,6 @@ fn settle_measured_qubits<'a>(
         after_gate,
         readout: noise.readout.clone(),
     }))
-}
-
-/// Exact per-classical-bit measurement marginals under a noise model, evolved
-/// on the density-matrix backend. Measurements are read as `Tr(P_1 rho)` on the
-/// final state without collapse, so this assumes terminal (non-feedback)
-/// measurement, matching the domain of `noisy_marginals_analytical`.
-#[cfg(test)]
-pub(crate) fn dm_noisy_marginals(
-    circuit: &Circuit,
-    noise: &NoiseModel,
-    seed: u64,
-) -> Result<Vec<f64>> {
-    let dm = evolve_density_matrix(
-        &BackendKind::DensityMatrix,
-        circuit,
-        Some(noise),
-        None,
-        seed,
-        &ResolvedLimits::process_default(),
-    )?;
-    let mut result = vec![0.5f64; circuit.num_classical_bits];
-    for inst in &circuit.instructions {
-        if let Instruction::Measure {
-            qubit,
-            classical_bit,
-        } = inst
-            && *classical_bit < result.len()
-        {
-            result[*classical_bit] = dm.qubit_probability(*qubit)?;
-        }
-    }
-    Ok(result)
 }
 
 /// Exact `Tr(rho P_k)` for each joint Pauli `P_k`, evolving the density-matrix

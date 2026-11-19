@@ -30,7 +30,7 @@ fn angles_survive_exactly() {
 
 #[test]
 fn u3_matrix_round_trips() {
-    let mat = Parser::u_matrix(0.7, -1.3, 2.1);
+    let mat = gate_library::u_matrix(0.7, -1.3, 2.1);
     let round = reparse(&one_gate(Gate::Fused(Box::new(mat)), &[0]));
     let Instruction::Gate { gate, .. } = &round.instructions[0] else {
         panic!("expected a gate");

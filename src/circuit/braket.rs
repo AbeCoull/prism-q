@@ -6,6 +6,7 @@ use num_complex::Complex64;
 
 use crate::PauliObservable;
 use crate::circuit::Instruction;
+use crate::circuit::openqasm::unsupported;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::noise::NoiseChannel;
@@ -634,13 +635,13 @@ pub(crate) fn unitary_instructions(
         });
     }
     if num_targets > crate::circuit::synthesis::MAX_COMPOSED_QUBITS {
-        return Err(PrismError::UnsupportedConstruct {
-            construct: format!(
+        return Err(unsupported(
+            line,
+            format!(
                 "`unitary` on {num_targets} qubits, past the {} the reduction covers",
                 crate::circuit::synthesis::MAX_COMPOSED_QUBITS
             ),
-            line,
-        });
+        ));
     }
     check_unitary(matrix, line)?;
     let flat: Vec<Complex64> = matrix.iter().flat_map(|row| row.iter().copied()).collect();
@@ -745,10 +746,7 @@ fn parse_observable_factor(
         }),
         "h" => Ok(ObservableFactor::Hadamard { targets }),
         "i" => Ok(ObservableFactor::Identity { targets }),
-        other => Err(PrismError::UnsupportedConstruct {
-            construct: format!("observable `{other}`"),
-            line,
-        }),
+        other => Err(unsupported(line, format!("observable `{other}`"))),
     }
 }
 
@@ -841,14 +839,11 @@ fn read_result_pragma(body: &str, line: usize, resolve: &QubitResolver<'_>) -> R
         )?)),
         "variance" => Ok(ResultSpec::Variance(parse_observable(rest, line, resolve)?)),
         "sample" => Ok(ResultSpec::Sample(parse_observable(rest, line, resolve)?)),
-        "adjoint_gradient" => Err(PrismError::UnsupportedConstruct {
-            construct: "`adjoint_gradient`, which Braket serves on SV1 only".to_string(),
+        "adjoint_gradient" => Err(unsupported(
             line,
-        }),
-        other => Err(PrismError::UnsupportedConstruct {
-            construct: format!("result type `{other}`"),
-            line,
-        }),
+            "`adjoint_gradient`, which Braket serves on SV1 only",
+        )),
+        other => Err(unsupported(line, format!("result type `{other}`"))),
     }
 }
 
@@ -978,10 +973,10 @@ pub(crate) fn parse_noise_pragma(
                 kraus: kraus_2q(&entries, line)?,
             },
             other => {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("`kraus` on {other} qubits, which Braket caps at two"),
+                return Err(unsupported(
                     line,
-                });
+                    format!("`kraus` on {other} qubits, which Braket caps at two"),
+                ));
             }
         };
         channel.validate()?;
@@ -1091,10 +1086,7 @@ pub(crate) fn parse_noise_pragma(
             }
         }
         other => {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("noise channel `{other}`"),
-                line,
-            });
+            return Err(unsupported(line, format!("noise channel `{other}`")));
         }
     };
     channel.validate()?;

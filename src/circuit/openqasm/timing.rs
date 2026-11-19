@@ -240,20 +240,21 @@ impl<'a> Parser<'a> {
             Ok(()) => schedule.finish(None, line)?.map(|(_, length)| length.base),
             Err(why) => Err(why),
         };
-        outcome.map_err(|why| PrismError::UnsupportedConstruct {
-            construct: match why {
-                Unscheduled::Statement => {
-                    "`durationof` over a block holding anything but gate calls, `measure`, \
-                     `reset`, `barrier`, `delay`, `nop` and `box`"
-                }
-                Unscheduled::Mixed => {
-                    "`durationof` over delays mixing `dt` with SI units, whose order depends \
-                     on the backend's sample period"
-                }
-                Unscheduled::Backtrack => "`durationof` over a stretch that backtracks",
-            }
-            .into(),
-            line,
+        outcome.map_err(|why| {
+            unsupported(
+                line,
+                match why {
+                    Unscheduled::Statement => {
+                        "`durationof` over a block holding anything but gate calls, `measure`, \
+                         `reset`, `barrier`, `delay`, `nop` and `box`"
+                    }
+                    Unscheduled::Mixed => {
+                        "`durationof` over delays mixing `dt` with SI units, whose order depends \
+                         on the backend's sample period"
+                    }
+                    Unscheduled::Backtrack => "`durationof` over a stretch that backtracks",
+                },
+            )
         })
     }
 

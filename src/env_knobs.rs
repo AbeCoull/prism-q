@@ -15,6 +15,13 @@ pub(crate) fn usize_override(var: &str, min: usize) -> Option<usize> {
     parse_usize_override(var, std::env::var(var).ok(), min)
 }
 
+/// A flag knob: `default` when unset or unrecognized, with a warning naming the
+/// variable. Accepts `0`/`false` and `1`/`true` in any case.
+#[cfg(feature = "distributed")]
+pub(crate) fn bool_knob(var: &str, default: bool) -> bool {
+    parse_bool_knob(var, std::env::var(var).ok(), default)
+}
+
 /// `PRISM_BENCH_VARIANT=<letter>`, read once. `a` is the base; each switched change in one
 /// interleaved run claims its own letter. Branch on it coarsely, never in a gate inner loop.
 #[cfg(feature = "bench-internal")]
@@ -55,6 +62,23 @@ pub(crate) fn parse_usize_override(var: &str, raw: Option<String>, min: usize) -
         Err(_) => {
             eprintln!("warning: {var}={raw:?} is not a count; ignoring it.");
             None
+        }
+    }
+}
+
+#[cfg(feature = "distributed")]
+pub(crate) fn parse_bool_knob(var: &str, raw: Option<String>, default: bool) -> bool {
+    let Some(raw) = raw else {
+        return default;
+    };
+    match raw.trim() {
+        "0" => false,
+        "1" => true,
+        other if other.eq_ignore_ascii_case("false") => false,
+        other if other.eq_ignore_ascii_case("true") => true,
+        other => {
+            eprintln!("warning: {var}={other:?} is not a flag; using {default}.");
+            default
         }
     }
 }

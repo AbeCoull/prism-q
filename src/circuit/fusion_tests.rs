@@ -3,6 +3,7 @@ use crate::backend::Backend;
 use crate::circuit::plan::Tracer;
 use crate::gates::PauliRotData;
 use crate::sim::unified_pauli::PauliAxis;
+use crate::test_support::assert_mat_close;
 const EPS: f64 = 1e-12;
 
 #[test]
@@ -86,19 +87,6 @@ fn qaoa_doubled_buffer_keeps_post_phase_floor() {
     );
 }
 
-fn assert_mat_close(actual: &[[Complex64; 2]; 2], expected: &[[Complex64; 2]; 2]) {
-    for i in 0..2 {
-        for j in 0..2 {
-            assert!(
-                (actual[i][j] - expected[i][j]).norm() < EPS,
-                "[{i}][{j}]: expected {:?}, got {:?}",
-                expected[i][j],
-                actual[i][j]
-            );
-        }
-    }
-}
-
 fn identity_mat() -> [[Complex64; 2]; 2] {
     let zero = Complex64::new(0.0, 0.0);
     let one = Complex64::new(1.0, 0.0);
@@ -125,15 +113,15 @@ fn count_fused_2q(circuit: &Circuit) -> usize {
 fn test_mat_mul_identity() {
     let id = identity_mat();
     let h = Gate::H.matrix_2x2();
-    assert_mat_close(&mat_mul_2x2(&id, &h), &h);
-    assert_mat_close(&mat_mul_2x2(&h, &id), &h);
+    assert_mat_close(&mat_mul_2x2(&id, &h), &h, EPS);
+    assert_mat_close(&mat_mul_2x2(&h, &id), &h, EPS);
 }
 
 #[test]
 fn test_mat_mul_h_h_is_identity() {
     let h = Gate::H.matrix_2x2();
     let result = mat_mul_2x2(&h, &h);
-    assert_mat_close(&result, &identity_mat());
+    assert_mat_close(&result, &identity_mat(), EPS);
 }
 
 #[test]
@@ -143,7 +131,7 @@ fn test_mat_mul_associative() {
     let c = Gate::Rz(2.3).matrix_2x2();
     let ab_c = mat_mul_2x2(&mat_mul_2x2(&a, &b), &c);
     let a_bc = mat_mul_2x2(&a, &mat_mul_2x2(&b, &c));
-    assert_mat_close(&ab_c, &a_bc);
+    assert_mat_close(&ab_c, &a_bc, EPS);
 }
 
 fn count_fused(circuit: &Circuit) -> usize {
@@ -215,7 +203,7 @@ fn test_fuse_adjacent_same_qubit() {
     assert_eq!(count_fused(&fused), 1);
     let expected = mat_mul_2x2(&Gate::T.matrix_2x2(), &Gate::H.matrix_2x2());
     let actual = extract_fused_matrix(&fused.instructions[0]);
-    assert_mat_close(&actual, &expected);
+    assert_mat_close(&actual, &expected, EPS);
 }
 
 #[test]
@@ -231,7 +219,7 @@ fn test_fuse_across_different_qubit() {
 
     let expected = mat_mul_2x2(&Gate::T.matrix_2x2(), &Gate::H.matrix_2x2());
     let fused_mat = extract_fused_matrix(&fused.instructions[0]);
-    assert_mat_close(&fused_mat, &expected);
+    assert_mat_close(&fused_mat, &expected, EPS);
 }
 
 #[test]
@@ -301,7 +289,7 @@ fn test_long_chain() {
         ),
     );
     let actual = extract_fused_matrix(&fused.instructions[0]);
-    assert_mat_close(&actual, &expected);
+    assert_mat_close(&actual, &expected, EPS);
 }
 
 #[test]
@@ -449,10 +437,10 @@ fn test_fusion_matrix_order_matters() {
         "X·H and H·X should produce different fused matrices"
     );
     let expected_xh = mat_mul_2x2(&Gate::H.matrix_2x2(), &Gate::X.matrix_2x2());
-    assert_mat_close(&mat_xh, &expected_xh);
+    assert_mat_close(&mat_xh, &expected_xh, EPS);
 
     let expected_hx = mat_mul_2x2(&Gate::X.matrix_2x2(), &Gate::H.matrix_2x2());
-    assert_mat_close(&mat_hx, &expected_hx);
+    assert_mat_close(&mat_hx, &expected_hx, EPS);
 }
 
 #[test]
@@ -1087,7 +1075,7 @@ fn reorder_exposes_1q_fusion() {
     let h_mat = Gate::H.matrix_2x2();
     let expected = mat_mul_2x2(&t_mat, &h_mat);
     if let Gate::Fused(mat) = &gates[0].0 {
-        assert_mat_close(mat, &expected);
+        assert_mat_close(mat, &expected, EPS);
     }
 }
 

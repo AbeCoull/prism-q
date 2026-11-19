@@ -2118,38 +2118,6 @@ pub(crate) fn zero_slice(slice: &mut [Complex64]) {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", test))]
-#[target_feature(enable = "avx2")]
-unsafe fn scale_slice_avx2(slice: &mut [Complex64], factor: f64) {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        let f = _mm256_set1_pd(factor);
-        let ptr = slice.as_mut_ptr() as *mut f64;
-        let pairs = slice.len() / 2;
-        for i in 0..pairs {
-            let off = i * 4;
-            let v = _mm256_loadu_pd(ptr.add(off));
-            _mm256_storeu_pd(ptr.add(off), _mm256_mul_pd(v, f));
-        }
-        if !slice.len().is_multiple_of(2) {
-            slice[slice.len() - 1] *= factor;
-        }
-    }
-}
-
-#[cfg(all(target_arch = "x86_64", test))]
-#[target_feature(enable = "avx512f")]
-unsafe fn scale_slice_avx512(slice: &mut [Complex64], factor: f64) {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        let f = _mm512_set1_pd(factor);
-        let ptr = slice.as_mut_ptr() as *mut f64;
-        for_each_quad!(slice.len(), |off, k| {
-            store_pd(ptr.add(off), k, _mm512_mul_pd(load_pd(ptr.add(off), k), f));
-        });
-    }
-}
-
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn scale_complex_slice_avx512(slice: &mut [Complex64], factor: Complex64) {
@@ -2559,41 +2527,6 @@ pub(crate) fn scale_complex_to_slice(dst: &mut [Complex64], src: &[Complex64], f
     }
     for (i, &c) in src.iter().enumerate() {
         dst[i] = c * factor;
-    }
-}
-
-#[cfg(test)]
-fn scale_slice(slice: &mut [Complex64], factor: f64) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if slice.len() >= MIN_SIMD_SLICE && simd_tier() == SimdTier::Avx512 {
-            // SAFETY: AVX-512F detected, and the helper writes only within the mutable
-            // slice.
-            unsafe { scale_slice_avx512(slice, factor) };
-        } else if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-            // SAFETY: AVX2 checked above, and the helper writes
-            // only within the mutable slice.
-            unsafe { scale_slice_avx2(slice, factor) };
-        } else {
-            for amp in slice.iter_mut() {
-                *amp *= factor;
-            }
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: NEON is baseline on aarch64, and the loop
-    // only touches elements inside the mutable slice.
-    unsafe {
-        let f = vdupq_n_f64(factor);
-        let ptr = slice.as_mut_ptr() as *mut f64;
-        for i in 0..slice.len() {
-            let p = ptr.add(i * 2);
-            vst1q_f64(p, vmulq_f64(vld1q_f64(p), f));
-        }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    for amp in slice.iter_mut() {
-        *amp *= factor;
     }
 }
 
@@ -3198,7 +3131,7 @@ impl PreparedGate2q {
             // SAFETY: x86_64 guarantees SSE2, and the loop builds in-bounds,
             // disjoint 4-amplitude groups.
             unsafe {
-                use crate::backend::statevector::insert_zero_bit;
+                use crate::backend::insert_zero_bit;
                 for k in 0..n_iter {
                     let idx = insert_zero_bit(insert_zero_bit(k, lo), hi);
                     let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
@@ -3219,7 +3152,7 @@ impl PreparedGate2q {
 
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
-            use crate::backend::statevector::insert_zero_bit;
+            use crate::backend::insert_zero_bit;
             for k in 0..n_iter {
                 let idx = insert_zero_bit(insert_zero_bit(k, lo), hi);
                 let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
@@ -3298,7 +3231,7 @@ impl PreparedGate2q {
                         );
                     }
                     SimdTier::Sse2 => {
-                        use crate::backend::statevector::insert_zero_bit;
+                        use crate::backend::insert_zero_bit;
                         for k in 0..n_iter {
                             let idx = insert_zero_bit(insert_zero_bit(k, lo), hi);
                             let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
@@ -3331,7 +3264,7 @@ impl PreparedGate2q {
         q0: usize,
         q1: usize,
     ) {
-        use crate::backend::statevector::insert_zero_bit;
+        use crate::backend::insert_zero_bit;
         let mask0 = 1usize << q0;
         let mask1 = 1usize << q1;
         let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
@@ -3642,7 +3575,7 @@ fn walsh_blocked<const AVX: bool>(a: &mut [f64]) {
         let h = 1usize << level;
         #[cfg(feature = "parallel")]
         if parallel {
-            use crate::backend::statevector::SendPtr;
+            use crate::backend::SendPtr;
             use rayon::prelude::*;
             let span = h << step;
             let per_block = h / WALSH_SWEEP_CHUNK;

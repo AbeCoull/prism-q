@@ -3,6 +3,7 @@ use crate::Limits;
 use crate::limits::ResolvedLimits;
 use crate::sim::route::{MIN_AUTO_REGISTER_EXPECTATION_QUBITS, decide_register_subset};
 use crate::sim::{BackendKind, Query, ResolvedBackend, RouteRule, simulate};
+use crate::test_support::assert_close;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -68,13 +69,6 @@ fn statevector_values(circuit: &Circuit, observables: &[Vec<PauliTerm>]) -> Vec<
         .unwrap()
 }
 
-fn assert_close(got: &[f64], want: &[f64], label: &str) {
-    assert_eq!(got.len(), want.len(), "{label}");
-    for (i, (g, w)) in got.iter().zip(want).enumerate() {
-        assert!((g - w).abs() < EPS, "{label}[{i}]: {g} against {w}");
-    }
-}
-
 #[test]
 fn every_engine_matches_the_statevector() {
     for seed in 0..24u64 {
@@ -90,7 +84,7 @@ fn every_engine_matches_the_statevector() {
             let plan =
                 RegisterExpectations::plan_with(&circuit, &observables, max_dense, max_excess)
                     .unwrap();
-            assert_close(&plan.values(), &want, &format!("seed {seed} {label}"));
+            assert_close(&format!("seed {seed} {label}"), &plan.values(), &want, EPS);
         }
     }
 }
@@ -129,9 +123,10 @@ fn a_part_past_the_dense_cap_answers_through_its_excess_rotations() {
         "no part past the dense cap propagates"
     );
     assert_close(
+        "wide part",
         &plan.values(),
         &statevector_values(&circuit, &observables),
-        "wide part",
+        EPS,
     );
 }
 
@@ -151,9 +146,10 @@ fn an_observable_that_flips_a_zero_qubit_reads_zero() {
     let values = plan.values();
     assert_eq!(&values[..2], &[0.0, 0.0]);
     assert_close(
+        "zero qubit",
         &values,
         &statevector_values(&circuit, &observables),
-        "zero qubit",
+        EPS,
     );
 }
 
@@ -251,9 +247,10 @@ fn auto_expectations_and_marginals_take_the_register_on_clifford_t() {
     assert_eq!(result.metadata.backend, ResolvedBackend::StabilizerRank);
     assert_eq!(result.metadata.reason, RouteRule::CliffordRegister);
     assert_close(
+        "auto",
         &result.values,
         &statevector_values(&circuit, &observables),
-        "auto",
+        EPS,
     );
 
     let marginals = simulate(&circuit).seed(42).marginals().unwrap();
@@ -283,7 +280,7 @@ fn few_qubit_distributions_read_the_walsh_transform_of_the_register() {
             .seed(42)
             .probabilities_of(&qubits)
             .unwrap();
-        assert_close(&got, &want, &format!("{qubits:?}"));
+        assert_close(&format!("{qubits:?}"), &got, &want, EPS);
     }
 }
 

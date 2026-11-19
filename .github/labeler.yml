@@ -20,7 +20,7 @@ mps:
 
 parser:
   - changed-files:
-    - any-glob-to-any-file: 'src/circuit/openqasm.rs'
+    - any-glob-to-any-file: 'src/circuit/openqasm/**'
 
 circuit:
   - changed-files:

@@ -1,11 +1,13 @@
-//! Recognition of expanded QFT gate sequences as [`Gate::QftBlock`].
+//! Recognition of expanded QFT gate sequences as [`Gate::QftBlock`], and the textbook
+//! expansion that reverses it.
 
 use std::borrow::Cow;
 use std::f64::consts::PI;
 
 use num_complex::Complex64;
 
-use super::{Circuit, Instruction};
+use super::region::any_bare_gate;
+use super::{Circuit, GuardedRegion, Instruction, smallvec};
 use crate::gates::Gate;
 
 /// Narrowest QFT on part of the register that becomes a block. Below it the gates
@@ -312,4 +314,143 @@ fn match_inverse(insts: &[Instruction], i: usize) -> Option<QftMatch> {
         swaps: range.is_some(),
         big_endian: dir < 0,
     })
+}
+
+/// One step of the textbook QFT decomposition yielded by [`qft_textbook_steps`].
+#[derive(Debug, Clone, Copy)]
+pub enum QftTextbookStep {
+    Hadamard(usize),
+    CPhase {
+        control: usize,
+        target: usize,
+        theta: f64,
+    },
+    Swap(usize, usize),
+}
+
+/// Yield the textbook decomposition of the [`Gate::QftBlock`] with these fields.
+///
+/// Forward order: for each qubit `q` from `num - 1` down to `0`, `H q[start+q]`
+/// followed by `cphase(pi / 2^(q-k))` controlled by `q[start+k]` for `k in 0..q`,
+/// then, with `swaps`, the bit-reversal swaps. `big_endian` maps `q[start+i]` to
+/// `q[start+num-1-i]` throughout, and `inverse` yields the forward sequence
+/// reversed with negated angles.
+pub fn qft_textbook_steps(
+    start: usize,
+    num: usize,
+    inverse: bool,
+    swaps: bool,
+    big_endian: bool,
+) -> impl Iterator<Item = QftTextbookStep> {
+    let label = move |i: usize| {
+        if big_endian {
+            start + num - 1 - i
+        } else {
+            start + i
+        }
+    };
+    let columns = (0..num).rev().flat_map(move |q| {
+        let head = std::iter::once(QftTextbookStep::Hadamard(label(q)));
+        let phases = (0..q).map(move |k| QftTextbookStep::CPhase {
+            control: label(k),
+            target: label(q),
+            theta: std::f64::consts::TAU / (1u64 << (q - k + 1)) as f64,
+        });
+        head.chain(phases)
+    });
+    let swap_count = if swaps { num / 2 } else { 0 };
+    let forward = columns
+        .chain((0..swap_count).map(move |i| QftTextbookStep::Swap(start + i, start + num - 1 - i)));
+    let (forward, reversed) = if inverse {
+        (None, Some(forward.rev().map(QftTextbookStep::adjoint)))
+    } else {
+        (Some(forward), None)
+    };
+    forward
+        .into_iter()
+        .flatten()
+        .chain(reversed.into_iter().flatten())
+}
+
+impl QftTextbookStep {
+    fn adjoint(self) -> Self {
+        match self {
+            QftTextbookStep::CPhase {
+                control,
+                target,
+                theta,
+            } => QftTextbookStep::CPhase {
+                control,
+                target,
+                theta: -theta,
+            },
+            step => step,
+        }
+    }
+}
+
+/// Expand `Gate::QftBlock` instructions to textbook QFT gates.
+///
+/// Backends without native support call this before dispatch. Returns
+/// `Cow::Borrowed` when there is nothing to expand.
+pub fn expand_qft_blocks(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
+    if !any_bare_gate(&circuit.instructions, &mut |gate| {
+        matches!(gate, Gate::QftBlock { .. })
+    }) {
+        return std::borrow::Cow::Borrowed(circuit);
+    }
+    std::borrow::Cow::Owned(circuit.with_instructions(expanded_qft_blocks(&circuit.instructions)))
+}
+
+fn expanded_qft_blocks(instructions: &[Instruction]) -> Vec<Instruction> {
+    let mut out: Vec<Instruction> = Vec::with_capacity(instructions.len() * 2);
+    for inst in instructions {
+        if let Instruction::Gate {
+            gate:
+                Gate::QftBlock {
+                    start,
+                    num,
+                    inverse,
+                    swaps,
+                    big_endian,
+                },
+            ..
+        } = inst
+        {
+            for step in qft_textbook_steps(
+                *start as usize,
+                *num as usize,
+                *inverse,
+                *swaps,
+                *big_endian,
+            ) {
+                match step {
+                    QftTextbookStep::Hadamard(q) => out.push(Instruction::Gate {
+                        gate: Gate::H,
+                        targets: smallvec![q],
+                    }),
+                    QftTextbookStep::CPhase {
+                        control,
+                        target,
+                        theta,
+                    } => out.push(Instruction::Gate {
+                        gate: Gate::cphase(theta),
+                        targets: smallvec![control, target],
+                    }),
+                    QftTextbookStep::Swap(a, b) => out.push(Instruction::Gate {
+                        gate: Gate::Swap,
+                        targets: smallvec![a, b],
+                    }),
+                }
+            }
+        } else if let Instruction::Region(region) = inst {
+            out.push(Instruction::Region(Box::new(GuardedRegion::new(
+                region.condition().clone(),
+                expanded_qft_blocks(region.body()),
+            ))));
+        } else {
+            out.push(inst.clone());
+        }
+    }
+    out
 }

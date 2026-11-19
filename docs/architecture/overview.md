@@ -25,7 +25,7 @@ flow and native QEC programs enter beside the circuit path and reuse its parts.
 ```mermaid
 flowchart TD
     API["Public API: simulate, run_qasm, run_on (src/lib.rs)"]
-    P["OpenQASM parser (src/circuit/openqasm.rs)"]
+    P["OpenQASM parser (src/circuit/openqasm/)"]
     IR["Circuit IR (src/circuit/mod.rs)"]
     DP["DynamicProgram: blocks of Circuit IR (src/circuit/dynamic/)"]
     QP["QecProgram (src/qec/)"]

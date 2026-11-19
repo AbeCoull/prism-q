@@ -3,7 +3,7 @@ use crate::gates::{cu_matrix_4x4, mat_mul_2x2};
 use std::f64::consts::{FRAC_PI_2, PI};
 
 fn u3(theta: f64, phi: f64, lam: f64) -> Gate {
-    Gate::Fused(Box::new(crate::circuit::openqasm::Parser::u_matrix(
+    Gate::Fused(Box::new(crate::circuit::gate_library::u_matrix(
         theta, phi, lam,
     )))
 }

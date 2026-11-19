@@ -513,11 +513,7 @@ pub(super) fn decide_native(
     if decomposed && !matches!(plan, BackendPlan::ProductState) {
         return Ok(None);
     }
-    let capable = if sampling {
-        plan.supports_native_sampling()
-    } else {
-        plan.supports_pauli_expectation()
-    };
+    let capable = !sampling || plan.supports_native_sampling();
     Ok(capable.then_some(plan))
 }
 
@@ -680,12 +676,6 @@ pub(super) fn decide_native_expectations(
             reason: "expectation values need a backend that holds a state; the stabilizer-rank route returns probabilities only".into(),
         });
     };
-    if !plan.supports_pauli_expectation() {
-        return Err(PrismError::BackendUnsupported {
-            backend: format!("{:?}", plan.resolved()),
-            operation: "Pauli expectation values".into(),
-        });
-    }
     Ok(plan)
 }
 

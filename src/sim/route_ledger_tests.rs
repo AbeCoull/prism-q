@@ -8,6 +8,7 @@ use super::*;
 use crate::circuit::{ClassicalCondition, Parameters, PreparedCircuit, SmallVec};
 use crate::gates::Gate;
 use crate::sim::noise::{NoiseChannel, NoiseEvent};
+use crate::test_support::assert_close;
 
 const SEED: u64 = 42;
 const EPS: f64 = 1e-10;
@@ -474,13 +475,6 @@ fn pauli_value(state: &[Complex64], observable: &[PauliTerm]) -> f64 {
         acc += state[j ^ flip].conj() * phase * parity * amp;
     }
     acc.re
-}
-
-fn assert_close(label: &str, got: &[f64], want: &[f64], eps: f64) {
-    assert_eq!(got.len(), want.len(), "{label}: length");
-    for (i, (g, w)) in got.iter().zip(want).enumerate() {
-        assert!((g - w).abs() <= eps, "{label}[{i}]: {g} vs {w}");
-    }
 }
 
 fn marginals_of(probs: &[f64], n: usize) -> Vec<f64> {

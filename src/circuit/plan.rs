@@ -867,9 +867,7 @@ fn record_sites(
         {
             return;
         }
-        let start = steps.len() as u32;
-        steps.extend_from_slice(recipe_steps);
-        let range = start..steps.len() as u32;
+        let range = push_steps(steps, recipe_steps);
         sites.push(Site {
             instruction: index,
             entry: entry as u32,
@@ -879,6 +877,11 @@ fn record_sites(
                 Recipe::Mat2(range, diagonal)
             },
         });
+    };
+    let angle_site = |entry: usize, src: u32| Site {
+        instruction: index,
+        entry: entry as u32,
+        recipe: Recipe::Angle(src),
     };
 
     match gate {
@@ -918,15 +921,10 @@ fn record_sites(
             let [single] = prov.as_slice() else {
                 return false;
             };
-            let [Step::M1 { src } | Step::M2 { src, .. } | Step::Rzz { src }] = single.as_slice()
-            else {
+            let Some(src) = angle_source(single) else {
                 return false;
             };
-            sites.push(Site {
-                instruction: index,
-                entry: 0,
-                recipe: Recipe::Angle(*src),
-            });
+            sites.push(angle_site(0, src));
             true
         }
         Gate::BatchRzz(d) => {
@@ -937,11 +935,7 @@ fn record_sites(
                 let [Step::M2 { src, .. } | Step::Rzz { src }] = p.as_slice() else {
                     return false;
                 };
-                sites.push(Site {
-                    instruction: index,
-                    entry: entry as u32,
-                    recipe: Recipe::Angle(*src),
-                });
+                sites.push(angle_site(entry, *src));
             }
             true
         }
@@ -950,15 +944,10 @@ fn record_sites(
                 return false;
             }
             for (entry, p) in prov.iter().enumerate() {
-                let [Step::M1 { src } | Step::M2 { src, .. } | Step::Rzz { src }] = p.as_slice()
-                else {
+                let Some(src) = angle_source(p) else {
                     return false;
                 };
-                sites.push(Site {
-                    instruction: index,
-                    entry: entry as u32,
-                    recipe: Recipe::Angle(*src),
-                });
+                sites.push(angle_site(entry, src));
             }
             true
         }
@@ -967,9 +956,7 @@ fn record_sites(
                 return false;
             }
             for (entry, (p, diagonal)) in prov.iter().zip(&data.entries).enumerate() {
-                let start = steps.len() as u32;
-                steps.extend_from_slice(p);
-                let range = start..steps.len() as u32;
+                let range = push_steps(steps, p);
                 let recipe = match diagonal {
                     DiagEntry::Phase1q { .. } => Recipe::Mat2(range, true),
                     DiagEntry::Phase2q { .. } => Recipe::Phase(range),
@@ -988,12 +975,11 @@ fn record_sites(
                 return false;
             }
             for (entry, p) in prov.iter().enumerate() {
-                let start = steps.len() as u32;
-                steps.extend_from_slice(p);
+                let range = push_steps(steps, p);
                 sites.push(Site {
                     instruction: index,
                     entry: entry as u32,
-                    recipe: Recipe::Phase(start..steps.len() as u32),
+                    recipe: Recipe::Phase(range),
                 });
             }
             true
@@ -1002,12 +988,11 @@ fn record_sites(
             let [payload] = prov.as_slice() else {
                 return false;
             };
-            let start = steps.len() as u32;
-            steps.extend_from_slice(payload);
+            let range = push_steps(steps, payload);
             sites.push(Site {
                 instruction: index,
                 entry: 0,
-                recipe: Recipe::Phase(start..steps.len() as u32),
+                recipe: Recipe::Phase(range),
             });
             true
         }
@@ -1031,6 +1016,19 @@ fn record_sites(
         | Gate::Mcu(_)
         | Gate::QftBlock { .. }
         | Gate::Unitary(_) => true,
+    }
+}
+
+fn push_steps(steps: &mut Vec<Step>, payload: &[Step]) -> Range<u32> {
+    let start = steps.len() as u32;
+    steps.extend_from_slice(payload);
+    start..steps.len() as u32
+}
+
+fn angle_source(payload: &[Step]) -> Option<u32> {
+    match payload {
+        [Step::M1 { src } | Step::M2 { src, .. } | Step::Rzz { src }] => Some(*src),
+        _ => None,
     }
 }
 

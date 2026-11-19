@@ -705,9 +705,7 @@ fn run_with_internal(
     opts: SimOptions,
     limits: &ResolvedLimits,
 ) -> Result<RunOutcome> {
-    if !kind.is_auto() {
-        validate_explicit_backend(&kind, circuit, limits)?;
-    }
+    validate_explicit_backend(&kind, circuit, limits)?;
     // The distributed backend runs the whole circuit across ranks in lockstep.
     // Subsystem decomposition, Clifford+T, and temporal-Clifford shortcuts all
     // reshape execution per sub-block, which would desynchronize the collective

@@ -449,11 +449,15 @@ impl BackendKind {
     }
 }
 
+/// Reject a circuit the explicitly selected `kind` cannot run; an `Auto` kind passes.
 pub(super) fn validate_explicit_backend(
     kind: &BackendKind,
     circuit: &Circuit,
     limits: &ResolvedLimits,
 ) -> Result<()> {
+    if kind.is_auto() {
+        return Ok(());
+    }
     if kind.is_stabilizer_family() && !circuit.is_clifford_only() {
         return Err(PrismError::IncompatibleBackend {
             backend: "stabilizer".into(),

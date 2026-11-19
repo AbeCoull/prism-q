@@ -739,9 +739,7 @@ fn inspect_probability(
     circuit: &Circuit,
     limits: &ResolvedLimits,
 ) -> Result<Plan> {
-    if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit, limits)?;
-    }
+    validate_explicit_backend(kind, circuit, limits)?;
     #[cfg(feature = "distributed")]
     if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
         return Ok(execution_plan(

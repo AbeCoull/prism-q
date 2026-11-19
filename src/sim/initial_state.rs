@@ -42,6 +42,19 @@ pub(super) fn check_initial_state_len(state: StartState<'_>, num_qubits: usize) 
     })
 }
 
+/// Check `kind` and the width of `state` against `circuit`, then plan the backend that
+/// loads it.
+fn start_state_plan(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    state: StartState<'_>,
+    limits: &ResolvedLimits,
+) -> Result<BackendPlan> {
+    validate_explicit_backend(kind, circuit, limits)?;
+    check_initial_state_len(state, circuit.num_qubits)?;
+    initial_state_plan(kind, circuit.num_qubits, state, limits)
+}
+
 /// Build the constrained backend for a start state and load it.
 pub(super) fn backend_from_initial_state(
     kind: &BackendKind,
@@ -50,11 +63,7 @@ pub(super) fn backend_from_initial_state(
     seed: u64,
     limits: &ResolvedLimits,
 ) -> Result<(Box<dyn Backend>, RouteRule)> {
-    if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit, limits)?;
-    }
-    check_initial_state_len(state, circuit.num_qubits)?;
-    let plan = initial_state_plan(kind, circuit.num_qubits, state, limits)?;
+    let plan = start_state_plan(kind, circuit, state, limits)?;
     let mut backend = plan.build(seed, limits);
     state.load(&mut *backend, circuit.num_classical_bits)?;
     let reason = route_metadata(&*backend, plan.is_gpu(), RouteRule::StartState).reason;
@@ -118,11 +127,7 @@ pub(super) fn shots_from_initial_state(
 
     // Plan, expansion, and fusion are shot independent, so they are hoisted out
     // of the replay loop, matching `run_shots_per_shot`.
-    if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit, limits)?;
-    }
-    check_initial_state_len(state, circuit.num_qubits)?;
-    let plan = initial_state_plan(kind, circuit.num_qubits, state, limits)?;
+    let plan = start_state_plan(kind, circuit, state, limits)?;
     let probe = plan.build(seed, limits);
     let expanded = expand_for_backend(&*probe, circuit);
     let fused = fuse_for_backend(&*probe, &expanded);

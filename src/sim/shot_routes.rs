@@ -569,9 +569,7 @@ pub(super) fn run_shots_per_shot(
     limits: &ResolvedLimits,
 ) -> Result<ShotsResult> {
     // Pre-compute seed-independent analysis to avoid redundant work.
-    if !kind.is_auto() {
-        validate_explicit_backend(&kind, circuit, limits)?;
-    }
+    validate_explicit_backend(&kind, circuit, limits)?;
 
     let (decompose, has_partial_independence) = analyze_independence(circuit);
 
@@ -655,9 +653,7 @@ pub(super) fn run_shots_per_shot(
         let block_plans: Vec<BackendPlan> = partitions
             .iter()
             .map(|(sub, _, _)| {
-                if !kind.is_auto() {
-                    validate_explicit_backend(&kind, sub, limits)?;
-                }
+                validate_explicit_backend(&kind, sub, limits)?;
                 Ok(resolve_backend(&kind, sub, false, limits))
             })
             .collect::<Result<_>>()?;

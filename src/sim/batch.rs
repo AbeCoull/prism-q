@@ -184,7 +184,7 @@ pub(crate) fn prepared_route(
     request: Option<&Limits>,
 ) -> Option<PreparedRoute> {
     let limits = &ResolvedLimits::resolve(request);
-    if !kind.is_auto() && validate_explicit_backend(kind, template, limits).is_err() {
+    if validate_explicit_backend(kind, template, limits).is_err() {
         return None;
     }
     let ProbabilityRoute::Direct {
@@ -333,9 +333,7 @@ pub(super) fn run_batch_entry(
         *held = None;
         return run_with_internal(kind.clone(), circuit, seed, SimOptions::default(), limits);
     };
-    if !kind.is_auto() {
-        validate_explicit_backend(kind, circuit, limits)?;
-    }
+    validate_explicit_backend(kind, circuit, limits)?;
 
     let reusable = matches!(
         &*held,

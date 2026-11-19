@@ -2225,6 +2225,7 @@ mod multi_2q_subcube {
     use crate::backend::statevector::StatevectorBackend;
     use crate::circuit::Circuit;
     use crate::gates::{Gate, Multi2qData};
+    use crate::test_support::random_state;
     use num_complex::Complex64;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -2237,14 +2238,6 @@ mod multi_2q_subcube {
             }
         }
         m
-    }
-
-    fn random_state(n: usize, rng: &mut ChaCha8Rng) -> Vec<Complex64> {
-        let raw: Vec<Complex64> = (0..1usize << n)
-            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
-            .collect();
-        let norm = raw.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
-        raw.into_iter().map(|a| a / norm).collect()
     }
 
     // The batch as one Multi2q against the same gates one at a time, from the
@@ -2341,7 +2334,7 @@ mod multi_pauli_rot {
     use crate::circuit::Circuit;
     use crate::gates::{Gate, MultiPauliRotData, PauliRotData, pauli_rot_masks};
     use crate::sim::unified_pauli::PauliAxis;
-    use num_complex::Complex64;
+    use crate::test_support::random_state;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
@@ -2376,14 +2369,6 @@ mod multi_pauli_rot {
         }
         let theta = rng.random::<f64>() * std::f64::consts::TAU - std::f64::consts::PI;
         (targets, PauliRotData { theta, axes })
-    }
-
-    fn random_state(n: usize, rng: &mut ChaCha8Rng) -> Vec<Complex64> {
-        let raw: Vec<Complex64> = (0..1usize << n)
-            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
-            .collect();
-        let norm = raw.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
-        raw.into_iter().map(|a| a / norm).collect()
     }
 
     // The batch as one MultiPauliRot against the same strings as native

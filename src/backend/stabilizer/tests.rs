@@ -5,6 +5,7 @@ use crate::circuit::{Circuit, Instruction};
 use crate::error::PrismError;
 use crate::gates::Gate;
 use crate::sim;
+use crate::test_support::group_strings;
 use num_complex::Complex64;
 
 #[test]
@@ -1554,35 +1555,6 @@ fn tableau_expectations(
 ) -> Vec<f64> {
     sim::run_on(backend, circuit).unwrap();
     backend.pauli_expectations(observables).unwrap()
-}
-
-/// Pauli strings read off the stabilizer half of an eager tableau: each
-/// generator, then the product of each adjacent pair. Every one is in the
-/// group, so its expectation is +1 or -1.
-fn group_strings(backend: &StabilizerBackend) -> Vec<Vec<crate::sim::unified_pauli::PauliTerm>> {
-    let n = backend.num_qubits();
-    let nw = n.div_ceil(64);
-    let (xz, _) = backend.raw_tableau();
-    let string_of = |rows: &[usize]| -> Vec<crate::sim::unified_pauli::PauliTerm> {
-        (0..n)
-            .filter_map(|q| {
-                let bit =
-                    |r: usize, half: usize| (xz[r * 2 * nw + half * nw + q / 64] >> (q % 64)) & 1;
-                let x = rows.iter().fold(0, |acc, &r| acc ^ bit(r, 0)) == 1;
-                let z = rows.iter().fold(0, |acc, &r| acc ^ bit(r, 1)) == 1;
-                match (x, z) {
-                    (true, false) => Some(crate::sim::unified_pauli::PauliTerm::x(q)),
-                    (false, true) => Some(crate::sim::unified_pauli::PauliTerm::z(q)),
-                    (true, true) => Some(crate::sim::unified_pauli::PauliTerm::y(q)),
-                    (false, false) => None,
-                }
-            })
-            .collect()
-    };
-    let mut strings: Vec<Vec<crate::sim::unified_pauli::PauliTerm>> =
-        (n..2 * n).map(|r| string_of(&[r])).collect();
-    strings.extend((n..2 * n - 1).map(|r| string_of(&[r, r + 1])));
-    strings
 }
 
 fn assert_expectations_close(got: &[f64], want: &[f64], label: &str) {

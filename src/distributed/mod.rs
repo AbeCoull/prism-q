@@ -13,7 +13,7 @@ pub use comm::{RankComm, SerialComm};
 #[cfg(feature = "distributed-mpi")]
 pub use comm::MpiComm;
 
-use crate::env_knobs::parse_usize_knob;
+use crate::env_knobs::{bool_knob, usize_knob};
 
 /// Default for `PRISM_DIST_MIN_LOCAL_QUBITS`. Smaller slices per rank spend more time
 /// in communication than computation.
@@ -26,14 +26,7 @@ pub const MIN_LOCAL_QUBITS_DEFAULT: usize = 10;
 pub fn min_local_qubits() -> usize {
     use std::sync::OnceLock;
     static CACHED: OnceLock<usize> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        parse_usize_knob(
-            "PRISM_DIST_MIN_LOCAL_QUBITS",
-            std::env::var("PRISM_DIST_MIN_LOCAL_QUBITS").ok(),
-            MIN_LOCAL_QUBITS_DEFAULT,
-            1,
-        )
-    })
+    *CACHED.get_or_init(|| usize_knob("PRISM_DIST_MIN_LOCAL_QUBITS", MIN_LOCAL_QUBITS_DEFAULT, 1))
 }
 
 /// Default for `PRISM_DIST_EXCHANGE_CHUNK`: 2^29 amplitudes, the largest power of two
@@ -48,14 +41,7 @@ pub const EXCHANGE_CHUNK_DEFAULT: usize = 1 << 29;
 pub fn exchange_chunk() -> usize {
     use std::sync::OnceLock;
     static CACHED: OnceLock<usize> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        parse_usize_knob(
-            "PRISM_DIST_EXCHANGE_CHUNK",
-            std::env::var("PRISM_DIST_EXCHANGE_CHUNK").ok(),
-            EXCHANGE_CHUNK_DEFAULT,
-            1,
-        )
-    })
+    *CACHED.get_or_init(|| usize_knob("PRISM_DIST_EXCHANGE_CHUNK", EXCHANGE_CHUNK_DEFAULT, 1))
 }
 
 /// Whether the distributed backend relabels qubits to keep busy qubits local.
@@ -70,31 +56,7 @@ pub fn exchange_chunk() -> usize {
 pub fn relabel_enabled() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        parse_bool_knob(
-            "PRISM_DIST_RELABEL",
-            std::env::var("PRISM_DIST_RELABEL").ok(),
-            true,
-        )
-    })
-}
-
-/// Read a flag knob: `0`/`false` and `1`/`true` in any case; anything else
-/// warns on stderr and yields `default`, for the reason `env_knobs` gives.
-fn parse_bool_knob(var: &str, raw: Option<String>, default: bool) -> bool {
-    let Some(raw) = raw else {
-        return default;
-    };
-    match raw.trim() {
-        "0" => false,
-        "1" => true,
-        other if other.eq_ignore_ascii_case("false") => false,
-        other if other.eq_ignore_ascii_case("true") => true,
-        other => {
-            eprintln!("warning: {var}={other:?} is not a flag; using {default}.");
-            default
-        }
-    }
+    *CACHED.get_or_init(|| bool_knob("PRISM_DIST_RELABEL", true))
 }
 
 /// Shared handle to a rank transport for distributed simulation.
@@ -155,6 +117,7 @@ impl DistributedContext {
 #[cfg(test)]
 mod knob_tests {
     use super::*;
+    use crate::env_knobs::{parse_bool_knob, parse_usize_knob};
 
     // One case per parse site. The knob functions cache per process, so the
     // parsers are exercised directly rather than through the environment.

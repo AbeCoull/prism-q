@@ -2939,13 +2939,17 @@ const MIN_PAR_COLLAPSE_WORDS: usize = 2 * crate::backend::MIN_PAR_ELEMS;
 
 /// [`compile_forward`] over the whole register at once, measured at the end.
 pub(crate) fn compile_forward_dense(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
-    debug_assert!(
-        !circuit
-            .instructions
-            .iter()
-            .any(|inst| matches!(inst, Instruction::Region(_)))
-    );
-    let measurements = circuit.measurement_map();
+    let measurements: Vec<(usize, usize)> = circuit
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => Some((*qubit, *classical_bit)),
+            _ => None,
+        })
+        .collect();
 
     let num_measurements = measurements.len();
     if num_measurements == 0 {

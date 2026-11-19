@@ -111,13 +111,17 @@ pub(super) fn build_measurement_rows(circuit: &Circuit) -> Vec<(PauliVec, usize,
     let n = circuit.num_qubits;
     let num_qubit_words = n.div_ceil(64);
 
-    debug_assert!(
-        !circuit
-            .instructions
-            .iter()
-            .any(|inst| matches!(inst, Instruction::Region(_)))
-    );
-    let measurements = circuit.measurement_map();
+    let measurements: Vec<(usize, usize)> = circuit
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => Some((*qubit, *classical_bit)),
+            _ => None,
+        })
+        .collect();
 
     let m = measurements.len();
     if m == 0 {

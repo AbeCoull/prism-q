@@ -59,88 +59,30 @@ pub fn run_qec_program_with_strategy(
     strategy: QecTStrategy,
 ) -> Result<QecSampleResult> {
     match strategy {
-        QecTStrategy::Auto => run_qec_program_auto(program),
+        QecTStrategy::Auto => {
+            run_qec_program_auto_with(program, run_qec_program_spd, run_qec_program_camps)
+        }
         QecTStrategy::Reference => run_qec_program_reference(program),
         QecTStrategy::Spd => run_qec_program_spd(program),
         QecTStrategy::Camps => run_qec_program_camps(program),
     }
 }
 
-#[cfg(test)]
-mod auto_test_hooks {
-    use std::cell::Cell;
-
-    thread_local! {
-        static FORCE_SPD_NONEXACT: Cell<bool> = const { Cell::new(false) };
-        static FORCE_CAMPS_FAILURE: Cell<bool> = const { Cell::new(false) };
-    }
-
-    pub(super) fn force_spd_nonexact() -> bool {
-        FORCE_SPD_NONEXACT.with(Cell::get)
-    }
-
-    pub(super) fn force_camps_failure() -> bool {
-        FORCE_CAMPS_FAILURE.with(Cell::get)
-    }
-
-    pub(super) fn set_force_spd_nonexact(value: bool) {
-        FORCE_SPD_NONEXACT.with(|flag| flag.set(value));
-    }
-
-    pub(super) fn set_force_camps_failure(value: bool) {
-        FORCE_CAMPS_FAILURE.with(|flag| flag.set(value));
-    }
-}
-
-#[cfg(test)]
-fn run_qec_program_spd_for_auto(program: &QecProgram) -> Result<QecSampleResult> {
-    let mut result = run_qec_program_spd(program)?;
-    if auto_test_hooks::force_spd_nonexact() {
-        for estimates in [
-            result.observable_expectations.as_mut(),
-            result.expectation_values.as_mut(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for estimate in estimates {
-                estimate.variance = estimate.variance.max(1.0);
-            }
-        }
-    }
-    Ok(result)
-}
-
-#[cfg(not(test))]
-fn run_qec_program_spd_for_auto(program: &QecProgram) -> Result<QecSampleResult> {
-    run_qec_program_spd(program)
-}
-
-#[cfg(test)]
-fn run_qec_program_camps_for_auto(program: &QecProgram) -> Result<QecSampleResult> {
-    if auto_test_hooks::force_camps_failure() {
-        return Err(PrismError::BackendUnsupported {
-            backend: "QEC CAMPS".to_string(),
-            operation: "forced CAMPS failure for auto-dispatch test".to_string(),
-        });
-    }
-    run_qec_program_camps(program)
-}
-
-#[cfg(not(test))]
-fn run_qec_program_camps_for_auto(program: &QecProgram) -> Result<QecSampleResult> {
-    run_qec_program_camps(program)
-}
-
-fn run_qec_program_auto(program: &QecProgram) -> Result<QecSampleResult> {
-    match run_qec_program_spd_for_auto(program) {
+fn run_qec_program_auto_with(
+    program: &QecProgram,
+    spd: impl FnOnce(&QecProgram) -> Result<QecSampleResult>,
+    camps: impl FnOnce(&QecProgram) -> Result<QecSampleResult>,
+) -> Result<QecSampleResult> {
+    match spd(program) {
         Ok(result) if analytical_result_has_no_truncation(&result) => Ok(result),
         Ok(_) => run_qec_program_auto_after_camps(
             program,
+            camps,
             "light-cone SPD exceeded its exact truncation budget".to_string(),
         ),
         Err(spd_error) => run_qec_program_auto_after_camps(
             program,
+            camps,
             format!("light-cone SPD failed ({spd_error})"),
         ),
     }
@@ -148,9 +90,10 @@ fn run_qec_program_auto(program: &QecProgram) -> Result<QecSampleResult> {
 
 fn run_qec_program_auto_after_camps(
     program: &QecProgram,
+    camps: impl FnOnce(&QecProgram) -> Result<QecSampleResult>,
     spd_context: String,
 ) -> Result<QecSampleResult> {
-    match run_qec_program_camps_for_auto(program) {
+    match camps(program) {
         Ok(result) => Ok(result),
         Err(camps_error) => {
             run_qec_program_tensor_network_observable(program).map_err(|tn_error| {

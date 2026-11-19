@@ -3,13 +3,13 @@
 //! column-major forward stabilizer simulation.
 
 use super::accumulator::transpose_64x64_dispatch;
-use super::{PauliVec, flip_bit, get_bit, set_bit};
+use super::{PauliVec, flip_bit, get_bit, incompatible, set_bit};
 #[cfg(target_arch = "x86_64")]
 use crate::backend::stabilizer::kernels::rowmul_words_avx512;
 #[cfg(target_arch = "x86_64")]
 use crate::backend::word_ops::{WordTier, word_tier};
 use crate::circuit::{Circuit, Instruction};
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 use crate::gates::Gate;
 
 /// Heisenberg-picture backward propagation of a Pauli through a Clifford gate,
@@ -1873,10 +1873,10 @@ pub(super) fn forward_as_backward_gate(gate: &Gate) -> Result<&Gate> {
         Gate::H | Gate::X | Gate::Y | Gate::Z | Gate::Id | Gate::Cx | Gate::Cz | Gate::Swap => {
             Ok(gate)
         }
-        _ => Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: format!("unsupported gate {:?} in column-major forward sim", gate),
-        }),
+        _ => Err(incompatible(format!(
+            "unsupported gate {:?} in column-major forward sim",
+            gate
+        ))),
     }
 }
 

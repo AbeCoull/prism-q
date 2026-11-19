@@ -531,3 +531,7 @@ fn minimize_flat_dyn(flat: &mut [u64], rank: usize, words: usize) -> usize {
     }
     weights.iter().map(|&w| w as usize).sum()
 }
+
+#[cfg(test)]
+#[path = "parity_tests.rs"]
+mod tests;

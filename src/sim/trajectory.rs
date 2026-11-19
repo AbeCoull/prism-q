@@ -3,6 +3,7 @@
 //! per distinct error pattern when every shot's Pauli errors can be drawn first.
 
 use std::collections::{BTreeMap, HashMap};
+use std::marker::PhantomData;
 
 use num_complex::Complex64;
 use rand::SeedableRng;
@@ -11,14 +12,12 @@ use smallvec::smallvec;
 
 use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
-use crate::circuit::{Circuit, Instruction};
+use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
 use crate::gates::Gate;
 use crate::limits::ResolvedLimits;
 use crate::sim::ShotsResult;
-use crate::sim::noise::{
-    NoiseChannel, NoiseEvent, NoiseModel, ReadoutError, SlotWalk, walk_noise_slots,
-};
+use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError, pair_branch};
 use crate::sim::unified_pauli::PauliAxis;
 
 #[cfg(feature = "parallel")]
@@ -462,15 +461,78 @@ fn apply_phase_damping(
     apply_diagonal_kraus_2op(backend, qubit, damping, false, rand::RngExt::random(rng))
 }
 
-/// A trajectory over a model with guarded slots.
-struct TrajectoryWalk<'a> {
+/// One shot's pass over a circuit and its noise slots, driven by
+/// [`walk_noise_slots`].
+pub(crate) trait SlotWalk {
+    /// The classical bits, current for a guard to read.
+    fn classical(&mut self) -> Result<&[bool]>;
+    /// Apply an instruction other than a region, whose body the walk descends
+    /// into itself.
+    fn apply(&mut self, instruction: &Instruction) -> Result<()>;
+    /// Fire the events of [`NoiseModel::after_gate`] slot `slot`.
+    fn fire(&mut self, slot: usize) -> Result<()>;
+}
+
+/// Run `circuit.instructions[from..]` in execution order under a model laying
+/// out guarded slots, firing each slot after its instruction and a guarded
+/// body's slots only when the body runs. See [`NoiseModel::after_gate`].
+pub(crate) fn walk_noise_slots(
+    circuit: &Circuit,
+    from: usize,
+    walk: &mut impl SlotWalk,
+) -> Result<()> {
+    let nested = circuit.instructions.len() + circuit.guarded_noise_slots_before(from);
+    walk_slot_list(&circuit.instructions[from..], from, nested, walk)
+}
+
+fn walk_slot_list(
+    list: &[Instruction],
+    base: usize,
+    mut nested: usize,
+    walk: &mut impl SlotWalk,
+) -> Result<()> {
+    for (offset, instruction) in list.iter().enumerate() {
+        match instruction {
+            Instruction::Region(region) => {
+                if region.condition().evaluate(walk.classical()?) {
+                    walk_region_body(region, nested, walk)?;
+                }
+                nested += region.noise_slots();
+            }
+            Instruction::Conditional { condition, .. } => {
+                let taken = condition.evaluate(walk.classical()?);
+                walk.apply(instruction)?;
+                if taken {
+                    walk.fire(nested)?;
+                }
+                nested += 1;
+            }
+            _ => walk.apply(instruction)?,
+        }
+        walk.fire(base + offset)?;
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn walk_region_body(
+    region: &crate::circuit::GuardedRegion,
+    base: usize,
+    walk: &mut impl SlotWalk,
+) -> Result<()> {
+    walk_slot_list(region.body(), base, base + region.body().len(), walk)
+}
+
+/// A trajectory over a model with guarded slots, firing each event through `A`.
+struct TrajectoryWalk<'a, A> {
     backend: &'a mut dyn Backend,
     noise: &'a PreparedNoise,
     readout: &'a [Option<ReadoutError>],
     rng: &'a mut ChaCha8Rng,
+    events: PhantomData<A>,
 }
 
-impl SlotWalk for TrajectoryWalk<'_> {
+impl<A: EventApplier> SlotWalk for TrajectoryWalk<'_, A> {
     fn classical(&mut self) -> Result<&[bool]> {
         self.backend.sync_deferred_measurements()?;
         Ok(self.backend.classical_results())
@@ -483,7 +545,7 @@ impl SlotWalk for TrajectoryWalk<'_> {
 
     fn fire(&mut self, slot: usize) -> Result<()> {
         for event in self.noise.laid_out_slot(slot) {
-            apply_noise_event(self.backend, event, self.rng)?;
+            A::apply(self.backend, event, self.rng)?;
         }
         Ok(())
     }
@@ -858,6 +920,69 @@ fn apply_noise_event(
     }
 }
 
+/// How a trajectory fires one noise event.
+trait EventApplier {
+    fn apply(backend: &mut dyn Backend, event: &PreparedEvent, rng: &mut ChaCha8Rng) -> Result<()>;
+}
+
+/// Every channel unraveled by [`apply_noise_event`].
+struct NoiseEvents;
+
+impl EventApplier for NoiseEvents {
+    #[inline(always)]
+    fn apply(backend: &mut dyn Backend, event: &PreparedEvent, rng: &mut ChaCha8Rng) -> Result<()> {
+        apply_noise_event(backend, event, rng)
+    }
+}
+
+/// Pauli events drawn by [`apply_frame_event`], on the frame sampler's branch stream
+/// rather than the [`TWO_QUBIT_PAULIS`] draw.
+struct FrameEvents;
+
+impl EventApplier for FrameEvents {
+    #[inline(always)]
+    fn apply(backend: &mut dyn Backend, event: &PreparedEvent, rng: &mut ChaCha8Rng) -> Result<()> {
+        apply_frame_event(backend, event, rng)
+    }
+}
+
+/// Draw one Pauli event and apply the letters it fires.
+#[inline]
+fn apply_frame_event(
+    backend: &mut dyn Backend,
+    event: &PreparedEvent,
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    match &event.channel {
+        PreparedChannel::PauliPair { p, .. } => {
+            let r: f64 = rand::RngExt::random(rng);
+            if r < *p {
+                let (l0, l1) = pair_branch(r / p);
+                apply_pauli_letter(backend, event.qubits[0], l0)?;
+                apply_pauli_letter(backend, event.qubits[1], l1)?;
+            }
+            Ok(())
+        }
+        PreparedChannel::Pauli(thresholds) => thresholds.apply(backend, event.qubits[0], rng),
+        _ => unreachable!("frame replay runs Pauli-frame channels only"),
+    }
+}
+
+/// Apply one letter of a two-qubit branch, indexed as [`pair_branch`] returns
+/// it. Identity applies nothing.
+fn apply_pauli_letter(backend: &mut dyn Backend, qubit: usize, letter: usize) -> Result<()> {
+    let gate = match letter {
+        1 => Gate::X,
+        2 => Gate::Y,
+        3 => Gate::Z,
+        _ => return Ok(()),
+    };
+    backend.apply(&Instruction::Gate {
+        gate,
+        targets: SmallVec::from_elem(qubit, 1),
+    })
+}
+
 /// Apply each `(qubit, channel)` site in turn on `backend` as a trajectory does, drawing
 /// from the noise stream of `seed`. `host_decided` reads every damping, thermal and
 /// one-qubit Kraus branch back to the host as a backend without device decisions does,
@@ -926,7 +1051,14 @@ pub fn run_noisy_shot(
     if defer {
         evolve_noisy(backend, circuit, &prepared, 0, &readout.at_write, &mut rng)?;
     } else {
-        evolve_noisy_eager(backend, circuit, &prepared, 0, &readout.at_write, &mut rng)?;
+        evolve_noisy_eager::<NoiseEvents>(
+            backend,
+            circuit,
+            &prepared,
+            0,
+            &readout.at_write,
+            &mut rng,
+        )?;
     }
     let mut results = backend.classical_results().to_vec();
     apply_readout_errors(&mut results, &readout.record, &mut rng);
@@ -1365,7 +1497,7 @@ pub(crate) fn evolve_noisy(
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     backend.begin_deferred_measurements(measurement_count(&circuit.instructions[from..]))?;
-    let evolved = evolve_noisy_eager(backend, circuit, noise, from, readout, rng);
+    let evolved = evolve_noisy_eager::<NoiseEvents>(backend, circuit, noise, from, readout, rng);
     evolved.and(backend.end_deferred_measurements())
 }
 
@@ -1382,7 +1514,7 @@ fn measurement_count(instructions: &[Instruction]) -> usize {
 }
 
 /// [`evolve_noisy`] with each outcome read back as its measurement lands.
-fn evolve_noisy_eager(
+fn evolve_noisy_eager<A: EventApplier>(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &PreparedNoise,
@@ -1397,16 +1529,17 @@ fn evolve_noisy_eager(
         {
             backend.apply(instr)?;
             for event in events {
-                apply_noise_event(backend, event, rng)?;
+                A::apply(backend, event, rng)?;
             }
         }
         return Ok(());
     }
-    let mut walk = TrajectoryWalk {
+    let mut walk = TrajectoryWalk::<A> {
         backend,
         noise,
         readout,
         rng,
+        events: PhantomData,
     };
     walk_noise_slots(circuit, from, &mut walk)
 }
@@ -1517,6 +1650,39 @@ pub(crate) fn run_trajectories_held<B: Backend>(
         reseed(backend, shot_seed);
         let (result, leaked) = run_shot(backend, circuit, &prepared, &readout, memory, rng)?;
         Ok((result, leaked, crate::sim::backend_metadata(backend)))
+    })
+}
+
+/// Replay a Pauli `noise` model shot by shot on the backend `backend_factory` builds
+/// from each shot's seed, drawing pair events as the frame sampler does.
+pub(crate) fn run_shots_noisy_brute_with(
+    backend_factory: impl Fn(u64) -> Box<dyn Backend>,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    let readout = ShotReadout::new(circuit, &noise.readout);
+    let prepared = PreparedNoise::new(noise);
+    let route = crate::sim::ResolvedBackend::Stabilizer;
+    run_serial(circuit, None, num_shots, seed, route, |shot_seed, rng| {
+        let mut backend = backend_factory(shot_seed);
+        backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+        evolve_noisy_eager::<FrameEvents>(
+            backend.as_mut(),
+            circuit,
+            &prepared,
+            0,
+            &readout.at_write,
+            rng,
+        )?;
+        let mut results = backend.classical_results().to_vec();
+        apply_readout_errors(&mut results, &readout.record, rng);
+        Ok((
+            results,
+            Vec::new(),
+            crate::sim::backend_metadata(backend.as_ref()),
+        ))
     })
 }
 

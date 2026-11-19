@@ -7,7 +7,8 @@ use std::fmt;
 
 use smallvec::SmallVec;
 
-use super::expr::{BinaryOp, Expr};
+use super::expr::Expr;
+use crate::circuit::dynamic::BinaryOp;
 
 pub(crate) type Block<'a> = Vec<Stmt<'a>>;
 

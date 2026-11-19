@@ -1163,9 +1163,9 @@ impl<'a> Parser<'a> {
                 }
                 Expr::Binary { op, left, right } => {
                     let left = self.resolve_calls(left, line, out)?;
-                    if matches!(op, syntax_expr::BinaryOp::And | syntax_expr::BinaryOp::Or) {
+                    if matches!(op, BinaryOp::And | BinaryOp::Or) {
                         match self.typed_of(&left, line) {
-                            Ok(value) if value.truthy() == (*op == syntax_expr::BinaryOp::Or) => {
+                            Ok(value) if value.truthy() == (*op == BinaryOp::Or) => {
                                 return Ok(Expr::Number(ClassicalValue::Bool(value.truthy())));
                             }
                             Err(_)

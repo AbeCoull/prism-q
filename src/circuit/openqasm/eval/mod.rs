@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::circuit::dynamic::{ClassicalExpr, ExternFunction};
+use crate::circuit::dynamic::{BinaryOp, ClassicalExpr, ExternFunction};
 use crate::circuit::qasm::ast::{
     self, Argument, ArrayShape, AssignOp, Block, CmpOp, Condition, DefParam, ForRange, Index,
     Operand, OperandName, Stmt, StmtKind,

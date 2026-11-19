@@ -12,90 +12,9 @@ use num_complex::Complex64;
 use super::ast::Range;
 use super::lexer::{Kind, TIME_UNITS, Token};
 use super::stream::{MAX_NESTING, Stream, with_stack};
-use crate::circuit::dynamic::{self, ClassicalValue, UnaryOp};
+use crate::circuit::dynamic::{self, BinaryOp, ClassicalValue, UnaryOp};
 use crate::circuit::openqasm::unsupported;
 use crate::error::{PrismError, Result};
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-    Pow,
-    Shl,
-    Shr,
-    BitAnd,
-    BitOr,
-    BitXor,
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    And,
-    Or,
-}
-
-impl BinaryOp {
-    fn is_bitwise(self) -> bool {
-        matches!(
-            self,
-            BinaryOp::Shl | BinaryOp::Shr | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
-        )
-    }
-
-    pub(crate) fn runtime(self) -> dynamic::BinaryOp {
-        use dynamic::BinaryOp as Op;
-        match self {
-            BinaryOp::Add => Op::Add,
-            BinaryOp::Sub => Op::Sub,
-            BinaryOp::Mul => Op::Mul,
-            BinaryOp::Div => Op::Div,
-            BinaryOp::Rem => Op::Rem,
-            BinaryOp::Pow => Op::Pow,
-            BinaryOp::Shl => Op::Shl,
-            BinaryOp::Shr => Op::Shr,
-            BinaryOp::BitAnd => Op::BitAnd,
-            BinaryOp::BitOr => Op::BitOr,
-            BinaryOp::BitXor => Op::BitXor,
-            BinaryOp::Eq => Op::Eq,
-            BinaryOp::Ne => Op::Ne,
-            BinaryOp::Lt => Op::Lt,
-            BinaryOp::Le => Op::Le,
-            BinaryOp::Gt => Op::Gt,
-            BinaryOp::Ge => Op::Ge,
-            BinaryOp::And => Op::And,
-            BinaryOp::Or => Op::Or,
-        }
-    }
-
-    fn spelling(self) -> &'static str {
-        match self {
-            BinaryOp::Add => "+",
-            BinaryOp::Sub => "-",
-            BinaryOp::Mul => "*",
-            BinaryOp::Div => "/",
-            BinaryOp::Rem => "%",
-            BinaryOp::Pow => "**",
-            BinaryOp::Shl => "<<",
-            BinaryOp::Shr => ">>",
-            BinaryOp::BitAnd => "&",
-            BinaryOp::BitOr => "|",
-            BinaryOp::BitXor => "^",
-            BinaryOp::Eq => "==",
-            BinaryOp::Ne => "!=",
-            BinaryOp::Lt => "<",
-            BinaryOp::Le => "<=",
-            BinaryOp::Gt => ">",
-            BinaryOp::Ge => ">=",
-            BinaryOp::And => "&&",
-            BinaryOp::Or => "||",
-        }
-    }
-}
 
 /// A length of time, held as nanoseconds beside backend sample periods (`dt`),
 /// which only a backend relates to each other.
@@ -626,7 +545,7 @@ impl fmt::Display for Expr<'_> {
             }
             Expr::Binary { op, left, right } => {
                 grouped(f, left)?;
-                write!(f, " {} ", op.spelling())?;
+                write!(f, " {} ", spelling(*op))?;
                 grouped(f, right)
             }
             Expr::Call(call) => {
@@ -1343,6 +1262,30 @@ fn complex_value(
     })
 }
 
+fn spelling(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Rem => "%",
+        BinaryOp::Pow => "**",
+        BinaryOp::Shl => "<<",
+        BinaryOp::Shr => ">>",
+        BinaryOp::BitAnd => "&",
+        BinaryOp::BitOr => "|",
+        BinaryOp::BitXor => "^",
+        BinaryOp::Eq => "==",
+        BinaryOp::Ne => "!=",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
+    }
+}
+
 /// `op` over two folded values, by the arithmetic a runtime expression follows:
 /// two integers stay an exact integer, with `/` truncating toward zero, and a
 /// float on either side makes a float.
@@ -1352,10 +1295,13 @@ pub(crate) fn arithmetic(
     right: ClassicalValue,
     line: usize,
 ) -> Result<ClassicalValue> {
-    let (left, right) = if op.is_bitwise() {
+    let (left, right) = if matches!(
+        op,
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+    ) {
         (
-            integral(op.spelling(), left, line)?,
-            integral(op.spelling(), right, line)?,
+            integral(spelling(op), left, line)?,
+            integral(spelling(op), right, line)?,
         )
     } else {
         (left, right)
@@ -1393,13 +1339,13 @@ pub(crate) fn arithmetic(
         }
         _ => {}
     }
-    let value = dynamic::binary(op.runtime(), left, right).map_err(|err| PrismError::Parse {
+    let value = dynamic::binary(op, left, right).map_err(|err| PrismError::Parse {
         line,
         message: err.to_string(),
     })?;
     match value {
         ClassicalValue::Float(value) if op == BinaryOp::Pow => {
-            Ok(ClassicalValue::Float(finite(line, op.spelling(), value)?))
+            Ok(ClassicalValue::Float(finite(line, spelling(op), value)?))
         }
         other => Ok(other),
     }
@@ -1557,7 +1503,7 @@ pub(crate) fn combine_timed(op: BinaryOp, left: Timed, right: Timed, line: usize
             let Some(ratio) = a.ratio(b) else {
                 return Err(mixed("a duration ratio"));
             };
-            Timed::Number(finite(line, op.spelling(), ratio)?)
+            Timed::Number(finite(line, spelling(op), ratio)?)
         }
         (Eq | Ne | Lt | Le | Gt | Ge, Some(_), Some(_)) => {
             use std::cmp::Ordering::{Equal, Greater, Less};
@@ -1582,7 +1528,7 @@ pub(crate) fn combine_timed(op: BinaryOp, left: Timed, right: Timed, line: usize
                 line,
                 message: format!(
                     "`{}` between {} and {}",
-                    op.spelling(),
+                    spelling(op),
                     left.describe(),
                     right.describe()
                 ),

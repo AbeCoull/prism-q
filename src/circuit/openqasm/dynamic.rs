@@ -12,11 +12,12 @@ use std::collections::{HashMap, HashSet};
 use super::runtime_analysis::RuntimeAnalysis;
 use super::*;
 use crate::circuit::dynamic::{
-    self as dynamic, ClassicalExpr, ClassicalType as RuntimeType, ClassicalValue, DynamicProgram,
-    DynamicProgramBuilder, ExternCall, ExternFunction, RotationKind, UnaryOp, VarId,
+    self as dynamic, BinaryOp, ClassicalExpr, ClassicalType as RuntimeType, ClassicalValue,
+    DynamicProgram, DynamicProgramBuilder, ExternCall, ExternFunction, RotationKind, UnaryOp,
+    VarId,
 };
 use crate::circuit::qasm::ast::{AssignOp, Block, Condition, Operand, Stmt};
-use crate::circuit::qasm::expr::{self as syntax_expr, BinaryOp, Expr};
+use crate::circuit::qasm::expr::{self as syntax_expr, Expr};
 use crate::circuit::qasm::stream::{Stream, with_stack};
 use crate::circuit::qasm::{lexer, parser as syntax};
 
@@ -370,7 +371,7 @@ fn lower(
             Expr::Not(inner) => ClassicalExpr::unary(UnaryOp::Not, recurse(inner)?),
             Expr::BitNot(inner) => ClassicalExpr::unary(UnaryOp::BitNot, recurse(inner)?),
             Expr::Binary { op, left, right } => {
-                ClassicalExpr::binary(op.runtime(), recurse(left)?, recurse(right)?)
+                ClassicalExpr::binary(*op, recurse(left)?, recurse(right)?)
             }
             Expr::Call(call) => {
                 let Some(function) = function(call.name) else {
@@ -634,7 +635,7 @@ impl<'a> Parser<'a> {
         );
         let mut value = self.lower_expr(&assign.value, line)?;
         if let Some(op) = assign.op {
-            value = ClassicalExpr::binary(op.binary().runtime(), bit, value);
+            value = ClassicalExpr::binary(op.binary(), bit, value);
         }
         let value = ClassicalExpr::binary(
             dynamic::BinaryOp::BitAnd,
@@ -938,7 +939,7 @@ impl<'a> Parser<'a> {
         let mut lowered = self.lower_expr(value, line)?;
         if let Some(op) = op {
             let current = self.lower_expr(&operand_expr(target)?, line)?;
-            lowered = ClassicalExpr::binary(op.binary().runtime(), current, lowered);
+            lowered = ClassicalExpr::binary(op.binary(), current, lowered);
         }
         match lowered {
             ClassicalExpr::Const(ClassicalValue::Float(_)) => Err(parse_error(
@@ -1392,7 +1393,7 @@ impl<'a> Parser<'a> {
         self.require_streaming("a runtime assignment", line)?;
         let mut value = self.lower_expr(value, line)?;
         if let Some(op) = op {
-            value = ClassicalExpr::binary(op.binary().runtime(), ClassicalExpr::Var(var), value);
+            value = ClassicalExpr::binary(op.binary(), ClassicalExpr::Var(var), value);
         }
         self.state().builder.assign(var, value);
         Ok(())

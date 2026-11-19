@@ -331,15 +331,15 @@ impl<'a> Parser<'a> {
             Expr::Binary { op, left, right } => {
                 let (left, right) = (self.affine_of(left, line)?, self.affine_of(right, line)?);
                 let sign = match op {
-                    syntax_expr::BinaryOp::Add => 1.0,
-                    syntax_expr::BinaryOp::Sub => -1.0,
-                    syntax_expr::BinaryOp::Mul if left.slot.is_none() => {
+                    BinaryOp::Add => 1.0,
+                    BinaryOp::Sub => -1.0,
+                    BinaryOp::Mul if left.slot.is_none() => {
                         return Ok(scaled(right, left.offset));
                     }
-                    syntax_expr::BinaryOp::Mul if right.slot.is_none() => {
+                    BinaryOp::Mul if right.slot.is_none() => {
                         return Ok(scaled(left, right.offset));
                     }
-                    syntax_expr::BinaryOp::Div if right.slot.is_none() && right.offset != 0.0 => {
+                    BinaryOp::Div if right.slot.is_none() && right.offset != 0.0 => {
                         return Ok(Linear {
                             scale: left.scale / right.offset,
                             offset: left.offset / right.offset,

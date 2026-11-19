@@ -170,28 +170,13 @@ fn launch_pauli_rotation_gpu(
 
 #[cfg(feature = "gpu")]
 fn check_device_budget(context: &GpuContext, num_qubits: usize) -> crate::error::Result<()> {
-    if num_qubits >= usize::BITS as usize - 4 {
-        return Ok(());
-    }
-    let Ok(free) = context.vram_available() else {
-        return Ok(());
-    };
-    let needed = (1usize << num_qubits) * crate::gpu::STATEVECTOR_BYTES_PER_AMPLITUDE;
-    if needed > free {
-        return Err(crate::error::PrismError::ResourceLimit(Box::new(
-            crate::error::ResourceLimit {
-                backend: "statevector-gpu".to_string(),
-                operation: format!("the {num_qubits}-qubit state on the device"),
-                resource: crate::error::ResourceKind::DeviceBytes,
-                required: needed as u128,
-                limit: free as u128,
-                env_var: None,
-                knob: None,
-                limit_source: crate::limits::LimitSource::Detected,
-            },
-        )));
-    }
-    Ok(())
+    let needed = (num_qubits < usize::BITS as usize - 4)
+        .then(|| (1usize << num_qubits) * crate::gpu::STATEVECTOR_BYTES_PER_AMPLITUDE);
+    context.require_device_bytes(
+        "statevector-gpu",
+        format!("the {num_qubits}-qubit state on the device"),
+        needed,
+    )
 }
 
 /// Insert a zero bit at `bit_pos`, shifting all higher bits left by one.

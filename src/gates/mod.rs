@@ -8,6 +8,14 @@ use smallvec::SmallVec;
 use std::f64::consts::{FRAC_1_SQRT_2, PI};
 use std::fmt;
 
+mod data;
+mod matrix;
+mod tile;
+
+pub use data::*;
+pub(crate) use matrix::*;
+pub(crate) use tile::*;
+
 /// Zero threshold on an entry's `norm_sqr` in `preserves_sparsity`.
 const NEAR_ZERO_NORM_SQ: f64 = 1e-24;
 
@@ -144,50 +152,6 @@ pub const MAX_UNITARY_QUBITS: usize = 4;
 /// Tolerance on `max |(U^dagger U - I)_ij|` for a matrix [`Gate::unitary`]
 /// accepts, matching the norm tolerance on a caller-supplied start state.
 const UNITARY_EPS: f64 = 1e-9;
-
-/// Data for a dense multi-qubit unitary.
-///
-/// Fields are private: the kernels read `num_qubits` and the matrix length as
-/// one fact, and a disagreement between them is an out-of-bounds read rather
-/// than a wrong answer. [`Gate::unitary`] is the only constructor.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnitaryData {
-    mat: Vec<Complex64>,
-    num_qubits: u8,
-}
-
-impl UnitaryData {
-    /// Row-major `2^k x 2^k` entries, `targets[0]` the most significant index
-    /// bit.
-    pub fn matrix(&self) -> &[Complex64] {
-        &self.mat
-    }
-
-    pub fn num_qubits(&self) -> usize {
-        self.num_qubits as usize
-    }
-
-    fn adjoint(&self) -> UnitaryData {
-        let dim = 1usize << self.num_qubits;
-        let mut mat = vec![Complex64::new(0.0, 0.0); dim * dim];
-        for row in 0..dim {
-            for column in 0..dim {
-                mat[row * dim + column] = self.mat[column * dim + row].conj();
-            }
-        }
-        UnitaryData {
-            mat,
-            num_qubits: self.num_qubits,
-        }
-    }
-
-    pub(crate) fn conjugated(&self) -> UnitaryData {
-        UnitaryData {
-            mat: self.mat.iter().map(Complex64::conj).collect(),
-            num_qubits: self.num_qubits,
-        }
-    }
-}
 
 /// Reject a matrix [`Gate::unitary`] cannot carry: a width outside
 /// `1..=MAX_UNITARY_QUBITS`, a length other than `4^k`, a non-finite entry,
@@ -340,548 +304,6 @@ pub(crate) fn diagonal_batch(mat: &[Complex64], targets: &[usize]) -> Option<Gat
     Some(Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })))
 }
 
-/// Analytic differentiation generator for a parametric gate, returned by
-/// [`Gate::pauli_generator`].
-///
-/// Each rotation variant is `exp(-i θ/2 G)` with the named Pauli
-/// generator `G` acting on the gate's `targets` (in order); `Phase` is the
-/// non-Pauli phase gate `diag(1, e^{iθ})` whose generator is the projector
-/// `|1⟩⟨1|` on `targets[0]`. The borrow is of the gate the generator was read
-/// from, so a caller holding one cannot pair it with another gate's letters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GeneratorKind<'a> {
-    /// `Rx(θ)`: generator `X` on `targets[0]`.
-    RotX,
-    /// `Ry(θ)`: generator `Y` on `targets[0]`.
-    RotY,
-    /// `Rz(θ)`: generator `Z` on `targets[0]`.
-    RotZ,
-    /// `Rzz(θ)`: generator `Z⊗Z` on `targets[0]` and `targets[1]`.
-    RotZz,
-    /// `P(θ)`: generator is the projector `|1⟩⟨1|` on `targets[0]`.
-    Phase,
-    /// `PauliRot(θ)`: generator is the Pauli string whose letter at index `i`
-    /// acts on `targets[i]`.
-    RotPauli(&'a [PauliAxis]),
-}
-
-/// Data for a multi-qubit Pauli rotation `exp(-i θ P / 2)`.
-///
-/// `axes[i]` is the letter of `P` on the owning instruction's `targets[i]`.
-/// Fields are private so every construction path runs the recognizing
-/// lowering in [`crate::Circuit::add_pauli_rotation`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct PauliRotData {
-    pub(crate) theta: f64,
-    pub(crate) axes: Vec<PauliAxis>,
-}
-
-impl PauliRotData {
-    /// Rotation angle in radians.
-    pub fn theta(&self) -> f64 {
-        self.theta
-    }
-
-    /// Overwrite the rotation angle, leaving the Pauli string alone. The
-    /// recognizing lowering runs on the string, so rebinding an angle cannot
-    /// invalidate it.
-    pub fn set_theta(&mut self, theta: f64) {
-        self.theta = theta;
-    }
-
-    /// Pauli letters aligned with the instruction targets.
-    pub fn axes(&self) -> &[PauliAxis] {
-        &self.axes
-    }
-}
-
-/// Pack the Pauli string of a rotation into `(xmask, zmask, num_y)`, where
-/// `xmask` covers X and Y letters and `zmask` covers Z and Y, and `axes[i]`
-/// acts on `targets[i]`.
-///
-/// The native kernel and the adjoint gradient both derive their masks here, so
-/// a change to the letter convention cannot move one without the other.
-#[inline]
-pub(crate) fn pauli_rot_masks(targets: &[usize], axes: &[PauliAxis]) -> (usize, usize, u32) {
-    let mut xmask = 0usize;
-    let mut zmask = 0usize;
-    let mut num_y = 0u32;
-    for (&q, axis) in targets.iter().zip(axes) {
-        let bit = 1usize << q;
-        match axis {
-            PauliAxis::X => xmask |= bit,
-            PauliAxis::Z => zmask |= bit,
-            PauliAxis::Y => {
-                xmask |= bit;
-                zmask |= bit;
-                num_y += 1;
-            }
-        }
-    }
-    (xmask, zmask, num_y)
-}
-
-/// Data for a `MultiPauliRot` batch: `(xmask, zmask, theta)` per rotation in circuit
-/// order. Bit `q` of `xmask` marks an X or Y letter on qubit `q` and bit `q` of `zmask`
-/// a Z or Y, so the Y count is `(xmask & zmask).count_ones()`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MultiPauliRotData {
-    pub(crate) rotations: Vec<(usize, usize, f64)>,
-}
-
-impl MultiPauliRotData {
-    pub fn rotations(&self) -> &[(usize, usize, f64)] {
-        &self.rotations
-    }
-
-    /// Every qubit any rotation touches, as a bit mask.
-    pub(crate) fn support(&self) -> usize {
-        self.rotations.iter().fold(0, |acc, &(x, z, _)| acc | x | z)
-    }
-
-    /// Call `f` with each rotation as an angle, ascending targets, and their letters.
-    #[cfg(feature = "gpu")]
-    pub(crate) fn for_each_rotation(&self, mut f: impl FnMut(f64, &[usize], &[PauliAxis])) {
-        let mut targets: SmallVec<[usize; 8]> = SmallVec::new();
-        let mut axes: SmallVec<[PauliAxis; 8]> = SmallVec::new();
-        for &(xmask, zmask, theta) in &self.rotations {
-            targets.clear();
-            axes.clear();
-            let mut rest = xmask | zmask;
-            while rest != 0 {
-                let q = rest.trailing_zeros() as usize;
-                rest &= rest - 1;
-                targets.push(q);
-                axes.push(match (xmask >> q & 1, zmask >> q & 1) {
-                    (1, 1) => PauliAxis::Y,
-                    (1, _) => PauliAxis::X,
-                    _ => PauliAxis::Z,
-                });
-            }
-            f(theta, &targets, &axes);
-        }
-    }
-}
-
-/// Data for a multi-controlled unitary gate.
-#[derive(Debug, Clone, PartialEq)]
-pub struct McuData {
-    pub(crate) mat: [[Complex64; 2]; 2],
-    pub(crate) num_controls: u8,
-}
-
-impl McuData {
-    /// `mat` applied to the target when all `num_controls` controls are set.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `num_controls` is below 2; [`Gate::mcu`] takes one control and
-    /// returns the controlled 2x2 form instead.
-    pub fn new(mat: [[Complex64; 2]; 2], num_controls: u8) -> Self {
-        assert!(num_controls >= 2, "McuData needs at least 2 controls");
-        Self { mat, num_controls }
-    }
-
-    /// 2x2 unitary applied to the target qubit.
-    pub fn mat(&self) -> &[[Complex64; 2]; 2] {
-        &self.mat
-    }
-
-    pub fn num_controls(&self) -> u8 {
-        self.num_controls
-    }
-}
-
-/// Data for a batched controlled-phase gate: `(target_qubit, phase)` entries, with
-/// the shared control in the instruction's `targets[0]`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BatchPhaseData {
-    pub(crate) phases: SmallVec<[(usize, Complex64); 8]>,
-}
-
-impl BatchPhaseData {
-    /// # Panics
-    ///
-    /// Panics if there are more than [`Self::MAX_PHASES`] entries.
-    pub fn new(phases: impl IntoIterator<Item = (usize, Complex64)>) -> Self {
-        let phases: SmallVec<[(usize, Complex64); 8]> = phases.into_iter().collect();
-        assert!(
-            phases.len() <= Self::MAX_PHASES,
-            "BatchPhaseData holds at most {} entries",
-            Self::MAX_PHASES
-        );
-        Self { phases }
-    }
-
-    pub fn phases(&self) -> &[(usize, Complex64)] {
-        &self.phases
-    }
-
-    /// Entry cap the fusion pass splits on, matching the kernel group tables.
-    /// Targets are distinct within one payload, so a repeated `(control, target)`
-    /// pair folds into a single entry rather than adding one.
-    pub const MAX_PHASES: usize = 40;
-}
-
-/// Data for batched ZZ rotations: `(qubit_0, qubit_1, theta)` entries, with every
-/// qubit also in the instruction's `targets`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BatchRzzData {
-    pub(crate) edges: Vec<(usize, usize, f64)>,
-}
-
-impl BatchRzzData {
-    /// # Panics
-    ///
-    /// Panics if there are more than [`Self::MAX_EDGES`] edges.
-    pub fn new(edges: Vec<(usize, usize, f64)>) -> Self {
-        assert!(
-            edges.len() <= Self::MAX_EDGES,
-            "BatchRzzData holds at most {} edges",
-            Self::MAX_EDGES
-        );
-        Self { edges }
-    }
-
-    pub fn edges(&self) -> &[(usize, usize, f64)] {
-        &self.edges
-    }
-
-    /// Edge cap the fusion pass splits on, matching the kernel group tables.
-    pub const MAX_EDGES: usize = 32;
-}
-
-/// An individual diagonal phase contribution in a [`DiagonalBatchData`].
-#[derive(Debug, Clone, PartialEq)]
-pub enum DiagEntry {
-    /// Diagonal on a single qubit: `state[i] *= d0` when bit 0, `*= d1` when bit 1.
-    Phase1q {
-        qubit: usize,
-        d0: Complex64,
-        d1: Complex64,
-    },
-    /// Phase on a qubit pair: `state[i] *= phase` when both bits are set (CZ/CPhase).
-    Phase2q {
-        q0: usize,
-        q1: usize,
-        phase: Complex64,
-    },
-    /// Parity-dependent phase (Rzz): `state[i] *= same` when parity is even,
-    /// `state[i] *= diff` when parity is odd.
-    Parity2q {
-        q0: usize,
-        q1: usize,
-        same: Complex64,
-        diff: Complex64,
-    },
-}
-
-impl DiagEntry {
-    /// Return the qubit and dense 2×2 matrix for a [`DiagEntry::Phase1q`]
-    /// entry, or `None` for two-qubit entries.
-    pub(crate) fn as_1q_matrix(&self) -> Option<(usize, [[Complex64; 2]; 2])> {
-        match *self {
-            DiagEntry::Phase1q { qubit, d0, d1 } => {
-                let z = Complex64::new(0.0, 0.0);
-                Some((qubit, [[d0, z], [z, d1]]))
-            }
-            _ => None,
-        }
-    }
-
-    /// Return the qubit pair and dense 4×4 matrix for a [`DiagEntry::Phase2q`]
-    /// or [`DiagEntry::Parity2q`] entry, or `None` for single-qubit entries.
-    pub(crate) fn as_2q_matrix(&self) -> Option<(usize, usize, [[Complex64; 4]; 4])> {
-        let z = Complex64::new(0.0, 0.0);
-        let one = Complex64::new(1.0, 0.0);
-        match *self {
-            DiagEntry::Phase2q { q0, q1, phase } => Some((
-                q0,
-                q1,
-                [
-                    [one, z, z, z],
-                    [z, one, z, z],
-                    [z, z, one, z],
-                    [z, z, z, phase],
-                ],
-            )),
-            DiagEntry::Parity2q {
-                q0, q1, same, diff, ..
-            } => Some((
-                q0,
-                q1,
-                [
-                    [same, z, z, z],
-                    [z, diff, z, z],
-                    [z, z, diff, z],
-                    [z, z, z, same],
-                ],
-            )),
-            _ => None,
-        }
-    }
-}
-
-/// Data for a batched diagonal gate; the kernel builds a phase LUT indexed by the
-/// bits of the distinct qubits in `entries`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DiagonalBatchData {
-    pub(crate) entries: Vec<DiagEntry>,
-}
-
-impl DiagonalBatchData {
-    pub fn new(entries: Vec<DiagEntry>) -> Self {
-        Self { entries }
-    }
-
-    pub fn entries(&self) -> &[DiagEntry] {
-        &self.entries
-    }
-
-    /// Widest qubit group one kernel lookup table covers. Qubits joined by a two-qubit
-    /// entry share a group, so the fusion pass closes a batch before a component outgrows it.
-    pub(crate) const MAX_QUBITS_PER_GROUP: usize = 10;
-
-    /// Most lookup tables one kernel sweep combines.
-    pub(crate) const MAX_GROUPS: usize = 4;
-}
-
-/// Data for a `MultiFused` batch of `(target_qubit, 2×2 matrix)` entries.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MultiFusedData {
-    pub(crate) gates: Vec<(usize, [[Complex64; 2]; 2])>,
-    pub(crate) all_diagonal: bool,
-}
-
-impl MultiFusedData {
-    /// Batch `(target_qubit, 2×2 matrix)` entries, computing the diagonal flag the
-    /// kernels branch on. Entries on one target fold into one matrix in list order, so
-    /// the batch holds each target once and its entries commute.
-    pub fn new(gates: Vec<(usize, [[Complex64; 2]; 2])>) -> Self {
-        let mut folded: Vec<(usize, [[Complex64; 2]; 2])> = Vec::with_capacity(gates.len());
-        for (target, mat) in gates {
-            match folded.iter_mut().find(|(q, _)| *q == target) {
-                Some((_, acc)) => *acc = mat_mul_2x2(&mat, acc),
-                None => folded.push((target, mat)),
-            }
-        }
-        let gates = folded;
-        let all_diagonal = gates.iter().all(|(_, m)| is_diagonal_2x2(m));
-        Self {
-            gates,
-            all_diagonal,
-        }
-    }
-
-    pub fn gates(&self) -> &[(usize, [[Complex64; 2]; 2])] {
-        &self.gates
-    }
-
-    /// Whether every matrix is diagonal, so the batch applies as a phase pass.
-    pub fn all_diagonal(&self) -> bool {
-        self.all_diagonal
-    }
-}
-
-/// Data for a `Multi2q` batch of `(q0, q1, 4×4 matrix)` entries in circuit order.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Multi2qData {
-    pub(crate) gates: Vec<(usize, usize, [[Complex64; 4]; 4])>,
-}
-
-impl Multi2qData {
-    pub fn new(gates: Vec<(usize, usize, [[Complex64; 4]; 4])>) -> Self {
-        Self { gates }
-    }
-
-    pub fn gates(&self) -> &[(usize, usize, [[Complex64; 4]; 4])] {
-        &self.gates
-    }
-}
-
-/// A `Multi2q` batch runs inside one tile of `2^tile_bits` amplitudes: the
-/// lowest bits of the index plus up to `tile_bits - MULTI_2Q_LOW_BITS` gathered
-/// high qubits, so a batch is tileable when its gates touch at most that many
-/// distinct qubits at or above [`multi_2q_low_bits`]. The tile size is per
-/// platform, see [`multi_2q_tile_bits`]; [`MULTI_2Q_HIGH_BUDGET`] is the
-/// widest budget any platform reaches and sizes the inline qubit lists.
-pub(crate) const MULTI_2Q_MAX_TILE_BITS: usize = 18;
-/// Smallest tile the knob accepts, 128 KB: half the derived floor, so a sweep can
-/// try it.
-pub(crate) const MULTI_2Q_MIN_TILE_BITS: usize = 13;
-/// Fewest low bits a tile keeps contiguous: 64-amplitude runs, 1 KB each.
-pub(crate) const MULTI_2Q_MIN_LOW_BITS: usize = 6;
-/// Most distinct high qubits one `Multi2q` batch may span on any platform.
-pub(crate) const MULTI_2Q_HIGH_BUDGET: usize = MULTI_2Q_MAX_TILE_BITS - MULTI_2Q_MIN_LOW_BITS;
-
-/// Qubits from this index up count against a batch's high-qubit budget: the
-/// tile keeps `2^low_bits` amplitudes contiguous per run and gathers the rest.
-/// Default 6, the shortest run, since every bit taken from the run is one
-/// more high qubit a pass over the state can serve: at 24 qubits a quantum
-/// volume circuit went from 88 passes to 54 and ran 10% faster against 10.
-/// `PRISM_MULTI_2Q_LOW_BITS` overrides it, clamped to
-/// `MULTI_2Q_MIN_LOW_BITS..tile_bits`.
-pub(crate) fn multi_2q_low_bits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        crate::env_knobs::usize_override("PRISM_MULTI_2Q_LOW_BITS", 1)
-            .unwrap_or(6)
-            .clamp(MULTI_2Q_MIN_LOW_BITS, multi_2q_tile_bits() - 1)
-    })
-}
-
-/// Log2 of the `Multi2q` tile in amplitudes: the tile budget from the cache topology
-/// (2^14, 256 KB, on the x86 cores measured), or `PRISM_MULTI_2Q_TILE_BITS` clamped
-/// to `MULTI_2Q_MIN_TILE_BITS..=MULTI_2Q_MAX_TILE_BITS`.
-///
-/// The tile has to sit in the core's private cache: on an i7-6700K (256 KB
-/// of L2 per core, 8 MB of L3 shared by four) a 1 MB tile ran quantum volume
-/// at 22 and 24 qubits 2x slower and a 2 MB tile 3x, while 512 KB read flat.
-/// A wider tile takes more of a random-pair layer per pass over the state,
-/// so on a core with a larger private cache the knob is worth a sweep.
-pub(crate) fn multi_2q_tile_bits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        crate::env_knobs::usize_override("PRISM_MULTI_2Q_TILE_BITS", 1)
-            .unwrap_or_else(|| {
-                (crate::backend::cache::tile_budget_bytes() / size_of::<Complex64>()).ilog2()
-                    as usize
-            })
-            .clamp(MULTI_2Q_MIN_TILE_BITS, MULTI_2Q_MAX_TILE_BITS)
-    })
-}
-
-/// [`multi_2q_tile_bits`] for a `num_qubits` statevector: cut, down to
-/// [`MULTI_2Q_MIN_TILE_BITS`], so a parallel pass gathers at least
-/// `cache::min_parallel_tiles` subcubes instead of leaving workers idle at the widths
-/// just past the parallel threshold.
-#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
-pub(crate) fn multi_2q_tile_bits_for(num_qubits: usize) -> usize {
-    let bits = multi_2q_tile_bits();
-    #[cfg(feature = "parallel")]
-    if num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
-        let pool_bits = num_qubits - crate::backend::cache::min_parallel_tiles().ilog2() as usize;
-        return bits.min(pool_bits).max(MULTI_2Q_MIN_TILE_BITS);
-    }
-    bits
-}
-
-/// Most distinct high qubits one `Multi2q` batch may span on a `num_qubits` state.
-pub(crate) fn multi_2q_high_budget_for(num_qubits: usize) -> usize {
-    multi_2q_tile_bits_for(num_qubits) - multi_2q_low_bits()
-}
-
-/// The high qubits `high` grows to if the pair joins a batch on a `num_qubits`
-/// state, or `None` when the pair would take it past [`multi_2q_high_budget_for`].
-pub(crate) fn multi_2q_join(
-    high: &[usize],
-    q0: usize,
-    q1: usize,
-    num_qubits: usize,
-) -> Option<smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>> {
-    let budget = multi_2q_high_budget_for(num_qubits);
-    let low_bits = multi_2q_low_bits();
-    let mut joined: smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> =
-        high.iter().copied().collect();
-    for q in [q0, q1] {
-        if q >= low_bits && !joined.contains(&q) {
-            if joined.len() == budget {
-                return None;
-            }
-            joined.push(q);
-        }
-    }
-    Some(joined)
-}
-
-/// [`multi_2q_join`] for the X and Y qubits of a Pauli string, which a
-/// `MultiPauliRot` batch needs inside its tile.
-pub(crate) fn pauli_rot_join(
-    high: &[usize],
-    qubits: impl IntoIterator<Item = usize>,
-    num_qubits: usize,
-) -> Option<smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>> {
-    let budget = multi_2q_high_budget_for(num_qubits);
-    let low_bits = multi_2q_low_bits();
-    let mut joined: smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> =
-        high.iter().copied().collect();
-    for q in qubits {
-        if q >= low_bits && !joined.contains(&q) {
-            if joined.len() == budget {
-                return None;
-            }
-            joined.push(q);
-        }
-    }
-    Some(joined)
-}
-
-/// Controlled `mat` as a 4x4 with the control on the high bit of the basis index.
-#[inline]
-pub(crate) fn cu_matrix_4x4(mat: &[[Complex64; 2]; 2]) -> [[Complex64; 4]; 4] {
-    let z = Complex64::new(0.0, 0.0);
-    let o = Complex64::new(1.0, 0.0);
-    [
-        [o, z, z, z],
-        [z, o, z, z],
-        [z, z, mat[0][0], mat[0][1]],
-        [z, z, mat[1][0], mat[1][1]],
-    ]
-}
-
-/// Kronecker product of two 2×2 matrices: A ⊗ B → 4×4.
-///
-/// Result indices: `(i*2+j, k*2+l) = A[i][k] * B[j][l]`
-/// where i,k index A (targets\[0\]) and j,l index B (targets\[1\]).
-#[inline]
-pub(crate) fn kron_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Complex64; 4]; 4] {
-    let mut result = [[Complex64::new(0.0, 0.0); 4]; 4];
-    for i in 0..2 {
-        for k in 0..2 {
-            let aik = a[i][k];
-            for j in 0..2 {
-                for l in 0..2 {
-                    result[i * 2 + j][k * 2 + l] = aik * b[j][l];
-                }
-            }
-        }
-    }
-    result
-}
-
-#[inline]
-pub(crate) fn mat_mul_4x4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
-    let zero = Complex64::new(0.0, 0.0);
-    let mut result = [[zero; 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            let mut sum = zero;
-            for k in 0..4 {
-                sum += a[i][k] * b[k][j];
-            }
-            result[i][j] = sum;
-        }
-    }
-    result
-}
-
-fn adjoint_4x4(m: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
-    let mut result = [[Complex64::new(0.0, 0.0); 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            result[i][j] = m[j][i].conj();
-        }
-    }
-    result
-}
-
-fn adjoint_2x2(m: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
-    [
-        [m[0][0].conj(), m[1][0].conj()],
-        [m[0][1].conj(), m[1][1].conj()],
-    ]
-}
-
 #[inline]
 fn count_unique_qubits<I: IntoIterator<Item = usize>>(iter: I) -> usize {
     let mut seen: SmallVec<[usize; 8]> = SmallVec::new();
@@ -967,20 +389,6 @@ fn special_unitary(m: &[[Complex64; 2]; 2], phase: f64) -> [[Complex64; 2]; 2] {
     [
         [m[0][0] * factor, m[0][1] * factor],
         [m[1][0] * factor, m[1][1] * factor],
-    ]
-}
-
-#[inline]
-pub(crate) fn mat_mul_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
-    [
-        [
-            a[0][0] * b[0][0] + a[0][1] * b[1][0],
-            a[0][0] * b[0][1] + a[0][1] * b[1][1],
-        ],
-        [
-            a[1][0] * b[0][0] + a[1][1] * b[1][0],
-            a[1][0] * b[0][1] + a[1][1] * b[1][1],
-        ],
     ]
 }
 
@@ -1381,6 +789,27 @@ impl Gate {
         }
     }
 
+    /// Angle a parameter binds: the rotation angle of `Rx`, `Ry`, `Rz`, `Rzz`, `P`
+    /// and `PauliRot`, or `None` for every other variant.
+    #[inline]
+    pub(crate) fn angle(&self) -> Option<f64> {
+        match self {
+            Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t) => Some(*t),
+            Gate::PauliRot(data) => Some(data.theta),
+            _ => None,
+        }
+    }
+
+    /// Mutable form of [`Self::angle`].
+    #[inline]
+    pub(crate) fn angle_mut(&mut self) -> Option<&mut f64> {
+        match self {
+            Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t) => Some(t),
+            Gate::PauliRot(data) => Some(&mut data.theta),
+            _ => None,
+        }
+    }
+
     /// `U^k` for a single-qubit gate; negative `k` inverts first.
     pub(crate) fn matrix_power(&self, k: i64) -> Gate {
         debug_assert_eq!(
@@ -1773,31 +1202,6 @@ impl Gate {
     }
 }
 
-/// Whether a 2x2 matrix is diagonal (both off-diagonal norms below `IDENTITY_EPS`).
-#[inline]
-pub(crate) fn is_diagonal_2x2(mat: &[[Complex64; 2]; 2]) -> bool {
-    mat[0][1].norm() < IDENTITY_EPS && mat[1][0].norm() < IDENTITY_EPS
-}
-
-/// Whether a 2x2 matrix is antidiagonal (both diagonal norms below `IDENTITY_EPS`).
-#[inline]
-pub(crate) fn is_antidiagonal_2x2(mat: &[[Complex64; 2]; 2]) -> bool {
-    mat[0][0].norm() < IDENTITY_EPS && mat[1][1].norm() < IDENTITY_EPS
-}
-
-/// Whether a 4x4 matrix is diagonal (all off-diagonal norms below `IDENTITY_EPS`).
-#[inline]
-pub(crate) fn is_diagonal_4x4(mat: &[[Complex64; 4]; 4]) -> bool {
-    for (r, row) in mat.iter().enumerate() {
-        for (c, value) in row.iter().enumerate() {
-            if r != c && value.norm() >= IDENTITY_EPS {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 fn rzz_entry(q0: usize, q1: usize, theta: f64) -> DiagEntry {
     DiagEntry::Parity2q {
         q0,
@@ -1858,14 +1262,6 @@ const NAMED_1Q_CANDIDATES: &[Gate] = &[
     Gate::SX,
     Gate::SXdg,
 ];
-
-fn matrices_equal(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], eps: f64) -> bool {
-    (0..2).all(|i| (0..2).all(|j| (a[i][j] - b[i][j]).norm() <= eps))
-}
-
-fn matrices_equal_4x4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4], eps: f64) -> bool {
-    (0..4).all(|i| (0..4).all(|j| (a[i][j] - b[i][j]).norm() <= eps))
-}
 
 /// The named two-qubit gate `mat` equals within `RECOGNIZE_EPS`, then `Rzz`,
 /// then `Cu` when the matrix is the identity outside its trailing block, else

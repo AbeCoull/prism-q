@@ -11,6 +11,7 @@ use super::parameter::angle_of;
 use super::{Circuit, Instruction};
 use crate::gates::{
     DiagEntry, Gate, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4,
+    swap_qubit_order_4x4,
 };
 
 /// One factor of a fused payload, naming a template instruction and how its
@@ -782,7 +783,11 @@ fn product_4x4(pool: &[Step], bound: &Circuit, range: Range<u32>) -> [[Complex64
         }
         Step::M2 { src, swapped } => {
             let m = gate_4x4(bound, *src);
-            if *swapped { swap_order(&m) } else { m }
+            if *swapped {
+                swap_qubit_order_4x4(&m)
+            } else {
+                m
+            }
         }
         Step::Rzz { src } => Gate::Rzz(angle_of(&bound.instructions[*src as usize])).matrix_4x4(),
         Step::Project {
@@ -827,11 +832,6 @@ fn projected_1q(steps: &[Step], part: DiagPart, bound: &Circuit) -> [[Complex64;
     [[d0, zero], [zero, d1]]
 }
 
-fn swap_order(mat: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
-    let swap = Gate::Swap.matrix_4x4();
-    mat_mul_4x4(&swap, &mat_mul_4x4(mat, &swap))
-}
-
 fn gate_2x2(circuit: &Circuit, src: u32) -> [[Complex64; 2]; 2] {
     match &circuit.instructions[src as usize] {
         Instruction::Gate { gate, .. } => gate.matrix_2x2(),
@@ -867,9 +867,7 @@ fn record_sites(
         {
             return;
         }
-        let start = steps.len() as u32;
-        steps.extend_from_slice(recipe_steps);
-        let range = start..steps.len() as u32;
+        let range = push_steps(steps, recipe_steps);
         sites.push(Site {
             instruction: index,
             entry: entry as u32,
@@ -879,6 +877,11 @@ fn record_sites(
                 Recipe::Mat2(range, diagonal)
             },
         });
+    };
+    let angle_site = |entry: usize, src: u32| Site {
+        instruction: index,
+        entry: entry as u32,
+        recipe: Recipe::Angle(src),
     };
 
     match gate {
@@ -918,15 +921,10 @@ fn record_sites(
             let [single] = prov.as_slice() else {
                 return false;
             };
-            let [Step::M1 { src } | Step::M2 { src, .. } | Step::Rzz { src }] = single.as_slice()
-            else {
+            let Some(src) = angle_source(single) else {
                 return false;
             };
-            sites.push(Site {
-                instruction: index,
-                entry: 0,
-                recipe: Recipe::Angle(*src),
-            });
+            sites.push(angle_site(0, src));
             true
         }
         Gate::BatchRzz(d) => {
@@ -937,11 +935,7 @@ fn record_sites(
                 let [Step::M2 { src, .. } | Step::Rzz { src }] = p.as_slice() else {
                     return false;
                 };
-                sites.push(Site {
-                    instruction: index,
-                    entry: entry as u32,
-                    recipe: Recipe::Angle(*src),
-                });
+                sites.push(angle_site(entry, *src));
             }
             true
         }
@@ -950,15 +944,10 @@ fn record_sites(
                 return false;
             }
             for (entry, p) in prov.iter().enumerate() {
-                let [Step::M1 { src } | Step::M2 { src, .. } | Step::Rzz { src }] = p.as_slice()
-                else {
+                let Some(src) = angle_source(p) else {
                     return false;
                 };
-                sites.push(Site {
-                    instruction: index,
-                    entry: entry as u32,
-                    recipe: Recipe::Angle(*src),
-                });
+                sites.push(angle_site(entry, src));
             }
             true
         }
@@ -967,9 +956,7 @@ fn record_sites(
                 return false;
             }
             for (entry, (p, diagonal)) in prov.iter().zip(&data.entries).enumerate() {
-                let start = steps.len() as u32;
-                steps.extend_from_slice(p);
-                let range = start..steps.len() as u32;
+                let range = push_steps(steps, p);
                 let recipe = match diagonal {
                     DiagEntry::Phase1q { .. } => Recipe::Mat2(range, true),
                     DiagEntry::Phase2q { .. } => Recipe::Phase(range),
@@ -988,12 +975,11 @@ fn record_sites(
                 return false;
             }
             for (entry, p) in prov.iter().enumerate() {
-                let start = steps.len() as u32;
-                steps.extend_from_slice(p);
+                let range = push_steps(steps, p);
                 sites.push(Site {
                     instruction: index,
                     entry: entry as u32,
-                    recipe: Recipe::Phase(start..steps.len() as u32),
+                    recipe: Recipe::Phase(range),
                 });
             }
             true
@@ -1002,12 +988,11 @@ fn record_sites(
             let [payload] = prov.as_slice() else {
                 return false;
             };
-            let start = steps.len() as u32;
-            steps.extend_from_slice(payload);
+            let range = push_steps(steps, payload);
             sites.push(Site {
                 instruction: index,
                 entry: 0,
-                recipe: Recipe::Phase(start..steps.len() as u32),
+                recipe: Recipe::Phase(range),
             });
             true
         }
@@ -1031,6 +1016,19 @@ fn record_sites(
         | Gate::Mcu(_)
         | Gate::QftBlock { .. }
         | Gate::Unitary(_) => true,
+    }
+}
+
+fn push_steps(steps: &mut Vec<Step>, payload: &[Step]) -> Range<u32> {
+    let start = steps.len() as u32;
+    steps.extend_from_slice(payload);
+    start..steps.len() as u32
+}
+
+fn angle_source(payload: &[Step]) -> Option<u32> {
+    match payload {
+        [Step::M1 { src } | Step::M2 { src, .. } | Step::Rzz { src }] => Some(*src),
+        _ => None,
     }
 }
 
@@ -1166,15 +1164,11 @@ pub(super) fn write_angle(inst: &mut Instruction, entry: usize, theta: f64) -> b
     let Instruction::Gate { gate, .. } = inst else {
         return false;
     };
+    if let Some(angle) = gate.angle_mut() {
+        *angle = theta;
+        return true;
+    }
     match gate {
-        Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::P(t) | Gate::Rzz(t) => {
-            *t = theta;
-            true
-        }
-        Gate::PauliRot(d) => {
-            d.set_theta(theta);
-            true
-        }
         Gate::BatchRzz(d) => match d.edges.get_mut(entry) {
             Some(edge) => {
                 edge.2 = theta;

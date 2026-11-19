@@ -527,16 +527,7 @@ pub(super) fn visit_noise_slots(
 
 fn collect_region_qubits(body: &[Instruction], out: &mut SmallVec<[usize; 4]>) {
     for inst in body {
-        match inst {
-            Instruction::Gate { targets, .. }
-            | Instruction::Conditional { targets, .. }
-            | Instruction::Barrier { qubits: targets }
-            | Instruction::Save {
-                qubits: targets, ..
-            } => out.extend_from_slice(targets),
-            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => out.push(*qubit),
-            Instruction::Region(inner) => out.extend_from_slice(inner.qubits()),
-        }
+        out.extend_from_slice(inst.qubits());
     }
 }
 

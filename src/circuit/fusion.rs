@@ -11,7 +11,7 @@ use super::{Circuit, GuardedRegion, Instruction, SmallVec, smallvec};
 use crate::gates::{
     DiagEntry, DiagonalBatchData, Gate, IDENTITY_EPS, MULTI_2Q_HIGH_BUDGET, Multi2qData,
     MultiFusedData, MultiPauliRotData, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2,
-    mat_mul_4x4, multi_2q_join, pauli_rot_join, pauli_rot_masks,
+    mat_mul_4x4, multi_2q_join, pauli_rot_join, pauli_rot_masks, swap_qubit_order_4x4,
 };
 
 use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases, split_batch_phases};
@@ -93,17 +93,6 @@ const MIN_QUBITS_FOR_PAULI_ROT_BATCH: usize = 8;
 pub(super) fn push_unique(qubits: &mut SmallVec<[usize; 4]>, q: usize) {
     if !qubits.contains(&q) {
         qubits.push(q);
-    }
-}
-
-fn inst_qubits(inst: &Instruction) -> &[usize] {
-    match inst {
-        Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => targets,
-        Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
-            std::slice::from_ref(qubit)
-        }
-        Instruction::Barrier { qubits } | Instruction::Save { qubits, .. } => qubits,
-        Instruction::Region(region) => region.qubits(),
     }
 }
 
@@ -199,7 +188,7 @@ pub(crate) fn cancel_self_inverse_pairs<'a>(
                 }
             }
             _ => {
-                for &q in inst_qubits(inst) {
+                for &q in inst.qubits() {
                     if q < n {
                         clear_pending(q, &circuit.instructions, &mut pending);
                     }
@@ -232,14 +221,6 @@ pub(super) fn is_identity(mat: &[[Complex64; 2]; 2]) -> bool {
         && mat[1][0].norm() < IDENTITY_EPS
         && (mat[1][1].re - 1.0).abs() < IDENTITY_EPS
         && mat[1][1].im.abs() < IDENTITY_EPS
-}
-
-#[inline]
-pub(super) fn gate_1q_matrix(gate: &Gate) -> [[Complex64; 2]; 2] {
-    match gate {
-        Gate::Fused(m) => **m,
-        _ => gate.matrix_2x2(),
-    }
 }
 
 #[inline]
@@ -332,7 +313,7 @@ pub(crate) fn fuse_single_qubit_gates<'a>(
                 }
             }
             _ => {
-                for &q in inst_qubits(inst) {
+                for &q in inst.qubits() {
                     flush(&mut pending[q], &mut output, t);
                 }
                 output.push(inst.clone());
@@ -430,7 +411,7 @@ pub(crate) fn reorder_1q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) ->
                         }
                     },
                     _ => {
-                        for &q in inst_qubits(inst) {
+                        for &q in inst.qubits() {
                             block_all[q] = idx;
                             block_diag[q] = idx;
                         }
@@ -492,14 +473,14 @@ pub(crate) fn fuse_multi_1q_gates<'a>(
         match inst {
             Instruction::Gate { gate, targets } if gate.num_qubits() == 1 => {
                 let q = targets[0];
-                let mat = gate_1q_matrix(gate);
+                let mat = gate.matrix_2x2();
                 if accumulate_1q(&mut pending[q], mat) {
                     pending_count += 1;
                 }
                 t.note(&mut srcs[q], i, Place::Plain);
             }
             _ => {
-                for &q in inst_qubits(inst) {
+                for &q in inst.qubits() {
                     flush_1q_pending(
                         q,
                         &mut pending,
@@ -638,7 +619,7 @@ fn fuse_2q_gates_where<'a>(
         match inst {
             Instruction::Gate { gate, targets } if gate.num_qubits() == 1 => {
                 let q = targets[0];
-                let mat = gate_1q_matrix(gate);
+                let mat = gate.matrix_2x2();
                 accumulate_1q(&mut pending_1q[q], mat);
                 t.note(&mut srcs[q], i, Place::Plain);
             }
@@ -691,7 +672,7 @@ fn fuse_2q_gates_where<'a>(
                 }
             }
             _ => {
-                for &q in inst_qubits(inst) {
+                for &q in inst.qubits() {
                     changed |=
                         settle_trailing_1q(q, &mut pending_1q, &last_2q, &mut output, &mut srcs, t);
                     last_2q[q] = None;
@@ -768,12 +749,6 @@ fn settle_trailing_1q(
 }
 
 #[inline]
-fn swap_order_4x4(mat: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
-    let swap = Gate::Swap.matrix_4x4();
-    mat_mul_4x4(&swap, &mat_mul_4x4(mat, &swap))
-}
-
-#[inline]
 fn same_unordered_pair(a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
     (a0 == b0 && a1 == b1) || (a0 == b1 && a1 == b0)
 }
@@ -788,7 +763,7 @@ fn orient_2q_matrix(
     if targets[0] == q0 && targets[1] == q1 {
         *mat
     } else {
-        swap_order_4x4(mat)
+        swap_qubit_order_4x4(mat)
     }
 }
 
@@ -1016,7 +991,7 @@ fn fuse_same_pair_2q_blocks<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<
             Instruction::Gate { gate, targets } if gate.num_qubits() == 1 => {
                 if let Some(active) = &mut run {
                     if active.can_accept_1q(targets[0]) {
-                        let mat = gate_1q_matrix(gate);
+                        let mat = gate.matrix_2x2();
                         active.push_1q(mat, targets[0], inst.clone(), i, t);
                     } else {
                         flush_pair_run(&mut run, &mut output, &mut changed, t);
@@ -1720,10 +1695,7 @@ pub(super) fn fuse_at_width<'a>(
     profile: FusionProfile,
     t: &mut Tracer,
 ) -> Cow<'a, Circuit> {
-    let pass_s = split_batch_phases(circuit, t);
-    let pass_r = apply_pass(pass_s, t, |c, _| fuse_region_bodies(c, n, profile));
-    let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
-    let pass0r = apply_pass(pass0, t, fuse_rzz);
+    let pass0r = front_passes(circuit, n, profile, t);
     if profile == FusionProfile::Device {
         return device_passes(pass0r, n, t);
     }
@@ -1735,10 +1707,7 @@ pub(super) fn fuse_at_width<'a>(
         return pass0b;
     }
 
-    let pass1 = apply_pass(pass0b, t, fuse_single_qubit_gates);
-    let pass1r = reorder_1q_gates(pass1, t);
-    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
-    let pass1f = apply_pass(pass1c, t, fuse_single_qubit_gates);
+    let pass1f = single_qubit_passes(pass0b, t);
 
     let pass_2q = gated(pass1f, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
         fuse_2q_gates(c, t, n)
@@ -1752,6 +1721,30 @@ pub(super) fn fuse_at_width<'a>(
     batch_passes(pass_2qb, n, t)
 }
 
+/// The passes every profile opens with: `BatchPhase` split, region bodies, self-inverse
+/// cancellation, and `Rzz` recognition.
+#[inline]
+fn front_passes<'a>(
+    circuit: &'a Circuit,
+    n: usize,
+    profile: FusionProfile,
+    t: &mut Tracer,
+) -> Cow<'a, Circuit> {
+    let pass_s = split_batch_phases(circuit, t);
+    let pass_r = apply_pass(pass_s, t, |c, _| fuse_region_bodies(c, n, profile));
+    let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
+    apply_pass(pass0, t, fuse_rzz)
+}
+
+/// 1q fusion, reordering, the cancellation the reorder exposes, and 1q fusion again.
+#[inline]
+fn single_qubit_passes<'a>(stream: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
+    let pass1 = apply_pass(stream, t, fuse_single_qubit_gates);
+    let pass1r = reorder_1q_gates(pass1, t);
+    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
+    apply_pass(pass1c, t, fuse_single_qubit_gates)
+}
+
 /// The [`FusionProfile::Device`] passes after `fuse_rzz`. A 1q gate joins a 2q gate only
 /// inside a same-pair run that fuses to a dense 4x4 anyway, so a lone CX stays a
 /// permutation and its neighbours stay 1q gates the device can tile.
@@ -1759,10 +1752,7 @@ fn device_passes<'a>(stream: Cow<'a, Circuit>, n: usize, t: &mut Tracer) -> Cow<
     if n < MIN_QUBITS_FOR_FUSION {
         return stream;
     }
-    let pass1 = apply_pass(stream, t, fuse_single_qubit_gates);
-    let pass1r = reorder_1q_gates(pass1, t);
-    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
-    let pass1f = apply_pass(pass1c, t, fuse_single_qubit_gates);
+    let pass1f = single_qubit_passes(stream, t);
     let pass_2q = gated(pass1f, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
         let runs = same_pair_run_members(&c);
         fuse_2q_gates_where(c, t, false, |i| runs[i])
@@ -1841,19 +1831,14 @@ pub(crate) fn fuse_staged(
 #[cfg(any(test, feature = "bench-internal"))]
 pub(crate) fn fuse_before_batching(circuit: &Circuit, n: usize) -> Cow<'_, Circuit> {
     let t = &mut Tracer::off();
-    let pass_r = fuse_region_bodies(circuit, n, FusionProfile::Host);
-    let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
-    let pass0r = apply_pass(pass0, t, fuse_rzz);
+    let pass0r = front_passes(circuit, n, FusionProfile::Host, t);
     let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
         apply_pass(c, t, fuse_batch_rzz)
     });
     if n < MIN_QUBITS_FOR_FUSION {
         return pass0b;
     }
-    let pass1 = apply_pass(pass0b, t, fuse_single_qubit_gates);
-    let pass1r = reorder_1q_gates(pass1, t);
-    let pass1c = apply_pass(pass1r, t, cancel_self_inverse_pairs);
-    let pass1f = apply_pass(pass1c, t, fuse_single_qubit_gates);
+    let pass1f = single_qubit_passes(pass0b, t);
     let pass_2q = gated(pass1f, n, MIN_QUBITS_FOR_2Q_FUSION, |c| {
         fuse_2q_gates(c, t, n)
     });

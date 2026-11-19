@@ -545,6 +545,25 @@ pub(crate) mod sealed {
         ) -> Option<crate::error::Result<()>> {
             None
         }
+
+        /// Leave the outcomes of measurements and resets on the device until the next
+        /// [`Self::sync_deferred_measurements`], at most `capacity` of them between two
+        /// syncs. Classical bits and the norm go stale meanwhile, so every read of either
+        /// syncs first. A no-op where the backend decides each measurement on the host,
+        /// or with a deferral already open.
+        fn begin_deferred_measurements(&mut self, _capacity: usize) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        /// Read back the deferred outcomes, leaving the deferral open.
+        fn sync_deferred_measurements(&mut self) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        /// Read back the deferred outcomes and close the deferral.
+        fn end_deferred_measurements(&mut self) -> crate::error::Result<()> {
+            Ok(())
+        }
     }
 }
 

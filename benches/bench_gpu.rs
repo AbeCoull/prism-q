@@ -29,7 +29,8 @@ use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::circuit::fusion::fuse_circuit_for_profile;
 use prism_q::circuit::{
-    Circuit, Instruction, expand_pauli_rotations, expand_qft_blocks, recognize_qft_blocks, smallvec,
+    Circuit, ClassicalCondition, Instruction, expand_pauli_rotations, expand_qft_blocks,
+    recognize_qft_blocks, smallvec,
 };
 use prism_q::circuits;
 use prism_q::gates::Gate;
@@ -431,7 +432,28 @@ fn measured_random_circuit(n: usize) -> Circuit {
 }
 
 fn noisy_sweep_sizes() -> &'static [usize] {
-    if is_fast() { &[16] } else { &[20] }
+    if is_fast() { &[16] } else { &[14, 16, 20] }
+}
+
+/// Four rounds of a depth 3 random block, each closed by measuring every other qubit
+/// and an `X` conditioned on one of those outcomes, then a final `measure_all`.
+fn mid_measured_random_circuit(n: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, 2 * n);
+    for round in 0..4 {
+        let block = circuits::random_circuit(n, 3, SEED + round as u64);
+        circuit.instructions.extend(block.instructions);
+        let first = round % 2;
+        for q in (first..n).step_by(2) {
+            circuit.add_measure(q, n + q);
+        }
+        circuit.instructions.push(Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(n + first),
+            gate: Gate::X,
+            targets: smallvec![first + 1],
+        });
+    }
+    circuit.measure_all();
+    circuit
 }
 
 const NOISY_SHOTS: usize = 2;
@@ -465,6 +487,24 @@ fn bench_gpu_noisy_kraus(c: &mut Criterion) {
             });
         });
     }
+
+    group.finish();
+}
+
+fn bench_gpu_noisy_kraus_mid_measure(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/noisy_kraus_mid_measure");
+    configure_group(&mut group);
+    let kind = gpu_kind(&ctx);
+
+    let n = if is_fast() { 16 } else { 20 };
+    let circuit = mid_measured_random_circuit(n);
+    let noise = custom_kraus_noise(&circuit);
+    group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+        b.iter(|| {
+            run_shots_with_noise(kind.clone(), circ, &noise, NOISY_SHOTS, 42).unwrap();
+        });
+    });
 
     group.finish();
 }
@@ -1442,6 +1482,7 @@ criterion_group! {
     bench_gpu_throughput,
     bench_gpu_floor,
     bench_gpu_noisy_kraus,
+    bench_gpu_noisy_kraus_mid_measure,
     bench_cpu_noisy_kraus,
     bench_stab_cpu_clifford_d10,
     bench_stab_gpu_clifford_d10,

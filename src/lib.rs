@@ -138,7 +138,7 @@ pub use sim::stabilizer_rank::{
 };
 #[cfg(feature = "bench-internal")]
 #[doc(hidden)]
-pub use sim::trajectory::apply_noise_sites;
+pub use sim::trajectory::{apply_noise_sites, run_noisy_shot};
 pub use sim::unified_pauli::{
     PauliAxis, PauliTerm, SpdObservableResult, SpdResult, SpdTruncation, SppObservableResult,
     SppResult, inverse_light_cone, run_spd, run_spd_observable, run_spd_observable_budgeted,

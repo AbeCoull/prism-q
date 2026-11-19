@@ -39,7 +39,9 @@ directly:
   and subsystem decomposition, and leaves sub-circuits below `crate::gpu::min_qubits()`
   (default 14, `PRISM_GPU_MIN_QUBITS` override) on the CPU. Measurements and resets in
   one instruction run are decided on the device and read back together, at the end of
-  the run or before a classically conditioned gate or region.
+  the run or before a classically conditioned gate or region. A noisy trajectory shot
+  keeps them on the device across its noise sites until a conditional, a region, a
+  readout flip, a Kraus branch picked on the host, or the end of the shot.
 - `BackendKind::StabilizerGpu { context }`. Gates apply to a device tableau through
   one word-grouped batched Clifford kernel (`stab_apply_word_grouped`). Measurement and
   reset keep pivot search, row cascade, phase fixup and deterministic outcomes on the

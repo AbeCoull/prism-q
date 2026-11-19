@@ -8,7 +8,7 @@
 //! `Multi2q` launches once per sub-gate, on the permutation or diagonal kernel when the
 //! sub-gate's matrix is exactly one.
 
-use cudarc::driver::{CudaViewMut, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaViewMut, DevicePtr, LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
 
 use crate::backend::statevector::kernels as cpu_k;
@@ -72,7 +72,7 @@ struct TileGatesArg {
 // SAFETY: a plain `repr(C)` f64 array and two u64s with the layout the kernel declares.
 unsafe impl cudarc::driver::DeviceRepr for TileGatesArg {}
 
-/// Most operators a one-qubit Kraus channel carries into `noise_decide_kraus`.
+/// Most operators a one-qubit Kraus channel carries into `noise_site_kraus`.
 pub(crate) const NOISE_MAX_KRAUS: usize = 16;
 
 /// A one-qubit Kraus channel as a by-value kernel parameter: per operator its matrix then
@@ -1050,10 +1050,12 @@ pub(crate) fn noise_kraus(
     noise_site(ctx, state, qubit, NoiseDecide::Kraus { set: &set, r_unit })
 }
 
-/// One trajectory noise site on `qubit` in three launches and no readback: stage 1 of
-/// [`measure_prob_one`] (or of [`reduced_density_matrix_1q`] for a Kraus channel), the
-/// decide kernel on its partials, and `apply_gate_1q_from_buffer`. The pending norm is
-/// read, not changed: each branch matrix carries its own normalization.
+/// One trajectory noise site on `qubit` in two launches and no readback: a
+/// `noise_site_*` kernel that runs stage 1 of [`measure_prob_one`] (or of
+/// [`reduced_density_matrix_1q`] for a Kraus channel) and decides the branch in the block
+/// that finishes last, then `apply_gate_1q_from_buffer`. The pending norm is read from the
+/// measure log while it holds it, and is not changed: each branch matrix carries its own
+/// normalization.
 fn noise_site(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1063,9 +1065,9 @@ fn noise_site(
     let n = state.num_qubits();
     check_qubit(n, qubit)?;
     let pairs: u64 = 1u64 << (n - 1);
-    let (reduce, count, columns) = match decide {
-        NoiseDecide::Kraus { .. } => ("rdm_qubit", pairs, 4u32),
-        _ => ("measure_prob_one", 1u64 << n, 1u32),
+    let (count, columns) = match decide {
+        NoiseDecide::Kraus { .. } => (pairs, 4u32),
+        _ => (1u64 << n, 1u32),
     };
     let elems_per_block = 2u64 * BLOCK_SIZE as u64;
     let num_blocks = count.div_ceil(elems_per_block).max(1) as u32;
@@ -1081,45 +1083,34 @@ fn noise_site(
         (columns * num_blocks) as usize,
     )?;
     super::ensure_capacity(&mut scratch.noise_decision, device, 9)?;
+    super::ensure_capacity(&mut scratch.noise_ticket, device, 1)?;
     let partials = scratch.measure_partials.as_mut().unwrap();
     let decision = scratch.noise_decision.as_mut().unwrap();
+    let ticket = scratch.noise_ticket.as_mut().unwrap();
 
+    let norm_log: u64 = match (&state.measure_log, state.norm_in_log) {
+        (Some(log), true) => log.raw().device_ptr(stream).0,
+        _ => 0,
+    };
+    let norm = state.pending_norm;
+    let eps = crate::sim::trajectory::JUMP_EPSILON;
     let qubit_i = qubit as i32;
     {
-        let func = device.function(reduce)?;
+        let name = match decide {
+            NoiseDecide::Damping { .. } => "noise_site_damping",
+            NoiseDecide::Thermal { .. } => "noise_site_thermal",
+            NoiseDecide::Kraus { .. } => "noise_site_kraus",
+        };
+        let func = device.function(name)?;
         let mut builder = stream.launch_builder(&func);
         builder
             .arg(state.buffer().raw())
             .arg(&count)
             .arg(&qubit_i)
-            .arg(partials.raw_mut());
-        let cfg = LaunchConfig {
-            grid_dim: (num_blocks, 1, 1),
-            block_dim: (BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: shared_bytes,
-        };
-        // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers `count`
-        // elements (or pairs) and the partials hold `columns` f64s per block.
-        unsafe {
-            builder.launch(cfg).map_err(|e| driver_err(reduce, e))?;
-        }
-        device.count_launch(1);
-    }
-
-    let norm = state.pending_norm();
-    let eps = crate::sim::trajectory::JUMP_EPSILON;
-    {
-        let name = match decide {
-            NoiseDecide::Damping { .. } => "noise_decide_damping",
-            NoiseDecide::Thermal { .. } => "noise_decide_thermal",
-            NoiseDecide::Kraus { .. } => "noise_decide_kraus",
-        };
-        let func = device.function(name)?;
-        let mut builder = stream.launch_builder(&func);
-        builder
-            .arg(partials.raw())
-            .arg(&num_blocks)
+            .arg(partials.raw_mut())
+            .arg(ticket.raw_mut())
             .arg(decision.raw_mut())
+            .arg(&norm_log)
             .arg(&norm);
         match &decide {
             NoiseDecide::Damping {
@@ -1150,16 +1141,18 @@ fn noise_site(
         }
         builder.arg(&eps);
         let cfg = LaunchConfig {
-            grid_dim: (1, 1, 1),
+            grid_dim: (num_blocks, 1, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: shared_bytes,
         };
-        // SAFETY: signature matches kernel; one block reduces `num_blocks` partials as
-        // the finalize kernel does, and thread 0 writes the nine f64s of `decision`.
+        // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers `count`
+        // elements (or pairs), the partials hold `columns` f64s per block, the ticket is
+        // zero between launches, and only thread 0 of the last block writes the nine f64s
+        // of `decision`. `norm_log` is null or the live measure log.
         unsafe {
             builder.launch(cfg).map_err(|e| driver_err(name, e))?;
         }
-        device.count_launch(0);
+        device.count_launch(1);
     }
 
     let func = device.function("apply_gate_1q_from_buffer")?;
@@ -1521,29 +1514,21 @@ pub(crate) fn measure_collapse(
 }
 
 /// Start a run of measurements decided on the device: size the log for `capacity`
-/// outcomes and upload the pending norm into its first slot.
+/// outcomes between readbacks. The first [`measure_logged`] after each readback uploads
+/// the pending norm.
 pub(crate) fn begin_measure_log(
     ctx: &GpuContext,
     state: &mut GpuState,
     capacity: usize,
 ) -> Result<()> {
-    let device = ctx.device();
+    debug_assert!(!state.norm_in_log, "measure log begun with outcomes unread");
     if state
         .measure_log
         .as_ref()
         .is_none_or(|log| log.len() < capacity + 1)
     {
-        state.measure_log = Some(GpuBuffer::<f64>::alloc_zeros(device, capacity + 1)?);
+        state.measure_log = Some(GpuBuffer::<f64>::alloc_zeros(ctx.device(), capacity + 1)?);
     }
-    let log = state
-        .measure_log
-        .as_mut()
-        .expect("measure log allocated above");
-    device
-        .stream()?
-        .memcpy_htod(&[state.pending_norm], &mut log.raw_mut().slice_mut(0..1))
-        .map_err(|e| driver_err("upload measure log norm", e))?;
-    device.count_upload();
     Ok(())
 }
 
@@ -1573,6 +1558,13 @@ pub(crate) fn measure_logged(
         .as_mut()
         .expect("measure_logged called before begin_measure_log");
     debug_assert!(slot < log.len() - 1, "measure log slot {slot} out of range");
+    if !state.norm_in_log {
+        stream
+            .memcpy_htod(&[state.pending_norm], &mut log.raw_mut().slice_mut(0..1))
+            .map_err(|e| driver_err("upload measure log norm", e))?;
+        device.count_upload();
+        state.norm_in_log = true;
+    }
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
@@ -1666,6 +1658,7 @@ pub(crate) fn read_measure_log(
         .map_err(|e| driver_err("measure log dtoh", e))?;
     device.count_drain();
     state.pending_norm = host[0];
+    state.norm_in_log = false;
     Ok(host[1..].iter().map(|&v| v != 0.0).collect())
 }
 

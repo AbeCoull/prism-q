@@ -471,8 +471,9 @@ struct TrajectoryWalk<'a> {
 }
 
 impl SlotWalk for TrajectoryWalk<'_> {
-    fn classical(&self) -> &[bool] {
-        self.backend.classical_results()
+    fn classical(&mut self) -> Result<&[bool]> {
+        self.backend.sync_deferred_measurements()?;
+        Ok(self.backend.classical_results())
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
@@ -498,8 +499,8 @@ struct MemoryWalk<'a> {
 }
 
 impl SlotWalk for MemoryWalk<'_> {
-    fn classical(&self) -> &[bool] {
-        self.backend.classical_results()
+    fn classical(&mut self) -> Result<&[bool]> {
+        Ok(self.backend.classical_results())
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
@@ -706,6 +707,7 @@ fn kraus_host_decided(
     kraus: &[Kraus1q],
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
+    backend.sync_deferred_measurements()?;
     let rho = backend.reduced_density_matrix_1q(qubit)?;
 
     let mut cumulative: smallvec::SmallVec<[f64; 8]> = smallvec::SmallVec::new();
@@ -902,6 +904,33 @@ pub fn apply_noise_sites(
         }
     }
     Ok(())
+}
+
+/// Run one trajectory shot of `circuit` under `noise` on `backend` from shot seed `seed`
+/// and return its record. `defer` keeps measurement outcomes on the device between the
+/// reads that need them, as a trajectory does; without it each outcome reads back as its
+/// measurement lands, so the two runs can be compared bit for bit.
+#[cfg(feature = "bench-internal")]
+#[doc(hidden)]
+pub fn run_noisy_shot(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    seed: u64,
+    defer: bool,
+) -> Result<Vec<bool>> {
+    let prepared = PreparedNoise::new(noise);
+    let readout = ShotReadout::new(circuit, &noise.readout);
+    let mut rng = noise_rng(seed);
+    backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+    if defer {
+        evolve_noisy(backend, circuit, &prepared, 0, &readout.at_write, &mut rng)?;
+    } else {
+        evolve_noisy_eager(backend, circuit, &prepared, 0, &readout.at_write, &mut rng)?;
+    }
+    let mut results = backend.classical_results().to_vec();
+    apply_readout_errors(&mut results, &readout.record, &mut rng);
+    Ok(results)
 }
 
 /// What a model asks of each shot beyond its event stream: leak flags when it
@@ -1256,6 +1285,7 @@ pub(crate) fn flip_written_bit(
     if let Instruction::Measure { classical_bit, .. } = instruction
         && let Some(Some(err)) = readout.get(*classical_bit)
     {
+        backend.sync_deferred_measurements()?;
         let bit = backend.classical_results()[*classical_bit];
         let r: f64 = rand::RngExt::random(rng);
         if r < if bit { err.p10 } else { err.p01 } {
@@ -1322,7 +1352,37 @@ fn finish_trajectory(
 /// slot of `noise` after its instruction and flipping each measured bit at its
 /// `readout` rate as the measurement writes it. `noise` holds no per-shot memory
 /// channel.
+///
+/// Measurement outcomes stay on the device between the reads that need them: a
+/// conditional or region guard, a readout flip, a branch decided on the host, and the
+/// end of the run.
 pub(crate) fn evolve_noisy(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    noise: &PreparedNoise,
+    from: usize,
+    readout: &[Option<ReadoutError>],
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    backend.begin_deferred_measurements(measurement_count(&circuit.instructions[from..]))?;
+    let evolved = evolve_noisy_eager(backend, circuit, noise, from, readout, rng);
+    evolved.and(backend.end_deferred_measurements())
+}
+
+/// Measurements and resets in `instructions`, guarded bodies included.
+fn measurement_count(instructions: &[Instruction]) -> usize {
+    instructions
+        .iter()
+        .map(|instruction| match instruction {
+            Instruction::Measure { .. } | Instruction::Reset { .. } => 1,
+            Instruction::Region(region) => measurement_count(region.body()),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// [`evolve_noisy`] with each outcome read back as its measurement lands.
+fn evolve_noisy_eager(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &PreparedNoise,

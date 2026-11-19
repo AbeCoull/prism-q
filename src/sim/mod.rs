@@ -345,6 +345,27 @@ pub(crate) fn fuse_for_backend<'a>(
     )
 }
 
+/// Build the statevector `kind` selects, fuse `circuit` for it, initialize it, run
+/// `before_apply`, then evolve the state. The hook sits after the `init` that rejects an
+/// oversized register and before the `2^n` evolution. The flag reports whether a device
+/// was requested.
+fn evolved_statevector<T>(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    limits: &ResolvedLimits,
+    before_apply: impl FnOnce() -> Result<T>,
+) -> Result<(StatevectorBackend, bool, T)> {
+    let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
+    let mut backend = build_statevector(&accel, seed, limits);
+    let expanded = expand_for_backend(&backend, circuit);
+    let fused = fuse_for_backend(&backend, &expanded);
+    backend.init(fused.num_qubits, fused.num_classical_bits)?;
+    let hooked = before_apply()?;
+    backend.apply_instructions(&fused.instructions)?;
+    Ok((backend, !matches!(accel, dispatch::Accel::Cpu), hooked))
+}
+
 /// [`apply_fused_circuit`] for a terminal that has nowhere to put a save.
 ///
 /// Only [`Simulate::run`] returns save records, so every other terminal

@@ -584,21 +584,26 @@ pub(super) fn grouped_expectation_statevector(
         validate_observable(factors, circuit.num_qubits)?;
     }
 
-    let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
-    let mut backend = build_statevector(&accel, seed, limits);
-    let expanded = expand_for_backend(&backend, circuit);
-    let fused = fuse_for_backend(&backend, &expanded);
-    backend.init(fused.num_qubits, fused.num_classical_bits)?;
-    backend.apply_instructions(&fused.instructions)?;
+    let (backend, expected_device, ()) =
+        evolved_statevector(kind, circuit, seed, limits, || Ok(()))?;
     let mut result = grouped_expectation_on_state(&backend, observable)?;
+    result.metadata.reason = statevector_route_reason(kind, &backend, expected_device);
+    Ok(result)
+}
+
+/// The reason a statevector route reports: the default or explicit rule for `kind`, or
+/// the device fallback when a requested device did not take the state.
+fn statevector_route_reason(
+    kind: &BackendKind,
+    backend: &StatevectorBackend,
+    expected_device: bool,
+) -> RouteRule {
     let reason = if kind.is_auto() {
         RouteRule::Default
     } else {
         RouteRule::ExplicitBackend
     };
-    result.metadata.reason =
-        route_metadata(&backend, !matches!(accel, dispatch::Accel::Cpu), reason).reason;
-    Ok(result)
+    route_metadata(backend, expected_device, reason).reason
 }
 
 /// `observable_variance` on the statevector route: the circuit runs once and `<T>` and
@@ -623,21 +628,11 @@ pub(super) fn operator_variance_statevector(
         .collect::<Result<Vec<_>>>()?;
     let table = observable::OperatorTable::new(&terms);
 
-    let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
-    let mut backend = build_statevector(&accel, seed, limits);
-    let expanded = expand_for_backend(&backend, circuit);
-    let fused = fuse_for_backend(&backend, &expanded);
-    backend.init(fused.num_qubits, fused.num_classical_bits)?;
-    backend.apply_instructions(&fused.instructions)?;
+    let (backend, expected_device, ()) =
+        evolved_statevector(kind, circuit, seed, limits, || Ok(()))?;
     let (first, second) = backend.operator_moments(&table)?;
-    let reason = if kind.is_auto() {
-        RouteRule::Default
-    } else {
-        RouteRule::ExplicitBackend
-    };
     let mut metadata = backend_metadata(&backend);
-    metadata.reason =
-        route_metadata(&backend, !matches!(accel, dispatch::Accel::Cpu), reason).reason;
+    metadata.reason = statevector_route_reason(kind, &backend, expected_device);
     Ok(ObservableVariance {
         variance: second - first * first,
         mean: first + offset,
@@ -839,23 +834,20 @@ pub(super) fn expectation_values_statevector(
         validate_observable(obs, circuit.num_qubits)?;
     }
 
-    let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
-    let mut backend = build_statevector(&accel, seed, limits);
-    let expanded = expand_for_backend(&backend, circuit);
-    let fused = fuse_for_backend(&backend, &expanded);
-    backend.init(fused.num_qubits, fused.num_classical_bits)?;
-    let masks = observables
-        .iter()
-        .map(|obs| pauli_masks(obs, circuit.num_qubits))
-        .collect::<Result<Vec<_>>>()?;
-    backend.apply_instructions(&fused.instructions)?;
+    let (backend, expected_device, masks) =
+        evolved_statevector(kind, circuit, seed, limits, || {
+            observables
+                .iter()
+                .map(|obs| pauli_masks(obs, circuit.num_qubits))
+                .collect::<Result<Vec<_>>>()
+        })?;
 
     let values = match backend.pauli_expectations_on_device(&masks) {
         Some(values) => values?,
         None => pauli_expectations_from_masks(backend.state_vector(), &masks).0,
     };
     let mut metadata = backend_metadata(&backend);
-    if !matches!(accel, dispatch::Accel::Cpu) && metadata.placement == Placement::Host {
+    if expected_device && metadata.placement == Placement::Host {
         metadata.reason = RouteRule::DeviceInitializationFallback;
     }
     Ok(analytic_expectations(values, metadata))

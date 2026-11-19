@@ -94,14 +94,9 @@ pub(super) fn prepare_terminal_statevector_backend(
         circuit: stripped,
         meas_map,
     } = terminal;
-    let accel = accel_for(kind, Family::Statevector, stripped.num_qubits);
-    let mut backend = build_statevector(&accel, seed, limits);
-    let expanded = expand_for_backend(&backend, &stripped);
-    let fused = fuse_for_backend(&backend, &expanded);
-    backend.init(fused.num_qubits, fused.num_classical_bits)?;
-    backend.apply_instructions(&fused.instructions)?;
-
-    Ok((backend, meas_map, !matches!(accel, dispatch::Accel::Cpu)))
+    let (backend, expected_device, ()) =
+        evolved_statevector(kind, &stripped, seed, limits, || Ok(()))?;
+    Ok((backend, meas_map, expected_device))
 }
 
 /// A source that answers every measurement in a circuit from a single state,

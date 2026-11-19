@@ -2454,13 +2454,13 @@ pub prism_q::sim::unified_pauli::SppResult::std_errors: alloc::vec::Vec<f64>
 pub prism_q::sim::unified_pauli::SppResult::t_count: usize
 pub fn prism_q::sim::unified_pauli::inverse_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm]) -> alloc::vec::Vec<bool>
 pub fn prism_q::sim::unified_pauli::run_pauli_path_observable(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::PauliPathResult>
-pub fn prism_q::sim::unified_pauli::run_spd(&prism_q::circuit::Circuit, f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdResult>
-pub fn prism_q::sim::unified_pauli::run_spd_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::sim::unified_pauli::run_spd_observable_budgeted(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::sim::unified_pauli::run_spd_observable_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::sim::unified_pauli::run_spd_with(&prism_q::circuit::Circuit, &prism_q::sim::unified_pauli::SpdTruncation) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdResult>
-pub fn prism_q::sim::unified_pauli::run_spp(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::sim::unified_pauli::SppResult>
-pub fn prism_q::sim::unified_pauli::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize, u64) -> prism_q::error::Result<prism_q::sim::unified_pauli::SppObservableResult>
+pub fn prism_q::sim::unified_pauli::run_spd(&prism_q::circuit::Circuit, f64, usize) -> prism_q::error::Result<prism_q::SpdResult>
+pub fn prism_q::sim::unified_pauli::run_spd_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::sim::unified_pauli::run_spd_observable_budgeted(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::sim::unified_pauli::run_spd_observable_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::sim::unified_pauli::run_spd_with(&prism_q::circuit::Circuit, &prism_q::SpdTruncation) -> prism_q::error::Result<prism_q::SpdResult>
+pub fn prism_q::sim::unified_pauli::run_spp(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::SppResult>
+pub fn prism_q::sim::unified_pauli::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize, u64) -> prism_q::error::Result<prism_q::SppObservableResult>
 #[non_exhaustive] pub enum prism_q::sim::BackendKind
 pub prism_q::sim::BackendKind::Auto
 pub prism_q::sim::BackendKind::AutoGpu
@@ -2469,7 +2469,7 @@ pub prism_q::sim::BackendKind::DensityMatrix
 pub prism_q::sim::BackendKind::DensityMatrixGpu
 pub prism_q::sim::BackendKind::DensityMatrixGpu::context: alloc::sync::Arc<prism_q::gpu::GpuContext>
 pub prism_q::sim::BackendKind::DeterministicPauli
-pub prism_q::sim::BackendKind::DeterministicPauli::truncation: prism_q::sim::unified_pauli::SpdTruncation
+pub prism_q::sim::BackendKind::DeterministicPauli::truncation: prism_q::SpdTruncation
 pub prism_q::sim::BackendKind::Factored
 pub prism_q::sim::BackendKind::FactoredStabilizer
 pub prism_q::sim::BackendKind::Mps
@@ -2796,7 +2796,7 @@ pub prism_q::BackendKind::DensityMatrix
 pub prism_q::BackendKind::DensityMatrixGpu
 pub prism_q::BackendKind::DensityMatrixGpu::context: alloc::sync::Arc<prism_q::gpu::GpuContext>
 pub prism_q::BackendKind::DeterministicPauli
-pub prism_q::BackendKind::DeterministicPauli::truncation: prism_q::sim::unified_pauli::SpdTruncation
+pub prism_q::BackendKind::DeterministicPauli::truncation: prism_q::SpdTruncation
 pub prism_q::BackendKind::Factored
 pub prism_q::BackendKind::FactoredStabilizer
 pub prism_q::BackendKind::Mps
@@ -4638,13 +4638,13 @@ pub fn prism_q::run_qec_program_with_strategy(&prism_q::qec::QecProgram, prism_q
 pub fn prism_q::run_shots_compiled(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
 pub fn prism_q::run_shots_compiled_with_gpu(&prism_q::circuit::Circuit, usize, u64, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> prism_q::error::Result<prism_q::ShotsResult>
 pub fn prism_q::run_shots_noisy(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
-pub fn prism_q::run_spd(&prism_q::circuit::Circuit, f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdResult>
-pub fn prism_q::run_spd_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::run_spd_observable_budgeted(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::run_spd_observable_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>
-pub fn prism_q::run_spd_with(&prism_q::circuit::Circuit, &prism_q::sim::unified_pauli::SpdTruncation) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdResult>
-pub fn prism_q::run_spp(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::sim::unified_pauli::SppResult>
-pub fn prism_q::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize, u64) -> prism_q::error::Result<prism_q::sim::unified_pauli::SppObservableResult>
+pub fn prism_q::run_spd(&prism_q::circuit::Circuit, f64, usize) -> prism_q::error::Result<prism_q::SpdResult>
+pub fn prism_q::run_spd_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::run_spd_observable_budgeted(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::run_spd_observable_light_cone(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::SpdObservableResult>
+pub fn prism_q::run_spd_with(&prism_q::circuit::Circuit, &prism_q::SpdTruncation) -> prism_q::error::Result<prism_q::SpdResult>
+pub fn prism_q::run_spp(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::SppResult>
+pub fn prism_q::run_spp_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], usize, u64) -> prism_q::error::Result<prism_q::SppObservableResult>
 pub fn prism_q::run_stabilizer_rank(&prism_q::circuit::Circuit, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
 pub fn prism_q::run_stabilizer_rank_approx(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::sim::stabilizer_rank::StabRankResult>
 pub fn prism_q::set_default_limits(prism_q::Limits)

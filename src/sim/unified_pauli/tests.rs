@@ -1,8 +1,19 @@
+use super::spd::*;
+use super::spp::*;
 use super::*;
 use crate::limits::ResolvedLimits;
+use crate::sim::compiled::propagate_backward;
+use crate::sim::noise::NoiseModel;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::f64::consts::{FRAC_PI_4, SQRT_2};
+
+fn marginals_flat(expectations: &[f64]) -> Vec<f64> {
+    crate::sim::expectations_to_marginals(expectations)
+        .into_iter()
+        .flat_map(|(p0, p1)| [p0, p1])
+        .collect()
+}
 
 fn t_branch() -> RotBranch {
     RotBranch::new(FRAC_PI_4)
@@ -197,7 +208,7 @@ fn test_spp_to_probabilities() {
         t_count: 2,
         nonzero_fraction: 0.8,
     };
-    let probs = spp_to_probabilities(&result);
+    let probs = marginals_flat(&result.expectations);
     assert_eq!(probs.len(), 4);
     assert!((probs[0] - 0.75).abs() < 1e-14);
     assert!((probs[1] - 0.25).abs() < 1e-14);
@@ -367,7 +378,7 @@ fn test_spd_to_probabilities() {
         max_terms: 4,
         total_discarded: 0.0,
     };
-    let probs = spd_to_probabilities(&result);
+    let probs = marginals_flat(&result.expectations);
     assert_eq!(probs.len(), 4);
     assert!((probs[0] - 0.75).abs() < 1e-14);
     assert!((probs[1] - 0.25).abs() < 1e-14);
@@ -471,7 +482,7 @@ fn run_spd_pure_clifford() {
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_gate(Gate::Cx, &[0, 1]);
     let result = run_spd(&circuit, 0.0, 1024).unwrap();
-    let probs = spd_to_probabilities(&result);
+    let probs = marginals_flat(&result.expectations);
     assert_eq!(probs.len(), 4);
     let sum: f64 = probs.iter().sum();
     assert!((sum - 2.0).abs() < 1e-9);
@@ -579,7 +590,7 @@ fn light_cone_spd_matches_on_entangled_observable() {
 // every circuit (measured +2.6% to +5.8% on op-heavy rows at 48 bytes).
 #[test]
 fn coalesced_op_stays_at_the_one_qubit_variant_size() {
-    assert_eq!(std::mem::size_of::<super::CoalescedOp>(), 40);
+    assert_eq!(std::mem::size_of::<CoalescedOp>(), 40);
 }
 
 fn u3(theta: f64, phi: f64, lam: f64) -> Gate {

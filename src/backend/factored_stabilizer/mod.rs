@@ -50,9 +50,6 @@ use crate::limits::ResolvedLimits;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use std::borrow::Cow;
 
-#[cfg(feature = "parallel")]
-use crate::backend::MIN_QUBITS_FOR_PAR_GATES;
-
 #[cfg(test)]
 mod tests;
 
@@ -127,18 +124,6 @@ impl SubTableau {
         }
     }
 
-    #[cfg(feature = "parallel")]
-    #[inline(always)]
-    fn par_rows(&self) -> bool {
-        self.n >= MIN_QUBITS_FOR_PAR_GATES
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    #[inline(always)]
-    fn par_rows(&self) -> bool {
-        false
-    }
-
     /// Stabilizer-half row window for gate kernels (rows n..2n+1), skipping
     /// the destabilizers and marking them stale for the next measurement to
     /// rebuild.
@@ -147,94 +132,6 @@ impl SubTableau {
         self.destabs = Destabs::Stale;
         let start = self.n * self.stride();
         (&mut self.xz[start..], &mut self.phase[self.n..])
-    }
-
-    #[inline(always)]
-    fn apply_h(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::h_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_s(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::s_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_sdg(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::sdg_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_x(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::x_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_y(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::y_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_z(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::z_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_sx(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::sx_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_sxdg(&mut self, a: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::sxdg_all(xz, phase, nw, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_cx(&mut self, ctrl: usize, tgt: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::cx_all(xz, phase, nw, par, ctrl, tgt);
-    }
-
-    #[inline(always)]
-    fn apply_cz(&mut self, a: usize, b: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::cz_all(xz, phase, nw, par, a, b);
-    }
-
-    #[inline(always)]
-    fn apply_swap(&mut self, a: usize, b: usize) {
-        let par = self.par_rows();
-        let nw = self.num_words;
-        let (xz, phase) = self.gate_rows();
-        rowops::swap_all(xz, phase, nw, par, a, b);
     }
 
     /// Batched gate application over this cluster's rows, reusing the dense
@@ -255,30 +152,18 @@ impl SubTableau {
     }
 
     fn dispatch_gate(&mut self, gate: &Gate, local_targets: &[usize]) -> Result<()> {
-        match gate {
-            Gate::H => self.apply_h(local_targets[0]),
-            Gate::S => self.apply_s(local_targets[0]),
-            Gate::Sdg => self.apply_sdg(local_targets[0]),
-            Gate::X => self.apply_x(local_targets[0]),
-            Gate::Y => self.apply_y(local_targets[0]),
-            Gate::Z => self.apply_z(local_targets[0]),
-            Gate::SX => self.apply_sx(local_targets[0]),
-            Gate::SXdg => self.apply_sxdg(local_targets[0]),
-            Gate::Id => {}
-            Gate::Cx => self.apply_cx(local_targets[0], local_targets[1]),
-            Gate::Cz => self.apply_cz(local_targets[0], local_targets[1]),
-            Gate::Swap => self.apply_swap(local_targets[0], local_targets[1]),
-            _ => {
-                return Err(PrismError::BackendUnsupported {
-                    backend: "factored-stabilizer".to_string(),
-                    operation: format!(
-                        "non-Clifford gate `{}` (factored stabilizer supports Clifford gates only)",
-                        gate.name()
-                    ),
-                });
-            }
+        let par = kernels::par_rows(self.n);
+        let nw = self.num_words;
+        if rowops::apply_clifford_all(gate, local_targets, nw, par, || self.gate_rows()) {
+            return Ok(());
         }
-        Ok(())
+        Err(PrismError::BackendUnsupported {
+            backend: "factored-stabilizer".to_string(),
+            operation: format!(
+                "non-Clifford gate `{}` (factored stabilizer supports Clifford gates only)",
+                gate.name()
+            ),
+        })
     }
 
     fn rowmul(&mut self, h: usize, i: usize) {

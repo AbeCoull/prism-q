@@ -4,11 +4,13 @@
 
 use num_complex::Complex64;
 use rand::Rng;
+use std::f64::consts::FRAC_1_SQRT_2;
 
 use super::parts::{ProductGauge, compress};
 use super::{
     MeasuredRows, RegisterPauli, bit, diagonalize, find, fold_table, groups, join, measured_rows,
 };
+use crate::backend::simd::walsh_hadamard;
 use crate::circuit::Circuit;
 use crate::error::Result;
 use crate::sim::shots::{draws_split_across_workers, sample_in_shot_blocks};
@@ -293,6 +295,9 @@ struct Part {
     rank: usize,
     /// `None` for a part held whole.
     cut: Option<CutChoice>,
+    /// Whether a whole part reads its table out by [`WalshReadout`] rather than from its
+    /// dense amplitudes, whichever [`SplitPlan::work`] prices lower.
+    walsh: bool,
 }
 
 /// The register of a terminal Clifford+T circuit split into parts and tiered, from the
@@ -364,17 +369,22 @@ impl SplitPlan {
                 None => 1u128 << width,
                 Some(c) => (1u128 << c.left_width) + (1u128 << c.right_width),
             };
-            let excess = (0..gauge.excess.len())
+            let excess: Vec<usize> = (0..gauge.excess.len())
                 .filter(|&i| {
                     let (p, _) = gauge.excess[i];
                     (p.x | p.z) & mask != 0
                 })
                 .collect();
+            let walsh = cut.is_none()
+                && rank > 0
+                && walsh_readout_work(rank, excess.len())
+                    < dense_readout_work(width, rank, excess.len());
             parts.push(Part {
                 mask,
                 excess,
                 rank,
                 cut,
+                walsh,
             });
         }
         if amplitudes > 1u128 << limits.total_log2 {
@@ -391,18 +401,19 @@ impl SplitPlan {
         }))
     }
 
-    /// Register amplitude updates to build every table: one pass for the anchors, one per
-    /// excess rotation and about `3 (r + 1)` to read out a whole part, the same with every
-    /// row on each side of a cut, plus the pass that phases it.
+    /// Register amplitude updates to build every table: the cheaper readout of each whole
+    /// part, and for each side of a cut one pass for the anchors, one per excess rotation
+    /// and about `3 (k + 1)` to diagonalize its rows, plus the pass that phases it.
     pub(in crate::sim) fn work(&self) -> f64 {
         let pass = |width: usize| 2f64.powi(width as i32);
         self.parts
             .iter()
             .map(|part| match part.cut {
                 None if part.rank == 0 => 0.0,
+                None if part.walsh => walsh_readout_work(part.rank, part.excess.len()),
                 None => {
                     let width = part.mask.count_ones() as usize;
-                    (part.excess.len() + 1 + 3 * (part.rank + 1)) as f64 * pass(width)
+                    dense_readout_work(width, part.rank, part.excess.len())
                 }
                 Some(cut) => {
                     let side = |mask: u64, width: usize| {
@@ -586,6 +597,29 @@ impl SplitPlan {
     /// The part's table: entry `t` is the probability that basis row `j` reads bit `j` of
     /// `t` for every `j`.
     fn whole_table(&self, part: &Part, basis: &[Letters]) -> Vec<f64> {
+        if part.walsh {
+            self.walsh_table(part, basis)
+        } else {
+            self.dense_table(part, basis)
+        }
+    }
+
+    /// [`Self::whole_table`] as the Walsh transform of the expectation value of every
+    /// product of basis rows, `P(t) = 2^-r Σ_s (-1)^|s & t| <Π_{j in s} B_j>`.
+    fn walsh_table(&self, part: &Part, basis: &[Letters]) -> Vec<f64> {
+        let readout = WalshReadout::new(&self.gauge, part.mask, &part.excess, basis);
+        let mut table = vec![0.0f64; 1 << basis.len()];
+        readout.fill(&mut table);
+        walsh_hadamard(&mut table);
+        let scale = 0.5f64.powi(basis.len() as i32);
+        for p in &mut table {
+            *p = (*p * scale).max(0.0);
+        }
+        table
+    }
+
+    /// [`Self::whole_table`] from the part's dense amplitudes, diagonalized row by row.
+    fn dense_table(&self, part: &Part, basis: &[Letters]) -> Vec<f64> {
         let width = part.mask.count_ones() as usize;
         let mut amps = self.gauge.part_state(part.mask, &part.excess);
         let mut rows: Vec<RegisterPauli> = basis
@@ -745,6 +779,173 @@ impl SplitPlan {
             }
         }
         (psi, cumulative)
+    }
+}
+
+/// Register amplitude updates one entry of a Walsh readout costs per term the fill
+/// evaluates, its allocation included: 2.6 to 4.9 ns per entry on parts of 13 to 18 rows
+/// with no excess, threaded, against 0.24 to 0.38 ns per dense register update.
+const WALSH_TERM_UNITS: f64 = 10.0;
+/// Register amplitude updates one entry of a Walsh readout costs per transform level:
+/// 0.02 to 0.05 ns while the table fits in cache, 0.16 ns at `2^24` entries.
+const WALSH_LEVEL_UNITS: f64 = 0.25;
+/// Table entries one task of the Walsh fill covers.
+const WALSH_FILL_CHUNK_LOG: usize = 10;
+/// Smallest Walsh fill split over the Rayon pool.
+#[cfg(feature = "parallel")]
+const WALSH_FILL_PAR_LOG: usize = 12;
+
+/// Register amplitude updates to read a whole part out of its dense amplitudes: one pass
+/// for the anchors, one per excess rotation and about `3 (r + 1)` to diagonalize the rows.
+fn dense_readout_work(width: usize, rank: usize, excess: usize) -> f64 {
+    (excess + 1 + 3 * (rank + 1)) as f64 * 2f64.powi(width as i32)
+}
+
+/// Register amplitude updates of a [`WalshReadout`] of `2^rank` entries: the fill
+/// evaluates about `1.5^excess` terms per entry, as many as half the rotations splitting
+/// each one in two, and the transform takes `rank` levels.
+fn walsh_readout_work(rank: usize, excess: usize) -> f64 {
+    let terms = 1.5f64.powi(excess as i32);
+    2f64.powi(rank as i32) * (WALSH_TERM_UNITS * terms + WALSH_LEVEL_UNITS * rank as f64)
+}
+
+/// Expectation values on one part in the product gauge of every product of its basis
+/// rows. A Pauli string is propagated back through the part's excess rotations, and each
+/// term is read off the anchors' Bloch vectors, whose components are `0` or `±1/√2`.
+struct WalshReadout {
+    /// The basis rows on the part's bits, packed.
+    rows: Vec<RegisterPauli>,
+    /// Bits whose anchor has `<X> = 0`, and those with `<Y> = 0`.
+    blind: [u64; 2],
+    /// Bits whose anchor has a negative `<X>`, `<Y>` and `<Z>`.
+    negative: [u64; 3],
+    /// `2^(-w/2)` by weight `w`.
+    scale: [f64; 65],
+    /// `(R, cos 2θ, sin 2θ)` for each excess rotation `exp(-i θ R)` on the part, packed,
+    /// in circuit order.
+    excess: Vec<(RegisterPauli, f64, f64)>,
+}
+
+impl WalshReadout {
+    fn new(gauge: &ProductGauge, mask: u64, excess: &[usize], basis: &[Letters]) -> Self {
+        let mut blind = [0u64; 2];
+        let mut negative = [0u64; 3];
+        let mut rest = mask;
+        let mut i = 0;
+        while rest != 0 {
+            let [a, b] = gauge.anchors[rest.trailing_zeros() as usize];
+            rest &= rest - 1;
+            let ab = a.conj() * b;
+            let bloch = [2.0 * ab.re, 2.0 * ab.im, a.norm_sqr() - b.norm_sqr()];
+            for (axis, &v) in bloch.iter().enumerate() {
+                if v == 0.0 {
+                    debug_assert!(axis < 2, "an anchor has <Z> = cos(π/4)");
+                    blind[axis] |= 1 << i;
+                } else {
+                    debug_assert!((v.abs() - FRAC_1_SQRT_2).abs() < 1e-12);
+                    negative[axis] |= u64::from(v < 0.0) << i;
+                }
+            }
+            i += 1;
+        }
+        let mut scale = [0.0; 65];
+        for (w, s) in scale.iter_mut().enumerate() {
+            let half = 0.5f64.powi((w / 2) as i32);
+            *s = if w % 2 == 1 {
+                half * FRAC_1_SQRT_2
+            } else {
+                half
+            };
+        }
+        let pack = |x: u64, z: u64, phase4: u8| RegisterPauli {
+            x: compress(x, mask),
+            z: compress(z, mask),
+            phase4,
+        };
+        Self {
+            rows: basis.iter().map(|&(x, z)| pack(x, z, 0)).collect(),
+            blind,
+            negative,
+            scale,
+            excess: excess
+                .iter()
+                .map(|&j| {
+                    let (p, theta) = gauge.excess[j];
+                    let (sin, cos) = (2.0 * theta).sin_cos();
+                    (pack(p.x, p.z, p.phase4), cos, sin)
+                })
+                .collect(),
+        }
+    }
+
+    /// `table[s] = <Π_{j in s} B_j>` for every subset `s` of the rows. Each task walks one
+    /// aligned chunk in Gray-code order, so a step multiplies one row in.
+    fn fill(&self, table: &mut [f64]) {
+        let chunk = table.len().min(1 << WALSH_FILL_CHUNK_LOG);
+        let fill_chunk = |(c, entries): (usize, &mut [f64])| {
+            let low = entries.len().trailing_zeros();
+            let mut q = self.product(c << low);
+            for i in 0..entries.len() {
+                entries[i ^ (i >> 1)] = self.value(q, self.excess.len());
+                let next = i + 1;
+                if next < entries.len() {
+                    q = q.mul(self.rows[next.trailing_zeros() as usize]);
+                }
+            }
+        };
+        #[cfg(feature = "parallel")]
+        if table.len() >= 1 << WALSH_FILL_PAR_LOG {
+            use rayon::prelude::*;
+            table.par_chunks_mut(chunk).enumerate().for_each(fill_chunk);
+            return;
+        }
+        table.chunks_mut(chunk).enumerate().for_each(fill_chunk);
+    }
+
+    fn product(&self, subset: usize) -> RegisterPauli {
+        let mut q = RegisterPauli {
+            x: 0,
+            z: 0,
+            phase4: 0,
+        };
+        let mut rest = subset;
+        while rest != 0 {
+            q = q.mul(self.rows[rest.trailing_zeros() as usize]);
+            rest &= rest - 1;
+        }
+        q
+    }
+
+    /// `<q>` after the first `rotations` excess rotations: `exp(iθR) q exp(-iθR)` is `q`
+    /// when `q` commutes with `R`, else `cos 2θ q - i sin 2θ q R`.
+    fn value(&self, q: RegisterPauli, rotations: usize) -> f64 {
+        if rotations == 0 {
+            return self.product_value(q);
+        }
+        let (r, cos, sin) = self.excess[rotations - 1];
+        if ((q.x & r.z) ^ (q.z & r.x)).count_ones() & 1 == 0 {
+            return self.value(q, rotations - 1);
+        }
+        let mut qr = q.mul(r);
+        qr.phase4 = (qr.phase4 + 3) & 3;
+        cos * self.value(q, rotations - 1) + sin * self.value(qr, rotations - 1)
+    }
+
+    /// `<q>` on the product of the anchors.
+    #[inline(always)]
+    fn product_value(&self, q: RegisterPauli) -> f64 {
+        debug_assert_eq!(q.phase4 & 1, 0, "a Hermitian term has a real sign");
+        let (xs, ys, zs) = (q.x & !q.z, q.x & q.z, q.z & !q.x);
+        if (xs & self.blind[0]) | (ys & self.blind[1]) != 0 {
+            return 0.0;
+        }
+        let flips = (xs & self.negative[0]) | (ys & self.negative[1]) | (zs & self.negative[2]);
+        let magnitude = self.scale[(q.x | q.z).count_ones() as usize];
+        if (flips.count_ones() + u32::from(q.phase4 >> 1)) & 1 == 1 {
+            -magnitude
+        } else {
+            magnitude
+        }
     }
 }
 

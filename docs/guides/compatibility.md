@@ -98,6 +98,13 @@ Seeded output has changed in these releases:
     qubits in all, and those circuits move from the statevector, or past the statevector
     cap from the MPS. Fixed-seed shots on all of these circuits changed. Probabilities
     from `run_stabilizer_rank` are unchanged.
+  - The Clifford register reads the outcome table of a part it holds whole as the Walsh
+    transform of the expectation values of the part's measured rows, wherever that costs
+    less than diagonalizing the part's amplitudes. The two tables agree to about 1e-15, so
+    a fixed-seed shot changes only where its draw lands that close to the boundary between
+    two outcomes. The cheaper readout also moves `Auto` terminal shots of some Clifford+T
+    circuits from the statevector to the register, those whose register is nearly as wide
+    as the circuit, and fixed-seed shots on those circuits changed.
   - `Auto` terminal shots of a Clifford+T circuit are priced between the Clifford
     register and the dense run instead of capping the T count. Circuits with more than 20
     T gates, or at least as many T gates as qubits, whose register fits 20 qubits move to

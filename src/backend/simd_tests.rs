@@ -924,6 +924,28 @@ fn pack_masked_bits_scalar_matches_pext() {
     }
 }
 
+#[test]
+fn walsh_hadamard_tiers_agree_bit_for_bit() {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for r in [2, 3, 4, 11, 12, 14, 15, 17, 18] {
+        let values: Vec<f64> = (0..1usize << r)
+            .map(|_| rng.random::<f64>() - 0.5)
+            .collect();
+        let mut scalar = values.clone();
+        walsh_blocked::<false>(&mut scalar);
+        #[cfg(target_arch = "x86_64")]
+        if has_avx2_fma() {
+            let mut avx = values.clone();
+            walsh_blocked::<true>(&mut avx);
+            assert_eq!(avx, scalar, "2^{r} entries");
+        }
+        let mut dispatched = values;
+        walsh_hadamard(&mut dispatched);
+        assert_eq!(dispatched, scalar, "2^{r} entries");
+    }
+}
+
 // Completeness tripwire: pin the count of `#[target_feature]` kernels so adding
 // one without a paired per-tier test fails here. Reads source text only, so it
 // runs on every arch.
@@ -934,7 +956,7 @@ fn target_feature_kernel_count_is_pinned() {
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
     let expected: [(&str, usize); 8] = [
-        ("src/backend/simd.rs", 52),
+        ("src/backend/simd.rs", 54),
         ("src/backend/word_ops.rs", 3),
         ("src/backend/stabilizer/kernels/simd.rs", 5),
         ("src/backend/statevector/kernels.rs", 19),

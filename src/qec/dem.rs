@@ -12,6 +12,7 @@ use super::parity_walk::compile_fault_sites;
 use super::runner::QecParityProjection;
 use super::{QecOp, QecProgram};
 use crate::error::{PrismError, Result};
+use crate::sim::compiled::parity::sorted_symmetric_difference;
 
 /// One error mechanism: an independent fault process that flips a fixed set of
 /// detectors and observables with the given probability.
@@ -459,8 +460,8 @@ fn partition_cover(
             if candidate.detectors.is_empty() || !is_subset(&candidate.detectors, remaining) {
                 continue;
             }
-            let next_remaining = symmetric_difference(remaining, &candidate.detectors);
-            let next_observables = symmetric_difference(observables, &candidate.observables);
+            let next_remaining = sorted_symmetric_difference(remaining, &candidate.detectors);
+            let next_observables = sorted_symmetric_difference(observables, &candidate.observables);
             chosen.push(at);
             if search(
                 &next_remaining,
@@ -516,31 +517,6 @@ fn is_subset(a: &[usize], b: &[usize]) -> bool {
         return false;
     }
     true
-}
-
-/// Symmetric difference of two ascending index lists, ascending.
-fn symmetric_difference(a: &[usize], b: &[usize]) -> Vec<usize> {
-    let mut out = Vec::with_capacity(a.len() + b.len());
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Less => {
-                out.push(a[i]);
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                out.push(b[j]);
-                j += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    out.extend_from_slice(&a[i..]);
-    out.extend_from_slice(&b[j..]);
-    out
 }
 
 pub(super) fn symptom_label(mechanism: &ErrorMechanism) -> String {

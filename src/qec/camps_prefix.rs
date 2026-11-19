@@ -13,6 +13,7 @@
 //! by linearity over the existing rows, which composes sequential state gates as
 //! `C ← U·C`.
 
+use crate::backend::stabilizer::kernels::rowmul_words_cached;
 use crate::gates::Gate;
 
 /// Packed signed Pauli row. `(x, z)` bits give the letter directly ((0,0)=I, (1,0)=X,
@@ -105,54 +106,24 @@ impl PauliKind {
     }
 }
 
-/// Per-qubit phase contribution when multiplying Pauli letter `a` by
-/// Pauli letter `b` (in that order). Returns the `phase4` increment
-/// such that `(letter a) · (letter b) = i^{increment} · (letter a XOR b
-/// in (x,z) bits)`.
-#[inline(always)]
-fn letter_product_phase(ax: bool, az: bool, bx: bool, bz: bool) -> u8 {
-    match ((ax, az), (bx, bz)) {
-        ((false, false), _) | (_, (false, false)) => 0,
-        ((true, false), (true, false)) => 0,
-        ((false, true), (false, true)) => 0,
-        ((true, true), (true, true)) => 0,
-        ((true, false), (true, true)) => 1,
-        ((true, false), (false, true)) => 3,
-        ((true, true), (true, false)) => 3,
-        ((true, true), (false, true)) => 1,
-        ((false, true), (true, false)) => 1,
-        ((false, true), (true, true)) => 3,
-    }
-}
-
-/// `dst ← (i^extra_phase4) · dst · src`, with phase tracking across
-/// each qubit position.
-fn rowmul_into(dst: &mut SignedPauli, src: &SignedPauli, n: usize, extra_phase4: u8) {
-    let mut total: u32 = u32::from(dst.phase4) + u32::from(src.phase4) + u32::from(extra_phase4);
-    for q in 0..n {
-        let ax = dst.get_x(q);
-        let az = dst.get_z(q);
-        let bx = src.get_x(q);
-        let bz = src.get_z(q);
-        total += u32::from(letter_product_phase(ax, az, bx, bz));
-    }
-    for w in 0..dst.x.len() {
-        dst.x[w] ^= src.x[w];
-        dst.z[w] ^= src.z[w];
-    }
-    dst.phase4 = (total & 3) as u8;
+/// `dst ← (i^extra_phase4) · dst · src`. The word kernel returns the `i` exponent of
+/// `src · dst`, the negation of the exponent of `dst · src`.
+fn rowmul_into(dst: &mut SignedPauli, src: &SignedPauli, extra_phase4: u8) {
+    let src_dst = rowmul_words_cached(&mut dst.x, &mut dst.z, &src.x, &src.z, 0);
+    let total = u64::from(dst.phase4) + u64::from(src.phase4) + u64::from(extra_phase4);
+    dst.phase4 = (total.wrapping_sub(src_dst) & 3) as u8;
 }
 
 /// `rows[dst] ← (i^extra_phase4) · rows[dst] · rows[src]` for distinct `dst` and `src`,
 /// without cloning either row.
-fn rowmul_within(rows: &mut [SignedPauli], dst: usize, src: usize, n: usize, extra_phase4: u8) {
+fn rowmul_within(rows: &mut [SignedPauli], dst: usize, src: usize, extra_phase4: u8) {
     debug_assert_ne!(dst, src, "rowmul_within requires distinct rows");
     let hi = dst.max(src);
     let (left, right) = rows.split_at_mut(hi);
     if dst < src {
-        rowmul_into(&mut left[dst], &right[0], n, extra_phase4);
+        rowmul_into(&mut left[dst], &right[0], extra_phase4);
     } else {
-        rowmul_into(&mut right[0], &left[src], n, extra_phase4);
+        rowmul_into(&mut right[0], &left[src], extra_phase4);
     }
 }
 
@@ -252,29 +223,25 @@ impl SignedCliffordPrefix {
 
     fn apply_s(&mut self, p: usize) {
         // State-gate S: new inv_x[p] = C† (S† X S) C = C† (-Y) C = -i X Z propagated.
-        let n = self.num_qubits;
-        rowmul_into(&mut self.inv_x[p], &self.inv_z[p], n, 3);
+        rowmul_into(&mut self.inv_x[p], &self.inv_z[p], 3);
     }
 
     fn apply_sdg(&mut self, p: usize) {
         // State-gate Sdg: new inv_x[p] = C† (S X S†) C = C† Y C = i X Z propagated.
-        let n = self.num_qubits;
-        rowmul_into(&mut self.inv_x[p], &self.inv_z[p], n, 1);
+        rowmul_into(&mut self.inv_x[p], &self.inv_z[p], 1);
     }
 
     fn apply_sx(&mut self, p: usize) {
         // State-gate SX: new inv_z[p] = C† (SX† Z SX) C = C† Y C.
         // Rowmul order here is inv_z[p] · inv_x[p] = Z·X = iY, so landing on
         // +Y needs an extra `i^3 = -i` factor: (-i)·iY = Y.
-        let n = self.num_qubits;
-        rowmul_into(&mut self.inv_z[p], &self.inv_x[p], n, 3);
+        rowmul_into(&mut self.inv_z[p], &self.inv_x[p], 3);
     }
 
     fn apply_sxdg(&mut self, p: usize) {
         // State-gate SXdg: new inv_z[p] = C† (-Y) C. With Z·X = iY order and
         // an extra factor `i`: i · iY = -Y.
-        let n = self.num_qubits;
-        rowmul_into(&mut self.inv_z[p], &self.inv_x[p], n, 1);
+        rowmul_into(&mut self.inv_z[p], &self.inv_x[p], 1);
     }
 
     fn apply_x(&mut self, p: usize) {
@@ -296,18 +263,16 @@ impl SignedCliffordPrefix {
         // CX X_t CX = X_t → unchanged
         // CX Z_c CX = Z_c → unchanged
         // CX Z_t CX = Z_c Z_t → new inv_z[t] = inv_z[c] · inv_z[t]
-        let n = self.num_qubits;
-        rowmul_within(&mut self.inv_x, ctrl, tgt, n, 0);
-        rowmul_within(&mut self.inv_z, tgt, ctrl, n, 0);
+        rowmul_within(&mut self.inv_x, ctrl, tgt, 0);
+        rowmul_within(&mut self.inv_z, tgt, ctrl, 0);
     }
 
     fn apply_cz(&mut self, a: usize, b: usize) {
         // CZ X_a CZ = X_a Z_b → new inv_x[a] = inv_x[a] · inv_z[b]
         // CZ X_b CZ = Z_a X_b → new inv_x[b] = inv_z[a] · inv_x[b]
         // Z_a, Z_b unchanged
-        let n = self.num_qubits;
-        rowmul_into(&mut self.inv_x[a], &self.inv_z[b], n, 0);
-        rowmul_into(&mut self.inv_x[b], &self.inv_z[a], n, 0);
+        rowmul_into(&mut self.inv_x[a], &self.inv_z[b], 0);
+        rowmul_into(&mut self.inv_x[b], &self.inv_z[a], 0);
     }
 
     fn apply_swap(&mut self, a: usize, b: usize) {
@@ -672,11 +637,11 @@ pub(crate) fn evaluate_pauli_observable_camps(
             PauliAxis::X => prefix.conjugate_x(term.qubit),
             PauliAxis::Y => {
                 let mut row = prefix.conjugate_x(term.qubit);
-                rowmul_into(&mut row, &prefix.inv_z[term.qubit], n, 1);
+                rowmul_into(&mut row, &prefix.inv_z[term.qubit], 1);
                 row
             }
         };
-        rowmul_into(&mut combined, &row, n, 0);
+        rowmul_into(&mut combined, &row, 0);
     }
     let factors = combined.mps_factors(n);
     let p = u32::from(combined.phase4);

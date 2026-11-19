@@ -4,14 +4,14 @@
 /// CSR matrix over GF(2) mapping random-bit columns to measurement rows.
 #[derive(Debug, Clone)]
 pub struct SparseParity {
-    pub col_indices: Vec<u32>,
-    pub row_offsets: Vec<u32>,
-    pub num_rows: usize,
-    pub non_det_rows: Vec<u32>,
+    pub(crate) col_indices: Vec<u32>,
+    pub(crate) row_offsets: Vec<u32>,
+    pub(crate) num_rows: usize,
+    pub(crate) non_det_rows: Vec<u32>,
 }
 
 impl SparseParity {
-    pub fn from_flip_rows(flip_rows: &[Vec<u64>], num_measurements: usize) -> Self {
+    pub(crate) fn from_flip_rows(flip_rows: &[Vec<u64>], num_measurements: usize) -> Self {
         let num_rows = num_measurements;
         let m_words = num_rows.div_ceil(64);
         let tail_mask = match num_rows % 64 {
@@ -97,17 +97,17 @@ impl SparseParity {
     }
 
     #[inline(always)]
-    pub fn row_weight(&self, row: usize) -> usize {
+    pub(crate) fn row_weight(&self, row: usize) -> usize {
         (self.row_offsets[row + 1] - self.row_offsets[row]) as usize
     }
 
-    pub fn row_cols(&self, row: usize) -> &[u32] {
+    pub(crate) fn row_cols(&self, row: usize) -> &[u32] {
         let start = self.row_offsets[row] as usize;
         let end = self.row_offsets[row + 1] as usize;
         &self.col_indices[start..end]
     }
 
-    pub fn stats(&self) -> ParityStats {
+    pub(crate) fn stats(&self) -> ParityStats {
         if self.num_rows == 0 {
             return ParityStats {
                 min_weight: 0,
@@ -139,7 +139,7 @@ impl SparseParity {
         }
     }
 
-    pub fn find_blocks(&self, rank: usize) -> Option<Vec<Vec<usize>>> {
+    pub(crate) fn find_blocks(&self, rank: usize) -> Option<Vec<Vec<usize>>> {
         if self.num_rows <= 1 || rank == 0 {
             return None;
         }
@@ -188,7 +188,7 @@ impl SparseParity {
         blocks_by_root(&mut parent)
     }
 
-    pub fn compile_detection_events(&self, pairs: &[(usize, usize)]) -> SparseParity {
+    pub(crate) fn compile_detection_events(&self, pairs: &[(usize, usize)]) -> SparseParity {
         let num_events = pairs.len();
         let mut row_offsets = Vec::with_capacity(num_events + 1);
         let mut col_indices = Vec::new();
@@ -197,7 +197,7 @@ impl SparseParity {
             row_offsets.push(col_indices.len() as u32);
             let cols_a = self.row_cols(m_a);
             let cols_b = self.row_cols(m_b);
-            let sym_diff = symmetric_difference(cols_a, cols_b);
+            let sym_diff = sorted_symmetric_difference(cols_a, cols_b);
             col_indices.extend_from_slice(&sym_diff);
         }
         row_offsets.push(col_indices.len() as u32);
@@ -262,17 +262,18 @@ fn blocks_by_root(parent: &mut [usize]) -> Option<Vec<Vec<usize>>> {
     (blocks.len() > 1).then_some(blocks)
 }
 
-fn symmetric_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
-    let mut result = Vec::new();
+/// Symmetric difference of two ascending lists, ascending.
+pub(crate) fn sorted_symmetric_difference<T: Ord + Copy>(a: &[T], b: &[T]) -> Vec<T> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
     let (mut i, mut j) = (0, 0);
     while i < a.len() && j < b.len() {
         match a[i].cmp(&b[j]) {
             std::cmp::Ordering::Less => {
-                result.push(a[i]);
+                out.push(a[i]);
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                result.push(b[j]);
+                out.push(b[j]);
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
@@ -281,9 +282,9 @@ fn symmetric_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
             }
         }
     }
-    result.extend_from_slice(&a[i..]);
-    result.extend_from_slice(&b[j..]);
-    result
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
+    out
 }
 
 /// Row-weight statistics of a parity matrix; a row's weight is the number of

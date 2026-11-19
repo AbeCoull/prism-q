@@ -5,8 +5,6 @@
 #[cfg(feature = "bench-internal")]
 use super::noise::{QecCompiledNoiseSampler, compile_qec_noisy_sampler};
 use super::noise::{QecParityNoise, feedforward_body_letter, feedforward_body_rejection};
-#[cfg(test)]
-use super::noise::{compile_qec_parity_noise, compile_qec_parity_noise_windows};
 use super::reference::QecReference;
 use super::reference_runner::run_qec_program_reference;
 use super::{
@@ -716,42 +714,6 @@ impl QecParityProjection {
     /// Outputs that `record` feeds.
     pub(super) fn outputs(&self, record: usize) -> &[usize] {
         &self.record_outputs[self.record_offsets[record]..self.record_offsets[record + 1]]
-    }
-
-    /// Overwrite `projected` with the output parities of the record bits in `records`.
-    #[cfg(test)]
-    fn project_into(&self, records: &[u64], projected: &mut [u64]) {
-        projected.fill(0);
-        for (word_idx, &word) in records.iter().enumerate() {
-            let mut bits = word;
-            while bits != 0 {
-                let record = word_idx * 64 + bits.trailing_zeros() as usize;
-                let outputs = &self.record_outputs
-                    [self.record_offsets[record]..self.record_offsets[record + 1]];
-                for &output in outputs {
-                    projected[output / 64] ^= 1u64 << (output % 64);
-                }
-                bits &= bits - 1;
-            }
-        }
-    }
-
-    /// Projected reference records, or `None` when any flip row of `sampler` reaches an
-    /// output and the noiseless parities vary between shots.
-    #[cfg(test)]
-    fn constant_pattern(
-        &self,
-        sampler: &crate::sim::compiled::CompiledSampler,
-    ) -> Option<Vec<u64>> {
-        let mut projected = vec![0u64; self.words];
-        for row in sampler.flip_rows() {
-            self.project_into(row, &mut projected);
-            if projected.iter().any(|&word| word != 0) {
-                return None;
-            }
-        }
-        self.project_into(sampler.ref_bits_packed(), &mut projected);
-        Some(projected)
     }
 }
 
